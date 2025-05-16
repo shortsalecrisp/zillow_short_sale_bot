@@ -1,0 +1,26 @@
+{
+  "zillow_url": "https://www.zillow.com/homes/for_sale/?searchQueryState=%7B%22isMapVisible%22%3Atrue%2C%22mapBounds%22%3A%7B%22west%22%3A-155.64585572214366%2C%22east%22%3A-65.64585572214366%2C%22south%22%3A19.832418649797937%2C%22north%22%3A64.71017157443481%7D%2C%22filterState%22%3A%7B%22sort%22%3A%7B%22value%22%3A%22globalrelevanceex%22%7D%2C%22mf%22%3A%7B%22value%22%3Afalse%7D%2C%22land%22%3A%7B%22value%22%3Afalse%7D%2C%22apa%22%3A%7B%22value%22%3Afalse%7D%2C%22manu%22%3A%7B%22value%22%3Afalse%7D%2C%22doz%22%3A%7B%22value%22%3A%221%22%7D%2C%22att%22%3A%7B%22value%22%3A%22short%20sale%22%7D%7D%2C%22isListVisible%22%3Atrue%2C%22mapZoom%22%3A4%7D",
+  "user_agents": [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+  ],
+  "must_include": "short sale",
+  "disallowed_phrases": ["off market", "sold"],
+  "allowed_types": ["SINGLE_FAMILY", "CONDO"],
+  "disallowed_states": ["MI"],
+  "sheet_id": "1exKIu0xN6O36eKl2oYxCwhcfFKltF9xPHiM73wEOpaw",
+  "sheet_tab": "Agent Contact/Address List",
+  "openai_model": "gpt-4o-mini",
+  "poll_interval_min": 60,
+  "poll_random_min": 10,
+  "sms_enabled": false,
+  "email_enabled": true,
+  "email_from": "ygkutler@gmail.com",
+  "email_to": "yoni.kutler@ygkutler.com",
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 587,
+  "smtp_user": "ygkutler@gmail.com",
+  "smtp_pass": "lufh plnx gcdu myou",
+  "sms_api_key": "00d655092e482d3f0174a55b1e650cab7ceabebc88057f30"
+}
+
