@@ -1,78 +1,91 @@
-"""
-bot.py
-End-to-end pipeline:
-
-1.  Qualify each Zillow row with GPT-4o        (short-sale? no banned 
-phrases?)
-2.  Deduplicate with SQLite + Google Sheets    (skip if zpid or phone 
-seen)
-3.  Use GPT web search to find agent contact   (mobile + email)
-4.  Append to Google Sheet
-5.  Send SMS through SMSMobile.io
-"""
-
-from __future__ import annotations
-
-import json
 import os
-import sqlite3
+import json
 import time
-from pathlib import Path
-from typing import Dict, List
-
-import gspread
-import openai
+import sqlite3
 import requests
+import openai
+import gspread
 from google.oauth2.service_account import Credentials
 from oauth2client.service_account import ServiceAccountCredentials  # 
-gspread 6.x legacy
+legacy for gspread 6.x
 
-# ────────────────────────────── ENV / 
-Secrets ──────────────────────────────
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-SMSMOBILE_KEY = os.environ["SMSMOBILE_KEY"]
-SMSMOBILE_FROM = os.getenv("SMSMOBILE_FROM", "15551234567")
+# ───────── CONFIG ─────────
 
-GOOGLE_CREDS_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-SPREADSHEET_URL = (
-    
-"https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70/edit#gid=0"
-)
+# These must be set in your Render environment
+OPENAI_API_KEY        = os.getenv("OPENAI_API_KEY")
+SMSMOBILE_API_KEY     = os.getenv("SMSMOBILE_API_KEY")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+
+# Your sheet ID from:
+# 
+https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70/edit
+GOOGLE_SHEET_ID       = "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70"
 
 openai.api_key = OPENAI_API_KEY
 
-# ────────────────────────────── GPT Prompts 
-────────────────────────────────
-QUALIFY_PROMPT_TEMPLATE = """
-Return "YES" if the listing description below clearly shows the property 
-is a
-SHORT SALE **and** does NOT contain ANY of these phrases 
-(case-insensitive):
+# ───────── SQLITE DEDUPE ─────────
 
-    cash only, auction, reo, foreclosure, trustee sale, sheriff sale,
-    tax sale, bankruptcy, court approval, third-party approval
+conn = sqlite3.connect("seen.db")
+conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY 
+KEY)")
+conn.commit()
 
-Otherwise return "NO".
+def has_seen(zpid: str) -> bool:
+    cur = conn.execute("SELECT 1 FROM listings WHERE zpid = ?", (zpid,))
+    return cur.fetchone() is not None
 
-Respond with exactly YES or NO.
+def mark_seen(zpid: str):
+    conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES (?)", 
+(zpid,))
+    conn.commit()
 
-Listing description:
---------------------
-{desc}
-"""
+# ───────── GOOGLE SHEETS ─────────
 
-CONTACT_PROMPT_TEMPLATE = """
-You are a real-estate assistant. Using public web sources (MLS, brokerage
-websites, state licensing DBs, etc.) find the **mobile phone number** and
-**direct email address** for the listing agent below.
+# scopes needed for Sheets & Drive
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+gc = gspread.authorize(creds)
+sheet = gc.open_by_key(GOOGLE_SHEET_ID).sheet1
 
-Return JSON with keys "phone" and "email".  Leave a value empty if not 
-found.
+# ───────── AI LOGIC ─────────
 
-Agent name: {agent_name}
-Agent state: {state}
-Brokerage (if known): {brokerage}
-"""
+def qualifies_listing(listing_text: str) -> bool:
+    prompt = (
+        "You are a real estate expert. Return YES if the following listing 
+text "
+        "describes a short sale property; otherwise return NO.\n\n"
+        f"{listing_text}\n\nAnswer ONLY YES or NO."
+    )
+    resp = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    answer = resp.choices[0].message.content.strip().upper()
+    return answer == "YES"
+
+def find_contact(agent_name: str, state: str) -> dict:
+    prompt = (
+        f"Provide the email and mobile phone number for real estate agent 
+"
+        f"{agent_name} in {state}. Return ONLY JSON with keys "
+        f"'email' and 'phone'. If you can’t find it, use null values."
+    )
+    resp = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    try:
+        return json.loads(resp.choices[0].message.content)
+    except json.JSONDecodeError:
+        return {"email": None, "phone": None}
+
+# ───────── SMS SENDING ─────────
 
 SMS_TEMPLATE = (
     "Hey {first}, this is Yoni Kutler—I saw your short sale listing at 
@@ -89,153 +102,58 @@ paid by "
 this could help?"
 )
 
-# ────────────────────────────── SQLite 
-dedupe ──────────────────────────────
-DB_PATH = Path("seen.db")
-conn = sqlite3.connect(DB_PATH)
-conn.execute(
+def send_sms(phone: str, first: str, address: str):
+    body = SMS_TEMPLATE.format(first=first, address=address)
+    resp = requests.post(
+        "https://api.smsmobile.com/send",  # <-- replace if your endpoint 
+differs
+        headers={
+            "Authorization": f"Bearer {SMSMOBILE_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"to": phone, "message": body},
+    )
+    resp.raise_for_status()
+
+# ───────── MAIN PROCESS ─────────
+
+def process_rows(rows: list):
     """
-    CREATE TABLE IF NOT EXISTS listings (
-        zpid  TEXT PRIMARY KEY,
-        phone TEXT
-    )
-"""
-)
-conn.commit()
-
-# ────────────────────────────── Google 
-Sheets ─────────────────────────────
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-gcreds = 
-Credentials.from_service_account_info(json.loads(GOOGLE_CREDS_JSON), 
-scopes=SCOPES)
-gc = gspread.authorize(gcreds)
-sheet = gc.open_by_url(SPREADSHEET_URL).sheet1  # first tab
-
-
-def phone_exists_in_sheet(phone: str) -> bool:
-    if not phone:
-        return False
-    # Column D (4) assumed to hold phone numbers
-    return phone in sheet.col_values(4)
-
-
-# ────────────────────────────── GPT helper 
-wrappers ───────────────────────
-def gpt_yes(prompt: str) -> bool:
-    """Return True if GPT answers YES."""
-    resp = openai.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=1,
-        temperature=0,
-    )
-    return resp.choices[0].message.content.strip().upper() == "YES"
-
-
-def gpt_json(prompt: str) -> Dict[str, str]:
-    resp = openai.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-    )
-    try:
-        return json.loads(resp.choices[0].message.content)
-    except Exception:
-        return {"phone": "", "email": ""}
-
-
-# ────────────────────────────── SMSMobile 
-─────────────────────────────────
-def send_sms(to_number: str, body: str) -> None:
-    if not to_number:
-        return
-    payload = {
-        "api_key": SMSMOBILE_KEY,
-        "from": SMSMOBILE_FROM,
-        "to": to_number,
-        "text": body,
-    }
-    r = requests.post("https://smsmobile.io/api/v1/send", json=payload, 
-timeout=15)
-    r.raise_for_status()
-
-
-# ────────────────────────────── Main 
-entrypoint ───────────────────────────
-def process_rows(rows: List[Dict]) -> None:
-    """
-    Called from webhook_server.py.
-    `rows` is a list of Apify items (dicts) for one Zillow scrape.
+    rows: list of dicts from Apify dataset, each with at least:
+      - zpid
+      - description
+      - agentName
+      - state
+      - address
     """
     for row in rows:
-        zpid = str(row.get("zpid") or row.get("detailUrl", ""))
-        if not zpid:
+        zpid        = row.get("zpid")
+        if not zpid or has_seen(zpid):
             continue
 
-        # ---- local dedupe by zpid 
------------------------------------------
-        if conn.execute("SELECT 1 FROM listings WHERE zpid = ?", 
-(zpid,)).fetchone():
+        desc        = row.get("description", "")
+        if not qualifies_listing(desc):
+            mark_seen(zpid)
             continue
 
-        desc = row.get("description") or row.get("homeDescription") or ""
-        if not desc:
-            continue
+        agent_name  = row.get("agentName", "")
+        state       = row.get("state", "")
+        contact     = find_contact(agent_name, state)
+        phone       = contact.get("phone")
+        email       = contact.get("email")
 
-        # ---- GPT qualification 
--------------------------------------------
-        if not gpt_yes(QUALIFY_PROMPT_TEMPLATE.format(desc=desc[:4000])):
-            continue
+        if phone:
+            first   = agent_name.split()[0]
+            address = row.get("address", "")
+            send_sms(phone, first, address)
 
-        # ---- contact lookup 
-----------------------------------------------
-        agent_name = (
-            row.get("listingAgentName")
-            or row.get("brokerName")
-            or row.get("agentName")
-            or ""
-        )
-        state = row.get("state") or row.get("stateCode") or ""
-        brokerage = row.get("brokerageName") or ""
-        contact = gpt_json(
-            CONTACT_PROMPT_TEMPLATE.format(
-                agent_name=agent_name, state=state, brokerage=brokerage
-            )
-        )
-        phone = contact.get("phone", "").strip()
-        email = contact.get("email", "").strip()
+        # Append to Google Sheet:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        sheet.append_row([
+            zpid, row.get("address"), agent_name,
+            phone, email, timestamp
+        ])
 
-        # ---- dedupe by phone in Google Sheet 
-------------------------------
-        if phone_exists_in_sheet(phone):
-            continue
-
-        # ---- append to sheet 
----------------------------------------------
-        address = row.get("address") or row.get("streetAddress") or ""
-        sheet.append_row(
-            [
-                time.strftime("%Y-%m-%d %H:%M"),
-                zpid,
-                agent_name,
-                phone,
-                email,
-                address,
-                row.get("detailUrl", ""),
-            ],
-            value_input_option="USER_ENTERED",
-        )
-
-        # ---- send SMS 
------------------------------------------------------
-        first = agent_name.split()[0] if agent_name else ""
-        sms_body = SMS_TEMPLATE.format(first=first, address=address)
-        send_sms(phone, sms_body)
-
-        # ---- mark as seen 
--------------------------------------------------
-        conn.execute("INSERT OR IGNORE INTO listings (zpid, phone) VALUES 
-(?, ?)", (zpid, phone))
-        conn.commit()
+        mark_seen(zpid)
+        time.sleep(1)  # throttle so we don’t hit rate limits
 
