@@ -11,3 +11,4 @@ openai
 twilio                   
 python-dotenv             
 gspread
+oauth2client
