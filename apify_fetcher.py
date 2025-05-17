@@ -1,16 +1,22 @@
-import os, requests
+import os
+import requests
+from dotenv import load_dotenv
 
+# Load environment variables from .env
+load_dotenv()
+
+# Grab your Apify token
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
+HEADERS = {"Authorization": f"Bearer {APIFY_TOKEN}"} if APIFY_TOKEN else 
+{}
 
 def fetch_rows(dataset_id: str) -> list[dict]:
-    url = (
-        f"https://api.apify.com/v2/datasets/{dataset_id}"
-        "/items?format=json&clean=1"
-    )
-    r = requests.get(
-        url,
-        headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json()
+    """
+    Fetch all items from an Apify dataset.
+    """
+    url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
+    params = {"format": "json", "clean": 1}
+    response = requests.get(url, params=params, headers=HEADERS)
+    response.raise_for_status()
+    return response.json()
+
