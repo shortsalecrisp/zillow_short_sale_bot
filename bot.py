@@ -1,193 +1,197 @@
-#!/usr/bin/env python3
-import argparse
-import json
-import logging
-import os
-import pickle
-import random
-import sqlite3
-import time
-from datetime import datetime, timedelta
-from urllib.parse import urlparse, parse_qs, urlencode
+"""
+Zillow short-sale pipeline.
 
-import requests
+Receives rows from Apify webhook, filters with GPT, looks up the listing
+agent’s mobile & email via Google Search + GPT extraction, writes Google
+Sheets, sends SMS through SMSmobile, and stores every zpid in SQLite so
+we never process a listing twice.
+
+Environment variables expected (Render → Environment tab):
+
+  OPENAI_API_KEY        OpenAI secret key
+  APIFY_API_TOKEN       Apify token
+  SMSMOBILE_API_KEY     SMSmobile key
+  SMSMOBILE_FROM        Sender ID / phone registered with SMSmobile
+  GOOGLE_SVC_JSON       (optional) entire JSON for the service account
+"""
+
+import os, json, html, textwrap, datetime, sqlite3, requests
+from pathlib import Path
+
+import openai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import smtplib
-from email.message import EmailMessage
 
-# --- Configuration paths ---
-BASE_DIR = os.path.dirname(__file__)
-CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
-COOKIES_PATH = os.path.join(BASE_DIR, 'cookies.pkl')
-DB_PATH = os.path.join(BASE_DIR, 'seen.db')
-SERVICE_ACCOUNT = os.path.join(BASE_DIR, 'service_account.json')
+# ---------- secrets ----------
+openai.api_key = os.environ["OPENAI_API_KEY"]
+APIFY_TOKEN    = os.environ["APIFY_API_TOKEN"]
+SMS_KEY        = os.environ["SMSMOBILE_API_KEY"]
+SMS_FROM       = os.environ["SMSMOBILE_FROM"]
 
-# --- Logging setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-5s  %(message)s"
-)
-log = logging.getLogger(__name__)
+# if service-account JSON is in an env-var, write it once
+if "GOOGLE_SVC_JSON" in os.environ and not 
+Path("service_account.json").exists():
+    Path("service_account.json").write_text(os.environ["GOOGLE_SVC_JSON"], 
+encoding="utf-8")
 
+# ---------- Google Sheets ----------
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+creds  = 
+ServiceAccountCredentials.from_json_keyfile_name("service_account.json", 
+SCOPES)
+gsc    = gspread.authorize(creds)
+SHEET  = 
+gsc.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1   # 
+<-- your sheet
 
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
+# ---------- local dedupe ----------
+conn = sqlite3.connect("seen.db")
+conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY 
+KEY)")
+conn.commit()
 
-
-def build_session(cfg):
-    sess = requests.Session()
-    # pick a random, ASCII-only User-Agent
-    ua = random.choice(cfg.get('user_agents', []))
-    ua = ua.encode('latin-1', 'ignore').decode('latin-1')
-    sess.headers.update({
-        'User-Agent': ua,
-        'Referer': cfg['zillow_url'],
-        'Accept': 'application/json'
-    })
-    # load cookies if seeded
-    if os.path.exists(COOKIES_PATH):
-        with open(COOKIES_PATH, 'rb') as f:
-            try:
-                cookies = pickle.load(f)
-                sess.cookies.update(cookies)
-            except Exception:
-                log.warning("Could not load cookies.pkl, continuing without cookies")
-    return sess
-
-
-def get_api_url(zillow_url):
-    parsed = urlparse(zillow_url)
-    qs = parse_qs(parsed.query)
-    sq = qs.get('searchQueryState')
-    if not sq:
-        raise ValueError("searchQueryState parameter missing in zillow_url")
-    searchQueryState = sq[0]
-    wants = json.dumps({"cat1": ["mapResults"]})
-    wants_enc = urlencode({'wants': wants})
-    return f"{parsed.scheme}://{parsed.netloc}/search/GetSearchPageState.htm?searchQueryState={searchQueryState}&{wants_enc}&requestId=1"
-
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute('CREATE TABLE IF NOT EXISTS seen(zpid TEXT PRIMARY KEY)')
-    conn.commit()
-    return conn
-
-
-def poll_once(cfg):
-    sess = build_session(cfg)
-    api_url = get_api_url(cfg['zillow_url'])
-    log.info("Fetching Zillow JSON…")
-    resp = sess.get(api_url, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-
-    conn = init_db()
-    cur = conn.cursor()
-    new_listings = []
-
-    for r in data.get('cat1', {}).get('searchResults', {}).get('mapResults', []):
-        zpid = str(r.get('zpid'))
-        if cur.execute('SELECT 1 FROM seen WHERE zpid=?', (zpid,)).fetchone():
-            continue
-        desc = r.get('statusText', '').lower()
-        if cfg['must_include'].lower() not in desc:
-            continue
-        if any(p.lower() in desc for p in cfg.get('disallowed_phrases', [])):
-            continue
-
-        home = r.get('hdpData', {}).get('homeInfo', {})
-        if home.get('homeType') not in cfg.get('allowed_types', []):
-            continue
-
-        address = home.get('address', '')
-        state = address.split(',')[-1].strip() if ',' in address else ''
-        if state in cfg.get('disallowed_states', []):
-            continue
-
-        # passed all filters
-        new_listings.append(r)
-        cur.execute('INSERT INTO seen(zpid) VALUES (?)', (zpid,))
-
-    conn.commit()
-    conn.close()
-
-    if not new_listings:
-        log.info("No new listings.")
-        return []
-
-    # --- Append to Google Sheet ---
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        SERVICE_ACCOUNT,
-        ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+# ---------- helpers ----------
+def send_sms(to: str, body: str) -> None:
+    """Send SMS via SMSmobile (adjust URL/field names if your account 
+differs)."""
+    url = "https://rest.smsmobile.com/v1/messages"        # update if docs 
+show a different path
+    r = requests.post(
+        url,
+        json={
+            "apiKey":  SMS_KEY,
+            "from":    SMS_FROM,
+            "to":      to,
+            "message": body,
+        },
+        timeout=15,
     )
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(cfg['sheet_id']).worksheet(cfg['sheet_tab'])
+    r.raise_for_status()
 
-    rows = []
-    for r in new_listings:
-        hi = r.get('hdpData', {}).get('homeInfo', {})
-        rows.append([
-            datetime.now().isoformat(),
-            hi.get('address', ''),
-            r.get('detailUrl', ''),
-            r.get('zpid', ''),
-            hi.get('price', ''),
-            hi.get('bedrooms', ''),
-            hi.get('bathrooms', ''),
-            hi.get('livingArea', '')
+def gpt_is_short_sale(text: str) -> bool:
+    prompt = (
+        "Return YES if the following listing text indicates the property 
+is a short sale "
+        "and NOT already approved or labelled 'not a short sale'. 
+Otherwise return NO.\n\n"
+        f"{text[:3500]}"
+    )
+    resp = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role":"user","content":prompt}],
+        max_tokens=3,
+        temperature=0,
+    )
+    return "YES" in resp.choices[0].message.content.upper()
+
+# ---------- contact lookup via Google Search + GPT ----------
+SEARCH_ACTOR = "apify/google-search-scraper"
+
+def _google_search(query: str, max_links: int = 5) -> list[str]:
+    run = requests.post(
+        f"https://api.apify.com/v2/acts/{SEARCH_ACTOR}/runs",
+        params={"token": APIFY_TOKEN, "waitForFinish": 1},
+        json={
+            "queries": [query],
+            "resultsPerPage": max_links,
+            "maxPagesPerQuery": 1,
+        },
+        timeout=90,
+    ).json()["data"]
+
+    dataset = run["defaultDatasetId"]
+    items = requests.get(
+        f"https://api.apify.com/v2/datasets/{dataset}/items",
+        params={"token": APIFY_TOKEN, "clean": 1, "format": "json"},
+        timeout=30,
+    ).json()
+    return [it["url"] for it in items][:max_links]
+
+def _gpt_extract(url: str, html_text: str):
+    prompt = textwrap.dedent(f"""
+        Extract a phone number and an email from the HTML below.
+        Return strictly JSON like {{"phone":"...","email":"..."}} – use 
+null if missing.
+        Do NOT guess.
+
+        URL: {url}
+
+        HTML snippet:
+        {html.escape(html_text[:3500])}
+    """)
+    resp = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role":"user","content":prompt}],
+        max_tokens=64,
+        temperature=0,
+    )
+    try:
+        data = json.loads(resp.choices[0].message.content)
+        return data.get("phone"), data.get("email")
+    except Exception:
+        return None, None
+
+def find_contact(row: dict):
+    agent  = row.get("agentName", "")
+    address = row.get("address","")
+    state  = address.split(",")[-2].strip().split()[0] if "," in address 
+else ""
+    query  = f"\"{agent}\" real estate {state} phone"
+
+    for link in _google_search(query):
+        try:
+            html_txt = requests.get(link, timeout=12, 
+headers={"User-Agent":"Mozilla/5.0"}).text
+        except Exception:
+            continue
+        phone, email = _gpt_extract(link, html_txt)
+        if phone or email:
+            return phone, email
+    return None, None   # nothing found
+
+# ---------- main entry called from webhook ----------
+def process_rows(rows: list[dict]):
+    imported = 0
+    for row in rows:
+        zpid = str(row["zpid"])
+
+        # skip duplicates
+        if conn.execute("SELECT 1 FROM listings WHERE zpid=?", 
+(zpid,)).fetchone():
+            continue
+
+        # GPT short-sale filter
+        if not gpt_is_short_sale(row.get("description","")):
+            continue
+
+        phone, email = find_contact(row)
+        if not phone:
+            continue    # require a phone to send SMS
+
+        # write Google Sheet
+        SHEET.append_row([
+            datetime.datetime.now().isoformat(timespec="seconds"),
+            row.get("address"),
+            phone,
+            email or "",
+            row.get("agentName",""),
+            row.get("detailUrl"),
         ])
-    for row in rows:
-        sheet.append_row(row, value_input_option='RAW')
 
-    # --- Send email notification ---
-    if cfg.get('email_enabled'):
-        msg = EmailMessage()
-        msg['Subject'] = f"{len(new_listings)} new Zillow listings"
-        msg['From'] = cfg['email_from']
-        msg['To'] = cfg['email_to']
-        body = "New listings:\n" + "\n".join(r.get('detailUrl', '') for r in new_listings)
-        msg.set_content(body)
-        with smtplib.SMTP(cfg['smtp_host'], cfg['smtp_port']) as smtp:
-            smtp.starttls()
-            smtp.login(cfg['smtp_user'], cfg['smtp_pass'])
-            smtp.send_message(msg)
+        # send SMS
+        sms_text = f"Hi {row.get('agentName','there')}, I saw your 
+short-sale at {row.get('address')}. Are you open to discussing?"
+        try:
+            send_sms(phone, sms_text)
+            print("Contacted", phone, row.get("address"))
+        except Exception as e:
+            print("SMS failed", phone, e)
 
-    log.info(f"Pushed {len(new_listings)} new listings.")
-    return new_listings
+        # mark as processed
+        conn.execute("INSERT OR IGNORE INTO listings (zpid) VALUES (?)", 
+(zpid,))
+        conn.commit()
+        imported += 1
 
-def process_rows(rows):
-    """
-    Called by webhook_server to handle a list of Zillow rows.
-    Replace the body with your real dedupe → Sheets → SMS logic.
-    """
-    for row in rows:
-        print("Got row", row.get("zpid", "n/a"))
-
-
-def main():
-    cfg = load_config()
-    parser = argparse.ArgumentParser(description='Zillow short sale monitor')
-    parser.add_argument('--once', action='store_true', help='Run once and exit')
-    args = parser.parse_args()
-
-    if args.once:
-        poll_once(cfg)
-    else:
-        while True:
-            poll_once(cfg)
-            interval = random.randint(
-                int(cfg['poll_interval_min'] * 0.8),
-                int(cfg['poll_interval_min'] * 1.2)
-            )
-            next_run = datetime.now() + timedelta(minutes=interval)
-            log.info(f"Sleeping until {next_run.strftime('%I:%M %p')}")
-            time.sleep(interval * 60)
-
-
-if __name__ == '__main__':
-    main()
+    print("process_rows finished – imported", imported)
 
