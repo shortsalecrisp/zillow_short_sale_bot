@@ -10,4 +10,5 @@ google-auth-oauthlib      # sheets uses these three
 openai                    # if you call ChatGPT
 twilio                    # if you send SMS
 python-dotenv             # only if you use it for local env-vars
-
+gspread                   # <—- new line
+gspread
