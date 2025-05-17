@@ -7,8 +7,7 @@ load_dotenv()
 
 # Grab your Apify token
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
-HEADERS = {"Authorization": f"Bearer {APIFY_TOKEN}"} if APIFY_TOKEN else 
-{}
+HEADERS = {"Authorization": f"Bearer {APIFY_TOKEN}"} if APIFY_TOKEN else {}
 
 def fetch_rows(dataset_id: str) -> list[dict]:
     """
