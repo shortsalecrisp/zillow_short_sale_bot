@@ -7,7 +7,6 @@ import openai
 import gspread
 from google.oauth2.service_account import Credentials
 from oauth2client.service_account import ServiceAccountCredentials  # 
-legacy for gspread 6.x
 
 # ───────── CONFIG ─────────
 
