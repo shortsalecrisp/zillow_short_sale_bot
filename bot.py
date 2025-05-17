@@ -46,8 +46,18 @@ gsc.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1   #
 
 # ---------- local dedupe ----------
 conn = sqlite3.connect("seen.db")
-conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY 
-KEY)")
+conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS listings (
+        zpid    TEXT PRIMARY KEY,
+        address TEXT,
+        agent   TEXT,
+        phone   TEXT,
+        email   TEXT,
+        status  TEXT
+    );
+    """
+)
 conn.commit()
 
 # ---------- helpers ----------
