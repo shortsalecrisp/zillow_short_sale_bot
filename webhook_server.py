@@ -11,20 +11,22 @@ EXPORTED_ZPIDS: set[str] = set()
 @app.post("/apify-hook")
 async def apify_hook(req: Request):
     """
-    Webhook endpoint for Apify.
-
-    · Manual “Test” button – datasetId comes in JSON body
-    · Scheduled run        – datasetId comes as query-string param
+    Apify → Render webhook.
+    • Manual “Test” button – datasetId in JSON body
+    • Scheduled run        – datasetId in query-string
     """
     payload = await req.json()
-    dataset_id = payload.get("datasetId") or 
-req.query_params.get("datasetId")
+
+    dataset_id = (
+        payload.get("datasetId") or
+        req.query_params.get("datasetId")
+    )
     if not dataset_id:
         return {"error": "datasetId missing"}
 
     rows = fetch_rows(dataset_id)
 
-    # de-dup within this container
+    # Skip rows we've already handled in this container
     fresh_rows = [r for r in rows if r.get("zpid") not in EXPORTED_ZPIDS]
     EXPORTED_ZPIDS.update(r.get("zpid") for r in fresh_rows)
 
@@ -34,6 +36,6 @@ req.query_params.get("datasetId")
 
 @app.get("/export-zpids")
 async def export_zpids():
-    """Used by the runner-Actor to build excludeZpids."""
+    """Runner Actor hits this to build excludeZpids."""
     return list(EXPORTED_ZPIDS)
 
