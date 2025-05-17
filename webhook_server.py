@@ -11,6 +11,8 @@ async def apify_hook(req: Request):
     if not dataset_id:
         return {"error": "datasetId missing"}
 
+print("Webhook received datasetId:", dataset_id)
+
     rows = fetch_rows(dataset_id)                   # apify_fetcher.py
     process_rows(rows)                              # your Sheets/SMS logic
     return {"status": "ok", "imported": len(rows)}
