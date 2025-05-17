@@ -159,6 +159,14 @@ def poll_once(cfg):
     log.info(f"Pushed {len(new_listings)} new listings.")
     return new_listings
 
+def process_rows(rows):
+    """
+    Called by webhook_server to handle a list of Zillow rows.
+    Replace the body with your real dedupe → Sheets → SMS logic.
+    """
+    for row in rows:
+        print("Got row", row.get("zpid", "n/a"))
+
 
 def main():
     cfg = load_config()
