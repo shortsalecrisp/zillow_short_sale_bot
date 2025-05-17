@@ -1,25 +1,20 @@
 from fastapi import FastAPI, Request
 
-from apify_fetcher import fetch_rows     # your helper that pulls dataset 
-rows
-from bot import process_rows             # the pipeline we finished 
-earlier
+from apify_fetcher import fetch_rows
+from bot import process_rows
 
 app = FastAPI()
 
-# keep track of every ZPID we've already handled during this container’s 
-life
 EXPORTED_ZPIDS: set[str] = set()
 
 
 @app.post("/apify-hook")
 async def apify_hook(req: Request):
     """
-    Entry-point for Apify webhooks.
+    Webhook endpoint for Apify.
 
-    • Manual “Test” button ➜ datasetId is in the JSON body
-    • Normal task run        ➜ datasetId is passed as a query-string 
-param
+    · Manual “Test” button – datasetId comes in JSON body
+    · Scheduled run        – datasetId comes as query-string param
     """
     payload = await req.json()
     dataset_id = payload.get("datasetId") or 
@@ -29,7 +24,7 @@ req.query_params.get("datasetId")
 
     rows = fetch_rows(dataset_id)
 
-    # Deduplicate against zpids we've already processed in this pod.
+    # de-dup within this container
     fresh_rows = [r for r in rows if r.get("zpid") not in EXPORTED_ZPIDS]
     EXPORTED_ZPIDS.update(r.get("zpid") for r in fresh_rows)
 
@@ -39,9 +34,6 @@ req.query_params.get("datasetId")
 
 @app.get("/export-zpids")
 async def export_zpids():
-    """
-    Helper for the JS runner Actor.
-    Returns all ZPIDs we’ve seen so far so Apify can set `excludeZpids`.
-    """
+    """Used by the runner-Actor to build excludeZpids."""
     return list(EXPORTED_ZPIDS)
 
