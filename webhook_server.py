@@ -1,50 +1,47 @@
-# webhook_server.py
-from fastapi import FastAPI, Request, HTTPException
-from typing import List
-from apify_fetcher import fetch_rows          # your helper that loads 
-dataset rows
-from bot import process_rows, load_seen_zpids # new helper in bot.py
+from fastapi import FastAPI, Request
+
+from apify_fetcher import fetch_rows     # your helper that pulls dataset 
+rows
+from bot import process_rows             # the pipeline we finished 
+earlier
 
 app = FastAPI()
 
-##########################################################################
-# 1)  Webhook that Apify calls after every run (dataset → Google Sheet)  
-#
-##########################################################################
+# keep track of every ZPID we've already handled during this container’s 
+life
+EXPORTED_ZPIDS: set[str] = set()
+
+
 @app.post("/apify-hook")
 async def apify_hook(req: Request):
     """
-    Called by Apify's HTTP-webhook integration.
-    Handles both the manual “Test” button and real runs.
+    Entry-point for Apify webhooks.
+
+    • Manual “Test” button ➜ datasetId is in the JSON body
+    • Normal task run        ➜ datasetId is passed as a query-string 
+param
     """
-    data = await req.json()
-    dataset_id = (
-        data.get("datasetId")                  # manual “Test”
-        or req.query_params.get("datasetId")   # normal run
-    )
+    payload = await req.json()
+    dataset_id = payload.get("datasetId") or 
+req.query_params.get("datasetId")
     if not dataset_id:
-        raise HTTPException(status_code=400, detail="datasetId missing")
+        return {"error": "datasetId missing"}
 
-    rows = fetch_rows(dataset_id)              # list[dict] from Apify 
-dataset
-    imported = process_rows(rows)              # → bot handles filtering, 
-sheet, sms
-    return {"status": "ok", "imported": imported}
+    rows = fetch_rows(dataset_id)
+
+    # Deduplicate against zpids we've already processed in this pod.
+    fresh_rows = [r for r in rows if r.get("zpid") not in EXPORTED_ZPIDS]
+    EXPORTED_ZPIDS.update(r.get("zpid") for r in fresh_rows)
+
+    process_rows(fresh_rows)
+    return {"status": "ok", "imported": len(fresh_rows)}
 
 
-###########################################################
-# 2)  Export endpoint for Apify helper (excludeZpids)      #
-###########################################################
-@app.get("/export-zpids", response_model=List[int])
+@app.get("/export-zpids")
 async def export_zpids():
     """
-    Returns the list of Zillow property IDs that have ALREADY been 
-processed.
-    Apify’s helper hits this endpoint before every run and passes the IDs 
-in
-    the Actor input as `excludeZpids`, so the scraper only fetches *new* 
-homes.
+    Helper for the JS runner Actor.
+    Returns all ZPIDs we’ve seen so far so Apify can set `excludeZpids`.
     """
-    return load_seen_zpids()       # simple list[int] that you save in 
-bot.py
+    return list(EXPORTED_ZPIDS)
 
