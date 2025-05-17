@@ -5,10 +5,9 @@ requests
 google-api-python-client
 google-auth
 google-auth-httplib2
-google-auth-oauthlib      # sheets uses these three
+google-auth-oauthlib      
 
-openai                    # if you call ChatGPT
-twilio                    # if you send SMS
-python-dotenv             # only if you use it for local env-vars
-gspread                   # <—- new line
+openai                    
+twilio                   
+python-dotenv             
 gspread
