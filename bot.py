@@ -7,19 +7,30 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 
-# Load environment variables
+# 1) Load API keys & creds from environment
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SMSM_KEY         = os.getenv("SMSM_KEY")
+OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY")
+SMSM_KEY          = os.getenv("SMSM_KEY")
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
 openai.api_key = OPENAI_API_KEY
 
-# Google Sheets setup
-SHEET_URL = "https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70/edit?gid=0"
-GSCOPE    = ["https://spreadsheets.google.com/feeds",
-             "https://www.googleapis.com/auth/drive"]
-CREDS     = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", GSCOPE)
-GC        = gspread.authorize(CREDS)
+# 2) Parse Google service-account JSON from the env var
+if not GOOGLE_CREDENTIALS:
+    raise RuntimeError("Missing GOOGLE_CREDENTIALS env var")
+creds_dict = json.loads(GOOGLE_CREDENTIALS)
+
+# 3) Google Sheets setup via in-memory creds
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
+CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, 
+SCOPE)
+GC    = gspread.authorize(CREDS)
+# your sheet URL:
+SHEET_URL = 
+"https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70/edit?gid=0"
 SHEET     = GC.open_by_url(SHEET_URL).sheet1
 
 # SMS endpoint
@@ -33,26 +44,30 @@ def process_rows(rows):
     4) Append to Google Sheet & send SMS.
     """
     conn = sqlite3.connect("seen.db")
-    conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY 
+KEY)")
     conn.commit()
 
     for row in rows:
         zpid = str(row.get("zpid", ""))
-        if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
+        # skip if seen
+        if conn.execute("SELECT 1 FROM listings WHERE zpid=?", 
+(zpid,)).fetchone():
             continue
 
         # 2) Filter via OpenAI
         listing_text = row.get("description", "")
-        filter_prompt = (
-            "Return YES if the following listing text indicates a qualifying short sale "
+        prompt = (
+            "Return YES if the following listing text indicates a 
+qualifying short sale "
             "with none of our excluded terms; otherwise return NO.\n\n"
             f"{listing_text}"
         )
-        filt_resp = openai.ChatCompletion.create(
+        resp = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[{"role":"user","content":filter_prompt}],
+            messages=[{"role": "user", "content": prompt}],
         )
-        decision = filt_resp.choices[0].message.content.strip().upper()
+        decision = resp.choices[0].message.content.strip().upper()
         if not decision.startswith("YES"):
             continue
 
@@ -60,14 +75,16 @@ def process_rows(rows):
         agent_name = row.get("listingAgent", {}).get("name", "")
         state      = row.get("state", "")
         contact_prompt = (
-            f"Find the mobile phone number and email for real estate agent "
-            f"{agent_name} in {state}. Respond in JSON with keys 'phone' and 'email'."
+            f"Find the mobile phone number and email for real estate agent 
+"
+            f"{agent_name} in {state}. Respond in JSON with keys 'phone' 
+and 'email'."
         )
-        cont_resp = openai.ChatCompletion.create(
+        cont = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[{"role":"user","content":contact_prompt}],
+            messages=[{"role": "user", "content": contact_prompt}],
         )
-        cont_text = cont_resp.choices[0].message.content.strip()
+        cont_text = cont.choices[0].message.content.strip()
         try:
             contact = json.loads(cont_text)
             phone   = contact.get("phone")
@@ -84,12 +101,18 @@ def process_rows(rows):
             address = row.get("address", "")
 
             sms_body = (
-                "Hey {first}, this is Yoni Kutler - I saw your short sale listing at {address} "
-                "and wanted to introduce myself. I specialize in helping agents get faster bank "
-                "approvals and ensure these deals close. I know you likely handle short sales yourself, "
-                "but I work behind the scenes to take on lender negotiations so you can focus on selling. "
-                "No cost to you or your client - I'm only paid by the buyer at closing. "
-                "Would you be open to a quick call to see if this could help?"
+                "Hey {first}, this is Yoni Kutler—I saw your short sale 
+listing at {address} "
+                "and wanted to introduce myself. I specialize in helping 
+agents get faster bank "
+                "approvals and ensure these deals close. I know you likely 
+handle short sales yourself, "
+                "but I work behind the scenes to take on lender 
+negotiations so you can focus on selling. "
+                "No cost to you or your client—I’m only paid by the buyer 
+at closing. "
+                "Would you be open to a quick call to see if this could 
+help?"
             ).format(first=first, address=address)
 
             requests.post(
@@ -98,8 +121,10 @@ def process_rows(rows):
                 headers={"Authorization": f"Bearer {SMSM_KEY}"},
             )
 
-            SHEET.append_row([zpid, agent_name, phone, email, address, "SMS sent"])
+            SHEET.append_row([zpid, agent_name, phone, email, address, 
+"SMS sent"])
 
+        # mark seen
         conn.execute(
             "INSERT OR IGNORE INTO listings(zpid) VALUES(?)",
             (zpid,),
@@ -107,3 +132,4 @@ def process_rows(rows):
         conn.commit()
 
     conn.close()
+
