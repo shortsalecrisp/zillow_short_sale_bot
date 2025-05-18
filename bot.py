@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 
 # 1) Load env vars
 load_dotenv()
-OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY")
-SMSM_KEY          = os.getenv("SMSM_KEY")
+OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
+SMSM_KEY           = os.getenv("SMSM_KEY")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
 if not OPENAI_API_KEY or not SMSM_KEY or not GOOGLE_CREDENTIALS:
@@ -53,7 +53,7 @@ KEY)")
 (zpid,)).fetchone():
             continue
 
-        # --- step 2: filter ---
+        # 2) Filter via OpenAI
         listing_text = row.get("description", "")
         filter_prompt = (
             "Return YES if the following listing text indicates a 
@@ -61,15 +61,15 @@ qualifying short sale "
             "with none of our excluded terms; otherwise return NO.\n\n"
             f"{listing_text}"
         )
-        filter_resp = openai.ChatCompletion.create(
+        filt_resp = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": filter_prompt}],
         )
-        decision = filter_resp.choices[0].message.content.strip().upper()
+        decision = filt_resp.choices[0].message.content.strip().upper()
         if not decision.startswith("YES"):
             continue
 
-        # --- step 3: contact lookup ---
+        # 3) Contact lookup via OpenAI
         agent_name = row.get("listingAgent", {}).get("name", "")
         state      = row.get("state", "")
         contact_prompt = (
@@ -92,7 +92,7 @@ and 'email'."
         if not phone:
             continue
 
-        # --- step 4: write & SMS ---
+        # 4) Append & SMS
         all_records = SHEET.get_all_records()
         if not any(r.get("phone") == phone for r in all_records):
             first   = agent_name.split()[0] if agent_name else ""
