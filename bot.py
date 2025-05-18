@@ -7,20 +7,20 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 
-# 1) Load API keys & creds from environment
+# 1) Load env vars
 load_dotenv()
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY")
 SMSM_KEY          = os.getenv("SMSM_KEY")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
+if not OPENAI_API_KEY or not SMSM_KEY or not GOOGLE_CREDENTIALS:
+    raise RuntimeError("Missing one of OPENAI_API_KEY, SMSM_KEY or 
+GOOGLE_CREDENTIALS")
+
 openai.api_key = OPENAI_API_KEY
 
-# 2) Parse Google service-account JSON from the env var
-if not GOOGLE_CREDENTIALS:
-    raise RuntimeError("Missing GOOGLE_CREDENTIALS env var")
+# 2) Google Sheets creds from env JSON
 creds_dict = json.loads(GOOGLE_CREDENTIALS)
-
-# 3) Google Sheets setup via in-memory creds
 SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
@@ -28,20 +28,19 @@ SCOPE = [
 CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, 
 SCOPE)
 GC    = gspread.authorize(CREDS)
-# your sheet URL:
 SHEET_URL = 
 "https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70/edit?gid=0"
 SHEET     = GC.open_by_url(SHEET_URL).sheet1
 
-# SMS endpoint
+# 3) SMS endpoint
 SMSM_URL = "https://api.smsmobile.com/v1/messages"
 
 def process_rows(rows):
     """
     1) Dedupe in SQLite.
-    2) Filter qualifying short-sales via OpenAI.
-    3) Lookup agent contact via OpenAI.
-    4) Append to Google Sheet & send SMS.
+    2) Filter via OpenAI.
+    3) Lookup contact via OpenAI.
+    4) Append to Sheet & send SMS.
     """
     conn = sqlite3.connect("seen.db")
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY 
@@ -50,28 +49,27 @@ KEY)")
 
     for row in rows:
         zpid = str(row.get("zpid", ""))
-        # skip if seen
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", 
 (zpid,)).fetchone():
             continue
 
-        # 2) Filter via OpenAI
+        # --- step 2: filter ---
         listing_text = row.get("description", "")
-        prompt = (
+        filter_prompt = (
             "Return YES if the following listing text indicates a 
 qualifying short sale "
             "with none of our excluded terms; otherwise return NO.\n\n"
             f"{listing_text}"
         )
-        resp = openai.ChatCompletion.create(
+        filter_resp = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": filter_prompt}],
         )
-        decision = resp.choices[0].message.content.strip().upper()
+        decision = filter_resp.choices[0].message.content.strip().upper()
         if not decision.startswith("YES"):
             continue
 
-        # 3) Lookup agent contact via OpenAI
+        # --- step 3: contact lookup ---
         agent_name = row.get("listingAgent", {}).get("name", "")
         state      = row.get("state", "")
         contact_prompt = (
@@ -80,11 +78,11 @@ qualifying short sale "
             f"{agent_name} in {state}. Respond in JSON with keys 'phone' 
 and 'email'."
         )
-        cont = openai.ChatCompletion.create(
+        cont_resp = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": contact_prompt}],
         )
-        cont_text = cont.choices[0].message.content.strip()
+        cont_text = cont_resp.choices[0].message.content.strip()
         try:
             contact = json.loads(cont_text)
             phone   = contact.get("phone")
@@ -94,12 +92,11 @@ and 'email'."
         if not phone:
             continue
 
-        # 4) Append & SMS
+        # --- step 4: write & SMS ---
         all_records = SHEET.get_all_records()
         if not any(r.get("phone") == phone for r in all_records):
             first   = agent_name.split()[0] if agent_name else ""
             address = row.get("address", "")
-
             sms_body = (
                 "Hey {first}, this is Yoni Kutler—I saw your short sale 
 listing at {address} "
@@ -124,7 +121,7 @@ help?"
             SHEET.append_row([zpid, agent_name, phone, email, address, 
 "SMS sent"])
 
-        # mark seen
+        # mark as seen
         conn.execute(
             "INSERT OR IGNORE INTO listings(zpid) VALUES(?)",
             (zpid,),
