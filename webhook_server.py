@@ -20,11 +20,15 @@ if not (OPENAI_API_KEY and SMSM_KEY and SHEET_URL):
 # 
 ─────────────────────────────────────────────────────────────────────────────────
 
+from fastapi import FastAPI, Request
+
 from apify_fetcher import fetch_rows
 from bot import process_rows
 
 app = FastAPI()
 
+# ─────────────────────────────────────────────────────────  
+← now a comment
 EXPORTED_ZPIDS: set[str] = set()
 
 
