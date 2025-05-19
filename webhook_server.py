@@ -28,7 +28,7 @@ from bot import process_rows
 app = FastAPI()
 
 # ─────────────────────────────────────────────────────────  
-← now a comment
+# Tracks ZPIDs already exported to avoid duplicates
 EXPORTED_ZPIDS: set[str] = set()
 
 
