@@ -1,4 +1,24 @@
 from fastapi import FastAPI, Request
+import os
+
+# ── Startup sanity check 
+─────────────────────────────────────────────────────────
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SMSM_KEY       = os.getenv("SMSM_KEY")
+SHEET_URL      = os.getenv("SHEET_URL")
+
+if not (OPENAI_API_KEY and SMSM_KEY and SHEET_URL):
+    missing = [
+        name for name, val in [
+            ("OPENAI_API_KEY", OPENAI_API_KEY),
+            ("SMSM_KEY", SMSM_KEY),
+            ("SHEET_URL", SHEET_URL),
+        ]
+        if not val
+    ]
+    raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+# 
+─────────────────────────────────────────────────────────────────────────────────
 
 from apify_fetcher import fetch_rows
 from bot import process_rows
