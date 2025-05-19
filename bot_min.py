@@ -13,8 +13,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SMSM_KEY       = os.getenv("SMSM_KEY")
 SHEET_URL      = os.getenv("SHEET_URL")
 
-if not OPENAI_API_KEY or not SMSM_KEY or not SHEET_URL:
-    raise RuntimeError("Missing one of OPENAI_API_KEY, SMSM_KEY or SHEET_URL")
+if not (OPENAI_API_KEY and SMSM_KEY and SHEET_URL):
+    raise RuntimeError("Missing one of OPENAI_API_KEY, SMSM_KEY or 
+SHEET_URL")
 
 # OpenAI setup
 openai.api_key = OPENAI_API_KEY
