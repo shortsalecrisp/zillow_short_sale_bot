@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 import os
 
 # ── Startup sanity check 
-─────────────────────────────────────────────────────────
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SMSM_KEY       = os.getenv("SMSM_KEY")
 SHEET_URL      = os.getenv("SHEET_URL")
