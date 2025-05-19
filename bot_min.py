@@ -11,13 +11,15 @@ from dotenv import load_dotenv
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SMSM_KEY       = os.getenv("SMSM_KEY")
+SMS_ENABLED    = os.getenv("SMS_ENABLED", "false").lower() == "true"
 SHEET_URL      = os.getenv("SHEET_URL")
 
-missing = [name for name, val in (
+missing = [name for name, val in [
     ("OPENAI_API_KEY", OPENAI_API_KEY),
-    ("SMSM_KEY",        SMSM_KEY),
-    ("SHEET_URL",       SHEET_URL),
-) if not val]
+    ("SHEET_URL",      SHEET_URL),
+] if not val]
+if SMS_ENABLED and not SMSM_KEY:
+    missing.append("SMSM_KEY")
 if missing:
     raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 # OpenAI setup
@@ -106,12 +108,16 @@ def process_rows(rows):
                 "Would you be open to a quick call to see if this could help?"
             ).format(first=first, address=address)
 
-            requests.post(
-                SMSM_URL,
-                json={"to": phone, "message": sms_body},
-                headers={"Authorization": f"Bearer {SMSM_KEY}"},
-            )
-            SHEET.append_row([zpid, agent_name, phone, email, address, "SMS sent"])
+            if SMS_ENABLED:
+                requests.post(
+                    SMSM_URL,
+                    json={"to": phone, "message": sms_body},
+                    headers={"Authorization": f"Bearer {SMSM_KEY}"},
+                )
+                note = "SMS sent"
+            else:
+                note = "SMS skipped"
+            SHEET.append_row([zpid, agent_name, phone, email, address, note])
 
         conn.execute(
             "INSERT OR IGNORE INTO listings(zpid) VALUES(?)",
