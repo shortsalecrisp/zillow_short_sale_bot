@@ -1,5 +1,10 @@
 from fastapi import FastAPI, Request
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env if present. Render-provided
+# variables override these automatically.
+load_dotenv()
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
