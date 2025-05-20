@@ -1,7 +1,5 @@
 from fastapi import FastAPI, Request
 import os
-
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SMSM_KEY       = os.getenv("SMSM_KEY")
 SHEET_URL      = os.getenv("SHEET_URL")
@@ -17,10 +15,9 @@ if not (OPENAI_API_KEY and SMSM_KEY and SHEET_URL):
     ]
     raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
 
-from fastapi import FastAPI, Request
-
 from apify_fetcher import fetch_rows
-from bot import process_rows
+# Use the streamlined bot implementation
+from bot_min import process_rows
 
 app = FastAPI()
 
