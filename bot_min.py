@@ -33,8 +33,7 @@ def process_rows(rows):
         listing_text = row.get("description", "")
         filt_resp = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": "Return YES if the following listing text indicates a 
-qualifying short sale with none of our excluded terms; otherwise return NO.\n\n" + listing_text}],
+            messages=[{"role": "user", "content": "Return YES if the following listing text indicates a qualifying short sale with none of our excluded terms; otherwise return NO.\n\n" + listing_text}],
             temperature=0.2,
         )
         if not filt_resp.choices[0].message.content.strip().upper().startswith("YES"):
@@ -43,8 +42,7 @@ qualifying short sale with none of our excluded terms; otherwise return NO.\n\n"
         state = row.get("state", "")
         cont_resp = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": f"Find the mobile phone number and email for real estate 
-agent {agent_name} in {state}. Respond in JSON with keys 'phone' and 'email'."}],
+            messages=[{"role": "user", "content": f"Find the mobile phone number and email for real estate agent {agent_name} in {state}. Respond in JSON with keys 'phone' and 'email'."}],
             temperature=0.2,
         )
         try:
@@ -58,8 +56,7 @@ agent {agent_name} in {state}. Respond in JSON with keys 'phone' and 'email'."}]
         if any(r.get("phone") == phone for r in SHEET.get_all_records()):
             continue
         sms_body = (
-            f"Hey {agent_name.split()[0] if agent_name else ''}, this is Yoni Kutler—I saw your short sale 
-listing at {row.get('address','')} and wanted to introduce myself. "
+            f"Hey {agent_name.split()[0] if agent_name else ''}, this is Yoni Kutler—I saw your short sale listing at {row.get('address','')} and wanted to introduce myself. "
             "I specialize in helping agents get faster bank approvals and ensure these deals close. "
             "No cost to you or your client—I’m only paid by the buyer at closing. "
             "Would you be open to a quick call to see if this could help?"
