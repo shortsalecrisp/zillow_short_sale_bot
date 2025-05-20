@@ -7,8 +7,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 
-# ── 1  Load environment variables 
-──────────────────────────────────────────
 load_dotenv()
 
 # OpenAI: the v1 client reads OPENAI_API_KEY from the env automatically
@@ -17,8 +15,6 @@ client = OpenAI()
 SMSM_KEY  = os.getenv("SMSM_KEY")
 SHEET_URL = os.getenv("SHEET_URL")
 
-# ── 2  Google Sheets setup 
-────────────────────────────────────────────────
 GSCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
@@ -37,12 +33,8 @@ CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, GSCOPE)
 GC    = gspread.authorize(CREDS)
 SHEET = GC.open_by_url(SHEET_URL).sheet1
 
-# ── 3  SMS endpoint 
-───────────────────────────────────────────────────────
 SMSM_URL = "https://api.smsmobile.com/v1/messages"
 
-# ── 4  Core pipeline 
-──────────────────────────────────────────────────────
 def process_rows(rows: list[dict]) -> None:
     """
     1) dedupe
@@ -56,11 +48,9 @@ def process_rows(rows: list[dict]) -> None:
 
     for row in rows:
         zpid = str(row.get("zpid", ""))
-        # ── 4a  Skip if we've already handled this listing ────────────────
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             continue
 
-        # ── 4b  Filter: is this a qualifying short sale? ──────────────────
         listing_text  = row.get("description", "")
         filter_prompt = (
             "Return YES if the following listing text indicates a *qualifying short sale* "
@@ -77,7 +67,6 @@ def process_rows(rows: list[dict]) -> None:
         if not decision.startswith("YES"):
             continue
 
-        # ── 4c  Lookup: phone & email for the agent ───────────────────────
         agent_name = row.get("listingAgent", {}).get("name", "")
         state      = row.get("state", "")
         contact_prompt = (
@@ -99,7 +88,6 @@ def process_rows(rows: list[dict]) -> None:
         if not phone:
             continue  # need a phone number to proceed
 
-        # ── 4d  Send SMS + record to Sheet (skip if phone already present) ─
         if not any(r.get("phone") == phone for r in SHEET.get_all_records()):
             first    = agent_name.split()[0] if agent_name else ""
             address  = row.get("address", "")
@@ -120,7 +108,6 @@ def process_rows(rows: list[dict]) -> None:
             )
             SHEET.append_row([zpid, agent_name, phone, email, address, "SMS sent"])
 
-        # ── 4e  Persist zpid so we don't process it again ──────────────────
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
 
