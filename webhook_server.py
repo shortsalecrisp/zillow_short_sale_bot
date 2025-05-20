@@ -20,7 +20,7 @@ if not (OPENAI_API_KEY and SMSM_KEY and SHEET_URL):
 from fastapi import FastAPI, Request
 
 from apify_fetcher import fetch_rows
-from bot import process_rows
+from bot_min import process_rows
 
 app = FastAPI()
 
