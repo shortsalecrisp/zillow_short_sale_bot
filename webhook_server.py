@@ -23,14 +23,12 @@ EXPORTED_ZPIDS: set[str] = set()
 async def apify_hook(request: Request):
     """Webhook entry‑point for Apify dataset notifications.
 
-    The dataset ID may arrive either in the JSON body (manual “test” 
-button)
+    The dataset ID may arrive either in the JSON body (manual “test” button)
     or as a query‑string parameter during scheduled runs.
     """
     payload = await request.json()
 
-    dataset_id = payload.get("datasetId") or 
-request.query_params.get("datasetId")
+    dataset_id = payload.get("datasetId") or request.query_params.get("datasetId")
     if not dataset_id:
         return {"error": "datasetId missing"}
 
