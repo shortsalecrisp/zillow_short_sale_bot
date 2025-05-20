@@ -28,9 +28,9 @@ async def apify_hook(request: Request):
     """
     payload = await request.json()
 
-    dataset_id = payload.get("datasetId") or request.query_params.get("datasetId")
+    dataset_id = payload.get("dataset_id") or request.query_params.get("datasetId")
     if not dataset_id:
-        return {"error": "datasetId missing"}
+        return {"error": "dataset_id missing"}
 
     rows = fetch_rows(dataset_id)
 
