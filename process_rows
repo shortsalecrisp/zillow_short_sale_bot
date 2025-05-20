@@ -1,0 +1,205 @@
+"""Zillow short‑sale pipeline.
+Receives rows from Apify webhook, filters with GPT, looks up agent 
+phone/email
+via Google‑search + GPT, writes Google Sheet, sends SMS through SMSmobile.
+All secrets are read from environment variables set in Render.
+
+Required env‑vars (Render → Environment tab for Web‑Service **and** Cron 
+Job):
+  OPENAI_API_KEY       – OpenAI secret key
+  APIFY_API_TOKEN      – Apify token
+  SMSMOBILE_API_KEY    – SMSmobile key
+  SMSMOBILE_FROM       – sender ID/phone as registered with SMSmobile
+  GOOGLE_SVC_JSON      – (optional) entire JSON for service‑account
+
+Google Sheet: 
+https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70
+"""
+
+import os, json, html, textwrap, datetime, sqlite3, requests
+from pathlib import Path
+
+import openai
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+# ------------------  load secrets  ------------------
+openai.api_key = os.environ["OPENAI_API_KEY"]
+APIFY_TOKEN    = os.environ["APIFY_API_TOKEN"]
+SMS_KEY        = os.environ["SMSMOBILE_API_KEY"]
+SMS_FROM       = os.environ["SMSMOBILE_FROM"]
+
+# optional – write service‑account json from env‑var
+if "GOOGLE_SVC_JSON" in os.environ and not 
+Path("service_account.json").exists():
+    Path("service_account.json").write_text(os.environ["GOOGLE_SVC_JSON"], 
+encoding="utf‑8")
+
+# ------------------  Google Sheets ------------------
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+creds = 
+ServiceAccountCredentials.from_json_keyfile_name("service_account.json", 
+SCOPES)
+client = gspread.authorize(creds)
+SHEET = 
+client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1
+
+# ------------------  local dedupe DB ------------------
+conn = sqlite3.connect("seen.db")
+conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY 
+KEY)")
+conn.commit()
+
+# ------------------  utility funcs ------------------
+
+def send_sms(to: str, body: str):
+    """Send SMS via SMSmobile – adjust URL/fields if your account 
+differs."""
+    url = "https://rest.smsmobile.com/v1/messages"  # <-- update if needed
+    r = requests.post(
+        url,
+        json={
+            "apiKey": SMS_KEY,
+            "from": SMS_FROM,
+            "to": to,
+            "message": body,
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+
+
+def gpt_is_short_sale(description: str) -> bool:
+    prompt = (
+        "Return YES if the following home listing text indicates the 
+property is a short sale "
+        "and NOT already approved or marked 'not a short sale'. Otherwise 
+return NO.\n\n"
+        f"Listing text:\n{description[:3500]}"
+    )
+    resp = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=3,
+        temperature=0,
+    )
+    return "YES" in resp.choices[0].message.content.upper()
+
+# --------------  contact lookup via Google‑search + GPT  --------------
+SEARCH_ACTOR = "apify/google-search-scraper"
+
+
+def _scrape_google(query: str, max_links: int = 5):
+    """Return a list of top result URLs for the query using Apify Google 
+Search."""
+    run = requests.post(
+        f"https://api.apify.com/v2/acts/{SEARCH_ACTOR}/runs",
+        params={"token": APIFY_TOKEN, "waitForFinish": 1},
+        json={
+            "queries": [query],
+            "resultsPerPage": max_links,
+            "maxPagesPerQuery": 1,
+        },
+        timeout=90,
+    ).json()["data"]
+
+    dataset_id = run["defaultDatasetId"]
+    items = requests.get(
+        f"https://api.apify.com/v2/datasets/{dataset_id}/items",
+        params={"token": APIFY_TOKEN, "clean": 1, "format": "json"},
+        timeout=30,
+    ).json()
+    return [itm["url"] for itm in items][:max_links]
+
+
+def _extract_with_gpt(url: str, html_text: str):
+    prompt = textwrap.dedent(
+        f"""
+        You are a data extractor. Examine the HTML snippet from {url}.
+        Return strictly JSON like {{"phone":"...","email":"..."}}. Use 
+null if not found.
+        Do NOT invent values.
+
+        HTML snippet:\n{html.escape(html_text[:3500])}
+        """
+    )
+    resp = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=64,
+        temperature=0,
+    )
+    try:
+        data = json.loads(resp.choices[0].message.content)
+        return data.get("phone"), data.get("email")
+    except Exception:
+        return None, None
+
+
+def find_contact(row: dict):
+    agent = row.get("agentName", "")
+    # crude state extraction from address string
+    address = row.get("address", "")
+    state = address.split(",")[-2].strip().split()[0] if "," in address 
+else ""
+    query = f'"{agent}" real estate {state} phone'
+
+    for link in _scrape_google(query):
+        try:
+            html_text = requests.get(link, timeout=12, 
+headers={"User-Agent": "Mozilla/5.0"}).text
+        except Exception:
+            continue
+        phone, email = _extract_with_gpt(link, html_text)
+        if phone or email:
+            return phone, email
+
+    return None, None  # fallback if nothing found
+
+# --------------  main pipeline called by webhook_server.py --------------
+
+def process_rows(rows: list[dict]):
+    """Called by webhook_server after fetching dataset rows."""
+    imported = 0
+    for row in rows:
+        zpid = str(row["zpid"])
+        # skip duplicates
+        if conn.execute("SELECT 1 FROM listings WHERE zpid=?", 
+(zpid,)).fetchone():
+            continue
+
+        # filter by GPT short‑sale test
+        if not gpt_is_short_sale(row.get("description", "")):
+            continue
+
+        phone, email = find_contact(row)
+        if not phone:
+            continue  # we require a phone to text
+
+        # append to Google Sheet
+        SHEET.append_row([
+            datetime.datetime.now().isoformat(timespec="seconds"),
+            row.get("address"),
+            phone,
+            email or "",
+            row.get("agentName", ""),
+            row.get("detailUrl"),
+        ])
+
+        # send SMS
+        sms_body = f"Hi {row.get('agentName','there')}, I saw your 
+short‑sale at {row.get('address')}. Are you open to discussing?"
+        try:
+            send_sms(phone, sms_body)
+            print("Contacted", phone, row.get("address"))
+        except Exception as e:
+            print("SMS failed", phone, e)
+
+        # mark as seen
+        conn.execute("INSERT OR IGNORE INTO listings (zpid) VALUES (?)", 
+(zpid,))
+        conn.commit()
+        imported += 1
+
+    print("process_rows finished – imported", imported)
+

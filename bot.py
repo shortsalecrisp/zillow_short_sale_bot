@@ -9,28 +9,30 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
-SMSM_KEY           = os.getenv("SMSM_KEY")
+OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
+SMSM_KEY         = os.getenv("SMSM_KEY")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
-SHEET_URL          = os.getenv("SHEET_URL")
+SHEET_URL        = os.getenv("SHEET_URL")
 
+# Ensure all required secrets are present
 if not OPENAI_API_KEY or not SMSM_KEY or not GOOGLE_CREDENTIALS or not 
 SHEET_URL:
-    raise RuntimeError("Missing one of OPENAI_API_KEY, SMSM_KEY, 
-GOOGLE_CREDENTIALS or SHEET_URL")
+    raise RuntimeError(
+        "Missing one of OPENAI_API_KEY, SMSM_KEY, GOOGLE_CREDENTIALS or 
+SHEET_URL"
+    )
 
+# Configure OpenAI
 openai.api_key = OPENAI_API_KEY
 
-# Google Sheets setup
-GSCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
+# Set up Google Sheets client
+GSCOPE = ["https://spreadsheets.google.com/feeds", 
+"https://www.googleapis.com/auth/drive"]
 creds_dict = json.loads(GOOGLE_CREDENTIALS)
-CREDS      = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, 
+CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, 
 GSCOPE)
-GC         = gspread.authorize(CREDS)
-SHEET      = GC.open_by_url(SHEET_URL).sheet1
+GC    = gspread.authorize(CREDS)
+SHEET = GC.open_by_url(SHEET_URL).sheet1
 
 # SMS endpoint
 SMSM_URL = "https://api.smsmobile.com/v1/messages"
@@ -49,6 +51,7 @@ KEY)")
 
     for row in rows:
         zpid = str(row.get("zpid", ""))
+        # Skip if already seen
         if conn.execute("SELECT 1 FROM listings WHERE zpid = ?", 
 (zpid,)).fetchone():
             continue
@@ -59,7 +62,7 @@ KEY)")
             "Return YES if the following listing text indicates a 
 qualifying short sale "
             "with none of our excluded terms; otherwise return NO.\n\n"
-            f"{listing_text}"
+            + listing_text
         )
         filt_resp = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
@@ -85,21 +88,21 @@ and 'email'."
         cont_text = cont_resp.choices[0].message.content.strip()
         try:
             contact = json.loads(cont_text)
-            phone   = contact.get("phone")
-            email   = contact.get("email", "")
         except json.JSONDecodeError:
             continue
+        phone = contact.get("phone")
+        email = contact.get("email", "")
         if not phone:
             continue
 
-        # 4) Append & SMS
-        all_records = SHEET.get_all_records()
-        if not any(r.get("phone") == phone for r in all_records):
+        # 4) Append to Google Sheet & send SMS if not already in sheet
+        existing = SHEET.get_all_records()
+        if not any(rec.get("phone") == phone for rec in existing):
             first   = agent_name.split()[0] if agent_name else ""
             address = row.get("address", "")
 
             sms_body = (
-                "Hey {first}, this is Yoni Kutler - I saw your short sale 
+                f"Hey {first}, this is Yoni Kutler - I saw your short sale 
 listing at {address} "
                 "and wanted to introduce myself. I specialize in helping 
 agents get faster bank "
@@ -111,7 +114,7 @@ negotiations so you can focus on selling. "
 buyer at closing. "
                 "Would you be open to a quick call to see if this could 
 help?"
-            ).format(first=first, address=address)
+            )
 
             requests.post(
                 SMSM_URL,
@@ -122,10 +125,9 @@ help?"
             SHEET.append_row([zpid, agent_name, phone, email, address, 
 "SMS sent"])
 
-        conn.execute(
-            "INSERT OR IGNORE INTO listings (zpid) VALUES (?)",
-            (zpid,),
-        )
+        # Mark as seen
+        conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES (?)", 
+(zpid,))
         conn.commit()
 
     conn.close()
