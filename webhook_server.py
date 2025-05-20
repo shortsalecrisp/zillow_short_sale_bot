@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Request
 import os
 
-# ── Startup sanity check 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SMSM_KEY       = os.getenv("SMSM_KEY")
@@ -17,8 +16,6 @@ if not (OPENAI_API_KEY and SMSM_KEY and SHEET_URL):
         if not val
     ]
     raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
-# 
-─────────────────────────────────────────────────────────────────────────────────
 
 from fastapi import FastAPI, Request
 
@@ -27,8 +24,6 @@ from bot import process_rows
 
 app = FastAPI()
 
-# ─────────────────────────────────────────────────────────  
-← now a comment
 EXPORTED_ZPIDS: set[str] = set()
 
 
