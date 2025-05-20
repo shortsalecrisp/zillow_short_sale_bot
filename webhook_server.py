@@ -4,11 +4,7 @@ import os
 from apify_fetcher import fetch_rows
 from bot_min import process_rows
 
-# 
----------------------------------------------------------------------------
 # Environment‑variable guard
-# 
----------------------------------------------------------------------------
 REQUIRED_ENV_VARS = [
     "OPENAI_API_KEY",
     "SMSM_KEY",
@@ -18,11 +14,7 @@ missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
 if missing:
     raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
 
-# 
----------------------------------------------------------------------------
 # FastAPI app
-# 
----------------------------------------------------------------------------
 app = FastAPI()
 EXPORTED_ZPIDS: set[str] = set()
 
