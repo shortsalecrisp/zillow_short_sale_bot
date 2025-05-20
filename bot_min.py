@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# OpenAI: the v1 client reads OPENAI_API_KEY from the env automatically
 client = OpenAI()
 
 SMSM_KEY  = os.getenv("SMSM_KEY")
