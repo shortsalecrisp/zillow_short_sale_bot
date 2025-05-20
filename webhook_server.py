@@ -1,10 +1,13 @@
 from fastapi import FastAPI, Request
 import os
 
+from apify_fetcher import fetch_rows
+from bot_min import process_rows
+
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SMSM_KEY       = os.getenv("SMSM_KEY")
-SHEET_URL      = os.getenv("SHEET_URL")
+SMSM_KEY = os.getenv("SMSM_KEY")
+SHEET_URL = os.getenv("SHEET_URL")
 
 if not (OPENAI_API_KEY and SMSM_KEY and SHEET_URL):
     missing = [
@@ -16,11 +19,6 @@ if not (OPENAI_API_KEY and SMSM_KEY and SHEET_URL):
         if not val
     ]
     raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
-
-from fastapi import FastAPI, Request
-
-from apify_fetcher import fetch_rows
-from bot import process_rows
 
 app = FastAPI()
 
@@ -57,4 +55,3 @@ async def apify_hook(req: Request):
 async def export_zpids():
     """Runner Actor hits this to build excludeZpids."""
     return list(EXPORTED_ZPIDS)
-
