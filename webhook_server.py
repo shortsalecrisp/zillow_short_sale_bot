@@ -18,6 +18,10 @@ if missing:
 app = FastAPI()
 EXPORTED_ZPIDS: set[str] = set()
 
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
 
 @app.post("/apify-hook")
 async def apify_hook(request: Request):
