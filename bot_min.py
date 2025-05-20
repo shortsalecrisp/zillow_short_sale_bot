@@ -26,12 +26,9 @@ if not cred_json:
 try:
     creds_dict = json.loads(cred_json)
 except json.JSONDecodeError as exc:
-    raise RuntimeError("GOOGLE_CREDENTIALS_JSON is not valid JSON") from 
-exc
+    raise RuntimeError("GOOGLE_CREDENTIALS_JSON is not valid JSON") from exc
 
-CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, 
-GSCOPE)
-
+CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, GSCOPE)
 GC    = gspread.authorize(CREDS)
 SHEET = GC.open_by_url(SHEET_URL).sheet1
 
