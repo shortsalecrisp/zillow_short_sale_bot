@@ -1,12 +1,13 @@
-from fastapi import FastAPI, Request, HTTPException
-import os, sqlite3
+from fastapi import FastAPI, Request
+import os, sqlite3, json
+
 from apify_fetcher import fetch_rows
 from bot_min import process_rows
 
 REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "SMSM_KEY", "SHEET_URL"]
-missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
 if missing:
-    raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+    raise RuntimeError(", ".join(missing))
 
 app = FastAPI()
 EXPORTED_ZPIDS: set[str] = set()
@@ -17,13 +18,12 @@ def root():
 
 @app.get("/export-zpids")
 def export_zpids():
-    try:
-        conn = sqlite3.connect("seen.db")
-        rows = conn.execute("SELECT zpid FROM listings").fetchall()
-        conn.close()
-        return {"zpids": [row[0] for row in rows]}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    conn = sqlite3.connect("seen.db")
+    conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
+    zpids = [row[0] for row in conn.execute("SELECT zpid FROM listings")]
+    conn.close()
+    EXPORTED_ZPIDS.update(zpids)
+    return {"zpids": zpids}
 
 @app.post("/apify-hook")
 async def apify_hook(request: Request):
@@ -40,6 +40,6 @@ async def apify_hook(request: Request):
     return {"status": "processed", "rows": len(fresh_rows)}
 
 @app.get("/healthz")
-def health_check():
+def healthz():
     return {"status": "ok"}
 
