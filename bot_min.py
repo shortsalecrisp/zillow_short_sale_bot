@@ -30,7 +30,12 @@ def process_rows(rows):
         zpid = str(row.get("zpid", ""))
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             continue
-        listing_text = row.get("description", "")
+    listing_text = (
+        row.get("homeDescription")
+        or row.get("description")
+        or row.get("hdpData", {}).get("homeInfo", {}).get("homeDescription", "")
+        or ""
+    )
         filt_resp = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": "Return YES if the following listing text indicates a qualifying short sale with none of our excluded terms; otherwise return NO.\n\n" + listing_text}],
