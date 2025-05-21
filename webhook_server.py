@@ -28,8 +28,7 @@ def export_zpids():
 @app.post("/apify-hook")
 async def apify_hook(request: Request):
     payload = await request.json()
-    dataset_id = payload.get("dataset_id") or 
-request.query_params.get("dataset_id")
+    dataset_id = payload.get("dataset_id") or request.query_params.get("dataset_id")
     if not dataset_id:
         return {"error": "dataset_id missing"}
     rows = fetch_rows(dataset_id)
