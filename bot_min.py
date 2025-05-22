@@ -1,5 +1,6 @@
 import re, requests
 from bs4 import BeautifulSoup
+import time
 
 # helper – pull description from listing HTML if API field empty
 def fetch_zillow_description(detail_url: str) -> str:
