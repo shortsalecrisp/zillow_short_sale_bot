@@ -23,12 +23,6 @@ SHEET = GC.open_by_url(SHEET_URL).sheet1
 SMSM_URL = "https://api.smsmobile.com/v1/messages"
 
 def process_rows(rows):
-    """
-    • de-dupe by zpid (SQLite)
-    • pull/​scrape listing_text  → GPT filter
-    • GPT lookup of agent contact
-    • write sheet + send SMS
-    """
     print(f"► fetched {len(rows)} rows at {time.strftime('%X')}", flush=True)
 
     conn = sqlite3.connect("seen.db")
@@ -41,7 +35,6 @@ def process_rows(rows):
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             continue
 
-        # ─── pull “What’s Special / Happening” text ──────────────────────
         listing_text = (
             row.get("homeDescription")
             or row.get("description")
@@ -62,6 +55,9 @@ def process_rows(rows):
             except Exception:
                 listing_text = ""
 
+        if not listing_text.strip():
+            continue  # nothing to evaluate
+
         filter_prompt = (
             "Return YES if the following listing text indicates a qualifying short sale "
             "with none of our excluded terms; otherwise return NO.\n\n"
@@ -75,8 +71,10 @@ def process_rows(rows):
         if not filt_resp.choices[0].message.content.strip().upper().startswith("YES"):
             continue
 
-        # ─── GPT contact lookup ──────────────────────────────────────────
-        agent_name = row.get("listingAgent", {}).get("name", "")
+        agent_name = row.get("listingAgent", {}).get("name", "").strip()
+        if not agent_name:
+            continue  # skip rows without an agent name
+
         first, *rest = agent_name.split()
         last = " ".join(rest)
         state = row.get("addressState") or row.get("state", "")
@@ -98,24 +96,22 @@ def process_rows(rows):
         if not phone:
             continue
 
-        # ─── write to sheet if phone not already present ─────────────────
         if not any(r.get("phone") == phone for r in SHEET.get_all_records()):
             address = row.get("listing_address") or row.get("address", "")
             city    = row.get("city")            or row.get("addressCity", "")
             state   = row.get("state")           or row.get("addressState", "")
 
             SHEET.append_row([
-                first,             # name
-                last,              # last name
+                first,              # name
+                last,               # last name
                 phone,
                 email,
                 address,
                 city,
                 state,
-                "", "", "", ""     # Column 1, Initial Text, list, response_status
+                "", "", "", ""      # Column 1, Initial Text, list, response_status
             ])
 
-            # ─── send SMS ────────────────────────────────────────────────
             sms_body = (
                 f"Hey {first}, this is Yoni Kutler—I saw your short sale listing at "
                 f"{address} and wanted to introduce myself. I specialize in helping "
