@@ -22,23 +22,34 @@ SMSM_URL = "https://api.smsmobile.com/v1/messages"
 
 def process_rows(rows):
     print(f"► fetched {len(rows)} rows at {time.strftime('%X')}", flush=True)
-
     conn = sqlite3.connect("seen.db")
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
     conn.commit()
-
     new_rows = 0
     for row in rows:
         zpid = str(row.get("zpid", ""))
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             continue
 
-        listing_text = (
-            row.get("homeDescription")
-            or row.get("description")
-            or row.get("hdpData", {}).get("homeInfo", {}).get("homeDescription", "")
-            or ""
-        )
+        def _get_desc(r: dict) -> str:
+            paths = [
+                ["homeDescription"],
+                ["description"],
+                ["whatsSpecial"],
+                ["hdpData", "homeInfo", "homeDescription"],
+                ["hdpData", "homeInfo", "description"],
+                ["hdpData", "homeInfo", "resoFacts", "generalDescription"],
+            ]
+            for path in paths:
+                node = r
+                for key in path:
+                    node = node.get(key, {})
+                if isinstance(node, str) and node.strip():
+                    return node.strip()
+            texts = [str(v) for v in r.values() if isinstance(v, str) and len(v) > 30]
+            return " ".join(texts)[:4000]
+
+        listing_text = _get_desc(row)
 
         filter_prompt = (
             "Return YES if the following listing text indicates a qualifying short sale "
@@ -66,38 +77,39 @@ def process_rows(rows):
             messages=[{"role": "user", "content": contact_prompt}],
             temperature=0.2,
         )
+        cont_text = cont_resp.choices[0].message.content.strip()
         try:
-            contact = json.loads(cont_resp.choices[0].message.content)
+            contact = json.loads(cont_text)
             phone = contact.get("phone")
             email = contact.get("email", "")
         except json.JSONDecodeError:
-            phone = None
-            email = ""
-
+            continue
         if not phone:
             continue
 
-        address = row.get("address") or row.get("addressStreet", "")
-        first = agent_name.split()[0] if agent_name else ""
-        sms_body = (
-            f"Hey {first}, this is Yoni Kutler—I saw your short sale listing at {address} "
-            "and wanted to introduce myself. I specialize in helping agents get faster bank "
-            "approvals and ensure these deals close. I work behind the scenes on lender "
-            "negotiations so you can focus on selling. No cost to you or your client—"
-            "I’m only paid by the buyer at closing. Would you be open to a quick call?"
-        )
+        all_records = SHEET.get_all_records()
+        if not any(r.get("phone") == phone for r in all_records):
+            first = agent_name.split()[0] if agent_name else ""
+            address = row.get("address") or row.get("addressStreet", "")
+            sms_body = (
+                "Hey {first}, this is Yoni Kutler—I saw your short sale listing at {address} "
+                "and wanted to introduce myself. I specialize in helping agents get faster bank "
+                "approvals and ensure these deals close. I know you likely handle short sales yourself, "
+                "but I work behind the scenes to take on lender negotiations so you can focus on selling. "
+                "No cost to you or your client—I’m only paid by the buyer at closing. "
+                "Would you be open to a quick call to see if this could help?"
+            ).format(first=first, address=address)
 
-        requests.post(
-            SMSM_URL,
-            json={"to": phone, "message": sms_body},
-            headers={"Authorization": f"Bearer {SMSM_KEY}"},
-            timeout=30,
-        )
-        SHEET.append_row([zpid, agent_name, phone, email, address, "SMS sent"])
+            requests.post(
+                SMSM_URL,
+                json={"to": phone, "message": sms_body},
+                headers={"Authorization": f"Bearer {SMSM_KEY}"},
+            )
+            SHEET.append_row([zpid, agent_name, phone, email, address, "SMS sent"])
+
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
         new_rows += 1
-
-    conn.close()
     print(f"► processed {new_rows} new listings", flush=True)
+    conn.close()
 
