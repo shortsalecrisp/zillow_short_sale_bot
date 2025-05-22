@@ -12,4 +12,5 @@ twilio
 python-dotenv             
 gspread
 oauth2client
-beautifulsoup4
+beautifulsoup4==4.12.3
+
