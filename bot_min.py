@@ -1,6 +1,12 @@
 import re, requests
 from bs4 import BeautifulSoup
-import time
+import os, json, requests, time
+import sqlite3
+from openai import OpenAI
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from dotenv import load_dotenv
+
 
 # helper – pull description from listing HTML if API field empty
 def fetch_zillow_description(detail_url: str) -> str:
