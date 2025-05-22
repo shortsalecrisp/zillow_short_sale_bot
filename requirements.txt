@@ -12,3 +12,4 @@ twilio
 python-dotenv             
 gspread
 oauth2client
+beautifulsoup4

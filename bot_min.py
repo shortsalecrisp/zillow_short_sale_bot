@@ -3,6 +3,8 @@ from openai import OpenAI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
+import re
+from bs4 import BeautifulSoup
 
 load_dotenv()
 client = OpenAI()
@@ -21,34 +23,45 @@ SHEET = GC.open_by_url(SHEET_URL).sheet1
 SMSM_URL = "https://api.smsmobile.com/v1/messages"
 
 def process_rows(rows):
+    """
+    • de-dupe by zpid (SQLite)
+    • pull/​scrape listing_text  → GPT filter
+    • GPT lookup of agent contact
+    • write sheet + send SMS
+    """
     print(f"► fetched {len(rows)} rows at {time.strftime('%X')}", flush=True)
 
     conn = sqlite3.connect("seen.db")
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
     conn.commit()
 
-    EXPECTED_HEADERS = [
-        "name", "last name", "phone", "email",
-        "listing_address", "city", "state",
-    ]
-    all_records = SHEET.get_all_records(expected_headers=EXPECTED_HEADERS)
-
-    new_rows = 0
+    processed = 0
     for row in rows:
         zpid = str(row.get("zpid", ""))
-
-        # skip if Zillow ID already processed in this container
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             continue
 
-        # skip if phone already on the sheet
-        listing_phone_set = {r["phone"] for r in all_records if r["phone"]}
+        # ─── pull “What’s Special / Happening” text ──────────────────────
         listing_text = (
             row.get("homeDescription")
             or row.get("description")
             or row.get("hdpData", {}).get("homeInfo", {}).get("homeDescription", "")
             or ""
         )
+        if not listing_text and row.get("detailUrl"):
+            try:
+                html = requests.get(
+                    row["detailUrl"],
+                    timeout=10,
+                    headers={"User-Agent": "Mozilla/5.0 (+https://example.com/bot)"}
+                ).text
+                soup   = BeautifulSoup(html, "html.parser")
+                marker = soup.find(string=re.compile(r"what['’]s\s+(special|happening)", re.I))
+                if marker:
+                    listing_text = marker.find_next().get_text(" ", strip=True)
+            except Exception:
+                listing_text = ""
+
         filter_prompt = (
             "Return YES if the following listing text indicates a qualifying short sale "
             "with none of our excluded terms; otherwise return NO.\n\n"
@@ -62,8 +75,11 @@ def process_rows(rows):
         if not filt_resp.choices[0].message.content.strip().upper().startswith("YES"):
             continue
 
-        agent_name = row.get("listingAgent", {}).get("name", "").strip()
-        state      = row.get("addressState") or row.get("state", "")
+        # ─── GPT contact lookup ──────────────────────────────────────────
+        agent_name = row.get("listingAgent", {}).get("name", "")
+        first, *rest = agent_name.split()
+        last = " ".join(rest)
+        state = row.get("addressState") or row.get("state", "")
         contact_prompt = (
             f"Find the mobile phone number and email for real estate agent "
             f"{agent_name} in {state}. Respond in JSON with keys 'phone' and 'email'."
@@ -75,37 +91,49 @@ def process_rows(rows):
         )
         try:
             contact = json.loads(cont_resp.choices[0].message.content)
-            phone   = (contact.get("phone") or "").strip()
-            email   = (contact.get("email") or "").strip()
-        except json.JSONDecodeError:
+            phone   = contact.get("phone")
+            email   = contact.get("email", "")
+        except Exception:
             continue
-        if not phone or phone in listing_phone_set:
-            continue  # need a phone and must be unique
+        if not phone:
+            continue
 
-        name_parts  = agent_name.split(maxsplit=1)
-        first       = name_parts[0] if name_parts else ""
-        last_name   = name_parts[1] if len(name_parts) > 1 else ""
-        address     = row.get("address") or row.get("listing_address") or ""
-        city        = row.get("addressCity") or ""
-        # state already captured
+        # ─── write to sheet if phone not already present ─────────────────
+        if not any(r.get("phone") == phone for r in SHEET.get_all_records()):
+            address = row.get("listing_address") or row.get("address", "")
+            city    = row.get("city")            or row.get("addressCity", "")
+            state   = row.get("state")           or row.get("addressState", "")
 
-        SHEET.append_row(
-            [
-                first,
-                last_name,
+            SHEET.append_row([
+                first,             # name
+                last,              # last name
                 phone,
                 email,
                 address,
                 city,
                 state,
-            ],
-            value_input_option="USER_ENTERED",
-        )
+                "", "", "", ""     # Column 1, Initial Text, list, response_status
+            ])
 
-        conn.execute("INSERT OR IGNORE INTO listings (zpid) VALUES (?)", (zpid,))
+            # ─── send SMS ────────────────────────────────────────────────
+            sms_body = (
+                f"Hey {first}, this is Yoni Kutler—I saw your short sale listing at "
+                f"{address} and wanted to introduce myself. I specialize in helping "
+                f"agents get faster bank approvals and ensure these deals close. "
+                "No cost to you or your client—I’m only paid by the buyer at closing. "
+                "Would you be open to a quick call to see if this could help?"
+            )
+            requests.post(
+                SMSM_URL,
+                json={"to": phone, "message": sms_body},
+                headers={"Authorization": f"Bearer {SMSM_KEY}"},
+                timeout=10,
+            )
+
+        conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
-        new_rows += 1
+        processed += 1
 
-    print(f"► processed {new_rows} new listings", flush=True)
+    print(f"► processed {processed} new listings", flush=True)
     conn.close()
 
