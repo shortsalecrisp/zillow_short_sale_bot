@@ -1,38 +1,53 @@
-import re, requests
+import re, os, json, time, sqlite3, requests
 from bs4 import BeautifulSoup
-import os, json, requests, time
-import sqlite3
+
 from openai import OpenAI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 
+load_dotenv()                       # reads .env in Render
+client = OpenAI()                   # uses OPENAI_API_KEY from env
 
-# helper – pull description from listing HTML if API field empty
+SMSM_KEY  = os.getenv("SMSM_KEY")   # kept for future SMS logic
+SHEET_URL = os.getenv("SHEET_URL")
+
+GSCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
+creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
+CREDS  = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, GSCOPE)
+GC     = gspread.authorize(CREDS)
+SHEET  = GC.open_by_url(SHEET_URL).sheet1
+
 def fetch_zillow_description(detail_url: str) -> str:
     try:
-        resp = requests.get(detail_url, timeout=10, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; ShortSaleBot/1.0)"
-        })
+        resp = requests.get(
+            detail_url,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ShortSaleBot/1.0)"},
+        )
         resp.raise_for_status()
     except Exception:
         return ""
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # 1) Zillow often stores JSON state in scripts – look there first
+    # 1) JSON blobs embedded in <script type="application/json">
     for script in soup.find_all("script", type="application/json"):
-        if "homeDescription" in script.string or "descriptionPlainText" in script.string:
-            m = re.search(r'"(?:homeDescription|descriptionPlainText)"\s*:\s*"([^"]+)"',
-                          script.string)
-            if m:
-                return bytes(m.group(1), "utf-8").decode("unicode_escape")
+        txt = script.string or ""
+        m = re.search(
+            r'"(?:homeDescription|descriptionPlainText)"\s*:\s*"([^"]+)"', txt
+        )
+        if m:
+            return bytes(m.group(1), "utf-8").decode("unicode_escape")
 
-    # 2) fallback: look for the visible “What’s special …” section
-    el = soup.find(string=re.compile(r"(?i)what.?s.+special")).find_parent("section") \
-         if soup.find(string=re.compile(r"(?i)what.?s.+special")) else None
-    if el:
-        return " ".join(el.stripped_strings)
+    # 2) visible “What’s special …” section
+    trig = soup.find(string=re.compile(r"(?i)what.?s.+special"))
+    sec  = trig.find_parent("section") if trig else None
+    if sec:
+        return " ".join(sec.stripped_strings)
 
     return ""
 
@@ -48,6 +63,7 @@ def process_rows(rows):
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             continue
 
+        # description from API fields
         listing_text = (
             row.get("homeDescription")
             or row.get("description")
@@ -55,6 +71,7 @@ def process_rows(rows):
             or ""
         )
 
+        # fallback: scrape HTML
         if not listing_text:
             detail_url = row.get("detailUrl") or row.get("url") or ""
             listing_text = fetch_zillow_description(detail_url) if detail_url else ""
@@ -64,20 +81,17 @@ def process_rows(rows):
             continue
 
         filter_prompt = (
-            "Return YES if the following listing text contains the exact phrase "
-            "'short sale' (case-insensitive) **and** does NOT contain any of these "
-            "disqualifying words: approved, negotiator, settlement fee, fee at closing. "
-            "Otherwise return NO.\n\n"
+            "Return YES if the following text contains the phrase 'short sale' "
+            "(case-insensitive) and does NOT contain any of: approved, negotiator, "
+            "settlement fee, fee at closing. Otherwise return NO.\n\n"
             f"{listing_text}"
         )
-
         resp = client.chat.completions.create(
             model="gpt-3.5-turbo-0125",
             messages=[{"role": "user", "content": filter_prompt}],
             temperature=0.0,
         )
-        decision = resp.choices[0].message.content.strip().upper()
-        if not decision.startswith("YES"):
+        if not resp.choices[0].message.content.strip().upper().startswith("YES"):
             continue
 
         agent_name = row.get("listingAgent", {}).get("name", "")
@@ -86,7 +100,6 @@ def process_rows(rows):
             f"Find the MOBILE phone number and email for real-estate agent "
             f"{agent_name} in {state}. Respond in JSON with keys 'phone' and 'email'."
         )
-
         cont_resp = client.chat.completions.create(
             model="gpt-3.5-turbo-0125",
             messages=[{"role": "user", "content": contact_prompt}],
@@ -100,17 +113,17 @@ def process_rows(rows):
             phone = email = ""
 
         if not phone:
-            continue  # can’t proceed without a number
+            continue  # must have a phone number
 
         first, *rest = agent_name.split()
-        last = " ".join(rest)
+        last    = " ".join(rest)
         address = row.get("address") or row.get("addressStreet") or ""
         city    = row.get("addressCity") or ""
         st      = row.get("addressState") or row.get("state") or ""
 
         SHEET.append_row([first, last, phone, email, address, city, st, "", "", ""])
 
-        # ── STEP 5: mark as seen & optional SMS logic ──────────
+        # mark as processed
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
 
