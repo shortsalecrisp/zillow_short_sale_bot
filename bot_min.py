@@ -24,13 +24,11 @@ CREDS  = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, GSCOPE)
 GC     = gspread.authorize(CREDS)
 SHEET  = GC.open_by_url(SHEET_URL).sheet1
 
+UA = "Mozilla/5.0 (compatible; ShortSaleBot/1.0)"
+
 def fetch_zillow_description(detail_url: str) -> str:
     try:
-        resp = requests.get(
-            detail_url,
-            timeout=10,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; ShortSaleBot/1.0)"},
-        )
+        resp = requests.get(detail_url, timeout=10, headers={"User-Agent": UA})
         resp.raise_for_status()
     except Exception:
         return ""
@@ -39,9 +37,7 @@ def fetch_zillow_description(detail_url: str) -> str:
 
     for script in soup.find_all("script", type="application/json"):
         txt = script.string or ""
-        m = re.search(
-            r'"(?:homeDescription|descriptionPlainText)"\s*:\s*"([^"]+)"', txt
-        )
+        m = re.search(r'"(?:homeDescription|descriptionPlainText)"\s*:\s*"([^"]+)"', txt)
         if m:
             return bytes(m.group(1), "utf-8").decode("unicode_escape")
 
@@ -51,6 +47,38 @@ def fetch_zillow_description(detail_url: str) -> str:
         return " ".join(sec.stripped_strings)
 
     return ""
+
+def fetch_zillow_agent(detail_url: str) -> str:
+    try:
+        resp = requests.get(detail_url, timeout=10, headers={"User-Agent": UA})
+        resp.raise_for_status()
+    except Exception:
+        return ""
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    for script in soup.find_all("script", type="application/json"):
+        txt = script.string or ""
+        m = re.search(r'"listingProvider".+?"name"\s*:\s*"([^"]+)"', txt)
+        if m:
+            return m.group(1)
+
+    label = soup.find(string=re.compile(r"Listing agent", re.I))
+    if label:
+        name_el = label.find_next("a") or label.find_next("span")
+        if name_el:
+            return name_el.get_text(strip=True)
+
+    return ""
+
+def extract_agent_name(row) -> str:
+    return (
+        row.get("listingProvider", {}).get("agents", [{}])[0].get("name") or
+        row.get("listingAgentName") or
+        row.get("listingAgent", {}).get("name") or
+        row.get("agentName") or
+        ""
+    ).strip()
 
 def process_rows(rows):
     logger.info("fetched %d rows at %s", len(rows), time.strftime("%X"))
@@ -71,9 +99,10 @@ def process_rows(rows):
             or ""
         )
 
-        if not listing_text:
-            detail_url = row.get("detailUrl") or row.get("url") or ""
-            listing_text = fetch_zillow_description(detail_url) if detail_url else ""
+        detail_url = row.get("detailUrl") or row.get("url") or ""
+
+        if not listing_text and detail_url:
+            listing_text = fetch_zillow_description(detail_url)
 
         if not listing_text:
             logger.warning("skip %s – no description", zpid)
@@ -93,7 +122,11 @@ def process_rows(rows):
         if not resp.choices[0].message.content.strip().upper().startswith("YES"):
             continue
 
-        agent_name = (row.get("listingAgent", {}).get("name") or "").strip()
+        agent_name = extract_agent_name(row)
+        if not agent_name and detail_url:
+            agent_name = fetch_zillow_agent(detail_url)
+        agent_name = agent_name.strip()
+
         if not agent_name:
             logger.warning("skip %s – no agent name", zpid)
             continue
