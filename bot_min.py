@@ -1,4 +1,4 @@
-kimport os, re, json, time, sqlite3, logging, requests
+import os, re, json, time, sqlite3, logging, requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
