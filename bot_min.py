@@ -1,23 +1,21 @@
-import os, re, json, time, sqlite3, logging, requests
+kimport os, re, json, time, sqlite3, logging, requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from openai import OpenAI   # still used for short-sale filter
+from openai import OpenAI
 
-# ── ENV ──────────────────────────────────────────────────────────────────────
 load_dotenv()
 
 OPENAI_MODEL          = "gpt-3.5-turbo-0125"
 GOOGLE_API_KEY        = os.getenv("GOOGLE_SEARCH_API_KEY")
-GOOGLE_CSE_ID         = os.getenv("GOOGLE_CSE_ID")              # Programmable Search ID
+GOOGLE_CSE_ID         = os.getenv("GOOGLE_CSE_ID")
 SHEET_URL             = os.getenv("SHEET_URL")
 
 client = OpenAI()
 UA     = "Mozilla/5.0 (compatible; ShortSaleBot/1.0)"
 
-# ── Google Sheets setup ─────────────────────────────────────────────────────
 GSCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
@@ -27,17 +25,13 @@ CREDS  = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, GSCOPE)
 GC     = gspread.authorize(CREDS)
 SHEET  = GC.open_by_url(SHEET_URL).sheet1
 
-# ── logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bot_min")
 
-# ── regex helpers ───────────────────────────────────────────────────────────
 PHONE_RE = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-
 STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
 
-# ── Zillow helpers ──────────────────────────────────────────────────────────
 def fetch_zillow_description(detail_url: str) -> str:
     try:
         html = requests.get(detail_url, timeout=10, headers={"User-Agent": UA}).text
@@ -55,19 +49,15 @@ def fetch_zillow_agent(detail_url: str) -> str:
         html = requests.get(detail_url, timeout=10, headers={"User-Agent": UA}).text
     except Exception:
         return ""
-    # JSON block
     m = re.search(r'"listingProvider".+?"name"\s*:\s*"([^"]+)"', html)
     if m:
         return m.group(1)
-    # “Listed by:” fallback
     m = re.search(r"Listed by:\s*([A-Za-z][A-Za-z\s.\'-]+)", html)
     return m.group(1) if m else ""
 
-# ── Google Programmable Search helper ───────────────────────────────────────
 def google_contact_lookup(agent: str, state: str) -> tuple[str, str]:
     if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
         return "", ""
-
     params = {
         "key": GOOGLE_API_KEY,
         "cx": GOOGLE_CSE_ID,
@@ -78,7 +68,6 @@ def google_contact_lookup(agent: str, state: str) -> tuple[str, str]:
         res = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10).json()
     except Exception:
         return "", ""
-
     for item in res.get("items", []):
         snippet = item.get("snippet", "")
         phone_match = PHONE_RE.search(snippet)
@@ -87,8 +76,6 @@ def google_contact_lookup(agent: str, state: str) -> tuple[str, str]:
         email = email_match.group() if email_match else ""
         if phone or email:
             return phone, email
-
-        # follow the link if snippet empty
         try:
             page = requests.get(item["link"], timeout=8, headers={"User-Agent": UA}).text
             phone_match = PHONE_RE.search(page)
@@ -99,10 +86,8 @@ def google_contact_lookup(agent: str, state: str) -> tuple[str, str]:
                 return phone, email
         except Exception:
             continue
-
     return "", ""
 
-# ── process_rows main loop ──────────────────────────────────────────────────
 def process_rows(rows):
     logger.info("fetched %d rows at %s", len(rows), time.strftime("%X"))
     conn = sqlite3.connect("seen.db")
@@ -114,21 +99,25 @@ def process_rows(rows):
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             continue
 
-        # ------------ description (for short-sale filter) -------------------
         listing_text = (
             row.get("homeDescription")
             or row.get("description")
-            or row.get("hdpData", {}).get("homeInfo", {}).get("homeDescription")
+            or row.get("hdpData.homeInfo.homeDescription")
+            or row.get("hdpData.homeInfo.description")
             or ""
         )
-        detail_url = row.get("detailUrl") or row.get("url") or ""
+        detail_url = (
+            row.get("detailUrl")
+            or row.get("url")
+            or row.get("hdpData.homeInfo.detailUrl")
+            or ""
+        )
         if not listing_text and detail_url:
             listing_text = fetch_zillow_description(detail_url)
         if not listing_text:
             logger.warning("skip %s – no description", zpid)
             continue
 
-        # ------------ filter for “short sale” ------------------------------
         prompt = (
             "Return YES if the following text contains the phrase 'short sale' "
             "(case-insensitive) and does NOT contain any of: approved, negotiator, "
@@ -143,7 +132,6 @@ def process_rows(rows):
         if not resp.choices[0].message.content.strip().upper().startswith("YES"):
             continue
 
-        # ------------ agent name extraction --------------------------------
         agent = (
             row.get("listingProvider", {}).get("agents", [{}])[0].get("name") or
             row.get("listingAgentName") or
@@ -151,25 +139,22 @@ def process_rows(rows):
             row.get("agentName") or
             ""
         ).strip()
-
+        if not agent and detail_url:
+            agent = fetch_zillow_agent(detail_url)
         if not agent:
-            agent = fetch_zillow_agent(detail_url) if detail_url else ""
-        if not agent:
-            agent_match = re.search(r"Listed by:\s*([A-Za-z][A-Za-z\s.\'-]+)", listing_text)
-            agent = agent_match.group(1) if agent_match else ""
+            m = re.search(r"Listed by:\s*([A-Za-z][A-Za-z\s.\'-]+)", listing_text)
+            agent = m.group(1) if m else ""
         agent = STRIP_TRAIL.sub("", agent).strip()
         if not agent:
             logger.warning("skip %s – no agent name", zpid)
             continue
 
-        # ------------ contact lookup via Google Programmable Search --------
         state = row.get("addressState") or row.get("state", "")
         phone, email = google_contact_lookup(agent, state)
         if not phone and not email:
             logger.warning("skip %s – contact not found for %s", zpid, agent)
             continue
 
-        # ------------ write to Google Sheets -------------------------------
         parts = agent.split()
         first = parts[0]
         last  = " ".join(parts[1:]) if len(parts) > 1 else ""
