@@ -1,4 +1,4 @@
-import re, os, json, time, sqlite3, requests
+import re, os, json, time, sqlite3, requests, logging
 from bs4 import BeautifulSoup
 
 from openai import OpenAI
@@ -6,11 +6,14 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 
-load_dotenv()                       # reads .env in Render
-client = OpenAI()                   # uses OPENAI_API_KEY from env
+load_dotenv()
+client = OpenAI()
 
-SMSM_KEY  = os.getenv("SMSM_KEY")   # kept for future SMS logic
+SMSM_KEY  = os.getenv("SMSM_KEY")
 SHEET_URL = os.getenv("SHEET_URL")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 GSCOPE = [
     "https://spreadsheets.google.com/feeds",
@@ -34,7 +37,6 @@ def fetch_zillow_description(detail_url: str) -> str:
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # 1) JSON blobs embedded in <script type="application/json">
     for script in soup.find_all("script", type="application/json"):
         txt = script.string or ""
         m = re.search(
@@ -43,7 +45,6 @@ def fetch_zillow_description(detail_url: str) -> str:
         if m:
             return bytes(m.group(1), "utf-8").decode("unicode_escape")
 
-    # 2) visible “What’s special …” section
     trig = soup.find(string=re.compile(r"(?i)what.?s.+special"))
     sec  = trig.find_parent("section") if trig else None
     if sec:
@@ -52,7 +53,7 @@ def fetch_zillow_description(detail_url: str) -> str:
     return ""
 
 def process_rows(rows):
-    print(f"► fetched {len(rows)} rows at {time.strftime('%X')}", flush=True)
+    logger.info("fetched %d rows at %s", len(rows), time.strftime("%X"))
 
     conn = sqlite3.connect("seen.db")
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
@@ -63,7 +64,6 @@ def process_rows(rows):
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             continue
 
-        # description from API fields
         listing_text = (
             row.get("homeDescription")
             or row.get("description")
@@ -71,13 +71,12 @@ def process_rows(rows):
             or ""
         )
 
-        # fallback: scrape HTML
         if not listing_text:
             detail_url = row.get("detailUrl") or row.get("url") or ""
             listing_text = fetch_zillow_description(detail_url) if detail_url else ""
 
         if not listing_text:
-            print(f"⤷ skip {zpid}: still no description")
+            logger.warning("skip %s – no description", zpid)
             continue
 
         filter_prompt = (
@@ -94,8 +93,12 @@ def process_rows(rows):
         if not resp.choices[0].message.content.strip().upper().startswith("YES"):
             continue
 
-        agent_name = row.get("listingAgent", {}).get("name", "")
-        state      = row.get("addressState") or row.get("state", "")
+        agent_name = (row.get("listingAgent", {}).get("name") or "").strip()
+        if not agent_name:
+            logger.warning("skip %s – no agent name", zpid)
+            continue
+
+        state = row.get("addressState") or row.get("state", "")
         contact_prompt = (
             f"Find the MOBILE phone number and email for real-estate agent "
             f"{agent_name} in {state}. Respond in JSON with keys 'phone' and 'email'."
@@ -113,17 +116,19 @@ def process_rows(rows):
             phone = email = ""
 
         if not phone:
-            continue  # must have a phone number
+            logger.warning("skip %s – no phone returned for %s", zpid, agent_name)
+            continue
 
-        first, *rest = agent_name.split()
-        last    = " ".join(rest)
+        parts = agent_name.split()
+        first = parts[0]
+        last  = " ".join(parts[1:]) if len(parts) > 1 else ""
+
         address = row.get("address") or row.get("addressStreet") or ""
         city    = row.get("addressCity") or ""
         st      = row.get("addressState") or row.get("state") or ""
 
         SHEET.append_row([first, last, phone, email, address, city, st, "", "", ""])
 
-        # mark as processed
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
 
