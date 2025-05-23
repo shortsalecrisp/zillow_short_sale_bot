@@ -69,6 +69,21 @@ def fetch_zillow_agent(detail_url: str) -> str:
         if name_el:
             return name_el.get_text(strip=True)
 
+    listed_match = re.search(r"Listed by:\s*([A-Za-z][A-Za-z\s.\'-]+)", soup.get_text(" ", strip=True))
+    if listed_match:
+        return listed_match.group(1).strip()
+
+    return ""
+
+def parse_agent_from_text(text: str) -> str:
+    patterns = [
+        r"Listed by:\s*([A-Za-z][A-Za-z\s.\'-]+)",
+        r"Listing agent[:\s]*([A-Za-z][A-Za-z\s.\'-]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.I)
+        if m:
+            return m.group(1).strip()
     return ""
 
 def extract_agent_name(row) -> str:
@@ -123,6 +138,8 @@ def process_rows(rows):
             continue
 
         agent_name = extract_agent_name(row)
+        if not agent_name:
+            agent_name = parse_agent_from_text(listing_text)
         if not agent_name and detail_url:
             agent_name = fetch_zillow_agent(detail_url)
         agent_name = agent_name.strip()
