@@ -37,12 +37,15 @@ def fetch_zillow_description(detail_url: str) -> str:
         html = requests.get(detail_url, timeout=10, headers={"User-Agent": UA}).text
     except Exception:
         return ""
+
     soup = BeautifulSoup(html, "html.parser")
+
     for s in soup.find_all("script", type="application/json"):
         m = re.search(r'"(?:homeDescription|descriptionPlainText)"\s*:\s*"([^"]+)"', s.string or "")
         if m:
             return bytes(m.group(1), "utf-8").decode("unicode_escape")
-    return ""
+
+    return soup.get_text(" ", strip=True)
 
 def fetch_zillow_agent(detail_url: str) -> str:
     try:
