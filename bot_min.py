@@ -38,8 +38,6 @@ def fetch_page(url: str) -> str:
 
 def zillow_description(url: str) -> str:
     html = fetch_page(url)
-    if not html:
-        return ""
     soup = BeautifulSoup(html, "html.parser")
     for s in soup.find_all("script", type="application/json"):
         m = re.search(r'"(?:homeDescription|descriptionPlainText)"\s*:\s*"([^"]+)"', s.string or "")
@@ -60,31 +58,30 @@ def zillow_agent(url: str) -> str:
 def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
     if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
         return "", ""
-    queries = [
-        f'"{agent}" {state} phone email',
-        f'"{agent}" "{broker}" phone email' if broker else "",
-    ]
+    queries = [f'"{agent}" {state} phone email', f'"{agent}" "{broker}" phone email' if broker else ""]
     for q in queries:
         if not q:
             continue
         params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": q, "num": 10}
-        items = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10).json().get("items", [])
-        for it in items:
+        for it in requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10).json().get("items", []):
             html = fetch_page(it.get("link", ""))
             phone = PHONE_RE.search(html)
             email = EMAIL_RE.search(html)
             if phone or email:
                 return phone.group() if phone else "", email.group() if email else ""
     if APIFY_TOKEN:
-        data = requests.post(
-            "https://api.apify.com/v2/acts/drobnikj~realtor-agent-scraper/run-sync-get-dataset-items",
-            params={"token": APIFY_TOKEN},
-            json={"search": agent, "state": state},
-            timeout=15,
-        ).json()
-        if data:
-            rec = data[0]
-            return rec.get("mobilePhone") or rec.get("officePhone") or "", rec.get("email") or ""
+        try:
+            resp = requests.post(
+                "https://api.apify.com/v2/acts/drobnikj~realtor-agent-scraper/run-sync-get-dataset-items",
+                params={"token": APIFY_TOKEN},
+                json={"search": agent, "state": state},
+                timeout=15,
+            ).json()
+            if isinstance(resp, list) and resp:
+                rec = resp[0]
+                return rec.get("mobilePhone") or rec.get("officePhone") or "", rec.get("email") or ""
+        except Exception:
+            pass
     return "", ""
 
 
@@ -99,9 +96,7 @@ def process_rows(rows):
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             continue
 
-        detail_url = (
-            row.get("detailUrl") or row.get("url") or row.get("hdpData.homeInfo.detailUrl") or ""
-        )
+        detail_url = row.get("detailUrl") or row.get("url") or row.get("hdpData.homeInfo.detailUrl") or ""
         listing_text = (
             row.get("homeDescription")
             or row.get("description")
@@ -110,8 +105,7 @@ def process_rows(rows):
             or zillow_description(detail_url)
         )
         if not listing_text:
-            logger.warning("skip %s – no description", zpid)
-            continue
+            listing_text = " ".join(str(v) for v in row.values() if isinstance(v, str))
 
         prompt = (
             "Return YES if the following text contains the phrase 'short sale' "
@@ -120,9 +114,7 @@ def process_rows(rows):
             f"{listing_text}"
         )
         if not client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
+            model=OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.0
         ).choices[0].message.content.strip().upper().startswith("YES"):
             continue
 
