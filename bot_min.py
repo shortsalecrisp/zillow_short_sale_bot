@@ -60,11 +60,11 @@ def retry_fetch_description(detail_url: str, row: dict) -> str:
         or ""
     ).strip()
     retries = 0
-    while not desc and retries < MAX_RETRIES:
+    while (not desc or len(desc) < 60) and retries < MAX_RETRIES:
         logger.info("zpid %s retry %d/%d fetch description", row.get("zpid"), retries + 1, MAX_RETRIES)
         desc = zillow_description(detail_url).strip()
         retries += 1
-        if desc:
+        if desc and len(desc) >= 60:
             break
         time.sleep(RETRY_SLEEP_SEC)
     if not desc:
@@ -90,9 +90,11 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
     ]
     for q in filter(None, queries):
         params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": q, "num": 10}
+        logger.info("Google query: %s", q)
         try:
             resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10).json()
-        except Exception:
+        except Exception as e:
+            logger.error("Google search error: %s", e)
             continue
         for it in resp.get("items", []):
             html = fetch_page(it.get("link", ""))
@@ -114,8 +116,8 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
                     rec.get("mobilePhone") or rec.get("officePhone") or "",
                     rec.get("email") or "",
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("Apify agent lookup error: %s", e)
     return "", ""
 
 
@@ -140,7 +142,7 @@ def process_rows(rows):
 
         logger.info("%d/%d PROCESS zpid %s", idx, len(rows), zpid)
         listing_text = retry_fetch_description(detail_url, row)
-        logger.info("zpid %s description len %d", zpid, len(listing_text))
+        logger.info("zpid %s description len %d preview: %s", zpid, len(listing_text), listing_text[:120].replace("\n", " "))
 
         prompt = (
             "Return YES if the following text contains the phrase 'short sale' "
