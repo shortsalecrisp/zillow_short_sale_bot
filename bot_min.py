@@ -46,18 +46,33 @@ def force_fetch_detail(zpid: str) -> str:
 
 
 def get_description(row: dict) -> str:
-    text = (
-        row.get("fullText")
-        or row.get("homeDescription")
-        or row.get("descriptionPlainText")
-        or row.get("description")
-        or ""
-    ).strip()
-    if text:
-        return text
+    logger.debug("DEBUG: raw row keys = %s", list(row.keys()))
+
+    ft = row.get("fullText") or ""
+    if ft.strip():
+        return ft.strip()
+
+    for key in ("homeDescription", "descriptionPlainText", "description"):
+        val = (row.get(key) or "").strip()
+        if val:
+            return val
+
+    detail = row.get("detail", {})
+    home_info = detail.get("homeInfo", {}) if isinstance(detail, dict) else {}
+    nested = (home_info.get("homeDescription") or "").strip()
+    if nested:
+        return nested
+
+    hdp = row.get("hdpData", {})
+    home_info2 = hdp.get("homeInfo", {}) if isinstance(hdp, dict) else {}
+    nested2 = (home_info2.get("homeDescription") or "").strip()
+    if nested2:
+        return nested2
+
     zpid = row.get("zpid")
     if zpid:
         return force_fetch_detail(zpid)
+
     return ""
 
 
