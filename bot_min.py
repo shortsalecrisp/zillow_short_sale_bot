@@ -1,4 +1,4 @@
-import os, re, json, sqlite3, logging, requests, html
+import os, re, json, sqlite3, logging, requests
 from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -28,38 +28,37 @@ logger = logging.getLogger("bot_min")
 PHONE_RE    = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
 EMAIL_RE    = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
-HTML_RE     = re.compile(r"<[^>]+>")
 
 
-def strip_html(text: str) -> str:
-    return HTML_RE.sub(" ", html.unescape(text or "")).strip()
+def force_fetch_detail(zpid: str) -> str:
+    try:
+        resp = requests.post(
+            "https://api.apify.com/v2/acts/apify~zillow-detail/run-sync-get-dataset-items",
+            params={"token": APIFY_TOKEN},
+            json={"zpid": zpid},
+            timeout=30,
+        ).json()
+        if isinstance(resp, list) and resp:
+            return resp[0].get("homeDescription", "").strip()
+    except Exception:
+        return ""
+    return ""
 
 
 def get_description(row: dict) -> str:
-    cand = [
-        row.get("homeDescription"),
-        strip_html(row.get("homeDescriptionHtml", "")),
-        row.get("descriptionPlainText"),
-        row.get("description"),
-    ]
-    base_desc = max((t.strip() for t in cand if t and t.strip()), key=len, default="")
-    if len(base_desc) >= 50:
-        return base_desc
+    text = (
+        row.get("fullText")
+        or row.get("homeDescription")
+        or row.get("descriptionPlainText")
+        or row.get("description")
+        or ""
+    ).strip()
+    if text:
+        return text
     zpid = row.get("zpid")
-    if APIFY_TOKEN and zpid:
-        try:
-            detail = requests.post(
-                "https://api.apify.com/v2/acts/apify~zillow-detail/run-sync-get-dataset-items",
-                params={"token": APIFY_TOKEN},
-                json={"zpid": zpid},
-                timeout=15,
-            ).json()
-            if isinstance(detail, list) and detail:
-                full_desc = detail[0].get("homeDescription", "").strip()
-                return full_desc if len(full_desc) > len(base_desc) else base_desc
-        except Exception as e:
-            logger.warning("Detail actor failed for %s: %s", zpid, e)
-    return base_desc
+    if zpid:
+        return force_fetch_detail(zpid)
+    return ""
 
 
 def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
@@ -76,9 +75,9 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
         except Exception:
             continue
         for it in resp.get("items", []):
-            html_page = requests.get(it.get("link", ""), timeout=10).text
-            phone = PHONE_RE.search(html_page)
-            email = EMAIL_RE.search(html_page)
+            html = requests.get(it.get("link", ""), timeout=10).text
+            phone = PHONE_RE.search(html)
+            email = EMAIL_RE.search(html)
             if phone or email:
                 return phone.group() if phone else "", email.group() if email else ""
     if APIFY_TOKEN:
