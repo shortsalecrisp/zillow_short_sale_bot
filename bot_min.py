@@ -31,12 +31,51 @@ STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
 
 
 def get_description(row: dict) -> str:
-    return (
+    """Return a description for the listing, fetching HTML/Apify as needed."""
+    text = (
         row.get("descriptionPlainText")
         or row.get("homeDescription")
         or row.get("description")
         or ""
     ).strip()
+    if text:
+        return text
+
+    url = row.get("detailUrl") or row.get("hdpUrl")
+    if url:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Referer": "https://www.zillow.com/",
+            }
+            html = requests.get(url, headers=headers, timeout=10).text
+            m = re.search(r'"homeDescription":"(.*?)"', html)
+            if m:
+                text = json.loads(f'"{m.group(1)}"')  # unescape
+        except Exception:
+            text = ""
+    if text:
+        return text.strip()
+
+    zpid = row.get("zpid")
+    if APIFY_TOKEN and zpid:
+        try:
+            resp = requests.post(
+                "https://api.apify.com/v2/acts/apify~zillow-detail/run-sync-get-dataset-items",
+                params={"token": APIFY_TOKEN},
+                json={"zpid": zpid},
+                timeout=15,
+            ).json()
+            if isinstance(resp, list) and resp:
+                text = resp[0].get("homeDescription", "").strip()
+        except Exception:
+            text = ""
+    if text:
+        return text
+
+    return f"{row.get('address', '')} {row.get('price', '')}".strip()
 
 
 def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
@@ -83,6 +122,12 @@ def process_rows(rows):
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
     conn.commit()
 
+    # Track next row for early writes
+    try:
+        next_row = len(SHEET.get_all_values()) + 1
+    except Exception:
+        next_row = 1
+
     for idx, row in enumerate(rows, 1):
         zpid = str(row.get("zpid", ""))
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
@@ -90,9 +135,8 @@ def process_rows(rows):
             continue
 
         listing_text = get_description(row)
-        if len(listing_text) < 60:
-            logger.warning("EMPTY_DESC zpid %s len %d", zpid, len(listing_text))
-            continue
+        if not listing_text:
+            logger.warning("blank description: %s", zpid)
 
         prompt = (
             "Return YES if the following text contains the phrase 'short sale' "
@@ -130,15 +174,21 @@ def process_rows(rows):
         city    = row.get("addressCity") or ""
         st      = row.get("addressState") or row.get("state") or ""
 
-        phone, email = google_lookup(agent, st, row.get("brokerName", ""))
-        logger.info("zpid %s contact phone:%s email:%s", zpid, phone, email)
-
+        row_idx = next_row
         try:
-            SHEET.append_row([first, last, phone, email, address, city, st, "", "", ""])
-            logger.info("zpid %s appended to sheet", zpid)
+            SHEET.append_row([first, last, "", "", address, city, st, "", "", ""])
+            next_row += 1
         except Exception as e:
-            logger.error("Sheets error zpid %s: %s", zpid, e)
-            continue
+            logger.error("Sheets write failed: %s", e)
+
+        phone, email = google_lookup(agent, st, row.get("brokerName", ""))
+        logger.info("%s contact → phone:%s email:%s", zpid, phone, email)
+
+        if phone or email:
+            try:
+                SHEET.update(f"C{row_idx}:D{row_idx}", [[phone, email]])
+            except Exception as e:
+                logger.error("Sheets write failed: %s", e)
 
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
