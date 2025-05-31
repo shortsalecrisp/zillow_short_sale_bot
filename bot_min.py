@@ -1,3 +1,4 @@
+# bot_min.py
 import os, re, json, time, sqlite3, logging, requests
 from dotenv import load_dotenv
 import gspread
@@ -31,51 +32,41 @@ STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
 
 
 def get_description(row: dict) -> str:
-    """Return a description for the listing, fetching HTML/Apify as needed."""
-    text = (
-        row.get("descriptionPlainText")
-        or row.get("homeDescription")
-        or row.get("description")
-        or ""
-    ).strip()
-    if text:
-        return text
+    """
+    Return the *full* listing description.
 
-    url = row.get("detailUrl") or row.get("hdpUrl")
-    if url:
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Referer": "https://www.zillow.com/",
-            }
-            html = requests.get(url, headers=headers, timeout=10).text
-            m = re.search(r'"homeDescription":"(.*?)"', html)
-            if m:
-                text = json.loads(f'"{m.group(1)}"')  # unescape
-        except Exception:
-            text = ""
-    if text:
-        return text.strip()
+    Strategy:
+    1.  Start with the longest text already attached to the row.
+    2.  Always call the Apify Zillow-Detail actor; if its `homeDescription`
+        is longer, prefer that.
+    """
+
+    def _longest(*vals) -> str:
+        """Pick the longest non-empty string (after stripping)."""
+        return max((v.strip() for v in vals if v and v.strip()), key=len, default="")
+
+    base_desc = _longest(
+        row.get("homeDescription"),
+        row.get("descriptionPlainText"),
+        row.get("description"),
+    )
 
     zpid = row.get("zpid")
     if APIFY_TOKEN and zpid:
         try:
-            resp = requests.post(
+            detail = requests.post(
                 "https://api.apify.com/v2/acts/apify~zillow-detail/run-sync-get-dataset-items",
                 params={"token": APIFY_TOKEN},
                 json={"zpid": zpid},
                 timeout=15,
             ).json()
-            if isinstance(resp, list) and resp:
-                text = resp[0].get("homeDescription", "").strip()
-        except Exception:
-            text = ""
-    if text:
-        return text
+            if isinstance(detail, list) and detail:
+                full_desc = detail[0].get("homeDescription", "").strip()
+                return _longest(base_desc, full_desc)
+        except Exception as e:
+            logger.warning("Detail actor failed for %s: %s", zpid, e)
 
-    return f"{row.get('address', '')} {row.get('price', '')}".strip()
+    return base_desc
 
 
 def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
@@ -88,7 +79,9 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
     for q in filter(None, queries):
         params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": q, "num": 10}
         try:
-            resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10).json()
+            resp = requests.get(
+                "https://www.googleapis.com/customsearch/v1", params=params, timeout=10
+            ).json()
         except Exception:
             continue
         for it in resp.get("items", []):
@@ -122,7 +115,6 @@ def process_rows(rows):
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
     conn.commit()
 
-    # Track next row for early writes
     try:
         next_row = len(SHEET.get_all_values()) + 1
     except Exception:
@@ -135,6 +127,8 @@ def process_rows(rows):
             continue
 
         listing_text = get_description(row)
+        logger.debug("zpid %s description length = %d", zpid, len(listing_text))
+
         if not listing_text:
             logger.warning("blank description: %s", zpid)
 
