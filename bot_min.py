@@ -1,5 +1,4 @@
-# bot_min.py
-import os, re, json, time, sqlite3, logging, requests
+import os, re, json, sqlite3, logging, requests, html
 from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -29,28 +28,23 @@ logger = logging.getLogger("bot_min")
 PHONE_RE    = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
 EMAIL_RE    = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
+HTML_RE     = re.compile(r"<[^>]+>")
+
+
+def strip_html(text: str) -> str:
+    return HTML_RE.sub(" ", html.unescape(text or "")).strip()
 
 
 def get_description(row: dict) -> str:
-    """
-    Return the *full* listing description.
-
-    Strategy:
-    1.  Start with the longest text already attached to the row.
-    2.  Always call the Apify Zillow-Detail actor; if its `homeDescription`
-        is longer, prefer that.
-    """
-
-    def _longest(*vals) -> str:
-        """Pick the longest non-empty string (after stripping)."""
-        return max((v.strip() for v in vals if v and v.strip()), key=len, default="")
-
-    base_desc = _longest(
+    cand = [
         row.get("homeDescription"),
+        strip_html(row.get("homeDescriptionHtml", "")),
         row.get("descriptionPlainText"),
         row.get("description"),
-    )
-
+    ]
+    base_desc = max((t.strip() for t in cand if t and t.strip()), key=len, default="")
+    if len(base_desc) >= 50:
+        return base_desc
     zpid = row.get("zpid")
     if APIFY_TOKEN and zpid:
         try:
@@ -62,10 +56,9 @@ def get_description(row: dict) -> str:
             ).json()
             if isinstance(detail, list) and detail:
                 full_desc = detail[0].get("homeDescription", "").strip()
-                return _longest(base_desc, full_desc)
+                return full_desc if len(full_desc) > len(base_desc) else base_desc
         except Exception as e:
             logger.warning("Detail actor failed for %s: %s", zpid, e)
-
     return base_desc
 
 
@@ -79,15 +72,13 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
     for q in filter(None, queries):
         params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": q, "num": 10}
         try:
-            resp = requests.get(
-                "https://www.googleapis.com/customsearch/v1", params=params, timeout=10
-            ).json()
+            resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10).json()
         except Exception:
             continue
         for it in resp.get("items", []):
-            html = requests.get(it.get("link", ""), timeout=10).text
-            phone = PHONE_RE.search(html)
-            email = EMAIL_RE.search(html)
+            html_page = requests.get(it.get("link", ""), timeout=10).text
+            phone = PHONE_RE.search(html_page)
+            email = EMAIL_RE.search(html_page)
             if phone or email:
                 return phone.group() if phone else "", email.group() if email else ""
     if APIFY_TOKEN:
@@ -114,24 +105,19 @@ def process_rows(rows):
     conn = sqlite3.connect("seen.db")
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
     conn.commit()
-
     try:
         next_row = len(SHEET.get_all_values()) + 1
     except Exception:
         next_row = 1
-
     for idx, row in enumerate(rows, 1):
         zpid = str(row.get("zpid", ""))
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             logger.info("%d/%d zpid %s already processed – skip", idx, len(rows), zpid)
             continue
-
         listing_text = get_description(row)
         logger.debug("zpid %s description length = %d", zpid, len(listing_text))
-
         if not listing_text:
             logger.warning("blank description: %s", zpid)
-
         prompt = (
             "Return YES if the following text contains the phrase 'short sale' "
             "(case-insensitive) and does NOT contain any of: approved, negotiator, "
@@ -147,10 +133,8 @@ def process_rows(rows):
             logger.error("OpenAI error zpid %s: %s", zpid, e)
             continue
         logger.info("zpid %s OpenAI result %s", zpid, result)
-
         if not result.upper().startswith("YES"):
             continue
-
         agent = (
             row.get("listingProvider", {}).get("agents", [{}])[0].get("name")
             or row.get("listingAgentName")
@@ -167,27 +151,22 @@ def process_rows(rows):
         address = row.get("address") or row.get("addressStreet") or ""
         city    = row.get("addressCity") or ""
         st      = row.get("addressState") or row.get("state") or ""
-
         row_idx = next_row
         try:
             SHEET.append_row([first, last, "", "", address, city, st, "", "", ""])
             next_row += 1
         except Exception as e:
             logger.error("Sheets write failed: %s", e)
-
         phone, email = google_lookup(agent, st, row.get("brokerName", ""))
         logger.info("%s contact → phone:%s email:%s", zpid, phone, email)
-
         if phone or email:
             try:
                 SHEET.update(f"C{row_idx}:D{row_idx}", [[phone, email]])
             except Exception as e:
                 logger.error("Sheets write failed: %s", e)
-
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
         logger.info("zpid %s marked processed", zpid)
-
     conn.close()
     logger.info("END run – processing complete")
 
