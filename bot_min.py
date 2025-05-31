@@ -22,7 +22,7 @@ CREDS = ServiceAccountCredentials.from_json_keyfile_dict(
 )
 SHEET = gspread.authorize(CREDS).open_by_url(SHEET_URL).sheet1
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("bot_min")
 
 PHONE_RE    = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
