@@ -30,6 +30,7 @@ EMAIL_RE    = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
 
 
+# ---------- helper funcs (unchanged) ----------
 def force_fetch_detail(zpid: str) -> str:
     try:
         resp = requests.post(
@@ -114,6 +115,7 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
     return "", ""
 
 
+# ---------- main row processor ----------
 def process_rows(rows):
     logger.info("START run – %d scraped rows", len(rows))
     conn = sqlite3.connect("seen.db")
@@ -123,15 +125,16 @@ def process_rows(rows):
         next_row = len(SHEET.get_all_values()) + 1
     except Exception:
         next_row = 1
+
     for idx, row in enumerate(rows, 1):
         zpid = str(row.get("zpid", ""))
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             logger.info("%d/%d zpid %s already processed – skip", idx, len(rows), zpid)
             continue
+
         listing_text = get_description(row)
         logger.debug("zpid %s description length = %d", zpid, len(listing_text))
-        if not listing_text:
-            logger.warning("blank description: %s", zpid)
+
         prompt = (
             "Return YES if the following text contains the phrase 'short sale' "
             "(case-insensitive) and does NOT contain any of: approved, negotiator, "
@@ -146,9 +149,12 @@ def process_rows(rows):
         except Exception as e:
             logger.error("OpenAI error zpid %s: %s", zpid, e)
             continue
+
         logger.info("zpid %s OpenAI result %s", zpid, result)
         if not result.upper().startswith("YES"):
             continue
+
+        # ------------- agent parsing -------------
         agent = (
             row.get("listingProvider", {}).get("agents", [{}])[0].get("name")
             or row.get("listingAgentName")
@@ -157,20 +163,30 @@ def process_rows(rows):
             or ""
         )
         agent = STRIP_TRAIL.sub("", agent).strip()
-        if not agent:
-            logger.warning("zpid %s no agent – skip", zpid)
-            continue
+
         parts = agent.split()
         first, last = parts[0], " ".join(parts[1:]) if len(parts) > 1 else ""
-        address = row.get("address") or row.get("addressStreet") or ""
-        city    = row.get("addressCity") or ""
-        st      = row.get("addressState") or row.get("state") or ""
-        row_idx = next_row
+
+        # ------------- address fields (Option B) -------------
+        street = row.get("street", "")
+        city   = row.get("city", "")
+        st     = row.get("state", "")
+        zipc   = row.get("zip", "")
+
+        # build the row for Sheets
+        sheet_row = [first, last, "", "", street, city, st, zipc]
+
+        # ------------- append to Sheets -------------
         try:
-            SHEET.append_row([first, last, "", "", address, city, st, "", "", ""])
+            SHEET.append_row(sheet_row, value_input_option="RAW")
+            row_idx = next_row
             next_row += 1
         except Exception as e:
             logger.error("Sheets write failed: %s", e)
+            # don’t mark processed – retry next run
+            continue
+
+        # ------------- phone / email lookup (only if row saved) -------------
         phone, email = google_lookup(agent, st, row.get("brokerName", ""))
         logger.info("%s contact → phone:%s email:%s", zpid, phone, email)
         if phone or email:
@@ -178,9 +194,12 @@ def process_rows(rows):
                 SHEET.update(f"C{row_idx}:D{row_idx}", [[phone, email]])
             except Exception as e:
                 logger.error("Sheets write failed: %s", e)
+
+        # ------------- mark processed -------------
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
         logger.info("zpid %s marked processed", zpid)
+
     conn.close()
     logger.info("END run – processing complete")
 
