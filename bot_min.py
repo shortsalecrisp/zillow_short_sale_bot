@@ -207,14 +207,13 @@ def process_rows(rows):
         street = row.get("street", "")
         city   = row.get("city", "")
         st     = row.get("state", "")
-        zipc   = row.get("zip", "")
 
-        sheet_row = [first, last, "", "", street, city, st, zipc]
+        sheet_row = [first, last, "", "", street, city, st]   #  <-- NEW
 
         # -------- append to Sheets --------
         try:
             SHEET.append_row(sheet_row, value_input_option="RAW")
-            row_idx = next_row
+            row_idx = next_row          # <- first free row number *before* we increment
             next_row += 1
         except Exception as e:
             logger.error("Sheets write failed: %s", e)
