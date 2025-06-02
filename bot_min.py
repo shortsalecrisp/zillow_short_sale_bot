@@ -4,6 +4,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
 
+# ---------- env / globals ----------
 load_dotenv()
 OPENAI_MODEL   = "gpt-3.5-turbo-0125"
 GOOGLE_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
@@ -30,7 +31,7 @@ EMAIL_RE    = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
 
 
-# ---------- helper funcs (unchanged) ----------
+# ---------- helpers ----------
 def force_fetch_detail(zpid: str) -> str:
     try:
         resp = requests.post(
@@ -78,25 +79,55 @@ def get_description(row: dict) -> str:
 
 
 def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
+    """Return (phone, email) or ('',''). Includes verbose diagnostics."""
     if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
+        logger.debug("google_lookup → custom-search creds missing")
         return "", ""
+
     queries = [
         f'"{agent}" {state} phone email',
         f'"{agent}" "{broker}" phone email' if broker else "",
     ]
+
+    # --- Google Custom Search pass ---
     for q in filter(None, queries):
+        logger.debug("google_lookup → query: %s", q)
         params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": q, "num": 10}
         try:
-            resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10).json()
-        except Exception:
+            resp = requests.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params=params,
+                timeout=10,
+            ).json()
+        except Exception as e:
+            logger.error("google_lookup HTTP error for %s: %s", q, e)
             continue
+
         for it in resp.get("items", []):
-            html = requests.get(it.get("link", ""), timeout=10).text
+            url = it.get("link", "")
+            logger.debug("google_lookup → checking %s", url)
+            try:
+                html = requests.get(url, timeout=10).text
+            except Exception as e:
+                logger.debug("  fetch failed: %s", e)
+                continue
+
             phone = PHONE_RE.search(html)
             email = EMAIL_RE.search(html)
             if phone or email:
+                logger.debug(
+                    "  MATCH! phone:%s email:%s source:%s",
+                    phone.group() if phone else "",
+                    email.group() if email else "",
+                    url,
+                )
                 return phone.group() if phone else "", email.group() if email else ""
+
+    logger.debug("google_lookup → no match via Custom Search for %s", agent)
+
+    # --- fallback: Apify realtor-agent-scraper ---
     if APIFY_TOKEN:
+        logger.debug("google_lookup → fallback to Apify agent scraper")
         try:
             resp = requests.post(
                 "https://api.apify.com/v2/acts/drobnikj~realtor-agent-scraper/run-sync-get-dataset-items",
@@ -106,21 +137,27 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
             ).json()
             if isinstance(resp, list) and resp:
                 rec = resp[0]
-                return (
-                    rec.get("mobilePhone") or rec.get("officePhone") or "",
-                    rec.get("email") or "",
-                )
-        except Exception:
-            pass
+                phone = rec.get("mobilePhone") or rec.get("officePhone") or ""
+                email = rec.get("email") or ""
+                if phone or email:
+                    logger.debug(
+                        "  MATCH! phone:%s email:%s (Apify agent scraper)", phone, email
+                    )
+                return phone, email
+        except Exception as e:
+            logger.error("Apify agent scraper error: %s", e)
+
+    logger.debug("google_lookup → no contact found for %s", agent)
     return "", ""
 
 
-# ---------- main row processor ----------
+# ---------- main pipeline ----------
 def process_rows(rows):
     logger.info("START run – %d scraped rows", len(rows))
     conn = sqlite3.connect("seen.db")
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
     conn.commit()
+
     try:
         next_row = len(SHEET.get_all_values()) + 1
     except Exception:
@@ -154,7 +191,7 @@ def process_rows(rows):
         if not result.upper().startswith("YES"):
             continue
 
-        # ------------- agent parsing -------------
+        # -------- agent & address fields --------
         agent = (
             row.get("listingProvider", {}).get("agents", [{}])[0].get("name")
             or row.get("listingAgentName")
@@ -167,26 +204,23 @@ def process_rows(rows):
         parts = agent.split()
         first, last = parts[0], " ".join(parts[1:]) if len(parts) > 1 else ""
 
-        # ------------- address fields (Option B) -------------
         street = row.get("street", "")
         city   = row.get("city", "")
         st     = row.get("state", "")
         zipc   = row.get("zip", "")
 
-        # build the row for Sheets
         sheet_row = [first, last, "", "", street, city, st, zipc]
 
-        # ------------- append to Sheets -------------
+        # -------- append to Sheets --------
         try:
             SHEET.append_row(sheet_row, value_input_option="RAW")
             row_idx = next_row
             next_row += 1
         except Exception as e:
             logger.error("Sheets write failed: %s", e)
-            # don’t mark processed – retry next run
-            continue
+            continue  # skip phone/email lookup – row not saved
 
-        # ------------- phone / email lookup (only if row saved) -------------
+        # -------- phone/email enrichment --------
         phone, email = google_lookup(agent, st, row.get("brokerName", ""))
         logger.info("%s contact → phone:%s email:%s", zpid, phone, email)
         if phone or email:
@@ -195,7 +229,7 @@ def process_rows(rows):
             except Exception as e:
                 logger.error("Sheets write failed: %s", e)
 
-        # ------------- mark processed -------------
+        # -------- mark processed --------
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
         logger.info("zpid %s marked processed", zpid)
