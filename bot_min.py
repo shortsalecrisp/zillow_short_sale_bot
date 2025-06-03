@@ -4,7 +4,9 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
 
-# ---------- env / globals ----------
+# ──────────────────────────────────────────────────────────────
+#  ENV / GLOBALS
+# ──────────────────────────────────────────────────────────────
 load_dotenv()
 OPENAI_MODEL   = "gpt-3.5-turbo-0125"
 GOOGLE_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
@@ -23,7 +25,8 @@ CREDS = ServiceAccountCredentials.from_json_keyfile_dict(
 )
 SHEET = gspread.authorize(CREDS).open_by_url(SHEET_URL).sheet1
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG,
+                    format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("bot_min")
 
 PHONE_RE    = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
@@ -31,7 +34,15 @@ EMAIL_RE    = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
 
 
-# ---------- helpers ----------
+# ──────────────────────────────────────────────────────────────
+#  HELPERS
+# ──────────────────────────────────────────────────────────────
+def _clean_phone(raw: str) -> str:
+    """Return a 10-digit string or the raw phone if cleaning fails."""
+    digits = "".join(filter(str.isdigit, raw))
+    return digits if len(digits) == 10 else raw
+
+
 def force_fetch_detail(zpid: str) -> str:
     try:
         resp = requests.post(
@@ -43,16 +54,16 @@ def force_fetch_detail(zpid: str) -> str:
         if isinstance(resp, list) and resp:
             return resp[0].get("homeDescription", "").strip()
     except Exception:
-        return ""
+        pass
     return ""
 
 
 def get_description(row: dict) -> str:
     logger.debug("DEBUG: raw row keys = %s", list(row.keys()))
 
-    ft = row.get("fullText") or ""
-    if ft.strip():
-        return ft.strip()
+    ft = row.get("fullText", "").strip()
+    if ft:
+        return ft
 
     for key in ("homeDescription", "descriptionPlainText", "description"):
         val = (row.get(key) or "").strip()
@@ -61,27 +72,21 @@ def get_description(row: dict) -> str:
 
     detail = row.get("detail", {})
     home_info = detail.get("homeInfo", {}) if isinstance(detail, dict) else {}
-    nested = (home_info.get("homeDescription") or "").strip()
-    if nested:
-        return nested
+    if home_info.get("homeDescription"):
+        return home_info["homeDescription"].strip()
 
     hdp = row.get("hdpData", {})
     home_info2 = hdp.get("homeInfo", {}) if isinstance(hdp, dict) else {}
-    nested2 = (home_info2.get("homeDescription") or "").strip()
-    if nested2:
-        return nested2
+    if home_info2.get("homeDescription"):
+        return home_info2["homeDescription"].strip()
 
-    zpid = row.get("zpid")
-    if zpid:
-        return force_fetch_detail(zpid)
-
-    return ""
+    # last-ditch fetch
+    return force_fetch_detail(row.get("zpid", ""))
 
 
 def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
     """Return (phone, email) or ('',''). Includes verbose diagnostics."""
-    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
-        logger.debug("google_lookup → custom-search creds missing")
+    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID or not agent:
         return "", ""
 
     queries = [
@@ -89,14 +94,14 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
         f'"{agent}" "{broker}" phone email' if broker else "",
     ]
 
-    # --- Google Custom Search pass ---
+    # 1️⃣  Google Custom Search
     for q in filter(None, queries):
         logger.debug("google_lookup → query: %s", q)
-        params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": q, "num": 10}
         try:
             resp = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
-                params=params,
+                params={"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID,
+                        "q": q, "num": 10},
                 timeout=10,
             ).json()
         except Exception as e:
@@ -112,37 +117,35 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
                 logger.debug("  fetch failed: %s", e)
                 continue
 
-            phone = PHONE_RE.search(html)
-            email = EMAIL_RE.search(html)
-            if phone or email:
-                logger.debug(
-                    "  MATCH! phone:%s email:%s source:%s",
-                    phone.group() if phone else "",
-                    email.group() if email else "",
-                    url,
-                )
-                return phone.group() if phone else "", email.group() if email else ""
+            phone_m = PHONE_RE.search(html)
+            email_m = EMAIL_RE.search(html)
+            if phone_m or email_m:
+                phone = _clean_phone(phone_m.group()) if phone_m else ""
+                email = email_m.group() if email_m else ""
+                logger.debug("  MATCH! phone:%s email:%s source:%s",
+                             phone, email, url)
+                return phone, email
 
     logger.debug("google_lookup → no match via Custom Search for %s", agent)
 
-    # --- fallback: Apify realtor-agent-scraper ---
+    # 2️⃣  Apify realtor-agent scraper fallback
     if APIFY_TOKEN:
         logger.debug("google_lookup → fallback to Apify agent scraper")
         try:
             resp = requests.post(
-                "https://api.apify.com/v2/acts/drobnikj~realtor-agent-scraper/run-sync-get-dataset-items",
+                "https://api.apify.com/v2/acts/drobnikj~realtor-agent-scraper/"
+                "run-sync-get-dataset-items",
                 params={"token": APIFY_TOKEN},
                 json={"search": agent, "state": state},
                 timeout=15,
             ).json()
             if isinstance(resp, list) and resp:
-                rec = resp[0]
-                phone = rec.get("mobilePhone") or rec.get("officePhone") or ""
-                email = rec.get("email") or ""
+                rec   = resp[0]
+                phone = _clean_phone(
+                    rec.get("mobilePhone") or rec.get("officePhone", ""))
+                email = rec.get("email", "")
                 if phone or email:
-                    logger.debug(
-                        "  MATCH! phone:%s email:%s (Apify agent scraper)", phone, email
-                    )
+                    logger.debug("  MATCH! phone:%s email:%s (Apify)", phone, email)
                 return phone, email
         except Exception as e:
             logger.error("Apify agent scraper error: %s", e)
@@ -151,17 +154,16 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
     return "", ""
 
 
-# ---------- main pipeline ----------
+# ──────────────────────────────────────────────────────────────
+#  MAIN PIPELINE
+# ──────────────────────────────────────────────────────────────
 def process_rows(rows):
     logger.info("START run – %d scraped rows", len(rows))
+
+    #  initialize / dedupe store
     conn = sqlite3.connect("seen.db")
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
     conn.commit()
-
-    try:
-        next_row = len(SHEET.get_all_values()) + 1
-    except Exception:
-        next_row = 1
 
     for idx, row in enumerate(rows, 1):
         zpid = str(row.get("zpid", ""))
@@ -169,16 +171,18 @@ def process_rows(rows):
             logger.info("%d/%d zpid %s already processed – skip", idx, len(rows), zpid)
             continue
 
+        # ----- short-sale filter via OpenAI -----
         listing_text = get_description(row)
         logger.debug("zpid %s description length = %d", zpid, len(listing_text))
 
         prompt = (
             "Return YES if the following text contains the phrase 'short sale' "
             "(case-insensitive) and does NOT contain any of: approved, negotiator, "
-            "settlement fee, fee at closing. Otherwise return NO.\n\n" + listing_text
+            "settlement fee, fee at closing. Otherwise return NO.\n\n"
+            + listing_text
         )
         try:
-            result = client.chat.completions.create(
+            ans = client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
@@ -187,11 +191,11 @@ def process_rows(rows):
             logger.error("OpenAI error zpid %s: %s", zpid, e)
             continue
 
-        logger.info("zpid %s OpenAI result %s", zpid, result)
-        if not result.upper().startswith("YES"):
+        logger.info("zpid %s OpenAI result %s", zpid, ans)
+        if not ans.upper().startswith("YES"):
             continue
 
-        # -------- agent & address fields --------
+        # ----- agent / address fields -----
         agent = (
             row.get("listingProvider", {}).get("agents", [{}])[0].get("name")
             or row.get("listingAgentName")
@@ -201,40 +205,41 @@ def process_rows(rows):
         )
         agent = STRIP_TRAIL.sub("", agent).strip()
 
-        # ---- safe name split (handles empty agent) ----
-        if agent:
-            parts = agent.split()
-            first = parts[0]
-            last  = " ".join(parts[1:]) if len(parts) > 1 else ""
-        else:
-            first = last = ""
+        parts  = agent.split()
+        first  = parts[0] if parts else ""
+        last   = " ".join(parts[1:]) if len(parts) > 1 else ""
 
         street = row.get("street", "")
         city   = row.get("city", "")
-        st     = row.get("state", "")
+        st_abv = row.get("state", "")
 
-        # Build the 7-column row: First | Last | Phone | Email | listing_address | City | State
-        sheet_row = [first, last, "", "", street, city, st]
+        # row to insert (exactly 7 columns A→G)
+        sheet_row = [first, last, "", "", street, city, st_abv]
 
-        # -------- append to Sheets --------
+        # ----- append row, *forced to start at column A* -----
+        # table_range="A:A" makes gspread (≥5.11) always place the new row
+        # beginning in column A even if there are stray values elsewhere.
         try:
-            SHEET.append_row(sheet_row, value_input_option="RAW")
-            row_idx = next_row          # first free row number BEFORE increment
-            next_row += 1
+            before_rows = len(SHEET.get_all_values())
+            SHEET.append_row(sheet_row,
+                             value_input_option="RAW",
+                             table_range="A:A")
+            row_idx = before_rows + 1           # the row we just wrote
         except Exception as e:
             logger.error("Sheets write failed: %s", e)
-            continue  # skip phone/email lookup – row not saved
+            continue   # can’t enrich if base row not saved
 
-        # -------- phone/email enrichment --------
-        phone, email = google_lookup(agent, st, row.get("brokerName", ""))
+        # ----- phone/email enrichment -----
+        phone, email = google_lookup(agent, st_abv, row.get("brokerName", ""))
         logger.info("%s contact → phone:%s email:%s", zpid, phone, email)
+
         if phone or email:
             try:
                 SHEET.update(f"C{row_idx}:D{row_idx}", [[phone, email]])
             except Exception as e:
-                logger.error("Sheets write failed: %s", e)
+                logger.error("Sheets write failed (update): %s", e)
 
-        # -------- mark processed --------
+        # ----- mark processed -----
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
         logger.info("zpid %s marked processed", zpid)
