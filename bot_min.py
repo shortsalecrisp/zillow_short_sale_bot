@@ -208,6 +208,7 @@ def process_rows(rows):
         city   = row.get("city", "")
         st     = row.get("state", "")
 
+        # ❶  Build the 7-column row, matching Sheet layout
         sheet_row = [first, last, "", "", street, city, st]   #  <-- NEW
 
         # -------- append to Sheets --------
