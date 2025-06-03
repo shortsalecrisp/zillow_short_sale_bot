@@ -1,10 +1,17 @@
+# bot_min.py  – short-sale detector → Google Sheets
+# ---------------------------------------------------------------------------
+# Writes each qualifying listing on ONE row:
+#   A  first name | B  last name | C  phone | D  email | E  street | F  city | G  state
+# Contact lookup does best-effort retries; if still blank, we record the row anyway.
+# ---------------------------------------------------------------------------
+
 import os, re, json, sqlite3, logging, time, requests
 from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
 
-# ─────────────────────────── ENV / GLOBALS ────────────────────────────────
+# --------------------------- ENV / GLOBALS ---------------------------------
 load_dotenv()
 OPENAI_MODEL   = "gpt-3.5-turbo-0125"
 GOOGLE_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
@@ -30,8 +37,7 @@ PHONE_RE    = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
 EMAIL_RE    = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
 
-# ─────────────────────────── HELPERS 
-──────────────────────────────────────
+# ----------------------------- HELPERS -------------------------------------
 def force_fetch_detail(zpid: str) -> str:
     """Last-ditch Zillow detail call if description missing."""
     try:
@@ -51,12 +57,7 @@ def force_fetch_detail(zpid: str) -> str:
 def get_description(row: dict) -> str:
     logger.debug("DEBUG: raw row keys = %s", list(row.keys()))
 
-    for key in (
-        "fullText",
-        "homeDescription",
-        "descriptionPlainText",
-        "description",
-    ):
+    for key in ("fullText", "homeDescription", "descriptionPlainText", "description"):
         val = (row.get(key) or "").strip()
         if val:
             return val
@@ -77,8 +78,7 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
     """
     Best-effort scrape for phone/email.
     - keeps the first decent email seen (best_email)
-    - keeps retrying queries until a phone number surfaces or we exhaust list
-    Falls back to Apify realtor-agent-scraper if Google CSE fails.
+    - retries alt queries; falls back to Apify scraper
     """
     if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
         logger.debug("google_lookup → custom-search creds missing")
@@ -160,14 +160,14 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
     return "", best_email  # might still have an email
 
 
-# ─────────────────────────── MAIN PIPELINE ────────────────────────────────
+# ----------------------------- MAIN ----------------------------------------
 def process_rows(rows):
     logger.info("START run – %d scraped rows", len(rows))
     conn = sqlite3.connect("seen.db")
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
     conn.commit()
 
-    # Track current row count once (header row assumed at A1)
+    # current row count once (header assumed at A1)
     existing_rows = len(SHEET.get_all_values())
 
     for idx, row in enumerate(rows, 1):
@@ -198,7 +198,7 @@ def process_rows(rows):
         if not result.upper().startswith("YES"):
             continue
 
-        # ---------------- agent & address fields ----------------
+        # -------- agent & address fields --------
         agent = (
             row.get("listingProvider", {}).get("agents", [{}])[0].get("name")
             or row.get("listingAgentName")
@@ -217,7 +217,7 @@ def process_rows(rows):
 
         sheet_row = [first, last, "", "", street, city, st]
 
-        # ---------------- append to Sheet ----------------------
+        # -------- append to Sheet --------
         next_row_idx = existing_rows + 1
         try:
             SHEET.update(
@@ -231,18 +231,20 @@ def process_rows(rows):
             logger.error("Sheets write failed: %s", e)
             continue  # skip contact lookup if base row failed
 
-        # ---------------- phone/email enrichment ----------------
+        # -------- phone/email enrichment --------
         phone, email = google_lookup(agent, st, row.get("brokerName", ""))
         logger.info("%s contact → phone:%s email:%s", zpid, phone, email)
         if phone or email:
             try:
                 SHEET.update(
-                    f"C{next_row_idx}:D{next_row_idx}", [[phone, email]], value_input_option="RAW"
+                    f"C{next_row_idx}:D{next_row_idx}",
+                    [[phone, email]],
+                    value_input_option="RAW",
                 )
             except Exception as e:
                 logger.error("Sheets write failed: %s", e)
 
-        # ---------------- mark processed ------------------------
+        # -------- mark processed ----------
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
         logger.info("zpid %s marked processed", zpid)
