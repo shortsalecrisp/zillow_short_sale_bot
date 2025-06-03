@@ -1,11 +1,25 @@
+"""
+bot_min.py  –  Zillow short-sale scraper → Google Sheets
+
+Changes in this version
+-----------------------
+* Explicit “A:G” write range => rows ALWAYS start in column A.
+* Stricter PHONE_RE; normalise to  xxx-xxx-xxxx.
+* Discard image-file “e-mails”.
+* Skip writing if the phone already exists in column C.
+"""
+
 import os, re, json, sqlite3, logging, requests
+from typing import Tuple, List
+
 from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
 
-# ---------- env / globals ----------
+# ───────────────────────── env / globals ─────────────────────────
 load_dotenv()
+
 OPENAI_MODEL   = "gpt-3.5-turbo-0125"
 GOOGLE_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID")
@@ -18,52 +32,34 @@ GSCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
-CREDS = ServiceAccountCredentials.from_json_keyfile_dict(
+CREDS  = ServiceAccountCredentials.from_json_keyfile_dict(
     json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON")), GSCOPE
 )
-SHEET = gspread.authorize(CREDS).open_by_url(SHEET_URL).sheet1
+SHEET  = gspread.authorize(CREDS).open_by_url(SHEET_URL).sheet1
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("bot_min")
 
-PHONE_RE    = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
-EMAIL_RE    = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-STRIP_TRAIL = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
+# ───────────────────────────── regex ─────────────────────────────
+PHONE_RE = re.compile(
+    r"""(?<!\d)(?:            # no digit just before
+        \(\d{3}\)\s*\d{3}[-.\s]\d{4} |      # (123) 456-7890
+        \d{3}[-.\s]\d{3}[-.\s]\d{4}         # 123-456-7890 / 123.456.7890
+    )(?!\d)""",
+    re.VERBOSE,
+)
+EMAIL_RE     = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+STRIP_TRAIL  = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
+IMAGE_EXT_RE = re.compile(r"\.(?:png|jpe?g|gif|svg|webp)$", re.I)
+
+# ───────────────────────── helpers ───────────────────────────────
+def normalise_phone(raw: str) -> str:
+    """Digits →  xxx-xxx-xxxx ; return '' if not 10 digits."""
+    digits = re.sub(r"\D", "", raw)
+    return f"{digits[0:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else ""
 
 
-# ---------- small utilities ----------
-def clean_phone(raw: str) -> str:
-    """Digits-only version for comparisons (10–11 digits kept)."""
-    digits = re.sub(r"\D", "", raw or "")
-    return digits[-10:] if len(digits) >= 10 else ""
-
-
-def format_phone(raw: str) -> str:
-    """
-    Return phone in XXX-XXX-XXXX format.
-    If we cannot get 10 digits, fall back to the original string.
-    """
-    digits = clean_phone(raw)
-    if len(digits) == 10:
-        return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
-    return raw or ""
-
-
-def dedupe_phone(phone_digits: str, row_idx: int) -> None:
-    """Delete new row if this phone already exists elsewhere in col C."""
-    if not phone_digits:
-        return
-    try:
-        phones = SHEET.col_values(3)  # column C
-        matches = [i for i, p in enumerate(phones, start=1) if clean_phone(p) == phone_digits]
-        if len(matches) > 1 and row_idx in matches:
-            logger.info("Duplicate phone %s found → deleting row %d", phone_digits, row_idx)
-            SHEET.delete_rows(row_idx)
-    except Exception as e:
-        logger.error("Phone dedupe check failed: %s", e)
-
-
-# ---------- helpers ----------
 def force_fetch_detail(zpid: str) -> str:
     try:
         resp = requests.post(
@@ -75,43 +71,37 @@ def force_fetch_detail(zpid: str) -> str:
         if isinstance(resp, list) and resp:
             return resp[0].get("homeDescription", "").strip()
     except Exception:
-        return ""
+        pass
     return ""
 
 
 def get_description(row: dict) -> str:
-    logger.debug("DEBUG: raw row keys = %s", list(row.keys()))
-
-    ft = row.get("fullText") or ""
-    if ft.strip():
-        return ft.strip()
-
-    for key in ("homeDescription", "descriptionPlainText", "description"):
+    for key in ("fullText", "homeDescription", "descriptionPlainText", "description"):
         val = (row.get(key) or "").strip()
         if val:
             return val
 
     detail = row.get("detail", {})
     home_info = detail.get("homeInfo", {}) if isinstance(detail, dict) else {}
-    nested = (home_info.get("homeDescription") or "").strip()
-    if nested:
-        return nested
+    if home_desc := home_info.get("homeDescription", "").strip():
+        return home_desc
 
     hdp = row.get("hdpData", {})
     home_info2 = hdp.get("homeInfo", {}) if isinstance(hdp, dict) else {}
-    nested2 = (home_info2.get("homeDescription") or "").strip()
-    if nested2:
-        return nested2
+    if home_desc2 := home_info2.get("homeDescription", "").strip():
+        return home_desc2
 
-    zpid = row.get("zpid")
-    if zpid:
+    if zpid := row.get("zpid"):
         return force_fetch_detail(zpid)
 
     return ""
 
 
-def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
-    """Return (phone, email) or ('',''). Includes verbose diagnostics."""
+def google_lookup(agent: str, state: str, broker: str) -> Tuple[str, str]:
+    """
+    Return (phone, email) – both may be ''.
+    Performs up to two Google CSE passes, then optional Apify fallback.
+    """
     if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
         logger.debug("google_lookup → custom-search creds missing")
         return "", ""
@@ -121,15 +111,11 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
         f'"{agent}" "{broker}" phone email' if broker else "",
     ]
 
-    # --- Google Custom Search pass ---
     for q in filter(None, queries):
-        logger.debug("google_lookup → query: %s", q)
         params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": q, "num": 10}
         try:
             resp = requests.get(
-                "https://www.googleapis.com/customsearch/v1",
-                params=params,
-                timeout=10,
+                "https://www.googleapis.com/customsearch/v1", params=params, timeout=10
             ).json()
         except Exception as e:
             logger.error("google_lookup HTTP error for %s: %s", q, e)
@@ -137,29 +123,25 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
 
         for it in resp.get("items", []):
             url = it.get("link", "")
-            logger.debug("google_lookup → checking %s", url)
             try:
                 html = requests.get(url, timeout=10).text
-            except Exception as e:
-                logger.debug("  fetch failed: %s", e)
+            except Exception:
                 continue
 
-            phone = PHONE_RE.search(html)
-            email = EMAIL_RE.search(html)
-            if phone or email:
-                logger.debug(
-                    "  MATCH! phone:%s email:%s source:%s",
-                    phone.group() if phone else "",
-                    email.group() if email else "",
-                    url,
-                )
-                return phone.group() if phone else "", email.group() if email else ""
+            phone_match = PHONE_RE.search(html)
+            email_match = EMAIL_RE.search(html)
 
-    logger.debug("google_lookup → no match via Custom Search for %s", agent)
+            phone = normalise_phone(phone_match.group()) if phone_match else ""
+            email = email_match.group("") if email_match else ""
+
+            if email and IMAGE_EXT_RE.search(email):
+                email = ""  # throw away *.png etc.
+
+            if phone or email:
+                return phone, email
 
     # --- fallback: Apify realtor-agent-scraper ---
     if APIFY_TOKEN:
-        logger.debug("google_lookup → fallback to Apify agent scraper")
         try:
             resp = requests.post(
                 "https://api.apify.com/v2/acts/drobnikj~realtor-agent-scraper/run-sync-get-dataset-items",
@@ -168,24 +150,32 @@ def google_lookup(agent: str, state: str, broker: str) -> tuple[str, str]:
                 timeout=15,
             ).json()
             if isinstance(resp, list) and resp:
-                rec = resp[0]
-                phone = rec.get("mobilePhone") or rec.get("officePhone") or ""
+                rec   = resp[0]
+                phone = normalise_phone(rec.get("mobilePhone") or rec.get("officePhone") or "")
                 email = rec.get("email") or ""
-                if phone or email:
-                    logger.debug(
-                        "  MATCH! phone:%s email:%s (Apify agent scraper)", phone, email
-                    )
                 return phone, email
         except Exception as e:
             logger.error("Apify agent scraper error: %s", e)
 
-    logger.debug("google_lookup → no contact found for %s", agent)
     return "", ""
 
 
-# ---------- main pipeline ----------
-def process_rows(rows):
+def first_empty_row() -> int:
+    """Index (1-based) of the first completely empty row in column A."""
+    col_a = SHEET.col_values(1)          # non-blank cells only
+    return len(col_a) + 1
+
+
+def phone_in_sheet(clean_digits: str) -> bool:
+    """True if phone (digits only) already exists in column C."""
+    existing = {re.sub(r"\D", "", p) for p in SHEET.col_values(3)}
+    return clean_digits in existing
+
+
+# ─────────────────────────── pipeline ────────────────────────────
+def process_rows(rows: List[dict]) -> None:
     logger.info("START run – %d scraped rows", len(rows))
+
     conn = sqlite3.connect("seen.db")
     conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
     conn.commit()
@@ -193,12 +183,10 @@ def process_rows(rows):
     for idx, row in enumerate(rows, 1):
         zpid = str(row.get("zpid", ""))
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
-            logger.info("%d/%d zpid %s already processed – skip", idx, len(rows), zpid)
-            continue
+            continue  # already processed earlier
 
+        # ---------- OpenAI filter ----------
         listing_text = get_description(row)
-        logger.debug("zpid %s description length = %d", zpid, len(listing_text))
-
         prompt = (
             "Return YES if the following text contains the phrase 'short sale' "
             "(case-insensitive) and does NOT contain any of: approved, negotiator, "
@@ -214,13 +202,10 @@ def process_rows(rows):
             logger.error("OpenAI error zpid %s: %s", zpid, e)
             continue
 
-        logger.info("zpid %s OpenAI result %s", zpid, result)
         if not result.upper().startswith("YES"):
-            conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
-            conn.commit()
             continue
 
-        # -------- agent & address fields --------
+        # ---------- Build 7-column row ----------
         agent = (
             row.get("listingProvider", {}).get("agents", [{}])[0].get("name")
             or row.get("listingAgentName")
@@ -229,38 +214,49 @@ def process_rows(rows):
             or ""
         )
         agent = STRIP_TRAIL.sub("", agent).strip()
-
-        parts = agent.split()
-        first, last = parts[0], " ".join(parts[1:]) if len(parts) > 1 else ""
+        first, *last_parts = agent.split()
+        last = " ".join(last_parts)
 
         street = row.get("street", "")
         city   = row.get("city", "")
         st     = row.get("state", "")
 
-        # -------- phone/email enrichment --------
-        phone_raw, email = google_lookup(agent, st, row.get("brokerName", ""))
-        phone = format_phone(phone_raw)
-        logger.info("%s contact → phone:%s email:%s", zpid, phone, email)
+        # ---------- Phone / email enrichment ----------
+        phone, email = google_lookup(agent, st, row.get("brokerName", ""))
 
-        #     Build the 7 cells in the order we want
-        sheet_row = [first, last, phone, email, street, city, st]
+        # clean/format phone one more time
+        phone_digits = re.sub(r"\D", "", phone)
+        phone_formatted = normalise_phone(phone) if phone_digits else ""
 
-        # -------- append to Sheets --------
+        if phone_in_sheet(phone_digits):
+            logger.info("Phone %s already seen – skipping write", phone_formatted)
+            # still mark zpid so we don't re-process forever
+            conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
+            conn.commit()
+            continue
+
+        # ---------- Write to sheet (explicit A:G range) ----------
+        sheet_row = [
+            first.strip(),
+            last.strip(),
+            phone_formatted,
+            email.strip(),
+            street.strip(),
+            city.strip(),
+            st.strip(),
+        ]
+
+        row_idx = first_empty_row()
         try:
-            next_row_idx = len(SHEET.col_values(1)) + 1  # next blank row index
-            SHEET.append_row(sheet_row, value_input_option="RAW")
-            logger.debug("Sheet write → row %d OK", next_row_idx)
+            SHEET.update(f"A{row_idx}:G{row_idx}", [sheet_row])
+            logger.info("Sheet write → row %s OK", row_idx)
         except Exception as e:
-            logger.error("Sheets append failed: %s", e)
-            continue  # skip dedupe / marking if we couldn't write
+            logger.error("Sheets write failed: %s", e)
+            continue
 
-        # -------- phone-based deduplication --------
-        dedupe_phone(clean_phone(phone), next_row_idx)
-
-        # -------- mark processed --------
+        # ---------- mark processed ----------
         conn.execute("INSERT OR IGNORE INTO listings(zpid) VALUES(?)", (zpid,))
         conn.commit()
-        logger.info("zpid %s marked processed", zpid)
 
     conn.close()
     logger.info("END run – processing complete")
