@@ -201,20 +201,25 @@ def process_rows(rows):
         )
         agent = STRIP_TRAIL.sub("", agent).strip()
 
-        parts = agent.split()
-        first, last = parts[0], " ".join(parts[1:]) if len(parts) > 1 else ""
+        # ---- safe name split (handles empty agent) ----
+        if agent:
+            parts = agent.split()
+            first = parts[0]
+            last  = " ".join(parts[1:]) if len(parts) > 1 else ""
+        else:
+            first = last = ""
 
         street = row.get("street", "")
         city   = row.get("city", "")
         st     = row.get("state", "")
 
-        # ❶  Build the 7-column row, matching Sheet layout
-        sheet_row = [first, last, "", "", street, city, st]   #  <-- NEW
+        # Build the 7-column row: First | Last | Phone | Email | listing_address | City | State
+        sheet_row = [first, last, "", "", street, city, st]
 
         # -------- append to Sheets --------
         try:
             SHEET.append_row(sheet_row, value_input_option="RAW")
-            row_idx = next_row          # <- first free row number *before* we increment
+            row_idx = next_row          # first free row number BEFORE increment
             next_row += 1
         except Exception as e:
             logger.error("Sheets write failed: %s", e)
