@@ -37,7 +37,6 @@ EMAIL_RE     = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 STRIP_TRAIL  = re.compile(r"\b(TREC|DRE|Lic\.?|License)\b.*$", re.I)
 
 # ───────────────────────────── helpers 
-────────────────────────────────────
 def force_fetch_detail(zpid: str) -> str:
     """Fallback to Apify Zillow-detail actor for long descriptions."""
     try:
