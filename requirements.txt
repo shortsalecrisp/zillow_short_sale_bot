@@ -2,9 +2,11 @@ fastapi
 uvicorn[standard]
 requests>=2.31.0
 beautifulsoup4==4.12.3
-google-api-python-client>=2.126.0
-google-auth>=2.29.0
+gspread==6.1.0
+oauth2client==4.1.3
+python-dotenv==1.0.1
+google-api-python-client>=2.126.0   # keep this
+google-auth>=2.29.0                 # plus these two
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.0.0
-python-dotenv==1.0.1
-google-oauth-python-client==2.12.0
+
