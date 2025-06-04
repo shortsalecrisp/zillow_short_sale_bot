@@ -7,10 +7,8 @@ from bot_min import process_rows
 # —————————————————————————————————————————————————————————————————————————————
 #  CONFIG & SIMPLE LOGGING
 # —————————————————————————————————————————————————————————————————————————————
-REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "SMSM_KEY", "SHEET_URL"]
-missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
-if missing:
-    raise RuntimeError(", ".join(missing))
+# Removed the environment variable guard for OPENAI_API_KEY, SMSM_KEY, SHEET_URL
+# If you need to enforce other required vars, you can add them here.
 
 DB_PATH = "seen.db"
 TABLE_SQL = "CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)"
