@@ -1,4 +1,4 @@
-import os, json, logging, re, requests
+conda activate zillowbotimport os, json, logging, re, requests
 from typing import List, Dict, Tuple
 import gspread
 from google.oauth2.service_account import Credentials
@@ -7,8 +7,8 @@ from bs4 import BeautifulSoup
 # ── ENV ────────────────────────────────────────────────────────────────────────
 SHEET_ID        = os.environ["GSHEET_ID"]
 SHEET_NAME      = "Sheet1"
-CS_API_KEY      = os.environ["GS_CSE_KEY"]
-CS_CX           = os.environ.get("CS_CX") or os.environ["CS_ENGINE_ID"]    # either name
+CS_API_KEY = os.environ["CS_API_KEY"] 
+CS_CX           = os.environ.get("CS_CX")
 SERVICE_ACCOUNT = json.loads(
     os.environ.get("GSERVICE_ACCOUNT") or os.environ["GCP_SERVICE_ACCOUNT_JSON"]
 )
