@@ -93,8 +93,6 @@ def valid_phone(p: str) -> bool:
         except Exception:
             return False
     return plausible_us_number(p)
-# 
-──────────────────────────────────────────────────────────────────────────────
 
 def ok_email(addr: str) -> bool:
     return not addr.lower().endswith(IMG_EXT)
