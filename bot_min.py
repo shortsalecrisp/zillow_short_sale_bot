@@ -118,13 +118,13 @@ def google_lookup(agent: str, state: str) -> tuple[str, str]:
                 break
         return phone, email
 
-    # 1. Prefer mobile, cell, or direct labels
-    q1 = f'"{agent}" {state} ("mobile" OR "cell" OR "direct") phone email'
+    # 1. Prefer mobile, cell, or direct and explicitly exclude "office"
+    q1 = f'"{agent}" {state} ("mobile" OR "cell" OR "direct") phone email -office'
     phone, email = run_query(q1)
 
-    # 2. Fallback to generic phone if none found
+    # 2. Fallback to generic phone/email but still exclude "office"
     if not (phone or email):
-        q2 = f'"{agent}" {state} phone email'
+        q2 = f'"{agent}" {state} phone email -office'
         phone, email = run_query(q2)
 
     LOGGER.info("Lookup %s → phone=%r email=%r", agent, phone, email)
