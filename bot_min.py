@@ -7,21 +7,18 @@ import gspread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 
-# ENV–CONFIG
 CS_API_KEY   = os.environ["CS_API_KEY"]
 CS_CX        = os.environ["CS_CX"]
 GSHEET_ID    = os.environ["GSHEET_ID"]
 SC_JSON      = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES       = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# LOGGING
 logging.basicConfig(
     level=os.getenv("LOGLEVEL", "DEBUG"),
     format="%(asctime)s %(levelname)s: %(message)s",
 )
 LOGGER = logging.getLogger("bot")
 
-# SMS CONFIG
 SMS_ENABLE      = os.getenv("SMSM_ENABLE", "false").lower() == "true"
 SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER", "")
@@ -36,7 +33,6 @@ SMS_TEMPLATE    = os.getenv("SMSM_TEMPLATE") or (
     "Would you be open to a quick call to see if this could help?"
 )
 
-# REGEX
 SHORT_RE  = re.compile(r"\bshort\s+sale\b", re.I)
 BAD_RE    = re.compile(r"approved|negotiator|settlement fee|fee at closing", re.I)
 PHONE_RE  = re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
@@ -62,24 +58,36 @@ def page_matches_agent(html: str, agent: str) -> bool:
     html_l = html.lower()
     return all(tok in html_l for tok in agent_tokens(agent))
 
-# SHEETS
-creds  = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
-gs     = gspread.authorize(creds)
-ws     = gs.open_by_key(GSHEET_ID).sheet1  # first tab
+creds = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
+sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+gs = gspread.authorize(creds)
+ws = gs.open_by_key(GSHEET_ID).sheet1
 
 def phone_exists(phone: str) -> bool:
     try:
-        phones = ws.col_values(3)                 # Column C now holds phone
+        phones = ws.col_values(3)  # Column C holds phone
         return phone in phones
     except Exception as exc:
         LOGGER.error("Sheet read failed: %s", exc)
         return False
 
 def append_row(values: list[str]):
-    LOGGER.debug("Appending row: %s", values)
-    ws.append_row(values, value_input_option="RAW")
+    """
+    Always append starting at column A.  Values order must be:
+    first_name, last_name, phone, email, street, city, state
+    """
+    body = {"values": [values]}
+    try:
+        sheets_service.spreadsheets().values().append(
+            spreadsheetId=GSHEET_ID,
+            range="Sheet1!A1",
+            valueInputOption="RAW",
+            body=body
+        ).execute()
+        LOGGER.info("Appended row: %s", values)
+    except Exception as exc:
+        LOGGER.error("Failed to append row: %s → %s", values, exc)
 
-# CONTACT LOOKUP
 def google_lookup(agent: str, state: str) -> tuple[str, str]:
     def run_query(q: str) -> tuple[str, str]:
         phone = email = ""
@@ -116,7 +124,6 @@ def google_lookup(agent: str, state: str) -> tuple[str, str]:
     LOGGER.info("Lookup %s → phone=%r email=%r", agent, phone, email)
     return phone, email
 
-# SMS
 def send_sms(to_number: str, first: str, address: str) -> bool:
     if not SMS_ENABLE:
         LOGGER.debug("SMS disabled; skip")
@@ -145,16 +152,15 @@ def send_sms(to_number: str, first: str, address: str) -> bool:
     LOGGER.info("SMS sent to %s", to_e164)
     return True
 
-# MAIN
 def process_rows(rows: list[dict]):
     LOGGER.info("Processing %d rows", len(rows))
     for r in rows:
-        street  = r.get("street", "")
-        city    = r.get("city", "")
-        state   = r.get("state", "")
-        zipc    = r.get("zip", "")
-        desc    = r.get("description", "")
-        agent   = r.get("agentName", "").strip()
+        street   = r.get("street", "")
+        city     = r.get("city", "")
+        state    = r.get("state", "")
+        zipc     = r.get("zip", "")
+        desc     = r.get("description", "")
+        agent    = r.get("agentName", "").strip()
 
         if not is_short_sale(desc):
             continue
