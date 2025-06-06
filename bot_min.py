@@ -1,14 +1,3 @@
-"""
-bot_min.py  –  Zillow → Google Sheets bot with smarter Google-only contact finder
-───────────────────────────────────────────────────────────────────────────────
-2025-06-06 update
-• Adds a NANPA-area-code fallback validator when phonenumbers is unavailable.
-  This blocks bogus “121-679-3109”-type matches that slipped through.
-Everything else (CSE queries, scoring, structured-data scrape, Sheets logic,
-domain list, etc.) is unchanged from the previous working build.
-"""
-from __future__ import annotations
-
 import os, json, logging, re, requests, time, html
 from collections import defaultdict, Counter
 from urllib.parse import urlparse
