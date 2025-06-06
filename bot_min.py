@@ -72,10 +72,6 @@ def phone_exists(phone: str) -> bool:
         return False
 
 def append_row(values: list[str]):
-    """
-    Always append starting at column A.  Values order must be:
-    first_name, last_name, phone, email, street, city, state
-    """
     body = {"values": [values]}
     try:
         sheets_service.spreadsheets().values().append(
@@ -91,6 +87,7 @@ def append_row(values: list[str]):
 def google_lookup(agent: str, state: str) -> tuple[str, str]:
     def run_query(q: str) -> tuple[str, str]:
         phone = email = ""
+        LOGGER.info("CSE run_query: %r", q)
         try:
             resp = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
@@ -102,25 +99,34 @@ def google_lookup(agent: str, state: str) -> tuple[str, str]:
             return "", ""
         for item in resp.get("items", []):
             url = item.get("link", "")
+            LOGGER.debug("Inspecting URL: %s", url)
             try:
                 html = requests.get(url, timeout=10).text
             except Exception:
                 continue
             if not page_matches_agent(html, agent):
+                LOGGER.debug("Tokens not on page: %s", url)
                 continue
             if not phone and (m := PHONE_RE.search(html)):
                 phone = fmt_phone(m.group())
+                LOGGER.debug("Found phone %r on %s", phone, url)
             if not email and (m := EMAIL_RE.search(html)) and ok_email(m.group()):
                 email = m.group()
+                LOGGER.debug("Found email %r on %s", email, url)
             if phone or email:
+                LOGGER.info("CSE match: phone=%r, email=%r on %s", phone, email, url)
                 break
         return phone, email
 
-    q1 = f'"{agent}" {state} "mobile" OR "cell" phone email'
+    # 1. Prefer mobile, cell, or direct labels
+    q1 = f'"{agent}" {state} ("mobile" OR "cell" OR "direct") phone email'
     phone, email = run_query(q1)
+
+    # 2. Fallback to generic phone if none found
     if not (phone or email):
-        q2 = f'"{agent}" {state} mobile OR cell site:(realtor.com OR redfin.com OR homesnap.com)'
+        q2 = f'"{agent}" {state} phone email'
         phone, email = run_query(q2)
+
     LOGGER.info("Lookup %s → phone=%r email=%r", agent, phone, email)
     return phone, email
 
@@ -140,6 +146,7 @@ def send_sms(to_number: str, first: str, address: str) -> bool:
         test_digits = re.sub(r"\D", "", SMS_TEST_NUMBER)
         to_e164 = "+1" + test_digits if len(test_digits) == 10 else "+" + test_digits
     text = SMS_TEMPLATE.format(first=first, address=address)
+    LOGGER.debug("SMS payload: to=%s, text=%r", to_e164, text)
     payload = {"key": SMS_API_KEY, "to": to_e164, "from": SMS_FROM, "text": text}
     try:
         resp = requests.post("https://smsmobileapi.com/api/v1/messages", json=payload, timeout=15)
