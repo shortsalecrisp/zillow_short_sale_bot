@@ -118,14 +118,20 @@ def google_lookup(agent: str, state: str) -> tuple[str, str]:
                 break
         return phone, email
 
-    # 1. Prefer mobile, cell, or direct and explicitly exclude "office"
-    q1 = f'"{agent}" {state} ("mobile" OR "cell" OR "direct") phone email -office'
+    # 1) Restrict to real‐estate domains and look for mobile/cell/direct (exclude office)
+    domains = "site:(realtor.com OR redfin.com OR homesnap.com OR coldwellbanker.com)"
+    q1 = f'"{agent}" {state} ("mobile" OR "cell" OR "direct") phone email {domains} -office'
     phone, email = run_query(q1)
 
-    # 2. Fallback to generic phone/email but still exclude "office"
+    # 2) If still none, relax to any phone/email on those domains (exclude office)
     if not (phone or email):
-        q2 = f'"{agent}" {state} phone email -office'
+        q2 = f'"{agent}" {state} phone email {domains} -office'
         phone, email = run_query(q2)
+
+    # 3) Final fallback: generic phone/email, still excluding office
+    if not (phone or email):
+        q3 = f'"{agent}" {state} phone email -office'
+        phone, email = run_query(q3)
 
     LOGGER.info("Lookup %s → phone=%r email=%r", agent, phone, email)
     return phone, email
