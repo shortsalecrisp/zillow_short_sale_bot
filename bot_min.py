@@ -27,25 +27,23 @@ logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
                     format="%(asctime)s %(levelname)s: %(message)s")
 LOG = logging.getLogger("bot")
 
-COL_ORDER = ["first", "last", "phone", "email", "street", "city", "state"]
-
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
 BAD_RE = re.compile(r"approved|negotiator|settlement fee|fee at closing", re.I)
 
 def is_short_sale(txt: str) -> bool:
     return bool(SHORT_RE.search(txt)) and not BAD_RE.search(txt)
 
-IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
+IMG_EXT  = (".png",".jpg",".jpeg",".gif",".svg",".webp")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
 def fmt_phone(raw: str) -> str:
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) == 11 and digits.startswith("1"):
+    digits = re.sub(r"\D","",raw)
+    if len(digits)==11 and digits.startswith("1"):
         digits = digits[1:]
-    return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else ""
+    return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits)==10 else ""
 
-US_AREA_CODES = {
+US_AREA_CODES = {  # truncated set
     '201','202','203','205','206','207','208','209','210','212','213','214','215','216','217','218','219',
     '220','224','225','227','228','229','231','234','239','240','248','251','252','253','254','256','260',
     '262','267','269','270','272','276','281','301','302','303','304','305','307','308','309','310','312',
@@ -68,58 +66,58 @@ US_AREA_CODES = {
     '984','985','986','989'
 }
 
-def plausible_us_number(p: str) -> bool:
-    return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}", p)) and p[:3] in US_AREA_CODES
+def plausible_us_number(p:str)->bool:
+    return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}",p)) and p[:3] in US_AREA_CODES
 
-def valid_phone(p: str) -> bool:
+def valid_phone(p:str)->bool:
     if phonenumbers:
         try:
-            return phonenumbers.is_possible_number(phonenumbers.parse(p, "US"))
+            return phonenumbers.is_possible_number(phonenumbers.parse(p,"US"))
         except Exception:
             return False
     return plausible_us_number(p)
 
-def ok_email(addr: str) -> bool:
+def ok_email(addr:str)->bool:
     return not addr.lower().endswith(IMG_EXT)
 
-LABEL_NEAR_RE = re.compile(r"(mobile|cell|direct|text|phone|tel)", re.I)
-def label_score(label: str) -> int:
-    return 4 if label.lower() in ("mobile","cell","direct","text") else 2
+LABEL_TABLE = {
+    "mobile":4,"cell":4,"direct":4,"text":4,"c:":4,"m:":4,
+    "phone":2,"tel":2,"p:":2,
+    "office":1,"main":1,"customer":1,"footer":1
+}
+LABEL_RE = re.compile(r"(" + "|".join(map(re.escape,LABEL_TABLE.keys())) + r")", re.I)
 
-global_phone_hits: Counter[str] = Counter()
-
-def proximity_scan(html_text: str) -> list[tuple[str,int]]:
-    out = []
+def proximity_scan(html_text:str)->dict[str,tuple[int,int]]:
+    hits={}
     for m in PHONE_RE.finditer(html_text):
-        phone = fmt_phone(m.group())
+        phone=fmt_phone(m.group())
         if not valid_phone(phone):
             continue
-        global_phone_hits[phone] += 1
-        if global_phone_hits[phone] > 2:
+        snippet=html_text[max(m.start()-80,0):min(m.end()+80,len(html_text))]
+        lab=LABEL_RE.search(snippet)
+        w=LABEL_TABLE.get(lab.group().lower(),0) if lab else 0
+        if w<2:
             continue
-        snippet = html_text[max(m.start()-80,0):min(m.end()+80,len(html_text))]
-        match = LABEL_NEAR_RE.search(snippet)
-        score = label_score(match.group()) if match else 0
-        if score < 2:
-            continue
-        out.append((phone,score))
-    return out
+        s=2+w
+        best,tot=hits.get(phone,(0,0))
+        hits[phone]=(max(best,w),tot+s)
+    return hits
 
-def extract_structured_contacts(html_text: str) -> tuple[list[str], list[str]]:
-    phones, mails = [], []
+def extract_structured_contacts(html_text:str)->tuple[list[str],list[str]]:
+    phones,mails=[],[]
     if not BeautifulSoup:
-        return phones, mails
-    soup = BeautifulSoup(html_text,"html.parser")
+        return phones,mails
+    soup=BeautifulSoup(html_text,"html.parser")
     for tag in soup.find_all("script",{"type":"application/ld+json"}):
         try:
-            data = json.loads(tag.string or "")
+            data=json.loads(tag.string or "")
         except Exception:
             continue
         if isinstance(data,list):
-            data = data[0]
+            data=data[0]
         if isinstance(data,dict):
-            tel = data.get("telephone") or (data.get("contactPoint") or {}).get("telephone")
-            mail = data.get("email") or (data.get("contactPoint") or {}).get("email")
+            tel=data.get("telephone") or (data.get("contactPoint") or {}).get("telephone")
+            mail=data.get("email") or (data.get("contactPoint") or {}).get("email")
             if tel:
                 phones.append(fmt_phone(tel))
             if mail:
@@ -128,21 +126,20 @@ def extract_structured_contacts(html_text: str) -> tuple[list[str], list[str]]:
         phones.append(fmt_phone(a["href"].split("tel:")[-1]))
     for a in soup.select('a[href^="mailto:"]'):
         mails.append(a["href"].split("mailto:")[-1])
-    return phones, mails
+    return phones,mails
 
-creds = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
-sheets_service = build("sheets","v4",credentials=creds,cache_discovery=False)
-gc = gspread.authorize(creds)
-ws = gc.open_by_key(GSHEET_ID).sheet1
+creds=Credentials.from_service_account_info(SC_JSON,scopes=SCOPES)
+sheets_service=build("sheets","v4",credentials=creds,cache_discovery=False)
+gc=gspread.authorize(creds)
+ws=gc.open_by_key(GSHEET_ID).sheet1
 
-def phone_exists(phone: str) -> bool:
+def phone_exists(phone:str)->bool:
     try:
         return phone in ws.col_values(3)
-    except Exception as e:
-        LOG.error("Sheet read err: %s", e)
+    except Exception:
         return False
 
-def append_row(row: list[str]):
+def append_row(row:list[str]):
     sheets_service.spreadsheets().values().append(
         spreadsheetId=GSHEET_ID,
         range="Sheet1!A1",
@@ -150,13 +147,13 @@ def append_row(row: list[str]):
         body={"values":[row]}
     ).execute()
 
-def fetch_text(url: str) -> str|None:
-    for target in (url, f"https://r.jina.ai/http://{url}"):
+def fetch_text(url:str)->str|None:
+    for target in (url,f"https://r.jina.ai/http://{url}"):
         try:
-            r = requests.get(target, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+            r=requests.get(target,timeout=10,headers={"User-Agent":"Mozilla/5.0"})
             if r.status_code!=200 and r.status_code not in (403,429,999):
                 continue
-            txt = r.text
+            txt=r.text
             if "unusual traffic" in txt[:600].lower():
                 continue
             return txt
@@ -164,115 +161,133 @@ def fetch_text(url: str) -> str|None:
             continue
     return None
 
-AGENT_SITES = [
+AGENT_SITES=[
     "realtor.com","zillow.com","redfin.com","homesnap.com","kw.com","remax.com",
     "coldwellbanker.com","compass.com","exprealty.com","bhhs.com","c21.com",
-    "realtyonegroup.com","mlsmatrix.com","mlslistings.com","har.com",
-    "brightmlshomes.com"
+    "realtyonegroup.com","mlsmatrix.com","mlslistings.com","har.com","brightmlshomes.com"
 ]
-DOMAIN_CLAUSE = " OR ".join(f"site:{d}" for d in AGENT_SITES)
+DOMAIN_CLAUSE=" OR ".join(f"site:{d}" for d in AGENT_SITES)
 
-def build_queries(agent: str, state: str) -> list[str]:
+def build_queries(agent:str,state:str)->list[str]:
     return [
         f'"{agent}" {state} ("mobile" OR "cell" OR "direct") phone email ({DOMAIN_CLAUSE})',
         f'"{agent}" {state} phone email ({DOMAIN_CLAUSE})',
         f'"{agent}" {state} contact ({DOMAIN_CLAUSE})'
     ]
 
-agent_cache: dict[str, tuple[str,str]] = {}
+AREA_BY_STATE={
+    "FL":["305","321","352","386","407","561","727","754","772","786","813","850","863","904","941","954"],
+    "GA":["404","470","478","678","706","770","912"],
+    
+"TX":["210","214","254","281","325","346","361","409","430","432","469","512","682","713","737","806","817","830","832","903","915","936","940","956","972","979","985"],
+    "OK":["405","539","580","918"],
+    
+"CA":["209","213","310","323","408","415","424","442","510","530","559","562","619","626","650","657","661","669","707","714","747","760","805","818","820","831","858","909","916","925","949","951"]
+}
 
-def realtor_fallback(agent: str, state: str) -> tuple[str,str]:
-    first, *last = agent.split()
+agent_cache:dict[str,tuple[str,str]]={}
+
+def realtor_fallback(agent:str,state:str)->tuple[str,str]:
+    first,*last=agent.split()
     if not last:
         return "",""
-    url = f"https://www.realtor.com/realestateagents/{'-'.join([first.lower()]+last).lower()}_{state.lower()}"
-    html_txt = fetch_text(url)
+    url=f"https://www.realtor.com/realestateagents/{'-'.join([first.lower()]+last).lower()}_{state.lower()}"
+    html_txt=fetch_text(url)
     if not html_txt:
         return "",""
-    phones, mails = extract_structured_contacts(html_txt)
-    phone = next((p for p in phones if valid_phone(p)), "")
-    email = mails[0] if mails else ""
-    return phone, email
+    phones,mails=extract_structured_contacts(html_txt)
+    phone=next((p for p in phones if valid_phone(p)), "")
+    email=mails[0] if mails else ""
+    return phone,email
 
-def google_lookup(agent: str, state: str) -> tuple[str,str]:
-    key = f"{agent}|{state}"
+def google_lookup(agent:str,state:str)->tuple[str,str]:
+    key=f"{agent}|{state}"
     if key in agent_cache:
         return agent_cache[key]
-    phones = Counter()
-    emails: dict[str,int] = defaultdict(int)
+    candidate_phone:dict[str,tuple[int,int]]={}
+    candidate_email:dict[str,int]=defaultdict(int)
     for q in build_queries(agent,state):
         time.sleep(0.25)
         try:
-            items = requests.get(
-                "https://www.googleapis.com/customsearch/v1",
-                params={"key":CS_API_KEY,"cx":CS_CX,"q":q,"num":10},
-                timeout=10
+            items=requests.get("https://www.googleapis.com/customsearch/v1",
+                params={"key":CS_API_KEY,"cx":CS_CX,"q":q,"num":10},timeout=10
             ).json().get("items",[])
         except Exception:
             continue
         for it in items:
-            meta = it.get("pagemap",{})
-            tel = meta.get("contactpoint",[{}])[0].get("telephone")
-            mail = meta.get("contactpoint",[{}])[0].get("email")
+            meta=it.get("pagemap",{})
+            tel=meta.get("contactpoint",[{}])[0].get("telephone")
+            mail=meta.get("contactpoint",[{}])[0].get("email")
             if tel:
-                p = fmt_phone(tel)
+                p=fmt_phone(tel)
                 if valid_phone(p):
-                    phones[p] += 4
+                    bw,ts=candidate_phone.get(p,(0,0))
+                    candidate_phone[p]=(4,max(ts,0)+6)
             if mail and ok_email(mail):
-                emails[mail] += 3
+                candidate_email[mail]+=3
         for it in items:
-            url = it.get("link","")
-            html_txt = fetch_text(url)
+            url=it.get("link","")
+            html_txt=fetch_text(url)
             if not html_txt or agent.lower() not in html_txt.lower():
                 continue
-            p_list, m_list = extract_structured_contacts(html_txt)
+            p_list,m_list=extract_structured_contacts(html_txt)
             for p in p_list:
-                p_fmt = fmt_phone(p)
+                p_fmt=fmt_phone(p)
                 if valid_phone(p_fmt):
-                    phones[p_fmt] += 4
+                    bw,ts=candidate_phone.get(p_fmt,(0,0))
+                    candidate_phone[p_fmt]=(4,max(ts,0)+6)
             for m in m_list:
                 if ok_email(m):
-                    emails[m] += 3
-            low = html.unescape(html_txt.lower())
-            for p,s in proximity_scan(low):
-                phones[p] += s
+                    candidate_email[m]+=3
+            low=html.unescape(html_txt.lower())
+            prox=proximity_scan(low)
+            for p,(bw,s) in prox.items():
+                pbw,pts=candidate_phone.get(p,(0,0))
+                candidate_phone[p]=(max(pbw,bw),pts+s)
             for m in EMAIL_RE.findall(low):
-                if ok_email(m):
-                    emails[m] += 1
-            if phones and emails:
+                if ok_email(m) and agent.split()[-1].lower() in m.lower():
+                    candidate_email[m]+=1
+            if candidate_phone and candidate_email:
                 break
-        if phones and emails:
+        if candidate_phone and candidate_email:
             break
-    if not phones:
-        fb_p, fb_e = realtor_fallback(agent,state)
+    if not candidate_phone:
+        fb_p,fb_e=realtor_fallback(agent,state)
         if fb_p:
-            phones[fb_p] = 3
+            candidate_phone[fb_p]=(3,3)
         if fb_e:
-            emails[fb_e] = 2
-    phone = phones.most_common(1)[0][0] if phones else ""
-    email = max(emails, key=emails.get) if emails else ""
-    agent_cache[key] = (phone,email)
-    return phone, email
+            candidate_email[fb_e]=2
+    phone=""
+    if candidate_phone:
+        phone=max(candidate_phone.items(),key=lambda kv:(kv[1][0],kv[1][1]))[0]
+    if phone and phone[:3] not in AREA_BY_STATE.get(state.upper(),[]):
+        LOG.debug("area mismatch reject %s",phone)
+        phone=""
+    if not phone and candidate_phone:
+        phone=list(candidate_phone.keys())[0]
+    email=max(candidate_email,key=candidate_email.get) if candidate_email else ""
+    agent_cache[key]=(phone,email)
+    return phone,email
 
-def process_rows(rows: list[dict]):
+creds=Credentials.from_service_account_info(SC_JSON,scopes=SCOPES)
+sheets_service=build("sheets","v4",credentials=creds,cache_discovery=False)
+gc=gspread.authorize(creds)
+ws=gc.open_by_key(GSHEET_ID).sheet1
+
+def process_rows(rows:list[dict]):
     for r in rows:
         if not is_short_sale(r.get("description","")):
             continue
-        agent = r.get("agentName","").strip()
+        agent=r.get("agentName","").strip()
         if not agent:
             continue
-        phone,email = google_lookup(agent, r.get("state",""))
-        phone = fmt_phone(phone)
+        phone,email=google_lookup(agent,r.get("state",""))
+        phone=fmt_phone(phone)
         if phone and phone_exists(phone):
             continue
-        first,*last = agent.split()
+        first,*last=agent.split()
         append_row([
-            first,
-            " ".join(last),
-            phone,
-            email,
-            r.get("street",""),
-            r.get("city",""),
-            r.get("state","")
+            first," ".join(last),phone,email,
+            r.get("street",""),r.get("city",""),r.get("state","")
         ])
 
