@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os, json, logging, re, requests, time, html
-from collections import defaultdict, Counter
+from collections import defaultdict
 from urllib.parse import urlparse
 try:
     import phonenumbers
@@ -28,6 +28,9 @@ SHORT_RE=re.compile(r"\bshort\s+sale\b",re.I)
 BAD_RE=re.compile(r"approved|negotiator|settlement fee|fee at closing",re.I)
 TEAM_RE=re.compile(r"^\s*the\b|\bteam\b",re.I)
 
+def is_short_sale(txt:str)->bool:
+    return bool(SHORT_RE.search(txt)) and not BAD_RE.search(txt)
+
 IMG_EXT=(".png",".jpg",".jpeg",".gif",".svg",".webp")
 PHONE_RE=re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
 EMAIL_RE=re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",re.I)
@@ -38,14 +41,12 @@ def fmt_phone(raw:str)->str:
         d=d[1:]
     return f"{d[:3]}-{d[3:6]}-{d[6:]}" if len(d)==10 else ""
 
-US_AREA_CODES=set(k for k in [str(i) for i in range(201,990)])
+US_AREA_CODES=set(str(i) for i in range(201,990))
 
 def valid_phone(p:str)->bool:
     if phonenumbers:
-        try:
-            return phonenumbers.is_possible_number(phonenumbers.parse(p,"US"))
-        except Exception:
-            return False
+        try:return phonenumbers.is_possible_number(phonenumbers.parse(p,"US"))
+        except Exception:return False
     return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}",p)) and p[:3] in US_AREA_CODES
 
 def ok_email(a:str)->bool:
