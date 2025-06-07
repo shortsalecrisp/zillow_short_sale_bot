@@ -146,10 +146,12 @@ def realtor_fb(a:str,s:str)->tuple[str,str]:
     return next((p for p in ph if valid_phone(p)),""),(em[0] if em else "")
 
 def lookup(a:str,s:str)->tuple[str,str]:
+    if not a.strip():return "",""          # ← guard 1
     k=f"{a}|{s}"
     if k in cache:return cache[k]
     cand_p:dict[str,tuple[int,int]]={}
     cand_e:dict[str,int]=defaultdict(int)
+    last=a.split()[-1].lower()             # safe because blank names skipped
     for q in build_q(a,s):
         time.sleep(0.25)
         try:items=requests.get("https://www.googleapis.com/customsearch/v1",
@@ -180,7 +182,7 @@ def lookup(a:str,s:str)->tuple[str,str]:
                 b,tos=cand_p.get(p,(0,0))
                 cand_p[p]=(max(bw,b),tos+sc)
             for m in EMAIL_RE.findall(low):
-                if ok_email(m) and a.split()[-1].lower() in m.lower():
+                if last and ok_email(m) and last in m.lower():
                     cand_e[m]+=1
             if cand_p and cand_e:break
         if cand_p and cand_e:break
@@ -207,6 +209,9 @@ def process_rows(rows:list[dict]):
     for r in rows:
         if not is_short_sale(r.get("description","")):continue
         name=r.get("agentName","").strip()
+        if not name:
+            name=extract_name(r.get("openai_summary","")+"\n"+r.get("description",""))
+            if not name:continue
         if TEAM_RE.search(name):
             alt=extract_name(r.get("openai_summary","")+"\n"+r.get("description",""))
             if alt:name=alt
