@@ -1,4 +1,3 @@
-from __future__ import annotations
 import os, json, logging, re, requests, time, html
 from collections import defaultdict
 from urllib.parse import urlparse
@@ -145,13 +144,30 @@ def realtor_fb(a:str,s:str)->tuple[str,str]:
     ph,em=extract_struct(t)
     return next((p for p in ph if valid_phone(p)),""),(em[0] if em else "")
 
+def extra_email_search(a:str,s:str)->dict[str,int]:
+    emails=defaultdict(int)
+    last=a.split()[-1].lower()
+    for q in [f'realtor {a} email address {s}',f'"{a}" {s} email',f'{a} real estate email']:
+        time.sleep(0.25)
+        try:items=requests.get("https://www.googleapis.com/customsearch/v1",
+              params={"key":CS_API_KEY,"cx":CS_CX,"q":q,"num":10},timeout=10).json().get("items",[])
+        except Exception:continue
+        for it in items:
+            pm=it.get("pagemap",{})
+            mail=pm.get("contactpoint",[{}])[0].get("email")
+            if mail and ok_email(mail) and last in mail.lower():emails[mail]+=3
+            txt=(it.get("title","")+" "+it.get("snippet","")).lower()
+            for m in EMAIL_RE.findall(txt):
+                if ok_email(m) and last in m.lower():emails[m]+=1
+    return emails
+
 def lookup(a:str,s:str)->tuple[str,str]:
-    if not a.strip():return "",""          # ← guard 1
+    if not a.strip():return "",""
     k=f"{a}|{s}"
     if k in cache:return cache[k]
     cand_p:dict[str,tuple[int,int]]={}
     cand_e:dict[str,int]=defaultdict(int)
-    last=a.split()[-1].lower()             # safe because blank names skipped
+    last=a.split()[-1].lower()
     for q in build_q(a,s):
         time.sleep(0.25)
         try:items=requests.get("https://www.googleapis.com/customsearch/v1",
@@ -190,6 +206,8 @@ def lookup(a:str,s:str)->tuple[str,str]:
         fp,fe=realtor_fb(a,s)
         if fp:cand_p[fp]=(3,3)
         if fe:cand_e[fe]=2
+    if not cand_e:
+        cand_e.update(extra_email_search(a,s))
     phone=""
     if cand_p:phone=max(cand_p.items(),key=lambda kv:(kv[1][0],kv[1][1]))[0]
     if phone and phone[:3] not in AREA_BY_STATE.get(s.upper(),[]):phone=""
