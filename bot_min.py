@@ -1,6 +1,5 @@
 import os, json, logging, re, requests, time, html
 from collections import defaultdict
-from urllib.parse import urlparse
 try:
     import phonenumbers
 except ImportError:
@@ -26,15 +25,15 @@ SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
 BAD_RE = re.compile(r"approved|negotiator|settlement fee|fee at closing", re.I)
 TEAM_RE = re.compile(r"^\s*the\b|\bteam\b", re.I)
 
-def is_short_sale(txt: str) -> bool:
-    return bool(SHORT_RE.search(txt)) and not BAD_RE.search(txt)
+def is_short_sale(t: str) -> bool:
+    return bool(SHORT_RE.search(t)) and not BAD_RE.search(t)
 
 IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
-def fmt_phone(raw: str) -> str:
-    d = re.sub(r"\D", "", raw)
+def fmt_phone(r: str) -> str:
+    d = re.sub(r"\D", "", r)
     if len(d) == 11 and d.startswith("1"):
         d = d[1:]
     return f"{d[:3]}-{d[3:6]}-{d[6:]}" if len(d) == 10 else ""
@@ -49,10 +48,17 @@ def valid_phone(p: str) -> bool:
             return False
     return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}", p)) and p[:3] in US_AREA_CODES
 
-def ok_email(a: str) -> bool:
-    if a.lower().endswith(IMG_EXT):
+def clean_email(e: str) -> str:
+    e = e.split("?")[0].strip()
+    return e
+
+def ok_email(e: str) -> bool:
+    e = clean_email(e)
+    if not e or "@" not in e:
         return False
-    if re.search(r"\.(gov|edu|mil)$", a, re.I):
+    if e.lower().endswith(IMG_EXT):
+        return False
+    if re.search(r"\.(gov|edu|mil)$", e, re.I):
         return False
     return True
 
@@ -95,11 +101,11 @@ def extract_struct(td: str) -> tuple[list[str], list[str]]:
             if tel:
                 phones.append(fmt_phone(tel))
             if mail:
-                mails.append(mail)
+                mails.append(clean_email(mail))
     for a in soup.select('a[href^="tel:"]'):
         phones.append(fmt_phone(a["href"].split("tel:")[-1]))
     for a in soup.select('a[href^="mailto:"]'):
-        mails.append(a["href"].split("mailto:")[-1])
+        mails.append(clean_email(a["href"].split("mailto:")[-1]))
     return phones, mails
 
 creds = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
@@ -118,11 +124,11 @@ def append(r: list[str]):
         spreadsheetId=GSHEET_ID, range="Sheet1!A1",
         valueInputOption="RAW", body={"values": [r]}).execute()
 
-def fetch(url: str) -> str | None:
-    for u in (url, f"https://r.jina.ai/http://{url}"):
+def fetch(u: str) -> str | None:
+    for x in (u, f"https://r.jina.ai/http://{u}"):
         try:
-            r = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if r.status_code != 200 and r.status_code not in (403, 429, 999):
+            r = requests.get(x, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code not in (200, 403, 429, 999):
                 continue
             t = r.text
             if "unusual traffic" in t[:600].lower():
@@ -138,13 +144,6 @@ AGENT_SITES = ["realtor.com", "zillow.com", "redfin.com", "homesnap.com", "kw.co
 DOMAIN_CLAUSE = " OR ".join(f"site:{d}" for d in AGENT_SITES)
 SOCIAL_CLAUSE = "site:facebook.com OR site:linkedin.com"
 
-def build_q(a: str, s: str) -> list[str]:
-    return [
-        f'"{a}" {s} ("mobile" OR "cell" OR "direct") phone email ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} phone email ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} contact ({DOMAIN_CLAUSE})'
-    ]
-
 AREA_BY_STATE = {"FL": ["305", "321", "352", "386", "407", "561", "727", "813", "850", "863", "904", "941", "954", "772", "786"],
                  "GA": ["404", "470", "478", "678", "706", "770", "912"],
                  "CA": ["209", "213", "310", "323", "408", "415", "424", "510", "559", "562", "619", "626", "650", "657",
@@ -154,125 +153,135 @@ AREA_BY_STATE = {"FL": ["305", "321", "352", "386", "407", "561", "727", "813", 
                  "IL": ["217", "224", "309", "312", "331", "618", "630", "708", "773", "779", "815", "847", "872"],
                  "OK": ["405", "539", "580", "918"]}
 
-cache: dict[str, tuple[str, str]] = {}
+cache_p: dict[str, str] = {}
+cache_e: dict[str, str] = {}
 
-def realtor_fb(a: str, s: str) -> tuple[str, str]:
-    f, *l = a.split()
-    if not l:
-        return "", ""
-    url = f"https://www.realtor.com/realestateagents/{'-'.join([f.lower()] + l).lower()}_{s.lower()}"
-    t = fetch(url)
-    if not t:
-        return "", ""
-    ph, em = extract_struct(t)
-    return next((p for p in ph if valid_phone(p)), ""), (em[0] if em else "")
+def search_items(q: str) -> list[dict]:
+    try:
+        return requests.get("https://www.googleapis.com/customsearch/v1",
+                            params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
+                            timeout=10).json().get("items", [])
+    except Exception:
+        return []
+
+def find_phone(a: str, s: str) -> str:
+    k = f"{a}|{s}"
+    if k in cache_p:
+        return cache_p[k]
+    cand: dict[str, tuple[int, int]] = {}
+    last = a.split()[-1].lower()
+    qs = [
+        f'"{a}" {s} ("mobile" OR "cell" OR "direct") phone ({DOMAIN_CLAUSE})',
+        f'"{a}" {s} phone ({DOMAIN_CLAUSE})',
+        f'"{a}" {s} contact ({DOMAIN_CLAUSE})'
+    ]
+    for q in qs:
+        time.sleep(0.25)
+        for it in search_items(q):
+            m = it.get("pagemap", {})
+            tel = m.get("contactpoint", [{}])[0].get("telephone")
+            if tel:
+                p = fmt_phone(tel)
+                if valid_phone(p):
+                    cand[p] = (4, 8)
+        for it in search_items(q):
+            u = it.get("link", "")
+            t = fetch(u)
+            if not t or a.lower() not in t.lower():
+                continue
+            ph, _ = extract_struct(t)
+            for p in ph:
+                pf = fmt_phone(p)
+                if valid_phone(pf):
+                    bw, ts = cand.get(pf, (0, 0))
+                    cand[pf] = (4, ts + 6)
+            low = html.unescape(t.lower())
+            for p, (bw, sc) in proximity_scan(low).items():
+                b, ts = cand.get(p, (0, 0))
+                cand[p] = (max(bw, b), ts + sc)
+        if cand:
+            break
+    phone = ""
+    if cand:
+        phone = max(cand.items(), key=lambda kv: (kv[1][0], kv[1][1]))[0]
+    if phone and phone[:3] not in AREA_BY_STATE.get(s.upper(), []):
+        phone = ""
+    if not phone and cand:
+        phone = list(cand.keys())[0]
+    cache_p[k] = phone
+    return phone
 
 def extra_email_search(a: str, s: str) -> dict[str, int]:
     out: dict[str, int] = {}
-    queries = [
+    last = a.split()[-1].lower()
+    qs = [
         f'realtor {a} email address in {s} ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})',
         f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})'
     ]
-    last = a.split()[-1].lower()
-    for q in queries:
+    for q in qs:
         time.sleep(0.25)
-        try:
-            items = requests.get("https://www.googleapis.com/customsearch/v1",
-                                 params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
-                                 timeout=10).json().get("items", [])
-        except Exception:
-            continue
-        for it in items:
+        for it in search_items(q):
             pm = it.get("pagemap", {})
-            mail = pm.get("contactpoint", [{}])[0].get("email")
-            if mail and ok_email(mail) and last in mail.lower():
+            mail = clean_email(pm.get("contactpoint", [{}])[0].get("email", ""))
+            if ok_email(mail) and last in mail.lower():
                 out[mail] += 3
             u = it.get("link", "")
             t = fetch(u)
             if not t:
                 continue
             for m in EMAIL_RE.findall(t):
+                m = clean_email(m)
                 if ok_email(m) and last in m.lower():
                     out[m] += 2
         if out:
             break
     return out
 
-def lookup(a: str, s: str) -> tuple[str, str]:
-    if not a.strip():
-        return "", ""
+def find_email(a: str, s: str) -> str:
     k = f"{a}|{s}"
-    if k in cache:
-        return cache[k]
-    cand_p: dict[str, tuple[int, int]] = {}
-    cand_e: dict[str, int] = defaultdict(int)
+    if k in cache_e:
+        return cache_e[k]
+    cand: defaultdict[str, int] = defaultdict(int)
     last = a.split()[-1].lower()
-    for q in build_q(a, s):
+    qs = [
+        f'"{a}" {s} email ({DOMAIN_CLAUSE})',
+        f'"{a}" {s} contact email ({DOMAIN_CLAUSE})'
+    ]
+    for q in qs:
         time.sleep(0.25)
-        try:
-            items = requests.get("https://www.googleapis.com/customsearch/v1",
-                                 params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
-                                 timeout=10).json().get("items", [])
-        except Exception:
-            continue
-        for it in items:
+        for it in search_items(q):
             m = it.get("pagemap", {})
-            tel = m.get("contactpoint", [{}])[0].get("telephone")
-            mail = m.get("contactpoint", [{}])[0].get("email")
-            if tel:
-                p = fmt_phone(tel)
-                if valid_phone(p):
-                    cand_p[p] = (4, 8)
-            if mail and ok_email(mail):
-                cand_e[mail] += 3
-        for it in items:
+            mail = clean_email(m.get("contactpoint", [{}])[0].get("email", ""))
+            if ok_email(mail):
+                cand[mail] += 3
+        for it in search_items(q):
             u = it.get("link", "")
             t = fetch(u)
             if not t or a.lower() not in t.lower():
                 continue
-            ph, em = extract_struct(t)
-            for p in ph:
-                pf = fmt_phone(p)
-                if valid_phone(pf):
-                    bw, ts = cand_p.get(pf, (0, 0))
-                    cand_p[pf] = (4, ts + 6)
+            _, em = extract_struct(t)
             for m in em:
+                m = clean_email(m)
                 if ok_email(m):
-                    cand_e[m] += 3
-            low = html.unescape(t.lower())
-            for p, (bw, sc) in proximity_scan(low).items():
-                b, tos = cand_p.get(p, (0, 0))
-                cand_p[p] = (max(bw, b), tos + sc)
-            for m in EMAIL_RE.findall(low):
+                    cand[m] += 3
+            for m in EMAIL_RE.findall(t):
+                m = clean_email(m)
                 if ok_email(m) and last in m.lower():
-                    cand_e[m] += 1
-        if cand_p and cand_e:
+                    cand[m] += 1
+        if cand:
             break
-    if not cand_p:
-        fp, fe = realtor_fb(a, s)
-        if fp:
-            cand_p[fp] = (3, 3)
-        if fe and ok_email(fe):
-            cand_e[fe] = 2
-    if not cand_e:
-        cand_e.update(extra_email_search(a, s))
-    phone = ""
-    if cand_p:
-        phone = max(cand_p.items(), key=lambda kv: (kv[1][0], kv[1][1]))[0]
-    if phone and phone[:3] not in AREA_BY_STATE.get(s.upper(), []):
-        phone = ""
-    if not phone and cand_p:
-        phone = list(cand_p.keys())[0]
-    email = max(cand_e, key=cand_e.get) if cand_e else ""
-    cache[k] = (phone, email)
-    return phone, email
+    if not cand:
+        cand.update(extra_email_search(a, s))
+    email = max(cand, key=cand.get) if cand else ""
+    cache_e[k] = email
+    return email
 
-def extract_name(txt: str) -> str | None:
-    m = re.search(r"listing agent[:\s-]*([A-Za-z \.\'’-]{3,})", txt, re.I)
+def extract_name(t: str) -> str | None:
+    m = re.search(r"listing agent[:\s-]*([A-Za-z \.\'’-]{3,})", t, re.I)
     if m:
-        nm = m.group(1).strip()
-        if not TEAM_RE.search(nm):
-            return nm
+        n = m.group(1).strip()
+        if not TEAM_RE.search(n):
+            return n
     return None
 
 def process_rows(rows: list[dict]):
@@ -292,10 +301,10 @@ def process_rows(rows: list[dict]):
                 continue
         if TEAM_RE.search(name):
             continue
-        phone, email = lookup(name, r.get("state", ""))
-        phone = fmt_phone(phone)
+        phone = fmt_phone(find_phone(name, r.get("state", "")))
         if phone and phone_exists(phone):
             continue
+        email = find_email(name, r.get("state", ""))
         first, *last = name.split()
         append([first, " ".join(last), phone, email,
                 r.get("street", ""), r.get("city", ""), r.get("state", "")])
