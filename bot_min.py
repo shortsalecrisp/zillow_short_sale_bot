@@ -33,6 +33,7 @@ def is_short_sale(txt:str)->bool:
 IMG_EXT=(".png",".jpg",".jpeg",".gif",".svg",".webp")
 PHONE_RE=re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
 EMAIL_RE=re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",re.I)
+BAD_EMAIL_TLD={"edu","gov","mil"}
 
 def fmt_phone(raw:str)->str:
     d=re.sub(r"\D","",raw)
@@ -49,7 +50,11 @@ def valid_phone(p:str)->bool:
     return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}",p)) and p[:3] in US_AREA_CODES
 
 def ok_email(a:str)->bool:
-    return not a.lower().endswith(IMG_EXT)
+    if not a or a.lower().endswith(IMG_EXT):return False
+    if not re.search(r"@",a):return False
+    dom=a.rsplit("@",1)[-1].lower()
+    if "." in dom and dom.rsplit(".",1)[-1] in BAD_EMAIL_TLD:return False
+    return True
 
 LABEL_TABLE={"mobile":4,"cell":4,"direct":4,"text":4,"c:":4,"m:":4,
              "phone":2,"tel":2,"p:":2,
@@ -83,8 +88,11 @@ def extract_struct(td:str)->tuple[list[str],list[str]]:
             mail=data.get("email") or (data.get("contactPoint")or{}).get("email")
             if tel:phones.append(fmt_phone(tel))
             if mail:mails.append(mail)
-    for a in soup.select('a[href^="tel:"]'):phones.append(fmt_phone(a["href"].split("tel:")[-1]))
-    for a in soup.select('a[href^="mailto:"]'):mails.append(a["href"].split("mailto:")[-1])
+    for a in soup.select('a[href^="tel:"]'):
+        phones.append(fmt_phone(a["href"].split("tel:")[-1].split("?")[0]))
+    for a in soup.select('a[href^="mailto:"]'):
+        m=a["href"][7:].split("?")[0]
+        mails.append(m)
     return phones,mails
 
 creds=Credentials.from_service_account_info(SC_JSON,scopes=SCOPES)
@@ -114,7 +122,8 @@ def fetch(url:str)->str|None:
 
 AGENT_SITES=["realtor.com","zillow.com","redfin.com","homesnap.com","kw.com","remax.com",
              "coldwellbanker.com","compass.com","exprealty.com","bhhs.com","c21.com",
-             "realtyonegroup.com","mlsmatrix.com","mlslistings.com","har.com","brightmlshomes.com"]
+             "realtyonegroup.com","mlsmatrix.com","mlslistings.com","har.com","brightmlshomes.com",
+             "facebook.com","linkedin.com"]
 DOMAIN_CLAUSE=" OR ".join(f"site:{d}" for d in AGENT_SITES)
 
 def build_q(a:str,s:str)->list[str]:
@@ -147,7 +156,9 @@ def realtor_fb(a:str,s:str)->tuple[str,str]:
 def extra_email_search(a:str,s:str)->dict[str,int]:
     emails=defaultdict(int)
     last=a.split()[-1].lower()
-    for q in [f'realtor {a} email address {s}',f'"{a}" {s} email',f'{a} real estate email']:
+    for q in [f'realtor {a} email address {s} ({DOMAIN_CLAUSE})',
+              f'"{a}" {s} email ({DOMAIN_CLAUSE})',
+              f'{a} real estate email ({DOMAIN_CLAUSE})']:
         time.sleep(0.25)
         try:items=requests.get("https://www.googleapis.com/customsearch/v1",
               params={"key":CS_API_KEY,"cx":CS_CX,"q":q,"num":10},timeout=10).json().get("items",[])
@@ -198,14 +209,14 @@ def lookup(a:str,s:str)->tuple[str,str]:
                 b,tos=cand_p.get(p,(0,0))
                 cand_p[p]=(max(bw,b),tos+sc)
             for m in EMAIL_RE.findall(low):
-                if last and ok_email(m) and last in m.lower():
+                if ok_email(m) and last in m.lower():
                     cand_e[m]+=1
             if cand_p and cand_e:break
         if cand_p and cand_e:break
     if not cand_p:
         fp,fe=realtor_fb(a,s)
         if fp:cand_p[fp]=(3,3)
-        if fe:cand_e[fe]=2
+        if fe and ok_email(fe):cand_e[fe]=2
     if not cand_e:
         cand_e.update(extra_email_search(a,s))
     phone=""
