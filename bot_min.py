@@ -249,7 +249,7 @@ def process_rows(rows):
         email=lookup_email(name,state)
         if phone and phone_exists(phone): continue
         first,*last=name.split()
-        append_row([zpid,first," ".join(last),phone,email,
+        append_row([first," ".join(last),phone,email,
                     r.get("street",""),r.get("city",""),state])
         done_zpids.add(zpid)
         if phone: send_sms(phone,first,r.get("street",""))
