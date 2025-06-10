@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-"""
-bot_min.py – minimal but functional crawler / enrichment helper
-for the Render deployment that:
-
-• Builds reasonable follow-up URLs from a seed listing link
-• Falls back to a read-only proxy (“backup fetch”) when direct fetch fails
-• Uses Google Programmable Search to discover deeper contact pages
-• Extracts phone numbers and emails with loose but effective regexes
-• Exposes a process_rows() helper imported by webhook_server.py
-• May be executed as a CLI utility (`python bot_min.py <url> [-d N]`)
-"""
-
-from __future__ import annotations
-
 ###############################################################################
 # Imports
 ###############################################################################
@@ -25,7 +10,7 @@ import sys
 import time
 import urllib.parse
 from collections import OrderedDict
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import requests
 from bs4 import BeautifulSoup
@@ -72,10 +57,8 @@ def normalize_url(raw: str) -> str:
 
 def build_candidate_urls(seed: str) -> List[str]:
     """
-    Very light weight “URL builder” that tries obvious sibling paths that
-    frequently host contact info:
-
-        /about, /contact, /bio, /profile, /team, /meet-the-team
+    Very lightweight “URL builder” that tries common sibling paths that
+    often host contact information.
     """
     base = normalize_url(seed)
     parts = urllib.parse.urlparse(base)
@@ -110,7 +93,7 @@ def fetch(url: str, timeout: float = 15.0) -> Optional[str]:
 
 def backup_fetch(url: str, timeout: float = 15.0) -> Optional[str]:
     """
-    Fallback to jina.ai raw mirror which often escapes bot protections.
+    Fallback to jina.ai raw mirror which often bypasses bot protection.
     """
     url = normalize_url(url)
     p = urllib.parse.urlparse(url)
@@ -161,14 +144,12 @@ def extract_contacts(html: str) -> Tuple[List[str], List[str]]:
     phones: "OrderedDict[str, None]" = OrderedDict()
     emails: "OrderedDict[str, None]" = OrderedDict()
 
-    # phone numbers
     for m in PHONE_RE.finditer(html):
         digits = re.sub(r"[^\d]", "", m.group())
         if len(digits) == 10:
             fmt = f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
             phones[fmt] = None
 
-    # emails
     for m in EMAIL_RE.finditer(html):
         emails[m.group()] = None
 
@@ -232,10 +213,44 @@ class Scraper:
             result["emails"].extend(e)
             if p or e:
                 break
-        # dedupe while preserving order
         result["phones"] = list(OrderedDict.fromkeys(result["phones"]))
         result["emails"] = list(OrderedDict.fromkeys(result["emails"]))
         return result
+
+
+###############################################################################
+# Row helper utilities
+###############################################################################
+
+
+_POSSIBLE_URL_KEYS = (
+    "url",
+    "link",
+    "href",
+    "listing_url",
+    "detailUrl",
+    "detail_url",
+    "zillowUrl",
+    "zillow_url",
+    "pageUrl",
+    "page_url",
+)
+
+
+def _extract_url(record: Union[str, Dict[str, object]]) -> str:
+    """
+    Accept either a raw string or a mapping; return a plausible URL or ''.
+    """
+    if record is None:
+        return ""
+    # raw string already?
+    if isinstance(record, str):
+        return record.strip()
+    if isinstance(record, dict):
+        for k in _POSSIBLE_URL_KEYS:
+            if k in record and record[k]:
+                return str(record[k]).strip()
+    return ""
 
 
 ###############################################################################
@@ -243,16 +258,16 @@ class Scraper:
 ###############################################################################
 
 
-def process_rows(rows: Sequence[str], depth: int = 2) -> List[Dict[str, object]]:
+def process_rows(rows: Sequence[Union[str, Dict[str, object]]], depth: int = 2) -> List[Dict[str, object]]:
     """
-    Process a sequence of URL strings, returning contact info dicts.
+    Process a sequence of raw rows (string URLs OR dicts containing a URL).
 
-    Each row is expected to contain a single URL. Blank rows ignored.
+    Returns list of dicts: {url, phones, emails}
     """
     scraper = Scraper(max_depth=depth)
-    out = []
-    for raw in rows:
-        url = raw.strip()
+    out: List[Dict[str, object]] = []
+    for item in rows:
+        url = _extract_url(item)
         if not url:
             continue
         out.append(scraper.crawl(url))
@@ -286,12 +301,10 @@ def _run_cli() -> None:
 
 
 def _self_test() -> None:
-    url = "https://www.example.com"
-    s = Scraper(max_depth=0)
-    res = s.crawl(url)
-    assert res["url"] == url
-    assert "phones" in res and "emails" in res
-    assert isinstance(process_rows([url]), list)
+    dummy = {"url": "https://example.com"}
+    res_list = process_rows([dummy])
+    assert isinstance(res_list, list) and res_list[0]["url"] == dummy["url"]
+    assert "phones" in res_list[0] and "emails" in res_list[0]
 
 
 ###############################################################################
@@ -302,4 +315,3 @@ if __name__ == "__main__":
     if os.getenv("DEBUG"):
         _self_test()
     _run_cli()
-
