@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
 import os, json, logging, re, time, html, requests
 from collections import defaultdict
+
 try:
     import phonenumbers
 except ImportError:
@@ -9,27 +9,29 @@ try:
     from bs4 import BeautifulSoup
 except ImportError:
     BeautifulSoup = None
+
 import gspread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 
+# ──────────────────────────────── CONFIG ────────────────────────────────
 CS_API_KEY = os.environ["CS_API_KEY"]
-CS_CX = os.environ["CS_CX"]
-GSHEET_ID = os.environ["GSHEET_ID"]
-SC_JSON = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+CS_CX      = os.environ["CS_CX"]
+GSHEET_ID  = os.environ["GSHEET_ID"]
+SC_JSON    = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
+SCOPES     = ["https://www.googleapis.com/auth/spreadsheets"]
 
 logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
                     format="%(asctime)s %(levelname)s: %(message)s")
 LOG = logging.getLogger("bot")
 
-SMS_ENABLE = os.getenv("SMSM_ENABLE", "false").lower() == "true"
-SMS_TEST_MODE = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
+SMS_ENABLE      = os.getenv("SMSM_ENABLE", "false").lower() == "true"
+SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER", "")
-SMS_API_KEY = os.getenv("SMSM_API_KEY", "")
-SMS_FROM = os.getenv("SMSM_FROM", "")
-SMS_URL = os.getenv("SMSM_URL", "https://api.smsmobileapi.com/sendsms/")
-SMS_TEMPLATE = os.getenv("SMSM_TEMPLATE") or (
+SMS_API_KEY     = os.getenv("SMSM_API_KEY", "")
+SMS_FROM        = os.getenv("SMSM_FROM", "")
+SMS_URL         = os.getenv("SMSM_URL", "https://api.smsmobileapi.com/sendsms/")
+SMS_TEMPLATE    = os.getenv("SMSM_TEMPLATE") or (
     "Hey {first}, this is Yoni Kutler—I saw your short-sale listing at {address} "
     "and wanted to introduce myself. I specialize in helping agents get faster bank "
     "approvals and ensure these deals close. No cost to you—I’m paid by the buyer "
@@ -40,10 +42,10 @@ MAX_Q_PHONE = 3
 MAX_Q_EMAIL = 3
 
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
-BAD_RE = re.compile(r"approved|negotiator|settlement fee|fee at closing", re.I)
-TEAM_RE = re.compile(r"^\s*the\b|\bteam\b", re.I)
+BAD_RE   = re.compile(r"approved|negotiator|settlement fee|fee at closing", re.I)
+TEAM_RE  = re.compile(r"^\s*the\b|\bteam\b", re.I)
 
-IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
+IMG_EXT  = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
@@ -67,8 +69,7 @@ cache_p, cache_e = {}, {}
 
 def is_short_sale(t): return SHORT_RE.search(t) and not BAD_RE.search(t)
 def fmt_phone(r):
-    d = re.sub(r"\D", "", r)
-    d = d[1:] if len(d) == 11 and d.startswith("1") else d
+    d = re.sub(r"\D", "", r); d = d[1:] if len(d) == 11 and d.startswith("1") else d
     return f"{d[:3]}-{d[3:6]}-{d[6:]}" if len(d) == 10 else ""
 def valid_phone(p):
     if phonenumbers:
@@ -103,19 +104,23 @@ def extract_struct(td):
         if isinstance(data, list): data = data[0]
         if isinstance(data, dict):
             tel = data.get("telephone") or (data.get("contactPoint") or {}).get("telephone")
-            mail = data.get("email") or (data.get("contactPoint") or {}).get("email")
-            if tel: phones.append(fmt_phone(tel))
+            mail = data.get("email")    or (data.get("contactPoint") or {}).get("email")
+            if tel:  phones.append(fmt_phone(tel))
             if mail: mails.append(clean_email(mail))
-    for a in soup.select('a[href^="tel:"]'): phones.append(fmt_phone(a["href"].split("tel:")[-1]))
+    for a in soup.select('a[href^="tel:"]'):    phones.append(fmt_phone(a["href"].split("tel:")[-1]))
     for a in soup.select('a[href^="mailto:"]'): mails.append(clean_email(a["href"].split("mailto:")[-1]))
     return phones, mails
 
 def phone_exists(p):
     try: return p in ws.col_values(3)
     except: return False
-def zpid_exists(z):
-    try: return z in ws.col_values(1)
-    except: return False
+
+def load_seen_zpids():
+    try: return set(ws.col_values(8))
+    except: return set()
+
+SEEN_ZPIDS = load_seen_zpids()
+
 def append_row(v):
     sheets_service.spreadsheets().values().append(
         spreadsheetId=GSHEET_ID,
@@ -140,7 +145,7 @@ def google_items(q):
         j = requests.get(
             "https://www.googleapis.com/customsearch/v1",
             params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
-            timeout=10,
+            timeout=10
         ).json()
         return j.get("items", [])
     except: return []
@@ -149,13 +154,13 @@ def build_q_phone(a, s):
     return [
         f'"{a}" {s} ("mobile" OR "cell" OR "direct") phone ({DOMAIN_CLAUSE})',
         f'"{a}" {s} phone ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} contact ({DOMAIN_CLAUSE})',
+        f'"{a}" {s} contact ({DOMAIN_CLAUSE})'
     ]
 def build_q_email(a, s):
     return [
         f'"{a}" {s} email ({DOMAIN_CLAUSE})',
         f'"{a}" {s} contact email ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})',
+        f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})'
     ]
 
 def lookup_phone(a, s):
@@ -170,7 +175,8 @@ def lookup_phone(a, s):
                 p = fmt_phone(tel)
                 if valid_phone(p): cand[p] = (4, 8)
         for it in google_items(q):
-            u = it.get("link", ""); t = fetch(u)
+            u = it.get("link", "")
+            t = fetch(u)
             if not t or a.lower() not in t.lower(): continue
             ph, _ = extract_struct(t)
             for p in ph:
@@ -197,7 +203,8 @@ def lookup_email(a, s):
             mail = clean_email(it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email", ""))
             if ok_email(mail): cand[mail] += 3
         for it in google_items(q):
-            u = it.get("link", ""); t = fetch(u)
+            u = it.get("link", "")
+            t = fetch(u)
             if not t or a.lower() not in t.lower(): continue
             _, em = extract_struct(t)
             for m in em:
@@ -216,8 +223,10 @@ def lookup_email(a, s):
 def send_sms(num, first, address):
     if not SMS_ENABLE: return False
     d = re.sub(r"\D", "", num)
-    if len(d) == 10: to_e164 = "+1" + d
-    elif len(d) == 11 and d.startswith("1"): to_e164 = "+" + d
+    if len(d) == 10:
+        to_e164 = "+1" + d
+    elif len(d) == 11 and d.startswith("1"):
+        to_e164 = "+" + d
     else: return False
     if SMS_TEST_MODE and SMS_TEST_NUMBER:
         td = re.sub(r"\D", "", SMS_TEST_NUMBER)
@@ -226,7 +235,7 @@ def send_sms(num, first, address):
         "recipients": to_e164,
         "message": SMS_TEMPLATE.format(first=first, address=address),
         "apikey": SMS_API_KEY,
-        "sendsms": "1",
+        "sendsms": "1"
     }
     if SMS_FROM: payload["from"] = SMS_FROM
     try:
@@ -243,34 +252,38 @@ def extract_name(t):
     m = re.search(r"listing agent[:\s-]*([A-Za-z \.'’-]{3,})", t, re.I)
     if m:
         n = m.group(1).strip()
-        if not TEAM_RE.search(n):
-            return n
+        if not TEAM_RE.search(n): return n
     return None
 
 def process_rows(rows):
+    global SEEN_ZPIDS
     for r in rows:
         zpid = str(r.get("zpid", "")).strip()
-        if zpid and zpid_exists(zpid):
-            LOG.debug("dedup skip zpid %s", zpid)
+        if zpid in SEEN_ZPIDS:
+            LOG.debug("Skipping duplicate zpid %s", zpid)
             continue
-        if not is_short_sale(r.get("description", "")):
-            continue
+
+        if not is_short_sale(r.get("description", "")): continue
+
         name = r.get("agentName", "").strip()
         if not name:
             name = extract_name(r.get("openai_summary", "") + "\n" + r.get("description", ""))
-            if not name:
-                continue
+            if not name: continue
+
         if TEAM_RE.search(name):
             alt = extract_name(r.get("openai_summary", "") + "\n" + r.get("description", ""))
             if alt: name = alt
             else: continue
         if TEAM_RE.search(name): continue
+
         state = r.get("state", "")
         phone = fmt_phone(lookup_phone(name, state))
         email = lookup_email(name, state)
-        if phone and phone_exists(phone):
-            LOG.debug("dedup skip phone %s", phone)
+
+        if phone and phone_exists(phone): 
+            LOG.debug("Phone %s already in sheet, skipping", phone)
             continue
+
         first, *last = name.split()
         append_row([
             first,
@@ -280,8 +293,12 @@ def process_rows(rows):
             r.get("street", ""),
             r.get("city", ""),
             state,
+            zpid
         ])
+        SEEN_ZPIDS.add(zpid)
+        LOG.info("Added zpid %s", zpid)
+
         if phone:
             send_sms(phone, first, r.get("street", ""))
-        LOG.info("added listing %s %s", zpid, name)
+
 
