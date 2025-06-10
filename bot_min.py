@@ -1,5 +1,6 @@
 import os, json, logging, re, time, html, requests
 from collections import defaultdict
+from urllib.parse import urlparse
 try:
     import phonenumbers
 except ImportError:
@@ -27,6 +28,7 @@ SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER", "")
 SMS_API_KEY     = os.getenv("SMSM_API_KEY", "")
 SMS_FROM        = os.getenv("SMSM_FROM", "")
+SMS_URL         = os.getenv("SMSM_URL", "https://api.smsmobileapi.com/sendsms/")
 SMS_TEMPLATE    = os.getenv("SMSM_TEMPLATE") or (
     "Hey {first}, this is Yoni Kutler—I saw your short-sale listing at {address} and "
     "wanted to introduce myself. I specialize in helping agents get faster bank approvals "
@@ -137,17 +139,22 @@ def append(v: list[str]):
     ).execute()
 
 def fetch(u: str) -> str | None:
-    for x in (u, f"https://r.jina.ai/http://{u}"):
-        try:
-            r = requests.get(x, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
-            if r.status_code not in (200,403,429,999):
+    candidates = [u, f"https://r.jina.ai/http://{u}"]
+    if u.startswith("https://"):
+        bare = u[8:]
+    elif u.startswith("http://"):
+        bare = u[7:]
+    else:
+        bare = u
+    candidates.append(f"https://r.jina.ai/http://{bare}")
+    for x in candidates:
+        for _ in range(2):
+            try:
+                r = requests.get(x, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+                if r.status_code == 200 and "unusual traffic" not in r.text[:600].lower():
+                    return r.text
+            except Exception:
                 continue
-            t = r.text
-            if "unusual traffic" in t[:600].lower():
-                continue
-            return t
-        except Exception:
-            continue
     return None
 
 AGENT_SITES = [
@@ -157,15 +164,6 @@ AGENT_SITES = [
 ]
 DOMAIN_CLAUSE = " OR ".join(f"site:{d}" for d in AGENT_SITES)
 SOCIAL_CLAUSE = "site:facebook.com OR site:linkedin.com"
-
-AREA_BY_STATE = {"FL":["305","321","352","386","407","561","727","813","850","863","904","941","954","772","786"],
-                 "GA":["404","470","478","678","706","770","912"],
-                 "CA":["209","213","310","323","408","415","424","510","559","562","619","626","650","657",
-                        "661","707","714","747","760","805","818","831","858","909","916","925","949","951"],
-                 "TX":["210","214","254","281","325","346","361","409","430","432","469","512","682","713","737",
-                        "806","817","830","832","903","915","936","940","956","972","979"],
-                 "IL":["217","224","309","312","331","618","630","708","773","779","815","847","872"],
-                 "OK":["405","539","580","918"]}
 
 def google_items(q: str) -> list[dict]:
     try:
@@ -225,8 +223,6 @@ def lookup_phone(a: str, s: str) -> str:
     phone = ""
     if cand:
         phone = max(cand.items(), key=lambda kv:(kv[1][0], kv[1][1]))[0]
-    if phone and phone[:3] not in AREA_BY_STATE.get(s.upper(), []):
-        phone = ""
     if not phone and cand:
         phone = list(cand.keys())[0]
     cache_p[k] = phone
@@ -234,7 +230,6 @@ def lookup_phone(a: str, s: str) -> str:
 
 def extra_email_search(a: str, s: str) -> dict[str,int]:
     out: defaultdict[str,int] = defaultdict(int)
-    last = a.split()[-1].lower()
     qs = [
         f'realtor {a} email address in {s} ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})',
         f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})'
@@ -244,7 +239,7 @@ def extra_email_search(a: str, s: str) -> dict[str,int]:
         for it in google_items(q):
             pm   = it.get("pagemap", {})
             mail = clean_email(pm.get("contactpoint", [{}])[0].get("email",""))
-            if ok_email(mail) and last in mail.lower():
+            if ok_email(mail):
                 out[mail] += 3
             u = it.get("link","")
             t = fetch(u)
@@ -252,7 +247,7 @@ def extra_email_search(a: str, s: str) -> dict[str,int]:
                 continue
             for m in EMAIL_RE.findall(t):
                 m = clean_email(m)
-                if ok_email(m) and last in m.lower():
+                if ok_email(m):
                     out[m] += 2
         if out:
             break
@@ -263,7 +258,6 @@ def lookup_email(a: str, s: str) -> str:
     if k in cache_e:
         return cache_e[k]
     cand: defaultdict[str,int] = defaultdict(int)
-    last = a.split()[-1].lower()
     for q in build_q_email(a, s):
         time.sleep(0.25)
         for it in google_items(q):
@@ -283,7 +277,7 @@ def lookup_email(a: str, s: str) -> str:
                     cand[m] += 3
             for m in EMAIL_RE.findall(t):
                 m = clean_email(m)
-                if ok_email(m) and last in m.lower():
+                if ok_email(m):
                     cand[m] += 1
         if cand:
             break
@@ -309,10 +303,16 @@ def send_sms(to_number: str, first: str, address: str) -> bool:
         td = re.sub(r"\D", "", SMS_TEST_NUMBER)
         to_e164 = "+1" + td if len(td) == 10 else "+" + td
     text = SMS_TEMPLATE.format(first=first, address=address)
-    payload = {"key": SMS_API_KEY, "to": to_e164, "from": SMS_FROM, "text": text}
+    payload = {
+        "recipients": to_e164,
+        "message": text,
+        "apikey": SMS_API_KEY,
+        "sendsms": "1"
+    }
+    if SMS_FROM:
+        payload["from"] = SMS_FROM
     try:
-        resp = requests.post("https://smsmobileapi.com/api/v1/messages",
-                             json=payload, timeout=15)
+        resp = requests.post(SMS_URL, data=payload, timeout=15)
     except Exception as exc:
         LOG.error("SMS request exception: %s", exc)
         return False
