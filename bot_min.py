@@ -13,6 +13,9 @@ import gspread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 
+# ────────────────────────────
+# CONFIG & CONSTANTS
+# ────────────────────────────
 CS_API_KEY = os.environ["CS_API_KEY"]
 CS_CX      = os.environ["CS_CX"]
 GSHEET_ID  = os.environ["GSHEET_ID"]
@@ -36,6 +39,13 @@ SMS_TEMPLATE    = os.getenv("SMSM_TEMPLATE") or (
     "Open to a quick call to see if this could help?"
 )
 
+# GOOGLE QUERY CAPS
+MAX_Q_PHONE = 3
+MAX_Q_EMAIL = 3
+
+# ────────────────────────────
+# REGEXES
+# ────────────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
 BAD_RE   = re.compile(r"approved|negotiator|settlement fee|fee at closing", re.I)
 TEAM_RE  = re.compile(r"^\s*the\b|\bteam\b", re.I)
@@ -44,8 +54,13 @@ IMG_EXT  = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
+# ────────────────────────────
+# HELPERS
+# ────────────────────────────
+
 def is_short_sale(t: str) -> bool:
     return bool(SHORT_RE.search(t)) and not BAD_RE.search(t)
+
 
 def fmt_phone(r: str) -> str:
     d = re.sub(r"\D", "", r)
@@ -53,7 +68,9 @@ def fmt_phone(r: str) -> str:
         d = d[1:]
     return f"{d[:3]}-{d[3:6]}-{d[6:]}" if len(d) == 10 else ""
 
+
 US_AREA_CODES = set(str(i) for i in range(201, 990))
+
 
 def valid_phone(p: str) -> bool:
     if phonenumbers:
@@ -63,8 +80,10 @@ def valid_phone(p: str) -> bool:
             return False
     return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}", p)) and p[:3] in US_AREA_CODES
 
+
 def clean_email(e: str) -> str:
     return e.split("?")[0].strip()
+
 
 def ok_email(e: str) -> bool:
     e = clean_email(e)
@@ -76,10 +95,12 @@ def ok_email(e: str) -> bool:
         return False
     return True
 
+
 LABEL_TABLE = {"mobile":4,"cell":4,"direct":4,"text":4,"c:":4,"m:":4,
                "phone":2,"tel":2,"p:":2,
                "office":1,"main":1,"customer":1,"footer":1}
 LABEL_RE = re.compile(r"(" + "|".join(map(re.escape, LABEL_TABLE)) + r")", re.I)
+
 
 def proximity_scan(t: str) -> dict[str, tuple[int, int]]:
     out = {}
@@ -95,6 +116,7 @@ def proximity_scan(t: str) -> dict[str, tuple[int, int]]:
         bw, ts = out.get(p, (0,0))
         out[p] = (max(bw, w), ts + 2 + w)
     return out
+
 
 def extract_struct(td: str) -> tuple[list[str], list[str]]:
     phones, mails = [], []
@@ -121,10 +143,14 @@ def extract_struct(td: str) -> tuple[list[str], list[str]]:
         mails.append(clean_email(a["href"].split("mailto:")[-1]))
     return phones, mails
 
+# ────────────────────────────
+# GOOGLE SHEETS SETUP
+# ────────────────────────────
 creds          = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 gc             = gspread.authorize(creds)
 ws             = gc.open_by_key(GSHEET_ID).sheet1
+
 
 def phone_exists(p: str) -> bool:
     try:
@@ -132,20 +158,26 @@ def phone_exists(p: str) -> bool:
     except Exception:
         return False
 
+
 def append(v: list[str]):
     sheets_service.spreadsheets().values().append(
         spreadsheetId=GSHEET_ID, range="Sheet1!A1",
         valueInputOption="RAW", body={"values": [v]}
     ).execute()
 
+# ────────────────────────────
+# NETWORK FETCH
+# ────────────────────────────
+
 def fetch(u: str) -> str | None:
-    candidates = [u, f"https://r.jina.ai/http://{u}"]
+    candidates = [u]
     if u.startswith("https://"):
         bare = u[8:]
     elif u.startswith("http://"):
         bare = u[7:]
     else:
         bare = u
+    candidates.append(f"https://r.jina.ai/http://{u}")
     candidates.append(f"https://r.jina.ai/http://{bare}")
     for x in candidates:
         for _ in range(2):
@@ -157,6 +189,9 @@ def fetch(u: str) -> str | None:
                 continue
     return None
 
+# ────────────────────────────
+# GOOGLE CUSTOM SEARCH
+# ────────────────────────────
 AGENT_SITES = [
     "realtor.com","zillow.com","redfin.com","homesnap.com","kw.com","remax.com",
     "coldwellbanker.com","compass.com","exprealty.com","bhhs.com","c21.com",
@@ -164,6 +199,7 @@ AGENT_SITES = [
 ]
 DOMAIN_CLAUSE = " OR ".join(f"site:{d}" for d in AGENT_SITES)
 SOCIAL_CLAUSE = "site:facebook.com OR site:linkedin.com"
+
 
 def google_items(q: str) -> list[dict]:
     try:
@@ -173,6 +209,7 @@ def google_items(q: str) -> list[dict]:
     except Exception:
         return []
 
+
 def build_q_phone(a: str, s: str) -> list[str]:
     return [
         f'"{a}" {s} ("mobile" OR "cell" OR "direct") phone ({DOMAIN_CLAUSE})',
@@ -180,29 +217,37 @@ def build_q_phone(a: str, s: str) -> list[str]:
         f'"{a}" {s} contact ({DOMAIN_CLAUSE})'
     ]
 
+
 def build_q_email(a: str, s: str) -> list[str]:
     return [
         f'"{a}" {s} email ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} contact email ({DOMAIN_CLAUSE})'
+        f'"{a}" {s} contact email ({DOMAIN_CLAUSE})',
+        f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})'
     ]
+
+# ────────────────────────────
+# PHONE & EMAIL LOOKUPS
+# ────────────────────────────
 
 cache_p: dict[str,str] = {}
 cache_e: dict[str,str] = {}
+
 
 def lookup_phone(a: str, s: str) -> str:
     k = f"{a}|{s}"
     if k in cache_p:
         return cache_p[k]
     cand: dict[str, tuple[int,int]] = {}
-    for q in build_q_phone(a, s):
+    for q in build_q_phone(a, s)[:MAX_Q_PHONE]:
         time.sleep(0.25)
+        # pagemap hits
         for it in google_items(q):
-            pm = it.get("pagemap", {})
-            tel = pm.get("contactpoint", [{}])[0].get("telephone")
+            tel = it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone")
             if tel:
                 p = fmt_phone(tel)
                 if valid_phone(p):
                     cand[p] = (4, 8)
+        # page fetch hits
         for it in google_items(q):
             u = it.get("link", "")
             t = fetch(u)
@@ -220,49 +265,20 @@ def lookup_phone(a: str, s: str) -> str:
                 cand[p] = (max(bw,b), ts+sc)
         if cand:
             break
-    phone = ""
-    if cand:
-        phone = max(cand.items(), key=lambda kv:(kv[1][0], kv[1][1]))[0]
-    if not phone and cand:
-        phone = list(cand.keys())[0]
+    phone = max(cand.items(), key=lambda kv:(kv[1][0], kv[1][1]))[0] if cand else ""
     cache_p[k] = phone
     return phone
 
-def extra_email_search(a: str, s: str) -> dict[str,int]:
-    out: defaultdict[str,int] = defaultdict(int)
-    qs = [
-        f'realtor {a} email address in {s} ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})',
-        f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})'
-    ]
-    for q in qs:
-        time.sleep(0.25)
-        for it in google_items(q):
-            pm   = it.get("pagemap", {})
-            mail = clean_email(pm.get("contactpoint", [{}])[0].get("email",""))
-            if ok_email(mail):
-                out[mail] += 3
-            u = it.get("link","")
-            t = fetch(u)
-            if not t:
-                continue
-            for m in EMAIL_RE.findall(t):
-                m = clean_email(m)
-                if ok_email(m):
-                    out[m] += 2
-        if out:
-            break
-    return out
 
 def lookup_email(a: str, s: str) -> str:
     k = f"{a}|{s}"
     if k in cache_e:
         return cache_e[k]
     cand: defaultdict[str,int] = defaultdict(int)
-    for q in build_q_email(a, s):
+    for q in build_q_email(a, s)[:MAX_Q_EMAIL]:
         time.sleep(0.25)
         for it in google_items(q):
-            pm   = it.get("pagemap", {})
-            mail = clean_email(pm.get("contactpoint", [{}])[0].get("email",""))
+            mail = clean_email(it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email",""))
             if ok_email(mail):
                 cand[mail] += 3
         for it in google_items(q):
@@ -281,11 +297,16 @@ def lookup_email(a: str, s: str) -> str:
                     cand[m] += 1
         if cand:
             break
-    if not cand:
-        cand.update(extra_email_search(a, s))
-    email = max(cand, key=cand.get) if cand else ""
+    # confidence filter: require at least one name token inside e-mail
+    name_tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in a.split() if w}
+    good = {m:sc for m,sc in cand.items() if any(tok and tok in m.lower() for tok in name_tokens)}
+    email = max(good, key=good.get) if good else ""
     cache_e[k] = email
     return email
+
+# ────────────────────────────
+# SMS SENDER
+# ────────────────────────────
 
 def send_sms(to_number: str, first: str, address: str) -> bool:
     if not SMS_ENABLE:
@@ -322,27 +343,30 @@ def send_sms(to_number: str, first: str, address: str) -> bool:
     LOG.info("SMS sent to %s", to_e164)
     return True
 
+# ────────────────────────────
+# MAIN PROCESSING
+# ────────────────────────────
+
 def extract_name(t: str) -> str | None:
-    m = re.search(r"listing agent[:\s-]*([A-Za-z \.\'’-]{3,})", t, re.I)
+    m = re.search(r"listing agent[:\s-]*([A-Za-z \.'’-]{3,})", t, re.I)
     if m:
         n = m.group(1).strip()
         if not TEAM_RE.search(n):
             return n
     return None
 
+
 def process_rows(rows: list[dict]):
     for r in rows:
         if not is_short_sale(r.get("description","")):
             continue
-        name = r.get("agentName","").strip()
+        name = r.get("agentName",""").strip()
         if not name:
-            name = extract_name(r.get("openai_summary","") + "\n" +
-                                r.get("description",""))
+            name = extract_name(r.get("openai_summary","") + "\n" + r.get("description",""))
             if not name:
                 continue
         if TEAM_RE.search(name):
-            alt = extract_name(r.get("openai_summary","") + "\n" +
-                               r.get("description",""))
+            alt = extract_name(r.get("openai_summary","") + "\n" + r.get("description",""))
             if alt:
                 name = alt
             else:
