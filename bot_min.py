@@ -18,55 +18,61 @@ GSHEET_ID  = os.environ["GSHEET_ID"]
 SC_JSON    = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES     = ["https://www.googleapis.com/auth/spreadsheets"]
 
-logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
+logging.basicConfig(level=os.getenv("LOGLEVEL","DEBUG"),
                     format="%(asctime)s %(levelname)s: %(message)s")
 LOG = logging.getLogger("bot")
 
-SMS_ENABLE      = os.getenv("SMSM_ENABLE", "false").lower() == "true"
-SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
-SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER", "")
-SMS_API_KEY     = os.getenv("SMSM_API_KEY", "")
-SMS_FROM        = os.getenv("SMSM_FROM", "")
-SMS_URL         = os.getenv("SMSM_URL", "https://api.smsmobileapi.com/sendsms/")
+SMS_ENABLE      = os.getenv("SMSM_ENABLE","false").lower()=="true"
+SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE","true").lower()=="true"
+SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER","")
+SMS_API_KEY     = os.getenv("SMSM_API_KEY","")
+SMS_FROM        = os.getenv("SMSM_FROM","")
+SMS_URL         = os.getenv("SMSM_URL","https://api.smsmobileapi.com/sendsms/")
 SMS_TEMPLATE    = os.getenv("SMSM_TEMPLATE") or (
-    "Hey {first}, this is Yoni Kutler—I saw your short-sale listing at {address} "
-    "and wanted to introduce myself. I specialize in helping agents get faster bank "
-    "approvals and ensure these deals close. No cost to you—I’m paid by the buyer "
-    "at closing. Open to a quick call to see if this could help?"
+    "Hey {first}, this is Yoni Kutler—I saw your short-sale listing at {address} and "
+    "wanted to introduce myself. I specialize in helping agents get faster bank approvals "
+    "and ensure these deals close. No cost to you—I’m paid by the buyer at closing. "
+    "Open to a quick call to see if this could help?"
 )
 
 MAX_Q_PHONE = 3
 MAX_Q_EMAIL = 3
 
-SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
-BAD_RE   = re.compile(r"approved|negotiator|settlement fee|fee at closing", re.I)
-TEAM_RE  = re.compile(r"^\s*the\b|\bteam\b", re.I)
+SHORT_RE = re.compile(r"\bshort\s+sale\b",re.I)
+BAD_RE   = re.compile(r"approved|negotiator|settlement fee|fee at closing",re.I)
+TEAM_RE  = re.compile(r"^\s*the\b|\bteam\b",re.I)
 
 IMG_EXT  = (".png",".jpg",".jpeg",".gif",".svg",".webp")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
-EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",re.I)
 
 LABEL_TABLE = {"mobile":4,"cell":4,"direct":4,"text":4,"c:":4,"m:":4,
                "phone":2,"tel":2,"p:":2,"office":1,"main":1,"customer":1,"footer":1}
-LABEL_RE = re.compile("("+"|".join(map(re.escape, LABEL_TABLE))+")", re.I)
+LABEL_RE = re.compile("("+"|".join(map(re.escape,LABEL_TABLE))+")",re.I)
 US_AREA_CODES = {str(i) for i in range(201,990)}
 
-creds = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
-sheets_service = build("sheets","v4",credentials=creds,cache_discovery=False)
-gc = gspread.authorize(creds)
-ws = gc.open_by_key(GSHEET_ID).sheet1
+creds=Credentials.from_service_account_info(SC_JSON,scopes=SCOPES)
+sheets_service=build("sheets","v4",credentials=creds,cache_discovery=False)
+gc=gspread.authorize(creds)
+ws=gc.open_by_key(GSHEET_ID).sheet1
 
-AGENT_SITES = ["realtor.com","zillow.com","redfin.com","homesnap.com","kw.com","remax.com",
-               "coldwellbanker.com","compass.com","exprealty.com","bhhs.com","c21.com",
-               "realtyonegroup.com","mlsmatrix.com","mlslistings.com","har.com","brightmlshomes.com"]
-DOMAIN_CLAUSE = " OR ".join(f"site:{d}" for d in AGENT_SITES)
-SOCIAL_CLAUSE = "site:facebook.com OR site:linkedin.com"
+try:
+    done_zpids=set(ws.col_values(1))
+except:
+    done_zpids=set()
 
-cache_p, cache_e = {}, {}
+AGENT_SITES=["realtor.com","zillow.com","redfin.com","homesnap.com","kw.com","remax.com",
+             "coldwellbanker.com","compass.com","exprealty.com","bhhs.com","c21.com",
+             "realtyonegroup.com","mlsmatrix.com","mlslistings.com","har.com","brightmlshomes.com"]
+DOMAIN_CLAUSE=" OR ".join(f"site:{d}" for d in AGENT_SITES)
+SOCIAL_CLAUSE="site:facebook.com OR site:linkedin.com"
+
+cache_p,cache_e={},{}
 
 def is_short_sale(t): return SHORT_RE.search(t) and not BAD_RE.search(t)
 def fmt_phone(r):
-    d=re.sub(r"\D","",r); d=d[1:] if len(d)==11 and d.startswith("1") else d
+    d=re.sub(r"\D","",r)
+    if len(d)==11 and d.startswith("1"): d=d[1:]
     return f"{d[:3]}-{d[3:6]}-{d[6:]}" if len(d)==10 else ""
 def valid_phone(p):
     if phonenumbers:
@@ -109,9 +115,10 @@ def extract_struct(td):
     return phones,mails
 
 def phone_exists(p):
-    try: return p in ws.col_values(3)
+    try: return p in ws.col_values(4)
     except: return False
-def append_row(v): sheets_service.spreadsheets().values().append(
+def append_row(v):
+    sheets_service.spreadsheets().values().append(
         spreadsheetId=GSHEET_ID,range="Sheet1!A1",valueInputOption="RAW",
         body={"values":[v]}).execute()
 
@@ -137,22 +144,22 @@ def google_items(q):
 def build_q_phone(a,s):
     return [f'"{a}" {s} ("mobile" OR "cell" OR "direct") phone ({DOMAIN_CLAUSE})',
             f'"{a}" {s} phone ({DOMAIN_CLAUSE})',
-            f'"{a}" {s} contact ({DOMAIN_CLAUSE})']
+            f'"{a}" {s} contact ({DOMAIN_CLAUSE})'][:MAX_Q_PHONE]
 def build_q_email(a,s):
     return [f'"{a}" {s} email ({DOMAIN_CLAUSE})',
             f'"{a}" {s} contact email ({DOMAIN_CLAUSE})',
-            f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})']
+            f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})'][:MAX_Q_EMAIL]
 
 def lookup_phone(a,s):
     k=f"{a}|{s}"
     if k in cache_p: return cache_p[k]
     cand={}
-    for q in build_q_phone(a,s)[:MAX_Q_PHONE]:
+    for q in build_q_phone(a,s):
         time.sleep(0.25)
         for it in google_items(q):
             tel=it.get("pagemap",{}).get("contactpoint",[{}])[0].get("telephone")
             if tel:
-                p=fmt_phone(tel); 
+                p=fmt_phone(tel)
                 if valid_phone(p): cand[p]=(4,8)
         for it in google_items(q):
             u=it.get("link",""); t=fetch(u)
@@ -176,7 +183,7 @@ def lookup_email(a,s):
     k=f"{a}|{s}"
     if k in cache_e: return cache_e[k]
     cand=defaultdict(int)
-    for q in build_q_email(a,s)[:MAX_Q_EMAIL]:
+    for q in build_q_email(a,s):
         time.sleep(0.25)
         for it in google_items(q):
             mail=clean_email(it.get("pagemap",{}).get("contactpoint",[{}])[0].get("email",""))
@@ -200,12 +207,12 @@ def lookup_email(a,s):
 
 def send_sms(num,first,address):
     if not SMS_ENABLE: return False
-    d=re.sub(r"\D","",num)
+    d=re.sub(r"\\D","",num)
     if len(d)==10: to_e164="+1"+d
     elif len(d)==11 and d.startswith("1"): to_e164="+"+d
     else: return False
     if SMS_TEST_MODE and SMS_TEST_NUMBER:
-        td=re.sub(r"\D","",SMS_TEST_NUMBER)
+        td=re.sub(r"\\D","",SMS_TEST_NUMBER)
         to_e164="+1"+td if len(td)==10 else "+"+td
     payload={"recipients":to_e164,"message":SMS_TEMPLATE.format(first=first,address=address),
              "apikey":SMS_API_KEY,"sendsms":"1"}
@@ -213,8 +220,7 @@ def send_sms(num,first,address):
     try:
         r=requests.post(SMS_URL,data=payload,timeout=15)
         if r.status_code==200: LOG.info("SMS sent to %s",to_e164); return True
-        LOG.error("SMS failed %s %s",r.status_code,r.text[:200])
-    except Exception as e: LOG.error("SMS error %s",e)
+    except: pass
     return False
 
 def extract_name(t):
@@ -226,6 +232,8 @@ def extract_name(t):
 
 def process_rows(rows):
     for r in rows:
+        zpid=str(r.get("zpid",""))
+        if zpid in done_zpids: continue
         if not is_short_sale(r.get("description","")): continue
         name=r.get("agentName","").strip()
         if not name:
@@ -241,7 +249,8 @@ def process_rows(rows):
         email=lookup_email(name,state)
         if phone and phone_exists(phone): continue
         first,*last=name.split()
-        append_row([first," ".join(last),phone,email,
+        append_row([zpid,first," ".join(last),phone,email,
                     r.get("street",""),r.get("city",""),state])
+        done_zpids.add(zpid)
         if phone: send_sms(phone,first,r.get("street",""))
 
