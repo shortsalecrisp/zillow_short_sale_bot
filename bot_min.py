@@ -1,4 +1,4 @@
-k# === bot_min.py  (June 2025 – patch: stale-listing filter + office-phone skip
+# === bot_min.py  (June 2025 – patch: stale-listing filter + office-phone skip
 #                             + “empty-description” gate + vault handling) =====
 
 import os, sys, json, logging, re, time, html, random, requests
