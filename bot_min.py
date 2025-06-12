@@ -1,4 +1,5 @@
-# === bot_min.py  (June 2025 – patch: stale-listing filter + office-phone skip) ============
+k# === bot_min.py  (June 2025 – patch: stale-listing filter + office-phone skip
+#                             + “empty-description” gate + vault handling) =====
 
 import os, sys, json, logging, re, time, html, random, requests
 from collections import defaultdict
@@ -83,7 +84,7 @@ SOCIAL_CLAUSE = "site:facebook.com OR site:linkedin.com"
 cache_p, cache_e = {}, {}
 
 # ────────────────────────── UTILITIES ──────────────────────────────
-def is_short_sale(t): 
+def is_short_sale(t):
     return SHORT_RE.search(t) and not BAD_RE.search(t)
 
 def fmt_phone(r):
@@ -99,7 +100,7 @@ def valid_phone(p):
             return False
     return re.fullmatch(r"\d{3}-\d{3}-\d{4}", p) and p[:3] in US_AREA_CODES
 
-def clean_email(e): 
+def clean_email(e):
     return e.split("?")[0].strip()
 
 def ok_email(e):
@@ -225,7 +226,7 @@ def extract_struct(td):
         mails.append(clean_email(a["href"].split("mailto:")[-1]))
     return phones, mails
 
-# ───────────────────── Sheet helpers (unchanged) ───────────────────
+# ───────────────────── Sheet helpers ───────────────────────────────
 def phone_exists(p):
     try:
         return p in ws.col_values(3)
@@ -240,6 +241,18 @@ def append_row(v):
         body={"values": [v]}
     ).execute()
     LOG.info("Row appended to sheet")
+
+# ► NEW ◄  very small helper to drop a zpid into the Vault sheet
+def vault_append(zpid: str):
+    try:
+        sheets_service.spreadsheets().values().append(
+            spreadsheetId=GSHEET_ID,
+            range="'Vault'!A1",
+            valueInputOption="RAW",
+            body={"values": [[zpid]]}
+        ).execute()
+    except Exception as e:
+        LOG.warning("Vault append failed for %s – %s", zpid, e)
 
 # ───────────────────── lookup functions  (PHONE patched) ───────────
 def lookup_phone(a, s):
@@ -281,7 +294,7 @@ def lookup_phone(a, s):
     if cand_good:
         phone = max(cand_good, key=cand_good.get)
     elif not cand_good and cand_office:
-        phone = ""    # ► NEW ◄ prefer blank over office/main only
+        phone = ""    # prefer blank over office/main only
     cache_p[k] = phone
     return phone
 
@@ -360,26 +373,35 @@ def extract_name(t):
             return n
     return None
 
+# ──────────────────────────── MAIN PROCESS ─────────────────────────
 def process_rows(rows):
     for r in rows:
-        if not is_short_sale(r.get("description", "")):
+        desc = (r.get("description") or "").strip()
+        zpid = str(r.get("zpid", "")).strip()
+
+        # ①  Skip listings with no description and do NOT vault them
+        if not desc:
+            LOG.debug("Listing %s skipped – empty description.", zpid)
             continue
 
-        # ► NEW ◄  RapidAPI stale/off-market check
-        zpid = str(r.get("zpid", ""))
+        # ②  Vault any listing that is clearly NOT a short sale
+        if not is_short_sale(desc):
+            if zpid:
+                vault_append(zpid)
+            continue
+
+        # RapidAPI stale/off-market check
         if zpid and not is_active_listing(zpid):
             LOG.info("Skip stale/off-market zpid %s", zpid)
             continue
 
         name = r.get("agentName", "").strip()
         if not name:
-            name = extract_name(r.get("openai_summary", "") + "\n" +
-                                r.get("description", ""))
+            name = extract_name(r.get("openai_summary", "") + "\n" + desc)
             if not name:
                 continue
         if TEAM_RE.search(name):
-            alt = extract_name(r.get("openai_summary", "") + "\n" +
-                               r.get("description", ""))
+            alt = extract_name(r.get("openai_summary", "") + "\n" + desc)
             if alt:
                 name = alt
             else:
@@ -399,6 +421,8 @@ def process_rows(rows):
             first, " ".join(last), phone, email,
             r.get("street", ""), r.get("city", ""), state
         ])
+        if zpid:
+            vault_append(zpid)
         if phone:
             send_sms(phone, first, r.get("street", ""))
 
