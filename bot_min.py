@@ -1,5 +1,4 @@
-# === bot_min.py  (June 2025 – patch: stale-listing filter + office-phone skip
-#                             + “empty-description” gate + vault handling) =====
+# === bot_min.py  (June 2025 – patch: precise “realtor {state} phone number” query) ============
 
 import os, sys, json, logging, re, time, html, random, requests
 from collections import defaultdict
@@ -22,7 +21,7 @@ GSHEET_ID  = os.environ["GSHEET_ID"]
 SC_JSON    = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES     = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# ► NEW ◄  RapidAPI key/host for status check (optional)
+# ► RapidAPI key/host for status check (optional)
 RAPID_KEY  = os.getenv("RAPID_KEY", "").strip()
 RAPID_HOST = os.getenv("RAPID_HOST", "zillow-com1.p.rapidapi.com").strip()
 GOOD_STATUS = {
@@ -33,18 +32,20 @@ logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
                     format="%(asctime)s %(levelname)s: %(message)s")
 LOG = logging.getLogger("bot")
 
-# ─────────────────────── SMS CONFIG (unchanged) ────────────────────
+# ─────────────────────── SMS CONFIG ────────────────────────────────
 SMS_ENABLE      = os.getenv("SMSM_ENABLE", "false").lower() == "true"
 SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER", "")
 SMS_API_KEY     = os.getenv("SMSM_API_KEY", "")
 SMS_FROM        = os.getenv("SMSM_FROM", "")
 SMS_URL         = os.getenv("SMSM_URL", "https://api.smsmobileapi.com/sendsms/")
-SMS_TEMPLATE    = os.getenv("SMSM_TEMPLATE") or (
-    "Hey {first}, this is Yoni Kutler—I saw your short-sale listing at {address} "
-    "and wanted to introduce myself. I specialize in helping agents get faster bank "
-    "approvals and ensure these deals close. No cost to you—I’m paid by the buyer "
-    "at closing. Open to a quick call to see if this could help?"
+SMS_TEMPLATE    = (
+    "Hey {first}, this is Yoni Kutler—I saw your listing at {address} and wanted to "
+    "introduce myself. I specialize in helping agents get faster bank approvals and "
+    "ensure these deals close. I know you likely handle short sales yourself, but I "
+    "work behind the scenes to take on lender negotiations so you can focus on selling. "
+    "No cost to you or your client—I’m only paid by the buyer at closing. Would you be "
+    "open to a quick call to see if this could help?"
 )
 
 MAX_Q_PHONE = 5
@@ -52,7 +53,7 @@ MAX_Q_EMAIL = 5
 
 # ──────────────────────────── REGEXES ──────────────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
-BAD_RE   = re.compile(r"\b(?:approved short sale|short sale approved)\b", re.I)   # allow “unapproved …”
+BAD_RE   = re.compile(r"\b(?:approved short sale|short sale approved)\b", re.I)
 
 TEAM_RE = re.compile(r"^\s*the\b|\bteam\b", re.I)
 
@@ -84,7 +85,7 @@ SOCIAL_CLAUSE = "site:facebook.com OR site:linkedin.com"
 cache_p, cache_e = {}, {}
 
 # ────────────────────────── UTILITIES ──────────────────────────────
-def is_short_sale(t):
+def is_short_sale(t): 
     return SHORT_RE.search(t) and not BAD_RE.search(t)
 
 def fmt_phone(r):
@@ -100,17 +101,17 @@ def valid_phone(p):
             return False
     return re.fullmatch(r"\d{3}-\d{3}-\d{4}", p) and p[:3] in US_AREA_CODES
 
-def clean_email(e):
+def clean_email(e): 
     return e.split("?")[0].strip()
 
 def ok_email(e):
     e = clean_email(e)
     return e and "@" in e and not e.lower().endswith(IMG_EXT) and not re.search(r"\.(gov|edu|mil)$", e, re.I)
 
-# ► NEW ◄  RapidAPI helper to decide if listing is active
+# ► RapidAPI helper to decide if listing is active
 def is_active_listing(zpid):
     if not RAPID_KEY:
-        return True   # no key → we can’t check → allow
+        return True
     try:
         r = requests.get(
             f"https://{RAPID_HOST}/property",
@@ -136,7 +137,7 @@ def fetch(u):
         u,
         f"https://r.jina.ai/http://{u}",
         f"https://r.jina.ai/http://{bare}",
-        f"https://r.jina.ai/http://screenshot/{bare}"   # JS-render variant
+        f"https://r.jina.ai/http://screenshot/{bare}"
     ]
     for url in variants:
         for _ in range(2):
@@ -158,19 +159,20 @@ def google_items(q, tries=3):
                 timeout=10
             ).json()
             return j.get("items", [])
-        except Exception as e:
+        except Exception:
             if attempt == tries - 1:
                 return []
             time.sleep(1.5 * (attempt + 1))
 
-# ─────────────────── query builders (unchanged) ────────────────────
+# ─────────────────── query builders ────────────────────────────────
 def build_q_phone(a, s):
+    """First query is now: "{full name} realtor {state} phone number"."""
     return [
+        f'"{a}" realtor {s} phone number',
         f'"{a}" {s} ("mobile" OR "cell" OR "direct") phone ({DOMAIN_CLAUSE})',
         f'"{a}" {s} phone ({DOMAIN_CLAUSE})',
         f'"{a}" {s} contact ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} realty phone',
-        f'"{a}" {s} phone {SOCIAL_CLAUSE}'
+        f'"{a}" {s} phone {SOCIAL_CLAUSE}',
     ]
 
 def build_q_email(a, s):
@@ -242,19 +244,7 @@ def append_row(v):
     ).execute()
     LOG.info("Row appended to sheet")
 
-# ► NEW ◄  very small helper to drop a zpid into the Vault sheet
-def vault_append(zpid: str):
-    try:
-        sheets_service.spreadsheets().values().append(
-            spreadsheetId=GSHEET_ID,
-            range="'Vault'!A1",
-            valueInputOption="RAW",
-            body={"values": [[zpid]]}
-        ).execute()
-    except Exception as e:
-        LOG.warning("Vault append failed for %s – %s", zpid, e)
-
-# ───────────────────── lookup functions  (PHONE patched) ───────────
+# ───────────────────── lookup functions ────────────────────────────
 def lookup_phone(a, s):
     k = f"{a}|{s}"
     if k in cache_p:
@@ -332,7 +322,7 @@ def lookup_email(a, s):
     cache_e[k] = email
     return email
 
-# ─────────────────────── SMS (unchanged) ───────────────────────────
+# ─────────────────────── SMS ───────────────────────────────────────
 def send_sms(num, first, address):
     if not SMS_ENABLE:
         return False
@@ -364,7 +354,7 @@ def send_sms(num, first, address):
         LOG.error("SMS error %s", e)
     return False
 
-# ───────────────────── scrape helpers (unchanged) ────────────────
+# ───────────────────── scrape helpers ──────────────────────────────
 def extract_name(t):
     m = re.search(r"listing agent[:\s\-]*([A-Za-z \.'’-]{3,})", t, re.I)
     if m:
@@ -373,35 +363,25 @@ def extract_name(t):
             return n
     return None
 
-# ──────────────────────────── MAIN PROCESS ─────────────────────────
 def process_rows(rows):
     for r in rows:
-        desc = (r.get("description") or "").strip()
-        zpid = str(r.get("zpid", "")).strip()
-
-        # ①  Skip listings with no description and do NOT vault them
-        if not desc:
-            LOG.debug("Listing %s skipped – empty description.", zpid)
+        if not is_short_sale(r.get("description", "")):
             continue
 
-        # ②  Vault any listing that is clearly NOT a short sale
-        if not is_short_sale(desc):
-            if zpid:
-                vault_append(zpid)
-            continue
-
-        # RapidAPI stale/off-market check
+        zpid = str(r.get("zpid", ""))
         if zpid and not is_active_listing(zpid):
             LOG.info("Skip stale/off-market zpid %s", zpid)
             continue
 
         name = r.get("agentName", "").strip()
         if not name:
-            name = extract_name(r.get("openai_summary", "") + "\n" + desc)
+            name = extract_name(r.get("openai_summary", "") + "\n" +
+                                r.get("description", ""))
             if not name:
                 continue
         if TEAM_RE.search(name):
-            alt = extract_name(r.get("openai_summary", "") + "\n" + desc)
+            alt = extract_name(r.get("openai_summary", "") + "\n" +
+                               r.get("description", ""))
             if alt:
                 name = alt
             else:
@@ -421,8 +401,6 @@ def process_rows(rows):
             first, " ".join(last), phone, email,
             r.get("street", ""), r.get("city", ""), state
         ])
-        if zpid:
-            vault_append(zpid)
         if phone:
             send_sms(phone, first, r.get("street", ""))
 
