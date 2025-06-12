@@ -1,4 +1,4 @@
-# === bot_min.py  (June 2025 – patch: broader brokerage search + JS-render fetch) ============
+# === bot_min.py  (June 2025 – patch: stale-listing filter + office-phone skip) ============
 
 import os, sys, json, logging, re, time, html, random, requests
 from collections import defaultdict
@@ -20,6 +20,13 @@ CS_CX      = os.environ["CS_CX"]
 GSHEET_ID  = os.environ["GSHEET_ID"]
 SC_JSON    = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES     = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# ► NEW ◄  RapidAPI key/host for status check (optional)
+RAPID_KEY  = os.getenv("RAPID_KEY", "").strip()
+RAPID_HOST = os.getenv("RAPID_HOST", "zillow-com1.p.rapidapi.com").strip()
+GOOD_STATUS = {
+    "FOR_SALE", "ACTIVE", "COMING_SOON", "PENDING", "NEW_CONSTRUCTION"
+}
 
 logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
                     format="%(asctime)s %(levelname)s: %(message)s")
@@ -44,8 +51,7 @@ MAX_Q_EMAIL = 5
 
 # ──────────────────────────── REGEXES ──────────────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
-# reject *approved* short sales but allow “unapproved” / “not approved”
-BAD_RE   = re.compile(r"\b(?:approved short sale|short sale approved)\b", re.I)
+BAD_RE   = re.compile(r"\b(?:approved short sale|short sale approved)\b", re.I)   # allow “unapproved …”
 
 TEAM_RE = re.compile(r"^\s*the\b|\bteam\b", re.I)
 
@@ -69,7 +75,6 @@ AGENT_SITES = [
     "remax.com", "coldwellbanker.com", "compass.com", "exprealty.com",
     "bhhs.com", "c21.com", "realtyonegroup.com", "mlsmatrix.com",
     "mlslistings.com", "har.com", "brightmlshomes.com",
-    # new brokerage domains for 403-blocked Zillow profiles
     "exitrealty.com", "realtyexecutives.com", "realty.com"
 ]
 DOMAIN_CLAUSE = " OR ".join(f"site:{d}" for d in AGENT_SITES)
@@ -101,6 +106,28 @@ def ok_email(e):
     e = clean_email(e)
     return e and "@" in e and not e.lower().endswith(IMG_EXT) and not re.search(r"\.(gov|edu|mil)$", e, re.I)
 
+# ► NEW ◄  RapidAPI helper to decide if listing is active
+def is_active_listing(zpid):
+    if not RAPID_KEY:
+        return True   # no key → we can’t check → allow
+    try:
+        r = requests.get(
+            f"https://{RAPID_HOST}/property",
+            params={"zpid": zpid},
+            headers={
+                "X-RapidAPI-Key": RAPID_KEY,
+                "X-RapidAPI-Host": RAPID_HOST
+            },
+            timeout=15
+        )
+        r.raise_for_status()
+        data = r.json().get("data") or r.json()
+        status = (data.get("homeStatus") or "").upper()
+        return (not status) or status in GOOD_STATUS
+    except Exception as e:
+        LOG.warning("RapidAPI status check failed for %s (%s) – keeping row", zpid, e)
+        return True
+
 # ─────────────────── fetch() with JS-render fallback ───────────────
 def fetch(u):
     bare = u[8:] if u.startswith("https://") else u[7:] if u.startswith("http://") else u
@@ -108,8 +135,7 @@ def fetch(u):
         u,
         f"https://r.jina.ai/http://{u}",
         f"https://r.jina.ai/http://{bare}",
-        # new: render-then-read variant for JS-heavy pages
-        f"https://r.jina.ai/http://screenshot/{bare}"
+        f"https://r.jina.ai/http://screenshot/{bare}"   # JS-render variant
     ]
     for url in variants:
         for _ in range(2):
@@ -163,12 +189,13 @@ def proximity_scan(t):
         if not valid_phone(p):
             continue
         sn = t[max(m.start()-80, 0):min(m.end()+80, len(t))]
-        lab = LABEL_RE.search(sn)
-        w = LABEL_TABLE.get(lab.group().lower(), 0) if lab else 0
+        lab_match = LABEL_RE.search(sn)
+        lab = lab_match.group().lower() if lab_match else ""
+        w = LABEL_TABLE.get(lab, 0)
         if w < 2:
             continue
-        bw, ts = out.get(p, (0, 0))
-        out[p] = (max(bw, w), ts + 2 + w)
+        bw, ts, _ = out.get(p, (0, 0, False))
+        out[p] = (max(bw, w), ts + 2 + w, lab in ("office", "main"))
     return out
 
 def extract_struct(td):
@@ -214,20 +241,28 @@ def append_row(v):
     ).execute()
     LOG.info("Row appended to sheet")
 
-# ───────────────────── lookup functions (unchanged) ────────────────
+# ───────────────────── lookup functions  (PHONE patched) ───────────
 def lookup_phone(a, s):
     k = f"{a}|{s}"
     if k in cache_p:
         return cache_p[k]
-    cand = {}
+
+    cand_good  = {}
+    cand_office = {}
+
+    def add(p, score, office_flag):
+        d = fmt_phone(p)
+        if not valid_phone(d):
+            return
+        target = cand_office if office_flag else cand_good
+        target[d] = target.get(d, 0) + score
+
     for q in build_q_phone(a, s)[:MAX_Q_PHONE]:
         time.sleep(0.25)
         for it in google_items(q):
             tel = it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone")
             if tel:
-                p = fmt_phone(tel)
-                if valid_phone(p):
-                    cand[p] = (4, 8)
+                add(tel, 4, False)
         for it in google_items(q):
             u = it.get("link", "")
             t = fetch(u)
@@ -235,17 +270,18 @@ def lookup_phone(a, s):
                 continue
             ph, _ = extract_struct(t)
             for p in ph:
-                pf = fmt_phone(p)
-                if valid_phone(pf):
-                    bw, ts = cand.get(pf, (0, 0))
-                    cand[pf] = (4, ts + 6)
+                add(p, 6, False)
             low = html.unescape(t.lower())
-            for p, (bw, sc) in proximity_scan(low).items():
-                b, ts = cand.get(p, (0, 0))
-                cand[p] = (max(bw, b), ts + sc)
-        if cand:
+            for p, (bw, sc, office_flag) in proximity_scan(low).items():
+                add(p, sc, office_flag)
+        if cand_good or cand_office:
             break
-    phone = max(cand, key=lambda k: cand[k]) if cand else ""
+
+    phone = ""
+    if cand_good:
+        phone = max(cand_good, key=cand_good.get)
+    elif not cand_good and cand_office:
+        phone = ""    # ► NEW ◄ prefer blank over office/main only
     cache_p[k] = phone
     return phone
 
@@ -315,7 +351,7 @@ def send_sms(num, first, address):
         LOG.error("SMS error %s", e)
     return False
 
-# ─────────────────────── scrape helpers (unchanged) ────────────────
+# ───────────────────── scrape helpers (unchanged) ────────────────
 def extract_name(t):
     m = re.search(r"listing agent[:\s\-]*([A-Za-z \.'’-]{3,})", t, re.I)
     if m:
@@ -328,6 +364,13 @@ def process_rows(rows):
     for r in rows:
         if not is_short_sale(r.get("description", "")):
             continue
+
+        # ► NEW ◄  RapidAPI stale/off-market check
+        zpid = str(r.get("zpid", ""))
+        if zpid and not is_active_listing(zpid):
+            LOG.info("Skip stale/off-market zpid %s", zpid)
+            continue
+
         name = r.get("agentName", "").strip()
         if not name:
             name = extract_name(r.get("openai_summary", "") + "\n" +
