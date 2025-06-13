@@ -1,7 +1,10 @@
-# === bot_min.py  (June 2025 – patch: precise “realtor {state} phone number” query) ============
+# === bot_min.py  (June 2025  → patch: resilient Zillow / rate-limit, exp-backoff,
+#                  brokerage scrape pass, structured metrics, light parallelism) ===
 
-import os, sys, json, logging, re, time, html, random, requests
-from collections import defaultdict
+import os, sys, json, logging, re, time, html, random, requests, asyncio, concurrent.futures
+from collections import defaultdict, Counter
+from datetime import datetime
+
 try:
     import phonenumbers
 except ImportError:
@@ -13,6 +16,7 @@ except ImportError:
 import gspread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
+
 
 # ─────────────────────────── ENV / AUTH ────────────────────────────
 CS_API_KEY = os.environ["CS_API_KEY"]
@@ -32,7 +36,15 @@ logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
                     format="%(asctime)s %(levelname)s: %(message)s")
 LOG = logging.getLogger("bot")
 
-# ─────────────────────── SMS CONFIG ────────────────────────────────
+# ──────────────────────── NEW   CONFIGS  ───────────────────────────
+MAX_ZILLOW_403      = 3          # bail-out guard for repeated 403s
+MAX_RATE_429        = 3          # bail-out guard for repeated 429s
+BACKOFF_FACTOR      = 1.7        # exponential back-off base
+MAX_BACKOFF_SECONDS = 12
+GOOGLE_CONCURRENCY  = 4          # parallel fetch workers
+METRICS             = Counter()  # structured-error metrics collector
+
+# ─────────────────────── SMS CONFIG (unchanged) ────────────────────
 SMS_ENABLE      = os.getenv("SMSM_ENABLE", "false").lower() == "true"
 SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER", "")
@@ -79,7 +91,14 @@ AGENT_SITES = [
     "mlslistings.com", "har.com", "brightmlshomes.com",
     "exitrealty.com", "realtyexecutives.com", "realty.com"
 ]
+
+# ► NEW brokerage/parent-firm domains pass
+BROKERAGE_SITES = [
+    "sothebysrealty.com", "corcoran.com", "douglaselliman.com",
+    "cryereleike.com", "windermere.com", "longandfoster.com"
+]
 DOMAIN_CLAUSE = " OR ".join(f"site:{d}" for d in AGENT_SITES)
+BROKERAGE_CLAUSE = " OR ".join(f"site:{d}" for d in BROKERAGE_SITES)
 SOCIAL_CLAUSE = "site:facebook.com OR site:linkedin.com"
 
 cache_p, cache_e = {}, {}
@@ -132,25 +151,63 @@ def is_active_listing(zpid):
 
 # ─────────────────── fetch() with JS-render fallback ───────────────
 def fetch(u):
+    """
+    HTTP fetch with:
+      • Zillow 403 guard
+      • 429 rate-limit exponential back-off
+      • r.jina.ai single-page & screenshot fallbacks
+      • structured metrics
+    """
     bare = u[8:] if u.startswith("https://") else u[7:] if u.startswith("http://") else u
     variants = [
         u,
-        f"https://r.jina.ai/http://{u}",
-        f"https://r.jina.ai/http://{bare}",
-        f"https://r.jina.ai/http://screenshot/{bare}"
+        f"https://r.jina.ai/http://{u}",                # rendertron pass-through
+        f"https://r.jina.ai/http://{bare}",            # bare variant
+        f"https://r.jina.ai/http://screenshot/{bare}", # screenshot bare
+        f"https://r.jina.ai/http://screenshot/{u}"     # screenshot full url  (NEW / malformed-url fix)
     ]
+
+    z403, ratelimit = 0, 0
+    backoff = 1.0
     for url in variants:
-        for _ in range(2):
+        for _ in range(3):  # at most 3 attempts per variant
             try:
                 r = requests.get(url, timeout=10,
                                  headers={"User-Agent": "Mozilla/5.0"})
-                if r.status_code == 200 and "unusual traffic" not in r.text[:700].lower():
-                    return r.text
-            except Exception:
-                continue
+            except Exception as exc:
+                METRICS["fetch_error"] += 1
+                LOG.debug("fetch error %s on %s", exc, url)
+                break
+
+            if r.status_code == 200:
+                if "unusual traffic" in r.text[:700].lower():
+                    METRICS["fetch_unusual"] += 1
+                    break
+                return r.text
+
+            if r.status_code == 403 and "zillow.com" in url:
+                z403 += 1
+                METRICS["fetch_403"] += 1
+                if z403 >= MAX_ZILLOW_403:
+                    LOG.debug("bailing after %s consecutive Zillow 403s", z403)
+                    return None
+            elif r.status_code == 429:
+                ratelimit += 1
+                METRICS["fetch_429"] += 1
+                if ratelimit >= MAX_RATE_429:
+                    LOG.debug("rate-limit ceiling hit, giving up (%s)", url)
+                    return None
+            else:
+                METRICS["fetch_other_%s" % r.status_code] += 1
+
+            time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
+            backoff *= BACKOFF_FACTOR  # exponential back-off
+
     return None
 
+# ─────────────────── Google API helpers (parallel) ─────────────────
 def google_items(q, tries=3):
+    backoff = 1.0
     for attempt in range(tries):
         try:
             j = requests.get(
@@ -160,9 +217,9 @@ def google_items(q, tries=3):
             ).json()
             return j.get("items", [])
         except Exception:
-            if attempt == tries - 1:
-                return []
-            time.sleep(1.5 * (attempt + 1))
+            time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
+            backoff *= BACKOFF_FACTOR
+    return []
 
 # ─────────────────── query builders ────────────────────────────────
 def build_q_phone(a, s):
@@ -173,6 +230,8 @@ def build_q_phone(a, s):
         f'"{a}" {s} phone ({DOMAIN_CLAUSE})',
         f'"{a}" {s} contact ({DOMAIN_CLAUSE})',
         f'"{a}" {s} phone {SOCIAL_CLAUSE}',
+        # brokerage pass (NEW)
+        f'"{a}" {s} phone ({BROKERAGE_CLAUSE})',
     ]
 
 def build_q_email(a, s):
@@ -181,7 +240,9 @@ def build_q_email(a, s):
         f'"{a}" {s} contact email ({DOMAIN_CLAUSE})',
         f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})',
         f'"{a}" {s} realty email',
-        f'"{a}" {s} gmail.com'
+        f'"{a}" {s} gmail.com',
+        # brokerage pass (NEW)
+        f'"{a}" {s} email ({BROKERAGE_CLAUSE})',
     ]
 
 # ─────────────────── proximity scan & structured ───────────────────
@@ -244,6 +305,11 @@ def append_row(v):
     ).execute()
     LOG.info("Row appended to sheet")
 
+# ───────────────────── parallel helper ─────────────────────────────
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY)
+def pmap(fn, iterable):
+    return list(_executor.map(fn, iterable))
+
 # ───────────────────── lookup functions ────────────────────────────
 def lookup_phone(a, s):
     k = f"{a}|{s}"
@@ -260,23 +326,30 @@ def lookup_phone(a, s):
         target = cand_office if office_flag else cand_good
         target[d] = target.get(d, 0) + score
 
-    for q in build_q_phone(a, s)[:MAX_Q_PHONE]:
-        time.sleep(0.25)
-        for it in google_items(q):
+    # run Google queries concurrently
+    queries = build_q_phone(a, s)[:MAX_Q_PHONE]
+    google_batches = pmap(google_items, queries)
+
+    for items in google_batches:
+        for it in items:
             tel = it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone")
             if tel:
                 add(tel, 4, False)
-        for it in google_items(q):
-            u = it.get("link", "")
-            t = fetch(u)
-            if not t or a.lower() not in t.lower():
-                continue
-            ph, _ = extract_struct(t)
-            for p in ph:
-                add(p, 6, False)
-            low = html.unescape(t.lower())
-            for p, (bw, sc, office_flag) in proximity_scan(low).items():
-                add(p, sc, office_flag)
+
+    # fetch result links in parallel as well
+    urls = [it.get("link", "") for items in google_batches for it in items][:30]
+    html_pages = pmap(fetch, urls)
+
+    for t in html_pages:
+        if not t or a.lower() not in (t or "").lower():
+            continue
+        ph, _ = extract_struct(t)
+        for p in ph:
+            add(p, 6, False)
+        low = html.unescape(t.lower())
+        for p, (bw, sc, office_flag) in proximity_scan(low).items():
+            add(p, sc, office_flag)
+
         if cand_good or cand_office:
             break
 
@@ -293,28 +366,35 @@ def lookup_email(a, s):
     if k in cache_e:
         return cache_e[k]
     cand = defaultdict(int)
-    for q in build_q_email(a, s)[:MAX_Q_EMAIL]:
-        time.sleep(0.25)
-        for it in google_items(q):
+
+    queries = build_q_email(a, s)[:MAX_Q_EMAIL]
+    google_batches = pmap(google_items, queries)
+
+    for items in google_batches:
+        for it in items:
             mail = clean_email(it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email", ""))
             if ok_email(mail):
                 cand[mail] += 3
-        for it in google_items(q):
-            u = it.get("link", "")
-            t = fetch(u)
-            if not t or a.lower() not in t.lower():
-                continue
-            _, em = extract_struct(t)
-            for m in em:
-                m = clean_email(m)
-                if ok_email(m):
-                    cand[m] += 3
-            for m in EMAIL_RE.findall(t):
-                m = clean_email(m)
-                if ok_email(m):
-                    cand[m] += 1
+
+    urls = [it.get("link", "") for items in google_batches for it in items][:30]
+    html_pages = pmap(fetch, urls)
+
+    for t in html_pages:
+        if not t or a.lower() not in (t or "").lower():
+            continue
+        _, em = extract_struct(t)
+        for m in em:
+            m = clean_email(m)
+            if ok_email(m):
+                cand[m] += 3
+        for m in EMAIL_RE.findall(t):
+            m = clean_email(m)
+            if ok_email(m):
+                cand[m] += 1
+
         if cand:
             break
+
     tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in a.split()}
     good = {m: sc for m, sc in cand.items()
             if any(tok and tok in m.lower() for tok in tokens)}
@@ -322,7 +402,7 @@ def lookup_email(a, s):
     cache_e[k] = email
     return email
 
-# ─────────────────────── SMS ───────────────────────────────────────
+# ─────────────────────── SMS (unchanged) ───────────────────────────
 def send_sms(num, first, address):
     if not SMS_ENABLE:
         return False
@@ -419,4 +499,8 @@ if __name__ == "__main__":
 
     LOG.debug("Sample fields on first fresh row: %s", list(fresh_rows[0].keys()))
     process_rows(fresh_rows)
+
+    # structured-metrics flush
+    if METRICS:
+        LOG.info("metrics %s", dict(METRICS))
 
