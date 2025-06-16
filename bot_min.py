@@ -503,4 +503,3 @@ if __name__ == "__main__":
     # structured-metrics flush
     if METRICS:
         LOG.info("metrics %s", dict(METRICS))
-
