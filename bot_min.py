@@ -1,5 +1,4 @@
-# === bot_min.py  (June 2025  → patch: resilient Zillow / rate-limit, exp-backoff,
-#                  brokerage scrape pass, structured metrics, light parallelism) ===
+# === bot_min.py  (June 2025  → patch: add per-contact debug source logging) ===
 
 import os, sys, json, logging, re, time, html, random, requests, asyncio, concurrent.futures
 from collections import defaultdict, Counter
@@ -36,13 +35,17 @@ logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
                     format="%(asctime)s %(levelname)s: %(message)s")
 LOG = logging.getLogger("bot")
 
+# ► new: store winning phone/email source for debug visibility
+PHONE_SRC = {}
+EMAIL_SRC = {}
+
 # ──────────────────────── NEW   CONFIGS  ───────────────────────────
-MAX_ZILLOW_403      = 3          # bail-out guard for repeated 403s
-MAX_RATE_429        = 3          # bail-out guard for repeated 429s
-BACKOFF_FACTOR      = 1.7        # exponential back-off base
+MAX_ZILLOW_403      = 3
+MAX_RATE_429        = 3
+BACKOFF_FACTOR      = 1.7
 MAX_BACKOFF_SECONDS = 12
-GOOGLE_CONCURRENCY  = 4          # parallel fetch workers
-METRICS             = Counter()  # structured-error metrics collector
+GOOGLE_CONCURRENCY  = 4
+METRICS             = Counter()
 
 # ─────────────────────── SMS CONFIG (unchanged) ────────────────────
 SMS_ENABLE      = os.getenv("SMSM_ENABLE", "false").lower() == "true"
@@ -92,14 +95,13 @@ AGENT_SITES = [
     "exitrealty.com", "realtyexecutives.com", "realty.com"
 ]
 
-# ► NEW brokerage/parent-firm domains pass
 BROKERAGE_SITES = [
     "sothebysrealty.com", "corcoran.com", "douglaselliman.com",
     "cryereleike.com", "windermere.com", "longandfoster.com"
 ]
-DOMAIN_CLAUSE = " OR ".join(f"site:{d}" for d in AGENT_SITES)
+DOMAIN_CLAUSE    = " OR ".join(f"site:{d}" for d in AGENT_SITES)
 BROKERAGE_CLAUSE = " OR ".join(f"site:{d}" for d in BROKERAGE_SITES)
-SOCIAL_CLAUSE = "site:facebook.com OR site:linkedin.com"
+SOCIAL_CLAUSE    = "site:facebook.com OR site:linkedin.com"
 
 cache_p, cache_e = {}, {}
 
@@ -127,7 +129,6 @@ def ok_email(e):
     e = clean_email(e)
     return e and "@" in e and not e.lower().endswith(IMG_EXT) and not re.search(r"\.(gov|edu|mil)$", e, re.I)
 
-# ► RapidAPI helper to decide if listing is active
 def is_active_listing(zpid):
     if not RAPID_KEY:
         return True
@@ -135,10 +136,7 @@ def is_active_listing(zpid):
         r = requests.get(
             f"https://{RAPID_HOST}/property",
             params={"zpid": zpid},
-            headers={
-                "X-RapidAPI-Key": RAPID_KEY,
-                "X-RapidAPI-Host": RAPID_HOST
-            },
+            headers={"X-RapidAPI-Key": RAPID_KEY, "X-RapidAPI-Host": RAPID_HOST},
             timeout=15
         )
         r.raise_for_status()
@@ -151,29 +149,20 @@ def is_active_listing(zpid):
 
 # ─────────────────── fetch() with JS-render fallback ───────────────
 def fetch(u):
-    """
-    HTTP fetch with:
-      • Zillow 403 guard
-      • 429 rate-limit exponential back-off
-      • r.jina.ai single-page & screenshot fallbacks
-      • structured metrics
-    """
     bare = u[8:] if u.startswith("https://") else u[7:] if u.startswith("http://") else u
     variants = [
         u,
-        f"https://r.jina.ai/http://{u}",                # rendertron pass-through
-        f"https://r.jina.ai/http://{bare}",            # bare variant
-        f"https://r.jina.ai/http://screenshot/{bare}", # screenshot bare
-        f"https://r.jina.ai/http://screenshot/{u}"     # screenshot full url  (NEW / malformed-url fix)
+        f"https://r.jina.ai/http://{u}",
+        f"https://r.jina.ai/http://{bare}",
+        f"https://r.jina.ai/http://screenshot/{bare}",
+        f"https://r.jina.ai/http://screenshot/{u}"
     ]
 
-    z403, ratelimit = 0, 0
-    backoff = 1.0
+    z403, ratelimit, backoff = 0, 0, 1.0
     for url in variants:
-        for _ in range(3):  # at most 3 attempts per variant
+        for _ in range(3):
             try:
-                r = requests.get(url, timeout=10,
-                                 headers={"User-Agent": "Mozilla/5.0"})
+                r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
             except Exception as exc:
                 METRICS["fetch_error"] += 1
                 LOG.debug("fetch error %s on %s", exc, url)
@@ -201,14 +190,13 @@ def fetch(u):
                 METRICS["fetch_other_%s" % r.status_code] += 1
 
             time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
-            backoff *= BACKOFF_FACTOR  # exponential back-off
-
+            backoff *= BACKOFF_FACTOR
     return None
 
 # ─────────────────── Google API helpers (parallel) ─────────────────
 def google_items(q, tries=3):
     backoff = 1.0
-    for attempt in range(tries):
+    for _ in range(tries):
         try:
             j = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
@@ -223,14 +211,12 @@ def google_items(q, tries=3):
 
 # ─────────────────── query builders ────────────────────────────────
 def build_q_phone(a, s):
-    """First query is now: "{full name} realtor {state} phone number"."""
     return [
         f'"{a}" realtor {s} phone number',
         f'"{a}" {s} ("mobile" OR "cell" OR "direct") phone ({DOMAIN_CLAUSE})',
         f'"{a}" {s} phone ({DOMAIN_CLAUSE})',
         f'"{a}" {s} contact ({DOMAIN_CLAUSE})',
         f'"{a}" {s} phone {SOCIAL_CLAUSE}',
-        # brokerage pass (NEW)
         f'"{a}" {s} phone ({BROKERAGE_CLAUSE})',
     ]
 
@@ -241,7 +227,6 @@ def build_q_email(a, s):
         f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})',
         f'"{a}" {s} realty email',
         f'"{a}" {s} gmail.com',
-        # brokerage pass (NEW)
         f'"{a}" {s} email ({BROKERAGE_CLAUSE})',
     ]
 
@@ -310,23 +295,23 @@ _executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY
 def pmap(fn, iterable):
     return list(_executor.map(fn, iterable))
 
-# ───────────────────── lookup functions ────────────────────────────
+# ───────────────────── lookup functions (patched) ──────────────────
 def lookup_phone(a, s):
     k = f"{a}|{s}"
     if k in cache_p:
         return cache_p[k]
 
-    cand_good  = {}
-    cand_office = {}
+    cand_good, cand_office, src_good = {}, {}, {}
 
-    def add(p, score, office_flag):
+    def add(p, score, office_flag, src=""):
         d = fmt_phone(p)
         if not valid_phone(d):
             return
         target = cand_office if office_flag else cand_good
         target[d] = target.get(d, 0) + score
+        if not office_flag and src:
+            src_good[d] = src
 
-    # run Google queries concurrently
     queries = build_q_phone(a, s)[:MAX_Q_PHONE]
     google_batches = pmap(google_items, queries)
 
@@ -334,21 +319,21 @@ def lookup_phone(a, s):
         for it in items:
             tel = it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone")
             if tel:
-                add(tel, 4, False)
+                add(tel, 4, False, f"CSE:{it.get('link','')}")
 
-    # fetch result links in parallel as well
     urls = [it.get("link", "") for items in google_batches for it in items][:30]
     html_pages = pmap(fetch, urls)
 
-    for t in html_pages:
-        if not t or a.lower() not in (t or "").lower():
+    for url, page in zip(urls, html_pages):
+        if not page or a.lower() not in page.lower():
             continue
-        ph, _ = extract_struct(t)
+        ph, _ = extract_struct(page)
         for p in ph:
-            add(p, 6, False)
-        low = html.unescape(t.lower())
+            add(p, 6, False, url)
+
+        low = html.unescape(page.lower())
         for p, (bw, sc, office_flag) in proximity_scan(low).items():
-            add(p, sc, office_flag)
+            add(p, sc, office_flag, url)
 
         if cand_good or cand_office:
             break
@@ -356,8 +341,13 @@ def lookup_phone(a, s):
     phone = ""
     if cand_good:
         phone = max(cand_good, key=cand_good.get)
-    elif not cand_good and cand_office:
-        phone = ""    # prefer blank over office/main only
+    elif cand_office:
+        phone = ""
+
+    if phone:
+        LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "unknown"))
+        PHONE_SRC[k] = src_good.get(phone, "unknown")
+
     cache_p[k] = phone
     return phone
 
@@ -365,7 +355,8 @@ def lookup_email(a, s):
     k = f"{a}|{s}"
     if k in cache_e:
         return cache_e[k]
-    cand = defaultdict(int)
+
+    cand, src_e = defaultdict(int), {}
 
     queries = build_q_email(a, s)[:MAX_Q_EMAIL]
     google_batches = pmap(google_items, queries)
@@ -375,30 +366,37 @@ def lookup_email(a, s):
             mail = clean_email(it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email", ""))
             if ok_email(mail):
                 cand[mail] += 3
+                src_e.setdefault(mail, f"CSE:{it.get('link','')}")
 
     urls = [it.get("link", "") for items in google_batches for it in items][:30]
     html_pages = pmap(fetch, urls)
 
-    for t in html_pages:
-        if not t or a.lower() not in (t or "").lower():
+    for url, page in zip(urls, html_pages):
+        if not page or a.lower() not in page.lower():
             continue
-        _, em = extract_struct(t)
+        _, em = extract_struct(page)
         for m in em:
             m = clean_email(m)
             if ok_email(m):
                 cand[m] += 3
-        for m in EMAIL_RE.findall(t):
+                src_e.setdefault(m, url)
+        for m in EMAIL_RE.findall(page):
             m = clean_email(m)
             if ok_email(m):
                 cand[m] += 1
+                src_e.setdefault(m, url)
 
         if cand:
             break
 
     tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in a.split()}
-    good = {m: sc for m, sc in cand.items()
-            if any(tok and tok in m.lower() for tok in tokens)}
+    good = {m: sc for m, sc in cand.items() if any(tok and tok in m.lower() for tok in tokens)}
     email = max(good, key=good.get) if good else ""
+
+    if email:
+        LOG.debug("EMAIL WIN %s via %s", email, src_e.get(email, "unknown"))
+        EMAIL_SRC[k] = src_e.get(email, "unknown")
+
     cache_e[k] = email
     return email
 
@@ -500,6 +498,6 @@ if __name__ == "__main__":
     LOG.debug("Sample fields on first fresh row: %s", list(fresh_rows[0].keys()))
     process_rows(fresh_rows)
 
-    # structured-metrics flush
     if METRICS:
         LOG.info("metrics %s", dict(METRICS))
+
