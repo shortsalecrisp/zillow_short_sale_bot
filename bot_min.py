@@ -1,4 +1,4 @@
-# === bot_min.py  (June 2025 → Google-CSE-first, Zillow skip, SMS confirm, ZPID vault) ============
+# === bot_min.py  (June 2025 → SMS “x” only after real confirmation) =================
 
 import os, sys, json, logging, re, time, html, requests, concurrent.futures
 from collections import defaultdict, Counter
@@ -33,6 +33,7 @@ logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
 LOG = logging.getLogger("bot")
 
 # ───────────────────────── CONFIGS ─────────────────────────────────
+MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
 BACKOFF_FACTOR      = 1.7
 MAX_BACKOFF_SECONDS = 12
@@ -72,37 +73,10 @@ LABEL_TABLE = {"mobile":4,"cell":4,"direct":4,"text":4,"c:":4,"m:":4,
 LABEL_RE = re.compile("(" + "|".join(map(re.escape, LABEL_TABLE)) + ")", re.I)
 US_AREA_CODES = {str(i) for i in range(201, 990)}
 
-# ─────────────────────── Google / Sheets auth ─────────────────────
-creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
-sheets_service  = build("sheets", "v4", credentials=creds, cache_discovery=False)
-gc              = gspread.authorize(creds)
-ws              = gc.open_by_key(GSHEET_ID).sheet1
-
-# ─────────────────── ZPID Vault dedup sheet ───────────────────────
-VAULT_SHEET_NAME = "Vault"
-try:
-    vault_ws = gc.open_by_key(GSHEET_ID).worksheet(VAULT_SHEET_NAME)
-except Exception:
-    vault_ws = gc.open_by_key(GSHEET_ID).add_worksheet(title=VAULT_SHEET_NAME, rows="1", cols="1")
-
-try:
-    ZPID_VAULT = set(vault_ws.col_values(1))
-except Exception as e:
-    LOG.error("Vault load error %s", e)
-    ZPID_VAULT = set()
-
-def vault_contains(zpid: str) -> bool:
-    return zpid in ZPID_VAULT
-
-def vault_add(zpid: str):
-    if not zpid or zpid in ZPID_VAULT:
-        return
-    try:
-        vault_ws.append_row([zpid])
-        ZPID_VAULT.add(zpid)
-        LOG.debug("Vault added zpid %s", zpid)
-    except Exception as e:
-        LOG.error("Vault append error %s", e)
+creds = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
+sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+gc = gspread.authorize(creds)
+ws = gc.open_by_key(GSHEET_ID).sheet1
 
 # ───────────────────────── SITE LISTS ──────────────────────────────
 AGENT_SITES = [
@@ -124,8 +98,8 @@ SOCIAL_CLAUSE    = "site:facebook.com OR site:linkedin.com"
 cache_p, cache_e = {}, {}
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY)
 
-# ────────────────────────── UTILITIES ─────────────────────────────
-def is_short_sale(t): 
+# ────────────────────────── UTILITIES ──────────────────────────────
+def is_short_sale(t):
     return SHORT_RE.search(t) and not BAD_RE.search(t)
 
 def fmt_phone(r):
@@ -137,18 +111,18 @@ def valid_phone(p):
     if phonenumbers:
         try:
             return phonenumbers.is_possible_number(phonenumbers.parse(p, "US"))
-        except:
+        except Exception:
             return False
     return re.fullmatch(r"\d{3}-\d{3}-\d{4}", p) and p[:3] in US_AREA_CODES
 
-def clean_email(e): 
+def clean_email(e):
     return e.split("?")[0].strip()
 
 def ok_email(e):
     e = clean_email(e)
     return e and "@" in e and not e.lower().endswith(IMG_EXT) and not re.search(r"\.(gov|edu|mil)$", e, re.I)
 
-# ─────────────────────── Google Sheets helpers ────────────────────
+# ─────────────────────── Google Sheets helpers ─────────────────────
 def mark_sent(row_idx: int):
     try:
         sheets_service.spreadsheets().values().update(
@@ -219,9 +193,29 @@ def send_sms(num, first, address, row_idx):
         msg_id = data.get("message_id")
         LOG.info("SMS queued to %s id=%s", to_e164, msg_id)
 
-        # mark as soon as we can reasonably confirm
-        mark_sent(row_idx)          # optimistic for now; API gives no web-hook
-        return True
+        # In test mode we mark immediately; otherwise we require confirmed delivery
+        if SMS_TEST_MODE:
+            mark_sent(row_idx)
+            return True
+
+        if not msg_id:
+            LOG.warning("No message_id returned; not marking sent")
+            return False
+
+        good = {"SENT", "DELIVERED", "DELIVERED_TO_HANDSET"}
+        for _ in range(6):                      # up to ≈3 min
+            time.sleep(30)
+            try:
+                s = requests.get(f"{SMS_URL}{msg_id}/status", timeout=10)
+                if s.status_code == 200:
+                    status = s.json().get("status", "").upper()
+                    LOG.debug("SMS id=%s poll status=%s", msg_id, status)
+                    if status in good:
+                        mark_sent(row_idx)
+                        return True
+            except Exception:
+                pass
+        LOG.warning("SMS never confirmed delivered for id=%s", msg_id)
     except Exception as e:
         LOG.error("SMS error %s", e)
     return False
@@ -248,11 +242,6 @@ def is_active_listing(zpid):
 
 # ─────────────────── fetch() with fallback ─────────────────────────
 def fetch(u):
-    # ✱ Gate Zillow – skip noise
-    if "zillow.com" in u.lower():
-        LOG.debug("SKIP Zillow fetch %s", u)
-        return None
-
     bare = u[8:] if u.startswith("https://") else u[7:] if u.startswith("http://") else u
     variants = [
         u,
@@ -262,8 +251,8 @@ def fetch(u):
         f"https://r.jina.ai/http://screenshot/{u}"
     ]
 
-    ratelimit = 0
-    backoff   = 1.0
+    z403 = ratelimit = 0
+    backoff = 1.0
     for url in variants:
         for _ in range(3):
             try:
@@ -275,14 +264,26 @@ def fetch(u):
                 break
 
             if r.status_code == 200:
-                if "unusual traffic" not in r.text[:700].lower():
-                    return r.text
-                METRICS["fetch_unusual"] += 1
+                if "unusual traffic" in r.text[:700].lower():
+                    METRICS["fetch_unusual"] += 1
+                    break
+                return r.text
 
+            if r.status_code == 403 and "zillow.com" in url:
+                z403 += 1
+                METRICS["fetch_403"] += 1
+                if z403 >= MAX_ZILLOW_403:
+                    LOG.debug("bailing after %s consecutive Zillow 403s", z403)
+                    return None
             elif r.status_code == 429:
                 ratelimit += 1
+                METRICS["fetch_429"] += 1
                 if ratelimit >= MAX_RATE_429:
+                    LOG.debug("rate-limit ceiling hit, giving up (%s)", url)
                     return None
+            else:
+                METRICS["fetch_other_%s" % r.status_code] += 1
+
             time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
             backoff *= BACKOFF_FACTOR
     return None
@@ -292,9 +293,11 @@ def google_items(q, tries=3):
     backoff = 1.0
     for _ in range(tries):
         try:
-            j = requests.get("https://www.googleapis.com/customsearch/v1",
-                             params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
-                             timeout=10).json()
+            j = requests.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
+                timeout=10
+            ).json()
             return j.get("items", [])
         except Exception:
             time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
@@ -307,15 +310,19 @@ def build_q_phone(a, s):
         f'"{a}" realtor {s} phone number',
         f'"{a}" {s} ("mobile" OR "cell" OR "direct") phone ({DOMAIN_CLAUSE})',
         f'"{a}" {s} phone ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} contact ({DOMAIN_CLAUSE})'
+        f'"{a}" {s} contact ({DOMAIN_CLAUSE})',
+        f'"{a}" {s} phone {SOCIAL_CLAUSE}',
+        f'"{a}" {s} phone ({BROKERAGE_CLAUSE})',
     ]
 
 def build_q_email(a, s):
     return [
         f'"{a}" {s} email ({DOMAIN_CLAUSE})',
         f'"{a}" {s} contact email ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} real estate email ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} gmail.com'
+        f'"{a}" {s} real estate email ({DOMAIN_CLAUSE} OR {SOCIAL_CLAUSE})',
+        f'"{a}" {s} realty email',
+        f'"{a}" {s} gmail.com',
+        f'"{a}" {s} email ({BROKERAGE_CLAUSE})',
     ]
 
 # ─────────────────── proximity scan & structured ───────────────────
@@ -383,33 +390,29 @@ def lookup_phone(a, s):
         if not office_flag and src:
             src_good[d] = src
 
-    # —— Phase 1: Google-CSE JSON-LD only
-    for q in build_q_phone(a, s)[:MAX_Q_PHONE]:
-        for it in google_items(q):
+    queries = build_q_phone(a, s)[:MAX_Q_PHONE]
+    google_batches = pmap(google_items, queries)
+
+    for items in google_batches:
+        for it in items:
             tel = it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone")
             if tel:
                 add(tel, 4, False, f"CSE:{it.get('link','')}")
-        if cand_good:  # confident hit → stop early
-            break
 
-    # —— Phase 2: fallback fetch only if still no good mobile/direct
-    if not cand_good:
-        urls = []
-        for q in build_q_phone(a, s)[:MAX_Q_PHONE]:
-            urls += [it.get("link", "") for it in google_items(q)]
-        urls = urls[:30]
-        html_pages = pmap(fetch, urls)
-        for url, page in zip(urls, html_pages):
-            if not page or a.lower() not in page.lower():
-                continue
-            ph, _ = extract_struct(page)
-            for p in ph:
-                add(p, 6, False, url)
-            low = html.unescape(page.lower())
-            for p, (bw, sc, office_flag) in proximity_scan(low).items():
-                add(p, sc, office_flag, url)
-            if cand_good or cand_office:
-                break
+    urls = [it.get("link", "") for items in google_batches for it in items][:30]
+    html_pages = pmap(fetch, urls)
+
+    for url, page in zip(urls, html_pages):
+        if not page or a.lower() not in page.lower():
+            continue
+        ph, _ = extract_struct(page)
+        for p in ph:
+            add(p, 6, False, url)
+        low = html.unescape(page.lower())
+        for p, (bw, sc, office_flag) in proximity_scan(low).items():
+            add(p, sc, office_flag, url)
+        if cand_good or cand_office:
+            break
 
     phone = ""
     if cand_good:
@@ -417,11 +420,11 @@ def lookup_phone(a, s):
     elif cand_office:
         phone = ""
 
-    LOG.debug("PHONE WIN=%s SRC=%s GOOD_TOP=%s OFFICE_TOP=%s",
-              phone or "<none>",
-              src_good.get(phone, "unknown"),
-              sorted(cand_good.items(),  key=lambda x: -x[1])[:4],
-              sorted(cand_office.items(), key=lambda x: -x[1])[:4])
+    if phone:
+        LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "unknown"))
+    else:
+        LOG.debug("PHONE FAIL for %s %s  cand_good=%s cand_office=%s",
+                  a, s, cand_good, cand_office)
 
     cache_p[k] = phone
     return phone
@@ -433,45 +436,46 @@ def lookup_email(a, s):
 
     cand, src_e = defaultdict(int), {}
 
-    # —— Phase 1: Google-CSE JSON-LD only
-    for q in build_q_email(a, s)[:MAX_Q_EMAIL]:
-        for it in google_items(q):
+    queries = build_q_email(a, s)[:MAX_Q_EMAIL]
+    google_batches = pmap(google_items, queries)
+
+    for items in google_batches:
+        for it in items:
             mail = clean_email(it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email", ""))
             if ok_email(mail):
                 cand[mail] += 3
                 src_e.setdefault(mail, f"CSE:{it.get('link','')}")
+
+    urls = [it.get("link", "") for items in google_batches for it in items][:30]
+    html_pages = pmap(fetch, urls)
+
+    for url, page in zip(urls, html_pages):
+        if not page or a.lower() not in page.lower():
+            continue
+        _, em = extract_struct(page)
+        for m in em:
+            m = clean_email(m)
+            if ok_email(m):
+                cand[m] += 3
+                src_e.setdefault(m, url)
+        for m in EMAIL_RE.findall(page):
+            m = clean_email(m)
+            if ok_email(m):
+                cand[m] += 1
+                src_e.setdefault(m, url)
         if cand:
             break
-
-    # —— Phase 2: fetch pages only if still empty
-    if not cand:
-        urls = []
-        for q in build_q_email(a, s)[:MAX_Q_EMAIL]:
-            urls += [it.get("link", "") for it in google_items(q)]
-        urls = urls[:30]
-        html_pages = pmap(fetch, urls)
-        for url, page in zip(urls, html_pages):
-            if not page or a.lower() not in page.lower():
-                continue
-            _, em = extract_struct(page)
-            for m in em:
-                m = clean_email(m)
-                if ok_email(m):
-                    cand[m] += 3
-                    src_e.setdefault(m, url)
-            for m in EMAIL_RE.findall(page):
-                m = clean_email(m)
-                if ok_email(m):
-                    cand[m] += 1
-                    src_e.setdefault(m, url)
-            if cand:
-                break
 
     tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in a.split()}
     good = {m: sc for m, sc in cand.items() if any(tok and tok in m.lower() for tok in tokens)}
     email = max(good, key=good.get) if good else ""
 
-    LOG.debug("EMAIL WIN=%s SRC=%s", email or "<none>", src_e.get(email, "unknown"))
+    if email:
+        LOG.debug("EMAIL WIN %s via %s", email, src_e.get(email, "unknown"))
+    else:
+        LOG.debug("EMAIL FAIL for %s %s  tokens=%s  candidates=%s",
+                  a, s, tokens, dict(list(cand.items())[:8]))
+
     cache_e[k] = email
     return email
 
@@ -487,18 +491,12 @@ def extract_name(t):
 # ───────────────────── main row processor ──────────────────────────
 def process_rows(rows):
     for r in rows:
-        zpid = str(r.get("zpid", "")).strip()
-        if zpid and vault_contains(zpid):
-            LOG.debug("SKIP zpid already seen %s", zpid)
-            continue
-        if zpid:
-            vault_add(zpid)
-
         txt = (r.get("description", "") + " " + r.get("openai_summary", "")).strip()
         if not is_short_sale(txt):
-            LOG.debug("SKIP non-short-sale %s (%s)", r.get("street"), zpid)
+            LOG.debug("SKIP non-short-sale %s (%s)", r.get("street"), r.get("zpid"))
             continue
 
+        zpid = str(r.get("zpid", ""))
         if zpid and not is_active_listing(zpid):
             LOG.info("Skip stale/off-market zpid %s", zpid)
             continue
@@ -518,6 +516,7 @@ def process_rows(rows):
             continue
 
         state = r.get("state", "")
+
         phone = fmt_phone(lookup_phone(name, state))
         email = lookup_email(name, state)
 
