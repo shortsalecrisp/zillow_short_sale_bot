@@ -1,5 +1,4 @@
 # === bot_min.py  (June 2025 → SMS “x” only after real confirmation) ================
-
 import os, sys, json, logging, re, time, html, requests, concurrent.futures, random
 from collections import defaultdict, Counter
 from datetime import datetime
@@ -12,6 +11,7 @@ try:
     from bs4 import BeautifulSoup
 except ImportError:
     BeautifulSoup = None
+
 import gspread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
@@ -101,40 +101,23 @@ _executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY
 
 # ─────────────────── query builders (NEW) ──────────────────────────
 def _name_tokens(name: str) -> list[str]:
-    """Helper: splits the agent’s name into search-friendly tokens >1 char."""
+    """Split agent name into tokens >1 char for search queries."""
     return [t for t in re.split(r"\s+", name.strip()) if len(t) > 1]
 
+
 def build_q_phone(name: str, state: str) -> list[str]:
-    """
-    Return a list of Google CSE queries (most specific → least) for phone lookup.
-    """
     tokens = _name_tokens(name)
     base   = " ".join(tokens) + f" {state} realtor phone number"
-    # Shuffle sites a bit so we don’t hammer the same domain every search
     portals = ["realtor.com", "zillow.com", "kw.com", "redfin.com", "homesnap.com"]
-    random.shuffle(portals)
-    return [
-        base + f" site:{portals[0]}",
-        base + f" site:{portals[1]}",
-        base + f" site:{portals[2]}",
-        base + f" site:{portals[3]}",
-        base,
-    ][:MAX_Q_PHONE]
+    random.shuffle(portals)                       # avoid repetitive patterns
+    return [f"{base} site:{p}" for p in portals[:4]] + [base]
+
 
 def build_q_email(name: str, state: str) -> list[str]:
-    """
-    Return a list of Google CSE queries (most specific → least) for email lookup.
-    """
     tokens = _name_tokens(name)
     base   = " ".join(tokens) + f" {state} realtor email address"
     portals = ["realtor.com", "linkedin.com", "kw.com", "facebook.com"]
-    return [
-        base + f" site:{portals[0]}",
-        base + f" site:{portals[1]}",
-        base + f" site:{portals[2]}",
-        base + f" site:{portals[3]}",
-        base,
-    ][:MAX_Q_EMAIL]
+    return [f"{base} site:{p}" for p in portals[:4]] + [base]
 
 
 # ────────────────────────── UTILITIES ──────────────────────────────
@@ -160,6 +143,7 @@ def clean_email(e):
 def ok_email(e):
     e = clean_email(e)
     return e and "@" in e and not e.lower().endswith(IMG_EXT) and not re.search(r"\.(gov|edu|mil)$", e, re.I)
+
 
 # ────────────────────────── fetch helpers ──────────────────────────
 def fetch_simple(u):
@@ -705,3 +689,4 @@ if __name__ == "__main__":
 
     if METRICS:
         LOG.info("metrics %s", dict(METRICS))
+
