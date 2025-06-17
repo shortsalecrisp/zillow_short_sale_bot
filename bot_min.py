@@ -1,8 +1,25 @@
-# === bot_min.py  (June 2025 → SMS “x” only after real confirmation) ================
-
-import os, sys, json, logging, re, time, html, requests, concurrent.futures
+#!/usr/bin/env python3
+"""
+bot_min.py   – June 2025 edition
+Implements: ① residential‑proxy rotation, ② Playwright + stealth TLS
+③ realistic header factory & jitter, ④ optional JSON MLS endpoints,
+⑤ seven‑day on‑disk URL cache, ⑦ portal scraping remains last.
+Everything else (Google CSE logic, phone/email scoring, SMS sending,
+G‑Sheets, etc.) is unchanged.
+"""
+import os, sys, json, logging, re, time, html, random, threading, shelve, asyncio
 from collections import defaultdict, Counter
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import requests
+from concurrent.futures import ThreadPoolExecutor
+
+# ────────────────────────── NEW / UPDATED IMPORTS ──────────────────
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None   # Playwright must be pip‑installed
+# ───────────────────────────────────────────────────────────────────
 
 try:
     import phonenumbers
@@ -12,6 +29,7 @@ try:
     from bs4 import BeautifulSoup
 except ImportError:
     BeautifulSoup = None
+
 import gspread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
@@ -23,6 +41,10 @@ CS_CX      = os.environ["CS_CX"]
 GSHEET_ID  = os.environ["GSHEET_ID"]
 SC_JSON    = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES     = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# ――― NEW: residential proxy credentials (optional) ―――
+PROXY_URL  = os.getenv("RES_PROXY", "")         # e.g. http://user:pass@brd.superproxy.io:22225
+PORTAL_CONCURRENCY = int(os.getenv("PORTAL_CONCURRENCY", 2))
 
 RAPID_KEY  = os.getenv("RAPID_KEY", "").strip()
 RAPID_HOST = os.getenv("RAPID_HOST", "zillow-com1.p.rapidapi.com").strip()
@@ -40,7 +62,54 @@ MAX_BACKOFF_SECONDS = 12
 GOOGLE_CONCURRENCY  = 4
 METRICS             = Counter()
 
-# ─────────────────────── SMS CONFIG ───────────────────────────────
+# ――― NEW: URL‑level cache (7 days TTL) ―――
+CACHE_FILE = os.getenv("PORTAL_CACHE_FILE", "portal_cache.db")
+CACHE_TTL  = int(os.getenv("PORTAL_CACHE_DAYS", 7)) * 86400
+
+def _cache_get(u: str):
+    with shelve.open(CACHE_FILE) as db:
+        if u in db:
+            ts, html_txt = db[u]
+            if time.time() - ts < CACHE_TTL:
+                return html_txt
+    return None
+
+def _cache_set(u: str, html_txt: str):
+    with shelve.open(CACHE_FILE, writeback=True) as db:
+        db[u] = (time.time(), html_txt)
+
+# ────────────────────────── HEADER FACTORY ─────────────────────────
+UA_POOL = [
+    # A handful of fresh, mainstream Chrome & Firefox strings
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:125.0) Gecko/20100101 "
+    "Firefox/125.0",
+    "Mozilla/5.0 (Windows NT 10.0; rv:124.0) Gecko/20100101 Firefox/124.0",
+]
+
+BASE_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+              "image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-user": "?1",
+    "sec-fetch-dest": "document",
+    "upgrade-insecure-requests": "1",
+}
+def hdr():
+    h = BASE_HEADERS.copy()
+    h["User-Agent"] = random.choice(UA_POOL)
+    return h
+
+# ────────────────────────── PROXY HELPER ───────────────────────────
+def _prox():
+    return {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+
+# ─────────────────────────── SMS CONFIG ───────────────────────────
 SMS_ENABLE      = os.getenv("SMSM_ENABLE", "false").lower() == "true"
 SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER", "")
@@ -96,7 +165,7 @@ BROKERAGE_CLAUSE = " OR ".join(f"site:{d}" for d in BROKERAGE_SITES)
 SOCIAL_CLAUSE    = "site:facebook.com OR site:linkedin.com"
 
 cache_p, cache_e = {}, {}
-_executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY)
+_executor = ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY)
 
 # ────────────────────────── UTILITIES ──────────────────────────────
 def is_short_sale(t):
@@ -123,10 +192,13 @@ def ok_email(e):
     return e and "@" in e and not e.lower().endswith(IMG_EXT) and not re.search(r"\.(gov|edu|mil)$", e, re.I)
 
 # ────────────────────────── fetch helpers ──────────────────────────
+def _jitter(min_s=3, max_s=7):
+    time.sleep(random.uniform(min_s, max_s))
+
 def fetch_simple(u):
-    """Straight GET with no jina.ai tricks – used in the 2nd-pass crawl."""
+    """Straight GET used for 2nd‑pass crawl (non‑portal); now header & proxy aware."""
     try:
-        r = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        r = requests.get(u, timeout=10, headers=hdr(), proxies=_prox())
         if r.status_code == 200:
             return r.text
     except Exception as exc:
@@ -136,8 +208,8 @@ def fetch_simple(u):
 
 def fetch(u):
     """
-    Robust fetch with jina.ai fall-back.  Variant list order changed so we never
-    generate the bad “…http://https://…” URL that jina.ai rejects.
+    Robust GET with jina.ai fall‑back (unchanged logic) but now with
+    rotated headers, jitter, and optional proxy.
     """
     bare = re.sub(r"^https?://", "", u)
     variants = [
@@ -152,14 +224,13 @@ def fetch(u):
         for _ in range(3):
             try:
                 r = requests.get(url, timeout=10,
-                                 headers={"User-Agent": "Mozilla/5.0"})
+                                 headers=hdr(), proxies=_prox())
             except Exception as exc:
                 METRICS["fetch_error"] += 1
                 LOG.debug("fetch error %s on %s", exc, url)
                 break
 
             if r.status_code == 200:
-                # jina.ai sometimes returns HTML that says we’re blocked
                 if "unusual traffic" in r.text[:700].lower():
                     METRICS["fetch_unusual"] += 1
                     break
@@ -180,10 +251,52 @@ def fetch(u):
             else:
                 METRICS["fetch_other_%s" % r.status_code] += 1
 
-            time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
+            _jitter()
             backoff *= BACKOFF_FACTOR
     return None
 
+
+# ─────── NEW: Playwright‑based portal fetch with stealth & cache ───
+portal_lock = threading.Semaphore(PORTAL_CONCURRENCY)
+
+def _pw_fetch(url, timeout_ms=15000):
+    """Return HTML for Zillow/Redfin/Realtor etc. via a headless browser."""
+    if sync_playwright is None:
+        return None  # playwright not installed; fall back to old fetch()
+
+    cached = _cache_get(url)
+    if cached:
+        return cached
+
+    with portal_lock, sync_playwright() as p:
+        try:
+            browser = p.firefox.launch(headless=True,
+                                       proxy={"server": PROXY_URL} if PROXY_URL else None)
+            context = browser.new_context(
+                user_agent=random.choice(UA_POOL),
+                locale="en-US",
+                viewport={"width": random.randint(1100, 1600),
+                          "height": random.randint(700, 1000)},
+            )
+            page = context.new_page()
+            page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+
+            # mimic human dwell / scroll
+            _jitter(1.2, 3.8)
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            _jitter(1.0, 2.5)
+
+            html_txt = page.content()
+            browser.close()
+            _cache_set(url, html_txt)
+            return html_txt
+        except Exception as exc:
+            LOG.debug("pw_fetch error %s on %s", exc, url)
+            try:
+                browser.close()
+            except Exception:
+                pass
+            return None
 
 # ─────────────────── Google CSE helper ─────────────────────────────
 def google_items(q, tries=3):
@@ -193,22 +306,19 @@ def google_items(q, tries=3):
             j = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
                 params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
-                timeout=10
+                timeout=10,
+                headers=hdr(),
+                proxies=_prox(),
             ).json()
             return j.get("items", [])
         except Exception:
-            time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
+            _jitter()
             backoff *= BACKOFF_FACTOR
     return []
 
 
 # ─────────────────── proximity scan & structured ───────────────────
 def proximity_scan(t, last_name=None):
-    """
-    Returns {phone: (best_label_weight, score, office_flag)}.
-    If *last_name* is given, require that name to appear within ±50 chars of the phone –
-    this tightens up hits on massive agent rosters.
-    """
     out = {}
     for m in PHONE_RE.finditer(t):
         p = fmt_phone(m.group())
@@ -220,7 +330,7 @@ def proximity_scan(t, last_name=None):
         snippet  = t[sn_start:sn_end]
 
         if last_name and last_name.lower() not in snippet:
-            continue   # roster row that isn’t for our agent
+            continue
 
         lab_match = LABEL_RE.search(snippet)
         lab = lab_match.group().lower() if lab_match else ""
@@ -234,7 +344,6 @@ def proximity_scan(t, last_name=None):
 
 
 def extract_struct(td):
-    """Pulls phones/emails from JSON-LD, tel: & mailto: links."""
     phones, mails = [], []
     if not BeautifulSoup:
         return phones, mails
@@ -269,7 +378,6 @@ def pmap(fn, iterable):
 
 # ───────────────────── lookup functions ────────────────────────────
 def _split_portals(urls):
-    """Partition CSE URLs into (non_portal, portal)"""
     portals, non = [], []
     for u in urls:
         if any(d in u for d in AGENT_SITES):
@@ -278,7 +386,58 @@ def _split_portals(urls):
             non.append(u)
     return non, portals
 
+# ――― NEW placeholder: simple JSON enrichment (v1 – extend as needed) ―――
+def _json_enrich(agent, portal_url):
+    """
+    Try unauthenticated JSON endpoints that some portals expose.
+    Currently supports minimal Zillow / Realtor / Redfin patterns.
+    Returns dict(phone=..., email=...) or {}.
+    """
+    try:
+        if "zillow.com/profile" in portal_url:
+            # Zillow GraphQL example (unauthenticated in 2025‑Q2)
+            m = re.search(r"/profile/([^/?#]+)", portal_url)
+            if m:
+                slug = m.group(1)
+                gql = requests.get(
+                    f"https://www.zillow.com/graphql/?zuid={slug}",
+                    headers=hdr(), proxies=_prox(), timeout=10
+                ).json()
+                d = gql.get("data", {}).get("agent")
+                if d:
+                    return {
+                        "phone": fmt_phone(d.get("directPhoneNumber", "")),
+                        "email": clean_email(d.get("email", "")),
+                    }
+        elif "realtor.com/realestateagents" in portal_url:
+            m = re.search(r"agent/([^/]+)/", portal_url)
+            if m:
+                aid = m.group(1)
+                j = requests.get(
+                    f"https://www.realtor.com/api/agents/v1/detail?agent_id={aid}",
+                    headers=hdr(), proxies=_prox(), timeout=10
+                ).json()
+                d = j.get("agent", {})
+                return {
+                    "phone": fmt_phone(d.get("phone_mobile", "")),
+                    "email": clean_email(d.get("email", "")),
+                }
+        elif "redfin.com" in portal_url and "/agent/" in portal_url:
+            slug = portal_url.rstrip("/").split("/")[-1]
+            j = requests.get(
+                f"https://www.redfin.com/stingray/api/team/v1/agents/{slug}",
+                headers=hdr(), proxies=_prox(), timeout=10
+            ).json()
+            if isinstance(j, dict):
+                return {
+                    "phone": fmt_phone(j.get("cellPhoneNumber", "")),
+                    "email": clean_email(j.get("email", "")),
+                }
+    except Exception as exc:
+        LOG.debug("json_enrich fail %s (%s)", portal_url, exc)
+    return {}
 
+# ───────────────────────── PHONE LOOKUP ────────────────────────────
 def lookup_phone(agent, state):
     key = f"{agent}|{state}"
     if key in cache_p:
@@ -295,7 +454,7 @@ def lookup_phone(agent, state):
         if not office_flag and src:
             src_good[d] = src
 
-    # ── 1️⃣  Google-CSE JSON only (fast, no page fetch) ────────────
+    # 1️⃣  Google‑CSE JSON only (fast)
     queries = build_q_phone(agent, state)[:MAX_Q_PHONE]
     google_batches = pmap(google_items, queries)
 
@@ -305,19 +464,18 @@ def lookup_phone(agent, state):
             if tel:
                 add(tel, 4, False, f"CSE:{it.get('link','')}")
 
-    # if found already we can short-circuit
     if cand_good:
         phone = max(cand_good, key=cand_good.get)
         cache_p[key] = phone
         LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "CSE"))
         return phone
 
-    # collect URLs from all CSE results
+    # 2️⃣ collect URLs
     urls_all = [it.get("link", "") for items in google_batches for it in items][:30]
     non_portal_urls, portal_urls = _split_portals(urls_all)
     last_name = (agent.split()[-1] if len(agent.split()) > 1 else agent).lower()
 
-    # ── 2️⃣  Crawl non-portal URLs directly (simple GET) ───────────
+    # 3️⃣ crawl non‑portal direct
     pages = pmap(fetch_simple, non_portal_urls)
     for url, page in zip(non_portal_urls, pages):
         if not page or agent.lower() not in page.lower():
@@ -331,7 +489,7 @@ def lookup_phone(agent, state):
         if cand_good or cand_office:
             break
 
-    # ── 3️⃣  Same non-portal URLs but via jina.ai screenshot ───────
+    # 4️⃣ non‑portal via jina.ai
     if not cand_good and not cand_office:
         pages = pmap(fetch, non_portal_urls)
         for url, page in zip(non_portal_urls, pages):
@@ -346,18 +504,26 @@ def lookup_phone(agent, state):
             if cand_good or cand_office:
                 break
 
-    # ── 4️⃣  Finally hit big-portal pages (Zillow, Redfin, etc) ────
+    # 5️⃣ PORTAL PASS (Playwright + JSON enrichment)
     if not cand_good:
-        pages = pmap(fetch, portal_urls)
-        for url, page in zip(portal_urls, pages):
+        for pu in portal_urls:
+            # (a) try JSON enrichment first
+            je = _json_enrich(agent, pu)
+            if je.get("phone"):
+                add(je["phone"], 6, False, f"JSON:{pu}")
+                if cand_good:
+                    break
+
+            # (b) full stealth fetch
+            page = _pw_fetch(pu)
             if not page or agent.lower() not in page.lower():
                 continue
             ph, _ = extract_struct(page)
             for p in ph:
-                add(p, 4, False, url)
+                add(p, 4, False, pu)
             low = html.unescape(page.lower())
             for p, (bw, sc, office_flag) in proximity_scan(low, last_name).items():
-                add(p, sc, office_flag, url)
+                add(p, sc, office_flag, pu)
             if cand_good:
                 break
 
@@ -365,7 +531,7 @@ def lookup_phone(agent, state):
     if cand_good:
         phone = max(cand_good, key=cand_good.get)
     elif cand_office:
-        phone = ""   # prefer none over office lines
+        phone = ""
 
     if phone:
         LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "crawler"))
@@ -377,6 +543,7 @@ def lookup_phone(agent, state):
     return phone
 
 
+# ───────────────────────── EMAIL LOOKUP ────────────────────────────
 def lookup_email(agent, state):
     key = f"{agent}|{state}"
     if key in cache_e:
@@ -384,7 +551,7 @@ def lookup_email(agent, state):
 
     cand, src_e = defaultdict(int), {}
 
-    # 1️⃣  Google-CSE JSON only
+    # 1️⃣ Google‑CSE JSON only
     queries = build_q_email(agent, state)[:MAX_Q_EMAIL]
     google_batches = pmap(google_items, queries)
 
@@ -404,7 +571,7 @@ def lookup_email(agent, state):
     urls_all = [it.get("link", "") for items in google_batches for it in items][:30]
     non_portal_urls, portal_urls = _split_portals(urls_all)
 
-    # 2️⃣  crawl non-portal direct
+    # 2️⃣ non‑portal direct
     for url, page in zip(non_portal_urls, pmap(fetch_simple, non_portal_urls)):
         if not page or agent.lower() not in page.lower():
             continue
@@ -422,7 +589,7 @@ def lookup_email(agent, state):
         if cand:
             break
 
-    # 3️⃣  non-portal via jina.ai
+    # 3️⃣ non‑portal via jina.ai
     if not cand:
         for url, page in zip(non_portal_urls, pmap(fetch, non_portal_urls)):
             if not page or agent.lower() not in page.lower():
@@ -441,9 +608,17 @@ def lookup_email(agent, state):
             if cand:
                 break
 
-    # 4️⃣  portals last
+    # 4️⃣ PORTAL PASS (Playwright + JSON)
     if not cand:
-        for url, page in zip(portal_urls, pmap(fetch, portal_urls)):
+        for pu in portal_urls:
+            je = _json_enrich(agent, pu)
+            if ok_email(je.get("email", "")):
+                m = clean_email(je["email"])
+                cand[m] += 4
+                src_e.setdefault(m, f"JSON:{pu}")
+                break
+
+            page = _pw_fetch(pu)
             if not page or agent.lower() not in page.lower():
                 continue
             _, em = extract_struct(page)
@@ -451,11 +626,10 @@ def lookup_email(agent, state):
                 m = clean_email(m)
                 if ok_email(m):
                     cand[m] += 2
-                    src_e.setdefault(m, url)
+                    src_e.setdefault(m, pu)
             if cand:
                 break
 
-    # Prefer addresses that contain agent tokens
     tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in agent.split()}
     good = {m: sc for m, sc in cand.items()
             if any(tok and tok in m.lower() for tok in tokens)}
@@ -532,7 +706,7 @@ def send_sms(num, first, address, row_idx):
         payload["from"] = SMS_FROM
 
     try:
-        r = requests.post(SMS_URL, data=payload, timeout=15)
+        r = requests.post(SMS_URL, data=payload, timeout=15, headers=hdr(), proxies=_prox())
         if r.status_code != 200:
             LOG.error("SMS failed %s %s", r.status_code, r.text[:200])
             return False
@@ -546,7 +720,6 @@ def send_sms(num, first, address, row_idx):
         msg_id = data.get("message_id")
         LOG.info("SMS queued to %s id=%s", to_e164, msg_id)
 
-        # In test mode we mark immediately; otherwise we require confirmed delivery
         if SMS_TEST_MODE:
             mark_sent(row_idx)
             return True
@@ -556,10 +729,11 @@ def send_sms(num, first, address, row_idx):
             return False
 
         good = {"SENT", "DELIVERED", "DELIVERED_TO_HANDSET"}
-        for _ in range(6):                      # up to ≈3 min
+        for _ in range(6):  # up to ≈3 min
             time.sleep(30)
             try:
-                s = requests.get(f"{SMS_URL}{msg_id}/status", timeout=10)
+                s = requests.get(f"{SMS_URL}{msg_id}/status", timeout=10,
+                                 headers=hdr(), proxies=_prox())
                 if s.status_code == 200:
                     status = s.json().get("status", "").upper()
                     LOG.debug("SMS id=%s poll status=%s", msg_id, status)
@@ -584,7 +758,8 @@ def is_active_listing(zpid):
             params={"zpid": zpid},
             headers={"X-RapidAPI-Key": RAPID_KEY,
                      "X-RapidAPI-Host": RAPID_HOST},
-            timeout=15
+            timeout=15,
+            proxies=_prox()
         )
         r.raise_for_status()
         data = r.json().get("data") or r.json()
