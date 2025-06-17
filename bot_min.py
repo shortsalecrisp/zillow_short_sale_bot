@@ -11,7 +11,6 @@ try:
     from bs4 import BeautifulSoup
 except ImportError:
     BeautifulSoup = None
-
 import gspread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
@@ -104,20 +103,22 @@ def _name_tokens(name: str) -> list[str]:
     """Split agent name into tokens >1 char for search queries."""
     return [t for t in re.split(r"\s+", name.strip()) if len(t) > 1]
 
-
 def build_q_phone(name: str, state: str) -> list[str]:
     tokens = _name_tokens(name)
     base   = " ".join(tokens) + f" {state} realtor phone number"
     portals = ["realtor.com", "zillow.com", "kw.com", "redfin.com", "homesnap.com"]
     random.shuffle(portals)                       # avoid repetitive patterns
-    return [f"{base} site:{p}" for p in portals[:4]] + [base]
-
+    return [
+        f"{base} site:{p}" for p in portals[:4]
+    ] + [base]
 
 def build_q_email(name: str, state: str) -> list[str]:
     tokens = _name_tokens(name)
     base   = " ".join(tokens) + f" {state} realtor email address"
     portals = ["realtor.com", "linkedin.com", "kw.com", "facebook.com"]
-    return [f"{base} site:{p}" for p in portals[:4]] + [base]
+    return [
+        f"{base} site:{p}" for p in portals[:4]
+    ] + [base]
 
 
 # ────────────────────────── UTILITIES ──────────────────────────────
@@ -143,6 +144,50 @@ def clean_email(e):
 def ok_email(e):
     e = clean_email(e)
     return e and "@" in e and not e.lower().endswith(IMG_EXT) and not re.search(r"\.(gov|edu|mil)$", e, re.I)
+
+
+# ───────────────────────── Rapid-API helpers  ──────────────────────
+def _phone_obj_to_str(obj: dict) -> str:
+    """Convert Zillow phone dict to 'xxx-yyy-zzzz'."""
+    try:
+        ac, pre, num = obj["areacode"], obj["prefix"], obj["number"]
+        return f"{ac}-{pre}-{num}"
+    except Exception:
+        return ""
+
+def rapid_phone(zpid: str) -> str:
+    """
+    Pull phone via Rapid-API /property.
+    Returns '' if not found / invalid.
+    """
+    if not (RAPID_KEY and zpid):
+        return ""
+    try:
+        r = requests.get(
+            f"https://{RAPID_HOST}/property",
+            params={"zpid": zpid},
+            headers={"X-RapidAPI-Key": RAPID_KEY,
+                     "X-RapidAPI-Host": RAPID_HOST},
+            timeout=15,
+        )
+        data = r.json().get("data", r.json())
+
+        # listed_by first (usually the true listing agent)
+        lb = data.get("listed_by") or {}
+        p  = _phone_obj_to_str(lb.get("phone", {}))
+        if valid_phone(p):
+            return p
+
+        # then any contact_recipients with an agent badge
+        for rec in data.get("contact_recipients", []):
+            badge = str(rec.get("badge_type", "")).lower()
+            if badge in {"listing agent", "premier agent", "agent"}:
+                p = _phone_obj_to_str(rec.get("phone", {}))
+                if valid_phone(p):
+                    return p
+    except Exception as exc:
+        LOG.debug("rapid_phone error %s", exc)
+    return ""
 
 
 # ────────────────────────── fetch helpers ──────────────────────────
@@ -302,10 +347,17 @@ def _split_portals(urls):
     return non, portals
 
 
-def lookup_phone(agent, state):
+def lookup_phone(agent, state, zpid=""):
     key = f"{agent}|{state}"
     if key in cache_p:
         return cache_p[key]
+
+    # ── Rapid-API shortcut ──────────────────────────────────────────
+    rp = fmt_phone(rapid_phone(zpid))
+    if rp:
+        LOG.debug("PHONE WIN %s via RapidAPI", rp)
+        cache_p[key] = rp
+        return rp
 
     cand_good, cand_office, src_good = {}, {}, {}
 
@@ -657,7 +709,7 @@ def process_rows(rows):
 
         state = r.get("state", "")
 
-        phone = fmt_phone(lookup_phone(name, state))
+        phone = fmt_phone(lookup_phone(name, state, zpid))   # ← passes zpid
         email = lookup_email(name, state)
 
         if phone and phone_exists(phone):
