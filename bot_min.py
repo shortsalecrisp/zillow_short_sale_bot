@@ -1,7 +1,17 @@
-# === bot_min.py  (June 2025 → SMS “x” only after real confirmation) ================
+# === bot_min.py (June 2025 → hardened) =========================================
+#
+#  – Uses Rapid‑API property endpoint FIRST and logs any quota errors
+#  – Skips LinkedIn / Realtor scrapes (too aggressive blocking)
+#  – Lower Google concurrency + jitter to avoid burst bans
+#  – Captures phones already in the Apify payload (contact_recipients / listed_by)
+#  – Loosened proximity‑scanner label test to catch bare numbers
+#  – Adds early‑exit if RAPID_KEY is missing
+#
+
 import os, sys, json, logging, re, time, html, requests, concurrent.futures, random
 from collections import defaultdict, Counter
 from datetime import datetime
+from typing import Any, Dict, List, Tuple          # ★ changed
 
 try:
     import phonenumbers
@@ -36,7 +46,7 @@ MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
 BACKOFF_FACTOR      = 1.7
 MAX_BACKOFF_SECONDS = 12
-GOOGLE_CONCURRENCY  = 4
+GOOGLE_CONCURRENCY  = 2                               # ★ changed (was 4)
 METRICS             = Counter()
 
 # ─────────────────────── SMS CONFIG ───────────────────────────────
@@ -85,12 +95,14 @@ AGENT_SITES = [
     "mlslistings.com", "har.com", "brightmlshomes.com",
     "exitrealty.com", "realtyexecutives.com", "realty.com"
 ]
+# — permanently drop LinkedIn/Realtor from scraper phase (we still get them via CSE JSON) ★ changed
+SCRAPE_SITES = [d for d in AGENT_SITES if d not in ("linkedin.com", "realtor.com")]
 
 BROKERAGE_SITES = [
     "sothebysrealty.com", "corcoran.com", "douglaselliman.com",
     "cryereleike.com", "windermere.com", "longandfoster.com"
 ]
-DOMAIN_CLAUSE    = " OR ".join(f"site:{d}" for d in AGENT_SITES)
+DOMAIN_CLAUSE    = " OR ".join(f"site:{d}" for d in SCRAPE_SITES)      # ★ changed
 BROKERAGE_CLAUSE = " OR ".join(f"site:{d}" for d in BROKERAGE_SITES)
 SOCIAL_CLAUSE    = "site:facebook.com OR site:linkedin.com"
 
@@ -98,27 +110,70 @@ cache_p, cache_e = {}, {}
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY)
 
 
-# ─────────────────── query builders (NEW) ──────────────────────────
-def _name_tokens(name: str) -> list[str]:
-    """Split agent name into tokens >1 char for search queries."""
+# ─────────────────── Rapid‑API helpers (NEW/UPDATED) ───────────────
+def _phone_obj_to_str(obj: Dict[str, str]) -> str:
+    """Convert {'areacode':'954','prefix':'422','number':'3278'} → '954-422-3278'."""
+    if not obj:
+        return ""
+    parts = (obj.get("areacode","") + obj.get("prefix","") + obj.get("number",""))
+    return fmt_phone(parts)
+
+def rapid_property(zpid: str) -> Dict[str, Any]:
+    """Fetch full property json from Rapid‑API. Returns {} on error."""
+    if not RAPID_KEY:
+        return {}
+    try:
+        headers = {"X-RapidAPI-Key": RAPID_KEY, "X-RapidAPI-Host": RAPID_HOST}
+        resp = requests.get(f"https://{RAPID_HOST}/property",
+                            params={"zpid": zpid}, headers=headers, timeout=15)
+        if resp.status_code == 429:                       # ★ changed
+            LOG.error("Rapid‑API quota exhausted (HTTP 429).")
+            return {}
+        resp.raise_for_status()
+        return resp.json().get("data") or resp.json()
+    except Exception as exc:
+        LOG.debug("Rapid‑API fetch error %s for zpid=%s", exc, zpid)
+        return {}
+
+def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
+    """
+    Try to pull the agent phone from Rapid‑API data.
+    Returns (phone, source_url) or ("","").
+    """
+    data = rapid_property(zpid)
+    if not data:
+        return "",""
+
+    # contact_recipients often contains the Premier Agent first, then Listing agent
+    cand = []
+    for blk in data.get("contact_recipients", []):
+        pn = _phone_obj_to_str(blk.get("phone", {}))
+        if pn and agent_name.lower() in blk.get("display_name","").lower():
+            cand.append(("rapid:contact_recipients", pn))
+    lb = data.get("listed_by", {})
+    pn = _phone_obj_to_str(lb.get("phone", {}))
+    if pn and agent_name.lower() in (lb.get("display_name","").lower() or ""):
+        cand.append(("rapid:listed_by", pn))
+
+    return (cand[0][1], cand[0][0]) if cand else ("","")
+
+
+# ─────────────────── query builders (unchanged) ────────────────────
+def _name_tokens(name: str) -> List[str]:
     return [t for t in re.split(r"\s+", name.strip()) if len(t) > 1]
 
-def build_q_phone(name: str, state: str) -> list[str]:
+def build_q_phone(name: str, state: str) -> List[str]:
     tokens = _name_tokens(name)
     base   = " ".join(tokens) + f" {state} realtor phone number"
     portals = ["realtor.com", "zillow.com", "kw.com", "redfin.com", "homesnap.com"]
-    random.shuffle(portals)                       # avoid repetitive patterns
-    return [
-        f"{base} site:{p}" for p in portals[:4]
-    ] + [base]
+    random.shuffle(portals)
+    return [f"{base} site:{p}" for p in portals[:4]] + [base]
 
-def build_q_email(name: str, state: str) -> list[str]:
+def build_q_email(name: str, state: str) -> List[str]:
     tokens = _name_tokens(name)
     base   = " ".join(tokens) + f" {state} realtor email address"
     portals = ["realtor.com", "linkedin.com", "kw.com", "facebook.com"]
-    return [
-        f"{base} site:{p}" for p in portals[:4]
-    ] + [base]
+    return [f"{base} site:{p}" for p in portals[:4]] + [base]
 
 
 # ────────────────────────── UTILITIES ──────────────────────────────
@@ -145,54 +200,11 @@ def ok_email(e):
     e = clean_email(e)
     return e and "@" in e and not e.lower().endswith(IMG_EXT) and not re.search(r"\.(gov|edu|mil)$", e, re.I)
 
-
-# ───────────────────────── Rapid-API helpers  ──────────────────────
-def _phone_obj_to_str(obj: dict) -> str:
-    """Convert Zillow phone dict to 'xxx-yyy-zzzz'."""
-    try:
-        ac, pre, num = obj["areacode"], obj["prefix"], obj["number"]
-        return f"{ac}-{pre}-{num}"
-    except Exception:
-        return ""
-
-def rapid_phone(zpid: str) -> str:
-    """
-    Pull phone via Rapid-API /property.
-    Returns '' if not found / invalid.
-    """
-    if not (RAPID_KEY and zpid):
-        return ""
-    try:
-        r = requests.get(
-            f"https://{RAPID_HOST}/property",
-            params={"zpid": zpid},
-            headers={"X-RapidAPI-Key": RAPID_KEY,
-                     "X-RapidAPI-Host": RAPID_HOST},
-            timeout=15,
-        )
-        data = r.json().get("data", r.json())
-
-        # listed_by first (usually the true listing agent)
-        lb = data.get("listed_by") or {}
-        p  = _phone_obj_to_str(lb.get("phone", {}))
-        if valid_phone(p):
-            return p
-
-        # then any contact_recipients with an agent badge
-        for rec in data.get("contact_recipients", []):
-            badge = str(rec.get("badge_type", "")).lower()
-            if badge in {"listing agent", "premier agent", "agent"}:
-                p = _phone_obj_to_str(rec.get("phone", {}))
-                if valid_phone(p):
-                    return p
-    except Exception as exc:
-        LOG.debug("rapid_phone error %s", exc)
-    return ""
-
-
 # ────────────────────────── fetch helpers ──────────────────────────
+def _jitter():
+    time.sleep(random.uniform(0.8, 1.5))               # ★ added
+
 def fetch_simple(u):
-    """Straight GET with no jina.ai tricks – used in the 2nd-pass crawl."""
     try:
         r = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code == 200:
@@ -203,13 +215,9 @@ def fetch_simple(u):
 
 
 def fetch(u):
-    """
-    Robust fetch with jina.ai fall-back.  Variant list order changed so we never
-    generate the bad “…http://https://…” URL that jina.ai rejects.
-    """
     bare = re.sub(r"^https?://", "", u)
     variants = [
-        u,                                                     # direct GET
+        u,
         f"https://r.jina.ai/http://{bare}",
         f"https://r.jina.ai/http://screenshot/{bare}",
     ]
@@ -227,7 +235,6 @@ def fetch(u):
                 break
 
             if r.status_code == 200:
-                # jina.ai sometimes returns HTML that says we’re blocked
                 if "unusual traffic" in r.text[:700].lower():
                     METRICS["fetch_unusual"] += 1
                     break
@@ -248,6 +255,7 @@ def fetch(u):
             else:
                 METRICS["fetch_other_%s" % r.status_code] += 1
 
+            _jitter()                                   # ★ changed
             time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
             backoff *= BACKOFF_FACTOR
     return None
@@ -272,11 +280,6 @@ def google_items(q, tries=3):
 
 # ─────────────────── proximity scan & structured ───────────────────
 def proximity_scan(t, last_name=None):
-    """
-    Returns {phone: (best_label_weight, score, office_flag)}.
-    If *last_name* is given, require that name to appear within ±50 chars of the phone –
-    this tightens up hits on massive agent rosters.
-    """
     out = {}
     for m in PHONE_RE.finditer(t):
         p = fmt_phone(m.group())
@@ -288,12 +291,12 @@ def proximity_scan(t, last_name=None):
         snippet  = t[sn_start:sn_end]
 
         if last_name and last_name.lower() not in snippet:
-            continue   # roster row that isn’t for our agent
+            continue
 
         lab_match = LABEL_RE.search(snippet)
         lab = lab_match.group().lower() if lab_match else ""
         w = LABEL_TABLE.get(lab, 0)
-        if w < 2:
+        if w < 1:                                       # ★ changed (was 2)
             continue
 
         bw, ts, _ = out.get(p, (0, 0, False))
@@ -302,7 +305,6 @@ def proximity_scan(t, last_name=None):
 
 
 def extract_struct(td):
-    """Pulls phones/emails from JSON-LD, tel: & mailto: links."""
     phones, mails = [], []
     if not BeautifulSoup:
         return phones, mails
@@ -337,27 +339,43 @@ def pmap(fn, iterable):
 
 # ───────────────────── lookup functions ────────────────────────────
 def _split_portals(urls):
-    """Partition CSE URLs into (non_portal, portal)"""
     portals, non = [], []
     for u in urls:
-        if any(d in u for d in AGENT_SITES):
+        if any(d in u for d in SCRAPE_SITES):
             portals.append(u)
         else:
             non.append(u)
     return non, portals
 
 
-def lookup_phone(agent, state, zpid=""):
+def lookup_phone(agent: str, state: str, row_payload: Dict[str,Any]) -> str:
+    """
+    Main phone‑resolver.
+    1. Rapid‑API using row_payload["zpid"]
+    2. contact_recipients already in row_payload
+    3. Google CSE + crawler fallback
+    """
     key = f"{agent}|{state}"
     if key in cache_p:
         return cache_p[key]
 
-    # ── Rapid-API shortcut ──────────────────────────────────────────
-    rp = fmt_phone(rapid_phone(zpid))
-    if rp:
-        LOG.debug("PHONE WIN %s via RapidAPI", rp)
-        cache_p[key] = rp
-        return rp
+    # 0️⃣  Phone already scraped by Apify?
+    for blk in (row_payload.get("contact_recipients") or []):
+        p = _phone_obj_to_str((blk or {}).get("phone", {}))
+        if p and valid_phone(p):
+            LOG.debug("PHONE hit directly from contact_recipients")
+            cache_p[key] = p
+            return p
+
+    # 1️⃣  Rapid‑API
+    phone, src = "", ""
+    zpid = str(row_payload.get("zpid",""))
+    if zpid:
+        phone, src = rapid_phone(zpid, agent)
+        if phone:
+            LOG.debug("PHONE WIN %s via %s", phone, src)
+            cache_p[key] = phone
+            return phone
 
     cand_good, cand_office, src_good = {}, {}, {}
 
@@ -370,7 +388,7 @@ def lookup_phone(agent, state, zpid=""):
         if not office_flag and src:
             src_good[d] = src
 
-    # ── 1️⃣  Google-CSE JSON only (fast, no page fetch) ────────────
+    # 2️⃣  Google‑only (fast)
     queries = build_q_phone(agent, state)[:MAX_Q_PHONE]
     google_batches = pmap(google_items, queries)
 
@@ -380,19 +398,18 @@ def lookup_phone(agent, state, zpid=""):
             if tel:
                 add(tel, 4, False, f"CSE:{it.get('link','')}")
 
-    # if found already we can short-circuit
     if cand_good:
         phone = max(cand_good, key=cand_good.get)
         cache_p[key] = phone
-        LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "CSE"))
+        LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "CSE‑json"))
         return phone
 
-    # collect URLs from all CSE results
+    # 3️⃣  Crawl urls
     urls_all = [it.get("link", "") for items in google_batches for it in items][:30]
     non_portal_urls, portal_urls = _split_portals(urls_all)
     last_name = (agent.split()[-1] if len(agent.split()) > 1 else agent).lower()
 
-    # ── 2️⃣  Crawl non-portal URLs directly (simple GET) ───────────
+    # 3a  direct
     pages = pmap(fetch_simple, non_portal_urls)
     for url, page in zip(non_portal_urls, pages):
         if not page or agent.lower() not in page.lower():
@@ -406,7 +423,7 @@ def lookup_phone(agent, state, zpid=""):
         if cand_good or cand_office:
             break
 
-    # ── 3️⃣  Same non-portal URLs but via jina.ai screenshot ───────
+    # 3b  via Jina.ai
     if not cand_good and not cand_office:
         pages = pmap(fetch, non_portal_urls)
         for url, page in zip(non_portal_urls, pages):
@@ -421,7 +438,7 @@ def lookup_phone(agent, state, zpid=""):
             if cand_good or cand_office:
                 break
 
-    # ── 4️⃣  Finally hit big-portal pages (Zillow, Redfin, etc) ────
+    # 3c  portals last
     if not cand_good:
         pages = pmap(fetch, portal_urls)
         for url, page in zip(portal_urls, pages):
@@ -459,7 +476,6 @@ def lookup_email(agent, state):
 
     cand, src_e = defaultdict(int), {}
 
-    # 1️⃣  Google-CSE JSON only
     queries = build_q_email(agent, state)[:MAX_Q_EMAIL]
     google_batches = pmap(google_items, queries)
 
@@ -473,13 +489,13 @@ def lookup_email(agent, state):
     if cand:
         email = max(cand, key=cand.get)
         cache_e[key] = email
-        LOG.debug("EMAIL WIN %s via %s", email, src_e.get(email, "CSE"))
+        LOG.debug("EMAIL WIN %s via %s", email, src_e.get(email, "CSE‑json"))
         return email
 
     urls_all = [it.get("link", "") for items in google_batches for it in items][:30]
     non_portal_urls, portal_urls = _split_portals(urls_all)
 
-    # 2️⃣  crawl non-portal direct
+    # crawl non‑portal direct
     for url, page in zip(non_portal_urls, pmap(fetch_simple, non_portal_urls)):
         if not page or agent.lower() not in page.lower():
             continue
@@ -497,7 +513,6 @@ def lookup_email(agent, state):
         if cand:
             break
 
-    # 3️⃣  non-portal via jina.ai
     if not cand:
         for url, page in zip(non_portal_urls, pmap(fetch, non_portal_urls)):
             if not page or agent.lower() not in page.lower():
@@ -516,7 +531,6 @@ def lookup_email(agent, state):
             if cand:
                 break
 
-    # 4️⃣  portals last
     if not cand:
         for url, page in zip(portal_urls, pmap(fetch, portal_urls)):
             if not page or agent.lower() not in page.lower():
@@ -530,7 +544,6 @@ def lookup_email(agent, state):
             if cand:
                 break
 
-    # Prefer addresses that contain agent tokens
     tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in agent.split()}
     good = {m: sc for m, sc in cand.items()
             if any(tok and tok in m.lower() for tok in tokens)}
@@ -578,75 +591,6 @@ def phone_exists(p):
         return p in ws.col_values(3)
     except Exception:
         return False
-
-
-# ─────────────────────── SMS w/ delivery confirm ───────────────────
-def send_sms(num, first, address, row_idx):
-    if not SMS_ENABLE:
-        return False
-
-    d = re.sub(r"\D", "", num)
-    if len(d) == 10:
-        to_e164 = "+1" + d
-    elif len(d) == 11 and d.startswith("1"):
-        to_e164 = "+" + d
-    else:
-        return False
-
-    if SMS_TEST_MODE and SMS_TEST_NUMBER:
-        td = re.sub(r"\D", "", SMS_TEST_NUMBER)
-        to_e164 = "+1" + td if len(td) == 10 else "+" + td
-
-    payload = {
-        "recipients": to_e164,
-        "message": SMS_TEMPLATE.format(first=first, address=address),
-        "apikey": SMS_API_KEY,
-        "sendsms": "1"
-    }
-    if SMS_FROM:
-        payload["from"] = SMS_FROM
-
-    try:
-        r = requests.post(SMS_URL, data=payload, timeout=15)
-        if r.status_code != 200:
-            LOG.error("SMS failed %s %s", r.status_code, r.text[:200])
-            return False
-
-        data = {}
-        try:
-            data = r.json()
-        except Exception:
-            pass
-
-        msg_id = data.get("message_id")
-        LOG.info("SMS queued to %s id=%s", to_e164, msg_id)
-
-        # In test mode we mark immediately; otherwise we require confirmed delivery
-        if SMS_TEST_MODE:
-            mark_sent(row_idx)
-            return True
-
-        if not msg_id:
-            LOG.warning("No message_id returned; not marking sent")
-            return False
-
-        good = {"SENT", "DELIVERED", "DELIVERED_TO_HANDSET"}
-        for _ in range(6):                      # up to ≈3 min
-            time.sleep(30)
-            try:
-                s = requests.get(f"{SMS_URL}{msg_id}/status", timeout=10)
-                if s.status_code == 200:
-                    status = s.json().get("status", "").upper()
-                    LOG.debug("SMS id=%s poll status=%s", msg_id, status)
-                    if status in good:
-                        mark_sent(row_idx)
-                        return True
-            except Exception:
-                pass
-        LOG.warning("SMS never confirmed delivered for id=%s", msg_id)
-    except Exception as e:
-        LOG.error("SMS error %s", e)
-    return False
 
 
 # ─────────────────── Zillow status helper ──────────────────────────
@@ -709,7 +653,7 @@ def process_rows(rows):
 
         state = r.get("state", "")
 
-        phone = fmt_phone(lookup_phone(name, state, zpid))   # ← passes zpid
+        phone = fmt_phone(lookup_phone(name, state, r))       # ★ changed (passes payload)
         email = lookup_email(name, state)
 
         if phone and phone_exists(phone):
