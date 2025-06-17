@@ -1,17 +1,19 @@
-# === bot_min.py (June 2025 → hardened) =========================================
+# === bot_min.py (June 2025 → hardened + direct-phone check) ====================
 #
-#  – Uses Rapid‑API property endpoint FIRST and logs any quota errors
+#  – Uses Rapid-API property endpoint FIRST and logs any quota errors
 #  – Skips LinkedIn / Realtor scrapes (too aggressive blocking)
 #  – Lower Google concurrency + jitter to avoid burst bans
 #  – Captures phones already in the Apify payload (contact_recipients / listed_by)
-#  – Loosened proximity‑scanner label test to catch bare numbers
-#  – Adds early‑exit if RAPID_KEY is missing
+#  – Loosened proximity-scanner label test to catch bare numbers
+#  – Adds early-exit if RAPID_KEY is missing
+#  – **NEW (June 17)**: Zillow / Rapid-API phone is accepted only if a quick
+#    Google check shows it is a direct/mobile line (not office)
 #
 
 import os, sys, json, logging, re, time, html, requests, concurrent.futures, random
 from collections import defaultdict, Counter
 from datetime import datetime
-from typing import Any, Dict, List, Tuple          # ★ changed
+from typing import Any, Dict, List, Tuple
 
 try:
     import phonenumbers
@@ -46,7 +48,7 @@ MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
 BACKOFF_FACTOR      = 1.7
 MAX_BACKOFF_SECONDS = 12
-GOOGLE_CONCURRENCY  = 2                               # ★ changed (was 4)
+GOOGLE_CONCURRENCY  = 2
 METRICS             = Counter()
 
 # ─────────────────────── SMS CONFIG ───────────────────────────────
@@ -82,6 +84,9 @@ LABEL_TABLE = {"mobile":4,"cell":4,"direct":4,"text":4,"c:":4,"m:":4,
 LABEL_RE = re.compile("(" + "|".join(map(re.escape, LABEL_TABLE)) + ")", re.I)
 US_AREA_CODES = {str(i) for i in range(201, 990)}
 
+# ───────────────────── extra globals (NEW) ────────────────────────
+OFFICE_HINTS = {"office", "main", "fax", "team", "brokerage", "corporate"}
+
 creds = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 gc = gspread.authorize(creds)
@@ -95,22 +100,20 @@ AGENT_SITES = [
     "mlslistings.com", "har.com", "brightmlshomes.com",
     "exitrealty.com", "realtyexecutives.com", "realty.com"
 ]
-# — permanently drop LinkedIn/Realtor from scraper phase (we still get them via CSE JSON) ★ changed
 SCRAPE_SITES = [d for d in AGENT_SITES if d not in ("linkedin.com", "realtor.com")]
 
 BROKERAGE_SITES = [
     "sothebysrealty.com", "corcoran.com", "douglaselliman.com",
     "cryereleike.com", "windermere.com", "longandfoster.com"
 ]
-DOMAIN_CLAUSE    = " OR ".join(f"site:{d}" for d in SCRAPE_SITES)      # ★ changed
+DOMAIN_CLAUSE    = " OR ".join(f"site:{d}" for d in SCRAPE_SITES)
 BROKERAGE_CLAUSE = " OR ".join(f"site:{d}" for d in BROKERAGE_SITES)
 SOCIAL_CLAUSE    = "site:facebook.com OR site:linkedin.com"
 
 cache_p, cache_e = {}, {}
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY)
 
-
-# ─────────────────── Rapid‑API helpers (NEW/UPDATED) ───────────────
+# ─────────────────── Rapid-API helpers ─────────────────────────────
 def _phone_obj_to_str(obj: Dict[str, str]) -> str:
     """Convert {'areacode':'954','prefix':'422','number':'3278'} → '954-422-3278'."""
     if not obj:
@@ -119,32 +122,31 @@ def _phone_obj_to_str(obj: Dict[str, str]) -> str:
     return fmt_phone(parts)
 
 def rapid_property(zpid: str) -> Dict[str, Any]:
-    """Fetch full property json from Rapid‑API. Returns {} on error."""
+    """Fetch full property json from Rapid-API. Returns {} on error."""
     if not RAPID_KEY:
         return {}
     try:
         headers = {"X-RapidAPI-Key": RAPID_KEY, "X-RapidAPI-Host": RAPID_HOST}
         resp = requests.get(f"https://{RAPID_HOST}/property",
                             params={"zpid": zpid}, headers=headers, timeout=15)
-        if resp.status_code == 429:                       # ★ changed
-            LOG.error("Rapid‑API quota exhausted (HTTP 429).")
+        if resp.status_code == 429:
+            LOG.error("Rapid-API quota exhausted (HTTP 429).")
             return {}
         resp.raise_for_status()
         return resp.json().get("data") or resp.json()
     except Exception as exc:
-        LOG.debug("Rapid‑API fetch error %s for zpid=%s", exc, zpid)
+        LOG.debug("Rapid-API fetch error %s for zpid=%s", exc, zpid)
         return {}
 
 def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
     """
-    Try to pull the agent phone from Rapid‑API data.
-    Returns (phone, source_url) or ("","").
+    Try to pull the agent phone from Rapid-API data.
+    Returns (phone, source_tag) or ("","").
     """
     data = rapid_property(zpid)
     if not data:
         return "",""
 
-    # contact_recipients often contains the Premier Agent first, then Listing agent
     cand = []
     for blk in data.get("contact_recipients", []):
         pn = _phone_obj_to_str(blk.get("phone", {}))
@@ -156,6 +158,26 @@ def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
         cand.append(("rapid:listed_by", pn))
 
     return (cand[0][1], cand[0][0]) if cand else ("","")
+
+
+# ─────────────────── Google helper for directness (NEW) ────────────
+def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> bool:
+    """
+    Quick Google CSE to decide if `phone` looks like the agent's direct/mobile line.
+    We accept if snippet contains agent name/last name and NOT obvious office hints.
+    """
+    if not phone:
+        return False
+    last = agent.split()[-1].lower()
+    q = f'"{phone}" {state}'
+    for _ in range(tries):
+        for it in google_items(q, tries=1):
+            snip = (it.get("snippet") or "").lower()
+            if (last in snip or agent.lower() in snip) and not any(k in snip for k in OFFICE_HINTS):
+                return True
+        # widen
+        q = f'"{phone}" "{agent.split()[0]}"'
+    return False
 
 
 # ─────────────────── query builders (unchanged) ────────────────────
@@ -202,7 +224,7 @@ def ok_email(e):
 
 # ────────────────────────── fetch helpers ──────────────────────────
 def _jitter():
-    time.sleep(random.uniform(0.8, 1.5))               # ★ added
+    time.sleep(random.uniform(0.8, 1.5))
 
 def fetch_simple(u):
     try:
@@ -255,7 +277,7 @@ def fetch(u):
             else:
                 METRICS["fetch_other_%s" % r.status_code] += 1
 
-            _jitter()                                   # ★ changed
+            _jitter()
             time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
             backoff *= BACKOFF_FACTOR
     return None
@@ -296,7 +318,7 @@ def proximity_scan(t, last_name=None):
         lab_match = LABEL_RE.search(snippet)
         lab = lab_match.group().lower() if lab_match else ""
         w = LABEL_TABLE.get(lab, 0)
-        if w < 1:                                       # ★ changed (was 2)
+        if w < 1:
             continue
 
         bw, ts, _ = out.get(p, (0, 0, False))
@@ -350,8 +372,8 @@ def _split_portals(urls):
 
 def lookup_phone(agent: str, state: str, row_payload: Dict[str,Any]) -> str:
     """
-    Main phone‑resolver.
-    1. Rapid‑API using row_payload["zpid"]
+    Main phone-resolver.
+    1. Rapid-API using row_payload["zpid"] (kept only if verified direct)
     2. contact_recipients already in row_payload
     3. Google CSE + crawler fallback
     """
@@ -367,15 +389,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str,Any]) -> str:
             cache_p[key] = p
             return p
 
-    # 1️⃣  Rapid‑API
-    phone, src = "", ""
+    # 1️⃣  Rapid-API
+    phone = ""
     zpid = str(row_payload.get("zpid",""))
     if zpid:
         phone, src = rapid_phone(zpid, agent)
-        if phone:
-            LOG.debug("PHONE WIN %s via %s", phone, src)
+        if phone and _looks_direct(phone, agent, state):
+            LOG.debug("PHONE WIN %s via %s (verified direct)", phone, src)
             cache_p[key] = phone
             return phone
+        phone = ""   # discard unverified / office numbers
 
     cand_good, cand_office, src_good = {}, {}, {}
 
@@ -388,7 +411,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str,Any]) -> str:
         if not office_flag and src:
             src_good[d] = src
 
-    # 2️⃣  Google‑only (fast)
+    # 2️⃣  Google-only (fast)
     queries = build_q_phone(agent, state)[:MAX_Q_PHONE]
     google_batches = pmap(google_items, queries)
 
@@ -401,7 +424,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str,Any]) -> str:
     if cand_good:
         phone = max(cand_good, key=cand_good.get)
         cache_p[key] = phone
-        LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "CSE‑json"))
+        LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "CSE-json"))
         return phone
 
     # 3️⃣  Crawl urls
@@ -489,13 +512,13 @@ def lookup_email(agent, state):
     if cand:
         email = max(cand, key=cand.get)
         cache_e[key] = email
-        LOG.debug("EMAIL WIN %s via %s", email, src_e.get(email, "CSE‑json"))
+        LOG.debug("EMAIL WIN %s via %s", email, src_e.get(email, "CSE-json"))
         return email
 
     urls_all = [it.get("link", "") for items in google_batches for it in items][:30]
     non_portal_urls, portal_urls = _split_portals(urls_all)
 
-    # crawl non‑portal direct
+    # crawl non-portal direct
     for url, page in zip(non_portal_urls, pmap(fetch_simple, non_portal_urls)):
         if not page or agent.lower() not in page.lower():
             continue
@@ -625,6 +648,27 @@ def extract_name(t):
 
 
 # ───────────────────── main row processor ──────────────────────────
+def send_sms(phone, first, address, row_idx):
+    if not SMS_ENABLE or not phone:
+        return
+    if SMS_TEST_MODE and SMS_TEST_NUMBER:
+        phone = SMS_TEST_NUMBER
+    try:
+        resp = requests.post(SMS_URL, timeout=10, data={
+            "api_key": SMS_API_KEY,
+            "to": phone,
+            "from": SMS_FROM,
+            "text": SMS_TEMPLATE.format(first=first, address=address)
+        })
+        if resp.status_code == 200 and "OK" in resp.text.upper():
+            mark_sent(row_idx)
+            LOG.info("SMS sent to %s", phone)
+        else:
+            LOG.error("SMS API error %s %s", resp.status_code, resp.text[:200])
+    except Exception as e:
+        LOG.error("SMS send error %s", e)
+
+
 def process_rows(rows):
     for r in rows:
         txt = (r.get("description", "") + " " + r.get("openai_summary", "")).strip()
@@ -653,7 +697,7 @@ def process_rows(rows):
 
         state = r.get("state", "")
 
-        phone = fmt_phone(lookup_phone(name, state, r))       # ★ changed (passes payload)
+        phone = fmt_phone(lookup_phone(name, state, r))
         email = lookup_email(name, state)
 
         if phone and phone_exists(phone):
