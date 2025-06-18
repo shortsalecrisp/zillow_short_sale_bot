@@ -20,7 +20,6 @@ from google.oauth2.service_account import Credentials
 
 
 # ─────────────────────────── ENV / AUTH 
-────────────────────────────
 CS_API_KEY = os.environ["CS_API_KEY"]
 CS_CX      = os.environ["CS_CX"]
 GSHEET_ID  = os.environ["GSHEET_ID"]
@@ -36,8 +35,6 @@ logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
                     format="%(asctime)s %(levelname)s: %(message)s")
 LOG = logging.getLogger("bot")
 
-# ───────────────────────── CONFIGS 
-─────────────────────────────────
 MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
 BACKOFF_FACTOR      = 1.7
@@ -63,7 +60,6 @@ MAX_Q_PHONE = 5
 MAX_Q_EMAIL = 5
 
 # ──────────────────────────── REGEXES 
-──────────────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
 BAD_RE   = re.compile(
     r"\b(?:approved short sale|short sale approved|"
@@ -81,14 +77,12 @@ LABEL_RE = re.compile("(" + "|".join(map(re.escape, LABEL_TABLE)) + ")", re.I)
 US_AREA_CODES = {str(i) for i in range(201, 990)}
 
 # ─────────────────────────── SHEETS 
-────────────────────────────────
 creds = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 gc = gspread.authorize(creds)
 ws = gc.open_by_key(GSHEET_ID).sheet1
 
 # ───────────────────────── SITE LISTS 
-──────────────────────────────
 AGENT_SITES = [
     "realtor.com", "zillow.com", "redfin.com", "homesnap.com", "kw.com",
     "remax.com", "coldwellbanker.com", "compass.com", "exprealty.com",
@@ -202,7 +196,6 @@ def build_q_email(name: str, state: str) -> List[str]:
     return [f"{base} site:{p}" for p in portals[:4]] + [base]
 
 # ─────────────────────────── MISC UTILS 
-────────────────────────────
 def valid_phone(p):
     if phonenumbers:
         try:
