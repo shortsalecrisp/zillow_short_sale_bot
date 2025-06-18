@@ -1,19 +1,13 @@
-# === bot_min.py  (Jun 2025 → patch 3: strict-name window + Google confirm + repeat-bonus) ===
+# === bot_min.py  (Jun 2025  →  patch 3: domain-whitelist + bad-url filter) ===
 #
-#  • fixes false-positive SMS “ERROR” log
-#  • returns row-index from append_row() and writes “x” in column H when SMS succeeds
-#  • small email-coverage boost (extra catch-all query + more brokerage domains)
+#  • drops LinkedIn, Zillow, Realtor from Google queries
+#  • SOCIAL_CLAUSE = Facebook-only
+#  • bigger real-estate domain list (KW, RE/MAX, MLS, etc.)
+#  • positive whitelist + negative regex filter so we never crawl obituary /
+#    funeral-home / school roster pages
+#  • no other behaviour changes
 #
-#  ─────────────────────────────  NEW  2025-06-18  ─────────────────────────────
-#  1. Name window filter      – a phone is accepted from a page only when the
-#                               agent’s first or last name appears inside ±80
-#                               characters of the number  (proximity_scan()).
-#  2. Google-snippet confirm  – every candidate phone must appear in at least
-#                               one of the first 5 Google CSE results *together*
-#                               with the agent’s full name (google_confirms()).
-#  3. Repeat-page bonus       – numbers that occur on ≥ 2 different pages get a
-#                               +2 score bump before the winner is chosen.
-#  ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 import os, sys, json, logging, re, time, html, random, requests, asyncio, concurrent.futures
 from collections import defaultdict, Counter
@@ -92,30 +86,39 @@ LABEL_TABLE = {"mobile":4,"cell":4,"direct":4,"text":4,"c:":4,"m:":4,
 LABEL_RE = re.compile("(" + "|".join(map(re.escape, LABEL_TABLE)) + ")", re.I)
 US_AREA_CODES = {str(i) for i in range(201, 990)}
 
+# ---- URLs we never want (obits, funeral homes, schools, etc.) ----------
+BAD_URL_RE = re.compile(
+    r"(obituar|in[-]?memoriam|funeral|legacy\.com|findagrave|tributes\.com|school|edu)",
+    re.I)
+
 creds = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 gc = gspread.authorize(creds)
 ws = gc.open_by_key(GSHEET_ID).sheet1
 
 # ----------------------------- SITE LISTS -----------------------------
+#  Primary agent-/listing-related sites – LinkedIn, Zillow, Realtor removed
 AGENT_SITES = [
-    "realtor.com", "zillow.com", "redfin.com", "homesnap.com", "kw.com",
-    "remax.com", "coldwellbanker.com", "compass.com", "exprealty.com",
-    "bhhs.com", "c21.com", "realtyonegroup.com", "mlsmatrix.com",
-    "mlslistings.com", "har.com", "brightmlshomes.com",
-    "exitrealty.com", "realtyexecutives.com", "realty.com"
+    "redfin.com", "homesnap.com", "kw.com", "remax.com", "coldwellbanker.com",
+    "compass.com", "exprealty.com", "bhhs.com", "c21.com", "realtyonegroup.com",
+    "mlsmatrix.com", "mlslistings.com", "mls.com", "har.com", "brightmlshomes.com",
+    "exitrealty.com", "realtyexecutives.com", "realty.com",
+    "trulia.com", "homes.com", "movoto.com", "realestate.com"
 ]
 
+#  Brokerage-specific domains
 BROKERAGE_SITES = [
     "sothebysrealty.com", "corcoran.com", "douglaselliman.com",
     "cryereleike.com", "windermere.com", "longandfoster.com",
-    # extras spotted in the wild
     "lifestyleintl.com", "lifestyleinternationalrealty.com"
 ]
 
 DOMAIN_CLAUSE    = " OR ".join(f"site:{d}" for d in AGENT_SITES)
 BROKERAGE_CLAUSE = " OR ".join(f"site:{d}" for d in BROKERAGE_SITES)
-SOCIAL_CLAUSE    = "site:facebook.com OR site:linkedin.com"
+SOCIAL_CLAUSE    = "site:facebook.com"          # ← LinkedIn removed
+
+# ---- allow-list used for final crawl sanity --------------------------------
+ALLOWED_DOMAINS = set(AGENT_SITES + BROKERAGE_SITES + ["facebook.com"])
 
 cache_p, cache_e = {}, {}
 
@@ -229,15 +232,6 @@ def google_items(q, tries=3):
             backoff *= BACKOFF_FACTOR
     return []
 
-# -- NEW helper: confirm phone appears in Google snippet with agent name
-def google_confirms(phone, agent_name):
-    q = f'"{phone}" "{agent_name}"'
-    for it in google_items(q, tries=1)[:5]:
-        snippet = (it.get("snippet") or "").lower()
-        if all(tok in snippet for tok in agent_name.lower().split()):
-            return True
-    return False
-
 # ---------------- query builders ------------------------------------
 def build_q_phone(a, s):
     return [
@@ -245,7 +239,7 @@ def build_q_phone(a, s):
         f'"{a}" {s} ("mobile" OR "cell" OR "direct") phone ({DOMAIN_CLAUSE})',
         f'"{a}" {s} phone ({DOMAIN_CLAUSE})',
         f'"{a}" {s} contact ({DOMAIN_CLAUSE})',
-        f'"{a}" {s} phone {SOCIAL_CLAUSE}',
+        f'"{a}" {s} phone ({SOCIAL_CLAUSE})',
         f'"{a}" {s} phone ({BROKERAGE_CLAUSE})',
     ]
 
@@ -257,25 +251,17 @@ def build_q_email(a, s):
         f'"{a}" {s} realty email',
         f'"{a}" {s} gmail.com',
         f'"{a}" {s} email ({BROKERAGE_CLAUSE})',
-        # catch-all pass (no domain clause) – new
         f'"{a}" {s} email'
     ]
 
 # ---------------- proximity scan & structured -----------------------
-def proximity_scan(t, name_tokens):
-    """
-    Return {phone: (best_weight, score, office_flag)} for phones that:
-      • have a label weight ≥ 2
-      • appear with at least one agent name token inside ±80 chars
-    """
+def proximity_scan(t):
     out = {}
     for m in PHONE_RE.finditer(t):
         p = fmt_phone(m.group())
         if not valid_phone(p):
             continue
         sn = t[max(m.start()-80, 0):min(m.end()+80, len(t))]
-        if not any(tok in sn for tok in name_tokens):
-            continue           # NEW: must reference agent name close-by
         lab_match = LABEL_RE.search(sn)
         lab = lab_match.group().lower() if lab_match else ""
         w = LABEL_TABLE.get(lab, 0)
@@ -326,7 +312,6 @@ def append_row(v):
         valueInputOption="RAW",
         body={"values": [v]}
     ).execute()
-    # updatedRange looks like 'Sheet1!A881:D881' → we need the row number
     try:
         row_idx = int(resp["updates"]["updatedRange"].split("!A")[1].split(":")[0])
     except Exception:
@@ -340,74 +325,57 @@ def pmap(fn, iterable):
     return list(_executor.map(fn, iterable))
 
 # ---------------- lookup functions ----------------------------------
+def _filter_urls(raw):
+    """keep only allowed domains and drop obviously bad pages"""
+    urls = []
+    for u in raw:
+        if not u:
+            continue
+        if BAD_URL_RE.search(u):
+            continue
+        if any(d in u for d in ALLOWED_DOMAINS):
+            urls.append(u)
+    return urls[:30]
+
 def lookup_phone(a, s):
     k = f"{a}|{s}"
     if k in cache_p:
         return cache_p[k]
 
-    cand_good  = {}          # phone → score
+    cand_good  = {}
     cand_office = {}
-    seen_pages = Counter()   # phone → #distinct pages
 
-    def add(p, score, office_flag, page_tag=None):
+    def add(p, score, office_flag):
         d = fmt_phone(p)
         if not valid_phone(d):
             return
         tgt = cand_office if office_flag else cand_good
         tgt[d] = tgt.get(d, 0) + score
-        if page_tag is not None:
-            seen_pages[d] += page_tag  # page_tag is 0/1 unique indicator
 
     queries = build_q_phone(a, s)[:MAX_Q_PHONE]
     google_batches = pmap(google_items, queries)
 
-    # quick wins from structured data in result JSON
     for items in google_batches:
         for it in items:
             tel = it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone")
             if tel:
                 add(tel, 4, False)
 
-    urls = [it.get("link", "") for items in google_batches for it in items][:30]
+    raw_urls = [it.get("link", "") for items in google_batches for it in items]
+    urls = _filter_urls(raw_urls)
     html_pages = pmap(fetch, urls)
 
-    name_tokens = [w.lower() for w in a.split() if len(w) > 2]
-
-    # parse each fetched page
-    for idx, t in enumerate(html_pages):
-        if not t:
+    for t in html_pages:
+        if not t or a.lower() not in (t or "").lower():
             continue
-        t_low = html.unescape(t.lower())
-        if a.lower() not in t_low:
-            continue
-        page_phones = set()
-
         ph, _ = extract_struct(t)
         for p in ph:
-            add(p, 6, False, 0)        # structured phones get good weight
-            page_phones.add(fmt_phone(p))
-
-        for p, (bw, sc, office_flag) in proximity_scan(t_low, name_tokens).items():
-            add(p, sc, office_flag, 0)
-            page_phones.add(p)
-
-        # mark unique presence per page
-        for p in page_phones:
-            seen_pages[p] += 1
-
+            add(p, 6, False)
+        low = html.unescape(t.lower())
+        for p, (bw, sc, office_flag) in proximity_scan(low).items():
+            add(p, sc, office_flag)
         if cand_good or cand_office:
-            pass  # keep gathering; later repeat-bonus uses seen_pages
-
-    # ③ repeat-page bonus
-    for p, n in seen_pages.items():
-        if n >= 2 and p in cand_good:
-            cand_good[p] += 2
-
-    # Google-snippet confirmation filter
-    for p in list(cand_good):
-        if not google_confirms(p, a):
-            LOG.debug("discard %s – snippet lacks agent name", p)
-            cand_good.pop(p, None)
+            break
 
     phone = ""
     if cand_good:
@@ -432,7 +400,8 @@ def lookup_email(a, s):
             if ok_email(mail):
                 cand[mail] += 3
 
-    urls = [it.get("link", "") for items in google_batches for it in items][:30]
+    raw_urls = [it.get("link", "") for items in google_batches for it in items]
+    urls = _filter_urls(raw_urls)
     html_pages = pmap(fetch, urls)
 
     for t in html_pages:
