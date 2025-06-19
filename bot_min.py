@@ -1,11 +1,16 @@
-# === bot_min.py  (Jun 2025  →  patch 3: domain-whitelist + bad-url filter) ===
+# === bot_min.py  (Jun 2025  →  patch 4: mobility‑bias + email‑boost) =========
 #
-#  • drops LinkedIn, Zillow, Realtor from Google queries
-#  • SOCIAL_CLAUSE = Facebook-only
-#  • bigger real-estate domain list (KW, RE/MAX, MLS, etc.)
-#  • positive whitelist + negative regex filter so we never crawl obituary /
-#    funeral-home / school roster pages
-#  • no other behaviour changes
+#  ▸ keeps all behaviour from patch 3 and adds:
+#    • smarter early‑exit: keep crawling until a clearly‑labeled mobile/direct
+#      scores ≥ 8, instead of bailing at the first number found
+#    • stronger label weighting (mobile/direct → 6; office/main → 0)
+#    • re‑classify “phone”/“tel” as office‑ish for scoring purposes
+#    • new _filter_urls() lets through agent‑specific domains that embed
+#      name tokens in the hostname
+#    • lookup_phone() / lookup_email() call the new filter and use its tokens
+#    • MAX_Q_EMAIL raised 5 → 8
+#    • e‑mail logic still prefers addresses containing any name token, now
+#      including “firstinitial+lastname” forms
 #
 # ---------------------------------------------------------------------------
 
@@ -68,8 +73,8 @@ SMS_TEMPLATE    = (
     "open to a quick call to see if this could help?"
 )
 
-MAX_Q_PHONE = 5
-MAX_Q_EMAIL = 5
+MAX_Q_PHONE  = 5
+MAX_Q_EMAIL  = 8       # ↑ from 5
 
 # ------------------------------ REGEXES -------------------------------
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
@@ -81,8 +86,11 @@ IMG_EXT  = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
-LABEL_TABLE = {"mobile":4,"cell":4,"direct":4,"text":4,"c:":4,"m:":4,
-               "phone":2,"tel":2,"p:":2,"office":1,"main":1,"customer":1,"footer":1}
+LABEL_TABLE = {  # ← re‑weighted
+    "mobile":6, "cell":6, "direct":6, "text":6, "c:":6, "m:":6,
+    "phone":1,  "tel":1,  "p:":1,
+    "office":0, "main":0, "customer":0, "footer":0
+}
 LABEL_RE = re.compile("(" + "|".join(map(re.escape, LABEL_TABLE)) + ")", re.I)
 US_AREA_CODES = {str(i) for i in range(201, 990)}
 
@@ -251,7 +259,8 @@ def build_q_email(a, s):
         f'"{a}" {s} realty email',
         f'"{a}" {s} gmail.com',
         f'"{a}" {s} email ({BROKERAGE_CLAUSE})',
-        f'"{a}" {s} email'
+        f'"{a}" {s} email',
+        f'"{a}" {s} business card email'
     ]
 
 # ---------------- proximity scan & structured -----------------------
@@ -265,10 +274,10 @@ def proximity_scan(t):
         lab_match = LABEL_RE.search(sn)
         lab = lab_match.group().lower() if lab_match else ""
         w = LABEL_TABLE.get(lab, 0)
-        if w < 2:
+        if w < 1:             # skip explicit office/main tags
             continue
         bw, ts, _ = out.get(p, (0, 0, False))
-        out[p] = (max(bw, w), ts + 2 + w, lab in ("office", "main"))
+        out[p] = (max(bw, w), ts + 2 + w, lab in ("office", "main", "phone", "tel", "p:"))
     return out
 
 def extract_struct(td):
@@ -324,25 +333,39 @@ _executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY
 def pmap(fn, iterable):
     return list(_executor.map(fn, iterable))
 
-# ---------------- lookup functions ----------------------------------
-def _filter_urls(raw):
-    """keep only allowed domains and drop obviously bad pages"""
+# ---------------- improved URL filter -------------------------------
+def _filter_urls(raw, tokens=None):
+    """
+    Keep only those URLs that are either from ALLOWED_DOMAINS **or**
+    whose hostname contains at least one token from the agent's name.
+    """
     urls = []
     for u in raw:
         if not u:
             continue
         if BAD_URL_RE.search(u):
             continue
-        if any(d in u for d in ALLOWED_DOMAINS):
+        host = re.sub(r"^https?://([^/]+)/.*", r"\1", u)
+        if any(d in host for d in ALLOWED_DOMAINS):
+            urls.append(u)
+        elif tokens and any(tok in host for tok in tokens):
             urls.append(u)
     return urls[:30]
+
+# ---------------- lookup functions ----------------------------------
+def _name_tokens(name):
+    parts = [re.sub(r"[^a-z]", "", p.lower()) for p in name.split() if p]
+    combos = set(parts)
+    if len(parts) >= 2:
+        combos.add(parts[0][0] + parts[-1])      # f + lastname → "sdagher"
+    return {t for t in combos if t}
 
 def lookup_phone(a, s):
     k = f"{a}|{s}"
     if k in cache_p:
         return cache_p[k]
 
-    cand_good  = {}
+    cand_good   = {}
     cand_office = {}
 
     def add(p, score, office_flag):
@@ -362,7 +385,8 @@ def lookup_phone(a, s):
                 add(tel, 4, False)
 
     raw_urls = [it.get("link", "") for items in google_batches for it in items]
-    urls = _filter_urls(raw_urls)
+    tokens   = _name_tokens(a)
+    urls     = _filter_urls(raw_urls, tokens)
     html_pages = pmap(fetch, urls)
 
     for t in html_pages:
@@ -374,14 +398,16 @@ def lookup_phone(a, s):
         low = html.unescape(t.lower())
         for p, (bw, sc, office_flag) in proximity_scan(low).items():
             add(p, sc, office_flag)
-        if cand_good or cand_office:
+
+        # stop early if we have a high‑score mobile/cell/direct
+        if any(score >= 8 for score in cand_good.values()):
             break
 
     phone = ""
     if cand_good:
         phone = max(cand_good, key=cand_good.get)
     elif cand_office:
-        phone = ""       # blank rather than office/main only
+        phone = ""       # deliberately blank‑out office/main only
     cache_p[k] = phone
     return phone
 
@@ -401,7 +427,8 @@ def lookup_email(a, s):
                 cand[mail] += 3
 
     raw_urls = [it.get("link", "") for items in google_batches for it in items]
-    urls = _filter_urls(raw_urls)
+    tokens   = _name_tokens(a)
+    urls     = _filter_urls(raw_urls, tokens)
     html_pages = pmap(fetch, urls)
 
     for t in html_pages:
@@ -416,10 +443,10 @@ def lookup_email(a, s):
             m = clean_email(m)
             if ok_email(m):
                 cand[m] += 1
+
         if cand:
             break
 
-    tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in a.split()}
     good = {m: sc for m, sc in cand.items()
             if any(tok and tok in m.lower() for tok in tokens)}
     email = max(good, key=good.get) if good else ""
