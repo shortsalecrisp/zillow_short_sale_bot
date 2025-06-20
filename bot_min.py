@@ -1,4 +1,4 @@
-# === bot_min.py (June 2025 → hardened + direct‑phone check + filters 20‑Jun patch + thread updates) ===
+# === bot_min.py (June 2025 → hardened + direct‑phone check + filters 20‑Jun patch + SMS fix) ===
 #
 #  – Uses Rapid‑API property endpoint FIRST and logs any quota errors
 #  – Skips LinkedIn / Realtor scrapes (too aggressive blocking)
@@ -21,13 +21,9 @@
 #        • _phone_obj_to_str rebuilt: correctly assembles numbers when Zillow
 #          returns the area code, prefix, and line as separate keys
 #
-#  – **Thread updates (21 Jun)**
-#        • `zillow.com` removed from all search/allow lists
-#        • `redfin.com` **added back** plus the brokerage list promoted to
-#          ALLOWED_SITES
-#        • Rapid‑API **e‑mail** extraction helper added and wired into
-#          `lookup_email`
-#        • `lookup_email` now receives the row payload
+#  – **21 Jun** (thread): Rapid‑API e‑mail support + Redfin re‑added
+#  – **21 Jun** (SMS fix): corrected field names for SMSMobileAPI (`apikey`,
+#                         `recipients`, `message`, `sendsms`)
 # --------------------------------------------------------------------------------------
 
 import os, sys, json, logging, re, time, html, requests, concurrent.futures, random
@@ -76,8 +72,8 @@ METRICS             = Counter()
 SMS_ENABLE      = os.getenv("SMSM_ENABLE", "false").lower() == "true"
 SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER", "")
-SMS_API_KEY     = os.getenv("SMSM_API_KEY", "")            # ← uses SMSM_API_KEY only
-SMS_FROM        = os.getenv("SMSM_FROM", "")
+SMS_API_KEY     = os.getenv("SMSM_API_KEY", "")
+SMS_FROM        = os.getenv("SMSM_FROM", "")             # still available if needed
 SMS_URL         = os.getenv("SMSM_URL", "https://api.smsmobileapi.com/sendsms/")
 SMS_TEMPLATE    = (
     "Hey {first}, this is Yoni Kutler—I saw your short sale listing at {address} and wanted to "
@@ -114,7 +110,7 @@ gc = gspread.authorize(creds)
 ws = gc.open_by_key(GSHEET_ID).sheet1
 
 # ───────────────────────── SITE LISTS ──────────────────────────────
-AGENT_SITES = [                       # zillow.com removed, redfin.com added
+AGENT_SITES = [
     "redfin.com", "homesnap.com", "kw.com", "remax.com", "coldwellbanker.com",
     "compass.com", "exprealty.com", "bhhs.com", "c21.com", "realtyonegroup.com",
     "mlsmatrix.com", "mlslistings.com", "har.com", "brightmlshomes.com",
@@ -126,22 +122,13 @@ BROKERAGE_SITES = [
     "sothebysrealty.com", "corcoran.com", "douglaselliman.com",
     "cryereleike.com", "windermere.com", "longandfoster.com"
 ]
-
 DOMAIN_CLAUSE    = " OR ".join(f"site:{d}" for d in SCRAPE_SITES)
 BROKERAGE_CLAUSE = " OR ".join(f"site:{d}" for d in BROKERAGE_SITES)
 SOCIAL_CLAUSE    = "site:facebook.com OR site:linkedin.com"
 
-# ────────────────────── allowed domains & cache ────────────────────
-ALLOWED_SITES = {                     # union of agent + brokerage
-    "redfin.com", "homesnap.com", "kw.com", "remax.com", "coldwellbanker.com",
-    "compass.com", "exprealty.com", "bhhs.com", "c21.com", "realtyonegroup.com",
-    "mlsmatrix.com", "mlslistings.com", "har.com", "brightmlshomes.com",
-    "exitrealty.com", "realtyexecutives.com", "realty.com",
-    "sothebysrealty.com", "corcoran.com", "douglaselliman.com",
-    "cryereleike.com", "windermere.com", "longandfoster.com"
-}
+ALLOWED_SITES = set(AGENT_SITES) | set(BROKERAGE_SITES)
 
-_blocked_until: Dict[str, float] = {}  # domain → epoch seconds
+_blocked_until: Dict[str, float] = {}
 
 def _domain(host_or_url: str) -> str:
     host = urlparse(host_or_url).netloc or host_or_url
@@ -204,14 +191,13 @@ def _phones_from_block(blk: Dict[str, Any]) -> List[str]:
         out.append(_phone_obj_to_str(ph))
     return [p for p in out if p]
 
-# NEW – e‑mail counterparts
 def _emails_from_block(blk: Dict[str, Any]) -> List[str]:
     if not blk:
         return []
     out = []
-    for key in ("email", "emailAddress"):
-        if blk.get(key):
-            out.append(clean_email(blk[key]))
+    for k in ("email", "emailAddress"):
+        if blk.get(k):
+            out.append(clean_email(blk[k]))
     for e in blk.get("emails", []):
         out.append(clean_email(e))
     return [e for e in out if ok_email(e)]
@@ -220,21 +206,17 @@ def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
     data = rapid_property(zpid)
     if not data:
         return "", ""
-
     cand, all_phones = [], set()
-
     for blk in data.get("contact_recipients", []):
         for pn in _phones_from_block(blk):
             all_phones.add(pn)
             if pn and agent_name.lower() in blk.get("display_name", "").lower():
                 cand.append(("rapid:contact_recipients", pn))
-
     lb = data.get("listed_by", {})
     for pn in _phones_from_block(lb):
         all_phones.add(pn)
         if pn and agent_name.lower() in lb.get("display_name", "").lower():
             cand.append(("rapid:listed_by", pn))
-
     if cand:
         return cand[0][1], cand[0][0]
     if len(all_phones) == 1:
@@ -246,26 +228,23 @@ def rapid_email(zpid: str, agent_name: str) -> Tuple[str, str]:
     if not data:
         return "", ""
     cand, all_em = [], set()
-
     for blk in data.get("contact_recipients", []):
         for em in _emails_from_block(blk):
             all_em.add(em)
             if agent_name.lower() in blk.get("display_name", "").lower():
                 cand.append(("rapid:contact_recipients", em))
-
     lb = data.get("listed_by", {})
     for em in _emails_from_block(lb):
         all_em.add(em)
         if agent_name.lower() in lb.get("display_name", "").lower():
             cand.append(("rapid:listed_by", em))
-
     if cand:
         return cand[0][1], cand[0][0]
     if len(all_em) == 1:
         return next(iter(all_em)), "rapid:fallback_single"
     return "", ""
 
-# ─────────────────── Google helper for directness ──────────────────
+# ─────────────────── Google helper ────────────────────────────────
 def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> bool:
     if not phone:
         return False
@@ -318,7 +297,7 @@ def ok_email(e):
 
 # ────────────────────────── fetch helpers ──────────────────────────
 def _jitter():          time.sleep(random.uniform(0.8, 1.5))
-def _mark_block(dom):   _blocked_until[dom] = time.time() + 600   # 10 min
+def _mark_block(dom):   _blocked_until[dom] = time.time() + 600
 
 def fetch_simple(u):
     if not _should_fetch(u):
@@ -463,8 +442,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     key = f"{agent}|{state}"
     if key in cache_p:
         return cache_p[key]
-
-    # 0️⃣  Phones already in Apify payload
+    # 0️⃣ in‑payload
     for blk in (row_payload.get("contact_recipients") or []):
         for p in _phones_from_block(blk):
             d = fmt_phone(p)
@@ -472,8 +450,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 cache_p[key] = d
                 LOG.debug("PHONE hit directly from contact_recipients")
                 return d
-
-    # 1️⃣  Rapid‑API
+    # 1️⃣ Rapid‑API
     phone = ""
     zpid = str(row_payload.get("zpid", ""))
     if zpid:
@@ -482,10 +459,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             cache_p[key] = phone
             LOG.debug("PHONE WIN %s via %s (verified direct)", phone, src_tag)
             return phone
-        phone = ""   # discard unverified / office
-
+    # 2️⃣ Google metadata  … (unchanged logic below)
     cand_good, cand_office, src_good = {}, {}, {}
-
     def add(p, score, office_flag, src=""):
         d = fmt_phone(p)
         if not valid_phone(d):
@@ -494,8 +469,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         target[d] = target.get(d, 0) + score
         if not office_flag and src:
             src_good[d] = src
-
-    # 2️⃣  Google metadata
     queries = build_q_phone(agent, state)[:MAX_Q_PHONE]
     google_batches = pmap(google_items, queries)
     for items in google_batches:
@@ -503,91 +476,68 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             tel = it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone")
             if tel:
                 add(tel, 4, False, f"CSE:{it.get('link', '')}")
-
     if cand_good:
         phone = max(cand_good, key=cand_good.get)
         cache_p[key] = phone
         LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "CSE‑json"))
         return phone
-
-    # 3️⃣  Crawl (same logic as before) …
+    # 3️⃣ crawl phases … (unchanged)
     urls_all = [it.get("link", "") for items in google_batches for it in items][:30]
     non_portal_urls, portal_urls = _split_portals(urls_all)
     last_name = (agent.split()[-1] if len(agent.split()) > 1 else agent).lower()
-
-    # 3a  direct pages fast
+    # 3a
     pages = pmap(fetch_simple, non_portal_urls)
     for url, page in zip(non_portal_urls, pages):
         if not page or agent.lower() not in page.lower():
             continue
         ph, _ = extract_struct(page)
-        for p in ph:
-            add(p, 6, False, url)
+        for p in ph: add(p, 6, False, url)
         low = html.unescape(page.lower())
-        for p, (bw, sc, office_flag) in proximity_scan(low, last_name).items():
+        for p,(_,sc,office_flag) in proximity_scan(low, last_name).items():
             add(p, sc, office_flag, url)
-        if cand_good or cand_office:
-            break
-
-    # 3b  jina.ai fallback
+        if cand_good or cand_office: break
+    # 3b
     if not cand_good and not cand_office:
         pages = pmap(fetch, non_portal_urls)
         for url, page in zip(non_portal_urls, pages):
             if not page or agent.lower() not in page.lower():
                 continue
             ph, _ = extract_struct(page)
-            for p in ph:
-                add(p, 5, False, url)
+            for p in ph: add(p, 5, False, url)
             low = html.unescape(page.lower())
-            for p, (bw, sc, office_flag) in proximity_scan(low, last_name).items():
+            for p,(_,sc,office_flag) in proximity_scan(low, last_name).items():
                 add(p, sc, office_flag, url)
-            if cand_good or cand_office:
-                break
-
-    # 3c  portals
+            if cand_good or cand_office: break
+    # 3c
     if not cand_good:
         pages = pmap(fetch, portal_urls)
         for url, page in zip(portal_urls, pages):
             if not page or agent.lower() not in page.lower():
                 continue
             ph, _ = extract_struct(page)
-            for p in ph:
-                add(p, 4, False, url)
+            for p in ph: add(p, 4, False, url)
             low = html.unescape(page.lower())
-            for p, (bw, sc, office_flag) in proximity_scan(low, last_name).items():
+            for p,(_,sc,office_flag) in proximity_scan(low, last_name).items():
                 add(p, sc, office_flag, url)
-            if cand_good:
-                break
-
-    phone = ""
-    if cand_good:
-        phone = max(cand_good, key=cand_good.get)
-    elif cand_office:
-        phone = ""
-
+            if cand_good: break
+    phone = max(cand_good, key=cand_good.get) if cand_good else ""
+    cache_p[key] = phone
     if phone:
         LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "crawler"))
     else:
         LOG.debug("PHONE FAIL for %s %s  cand_good=%s cand_office=%s",
                   agent, state, cand_good, cand_office)
-
-    cache_p[key] = phone
     return phone
-
 
 def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     key = f"{agent}|{state}"
     if key in cache_e:
         return cache_e[key]
-
-    # 0️⃣  already in payload?
     for blk in (row_payload.get("contact_recipients") or []):
         for em in _emails_from_block(blk):
             cache_e[key] = em
             LOG.debug("EMAIL hit directly from contact_recipients")
             return em
-
-    # 1️⃣  Rapid‑API
     zpid = str(row_payload.get("zpid", ""))
     if zpid:
         em, src = rapid_email(zpid, agent)
@@ -595,90 +545,65 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             cache_e[key] = em
             LOG.debug("EMAIL WIN %s via %s", em, src)
             return em
-
-    # 2️⃣  Google / crawl  (original logic ‑ unchanged except for arg order)
     cand, src_e = defaultdict(int), {}
-
     queries = build_q_email(agent, state)[:MAX_Q_EMAIL]
     google_batches = pmap(google_items, queries)
-
     for items in google_batches:
         for it in items:
             mail = clean_email(it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email", ""))
             if ok_email(mail):
                 cand[mail] += 3
                 src_e.setdefault(mail, f"CSE:{it.get('link', '')}")
-
     if cand:
         email = max(cand, key=cand.get)
         cache_e[key] = email
         LOG.debug("EMAIL WIN %s via %s", email, src_e.get(email, "CSE‑json"))
         return email
-
     urls_all = [it.get("link", "") for items in google_batches for it in items][:30]
     non_portal_urls, portal_urls = _split_portals(urls_all)
-
-    # crawl non‑portal
     for url, page in zip(non_portal_urls, pmap(fetch_simple, non_portal_urls)):
-        if not page or agent.lower() not in page.lower():
-            continue
+        if not page or agent.lower() not in page.lower(): continue
         _, ems = extract_struct(page)
         for m in ems:
             m = clean_email(m)
             if ok_email(m):
-                cand[m] += 3
-                src_e.setdefault(m, url)
+                cand[m] += 3; src_e.setdefault(m, url)
         for m in EMAIL_RE.findall(page):
             m = clean_email(m)
             if ok_email(m):
-                cand[m] += 1
-                src_e.setdefault(m, url)
-        if cand:
-            break
-
+                cand[m] += 1; src_e.setdefault(m, url)
+        if cand: break
     if not cand:
         for url, page in zip(non_portal_urls, pmap(fetch, non_portal_urls)):
-            if not page or agent.lower() not in page.lower():
-                continue
+            if not page or agent.lower() not in page.lower(): continue
             _, ems = extract_struct(page)
             for m in ems:
                 m = clean_email(m)
                 if ok_email(m):
-                    cand[m] += 2
-                    src_e.setdefault(m, url)
+                    cand[m] += 2; src_e.setdefault(m, url)
             for m in EMAIL_RE.findall(page):
                 m = clean_email(m)
                 if ok_email(m):
-                    cand[m] += 1
-                    src_e.setdefault(m, url)
-            if cand:
-                break
-
+                    cand[m] += 1; src_e.setdefault(m, url)
+            if cand: break
     if not cand:
         for url, page in zip(portal_urls, pmap(fetch, portal_urls)):
-            if not page or agent.lower() not in page.lower():
-                continue
+            if not page or agent.lower() not in page.lower(): continue
             _, ems = extract_struct(page)
             for m in ems:
                 m = clean_email(m)
                 if ok_email(m):
-                    cand[m] += 2
-                    src_e.setdefault(m, url)
-            if cand:
-                break
-
+                    cand[m] += 2; src_e.setdefault(m, url)
+            if cand: break
     tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in agent.split()}
     good = {m: sc for m, sc in cand.items()
             if any(tok and tok in m.lower() for tok in tokens)}
-
     email = max(good, key=good.get) if good else (max(cand, key=cand.get) if cand else "")
-
     if email:
         LOG.debug("EMAIL WIN %s via %s", email, src_e.get(email, "crawler"))
     else:
         LOG.debug("EMAIL FAIL for %s %s  tokens=%s  candidates=%s",
                   agent, state, tokens, dict(list(cand.items())[:8]))
-
     cache_e[key] = email
     return email
 
@@ -740,39 +665,43 @@ def extract_name(t):
             return n
     return None
 
-# ───────────────────── main row processor ──────────────────────────
+# ───────────────────── SMS sender (FIXED) ──────────────────────────
 def send_sms(phone, first, address, row_idx):
     if not SMS_ENABLE or not phone:
         return
     if SMS_TEST_MODE and SMS_TEST_NUMBER:
         phone = SMS_TEST_NUMBER
     try:
-        resp = requests.post(SMS_URL, timeout=10, data={
-            "api_key": SMS_API_KEY,
-            "to": phone,
-            "from": SMS_FROM,
-            "text": SMS_TEMPLATE.format(first=first, address=address)
-        })
-        if resp.status_code == 200 and "OK" in resp.text.upper():
+        resp = requests.post(
+            SMS_URL,
+            timeout=10,
+            data={
+                "apikey":     SMS_API_KEY,                                   # ← correct
+                "recipients": phone,                                         # ← correct
+                "message":    SMS_TEMPLATE.format(first=first, address=address),
+                "sendsms":    "1"
+            }
+        )
+        if resp.status_code == 200 and '"error":"0"' in resp.text:
             mark_sent(row_idx)
             LOG.info("SMS sent to %s", phone)
         else:
-            LOG.error("SMS API error %s %s", resp.status_code, resp.text[:200])
+            LOG.error("SMS API error %s %s",
+                      resp.status_code, resp.text[:200])
     except Exception as e:
         LOG.error("SMS send error %s", e)
 
+# ───────────────────── main row processor ──────────────────────────
 def process_rows(rows):
     for r in rows:
         txt = (r.get("description", "") + " " + r.get("openai_summary", "")).strip()
         if not is_short_sale(txt):
             LOG.debug("SKIP non‑short‑sale %s (%s)", r.get("street"), r.get("zpid"))
             continue
-
         zpid = str(r.get("zpid", ""))
         if zpid and not is_active_listing(zpid):
             LOG.info("Skip stale/off‑market zpid %s", zpid)
             continue
-
         name = r.get("agentName", "").strip()
         if not name:
             name = extract_name(txt)
@@ -786,19 +715,14 @@ def process_rows(rows):
                 continue
         if TEAM_RE.search(name):
             continue
-
         state = r.get("state", "")
-
         phone = fmt_phone(lookup_phone(name, state, r))
         email = lookup_email(name, state, r)
-
         if phone and phone_exists(phone):
             continue
-
         first, *last = name.split()
         row_idx = append_row([first, " ".join(last), phone, email,
                               r.get("street", ""), r.get("city", ""), state, ""])
-
         if phone:
             send_sms(phone, first, r.get("street", ""), row_idx)
 
@@ -809,15 +733,12 @@ if __name__ == "__main__":
     except json.JSONDecodeError:
         LOG.debug("No stdin payload; exiting")
         sys.exit(0)
-
     fresh_rows = payload.get("listings", [])
     if not fresh_rows:
         LOG.info("No listings in payload")
         sys.exit(0)
-
     LOG.debug("Sample fields on first fresh row: %s", list(fresh_rows[0].keys()))
     process_rows(fresh_rows)
-
     if METRICS:
         LOG.info("metrics %s", dict(METRICS))
 
