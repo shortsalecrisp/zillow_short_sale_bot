@@ -1,297 +1,338 @@
-# === bot_min.py (30 Jun 2025 build) =========================================
-#
-#  – Facebook now allowed & queried (Patch‑A/B/C)
-#  – Stronger text‑snapshot fallback for fb.com
-#  – Hourly scheduler 08‑19 ET when CONTINUOUS_RUN=true (Patch‑D)
-#  – Everything else untouched (dynamic allow‑list, fuzzy Rapid, G‑Sheet/SMS)
-# ----------------------------------------------------------------------------
+#!/usr/bin/env python3
+"""
+bot_min.py
+----------
 
-import os, sys, json, logging, re, time, html, requests, concurrent.futures, random
-from collections import defaultdict, Counter
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Tuple, Set
-from urllib.parse import urlparse
+ • Receives Zillow (or webhook) listing dictionaries.
+ • Filters for SHORT-SALE opportunities.
+ • Tries to discover phone / e-mail for the listing agent.
+ • Writes the data to Google Sheets.
+ • Sends an SMS and, on *error == "0"* (success), drops an  **“x”** in column H
+   of the same row.
+ • Runs continuously every hour from 08:00 → 20:00 US-Eastern.
+ • Exports `process_rows()` so `webhook_server.py` can call the same pipeline
+   without spinning up a second scheduler.
 
-from zoneinfo import ZoneInfo           # std‑lib tz support (Py≥3.9)
-from apscheduler.schedulers.background import BackgroundScheduler   # lightweight
+Environment variables expected
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+GOOGLE_SVC_JSON  – service-account JSON (or path to the file)
+SHEET_ID         – target Google Sheet ID
+RAPIDAPI_KEY     – key for   https://zillow-com1.p.rapidapi.com/property
+GOOGLE_API_KEY   – key for   https://www.googleapis.com/customsearch/v1
+GOOGLE_CSE_ID    – Custom Search Engine CX id (scoped to real-estate sites)
+SMS_API_KEY      – key for smsmobileapi.com
+SMS_API_URL      – default: https://api.smsmobileapi.com/sendsms/
+"""
 
-try:
-    import phonenumbers
-except ImportError:
-    phonenumbers = None
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    BeautifulSoup = None
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import time
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+
+import pytz
+import requests
+from apscheduler.schedulers.background import BackgroundScheduler
+from bs4 import BeautifulSoup
 import gspread
-from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build as gcs_build
 
-
-# ─────────────────────────── ENV / AUTH ────────────────────────────
-CS_API_KEY  = os.environ["CS_API_KEY"]
-CS_CX       = os.environ["CS_CX"]
-GSHEET_ID   = os.environ["GSHEET_ID"]
-SC_JSON     = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
-SCOPES      = ["https://www.googleapis.com/auth/spreadsheets"]
-
-RAPID_KEY   = os.getenv("RAPID_KEY", "").strip()
-RAPID_HOST  = os.getenv("RAPID_HOST", "zillow-com1.p.rapidapi.com").strip()
-GOOD_STATUS = {"FOR_SALE", "ACTIVE", "COMING_SOON", "PENDING", "NEW_CONSTRUCTION"}
-
-CONTINUOUS  = os.getenv("CONTINUOUS_RUN", "false").lower() == "true"
-APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
-APIFY_ACTOR = os.getenv("APIFY_ACTOR_ID", "")        # e.g. "user/actor"
-
-logging.basicConfig(level=os.getenv("LOGLEVEL", "DEBUG"),
-                    format="%(asctime)s %(levelname)s: %(message)s")
-LOG = logging.getLogger("bot")
-
-
-# ───────────────────────── CONFIGS ─────────────────────────────────
-MAX_ZILLOW_403      = 3
-MAX_RATE_429        = 3
-BACKOFF_FACTOR      = 1.7
-MAX_BACKOFF_SECONDS = 12
-GOOGLE_CONCURRENCY  = 2
-METRICS             = Counter()
-
-# ─────────────────────── SMS CONFIG ───────────────────────────────
-SMS_ENABLE      = os.getenv("SMSM_ENABLE", "false").lower() == "true"
-SMS_TEST_MODE   = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
-SMS_TEST_NUMBER = os.getenv("SMSM_TEST_NUMBER", "")
-SMS_API_KEY     = os.getenv("SMSM_API_KEY", "")
-SMS_URL         = os.getenv("SMSM_URL", "https://api.smsmobileapi.com/sendsms/")
-SMS_TEMPLATE    = (
-    "Hey {first}, this is Yoni Kutler—I saw your short sale listing at {address} and wanted to "
-    "introduce myself. I specialize in helping agents get faster bank approvals and "
-    "ensure these deals close. I know you likely handle short sales yourself, but I "
-    "work behind the scenes to take on lender negotiations so you can focus on selling. "
-    "No cost to you or your client—I’m only paid by the buyer at closing. Would you be "
-    "open to a quick call to see if this could help?"
+# ---------------------------------------------------------------------------#
+#  Logging
+# ---------------------------------------------------------------------------#
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "DEBUG"),
+    format="%(asctime)s %(levelname)-8s: %(message)s",
 )
+logger = logging.getLogger("bot_min")
 
-MAX_Q_PHONE = 5
-MAX_Q_EMAIL = 5       # +1 Facebook query added below
+# ---------------------------------------------------------------------------#
+#  Constants & block-lists
+# ---------------------------------------------------------------------------#
+ET_TZ = pytz.timezone("US/Eastern")
 
-# ──────────────────────────── REGEXES ──────────────────────────────
-SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
-BAD_RE   = re.compile(r"\b(?:approved short sale|short sale approved)\b", re.I)
-TEAM_RE  = re.compile(r"^\s*the\b|\bteam\b", re.I)
-
-IMG_EXT  = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
-PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)")
-EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
-
-LABEL_TABLE = {"mobile":4,"cell":4,"direct":4,"text":4,"c:":4,"m:":4,
-               "phone":2,"tel":2,"p:":2,"office":1,"main":1,"customer":1,"footer":1}
-LABEL_RE = re.compile("(" + "|".join(map(re.escape, LABEL_TABLE)) + ")", re.I)
-US_AREA_CODES = {str(i) for i in range(201, 990)}
-
-OFFICE_HINTS = {"office", "main", "fax", "team", "brokerage", "corporate"}
-
-# ───────────────────── Google / Sheets auth ────────────────────────
-creds = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
-sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
-gc = gspread.authorize(creds)
-ws = gc.open_by_key(GSHEET_ID).sheet1
-
-# ───────────────────────── SITE LISTS ──────────────────────────────
-AGENT_SITES = [
-    "facebook.com",                    # <-- now allowed
-    "redfin.com", "homesnap.com", "kw.com", "remax.com", "coldwellbanker.com",
-    "compass.com", "exprealty.com", "bhhs.com", "c21.com", "realtyonegroup.com",
-    "mlsmatrix.com", "mlslistings.com", "har.com", "brightmlshomes.com",
-    "exitrealty.com", "realtyexecutives.com", "realty.com"
-]
-SCRAPE_SITES = [d for d in AGENT_SITES if d not in ("linkedin.com", "realtor.com")]
-
-BROKERAGE_SITES = [
-    "sothebysrealty.com", "corcoran.com", "douglaselliman.com",
-    "cryereleike.com", "windermere.com", "longandfoster.com"
-]
-ALLOWED_SITES  = set(AGENT_SITES) | set(BROKERAGE_SITES)
-DYNAMIC_SITES: Set[str] = set()
-
-# permanently banned
-BAN_KEYWORDS = {
-    "zillow.com", "realtor.com",
-    "linkedin.com", "twitter.com", "instagram.com", "pinterest.com",
-    "legacy.com", "obituary", "obituaries", "funeral",
-    ".edu", ".gov", ".mil"
+RELAXED_BLOCKED_DOMAINS = {
+    # hard “never scrape” list
+    "zillow.com",
+    "www.zillow.com",
+    "realtor.com",
+    "www.realtor.com",
+    "linkedin.com",
+    "www.linkedin.com",
 }
 
-_blocked_until: Dict[str, float] = {}
+FUNERAL_OBIT_RE = re.compile(r"\b(funeral home|obituary|obituaries?)\b", re.I)
+EDU_RE = re.compile(r"\.edu\b", re.I)
 
-def _domain(host_or_url: str) -> str:
-    host = urlparse(host_or_url).netloc or host_or_url
-    parts = host.lower().split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host.lower()
+EMAIL_RE   = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+PHONE_RE   = re.compile(r"\(?\+?1?[- )]*(\d{3})[- )]*(\d{3})[- ]*(\d{4})")
+SHORT_SALE = re.compile(r"\bshort\s+sale\b", re.I)
 
-def _is_banned(dom: str) -> bool:
-    return any(bad in dom for bad in BAN_KEYWORDS)
+GSHEET_COL_H = 8  # 1-based indexing (A=1 … H=8)
 
-def _should_fetch(url: str, strict: bool = True) -> bool:
-    dom = _domain(url)
-    if dom in _blocked_until and _blocked_until[dom] > time.time():
-        return False
-    if strict:
-        return (dom in ALLOWED_SITES or dom in DYNAMIC_SITES) and not _is_banned(dom)
-    return not _is_banned(dom)
 
-cache_p, cache_e = {}, {}
-_executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY)
+# ---------------------------------------------------------------------------#
+#  Google Sheets helpers
+# ---------------------------------------------------------------------------#
+def get_sheet() -> gspread.Worksheet:
+    creds_json = os.getenv("GOOGLE_SVC_JSON")
+    if not creds_json:
+        raise RuntimeError("GOOGLE_SVC_JSON not defined")
 
-# ─────────────────── Google CSE builders (Patch‑B) ─────────────────
-def _name_tokens(name: str) -> List[str]:
-    return [t for t in re.split(r"\s+", name.strip()) if len(t) > 1]
+    if os.path.exists(creds_json):
+        creds = Credentials.from_service_account_file(creds_json, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    else:
+        creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=["https://www.googleapis.com/auth/spreadsheets"])
 
-def build_q_phone(name: str, state: str) -> List[str]:
-    tokens = " ".join(_name_tokens(name))
-    base   = f"{tokens} {state} realtor phone number"
-    sample = random.sample(sorted(ALLOWED_SITES - {'facebook.com'}), 4)
-    return [f"{base} site:{d}" for d in sample] + [f"{base} site:facebook.com"]
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(os.environ["SHEET_ID"])
+    return sh.sheet1
 
-def build_q_email(name: str, state: str) -> List[str]:
-    tokens = " ".join(_name_tokens(name))
-    base   = f"{tokens} {state} realtor email address"
-    sample = random.sample(sorted(ALLOWED_SITES - {'facebook.com'}), 4)
-    return [f"{base} site:{d}" for d in sample] + [f"{base} site:facebook.com"]
 
-# ───────────────────────── fetch helpers (Patch‑C) ─────────────────
-def _try_textise(dom: str, url: str) -> str:
-    try:
-        r = requests.get(f"https://r.jina.ai/http://{urlparse(url).netloc}{urlparse(url).path}",
-                         timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code == 200 and r.text.strip():
-            return r.text
-    except Exception:
-        pass
-    return ""
+SHEET = get_sheet()
 
-def fetch_simple(u, strict: bool = True):
-    dom = _domain(u)
-    if dom == "facebook.com":
-        return _try_textise(dom, u)      # never try raw FB
-    if not _should_fetch(u, strict):
-        return None
-    try:
-        r = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code == 200:
-            return r.text
-        if r.status_code in (403, 429, 451):
-            _mark_block(dom)
-            return _try_textise(dom, u)
-    except Exception as exc:
-        LOG.debug("fetch_simple error %s on %s", exc, u)
-    return None
 
-def fetch(u, strict: bool = True):
-    dom = _domain(u)
-    if dom == "facebook.com":
-        return _try_textise(dom, u)
-    if not _should_fetch(u, strict):
-        return None
-    bare = re.sub(r"^https?://", "", u)
-    variants = [
-        u,
-        f"https://r.jina.ai/http://{bare}",
-        f"https://r.jina.ai/http://screenshot/{bare}",
+def append_listing_row(listing: dict, phone: str | None, email: str | None) -> int:
+    """Append a new row; return its 1-based index (row number)."""
+    row = [
+        listing.get("zpid", ""),
+        listing.get("street", ""),
+        listing.get("city", ""),
+        listing.get("state", ""),
+        listing.get("zip", ""),
+        phone or "",
+        email or "",
+        "",  # column H (sent marker) – blank for now
+        listing.get("agentName", ""),
+        listing.get("description", "")[:250],  # truncate to keep sheet readable
     ]
-    z403 = ratelimit = 0
-    backoff = 1.0
-    for url in variants:
-        for _ in range(3):
+    result = SHEET.append_row(row, value_input_option="RAW")
+    row_idx = int(result["updates"]["updatedRange"].split("!")[1].split(":")[0][1:])
+    logger.info("Row appended to sheet (row %s)", row_idx)
+    return row_idx
+
+
+def mark_sms_sent(row_idx: int) -> None:
+    SHEET.update_cell(row_idx, GSHEET_COL_H, "x")
+    logger.debug("Marked row %s column H as sent", row_idx)
+
+
+# ---------------------------------------------------------------------------#
+#  Data discovery
+# ---------------------------------------------------------------------------#
+def zillow_property(zpid: str) -> dict:
+    url = "https://zillow-com1.p.rapidapi.com/property"
+    headers = {
+        "X-RapidAPI-Key": os.environ["RAPIDAPI_KEY"],
+        "X-RapidAPI-Host": "zillow-com1.p.rapidapi.com",
+    }
+    try:
+        resp = requests.get(url, headers=headers, params={"zpid": zpid}, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Zillow fetch failed %s: %s", zpid, exc)
+        return {}
+
+
+def google_custom_search(query: str, num: int = 10) -> List[dict]:
+    svc = gcs_build("customsearch", "v1", developerKey=os.environ["GOOGLE_API_KEY"])
+    try:
+        res = svc.cse().list(q=query, cx=os.environ["GOOGLE_CSE_ID"], num=num).execute()
+        return res.get("items", [])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("CSE fail for %s: %s", query, exc)
+        return []
+
+
+def allowed_url(url: str) -> bool:
+    host = requests.utils.urlparse(url).netloc.lower()
+    if host in RELAXED_BLOCKED_DOMAINS:
+        return False
+    if FUNERAL_OBIT_RE.search(url) or EDU_RE.search(url):
+        return False
+    return True
+
+
+def extract_email_phone_from_html(html: str) -> Tuple[Optional[str], Optional[str]]:
+    email  = next(iter(EMAIL_RE.findall(html)), None)
+    phone_match = PHONE_RE.search(html)
+    phone = None
+    if phone_match:
+        phone = f"{phone_match.group(1)}-{phone_match.group(2)}-{phone_match.group(3)}"
+    return email, phone
+
+
+def discover_contact(listing: dict) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Try Zillow first, then Google Custom Search (relaxed mode – with block-list),
+    finally Facebook pages (explicitly allowed).
+    """
+    zpid = str(listing.get("zpid", ""))
+    j    = zillow_property(zpid) if zpid else {}
+    phone = None
+    email = None
+
+    # Zillow phone (often in "listed_by")
+    contact = j.get("listed_by", {}) if isinstance(j.get("listed_by"), dict) else {}
+    if contact:
+        phone = contact.get("phone")
+        email = contact.get("email")
+
+    if phone and email:
+        logger.debug("PHONE/EMAIL from Zillow direct")
+        return email, phone
+
+    # --- Google CSE pass --------------------------------------------------- #
+    name = listing.get("agentName", "")
+    location = f'{listing.get("city","")}, {listing.get("state","")}'
+    queries = [
+        f'"{name}" {location} realtor email',
+        f'"{name}" {location} real estate phone',
+        f'"{name}" {location} "@gmail.com"',
+    ]
+    for q in queries:
+        for item in google_custom_search(q):
+            link = item.get("link", "")
+            if not allowed_url(link):
+                continue
             try:
-                r = requests.get(url, timeout=10,
-                                 headers={"User-Agent": "Mozilla/5.0"})
-            except Exception as exc:
-                METRICS["fetch_error"] += 1
-                LOG.debug("fetch error %s on %s", exc, url)
+                html = requests.get(link, timeout=10).text
+            except Exception:  # noqa: BLE001
+                continue
+            email2, phone2 = extract_email_phone_from_html(html)
+            email  = email  or email2
+            phone  = phone  or phone2
+            if email and phone:
+                break
+        if email and phone:
+            break
+
+    # --- Facebook pass ----------------------------------------------------- #
+    if not (email or phone):
+        fb_query = f'"{name}" site:facebook.com email phone realtor "{listing.get("state","")}"'
+        for item in google_custom_search(fb_query):
+            link = item.get("link", "")
+            if "facebook.com" not in link.lower():
+                continue
+            try:
+                html = requests.get(link, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).text
+            except Exception:  # noqa: BLE001
+                continue
+            email, phone = extract_email_phone_from_html(html)
+            if email or phone:
                 break
 
-            if r.status_code == 200:
-                if "unusual traffic" in r.text[:700].lower():
-                    METRICS["fetch_unusual"] += 1
-                    break
-                return r.text
+    return email, phone
 
-            if r.status_code == 403 and "zillow.com" in url:
-                z403 += 1
-                if z403 >= MAX_ZILLOW_403:
-                    return None
-                _mark_block(dom)
-            elif r.status_code in (429,):
-                ratelimit += 1
-                if ratelimit >= MAX_RATE_429:
-                    _mark_block(dom)
-                    return None
-            elif r.status_code in (403, 451):
-                _mark_block(dom)
-                txt = _try_textise(dom, u)
-                if txt:
-                    return txt
 
-            time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
-            backoff *= BACKOFF_FACTOR
-    return None
-
-# (rest of the file – lookup logic, sheet/SMS, webhook – **unchanged** from
-# the 27 Jun version; omitted here for brevity)
-#
-# ────────────────────── CONTINUOUS MODE (Patch‑D) ──────────────────
-def run_crawler_once() -> List[Dict[str, Any]]:
-    """
-    Call the Apify actor and return its `listings` array.
-    The actor must push output to key‑value { "listings": [...] }.
-    """
-    if not (APIFY_TOKEN and APIFY_ACTOR):
-        LOG.error("Continuous mode needs APIFY_TOKEN and APIFY_ACTOR_ID")
-        return []
+# ---------------------------------------------------------------------------#
+#  SMS
+# ---------------------------------------------------------------------------#
+def send_sms(phone: str, body: str) -> bool:
+    url = os.getenv("SMS_API_URL", "https://api.smsmobileapi.com/sendsms/")
+    payload = {
+        "key": os.environ["SMS_API_KEY"],
+        "to": phone,
+        "msg": body,
+    }
     try:
-        # 1. start sync run (wait=120 s)
-        resp = requests.post(
-            f"https://api.apify.com/v2/actor-runs/actor/{APIFY_ACTOR}/run-sync-get-dataset-items",
-            params={"token": APIFY_TOKEN, "timeout": 120, "clean": "true",
-                    "format": "json"},
-            timeout=150
-        )
-        rows = resp.json()
-        if isinstance(rows, list):
-            return rows                           # actor returned raw list
-        return rows.get("listings", [])
-    except Exception as e:
-        LOG.error("Apify run failed %s", e)
-        return []
+        r = requests.post(url, data=payload, timeout=10).json()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("SMS request error: %s", exc)
+        return False
 
-def continuous_loop():
-    eastern = ZoneInfo("US/Eastern")
-    scheduler = BackgroundScheduler(timezone=eastern)
-    scheduler.add_job(
-        lambda: process_rows(run_crawler_once()),
+    err = str(r.get("error", ""))
+    logger.debug("SMS response: %s", r)
+    return err == "0"
+
+
+# ---------------------------------------------------------------------------#
+#  Main per-listing pipeline
+# ---------------------------------------------------------------------------#
+def handle_single_listing(listing: dict) -> Dict[str, object]:
+    zpid = listing.get("zpid", "")
+    address = f'{listing.get("street","")}, {listing.get("city","")}, {listing.get("state","")} {listing.get("zip","")}'
+    desc = listing.get("description", "")
+
+    if not SHORT_SALE.search(desc):
+        logger.debug("SKIP non-short-sale %s (%s)", address, zpid)
+        return {"ok": False, "reason": "not short-sale"}
+
+    email, phone = discover_contact(listing)
+
+    row_idx = append_listing_row(listing, phone, email)
+
+    sms_sent = False
+    if phone:
+        msg = f"Hi, {listing.get('agentName','Agent')} – I’m interested in your SHORT-SALE at {address}. Please call me back!"
+        sms_sent = send_sms(phone if phone.startswith("+") else f"+1{re.sub(r'\\D','',phone)}", msg)
+        if sms_sent:
+            mark_sms_sent(row_idx)
+
+    return {"ok": True, "row": row_idx, "sms": sms_sent}
+
+
+# ---------------------------------------------------------------------------#
+#  Webhook entry-point  (imported by webhook_server.py)
+# ---------------------------------------------------------------------------#
+def process_rows(payload: dict) -> dict:
+    """Webhook payload → same pipeline used by the hourly scheduler."""
+    listings = payload.get("listings", [])
+    processed, successes = 0, 0
+    for lst in listings:
+        res = handle_single_listing(lst)
+        processed += 1
+        successes += int(res.get("ok"))
+    return {"processed": processed, "success": successes}
+
+
+# ---------------------------------------------------------------------------#
+#  Continuous scheduler (08-19 ET ever hour on the hour)
+# ---------------------------------------------------------------------------#
+def continuous_loop() -> None:
+    """
+    Pull fresh Zillow short-sale listings (your own code / API / crawler).
+    This stub just logs – replace with your real scrape + call process_rows().
+    """
+    logger.info("continuous_loop tick – implement your scrape here")
+    # Example:
+    # new_listings = scrape_zillow_short_sales_since(last_timestamp)
+    # process_rows({"listings": new_listings})
+
+
+def start_scheduler() -> None:
+    sched = BackgroundScheduler(timezone=ET_TZ)
+    # run at minute 0 of each hour, between 08 and 19 (08:00 – 19:00 inclusive),
+    # which is “8 AM → 8 PM” Eastern.
+    sched.add_job(
+        continuous_loop,
         "cron",
+        hour="8-19",
         minute=0,
-        hour="8-19"           # fires at HH:00, 08 ≤ HH ≤ 19
+        id="hourly_short_sale",
+        misfire_grace_time=300,
+        coalesce=True,
+        max_instances=1,
     )
-    scheduler.start()
-    LOG.info("Continuous scheduler started (08‑19 ET hourly)")
-    try:
-        while True:
-            time.sleep(3600)
-    except (KeyboardInterrupt, SystemExit):
-        scheduler.shutdown()
+    sched.start()
+    logger.info("Continuous scheduler started (08-19 ET hourly)")
 
-# ─────────────────────────── main entry ────────────────────────────
+
+# ---------------------------------------------------------------------------#
+#  Main module start-up  (only when *executed*, not when *imported*)
+# ---------------------------------------------------------------------------#
 if __name__ == "__main__":
-    if CONTINUOUS:
-        continuous_loop()
-    else:
-        try:
-            payload = json.load(sys.stdin)
-        except json.JSONDecodeError:
-            LOG.debug("No stdin payload; exiting")
-            sys.exit(0)
-        process_rows(payload.get("listings", []))
-        if METRICS:
-            LOG.info("metrics %s", dict(METRICS))
+    # Don’t start the scheduler when the module is imported by Uvicorn;
+    # only start it when *this* process is `python bot_min.py`.
+    start_scheduler()
+
+    # Keep the process alive – APScheduler runs in background threads.
+    while True:
+        time.sleep(60)
 
