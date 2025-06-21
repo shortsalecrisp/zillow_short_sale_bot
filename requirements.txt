@@ -1,12 +1,19 @@
 fastapi
 uvicorn[standard]
+
+# core utilities
 requests>=2.31.0
+python-dotenv==1.0.1
+apscheduler==3.10.4          # ← new
+
+# parsing / scraping
 beautifulsoup4==4.12.3
+
+# Google Sheets & Auth
 gspread==6.1.0
 oauth2client==4.1.3
-python-dotenv==1.0.1
-google-api-python-client>=2.126.0   # keep this
-google-auth>=2.29.0                 # plus these two
+google-api-python-client>=2.126.0
+google-auth>=2.29.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.0.0
 
