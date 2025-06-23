@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 #  ╭────────────────── bot_min.py ──────────────────╮
-#  │ build: 22 Jun 2025 – “B‑list” patch            │
-#  │   • Skip rows that are not short‑sales         │
-#  │   • Phone: surname‑proximity relevance test    │
-#  │   • E‑mail: blacklist model + brokerage boost  │
-#  │   • Google‑CSE: 1 s guard‑rail + in‑run cache  │
+#  │ build: 23 Jun 2025 – “C‑list” patch            │
+#  │   • Rapid‑e‑mail branch removed                │
+#  │   • Smarter Google q‑builder (+brokerage/site) │
+#  │   • E‑mail scorer: generic penalty, token boost│
+#  │   • in‑process phone dedupe + extra bans       │
+#  │   • CSE guard‑rail 1.5 s + negative cache      │
+#  │   • Pattern synth (v0.1) for @domain addresses │
 #  ╰────────────────────────────────────────────────╯
 
 import json, logging, os, random, re, sys, time, html, concurrent.futures, threading
@@ -87,13 +89,20 @@ sheets_service = gapi_build("sheets", "v4", credentials=creds, cache_discovery=F
 gc     = gspread.authorize(creds)
 ws     = gc.open_by_key(GSHEET_ID).sheet1
 
+# preload sheet phone column to prevent intra‑process duplicates
+try:
+    _preloaded = ws.col_values(3)
+except Exception:
+    _preloaded = []
+seen_phones: Set[str] = set(_preloaded)
+
 # ───────────────────────── SITE LISTS  (whitelist removed) ─────────
 # We now allow **any** domain except those matching the blacklist below.
 SCRAPE_SITES: List[str] = []   # kept for function signatures
 DYNAMIC_SITES: Set[str] = set()
 
 BAN_KEYWORDS = {
-    "zillow.com","realtor.com",
+    "zillow.com","realtor.com","redfin.com","homes.com",       # added heavy‑403 portals
     "linkedin.com","twitter.com","instagram.com","pinterest.com",
     "legacy.com","obituary","obituaries","funeral",
     ".gov",".edu",".mil"
@@ -199,25 +208,7 @@ def rapid_phone(zpid: str, agent_name: str) -> Tuple[str,str]:
     if len(allp)==1: return next(iter(allp)), "rapid:fallback_single"
     return "",""
 
-def rapid_email(zpid: str, agent_name: str) -> Tuple[str,str]:
-    data = rapid_property(zpid)
-    if not data: return "",""
-    cand, allem = [], set()
-    for blk in data.get("contact_recipients",[]):
-        for em in _emails_from_block(blk):
-            allem.add(em)
-            if _names_match(agent_name, blk.get("display_name","")):
-                cand.append(("rapid:contact_recipients", em))
-    lb=data.get("listed_by",{})
-    for em in _emails_from_block(lb):
-        allem.add(em)
-        if _names_match(agent_name, lb.get("display_name","")):
-            cand.append(("rapid:listed_by", em))
-    if cand: return cand[0][1], cand[0][0]
-    if len(allem)==1: return next(iter(allem)), "rapid:fallback_single"
-    return "",""
-
-# ───────────────────── HTML fetch helpers ──────────────────────────
+# ───────────────────── HTML fetch helpers (unchanged) ──────────────────────────
 def _jitter():          time.sleep(random.uniform(0.8,1.5))
 def _mark_block(dom):   _blocked_until[dom] = time.time() + 600
 
@@ -304,13 +295,15 @@ _last_cse_ts = 0.0
 _cse_lock    = threading.Lock()
 
 def google_items(q, tries=3):
+    """Thin wrapper around CustomSearch that enforces 1.5 s gap and
+       stores negative results to avoid buzzing the quota."""
     global _last_cse_ts
     with _cse_lock:
         if q in _cse_cache:
             return _cse_cache[q]
         delta = time.time() - _last_cse_ts
-        if delta < 1.0:               # 3.6 “guardian” delay
-            time.sleep(1.0 - delta)
+        if delta < 1.5:               # 1.5 s “guardian” delay
+            time.sleep(1.5 - delta)
         _last_cse_ts = time.time()
 
     backoff=1.0
@@ -322,10 +315,12 @@ def google_items(q, tries=3):
             ).json()
             items=j.get("items",[])
             with _cse_lock:
-                _cse_cache[q]=items
+                _cse_cache[q]=items          # ← store even if []
             return items
         except Exception:
             time.sleep(min(backoff,MAX_BACKOFF_SECONDS)); backoff*=BACKOFF_FACTOR
+    with _cse_lock:
+        _cse_cache[q]=[]
     return []
 
 # ───────────────────── structured & proximity scan (unchanged) ────
@@ -364,7 +359,7 @@ def proximity_scan(t,last_name=None):
         out[p]=(max(bw,w), ts+2+w, lab in ("office","main"))
     return out
 
-# ───────────────────── Google query builders (whitelist → broad) ──
+# ───────────────────── Google query builders (updated) ────────────
 def _name_tokens(name:str)->List[str]:
     return [t for t in re.split(r"\s+",name.strip()) if len(t)>1]
 
@@ -372,12 +367,37 @@ def build_q_phone(name:str,state:str)->List[str]:
     tokens=" ".join(_name_tokens(name))
     return [f'"{name}" {state} realtor phone']
 
-def build_q_email(name:str,state:str)->List[str]:
-    tokens=" ".join(_name_tokens(name))
-    return [f'"{name}" {state} realtor email address']
+def build_q_email(name:str,state:str,brokerage:str="",domain_hint:str="",mls_id:str="")->List[str]:
+    out=[f'"{name}" {state} realtor email']
+    if brokerage:
+        out.append(f'"{name}" "{brokerage}" email')
+    if domain_hint:
+        out.append(f'site:{domain_hint} "{name}" email')
+    if mls_id:
+        out.append(f'"{mls_id}" "{name.split()[-1]}" email')
+    return out
 
 # ───────────────────── caches ────────────────────────────────
 cache_p, cache_e = {}, {}
+domain_patterns: Dict[str,str] = {}   # learned e‑mail pattern per domain
+
+# ───────────────────── helper: infer e‑mail pattern ──────────
+def _pattern_from_example(addr:str,name:str)->str:
+    first,last=map(lambda s:re.sub(r"[^a-z]","",s.lower()), (name.split()[0],name.split()[-1]))
+    local,_=addr.split("@",1)
+    if local==f"{first}{last}": return "{first}{last}"
+    if local==f"{first}.{last}": return "{first}.{last}"
+    if local==f"{first[0]}{last}": return "{fi}{last}"
+    if local==f"{first}.{last[0]}": return "{first}.{li}"
+    return ""
+
+def _synth_email(name:str,domain:str)->str:
+    patt=domain_patterns.get(domain)
+    if not patt: return ""
+    first,last=map(lambda s:re.sub(r"[^a-z]","",s.lower()), (name.split()[0],name.split()[-1]))
+    fi,li=first[0],last[0]
+    local=patt.format(first=first,last=last,fi=fi,li=li)
+    return f"{local}@{domain}"
 
 # ───────────────────── lookup phone / email  (phone test patched)──
 def _split_portals(urls):
@@ -490,37 +510,51 @@ def lookup_email(agent:str,state:str,row_payload:Dict[str,Any])->str:
     key=f"{agent}|{state}"
     if key in cache_e: return cache_e[key]
 
+    brokerage,domain_hint,mls_id="","",""
+
+    # try contact_recipients (rare but free)
     for blk in (row_payload.get("contact_recipients") or []):
         for em in _emails_from_block(blk):
             cache_e[key]=em
             LOG.debug("EMAIL hit directly from contact_recipients"); return em
 
     zpid=str(row_payload.get("zpid",""))
-    brokerage=""
     if zpid:
-        em,src=rapid_email(zpid,agent)
-        if em:
-            cache_e[key]=em; LOG.debug("EMAIL WIN %s via %s",em,src); return em
-        # pull brokerage for boost
+        # no more rapid_email(), but we still pull brokerage for boosts
         rapid = rapid_property(zpid)
         brokerage = (rapid.get("listed_by") or {}).get("brokerageName","") if rapid else ""
+        mls_id    = (rapid.get("listed_by") or {}).get("listingAgentMlsId","") if rapid else ""
 
     cand,src_e=defaultdict(int),{}
 
     def add_e(m,score,src=""):
         m=clean_email(m)
         if not ok_email(m): return
+        dom=_domain(m)
+        # generic / office penalty
+        if re.search(r"\b(info|office|admin|support|advertising|noreply|hello)\b",m,re.I):
+            score-=2
+        # full name boost
+        tokens={re.sub(r"[^a-z]","",w.lower()) for w in agent.split()}
+        if tokens and all(tok and tok in m.lower() for tok in tokens):
+            score+=3
+        # brokerage boost
         if brokerage and brokerage.lower() in m.lower():
-            score += 1                                   # optional boost
+            score+=1
         cand[m]+=score
         if src: src_e.setdefault(m,src); DYNAMIC_SITES.add(_domain(src))
+        # learn pattern
+        patt=_pattern_from_example(m,agent)
+        if patt: domain_patterns.setdefault(dom,patt)
 
-    for items in pmap(google_items,build_q_email(agent,state)):
+    # Google CSE json‑LD hits
+    for items in pmap(google_items,build_q_email(agent,state,brokerage,domain_hint,mls_id)):
         for it in items:
             mail=it.get("pagemap",{}).get("contactpoint",[{}])[0].get("email","")
             add_e(mail,3,f"CSE:{it.get('link','')}")
 
-    urls=[it.get("link","") for items in pmap(google_items,build_q_email(agent,state)) for it in items][:20]
+    # Crawl first 20 links
+    urls=[it.get("link","") for items in pmap(google_items,build_q_email(agent,state,brokerage,domain_hint,mls_id)) for it in items][:20]
     non_portal,portal=_split_portals(urls)
 
     for url,page in zip(non_portal,pmap(fetch_simple,non_portal)):
@@ -538,14 +572,19 @@ def lookup_email(agent:str,state:str,row_payload:Dict[str,Any])->str:
             for m in EMAIL_RE.findall(page): add_e(m,1,url)
             if cand: break
 
-    tokens={re.sub(r"[^a-z]","",w.lower()) for w in agent.split()}
-    good={m:sc for m,sc in cand.items() if any(tok and tok in m.lower() for tok in tokens)}
-    email=max(good,key=good.get) if good else (max(cand,key=cand.get) if cand else "")
+    # pattern‑based synthesis if still empty
+    if not cand and domain_hint:
+        guess=_synth_email(agent,domain_hint)
+        if guess:
+            add_e(guess,2,"pattern‑synth")
+
+    email = max(cand,key=cand.get) if cand else ""
     if email:
-        LOG.debug("EMAIL WIN %s via %s",email,src_e.get(email,"crawler"))
+        cache_e[key]=email
+        LOG.debug("EMAIL WIN %s via %s",email,src_e.get(email,"crawler/pattern"))
     else:
-        LOG.debug("EMAIL FAIL for %s %s  tokens=%s  candidates=%s",agent,state,tokens,dict(list(cand.items())[:8]))
-    cache_e[key]=email
+        cache_e[key]=""
+        LOG.debug("EMAIL FAIL for %s %s  candidates=%s",agent,state,dict(list(cand.items())[:8]))
     return email
 
 # ───────────────────── Google Sheet helpers (unchanged) ────────────
@@ -571,10 +610,7 @@ def append_row(values)->int:
     return row_idx
 
 def phone_exists(p):
-    try:
-        return p in ws.col_values(3)
-    except Exception:
-        return False
+    return p in seen_phones
 
 # ───────────────────── misc helpers (unchanged) ────────────────────
 def extract_name(t):
@@ -631,7 +667,7 @@ def process_rows(rows:List[Dict[str,Any]]):
     for r in rows:
         txt=(r.get("description","")+" "+r.get("openai_summary","")).strip()
         if not is_short_sale(txt):
-            LOG.debug("SKIP non-short-sale %s (%s)",r.get("street"),r.get("zpid")); continue   # ← already skipping
+            LOG.debug("SKIP non-short-sale %s (%s)",r.get("street"),r.get("zpid")); continue
         zpid=str(r.get("zpid",""))
         if zpid and not is_active_listing(zpid):
             LOG.info("Skip stale/off-market zpid %s",zpid); continue
@@ -644,6 +680,7 @@ def process_rows(rows:List[Dict[str,Any]]):
         first,*last=name.split()
         row_idx=append_row([first," ".join(last),phone,email,
                             r.get("street",""),r.get("city",""),state,""])
+        if phone: seen_phones.add(phone)
         if phone: send_sms(phone,first,r.get("street",""),row_idx)
 
 # ───────────────────── main entry point (unchanged) ────────────────
