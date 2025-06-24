@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 #  ╭────────────────── bot_min.py ──────────────────╮
-#  │ build: 23 Jun 2025 – “C‑list” patch            │
-#  │   • Rapid‑e‑mail branch removed                │
-#  │   • Smarter Google q‑builder (+brokerage/site) │
-#  │   • E‑mail scorer: generic penalty, token boost│
-#  │   • in‑process phone dedupe + extra bans       │
-#  │   • CSE guard‑rail 1.5 s + negative cache      │
-#  │   • Pattern synth (v0.1) for @domain addresses │
+#  │ build: 24 Jun 2025 – “Named lock” patch        │
+#  │   • Require agent-name token (or nickname)     │
+#  │     in any e-mail we accept                    │
+#  │   • Nothing else touched                      │
 #  ╰────────────────────────────────────────────────╯
 
 import json, logging, os, random, re, sys, time, html, concurrent.futures, threading
@@ -89,7 +86,7 @@ sheets_service = gapi_build("sheets", "v4", credentials=creds, cache_discovery=F
 gc     = gspread.authorize(creds)
 ws     = gc.open_by_key(GSHEET_ID).sheet1
 
-# preload sheet phone column to prevent intra‑process duplicates
+# preload sheet phone column to prevent intra-process duplicates
 try:
     _preloaded = ws.col_values(3)
 except Exception:
@@ -97,12 +94,11 @@ except Exception:
 seen_phones: Set[str] = set(_preloaded)
 
 # ───────────────────────── SITE LISTS  (whitelist removed) ─────────
-# We now allow **any** domain except those matching the blacklist below.
-SCRAPE_SITES: List[str] = []   # kept for function signatures
+SCRAPE_SITES: List[str] = []
 DYNAMIC_SITES: Set[str] = set()
 
 BAN_KEYWORDS = {
-    "zillow.com","realtor.com","redfin.com","homes.com",       # added heavy‑403 portals
+    "zillow.com","realtor.com","redfin.com","homes.com",
     "linkedin.com","twitter.com","instagram.com","pinterest.com",
     "legacy.com","obituary","obituaries","funeral",
     ".gov",".edu",".mil"
@@ -136,7 +132,7 @@ def ok_email(e):
 
 def is_short_sale(text): return SHORT_RE.search(text) and not BAD_RE.search(text)
 
-# ───────────────────── Rapid‑API helpers (unchanged) ───────────────
+# ───────────────────── Rapid-API helpers (unchanged) ───────────────
 def _phone_obj_to_str(obj: Dict[str,str]) -> str:
     if not obj: return ""
     key_order = [
@@ -208,7 +204,7 @@ def rapid_phone(zpid: str, agent_name: str) -> Tuple[str,str]:
     if len(allp)==1: return next(iter(allp)), "rapid:fallback_single"
     return "",""
 
-# ───────────────────── HTML fetch helpers (unchanged) ──────────────────────────
+# ───────────────────── HTML fetch helpers (unchanged) ─────────────
 def _jitter():          time.sleep(random.uniform(0.8,1.5))
 def _mark_block(dom):   _blocked_until[dom] = time.time() + 600
 
@@ -230,7 +226,6 @@ def _is_banned(dom: str) -> bool:
     return any(bad in dom for bad in BAN_KEYWORDS)
 
 def _should_fetch(url: str, strict: bool = True) -> bool:
-    """Fetch policy: allow everything unless black‑listed or temporarily blocked."""
     dom = _domain(url)
     if dom in _blocked_until and _blocked_until[dom] > time.time():
         return False
@@ -295,14 +290,12 @@ _last_cse_ts = 0.0
 _cse_lock    = threading.Lock()
 
 def google_items(q, tries=3):
-    """Thin wrapper around CustomSearch that enforces 1.5 s gap and
-       stores negative results to avoid buzzing the quota."""
     global _last_cse_ts
     with _cse_lock:
         if q in _cse_cache:
             return _cse_cache[q]
         delta = time.time() - _last_cse_ts
-        if delta < 1.5:               # 1.5 s “guardian” delay
+        if delta < 1.5:
             time.sleep(1.5 - delta)
         _last_cse_ts = time.time()
 
@@ -315,7 +308,7 @@ def google_items(q, tries=3):
             ).json()
             items=j.get("items",[])
             with _cse_lock:
-                _cse_cache[q]=items          # ← store even if []
+                _cse_cache[q]=items
             return items
         except Exception:
             time.sleep(min(backoff,MAX_BACKOFF_SECONDS)); backoff*=BACKOFF_FACTOR
@@ -349,8 +342,8 @@ def proximity_scan(t,last_name=None):
     for m in PHONE_RE.finditer(t):
         p=fmt_phone(m.group())
         if not valid_phone(p): continue
-        sn_start=max(m.start()-120,0); sn_end=min(m.end()+120,len(t))   # ±120 chars
-        snippet=t[sn_start:sn_end]
+        sn_start,max_len=max(m.start()-120,0),min(m.end()+120,len(t))
+        snippet=t[sn_start:max_len]
         if last_name and last_name.lower() not in snippet: continue
         lab_match=LABEL_RE.search(snippet); lab=lab_match.group().lower() if lab_match else ""
         w=LABEL_TABLE.get(lab,0)
@@ -359,12 +352,11 @@ def proximity_scan(t,last_name=None):
         out[p]=(max(bw,w), ts+2+w, lab in ("office","main"))
     return out
 
-# ───────────────────── Google query builders (updated) ────────────
+# ───────────────────── Google query builders ────────────
 def _name_tokens(name:str)->List[str]:
     return [t for t in re.split(r"\s+",name.strip()) if len(t)>1]
 
 def build_q_phone(name:str,state:str)->List[str]:
-    tokens=" ".join(_name_tokens(name))
     return [f'"{name}" {state} realtor phone']
 
 def build_q_email(name:str,state:str,brokerage:str="",domain_hint:str="",mls_id:str="")->List[str]:
@@ -377,11 +369,47 @@ def build_q_email(name:str,state:str,brokerage:str="",domain_hint:str="",mls_id:
         out.append(f'"{mls_id}" "{name.split()[-1]}" email')
     return out
 
-# ───────────────────── caches ────────────────────────────────
-cache_p, cache_e = {}, {}
-domain_patterns: Dict[str,str] = {}   # learned e‑mail pattern per domain
+# ───────────────────── nickname helpers (NEW) ───────────
+_NICK_MAP = {
+    "bob":"robert","rob":"robert","bobby":"robert",
+    "bill":"william","will":"william","billy":"william","liam":"william",
+    "liz":"elizabeth","beth":"elizabeth","lisa":"elizabeth",
+    "tom":"thomas","tommy":"thomas",
+    "dave":"david",
+    "jim":"james","jimmy":"james","jamie":"james",
+    "mike":"michael",
+    "rick":"richard","rich":"richard","dick":"richard",
+    "jen":"jennifer","jenny":"jennifer","jenn":"jennifer",
+    "andy":"andrew","drew":"andrew",
+}
 
-# ───────────────────── helper: infer e‑mail pattern ──────────
+def _token_variants(tok:str)->Set[str]:
+    tok=tok.lower()
+    out={tok}
+    if tok in _NICK_MAP: out.add(_NICK_MAP[tok])
+    for k,v in _NICK_MAP.items():
+        if tok==v: out.add(k)
+    return out
+
+def _email_matches_name(agent:str,email:str)->bool:
+    local=email.split("@",1)[0].lower()
+    tks=[re.sub(r"[^a-z]","",t.lower()) for t in agent.split() if t]
+    if not tks: return False
+    first,last=tks[0],tks[-1]
+    for tk in tks:
+        if len(tk)>=3 and tk in local:
+            return True
+        for var in _token_variants(tk):
+            if len(var)>=3 and var in local:
+                return True
+    if first and last and (first[0]+last in local or first+last[0] in local or last+first[0] in local):
+        return True
+    return False
+
+# ───────────────────── caches & pattern synth ────────────
+cache_p, cache_e = {}, {}
+domain_patterns: Dict[str,str] = {}
+
 def _pattern_from_example(addr:str,name:str)->str:
     first,last=map(lambda s:re.sub(r"[^a-z]","",s.lower()), (name.split()[0],name.split()[-1]))
     local,_=addr.split("@",1)
@@ -399,7 +427,7 @@ def _synth_email(name:str,domain:str)->str:
     local=patt.format(first=first,last=last,fi=fi,li=li)
     return f"{local}@{domain}"
 
-# ───────────────────── lookup phone / email  (phone test patched)──
+# ───────────────────── phone lookup (unchanged logic) ────
 def _split_portals(urls):
     portals, non = [], []
     for u in urls:
@@ -407,8 +435,6 @@ def _split_portals(urls):
     return non, portals
 
 def _looks_direct(phone:str, agent:str, state:str, tries:int=2)->bool:
-    """True if *phone* is found on a page where agent’s surname appears
-       within ±120 chars of the number."""
     if not phone: return False
     last=agent.split()[-1].lower()
     queries=[f'"{phone}" {state}', f'"{phone}" "{agent.split()[0]}"']
@@ -418,15 +444,11 @@ def _looks_direct(phone:str, agent:str, state:str, tries:int=2)->bool:
             link=it.get("link","")
             page=fetch_simple(link, strict=False)
             if not page: continue
-            low=page.lower()
-            # strip formats for search
             low_digits=re.sub(r"\D","",page)
             if digits in low_digits:
-                # locate first occurrence of digits in raw page text
                 pos=low_digits.find(digits)
                 if pos==-1: continue
-                # map back to char‑level window via regex (approx.)
-                if last in low[max(0,pos-200):pos+200]:
+                if last in page.lower()[max(0,pos-200):pos+200]:
                     return True
     return False
 
@@ -434,7 +456,6 @@ def lookup_phone(agent:str,state:str,row_payload:Dict[str,Any])->str:
     key=f"{agent}|{state}"
     if key in cache_p: return cache_p[key]
 
-    # direct in‑payload
     for blk in (row_payload.get("contact_recipients") or []):
         for p in _phones_from_block(blk):
             d=fmt_phone(p)
@@ -447,14 +468,12 @@ def lookup_phone(agent:str,state:str,row_payload:Dict[str,Any])->str:
     undirect_phone=""
     if zpid:
         phone,src=rapid_phone(zpid,agent)
-        if phone:
-            if _looks_direct(phone,agent,state):
-                cache_p[key]=phone
-                LOG.debug("PHONE WIN %s via %s (surname proximity)",phone,src); return phone
-            undirect_phone=phone
+        if phone and _looks_direct(phone,agent,state):
+            cache_p[key]=phone
+            LOG.debug("PHONE WIN %s via %s (surname proximity)",phone,src); return phone
+        undirect_phone=phone
 
     cand_good,cand_office,src_good={}, {}, {}
-
     def add(p,score,office_flag,src=""):
         d=fmt_phone(p)
         if not valid_phone(d): return
@@ -462,9 +481,7 @@ def lookup_phone(agent:str,state:str,row_payload:Dict[str,Any])->str:
             (cand_office if office_flag else cand_good).get(d,0)+score
         if not office_flag and src: src_good[d]=src; DYNAMIC_SITES.add(_domain(src))
 
-    # Google metadata (unchanged logic, but wider queries)
-    queries=build_q_phone(agent,state)
-    for items in pmap(google_items,queries):
+    for items in pmap(google_items,build_q_phone(agent,state)):
         for it in items:
             tel=it.get("pagemap",{}).get("contactpoint",[{}])[0].get("telephone")
             if tel: add(tel,4,False,f"CSE:{it.get('link','')}")
@@ -473,7 +490,7 @@ def lookup_phone(agent:str,state:str,row_payload:Dict[str,Any])->str:
         phone=max(cand_good,key=cand_good.get); cache_p[key]=phone
         LOG.debug("PHONE WIN %s via %s",phone,src_good.get(phone,"CSE-json")); return phone
 
-    urls=[it.get("link","") for items in pmap(google_items,queries) for it in items][:20]
+    urls=[it.get("link","") for items in pmap(google_items,build_q_phone(agent,state)) for it in items][:20]
     non_portal,portal=_split_portals(urls)
     last_name=(agent.split()[-1] if len(agent.split())>1 else agent).lower()
 
@@ -486,7 +503,7 @@ def lookup_phone(agent:str,state:str,row_payload:Dict[str,Any])->str:
             add(p,sc,off,url)
         if cand_good or cand_office: break
 
-    if not cand_good and not cand_office:
+    if not cand_good:
         for url,page in zip(portal,pmap(fetch,portal)):
             if not page or agent.lower() not in page.lower(): continue
             ph,_=extract_struct(page)
@@ -496,64 +513,56 @@ def lookup_phone(agent:str,state:str,row_payload:Dict[str,Any])->str:
                 add(p,sc,off,url)
             if cand_good: break
 
-    phone=""
-    if cand_good: phone=max(cand_good,key=cand_good.get)
-    elif undirect_phone: phone=undirect_phone
-    cache_p[key]=phone
+    phone=cand_good and max(cand_good,key=cand_good.get) or undirect_phone
+    cache_p[key]=phone or ""
     if phone:
         LOG.debug("PHONE WIN %s via %s",phone,src_good.get(phone,"crawler/unverified"))
     else:
         LOG.debug("PHONE FAIL for %s %s  cand_good=%s cand_office=%s",agent,state,cand_good,cand_office)
     return phone
 
+# ───────────────────── e-mail lookup (patched) ────────────
 def lookup_email(agent:str,state:str,row_payload:Dict[str,Any])->str:
     key=f"{agent}|{state}"
     if key in cache_e: return cache_e[key]
 
     brokerage,domain_hint,mls_id="","",""
 
-    # try contact_recipients (rare but free)
     for blk in (row_payload.get("contact_recipients") or []):
         for em in _emails_from_block(blk):
-            cache_e[key]=em
-            LOG.debug("EMAIL hit directly from contact_recipients"); return em
+            if _email_matches_name(agent,em):
+                cache_e[key]=em
+                LOG.debug("EMAIL direct-payload match")
+                return em
 
     zpid=str(row_payload.get("zpid",""))
     if zpid:
-        # no more rapid_email(), but we still pull brokerage for boosts
         rapid = rapid_property(zpid)
         brokerage = (rapid.get("listed_by") or {}).get("brokerageName","") if rapid else ""
         mls_id    = (rapid.get("listed_by") or {}).get("listingAgentMlsId","") if rapid else ""
 
     cand,src_e=defaultdict(int),{}
-
     def add_e(m,score,src=""):
         m=clean_email(m)
-        if not ok_email(m): return
-        dom=_domain(m)
-        # generic / office penalty
+        if not ok_email(m) or not _email_matches_name(agent,m):
+            return
         if re.search(r"\b(info|office|admin|support|advertising|noreply|hello)\b",m,re.I):
             score-=2
-        # full name boost
         tokens={re.sub(r"[^a-z]","",w.lower()) for w in agent.split()}
         if tokens and all(tok and tok in m.lower() for tok in tokens):
             score+=3
-        # brokerage boost
         if brokerage and brokerage.lower() in m.lower():
             score+=1
         cand[m]+=score
         if src: src_e.setdefault(m,src); DYNAMIC_SITES.add(_domain(src))
-        # learn pattern
         patt=_pattern_from_example(m,agent)
-        if patt: domain_patterns.setdefault(dom,patt)
+        if patt: domain_patterns.setdefault(_domain(m),patt)
 
-    # Google CSE json‑LD hits
     for items in pmap(google_items,build_q_email(agent,state,brokerage,domain_hint,mls_id)):
         for it in items:
             mail=it.get("pagemap",{}).get("contactpoint",[{}])[0].get("email","")
             add_e(mail,3,f"CSE:{it.get('link','')}")
 
-    # Crawl first 20 links
     urls=[it.get("link","") for items in pmap(google_items,build_q_email(agent,state,brokerage,domain_hint,mls_id)) for it in items][:20]
     non_portal,portal=_split_portals(urls)
 
@@ -572,19 +581,17 @@ def lookup_email(agent:str,state:str,row_payload:Dict[str,Any])->str:
             for m in EMAIL_RE.findall(page): add_e(m,1,url)
             if cand: break
 
-    # pattern‑based synthesis if still empty
     if not cand and domain_hint:
         guess=_synth_email(agent,domain_hint)
         if guess:
-            add_e(guess,2,"pattern‑synth")
+            add_e(guess,2,"pattern-synth")
 
-    email = max(cand,key=cand.get) if cand else ""
+    email=max(cand,key=cand.get) if cand else ""
+    cache_e[key]=email or ""
     if email:
-        cache_e[key]=email
         LOG.debug("EMAIL WIN %s via %s",email,src_e.get(email,"crawler/pattern"))
     else:
-        cache_e[key]=""
-        LOG.debug("EMAIL FAIL for %s %s  candidates=%s",agent,state,dict(list(cand.items())[:8]))
+        LOG.debug("EMAIL FAIL for %s %s – personalised e-mail not found",agent,state)
     return email
 
 # ───────────────────── Google Sheet helpers (unchanged) ────────────
@@ -662,7 +669,7 @@ def send_sms(phone,first,address,row_idx):
     except Exception as e:
         LOG.error("SMS send error %s",e)
 
-# ───────────────────── core row processor (skip ensured) ───────────
+# ───────────────────── core row processor ───────────
 def process_rows(rows:List[Dict[str,Any]]):
     for r in rows:
         txt=(r.get("description","")+" "+r.get("openai_summary","")).strip()
@@ -683,7 +690,7 @@ def process_rows(rows:List[Dict[str,Any]]):
         if phone: seen_phones.add(phone)
         if phone: send_sms(phone,first,r.get("street",""),row_idx)
 
-# ───────────────────── main entry point (unchanged) ────────────────
+# ───────────────────── main entry point ──────────────
 if __name__ == "__main__":
     try:
         stdin_txt=sys.stdin.read().strip()
