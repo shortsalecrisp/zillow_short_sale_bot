@@ -1,22 +1,36 @@
-# webhook_server.py – receives listings from Apify, de-dupes, writes sheet & SMS
-from fastapi import FastAPI, Request
+# webhook_server.py – receives listings from Apify, de-dupes, writes sheet & SMS,
+#                     **and now records inbound SMS replies via a webhook**
+
+from fastapi import FastAPI, Request, HTTPException
 import os
 import re
 import json
 import logging
 import sqlite3
 import requests
+from datetime import datetime
+
+import gspread
+from google.oauth2.service_account import Credentials
 
 from apify_fetcher import fetch_rows          # unchanged helper
 from bot_min       import process_rows        # unchanged helper
 
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 # Configuration & logging
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 DB_PATH     = "seen.db"
 TABLE_SQL   = "CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)"
 SMS_API_URL = os.getenv("SMS_API_URL", "https://api.smsmobileapi.com/sendsms/")
 SMS_API_KEY = os.getenv("SMSM_API_KEY")       # must be set in Render
+
+# Google Sheets / Replies tab
+GSHEET_ID   = os.environ["GSHEET_ID"]
+SC_JSON     = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
+SCOPES      = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# Shared-secret token for inbound-SMS webhook
+WEBHOOK_TOKEN = os.environ["SMSM_WEBHOOK_TOKEN"]  # e.g. "65-g84-jfy7t"
 
 logging.basicConfig(
     level  = logging.INFO,
@@ -24,13 +38,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger("webhook_server")
 
+# FastAPI app
 app            = FastAPI()
-EXPORTED_ZPIDS: set[str] = set()              # in-memory dedupe cache
 
+# In-memory de-dupe cache of exported ZPIDs
+EXPORTED_ZPIDS: set[str] = set()
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
+# Google Sheets helpers
+# ──────────────────────────────────────────────────────────────────────
+creds         = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
+gclient       = gspread.authorize(creds)
+
+def get_replies_ws():
+    """Ensure a 'Replies' sheet exists and return the worksheet handle."""
+    try:
+        return gclient.open_by_key(GSHEET_ID).worksheet("Replies")
+    except gspread.WorksheetNotFound:
+        ws = gclient.open_by_key(GSHEET_ID).add_worksheet(
+            title="Replies", rows="1000", cols="3"
+        )
+        ws.append_row(["phone", "time_received", "message"])
+        return ws
+
+REPLIES_WS = get_replies_ws()
+
+# ──────────────────────────────────────────────────────────────────────
+# Local helpers
+# ──────────────────────────────────────────────────────────────────────
 def ensure_table() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.execute(TABLE_SQL)
@@ -43,6 +78,20 @@ def _digits_only(num: str) -> str:
     if len(digits) == 10:
         digits = "1" + digits
     return digits
+
+
+BAD_AREA = {"800", "866"}  # reject toll-free & 1xx after leading '1' stripped
+
+def fmt_phone(raw: str) -> str:
+    """Return 123-456-7890 or '' if invalid/toll-free/1xx."""
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        return ""
+    if digits[:3] in BAD_AREA or digits[:3].startswith("1"):
+        return ""
+    return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
 
 
 def send_sms(phone: str, message: str) -> None:
@@ -81,9 +130,9 @@ def send_sms(phone: str, message: str) -> None:
         logger.exception("SMS send failed: %s", exc)
 
 
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 # Health check & export utilities
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {"status": "ok"}
@@ -108,9 +157,9 @@ def reset_zpids():
     return {"status": "cleared"}
 
 
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 # Webhook – receives new listings from Apify
-# ---------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 @app.post("/apify-hook")
 async def apify_hook(request: Request):
     """
@@ -165,6 +214,46 @@ async def apify_hook(request: Request):
     conn.close()
 
     return {"status": "processed", "rows": len(fresh_rows)}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# NEW: Inbound-SMS webhook – records replies to Google Sheets
+# ──────────────────────────────────────────────────────────────────────
+@app.post("/sms-reply")
+async def sms_reply(request: Request):
+    """
+    SMSMobileAPI (Android Gateway) will POST JSON like:
+        {
+          "number":  "+15558675309",
+          "message": "Sure, let's talk!",
+          "guid":    "...",
+          "time_received": "2025-06-26 01:23:45"
+        }
+
+    The webhook URL must include ?token=<WEBHOOK_TOKEN>
+    """
+    token = request.query_params.get("token")
+    if token != WEBHOOK_TOKEN:
+        raise HTTPException(status_code=403, detail="bad token")
+
+    data = await request.json()
+    phone_raw = data.get("number") or data.get("phone") or ""
+    msg       = data.get("message", "")
+    ts        = data.get("time_received") or datetime.utcnow().isoformat(timespec="seconds")
+
+    phone = fmt_phone(phone_raw)
+    if not phone:
+        logger.warning("Ignored inbound with unusable phone: %s", phone_raw)
+        return {"status": "ignored"}
+
+    try:
+        REPLIES_WS.append_row([phone, ts, msg])
+        logger.info("Recorded reply from %s", phone)
+    except Exception as exc:
+        logger.exception("Sheet append error: %s", exc)
+        raise HTTPException(status_code=500, detail="sheet error")
+
+    return {"status": "ok"}
 
 
 @app.get("/healthz")
