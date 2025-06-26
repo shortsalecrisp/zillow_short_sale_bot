@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 #  ╭────────────────── bot_min.py ──────────────────╮
-#  │ build: 24 Jun 2025 – “Named lock” patch        │
-#  │   • Require agent-name token (or nickname)     │
-#  │     in any e-mail we accept                    │
-#  │   • Nothing else touched                      │
+#  │ build: 26 Jun 2025 – “Bad‑area & e‑mail tweaks”│
+#  │   • Reject 800/866/1xx area‑codes              │
+#  │   • Extra nicknames for e‑mail matching        │
+#  │   • fetch_simple() 403→textise fallback        │
+#  │   • Tie‑breaker drops false‑positive e‑mails   │
 #  ╰────────────────────────────────────────────────╯
 
 import json, logging, os, random, re, sys, time, html, concurrent.futures, threading
@@ -79,6 +80,7 @@ LABEL_RE = re.compile("(" + "|".join(map(re.escape, LABEL_TABLE)) + ")", re.I)
 US_AREA_CODES = {str(i) for i in range(201, 990)}
 
 OFFICE_HINTS = {"office", "main", "fax", "team", "brokerage", "corporate"}
+BAD_AREA     = {"800", "866"}  # add 888/877/855 later if desired
 
 # ─────────────────────── Google / Sheets setup ─────────────────────
 creds  = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
@@ -111,19 +113,28 @@ _executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY
 def pmap(fn, iterable): return list(_executor.map(fn, iterable))
 
 # ───────────────────── utilities: phone / email / fmt  ─────────────
+def _is_bad_area(area: str) -> bool:
+    """Reject toll‑free (800/866) and any NANP area code that itself starts with '1'."""
+    return area in BAD_AREA or area.startswith("1")
+
 def fmt_phone(r):
     d = re.sub(r"\D", "", r)
     if len(d) == 11 and d.startswith("1"):
         d = d[1:]
-    return f"{d[:3]}-{d[3:6]}-{d[6:]}" if len(d) == 10 else ""
+    if len(d) == 10 and not _is_bad_area(d[:3]):
+        return f"{d[:3]}-{d[3:6]}-{d[6:]}"
+    return ""
 
 def valid_phone(p):
+    if not p:
+        return False
     if phonenumbers:
         try:
-            return phonenumbers.is_possible_number(phonenumbers.parse(p, "US"))
+            ok = phonenumbers.is_possible_number(phonenumbers.parse(p, "US"))
+            return ok and not _is_bad_area(p[:3])
         except Exception:
             return False
-    return re.fullmatch(r"\d{3}-\d{3}-\d{4}", p)
+    return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}", p) and not _is_bad_area(p[:3]))
 
 def clean_email(e):   return e.split("?")[0].strip()
 def ok_email(e):
@@ -204,7 +215,7 @@ def rapid_phone(zpid: str, agent_name: str) -> Tuple[str,str]:
     if len(allp)==1: return next(iter(allp)), "rapid:fallback_single"
     return "",""
 
-# ───────────────────── HTML fetch helpers (unchanged) ─────────────
+# ───────────────────── HTML fetch helpers (modified fetch_simple) ──
 def _jitter():          time.sleep(random.uniform(0.8,1.5))
 def _mark_block(dom):   _blocked_until[dom] = time.time() + 600
 
@@ -236,9 +247,13 @@ def fetch_simple(u, strict=True):
     dom=_domain(u)
     try:
         r=requests.get(u,timeout=10,headers={"User-Agent":"Mozilla/5.0"})
-        if r.status_code==200: return r.text
-        if r.status_code in (403,429): _mark_block(dom)
-        if r.status_code in (403,451): return _try_textise(dom,u)
+        if r.status_code==200:
+            return r.text
+        if r.status_code in (403,429):
+            _mark_block(dom)
+        if r.status_code in (403,451):
+            txt=_try_textise(dom,u)
+            if txt: return txt
     except Exception as exc:
         LOG.debug("fetch_simple error %s on %s", exc,u)
     return None
@@ -369,7 +384,7 @@ def build_q_email(name:str,state:str,brokerage:str="",domain_hint:str="",mls_id:
         out.append(f'"{mls_id}" "{name.split()[-1]}" email')
     return out
 
-# ───────────────────── nickname helpers (NEW) ───────────
+# ───────────────────── nickname helpers (EXPANDED) ─────
 _NICK_MAP = {
     "bob":"robert","rob":"robert","bobby":"robert",
     "bill":"william","will":"william","billy":"william","liam":"william",
@@ -381,6 +396,14 @@ _NICK_MAP = {
     "rick":"richard","rich":"richard","dick":"richard",
     "jen":"jennifer","jenny":"jennifer","jenn":"jennifer",
     "andy":"andrew","drew":"andrew",
+    # Spanish / additional
+    "pepe":"jose","chepe":"jose","josé":"jose",
+    "toni":"antonio","tony":"antonio",
+    "paco":"francisco","pancho":"francisco","fran":"francisco","frank":"francisco",
+    "chuy":"jesus",
+    "lupe":"guadalupe","lupita":"guadalupe",
+    "alex":"alexander","sandy":"alexandra","sandra":"alexandra",
+    "ricki":"ricardo","ricky":"ricardo","richie":"richard"
 }
 
 def _token_variants(tok:str)->Set[str]:
@@ -586,7 +609,20 @@ def lookup_email(agent:str,state:str,row_payload:Dict[str,Any])->str:
         if guess:
             add_e(guess,2,"pattern-synth")
 
-    email=max(cand,key=cand.get) if cand else ""
+    # ---------- False‑positive tie‑breaker ----------
+    email=""
+    if cand:
+        max_score=max(cand.values())
+        winners=[m for m,s in cand.items() if s==max_score]
+        if len(winners)==1:
+            email=winners[0]
+        else:
+            last_tok=re.sub(r"[^a-z]","",agent.split()[-1].lower())
+            good=[m for m in winners if last_tok and last_tok in m.split("@")[0].lower()]
+            email=good[0] if good else ""
+            if not email:
+                LOG.debug("EMAIL tie %s – dropped (last name absent)",winners)
+
     cache_e[key]=email or ""
     if email:
         LOG.debug("EMAIL WIN %s via %s",email,src_e.get(email,"crawler/pattern"))
