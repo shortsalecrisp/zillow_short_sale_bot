@@ -117,7 +117,7 @@ logging.basicConfig(
 LOG = logging.getLogger("bot_min")
 
 # ──────────────────────────── REGEXES ──────────────────────────────
-SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
+SHORT_RE = re.compile(r"\bshort[\s‑-]*sale\b", re.I)
 BAD_RE   = re.compile(r"\b(?:approved short sale|short sale approved)\b", re.I)
 TEAM_RE  = re.compile(r"^\s*the\b|\bteam\b", re.I)
 IMG_EXT  = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
