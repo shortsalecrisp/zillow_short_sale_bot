@@ -987,7 +987,7 @@ def send_follow_up_sms(row_values):
     )
     resp.raise_for_status()
 
-def run _follow_up_pass():
+def _follow_up_pass():
     resp = service_spreadsheets.values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{SHEET_NAME}'!A:X",
