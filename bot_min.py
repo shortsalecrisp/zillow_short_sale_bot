@@ -964,60 +964,65 @@ def check_reply(phone: str, msg_id: str, since_iso: str) -> bool:
         return False
 
 # ───────────────────── follow-up logic refactored ──────────────────────
-def _business_elapsed(start: datetime, end: datetime) -> float:
-    if start >= end:
-        return 0.0
-    cur = start
-    elapsed = 0.0
-    while cur < end:
-        nxt = min(end, cur + timedelta(hours=1))
-        if WORK_START <= cur.hour < WORK_END:
-            elapsed += (nxt - cur).total_seconds() / 3600.0
+def business_hours_elapsed(start_ts, now):
+    def _is_weekend(d): return d.weekday() >= 5
+    total = 0.0
+    cur = start_ts
+    while cur < now:
+        nxt = cur + datetime.timedelta(minutes=30)
+        if not _is_weekend(cur) and 9 <= cur.hour < 17:
+            total += 0.5
         cur = nxt
-    return elapsed
+    return total
 
-def _follow_up_pass():
-    LOG.info("Running follow-up pass")
-    vals = ws.get_all_values()
-    if len(vals) <= 2:
-        LOG.debug("Not enough rows (%s) to process FU", len(vals))
+def send_follow_up_sms(row_values):
+    phone = row_values[1]
+    body = "Hey, just wanted to follow up on my message from earlier. Let me know if I can help with anything—happy to connect whenever works for you!"
+    resp = requests.post(
+        SMSMOBILE_API_URL,
+        headers={"Authorization": f"Bearer {SMSMOBILE_API_KEY}", "Content-Type": "application/json"},
+        json={"from": SMSMOBILE_FROM, "to": phone, "message": body}
+    )
+    resp.raise_for_status()
+
+def run_follow_up_pass():
+    resp = service_spreadsheets.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{SHEET_NAME}'!A:X",
+        majorDimension="ROWS",
+        valueRenderOption="FORMATTED_VALUE"
+    ).execute()
+    all_rows = resp.get("values", [])
+    if len(all_rows) <= 1:
         return
-    all_rows = vals[1:]          # drop header
-    base_idx = 2                # sheet row number of first data row
-    for rel_i, row in enumerate(all_rows):
-        idx = base_idx + rel_i
-        # pad to full length to avoid IndexError
-        if len(row) < MIN_COLS:
-            row = row + [""] * (MIN_COLS - len(row))
-        sent_flag  = (row[COL_SENT_FLAG] or "").strip().lower() == "x"
-        reply_flag = (row[COL_REPLY_FLAG] or "").strip().lower() == "x"
-        manual_note= bool((row[COL_MANUAL_NOTE] or "").strip())
-        init_ts    = (row[COL_INIT_TS]  or "").strip()
-        fu_ts      = (row[COL_FU_TS]    or "").strip()
-        msg_id     = (row[COL_MSG_ID]   or "").strip()
-        phone      = (row[COL_PHONE]    or "").strip()
-        first      = (row[COL_FIRST]    or "").strip()
-        address    = (row[COL_STREET]   or "").strip()
-        LOG.debug("Row %s – flags: sent=%s fu=%s reply=%s note=%s", idx, sent_flag, bool(fu_ts), reply_flag, manual_note)
-        if not sent_flag or fu_ts or reply_flag or manual_note or not init_ts:
+    last_row_idx = len(all_rows)
+    start_row_idx = max(2, last_row_idx - FOLLOW_UP_LOOKBACK + 1)
+    recent_rows = all_rows[start_row_idx - 1:]
+    now = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+    batch_updates = []
+    for sheet_row, row in enumerate(recent_rows, start=start_row_idx):
+        row += [""] * (24 - len(row))
+        if row[9].strip() or row[23].strip():
             continue
         try:
-            t0 = datetime.fromisoformat(init_ts)
-        except Exception:
-            LOG.error("Invalid init_ts '%s' on row %s", init_ts, idx)
+            ts = dtparse.parse(row[22].strip())
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=datetime.timezone.utc)
+        except:
             continue
-        now = datetime.now(tz=TZ)
-        worked = _business_elapsed(t0.astimezone(TZ), now)
-        if worked < FU_HOURS:
-            LOG.debug("Row %s – elapsed %.2fh < %.2fh; skipping", idx, worked, FU_HOURS)
+        if business_hours_elapsed(ts, now) < FOLLOW_UP_DEADLINE_HR:
             continue
-        # check for inbound reply
-        if check_reply(phone, msg_id, init_ts):
-            mark_reply(idx)
-            LOG.info("Row %s has agent reply – FU skipped", idx)
-            continue
-        LOG.info("Sending follow-up to row %s (elapsed %.2fh)", idx, worked)
-        send_sms(phone, first, address, idx, follow_up=True)
+        send_follow_up_sms(row)
+        stamp = now.isoformat(timespec="seconds")
+        batch_updates.append({
+            "range": f"'{SHEET_NAME}'!X{sheet_row}",
+            "values": [[f"FU {stamp}"]]
+        })
+    if batch_updates:
+        service_spreadsheets.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"valueInputOption": "USER_ENTERED", "data": batch_updates}
+        ).execute()
 
 # ───────────────────── core row processor (UNCHANGED) ─────────────────────
 def _expand_row(l: List[str], n: int = MIN_COLS) -> List[str]:
