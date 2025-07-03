@@ -533,16 +533,16 @@ def _email_matches_name(agent: str, email: str) -> bool:
     if not tks:
         return False
     first, last = tks[0], tks[-1]
-        if len(tk) >= 3 and tk in local:
-        return True
-    for var in _token_variants(tk):for tk in tks:
+    for tk in tks:
         if len(tk) >= 3 and tk in local:
             return True
-        for var in _token_variants(tok):
+        for var in _token_variants(tk):
             if len(var) >= 3 and var in local:
                 return True
     if first and last and (
-        first[0] + last in local or first + last[0] in local or last + first[0] in local
+        first[0] + last in local
+        or first + last[0] in local
+        or last + first[0] in local
     ):
         return True
     return False
