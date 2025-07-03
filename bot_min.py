@@ -988,7 +988,7 @@ def send_follow_up_sms(row_values):
     resp.raise_for_status()
 
 def _follow_up_pass():
-    resp = service_spreadsheets.values().get(
+    resp = sheets_service.values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{SHEET_NAME}'!A:X",
         majorDimension="ROWS",
@@ -1021,7 +1021,7 @@ def _follow_up_pass():
             "values": [[f"FU {stamp}"]]
         })
     if batch_updates:
-        service_spreadsheets.values().batchUpdate(
+        sheets_service.values().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={"valueInputOption": "USER_ENTERED", "data": batch_updates}
         ).execute()
