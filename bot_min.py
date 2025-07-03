@@ -533,7 +533,9 @@ def _email_matches_name(agent: str, email: str) -> bool:
     if not tks:
         return False
     first, last = tks[0], tks[-1]
-    for tk in tks:
+        if len(tk) >= 3 and tk in local:
+        return True
+    for var in _token_variants(tk):for tk in tks:
         if len(tk) >= 3 and tk in local:
             return True
         for var in _token_variants(tok):
@@ -985,7 +987,7 @@ def send_follow_up_sms(row_values):
     )
     resp.raise_for_status()
 
-def run_follow_up_pass():
+def run _follow_up_pass():
     resp = service_spreadsheets.values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=f"'{SHEET_NAME}'!A:X",
