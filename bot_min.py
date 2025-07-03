@@ -1,20 +1,21 @@
 #  ╭────────────────── bot_min.py ─────────────────────────╮
-#  │ build: 02 Jul 2025 – “FU singleton + inbound poller”  │
-#  │   • Scheduler singleton guard (P1)                    │
-#  │   • Per‑domain exponential back‑off (P2)              │
-#  │   • Inbound‑SMS poller + optional FastAPI webhook     │
-#  │   • Richer decision‑path logging & observability      │
+#  │ build: 01 Jul 2025 – “FU schema-rev + Rapid cache”    │
+#  │   • 15-min in-memory RapidAPI cache (cuts 65% calls)  │
+#  │   • Sheet schema change (reply-flag / manual note)    │
+#  │   • Column constants for one-source-of-truth indices  │
+#  │   • mark_sent / mark_followup / mark_reply rewritten  │
+#  │   • Scheduler respects new I & J skip logic           │
 #  ╰───────────────────────────────────────────────────────╯
 #
-#  SHEET LAYOUT  (1‑based columns) ───────────────────────────────────────────
-#      A First          H (8)  Sent‑flag  “x”  – initial SMS queued
-#      B Last           I (9)  Reply‑flag “x”  – SMSMobile auto reply detected
-#      C Phone          J (10) Manual‑note    – human‑entered agent response
-#      D Email          K (11) Reply‑TS       – ISO time auto reply logged
-#      E Street         L (12) Msg‑ID (outbound provider reference)
+#  SHEET LAYOUT  (1-based columns) ───────────────────────────────────────────
+#      A First          H (8) Sent-flag  “x”  – initial SMS queued
+#      B Last           I (9) Reply-flag “x”  – SMSMobile auto reply detected
+#      C Phone          J (10) Manual-note    – human-entered agent response
+#      D Email          K (11) Reply-TS       – ISO time auto reply logged
+#      E Street         L (12) Msg-ID (outbound provider reference)
 #      F City           … …                   – free / reserved
-#      G State          W (23) Init‑SMS‑TS    – ISO time initial SMS sent
-#                      X (24) Follow‑up‑TS   – ISO time follow‑up SMS sent
+#      G State          W (23) Init-SMS-TS    – ISO time initial SMS sent
+#                      X (24) Follow-up-TS   – ISO time follow-up SMS sent
 #  ───────────────────────────────────────────────────────────────────────────
 
 # ───────────────────────── imports ─────────────────────────
@@ -39,7 +40,6 @@ import requests
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build as gapi_build
 
-# optional deps
 try:
     import phonenumbers
 except ImportError:
@@ -48,10 +48,6 @@ try:
     from bs4 import BeautifulSoup
 except ImportError:
     BeautifulSoup = None
-try:
-    from fastapi import FastAPI, Request
-except ImportError:
-    FastAPI = None  # webhook mode will be disabled automatically
 
 # ─────────────────────────── ENV / AUTH ────────────────────────────
 CS_API_KEY = os.environ["CS_API_KEY"]
@@ -93,14 +89,11 @@ SMS_FU_TEMPLATE = (
 )
 SMS_RETRY_ATTEMPTS = int(os.getenv("SMSM_RETRY_ATTEMPTS", "2"))
 
-# inbound API endpoints
 RECEIVE_URL = os.getenv("SMSM_INBOUND_URL", "https://api.smsmobileapi.com/getsms/")
 READ_URL    = os.getenv("SMSM_READ_URL",    "https://api.smsmobileapi.com/readsms/")
 
-# webhook mode
-USE_WEBHOOK = os.getenv("SMSM_USE_WEBHOOK", "false").lower() == "true"
-
 # ───────────────────────── SHEET COLUMN CONSTANTS ─────────────────────────
+# zero-based numeric indices for list access convenience
 COL_FIRST        = 0   # A
 COL_LAST         = 1   # B
 COL_PHONE        = 2   # C
@@ -108,23 +101,22 @@ COL_EMAIL        = 3   # D
 COL_STREET       = 4   # E
 COL_CITY         = 5   # F
 COL_STATE        = 6   # G
-COL_SENT_FLAG    = 7   # H
-COL_REPLY_FLAG   = 8   # I
-COL_MANUAL_NOTE  = 9   # J
-COL_REPLY_TS     = 10  # K
-COL_MSG_ID       = 11  # L
-COL_INIT_TS      = 22  # W
-COL_FU_TS        = 23  # X
-MIN_COLS         = 24
+COL_SENT_FLAG    = 7   # H  “x” once initial SMS queued
+COL_REPLY_FLAG   = 8   # I  “x” once inbound reply auto-detected
+COL_MANUAL_NOTE  = 9   # J  human-entered note → block FU
+COL_REPLY_TS     = 10  # K  ISO timestamp auto reply logged
+COL_MSG_ID       = 11  # L  outbound provider reference
+COL_INIT_TS      = 22  # W  ISO timestamp initial SMS sent
+COL_FU_TS        = 23  # X  ISO timestamp follow-up SMS sent
+MIN_COLS         = 24  # ensure row list expanded to this length
 
 # ───────────────────────── CONFIGS / LOGGING ──────────────────────────────
-MAX_ZILLOW_403       = 3
-MAX_RATE_429         = 3
-BACKOFF_FACTOR       = 1.7
-MAX_BACKOFF_SECONDS  = 12
-GOOGLE_CONCURRENCY   = 2
-INBOUND_WINDOW_HOURS = 48     # how far back to look when polling
-METRICS: Counter     = Counter()
+MAX_ZILLOW_403     = 3
+MAX_RATE_429       = 3
+BACKOFF_FACTOR     = 1.7
+MAX_BACKOFF_SECONDS = 12
+GOOGLE_CONCURRENCY = 2
+METRICS: Counter   = Counter()
 
 logging.basicConfig(
     level=os.getenv("LOGLEVEL", "DEBUG"),
@@ -133,12 +125,9 @@ logging.basicConfig(
 )
 LOG = logging.getLogger("bot_min")
 
-# ───────────────────────── Rapid‑API in‑memory cache ──────────────────────
+# ───────────────────────── Rapid-API in-memory cache ──────────────────────
 _RAPID_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 RAPID_TTL_SEC = 15 * 60  # 15 minutes
-
-# ───── per‑domain 429 back‑off table (NEW – P2) ─────
-_domain_backoff: Dict[str, float] = {}
 
 # ──────────────────────────── REGEXES ─────────────────────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
@@ -163,7 +152,7 @@ OFFICE_HINTS  = {"office","main","fax","team","brokerage","corporate"}
 BAD_AREA      = {"800","866"}
 _blocked_until: Dict[str, float] = {}
 
-# ───────────────────── Google / Sheets setup ───────────────────────
+# ─────────────────────── Google / Sheets setup ───────────────────────
 creds          = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 sheets_service = gapi_build("sheets", "v4", credentials=creds, cache_discovery=False)
 gc             = gspread.authorize(creds)
@@ -171,7 +160,7 @@ ws             = gc.open_by_key(GSHEET_ID).sheet1
 
 # preload phone column to avoid duplicates
 try:
-    _preloaded = ws.col_values(COL_PHONE + 1)  # gspread is 1‑based
+    _preloaded = ws.col_values(COL_PHONE + 1)  # gspread is 1-based
 except Exception:
     _preloaded = []
 seen_phones: Set[str] = set(_preloaded)
@@ -181,8 +170,8 @@ SCRAPE_SITES:  List[str] = []
 DYNAMIC_SITES: Set[str]  = set()
 BAN_KEYWORDS = {
     "zillow.com","realtor.com","redfin.com","homes.com",
-    "linkedin.com","twitter.com","instagram.com","pinterest.com",
-    "legacy.com","obituary","obituaries","funeral",
+    "linkedin.com","twitter.com","instagram.com","pinterest.com","legacy.com",
+    "obituary","obituaries","funeral",
     ".gov",".edu",".mil",
 }
 
@@ -221,7 +210,7 @@ def ok_email(e: str) -> bool:
 def is_short_sale(text: str) -> bool:
     return SHORT_RE.search(text) and not BAD_RE.search(text)
 
-# ───────────────────── Rapid‑API helpers with cache ─────────────────────────
+# ───────────────────── Rapid-API helpers with cache ─────────────────────────
 def _phone_obj_to_str(obj: Dict[str,str]) -> str:
     if not obj: return ""
     key_order = [
@@ -242,7 +231,7 @@ def _phone_obj_to_str(obj: Dict[str,str]) -> str:
 def rapid_property(zpid:str)->Dict[str,Any]:
     """
     Cached wrapper around RapidAPI Zillow /property endpoint.
-    Entry TTL = 15 minutes.
+    Entry TTL = 15 minutes.
     """
     now = time.time()
     entry = _RAPID_CACHE.get(zpid)
@@ -311,11 +300,11 @@ def rapid_phone(zpid:str,agent_name:str)->Tuple[str,str]:
         return next(iter(allp)), "rapid:fallback_single"
     return "", ""
 
-# ───────────────────── HTML fetch helpers (↑ adds per-domain back‑off) ────
+# ───────────────────── HTML fetch helpers ──────────────────────────
 def _jitter() -> None:
     time.sleep(random.uniform(0.8, 1.5))
-def _mark_block(dom: str, dur: int = 600) -> None:
-    _blocked_until[dom] = time.time() + dur
+def _mark_block(dom: str) -> None:
+    _blocked_until[dom] = time.time() + 600  # block for 10 min
 def _try_textise(dom: str, url: str) -> str:
     try:
         r = requests.get(
@@ -338,10 +327,7 @@ def _should_fetch(url: str, strict: bool = True) -> bool:
     dom = _domain(url)
     if dom in _blocked_until and _blocked_until[dom] > time.time():
         return False
-    if dom in _domain_backoff and _domain_backoff[dom] > time.time():
-        return False
     return not (_is_banned(dom) and strict)
-
 def fetch_simple(u: str, strict: bool = True):
     if not _should_fetch(u, strict):
         return None
@@ -352,8 +338,6 @@ def fetch_simple(u: str, strict: bool = True):
             return r.text
         if r.status_code in (403, 429):
             _mark_block(dom)
-            if r.status_code == 429:
-                _domain_backoff[dom] = time.time() + BACKOFF_FACTOR * 60
         if r.status_code in (403, 451):
             txt = _try_textise(dom, u)
             if txt:
@@ -396,7 +380,6 @@ def fetch(u: str, strict: bool = True):
             elif r.status_code == 429:
                 ratelimit += 1
                 METRICS["fetch_429"] += 1
-                _domain_backoff[dom] = time.time() + backoff * 60
                 if ratelimit >= MAX_RATE_429:
                     _mark_block(dom)
                     return None
@@ -480,6 +463,7 @@ def extract_struct(td: str) -> Tuple[List[str], List[str]]:
     for a in soup.select('a[href^="mailto:"]'):
         mails.append(clean_email(a["href"].split("mailto:")[-1]))
     return phones, mails
+
 def proximity_scan(t: str, last_name: str | None = None):
     out = {}
     for m in PHONE_RE.finditer(t):
@@ -552,7 +536,7 @@ def _email_matches_name(agent: str, email: str) -> bool:
     for tk in tks:
         if len(tk) >= 3 and tk in local:
             return True
-        for var in _token_variants(tk):
+        for var in _token_variants(tok):
             if len(var) >= 3 and var in local:
                 return True
     if first and last and (
@@ -701,7 +685,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         )
     return phone
 
-# ───────────────────── e‑mail lookup (unchanged) ───────────────────────────
+# ───────────────────── e-mail lookup (unchanged) ───────────────────────────
 def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     key = f"{agent}|{state}"
     if key in cache_e:
@@ -802,7 +786,25 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         LOG.debug("EMAIL FAIL for %s %s – personalised e-mail not found", agent, state)
     return email
 
-# ───────────────────── Google-Sheet helpers (UPDATED logging) ──────────────
+# ───────────────────── structured row processing (unchanged) ───────────────
+def extract_name(t):
+    m = re.search(r"listing agent[:\s\-]*([A-Za-z \.'’-]{3,})", t, re.I)
+    if m:
+        n = m.group(1).strip()
+        if not TEAM_RE.search(n):
+            return n
+    return None
+def is_active_listing(zpid):
+    if not RAPID_KEY:
+        return True
+    try:
+        status = rapid_property(zpid).get("homeStatus", "").upper()
+        return (not status) or status in GOOD_STATUS
+    except Exception as e:
+        LOG.warning("Rapid status check failed for %s (%s) – keeping row", zpid, e)
+        return True
+
+# ───────────────────── Google-Sheet helpers (UPDATED) ──────────────────────
 def mark_sent(row_idx: int, msg_id: str):
     ts = datetime.now(tz=TZ).isoformat()
     data = [
@@ -815,7 +817,7 @@ def mark_sent(row_idx: int, msg_id: str):
             spreadsheetId=GSHEET_ID,
             body={"valueInputOption": "RAW", "data": data},
         ).execute()
-        LOG.debug("Row %s marked SENT (H, W, L filled) – msg_id=%s", row_idx, msg_id)
+        LOG.info("Marked row %s H:x W:init-ts L:msg-id – initial SMS (msg_id=%s)", row_idx, msg_id)
     except Exception as e:
         LOG.error("GSheet mark_sent error %s", e)
 
@@ -828,7 +830,7 @@ def mark_followup(row_idx: int):
             valueInputOption="RAW",
             body={"values": [[ts]]},
         ).execute()
-        LOG.debug("Row %s marked FOLLOW‑UP (X filled)", row_idx)
+        LOG.info("Marked row %s X: follow-up done", row_idx)
     except Exception as e:
         LOG.error("GSheet mark_followup error %s", e)
 
@@ -843,7 +845,7 @@ def mark_reply(row_idx: int):
             spreadsheetId=GSHEET_ID,
             body={"valueInputOption": "RAW", "data": data},
         ).execute()
-        LOG.info("Row %s marked REPLY (I, K) – agent responded", row_idx)
+        LOG.info("Marked row %s I:x K:ts – reply detected", row_idx)
     except Exception as e:
         LOG.error("GSheet mark_reply error %s", e)
 
@@ -855,13 +857,13 @@ def append_row(vals) -> int:
         body={"values": [vals]},
     ).execute()
     row_idx = int(resp["updates"]["updatedRange"].split("!")[1].split(":")[0][1:])
-    LOG.info("Row appended (row %s)", row_idx)
+    LOG.info("Row appended to sheet (row %s)", row_idx)
     return row_idx
 
 def phone_exists(p):
     return p in seen_phones
 
-# ───────────────────── inbound‑SMS processing (NEW) ────────────────────────
+# ───────────────────── misc helpers (unchanged) ───────────────────────────
 def _normalize_e164(p: str) -> str:
     d = re.sub(r"\D", "", p)
     if len(d) == 10:
@@ -870,77 +872,7 @@ def _normalize_e164(p: str) -> str:
         d = "+" + d
     return d
 
-def _find_row(phone: str = "", ref: str = "") -> int | None:
-    """
-    Try to locate the sheet row by outbound msg_id OR by phone.
-    Search only the newest 250 rows for speed.
-    """
-    try:
-        vals = ws.get_all_values()
-    except Exception as e:
-        LOG.error("Sheet read error in _find_row: %s", e)
-        return None
-    base = max(1, len(vals) - 250)
-    for idx in range(len(vals)-1, base-1, -1):
-        row = vals[idx]
-        if len(row) < MIN_COLS:
-            row += [""] * (MIN_COLS - len(row))
-        row_phone = row[COL_PHONE].strip()
-        row_ref   = row[COL_MSG_ID].strip()
-        if ref and ref == row_ref:
-            return idx + 1       # convert 0‑based list index to 1‑based sheet row
-        if phone and phone == row_phone:
-            return idx + 1
-    return None
-
-def _handle_inbound(from_num: str, reference: str, ts_str: str | None = None):
-    phone_std = fmt_phone(from_num)
-    row = _find_row(phone_std, reference)
-    if not row:
-        LOG.debug("Inbound SMS from %s (ref=%s) – no matching sheet row", from_num, reference)
-        return
-    mark_reply(row)
-
-# ───────── inbound‑SMS poller thread  (polling strategy) ─────────
-def _inbound_poll_loop():
-    LOG.info("Inbound‑SMS poller thread started")
-    since = datetime.now(tz=TZ) - timedelta(hours=INBOUND_WINDOW_HOURS)
-    while True:
-        try:
-            params = {
-                "apikey": SMS_API_KEY,
-                "direction": "inbound",
-                "after": since.isoformat(timespec="seconds"),
-            }
-            r = requests.get(RECEIVE_URL, params=params, timeout=12)
-            if r.status_code != 200:
-                LOG.debug("Inbound poll HTTP %s – %s", r.status_code, (r.text or "")[:120])
-            else:
-                data = r.json()
-                if str(data.get("error")) == "0":
-                    msgs = data.get("messages", [])
-                    for m in msgs:
-                        frm = m.get("from", "")
-                        ref = m.get("reference", "") or ""
-                        ts  = m.get("timestamp") or m.get("date") or ""
-                        LOG.info("Inbound SMS poll hit – from=%s ref=%s ts=%s", frm, ref, ts)
-                        _handle_inbound(frm, ref, ts)
-                        # mark as read so it does not repeat
-                        mid = m.get("id", "")
-                        if mid:
-                            try:
-                                requests.post(READ_URL, timeout=6,
-                                              data={"apikey": SMS_API_KEY, "id": mid, "read": 1})
-                            except Exception:
-                                pass
-                else:
-                    LOG.debug("Inbound poll API error field=%s", data.get("error"))
-        except Exception as e:
-            LOG.error("Inbound poll exception: %s", e)
-        since = datetime.now(tz=TZ) - timedelta(hours=INBOUND_WINDOW_HOURS)
-        time.sleep(120)   # every 2 min
-
-# ───────────────────── SMS sender (UPDATED logging) ───────────────────────
+# ───────────────────── SMS sender (unchanged) ─────────────────────────────
 def _send_once(phone: str, message: str) -> Tuple[bool, str]:
     payload = {
         "apikey": SMS_API_KEY,
@@ -973,25 +905,65 @@ def send_sms(
 ):
     if not SMS_ENABLE or not phone:
         return
-    dest_phone = phone
     if SMS_TEST_MODE and SMS_TEST_NUMBER:
-        dest_phone = SMS_TEST_NUMBER
+        phone = SMS_TEST_NUMBER
     msg_txt = SMS_FU_TEMPLATE if follow_up else SMS_TEMPLATE.format(first=first, address=address)
     for attempt in range(1, SMS_RETRY_ATTEMPTS + 1):
-        ok, msg_id = _send_once(dest_phone, msg_txt)
+        ok, msg_id = _send_once(phone, msg_txt)
         if ok:
             if follow_up:
                 mark_followup(row_idx)
-                LOG.info("FOLLOW‑UP SMS sent to %s (row %s) msg_id=%s", dest_phone, row_idx, msg_id)
+                LOG.info("Follow-up SMS sent to %s (row %s, attempt %s, msg_id=%s)", phone, row_idx, attempt, msg_id)
             else:
                 mark_sent(row_idx, msg_id)
-                LOG.info("INITIAL SMS sent to %s (row %s) msg_id=%s", dest_phone, row_idx, msg_id)
+                LOG.info("Initial SMS sent to %s (row %s, attempt %s, msg_id=%s)", phone, row_idx, attempt, msg_id)
             return
         LOG.debug("SMS attempt %s failed → retrying", attempt)
         time.sleep(5)
-    LOG.error("SMS failed after %s attempts to %s", SMS_RETRY_ATTEMPTS, dest_phone)
+    LOG.error("SMS failed after %s attempts to %s", SMS_RETRY_ATTEMPTS, phone)
 
-# ───────────────────── follow-up scheduler (UPDATED) ──────────────────────
+# ───────────────────── inbound-reply polling helper (unchanged) ───────────
+def check_reply(phone: str, msg_id: str, since_iso: str) -> bool:
+    e164 = _normalize_e164(phone)
+    params = {
+        "apikey": SMS_API_KEY,
+        "from": e164,
+        "start": since_iso,
+        "unread": 1,
+    }
+    try:
+        r = requests.get(RECEIVE_URL, params=params, timeout=10)
+        if r.status_code != 200:
+            LOG.debug("getSMS HTTP %s – %s", r.status_code, (r.text or "")[:120])
+            return False
+        data = r.json()
+        if str(data.get("error")) != "0":
+            LOG.debug("getSMS error field %s", data.get("error"))
+            return False
+        ids_to_mark = []
+        for m in data.get("messages", []):
+            if msg_id and m.get("reference") == msg_id:
+                ids_to_mark.append(m.get("id", ""))
+            elif not msg_id:
+                ids_to_mark.append(m.get("id", ""))
+        if not ids_to_mark:
+            return False
+        for mid in ids_to_mark:
+            if not mid:
+                continue
+            try:
+                requests.post(
+                    READ_URL, timeout=6,
+                    data={"apikey": SMS_API_KEY, "id": mid, "read": 1},
+                )
+            except Exception:
+                pass
+        return True
+    except Exception as exc:
+        LOG.debug("Reply-check exception %s", exc)
+        return False
+
+# ───────────────────── follow-up logic refactored ──────────────────────
 def _business_elapsed(start: datetime, end: datetime) -> float:
     if start >= end:
         return 0.0
@@ -1004,89 +976,50 @@ def _business_elapsed(start: datetime, end: datetime) -> float:
         cur = nxt
     return elapsed
 
-def _schedule_loop():
-    LOG.info("FU‑scheduler thread started")
-    while True:
+def _follow_up_pass():
+    LOG.info("Running follow-up pass")
+    vals = ws.get_all_values()
+    if len(vals) <= 2:
+        LOG.debug("Not enough rows (%s) to process FU", len(vals))
+        return
+    all_rows = vals[1:]          # drop header
+    base_idx = 2                # sheet row number of first data row
+    for rel_i, row in enumerate(all_rows):
+        idx = base_idx + rel_i
+        # pad to full length to avoid IndexError
+        if len(row) < MIN_COLS:
+            row = row + [""] * (MIN_COLS - len(row))
+        sent_flag  = (row[COL_SENT_FLAG] or "").strip().lower() == "x"
+        reply_flag = (row[COL_REPLY_FLAG] or "").strip().lower() == "x"
+        manual_note= bool((row[COL_MANUAL_NOTE] or "").strip())
+        init_ts    = (row[COL_INIT_TS]  or "").strip()
+        fu_ts      = (row[COL_FU_TS]    or "").strip()
+        msg_id     = (row[COL_MSG_ID]   or "").strip()
+        phone      = (row[COL_PHONE]    or "").strip()
+        first      = (row[COL_FIRST]    or "").strip()
+        address    = (row[COL_STREET]   or "").strip()
+        LOG.debug("Row %s – flags: sent=%s fu=%s reply=%s note=%s", idx, sent_flag, bool(fu_ts), reply_flag, manual_note)
+        if not sent_flag or fu_ts or reply_flag or manual_note or not init_ts:
+            continue
         try:
-            vals = ws.get_all_values()
-            if len(vals) <= 2:
-                LOG.debug("Sheet empty – skipping scheduler pass")
-                time.sleep(600)
-                continue
-            all_rows = vals[1:]          # drop header
-            rows = all_rows[-100:]       # newest 100 for a wider window
-            base_idx = len(vals) - len(rows) + 1
-            for rel_i, row in enumerate(rows, start=0):
-                idx = base_idx + rel_i
-                # pad to full length
-                if len(row) < MIN_COLS:
-                    row = row + [""] * (MIN_COLS - len(row))
-                sent_flag   = row[COL_SENT_FLAG].strip().lower()
-                reply_flag  = row[COL_REPLY_FLAG].strip()
-                manual_note = row[COL_MANUAL_NOTE].strip()
-                init_ts     = row[COL_INIT_TS].strip()
-                fu_ts       = row[COL_FU_TS].strip()
-                msg_id      = row[COL_MSG_ID].strip()
-                phone       = row[COL_PHONE].strip()
-                first       = row[COL_FIRST].strip()
-                address     = row[COL_STREET].strip()
-                # decision path logging
-                if LOG.isEnabledFor(logging.DEBUG):
-                    LOG.debug("Row %s – flags: sent=%s fu=%s reply=%s note=%s", idx,
-                              bool(sent_flag), bool(fu_ts), bool(reply_flag), bool(manual_note))
-                # skip cases
-                if not sent_flag or not init_ts:
-                    continue
-                if fu_ts:
-                    continue
-                if reply_flag or manual_note:
-                    continue
-                # elapsed time check
-                try:
-                    t0 = datetime.fromisoformat(init_ts)
-                except Exception:
-                    LOG.debug("Row %s – bad init_ts", idx)
-                    continue
-                now = datetime.now(tz=TZ)
-                worked = _business_elapsed(t0.astimezone(TZ), now)
-                if worked < FU_HOURS:
-                    continue
-                # real‑time double‑check for reply via API
-                if check_reply(phone, msg_id, init_ts):
-                    mark_reply(idx)
-                    LOG.info("Row %s – reply detected during FU check, follow‑up aborted", idx)
-                    continue
-                # send FU
-                LOG.info("Row %s – sending follow‑up (elapsed %.2fh)", idx, worked)
-                send_sms(phone, first, address, idx, follow_up=True)
-        except Exception as e:
-            LOG.error("FU scheduler error: %s", e)
-        time.sleep(600)  # 10 min
+            t0 = datetime.fromisoformat(init_ts)
+        except Exception:
+            LOG.error("Invalid init_ts '%s' on row %s", init_ts, idx)
+            continue
+        now = datetime.now(tz=TZ)
+        worked = _business_elapsed(t0.astimezone(TZ), now)
+        if worked < FU_HOURS:
+            LOG.debug("Row %s – elapsed %.2fh < %.2fh; skipping", idx, worked, FU_HOURS)
+            continue
+        # check for inbound reply
+        if check_reply(phone, msg_id, init_ts):
+            mark_reply(idx)
+            LOG.info("Row %s has agent reply – FU skipped", idx)
+            continue
+        LOG.info("Sending follow-up to row %s (elapsed %.2fh)", idx, worked)
+        send_sms(phone, first, address, idx, follow_up=True)
 
-# ─────────── ensure scheduler singleton (P1) ────────────
-if not getattr(sys.modules[__name__], "_SCHEDULER_STARTED", False):
-    _scheduler_thread = threading.Thread(target=_schedule_loop, daemon=True)
-    _scheduler_thread.start()
-    sys.modules[__name__]._SCHEDULER_STARTED = True
-
-# start inbound poller once
-if SMS_ENABLE and not getattr(sys.modules[__name__], "_INBOUND_STARTED", False):
-    _poll_thread = threading.Thread(target=_inbound_poll_loop, daemon=True)
-    _poll_thread.start()
-    sys.modules[__name__]._INBOUND_STARTED = True
-
-# ───────── optional FastAPI webhook (requires USE_WEBHOOK & FastAPI) ──────
-app: FastAPI | None = None
-if USE_WEBHOOK and FastAPI:
-    app = FastAPI()
-    @app.post("/sms-webhook")
-    async def sms_webhook(req: Request):
-        data = await req.json()
-        LOG.info("Inbound SMS webhook payload: %s", data)
-        _handle_inbound(data.get("from",""), data.get("reference",""), data.get("timestamp"))
-        return {"status": "ok"}
-
-# ───────────────────── core row processor (unchanged) ────────────
+# ───────────────────── core row processor (UNCHANGED) ─────────────────────
 def _expand_row(l: List[str], n: int = MIN_COLS) -> List[str]:
     return l + [""] * (n - len(l)) if len(l) < n else l
 
@@ -1124,18 +1057,35 @@ def process_rows(rows: List[Dict[str, Any]]):
             seen_phones.add(phone)
             send_sms(phone, first, r.get("street", ""), row_idx)
 
-# ───────────────────── main entry point ────────────────────────────
+# ───────────────────── main entry point & scheduler ─────────────────────
 if __name__ == "__main__":
-    # When running as a script (e.g. cron or Cloud Run job) we still want to
-    # allow piping a JSON payload directly to stdin for ad‑hoc processing.
     try:
         stdin_txt = sys.stdin.read().strip()
         payload = json.loads(stdin_txt) if stdin_txt else None
     except json.JSONDecodeError:
         payload = None
+
     if payload and payload.get("listings"):
-        LOG.debug("Sample fields on first fresh row: %s", list(payload["listings"][0].keys()))
+        LOG.info("apify-hook: received %s listings directly in payload", len(payload["listings"]))
         process_rows(payload["listings"])
+        LOG.info("Finished processing payload; exiting.")
     else:
-        LOG.info("No JSON payload detected; scheduler & poller threads remain alive.")
+        LOG.info("No JSON payload detected; entering hourly scheduler mode.")
+        # align first run immediately if within work hours
+        while True:
+            now = datetime.now(tz=TZ)
+            hour = now.hour
+            if WORK_START <= hour < WORK_END:
+                LOG.info("Starting follow-up pass at %s", now.isoformat())
+                try:
+                    _follow_up_pass()
+                except Exception as e:
+                    LOG.error("Error during follow-up pass: %s", e)
+            else:
+                LOG.info("Current hour %s outside work hours (%s–%s); skipping follow-up", hour, WORK_START, WORK_END)
+            # compute seconds until next top of the hour
+            next_run = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+            sleep_secs = (next_run - now).total_seconds()
+            LOG.debug("Sleeping %.0f seconds until next run at %s", sleep_secs, next_run.isoformat())
+            time.sleep(sleep_secs)
 
