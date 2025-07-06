@@ -1,3 +1,4 @@
+∑return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}", p) and not _is_bad_area(p[:3]))
 import concurrent.futures
 import html
 import json
@@ -183,17 +184,20 @@ def is_short_sale(text: str) -> bool:
 
 # ───────────────────── working‑hour elapsed helper (UPDATED) ─────────────────────
 def business_hours_elapsed(start_ts: datetime, now: datetime) -> float:
+    """Return number of *working* hours elapsed between ``start_ts`` and ``now``.
+
+    Only time falling between ``WORK_START`` and ``WORK_END`` on weekdays is
+    counted.  Both datetimes are converted to the bot's timezone to avoid
+    mismatches.  The calculation walks in 15‑minute increments for reasonable
+    accuracy without being too expensive.
     """
-    Hours elapsed between start_ts and now during which the bot is *allowed* to run
-    (Mon‑Fri, between WORK_START and WORK_END).
-    """
-    def _is_weekend(d): return d.weekday() >= 5
     total = 0.0
-    cur   = start_ts
+    cur = start_ts
+    step = timedelta(minutes=15)
     while cur < now:
-        nxt = cur + timedelta(minutes=30)
+        nxt = min(now, cur + step)
         if not _is_weekend(cur) and WORK_START <= cur.hour < WORK_END:
-            total += 0.5               # 30 min granularity
+            total += (nxt - cur).total_seconds() / 3600.0
         cur = nxt
     return total
 
