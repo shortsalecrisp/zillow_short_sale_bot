@@ -1,4 +1,3 @@
-∑return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}", p) and not _is_bad_area(p[:3]))
 import concurrent.futures
 import html
 import json
