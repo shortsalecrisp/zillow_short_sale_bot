@@ -1007,6 +1007,16 @@ def _follow_up_pass():
         if row[COL_REPLY_FLAG].strip() or row[COL_MANUAL_NOTE].strip():
             continue
 
+        # auto-check for replies since initial message
+        if check_reply(row[COL_PHONE], row[COL_MSG_ID], row[COL_INIT_TS]):
+            LOG.info(
+                "Auto-detected reply for row %s (msg_id=%s)",
+                sheet_row,
+                row[COL_MSG_ID],
+            )
+            mark_reply(sheet_row)
+            continue
+
         try:
             ts = datetime.fromisoformat(row[COL_INIT_TS])
             if ts.tzinfo is None:
