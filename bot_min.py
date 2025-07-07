@@ -41,6 +41,7 @@ GOOD_STATUS    = {"FOR_SALE", "ACTIVE", "COMING_SOON", "PENDING", "NEW_CONSTRUCT
 
 TZ             = pytz.timezone(os.getenv("BOT_TIMEZONE", "US/Eastern"))
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
+FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive (pauses at 8 pm)
 
@@ -991,8 +992,8 @@ def _follow_up_pass():
 
     now = datetime.now(tz=TZ)
     last_row_idx = len(all_rows)
-    # look back far enough to include any row whose FU window might open soon
-    start_row_idx = max(2, last_row_idx - int(FU_HOURS * 3))
+    # look back over recent rows for potential follow‑ups
+    start_row_idx = max(2, last_row_idx - FU_LOOKBACK_ROWS)
     recent_rows = all_rows[start_row_idx - 1:]
 
     for sheet_row, row in enumerate(recent_rows, start=start_row_idx):
