@@ -181,6 +181,11 @@ def ok_email(e: str) -> bool:
 def is_short_sale(text: str) -> bool:
     return SHORT_RE.search(text) and not BAD_RE.search(text)
 
+
+def _is_weekend(d: datetime) -> bool:
+    """Return True if ``d`` falls on a weekend (Saturday/Sunday)."""
+    return d.weekday() >= 5
+
 # ───────────────────── working‑hour elapsed helper (UPDATED) ─────────────────────
 def business_hours_elapsed(start_ts: datetime, now: datetime) -> float:
     """Return number of *working* hours elapsed between ``start_ts`` and ``now``.
@@ -190,6 +195,20 @@ def business_hours_elapsed(start_ts: datetime, now: datetime) -> float:
     mismatches.  The calculation walks in 15‑minute increments for reasonable
     accuracy without being too expensive.
     """
+
+    if start_ts.tzinfo is None:
+        start_ts = start_ts.replace(tzinfo=TZ)
+    else:
+        start_ts = start_ts.astimezone(TZ)
+
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TZ)
+    else:
+        now = now.astimezone(TZ)
+
+    if start_ts >= now:
+        return 0.0
+
     total = 0.0
     cur = start_ts
     step = timedelta(minutes=15)
@@ -198,6 +217,7 @@ def business_hours_elapsed(start_ts: datetime, now: datetime) -> float:
         if not _is_weekend(cur) and WORK_START <= cur.hour < WORK_END:
             total += (nxt - cur).total_seconds() / 3600.0
         cur = nxt
+
     return total
 
 # ───────────────────── scraping / lookup helpers (UNCHANGED) ─────────────────────
