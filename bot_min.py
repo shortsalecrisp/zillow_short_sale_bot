@@ -216,6 +216,12 @@ def business_hours_elapsed(start_ts: datetime, now: datetime) -> float:
     while cur < now:
         end_of_work = cur.replace(hour=WORK_END, minute=0, second=0, microsecond=0)
         nxt = min(now, cur + step, end_of_work)
+        if nxt == cur:
+            cur = (cur + timedelta(days=1)).replace(
+                hour=WORK_START, minute=0, second=0, microsecond=0
+            )
+            LOG.debug("business_hours_elapsed skipped to next workday")
+            continue
         if not _is_weekend(cur) and WORK_START <= cur.hour < WORK_END:
             total += (nxt - cur).total_seconds() / 3600.0
         cur = nxt
