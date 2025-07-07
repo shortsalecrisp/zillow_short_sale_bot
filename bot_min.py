@@ -1012,7 +1012,11 @@ def _follow_up_pass():
         except Exception:
             continue
 
-        if business_hours_elapsed(ts, now) < FU_HOURS:
+        hrs = business_hours_elapsed(ts, now)
+        if hrs < FU_HOURS:
+            LOG.debug(
+                "FU‑skip row %s – %.2f business hours elapsed", sheet_row, hrs
+            )
             continue
 
         # debug line requested by Yoni
