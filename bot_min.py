@@ -959,7 +959,15 @@ def send_sms(
         time.sleep(5)
     LOG.error("SMS failed after %s attempts to %s", SMS_RETRY_ATTEMPTS, phone)
 
-def check_reply(phone: str, msg_id: str, since_iso: str) -> bool:
+def check_reply(phone: str, since_iso: str) -> bool:
+    """Return True if a reply from *phone* has been received since *since_iso*.
+
+    The previous implementation attempted to filter messages by the original
+    outbound message ID.  If the phone number in the sheet is later updated and
+    follow‑ups are sent from a new number, that reference no longer matches.
+    To ensure replies are detected even after manual phone updates, we now query
+    for any unread messages from the given phone number and mark them as read."""
+
     e164 = _normalize_e164(phone)
     params = {
         "apikey": SMS_API_KEY,
@@ -976,21 +984,23 @@ def check_reply(phone: str, msg_id: str, since_iso: str) -> bool:
         if str(data.get("error")) != "0":
             LOG.debug("getSMS error field %s", data.get("error"))
             return False
-        ids_to_mark = []
-        for m in data.get("messages", []):
-            if msg_id and m.get("reference") == msg_id:
-                ids_to_mark.append(m.get("id", ""))
-            elif not msg_id:
-                ids_to_mark.append(m.get("id", ""))
+
+        ids_to_mark = [m.get("id", "") for m in data.get("messages", [])]
         if not ids_to_mark:
             return False
+
         for mid in ids_to_mark:
             if not mid:
                 continue
             try:
-                requests.post(READ_URL, timeout=6, data={"apikey": SMS_API_KEY, "id": mid, "read": 1})
+                requests.post(
+                    READ_URL,
+                    timeout=6,
+                    data={"apikey": SMS_API_KEY, "id": mid, "read": 1},
+                )
             except Exception:
                 pass
+
         return True
     except Exception as exc:
         LOG.debug("Reply-check exception %s", exc)
@@ -1025,7 +1035,7 @@ def _follow_up_pass():
             continue
 
         # auto-check for replies since initial message
-        if check_reply(row[COL_PHONE], row[COL_MSG_ID], row[COL_INIT_TS]):
+        if check_reply(row[COL_PHONE], row[COL_INIT_TS]):
             LOG.info(
                 "Auto-detected reply for row %s (msg_id=%s)",
                 sheet_row,
