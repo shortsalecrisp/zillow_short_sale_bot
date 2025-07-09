@@ -895,10 +895,19 @@ def _normalize_e164(p: str) -> str:
         d = "+" + d
     return d
 
+def _digits_only(num: str) -> str:
+    """Keep digits, prefix 1 if US local (10 digits)."""
+    digits = re.sub(r"\D", "", num or "")
+    if len(digits) == 10:
+        digits = "1" + digits
+    return digits
+
+
 def _send_once(phone: str, message: str) -> Tuple[bool, str]:
+    digits = _digits_only(phone)
     payload = {
         "apikey": SMS_API_KEY,
-        "recipients": phone,
+        "recipients": digits,
         "message": message,
         "sendsms": "1",
     }
