@@ -845,14 +845,16 @@ def mark_sent(row_idx: int, msg_id: str):
 
 def mark_followup(row_idx: int):
     ts = datetime.now(tz=TZ).isoformat()
+    data = [
+        {"range": f"Sheet1!I{row_idx}", "values": [["x"]]},
+        {"range": f"Sheet1!X{row_idx}", "values": [[ts]]},
+    ]
     try:
-        sheets_service.spreadsheets().values().update(
+        sheets_service.spreadsheets().values().batchUpdate(
             spreadsheetId=GSHEET_ID,
-            range=f"Sheet1!X{row_idx}:X{row_idx}",
-            valueInputOption="RAW",
-            body={"values": [[ts]]},
+            body={"valueInputOption": "RAW", "data": data},
         ).execute()
-        LOG.info("Marked row %s X: follow-up done", row_idx)
+        LOG.info("Marked row %s I:x X:follow-up done", row_idx)
     except Exception as e:
         LOG.error("GSheet mark_followup error %s", e)
 
