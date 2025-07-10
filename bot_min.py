@@ -43,7 +43,7 @@ TZ             = pytz.timezone(os.getenv("BOT_TIMEZONE", "US/Eastern"))
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
-WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive (pauses at 8 pm)
+WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (pauses at 9 pm)
 
 SMS_ENABLE        = os.getenv("SMSM_ENABLE", "false").lower() == "true"
 SMS_TEST_MODE     = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
