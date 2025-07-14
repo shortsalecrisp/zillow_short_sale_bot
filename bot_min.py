@@ -119,7 +119,15 @@ LABEL_TABLE = {
 LABEL_RE      = re.compile("(" + "|".join(map(re.escape, LABEL_TABLE)) + ")", re.I)
 US_AREA_CODES = {str(i) for i in range(201, 990)}
 OFFICE_HINTS  = {"office", "main", "fax", "team", "brokerage", "corporate"}
-BAD_AREA      = {"800", "866"}
+BAD_AREA      = {
+    "800",
+    "888",
+    "877",
+    "866",
+    "855",
+    "844",
+    "833",
+}
 
 # ───────────────────── Google / Sheets setup ─────────────────────
 creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
