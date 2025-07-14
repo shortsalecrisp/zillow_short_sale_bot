@@ -80,7 +80,15 @@ def _digits_only(num: str) -> str:
     return digits
 
 
-BAD_AREA = {"800", "866"}  # reject toll-free & 1xx after leading '1' stripped
+BAD_AREA = {
+    "800",
+    "888",
+    "877",
+    "866",
+    "855",
+    "844",
+    "833",
+}  # reject toll-free & 1xx after leading '1' stripped
 
 def fmt_phone(raw: str) -> str:
     """Return 123-456-7890 or '' if invalid/toll-free/1xx."""
