@@ -46,9 +46,15 @@ client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1
 
 # ------------------  local dedupe DB ------------------
 conn = sqlite3.connect("seen.db")
-conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY 
-KEY)")
+conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
 conn.commit()
+
+# Cache previously looked-up contacts to reduce Apify calls
+cache = sqlite3.connect("contact_cache.db")
+cache.execute(
+    "CREATE TABLE IF NOT EXISTS contacts (agent TEXT, state TEXT, phone TEXT, email TEXT, PRIMARY KEY(agent, state))"
+)
+cache.commit()
 
 # ------------------  utility funcs ------------------
 
@@ -90,26 +96,25 @@ SEARCH_ACTOR = "apify/google-search-scraper"
 
 
 def _scrape_google(query: str, max_links: int = 5):
-    """Return a list of top result URLs for the query using Apify Google 
-Search."""
-    run = requests.post(
-        f"https://api.apify.com/v2/acts/{SEARCH_ACTOR}/runs",
-        params={"token": APIFY_TOKEN, "waitForFinish": 1},
+    """Return a list of top result URLs for the query using Apify Google Search."""
+    resp = requests.post(
+        f"https://api.apify.com/v2/acts/{SEARCH_ACTOR}/run-sync-get-dataset-items",
+        params={
+            "token": APIFY_TOKEN,
+            "memory": 256,
+            "timeout": 60,
+            "clean": 1,
+            "format": "json",
+        },
         json={
             "queries": [query],
             "resultsPerPage": max_links,
             "maxPagesPerQuery": 1,
         },
         timeout=90,
-    ).json()["data"]
-
-    dataset_id = run["defaultDatasetId"]
-    items = requests.get(
-        f"https://api.apify.com/v2/datasets/{dataset_id}/items",
-        params={"token": APIFY_TOKEN, "clean": 1, "format": "json"},
-        timeout=30,
-    ).json()
-    return [itm["url"] for itm in items][:max_links]
+    )
+    items = resp.json()
+    return [itm.get("url") for itm in items][:max_links]
 
 
 def _extract_with_gpt(url: str, html_text: str):
@@ -140,18 +145,29 @@ def find_contact(row: dict):
     agent = row.get("agentName", "")
     # crude state extraction from address string
     address = row.get("address", "")
-    state = address.split(",")[-2].strip().split()[0] if "," in address 
-else ""
+    state = address.split(",")[-2].strip().split()[0] if "," in address else ""
+
+    cached = cache.execute(
+        "SELECT phone, email FROM contacts WHERE agent=? AND state=?",
+        (agent, state),
+    ).fetchone()
+    if cached:
+        return cached[0], cached[1]
+
     query = f'"{agent}" real estate {state} phone'
 
     for link in _scrape_google(query):
         try:
-            html_text = requests.get(link, timeout=12, 
-headers={"User-Agent": "Mozilla/5.0"}).text
+            html_text = requests.get(link, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
         except Exception:
             continue
         phone, email = _extract_with_gpt(link, html_text)
         if phone or email:
+            cache.execute(
+                "INSERT OR REPLACE INTO contacts (agent, state, phone, email) VALUES (?,?,?,?)",
+                (agent, state, phone or "", email or ""),
+            )
+            cache.commit()
             return phone, email
 
     return None, None  # fallback if nothing found
