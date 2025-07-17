@@ -1066,6 +1066,12 @@ def _follow_up_pass():
             )
             continue
 
+        if now.hour < 9:
+            LOG.debug(
+                "FU‑skip row %s – before 9am", sheet_row
+            )
+            continue
+
         # debug line requested by Yoni
         LOG.debug(
             "FU‑check row %s → Col I='%s' Col J='%s' (both blank—sending FU)",
@@ -1089,6 +1095,10 @@ def process_rows(rows: List[Dict[str, Any]]):
         txt = (r.get("description", "") + " " + r.get("openai_summary", "")).strip()
         if not is_short_sale(txt):
             LOG.debug("SKIP non-short-sale %s (%s)", r.get("street"), r.get("zpid"))
+            continue
+        street = (r.get("street") or r.get("address") or "").strip()
+        if street == "(Undisclosed Address)":
+            LOG.debug("SKIP undisclosed address zpid %s", r.get("zpid"))
             continue
         zpid = str(r.get("zpid", ""))
         if zpid and not is_active_listing(zpid):
