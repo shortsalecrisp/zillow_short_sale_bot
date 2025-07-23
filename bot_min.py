@@ -68,6 +68,7 @@ SMS_RETRY_ATTEMPTS = int(os.getenv("SMSM_RETRY_ATTEMPTS", "2"))
 
 RECEIVE_URL = os.getenv("SMSM_INBOUND_URL", "https://api.smsmobileapi.com/getsms/")
 READ_URL    = os.getenv("SMSM_READ_URL",    "https://api.smsmobileapi.com/readsms/")
+CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
 # column indices (0‑based)
 COL_FIRST       = 0   # A
@@ -651,19 +652,19 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     for blk in (row_payload.get("contact_recipients") or []):
         for p in _phones_from_block(blk):
             d = fmt_phone(p)
-            if d and valid_phone(d):
+            if not (d and valid_phone(d)):
+                continue
+            if is_mobile_number(d):
                 cache_p[key] = d
                 LOG.debug("PHONE hit directly from contact_recipients")
                 return d
     zpid = str(row_payload.get("zpid", ""))
-    undirect_phone = ""
     if zpid:
         phone, src = rapid_phone(zpid, agent)
-        if phone and _looks_direct(phone, agent, state):
+        if phone and _looks_direct(phone, agent, state) and is_mobile_number(phone):
             cache_p[key] = phone
             LOG.debug("PHONE WIN %s via %s (surname proximity)", phone, src)
             return phone
-        undirect_phone = phone
     cand_good, cand_office, src_good = {}, {}, {}
     def add(p, score, office_flag, src=""):
         d = fmt_phone(p)
@@ -709,7 +710,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 add(p, sc, off, url)
             if cand_good:
                 break
-    phone = cand_good and max(cand_good, key=cand_good.get) or undirect_phone
+    phone = ""
+    for cand, _ in sorted(cand_good.items(), key=lambda t: -t[1]):
+        if is_mobile_number(cand):
+            phone = cand
+            break
+    if not phone:
+        for cand, _ in sorted(cand_office.items(), key=lambda t: -t[1]):
+            if is_mobile_number(cand):
+                phone = cand
+                break
     cache_p[key] = phone or ""
     if phone:
         LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "crawler/unverified"))
@@ -909,6 +919,34 @@ def _digits_only(num: str) -> str:
     if len(digits) == 10:
         digits = "1" + digits
     return digits
+
+
+_line_type_cache: Dict[str, bool] = {}
+
+
+def is_mobile_number(phone: str) -> bool:
+    """Return True if *phone* is classified as a mobile line via Cloudmersive."""
+    if not phone:
+        return False
+    if phone in _line_type_cache:
+        return _line_type_cache[phone]
+    if not CLOUDMERSIVE_KEY:
+        return True
+    try:
+        digits = _digits_only(phone)
+        resp = requests.post(
+            "https://api.cloudmersive.com/validate/phonenumber/basic",
+            json={"PhoneNumber": digits, "DefaultCountryCode": "US"},
+            headers={"Apikey": CLOUDMERSIVE_KEY},
+            timeout=6,
+        )
+        data = resp.json()
+        is_mobile = data.get("PhoneNumberType", "").lower() == "mobile"
+    except Exception as exc:
+        LOG.warning("Cloudmersive lookup failed for %s (%s)", phone, exc)
+        is_mobile = False
+    _line_type_cache[phone] = is_mobile
+    return is_mobile
 
 
 def _send_once(phone: str, message: str) -> Tuple[bool, str]:
