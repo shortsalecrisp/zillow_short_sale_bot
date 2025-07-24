@@ -959,7 +959,7 @@ def is_mobile_number(phone: str) -> bool:
         )
         is_mobile = bool(
             data.get("IsMobile")
-            or data.get("PhoneNumberType", "").lower() == "mobile"
+            or "mobile" in data.get("PhoneNumberType", "").lower()
             or "mobile" in str(data.get("LineType", "")).lower()
         )
         LOG.debug("Cloudmersive classified %s as mobile=%s", digits, is_mobile)
