@@ -720,6 +720,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             if is_mobile_number(cand):
                 phone = cand
                 break
+    # If no candidate passed the mobile check, fall back to the highest scored
+    # number. Cloudmersive occasionally misclassifies mobile lines and leaving
+    # the phone field blank is less helpful than a best guess.
+    if not phone:
+        if cand_good:
+            phone = max(cand_good.items(), key=lambda t: t[1])[0]
+            LOG.debug("PHONE FALLBACK using unverified number %s", phone)
+        elif cand_office:
+            phone = max(cand_office.items(), key=lambda t: t[1])[0]
+            LOG.debug("PHONE FALLBACK using office number %s", phone)
     cache_p[key] = phone or ""
     if phone:
         LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "crawler/unverified"))
@@ -941,11 +951,18 @@ def is_mobile_number(phone: str) -> bool:
             timeout=6,
         )
         data = resp.json()
+        LOG.debug(
+            "Cloudmersive response for %s: status=%s data=%s",
+            digits,
+            resp.status_code,
+            data,
+        )
         is_mobile = bool(
             data.get("IsMobile")
             or data.get("PhoneNumberType", "").lower() == "mobile"
             or "mobile" in str(data.get("LineType", "")).lower()
         )
+        LOG.debug("Cloudmersive classified %s as mobile=%s", digits, is_mobile)
     except Exception as exc:
         LOG.warning(
             "Cloudmersive lookup failed for %s (%s) – assuming mobile", phone, exc
