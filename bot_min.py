@@ -932,6 +932,7 @@ def _digits_only(num: str) -> str:
 
 
 _line_type_cache: Dict[str, bool] = {}
+_assumed_mobile: Set[str] = set()
 
 
 def is_mobile_number(phone: str) -> bool:
@@ -939,6 +940,8 @@ def is_mobile_number(phone: str) -> bool:
     if not phone:
         return False
     if phone in _line_type_cache:
+        if phone in _assumed_mobile:
+            LOG.debug("Using cached assumed mobile value for %s", phone)
         return _line_type_cache[phone]
     if not CLOUDMERSIVE_KEY:
         return True
@@ -967,8 +970,11 @@ def is_mobile_number(phone: str) -> bool:
         LOG.warning(
             "Cloudmersive lookup failed for %s (%s) – assuming mobile", phone, exc
         )
+        _line_type_cache[phone] = True
+        _assumed_mobile.add(phone)
         return True
     _line_type_cache[phone] = is_mobile
+    _assumed_mobile.discard(phone)
     return is_mobile
 
 
