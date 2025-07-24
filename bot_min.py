@@ -947,8 +947,10 @@ def is_mobile_number(phone: str) -> bool:
             or "mobile" in str(data.get("LineType", "")).lower()
         )
     except Exception as exc:
-        LOG.warning("Cloudmersive lookup failed for %s (%s)", phone, exc)
-        is_mobile = False
+        LOG.warning(
+            "Cloudmersive lookup failed for %s (%s) – assuming mobile", phone, exc
+        )
+        return True
     _line_type_cache[phone] = is_mobile
     return is_mobile
 
