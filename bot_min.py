@@ -941,7 +941,11 @@ def is_mobile_number(phone: str) -> bool:
             timeout=6,
         )
         data = resp.json()
-        is_mobile = data.get("PhoneNumberType", "").lower() == "mobile"
+        is_mobile = bool(
+            data.get("IsMobile")
+            or data.get("PhoneNumberType", "").lower() == "mobile"
+            or "mobile" in str(data.get("LineType", "")).lower()
+        )
     except Exception as exc:
         LOG.warning("Cloudmersive lookup failed for %s (%s)", phone, exc)
         is_mobile = False
