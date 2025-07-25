@@ -649,11 +649,14 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     key = f"{agent}|{state}"
     if key in cache_p:
         return cache_p[key]
+    zillow_fallback = ""
     for blk in (row_payload.get("contact_recipients") or []):
         for p in _phones_from_block(blk):
             d = fmt_phone(p)
             if not (d and valid_phone(d)):
                 continue
+            if not zillow_fallback:
+                zillow_fallback = d
             if is_mobile_number(d):
                 cache_p[key] = d
                 LOG.debug("PHONE hit directly from contact_recipients")
@@ -661,10 +664,14 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     zpid = str(row_payload.get("zpid", ""))
     if zpid:
         phone, src = rapid_phone(zpid, agent)
-        if phone and _looks_direct(phone, agent, state) and is_mobile_number(phone):
-            cache_p[key] = phone
-            LOG.debug("PHONE WIN %s via %s (surname proximity)", phone, src)
-            return phone
+        d = fmt_phone(phone)
+        if d and valid_phone(d):
+            if not zillow_fallback:
+                zillow_fallback = d
+            if _looks_direct(d, agent, state) and is_mobile_number(d):
+                cache_p[key] = d
+                LOG.debug("PHONE WIN %s via %s (surname proximity)", d, src)
+                return d
     cand_good, cand_office, src_good = {}, {}, {}
     def add(p, score, office_flag, src=""):
         d = fmt_phone(p)
@@ -722,7 +729,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 break
     # If no candidate passed the mobile check, fall back to the highest scored
     # number. Cloudmersive occasionally misclassifies mobile lines and leaving
-    # the phone field blank is less helpful than a best guess.
+    # the phone field blank is less helpful than a best guess. As a last resort
+    # we fall back to the number scraped from Zillow even if unverified.
     if not phone:
         if cand_good:
             phone = max(cand_good.items(), key=lambda t: t[1])[0]
@@ -730,6 +738,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         elif cand_office:
             phone = max(cand_office.items(), key=lambda t: t[1])[0]
             LOG.debug("PHONE FALLBACK using office number %s", phone)
+        elif zillow_fallback:
+            phone = zillow_fallback
+            LOG.debug("PHONE FALLBACK using zillow number %s", phone)
     cache_p[key] = phone or ""
     if phone:
         LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "crawler/unverified"))
