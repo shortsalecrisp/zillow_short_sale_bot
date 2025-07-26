@@ -1105,6 +1105,9 @@ def _follow_up_pass():
         return
 
     now = datetime.now(tz=TZ)
+    if _is_weekend(now):
+        LOG.debug("Weekend – skipping follow-up pass")
+        return
     last_row_idx = len(all_rows)
     # look back over recent rows for potential follow‑ups
     start_row_idx = max(2, last_row_idx - FU_LOOKBACK_ROWS)
@@ -1226,12 +1229,14 @@ if __name__ == "__main__":
         while True:
             now = datetime.now(tz=TZ)
             hour = now.hour
-            if WORK_START <= hour < WORK_END:
+            if _is_weekend(now):
+                LOG.info("Weekend; skipping follow-up pass")
+            elif WORK_START <= hour < WORK_END:
                 LOG.info("Starting follow‑up pass at %s", now.isoformat())
                 try:
                     _follow_up_pass()
                 except Exception as e:
-                    LOG.error("Error during follow‑up pass: %s", e)
+                    LOG.error("Error during follow-up pass: %s", e)
             else:
                 LOG.info(
                     "Current hour %s outside work hours (%s–%s); skipping follow‑up",
