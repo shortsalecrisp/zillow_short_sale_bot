@@ -16,12 +16,15 @@ Google Sheet:
 https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70
 """
 
-import os, json, html, textwrap, datetime, sqlite3, requests
+import os, json, html, textwrap, datetime, sqlite3, requests, re
 from pathlib import Path
 
 import openai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+
+# Phrase indicating the property is explicitly *not* a short sale
+NOT_SHORT_RE = re.compile(r"not a\s+short\s+sale", re.I)
 
 # ------------------  load secrets  ------------------
 openai.api_key = os.environ["OPENAI_API_KEY"]
@@ -76,6 +79,9 @@ differs."""
 
 
 def gpt_is_short_sale(description: str) -> bool:
+    if NOT_SHORT_RE.search(description or ""):
+        return False
+
     prompt = (
         "Return YES if the following home listing text indicates the 
 property is a short sale "
