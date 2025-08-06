@@ -490,6 +490,8 @@ def extract_struct(td: str) -> Tuple[List[str], List[str]]:
         except Exception:
             continue
         if isinstance(data, list):
+            if not data:
+                continue
             data = data[0]
         if not isinstance(data, dict):
             continue
@@ -511,13 +513,15 @@ def extract_struct(td: str) -> Tuple[List[str], List[str]]:
         mails.append(clean_email(a["href"].split("mailto:")[-1]))
     return phones, mails
 
-def proximity_scan(t: str, last_name: str = None):
+def proximity_scan(t: str, first_name: str = "", last_name: str = ""):
     out = {}
     for m in PHONE_RE.finditer(t):
         p = fmt_phone(m.group())
         if not valid_phone(p):
             continue
         snippet = t[max(m.start() - 120, 0): m.end() + 120]
+        if first_name and first_name.lower() not in snippet:
+            continue
         if last_name and last_name.lower() not in snippet:
             continue
         lab_match = LABEL_RE.search(snippet)
@@ -530,12 +534,21 @@ def proximity_scan(t: str, last_name: str = None):
     return out
 
 def build_q_phone(name: str, state: str) -> List[str]:
-    return [f'"{name}" {state} realtor phone']
+    base = f'"{name}" {state}'
+    return [
+        f"{base} realtor phone",
+        f"{base} real estate cell",
+        f"{base} mobile",
+    ]
 
 def build_q_email(
     name: str, state: str, brokerage: str = "", domain_hint: str = "", mls_id: str = ""
 ) -> List[str]:
-    out = [f'"{name}" {state} realtor email']
+    out = [
+        f'"{name}" {state} realtor email',
+        f'"{name}" {state} real estate email',
+        f'"{name}" {state} contact email',
+    ]
     if brokerage:
         out.append(f'"{name}" "{brokerage}" email')
     if domain_hint:
@@ -575,7 +588,9 @@ def _token_variants(tok: str) -> Set[str]:
     return out
 
 def _email_matches_name(agent: str, email: str) -> bool:
-    local = email.split("@", 1)[0].lower()
+    local, domain = email.split("@", 1)
+    local = local.lower()
+    domain_l = domain.lower()
     tks = [re.sub(r"[^a-z]", "", w.lower()) for w in agent.split() if w]
     if not tks:
         return False
@@ -591,6 +606,8 @@ def _email_matches_name(agent: str, email: str) -> bool:
         or first + last[0] in local
         or last + first[0] in local
     ):
+        return True
+    if last and last in domain_l and (not first or first in domain_l or first[0] in domain_l):
         return True
     return False
 
@@ -696,7 +713,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         for it in items
     ][:20]
     non_portal, portal = _split_portals(urls)
-    last_name = (agent.split()[-1] if len(agent.split()) > 1 else agent).lower()
+    parts = agent.split()
+    first_name = parts[0].lower() if parts else ""
+    last_name = parts[-1].lower() if parts else ""
     for url, page in zip(non_portal, pmap(fetch_simple, non_portal)):
         if not page or agent.lower() not in page.lower():
             continue
@@ -704,7 +723,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         for p in ph:
             add(p, 6, False, url)
         low = html.unescape(page.lower())
-        for p, (_, sc, off) in proximity_scan(low, last_name).items():
+        for p, (_, sc, off) in proximity_scan(low, first_name, last_name).items():
             add(p, sc, off, url)
         if cand_good or cand_office:
             break
@@ -716,7 +735,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             for p in ph:
                 add(p, 4, False, url)
             low = html.unescape(page.lower())
-            for p, (_, sc, off) in proximity_scan(low, last_name).items():
+            for p, (_, sc, off) in proximity_scan(low, first_name, last_name).items():
                 add(p, sc, off, url)
             if cand_good:
                 break
@@ -780,10 +799,17 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     cand, src_e = defaultdict(int), {}
     def add_e(m, score, src=""):
         m = clean_email(m)
-        if not ok_email(m) or not _email_matches_name(agent, m):
+        if not ok_email(m):
+            return
+        domain = _domain(m)
+        last_tok = re.sub(r"[^a-z]", "", agent.split()[-1].lower()) if agent.split() else ""
+        if not (_email_matches_name(agent, m) or (last_tok and last_tok in domain)):
             return
         if re.search(r"\b(info|office|admin|support|advertising|noreply|hello)\b", m, re.I):
-            score -= 2
+            if last_tok and last_tok in domain:
+                score -= 1
+            else:
+                score -= 2
         tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in agent.split()}
         if tokens and all(tok and tok in m.lower() for tok in tokens):
             score += 3
