@@ -850,14 +850,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         LOG.debug("EMAIL FAIL for %s %s – personalised e-mail not found", agent, state)
     return email
 
-# ───────────────────── misc row utilities ─────────────────────
-def extract_name(t):
-    m = re.search(r"listing agent[:\s\-]*([A-Za-z \.'’-]{3,})", t, re.I)
-    if m:
-        n = m.group(1).strip()
-        if not TEAM_RE.search(n):
-            return n
-    return None
 
 def is_active_listing(zpid):
     if not RAPID_KEY:
@@ -1188,8 +1180,9 @@ def process_rows(rows: List[Dict[str, Any]]):
         if zpid and not is_active_listing(zpid):
             LOG.info("Skip stale/off-market zpid %s", zpid)
             continue
-        name = r.get("agentName", "").strip() or extract_name(txt)
+        name = (r.get("agentName") or "").strip()
         if not name or TEAM_RE.search(name):
+            LOG.debug("SKIP missing agent name for %s (%s)", r.get("street"), r.get("zpid"))
             continue
         state = r.get("state", "")
         phone = fmt_phone(lookup_phone(name, state, r))
