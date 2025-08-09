@@ -72,6 +72,15 @@ def ensure_table() -> sqlite3.Connection:
     return conn
 
 
+# preload ZPIDs from previous runs to avoid reprocessing duplicates
+try:
+    _pre_conn = ensure_table()
+    EXPORTED_ZPIDS.update(r[0] for r in _pre_conn.execute("SELECT zpid FROM listings"))
+    _pre_conn.close()
+except Exception as exc:
+    logger.warning("Failed to preload ZPIDs: %s", exc)
+
+
 def _digits_only(num: str) -> str:
     """Keep digits, prefix 1 if US local (10 digits)."""
     digits = re.sub(r"\D", "", num or "")
@@ -191,9 +200,18 @@ async def apify_hook(request: Request):
         logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
 
     # --- dedupe ---------------------------------------------------------------
-    fresh_rows = [r for r in rows if r.get("zpid") not in EXPORTED_ZPIDS]
+    seen_zpids: set[str] = set()
+    fresh_rows = []
+    for r in rows:
+        z = r.get("zpid")
+        if not z or z in EXPORTED_ZPIDS or z in seen_zpids:
+            continue
+        fresh_rows.append(r)
+        seen_zpids.add(z)
     if not fresh_rows:
-        logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
+        logger.info(
+            "apify-hook: no fresh rows to process (all zpids already seen)"
+        )
         return {"status": "no new rows"}
 
     logger.debug("Sample fields on first fresh row: %s",

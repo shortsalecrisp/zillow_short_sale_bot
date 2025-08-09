@@ -33,20 +33,14 @@ SMS_KEY        = os.environ["SMSMOBILE_API_KEY"]
 SMS_FROM       = os.environ["SMSMOBILE_FROM"]
 
 # optional – write service‑account json from env‑var
-if "GOOGLE_SVC_JSON" in os.environ and not 
-Path("service_account.json").exists():
-    Path("service_account.json").write_text(os.environ["GOOGLE_SVC_JSON"], 
-encoding="utf‑8")
+if "GOOGLE_SVC_JSON" in os.environ and not Path("service_account.json").exists():
+    Path("service_account.json").write_text(os.environ["GOOGLE_SVC_JSON"], encoding="utf-8")
 
 # ------------------  Google Sheets ------------------
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = 
-ServiceAccountCredentials.from_json_keyfile_name("service_account.json", 
-SCOPES)
+creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", SCOPES)
 client = gspread.authorize(creds)
-SHEET = 
-client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1
-
+SHEET = client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1
 # ------------------  local dedupe DB ------------------
 conn = sqlite3.connect("seen.db")
 conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
@@ -83,10 +77,8 @@ def gpt_is_short_sale(description: str) -> bool:
         return False
 
     prompt = (
-        "Return YES if the following home listing text indicates the 
-property is a short sale "
-        "and NOT already approved or marked 'not a short sale'. Otherwise 
-return NO.\n\n"
+        "Return YES if the following home listing text indicates the property is a short sale "
+        "and NOT already approved or marked 'not a short sale'. Otherwise return NO.\n\n"
         f"Listing text:\n{description[:3500]}"
     )
     resp = openai.chat.completions.create(
@@ -176,6 +168,12 @@ def find_contact(row: dict):
             cache.commit()
             return phone, email
 
+    # cache negative result to avoid repeated lookups
+    cache.execute(
+        "INSERT OR REPLACE INTO contacts (agent, state, phone, email) VALUES (?,?,?,?)",
+        (agent, state, "", ""),
+    )
+    cache.commit()
     return None, None  # fallback if nothing found
 
 # --------------  main pipeline called by webhook_server.py --------------
@@ -209,8 +207,7 @@ def process_rows(rows: list[dict]):
         ])
 
         # send SMS
-        sms_body = f"Hi {row.get('agentName','there')}, I saw your 
-short‑sale at {row.get('address')}. Are you open to discussing?"
+        sms_body = f"Hi {row.get('agentName','there')}, I saw your short‑sale at {row.get('address')}. Are you open to discussing?"
         try:
             send_sms(phone, sms_body)
             print("Contacted", phone, row.get("address"))
