@@ -1251,14 +1251,15 @@ if __name__ == "__main__":
         while True:
             now = datetime.now(tz=TZ)
             hour = now.hour
-            if _is_weekend(now):
-                LOG.info("Weekend; skipping follow-up pass")
-            elif WORK_START <= hour < WORK_END:
-                LOG.info("Starting follow‑up pass at %s", now.isoformat())
-                try:
-                    _follow_up_pass()
-                except Exception as e:
-                    LOG.error("Error during follow-up pass: %s", e)
+            if WORK_START <= hour < WORK_END:
+                if _is_weekend(now):
+                    LOG.info("Weekend; skipping follow-up pass")
+                else:
+                    LOG.info("Starting follow‑up pass at %s", now.isoformat())
+                    try:
+                        _follow_up_pass()
+                    except Exception as e:
+                        LOG.error("Error during follow-up pass: %s", e)
             else:
                 LOG.info(
                     "Current hour %s outside work hours (%s–%s); skipping follow‑up",
