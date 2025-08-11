@@ -191,13 +191,23 @@ async def apify_hook(request: Request):
         logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
 
     # --- dedupe ---------------------------------------------------------------
-    fresh_rows = [r for r in rows if r.get("zpid") not in EXPORTED_ZPIDS]
+    conn = ensure_table()
+    fresh_rows = []
+    for r in rows:
+        zpid = r.get("zpid")
+        if zpid in EXPORTED_ZPIDS:
+            continue
+        if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
+            EXPORTED_ZPIDS.add(zpid)
+            continue
+        fresh_rows.append(r)
+
     if not fresh_rows:
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
+        conn.close()
         return {"status": "no new rows"}
 
-    logger.debug("Sample fields on first fresh row: %s",
-                 list(fresh_rows[0].keys())[:15])
+    logger.debug("Sample fields on first fresh row: %s", list(fresh_rows[0].keys())[:15])
 
     # --- main processing ------------------------------------------------------
     # process_rows should append to the sheet and return SMS jobs
@@ -213,7 +223,6 @@ async def apify_hook(request: Request):
     # --- persist ZPIDs --------------------------------------------------------
     EXPORTED_ZPIDS.update(r.get("zpid") for r in fresh_rows)
 
-    conn = ensure_table()
     conn.executemany(
         "INSERT OR IGNORE INTO listings (zpid) VALUES (?)",
         [(r["zpid"],) for r in fresh_rows],
