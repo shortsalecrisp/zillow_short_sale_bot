@@ -16,7 +16,7 @@ Google Sheet:
 https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70
 """
 
-import os, json, html, textwrap, datetime, sqlite3, requests, re
+import os, json, html, textwrap, datetime, sqlite3, requests, re, time
 from pathlib import Path
 
 import openai
@@ -33,31 +33,32 @@ SMS_KEY        = os.environ["SMSMOBILE_API_KEY"]
 SMS_FROM       = os.environ["SMSMOBILE_FROM"]
 
 # optional – write service‑account json from env‑var
-if "GOOGLE_SVC_JSON" in os.environ and not 
-Path("service_account.json").exists():
-    Path("service_account.json").write_text(os.environ["GOOGLE_SVC_JSON"], 
-encoding="utf‑8")
+if "GOOGLE_SVC_JSON" in os.environ and not Path("service_account.json").exists():
+    Path("service_account.json").write_text(
+        os.environ["GOOGLE_SVC_JSON"], encoding="utf-8"
+    )
 
 # ------------------  Google Sheets ------------------
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = 
-ServiceAccountCredentials.from_json_keyfile_name("service_account.json", 
-SCOPES)
+creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", SCOPES)
 client = gspread.authorize(creds)
-SHEET = 
-client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1
+SHEET = client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1
 
 # ------------------  local dedupe DB ------------------
 conn = sqlite3.connect("seen.db")
 conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
 conn.commit()
 
-# Cache previously looked-up contacts to reduce Apify calls
+# Cache previously looked-up contacts to reduce Apify calls. Retain entries for a long time
+# since agent contact info rarely changes.
 cache = sqlite3.connect("contact_cache.db")
 cache.execute(
-    "CREATE TABLE IF NOT EXISTS contacts (agent TEXT, state TEXT, phone TEXT, email TEXT, PRIMARY KEY(agent, state))"
+    "CREATE TABLE IF NOT EXISTS contacts (agent TEXT, state TEXT, phone TEXT, email TEXT, last_seen REAL, PRIMARY KEY(agent, state))"
 )
 cache.commit()
+
+# how long to trust cached contact info (seconds)
+CONTACT_TTL = 60 * 60 * 24 * 365  # 1 year
 
 # ------------------  utility funcs ------------------
 
@@ -83,10 +84,9 @@ def gpt_is_short_sale(description: str) -> bool:
         return False
 
     prompt = (
-        "Return YES if the following home listing text indicates the 
-property is a short sale "
-        "and NOT already approved or marked 'not a short sale'. Otherwise 
-return NO.\n\n"
+        "Return YES if the following home listing text indicates the "
+        "property is a short sale "
+        "and NOT already approved or marked 'not a short sale'. Otherwise return NO.\n\n"
         f"Listing text:\n{description[:3500]}"
     )
     resp = openai.chat.completions.create(
@@ -154,10 +154,10 @@ def find_contact(row: dict):
     state = address.split(",")[-2].strip().split()[0] if "," in address else ""
 
     cached = cache.execute(
-        "SELECT phone, email FROM contacts WHERE agent=? AND state=?",
+        "SELECT phone, email, last_seen FROM contacts WHERE agent=? AND state=?",
         (agent, state),
     ).fetchone()
-    if cached:
+    if cached and (time.time() - cached[2] < CONTACT_TTL):
         return cached[0], cached[1]
 
     query = f'"{agent}" real estate {state} phone'
@@ -170,8 +170,8 @@ def find_contact(row: dict):
         phone, email = _extract_with_gpt(link, html_text)
         if phone or email:
             cache.execute(
-                "INSERT OR REPLACE INTO contacts (agent, state, phone, email) VALUES (?,?,?,?)",
-                (agent, state, phone or "", email or ""),
+                "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
+                (agent, state, phone or "", email or "", time.time()),
             )
             cache.commit()
             return phone, email
@@ -209,8 +209,10 @@ def process_rows(rows: list[dict]):
         ])
 
         # send SMS
-        sms_body = f"Hi {row.get('agentName','there')}, I saw your 
-short‑sale at {row.get('address')}. Are you open to discussing?"
+        sms_body = (
+            f"Hi {row.get('agentName','there')}, I saw your short-sale at {row.get('address')}. "
+            "Are you open to discussing?"
+        )
         try:
             send_sms(phone, sms_body)
             print("Contacted", phone, row.get("address"))
