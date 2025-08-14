@@ -1,2 +1,7 @@
 service_account.json
 .env
+
+seen.db
+
+__pycache__/
+*.pyc
