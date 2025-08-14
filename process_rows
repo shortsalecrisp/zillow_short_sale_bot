@@ -21,10 +21,13 @@ from pathlib import Path
 
 import openai
 import gspread
+from bs4 import BeautifulSoup
 from oauth2client.service_account import ServiceAccountCredentials
 
 # Phrase indicating the property is explicitly *not* a short sale
 NOT_SHORT_RE = re.compile(r"not a\s+short\s+sale", re.I)
+PHONE_RE = re.compile(r"(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 # ------------------  load secrets  ------------------
 openai.api_key = os.environ["OPENAI_API_KEY"]
@@ -147,6 +150,37 @@ null if not found.
         return None, None
 
 
+def _parse_detail_contact(url: str):
+    """Fetch the listing detail page and try simple regex parsing for contact info."""
+    try:
+        html_text = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
+    except Exception:
+        return None, None
+
+    soup = BeautifulSoup(html_text, "html.parser")
+    phone = email = None
+
+    # prefer explicit tel/mailto links
+    tel = soup.select_one("a[href^='tel']")
+    if tel:
+        phone = tel.get("href", "").split(":", 1)[-1]
+    mail = soup.select_one("a[href^='mailto']")
+    if mail:
+        email = mail.get("href", "").split(":", 1)[-1]
+
+    text = soup.get_text(" ", strip=True)
+    if not phone:
+        m = PHONE_RE.search(text)
+        if m:
+            phone = m.group(0)
+    if not email:
+        m = EMAIL_RE.search(text)
+        if m:
+            email = m.group(0)
+
+    return phone, email
+
+
 def find_contact(row: dict):
     agent = row.get("agentName", "")
     # crude state extraction from address string
@@ -160,8 +194,20 @@ def find_contact(row: dict):
     if cached and (time.time() - cached[2] < CONTACT_TTL):
         return cached[0], cached[1]
 
-    query = f'"{agent}" real estate {state} phone'
+    # first try to parse contact info from the listing detail page
+    detail_url = row.get("detailUrl")
+    if detail_url:
+        phone, email = _parse_detail_contact(detail_url)
+        if phone or email:
+            cache.execute(
+                "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
+                (agent, state, phone or "", email or "", time.time()),
+            )
+            cache.commit()
+            return phone, email
 
+    # fallback to Google search
+    query = f'"{agent}" real estate {state} phone'
     for link in _scrape_google(query):
         try:
             html_text = requests.get(link, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
