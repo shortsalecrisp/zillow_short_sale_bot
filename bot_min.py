@@ -1249,13 +1249,13 @@ if __name__ == "__main__":
     else:
         LOG.info("No JSON payload detected; entering hourly scheduler mode.")
         while True:
-            now = datetime.now(tz=TZ)
-            hour = now.hour
+            start = datetime.now(tz=TZ)
+            hour = start.hour
             if WORK_START <= hour < WORK_END:
-                if _is_weekend(now):
+                if _is_weekend(start):
                     LOG.info("Weekend; skipping follow-up pass")
                 else:
-                    LOG.info("Starting follow‑up pass at %s", now.isoformat())
+                    LOG.info("Starting follow‑up pass at %s", start.isoformat())
                     try:
                         _follow_up_pass()
                     except Exception as e:
@@ -1265,8 +1265,21 @@ if __name__ == "__main__":
                     "Current hour %s outside work hours (%s–%s); skipping follow‑up",
                     hour, WORK_START, WORK_END
                 )
-            next_run = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-            sleep_secs = (next_run - now).total_seconds()
+
+            now = datetime.now(tz=TZ)
+            if now.hour >= WORK_END - 1:
+                next_run = (now + timedelta(days=1)).replace(
+                    hour=WORK_START, minute=0, second=0, microsecond=0
+                )
+            elif now.hour < WORK_START:
+                next_run = now.replace(
+                    hour=WORK_START, minute=0, second=0, microsecond=0
+                )
+            else:
+                next_run = (now + timedelta(hours=1)).replace(
+                    minute=0, second=0, microsecond=0
+                )
+            sleep_secs = max(0, (next_run - datetime.now(tz=TZ)).total_seconds())
             LOG.debug(
                 "Sleeping %.0f seconds until next run at %s",
                 sleep_secs, next_run.isoformat()
