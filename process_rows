@@ -48,17 +48,18 @@ client = gspread.authorize(creds)
 SHEET = client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1
 
 # ------------------  local dedupe DB ------------------
-conn = sqlite3.connect("seen.db")
-conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
-conn.commit()
+SEEN_DB = "seen.db"
+CACHE_DB = "contact_cache.db"
 
-# Cache previously looked-up contacts to reduce Apify calls. Retain entries for a long time
-# since agent contact info rarely changes.
-cache = sqlite3.connect("contact_cache.db")
-cache.execute(
-    "CREATE TABLE IF NOT EXISTS contacts (agent TEXT, state TEXT, phone TEXT, email TEXT, last_seen REAL, PRIMARY KEY(agent, state))"
-)
-cache.commit()
+def _init_seen(conn: sqlite3.Connection) -> None:
+    """Ensure the listings table exists."""
+    conn.execute("CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)")
+
+def _init_cache(conn: sqlite3.Connection) -> None:
+    """Ensure the contacts cache table exists."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS contacts (agent TEXT, state TEXT, phone TEXT, email TEXT, last_seen REAL, PRIMARY KEY(agent, state))"
+    )
 
 # how long to trust cached contact info (seconds)
 CONTACT_TTL = 60 * 60 * 24 * 365  # 1 year
@@ -181,13 +182,13 @@ def _parse_detail_contact(url: str):
     return phone, email
 
 
-def find_contact(row: dict):
+def find_contact(row: dict, cache_conn: sqlite3.Connection):
     agent = row.get("agentName", "")
     # crude state extraction from address string
     address = row.get("address", "")
     state = address.split(",")[-2].strip().split()[0] if "," in address else ""
 
-    cached = cache.execute(
+    cached = cache_conn.execute(
         "SELECT phone, email, last_seen FROM contacts WHERE agent=? AND state=?",
         (agent, state),
     ).fetchone()
@@ -199,11 +200,11 @@ def find_contact(row: dict):
     if detail_url:
         phone, email = _parse_detail_contact(detail_url)
         if phone or email:
-            cache.execute(
+            cache_conn.execute(
                 "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
                 (agent, state, phone or "", email or "", time.time()),
             )
-            cache.commit()
+            cache_conn.commit()
             return phone, email
 
     # fallback to Google search
@@ -215,11 +216,11 @@ def find_contact(row: dict):
             continue
         phone, email = _extract_with_gpt(link, html_text)
         if phone or email:
-            cache.execute(
+            cache_conn.execute(
                 "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
                 (agent, state, phone or "", email or "", time.time()),
             )
-            cache.commit()
+            cache_conn.commit()
             return phone, email
 
     return None, None  # fallback if nothing found
@@ -229,47 +230,48 @@ def find_contact(row: dict):
 def process_rows(rows: list[dict]):
     """Called by webhook_server after fetching dataset rows."""
     imported = 0
-    for row in rows:
-        zpid = str(row["zpid"])
-        # skip duplicates
-        if conn.execute("SELECT 1 FROM listings WHERE zpid=?", 
-(zpid,)).fetchone():
-            continue
+    with sqlite3.connect(SEEN_DB) as conn, sqlite3.connect(CACHE_DB) as cache:
+        _init_seen(conn)
+        _init_cache(cache)
+        for row in rows:
+            zpid = str(row["zpid"])
+            # skip duplicates
+            if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
+                continue
 
-        # filter by GPT short‑sale test
-        if not gpt_is_short_sale(row.get("description", "")):
-            continue
+            # filter by GPT short‑sale test
+            if not gpt_is_short_sale(row.get("description", "")):
+                continue
 
-        phone, email = find_contact(row)
-        if not phone:
-            continue  # we require a phone to text
+            phone, email = find_contact(row, cache)
+            if not phone:
+                continue  # we require a phone to text
 
-        # append to Google Sheet
-        SHEET.append_row([
-            datetime.datetime.now().isoformat(timespec="seconds"),
-            row.get("address"),
-            phone,
-            email or "",
-            row.get("agentName", ""),
-            row.get("detailUrl"),
-        ])
+            # append to Google Sheet
+            SHEET.append_row([
+                datetime.datetime.now().isoformat(timespec="seconds"),
+                row.get("address"),
+                phone,
+                email or "",
+                row.get("agentName", ""),
+                row.get("detailUrl"),
+            ])
 
-        # send SMS
-        sms_body = (
-            f"Hi {row.get('agentName','there')}, I saw your short-sale at {row.get('address')}. "
-            "Are you open to discussing?"
-        )
-        try:
-            send_sms(phone, sms_body)
-            print("Contacted", phone, row.get("address"))
-        except Exception as e:
-            print("SMS failed", phone, e)
+            # send SMS
+            sms_body = (
+                f"Hi {row.get('agentName','there')}, I saw your short-sale at {row.get('address')}. "
+                "Are you open to discussing?"
+            )
+            try:
+                send_sms(phone, sms_body)
+                print("Contacted", phone, row.get("address"))
+            except Exception as e:
+                print("SMS failed", phone, e)
 
-        # mark as seen
-        conn.execute("INSERT OR IGNORE INTO listings (zpid) VALUES (?)", 
-(zpid,))
-        conn.commit()
-        imported += 1
+            # mark as seen
+            conn.execute("INSERT OR IGNORE INTO listings (zpid) VALUES (?)", (zpid,))
+            conn.commit()
+            imported += 1
 
     print("process_rows finished – imported", imported)
 

@@ -185,18 +185,26 @@ def add_row(first, last, phone, email, street, city, state) -> None:
 sms = SMSSender(api_key=CFG["smsmobile_api_key"])
 
 # ---------- 5. LOCAL SQLITE (dedupe by zpid) ----------
-conn = sqlite3.connect("seen.db")
-conn.execute("CREATE TABLE IF NOT EXISTS processed (zpid TEXT PRIMARY KEY)")
-conn.commit()
+DB_PATH = "seen.db"
+
+def _ensure_table(conn: sqlite3.Connection) -> None:
+    """Create the processed table if it doesn't already exist."""
+    conn.execute("CREATE TABLE IF NOT EXISTS processed (zpid TEXT PRIMARY KEY)")
 
 def already_sent(zpid: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM processed WHERE zpid = ?", (zpid,)
-    ).fetchone() is not None
+    """Check if we've already processed this zpid."""
+    with sqlite3.connect(DB_PATH) as conn:
+        _ensure_table(conn)
+        return conn.execute(
+            "SELECT 1 FROM processed WHERE zpid = ?", (zpid,)
+        ).fetchone() is not None
 
 def mark_sent(zpid: str) -> None:
-    conn.execute("INSERT OR IGNORE INTO processed VALUES (?)", (zpid,))
-    conn.commit()
+    """Record that we've processed this zpid."""
+    with sqlite3.connect(DB_PATH) as conn:
+        _ensure_table(conn)
+        conn.execute("INSERT OR IGNORE INTO processed VALUES (?)", (zpid,))
+        conn.commit()
 
 # ---------- 6. MAIN CYCLE ----------
 def run_cycle() -> None:
