@@ -163,23 +163,29 @@ scope = [
 creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
 sheet = gspread.authorize(creds).open(CFG["google_sheet_name"]).sheet1
 
+# Cache existing phone numbers once on startup to avoid repeated fetches
+try:
+    KNOWN_PHONES = {p.strip() for p in sheet.col_values(3)}  # column 3 = "Phone"
+except Exception as e:
+    print("Phone preload error:", e)
+    KNOWN_PHONES = set()
+
 def is_duplicate(phone: str) -> bool:
-    try:
-        phones = sheet.col_values(3)   # column 3 = "Phone"
-        return phone.strip() in [p.strip() for p in phones]
-    except Exception as e:
-        print("Dup-check error:", e)
-        return False
+    return phone.strip() in KNOWN_PHONES
 
 def add_row(first, last, phone, email, street, city, state) -> None:
     if is_duplicate(phone):
         print("Duplicate phone, skipping", phone)
         return
-    sheet.append_row(
-        [first, last, phone, email, street, city, state],
-        value_input_option="USER_ENTERED"
-    )
-    print("Added row for", first, last)
+    try:
+        sheet.append_row(
+            [first, last, phone, email, street, city, state],
+            value_input_option="USER_ENTERED"
+        )
+        KNOWN_PHONES.add(phone.strip())
+        print("Added row for", first, last)
+    except Exception as e:
+        print("Add-row error:", e)
 
 # ---------- 4. SMS ----------
 sms = SMSSender(api_key=CFG["smsmobile_api_key"])
