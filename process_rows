@@ -178,7 +178,7 @@ def _parse_detail_contact(url: str):
         m = EMAIL_RE.search(text)
         if m:
             email = m.group(0)
-
+    soup.decompose()
     return phone, email
 
 

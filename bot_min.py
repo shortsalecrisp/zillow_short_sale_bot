@@ -511,6 +511,7 @@ def extract_struct(td: str) -> Tuple[List[str], List[str]]:
         phones.append(fmt_phone(a["href"].split("tel:")[-1]))
     for a in soup.select('a[href^="mailto:"]'):
         mails.append(clean_email(a["href"].split("mailto:")[-1]))
+    soup.decompose()
     return phones, mails
 
 def proximity_scan(t: str, first_name: str = "", last_name: str = ""):
