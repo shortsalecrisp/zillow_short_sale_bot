@@ -7,6 +7,7 @@ Runs 8 AM – 8 PM Eastern at random 51–72-minute intervals.
 import json, re, sqlite3, time, random, requests, pytz
 from datetime import datetime, timedelta
 from fake_useragent import UserAgent
+from bs4 import BeautifulSoup
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import openai
@@ -18,6 +19,8 @@ with open("config.json") as f:
 
 openai.api_key = CFG["openai_api_key"]
 ua = UserAgent()
+GOOGLE_API_KEY = CFG.get("google_api_key")
+GOOGLE_CX = CFG.get("google_cx")
 
 # ---------- 1. ZILLOW HELPERS ----------
 def z_get(url: str) -> requests.Response:
@@ -126,7 +129,85 @@ def qualifies(home: dict) -> bool:
 def agent_name(home: dict) -> str:
     return home.get("agentName", "Agent")
 
-# ---------- 2. CHATGPT LOOKUP ----------
+# ---------- 2. PROFILE PAGE LOOKUP ----------
+BROKER_PATTERNS = [
+    "remax",
+    "compass",
+    "kw",
+    "kellerwilliams",
+    "century21",
+    "coldwellbanker",
+    "exp",
+    "realty",
+    "sothebys",
+    "bhhs",
+]
+
+def google_search_links(query: str) -> list[str]:
+    """Return result links from Google Custom Search API."""
+    if not GOOGLE_API_KEY or not GOOGLE_CX:
+        return []
+    params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CX, "q": query}
+    try:
+        r = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=15)
+        data = r.json()
+        return [item.get("link", "") for item in data.get("items", [])]
+    except Exception as e:
+        print("Google search error:", e)
+        return []
+
+def extract_contact(html: str):
+    """Return lists of phone tuples and emails from HTML."""
+    soup = BeautifulSoup(html, "html.parser")
+    phones = []
+    emails = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        text = a.get_text(" ", strip=True).lower()
+        if href.startswith("tel:"):
+            phones.append((href[4:], text))
+        elif href.startswith("mailto:"):
+            emails.append(href[7:])
+    # Fallback regex search if anchors not found
+    if not phones or not emails:
+        text_blob = soup.get_text(" ", strip=True)
+        if not phones:
+            for m in re.findall(r"\+?\d[\d\-\.\(\)\s]{7,}\d", text_blob):
+                phones.append((m, ""))
+        if not emails:
+            emails.extend(re.findall(r"[\w\.-]+@[\w\.-]+", text_blob))
+    return phones, emails
+
+def select_best_phone(phones):
+    """Prefer numbers labeled mobile/cell/direct."""
+    for num, ctx in phones:
+        if any(k in ctx for k in ("mobile", "cell", "direct")):
+            return num
+    return phones[0][0] if phones else ""
+
+def search_agent_profile(name: str, prop_addr: str) -> tuple[str, str]:
+    """Search for an agent profile page and scrape contact info."""
+    query = f"{name} real estate agent {prop_addr}"
+    headers = {"User-Agent": ua.random}
+    try:
+        links = google_search_links(query)
+        profile_url = ""
+        for link in links:
+            low = link.lower()
+            if any(pat in low for pat in BROKER_PATTERNS):
+                profile_url = link
+                break
+        if profile_url:
+            resp = requests.get(profile_url, headers=headers, timeout=15)
+            phones, emails = extract_contact(resp.text)
+            phone = select_best_phone(phones)
+            email = emails[0] if emails else ""
+            return phone, email
+    except Exception as e:
+        print("Profile search failed:", e)
+    return "", ""
+
+# ---------- 3. CHATGPT LOOKUP ----------
 def get_contact_info(name: str, prop_addr: str) -> tuple[str, str]:
     prompt = (
         "Find the MOBILE phone number and EMAIL address for real-estate agent "
@@ -155,7 +236,7 @@ def get_contact_info(name: str, prop_addr: str) -> tuple[str, str]:
         print("ChatGPT lookup failed:", e)
         return "", ""
 
-# ---------- 3. GOOGLE SHEETS ----------
+# ---------- 4. GOOGLE SHEETS ----------
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -187,10 +268,10 @@ def add_row(first, last, phone, email, street, city, state) -> None:
     except Exception as e:
         print("Add-row error:", e)
 
-# ---------- 4. SMS ----------
+# ---------- 5. SMS ----------
 sms = SMSSender(api_key=CFG["smsmobile_api_key"])
 
-# ---------- 5. LOCAL SQLITE (dedupe by zpid) ----------
+# ---------- 6. LOCAL SQLITE (dedupe by zpid) ----------
 DB_PATH = "seen.db"
 
 def _ensure_table(conn: sqlite3.Connection) -> None:
@@ -212,7 +293,7 @@ def mark_sent(zpid: str) -> None:
         conn.execute("INSERT OR IGNORE INTO processed VALUES (?)", (zpid,))
         conn.commit()
 
-# ---------- 6. MAIN CYCLE ----------
+# ---------- 7. MAIN CYCLE ----------
 def run_cycle() -> None:
     print("Checking Zillow …")
     try:
@@ -243,7 +324,13 @@ def run_cycle() -> None:
         # Mark first so we never re-process this zpid
         mark_sent(zpid)
 
-        phone, email = get_contact_info(name, address)
+        phone, email = search_agent_profile(name, address)
+        if not phone or not email:
+            chat_phone, chat_email = get_contact_info(name, address)
+            if not phone:
+                phone = chat_phone
+            if not email:
+                email = chat_email
         if not phone:
             print("No mobile for", name, "|", address)
             continue
@@ -267,7 +354,7 @@ def run_cycle() -> None:
         except Exception as e:
             print("SMS error:", e)
 
-# ---------- 7. SCHEDULER ----------
+# ---------- 8. SCHEDULER ----------
 ET = pytz.timezone("US/Eastern")
 
 def snooze() -> None:
