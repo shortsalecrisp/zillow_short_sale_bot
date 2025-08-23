@@ -4,11 +4,13 @@ phone/email
 via Google‑search + GPT, writes Google Sheet, sends SMS through SMSmobile.
 All secrets are read from environment variables set in Render.
 
-Required env‑vars (Render → Environment tab for Web‑Service **and** Cron 
+Required env‑vars (Render → Environment tab for Web‑Service **and** Cron
 Job):
   OPENAI_API_KEY       – OpenAI secret key
   APIFY_API_TOKEN      – Apify token
-  SMSMOBILE_API_KEY    – SMSmobile key
+  SMS_PROVIDER         – 'android_gateway' (default) or 'smsmobile'
+  SMS_GATEWAY_API_KEY  – API key for SMS Gateway for Android (if used)
+  SMSMOBILE_API_KEY    – SMSmobile key (if used)
   SMSMOBILE_FROM       – sender ID/phone as registered with SMSmobile
   GOOGLE_SVC_JSON      – (optional) entire JSON for service‑account
 
@@ -23,6 +25,7 @@ import openai
 import gspread
 from bs4 import BeautifulSoup
 from oauth2client.service_account import ServiceAccountCredentials
+from sms_providers import get_sender
 
 # Phrase indicating the property is explicitly *not* a short sale
 NOT_SHORT_RE = re.compile(r"not a\s+short\s+sale", re.I)
@@ -32,8 +35,8 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 # ------------------  load secrets  ------------------
 openai.api_key = os.environ["OPENAI_API_KEY"]
 APIFY_TOKEN    = os.environ["APIFY_API_TOKEN"]
-SMS_KEY        = os.environ["SMSMOBILE_API_KEY"]
-SMS_FROM       = os.environ["SMSMOBILE_FROM"]
+SMS_PROVIDER   = os.getenv("SMS_PROVIDER", "android_gateway")
+SMS_SENDER     = get_sender(SMS_PROVIDER)
 
 # optional – write service‑account json from env‑var
 if "GOOGLE_SVC_JSON" in os.environ and not Path("service_account.json").exists():
@@ -67,20 +70,8 @@ CONTACT_TTL = 60 * 60 * 24 * 365  # 1 year
 # ------------------  utility funcs ------------------
 
 def send_sms(to: str, body: str):
-    """Send SMS via SMSmobile – adjust URL/fields if your account 
-differs."""
-    url = "https://rest.smsmobile.com/v1/messages"  # <-- update if needed
-    r = requests.post(
-        url,
-        json={
-            "apiKey": SMS_KEY,
-            "from": SMS_FROM,
-            "to": to,
-            "message": body,
-        },
-        timeout=15,
-    )
-    r.raise_for_status()
+    """Send SMS using configured provider."""
+    SMS_SENDER.send(to, body)
 
 
 def gpt_is_short_sale(description: str) -> bool:

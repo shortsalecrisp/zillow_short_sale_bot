@@ -4,14 +4,14 @@ Zillow Short-Sale Scraper + SMS Bot
 Runs 8 AM – 8 PM Eastern at random 51–72-minute intervals.
 """
 
-import json, re, sqlite3, time, random, requests, pytz
+import json, re, sqlite3, time, random, requests, pytz, os
 from datetime import datetime, timedelta
 from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import openai
-from smsmobileapi import SMSSender
+from sms_providers import get_sender
 
 # ---------- 0. CONFIG ----------
 with open("config.json") as f:
@@ -21,6 +21,11 @@ openai.api_key = CFG["openai_api_key"]
 ua = UserAgent()
 GOOGLE_API_KEY = CFG.get("google_api_key")
 GOOGLE_CX = CFG.get("google_cx")
+
+# expose SMS credentials for provider abstraction
+os.environ.setdefault("SMS_GATEWAY_API_KEY", CFG.get("sms_gateway_api_key", ""))
+os.environ.setdefault("SMSMOBILE_API_KEY", CFG.get("smsmobile_api_key", ""))
+os.environ.setdefault("SMSMOBILE_FROM", CFG.get("smsmobile_from", ""))
 
 # ---------- 1. ZILLOW HELPERS ----------
 def z_get(url: str) -> requests.Response:
@@ -269,7 +274,7 @@ def add_row(first, last, phone, email, street, city, state) -> None:
         print("Add-row error:", e)
 
 # ---------- 5. SMS ----------
-sms = SMSSender(api_key=CFG["smsmobile_api_key"])
+sms = get_sender(CFG.get("sms_provider"))
 
 # ---------- 6. LOCAL SQLITE (dedupe by zpid) ----------
 DB_PATH = "seen.db"

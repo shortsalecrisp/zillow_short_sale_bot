@@ -5,9 +5,17 @@
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
   ],
   "must_include": "short sale",
-  "disallowed_phrases": ["off market", "sold"],
-  "allowed_types": ["SINGLE_FAMILY", "CONDO"],
-  "disallowed_states": ["MI"],
+  "disallowed_phrases": [
+    "off market",
+    "sold"
+  ],
+  "allowed_types": [
+    "SINGLE_FAMILY",
+    "CONDO"
+  ],
+  "disallowed_states": [
+    "MI"
+  ],
   "sheet_id": "1exKIu0xN6O36eKl2oYxCwhcfFKltF9xPHiM73wEOpaw",
   "sheet_tab": "Agent Contact/Address List",
   "openai_model": "gpt-4o-mini",
@@ -21,6 +29,8 @@
   "smtp_port": 587,
   "smtp_user": "ygkutler@gmail.com",
   "smtp_pass": "lufh plnx gcdu myou",
-  "sms_api_key": "00d655092e482d3f0174a55b1e650cab7ceabebc88057f30"
+  "sms_provider": "android_gateway",
+  "sms_gateway_api_key": "",
+  "smsmobile_api_key": "",
+  "smsmobile_from": ""
 }
-
