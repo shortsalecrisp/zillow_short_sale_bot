@@ -190,9 +190,29 @@ def select_best_phone(phones):
             return num
     return phones[0][0] if phones else ""
 
-def search_agent_profile(name: str, prop_addr: str) -> tuple[str, str]:
-    """Search for an agent profile page and scrape contact info."""
-    query = f"{name} real estate agent {prop_addr}"
+def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[str, str]:
+    """Search for an agent profile page and scrape contact info.
+
+    Builds a Google query that favors exact-name matches (with quoted
+    variations), appends state and brokerage keywords when available, and
+    includes contact-related terms.  Example:
+        ("Jane A Doe" OR "Jane Doe") CA "Compass" (mobile OR cell OR "direct line" OR email)
+    """
+    parts = name.split()
+    full = f'"{name}"'
+    simple = ""
+    if len(parts) >= 2:
+        simple = f'"{parts[0]} {parts[-1]}"'
+    name_clause = f"({full} OR {simple})" if simple and simple != full else full
+    contact_clause = '(mobile OR cell OR "direct line" OR email)'
+    query_bits = [name_clause]
+    if state:
+        query_bits.append(state)
+    if brokerage:
+        query_bits.append(f'"{brokerage}"')
+    query_bits.append(contact_clause)
+    query = " ".join(query_bits)
+
     headers = {"User-Agent": ua.random}
     try:
         links = google_search_links(query)
@@ -326,10 +346,16 @@ def run_cycle() -> None:
         address = home["address"]
         name = agent_name(home)
 
+        addr_parts = [p.strip() for p in address.split(",")]
+        street = addr_parts[0] if len(addr_parts) >= 1 else ""
+        city = addr_parts[1] if len(addr_parts) >= 2 else ""
+        state = addr_parts[2].split()[0] if len(addr_parts) >= 3 else ""
+        brokerage = home.get("brokerageName", "") or home.get("brokerName", "")
+
         # Mark first so we never re-process this zpid
         mark_sent(zpid)
 
-        phone, email = search_agent_profile(name, address)
+        phone, email = search_agent_profile(name, state, brokerage)
         if not phone or not email:
             chat_phone, chat_email = get_contact_info(name, address)
             if not phone:
@@ -343,12 +369,6 @@ def run_cycle() -> None:
         parts = name.split()
         first = parts[0]
         last  = " ".join(parts[1:]) if len(parts) > 1 else ""
-
-        street = city = state = ""
-        addr_parts = [p.strip() for p in address.split(",")]
-        if len(addr_parts) >= 1: street = addr_parts[0]
-        if len(addr_parts) >= 2: city   = addr_parts[1]
-        if len(addr_parts) >= 3: state  = addr_parts[2].split()[0]
 
         add_row(first, last, phone, email, street, city, state)
 
