@@ -11,10 +11,13 @@ import httpx
 from rich import print
 from rich.logging import RichHandler
 from dateutil import tz
+from sms_providers import get_sender
 
 AUTH_FILE = pathlib.Path("z_auth.json")
 SEND_SMS = bool(os.getenv("SEND_SMS", ""))  # default False
-SMS_API_KEY = os.getenv("SMS_API_KEY", "")
+SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
+SMS_SENDER = get_sender(SMS_PROVIDER)
+NOTIFY_PHONE = os.getenv("NOTIFY_PHONE", "YOUR_NUMBER_HERE")
 TZ = tz.gettz("US/Eastern")
 
 logging.basicConfig(
@@ -54,12 +57,7 @@ def maybe_notify(msg: str) -> None:
     if not SEND_SMS:
         return
     try:
-        httpx.post(
-            "https://api.smsmobile.io/v1/messages",
-            json={"to": "YOUR_NUMBER_HERE", "body": msg},
-            headers={"Authorization": f"Bearer {SMS_API_KEY}"},
-            timeout=10,
-        ).raise_for_status()
+        SMS_SENDER.send(NOTIFY_PHONE, msg)
     except Exception as e:
         log.warning("SMS send failed: %s", e)
 

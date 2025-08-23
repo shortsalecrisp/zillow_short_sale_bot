@@ -18,6 +18,7 @@ import pytz
 import requests
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build as gapi_build
+from sms_providers import get_sender
 
 try:
     import phonenumbers
@@ -48,9 +49,9 @@ WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (pauses at
 SMS_ENABLE        = os.getenv("SMSM_ENABLE", "false").lower() == "true"
 SMS_TEST_MODE     = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER   = os.getenv("SMSM_TEST_NUMBER", "")
-SMS_API_KEY       = os.getenv("SMSM_API_KEY", "")
-SMS_FROM          = os.getenv("SMSM_FROM", "")
-SMS_URL           = os.getenv("SMSM_URL", "https://api.smsmobileapi.com/sendsms/")
+SMS_PROVIDER      = os.getenv("SMS_PROVIDER", "android_gateway")
+SMS_SENDER        = get_sender(SMS_PROVIDER)
+SMSMOBILE_API_KEY = os.getenv("SMSMOBILE_API_KEY", "")
 SMS_TEMPLATE      = (
     "Hey {first}, this is Yoni Kutler—I saw your short sale listing at "
     "{address} and wanted to introduce myself. I specialize in helping "
@@ -1011,30 +1012,6 @@ def is_mobile_number(phone: str) -> bool:
     return is_mobile
 
 
-def _send_once(phone: str, message: str) -> Tuple[bool, str]:
-    digits = _digits_only(phone)
-    payload = {
-        "apikey": SMS_API_KEY,
-        "recipients": digits,
-        "message": message,
-        "sendsms": "1",
-    }
-    try:
-        resp = requests.post(SMS_URL, timeout=10, data=payload)
-        result = {}
-        try:
-            result = resp.json().get("result", {})
-        except Exception:
-            pass
-        ok = resp.status_code == 200 and str(result.get("error")) == "0"
-        msg_id = result.get("message_id") or ""
-        if not ok:
-            LOG.error("SMS API error %s – %s", resp.status_code, (resp.text or "")[:240])
-        return ok, msg_id
-    except Exception as e:
-        LOG.error("SMS send exception %s", e)
-        return False, ""
-
 def send_sms(
     phone: str,
     first: str,
@@ -1047,25 +1024,27 @@ def send_sms(
     if SMS_TEST_MODE and SMS_TEST_NUMBER:
         phone = SMS_TEST_NUMBER
     msg_txt = SMS_FU_TEMPLATE if follow_up else SMS_TEMPLATE.format(first=first, address=address)
+    digits = _digits_only(phone)
     for attempt in range(1, SMS_RETRY_ATTEMPTS + 1):
-        ok, msg_id = _send_once(phone, msg_txt)
-        if ok:
+        try:
+            msg_id = SMS_SENDER.send(digits, msg_txt) or ""
             if follow_up:
                 mark_followup(row_idx)
                 LOG.info(
                     "Follow‑up SMS sent to %s (row %s, attempt %s, msg_id=%s)",
-                    phone, row_idx, attempt, msg_id
+                    digits, row_idx, attempt, msg_id
                 )
             else:
                 mark_sent(row_idx, msg_id)
                 LOG.info(
                     "Initial SMS sent to %s (row %s, attempt %s, msg_id=%s)",
-                    phone, row_idx, attempt, msg_id
+                    digits, row_idx, attempt, msg_id
                 )
             return
-        LOG.debug("SMS attempt %s failed → retrying", attempt)
-        time.sleep(5)
-    LOG.error("SMS failed after %s attempts to %s", SMS_RETRY_ATTEMPTS, phone)
+        except Exception as e:
+            LOG.debug("SMS attempt %s failed → retrying", attempt)
+            time.sleep(5)
+    LOG.error("SMS failed after %s attempts to %s", SMS_RETRY_ATTEMPTS, digits)
 
 def check_reply(phone: str, since_iso: str) -> bool:
     """Return True if a reply from *phone* has been received since *since_iso*.
@@ -1077,8 +1056,10 @@ def check_reply(phone: str, since_iso: str) -> bool:
     for any unread messages from the given phone number and mark them as read."""
 
     e164 = _normalize_e164(phone)
+    if SMS_PROVIDER != "smsmobile":
+        return False
     params = {
-        "apikey": SMS_API_KEY,
+        "apikey": SMSMOBILE_API_KEY,
         "from": e164,
         "start": since_iso,
         "unread": 1,
@@ -1104,7 +1085,7 @@ def check_reply(phone: str, since_iso: str) -> bool:
                 requests.post(
                     READ_URL,
                     timeout=6,
-                    data={"apikey": SMS_API_KEY, "id": mid, "read": 1},
+                    data={"apikey": SMSMOBILE_API_KEY, "id": mid, "read": 1},
                 )
             except Exception:
                 pass

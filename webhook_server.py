@@ -7,7 +7,6 @@ import re
 import json
 import logging
 import sqlite3
-import requests
 from datetime import datetime
 
 import gspread
@@ -15,14 +14,15 @@ from google.oauth2.service_account import Credentials
 
 from apify_fetcher import fetch_rows          # unchanged helper
 from bot_min       import process_rows        # unchanged helper
+from sms_providers import get_sender
 
 # ──────────────────────────────────────────────────────────────────────
 # Configuration & logging
 # ──────────────────────────────────────────────────────────────────────
 DB_PATH     = "seen.db"
 TABLE_SQL   = "CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)"
-SMS_API_URL = os.getenv("SMS_API_URL", "https://api.smsmobileapi.com/sendsms/")
-SMS_API_KEY = os.getenv("SMSM_API_KEY")       # must be set in Render
+SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
+SMS_SENDER   = get_sender(SMS_PROVIDER)
 
 # Google Sheets / Replies tab
 GSHEET_ID   = os.environ["GSHEET_ID"]
@@ -103,37 +103,14 @@ def fmt_phone(raw: str) -> str:
 
 
 def send_sms(phone: str, message: str) -> None:
-    """
-    Send an SMS through SMSMobileAPI.
-
-    Required fields (per API docs):
-        apikey, recipients, message
-    """
-    if not SMS_API_KEY:
-        logger.warning("SMS_API_KEY missing – skipping SMS send")
-        return
-
+    """Send an SMS using the configured provider."""
     digits = _digits_only(phone)
     if not digits:
         logger.warning("Bad phone number '%s' – skipping SMS send", phone)
         return
-
-    payload = {
-        "apikey":     SMS_API_KEY,
-        "recipients": digits,
-        "message":    message,
-    }
-
     try:
-        r = requests.post(SMS_API_URL, data=payload, timeout=15)
-        r.raise_for_status()
-        j = r.json()
-        if j.get("result", {}).get("error") != "0":
-            logger.error("SMS API error %s %s",
-                         j["result"].get("error"),
-                         j["result"].get("sent"))
-        else:
-            logger.info("SMS sent OK to %s", digits)
+        SMS_SENDER.send(digits, message)
+        logger.info("SMS sent OK to %s", digits)
     except Exception as exc:
         logger.exception("SMS send failed: %s", exc)
 
