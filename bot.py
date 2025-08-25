@@ -148,18 +148,45 @@ BROKER_PATTERNS = [
     "bhhs",
 ]
 
-def google_search_links(query: str) -> list[str]:
-    """Return result links from Google Custom Search API."""
+def google_search_items(query: str) -> list[dict]:
+    """Return raw result items from Google Custom Search API."""
     if not GOOGLE_API_KEY or not GOOGLE_CX:
         return []
-    params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CX, "q": query}
+    params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CX, "q": query, "num": 10}
     try:
         r = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=15)
-        data = r.json()
-        return [item.get("link", "") for item in data.get("items", [])]
+        return r.json().get("items", [])
     except Exception as e:
         print("Google search error:", e)
         return []
+
+
+def build_phone_queries(name: str, state: str, brokerage: str = "") -> list[str]:
+    """Generate targeted phone search strings."""
+    base = f'"{name}" {state}' if state else f'"{name}"'
+    out = [
+        f"{base} mobile",
+        f"{base} cell",
+        f"{base} phone",
+    ]
+    if brokerage:
+        out.append(f'"{name}" "{brokerage}" phone')
+    return out
+
+
+def build_email_queries(name: str, state: str, brokerage: str = "", domain_hint: str = "") -> list[str]:
+    """Generate targeted email search strings."""
+    base = f'"{name}" {state}' if state else f'"{name}"'
+    out = [
+        f"{base} email",
+        f"{base} contact email",
+        f"{base} real estate email",
+    ]
+    if brokerage:
+        out.append(f'"{name}" "{brokerage}" email')
+    if domain_hint:
+        out.append(f'site:{domain_hint} "{name}" email')
+    return out
 
 def extract_contact(html: str):
     """Return lists of phone tuples and emails from HTML."""
@@ -191,46 +218,56 @@ def select_best_phone(phones):
     return phones[0][0] if phones else ""
 
 def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[str, str]:
-    """Search for an agent profile page and scrape contact info.
-
-    Builds a Google query that favors exact-name matches (with quoted
-    variations), appends state and brokerage keywords when available, and
-    includes contact-related terms.  Example:
-        ("Jane A Doe" OR "Jane Doe") CA "Compass" (mobile OR cell OR "direct line" OR email)
-    """
-    parts = name.split()
-    full = f'"{name}"'
-    simple = ""
-    if len(parts) >= 2:
-        simple = f'"{parts[0]} {parts[-1]}"'
-    name_clause = f"({full} OR {simple})" if simple and simple != full else full
-    contact_clause = '(mobile OR cell OR "direct line" OR email)'
-    query_bits = [name_clause]
-    if state:
-        query_bits.append(state)
-    if brokerage:
-        query_bits.append(f'"{brokerage}"')
-    query_bits.append(contact_clause)
-    query = " ".join(query_bits)
-
+    """Search Google for agent contact info using multiple targeted queries."""
     headers = {"User-Agent": ua.random}
-    try:
-        links = google_search_links(query)
-        profile_url = ""
-        for link in links:
-            low = link.lower()
-            if any(pat in low for pat in BROKER_PATTERNS):
-                profile_url = link
-                break
-        if profile_url:
-            resp = requests.get(profile_url, headers=headers, timeout=15)
-            phones, emails = extract_contact(resp.text)
-            phone = select_best_phone(phones)
-            email = emails[0] if emails else ""
+    queries = build_phone_queries(name, state, brokerage) + build_email_queries(
+        name, state, brokerage
+    )
+    items = []
+    for q in queries:
+        items.extend(google_search_items(q))
+    dedup: dict[str, dict] = {}
+    for it in items:
+        link = it.get("link", "")
+        if link and link not in dedup:
+            dedup[link] = it
+    items = list(dedup.values())
+
+    def _score(it: dict) -> int:
+        url = it.get("link", "").lower()
+        sc = 0
+        if all(tok.lower() in url for tok in name.split()):
+            sc += 2
+        if brokerage and brokerage.lower().replace(" ", "") in url:
+            sc += 1
+        return sc
+
+    items.sort(key=_score, reverse=True)
+
+    phone = email = ""
+    for it in items:
+        cp = (it.get("pagemap", {}).get("contactpoint") or [{}])[0]
+        phone = phone or cp.get("telephone", "")
+        email = email or cp.get("email", "")
+        if phone and email:
             return phone, email
-    except Exception as e:
-        print("Profile search failed:", e)
-    return "", ""
+
+    for it in items:
+        link = it.get("link", "")
+        if not link:
+            continue
+        try:
+            resp = requests.get(link, headers=headers, timeout=15)
+        except Exception:
+            continue
+        phones, emails = extract_contact(resp.text)
+        if not phone:
+            phone = select_best_phone(phones)
+        if not email and emails:
+            email = emails[0]
+        if phone and email:
+            break
+    return phone, email
 
 # ---------- 3. CHATGPT LOOKUP ----------
 def get_contact_info(name: str, prop_addr: str) -> tuple[str, str]:
