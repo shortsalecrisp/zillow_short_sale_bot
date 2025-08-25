@@ -17,3 +17,6 @@ google-auth>=2.29.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.0.0
 
+# testing
+pytest>=8.0.0
+

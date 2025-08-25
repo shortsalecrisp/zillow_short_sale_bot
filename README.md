@@ -2,6 +2,15 @@
 
 This repository contains scripts for scraping Zillow short sale listings and contacting agents via SMS or email.
 
+## Agent Contact Lookup
+
+`search_agent_profile` uses the Google Custom Search API to locate an agent's
+profile.  Result items are inspected for structured `pagemap` data such as
+`contactpoint.telephone` or `metatags.email`; when present this information is
+used directly to populate phone and email without fetching the page.  If no
+structured data is available, the page is downloaded and `extract_contact`
+scrapes the contact details.
+
 ## SMS Providers
 
 SMS sending is pluggable. Set the provider in `config.json` (`sms_provider`) or with the `SMS_PROVIDER` environment variable.
