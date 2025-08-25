@@ -148,15 +148,22 @@ BROKER_PATTERNS = [
     "bhhs",
 ]
 
-def google_search_links(query: str) -> list[str]:
-    """Return result links from Google Custom Search API."""
+def google_search_links(query: str) -> list[dict]:
+    """Return result items from Google Custom Search API.
+
+    Items may include `pagemap` structured data that exposes useful
+    contact information (e.g. `contactpoint.telephone` or
+    `metatags.email`).
+    """
     if not GOOGLE_API_KEY or not GOOGLE_CX:
         return []
     params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CX, "q": query}
     try:
-        r = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=15)
+        r = requests.get(
+            "https://www.googleapis.com/customsearch/v1", params=params, timeout=15
+        )
         data = r.json()
-        return [item.get("link", "") for item in data.get("items", [])]
+        return data.get("items", [])
     except Exception as e:
         print("Google search error:", e)
         return []
@@ -195,7 +202,9 @@ def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[st
 
     Builds a Google query that favors exact-name matches (with quoted
     variations), appends state and brokerage keywords when available, and
-    includes contact-related terms.  Example:
+    includes contact-related terms. Result items are inspected for
+    structured `pagemap` data (``contactpoint.telephone`` or
+    ``metatags.email``) before resorting to a full page fetch. Example:
         ("Jane A Doe" OR "Jane Doe") CA "Compass" (mobile OR cell OR "direct line" OR email)
     """
     parts = name.split()
@@ -215,13 +224,31 @@ def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[st
 
     headers = {"User-Agent": ua.random}
     try:
-        links = google_search_links(query)
+        items = google_search_links(query)
         profile_url = ""
-        for link in links:
+        for item in items:
+            pagemap = item.get("pagemap", {})
+            phones = []
+            emails = []
+            for cp in pagemap.get("contactpoint", []):
+                tel = cp.get("telephone")
+                if tel:
+                    phones.append((tel, cp.get("contacttype", "").lower()))
+            for mt in pagemap.get("metatags", []):
+                email = mt.get("email")
+                if email:
+                    emails.append(email)
+            if phones or emails:
+                phone = select_best_phone(phones)
+                email = emails[0] if emails else ""
+                if phone or email:
+                    return phone, email
+
+            link = item.get("link", "")
             low = link.lower()
-            if any(pat in low for pat in BROKER_PATTERNS):
+            if not profile_url and any(pat in low for pat in BROKER_PATTERNS):
                 profile_url = link
-                break
+
         if profile_url:
             resp = requests.get(profile_url, headers=headers, timeout=15)
             phones, emails = extract_contact(resp.text)
