@@ -37,43 +37,6 @@ def z_get(url: str) -> requests.Response:
 
 def parse_state_json(html: str) -> list:
     """
-    Extract search results either from Zillow’s modern
-    <script id="__NEXT_DATA__"> JSON or, if that fails, from the
-    legacy HTML-comment block.  Returns searchResults.mapResults.
-    """
-    # ── 1️⃣ Modern location ───────────────
-    m = re.search(
-        r'<script[^>]*id="__NEXT_DATA__"[^>]*>(\{.*?\})</script>',
-        html,
-        re.DOTALL,
-    )
-    if m:
-        data = json.loads(m.group(1))          # strict JSON (no </script>)
-        try:
-            state = data["props"]["pageProps"]["searchPageState"]
-            cat1 = state.get("cat1", {})
-            sr   = cat1.get("searchResults") or state.get("searchResults", {})
-            if sr:
-                if "mapResults" in sr:
-                    return sr["mapResults"]
-                if "listResults" in sr:        # mobile view sometimes
-                    return sr["listResults"]
-        except (KeyError, TypeError):
-            pass  # fall through to legacy
-
-    # ── 2️⃣ Legacy location (HTML comment) ─
-    m = re.search(r'<!--\s*({.*?})\s*-->', html, re.DOTALL)
-    if not m:
-        raise ValueError("Zillow JSON blob not found")
-    data = json.loads(m.group(1))
-    first_key = next(iter(data["apiCache"]))
-    results = data["apiCache"][first_key]["propertySearchSearchResultsV3"]
-    return results["searchResults"]["mapResults"]
-    results = data["apiCache"][first_key]["propertySearchSearchResultsV3"]
-    return results["searchResults"]["mapResults"]
-# ---------- 1A. PARSE ZILLOW HTML → LIST OF HOMES ----------
-def parse_state_json(html: str) -> list:
-    """
     Return Zillow search results (mapResults) from a Search Results Page.
 
     1. Preferred: modern  <script id="__NEXT_DATA__"> … JSON.
