@@ -30,8 +30,10 @@ except ImportError:
     BeautifulSoup = None
 
 # ───────────────────── configuration & constants ─────────────────────
-CS_API_KEY     = os.environ["CS_API_KEY"]
-CS_CX          = os.environ["CS_CX"]
+# Google Custom Search credentials. Prefer CS_* names but fall back to
+# GOOGLE_API_KEY / GOOGLE_CX if provided.
+CS_API_KEY     = os.getenv("CS_API_KEY") or os.environ["GOOGLE_API_KEY"]
+CS_CX          = os.getenv("CS_CX") or os.environ["GOOGLE_CX"]
 GSHEET_ID      = os.environ["GSHEET_ID"]
 SC_JSON        = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -1223,7 +1225,7 @@ if __name__ == "__main__":
 
     if payload and payload.get("listings"):
         LOG.info(
-            "apify-hook: received %s listings directly in payload",
+            "received %s listings directly in payload",
             len(payload["listings"])
         )
         process_rows(payload["listings"])
