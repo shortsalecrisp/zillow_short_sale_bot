@@ -48,12 +48,11 @@ FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (pauses at 9 pm)
 
-SMS_ENABLE        = os.getenv("SMSM_ENABLE", "false").lower() == "true"
-SMS_TEST_MODE     = os.getenv("SMSM_TEST_MODE", "true").lower() == "true"
-SMS_TEST_NUMBER   = os.getenv("SMSM_TEST_NUMBER", "")
+SMS_ENABLE        = os.getenv("SMS_ENABLE", "false").lower() == "true"
+SMS_TEST_MODE     = os.getenv("SMS_TEST_MODE", "true").lower() == "true"
+SMS_TEST_NUMBER   = os.getenv("SMS_TEST_NUMBER", "")
 SMS_PROVIDER      = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER        = get_sender(SMS_PROVIDER)
-SMSMOBILE_API_KEY = os.getenv("SMSMOBILE_API_KEY", "")
 SMS_TEMPLATE      = (
     "Hey {first}, this is Yoni Kutler—I saw your short sale listing at "
     "{address} and wanted to introduce myself. I specialize in helping "
@@ -67,10 +66,7 @@ SMS_FU_TEMPLATE   = (
     "Hey, just wanted to follow up on my message from earlier. "
     "Let me know if I can help with anything—happy to connect whenever works for you!"
 )
-SMS_RETRY_ATTEMPTS = int(os.getenv("SMSM_RETRY_ATTEMPTS", "2"))
-
-RECEIVE_URL = os.getenv("SMSM_INBOUND_URL", "https://api.smsmobileapi.com/getsms/")
-READ_URL    = os.getenv("SMSM_READ_URL",    "https://api.smsmobileapi.com/readsms/")
+SMS_RETRY_ATTEMPTS = int(os.getenv("SMS_RETRY_ATTEMPTS", "2"))
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
 # column indices (0‑based)
@@ -951,14 +947,6 @@ def append_row(vals) -> int:
 def phone_exists(p):
     return p in seen_phones
 
-def _normalize_e164(p: str) -> str:
-    d = re.sub(r"\D", "", p)
-    if len(d) == 10:
-        d = "1" + d
-    if not d.startswith("+"):
-        d = "+" + d
-    return d
-
 def _digits_only(num: str) -> str:
     """Keep digits, prefix 1 if US local (10 digits)."""
     digits = re.sub(r"\D", "", num or "")
@@ -1051,51 +1039,11 @@ def send_sms(
 def check_reply(phone: str, since_iso: str) -> bool:
     """Return True if a reply from *phone* has been received since *since_iso*.
 
-    The previous implementation attempted to filter messages by the original
-    outbound message ID.  If the phone number in the sheet is later updated and
-    follow‑ups are sent from a new number, that reference no longer matches.
-    To ensure replies are detected even after manual phone updates, we now query
-    for any unread messages from the given phone number and mark them as read."""
+    SMS Gateway for Android does not expose an API for retrieving inbound
+    messages in this script, so replies are not processed here and this always
+    returns ``False``."""
 
-    e164 = _normalize_e164(phone)
-    if SMS_PROVIDER != "smsmobile":
-        return False
-    params = {
-        "apikey": SMSMOBILE_API_KEY,
-        "from": e164,
-        "start": since_iso,
-        "unread": 1,
-    }
-    try:
-        r = requests.get(RECEIVE_URL, params=params, timeout=10)
-        if r.status_code != 200:
-            LOG.debug("getSMS HTTP %s – %s", r.status_code, (r.text or "")[:120])
-            return False
-        data = r.json()
-        if str(data.get("error")) != "0":
-            LOG.debug("getSMS error field %s", data.get("error"))
-            return False
-
-        ids_to_mark = [m.get("id", "") for m in data.get("messages", [])]
-        if not ids_to_mark:
-            return False
-
-        for mid in ids_to_mark:
-            if not mid:
-                continue
-            try:
-                requests.post(
-                    READ_URL,
-                    timeout=6,
-                    data={"apikey": SMSMOBILE_API_KEY, "id": mid, "read": 1},
-                )
-            except Exception:
-                pass
-
-        return True
-    except Exception as exc:
-        LOG.debug("Reply-check exception %s", exc)
-        return False
+    return False
 
 # ───────────────────── follow‑up pass (UPDATED) ─────────────────────
 def _follow_up_pass():
