@@ -30,7 +30,5 @@
   "smtp_user": "ygkutler@gmail.com",
   "smtp_pass": "lufh plnx gcdu myou",
   "sms_provider": "android_gateway",
-  "sms_gateway_api_key": "",
-  "smsmobile_api_key": "",
-  "smsmobile_from": ""
+  "sms_gateway_api_key": ""
 }
