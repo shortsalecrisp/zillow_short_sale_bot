@@ -25,5 +25,5 @@ class SMSGatewayForAndroid:
 def get_sender(provider: Optional[str] = None):
     """Return an SMS sender (currently only SMS Gateway for Android)."""
     # provider parameter is kept for backward compatibility but ignored
-    key = os.getenv("SMS_GATEWAY_API_KEY", "")
+    key = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
     return SMSGatewayForAndroid(api_key=key)
