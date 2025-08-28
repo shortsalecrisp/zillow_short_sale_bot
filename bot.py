@@ -22,10 +22,8 @@ ua = UserAgent()
 GOOGLE_API_KEY = CFG.get("google_api_key")
 GOOGLE_CX = CFG.get("google_cx")
 
-# expose SMS credentials for provider abstraction
+# expose SMS Gateway credentials
 os.environ.setdefault("SMS_GATEWAY_API_KEY", CFG.get("sms_gateway_api_key", ""))
-os.environ.setdefault("SMSMOBILE_API_KEY", CFG.get("smsmobile_api_key", ""))
-os.environ.setdefault("SMSMOBILE_FROM", CFG.get("smsmobile_from", ""))
 
 # ---------- 1. ZILLOW HELPERS ----------
 def z_get(url: str) -> requests.Response:
@@ -411,7 +409,7 @@ def run_cycle() -> None:
 
         sms_text = CFG["sms_template"].format(first=first, address=street)
         try:
-            sms.send_sms(phone, sms_text)
+            sms.send(phone, sms_text)
             print("SMS sent to", first, phone)
         except Exception as e:
             print("SMS error:", e)

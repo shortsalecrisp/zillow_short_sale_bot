@@ -1,20 +1,18 @@
 """Zillow short‑sale pipeline.
-Receives rows from Apify webhook, filters with GPT, looks up agent 
+Receives rows from Apify webhook, filters with GPT, looks up agent
 phone/email
-via Google‑search + GPT, writes Google Sheet, sends SMS through SMSmobile.
-All secrets are read from environment variables set in Render.
+via Google‑search + GPT, writes Google Sheet, sends SMS through SMS Gateway
+for Android. All secrets are read from environment variables set in Render.
 
 Required env‑vars (Render → Environment tab for Web‑Service **and** Cron
 Job):
   OPENAI_API_KEY       – OpenAI secret key
   APIFY_API_TOKEN      – Apify token
-  SMS_PROVIDER         – 'android_gateway' (default) or 'smsmobile'
-  SMS_GATEWAY_API_KEY  – API key for SMS Gateway for Android (if used)
-  SMSMOBILE_API_KEY    – SMSmobile key (if used)
-  SMSMOBILE_FROM       – sender ID/phone as registered with SMSmobile
+  SMS_PROVIDER         – currently only 'android_gateway'
+  SMS_GATEWAY_API_KEY  – API key for SMS Gateway for Android
   GOOGLE_SVC_JSON      – (optional) entire JSON for service‑account
 
-Google Sheet: 
+Google Sheet:
 https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70
 """
 
