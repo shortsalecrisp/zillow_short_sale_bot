@@ -48,7 +48,12 @@ FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (pauses at 9 pm)
 
-SMS_ENABLE        = os.getenv("SMS_ENABLE", "false").lower() == "true"
+_sms_enable_env = os.getenv("SMS_ENABLE")
+if _sms_enable_env is None:
+    # Enable SMS by default when any SMS API key is present
+    SMS_ENABLE = bool(os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY"))
+else:
+    SMS_ENABLE = _sms_enable_env.lower() == "true"
 SMS_TEST_MODE     = os.getenv("SMS_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER   = os.getenv("SMS_TEST_NUMBER", "")
 SMS_PROVIDER      = os.getenv("SMS_PROVIDER", "android_gateway")
@@ -1010,6 +1015,7 @@ def send_sms(
     follow_up: bool = False,
 ):
     if not SMS_ENABLE or not phone:
+        LOG.debug("SMS disabled or missing phone; skipping send to %s", phone)
         return
     if SMS_TEST_MODE and SMS_TEST_NUMBER:
         phone = SMS_TEST_NUMBER
