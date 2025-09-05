@@ -18,6 +18,7 @@ https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2
 
 import os, json, html, textwrap, datetime, sqlite3, requests, re, time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import openai
 import gspread
@@ -29,6 +30,57 @@ from sms_providers import get_sender
 NOT_SHORT_RE = re.compile(r"not a\s+short\s+sale", re.I)
 PHONE_RE = re.compile(r"(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+LABELLED_PHONE_RE = re.compile(
+    r"(?:Cell|Mobile|Direct|Text)[^0-9]{0,20}(\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4})",
+    re.I,
+)
+OFFICE_RE = re.compile(r"Office|Main|Brokerage|Team", re.I)
+WHITELIST_DOMAINS = [
+    # national brokerages
+    "kw.com",
+    "coldwellbankerhomes.com",
+    "cbrealty.com",
+    "remax.com",
+    "century21.com",
+    "bhhs.com",
+    "sothebysrealty.com",
+    "weichert.com",
+    "era.com",
+    "exprealty.com",
+    "compass.com",
+    "realtyonegroup.com",
+    "longandfoster.com",
+    "bhgre.com",
+    "redfin.com",
+    "ziprealty.com",
+    "windermere.com",
+    # aggregators / portals
+    "homes.com",
+    "realty.com",
+    "movoto.com",
+    "estately.com",
+    # socials
+    "instagram.com",
+    "facebook.com",
+    # realtor associations
+    "realtors.org",
+]
+
+MLS_TLDS = {"mls", "realtor", "realestate"}
+
+
+def _is_whitelisted(netloc: str) -> bool:
+    """Return True if the domain appears in our whitelist or matches MLS/association TLDs."""
+    if any(dom in netloc for dom in WHITELIST_DOMAINS):
+        return True
+    tld = netloc.rsplit(".", 1)[-1]
+    return tld in MLS_TLDS or "mls" in netloc
+
+QUERY_PATTERNS = [
+    '"{name}" realtor cell site:{domain}',
+    '"{name}" "mobile" real estate site:{domain}',
+    '"{name}" "direct" "text" site:{domain}',
+]
 
 # ------------------  load secrets  ------------------
 openai.api_key = os.environ["OPENAI_API_KEY"]
@@ -140,17 +192,11 @@ null if not found.
         return None, None
 
 
-def _parse_detail_contact(url: str):
-    """Fetch the listing detail page and try simple regex parsing for contact info."""
-    try:
-        html_text = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
-    except Exception:
-        return None, None
-
+def _regex_extract_contact(html_text: str):
+    """Extract phone/email from raw HTML using label-aware regex."""
     soup = BeautifulSoup(html_text, "html.parser")
     phone = email = None
 
-    # prefer explicit tel/mailto links
     tel = soup.select_one("a[href^='tel']")
     if tel:
         phone = tel.get("href", "").split(":", 1)[-1]
@@ -160,15 +206,30 @@ def _parse_detail_contact(url: str):
 
     text = soup.get_text(" ", strip=True)
     if not phone:
+        m = LABELLED_PHONE_RE.search(text)
+        if m:
+            phone = m.group(1)
+    if not phone:
         m = PHONE_RE.search(text)
         if m:
-            phone = m.group(0)
+            snippet = text[max(0, m.start() - 25) : m.end() + 25]
+            if not OFFICE_RE.search(snippet):
+                phone = m.group(0)
     if not email:
         m = EMAIL_RE.search(text)
         if m:
             email = m.group(0)
     soup.decompose()
     return phone, email
+
+
+def _parse_detail_contact(url: str):
+    """Fetch the listing detail page and try simple regex parsing for contact info."""
+    try:
+        html_text = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
+    except Exception:
+        return None, None
+    return _regex_extract_contact(html_text)
 
 
 def find_contact(row: dict, cache_conn: sqlite3.Connection):
@@ -196,21 +257,56 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
             cache_conn.commit()
             return phone, email
 
-    # fallback to Google search
-    query = f'"{agent}" real estate {state} phone'
-    for link in _scrape_google(query):
-        try:
-            html_text = requests.get(link, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
-        except Exception:
-            continue
-        phone, email = _extract_with_gpt(link, html_text)
-        if phone or email:
-            cache_conn.execute(
-                "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
-                (agent, state, phone or "", email or "", time.time()),
-            )
-            cache_conn.commit()
-            return phone, email
+    # Google search focused on whitelisted domains
+    queries = []
+    for domain in WHITELIST_DOMAINS:
+        for pattern in QUERY_PATTERNS:
+            q = pattern.format(name=agent, domain=domain)
+            if state:
+                q += f" {state}"
+            queries.append(q)
+    # broader MLS / association search patterns
+    if state:
+        queries.extend(
+            [
+                f'"{agent}" realtor {state} mls',
+                f'"{agent}" "cell" mls {state}',
+                f'"{agent}" email mls {state}',
+            ]
+        )
+    else:
+        queries.extend(
+            [
+                f'"{agent}" realtor mls',
+                f'"{agent}" "cell" mls',
+                f'"{agent}" email mls',
+            ]
+        )
+    queries.append(f'"{agent}" real estate {state} phone')
+
+    seen_links = set()
+    for query in queries:
+        for link in _scrape_google(query):
+            if link in seen_links:
+                continue
+            seen_links.add(link)
+            netloc = urlparse(link).netloc
+            if not _is_whitelisted(netloc):
+                continue
+            try:
+                html_text = requests.get(link, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
+            except Exception:
+                continue
+            phone, email = _regex_extract_contact(html_text)
+            if not phone and not email:
+                phone, email = _extract_with_gpt(link, html_text)
+            if phone or email:
+                cache_conn.execute(
+                    "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
+                    (agent, state, phone or "", email or "", time.time()),
+                )
+                cache_conn.commit()
+                return phone, email
 
     return None, None  # fallback if nothing found
 
