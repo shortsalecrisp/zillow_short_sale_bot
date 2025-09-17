@@ -12,6 +12,9 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import openai
 from sms_providers import get_sender
+from urllib.parse import urlparse
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ---------- 0. CONFIG ----------
 with open("config.json") as f:
@@ -25,13 +28,84 @@ GOOGLE_CX = CFG.get("google_cx")
 # expose SMS Gateway credentials
 os.environ.setdefault("SMS_GATEWAY_API_KEY", CFG.get("sms_gateway_api_key", ""))
 
-# ---------- 1. ZILLOW HELPERS ----------
-def z_get(url: str) -> requests.Response:
+ACCEPT_LANGUAGES = [
+    "en-US,en;q=0.9",
+    "en-US,en;q=0.8,es;q=0.5",
+    "en-CA,en;q=0.8",
+    "en-GB,en;q=0.9",
+]
+
+BLOCK_SIGNATURES = (
+    "captcha",
+    "access denied",
+    "unusual traffic",
+    "verify you are human",
+    "temporarily blocked",
+    "service unavailable",
+)
+
+BLOCKED_DOMAINS = {
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com",
+    "linkedin.com",
+    "www.linkedin.com",
+    "instagram.com",
+    "www.instagram.com",
+}
+
+def random_headers(extra=None) -> dict:
     headers = {
         "User-Agent": ua.random,
-        "Accept-Language": "en-US,en;q=0.9"
+        "Accept-Language": random.choice(ACCEPT_LANGUAGES),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Connection": "close",
     }
-    return requests.get(url, headers=headers, timeout=20)
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def new_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=2,
+        read=2,
+        backoff_factor=1.3,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET", "HEAD"),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+def looks_like_block(response: requests.Response, body: str = None) -> bool:
+    # Treat common block status codes immediately, before inspecting the body.
+    if response.status_code in (401, 403, 429, 503, 520):
+        return True
+    if body is None:
+        try:
+            body = response.text
+        except Exception:
+            body = ""
+    lower_body = body.lower()
+    return any(sig in lower_body for sig in BLOCK_SIGNATURES)
+
+
+def domain_from_url(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+
+# ---------- 1. ZILLOW HELPERS ----------
+def z_get(url: str) -> requests.Response:
+    session = new_session()
+    return session.get(url, headers=random_headers(), timeout=20)
 
 def parse_state_json(html: str) -> list:
     """
@@ -151,12 +225,52 @@ def google_search_items(query: str) -> list[dict]:
     if not GOOGLE_API_KEY or not GOOGLE_CX:
         return []
     params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CX, "q": query, "num": 10}
-    try:
-        r = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=15)
-        return r.json().get("items", [])
-    except Exception as e:
-        print("Google search error:", e)
-        return []
+    session = new_session()
+    for attempt in range(3):
+        delay = 1.2 * (attempt + 1)
+        headers = random_headers({"Accept": "application/json"})
+        try:
+            resp = session.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params=params,
+                headers=headers,
+                timeout=15,
+            )
+        except requests.RequestException as exc:
+            print("Google search error:", exc)
+            time.sleep(delay)
+            continue
+
+        try:
+            payload = resp.json()
+        except ValueError:
+            print("Google search returned non-JSON payload", resp.status_code)
+            time.sleep(delay)
+            continue
+
+        if resp.status_code != 200 or "error" in payload:
+            error = payload.get("error", {})
+            reason = ""
+            if error:
+                reason = error.get("errors", [{}])[0].get("reason", "")
+            print(
+                f"Google search API issue (status {resp.status_code} reason {reason or 'unknown'})"
+            )
+            if resp.status_code in (429, 503) or reason in {
+                "rateLimitExceeded",
+                "userRateLimitExceeded",
+                "dailyLimitExceeded",
+            }:
+                time.sleep(delay + random.uniform(0.5, 1.5))
+                continue
+            return []
+
+        items = payload.get("items", [])
+        if items:
+            return items
+        # Empty responses are often transient; small pause before retrying
+        time.sleep(delay)
+    return []
 
 
 def build_phone_queries(name: str, state: str, brokerage: str = "") -> list[str]:
@@ -215,57 +329,107 @@ def select_best_phone(phones):
             return num
     return phones[0][0] if phones else ""
 
-def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[str, str]:
-    """Search Google for agent contact info using multiple targeted queries."""
-    headers = {"User-Agent": ua.random}
+def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[str, str, bool]:
+    """Search Google for agent contact info using multiple targeted queries.
+
+    Returns (phone, email, blocked_flag).  The blocked flag indicates whether we
+    detected a probable access block while crawling supporting pages.  In that
+    case callers should skip marking the listing as processed so it can be
+    retried later.
+    """
+
+    session = new_session()
     queries = build_phone_queries(name, state, brokerage) + build_email_queries(
         name, state, brokerage
     )
     items = []
     for q in queries:
         items.extend(google_search_items(q))
+        time.sleep(random.uniform(0.6, 1.2))
+
     dedup: dict[str, dict] = {}
     for it in items:
         link = it.get("link", "")
-        if link and link not in dedup:
+        if not link:
+            continue
+        domain = domain_from_url(link)
+        if domain in BLOCKED_DOMAINS:
+            continue
+        if link not in dedup:
             dedup[link] = it
     items = list(dedup.values())
 
     def _score(it: dict) -> int:
         url = it.get("link", "").lower()
         sc = 0
-        if all(tok.lower() in url for tok in name.split()):
+        if all(tok.lower() in url for tok in name.split() if tok):
             sc += 2
         if brokerage and brokerage.lower().replace(" ", "") in url:
+            sc += 2
+        if any(pat in url for pat in BROKER_PATTERNS):
             sc += 1
         return sc
 
     items.sort(key=_score, reverse=True)
+    if len(items) > 12:
+        items = items[:12]
 
-    phone = email = ""
+    phone = ""
+    email = ""
+    blocked = False
+
     for it in items:
         cp = (it.get("pagemap", {}).get("contactpoint") or [{}])[0]
         phone = phone or cp.get("telephone", "")
         email = email or cp.get("email", "")
         if phone and email:
-            return phone, email
+            return phone, email, False
 
+    domain_last_hit: dict[str, float] = {}
+    max_fetches = 6
+    fetches = 0
     for it in items:
+        if phone and email:
+            break
+        if fetches >= max_fetches:
+            break
         link = it.get("link", "")
         if not link:
             continue
-        try:
-            resp = requests.get(link, headers=headers, timeout=15)
-        except Exception:
+        domain = domain_from_url(link)
+        if domain in BLOCKED_DOMAINS:
             continue
-        phones, emails = extract_contact(resp.text)
+        last = domain_last_hit.get(domain)
+        if last:
+            wait = 2.5 - (time.time() - last)
+            if wait > 0:
+                time.sleep(wait + random.uniform(0.2, 0.6))
+        domain_last_hit[domain] = time.time()
+
+        try:
+            resp = session.get(link, headers=random_headers(), timeout=15)
+        except requests.RequestException as exc:
+            print(f"Error fetching {link}: {exc}")
+            continue
+
+        if looks_like_block(resp):
+            blocked = True
+            print(
+                f"Block detected while fetching {link} (status {resp.status_code})."
+            )
+            time.sleep(random.uniform(6, 10))
+            break
+
+        html = resp.text
+        phones, emails = extract_contact(html)
         if not phone:
             phone = select_best_phone(phones)
         if not email and emails:
             email = emails[0]
-        if phone and email:
-            break
-    return phone, email
+        fetches += 1
+        time.sleep(random.uniform(0.5, 1.0))
+
+    return phone, email, blocked
 
 # ---------- 3. CHATGPT LOOKUP ----------
 def get_contact_info(name: str, prop_addr: str) -> tuple[str, str]:
@@ -387,32 +551,44 @@ def run_cycle() -> None:
         state = addr_parts[2].split()[0] if len(addr_parts) >= 3 else ""
         brokerage = home.get("brokerageName", "") or home.get("brokerName", "")
 
-        # Mark first so we never re-process this zpid
-        mark_sent(zpid)
+        phone = ""
+        email = ""
+        blocked = False
+        try:
+            phone, email, blocked = search_agent_profile(name, state, brokerage)
+        except Exception as exc:
+            print("Agent profile search error:", exc)
 
-        phone, email = search_agent_profile(name, state, brokerage)
-        if not phone or not email:
-            chat_phone, chat_email = get_contact_info(name, address)
-            if not phone:
-                phone = chat_phone
-            if not email:
-                email = chat_email
-        if not phone:
-            print("No mobile for", name, "|", address)
+        if blocked:
+            print(f"Blocked while searching for {name}; will retry later.")
+            time.sleep(random.uniform(4, 7))
             continue
 
-        parts = name.split()
-        first = parts[0]
-        last  = " ".join(parts[1:]) if len(parts) > 1 else ""
-
-        add_row(first, last, phone, email, street, city, state)
-
-        sms_text = CFG["sms_template"].format(first=first, address=street)
         try:
-            sms.send(phone, sms_text)
-            print("SMS sent to", first, phone)
-        except Exception as e:
-            print("SMS error:", e)
+            if not phone or not email:
+                chat_phone, chat_email = get_contact_info(name, address)
+                if not phone:
+                    phone = chat_phone
+                if not email:
+                    email = chat_email
+            if not phone:
+                print("No mobile for", name, "|", address)
+                continue
+
+            parts = name.split()
+            first = parts[0]
+            last  = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+            add_row(first, last, phone, email, street, city, state)
+
+            sms_text = CFG["sms_template"].format(first=first, address=street)
+            try:
+                sms.send(phone, sms_text)
+                print("SMS sent to", first, phone)
+            except Exception as e:
+                print("SMS error:", e)
+        finally:
+            mark_sent(zpid)
 
 # ---------- 8. SCHEDULER ----------
 ET = pytz.timezone("US/Eastern")
