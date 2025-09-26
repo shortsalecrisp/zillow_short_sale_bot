@@ -675,6 +675,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     if key in cache_p:
         return cache_p[key]
     zillow_fallback = ""
+    rejected: Dict[str, str] = {}
     for blk in (row_payload.get("contact_recipients") or []):
         for p in _phones_from_block(blk):
             d = fmt_phone(p)
@@ -686,6 +687,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 cache_p[key] = d
                 LOG.debug("PHONE hit directly from contact_recipients")
                 return d
+            rejected.setdefault(d, "contact_recipients")
     zpid = str(row_payload.get("zpid", ""))
     if zpid:
         phone, src = rapid_phone(zpid, agent)
@@ -693,10 +695,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         if d and valid_phone(d):
             if not zillow_fallback:
                 zillow_fallback = d
-            if _looks_direct(d, agent, state) and is_mobile_number(d):
-                cache_p[key] = d
-                LOG.debug("PHONE WIN %s via %s (surname proximity)", d, src)
-                return d
+            if is_mobile_number(d):
+                if _looks_direct(d, agent, state):
+                    cache_p[key] = d
+                    LOG.debug("PHONE WIN %s via %s (surname proximity)", d, src)
+                    return d
+            else:
+                rejected.setdefault(d, f"rapid:{src or 'unknown'}")
     cand_good, cand_office, src_good = {}, {}, {}
     def add(p, score, office_flag, src=""):
         d = fmt_phone(p)
@@ -749,32 +754,31 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         if is_mobile_number(cand):
             phone = cand
             break
+        rejected.setdefault(cand, "crawler:cand_good")
     if not phone:
         for cand, _ in sorted(cand_office.items(), key=lambda t: -t[1]):
             if is_mobile_number(cand):
                 phone = cand
                 break
-    # If no candidate passed the mobile check, fall back to the highest scored
-    # number. Cloudmersive occasionally misclassifies mobile lines and leaving
-    # the phone field blank is less helpful than a best guess. As a last resort
-    # we fall back to the number scraped from Zillow even if unverified.
-    if not phone:
-        if cand_good:
-            phone = max(cand_good.items(), key=lambda t: t[1])[0]
-            LOG.debug("PHONE FALLBACK using unverified number %s", phone)
-        elif cand_office:
-            phone = max(cand_office.items(), key=lambda t: t[1])[0]
-            LOG.debug("PHONE FALLBACK using office number %s", phone)
-        elif zillow_fallback:
-            phone = zillow_fallback
-            LOG.debug("PHONE FALLBACK using zillow number %s", phone)
+            rejected.setdefault(cand, "crawler:cand_office")
+    fallback_reason = ""
+    if not phone and zillow_fallback and is_mobile_number(zillow_fallback):
+        phone = zillow_fallback
+        fallback_reason = "contact_recipients_mobile"
     cache_p[key] = phone or ""
     if phone:
-        LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "crawler/unverified"))
+        src = src_good.get(phone)
+        if not src and fallback_reason:
+            src = fallback_reason
+        LOG.debug("PHONE WIN %s via %s", phone, src or "crawler/unverified")
     else:
-        LOG.debug(
-            "PHONE FAIL for %s %s  cand_good=%s cand_office=%s",
-            agent, state, cand_good, cand_office
+        METRICS["phone_no_verified_mobile"] += 1
+        LOG.warning(
+            "PHONE DROP no verified mobile for %s %s zpid=%s rejected=%s",
+            agent,
+            state,
+            zpid or "",
+            rejected,
         )
     return phone
 
@@ -961,7 +965,12 @@ def _digits_only(num: str) -> str:
 
 
 _line_type_cache: Dict[str, bool] = {}
-_assumed_mobile: Set[str] = set()
+
+
+def _is_explicit_mobile(value: Any) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() == "mobile"
 
 
 def is_mobile_number(phone: str) -> bool:
@@ -969,13 +978,11 @@ def is_mobile_number(phone: str) -> bool:
     if not phone:
         return False
     if phone in _line_type_cache:
-        if phone in _assumed_mobile:
-            LOG.debug("Using cached assumed mobile value for %s", phone)
         return _line_type_cache[phone]
     if not CLOUDMERSIVE_KEY:
         return True
+    digits = _digits_only(phone)
     try:
-        digits = _digits_only(phone)
         resp = requests.post(
             "https://api.cloudmersive.com/validate/phonenumber/basic",
             json={"PhoneNumber": digits, "DefaultCountryCode": "US"},
@@ -983,27 +990,29 @@ def is_mobile_number(phone: str) -> bool:
             timeout=6,
         )
         data = resp.json()
-        LOG.debug(
-            "Cloudmersive response for %s: status=%s data=%s",
-            digits,
-            resp.status_code,
-            data,
-        )
-        is_mobile = bool(
-            data.get("IsMobile")
-            or "mobile" in data.get("PhoneNumberType", "").lower()
-            or "mobile" in str(data.get("LineType", "")).lower()
-        )
-        LOG.debug("Cloudmersive classified %s as mobile=%s", digits, is_mobile)
     except Exception as exc:
-        LOG.warning(
-            "Cloudmersive lookup failed for %s (%s) – assuming mobile", phone, exc
-        )
-        _line_type_cache[phone] = True
-        _assumed_mobile.add(phone)
-        return True
+        LOG.warning("Cloudmersive lookup failed for %s (%s)", phone, exc)
+        _line_type_cache[phone] = False
+        return False
+    LOG.debug(
+        "Cloudmersive response for %s: status=%s data=%s",
+        digits,
+        resp.status_code,
+        data,
+    )
+    line_type = data.get("LineType")
+    phone_type = data.get("PhoneNumberType")
+    is_mobile = bool(data.get("IsMobile"))
+    if not is_mobile:
+        if _is_explicit_mobile(line_type) or _is_explicit_mobile(phone_type):
+            is_mobile = True
+    if not is_mobile:
+        if line_type and str(line_type).strip().lower() == "fixedlineormobile":
+            is_mobile = False
+        if phone_type and str(phone_type).strip().lower() == "fixedlineormobile":
+            is_mobile = False
     _line_type_cache[phone] = is_mobile
-    _assumed_mobile.discard(phone)
+    LOG.debug("Cloudmersive classified %s as mobile=%s", digits, is_mobile)
     return is_mobile
 
 
