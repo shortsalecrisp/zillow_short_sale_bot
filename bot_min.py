@@ -483,10 +483,10 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
     return []
 
 # ───────────────────── page‑parsing helpers ─────────────────────
-def extract_struct(td: str) -> Tuple[List[str], List[str]]:
-    phones, mails = [], []
+def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]]]:
+    phones, mails, meta = [], [], []
     if not BeautifulSoup:
-        return phones, mails
+        return phones, mails, meta
     soup = BeautifulSoup(td, "html.parser")
     for sc in soup.find_all("script", {"type": "application/ld+json"}):
         try:
@@ -499,24 +499,47 @@ def extract_struct(td: str) -> Tuple[List[str], List[str]]:
             data = data[0]
         if not isinstance(data, dict):
             continue
+        entry: Dict[str, Any] = {"raw": data}
         tel = data.get("telephone") or (data.get("contactPoint") or {}).get("telephone")
+        collected_phones: List[str] = []
         if isinstance(tel, list):
             for t in tel:
-                phones.append(fmt_phone(t))
+                formatted = fmt_phone(t)
+                phones.append(formatted)
+                if formatted:
+                    collected_phones.append(formatted)
         elif tel:
-            phones.append(fmt_phone(tel))
+            formatted = fmt_phone(tel)
+            phones.append(formatted)
+            if formatted:
+                collected_phones.append(formatted)
         mail = data.get("email") or (data.get("contactPoint") or {}).get("email")
+        collected_emails: List[str] = []
         if isinstance(mail, list):
             for m in mail:
-                mails.append(clean_email(m))
+                cleaned = clean_email(m)
+                mails.append(cleaned)
+                if cleaned:
+                    collected_emails.append(cleaned)
         elif mail:
-            mails.append(clean_email(mail))
+            cleaned = clean_email(mail)
+            mails.append(cleaned)
+            if cleaned:
+                collected_emails.append(cleaned)
+        if collected_phones or collected_emails:
+            entry["phones"] = collected_phones
+            entry["emails"] = collected_emails
+        if data.get("@type"):
+            entry["type"] = data.get("@type")
+        if data.get("name"):
+            entry["name"] = data.get("name")
+        meta.append(entry)
     for a in soup.select('a[href^="tel:"]'):
         phones.append(fmt_phone(a["href"].split("tel:")[-1]))
     for a in soup.select('a[href^="mailto:"]'):
         mails.append(clean_email(a["href"].split("mailto:")[-1]))
     soup.decompose()
-    return phones, mails
+    return phones, mails, meta
 
 def proximity_scan(t: str, first_name: str = "", last_name: str = ""):
     out = {}
@@ -600,12 +623,16 @@ def _email_matches_name(agent: str, email: str) -> bool:
     if not tks:
         return False
     first, last = tks[0], tks[-1]
+    segments = [seg for seg in re.split(r"[._\-]+", local) if seg]
     for tk in tks:
         if len(tk) >= 3 and tk in local:
             return True
         for var in _token_variants(tk):
             if len(var) >= 3 and var in local:
                 return True
+            for seg in segments:
+                if len(seg) >= 2 and (seg.startswith(var) or var.startswith(seg)):
+                    return True
     if first and last and (
         first[0] + last in local
         or first + last[0] in local
@@ -729,9 +756,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     for url, page in zip(non_portal, pmap(fetch_simple, non_portal)):
         if not page or agent.lower() not in page.lower():
             continue
-        ph, _ = extract_struct(page)
+        ph, _, meta = extract_struct(page)
+        meta_numbers = {p for entry in meta for p in entry.get("phones", [])}
         for p in ph:
-            add(p, 6, False, url)
+            boost = 2 if p in meta_numbers else 0
+            add(p, 6 + boost, False, f"{url}#ldjson" if boost else url)
         low = html.unescape(page.lower())
         for p, (_, sc, off) in proximity_scan(low, first_name, last_name).items():
             add(p, sc, off, url)
@@ -741,9 +770,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         for url, page in zip(portal, pmap(fetch, portal)):
             if not page or agent.lower() not in page.lower():
                 continue
-            ph, _ = extract_struct(page)
+            ph, _, meta = extract_struct(page)
+            meta_numbers = {p for entry in meta for p in entry.get("phones", [])}
             for p in ph:
-                add(p, 4, False, url)
+                boost = 1 if p in meta_numbers else 0
+                add(p, 4 + boost, False, f"{url}#ldjson" if boost else url)
             low = html.unescape(page.lower())
             for p, (_, sc, off) in proximity_scan(low, first_name, last_name).items():
                 add(p, sc, off, url)
@@ -844,7 +875,10 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     for url, page in zip(non_portal, pmap(fetch_simple, non_portal)):
         if not page or agent.lower() not in page.lower():
             continue
-        _, ems = extract_struct(page)
+        _, ems, meta = extract_struct(page)
+        for entry in meta:
+            for m in entry.get("emails", []):
+                add_e(m, 4, f"{url}#ldjson")
         for m in ems:
             add_e(m, 3, url)
         for m in EMAIL_RE.findall(page):
@@ -855,7 +889,10 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         for url, page in zip(portal, pmap(fetch, portal)):
             if not page or agent.lower() not in page.lower():
                 continue
-            _, ems = extract_struct(page)
+            _, ems, meta = extract_struct(page)
+            for entry in meta:
+                for m in entry.get("emails", []):
+                    add_e(m, 3, f"{url}#ldjson")
             for m in ems:
                 add_e(m, 2, url)
             for m in EMAIL_RE.findall(page):
