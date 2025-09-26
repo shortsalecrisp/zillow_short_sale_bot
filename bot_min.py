@@ -697,7 +697,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 cache_p[key] = d
                 LOG.debug("PHONE WIN %s via %s (surname proximity)", d, src)
                 return d
-    candidates: Dict[str, Dict[str, Any]] = {}
+    cand_meta: Dict[str, Dict[str, Any]] = {}
 
     parts = agent.split()
     first_name = parts[0].lower() if parts else ""
@@ -726,22 +726,23 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             score -= 4
         return score
 
-    def add(
-        p,
-        score,
-        office_flag,
+    def add_candidate(
+        phone: str,
+        score: float,
+        office_flag: bool,
         src: str = "",
+        *,
         label_weight: int = 0,
         src_rank: Optional[int] = None,
         src_rep: Optional[int] = None,
     ) -> None:
-        d = fmt_phone(p)
+        d = fmt_phone(phone)
         if not valid_phone(d):
             return
-        data = candidates.setdefault(
+        meta = cand_meta.setdefault(
             d,
             {
-                "score": 0,
+                "score": 0.0,
                 "label": 0,
                 "office_hits": 0,
                 "non_office_hits": 0,
@@ -750,28 +751,27 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 "looks_direct": None,
                 "first_seen": float("inf"),
                 "reputation": float("-inf"),
-                "best_rep": float("-inf"),
             },
         )
-        data["score"] += score
-        data["label"] = max(data["label"], label_weight)
+        meta["score"] += score
+        meta["label"] = max(meta["label"], label_weight)
         if office_flag:
-            data["office_hits"] += 1
+            meta["office_hits"] += 1
         else:
-            data["non_office_hits"] += 1
+            meta["non_office_hits"] += 1
         if src:
-            data["sources"].add(src)
-            if not data["best_src"]:
-                data["best_src"] = src
+            meta["sources"].add(src)
+            if not meta["best_src"]:
+                meta["best_src"] = src
             src_for_domain = src.split(":", 1)[1] if src.startswith("CSE:") else src
             DYNAMIC_SITES.add(_domain(src_for_domain))
         if src_rank is not None:
-            data["first_seen"] = min(data["first_seen"], src_rank)
+            meta["first_seen"] = min(meta["first_seen"], src_rank)
         if src_rep is not None:
-            data["reputation"] = max(data["reputation"], src_rep)
-            if src and src_rep > data["best_rep"]:
-                data["best_rep"] = src_rep
-                data["best_src"] = src
+            if src_rep > meta.get("reputation", float("-inf")):
+                meta["reputation"] = src_rep
+                if src:
+                    meta["best_src"] = src
 
     search_batches = pmap(google_items, build_q_phone(agent, state))
     url_seen: Dict[str, int] = {}
@@ -789,7 +789,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 url_reputation[link] = _source_reputation(link)
             tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
             if tel:
-                add(
+                add_candidate(
                     tel,
                     4,
                     False,
@@ -817,41 +817,29 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     ordered_urls = non_portal + portal
     url_rank = {u: idx for idx, u in enumerate(ordered_urls)}
 
-    def has_direct_labeled_mobile() -> bool:
-        for _, data in candidates.items():
-            if data["label"] >= 4 and data["non_office_hits"]:
+    def has_direct_label_hit() -> bool:
+        for meta in cand_meta.values():
+            if meta["label"] >= 4 and meta["non_office_hits"]:
                 return True
         return False
 
-    for url, page in zip(non_portal, pmap(fetch_simple, non_portal)):
-        if not page or agent.lower() not in page.lower():
-            continue
-        ph, _ = extract_struct(page)
-        for p in ph:
-            add(p, 6, False, url, src_rank=url_rank.get(url), src_rep=url_reputation.get(url, 0))
-        low = html.unescape(page.lower())
-        for p, (lab_w, sc, off) in proximity_scan(low, first_name, last_name).items():
-            add(
-                p,
-                sc,
-                off,
-                url,
-                label_weight=lab_w,
-                src_rank=url_rank.get(url),
-                src_rep=url_reputation.get(url, 0),
-            )
-        if has_direct_labeled_mobile():
-            break
-    if not has_direct_labeled_mobile():
-        for url, page in zip(portal, pmap(fetch, portal)):
+    def crawl_urls(urls: List[str], fetcher) -> None:
+        for url, page in zip(urls, pmap(fetcher, urls)):
             if not page or agent.lower() not in page.lower():
                 continue
             ph, _ = extract_struct(page)
             for p in ph:
-                add(p, 4, False, url, src_rank=url_rank.get(url), src_rep=url_reputation.get(url, 0))
+                add_candidate(
+                    p,
+                    6 if fetcher is fetch_simple else 4,
+                    False,
+                    url,
+                    src_rank=url_rank.get(url),
+                    src_rep=url_reputation.get(url, 0),
+                )
             low = html.unescape(page.lower())
             for p, (lab_w, sc, off) in proximity_scan(low, first_name, last_name).items():
-                add(
+                add_candidate(
                     p,
                     sc,
                     off,
@@ -860,67 +848,59 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                     src_rank=url_rank.get(url),
                     src_rep=url_reputation.get(url, 0),
                 )
-            if has_direct_labeled_mobile():
+            if has_direct_label_hit():
                 break
 
-    evaluation_order = sorted(
-        candidates.items(),
-        key=lambda item: (
-            item[1]["non_office_hits"] == 0,
-            not is_mobile_number(item[0]),
-            -item[1]["reputation"],
-            item[1]["first_seen"],
-            -item[1]["score"],
-            -item[1]["label"],
-            item[0],
-        ),
-    )
+    crawl_urls(non_portal, fetch_simple)
+    if not has_direct_label_hit():
+        crawl_urls(portal, fetch)
 
-    direct_hits: List[Tuple[str, Dict[str, Any]]] = []
-    non_office_hits: List[Tuple[str, Dict[str, Any]]] = []
-    office_hits: List[Tuple[str, Dict[str, Any]]] = []
+    def _direct_conf(phone: str, meta: Dict[str, Any]) -> bool:
+        if meta["label"] >= 4 and meta["non_office_hits"]:
+            return True
+        if meta["non_office_hits"] and is_mobile_number(phone):
+            if meta["looks_direct"] is None:
+                meta["looks_direct"] = _looks_direct(phone, agent, state)
+            return bool(meta["looks_direct"])
+        return False
 
-    for phone, data in evaluation_order:
-        mobile = is_mobile_number(phone)
-        label_direct = data["label"] >= 4 and data["non_office_hits"]
-        direct_conf = label_direct
-        if not direct_conf and mobile and data["non_office_hits"]:
-            if data["looks_direct"] is None:
-                data["looks_direct"] = _looks_direct(phone, agent, state)
-            direct_conf = bool(data["looks_direct"])
-        if direct_conf:
-            direct_hits.append((phone, data))
-            continue
-        if data["non_office_hits"]:
-            non_office_hits.append((phone, data))
+    def _rank_key(phone: str, meta: Dict[str, Any]) -> Tuple[Any, ...]:
+        return (
+            0 if is_mobile_number(phone) else 1,
+            -(meta.get("reputation", float("-inf")) or 0),
+            meta.get("first_seen", float("inf")),
+            -meta["score"],
+            -meta["label"],
+            phone,
+        )
+
+    direct_bucket: List[Tuple[str, Dict[str, Any]]] = []
+    non_office_bucket: List[Tuple[str, Dict[str, Any]]] = []
+    office_bucket: List[Tuple[str, Dict[str, Any]]] = []
+
+    for phone, meta in cand_meta.items():
+        if _direct_conf(phone, meta):
+            direct_bucket.append((phone, meta))
+        elif meta["non_office_hits"]:
+            non_office_bucket.append((phone, meta))
         else:
-            office_hits.append((phone, data))
+            office_bucket.append((phone, meta))
 
     def choose_best(bucket: List[Tuple[str, Dict[str, Any]]]) -> Tuple[str, Optional[Dict[str, Any]]]:
         if not bucket:
             return "", None
-        phone, data = min(
-            bucket,
-            key=lambda item: (
-                0 if is_mobile_number(item[0]) else 1,
-                -item[1]["reputation"],
-                item[1]["first_seen"],
-                -item[1]["score"],
-                -item[1]["label"],
-                item[0],
-            ),
-        )
-        return phone, data
+        phone, meta = min(bucket, key=lambda item: _rank_key(item[0], item[1]))
+        return phone, meta
 
-    phone, phone_data = choose_best(direct_hits)
+    phone, phone_meta = choose_best(direct_bucket)
     if not phone:
-        phone, phone_data = choose_best(non_office_hits)
+        phone, phone_meta = choose_best(non_office_bucket)
     if not phone:
-        phone, phone_data = choose_best(office_hits)
+        phone, phone_meta = choose_best(office_bucket)
 
     src = ""
-    if phone_data:
-        src = phone_data.get("best_src") or next(iter(phone_data.get("sources", [])), "crawler/unverified")
+    if phone_meta:
+        src = phone_meta.get("best_src") or next(iter(phone_meta.get("sources", [])), "crawler/unverified")
     if not phone and zillow_fallback:
         phone = zillow_fallback
         src = "zillow"
@@ -932,7 +912,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         LOG.debug("PHONE WIN %s via %s", phone, src)
     else:
         LOG.debug(
-            "PHONE FAIL for %s %s  candidates=%s zillow_fallback=%s",
+            "PHONE FAIL for %s %s candidates=%s zillow_fallback=%s",
             agent,
             state,
             {
@@ -941,11 +921,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                     "label": v["label"],
                     "office": v["office_hits"],
                     "non_office": v["non_office_hits"],
-                    "reputation": v["reputation"],
-                    "first_seen": v["first_seen"],
+                    "reputation": v.get("reputation", 0),
+                    "first_seen": v.get("first_seen", float("inf")),
                     "sources": sorted(v["sources"]),
                 }
-                for k, v in candidates.items()
+                for k, v in cand_meta.items()
             },
             zillow_fallback,
         )
