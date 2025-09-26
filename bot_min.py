@@ -697,30 +697,88 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 cache_p[key] = d
                 LOG.debug("PHONE WIN %s via %s (surname proximity)", d, src)
                 return d
-    cand_good, cand_office, src_good = {}, {}, {}
-    def add(p, score, office_flag, src=""):
+    candidates: Dict[str, Dict[str, Any]] = {}
+
+    def add(p, score, office_flag, src="", label_weight=0):
         d = fmt_phone(p)
         if not valid_phone(d):
             return
-        bucket = cand_office if office_flag else cand_good
-        bucket[d] = bucket.get(d, 0) + score
-        if not office_flag and src:
-            src_good[d] = src
+        data = candidates.setdefault(
+            d,
+            {
+                "score": 0,
+                "label": 0,
+                "office_hits": 0,
+                "non_office_hits": 0,
+                "sources": set(),
+                "best_src": "",
+                "looks_direct": None,
+            },
+        )
+        data["score"] += score
+        data["label"] = max(data["label"], label_weight)
+        if office_flag:
+            data["office_hits"] += 1
+        else:
+            data["non_office_hits"] += 1
+        if src:
+            data["sources"].add(src)
+            if not data["best_src"]:
+                data["best_src"] = src
             DYNAMIC_SITES.add(_domain(src))
-    for items in pmap(google_items, build_q_phone(agent, state)):
+
+    search_batches = pmap(google_items, build_q_phone(agent, state))
+    for items in search_batches:
         for it in items:
             tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
             if tel:
                 add(tel, 4, False, f"CSE:{it.get('link', '')}")
+
+    MAX_PHONE_URLS = 40
     urls = [
         it.get("link", "")
-        for items in pmap(google_items, build_q_phone(agent, state))
+        for items in search_batches
         for it in items
-    ][:20]
+    ][:MAX_PHONE_URLS]
+
+    def _prioritize_urls(urls: List[str]) -> List[str]:
+        agent_tokens = [re.sub(r"[^a-z]", "", w.lower()) for w in agent.split() if w]
+        last = agent_tokens[-1] if agent_tokens else ""
+
+        def score_url(u: str) -> int:
+            dom = _domain(u)
+            low = u.lower()
+            score = 0
+            if last and last in dom:
+                score += 4
+            if any(tok and tok in dom for tok in agent_tokens):
+                score += 3
+            if any(tok and tok in low for tok in ("agent", "realtor", "realty")):
+                score += 1
+            if any(tok in low for tok in ("bio", "about", "profile")):
+                score += 1
+            if "linkedin" in dom or "facebook" in dom:
+                score -= 2
+            if "zillow" in dom or "realtor.com" in dom:
+                score -= 1
+            return -score
+
+        indexed = list(enumerate(urls))
+        indexed.sort(key=lambda item: (score_url(item[1]), item[0]))
+        return [u for _, u in indexed]
+
     non_portal, portal = _split_portals(urls)
+    non_portal = _prioritize_urls(non_portal)
+    portal = _prioritize_urls(portal)
     parts = agent.split()
     first_name = parts[0].lower() if parts else ""
     last_name = parts[-1].lower() if parts else ""
+    def has_direct_labeled_mobile() -> bool:
+        for _, data in candidates.items():
+            if data["label"] >= 4 and data["non_office_hits"]:
+                return True
+        return False
+
     for url, page in zip(non_portal, pmap(fetch_simple, non_portal)):
         if not page or agent.lower() not in page.lower():
             continue
@@ -728,11 +786,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
         for p in ph:
             add(p, 6, False, url)
         low = html.unescape(page.lower())
-        for p, (_, sc, off) in proximity_scan(low, first_name, last_name).items():
-            add(p, sc, off, url)
-        if cand_good or cand_office:
+        for p, (lab_w, sc, off) in proximity_scan(low, first_name, last_name).items():
+            add(p, sc, off, url, label_weight=lab_w)
+        if has_direct_labeled_mobile():
             break
-    if not cand_good:
+    if not has_direct_labeled_mobile():
         for url, page in zip(portal, pmap(fetch, portal)):
             if not page or agent.lower() not in page.lower():
                 continue
@@ -740,41 +798,68 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             for p in ph:
                 add(p, 4, False, url)
             low = html.unescape(page.lower())
-            for p, (_, sc, off) in proximity_scan(low, first_name, last_name).items():
-                add(p, sc, off, url)
-            if cand_good:
+            for p, (lab_w, sc, off) in proximity_scan(low, first_name, last_name).items():
+                add(p, sc, off, url, label_weight=lab_w)
+            if has_direct_labeled_mobile():
                 break
-    phone = ""
-    for cand, _ in sorted(cand_good.items(), key=lambda t: -t[1]):
-        if is_mobile_number(cand):
-            phone = cand
+    def candidate_priority(item: Tuple[str, Dict[str, Any]]) -> Tuple[int, int, int, int, int]:
+        phone, data = item
+        return (
+            1 if data["non_office_hits"] == 0 else 0,
+            1 if not is_mobile_number(phone) else 0,
+            -(1 if data["label"] >= 4 else 0),
+            -data["score"],
+            -data["label"],
+        )
+
+    ordered_candidates = sorted(candidates.items(), key=candidate_priority)
+
+    confident_phone = ""
+    backup_non_office = ""
+    backup_office = ""
+
+    for phone, data in ordered_candidates:
+        mobile = is_mobile_number(phone)
+        if not backup_non_office and data["non_office_hits"]:
+            backup_non_office = phone
+        if not backup_office and not data["non_office_hits"]:
+            backup_office = phone
+
+        direct_conf = data["label"] >= 4
+        if not direct_conf and mobile and data["non_office_hits"]:
+            if data["looks_direct"] is None:
+                data["looks_direct"] = _looks_direct(phone, agent, state)
+            direct_conf = data["looks_direct"]
+        if direct_conf:
+            confident_phone = phone
             break
-    if not phone:
-        for cand, _ in sorted(cand_office.items(), key=lambda t: -t[1]):
-            if is_mobile_number(cand):
-                phone = cand
-                break
-    # If no candidate passed the mobile check, fall back to the highest scored
-    # number. Cloudmersive occasionally misclassifies mobile lines and leaving
-    # the phone field blank is less helpful than a best guess. As a last resort
-    # we fall back to the number scraped from Zillow even if unverified.
-    if not phone:
-        if cand_good:
-            phone = max(cand_good.items(), key=lambda t: t[1])[0]
-            LOG.debug("PHONE FALLBACK using unverified number %s", phone)
-        elif cand_office:
-            phone = max(cand_office.items(), key=lambda t: t[1])[0]
-            LOG.debug("PHONE FALLBACK using office number %s", phone)
-        elif zillow_fallback:
-            phone = zillow_fallback
-            LOG.debug("PHONE FALLBACK using zillow number %s", phone)
+
+    phone = confident_phone or backup_non_office or backup_office or zillow_fallback
+
+    if phone and phone not in candidates and phone != zillow_fallback:
+        # phone sourced via rapid/zillow fallbacks
+        src = "crawler/unverified"
+    else:
+        src = (
+            candidates.get(phone, {}).get("best_src")
+            if phone in candidates
+            else ("zillow" if phone == zillow_fallback else "crawler/unverified")
+        )
+
+    if not phone and zillow_fallback:
+        phone = zillow_fallback
+        src = "zillow"
+
     cache_p[key] = phone or ""
     if phone:
-        LOG.debug("PHONE WIN %s via %s", phone, src_good.get(phone, "crawler/unverified"))
+        LOG.debug("PHONE WIN %s via %s", phone, src)
     else:
         LOG.debug(
-            "PHONE FAIL for %s %s  cand_good=%s cand_office=%s",
-            agent, state, cand_good, cand_office
+            "PHONE FAIL for %s %s  candidates=%s zillow_fallback=%s",
+            agent,
+            state,
+            {k: {"score": v["score"], "label": v["label"], "office": v["office_hits"], "non_office": v["non_office_hits"]} for k, v in candidates.items()},
+            zillow_fallback,
         )
     return phone
 
