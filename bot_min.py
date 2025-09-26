@@ -10,7 +10,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import gspread
@@ -699,7 +699,42 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 return d
     candidates: Dict[str, Dict[str, Any]] = {}
 
-    def add(p, score, office_flag, src="", label_weight=0):
+    parts = agent.split()
+    first_name = parts[0].lower() if parts else ""
+    last_name = parts[-1].lower() if parts else ""
+    agent_tokens = [re.sub(r"[^a-z]", "", w.lower()) for w in parts if w]
+
+    def _source_reputation(url: str) -> int:
+        if not url:
+            return 0
+        dom = _domain(url)
+        low = url.lower()
+        score = 0
+        if last_name and last_name in dom:
+            score += 6
+        if any(tok and tok in dom for tok in agent_tokens):
+            score += 4
+        if any(tok and tok in low for tok in ("agent", "realtor", "realty", "team", "group", "properties")):
+            score += 2
+        if any(tok in low for tok in ("bio", "about", "profile", "meet", "contact")):
+            score += 2
+        if any(broker in dom for broker in ("kw.com", "compass.com", "realty.com", "expglobal")):
+            score += 1
+        if any(portal in dom for portal in ("zillow.com", "realtor.com", "redfin.com", "homes.com")):
+            score -= 2
+        if any(social in dom for social in ("facebook.com", "instagram.com", "linkedin.com", "twitter.com", "youtube.com")):
+            score -= 4
+        return score
+
+    def add(
+        p,
+        score,
+        office_flag,
+        src: str = "",
+        label_weight: int = 0,
+        src_rank: Optional[int] = None,
+        src_rep: Optional[int] = None,
+    ) -> None:
         d = fmt_phone(p)
         if not valid_phone(d):
             return
@@ -713,6 +748,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 "sources": set(),
                 "best_src": "",
                 "looks_direct": None,
+                "first_seen": float("inf"),
+                "reputation": float("-inf"),
+                "best_rep": float("-inf"),
             },
         )
         data["score"] += score
@@ -725,54 +763,60 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             data["sources"].add(src)
             if not data["best_src"]:
                 data["best_src"] = src
-            DYNAMIC_SITES.add(_domain(src))
+            src_for_domain = src.split(":", 1)[1] if src.startswith("CSE:") else src
+            DYNAMIC_SITES.add(_domain(src_for_domain))
+        if src_rank is not None:
+            data["first_seen"] = min(data["first_seen"], src_rank)
+        if src_rep is not None:
+            data["reputation"] = max(data["reputation"], src_rep)
+            if src and src_rep > data["best_rep"]:
+                data["best_rep"] = src_rep
+                data["best_src"] = src
 
     search_batches = pmap(google_items, build_q_phone(agent, state))
+    url_seen: Dict[str, int] = {}
+    raw_urls: List[str] = []
+    url_reputation: Dict[str, int] = {}
+
     for items in search_batches:
         for it in items:
+            link = it.get("link", "")
+            if link and link not in url_seen:
+                url_seen[link] = len(raw_urls)
+                raw_urls.append(link)
+                url_reputation[link] = _source_reputation(link)
+            elif link and link not in url_reputation:
+                url_reputation[link] = _source_reputation(link)
             tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
             if tel:
-                add(tel, 4, False, f"CSE:{it.get('link', '')}")
+                add(
+                    tel,
+                    4,
+                    False,
+                    f"CSE:{link}",
+                    src_rank=url_seen.get(link),
+                    src_rep=url_reputation.get(link, 0),
+                )
 
     MAX_PHONE_URLS = 40
-    urls = [
-        it.get("link", "")
-        for items in search_batches
-        for it in items
-    ][:MAX_PHONE_URLS]
+    urls = raw_urls[:MAX_PHONE_URLS]
 
     def _prioritize_urls(urls: List[str]) -> List[str]:
-        agent_tokens = [re.sub(r"[^a-z]", "", w.lower()) for w in agent.split() if w]
-        last = agent_tokens[-1] if agent_tokens else ""
-
-        def score_url(u: str) -> int:
-            dom = _domain(u)
-            low = u.lower()
-            score = 0
-            if last and last in dom:
-                score += 4
-            if any(tok and tok in dom for tok in agent_tokens):
-                score += 3
-            if any(tok and tok in low for tok in ("agent", "realtor", "realty")):
-                score += 1
-            if any(tok in low for tok in ("bio", "about", "profile")):
-                score += 1
-            if "linkedin" in dom or "facebook" in dom:
-                score -= 2
-            if "zillow" in dom or "realtor.com" in dom:
-                score -= 1
-            return -score
-
-        indexed = list(enumerate(urls))
-        indexed.sort(key=lambda item: (score_url(item[1]), item[0]))
-        return [u for _, u in indexed]
+        indexed = []
+        for u in urls:
+            rep = url_reputation.get(u, _source_reputation(u))
+            url_reputation.setdefault(u, rep)
+            base_rank = url_seen.get(u, len(url_seen))
+            indexed.append((u, -rep, base_rank))
+        indexed.sort(key=lambda item: (item[1], item[2]))
+        return [u for u, _, _ in indexed]
 
     non_portal, portal = _split_portals(urls)
     non_portal = _prioritize_urls(non_portal)
     portal = _prioritize_urls(portal)
-    parts = agent.split()
-    first_name = parts[0].lower() if parts else ""
-    last_name = parts[-1].lower() if parts else ""
+    ordered_urls = non_portal + portal
+    url_rank = {u: idx for idx, u in enumerate(ordered_urls)}
+
     def has_direct_labeled_mobile() -> bool:
         for _, data in candidates.items():
             if data["label"] >= 4 and data["non_office_hits"]:
@@ -784,10 +828,18 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             continue
         ph, _ = extract_struct(page)
         for p in ph:
-            add(p, 6, False, url)
+            add(p, 6, False, url, src_rank=url_rank.get(url), src_rep=url_reputation.get(url, 0))
         low = html.unescape(page.lower())
         for p, (lab_w, sc, off) in proximity_scan(low, first_name, last_name).items():
-            add(p, sc, off, url, label_weight=lab_w)
+            add(
+                p,
+                sc,
+                off,
+                url,
+                label_weight=lab_w,
+                src_rank=url_rank.get(url),
+                src_rep=url_reputation.get(url, 0),
+            )
         if has_direct_labeled_mobile():
             break
     if not has_direct_labeled_mobile():
@@ -796,59 +848,84 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
                 continue
             ph, _ = extract_struct(page)
             for p in ph:
-                add(p, 4, False, url)
+                add(p, 4, False, url, src_rank=url_rank.get(url), src_rep=url_reputation.get(url, 0))
             low = html.unescape(page.lower())
             for p, (lab_w, sc, off) in proximity_scan(low, first_name, last_name).items():
-                add(p, sc, off, url, label_weight=lab_w)
+                add(
+                    p,
+                    sc,
+                    off,
+                    url,
+                    label_weight=lab_w,
+                    src_rank=url_rank.get(url),
+                    src_rep=url_reputation.get(url, 0),
+                )
             if has_direct_labeled_mobile():
                 break
-    def candidate_priority(item: Tuple[str, Dict[str, Any]]) -> Tuple[int, int, int, int, int]:
-        phone, data = item
-        return (
-            1 if data["non_office_hits"] == 0 else 0,
-            1 if not is_mobile_number(phone) else 0,
-            -(1 if data["label"] >= 4 else 0),
-            -data["score"],
-            -data["label"],
-        )
 
-    ordered_candidates = sorted(candidates.items(), key=candidate_priority)
+    evaluation_order = sorted(
+        candidates.items(),
+        key=lambda item: (
+            item[1]["non_office_hits"] == 0,
+            not is_mobile_number(item[0]),
+            -item[1]["reputation"],
+            item[1]["first_seen"],
+            -item[1]["score"],
+            -item[1]["label"],
+            item[0],
+        ),
+    )
 
-    confident_phone = ""
-    backup_non_office = ""
-    backup_office = ""
+    direct_hits: List[Tuple[str, Dict[str, Any]]] = []
+    non_office_hits: List[Tuple[str, Dict[str, Any]]] = []
+    office_hits: List[Tuple[str, Dict[str, Any]]] = []
 
-    for phone, data in ordered_candidates:
+    for phone, data in evaluation_order:
         mobile = is_mobile_number(phone)
-        if not backup_non_office and data["non_office_hits"]:
-            backup_non_office = phone
-        if not backup_office and not data["non_office_hits"]:
-            backup_office = phone
-
-        direct_conf = data["label"] >= 4
+        label_direct = data["label"] >= 4 and data["non_office_hits"]
+        direct_conf = label_direct
         if not direct_conf and mobile and data["non_office_hits"]:
             if data["looks_direct"] is None:
                 data["looks_direct"] = _looks_direct(phone, agent, state)
-            direct_conf = data["looks_direct"]
+            direct_conf = bool(data["looks_direct"])
         if direct_conf:
-            confident_phone = phone
-            break
+            direct_hits.append((phone, data))
+            continue
+        if data["non_office_hits"]:
+            non_office_hits.append((phone, data))
+        else:
+            office_hits.append((phone, data))
 
-    phone = confident_phone or backup_non_office or backup_office or zillow_fallback
-
-    if phone and phone not in candidates and phone != zillow_fallback:
-        # phone sourced via rapid/zillow fallbacks
-        src = "crawler/unverified"
-    else:
-        src = (
-            candidates.get(phone, {}).get("best_src")
-            if phone in candidates
-            else ("zillow" if phone == zillow_fallback else "crawler/unverified")
+    def choose_best(bucket: List[Tuple[str, Dict[str, Any]]]) -> Tuple[str, Optional[Dict[str, Any]]]:
+        if not bucket:
+            return "", None
+        phone, data = min(
+            bucket,
+            key=lambda item: (
+                0 if is_mobile_number(item[0]) else 1,
+                -item[1]["reputation"],
+                item[1]["first_seen"],
+                -item[1]["score"],
+                -item[1]["label"],
+                item[0],
+            ),
         )
+        return phone, data
 
+    phone, phone_data = choose_best(direct_hits)
+    if not phone:
+        phone, phone_data = choose_best(non_office_hits)
+    if not phone:
+        phone, phone_data = choose_best(office_hits)
+
+    src = ""
+    if phone_data:
+        src = phone_data.get("best_src") or next(iter(phone_data.get("sources", [])), "crawler/unverified")
     if not phone and zillow_fallback:
         phone = zillow_fallback
         src = "zillow"
+    elif phone and not src:
+        src = "crawler/unverified" if phone != zillow_fallback else "zillow"
 
     cache_p[key] = phone or ""
     if phone:
@@ -858,7 +935,18 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             "PHONE FAIL for %s %s  candidates=%s zillow_fallback=%s",
             agent,
             state,
-            {k: {"score": v["score"], "label": v["label"], "office": v["office_hits"], "non_office": v["non_office_hits"]} for k, v in candidates.items()},
+            {
+                k: {
+                    "score": v["score"],
+                    "label": v["label"],
+                    "office": v["office_hits"],
+                    "non_office": v["non_office_hits"],
+                    "reputation": v["reputation"],
+                    "first_seen": v["first_seen"],
+                    "sources": sorted(v["sources"]),
+                }
+                for k, v in candidates.items()
+            },
             zillow_fallback,
         )
     return phone
