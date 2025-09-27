@@ -1040,14 +1040,17 @@ def is_mobile_number(phone: str) -> bool:
     line_type = data.get("LineType")
     phone_type = data.get("PhoneNumberType")
     is_mobile = bool(data.get("IsMobile"))
+    normalized_line = str(line_type or "").strip().lower()
+    normalized_type = str(phone_type or "").strip().lower()
     if not is_mobile:
         if _is_explicit_mobile(line_type) or _is_explicit_mobile(phone_type):
             is_mobile = True
     if not is_mobile:
-        if line_type and str(line_type).strip().lower() == "fixedlineormobile":
-            is_mobile = False
-        if phone_type and str(phone_type).strip().lower() == "fixedlineormobile":
-            is_mobile = False
+        if normalized_line == "fixedlineormobile" or normalized_type == "fixedlineormobile":
+            # Cloudmersive returns "FixedLineOrMobile" when it cannot definitively
+            # classify the line type. Treat it as usable so we do not drop real
+            # mobile numbers that happen to be marked ambiguous.
+            is_mobile = True
     _line_type_cache[phone] = is_mobile
     LOG.debug("Cloudmersive classified %s as mobile=%s", digits, is_mobile)
     return is_mobile
