@@ -74,6 +74,30 @@ SMS_FU_TEMPLATE   = (
 SMS_RETRY_ATTEMPTS = int(os.getenv("SMS_RETRY_ATTEMPTS", "2"))
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
+CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
+CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
+CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
+
+_generic_domains_env = os.getenv("CONTACT_GENERIC_EMAIL_DOMAINS", "homelight.com,example.org")
+GENERIC_EMAIL_DOMAINS = {
+    d.strip().lower()
+    for d in _generic_domains_env.split(",")
+    if d.strip()
+}
+GENERIC_EMAIL_PREFIXES = {
+    "info",
+    "contact",
+    "support",
+    "press",
+    "pr",
+    "office",
+    "hello",
+    "team",
+    "frontdesk",
+    "marketing",
+    "admin",
+}
+
 # column indices (0‑based)
 COL_FIRST       = 0   # A
 COL_LAST        = 1   # B
@@ -89,7 +113,9 @@ COL_REPLY_TS    = 10  # K
 COL_MSG_ID      = 11  # L
 COL_INIT_TS     = 22  # W
 COL_FU_TS       = 23  # X
-MIN_COLS        = 24
+COL_PHONE_CONF  = 24  # Y
+COL_CONTACT_REASON = 25  # Z
+MIN_COLS        = 26
 
 MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
@@ -136,6 +162,8 @@ BAD_AREA      = {
     "844",
     "833",
 }
+CONTACT_PAGE_HINTS = ("contact", "office", "team", "company")
+PHONE_OFFICE_TERMS = {"office", "front desk", "main", "team", "switchboard"}
 
 # ───────────────────── Google / Sheets setup ─────────────────────
 creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
@@ -449,6 +477,65 @@ def fetch_simple_relaxed(u: str):
 def fetch_relaxed(u: str):
     return fetch(u, strict=False)
 
+# ───────────────────── contact fetch helpers ─────────────────────
+_CONTACT_FETCH_BACKOFFS = (0.0, 0.7, 2.0)
+
+
+def _mirror_url(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    mirror = f"https://r.jina.ai/{base}"
+    if parsed.query:
+        mirror = f"{mirror}?{parsed.query}"
+    return mirror
+
+
+def fetch_contact_page(url: str) -> Tuple[str, bool]:
+    if not _should_fetch(url, strict=False):
+        return "", False
+    dom = _domain(url)
+    blocked = False
+    tries = len(_CONTACT_FETCH_BACKOFFS)
+    for attempt, delay in enumerate(_CONTACT_FETCH_BACKOFFS, start=1):
+        if delay:
+            time.sleep(delay)
+        try:
+            resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        except Exception as exc:
+            LOG.debug("fetch_contact_page error %s on %s", exc, url)
+            break
+        status = resp.status_code
+        if status == 200:
+            return resp.text, False
+        if status in (403, 429):
+            blocked = True
+            _mark_block(dom)
+            LOG.warning("BLOCK %s -> retry %s/%s", status, attempt, tries)
+            continue
+        if status in (301, 302) and resp.headers.get("Location"):
+            url = resp.headers["Location"]
+            continue
+        if status in (403, 451):
+            blocked = True
+            _mark_block(dom)
+            LOG.warning("BLOCK %s -> retry %s/%s", status, attempt, tries)
+            continue
+        break
+
+    if blocked:
+        mirror = _mirror_url(url)
+        if mirror:
+            try:
+                mirror_resp = requests.get(mirror, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                if mirror_resp.status_code == 200 and mirror_resp.text.strip():
+                    LOG.info("MIRROR FALLBACK used")
+                    return mirror_resp.text, True
+            except Exception as exc:
+                LOG.debug("mirror fetch failed %s on %s", exc, mirror)
+    return "", False
+
 # ───────────────────── Google CSE helpers ─────────────────────
 _cse_cache: Dict[str, List[Dict[str, Any]]] = {}
 _last_cse_ts = 0.0
@@ -483,11 +570,46 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
     return []
 
 # ───────────────────── page‑parsing helpers ─────────────────────
-def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]]]:
+def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]], Dict[str, Any]]:
     phones, mails, meta = [], [], []
+    info: Dict[str, Any] = {"title": "", "mailto": [], "tel": []}
     if not BeautifulSoup:
-        return phones, mails, meta
+        return phones, mails, meta, info
+
     soup = BeautifulSoup(td, "html.parser")
+    if soup.title and soup.title.string:
+        info["title"] = soup.title.string.strip()
+
+    def _as_list(value: Any) -> List[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    def _contact_values(node: Dict[str, Any], key: str) -> List[Any]:
+        values: List[Any] = []
+        for cp in _as_list(node.get("contactPoint")):
+            if isinstance(cp, dict):
+                val = cp.get(key)
+                if isinstance(val, list):
+                    values.extend(val)
+                elif val:
+                    values.append(val)
+        return values
+
+    def _add_phone(raw_value: Any, collected: List[str]) -> None:
+        formatted = fmt_phone(str(raw_value))
+        if formatted:
+            phones.append(formatted)
+            collected.append(formatted)
+
+    def _add_email(raw_value: Any, collected: List[str]) -> None:
+        cleaned = clean_email(str(raw_value))
+        if cleaned and ok_email(cleaned):
+            mails.append(cleaned)
+            collected.append(cleaned)
+
     for sc in soup.find_all("script", {"type": "application/ld+json"}):
         try:
             data = json.loads(sc.string or "")
@@ -496,53 +618,61 @@ def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]]]
         if isinstance(data, list):
             if not data:
                 continue
-            data = data[0]
-        if not isinstance(data, dict):
-            continue
-        entry: Dict[str, Any] = {"raw": data}
-        tel = data.get("telephone") or (data.get("contactPoint") or {}).get("telephone")
-        collected_phones: List[str] = []
-        if isinstance(tel, list):
-            for t in tel:
-                formatted = fmt_phone(t)
-                phones.append(formatted)
-                if formatted:
-                    collected_phones.append(formatted)
-        elif tel:
-            formatted = fmt_phone(tel)
-            phones.append(formatted)
-            if formatted:
-                collected_phones.append(formatted)
-        mail = data.get("email") or (data.get("contactPoint") or {}).get("email")
-        collected_emails: List[str] = []
-        if isinstance(mail, list):
-            for m in mail:
-                cleaned = clean_email(m)
-                mails.append(cleaned)
-                if cleaned:
-                    collected_emails.append(cleaned)
-        elif mail:
-            cleaned = clean_email(mail)
-            mails.append(cleaned)
-            if cleaned:
-                collected_emails.append(cleaned)
-        if collected_phones or collected_emails:
-            entry["phones"] = collected_phones
-            entry["emails"] = collected_emails
-        if data.get("@type"):
-            entry["type"] = data.get("@type")
-        if data.get("name"):
-            entry["name"] = data.get("name")
-        meta.append(entry)
+            # Zillow pages often wrap the Person node in an array; iterate all.
+            nodes = [d for d in data if isinstance(d, dict)]
+        else:
+            nodes = [data] if isinstance(data, dict) else []
+        for node in nodes:
+            entry: Dict[str, Any] = {"raw": node}
+            collected_phones: List[str] = []
+            for tel_val in _as_list(node.get("telephone")) + _contact_values(node, "telephone"):
+                _add_phone(tel_val, collected_phones)
+            collected_emails: List[str] = []
+            for mail_val in _as_list(node.get("email")) + _contact_values(node, "email"):
+                _add_email(mail_val, collected_emails)
+            if collected_phones:
+                entry["phones"] = collected_phones
+            if collected_emails:
+                entry["emails"] = collected_emails
+            node_type = node.get("@type")
+            if node_type:
+                entry["type"] = node_type
+            if node.get("name"):
+                entry["name"] = node.get("name")
+            if entry.keys() - {"raw"}:
+                meta.append(entry)
+
+    def _context_for(node) -> str:
+        parent = node.find_parent()
+        target = parent or node
+        snippet = target.get_text(" ", strip=True)
+        return " ".join(snippet.split())[:280]
+
     for a in soup.select('a[href^="tel:"]'):
-        phones.append(fmt_phone(a["href"].split("tel:")[-1]))
+        tel_val = a.get("href", "").split("tel:")[-1]
+        formatted = fmt_phone(tel_val)
+        if formatted:
+            phones.append(formatted)
+            info["tel"].append({
+                "phone": formatted,
+                "context": _context_for(a).lower(),
+            })
+
     for a in soup.select('a[href^="mailto:"]'):
-        mails.append(clean_email(a["href"].split("mailto:")[-1]))
+        mail_val = a.get("href", "").split("mailto:")[-1]
+        cleaned = clean_email(mail_val)
+        if cleaned and ok_email(cleaned):
+            mails.append(cleaned)
+            info["mailto"].append({
+                "email": cleaned,
+                "context": _context_for(a).lower(),
+            })
+
     soup.decompose()
-    return phones, mails, meta
+    return phones, mails, meta, info
 
 def proximity_scan(t: str, first_name: str = "", last_name: str = ""):
-    out = {}
+    out: Dict[str, Dict[str, Any]] = {}
     for m in PHONE_RE.finditer(t):
         p = fmt_phone(m.group())
         if not valid_phone(p):
@@ -557,8 +687,19 @@ def proximity_scan(t: str, first_name: str = "", last_name: str = ""):
         w = LABEL_TABLE.get(lab, 0)
         if w < 1:
             continue
-        bw, ts, off = out.get(p, (0, 0, False))
-        out[p] = (max(bw, w), ts + 2 + w, lab in ("office", "main"))
+        entry = out.setdefault(
+            p,
+            {
+                "weight": 0,
+                "score": 0.0,
+                "office": False,
+                "snippets": [],
+            },
+        )
+        entry["weight"] = max(entry["weight"], w)
+        entry["score"] += 2 + w
+        entry["office"] = entry["office"] or lab in ("office", "main")
+        entry["snippets"].append(" ".join(snippet.split()))
     return out
 
 def build_q_phone(name: str, state: str) -> List[str]:
@@ -643,9 +784,21 @@ def _email_matches_name(agent: str, email: str) -> bool:
         return True
     return False
 
-cache_p: Dict[str, str] = {}
-cache_e: Dict[str, str] = {}
+cache_p: Dict[str, Dict[str, Any]] = {}
+cache_e: Dict[str, Dict[str, Any]] = {}
 domain_patterns: Dict[str, str] = {}
+
+
+def _agent_tokens(name: str) -> List[str]:
+    return [re.sub(r"[^a-z]", "", part.lower()) for part in name.split() if len(part) > 1]
+
+
+def _page_is_contactish(url: str, title: str = "") -> bool:
+    low_url = url.lower()
+    low_title = title.lower() if title else ""
+    return any(h in low_url for h in CONTACT_PAGE_HINTS) or (
+        low_title and any(h in low_title for h in CONTACT_PAGE_HINTS)
+    )
 
 def _pattern_from_example(addr: str, name: str) -> str:
     first, last = map(lambda s: re.sub(r"[^a-z]", "", s.lower()), (name.split()[0], name.split()[-1]))
@@ -675,6 +828,33 @@ def _split_portals(urls):
         (portals if any(d in u for d in SCRAPE_SITES) else non).append(u)
     return non, portals
 
+
+EMAIL_SOURCE_BASE = {
+    "payload_contact": 1.0,
+    "rapid_contact": 0.95,
+    "rapid_listed_by": 0.95,
+    "jsonld_person": 1.0,
+    "jsonld_other": 0.7,
+    "mailto": 0.8,
+    "dom": 0.6,
+    "pattern": 0.5,
+    "cse_contact": 0.7,
+}
+
+
+def _is_generic_email(email: str) -> bool:
+    local, domain = email.split("@", 1)
+    local_key = re.sub(r"[^a-z0-9]", "", local.lower())
+    domain_l = domain.lower()
+    if any(local_key.startswith(prefix) for prefix in GENERIC_EMAIL_PREFIXES if prefix):
+        LOG.info("EMAIL REJECT generic: %s", email)
+        return True
+    for gd in GENERIC_EMAIL_DOMAINS:
+        if domain_l == gd or domain_l.endswith(f".{gd}"):
+            LOG.info("EMAIL REJECT generic: %s", email)
+            return True
+    return False
+
 def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> bool:
     if not phone:
         return False
@@ -697,133 +877,330 @@ def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> bool:
                 return True
     return False
 
-def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
+PHONE_SOURCE_BASE = {
+    "payload_contact": 2.6,
+    "rapid_contact": 1.4,
+    "rapid_listed_by": 1.4,
+    "rapid_fallback": 1.0,
+    "jsonld_person": 2.4,
+    "jsonld_other": 1.6,
+    "agent_card_dom": 2.2,
+    "crawler_unverified": 0.9,
+    "contact_us": 0.0,
+    "cse_contact": 1.4,
+}
+
+
+def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     key = f"{agent}|{state}"
     if key in cache_p:
         return cache_p[key]
-    zillow_fallback = ""
-    rejected: Dict[str, str] = {}
-    for blk in (row_payload.get("contact_recipients") or []):
-        for p in _phones_from_block(blk):
-            d = fmt_phone(p)
-            if not (d and valid_phone(d)):
-                continue
-            if not zillow_fallback:
-                zillow_fallback = d
-            if is_mobile_number(d):
-                cache_p[key] = d
-                LOG.debug("PHONE hit directly from contact_recipients")
-                return d
-            rejected.setdefault(d, "contact_recipients")
-    zpid = str(row_payload.get("zpid", ""))
-    if zpid:
-        phone, src = rapid_phone(zpid, agent)
-        d = fmt_phone(phone)
-        if d and valid_phone(d):
-            if not zillow_fallback:
-                zillow_fallback = d
-            if is_mobile_number(d):
-                if _looks_direct(d, agent, state):
-                    cache_p[key] = d
-                    LOG.debug("PHONE WIN %s via %s (surname proximity)", d, src)
-                    return d
-            else:
-                rejected.setdefault(d, f"rapid:{src or 'unknown'}")
-    cand_good, cand_office, src_good = {}, {}, {}
-    def add(p, score, office_flag, src=""):
-        d = fmt_phone(p)
-        if not valid_phone(d):
+
+    candidates: Dict[str, Dict[str, Any]] = {}
+    had_candidates = False
+
+    def _register(
+        phone: Any,
+        source: str,
+        *,
+        url: str = "",
+        page_title: str = "",
+        context: str = "",
+        meta_name: str = "",
+        name_match: bool = False,
+        bonus: float = 0.0,
+        office_flag: bool = False,
+    ) -> None:
+        nonlocal had_candidates
+        formatted = fmt_phone(str(phone))
+        if not (formatted and valid_phone(formatted)):
             return
-        bucket = cand_office if office_flag else cand_good
-        bucket[d] = bucket.get(d, 0) + score
-        if not office_flag and src:
-            src_good[d] = src
-            DYNAMIC_SITES.add(_domain(src))
-    for items in pmap(google_items, build_q_phone(agent, state)):
+        had_candidates = True
+        info = candidates.setdefault(
+            formatted,
+            {
+                "score": 0.0,
+                "sources": set(),
+                "applied": set(),
+                "contexts": [],
+                "page_titles": set(),
+                "meta_names": set(),
+                "urls": set(),
+                "best_source": source,
+                "best_base": -1.0,
+                "office_demoted": False,
+                "name_match": False,
+            },
+        )
+        base = PHONE_SOURCE_BASE.get(source, PHONE_SOURCE_BASE["crawler_unverified"])
+        if source and source not in info["applied"]:
+            info["score"] += base
+            info["applied"].add(source)
+            if base >= info["best_base"]:
+                info["best_base"] = base
+                info["best_source"] = source
+        elif not source:
+            info["score"] += base
+        if bonus:
+            info["score"] += bonus
+        if name_match and not info["name_match"]:
+            info["score"] += 0.6
+            info["name_match"] = True
+        info["sources"].add(source)
+        if context:
+            ctx = context.lower()
+            info["contexts"].append(ctx)
+            if any(term in ctx for term in PHONE_OFFICE_TERMS) and not info["office_demoted"]:
+                info["score"] -= 1.0
+                info["office_demoted"] = True
+                LOG.debug("PHONE DEMOTE office: %s", formatted)
+        if office_flag and not info["office_demoted"]:
+            info["score"] -= 1.0
+            info["office_demoted"] = True
+            LOG.debug("PHONE DEMOTE office: %s", formatted)
+        if page_title:
+            info["page_titles"].add(page_title.lower())
+        if url:
+            info["urls"].add(url.lower())
+            DYNAMIC_SITES.add(_domain(url))
+        if meta_name:
+            info["meta_names"].add(meta_name.lower())
+
+    for blk in (row_payload.get("contact_recipients") or []):
+        ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
+        meta_name = blk.get("display_name", "")
+        match = _names_match(agent, meta_name)
+        for p in _phones_from_block(blk):
+            _register(p, "payload_contact", context=ctx, meta_name=meta_name, name_match=match)
+
+    zpid = str(row_payload.get("zpid", ""))
+    rapid = rapid_property(zpid) if zpid else {}
+    if rapid:
+        lb = rapid.get("listed_by") or {}
+        lb_name = lb.get("display_name", "")
+        match = _names_match(agent, lb_name)
+        for p in _phones_from_block(lb):
+            _register(p, "rapid_listed_by", meta_name=lb_name, name_match=match)
+        for blk in rapid.get("contact_recipients", []) or []:
+            blk_name = blk.get("display_name", "")
+            match = _names_match(agent, blk_name)
+            ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
+            for p in _phones_from_block(blk):
+                _register(p, "rapid_contact", context=ctx, meta_name=blk_name, name_match=match)
+
+    queries = build_q_phone(agent, state)
+    for items in pmap(google_items, queries):
         for it in items:
             tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
             if tel:
-                add(tel, 4, False, f"CSE:{it.get('link', '')}")
+                _register(tel, "cse_contact", url=it.get("link", ""))
+
     urls = [
         it.get("link", "")
-        for items in pmap(google_items, build_q_phone(agent, state))
+        for items in pmap(google_items, queries)
         for it in items
     ][:20]
     non_portal, portal = _split_portals(urls)
     parts = agent.split()
     first_name = parts[0].lower() if parts else ""
     last_name = parts[-1].lower() if parts else ""
-    for url, page in zip(non_portal, pmap(fetch_simple, non_portal)):
-        if not page or agent.lower() not in page.lower():
-            continue
-        ph, _, meta = extract_struct(page)
-        meta_numbers = {p for entry in meta for p in entry.get("phones", [])}
-        for p in ph:
-            boost = 2 if p in meta_numbers else 0
-            add(p, 6 + boost, False, f"{url}#ldjson" if boost else url)
-        low = html.unescape(page.lower())
-        for p, (_, sc, off) in proximity_scan(low, first_name, last_name).items():
-            add(p, sc, off, url)
-        if cand_good or cand_office:
-            break
-    if not cand_good:
-        for url, page in zip(portal, pmap(fetch, portal)):
-            if not page or agent.lower() not in page.lower():
-                continue
-            ph, _, meta = extract_struct(page)
-            meta_numbers = {p for entry in meta for p in entry.get("phones", [])}
-            for p in ph:
-                boost = 1 if p in meta_numbers else 0
-                add(p, 4 + boost, False, f"{url}#ldjson" if boost else url)
-            low = html.unescape(page.lower())
-            for p, (_, sc, off) in proximity_scan(low, first_name, last_name).items():
-                add(p, sc, off, url)
-            if cand_good:
-                break
-    phone = ""
-    for cand, _ in sorted(cand_good.items(), key=lambda t: -t[1]):
-        if is_mobile_number(cand):
-            phone = cand
-            break
-        rejected.setdefault(cand, "crawler:cand_good")
-    if not phone:
-        for cand, _ in sorted(cand_office.items(), key=lambda t: -t[1]):
-            if is_mobile_number(cand):
-                phone = cand
-                break
-            rejected.setdefault(cand, "crawler:cand_office")
-    fallback_reason = ""
-    if not phone and zillow_fallback and is_mobile_number(zillow_fallback):
-        phone = zillow_fallback
-        fallback_reason = "contact_recipients_mobile"
-    cache_p[key] = phone or ""
-    if phone:
-        src = src_good.get(phone)
-        if not src and fallback_reason:
-            src = fallback_reason
-        LOG.debug("PHONE WIN %s via %s", phone, src or "crawler/unverified")
-    else:
-        METRICS["phone_no_verified_mobile"] += 1
-        LOG.warning(
-            "PHONE DROP no verified mobile for %s %s zpid=%s rejected=%s",
-            agent,
-            state,
-            zpid or "",
-            rejected,
-        )
-    return phone
 
-def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
+    def _process_page(url: str, page: str) -> None:
+        if not page or agent.lower() not in page.lower():
+            return
+        ph, _, meta, info = extract_struct(page)
+        page_title = info.get("title", "")
+        for entry in meta:
+            entry_type = entry.get("type")
+            types = entry_type if isinstance(entry_type, list) else [entry_type]
+            source = "jsonld_person" if any(
+                t and isinstance(t, str) and ("Person" in t or "Agent" in t)
+                for t in types
+            ) else "jsonld_other"
+            meta_name = str(entry.get("name", ""))
+            match = _names_match(agent, meta_name)
+            for num in entry.get("phones", []):
+                _register(
+                    num,
+                    source,
+                    url=url,
+                    page_title=page_title,
+                    meta_name=meta_name,
+                    name_match=match,
+                )
+        for anchor in info.get("tel", []):
+            _register(
+                anchor.get("phone", ""),
+                "agent_card_dom",
+                url=url,
+                page_title=page_title,
+                context=anchor.get("context", ""),
+            )
+        low = html.unescape(page.lower())
+        for num, details in proximity_scan(low, first_name, last_name).items():
+            _register(
+                num,
+                "agent_card_dom",
+                url=url,
+                page_title=page_title,
+                context=" ".join(details.get("snippets", [])),
+                bonus=min(1.0, details.get("score", 0.0) / 4.0),
+                office_flag=details.get("office", False),
+            )
+
+    for url in non_portal:
+        page, _ = fetch_contact_page(url)
+        if not page:
+            continue
+        _process_page(url, page)
+        if candidates:
+            break
+
+    if not candidates:
+        for url in portal:
+            page, _ = fetch_contact_page(url)
+            if not page:
+                continue
+            _process_page(url, page)
+            if candidates:
+                break
+
+    tokens = _agent_tokens(agent)
+    best_number = ""
+    best_score = float("-inf")
+    best_source = ""
+    for number, info in candidates.items():
+        if tokens and any(any(tok in ctx for tok in tokens) for ctx in info.get("contexts", [])):
+            info["score"] += 0.5
+        for meta_name in info.get("meta_names", []):
+            if _names_match(agent, meta_name):
+                info["score"] += 0.4
+                break
+        if info.get("page_titles") and agent.lower() in " ".join(info["page_titles"]):
+            info["score"] += 0.3
+        if any(
+            _page_is_contactish(url, next(iter(info["page_titles"])) if info["page_titles"] else "")
+            for url in info.get("urls", [])
+        ):
+            info["score"] -= 0.4
+        if not is_mobile_number(number):
+            info["score"] -= 1.0
+        info["final_score"] = info["score"]
+        source = info.get("best_source") or (next(iter(info["sources"])) if info["sources"] else "")
+        if info["score"] > best_score:
+            best_score = info["score"]
+            best_number = number
+            best_source = source
+
+    result = {
+        "number": "",
+        "confidence": "",
+        "score": best_score if best_score != float("-inf") else 0.0,
+        "source": best_source,
+        "reason": "",
+    }
+
+    if best_number:
+        if best_score >= CONTACT_PHONE_MIN_SCORE:
+            confidence = "high"
+            LOG.debug("PHONE WIN %s via %s score=%.2f", best_number, best_source or "unknown", best_score)
+        elif best_score >= CONTACT_PHONE_LOW_CONF:
+            confidence = "low"
+            LOG.info("PHONE WIN (low-confidence): %s %.2f %s", best_number, best_score, best_source or "unknown")
+        else:
+            confidence = ""
+        if confidence:
+            result.update({
+                "number": best_number,
+                "confidence": confidence,
+                "score": best_score,
+                "source": best_source,
+            })
+            cache_p[key] = result
+            return result
+
+    if had_candidates or best_number:
+        reason = "withheld_low_conf_mix"
+    else:
+        reason = "no_personal_mobile"
+    result.update({
+        "number": "",
+        "confidence": "",
+        "reason": reason,
+        "score": best_score if best_score != float("-inf") else 0.0,
+        "source": best_source,
+    })
+    cache_p[key] = result
+    METRICS["phone_no_verified_mobile"] += 1
+    LOG.warning(
+        "PHONE DROP no verified mobile for %s %s zpid=%s reason=%s",
+        agent,
+        state,
+        zpid or "",
+        reason,
+    )
+    return result
+
+def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     key = f"{agent}|{state}"
     if key in cache_e:
         return cache_e[key]
+
     brokerage = domain_hint = mls_id = ""
+    candidates: Dict[str, Dict[str, Any]] = {}
+    generic_seen: Set[str] = set()
+    had_candidates = False
+
+    def _register(email: str, source: str, *, url: str = "", page_title: str = "", context: str = "", meta_name: str = "") -> None:
+        nonlocal had_candidates
+        cleaned = clean_email(email)
+        if not cleaned or not ok_email(cleaned):
+            return
+        low = cleaned.lower()
+        if low in generic_seen:
+            return
+        if _is_generic_email(cleaned):
+            generic_seen.add(low)
+            return
+        had_candidates = True
+        info = candidates.setdefault(
+            cleaned,
+            {
+                "score": 0.0,
+                "sources": set(),
+                "applied": set(),
+                "contexts": [],
+                "page_titles": set(),
+                "meta_names": set(),
+                "urls": set(),
+                "best_source": source,
+                "best_base": -1.0,
+            },
+        )
+        base = EMAIL_SOURCE_BASE.get(source, EMAIL_SOURCE_BASE["dom"])
+        if source and source not in info["applied"]:
+            info["score"] += base
+            info["applied"].add(source)
+            if base >= info["best_base"]:
+                info["best_base"] = base
+                info["best_source"] = source
+        info["sources"].add(source)
+        if context:
+            info["contexts"].append(context.lower())
+        if page_title:
+            info["page_titles"].add(page_title.lower())
+        if url:
+            info["urls"].add(url.lower())
+            DYNAMIC_SITES.add(_domain(url))
+        if meta_name:
+            info["meta_names"].add(meta_name.lower())
+
     for blk in (row_payload.get("contact_recipients") or []):
+        ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
         for em in _emails_from_block(blk):
             if _email_matches_name(agent, em):
-                cache_e[key] = em
-                LOG.debug("EMAIL direct-payload match")
-                return em
+                _register(em, "payload_contact", context=ctx, meta_name=blk.get("display_name", ""))
+
     zpid = str(row_payload.get("zpid", ""))
     if zpid:
         rapid = rapid_property(zpid)
@@ -832,95 +1209,171 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
             brokerage = lb.get("brokerageName", "")
             mls_id = lb.get("listingAgentMlsId", "")
             for em in _emails_from_block(lb):
-                if _email_matches_name(agent, em):
-                    cache_e[key] = em
-                    LOG.debug("EMAIL via rapid:listed_by")
-                    return em
-    cand, src_e = defaultdict(int), {}
-    def add_e(m, score, src=""):
-        m = clean_email(m)
-        if not ok_email(m):
-            return
-        domain = _domain(m)
-        last_tok = re.sub(r"[^a-z]", "", agent.split()[-1].lower()) if agent.split() else ""
-        if not (_email_matches_name(agent, m) or (last_tok and last_tok in domain)):
-            return
-        if re.search(r"\b(info|office|admin|support|advertising|noreply|hello)\b", m, re.I):
-            if last_tok and last_tok in domain:
-                score -= 1
-            else:
-                score -= 2
-        tokens = {re.sub(r"[^a-z]", "", w.lower()) for w in agent.split()}
-        if tokens and all(tok and tok in m.lower() for tok in tokens):
-            score += 3
-        if brokerage and brokerage.lower() in m.lower():
-            score += 1
-        cand[m] += score
-        if src:
-            src_e.setdefault(m, src)
-            DYNAMIC_SITES.add(_domain(src))
-        patt = _pattern_from_example(m, agent)
-        if patt:
-            domain_patterns.setdefault(_domain(m), patt)
-    for items in pmap(google_items, build_q_email(agent, state, brokerage, domain_hint, mls_id)):
+                _register(em, "rapid_listed_by", meta_name=lb.get("display_name", ""))
+            for blk in rapid.get("contact_recipients", []) or []:
+                ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
+                for em in _emails_from_block(blk):
+                    _register(em, "rapid_contact", context=ctx, meta_name=blk.get("display_name", ""))
+
+    queries = build_q_email(agent, state, brokerage, domain_hint, mls_id)
+    for items in pmap(google_items, queries):
         for it in items:
             mail = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email") or "")
-            add_e(mail, 3, f"CSE:{it.get('link', '')}")
+            if mail:
+                _register(mail, "cse_contact", url=it.get("link", ""))
+
     urls = [
         it.get("link", "")
-        for items in pmap(google_items, build_q_email(agent, state, brokerage, domain_hint, mls_id))
+        for items in pmap(google_items, queries)
         for it in items
     ][:20]
     non_portal, portal = _split_portals(urls)
-    for url, page in zip(non_portal, pmap(fetch_simple, non_portal)):
+
+    def _process_page(url: str, page: str) -> None:
         if not page or agent.lower() not in page.lower():
-            continue
-        _, ems, meta = extract_struct(page)
+            return
+        _, ems, meta, info = extract_struct(page)
+        page_title = info.get("title", "")
+        seen = set()
         for entry in meta:
-            for m in entry.get("emails", []):
-                add_e(m, 4, f"{url}#ldjson")
-        for m in ems:
-            add_e(m, 3, url)
-        for m in EMAIL_RE.findall(page):
-            add_e(m, 1, url)
-        if cand:
-            break
-    if not cand:
-        for url, page in zip(portal, pmap(fetch, portal)):
-            if not page or agent.lower() not in page.lower():
+            entry_type = entry.get("type")
+            types = entry_type if isinstance(entry_type, list) else [entry_type]
+            source = "jsonld_person" if any(
+                t and isinstance(t, str) and ("Person" in t or "Agent" in t)
+                for t in types
+            ) else "jsonld_other"
+            meta_name = str(entry.get("name", ""))
+            for mail in entry.get("emails", []):
+                seen.add(mail)
+                _register(
+                    mail,
+                    source,
+                    url=url,
+                    page_title=page_title,
+                    meta_name=meta_name,
+                )
+                patt = _pattern_from_example(mail, agent)
+                if patt:
+                    domain_patterns.setdefault(_domain(mail), patt)
+        for item in info.get("mailto", []):
+            mail = item.get("email", "")
+            if not mail:
                 continue
-            _, ems, meta = extract_struct(page)
-            for entry in meta:
-                for m in entry.get("emails", []):
-                    add_e(m, 3, f"{url}#ldjson")
-            for m in ems:
-                add_e(m, 2, url)
-            for m in EMAIL_RE.findall(page):
-                add_e(m, 1, url)
-            if cand:
+            seen.add(mail)
+            _register(
+                mail,
+                "mailto",
+                url=url,
+                page_title=page_title,
+                context=item.get("context", ""),
+            )
+        for mail in ems:
+            if mail in seen:
+                continue
+            seen.add(mail)
+            _register(mail, "dom", url=url, page_title=page_title)
+        lower_page = page.lower()
+        for m in EMAIL_RE.finditer(lower_page):
+            raw = page[m.start(): m.end()]
+            cleaned = clean_email(raw)
+            if cleaned in seen:
+                continue
+            snippet = lower_page[max(0, m.start() - 120): m.end() + 120]
+            _register(cleaned, "dom", url=url, page_title=page_title, context=" ".join(snippet.split()))
+
+    for url in non_portal:
+        page, _ = fetch_contact_page(url)
+        if not page:
+            continue
+        _process_page(url, page)
+        if candidates:
+            break
+
+    if not candidates:
+        for url in portal:
+            page, _ = fetch_contact_page(url)
+            if not page:
+                continue
+            _process_page(url, page)
+            if candidates:
                 break
-    if not cand and domain_hint:
+
+    if not candidates and domain_hint:
         guess = _synth_email(agent, domain_hint)
         if guess:
-            add_e(guess, 2, "pattern-synth")
-    email = ""
-    if cand:
-        max_score = max(cand.values())
-        winners = [m for m, s in cand.items() if s == max_score]
-        if len(winners) == 1:
-            email = winners[0]
+            _register(guess, "pattern")
+
+    tokens = _agent_tokens(agent)
+    best_email = ""
+    best_score = 0.0
+    best_source = ""
+    for email, info in candidates.items():
+        local = email.split("@", 1)[0].lower()
+        if _email_matches_name(agent, email):
+            info["score"] += 0.35
+        hits = sum(1 for tok in tokens if tok and tok in local)
+        if hits:
+            info["score"] += 0.4 if hits >= len(tokens) else 0.25
+        if tokens and any(
+            any(tok in ctx for tok in tokens)
+            for ctx in info.get("contexts", [])
+        ):
+            info["score"] += 0.2
+        if info.get("page_titles") and agent.lower() in " ".join(info["page_titles"]):
+            info["score"] += 0.25
         else:
-            last_tok = re.sub(r"[^a-z]", "", agent.split()[-1].lower())
-            good = [m for m in winners if last_tok and last_tok in m.split("@")[0].lower()]
-            email = good[0] if good else ""
-            if not email:
-                LOG.debug("EMAIL tie %s – dropped (last name absent)", winners)
-    cache_e[key] = email or ""
-    if email:
-        LOG.debug("EMAIL WIN %s via %s", email, src_e.get(email, "crawler/pattern"))
+            for title in info.get("page_titles", []):
+                if tokens and all(tok in title for tok in tokens):
+                    info["score"] += 0.2
+                    break
+        for meta_name in info.get("meta_names", []):
+            if _names_match(agent, meta_name):
+                info["score"] += 0.3
+                break
+        if any(
+            _page_is_contactish(url, next(iter(info["page_titles"])) if info["page_titles"] else "")
+            for url in info.get("urls", [])
+        ):
+            info["score"] -= 0.3
+        if any(
+            any(term in ctx for term in PHONE_OFFICE_TERMS)
+            for ctx in info.get("contexts", [])
+        ):
+            info["score"] -= 0.35
+        final_score = info["score"]
+        info["final_score"] = final_score
+        source = info.get("best_source") or (next(iter(info["sources"])) if info["sources"] else "")
+        if final_score > best_score:
+            best_email = email
+            best_score = final_score
+            best_source = source
+
+    reason = ""
+    result = {
+        "email": best_email,
+        "score": best_score,
+        "source": best_source,
+        "reason": reason,
+    }
+
+    if best_email and best_score >= CONTACT_EMAIL_MIN_SCORE:
+        cache_e[key] = result
+        LOG.debug("EMAIL WIN %s via %s score=%.2f", best_email, best_source or "unknown", best_score)
+        return result
+
+    if not had_candidates:
+        reason = "no_personal_email"
     else:
-        LOG.debug("EMAIL FAIL for %s %s – personalised e-mail not found", agent, state)
-    return email
+        reason = "withheld_low_conf_mix"
+    result.update({"email": "", "reason": reason, "score": best_score, "source": best_source})
+    cache_e[key] = result
+    LOG.debug(
+        "EMAIL FAIL for %s %s – personalised e-mail not found (%s)",
+        agent,
+        state,
+        reason,
+    )
+    return result
 
 
 def is_active_listing(zpid):
@@ -1104,7 +1557,7 @@ def check_reply(phone: str, since_iso: str) -> bool:
 def _follow_up_pass():
     resp = sheets_service.spreadsheets().values().get(
         spreadsheetId=GSHEET_ID,
-        range="Sheet1!A:X",
+        range="Sheet1!A:Z",
         majorDimension="ROWS",
         valueRenderOption="FORMATTED_VALUE",
     ).execute()
@@ -1198,8 +1651,10 @@ def process_rows(rows: List[Dict[str, Any]]):
             LOG.debug("SKIP missing agent name for %s (%s)", r.get("street"), r.get("zpid"))
             continue
         state = r.get("state", "")
-        phone = fmt_phone(lookup_phone(name, state, r))
-        email = lookup_email(name, state, r)
+        phone_info = lookup_phone(name, state, r)
+        phone = phone_info.get("number", "")
+        email_info = lookup_email(name, state, r)
+        email = email_info.get("email", "")
         if phone and phone_exists(phone):
             continue
         first, *last = name.split()
@@ -1209,6 +1664,17 @@ def process_rows(rows: List[Dict[str, Any]]):
         row_vals[COL_LAST]    = " ".join(last)
         row_vals[COL_PHONE]   = phone
         row_vals[COL_EMAIL]   = email
+        row_vals[COL_PHONE_CONF] = phone_info.get("confidence", "")
+        reason = ""
+        phone_reason = phone_info.get("reason", "")
+        email_reason = email_info.get("reason", "")
+        if "withheld_low_conf_mix" in {phone_reason, email_reason}:
+            reason = "withheld_low_conf_mix"
+        elif phone_reason == "no_personal_mobile":
+            reason = "no_personal_mobile"
+        elif email_reason == "no_personal_email":
+            reason = "no_personal_email"
+        row_vals[COL_CONTACT_REASON] = reason
         row_vals[COL_STREET]  = r.get("street", "")
         row_vals[COL_CITY]    = r.get("city", "")
         row_vals[COL_STATE]   = state
