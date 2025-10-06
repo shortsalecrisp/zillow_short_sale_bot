@@ -1151,6 +1151,16 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     generic_seen: Set[str] = set()
     had_candidates = False
 
+    tokens = _agent_tokens(agent)
+    IDENTITY_SOURCES = {
+        "mailto",
+        "dom",
+        "jsonld_other",
+        "jsonld_person",
+        "cse_contact",
+        "pattern",
+    }
+
     def _register(email: str, source: str, *, url: str = "", page_title: str = "", context: str = "", meta_name: str = "") -> None:
         nonlocal had_candidates
         cleaned = clean_email(email)
@@ -1162,6 +1172,29 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if _is_generic_email(cleaned):
             generic_seen.add(low)
             return
+
+        if source in IDENTITY_SOURCES:
+            identity_ok = False
+            if _email_matches_name(agent, cleaned):
+                identity_ok = True
+            elif meta_name and _names_match(agent, meta_name):
+                identity_ok = True
+            else:
+                haystacks: List[str] = []
+                if context:
+                    haystacks.append(context.lower())
+                if page_title:
+                    haystacks.append(page_title.lower())
+                if meta_name:
+                    haystacks.append(meta_name.lower())
+                if tokens:
+                    for tok in tokens:
+                        if tok and any(tok in hay for hay in haystacks):
+                            identity_ok = True
+                            break
+            if not identity_ok:
+                return
+
         had_candidates = True
         info = candidates.setdefault(
             cleaned,
@@ -1208,12 +1241,29 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             lb = rapid.get("listed_by") or {}
             brokerage = lb.get("brokerageName", "")
             mls_id = lb.get("listingAgentMlsId", "")
+            lb_display = lb.get("display_name", "")
+            lb_ctx = " ".join(str(lb.get(k, "")) for k in ("title", "label", "role") if lb.get(k))
             for em in _emails_from_block(lb):
-                _register(em, "rapid_listed_by", meta_name=lb.get("display_name", ""))
+                if lb_display and not _names_match(agent, lb_display):
+                    continue
+                _register(
+                    em,
+                    "rapid_listed_by",
+                    meta_name=lb_display,
+                    context=lb_ctx,
+                )
             for blk in rapid.get("contact_recipients", []) or []:
                 ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
                 for em in _emails_from_block(blk):
-                    _register(em, "rapid_contact", context=ctx, meta_name=blk.get("display_name", ""))
+                    display_name = blk.get("display_name", "")
+                    if display_name and not _names_match(agent, display_name):
+                        continue
+                    _register(
+                        em,
+                        "rapid_contact",
+                        context=ctx,
+                        meta_name=display_name,
+                    )
 
     queries = build_q_email(agent, state, brokerage, domain_hint, mls_id)
     for items in pmap(google_items, queries):
@@ -1303,7 +1353,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if guess:
             _register(guess, "pattern")
 
-    tokens = _agent_tokens(agent)
     best_email = ""
     best_score = 0.0
     best_source = ""
