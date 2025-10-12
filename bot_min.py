@@ -78,6 +78,109 @@ CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
 CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
 CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
 
+BASE_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Referer": "https://www.google.com/",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Ch-Ua": '"Chromium";v="125", "Not.A/Brand";v="24", "Google Chrome";v="125"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+}
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.55 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edg/125.0.2535.92",
+]
+
+
+def _browser_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
+    headers = dict(BASE_BROWSER_HEADERS)
+    headers["User-Agent"] = random.choice(USER_AGENTS)
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+DOMAIN_MIN_GAP = float(os.getenv("DOMAIN_MIN_GAP", "1.2"))
+_DOMAIN_GAP_OVERRIDES = {
+    "realtor.com": 6.0,
+    "zillow.com": 4.0,
+    "trulia.com": 6.0,
+    "remax.com": 4.0,
+    "pontegroupne.com": 5.0,
+    "npdodge.com": 5.0,
+}
+_SKIP_THROTTLE_DOMAINS = {
+    "googleapis.com",
+    "oauth2.googleapis.com",
+    "sheets.googleapis.com",
+    "api.cloudmersive.com",
+    "api.smstext.app",
+    "r.jina.ai",
+}
+_domain_last_hit: Dict[str, float] = {}
+_domain_lock = threading.Lock()
+
+
+def _pre_request_sleep(url: str) -> str:
+    dom = _domain(url)
+    if dom in _SKIP_THROTTLE_DOMAINS:
+        return dom
+    gap = _DOMAIN_GAP_OVERRIDES.get(dom, DOMAIN_MIN_GAP)
+    with _domain_lock:
+        now = time.time()
+        last = _domain_last_hit.get(dom, 0.0)
+        wait = max(0.0, (last + gap) - now)
+        _domain_last_hit[dom] = now + wait
+    if wait > 0:
+        sleep_for = min(wait, gap * 2)
+        LOG.debug("domain throttle sleep %.2fs for %s", sleep_for, dom)
+        time.sleep(sleep_for)
+    return dom
+
+
+def _post_request_mark(dom: str) -> None:
+    if not dom or dom in _SKIP_THROTTLE_DOMAINS:
+        return
+    with _domain_lock:
+        _domain_last_hit[dom] = time.time()
+
+
+def _http_get(
+    url: str,
+    *,
+    extra_headers: Dict[str, str] | None = None,
+    timeout: float = 10,
+    **kwargs,
+):
+    dom = _pre_request_sleep(url)
+    try:
+        return requests.get(
+            url,
+            timeout=timeout,
+            headers=_browser_headers(extra_headers),
+            **kwargs,
+        )
+    finally:
+        _post_request_mark(dom)
+
 _generic_domains_env = os.getenv("CONTACT_GENERIC_EMAIL_DOMAINS", "homelight.com,example.org")
 GENERIC_EMAIL_DOMAINS = {
     d.strip().lower()
@@ -181,7 +284,7 @@ SCRAPE_SITES:  List[str] = []
 DYNAMIC_SITES: Set[str]  = set()
 BAN_KEYWORDS = {
     "zillow.com", "realtor.com", "redfin.com", "homes.com",
-    "linkedin.com", "twitter.com", "instagram.com", "pinterest.com", "legacy.com",
+    "linkedin.com", "twitter.com", "instagram.com", "pinterest.com", "facebook.com", "legacy.com",
     "obituary", "obituaries", "funeral",
     ".gov", ".edu", ".mil",
 }
@@ -305,10 +408,10 @@ def rapid_property(zpid: str) -> Dict[str, Any]:
         return {}
     try:
         headers = {"X-RapidAPI-Key": RAPID_KEY, "X-RapidAPI-Host": RAPID_HOST}
-        r = requests.get(
+        r = _http_get(
             f"https://{RAPID_HOST}/property",
             params={"zpid": zpid},
-            headers=headers,
+            extra_headers=headers,
             timeout=15,
         )
         if r.status_code == 429:
@@ -379,10 +482,9 @@ def _mark_block(dom: str) -> None:
 
 def _try_textise(dom: str, url: str) -> str:
     try:
-        r = requests.get(
+        r = _http_get(
             f"https://r.jina.ai/http://{urlparse(url).netloc}{urlparse(url).path}",
             timeout=10,
-            headers={"User-Agent": "Mozilla/5.0"},
         )
         if r.status_code == 200 and r.text.strip():
             return r.text
@@ -409,7 +511,7 @@ def fetch_simple(u: str, strict: bool = True):
         return None
     dom = _domain(u)
     try:
-        r = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        r = _http_get(u, timeout=10)
         if r.status_code == 200:
             return r.text
         if r.status_code in (403, 429):
@@ -437,7 +539,7 @@ def fetch(u: str, strict: bool = True):
     for url in variants:
         for _ in range(3):
             try:
-                r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                r = _http_get(url, timeout=10)
             except Exception as exc:
                 METRICS["fetch_error"] += 1
                 LOG.debug("fetch error %s on %s", exc, url)
@@ -502,7 +604,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if delay:
             time.sleep(delay)
         try:
-            resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            resp = _http_get(url, timeout=10)
         except Exception as exc:
             LOG.debug("fetch_contact_page error %s on %s", exc, url)
             break
@@ -528,7 +630,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         mirror = _mirror_url(url)
         if mirror:
             try:
-                mirror_resp = requests.get(mirror, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                mirror_resp = _http_get(mirror, timeout=10)
                 if mirror_resp.status_code == 200 and mirror_resp.text.strip():
                     LOG.info("MIRROR FALLBACK used")
                     return mirror_resp.text, True
@@ -553,7 +655,7 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
     backoff = 1.0
     for _ in range(tries):
         try:
-            j = requests.get(
+            j = _http_get(
                 "https://www.googleapis.com/customsearch/v1",
                 params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
                 timeout=10,
@@ -713,18 +815,37 @@ def build_q_phone(name: str, state: str) -> List[str]:
 def build_q_email(
     name: str, state: str, brokerage: str = "", domain_hint: str = "", mls_id: str = ""
 ) -> List[str]:
-    out = [
-        f'"{name}" {state} realtor email',
-        f'"{name}" {state} real estate email',
-        f'"{name}" {state} contact email',
-    ]
+    queries: List[str] = []
+
+    def _add(q: str) -> None:
+        if q and q not in queries:
+            queries.append(q)
+
+    base = f'"{name}" {state}'.strip()
+    _add(f"{base} realtor email")
+    _add(f"{base} real estate email")
+    _add(f"{base} contact email")
+    _add(f"{base} email address")
+
+    parts = [p for p in name.split() if p]
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        _add(f'"{first} {last}" "email" {state}'.strip())
+        if brokerage:
+            _add(f'"{last}" "{brokerage}" email')
+
     if brokerage:
-        out.append(f'"{name}" "{brokerage}" email')
+        _add(f'"{name}" "{brokerage}" email')
+        _add(f'"{name}" "{brokerage}" "contact"')
+
     if domain_hint:
-        out.append(f'site:{domain_hint} "{name}" email')
-    if mls_id:
-        out.append(f'"{mls_id}" "{name.split()[-1]}" email')
-    return out
+        _add(f'site:{domain_hint} "{name}" email')
+        _add(f'"{name}" "@{domain_hint}"')
+
+    if mls_id and parts:
+        _add(f'"{mls_id}" "{parts[-1]}" email')
+
+    return queries
 
 # nickname mapping for email‑matching heuristic
 _NICK_MAP = {
