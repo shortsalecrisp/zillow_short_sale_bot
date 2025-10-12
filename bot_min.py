@@ -197,7 +197,7 @@ SCRAPE_SITES:  List[str] = []
 DYNAMIC_SITES: Set[str]  = set()
 BAN_KEYWORDS = {
     "zillow.com", "realtor.com", "redfin.com", "homes.com",
-    "linkedin.com", "twitter.com", "instagram.com", "pinterest.com", "legacy.com",
+    "linkedin.com", "twitter.com", "instagram.com", "pinterest.com", "facebook.com", "legacy.com",
     "obituary", "obituaries", "funeral",
     ".gov", ".edu", ".mil",
 }
@@ -321,10 +321,10 @@ def rapid_property(zpid: str) -> Dict[str, Any]:
         return {}
     try:
         headers = {"X-RapidAPI-Key": RAPID_KEY, "X-RapidAPI-Host": RAPID_HOST}
-        r = requests.get(
+        r = _http_get(
             f"https://{RAPID_HOST}/property",
             params={"zpid": zpid},
-            headers=headers,
+            extra_headers=headers,
             timeout=15,
         )
         if r.status_code == 429:
@@ -395,7 +395,7 @@ def _mark_block(dom: str) -> None:
 
 def _try_textise(dom: str, url: str) -> str:
     try:
-        r = requests.get(
+        r = _http_get(
             f"https://r.jina.ai/http://{urlparse(url).netloc}{urlparse(url).path}",
             timeout=10,
             headers=BROWSER_HEADERS,
@@ -569,7 +569,7 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
     backoff = 1.0
     for _ in range(tries):
         try:
-            j = requests.get(
+            j = _http_get(
                 "https://www.googleapis.com/customsearch/v1",
                 params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
                 timeout=10,
