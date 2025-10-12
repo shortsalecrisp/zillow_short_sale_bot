@@ -78,6 +78,22 @@ CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
 CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
 CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
 
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+
 _generic_domains_env = os.getenv("CONTACT_GENERIC_EMAIL_DOMAINS", "homelight.com,example.org")
 GENERIC_EMAIL_DOMAINS = {
     d.strip().lower()
@@ -382,7 +398,7 @@ def _try_textise(dom: str, url: str) -> str:
         r = requests.get(
             f"https://r.jina.ai/http://{urlparse(url).netloc}{urlparse(url).path}",
             timeout=10,
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers=BROWSER_HEADERS,
         )
         if r.status_code == 200 and r.text.strip():
             return r.text
@@ -409,7 +425,7 @@ def fetch_simple(u: str, strict: bool = True):
         return None
     dom = _domain(u)
     try:
-        r = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        r = requests.get(u, timeout=10, headers=BROWSER_HEADERS)
         if r.status_code == 200:
             return r.text
         if r.status_code in (403, 429):
@@ -437,7 +453,7 @@ def fetch(u: str, strict: bool = True):
     for url in variants:
         for _ in range(3):
             try:
-                r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                r = requests.get(url, timeout=10, headers=BROWSER_HEADERS)
             except Exception as exc:
                 METRICS["fetch_error"] += 1
                 LOG.debug("fetch error %s on %s", exc, url)
@@ -502,7 +518,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if delay:
             time.sleep(delay)
         try:
-            resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            resp = requests.get(url, timeout=10, headers=BROWSER_HEADERS)
         except Exception as exc:
             LOG.debug("fetch_contact_page error %s on %s", exc, url)
             break
@@ -528,7 +544,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         mirror = _mirror_url(url)
         if mirror:
             try:
-                mirror_resp = requests.get(mirror, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                mirror_resp = requests.get(mirror, timeout=10, headers=BROWSER_HEADERS)
                 if mirror_resp.status_code == 200 and mirror_resp.text.strip():
                     LOG.info("MIRROR FALLBACK used")
                     return mirror_resp.text, True
@@ -713,18 +729,37 @@ def build_q_phone(name: str, state: str) -> List[str]:
 def build_q_email(
     name: str, state: str, brokerage: str = "", domain_hint: str = "", mls_id: str = ""
 ) -> List[str]:
-    out = [
-        f'"{name}" {state} realtor email',
-        f'"{name}" {state} real estate email',
-        f'"{name}" {state} contact email',
-    ]
+    queries: List[str] = []
+
+    def _add(q: str) -> None:
+        if q and q not in queries:
+            queries.append(q)
+
+    base = f'"{name}" {state}'.strip()
+    _add(f"{base} realtor email")
+    _add(f"{base} real estate email")
+    _add(f"{base} contact email")
+    _add(f"{base} email address")
+
+    parts = [p for p in name.split() if p]
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        _add(f'"{first} {last}" "email" {state}'.strip())
+        if brokerage:
+            _add(f'"{last}" "{brokerage}" email')
+
     if brokerage:
-        out.append(f'"{name}" "{brokerage}" email')
+        _add(f'"{name}" "{brokerage}" email')
+        _add(f'"{name}" "{brokerage}" "contact"')
+
     if domain_hint:
-        out.append(f'site:{domain_hint} "{name}" email')
-    if mls_id:
-        out.append(f'"{mls_id}" "{name.split()[-1]}" email')
-    return out
+        _add(f'site:{domain_hint} "{name}" email')
+        _add(f'"{name}" "@{domain_hint}"')
+
+    if mls_id and parts:
+        _add(f'"{mls_id}" "{parts[-1]}" email')
+
+    return queries
 
 # nickname mapping for email‑matching heuristic
 _NICK_MAP = {
