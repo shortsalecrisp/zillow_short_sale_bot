@@ -1,24 +1,73 @@
+from __future__ import annotations
+
 import concurrent.futures
 import html
 import json
 import logging
 import os
-import random
 import re
 import sys
 import threading
-import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Set, Tuple
 from urllib.parse import urlparse
+
+import time, random
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import gspread
 import pytz
 import requests
+from requests.adapters import HTTPAdapter, Retry
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build as gapi_build
 from sms_providers import get_sender
+
+_session = requests.Session()
+_retries = Retry(
+    total=5, connect=5, read=5,
+    backoff_factor=0.6,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=("GET",),
+    raise_on_status=False,
+)
+_adapter = HTTPAdapter(max_retries=_retries)
+_session.mount("http://", _adapter)
+_session.mount("https://", _adapter)
+
+_DEFAULT_TIMEOUT = 25
+
+def _http_get(
+    url: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    extra_headers: Optional[Dict[str, str]] = None,
+    timeout: int | float = _DEFAULT_TIMEOUT,
+) -> requests.Response:
+    hdrs = {}
+    if headers:
+        hdrs.update(headers)
+    if extra_headers:
+        hdrs.update(extra_headers)
+
+    attempts = 0
+    while True:
+        attempts += 1
+        resp = _session.get(url, params=params, headers=hdrs or None, timeout=timeout)
+        if resp.status_code == 429 and attempts <= 5:
+            ra = resp.headers.get("Retry-After")
+            sleep_s = int(ra) if ra and ra.isdigit() else min(30, 2 ** attempts) + random.uniform(0, 0.5)
+            time.sleep(sleep_s)
+            continue
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError:
+            if attempts <= 1 and resp.status_code in (500, 502, 503, 504):
+                time.sleep(0.5 + random.uniform(0, 0.25))
+                continue
+            raise
+        return resp
 
 try:
     import phonenumbers
@@ -425,7 +474,12 @@ def fetch_simple(u: str, strict: bool = True):
         return None
     dom = _domain(u)
     try:
-        r = requests.get(u, timeout=10, headers=BROWSER_HEADERS)
+        try:
+            r = _http_get(u, timeout=10, headers=BROWSER_HEADERS)
+        except requests.HTTPError as exc:
+            r = exc.response
+            if r is None:
+                raise
         if r.status_code == 200:
             return r.text
         if r.status_code in (403, 429):
@@ -453,10 +507,17 @@ def fetch(u: str, strict: bool = True):
     for url in variants:
         for _ in range(3):
             try:
-                r = requests.get(url, timeout=10, headers=BROWSER_HEADERS)
+                try:
+                    r = _http_get(url, timeout=10, headers=BROWSER_HEADERS)
+                except requests.HTTPError as exc:
+                    r = exc.response
+                    if r is None:
+                        raise
             except Exception as exc:
                 METRICS["fetch_error"] += 1
                 LOG.debug("fetch error %s on %s", exc, url)
+                break
+            if r is None:
                 break
             if r.status_code == 200:
                 if "unusual traffic" in r.text[:700].lower():
@@ -518,7 +579,12 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if delay:
             time.sleep(delay)
         try:
-            resp = requests.get(url, timeout=10, headers=BROWSER_HEADERS)
+            try:
+                resp = _http_get(url, timeout=10, headers=BROWSER_HEADERS)
+            except requests.HTTPError as exc:
+                resp = exc.response
+                if resp is None:
+                    raise
         except Exception as exc:
             LOG.debug("fetch_contact_page error %s on %s", exc, url)
             break
@@ -544,7 +610,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         mirror = _mirror_url(url)
         if mirror:
             try:
-                mirror_resp = requests.get(mirror, timeout=10, headers=BROWSER_HEADERS)
+                mirror_resp = _http_get(mirror, timeout=10, headers=BROWSER_HEADERS)
                 if mirror_resp.status_code == 200 and mirror_resp.text.strip():
                     LOG.info("MIRROR FALLBACK used")
                     return mirror_resp.text, True
