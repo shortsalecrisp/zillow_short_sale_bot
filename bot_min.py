@@ -1170,6 +1170,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     best_number = ""
     best_score = float("-inf")
     best_source = ""
+    best_is_mobile = False
     for number, info in candidates.items():
         if tokens and any(any(tok in ctx for tok in tokens) for ctx in info.get("contexts", [])):
             info["score"] += 0.5
@@ -1184,7 +1185,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             for url in info.get("urls", [])
         ):
             info["score"] -= 0.4
-        if not is_mobile_number(number):
+        mobile = is_mobile_number(number)
+        info["is_mobile"] = mobile
+        if not mobile:
             info["score"] -= 1.0
         info["final_score"] = info["score"]
         source = info.get("best_source") or (next(iter(info["sources"])) if info["sources"] else "")
@@ -1192,6 +1195,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             best_score = info["score"]
             best_number = number
             best_source = source
+            best_is_mobile = mobile
 
     result = {
         "number": "",
@@ -1202,19 +1206,33 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     }
 
     if best_number:
+        override_low_conf = False
+        adjusted_score = best_score
         if best_score >= CONTACT_PHONE_MIN_SCORE:
             confidence = "high"
             LOG.debug("PHONE WIN %s via %s score=%.2f", best_number, best_source or "unknown", best_score)
         elif best_score >= CONTACT_PHONE_LOW_CONF:
             confidence = "low"
             LOG.info("PHONE WIN (low-confidence): %s %.2f %s", best_number, best_score, best_source or "unknown")
+        elif best_is_mobile:
+            override_low_conf = True
+            confidence = "low"
+            adjusted_score = max(best_score, CONTACT_PHONE_LOW_CONF)
+            LOG.info(
+                "PHONE WIN (Cloudmersive override): %s %.2f %s raw=%.2f",
+                best_number,
+                adjusted_score,
+                best_source or "unknown",
+                best_score,
+            )
         else:
             confidence = ""
         if confidence:
+            best_score = adjusted_score
             result.update({
                 "number": best_number,
                 "confidence": confidence,
-                "score": best_score,
+                "score": adjusted_score,
                 "source": best_source,
             })
             cache_p[key] = result
