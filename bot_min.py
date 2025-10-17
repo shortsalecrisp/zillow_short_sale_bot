@@ -847,6 +847,25 @@ _NICK_MAP = {
     "alex": "alexander", "sandy": "alexandra", "sandra": "alexandra",
     "ricki": "ricardo", "ricky": "ricardo", "richie": "richard",
 }
+
+
+def _token_in_text(text: str, token: str) -> bool:
+    if not token:
+        return False
+    return bool(re.search(rf"\b{re.escape(token)}\b", text))
+
+
+def _first_last_tokens(name: str) -> Tuple[Set[str], str]:
+    parts = [p for p in name.split() if p]
+    if not parts:
+        return set(), ""
+    first_raw = re.sub(r"[^a-z]", "", parts[0].lower())
+    last_part = parts[-1] if len(parts) > 1 else parts[0]
+    last_raw = re.sub(r"[^a-z]", "", last_part.lower())
+    first_variants = {_ for _ in _token_variants(first_raw) if _}
+    return first_variants, last_raw
+
+
 def _token_variants(tok: str) -> Set[str]:
     tok = tok.lower()
     out = {tok}
@@ -1102,12 +1121,23 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         for it in items
     ][:20]
     non_portal, portal = _split_portals(urls)
-    parts = agent.split()
-    first_name = parts[0].lower() if parts else ""
-    last_name = parts[-1].lower() if parts else ""
+    parts = [p for p in agent.split() if p]
+    first_name = re.sub(r"[^a-z]", "", parts[0].lower()) if parts else ""
+    last_name = re.sub(r"[^a-z]", "", (parts[-1] if len(parts) > 1 else parts[0]).lower()) if parts else ""
+    first_variants, last_token = _first_last_tokens(agent)
+
+    def _page_has_name(page_text: str) -> bool:
+        if not (last_token or first_variants):
+            return False
+        low = page_text.lower()
+        if last_token and not _token_in_text(low, last_token):
+            return False
+        if first_variants and not any(_token_in_text(low, tok) for tok in first_variants):
+            return False
+        return True
 
     def _process_page(url: str, page: str) -> None:
-        if not page or agent.lower() not in page.lower():
+        if not page or not _page_has_name(page):
             return
         ph, _, meta, info = extract_struct(page)
         page_title = info.get("title", "")
@@ -1398,8 +1428,20 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     ][:20]
     non_portal, portal = _split_portals(urls)
 
+    first_variants, last_token = _first_last_tokens(agent)
+
+    def _page_has_name(page_text: str) -> bool:
+        if not (last_token or first_variants):
+            return False
+        low = page_text.lower()
+        if last_token and not _token_in_text(low, last_token):
+            return False
+        if first_variants and not any(_token_in_text(low, tok) for tok in first_variants):
+            return False
+        return True
+
     def _process_page(url: str, page: str) -> None:
-        if not page or agent.lower() not in page.lower():
+        if not page or not _page_has_name(page):
             return
         _, ems, meta, info = extract_struct(page)
         page_title = info.get("title", "")

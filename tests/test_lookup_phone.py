@@ -81,3 +81,72 @@ def test_realtor_office_label_cloudmersive_override(monkeypatch):
     assert result["confidence"] == "low"
     assert result["source"] == "rapid_contact"
     assert result["score"] >= bot_min.CONTACT_PHONE_LOW_CONF
+
+
+def test_lookup_phone_allows_nickname_in_page_guard(monkeypatch):
+    page_html = """
+    <html>
+        <body>
+            <h1>Joshua "Josh" Sparber</h1>
+            <p>Cell: (555) 010-0000</p>
+            <p>Office: (555) 999-0000</p>
+            <a href="tel:5550100000">Call Josh</a>
+        </body>
+    </html>
+    """
+
+    def fake_fetch(url):
+        return page_html, "text/html"
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://example.com/profile"}])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: "010-0000" in number)
+
+    bot_min.cache_p.clear()
+
+    result = bot_min.lookup_phone(
+        "Joshua M Sparber",
+        "MN",
+        {"zpid": "", "contact_recipients": []},
+    )
+
+    assert result["number"] == "555-010-0000"
+    assert result["source"] == "agent_card_dom"
+
+
+def test_lookup_email_allows_first_name_variants(monkeypatch):
+    page_html = """
+    <html>
+        <body>
+            <div>Meet Mike Johnson, your trusted agent.</div>
+            <a href="mailto:mike@homes.com">Email Mike Johnson</a>
+        </body>
+    </html>
+    """
+
+    def fake_fetch(url):
+        return page_html, "text/html"
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(
+        bot_min,
+        "build_q_email",
+        lambda agent, state, brokerage, domain_hint, mls_id: ["query"],
+    )
+    monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://example.com/profile"}])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+
+    bot_min.cache_e.clear()
+
+    result = bot_min.lookup_email(
+        "Michael Johnson",
+        "KY",
+        {"zpid": "", "contact_recipients": []},
+    )
+
+    assert result["email"] == "mike@homes.com"
+    assert result["source"] == "mailto"
