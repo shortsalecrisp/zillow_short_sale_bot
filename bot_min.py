@@ -1209,6 +1209,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     best_score = float("-inf")
     best_source = ""
     best_is_mobile = False
+    best_non_office_mobile_number = ""
+    best_non_office_mobile_score = float("-inf")
+    best_non_office_mobile_source = ""
     for number, info in candidates.items():
         if tokens and any(any(tok in ctx for tok in tokens) for ctx in info.get("contexts", [])):
             info["score"] += 0.5
@@ -1234,6 +1237,28 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             best_number = number
             best_source = source
             best_is_mobile = mobile
+        if mobile and not info.get("office_demoted") and info["score"] > best_non_office_mobile_score:
+            best_non_office_mobile_score = info["score"]
+            best_non_office_mobile_number = number
+            best_non_office_mobile_source = source
+
+    if (
+        best_number
+        and candidates.get(best_number, {}).get("office_demoted")
+        and best_non_office_mobile_number
+        and best_non_office_mobile_number != best_number
+    ):
+        LOG.info(
+            "PHONE OVERRIDE prefer_non_office_mobile: %s (%.2f) -> %s (%.2f)",
+            best_number,
+            best_score,
+            best_non_office_mobile_number,
+            best_non_office_mobile_score,
+        )
+        best_number = best_non_office_mobile_number
+        best_score = best_non_office_mobile_score
+        best_source = best_non_office_mobile_source
+        best_is_mobile = True
 
     result = {
         "number": "",
