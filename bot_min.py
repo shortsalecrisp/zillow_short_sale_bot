@@ -768,15 +768,19 @@ def proximity_scan(t: str, first_name: str = "", last_name: str = ""):
         if not valid_phone(p):
             continue
         snippet = t[max(m.start() - 120, 0): m.end() + 120]
-        if first_name and first_name.lower() not in snippet:
-            continue
-        if last_name and last_name.lower() not in snippet:
-            continue
-        lab_match = LABEL_RE.search(snippet)
+        snippet_low = snippet.lower()
+        lab_match = LABEL_RE.search(snippet_low)
         lab = lab_match.group().lower() if lab_match else ""
         w = LABEL_TABLE.get(lab, 0)
         if w < 1:
             continue
+        has_first = bool(first_name and first_name in snippet_low)
+        has_last = bool(last_name and last_name in snippet_low)
+        if not has_last:
+            if not has_first:
+                continue
+            if w < 3:
+                continue
         entry = out.setdefault(
             p,
             {
