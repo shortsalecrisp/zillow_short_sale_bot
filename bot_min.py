@@ -410,6 +410,12 @@ def _emails_from_block(blk: Dict[str, Any]) -> List[str]:
     return [e for e in out if ok_email(e)]
 
 def _names_match(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    if not isinstance(a, str):
+        a = str(a or "")
+    if not isinstance(b, str):
+        b = str(b or "")
     ta = {t.lower().strip(".") for t in a.split() if len(t) > 1}
     tb = {t.lower().strip(".") for t in b.split() if len(t) > 1}
     return bool(ta & tb)
