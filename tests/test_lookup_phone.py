@@ -150,3 +150,35 @@ def test_lookup_email_allows_first_name_variants(monkeypatch):
 
     assert result["email"] == "mike@homes.com"
     assert result["source"] == "mailto"
+
+
+def test_lookup_email_fallback_accepts_agent_match(monkeypatch):
+    fake_email = "priscilla.perez-mcguire@remax.com"
+
+    def fake_rapid_property(zpid):
+        return {
+            "listed_by": {
+                "display_name": "Priscilla Perez-McGuire",
+                "brokerageName": "RE/MAX Anchor Realty",
+                "emails": [fake_email],
+            }
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_email", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+    monkeypatch.setattr(bot_min, "CONTACT_EMAIL_MIN_SCORE", 2.5)
+
+    bot_min.cache_e.clear()
+
+    result = bot_min.lookup_email(
+        "Priscilla Perez-McGuire",
+        "FL",
+        {"zpid": "12345", "contact_recipients": []},
+    )
+
+    assert result["email"] == fake_email
+    assert result["confidence"] == "low"
+    assert result["source"] == "rapid_listed_by"

@@ -7,13 +7,15 @@ import re
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime
+from typing import Optional
 
 import gspread
 from google.oauth2.service_account import Credentials
 
 from apify_fetcher import fetch_rows          # unchanged helper
-from bot_min       import process_rows        # unchanged helper
+from bot_min       import process_rows, run_hourly_scheduler        # unchanged helper
 from sms_providers import get_sender
 
 # ──────────────────────────────────────────────────────────────────────
@@ -43,6 +45,52 @@ app            = FastAPI()
 
 # In-memory de-dupe cache of exported ZPIDs
 EXPORTED_ZPIDS: set[str] = set()
+
+_scheduler_thread: Optional[threading.Thread] = None
+_scheduler_stop: Optional[threading.Event] = None
+
+
+def _ensure_scheduler_thread() -> None:
+    global _scheduler_thread, _scheduler_stop
+    if _scheduler_thread and _scheduler_thread.is_alive():
+        return
+
+    _scheduler_stop = threading.Event()
+
+    def _runner() -> None:
+        logger.info("Background hourly scheduler thread starting")
+        while not _scheduler_stop.is_set():
+            try:
+                run_hourly_scheduler(stop_event=_scheduler_stop)
+                break
+            except Exception:
+                logger.exception(
+                    "Background scheduler crashed; restarting in 30 seconds"
+                )
+                if _scheduler_stop.wait(30):
+                    break
+        logger.info("Background hourly scheduler thread stopped")
+
+    _scheduler_thread = threading.Thread(
+        target=_runner,
+        name="hourly-scheduler",
+        daemon=True,
+    )
+    _scheduler_thread.start()
+
+
+@app.on_event("startup")
+async def _start_scheduler() -> None:
+    _ensure_scheduler_thread()
+
+
+@app.on_event("shutdown")
+async def _stop_scheduler() -> None:
+    global _scheduler_thread, _scheduler_stop
+    if _scheduler_stop:
+        _scheduler_stop.set()
+    if _scheduler_thread and _scheduler_thread.is_alive():
+        _scheduler_thread.join(timeout=10)
 
 # ──────────────────────────────────────────────────────────────────────
 # Google Sheets helpers

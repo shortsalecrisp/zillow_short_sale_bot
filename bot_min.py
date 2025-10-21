@@ -124,6 +124,7 @@ SMS_RETRY_ATTEMPTS = int(os.getenv("SMS_RETRY_ATTEMPTS", "2"))
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
 CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
+CONTACT_EMAIL_FALLBACK_SCORE = float(os.getenv("CONTACT_EMAIL_FALLBACK_SCORE", "0.45"))
 CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
 CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
 
@@ -180,7 +181,8 @@ COL_INIT_TS     = 22  # W
 COL_FU_TS       = 23  # X
 COL_PHONE_CONF  = 24  # Y
 COL_CONTACT_REASON = 25  # Z
-MIN_COLS        = 26
+COL_EMAIL_CONF  = 26  # AA
+MIN_COLS        = 27
 
 MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
@@ -1324,13 +1326,14 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         low = cleaned.lower()
         if low in generic_seen:
             return
-        if _is_generic_email(cleaned):
+        matches_agent = _email_matches_name(agent, cleaned)
+        if _is_generic_email(cleaned) and not matches_agent:
             generic_seen.add(low)
             return
 
         if source in IDENTITY_SOURCES:
             identity_ok = False
-            if _email_matches_name(agent, cleaned):
+            if matches_agent:
                 identity_ok = True
             elif meta_name and _names_match(agent, meta_name):
                 identity_ok = True
@@ -1363,6 +1366,10 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "urls": set(),
                 "best_source": source,
                 "best_base": -1.0,
+                "identity_hits": 0,
+                "identity_sources": set(),
+                "agent_match": False,
+                "domain": cleaned.split("@", 1)[1].lower(),
             },
         )
         base = EMAIL_SOURCE_BASE.get(source, EMAIL_SOURCE_BASE["dom"])
@@ -1373,6 +1380,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 info["best_base"] = base
                 info["best_source"] = source
         info["sources"].add(source)
+        if source in IDENTITY_SOURCES and source not in info["identity_sources"]:
+            info["identity_sources"].add(source)
+            info["identity_hits"] += 1
         if context:
             info["contexts"].append(context.lower())
         if page_title:
@@ -1381,7 +1391,18 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             info["urls"].add(url.lower())
             DYNAMIC_SITES.add(_domain(url))
         if meta_name:
-            info["meta_names"].add(meta_name.lower())
+            meta_low = meta_name.lower()
+            if meta_low not in info["meta_names"]:
+                info["meta_names"].add(meta_low)
+                if _names_match(agent, meta_name):
+                    info["identity_hits"] += 1
+                    info["identity_sources"].add("meta_name")
+            else:
+                info["meta_names"].add(meta_low)
+        if matches_agent and not info["agent_match"]:
+            info["agent_match"] = True
+            info["identity_hits"] += 1
+            info["identity_sources"].add("email_match")
 
     for blk in (row_payload.get("contact_recipients") or []):
         ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
@@ -1570,18 +1591,71 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "score": best_score,
         "source": best_source,
         "reason": reason,
+        "confidence": "",
     }
 
     if best_email and best_score >= CONTACT_EMAIL_MIN_SCORE:
+        result["confidence"] = "high"
         cache_e[key] = result
-        LOG.debug("EMAIL WIN %s via %s score=%.2f", best_email, best_source or "unknown", best_score)
+        LOG.debug(
+            "EMAIL WIN %s via %s score=%.2f",
+            best_email,
+            best_source or "unknown",
+            best_score,
+        )
         return result
+
+    fallback_ok = False
+    if best_email and best_score >= CONTACT_EMAIL_FALLBACK_SCORE:
+        info = candidates.get(best_email, {})
+        sources = info.get("sources", set())
+        identity_hits = info.get("identity_hits", 0)
+        agent_match = info.get("agent_match", False)
+        identity_sources = info.get("identity_sources", set())
+        strong_sources = sources & {
+            "rapid_listed_by",
+            "rapid_contact",
+            "payload_contact",
+            "jsonld_person",
+        }
+        domain = info.get("domain", best_email.split("@", 1)[1].lower()) if best_email else ""
+        domain_root = _domain(domain)
+        normalized_brokerage_tokens = []
+        if brokerage:
+            normalized_brokerage_tokens = [
+                tok
+                for tok in re.sub(r"[^a-z0-9]+", " ", brokerage.lower()).split()
+                if len(tok) >= 4
+            ]
+        domain_hint_hit = bool(domain_hint and domain.endswith(domain_hint.lower()))
+        brokerage_hit = any(tok in domain or tok in domain_root for tok in normalized_brokerage_tokens)
+        fallback_ok = (
+            agent_match
+            or identity_hits >= 2
+            or bool(strong_sources)
+            or bool(identity_sources - {"dom"})
+            or domain_hint_hit
+            or brokerage_hit
+        )
+        if fallback_ok:
+            result["confidence"] = "low"
+            cache_e[key] = result
+            LOG.info(
+                "EMAIL WIN (fallback) %s via %s score=%.2f", best_email, best_source or "unknown", best_score
+            )
+            return result
 
     if not had_candidates:
         reason = "no_personal_email"
     else:
         reason = "withheld_low_conf_mix"
-    result.update({"email": "", "reason": reason, "score": best_score, "source": best_source})
+    result.update({
+        "email": "",
+        "reason": reason,
+        "score": best_score,
+        "source": best_source,
+        "confidence": "",
+    })
     cache_e[key] = result
     LOG.debug(
         "EMAIL FAIL for %s %s – personalised e-mail not found (%s)",
@@ -1769,11 +1843,73 @@ def check_reply(phone: str, since_iso: str) -> bool:
 
     return False
 
+# ───────────────────── scheduler helpers ─────────────────────
+def _next_scheduler_run(now: datetime) -> datetime:
+    if now.hour >= WORK_END - 1:
+        return (now + timedelta(days=1)).replace(
+            hour=WORK_START, minute=0, second=0, microsecond=0
+        )
+    if now.hour < WORK_START:
+        return now.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
+    return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+
+def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
+    LOG.info(
+        "Hourly scheduler loop starting (thread=%s)",
+        threading.current_thread().name,
+    )
+    while True:
+        if stop_event and stop_event.is_set():
+            LOG.info("Hourly scheduler stop requested; exiting loop")
+            break
+        try:
+            start = datetime.now(tz=TZ)
+            hour = start.hour
+            if WORK_START <= hour < WORK_END:
+                if _is_weekend(start):
+                    LOG.info("Weekend; skipping follow-up pass")
+                else:
+                    LOG.info("Starting follow-up pass at %s", start.isoformat())
+                    try:
+                        _follow_up_pass()
+                    except Exception as exc:
+                        LOG.exception("Error during follow-up pass: %s", exc)
+            else:
+                LOG.info(
+                    "Current hour %s outside work hours (%s–%s); skipping follow-up",
+                    hour,
+                    WORK_START,
+                    WORK_END,
+                )
+
+            now = datetime.now(tz=TZ)
+            next_run = _next_scheduler_run(now)
+            sleep_secs = max(0, (next_run - datetime.now(tz=TZ)).total_seconds())
+            if sleep_secs > 0:
+                LOG.debug(
+                    "Sleeping %.0f seconds until next run at %s",
+                    sleep_secs,
+                    next_run.isoformat(),
+                )
+            if stop_event:
+                if stop_event.wait(timeout=sleep_secs):
+                    LOG.info("Hourly scheduler stop requested; exiting loop")
+                    break
+            else:
+                time.sleep(sleep_secs)
+        except Exception as exc:
+            LOG.exception("Hourly scheduler crashed; retrying in 30 seconds: %s", exc)
+            if stop_event and stop_event.wait(timeout=30):
+                LOG.info("Hourly scheduler stop requested during backoff; exiting loop")
+                break
+    LOG.info("Hourly scheduler loop terminated (thread=%s)", threading.current_thread().name)
+
 # ───────────────────── follow‑up pass (UPDATED) ─────────────────────
 def _follow_up_pass():
     resp = sheets_service.spreadsheets().values().get(
         spreadsheetId=GSHEET_ID,
-        range="Sheet1!A:Z",
+        range="Sheet1!A:AA",
         majorDimension="ROWS",
         valueRenderOption="FORMATTED_VALUE",
     ).execute()
@@ -1881,6 +2017,7 @@ def process_rows(rows: List[Dict[str, Any]]):
         row_vals[COL_PHONE]   = phone
         row_vals[COL_EMAIL]   = email
         row_vals[COL_PHONE_CONF] = phone_info.get("confidence", "")
+        row_vals[COL_EMAIL_CONF] = email_info.get("confidence", "")
         reason = ""
         phone_reason = phone_info.get("reason", "")
         email_reason = email_info.get("reason", "")
@@ -1917,41 +2054,5 @@ if __name__ == "__main__":
         LOG.info("Finished processing payload; exiting.")
     else:
         LOG.info("No JSON payload detected; entering hourly scheduler mode.")
-        while True:
-            start = datetime.now(tz=TZ)
-            hour = start.hour
-            if WORK_START <= hour < WORK_END:
-                if _is_weekend(start):
-                    LOG.info("Weekend; skipping follow-up pass")
-                else:
-                    LOG.info("Starting follow‑up pass at %s", start.isoformat())
-                    try:
-                        _follow_up_pass()
-                    except Exception as e:
-                        LOG.error("Error during follow-up pass: %s", e)
-            else:
-                LOG.info(
-                    "Current hour %s outside work hours (%s–%s); skipping follow‑up",
-                    hour, WORK_START, WORK_END
-                )
-
-            now = datetime.now(tz=TZ)
-            if now.hour >= WORK_END - 1:
-                next_run = (now + timedelta(days=1)).replace(
-                    hour=WORK_START, minute=0, second=0, microsecond=0
-                )
-            elif now.hour < WORK_START:
-                next_run = now.replace(
-                    hour=WORK_START, minute=0, second=0, microsecond=0
-                )
-            else:
-                next_run = (now + timedelta(hours=1)).replace(
-                    minute=0, second=0, microsecond=0
-                )
-            sleep_secs = max(0, (next_run - datetime.now(tz=TZ)).total_seconds())
-            LOG.debug(
-                "Sleeping %.0f seconds until next run at %s",
-                sleep_secs, next_run.isoformat()
-            )
-            time.sleep(sleep_secs)
+        run_hourly_scheduler()
 
