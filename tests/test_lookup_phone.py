@@ -131,6 +131,8 @@ def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
                     ],
                 }
             ],
+            "city": "Los Angeles",
+            "state": "CA",
         },
     )
 
@@ -172,11 +174,11 @@ def test_lookup_phone_continues_search_after_nonproductive_page(monkeypatch):
         calls.append(url)
         if url.endswith("/office"):
             page = """
-            <html><body><h1>Jane Agent</h1><p>Meet our team.</p></body></html>
+            <html><body><h1>Jane Agent</h1><p>Meet our team.</p><p>Serving Seattle, WA.</p></body></html>
             """
             return page, "text/html"
         page = """
-        <html><body><h1>Jane Agent</h1><p>Cell: (555) 333-4444</p></body></html>
+        <html><body><h1>Jane Agent</h1><p>Cell: (555) 333-4444</p><p>Based in Seattle, WA.</p></body></html>
         """
         return page, "text/html"
 
@@ -197,6 +199,141 @@ def test_lookup_phone_continues_search_after_nonproductive_page(monkeypatch):
     ]
     assert result["number"] == mobile_number
     assert result["source"] == "agent_card_dom"
+
+
+def test_lookup_phone_requires_location_cue(monkeypatch):
+    wrong_number_raw = "(555) 101-2020"
+    right_number_raw = "(555) 999-8888"
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "google_items", lambda query: [
+        {"link": "https://wrong.example"},
+        {"link": "https://right.example"},
+    ])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+
+    pages = {
+        "https://wrong.example": (
+            """
+            <html><body>
+            <h1>Lisa Dean</h1>
+            <p>Serving Austin, TX buyers.</p>
+            <p>Call {wrong}</p>
+            </body></html>
+            """.format(wrong=wrong_number_raw),
+            "text/html",
+        ),
+        "https://right.example": (
+            """
+            <html><body>
+            <h1>Lisa Dean</h1>
+            <p>Tampa FL short sale specialist.</p>
+            <p>Call {right}</p>
+            <a href="tel:5559998888">Call Lisa Dean</a>
+            </body></html>
+            """.format(right=right_number_raw),
+            "text/html",
+        ),
+    }
+
+    fetched = []
+
+    def fake_fetch(url):
+        fetched.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+
+    bot_min.cache_p.clear()
+
+    result = bot_min.lookup_phone(
+        "Lisa Dean",
+        "FL",
+        {"zpid": "1", "city": "Tampa", "state": "FL"},
+    )
+
+    assert fetched == ["https://wrong.example", "https://right.example"]
+    assert result["number"] == bot_min.fmt_phone(right_number_raw)
+
+
+def test_lookup_phone_team_context_not_demoted(monkeypatch):
+    office_number = "555-000-1111"
+    mobile_number = "555-222-3333"
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://team.example"}])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+
+    def fake_fetch(url):
+        return (
+            """
+            <html><body>
+            <h1>Kristina Bartlett</h1>
+            <p>Rachel Holland Team direct line: {mobile}</p>
+            <p>Main Office: {office}</p>
+            <p>Serving Spokane, WA homeowners.</p>
+            </body></html>
+            """.format(mobile=mobile_number, office=office_number),
+            "text/html",
+        )
+
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+
+    bot_min.cache_p.clear()
+
+    result = bot_min.lookup_phone(
+        "Kristina Bartlett",
+        "WA",
+        {"zpid": "1", "city": "Spokane", "state": "WA"},
+    )
+
+    assert result["number"] == mobile_number
+
+
+def test_lookup_phone_penalizes_template_number(monkeypatch):
+    template_number = "214-748-3641"
+    direct_number = "352-725-7206"
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://contact.example"}])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+
+    def fake_fetch(url):
+        return (
+            """
+            <html><body>
+            <h1>Jon McCall</h1>
+            <p>Hudson, FL short sale listings</p>
+            <p>Office: {template}</p>
+            <p>Cell: {direct}</p>
+            <a href="tel:3527257206">Call Jon</a>
+            </body></html>
+            """.format(template=template_number, direct=direct_number),
+            "text/html",
+        )
+
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+    monkeypatch.setattr(
+        bot_min,
+        "_looks_direct",
+        lambda number, agent, state: number != template_number,
+    )
+
+    bot_min.cache_p.clear()
+
+    result = bot_min.lookup_phone(
+        "Jon McCall",
+        "FL",
+        {"zpid": "1", "city": "Hudson", "state": "FL"},
+    )
+
+    assert result["number"] == direct_number
 
 
 def test_lookup_phone_uses_lower_mobile_override_threshold(monkeypatch):
@@ -240,6 +377,8 @@ def test_lookup_phone_uses_lower_mobile_override_threshold(monkeypatch):
                 ],
             }
         ],
+        "city": "Seattle",
+        "state": "WA",
     }
 
     result = bot_min.lookup_phone("Jane Agent", "WA", payload)
@@ -254,6 +393,7 @@ def test_lookup_phone_allows_nickname_in_page_guard(monkeypatch):
             <h1>Joshua "Josh" Sparber</h1>
             <p>Cell: (555) 010-0000</p>
             <p>Office: (555) 999-0000</p>
+            <p>Serving Minneapolis, MN short sale clients.</p>
             <a href="tel:5550100000">Call Josh</a>
         </body>
     </html>
@@ -274,7 +414,7 @@ def test_lookup_phone_allows_nickname_in_page_guard(monkeypatch):
     result = bot_min.lookup_phone(
         "Joshua M Sparber",
         "MN",
-        {"zpid": "", "contact_recipients": []},
+        {"zpid": "", "contact_recipients": [], "city": "Minneapolis", "state": "MN"},
     )
 
     assert result["number"] == "555-010-0000"
@@ -286,6 +426,7 @@ def test_lookup_email_allows_first_name_variants(monkeypatch):
     <html>
         <body>
             <div>Meet Mike Johnson, your trusted agent.</div>
+            <p>Louisville, KY short sale specialist.</p>
             <a href="mailto:mike@homes.com">Email Mike Johnson</a>
         </body>
     </html>
@@ -309,7 +450,7 @@ def test_lookup_email_allows_first_name_variants(monkeypatch):
     result = bot_min.lookup_email(
         "Michael Johnson",
         "KY",
-        {"zpid": "", "contact_recipients": []},
+        {"zpid": "", "contact_recipients": [], "city": "Louisville", "state": "KY"},
     )
 
     assert result["email"] == "mike@homes.com"

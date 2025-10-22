@@ -128,6 +128,7 @@ CONTACT_EMAIL_FALLBACK_SCORE = float(os.getenv("CONTACT_EMAIL_FALLBACK_SCORE", "
 CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
 CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
 CONTACT_PHONE_OVERRIDE_MIN = float(os.getenv("CONTACT_PHONE_OVERRIDE_MIN", "1.0"))
+CONTACT_PHONE_OVERRIDE_DELTA = float(os.getenv("CONTACT_PHONE_OVERRIDE_DELTA", "1.0"))
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -163,6 +164,60 @@ GENERIC_EMAIL_PREFIXES = {
     "frontdesk",
     "marketing",
     "admin",
+}
+
+STATE_ABBR_TO_NAME = {
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "DC": "District of Columbia",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
 }
 
 # column indices (0‑based)
@@ -231,7 +286,14 @@ BAD_AREA      = {
     "833",
 }
 CONTACT_PAGE_HINTS = ("contact", "office", "team", "company")
-PHONE_OFFICE_TERMS = {"office", "front desk", "main", "team", "switchboard"}
+PHONE_OFFICE_TERMS = {
+    "office",
+    "front desk",
+    "main office",
+    "main line",
+    "switchboard",
+    "reception",
+}
 
 # ───────────────────── Google / Sheets setup ─────────────────────
 creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
@@ -868,6 +930,65 @@ def _token_in_text(text: str, token: str) -> bool:
     return bool(re.search(rf"\b{re.escape(token)}\b", text))
 
 
+def _normalize_location_token(token: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", token.lower())
+
+
+def _collect_location_hints(
+    row_payload: Dict[str, Any],
+    state: str,
+    *extra_texts: str,
+) -> Tuple[Set[str], Set[str]]:
+    tokens: Set[str] = set()
+    digits: Set[str] = set()
+
+    def add_token(value: str, *, keep_short: bool = False) -> None:
+        norm = _normalize_location_token(value)
+        if not norm:
+            return
+        if norm.isdigit():
+            if len(norm) >= 4:
+                digits.add(norm)
+            return
+        if len(norm) < 3 and not keep_short:
+            return
+        tokens.add(norm)
+
+    def add_text(value: Any) -> None:
+        if not value:
+            return
+        text = html.unescape(str(value))
+        for part in re.split(r"[\s,;|/]+", text):
+            if part:
+                add_token(part)
+
+    if state:
+        add_token(state, keep_short=True)
+        state_name = STATE_ABBR_TO_NAME.get(state.upper())
+        if state_name:
+            add_text(state_name)
+
+    add_text(row_payload.get("city"))
+    add_text(row_payload.get("stateFull") or row_payload.get("state_name"))
+    add_text(row_payload.get("county") or row_payload.get("countyName"))
+
+    for extra in extra_texts:
+        add_text(extra)
+
+    return tokens, digits
+
+
+def _page_has_location(page_text: str, tokens: Set[str], digits: Set[str]) -> bool:
+    if not (tokens or digits):
+        return True
+    low = page_text.lower()
+    if any(_token_in_text(low, tok) for tok in tokens if tok):
+        return True
+    if any(d and d in low for d in digits):
+        return True
+    return False
+
+
 def _first_last_tokens(name: str) -> Tuple[Set[str], str]:
     parts = [p for p in name.split() if p]
     if not parts:
@@ -1031,6 +1152,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     candidates: Dict[str, Dict[str, Any]] = {}
     had_candidates = False
+    brokerage_hint = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
+    location_extras: List[str] = [brokerage_hint] if brokerage_hint else []
 
     def _register(
         phone: Any,
@@ -1064,6 +1187,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "best_base": -1.0,
                 "office_demoted": False,
                 "name_match": False,
+                "direct_ok": None,
+                "template_penalized": False,
             },
         )
         prev_score = info["score"]
@@ -1085,8 +1210,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if context:
             ctx = context.lower()
             info["contexts"].append(ctx)
-            if any(term in ctx for term in PHONE_OFFICE_TERMS) and not info["office_demoted"]:
-                info["score"] -= 1.0
+            if not info["office_demoted"] and any(term in ctx for term in PHONE_OFFICE_TERMS):
+                info["score"] -= 0.6
                 info["office_demoted"] = True
                 LOG.debug("PHONE DEMOTE office: %s", formatted)
         if office_flag and not info["office_demoted"]:
@@ -1114,9 +1239,15 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     zpid = str(row_payload.get("zpid", ""))
     rapid = rapid_property(zpid) if zpid else {}
+    lb: Dict[str, Any] = {}
     if rapid:
         lb = rapid.get("listed_by") or {}
         lb_name = lb.get("display_name", "")
+        brokerage_from_lb = lb.get("brokerageName", "")
+        if brokerage_from_lb:
+            location_extras.append(brokerage_from_lb)
+            if not brokerage_hint:
+                brokerage_hint = brokerage_from_lb
         match = _names_match(agent, lb_name)
         for p in _phones_from_block(lb):
             _register(p, "rapid_listed_by", meta_name=lb_name, name_match=match)
@@ -1126,6 +1257,21 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
             for p in _phones_from_block(blk):
                 _register(p, "rapid_contact", context=ctx, meta_name=blk_name, name_match=match)
+        address_info = rapid.get("address") or {}
+        location_extras.extend(
+            [
+                rapid.get("city", ""),
+                rapid.get("state", ""),
+                address_info.get("city", ""),
+                address_info.get("state", ""),
+            ]
+        )
+
+    location_tokens, location_digits = _collect_location_hints(
+        row_payload,
+        state,
+        *[hint for hint in location_extras if hint],
+    )
 
     queries = build_q_phone(agent, state)
     for items in pmap(google_items, queries):
@@ -1152,6 +1298,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if last_token and not _token_in_text(low, last_token):
             return False
         if first_variants and not any(_token_in_text(low, tok) for tok in first_variants):
+            return False
+        if not _page_has_location(page_text, location_tokens, location_digits):
             return False
         return True
 
@@ -1219,6 +1367,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 break
 
     tokens = _agent_tokens(agent)
+    direct_cache: Dict[str, bool] = {}
     best_number = ""
     best_score = float("-inf")
     best_source = ""
@@ -1240,12 +1389,33 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             for url in info.get("urls", [])
         ):
             info["score"] -= 0.4
+        preferred_source = info.get("best_source") or (
+            next(iter(info["sources"])) if info["sources"] else ""
+        )
+        if preferred_source in {
+            "agent_card_dom",
+            "dom",
+            "jsonld_other",
+            "cse_contact",
+            "crawler_unverified",
+        }:
+            if info.get("direct_ok") is None:
+                if number not in direct_cache:
+                    try:
+                        direct_cache[number] = _looks_direct(number, agent, state)
+                    except Exception as exc:
+                        LOG.debug("PHONE direct check failed for %s: %s", number, exc)
+                        direct_cache[number] = True
+                info["direct_ok"] = direct_cache[number]
+            if info.get("direct_ok") is False and not info.get("template_penalized"):
+                info["score"] -= 2.0
+                info["template_penalized"] = True
         mobile = is_mobile_number(number)
         info["is_mobile"] = mobile
         if not mobile:
             info["score"] -= 1.0
         info["final_score"] = info["score"]
-        source = info.get("best_source") or (next(iter(info["sources"])) if info["sources"] else "")
+        source = preferred_source
         if info["score"] > best_score:
             best_score = info["score"]
             best_number = number
@@ -1256,12 +1426,20 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             best_non_office_mobile_number = number
             best_non_office_mobile_source = source
 
+    override_threshold = max(CONTACT_PHONE_OVERRIDE_MIN, CONTACT_PHONE_LOW_CONF)
+    if best_score != float("-inf"):
+        override_threshold = max(
+            CONTACT_PHONE_OVERRIDE_MIN,
+            CONTACT_PHONE_LOW_CONF,
+            best_score - CONTACT_PHONE_OVERRIDE_DELTA,
+        )
+
     if (
         best_number
         and candidates.get(best_number, {}).get("office_demoted")
         and best_non_office_mobile_number
         and best_non_office_mobile_number != best_number
-        and best_non_office_mobile_score >= CONTACT_PHONE_OVERRIDE_MIN
+        and best_non_office_mobile_score >= override_threshold
     ):
         LOG.info(
             "PHONE OVERRIDE prefer_non_office_mobile: %s (%.2f) -> %s (%.2f)",
@@ -1279,13 +1457,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         and candidates.get(best_number, {}).get("office_demoted")
         and best_non_office_mobile_number
         and best_non_office_mobile_number != best_number
-        and best_non_office_mobile_score < CONTACT_PHONE_OVERRIDE_MIN
+        and best_non_office_mobile_score < override_threshold
     ):
         LOG.debug(
             "PHONE override skipped: best mobile %s score %.2f below threshold %.2f",
             best_non_office_mobile_number,
             best_non_office_mobile_score,
-            CONTACT_PHONE_OVERRIDE_MIN,
+            override_threshold,
         )
 
     result = {
@@ -1297,15 +1475,17 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     }
 
     if best_number:
+        candidate_info = candidates.get(best_number, {})
         override_low_conf = False
         adjusted_score = best_score
+        direct_ok = candidate_info.get("direct_ok", True)
         if best_score >= CONTACT_PHONE_MIN_SCORE:
             confidence = "high"
             LOG.debug("PHONE WIN %s via %s score=%.2f", best_number, best_source or "unknown", best_score)
         elif best_score >= CONTACT_PHONE_LOW_CONF:
             confidence = "low"
             LOG.info("PHONE WIN (low-confidence): %s %.2f %s", best_number, best_score, best_source or "unknown")
-        elif best_is_mobile:
+        elif best_is_mobile and direct_ok is not False:
             override_low_conf = True
             confidence = "low"
             adjusted_score = max(best_score, CONTACT_PHONE_LOW_CONF)
@@ -1356,10 +1536,12 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     if key in cache_e:
         return cache_e[key]
 
-    brokerage = domain_hint = mls_id = ""
+    brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
+    domain_hint = mls_id = ""
     candidates: Dict[str, Dict[str, Any]] = {}
     generic_seen: Set[str] = set()
     had_candidates = False
+    location_extras: List[str] = [brokerage] if brokerage else []
 
     tokens = _agent_tokens(agent)
     IDENTITY_SOURCES = {
@@ -1377,12 +1559,14 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if not cleaned or not ok_email(cleaned):
             return
         low = cleaned.lower()
-        if low in generic_seen:
-            return
         matches_agent = _email_matches_name(agent, cleaned)
-        if _is_generic_email(cleaned) and not matches_agent:
+        is_generic = _is_generic_email(cleaned)
+        if is_generic and not matches_agent:
+            if low in generic_seen:
+                return
             generic_seen.add(low)
-            return
+        elif is_generic:
+            generic_seen.add(low)
 
         if source in IDENTITY_SOURCES:
             identity_ok = False
@@ -1423,8 +1607,12 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "identity_sources": set(),
                 "agent_match": False,
                 "domain": cleaned.split("@", 1)[1].lower(),
+                "generic": False,
+                "generic_penalized": False,
             },
         )
+        if is_generic:
+            info["generic"] = True
         base = EMAIL_SOURCE_BASE.get(source, EMAIL_SOURCE_BASE["dom"])
         if source and source not in info["applied"]:
             info["score"] += base
@@ -1433,6 +1621,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 info["best_base"] = base
                 info["best_source"] = source
         info["sources"].add(source)
+        if is_generic and not matches_agent and not info["generic_penalized"]:
+            info["score"] -= 0.25
+            info["generic_penalized"] = True
         if source in IDENTITY_SOURCES and source not in info["identity_sources"]:
             info["identity_sources"].add(source)
             info["identity_hits"] += 1
@@ -1468,7 +1659,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         rapid = rapid_property(zpid)
         if rapid:
             lb = rapid.get("listed_by") or {}
-            brokerage = lb.get("brokerageName", "")
+            brokerage = (lb.get("brokerageName", "") or brokerage).strip()
+            if brokerage and brokerage not in location_extras:
+                location_extras.append(brokerage)
             mls_id = lb.get("listingAgentMlsId", "")
             lb_display = lb.get("display_name", "")
             lb_ctx = " ".join(str(lb.get(k, "")) for k in ("title", "label", "role") if lb.get(k))
@@ -1493,6 +1686,21 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                         context=ctx,
                         meta_name=display_name,
                     )
+            address_info = rapid.get("address") or {}
+            location_extras.extend(
+                [
+                    rapid.get("city", ""),
+                    rapid.get("state", ""),
+                    address_info.get("city", ""),
+                    address_info.get("state", ""),
+                ]
+            )
+
+    location_tokens, location_digits = _collect_location_hints(
+        row_payload,
+        state,
+        *[hint for hint in location_extras if hint],
+    )
 
     queries = build_q_email(agent, state, brokerage, domain_hint, mls_id)
     for items in pmap(google_items, queries):
@@ -1517,6 +1725,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if last_token and not _token_in_text(low, last_token):
             return False
         if first_variants and not any(_token_in_text(low, tok) for tok in first_variants):
+            return False
+        if not _page_has_location(page_text, location_tokens, location_digits):
             return False
         return True
 
@@ -1639,6 +1849,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             best_source = source
 
     reason = ""
+    has_non_generic_candidate = any(
+        not info.get("generic") for info in candidates.values()
+    )
     result = {
         "email": best_email,
         "score": best_score,
@@ -1648,6 +1861,17 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     }
 
     if best_email and best_score >= CONTACT_EMAIL_MIN_SCORE:
+        info = candidates.get(best_email, {})
+        if info.get("generic"):
+            result["confidence"] = "low"
+            cache_e[key] = result
+            LOG.info(
+                "EMAIL WIN (generic) %s via %s score=%.2f",
+                best_email,
+                best_source or "unknown",
+                best_score,
+            )
+            return result
         result["confidence"] = "high"
         cache_e[key] = result
         LOG.debug(
@@ -1682,6 +1906,16 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             ]
         domain_hint_hit = bool(domain_hint and domain.endswith(domain_hint.lower()))
         brokerage_hit = any(tok in domain or tok in domain_root for tok in normalized_brokerage_tokens)
+        domain_contains_agent = any(
+            tok and (tok in domain or tok in domain_root)
+            for tok in tokens
+            if len(tok) >= 3
+        )
+        context_match = any(
+            tok and any(tok in ctx for ctx in info.get("contexts", []))
+            for tok in tokens
+        )
+        generic_only = info.get("generic") and not has_non_generic_candidate
         fallback_ok = (
             agent_match
             or identity_hits >= 2
@@ -1689,6 +1923,16 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             or bool(identity_sources - {"dom"})
             or domain_hint_hit
             or brokerage_hit
+            or (
+                generic_only
+                and (
+                    domain_contains_agent
+                    or brokerage_hit
+                    or domain_hint_hit
+                    or context_match
+                    or identity_hits >= 1
+                )
+            )
         )
         if fallback_ok:
             result["confidence"] = "low"
