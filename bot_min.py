@@ -127,6 +127,7 @@ CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
 CONTACT_EMAIL_FALLBACK_SCORE = float(os.getenv("CONTACT_EMAIL_FALLBACK_SCORE", "0.45"))
 CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
 CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
+CONTACT_PHONE_OVERRIDE_MIN = float(os.getenv("CONTACT_PHONE_OVERRIDE_MIN", "1.0"))
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -1042,12 +1043,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         name_match: bool = False,
         bonus: float = 0.0,
         office_flag: bool = False,
-    ) -> None:
+    ) -> bool:
         nonlocal had_candidates
         formatted = fmt_phone(str(phone))
         if not (formatted and valid_phone(formatted)):
-            return
+            return False
         had_candidates = True
+        was_new = formatted not in candidates
         info = candidates.setdefault(
             formatted,
             {
@@ -1064,6 +1066,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "name_match": False,
             },
         )
+        prev_score = info["score"]
         base = PHONE_SOURCE_BASE.get(source, PHONE_SOURCE_BASE["crawler_unverified"])
         if source and source not in info["applied"]:
             info["score"] += base
@@ -1097,7 +1100,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             DYNAMIC_SITES.add(_domain(url))
         if meta_name:
             info["meta_names"].add(meta_name.lower())
-
+        triggered = False
+        if info["score"] >= CONTACT_PHONE_LOW_CONF:
+            if was_new or prev_score < CONTACT_PHONE_LOW_CONF:
+                triggered = True
+        return triggered
     for blk in (row_payload.get("contact_recipients") or []):
         ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
         meta_name = blk.get("display_name", "")
@@ -1148,9 +1155,10 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             return False
         return True
 
-    def _process_page(url: str, page: str) -> None:
+    def _process_page(url: str, page: str) -> bool:
         if not page or not _page_has_name(page):
-            return
+            return False
+        page_viable = False
         ph, _, meta, info = extract_struct(page)
         page_title = info.get("title", "")
         for entry in meta:
@@ -1163,25 +1171,27 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             meta_name = str(entry.get("name", ""))
             match = _names_match(agent, meta_name)
             for num in entry.get("phones", []):
-                _register(
+                if _register(
                     num,
                     source,
                     url=url,
                     page_title=page_title,
                     meta_name=meta_name,
                     name_match=match,
-                )
+                ):
+                    page_viable = True
         for anchor in info.get("tel", []):
-            _register(
+            if _register(
                 anchor.get("phone", ""),
                 "agent_card_dom",
                 url=url,
                 page_title=page_title,
                 context=anchor.get("context", ""),
-            )
+            ):
+                page_viable = True
         low = html.unescape(page.lower())
         for num, details in proximity_scan(low, first_name, last_name).items():
-            _register(
+            if _register(
                 num,
                 "agent_card_dom",
                 url=url,
@@ -1189,14 +1199,15 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 context=" ".join(details.get("snippets", [])),
                 bonus=min(1.0, details.get("score", 0.0) / 4.0),
                 office_flag=details.get("office", False),
-            )
+            ):
+                page_viable = True
+        return page_viable
 
     for url in non_portal:
         page, _ = fetch_contact_page(url)
         if not page:
             continue
-        _process_page(url, page)
-        if candidates:
+        if _process_page(url, page):
             break
 
     if not candidates:
@@ -1204,8 +1215,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             page, _ = fetch_contact_page(url)
             if not page:
                 continue
-            _process_page(url, page)
-            if candidates:
+            if _process_page(url, page):
                 break
 
     tokens = _agent_tokens(agent)
@@ -1251,7 +1261,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         and candidates.get(best_number, {}).get("office_demoted")
         and best_non_office_mobile_number
         and best_non_office_mobile_number != best_number
-        and best_non_office_mobile_score >= CONTACT_PHONE_LOW_CONF
+        and best_non_office_mobile_score >= CONTACT_PHONE_OVERRIDE_MIN
     ):
         LOG.info(
             "PHONE OVERRIDE prefer_non_office_mobile: %s (%.2f) -> %s (%.2f)",
@@ -1269,13 +1279,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         and candidates.get(best_number, {}).get("office_demoted")
         and best_non_office_mobile_number
         and best_non_office_mobile_number != best_number
-        and best_non_office_mobile_score < CONTACT_PHONE_LOW_CONF
+        and best_non_office_mobile_score < CONTACT_PHONE_OVERRIDE_MIN
     ):
         LOG.debug(
             "PHONE override skipped: best mobile %s score %.2f below threshold %.2f",
             best_non_office_mobile_number,
             best_non_office_mobile_score,
-            CONTACT_PHONE_LOW_CONF,
+            CONTACT_PHONE_OVERRIDE_MIN,
         )
 
     result = {
