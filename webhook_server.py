@@ -31,8 +31,8 @@ GSHEET_ID   = os.environ["GSHEET_ID"]
 SC_JSON     = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES      = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# Shared-secret token for inbound-SMS webhook
-WEBHOOK_TOKEN = os.environ["SMSM_WEBHOOK_TOKEN"]  # e.g. "65-g84-jfy7t"
+# Shared-secret token for inbound-SMS webhook (optional)
+WEBHOOK_TOKEN = os.getenv("SMSM_WEBHOOK_TOKEN")  # e.g. "65-g84-jfy7t"
 
 logging.basicConfig(
     level  = logging.INFO,
@@ -272,11 +272,16 @@ async def sms_reply(request: Request):
           "time_received": "2025-06-26 01:23:45"
         }
 
-    The webhook URL must include ?token=<WEBHOOK_TOKEN>
+    If SMSM_WEBHOOK_TOKEN is configured, the webhook URL must include
+    ?token=<WEBHOOK_TOKEN>.  If the env var is unset, the endpoint accepts
+    requests without a token (useful for local dev / legacy deploys).
     """
     token = request.query_params.get("token")
-    if token != WEBHOOK_TOKEN:
-        raise HTTPException(status_code=403, detail="bad token")
+    if WEBHOOK_TOKEN:
+        if token != WEBHOOK_TOKEN:
+            raise HTTPException(status_code=403, detail="bad token")
+    elif token:
+        logger.info("Ignoring unused token query param while token auth disabled")
 
     data = await request.json()
     phone_raw = data.get("number") or data.get("phone") or ""
