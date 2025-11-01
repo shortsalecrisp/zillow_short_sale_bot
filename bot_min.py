@@ -123,6 +123,15 @@ SMS_FU_TEMPLATE   = (
 SMS_RETRY_ATTEMPTS = int(os.getenv("SMS_RETRY_ATTEMPTS", "2"))
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
+CSE_MIN_INTERVAL = float(os.getenv("CSE_MIN_INTERVAL", "2.2"))
+_cse_jitter_low = float(os.getenv("CSE_JITTER_LOW", "0.35"))
+_cse_jitter_high = float(os.getenv("CSE_JITTER_HIGH", "0.85"))
+if _cse_jitter_high < _cse_jitter_low:
+    _cse_jitter_low, _cse_jitter_high = _cse_jitter_high, _cse_jitter_low
+
+CONTACT_DOMAIN_MIN_GAP = float(os.getenv("CONTACT_DOMAIN_MIN_GAP", "4.0"))
+CONTACT_DOMAIN_GAP_JITTER = float(os.getenv("CONTACT_DOMAIN_GAP_JITTER", "1.5"))
+
 CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
 CONTACT_EMAIL_FALLBACK_SCORE = float(os.getenv("CONTACT_EMAIL_FALLBACK_SCORE", "0.45"))
 CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
@@ -352,6 +361,27 @@ def ok_email(e: str) -> bool:
         and not e.lower().endswith(IMG_EXT)
         and not re.search(r"\.(gov|edu|mil)$", e, re.I)
     )
+
+
+def decode_cfemail(data: str) -> str:
+    """Decode Cloudflare obfuscated email strings."""
+    if not data:
+        return ""
+    try:
+        key = int(data[:2], 16)
+    except ValueError:
+        return ""
+    chars: List[str] = []
+    for i in range(2, len(data), 2):
+        chunk = data[i : i + 2]
+        if len(chunk) < 2:
+            return ""
+        try:
+            decoded = int(chunk, 16) ^ key
+        except ValueError:
+            return ""
+        chars.append(chr(decoded))
+    return "".join(chars)
 
 def is_short_sale(text: str) -> bool:
     return SHORT_RE.search(text) and not BAD_RE.search(text)
@@ -626,7 +656,9 @@ def fetch_relaxed(u: str):
     return fetch(u, strict=False)
 
 # ───────────────────── contact fetch helpers ─────────────────────
-_CONTACT_FETCH_BACKOFFS = (0.0, 0.7, 2.0)
+_CONTACT_FETCH_BACKOFFS = (0.0, 2.5, 6.0)
+
+_CONTACT_DOMAIN_LAST_FETCH: Dict[str, float] = {}
 
 
 def _mirror_url(url: str) -> str:
@@ -646,6 +678,15 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
     dom = _domain(url)
     blocked = False
     tries = len(_CONTACT_FETCH_BACKOFFS)
+    last_seen = _CONTACT_DOMAIN_LAST_FETCH.get(dom, 0.0)
+    if CONTACT_DOMAIN_MIN_GAP > 0 and last_seen:
+        gap = time.time() - last_seen
+        min_gap = CONTACT_DOMAIN_MIN_GAP
+        if gap < min_gap:
+            sleep_for = min_gap - gap
+            if CONTACT_DOMAIN_GAP_JITTER > 0:
+                sleep_for += random.uniform(0.25, CONTACT_DOMAIN_GAP_JITTER)
+            time.sleep(max(0.0, sleep_for))
     for attempt, delay in enumerate(_CONTACT_FETCH_BACKOFFS, start=1):
         if delay:
             time.sleep(delay)
@@ -659,6 +700,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         except Exception as exc:
             LOG.debug("fetch_contact_page error %s on %s", exc, url)
             break
+        _CONTACT_DOMAIN_LAST_FETCH[dom] = time.time()
         status = resp.status_code
         if status == 200:
             return resp.text, False
@@ -700,8 +742,10 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
         if q in _cse_cache:
             return _cse_cache[q]
         delta = time.time() - _last_cse_ts
-        if delta < 1.5:
-            time.sleep(1.5 - delta)
+        jitter = random.uniform(_cse_jitter_low, _cse_jitter_high) if _cse_jitter_high > 0 else 0.0
+        min_gap = max(0.0, CSE_MIN_INTERVAL + jitter)
+        if delta < min_gap:
+            time.sleep(min_gap - delta)
         _last_cse_ts = time.time()
     backoff = 1.0
     for _ in range(tries):
@@ -811,14 +855,28 @@ def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]],
                 "context": _context_for(a).lower(),
             })
 
+    seen_emails: Set[str] = set()
+
     for a in soup.select('a[href^="mailto:"]'):
         mail_val = a.get("href", "").split("mailto:")[-1]
         cleaned = clean_email(mail_val)
-        if cleaned and ok_email(cleaned):
+        if cleaned and ok_email(cleaned) and cleaned not in seen_emails:
             mails.append(cleaned)
+            seen_emails.add(cleaned)
             info["mailto"].append({
                 "email": cleaned,
                 "context": _context_for(a).lower(),
+            })
+
+    for cf_node in soup.select("[data-cfemail]"):
+        decoded = decode_cfemail(cf_node.get("data-cfemail", ""))
+        cleaned = clean_email(decoded)
+        if cleaned and ok_email(cleaned) and cleaned not in seen_emails:
+            mails.append(cleaned)
+            seen_emails.add(cleaned)
+            info["mailto"].append({
+                "email": cleaned,
+                "context": _context_for(cf_node).lower(),
             })
 
     soup.decompose()
