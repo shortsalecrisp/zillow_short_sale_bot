@@ -4,7 +4,7 @@ Zillow Short-Sale Scraper + SMS Bot
 Runs 8 AM – 8 PM Eastern at random 51–72-minute intervals.
 """
 
-import json, re, sqlite3, time, random, requests, pytz, os
+import json, re, sqlite3, time, random, requests, pytz, os, threading
 from datetime import datetime, timedelta
 from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
@@ -24,6 +24,28 @@ openai.api_key = CFG["openai_api_key"]
 ua = UserAgent()
 GOOGLE_API_KEY = CFG.get("google_api_key")
 GOOGLE_CX = CFG.get("google_cx")
+
+
+def _cfg_float(key: str, default: float) -> float:
+    try:
+        return float(CFG.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+CSE_MIN_INTERVAL = _cfg_float("google_cse_min_interval", 2.2)
+CSE_JITTER_LOW = _cfg_float("google_cse_jitter_low", 0.35)
+CSE_JITTER_HIGH = _cfg_float("google_cse_jitter_high", 0.85)
+if CSE_JITTER_HIGH < CSE_JITTER_LOW:
+    CSE_JITTER_LOW, CSE_JITTER_HIGH = CSE_JITTER_HIGH, CSE_JITTER_LOW
+
+POST_CSE_DELAY_LOW = _cfg_float("google_cse_post_delay_low", 0.9)
+POST_CSE_DELAY_HIGH = _cfg_float("google_cse_post_delay_high", 1.6)
+if POST_CSE_DELAY_HIGH < POST_CSE_DELAY_LOW:
+    POST_CSE_DELAY_LOW, POST_CSE_DELAY_HIGH = POST_CSE_DELAY_HIGH, POST_CSE_DELAY_LOW
+
+CONTACT_DOMAIN_MIN_DELAY = _cfg_float("contact_domain_min_delay", 4.0)
+CONTACT_DOMAIN_DELAY_JITTER = _cfg_float("contact_domain_delay_jitter", 1.4)
 
 # expose SMS Gateway credentials
 os.environ.setdefault("SMS_GATEWAY_API_KEY", CFG.get("sms_gateway_api_key", ""))
@@ -53,6 +75,11 @@ BLOCKED_DOMAINS = {
     "instagram.com",
     "www.instagram.com",
 }
+
+_LAST_CSE_AT = 0.0
+_CSE_LOCK = threading.Lock()
+
+_CONTACT_DOMAIN_LAST_FETCH = {}
 
 def random_headers(extra=None) -> dict:
     headers = {
@@ -101,6 +128,26 @@ def domain_from_url(url: str) -> str:
         return urlparse(url).netloc.lower()
     except Exception:
         return ""
+
+
+def decode_cfemail(data: str) -> str:
+    """Decode Cloudflare's data-cfemail obfuscation."""
+    if not data:
+        return ""
+    try:
+        key = int(data[:2], 16)
+    except ValueError:
+        return ""
+    decoded_chars = []
+    for idx in range(2, len(data), 2):
+        chunk = data[idx : idx + 2]
+        if len(chunk) < 2:
+            return ""
+        try:
+            decoded_chars.append(chr(int(chunk, 16) ^ key))
+        except ValueError:
+            return ""
+    return "".join(decoded_chars)
 
 # ---------- 1. ZILLOW HELPERS ----------
 def z_get(url: str) -> requests.Response:
@@ -224,10 +271,18 @@ def google_search_items(query: str) -> list[dict]:
     """Return raw result items from Google Custom Search API."""
     if not GOOGLE_API_KEY or not GOOGLE_CX:
         return []
+    global _LAST_CSE_AT
     params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CX, "q": query, "num": 10}
     session = new_session()
+    with _CSE_LOCK:
+        delta = time.time() - _LAST_CSE_AT
+        jitter = random.uniform(CSE_JITTER_LOW, CSE_JITTER_HIGH) if CSE_JITTER_HIGH > 0 else 0.0
+        min_gap = max(0.0, CSE_MIN_INTERVAL + jitter)
+        if delta < min_gap:
+            time.sleep(min_gap - delta)
+        _LAST_CSE_AT = time.time()
     for attempt in range(3):
-        delay = 1.2 * (attempt + 1)
+        delay = 1.5 * (attempt + 1)
         headers = random_headers({"Accept": "application/json"})
         try:
             resp = session.get(
@@ -305,13 +360,23 @@ def extract_contact(html: str):
     soup = BeautifulSoup(html, "html.parser")
     phones = []
     emails = []
+    seen_emails = set()
     for a in soup.find_all("a", href=True):
         href = a["href"]
         text = a.get_text(" ", strip=True).lower()
         if href.startswith("tel:"):
             phones.append((href[4:], text))
         elif href.startswith("mailto:"):
-            emails.append(href[7:])
+            addr = href[7:]
+            if addr not in seen_emails:
+                emails.append(addr)
+                seen_emails.add(addr)
+
+    for cf_node in soup.select("[data-cfemail]"):
+        decoded = decode_cfemail(cf_node.get("data-cfemail", ""))
+        if decoded and decoded not in seen_emails:
+            emails.append(decoded)
+            seen_emails.add(decoded)
     # Fallback regex search if anchors not found
     if not phones or not emails:
         text_blob = soup.get_text(" ", strip=True)
@@ -319,7 +384,10 @@ def extract_contact(html: str):
             for m in re.findall(r"\+?\d[\d\-\.\(\)\s]{7,}\d", text_blob):
                 phones.append((m, ""))
         if not emails:
-            emails.extend(re.findall(r"[\w\.-]+@[\w\.-]+", text_blob))
+            for match in re.findall(r"[\w\.-]+@[\w\.-]+", text_blob):
+                if match not in seen_emails:
+                    emails.append(match)
+                    seen_emails.add(match)
     return phones, emails
 
 def select_best_phone(phones):
@@ -345,7 +413,8 @@ def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[st
     items = []
     for q in queries:
         items.extend(google_search_items(q))
-        time.sleep(random.uniform(0.6, 1.2))
+        if POST_CSE_DELAY_HIGH > 0:
+            time.sleep(random.uniform(POST_CSE_DELAY_LOW, POST_CSE_DELAY_HIGH))
 
     dedup: dict[str, dict] = {}
     for it in items:
@@ -399,12 +468,18 @@ def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[st
         domain = domain_from_url(link)
         if domain in BLOCKED_DOMAINS:
             continue
-        last = domain_last_hit.get(domain)
+        last = domain_last_hit.get(domain) or _CONTACT_DOMAIN_LAST_FETCH.get(domain)
         if last:
-            wait = 2.5 - (time.time() - last)
-            if wait > 0:
-                time.sleep(wait + random.uniform(0.2, 0.6))
-        domain_last_hit[domain] = time.time()
+            elapsed = time.time() - last
+            min_gap = CONTACT_DOMAIN_MIN_DELAY
+            if elapsed < min_gap:
+                wait = min_gap - elapsed
+                if CONTACT_DOMAIN_DELAY_JITTER > 0:
+                    wait += random.uniform(0.2, CONTACT_DOMAIN_DELAY_JITTER)
+                time.sleep(max(0.0, wait))
+        now = time.time()
+        domain_last_hit[domain] = now
+        _CONTACT_DOMAIN_LAST_FETCH[domain] = now
 
         try:
             resp = session.get(link, headers=random_headers(), timeout=15)
