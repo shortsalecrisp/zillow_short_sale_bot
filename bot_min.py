@@ -950,6 +950,10 @@ def build_q_email(
     if brokerage:
         _add(f'"{name}" "{brokerage}" email')
         _add(f'"{name}" "{brokerage}" "contact"')
+        if parts:
+            _add(f'"{brokerage}" "{parts[-1]}" email')
+        if state:
+            _add(f'"{brokerage}" "{state}" "email"')
 
     if domain_hint:
         _add(f'site:{domain_hint} "{name}" email')
@@ -957,6 +961,9 @@ def build_q_email(
 
     if mls_id and parts:
         _add(f'"{mls_id}" "{parts[-1]}" email')
+        _add(f'"{name}" "{mls_id}" email')
+        if brokerage:
+            _add(f'"{mls_id}" "{brokerage}" email')
 
     return queries
 
@@ -1308,13 +1315,26 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 brokerage_hint = brokerage_from_lb
         match = _names_match(agent, lb_name)
         for p in _phones_from_block(lb):
-            _register(p, "rapid_listed_by", meta_name=lb_name, name_match=match)
+            _register(
+                p,
+                "rapid_listed_by",
+                meta_name=lb_name,
+                name_match=match,
+                office_flag=not match and bool(lb_name),
+            )
         for blk in rapid.get("contact_recipients", []) or []:
             blk_name = blk.get("display_name", "")
             match = _names_match(agent, blk_name)
             ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
             for p in _phones_from_block(blk):
-                _register(p, "rapid_contact", context=ctx, meta_name=blk_name, name_match=match)
+                _register(
+                    p,
+                    "rapid_contact",
+                    context=ctx,
+                    meta_name=blk_name,
+                    name_match=match,
+                    office_flag=not match and bool(blk_name),
+                )
         address_info = rapid.get("address") or {}
         location_extras.extend(
             [
@@ -1409,19 +1429,34 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 page_viable = True
         return page_viable
 
+    def _has_viable_phone_candidate() -> bool:
+        return any(
+            info.get("score", 0.0) >= CONTACT_PHONE_LOW_CONF and not info.get("office_demoted")
+            for info in candidates.values()
+        )
+
+    processed = 0
     for url in non_portal:
         page, _ = fetch_contact_page(url)
         if not page:
             continue
         if _process_page(url, page):
+            if _has_viable_phone_candidate():
+                break
+        processed += 1
+        if processed >= 3 and candidates:
             break
 
     if not candidates:
+        processed = 0
         for url in portal:
             page, _ = fetch_contact_page(url)
             if not page:
                 continue
-            if _process_page(url, page):
+            if _process_page(url, page) and _has_viable_phone_candidate():
+                break
+            processed += 1
+            if processed >= 3 and candidates:
                 break
 
     tokens = _agent_tokens(agent)
@@ -1456,6 +1491,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "jsonld_other",
             "cse_contact",
             "crawler_unverified",
+            "rapid_contact",
+            "rapid_listed_by",
         }:
             if info.get("direct_ok") is None:
                 if number not in direct_cache:
@@ -1544,16 +1581,25 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             confidence = "low"
             LOG.info("PHONE WIN (low-confidence): %s %.2f %s", best_number, best_score, best_source or "unknown")
         elif best_is_mobile and direct_ok is not False:
-            override_low_conf = True
-            confidence = "low"
-            adjusted_score = max(best_score, CONTACT_PHONE_LOW_CONF)
-            LOG.info(
-                "PHONE WIN (Cloudmersive override): %s %.2f %s raw=%.2f",
-                best_number,
-                adjusted_score,
-                best_source or "unknown",
-                best_score,
-            )
+            allow_override = True
+            if best_source in {"rapid_contact", "rapid_listed_by"}:
+                if not candidate_info.get("name_match") and candidate_info.get("direct_ok") is not True:
+                    allow_override = False
+            if allow_override:
+                override_low_conf = True
+                confidence = "low"
+                adjusted_score = max(best_score, CONTACT_PHONE_LOW_CONF)
+                LOG.info(
+                    "PHONE WIN (Cloudmersive override): %s %.2f %s raw=%.2f",
+                    best_number,
+                    adjusted_score,
+                    best_source or "unknown",
+                    best_score,
+                )
+            else:
+                confidence = ""
+                override_low_conf = False
+                adjusted_score = best_score
         else:
             confidence = ""
         if confidence:
@@ -1611,7 +1657,16 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "pattern",
     }
 
-    def _register(email: str, source: str, *, url: str = "", page_title: str = "", context: str = "", meta_name: str = "") -> None:
+    def _register(
+        email: str,
+        source: str,
+        *,
+        url: str = "",
+        page_title: str = "",
+        context: str = "",
+        meta_name: str = "",
+        penalty: float = 0.0,
+    ) -> None:
         nonlocal had_candidates
         cleaned = clean_email(email)
         if not cleaned or not ok_email(cleaned):
@@ -1667,6 +1722,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "domain": cleaned.split("@", 1)[1].lower(),
                 "generic": False,
                 "generic_penalized": False,
+                "penalty_applied": False,
             },
         )
         if is_generic:
@@ -1679,6 +1735,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 info["best_base"] = base
                 info["best_source"] = source
         info["sources"].add(source)
+        if penalty and not info["penalty_applied"]:
+            info["score"] -= penalty
+            info["penalty_applied"] = True
         if is_generic and not matches_agent and not info["generic_penalized"]:
             info["score"] -= 0.25
             info["generic_penalized"] = True
@@ -1724,25 +1783,25 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             lb_display = lb.get("display_name", "")
             lb_ctx = " ".join(str(lb.get(k, "")) for k in ("title", "label", "role") if lb.get(k))
             for em in _emails_from_block(lb):
-                if lb_display and not _names_match(agent, lb_display):
-                    continue
+                name_match = not lb_display or _names_match(agent, lb_display)
                 _register(
                     em,
                     "rapid_listed_by",
                     meta_name=lb_display,
                     context=lb_ctx,
+                    penalty=0.4 if not name_match else 0.0,
                 )
             for blk in rapid.get("contact_recipients", []) or []:
                 ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
                 for em in _emails_from_block(blk):
                     display_name = blk.get("display_name", "")
-                    if display_name and not _names_match(agent, display_name):
-                        continue
+                    name_match = not display_name or _names_match(agent, display_name)
                     _register(
                         em,
                         "rapid_contact",
                         context=ctx,
                         meta_name=display_name,
+                        penalty=0.4 if not name_match else 0.0,
                     )
             address_info = rapid.get("address") or {}
             location_extras.extend(
@@ -1840,21 +1899,32 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             snippet = lower_page[max(0, m.start() - 120): m.end() + 120]
             _register(cleaned, "dom", url=url, page_title=page_title, context=" ".join(snippet.split()))
 
+    def _has_viable_email_candidate() -> bool:
+        return any(info.get("score", 0.0) >= CONTACT_EMAIL_FALLBACK_SCORE for info in candidates.values())
+
+    processed = 0
     for url in non_portal:
         page, _ = fetch_contact_page(url)
         if not page:
             continue
         _process_page(url, page)
-        if candidates:
+        if _has_viable_email_candidate():
+            break
+        processed += 1
+        if processed >= 4 and candidates:
             break
 
     if not candidates:
+        processed = 0
         for url in portal:
             page, _ = fetch_contact_page(url)
             if not page:
                 continue
             _process_page(url, page)
-            if candidates:
+            if _has_viable_email_candidate():
+                break
+            processed += 1
+            if processed >= 4 and candidates:
                 break
 
     if not candidates and domain_hint:
