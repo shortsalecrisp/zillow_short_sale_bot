@@ -68,6 +68,11 @@ def test_realtor_office_label_cloudmersive_override(monkeypatch):
     monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
     monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
     monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+    monkeypatch.setattr(
+        bot_min,
+        "_looks_direct",
+        lambda number, agent, state, tries=2: number == test_number,
+    )
 
     bot_min.cache_p.clear()
 
@@ -114,6 +119,7 @@ def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
         return number in {office_number, mobile_number}
 
     monkeypatch.setattr(bot_min, "is_mobile_number", fake_is_mobile)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
 
     bot_min.cache_p.clear()
 
@@ -138,6 +144,42 @@ def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
 
     assert result["number"] == mobile_number
     assert result["source"] == "rapid_contact"
+
+
+def test_lookup_phone_mismatched_rapid_does_not_override(monkeypatch):
+    office_number = "555-010-1010"
+
+    def fake_rapid_property(zpid):
+        return {
+            "contact_recipients": [
+                {
+                    "display_name": "Main Office",
+                    "label": "Office",
+                    "phones": [
+                        {"number": office_number},
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: False)
+
+    bot_min.cache_p.clear()
+
+    result = bot_min.lookup_phone(
+        "Faith Corbett",
+        "NY",
+        {"zpid": "30768362", "contact_recipients": []},
+    )
+
+    assert result["number"] == ""
+    assert result["reason"] == "withheld_low_conf_mix"
 
 
 def test_lookup_phone_continues_search_after_nonproductive_page(monkeypatch):
@@ -184,6 +226,7 @@ def test_lookup_phone_continues_search_after_nonproductive_page(monkeypatch):
 
     monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
     monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: number == mobile_number)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
 
     bot_min.cache_p.clear()
 
@@ -363,6 +406,7 @@ def test_lookup_phone_uses_lower_mobile_override_threshold(monkeypatch):
         return True
 
     monkeypatch.setattr(bot_min, "is_mobile_number", fake_is_mobile)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
 
     bot_min.cache_p.clear()
 
