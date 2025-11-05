@@ -1148,6 +1148,37 @@ def _split_portals(urls):
     return non, portals
 
 
+def _extract_remax_emails(page: str) -> Set[str]:
+    emails: Set[str] = set()
+    if not page:
+        return emails
+    soup = None
+    if BeautifulSoup:
+        try:
+            soup = BeautifulSoup(page, "html.parser")
+        except Exception:
+            soup = None
+    if soup:
+        for attr in ("data-email", "data-agent-email", "data-agentemail", "data-contact-email", "data-vcard-email"):
+            for node in soup.select(f"[{attr}]"):
+                raw = node.get(attr) or ""
+                cleaned = clean_email(html.unescape(raw))
+                if cleaned and ok_email(cleaned):
+                    emails.add(cleaned)
+    attr_pattern = re.compile(r"data-(?:agent-)?email\s*=\s*['\"]([^'\"]+@[^'\"]+)['\"]", re.I)
+    for match in attr_pattern.finditer(page):
+        cleaned = clean_email(html.unescape(match.group(1)))
+        if cleaned and ok_email(cleaned):
+            emails.add(cleaned)
+    json_pattern = re.compile(r'"(?:agentEmail|email|contactEmail)"\s*:\s*"([^"@\s]+@[^"\s]+)"', re.I)
+    for match in json_pattern.finditer(page):
+        raw = match.group(1).replace("mailto:", "")
+        cleaned = clean_email(html.unescape(raw))
+        if cleaned and ok_email(cleaned):
+            emails.add(cleaned)
+    return emails
+
+
 EMAIL_SOURCE_BASE = {
     "payload_contact": 1.0,
     "rapid_contact": 0.95,
@@ -1158,13 +1189,20 @@ EMAIL_SOURCE_BASE = {
     "dom": 0.6,
     "pattern": 0.5,
     "cse_contact": 0.7,
+    "remax_struct": 0.85,
 }
+
+
+BROKERAGE_EMAIL_DOMAINS = {"remax.com", "remax.net"}
 
 
 def _is_generic_email(email: str) -> bool:
     local, domain = email.split("@", 1)
     local_key = re.sub(r"[^a-z0-9]", "", local.lower())
     domain_l = domain.lower()
+    domain_root = _domain(domain_l)
+    if domain_l in BROKERAGE_EMAIL_DOMAINS or domain_root in BROKERAGE_EMAIL_DOMAINS:
+        return False
     if any(local_key.startswith(prefix) for prefix in GENERIC_EMAIL_PREFIXES if prefix):
         LOG.info("EMAIL REJECT generic: %s", email)
         return True
@@ -1174,18 +1212,20 @@ def _is_generic_email(email: str) -> bool:
             return True
     return False
 
-def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> bool:
+def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> Optional[bool]:
     if not phone:
-        return False
+        return None
     last = agent.split()[-1].lower()
     digits = re.sub(r"\D", "", phone)
     queries = [f'"{phone}" {state}', f'"{phone}" "{agent.split()[0]}"']
+    saw_page = False
     for q in queries:
         for it in google_items(q, tries=tries):
             link = it.get("link", "")
             page = fetch_simple(link, strict=False)
             if not page:
                 continue
+            saw_page = True
             low_digits = re.sub(r"\D", "", page)
             if digits not in low_digits:
                 continue
@@ -1194,7 +1234,7 @@ def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> bool:
                 continue
             if last in page.lower()[max(0, pos - 200): pos + 200]:
                 return True
-    return False
+    return False if saw_page else None
 
 PHONE_SOURCE_BASE = {
     "payload_contact": 2.6,
@@ -1206,7 +1246,7 @@ PHONE_SOURCE_BASE = {
     "agent_card_dom": 2.2,
     "crawler_unverified": 0.9,
     "contact_us": 0.0,
-    "cse_contact": 1.4,
+    "cse_contact": 1.6,
 }
 
 
@@ -1460,7 +1500,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 break
 
     tokens = _agent_tokens(agent)
-    direct_cache: Dict[str, bool] = {}
+    direct_cache: Dict[str, Optional[bool]] = {}
     best_number = ""
     best_score = float("-inf")
     best_source = ""
@@ -1468,6 +1508,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     best_non_office_mobile_number = ""
     best_non_office_mobile_score = float("-inf")
     best_non_office_mobile_source = ""
+    mobile_candidates: List[Tuple[str, Dict[str, Any]]] = []
     for number, info in candidates.items():
         if tokens and any(any(tok in ctx for tok in tokens) for ctx in info.get("contexts", [])):
             info["score"] += 0.5
@@ -1502,6 +1543,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                         LOG.debug("PHONE direct check failed for %s: %s", number, exc)
                         direct_cache[number] = True
                 info["direct_ok"] = direct_cache[number]
+                if preferred_source == "cse_contact" and info["direct_ok"] is False:
+                    info["direct_ok"] = None
             if info.get("direct_ok") is False and not info.get("template_penalized"):
                 info["score"] -= 2.0
                 info["template_penalized"] = True
@@ -1509,6 +1552,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         info["is_mobile"] = mobile
         if not mobile:
             info["score"] -= 1.0
+        else:
+            mobile_candidates.append((number, info))
         info["final_score"] = info["score"]
         source = preferred_source
         if info["score"] > best_score:
@@ -1520,6 +1565,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             best_non_office_mobile_score = info["score"]
             best_non_office_mobile_number = number
             best_non_office_mobile_source = source
+
+    other_viable_candidates = [
+        (num, info)
+        for num, info in candidates.items()
+        if num != best_number
+        and info.get("final_score", info.get("score", 0.0)) >= CONTACT_PHONE_LOW_CONF
+    ]
 
     override_threshold = max(CONTACT_PHONE_OVERRIDE_MIN, CONTACT_PHONE_LOW_CONF)
     if best_score != float("-inf"):
@@ -1573,16 +1625,21 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         candidate_info = candidates.get(best_number, {})
         override_low_conf = False
         adjusted_score = best_score
-        direct_ok = candidate_info.get("direct_ok", True)
+        direct_ok = candidate_info.get("direct_ok")
         if best_score >= CONTACT_PHONE_MIN_SCORE:
             confidence = "high"
             LOG.debug("PHONE WIN %s via %s score=%.2f", best_number, best_source or "unknown", best_score)
         elif best_score >= CONTACT_PHONE_LOW_CONF:
             confidence = "low"
             LOG.info("PHONE WIN (low-confidence): %s %.2f %s", best_number, best_score, best_source or "unknown")
-        elif best_is_mobile and direct_ok is not False:
+        elif best_is_mobile:
             allow_override = True
-            if best_source in {"rapid_contact", "rapid_listed_by"}:
+            if direct_ok is False:
+                sole_mobile = len(mobile_candidates) == 1
+                other_viable = bool(other_viable_candidates)
+                if not sole_mobile and other_viable:
+                    allow_override = False
+            if allow_override and best_source in {"rapid_contact", "rapid_listed_by"}:
                 if not candidate_info.get("name_match") and candidate_info.get("direct_ok") is not True:
                     allow_override = False
             if allow_override:
@@ -1852,7 +1909,20 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             return
         _, ems, meta, info = extract_struct(page)
         page_title = info.get("title", "")
-        seen = set()
+        seen: Set[str] = set()
+        domain = _domain(url)
+        if domain in BROKERAGE_EMAIL_DOMAINS:
+            for mail in _extract_remax_emails(page):
+                if mail in seen:
+                    continue
+                seen.add(mail)
+                _register(
+                    mail,
+                    "remax_struct",
+                    url=url,
+                    page_title=page_title,
+                    meta_name=agent,
+                )
         for entry in meta:
             entry_type = entry.get("type")
             types = entry_type if isinstance(entry_type, list) else [entry_type]
@@ -2024,7 +2094,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "jsonld_person",
         }
         domain = info.get("domain", best_email.split("@", 1)[1].lower()) if best_email else ""
-        domain_root = _domain(domain)
+        domain_l = domain.lower()
+        domain_root = _domain(domain_l)
         normalized_brokerage_tokens = []
         if brokerage:
             normalized_brokerage_tokens = [
@@ -2032,10 +2103,14 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 for tok in re.sub(r"[^a-z0-9]+", " ", brokerage.lower()).split()
                 if len(tok) >= 4
             ]
-        domain_hint_hit = bool(domain_hint and domain.endswith(domain_hint.lower()))
-        brokerage_hit = any(tok in domain or tok in domain_root for tok in normalized_brokerage_tokens)
+        domain_hint_hit = bool(domain_hint and domain_l.endswith(domain_hint.lower()))
+        brokerage_domain_ok = any(
+            candidate in BROKERAGE_EMAIL_DOMAINS
+            for candidate in (domain_l, domain_root)
+        )
+        brokerage_hit = any(tok in domain_l or tok in domain_root for tok in normalized_brokerage_tokens)
         domain_contains_agent = any(
-            tok and (tok in domain or tok in domain_root)
+            tok and (tok in domain_l or tok in domain_root)
             for tok in tokens
             if len(tok) >= 3
         )
@@ -2051,12 +2126,14 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             or bool(identity_sources - {"dom"})
             or domain_hint_hit
             or brokerage_hit
+            or brokerage_domain_ok
             or (
                 generic_only
                 and (
                     domain_contains_agent
                     or brokerage_hit
                     or domain_hint_hit
+                    or brokerage_domain_ok
                     or context_match
                     or identity_hits >= 1
                 )
