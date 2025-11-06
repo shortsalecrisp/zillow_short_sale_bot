@@ -1054,44 +1054,6 @@ def _page_has_location(page_text: str, tokens: Set[str], digits: Set[str]) -> bo
     return False
 
 
-_CONFLICT_NAME_STOPWORDS = {
-    "real", "realty", "estate", "realtors", "properties", "property", "homes",
-    "home", "group", "team", "company", "inc", "llc", "corp", "co", "city",
-    "county", "state", "united", "states", "north", "south", "east", "west",
-    "florida", "fl", "beach", "park", "suite", "road", "street", "st", "rd",
-    "ave", "avenue", "drive", "dr", "boulevard", "blvd", "pkwy", "highway",
-    "office", "offices", "service", "services", "mortgage", "title", "bank",
-}
-
-_CONFLICT_NAME_PATTERN = re.compile(r"\b([A-Z][a-z]{2,})(?:\s+[A-Z][a-z]{2,})+\b")
-
-
-def _has_conflicting_attribution(context: str, agent_tokens: List[str]) -> bool:
-    if not context:
-        return False
-    lowered_tokens = {tok for tok in agent_tokens if tok}
-    for match in _CONFLICT_NAME_PATTERN.finditer(context):
-        words = match.group(0).split()
-        lowered = [w.lower() for w in words]
-        if any(w in lowered_tokens for w in lowered):
-            continue
-        usable = [w for w in lowered if w not in _CONFLICT_NAME_STOPWORDS]
-        if usable:
-            return True
-    conflict_kw = re.search(
-        r"(agent|realtor|broker)\s+([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})+)",
-        context,
-        re.IGNORECASE,
-    )
-    if conflict_kw:
-        words = conflict_kw.group(2).split()
-        lowered = [w.lower() for w in words]
-        if not any(w in lowered_tokens for w in lowered):
-            if any(w not in _CONFLICT_NAME_STOPWORDS for w in lowered):
-                return True
-    return False
-
-
 def _first_last_tokens(name: str) -> Tuple[Set[str], str]:
     parts = [p for p in name.split() if p]
     if not parts:
@@ -1253,15 +1215,10 @@ def _is_generic_email(email: str) -> bool:
 def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> Optional[bool]:
     if not phone:
         return None
-    agent_tokens = [tok.lower() for tok in agent.split() if tok]
-    if not agent_tokens:
-        return None
-    first = agent_tokens[0]
-    last = agent_tokens[-1]
+    last = agent.split()[-1].lower()
     digits = re.sub(r"\D", "", phone)
-    queries = [f'"{phone}" {state}', f'"{phone}" "{agent_tokens[0]}"']
+    queries = [f'"{phone}" {state}', f'"{phone}" "{agent.split()[0]}"']
     saw_page = False
-    conflicting = False
     for q in queries:
         for it in google_items(q, tries=tries):
             link = it.get("link", "")
@@ -1275,22 +1232,9 @@ def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> Optiona
             pos = low_digits.find(digits)
             if pos == -1:
                 continue
-            start = max(0, pos - 200)
-            end = pos + 200
-            context = html.unescape(page[start:end])
-            context_lower = context.lower()
-            if last and last in context_lower:
+            if last in page.lower()[max(0, pos - 200): pos + 200]:
                 return True
-            full_name = " ".join(agent_tokens)
-            if full_name and full_name in context_lower:
-                return True
-            if first and last and first in context_lower and last in context_lower:
-                return True
-            if _has_conflicting_attribution(context, agent_tokens):
-                conflicting = True
-    if conflicting:
-        return False
-    return None
+    return False if saw_page else None
 
 PHONE_SOURCE_BASE = {
     "payload_contact": 2.6,
