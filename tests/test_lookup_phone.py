@@ -379,6 +379,88 @@ def test_lookup_phone_penalizes_template_number(monkeypatch):
     assert result["number"] == direct_number
 
 
+def test_lookup_phone_ambiguous_direct_hit_allows_override(monkeypatch):
+    agent = "Holly Iannucci"
+    state = "FL"
+    mobile_number = "555-444-5555"
+    office_number = "555-000-1212"
+
+    agent_url = "https://agent.example/profile"
+    aggregator_url = "https://aggregator.example/listing"
+
+    contact_html = """
+    <html><body>
+    <h1>Holly Iannucci</h1>
+    <p>Kissimmee FL short sale specialist.</p>
+    <a href="tel:5554445555">Call now</a>
+    </body></html>
+    """
+
+    aggregator_html = """
+    <html><body>
+    <p>Call {mobile} for assistance with this property.</p>
+    </body></html>
+    """.format(mobile=mobile_number)
+
+    def fake_google_items(query, tries=3):
+        digits = "".join(ch for ch in mobile_number if ch.isdigit())
+        query_digits = "".join(ch for ch in query if ch.isdigit())
+        if digits and digits in query_digits:
+            return [{"link": aggregator_url}]
+        return [{"link": agent_url}]
+
+    def fake_fetch_contact_page(url):
+        if url == agent_url:
+            return contact_html, False
+        return "", False
+
+    def fake_fetch_simple(url, strict=True):
+        if url == aggregator_url:
+            return aggregator_html
+        if url == agent_url:
+            return contact_html
+        return ""
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "google_items", fake_google_items)
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch_contact_page)
+    monkeypatch.setattr(bot_min, "fetch_simple", fake_fetch_simple)
+    monkeypatch.setattr(
+        bot_min,
+        "is_mobile_number",
+        lambda number: bot_min.fmt_phone(number) == bot_min.fmt_phone(mobile_number),
+    )
+
+    bot_min.cache_p.clear()
+
+    result = bot_min.lookup_phone(
+        agent,
+        state,
+        {
+            "zpid": "1",
+            "city": "Kissimmee",
+            "state": state,
+            "contact_recipients": [
+                {
+                    "display_name": "Main Office",
+                    "label": "Office",
+                    "phones": [{"number": office_number}],
+                }
+            ],
+        },
+    )
+
+    assert result["number"] == bot_min.fmt_phone(mobile_number)
+    assert result["confidence"] in {"low", "high"}
+    assert result["score"] >= bot_min.CONTACT_PHONE_LOW_CONF
+    assert result["source"] == "agent_card_dom"
+    assert (
+        bot_min._looks_direct(bot_min.fmt_phone(mobile_number), agent, state)
+        is None
+    )
+
 def test_lookup_phone_uses_lower_mobile_override_threshold(monkeypatch):
     office_number = "555-555-0100"
     mobile_number = "555-777-8888"
