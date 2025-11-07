@@ -301,6 +301,42 @@ def test_lookup_phone_requires_location_cue(monkeypatch):
     assert result["number"] == bot_min.fmt_phone(right_number_raw)
 
 
+def test_lookup_phone_unlabeled_number_with_full_name(monkeypatch):
+    target_number = "708-407-4942"
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://name-only.example"}])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+
+    def fake_fetch(url):
+        return (
+            """
+            <html><body>
+            <h1>Ola Sanni</h1>
+            <p>Ola Sanni 708-407-4942</p>
+            <p>Serving Chicago, IL short sale owners.</p>
+            </body></html>
+            """,
+            "text/html",
+        )
+
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
+
+    bot_min.cache_p.clear()
+
+    result = bot_min.lookup_phone(
+        "Ola Sanni",
+        "IL",
+        {"zpid": "1", "city": "Chicago", "state": "IL"},
+    )
+
+    assert result["number"] == target_number
+    assert result["source"] == "agent_card_dom"
+
+
 def test_lookup_phone_team_context_not_demoted(monkeypatch):
     office_number = "555-000-1111"
     mobile_number = "555-222-3333"

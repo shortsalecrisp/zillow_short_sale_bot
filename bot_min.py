@@ -905,13 +905,17 @@ def proximity_scan(t: str, first_name: str = "", last_name: str = ""):
             continue
         snippet = t[max(m.start() - 120, 0): m.end() + 120]
         snippet_low = snippet.lower()
+        has_first = bool(first_name and first_name in snippet_low)
+        has_last = bool(last_name and last_name in snippet_low)
         lab_match = LABEL_RE.search(snippet_low)
         lab = lab_match.group().lower() if lab_match else ""
         w = LABEL_TABLE.get(lab, 0)
+        if w < 1 and has_first and has_last:
+            # Allow plain numbers that appear right next to the agent's
+            # full name even if there is no explicit "Cell"/"Phone" label.
+            w = 3
         if w < 1:
             continue
-        has_first = bool(first_name and first_name in snippet_low)
-        has_last = bool(last_name and last_name in snippet_low)
         if not has_last:
             if not has_first:
                 continue
