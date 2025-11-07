@@ -19,6 +19,7 @@ import gspread
 import pytz
 import requests
 from requests.adapters import HTTPAdapter, Retry
+from requests import exceptions as req_exc
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build as gapi_build
 from sms_providers import get_sender
@@ -36,6 +37,15 @@ _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
 
 _DEFAULT_TIMEOUT = 25
+
+_CONNECTION_ERRORS = (
+    req_exc.ConnectionError,
+    req_exc.ConnectTimeout,
+    req_exc.ReadTimeout,
+    req_exc.Timeout,
+    req_exc.ProxyError,
+    req_exc.SSLError,
+)
 
 def _http_get(
     url: str,
@@ -699,6 +709,11 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                     raise
         except Exception as exc:
             LOG.debug("fetch_contact_page error %s on %s", exc, url)
+            if isinstance(exc, _CONNECTION_ERRORS):
+                blocked = True
+                _mark_block(dom)
+                LOG.warning("BLOCK connect -> retry %s/%s", attempt, tries)
+                continue
             break
         _CONTACT_DOMAIN_LAST_FETCH[dom] = time.time()
         status = resp.status_code
@@ -1140,6 +1155,27 @@ def _synth_email(name: str, domain: str) -> str:
     fi, li = first[0], last[0]
     local = patt.format(first=first, last=last, fi=fi, li=li)
     return f"{local}@{domain}"
+
+def _guess_domain_from_brokerage(brokerage: str) -> str:
+    if not brokerage:
+        return ""
+    tokens = {
+        re.sub(r"[^a-z]", "", part.lower())
+        for part in brokerage.split()
+        if len(part) > 2
+    }
+    tokens.discard("")
+    if not tokens:
+        return ""
+    best_domain = ""
+    best_hits = 0
+    for dom in domain_patterns.keys():
+        dom_tokens = {seg for seg in re.split(r"[^a-z]", dom.lower()) if seg}
+        hits = len(tokens & dom_tokens)
+        if hits > best_hits:
+            best_domain = dom
+            best_hits = hits
+    return best_domain if best_hits else ""
 
 def _split_portals(urls):
     portals, non = [], []
@@ -1703,6 +1739,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     generic_seen: Set[str] = set()
     had_candidates = False
     location_extras: List[str] = [brokerage] if brokerage else []
+    blocked_domains: Set[str] = set()
 
     tokens = _agent_tokens(agent)
     IDENTITY_SOURCES = {
@@ -1974,8 +2011,11 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     processed = 0
     for url in non_portal:
+        dom = _domain(url)
         page, _ = fetch_contact_page(url)
         if not page:
+            if _blocked_until.get(dom, 0.0) > time.time():
+                blocked_domains.add(dom)
             continue
         _process_page(url, page)
         if _has_viable_email_candidate():
@@ -1987,8 +2027,11 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     if not candidates:
         processed = 0
         for url in portal:
+            dom = _domain(url)
             page, _ = fetch_contact_page(url)
             if not page:
+                if _blocked_until.get(dom, 0.0) > time.time():
+                    blocked_domains.add(dom)
                 continue
             _process_page(url, page)
             if _has_viable_email_candidate():
@@ -1996,6 +2039,20 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             processed += 1
             if processed >= 4 and candidates:
                 break
+
+    if not candidates and blocked_domains:
+        for dom in blocked_domains:
+            guess = _synth_email(agent, dom)
+            if guess:
+                _register(guess, "pattern", url=f"https://{dom}")
+        if not candidates and brokerage:
+            broker_domain = _guess_domain_from_brokerage(brokerage)
+            if broker_domain:
+                if not domain_hint:
+                    domain_hint = broker_domain
+                guess = _synth_email(agent, broker_domain)
+                if guess:
+                    _register(guess, "pattern", url=f"https://{broker_domain}")
 
     if not candidates and domain_hint:
         guess = _synth_email(agent, domain_hint)
