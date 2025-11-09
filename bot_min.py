@@ -312,7 +312,24 @@ PHONE_OFFICE_TERMS = {
     "main line",
     "switchboard",
     "reception",
+    "brokerage",
+    "team",
+    "corporate",
+    "assistant",
 }
+
+ALT_PHONE_SITES: Tuple[str, ...] = (
+    "kw.com",
+    "coldwellbankerhomes.com",
+    "remax.com",
+    "century21.com",
+    "bhhs.com",
+    "exprealty.com",
+    "compass.com",
+    "realtyonegroup.com",
+    "zillow.com",
+    "realtor.com",
+)
 
 # ───────────────────── Google / Sheets setup ─────────────────────
 creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
@@ -944,6 +961,35 @@ def build_q_phone(name: str, state: str) -> List[str]:
         f"{base} mobile",
     ]
 
+
+def build_alt_q_phone(
+    name: str,
+    state: str,
+    *,
+    brokerage: str = "",
+    extras: Optional[List[str]] = None,
+) -> List[str]:
+    alt_queries: List[str] = []
+    base = f'"{name}" {state}'.strip()
+
+    def _add(q: str) -> None:
+        if q and q not in alt_queries:
+            alt_queries.append(q)
+
+    for site in ALT_PHONE_SITES:
+        _add(f"{base} site:{site} phone")
+        _add(f"{base} site:{site} contact")
+    if brokerage:
+        _add(f'"{name}" "{brokerage}" phone')
+        _add(f'"{brokerage}" "{state}" "phone"')
+    for extra in extras or []:
+        extra = extra.strip()
+        if not extra:
+            continue
+        _add(f'"{name}" "{extra}" phone')
+        _add(f'"{name}" "{extra}" contact')
+    return alt_queries
+
 def build_q_email(
     name: str, state: str, brokerage: str = "", domain_hint: str = "", mls_id: str = ""
 ) -> List[str]:
@@ -1299,6 +1345,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     had_candidates = False
     brokerage_hint = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     location_extras: List[str] = [brokerage_hint] if brokerage_hint else []
+    processed_urls: Set[str] = set()
+    mirror_hits: Set[str] = set()
 
     def _register(
         phone: Any,
@@ -1356,11 +1404,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             ctx = context.lower()
             info["contexts"].append(ctx)
             if not info["office_demoted"] and any(term in ctx for term in PHONE_OFFICE_TERMS):
-                info["score"] -= 0.6
+                info["score"] -= 0.35
                 info["office_demoted"] = True
                 LOG.debug("PHONE DEMOTE office: %s", formatted)
         if office_flag and not info["office_demoted"]:
-            info["score"] -= 1.0
+            info["score"] -= 0.7
             info["office_demoted"] = True
             LOG.debug("PHONE DEMOTE office: %s", formatted)
         if page_title:
@@ -1515,29 +1563,82 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             for info in candidates.values()
         )
 
+    def _handle_url(url: str) -> bool:
+        if not url:
+            return False
+        low = url.lower()
+        if low in processed_urls:
+            return False
+        page, mirrored = fetch_contact_page(url)
+        processed_urls.add(low)
+        if mirrored:
+            mirror_hits.add(_domain(url))
+        if not page:
+            return False
+        return _process_page(url, page)
+
     processed = 0
     for url in non_portal:
-        page, _ = fetch_contact_page(url)
-        if not page:
-            continue
-        if _process_page(url, page):
-            if _has_viable_phone_candidate():
-                break
-        processed += 1
+        if _handle_url(url) and _has_viable_phone_candidate():
+            break
+        if url:
+            processed += 1
         if processed >= 3 and candidates:
             break
 
     if not candidates:
         processed = 0
         for url in portal:
-            page, _ = fetch_contact_page(url)
-            if not page:
-                continue
-            if _process_page(url, page) and _has_viable_phone_candidate():
+            if _handle_url(url) and _has_viable_phone_candidate():
                 break
-            processed += 1
+            if url:
+                processed += 1
             if processed >= 3 and candidates:
                 break
+
+    def _fallback_needed() -> bool:
+        if _has_viable_phone_candidate():
+            return False
+        if mirror_hits:
+            return True
+        if candidates and any(not info.get("office_demoted") for info in candidates.values()):
+            return False
+        return True
+
+    if _fallback_needed():
+        extras = [e for e in location_extras if e]
+        alt_queries = build_alt_q_phone(
+            agent,
+            state,
+            brokerage=brokerage_hint,
+            extras=extras,
+        )
+        if alt_queries:
+            alt_results = list(pmap(google_items, alt_queries))
+            for items in alt_results:
+                for it in items:
+                    tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
+                    if tel:
+                        _register(tel, "cse_contact", url=it.get("link", ""))
+            alt_urls = []
+            for items in alt_results:
+                for it in items:
+                    link = it.get("link", "")
+                    if not link:
+                        continue
+                    low = link.lower()
+                    if low in processed_urls:
+                        continue
+                    alt_urls.append(link)
+            alt_urls = alt_urls[:15]
+            alt_non_portal, alt_portal = _split_portals(alt_urls)
+            for url in alt_non_portal:
+                if _handle_url(url) and _has_viable_phone_candidate():
+                    break
+            if not _has_viable_phone_candidate():
+                for url in alt_portal:
+                    if _handle_url(url) and _has_viable_phone_candidate():
+                        break
 
     tokens = _agent_tokens(agent)
     direct_cache: Dict[str, Optional[bool]] = {}
@@ -1707,6 +1808,37 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "score": adjusted_score,
                 "source": best_source,
             })
+            cache_p[key] = result
+            return result
+
+    if candidates:
+        office_choice = max(
+            (
+                (number, info)
+                for number, info in candidates.items()
+                if info.get("office_demoted") and info.get("score", 0.0) >= CONTACT_PHONE_OVERRIDE_MIN
+            ),
+            key=lambda item: item[1].get("score", float("-inf")),
+            default=("", {}),
+        )
+        office_number, office_info = office_choice
+        if office_number:
+            office_score = office_info.get("score", 0.0)
+            office_source = next(iter(office_info.get("sources", [])), "")
+            LOG.info(
+                "PHONE WIN (office fallback): %s %.2f %s",
+                office_number,
+                office_score,
+                office_source or "unknown",
+            )
+            result.update(
+                {
+                    "number": office_number,
+                    "confidence": "low",
+                    "score": office_score,
+                    "source": office_source,
+                }
+            )
             cache_p[key] = result
             return result
 
