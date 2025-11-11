@@ -42,6 +42,8 @@ oauth2_module = sys.modules.setdefault("google.oauth2", types.ModuleType("google
 setattr(oauth2_module, "service_account", service_account_module)
 sys.modules["google.oauth2.service_account"] = service_account_module
 
+import pytest
+
 import bot_min
 
 
@@ -75,6 +77,10 @@ def test_realtor_office_label_cloudmersive_override(monkeypatch):
     )
 
     bot_min.cache_p.clear()
+    bot_min._line_type_cache.clear()
+    bot_min._line_type_verified.clear()
+    bot_min._line_type_cache.clear()
+    bot_min._line_type_verified.clear()
 
     result = bot_min.lookup_phone(
         "Jane Agent",
@@ -122,6 +128,8 @@ def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
     monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
 
     bot_min.cache_p.clear()
+    bot_min._line_type_cache.clear()
+    bot_min._line_type_verified.clear()
 
     result = bot_min.lookup_phone(
         "Jane Agent",
@@ -144,6 +152,162 @@ def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
 
     assert result["number"] == mobile_number
     assert result["source"] == "rapid_contact"
+
+
+def test_cloudmersive_boost_applied_to_mobile(monkeypatch):
+    mobile_number = "555-999-0000"
+
+    def fake_rapid_property(zpid):
+        return {
+            "contact_recipients": [
+                {
+                    "display_name": "Main Office",
+                    "label": "Cell",
+                    "phones": [
+                        {"number": mobile_number},
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+    monkeypatch.setattr(bot_min, "_names_match", lambda *args, **kwargs: False)
+
+    def fake_is_mobile(number):
+        bot_min._line_type_verified[number] = True
+        return True
+
+    monkeypatch.setattr(bot_min, "is_mobile_number", fake_is_mobile)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
+
+    bot_min.cache_p.clear()
+
+    result = bot_min.lookup_phone(
+        "Jane Agent",
+        "CA",
+        {"zpid": "12345", "contact_recipients": []},
+    )
+
+    expected = (
+        bot_min.PHONE_SOURCE_BASE["rapid_contact"]
+        - 0.7
+        + bot_min.CLOUDMERSIVE_MOBILE_BOOST
+    )
+    assert result["number"] == mobile_number
+    assert result["score"] == pytest.approx(expected, rel=1e-3)
+
+
+def test_trusted_contact_pages_not_penalized(monkeypatch):
+    mobile_number = "555-101-2020"
+
+    def fake_rapid_property(zpid):
+        return {}
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+
+    monkeypatch.setattr(
+        bot_min,
+        "google_items",
+        lambda query: [{"link": "https://trusted.test/contact"}],
+    )
+
+    def fake_fetch(url):
+        return "<html><body>Jane Agent - CA <a href=\"tel:5551012020\">Call</a></body></html>", False
+
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+
+    def fake_extract(page):
+        return (
+            [],
+            [],
+            [],
+            {
+                "tel": [{"phone": mobile_number, "context": "Call"}],
+                "title": "Contact Us",
+            },
+        )
+
+    monkeypatch.setattr(bot_min, "extract_struct", fake_extract)
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
+
+    original_trusted = bot_min.TRUSTED_CONTACT_DOMAINS.copy()
+    bot_min.TRUSTED_CONTACT_DOMAINS.add("trusted.test")
+
+    bot_min.cache_p.clear()
+
+    try:
+        result = bot_min.lookup_phone(
+            "Jane Agent",
+            "CA",
+            {"zpid": "abc", "city": "Los Angeles", "state": "CA"},
+        )
+    finally:
+        bot_min.TRUSTED_CONTACT_DOMAINS = original_trusted
+
+    assert result["number"] == mobile_number
+    assert result["score"] >= bot_min.PHONE_SOURCE_BASE["agent_card_dom"]
+
+
+def test_profile_hint_urls_are_used(monkeypatch):
+    mobile_number = "555-303-4040"
+
+    def fake_rapid_property(zpid):
+        return {}
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+
+    def fake_fetch(url):
+        return "<html><body>Jane Agent - CA <a href=\"tel:5553034040\">Text</a></body></html>", False
+
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+
+    def fake_extract(page):
+        return (
+            [],
+            [],
+            [],
+            {
+                "tel": [{"phone": mobile_number, "context": "Cell"}],
+                "title": "Agent Profile",
+            },
+        )
+
+    monkeypatch.setattr(bot_min, "extract_struct", fake_extract)
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
+
+    original_hints = bot_min.PROFILE_HINTS.copy()
+    bot_min.PROFILE_HINTS = {
+        "jane agent|ca": ["https://hint.test/profile"],
+    }
+
+    original_trusted = bot_min.TRUSTED_CONTACT_DOMAINS.copy()
+    bot_min.TRUSTED_CONTACT_DOMAINS.add("hint.test")
+    bot_min.cache_p.clear()
+    bot_min._line_type_cache.clear()
+    bot_min._line_type_verified.clear()
+
+    try:
+        result = bot_min.lookup_phone(
+            "Jane Agent",
+            "CA",
+            {"zpid": "abc", "city": "Los Angeles", "state": "CA"},
+        )
+    finally:
+        bot_min.PROFILE_HINTS = original_hints
+        bot_min.TRUSTED_CONTACT_DOMAINS = original_trusted
+
+    assert result["number"] == mobile_number
 
 
 def test_lookup_phone_mismatched_rapid_does_not_override(monkeypatch):

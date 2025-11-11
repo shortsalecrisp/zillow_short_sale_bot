@@ -145,9 +145,10 @@ CONTACT_DOMAIN_GAP_JITTER = float(os.getenv("CONTACT_DOMAIN_GAP_JITTER", "1.5"))
 CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
 CONTACT_EMAIL_FALLBACK_SCORE = float(os.getenv("CONTACT_EMAIL_FALLBACK_SCORE", "0.45"))
 CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
-CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
+CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.35"))
 CONTACT_PHONE_OVERRIDE_MIN = float(os.getenv("CONTACT_PHONE_OVERRIDE_MIN", "1.0"))
-CONTACT_PHONE_OVERRIDE_DELTA = float(os.getenv("CONTACT_PHONE_OVERRIDE_DELTA", "1.0"))
+CONTACT_PHONE_OVERRIDE_DELTA = float(os.getenv("CONTACT_PHONE_OVERRIDE_DELTA", "1.35"))
+CLOUDMERSIVE_MOBILE_BOOST = float(os.getenv("CLOUDMERSIVE_MOBILE_BOOST", "0.9"))
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -273,6 +274,31 @@ logging.basicConfig(
 )
 LOG = logging.getLogger("bot_min")
 
+_profile_hints_env = os.getenv("CONTACT_PROFILE_HINTS_JSON", "").strip()
+PROFILE_HINTS: Dict[str, List[str]] = {}
+if _profile_hints_env:
+    try:
+        parsed = json.loads(_profile_hints_env)
+        if isinstance(parsed, dict):
+            for raw_key, value in parsed.items():
+                key = str(raw_key or "").strip().lower()
+                if not key:
+                    continue
+                urls: List[str]
+                if isinstance(value, list):
+                    urls = [str(u).strip() for u in value if str(u or "").strip()]
+                else:
+                    v = str(value or "").strip()
+                    urls = [v] if v else []
+                if urls:
+                    PROFILE_HINTS[key] = urls
+        else:
+            LOG.warning("CONTACT_PROFILE_HINTS_JSON must be a JSON object, got %s", type(parsed))
+    except json.JSONDecodeError as exc:
+        LOG.warning("Failed to parse CONTACT_PROFILE_HINTS_JSON: %s", exc)
+else:
+    PROFILE_HINTS = {}
+
 # ───────────────────── regexes & misc helpers ─────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
 BAD_RE   = re.compile(
@@ -316,6 +342,14 @@ PHONE_OFFICE_TERMS = {
     "team",
     "corporate",
     "assistant",
+}
+TRUSTED_CONTACT_DOMAINS = {
+    d.strip().lower()
+    for d in os.getenv(
+        "CONTACT_TRUSTED_DOMAINS",
+        "weichert.com,kw.com,remax.com,compass.com,exprealty.com",
+    ).split(",")
+    if d.strip()
 }
 
 ALT_PHONE_SITES: Tuple[str, ...] = (
@@ -1347,6 +1381,15 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     location_extras: List[str] = [brokerage_hint] if brokerage_hint else []
     processed_urls: Set[str] = set()
     mirror_hits: Set[str] = set()
+    norm_agent = agent.strip().lower()
+    norm_state = state.strip().lower()
+    hint_urls: List[str] = []
+    if PROFILE_HINTS:
+        if norm_agent and norm_agent in PROFILE_HINTS:
+            hint_urls.extend(PROFILE_HINTS[norm_agent])
+        compound_key = f"{norm_agent}|{norm_state}" if norm_state else ""
+        if compound_key and compound_key in PROFILE_HINTS:
+            hint_urls.extend(PROFILE_HINTS[compound_key])
 
     def _register(
         phone: Any,
@@ -1382,6 +1425,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "name_match": False,
                 "direct_ok": None,
                 "template_penalized": False,
+                "cloudmersive_boosted": False,
+                "contact_penalized": False,
             },
         )
         prev_score = info["score"]
@@ -1605,6 +1650,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             return False
         return True
 
+    if hint_urls:
+        for hint_url in hint_urls:
+            if not hint_url:
+                continue
+            if _handle_url(hint_url) and _has_viable_phone_candidate():
+                break
+
     if _fallback_needed():
         extras = [e for e in location_extras if e]
         alt_queries = build_alt_q_phone(
@@ -1659,11 +1711,19 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 break
         if info.get("page_titles") and agent.lower() in " ".join(info["page_titles"]):
             info["score"] += 0.3
-        if any(
-            _page_is_contactish(url, next(iter(info["page_titles"])) if info["page_titles"] else "")
-            for url in info.get("urls", [])
-        ):
-            info["score"] -= 0.4
+        if not info.get("contact_penalized"):
+            penalize = False
+            page_title = next(iter(info["page_titles"])) if info.get("page_titles") else ""
+            for url in info.get("urls", []):
+                dom = _domain(url)
+                if dom and dom in TRUSTED_CONTACT_DOMAINS:
+                    penalize = False
+                    break
+                if _page_is_contactish(url, page_title):
+                    penalize = True
+            if penalize:
+                info["score"] -= 0.4
+                info["contact_penalized"] = True
         preferred_source = info.get("best_source") or (
             next(iter(info["sources"])) if info["sources"] else ""
         )
@@ -1695,6 +1755,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             info["score"] -= 1.0
         else:
             mobile_candidates.append((number, info))
+            if _line_type_verified.get(number) and not info.get("cloudmersive_boosted"):
+                info["score"] += CLOUDMERSIVE_MOBILE_BOOST
+                info["cloudmersive_boosted"] = True
         info["final_score"] = info["score"]
         source = preferred_source
         if info["score"] > best_score:
@@ -2440,6 +2503,7 @@ def _digits_only(num: str) -> str:
 
 
 _line_type_cache: Dict[str, bool] = {}
+_line_type_verified: Dict[str, bool] = {}
 
 
 def _is_explicit_mobile(value: Any) -> bool:
@@ -2455,6 +2519,8 @@ def is_mobile_number(phone: str) -> bool:
     if phone in _line_type_cache:
         return _line_type_cache[phone]
     if not CLOUDMERSIVE_KEY:
+        _line_type_cache[phone] = True
+        _line_type_verified[phone] = False
         return True
     digits = _digits_only(phone)
     try:
@@ -2468,6 +2534,7 @@ def is_mobile_number(phone: str) -> bool:
     except Exception as exc:
         LOG.warning("Cloudmersive lookup failed for %s (%s)", phone, exc)
         _line_type_cache[phone] = False
+        _line_type_verified[phone] = False
         return False
     LOG.debug(
         "Cloudmersive response for %s: status=%s data=%s",
@@ -2489,7 +2556,9 @@ def is_mobile_number(phone: str) -> bool:
             # classify the line type. Treat it as usable so we do not drop real
             # mobile numbers that happen to be marked ambiguous.
             is_mobile = True
+    verified = bool(data.get("Successful"))
     _line_type_cache[phone] = is_mobile
+    _line_type_verified[phone] = verified
     LOG.debug("Cloudmersive classified %s as mobile=%s", digits, is_mobile)
     return is_mobile
 
