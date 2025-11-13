@@ -8,14 +8,15 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import gspread
 from google.oauth2.service_account import Credentials
+import requests
 
 from apify_fetcher import fetch_rows          # unchanged helper
-from bot_min       import process_rows, run_hourly_scheduler        # unchanged helper
+from bot_min       import TZ, process_rows, run_hourly_scheduler        # unchanged helper
 from sms_providers import get_sender
 
 # ──────────────────────────────────────────────────────────────────────
@@ -49,6 +50,24 @@ EXPORTED_ZPIDS: set[str] = set()
 _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
 
+_ingest_thread: Optional[threading.Thread] = None
+_ingest_stop: Optional[threading.Event] = None
+
+APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or ""
+APIFY_TASK_ID = os.getenv("APIFY_ZILLOW_TASK_ID") or os.getenv("APIFY_TASK_ID") or ""
+APIFY_ACTOR_ID = os.getenv("APIFY_ZILLOW_ACTOR_ID") or ""
+APIFY_WAIT_FOR_FINISH = int(os.getenv("APIFY_WAIT_FOR_FINISH", "240"))
+APIFY_INPUT_RAW = os.getenv("APIFY_ZILLOW_INPUT", "").strip()
+try:
+    APIFY_RUN_INPUT = json.loads(APIFY_INPUT_RAW) if APIFY_INPUT_RAW else None
+except json.JSONDecodeError:
+    logger.warning("APIFY_ZILLOW_INPUT is not valid JSON – ignoring value")
+    APIFY_RUN_INPUT = None
+
+APIFY_RUN_START = int(os.getenv("APIFY_RUN_START_HOUR", "8"))
+APIFY_RUN_END = int(os.getenv("APIFY_RUN_END_HOUR", "20"))  # inclusive (run at 8 pm)
+APIFY_ENABLED = bool(APIFY_TOKEN and (APIFY_TASK_ID or APIFY_ACTOR_ID))
+
 
 def _ensure_scheduler_thread() -> None:
     global _scheduler_thread, _scheduler_stop
@@ -79,18 +98,48 @@ def _ensure_scheduler_thread() -> None:
     _scheduler_thread.start()
 
 
+def _ensure_ingest_thread() -> None:
+    global _ingest_thread, _ingest_stop
+    if not APIFY_ENABLED:
+        logger.info("Hourly Apify ingestion disabled (missing token or actor/task id)")
+        return
+    if _ingest_thread and _ingest_thread.is_alive():
+        return
+
+    _ingest_stop = threading.Event()
+
+    def _runner() -> None:
+        logger.info("Hourly Apify ingestion thread starting")
+        try:
+            _ingest_loop(_ingest_stop)
+        finally:
+            logger.info("Hourly Apify ingestion thread stopped")
+
+    _ingest_thread = threading.Thread(
+        target=_runner,
+        name="apify-hourly-ingest",
+        daemon=True,
+    )
+    _ingest_thread.start()
+
+
 @app.on_event("startup")
 async def _start_scheduler() -> None:
     _ensure_scheduler_thread()
+    _ensure_ingest_thread()
 
 
 @app.on_event("shutdown")
 async def _stop_scheduler() -> None:
-    global _scheduler_thread, _scheduler_stop
+    global _scheduler_thread, _scheduler_stop, _ingest_thread, _ingest_stop
     if _scheduler_stop:
         _scheduler_stop.set()
     if _scheduler_thread and _scheduler_thread.is_alive():
         _scheduler_thread.join(timeout=10)
+    if _ingest_stop:
+        _ingest_stop.set()
+    if _ingest_thread and _ingest_thread.is_alive():
+        _ingest_thread.join(timeout=10)
 
 # ──────────────────────────────────────────────────────────────────────
 # Google Sheets helpers
@@ -163,6 +212,88 @@ def send_sms(phone: str, message: str) -> None:
         logger.exception("SMS send failed: %s", exc)
 
 
+def _compute_next_ingest_run(ref: datetime) -> datetime:
+    local = ref.astimezone(TZ)
+    next_slot = local.replace(minute=0, second=0, microsecond=0)
+    if local.minute or local.second or local.microsecond:
+        next_slot += timedelta(hours=1)
+
+    if next_slot.hour < APIFY_RUN_START:
+        next_slot = next_slot.replace(hour=APIFY_RUN_START)
+    elif next_slot.hour > APIFY_RUN_END:
+        next_slot = (next_slot + timedelta(days=1)).replace(hour=APIFY_RUN_START)
+    elif next_slot.hour == APIFY_RUN_END and next_slot <= local:
+        next_slot = (next_slot + timedelta(days=1)).replace(hour=APIFY_RUN_START)
+
+    return next_slot
+
+
+def _trigger_apify_run() -> Optional[str]:
+    if not APIFY_ENABLED:
+        return None
+
+    if APIFY_TASK_ID:
+        endpoint = f"https://api.apify.com/v2/actor-tasks/{APIFY_TASK_ID}/runs"
+        label = f"task {APIFY_TASK_ID}"
+    else:
+        endpoint = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/runs"
+        label = f"actor {APIFY_ACTOR_ID}"
+
+    params = {"token": APIFY_TOKEN, "waitForFinish": APIFY_WAIT_FOR_FINISH}
+    kwargs = {"timeout": APIFY_WAIT_FOR_FINISH + 60}
+    if APIFY_RUN_INPUT is not None and not APIFY_TASK_ID:
+        kwargs["json"] = APIFY_RUN_INPUT
+
+    logger.info("Starting Apify %s run", label)
+    try:
+        resp = requests.post(endpoint, params=params, **kwargs)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.exception("Apify %s run failed: %s", label, exc)
+        return None
+
+    payload = resp.json().get("data", {})
+    status = payload.get("status") or payload.get("statusMessage")
+    dataset_id = payload.get("defaultDatasetId")
+    if not dataset_id:
+        logger.warning("Apify %s run completed with status %s but no dataset id", label, status)
+        return None
+
+    logger.info("Apify %s run finished with status %s (dataset %s)", label, status, dataset_id)
+    return dataset_id
+
+
+def _ingest_loop(stop_event: threading.Event) -> None:
+    next_run = _compute_next_ingest_run(datetime.now(tz=TZ))
+    while not stop_event.is_set():
+        now = datetime.now(tz=TZ)
+        sleep_secs = max(0, (next_run - now).total_seconds())
+        if sleep_secs:
+            logger.debug(
+                "Apify ingest sleeping %.0f seconds until %s",
+                sleep_secs,
+                next_run.isoformat(),
+            )
+        if stop_event.wait(timeout=sleep_secs):
+            break
+
+        if APIFY_RUN_START <= next_run.hour <= APIFY_RUN_END:
+            logger.info("Triggering Apify scrape scheduled for %s", next_run.isoformat())
+            dataset_id = _trigger_apify_run()
+            if dataset_id:
+                try:
+                    _process_dataset(dataset_id)
+                except Exception:
+                    logger.exception("Processing dataset %s failed", dataset_id)
+        else:
+            logger.info(
+                "Scheduled Apify scrape at %s skipped (outside configured hours)",
+                next_run.isoformat(),
+            )
+
+        next_run = _compute_next_ingest_run(next_run + timedelta(seconds=1))
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Health check & export utilities
 # ──────────────────────────────────────────────────────────────────────
@@ -193,6 +324,53 @@ def reset_zpids():
 # ──────────────────────────────────────────────────────────────────────
 # Webhook – receives new listings from Apify
 # ──────────────────────────────────────────────────────────────────────
+def _process_incoming_rows(rows: list[dict]) -> dict:
+    conn = ensure_table()
+    try:
+        fresh_rows: list[dict] = []
+        for r in rows:
+            zpid = r.get("zpid")
+            if zpid in EXPORTED_ZPIDS:
+                continue
+            if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
+                EXPORTED_ZPIDS.add(zpid)
+                continue
+            fresh_rows.append(r)
+
+        if not fresh_rows:
+            logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
+            return {"status": "no new rows"}
+
+        logger.debug("Sample fields on first fresh row: %s", list(fresh_rows[0].keys())[:15])
+
+        sms_jobs = process_rows(fresh_rows) or []
+
+        for job in sms_jobs:
+            try:
+                send_sms(job["phone"], job["message"])
+            except Exception:
+                logger.exception("send_sms failed for %s", job)
+
+        EXPORTED_ZPIDS.update(r.get("zpid") for r in fresh_rows)
+
+        conn.executemany(
+            "INSERT OR IGNORE INTO listings (zpid) VALUES (?)",
+            [(r["zpid"],) for r in fresh_rows],
+        )
+        conn.commit()
+        return {"status": "processed", "rows": len(fresh_rows)}
+    finally:
+        conn.close()
+
+
+def _process_dataset(dataset_id: str) -> dict:
+    rows = fetch_rows(dataset_id)
+    logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
+    if not rows:
+        return {"status": "no rows"}
+    return _process_incoming_rows(rows)
+
+
 @app.post("/apify-hook")
 async def apify_hook(request: Request):
     """
@@ -203,59 +381,17 @@ async def apify_hook(request: Request):
     body = await request.json()
     logger.debug("Incoming webhook payload: %s", json.dumps(body))
 
-    # --- obtain raw rows ------------------------------------------------------
     if isinstance(body.get("listings"), list):
         rows = body["listings"]
         logger.info("apify-hook: received %d listings directly in payload", len(rows))
-    else:
-        dataset_id = body.get("dataset_id") or request.query_params.get("dataset_id")
-        if not dataset_id:
-            logger.error("apify-hook: missing dataset_id and no listings array found")
-            return {"error": "dataset_id missing and no listings provided"}
-        rows = fetch_rows(dataset_id)
-        logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
+        return _process_incoming_rows(rows)
 
-    # --- dedupe ---------------------------------------------------------------
-    conn = ensure_table()
-    fresh_rows = []
-    for r in rows:
-        zpid = r.get("zpid")
-        if zpid in EXPORTED_ZPIDS:
-            continue
-        if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
-            EXPORTED_ZPIDS.add(zpid)
-            continue
-        fresh_rows.append(r)
+    dataset_id = body.get("dataset_id") or request.query_params.get("dataset_id")
+    if not dataset_id:
+        logger.error("apify-hook: missing dataset_id and no listings array found")
+        return {"error": "dataset_id missing and no listings provided"}
 
-    if not fresh_rows:
-        logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
-        conn.close()
-        return {"status": "no new rows"}
-
-    logger.debug("Sample fields on first fresh row: %s", list(fresh_rows[0].keys())[:15])
-
-    # --- main processing ------------------------------------------------------
-    # process_rows should append to the sheet and return SMS jobs
-    sms_jobs = process_rows(fresh_rows) or []
-
-    # --- send SMS -------------------------------------------------------------
-    for job in sms_jobs:
-        try:
-            send_sms(job["phone"], job["message"])
-        except Exception:
-            logger.exception("send_sms failed for %s", job)
-
-    # --- persist ZPIDs --------------------------------------------------------
-    EXPORTED_ZPIDS.update(r.get("zpid") for r in fresh_rows)
-
-    conn.executemany(
-        "INSERT OR IGNORE INTO listings (zpid) VALUES (?)",
-        [(r["zpid"],) for r in fresh_rows],
-    )
-    conn.commit()
-    conn.close()
-
-    return {"status": "processed", "rows": len(fresh_rows)}
+    return _process_dataset(dataset_id)
 
 
 # ──────────────────────────────────────────────────────────────────────
