@@ -8,7 +8,6 @@ import json
 import logging
 import sqlite3
 import threading
-from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -83,11 +82,6 @@ APIFY_INPUT_RAW = os.getenv("APIFY_ZILLOW_INPUT", "").strip()
 APIFY_INPUT_FILE = os.getenv("APIFY_ZILLOW_INPUT_FILE", "").strip()
 APIFY_RUN_INPUT: Optional[dict] = None
 
-_DEFAULT_INPUT_FILENAME = os.getenv("APIFY_DEFAULT_INPUT_FILE", "apify_input.short_sale.json")
-DEFAULT_APIFY_INPUT_PATH = Path(_DEFAULT_INPUT_FILENAME)
-if not DEFAULT_APIFY_INPUT_PATH.is_absolute():
-    DEFAULT_APIFY_INPUT_PATH = Path(__file__).resolve().parent / _DEFAULT_INPUT_FILENAME
-
 if APIFY_INPUT_RAW:
     try:
         APIFY_RUN_INPUT = json.loads(APIFY_INPUT_RAW)
@@ -107,29 +101,16 @@ elif APIFY_INPUT_FILE:
             "APIFY_ZILLOW_INPUT_FILE %s does not contain valid JSON",
             APIFY_INPUT_FILE,
         )
-elif DEFAULT_APIFY_INPUT_PATH.exists():
-    try:
-        with DEFAULT_APIFY_INPUT_PATH.open("r", encoding="utf-8") as fp:
-            APIFY_RUN_INPUT = json.load(fp)
-        logger.info(
-            "Loaded fallback Apify input from %s",
-            DEFAULT_APIFY_INPUT_PATH,
-        )
-    except json.JSONDecodeError:
-        logger.error(
-            "Default Apify input file %s does not contain valid JSON",
-            DEFAULT_APIFY_INPUT_PATH,
-        )
 
 APIFY_RUN_START = int(os.getenv("APIFY_RUN_START_HOUR", "8"))
 APIFY_RUN_END = int(os.getenv("APIFY_RUN_END_HOUR", "20"))  # inclusive (run at 8 pm)
 APIFY_ENABLED = bool(APIFY_TOKEN and (APIFY_TASK_ID or APIFY_ACTOR_ID))
 
 if APIFY_ENABLED and not APIFY_TASK_ID and APIFY_RUN_INPUT is None:
-    raise RuntimeError(
-        "Apify actor %s has no task input configured; set APIFY_ZILLOW_TASK_ID, "
-        "APIFY_ZILLOW_INPUT/APIFY_ZILLOW_INPUT_FILE, or provide %s"
-        % (APIFY_ACTOR_ID or "<unset>", DEFAULT_APIFY_INPUT_PATH)
+    logger.warning(
+        "Apify actor %s has no task input configured; supply APIFY_ZILLOW_INPUT, "
+        "APIFY_ZILLOW_INPUT_FILE, or set APIFY_TASK_ID so the scrape has search parameters",
+        APIFY_ACTOR_ID or "<unset>",
     )
 
 
