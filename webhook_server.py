@@ -78,15 +78,39 @@ APIFY_ACTOR_ID = _normalize_apify_identifier(
 )
 APIFY_WAIT_FOR_FINISH = int(os.getenv("APIFY_WAIT_FOR_FINISH", "240"))
 APIFY_INPUT_RAW = os.getenv("APIFY_ZILLOW_INPUT", "").strip()
-try:
-    APIFY_RUN_INPUT = json.loads(APIFY_INPUT_RAW) if APIFY_INPUT_RAW else None
-except json.JSONDecodeError:
-    logger.warning("APIFY_ZILLOW_INPUT is not valid JSON – ignoring value")
-    APIFY_RUN_INPUT = None
+APIFY_INPUT_FILE = os.getenv("APIFY_ZILLOW_INPUT_FILE", "").strip()
+APIFY_RUN_INPUT: Optional[dict] = None
+
+if APIFY_INPUT_RAW:
+    try:
+        APIFY_RUN_INPUT = json.loads(APIFY_INPUT_RAW)
+    except json.JSONDecodeError:
+        logger.warning("APIFY_ZILLOW_INPUT is not valid JSON – ignoring value")
+elif APIFY_INPUT_FILE:
+    try:
+        with open(APIFY_INPUT_FILE, "r", encoding="utf-8") as fp:
+            APIFY_RUN_INPUT = json.load(fp)
+    except FileNotFoundError:
+        logger.error(
+            "APIFY_ZILLOW_INPUT_FILE %s not found – actor runs will lack input",
+            APIFY_INPUT_FILE,
+        )
+    except json.JSONDecodeError:
+        logger.error(
+            "APIFY_ZILLOW_INPUT_FILE %s does not contain valid JSON",
+            APIFY_INPUT_FILE,
+        )
 
 APIFY_RUN_START = int(os.getenv("APIFY_RUN_START_HOUR", "8"))
 APIFY_RUN_END = int(os.getenv("APIFY_RUN_END_HOUR", "20"))  # inclusive (run at 8 pm)
 APIFY_ENABLED = bool(APIFY_TOKEN and (APIFY_TASK_ID or APIFY_ACTOR_ID))
+
+if APIFY_ENABLED and not APIFY_TASK_ID and APIFY_RUN_INPUT is None:
+    logger.warning(
+        "Apify actor %s has no task input configured; supply APIFY_ZILLOW_INPUT, "
+        "APIFY_ZILLOW_INPUT_FILE, or set APIFY_TASK_ID so the scrape has search parameters",
+        APIFY_ACTOR_ID or "<unset>",
+    )
 
 
 def _apify_disabled_reason() -> str:
