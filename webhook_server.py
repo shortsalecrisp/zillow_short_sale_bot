@@ -52,6 +52,7 @@ _scheduler_stop: Optional[threading.Event] = None
 
 _ingest_thread: Optional[threading.Thread] = None
 _ingest_stop: Optional[threading.Event] = None
+_startup_ingest_thread: Optional[threading.Thread] = None
 
 def _normalize_apify_identifier(raw: str) -> str:
     """Return Apify actor/task id in owner~name format."""
@@ -78,15 +79,39 @@ APIFY_ACTOR_ID = _normalize_apify_identifier(
 )
 APIFY_WAIT_FOR_FINISH = int(os.getenv("APIFY_WAIT_FOR_FINISH", "240"))
 APIFY_INPUT_RAW = os.getenv("APIFY_ZILLOW_INPUT", "").strip()
-try:
-    APIFY_RUN_INPUT = json.loads(APIFY_INPUT_RAW) if APIFY_INPUT_RAW else None
-except json.JSONDecodeError:
-    logger.warning("APIFY_ZILLOW_INPUT is not valid JSON – ignoring value")
-    APIFY_RUN_INPUT = None
+APIFY_INPUT_FILE = os.getenv("APIFY_ZILLOW_INPUT_FILE", "").strip()
+APIFY_RUN_INPUT: Optional[dict] = None
+
+if APIFY_INPUT_RAW:
+    try:
+        APIFY_RUN_INPUT = json.loads(APIFY_INPUT_RAW)
+    except json.JSONDecodeError:
+        logger.warning("APIFY_ZILLOW_INPUT is not valid JSON – ignoring value")
+elif APIFY_INPUT_FILE:
+    try:
+        with open(APIFY_INPUT_FILE, "r", encoding="utf-8") as fp:
+            APIFY_RUN_INPUT = json.load(fp)
+    except FileNotFoundError:
+        logger.error(
+            "APIFY_ZILLOW_INPUT_FILE %s not found – actor runs will lack input",
+            APIFY_INPUT_FILE,
+        )
+    except json.JSONDecodeError:
+        logger.error(
+            "APIFY_ZILLOW_INPUT_FILE %s does not contain valid JSON",
+            APIFY_INPUT_FILE,
+        )
 
 APIFY_RUN_START = int(os.getenv("APIFY_RUN_START_HOUR", "8"))
 APIFY_RUN_END = int(os.getenv("APIFY_RUN_END_HOUR", "20"))  # inclusive (run at 8 pm)
 APIFY_ENABLED = bool(APIFY_TOKEN and (APIFY_TASK_ID or APIFY_ACTOR_ID))
+
+if APIFY_ENABLED and not APIFY_TASK_ID and APIFY_RUN_INPUT is None:
+    logger.warning(
+        "Apify actor %s has no task input configured; supply APIFY_ZILLOW_INPUT, "
+        "APIFY_ZILLOW_INPUT_FILE, or set APIFY_TASK_ID so the scrape has search parameters",
+        APIFY_ACTOR_ID or "<unset>",
+    )
 
 
 def _apify_disabled_reason() -> str:
@@ -154,15 +179,51 @@ def _ensure_ingest_thread() -> None:
     _ingest_thread.start()
 
 
+def _kickoff_startup_ingest(reason: str) -> None:
+    global _startup_ingest_thread
+    if not APIFY_ENABLED:
+        return
+    if _startup_ingest_thread and _startup_ingest_thread.is_alive():
+        return
+
+    def _runner() -> None:
+        now = datetime.now(tz=TZ)
+        if not (APIFY_RUN_START <= now.hour <= APIFY_RUN_END):
+            logger.info(
+                "Immediate Apify ingest skipped (%s) because %s is outside %02d-%02d", 
+                reason,
+                now.isoformat(),
+                APIFY_RUN_START,
+                APIFY_RUN_END,
+            )
+            return
+
+        logger.info("Immediate Apify ingest triggered (%s)", reason)
+        dataset_id = _trigger_apify_run()
+        if dataset_id:
+            try:
+                _process_dataset(dataset_id)
+            except Exception:
+                logger.exception("Processing dataset %s failed", dataset_id)
+
+    _startup_ingest_thread = threading.Thread(
+        target=_runner,
+        name="apify-startup-ingest",
+        daemon=True,
+    )
+    _startup_ingest_thread.start()
+
+
 @app.on_event("startup")
 async def _start_scheduler() -> None:
     _ensure_scheduler_thread()
     _ensure_ingest_thread()
+    _kickoff_startup_ingest("startup deploy")
 
 
 @app.on_event("shutdown")
 async def _stop_scheduler() -> None:
-    global _scheduler_thread, _scheduler_stop, _ingest_thread, _ingest_stop
+    global _scheduler_thread, _scheduler_stop, _ingest_thread, _ingest_stop, _startup_ingest_thread
     if _scheduler_stop:
         _scheduler_stop.set()
     if _scheduler_thread and _scheduler_thread.is_alive():
@@ -171,6 +232,8 @@ async def _stop_scheduler() -> None:
         _ingest_stop.set()
     if _ingest_thread and _ingest_thread.is_alive():
         _ingest_thread.join(timeout=10)
+    if _startup_ingest_thread and _startup_ingest_thread.is_alive():
+        _startup_ingest_thread.join(timeout=10)
 
 # ──────────────────────────────────────────────────────────────────────
 # Google Sheets helpers
