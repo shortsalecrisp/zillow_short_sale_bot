@@ -1049,7 +1049,7 @@ def build_q_email(
         if brokerage:
             _add(f'"{last}" "{brokerage}" email')
 
-    brokerage_low = brokerage.lower() if brokerage else ""
+    brokerage_low = brokerage.lower()
     if brokerage:
         _add(f'"{name}" "{brokerage}" email')
         _add(f'"{name}" "{brokerage}" "contact"')
