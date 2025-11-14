@@ -27,5 +27,11 @@ Optional overrides:
 * `APIFY_RUN_START_HOUR` / `APIFY_RUN_END_HOUR` – restrict the ingestion window (defaults 8 and 20 to run 8 PM inclusive).
 * `APIFY_WAIT_FOR_FINISH` – seconds to wait for the task/actor to complete before processing the dataset (default 240).
 * `APIFY_ZILLOW_INPUT` – JSON payload passed to the actor run (ignored when using tasks that already encapsulate input).
+* `APIFY_ZILLOW_INPUT_FILE` – Path to a JSON file with the payload above. By default the server loads `apify_input.short_sale.json`,
+  which contains a nationwide "short sale" search identical to the legacy scraper.
+* `APIFY_DEFAULT_INPUT_FILE` – Override the fallback file name if you store the JSON elsewhere in the repo.
+
+> **Safety check**: If Apify is enabled but neither `APIFY_ZILLOW_TASK_ID` nor a JSON payload is available, the webhook server now
+> raises during startup so misconfigurations fail loudly instead of silently producing empty runs.
 
 Once configured, the webhook server's background thread runs the task/actor, pulls the resulting dataset, and feeds it through the same processing pipeline used for manual Apify webhooks.

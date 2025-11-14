@@ -1,0 +1,32 @@
+{
+  "searches": [
+    {
+      "id": "nationwide-short-sale",
+      "label": "New short sale listings across the US",
+      "searchQueryState": {
+        "isMapVisible": true,
+        "mapBounds": {
+          "west": -155.64585572214366,
+          "east": -65.64585572214366,
+          "south": 19.832418649797937,
+          "north": 64.71017157443481
+        },
+        "filterState": {
+          "sort": {"value": "globalrelevanceex"},
+          "mf": {"value": false},
+          "land": {"value": false},
+          "apa": {"value": false},
+          "manu": {"value": false},
+          "doz": {"value": "1"},
+          "att": {"value": "short sale"}
+        },
+        "isListVisible": true,
+        "mapZoom": 4
+      },
+      "maxPages": 5
+    }
+  ],
+  "maxListings": 200,
+  "dedupeByZpid": true,
+  "includeListingImages": false
+}
