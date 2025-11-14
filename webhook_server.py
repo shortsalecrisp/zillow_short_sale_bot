@@ -52,6 +52,7 @@ _scheduler_stop: Optional[threading.Event] = None
 
 _ingest_thread: Optional[threading.Thread] = None
 _ingest_stop: Optional[threading.Event] = None
+_startup_ingest_thread: Optional[threading.Thread] = None
 
 def _normalize_apify_identifier(raw: str) -> str:
     """Return Apify actor/task id in owner~name format."""
@@ -178,15 +179,51 @@ def _ensure_ingest_thread() -> None:
     _ingest_thread.start()
 
 
+def _kickoff_startup_ingest(reason: str) -> None:
+    global _startup_ingest_thread
+    if not APIFY_ENABLED:
+        return
+    if _startup_ingest_thread and _startup_ingest_thread.is_alive():
+        return
+
+    def _runner() -> None:
+        now = datetime.now(tz=TZ)
+        if not (APIFY_RUN_START <= now.hour <= APIFY_RUN_END):
+            logger.info(
+                "Immediate Apify ingest skipped (%s) because %s is outside %02d-%02d", 
+                reason,
+                now.isoformat(),
+                APIFY_RUN_START,
+                APIFY_RUN_END,
+            )
+            return
+
+        logger.info("Immediate Apify ingest triggered (%s)", reason)
+        dataset_id = _trigger_apify_run()
+        if dataset_id:
+            try:
+                _process_dataset(dataset_id)
+            except Exception:
+                logger.exception("Processing dataset %s failed", dataset_id)
+
+    _startup_ingest_thread = threading.Thread(
+        target=_runner,
+        name="apify-startup-ingest",
+        daemon=True,
+    )
+    _startup_ingest_thread.start()
+
+
 @app.on_event("startup")
 async def _start_scheduler() -> None:
     _ensure_scheduler_thread()
     _ensure_ingest_thread()
+    _kickoff_startup_ingest("startup deploy")
 
 
 @app.on_event("shutdown")
 async def _stop_scheduler() -> None:
-    global _scheduler_thread, _scheduler_stop, _ingest_thread, _ingest_stop
+    global _scheduler_thread, _scheduler_stop, _ingest_thread, _ingest_stop, _startup_ingest_thread
     if _scheduler_stop:
         _scheduler_stop.set()
     if _scheduler_thread and _scheduler_thread.is_alive():
@@ -195,6 +232,8 @@ async def _stop_scheduler() -> None:
         _ingest_stop.set()
     if _ingest_thread and _ingest_thread.is_alive():
         _ingest_thread.join(timeout=10)
+    if _startup_ingest_thread and _startup_ingest_thread.is_alive():
+        _startup_ingest_thread.join(timeout=10)
 
 # ──────────────────────────────────────────────────────────────────────
 # Google Sheets helpers
