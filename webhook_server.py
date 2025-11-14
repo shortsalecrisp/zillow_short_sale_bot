@@ -55,7 +55,11 @@ _ingest_stop: Optional[threading.Event] = None
 
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or ""
 APIFY_TASK_ID = os.getenv("APIFY_ZILLOW_TASK_ID") or os.getenv("APIFY_TASK_ID") or ""
-APIFY_ACTOR_ID = os.getenv("APIFY_ZILLOW_ACTOR_ID") or ""
+APIFY_ACTOR_ID = (
+    os.getenv("APIFY_ZILLOW_ACTOR_ID")
+    or os.getenv("APIFY_ACTOR_ID")
+    or ""
+)
 APIFY_WAIT_FOR_FINISH = int(os.getenv("APIFY_WAIT_FOR_FINISH", "240"))
 APIFY_INPUT_RAW = os.getenv("APIFY_ZILLOW_INPUT", "").strip()
 try:
@@ -67,6 +71,14 @@ except json.JSONDecodeError:
 APIFY_RUN_START = int(os.getenv("APIFY_RUN_START_HOUR", "8"))
 APIFY_RUN_END = int(os.getenv("APIFY_RUN_END_HOUR", "20"))  # inclusive (run at 8 pm)
 APIFY_ENABLED = bool(APIFY_TOKEN and (APIFY_TASK_ID or APIFY_ACTOR_ID))
+
+
+def _apify_disabled_reason() -> str:
+    if not APIFY_TOKEN:
+        return "missing APIFY_API_TOKEN/APIFY_TOKEN"
+    if not (APIFY_TASK_ID or APIFY_ACTOR_ID):
+        return "missing APIFY_TASK_ID/APIFY_ACTOR_ID"
+    return "unknown configuration issue"
 
 
 def _ensure_scheduler_thread() -> None:
@@ -101,7 +113,10 @@ def _ensure_scheduler_thread() -> None:
 def _ensure_ingest_thread() -> None:
     global _ingest_thread, _ingest_stop
     if not APIFY_ENABLED:
-        logger.info("Hourly Apify ingestion disabled (missing token or actor/task id)")
+        logger.info(
+            "Hourly Apify ingestion disabled (%s)",
+            _apify_disabled_reason(),
+        )
         return
     if _ingest_thread and _ingest_thread.is_alive():
         return
