@@ -53,12 +53,28 @@ _scheduler_stop: Optional[threading.Event] = None
 _ingest_thread: Optional[threading.Thread] = None
 _ingest_stop: Optional[threading.Event] = None
 
+def _normalize_apify_identifier(raw: str) -> str:
+    """Return Apify actor/task id in owner~name format."""
+    if not raw:
+        return ""
+    cleaned = raw.strip()
+    if "/" in cleaned and "~" not in cleaned:
+        owner, _, remainder = cleaned.partition("/")
+        cleaned = owner + "~" + remainder.replace("/", "~")
+        logger.info(
+            "Normalized Apify identifier '%s' to '%s' for API compatibility",
+            raw,
+            cleaned,
+        )
+    return cleaned
+
+
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN") or ""
-APIFY_TASK_ID = os.getenv("APIFY_ZILLOW_TASK_ID") or os.getenv("APIFY_TASK_ID") or ""
-APIFY_ACTOR_ID = (
-    os.getenv("APIFY_ZILLOW_ACTOR_ID")
-    or os.getenv("APIFY_ACTOR_ID")
-    or ""
+APIFY_TASK_ID = _normalize_apify_identifier(
+    os.getenv("APIFY_ZILLOW_TASK_ID") or os.getenv("APIFY_TASK_ID") or ""
+)
+APIFY_ACTOR_ID = _normalize_apify_identifier(
+    os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACTOR_ID") or ""
 )
 APIFY_WAIT_FOR_FINISH = int(os.getenv("APIFY_WAIT_FOR_FINISH", "240"))
 APIFY_INPUT_RAW = os.getenv("APIFY_ZILLOW_INPUT", "").strip()

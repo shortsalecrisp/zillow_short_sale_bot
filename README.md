@@ -20,7 +20,7 @@ With these variables set, the bot queries Google directly instead of relying on 
 To have the service trigger an Apify run at the top of every hour between 8 AM and 8 PM (local bot timezone), configure the following environment variables:
 
 * `APIFY_API_TOKEN` – your Apify API token (or set `APIFY_TOKEN`).
-* One of `APIFY_ZILLOW_TASK_ID` or `APIFY_ZILLOW_ACTOR_ID` – the task/actor that scrapes Zillow short sales.
+* One of `APIFY_ZILLOW_TASK_ID` or `APIFY_ZILLOW_ACTOR_ID` – the task/actor that scrapes Zillow short sales. You can provide either the canonical `owner~name` identifier that Apify expects or the friendlier `owner/name` form; the server normalizes the value automatically.
 
 Optional overrides:
 
