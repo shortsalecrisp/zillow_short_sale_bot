@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Grab your Apify token
-APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 HEADERS = {"Authorization": f"Bearer {APIFY_TOKEN}"} if APIFY_TOKEN else {}
 
 # Track dataset offsets in a shared SQLite database so multiple

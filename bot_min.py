@@ -148,9 +148,6 @@ CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
 CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.35"))
 CONTACT_PHONE_OVERRIDE_MIN = float(os.getenv("CONTACT_PHONE_OVERRIDE_MIN", "1.0"))
 CONTACT_PHONE_OVERRIDE_DELTA = float(os.getenv("CONTACT_PHONE_OVERRIDE_DELTA", "1.35"))
-CONTACT_PHONE_OFFICE_FALLBACK_MIN = float(
-    os.getenv("CONTACT_PHONE_OFFICE_FALLBACK_MIN", "0.3")
-)
 CLOUDMERSIVE_MOBILE_BOOST = float(os.getenv("CLOUDMERSIVE_MOBILE_BOOST", "0.9"))
 
 BROWSER_HEADERS = {
@@ -1049,7 +1046,6 @@ def build_q_email(
         if brokerage:
             _add(f'"{last}" "{brokerage}" email')
 
-    brokerage_low = brokerage.lower()
     if brokerage:
         _add(f'"{name}" "{brokerage}" email')
         _add(f'"{name}" "{brokerage}" "contact"')
@@ -1057,10 +1053,6 @@ def build_q_email(
             _add(f'"{brokerage}" "{parts[-1]}" email')
         if state:
             _add(f'"{brokerage}" "{state}" "email"')
-        if "keller" in brokerage_low or brokerage_low.startswith("kw") or " kw" in brokerage_low:
-            _add(f'site:kw.com "{name}" email')
-            _add(f'"{name}" "kw" "email" {state}'.strip())
-            _add(f'"{name}" "kw.com"')
 
     if domain_hint:
         _add(f'site:{domain_hint} "{name}" email')
@@ -1895,49 +1887,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         office_number, office_info = office_choice
         if office_number:
             office_score = office_info.get("score", 0.0)
-            office_source = office_info.get("best_source") or next(
-                iter(office_info.get("sources", [])),
-                "",
-            )
+            office_source = next(iter(office_info.get("sources", [])), "")
             LOG.info(
                 "PHONE WIN (office fallback): %s %.2f %s",
-                office_number,
-                office_score,
-                office_source or "unknown",
-            )
-            result.update(
-                {
-                    "number": office_number,
-                    "confidence": "low",
-                    "score": office_score,
-                    "source": office_source,
-                }
-            )
-            cache_p[key] = result
-            return result
-
-        fallback_sources = {"rapid_listed_by", "rapid_contact", "payload_contact"}
-        relaxed_office: Tuple[str, Dict[str, Any], str] = ("", {}, "")
-        relaxed_score = float("-inf")
-        for number, info in candidates.items():
-            if not info.get("office_demoted"):
-                continue
-            source = info.get("best_source") or next(iter(info.get("sources", [])), "")
-            score = info.get("score", 0.0)
-            if not source:
-                continue
-            if score < CONTACT_PHONE_OFFICE_FALLBACK_MIN and info.get("direct_ok") is not True:
-                continue
-            if source not in fallback_sources and not info.get("name_match"):
-                continue
-            if score > relaxed_score:
-                relaxed_office = (number, info, source)
-                relaxed_score = score
-        office_number, office_info, office_source = relaxed_office
-        if office_number:
-            office_score = office_info.get("score", 0.0)
-            LOG.info(
-                "PHONE WIN (office fallback relaxed): %s %.2f %s",
                 office_number,
                 office_score,
                 office_source or "unknown",
