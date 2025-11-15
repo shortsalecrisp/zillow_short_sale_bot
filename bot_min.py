@@ -1581,13 +1581,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     processed = 0
     for url in non_portal:
-        page, _ = fetch_contact_page(url)
-        if not page:
-            continue
-        if _process_page(url, page):
-            if _has_viable_phone_candidate():
-                break
-        processed += 1
         if _handle_url(url) and _has_viable_phone_candidate():
             break
         if url:
@@ -1598,13 +1591,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     if not candidates:
         processed = 0
         for url in portal:
-            page, _ = fetch_contact_page(url)
-            if not page:
-                continue
-            if _process_page(url, page) and _has_viable_phone_candidate():
             if _handle_url(url) and _has_viable_phone_candidate():
                 break
-            processed += 1
             if url:
                 processed += 1
             if processed >= 3 and candidates:
