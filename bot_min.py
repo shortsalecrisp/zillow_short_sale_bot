@@ -1,3 +1,4 @@
+@@ -1,2621 +1,2753 @@
 from __future__ import annotations
 
 import concurrent.futures
@@ -145,13 +146,9 @@ CONTACT_DOMAIN_GAP_JITTER = float(os.getenv("CONTACT_DOMAIN_GAP_JITTER", "1.5"))
 CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
 CONTACT_EMAIL_FALLBACK_SCORE = float(os.getenv("CONTACT_EMAIL_FALLBACK_SCORE", "0.45"))
 CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
-CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.35"))
+CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
 CONTACT_PHONE_OVERRIDE_MIN = float(os.getenv("CONTACT_PHONE_OVERRIDE_MIN", "1.0"))
-CONTACT_PHONE_OVERRIDE_DELTA = float(os.getenv("CONTACT_PHONE_OVERRIDE_DELTA", "1.35"))
-CONTACT_PHONE_OFFICE_FALLBACK_MIN = float(
-    os.getenv("CONTACT_PHONE_OFFICE_FALLBACK_MIN", "0.3")
-)
-CLOUDMERSIVE_MOBILE_BOOST = float(os.getenv("CLOUDMERSIVE_MOBILE_BOOST", "0.9"))
+CONTACT_PHONE_OVERRIDE_DELTA = float(os.getenv("CONTACT_PHONE_OVERRIDE_DELTA", "1.0"))
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -277,31 +274,6 @@ logging.basicConfig(
 )
 LOG = logging.getLogger("bot_min")
 
-_profile_hints_env = os.getenv("CONTACT_PROFILE_HINTS_JSON", "").strip()
-PROFILE_HINTS: Dict[str, List[str]] = {}
-if _profile_hints_env:
-    try:
-        parsed = json.loads(_profile_hints_env)
-        if isinstance(parsed, dict):
-            for raw_key, value in parsed.items():
-                key = str(raw_key or "").strip().lower()
-                if not key:
-                    continue
-                urls: List[str]
-                if isinstance(value, list):
-                    urls = [str(u).strip() for u in value if str(u or "").strip()]
-                else:
-                    v = str(value or "").strip()
-                    urls = [v] if v else []
-                if urls:
-                    PROFILE_HINTS[key] = urls
-        else:
-            LOG.warning("CONTACT_PROFILE_HINTS_JSON must be a JSON object, got %s", type(parsed))
-    except json.JSONDecodeError as exc:
-        LOG.warning("Failed to parse CONTACT_PROFILE_HINTS_JSON: %s", exc)
-else:
-    PROFILE_HINTS = {}
-
 # ───────────────────── regexes & misc helpers ─────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
 BAD_RE   = re.compile(
@@ -345,14 +317,6 @@ PHONE_OFFICE_TERMS = {
     "team",
     "corporate",
     "assistant",
-}
-TRUSTED_CONTACT_DOMAINS = {
-    d.strip().lower()
-    for d in os.getenv(
-        "CONTACT_TRUSTED_DOMAINS",
-        "weichert.com,kw.com,remax.com,compass.com,exprealty.com",
-    ).split(",")
-    if d.strip()
 }
 
 ALT_PHONE_SITES: Tuple[str, ...] = (
@@ -1049,7 +1013,6 @@ def build_q_email(
         if brokerage:
             _add(f'"{last}" "{brokerage}" email')
 
-    brokerage_low = brokerage.lower()
     if brokerage:
         _add(f'"{name}" "{brokerage}" email')
         _add(f'"{name}" "{brokerage}" "contact"')
@@ -1057,10 +1020,6 @@ def build_q_email(
             _add(f'"{brokerage}" "{parts[-1]}" email')
         if state:
             _add(f'"{brokerage}" "{state}" "email"')
-        if "keller" in brokerage_low or brokerage_low.startswith("kw") or " kw" in brokerage_low:
-            _add(f'site:kw.com "{name}" email')
-            _add(f'"{name}" "kw" "email" {state}'.strip())
-            _add(f'"{name}" "kw.com"')
 
     if domain_hint:
         _add(f'site:{domain_hint} "{name}" email')
@@ -1389,15 +1348,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     location_extras: List[str] = [brokerage_hint] if brokerage_hint else []
     processed_urls: Set[str] = set()
     mirror_hits: Set[str] = set()
-    norm_agent = agent.strip().lower()
-    norm_state = state.strip().lower()
-    hint_urls: List[str] = []
-    if PROFILE_HINTS:
-        if norm_agent and norm_agent in PROFILE_HINTS:
-            hint_urls.extend(PROFILE_HINTS[norm_agent])
-        compound_key = f"{norm_agent}|{norm_state}" if norm_state else ""
-        if compound_key and compound_key in PROFILE_HINTS:
-            hint_urls.extend(PROFILE_HINTS[compound_key])
 
     def _register(
         phone: Any,
@@ -1433,8 +1383,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "name_match": False,
                 "direct_ok": None,
                 "template_penalized": False,
-                "cloudmersive_boosted": False,
-                "contact_penalized": False,
             },
         )
         prev_score = info["score"]
@@ -1457,10 +1405,12 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             ctx = context.lower()
             info["contexts"].append(ctx)
             if not info["office_demoted"] and any(term in ctx for term in PHONE_OFFICE_TERMS):
+                info["score"] -= 0.6
                 info["score"] -= 0.35
                 info["office_demoted"] = True
                 LOG.debug("PHONE DEMOTE office: %s", formatted)
         if office_flag and not info["office_demoted"]:
+            info["score"] -= 1.0
             info["score"] -= 0.7
             info["office_demoted"] = True
             LOG.debug("PHONE DEMOTE office: %s", formatted)
@@ -1632,6 +1582,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     processed = 0
     for url in non_portal:
+        page, _ = fetch_contact_page(url)
+        if not page:
+            continue
+        if _process_page(url, page):
+            if _has_viable_phone_candidate():
+                break
+        processed += 1
         if _handle_url(url) and _has_viable_phone_candidate():
             break
         if url:
@@ -1642,8 +1599,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     if not candidates:
         processed = 0
         for url in portal:
+            page, _ = fetch_contact_page(url)
+            if not page:
+                continue
+            if _process_page(url, page) and _has_viable_phone_candidate():
             if _handle_url(url) and _has_viable_phone_candidate():
                 break
+            processed += 1
             if url:
                 processed += 1
             if processed >= 3 and candidates:
@@ -1657,13 +1619,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if candidates and any(not info.get("office_demoted") for info in candidates.values()):
             return False
         return True
-
-    if hint_urls:
-        for hint_url in hint_urls:
-            if not hint_url:
-                continue
-            if _handle_url(hint_url) and _has_viable_phone_candidate():
-                break
 
     if _fallback_needed():
         extras = [e for e in location_extras if e]
@@ -1719,19 +1674,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 break
         if info.get("page_titles") and agent.lower() in " ".join(info["page_titles"]):
             info["score"] += 0.3
-        if not info.get("contact_penalized"):
-            penalize = False
-            page_title = next(iter(info["page_titles"])) if info.get("page_titles") else ""
-            for url in info.get("urls", []):
-                dom = _domain(url)
-                if dom and dom in TRUSTED_CONTACT_DOMAINS:
-                    penalize = False
-                    break
-                if _page_is_contactish(url, page_title):
-                    penalize = True
-            if penalize:
-                info["score"] -= 0.4
-                info["contact_penalized"] = True
+        if any(
+            _page_is_contactish(url, next(iter(info["page_titles"])) if info["page_titles"] else "")
+            for url in info.get("urls", [])
+        ):
+            info["score"] -= 0.4
         preferred_source = info.get("best_source") or (
             next(iter(info["sources"])) if info["sources"] else ""
         )
@@ -1763,9 +1710,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             info["score"] -= 1.0
         else:
             mobile_candidates.append((number, info))
-            if _line_type_verified.get(number) and not info.get("cloudmersive_boosted"):
-                info["score"] += CLOUDMERSIVE_MOBILE_BOOST
-                info["cloudmersive_boosted"] = True
         info["final_score"] = info["score"]
         source = preferred_source
         if info["score"] > best_score:
@@ -1895,49 +1839,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         office_number, office_info = office_choice
         if office_number:
             office_score = office_info.get("score", 0.0)
-            office_source = office_info.get("best_source") or next(
-                iter(office_info.get("sources", [])),
-                "",
-            )
+            office_source = next(iter(office_info.get("sources", [])), "")
             LOG.info(
                 "PHONE WIN (office fallback): %s %.2f %s",
-                office_number,
-                office_score,
-                office_source or "unknown",
-            )
-            result.update(
-                {
-                    "number": office_number,
-                    "confidence": "low",
-                    "score": office_score,
-                    "source": office_source,
-                }
-            )
-            cache_p[key] = result
-            return result
-
-        fallback_sources = {"rapid_listed_by", "rapid_contact", "payload_contact"}
-        relaxed_office: Tuple[str, Dict[str, Any], str] = ("", {}, "")
-        relaxed_score = float("-inf")
-        for number, info in candidates.items():
-            if not info.get("office_demoted"):
-                continue
-            source = info.get("best_source") or next(iter(info.get("sources", [])), "")
-            score = info.get("score", 0.0)
-            if not source:
-                continue
-            if score < CONTACT_PHONE_OFFICE_FALLBACK_MIN and info.get("direct_ok") is not True:
-                continue
-            if source not in fallback_sources and not info.get("name_match"):
-                continue
-            if score > relaxed_score:
-                relaxed_office = (number, info, source)
-                relaxed_score = score
-        office_number, office_info, office_source = relaxed_office
-        if office_number:
-            office_score = office_info.get("score", 0.0)
-            LOG.info(
-                "PHONE WIN (office fallback relaxed): %s %.2f %s",
                 office_number,
                 office_score,
                 office_source or "unknown",
@@ -2551,7 +2455,6 @@ def _digits_only(num: str) -> str:
 
 
 _line_type_cache: Dict[str, bool] = {}
-_line_type_verified: Dict[str, bool] = {}
 
 
 def _is_explicit_mobile(value: Any) -> bool:
@@ -2567,8 +2470,6 @@ def is_mobile_number(phone: str) -> bool:
     if phone in _line_type_cache:
         return _line_type_cache[phone]
     if not CLOUDMERSIVE_KEY:
-        _line_type_cache[phone] = True
-        _line_type_verified[phone] = False
         return True
     digits = _digits_only(phone)
     try:
@@ -2582,7 +2483,6 @@ def is_mobile_number(phone: str) -> bool:
     except Exception as exc:
         LOG.warning("Cloudmersive lookup failed for %s (%s)", phone, exc)
         _line_type_cache[phone] = False
-        _line_type_verified[phone] = False
         return False
     LOG.debug(
         "Cloudmersive response for %s: status=%s data=%s",
@@ -2604,9 +2504,7 @@ def is_mobile_number(phone: str) -> bool:
             # classify the line type. Treat it as usable so we do not drop real
             # mobile numbers that happen to be marked ambiguous.
             is_mobile = True
-    verified = bool(data.get("Successful"))
     _line_type_cache[phone] = is_mobile
-    _line_type_verified[phone] = verified
     LOG.debug("Cloudmersive classified %s as mobile=%s", digits, is_mobile)
     return is_mobile
 
@@ -2867,4 +2765,3 @@ if __name__ == "__main__":
     else:
         LOG.info("No JSON payload detected; entering hourly scheduler mode.")
         run_hourly_scheduler()
-
