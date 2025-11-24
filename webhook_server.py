@@ -59,7 +59,14 @@ _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
 _startup_task: Optional[asyncio.Task] = None
 
-APIFY_ACTOR_ID = os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACTOR_ID")
+_APIFY_ACTOR_ID_RAW = os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACTOR_ID")
+# Apify actor "unique names" use `user~actor`, but many configs still include
+# a slash. Normalize here so `user/actor` works too and avoids 404s.
+APIFY_ACTOR_ID = (
+    _APIFY_ACTOR_ID_RAW.replace("/", "~") if _APIFY_ACTOR_ID_RAW else None
+)
+if _APIFY_ACTOR_ID_RAW and "/" in _APIFY_ACTOR_ID_RAW and "~" not in _APIFY_ACTOR_ID_RAW:
+    logger.info("Normalizing APIFY_ACTOR_ID from %s to %s", _APIFY_ACTOR_ID_RAW, APIFY_ACTOR_ID)
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN")
 APIFY_TIMEOUT = int(os.getenv("APIFY_ACTOR_TIMEOUT", "150"))
 APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "1024"))
