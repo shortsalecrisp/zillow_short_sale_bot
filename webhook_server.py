@@ -167,8 +167,15 @@ def _run_apify_actor() -> List[Dict[str, Any]]:
         "memory": APIFY_MEMORY,
         "clean": 1,
     }
-    logger.info("Triggering Apify actor %s for startup scrape", APIFY_ACTOR_ID)
-    resp = requests.post(url, params=params, json=APIFY_INPUT, timeout=APIFY_TIMEOUT + 30)
+    logger.info(
+        "Triggering Apify actor %s for startup scrape (%s input)",
+        APIFY_ACTOR_ID,
+        "custom" if APIFY_INPUT is not None else "default",
+    )
+    req_kwargs: Dict[str, Any] = {"params": params, "timeout": APIFY_TIMEOUT + 30}
+    if APIFY_INPUT is not None:
+        req_kwargs["json"] = APIFY_INPUT
+    resp = requests.post(url, **req_kwargs)
     resp.raise_for_status()
     data = resp.json()
     if not isinstance(data, list):
