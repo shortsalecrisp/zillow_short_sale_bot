@@ -2,7 +2,7 @@
 #                     **and now records inbound SMS replies via a webhook**
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 import os
@@ -57,6 +57,8 @@ EXPORTED_ZPIDS: set[str] = set()
 
 _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
+_apify_scheduler_thread: Optional[threading.Thread] = None
+_apify_scheduler_stop: Optional[threading.Event] = None
 _startup_task: Optional[asyncio.Task] = None
 
 _APIFY_ACTOR_ID_RAW = os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACTOR_ID")
@@ -109,6 +111,65 @@ def _ensure_scheduler_thread() -> None:
         daemon=True,
     )
     _scheduler_thread.start()
+
+
+def _next_scrape_run(now: datetime) -> datetime:
+    if now.hour >= WORK_END:
+        return (now + timedelta(days=1)).replace(
+            hour=WORK_START, minute=0, second=0, microsecond=0
+        )
+    if now.hour < WORK_START:
+        return now.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
+    return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+
+def _ensure_apify_scheduler_thread() -> None:
+    global _apify_scheduler_thread, _apify_scheduler_stop
+    if _apify_scheduler_thread and _apify_scheduler_thread.is_alive():
+        return
+
+    _apify_scheduler_stop = threading.Event()
+
+    def _runner() -> None:
+        logger.info("Apify hourly scheduler thread starting")
+        while not _apify_scheduler_stop.is_set():
+            try:
+                now = datetime.now(tz=TZ)
+                if _within_work_hours(now):
+                    logger.info("Triggering hourly Apify scrape at %s", now.isoformat())
+                    try:
+                        rows = _run_apify_actor()
+                        if rows:
+                            _process_incoming_rows(rows)
+                    except Exception:
+                        logger.exception("Hourly Apify scrape failed")
+                else:
+                    logger.info(
+                        "Outside work hours (%s-%s); skipping Apify scrape",
+                        WORK_START,
+                        WORK_END,
+                    )
+
+                next_run = _next_scrape_run(datetime.now(tz=TZ))
+                sleep_secs = max(
+                    0, (next_run - datetime.now(tz=TZ)).total_seconds()
+                )
+                if _apify_scheduler_stop.wait(timeout=sleep_secs):
+                    break
+            except Exception:
+                logger.exception(
+                    "Apify scheduler crashed; restarting in 30 seconds"
+                )
+                if _apify_scheduler_stop.wait(timeout=30):
+                    break
+        logger.info("Apify hourly scheduler thread stopped")
+
+    _apify_scheduler_thread = threading.Thread(
+        target=_runner,
+        name="apify-hourly-scheduler",
+        daemon=True,
+    )
+    _apify_scheduler_thread.start()
 
 
 def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -210,17 +271,22 @@ async def _maybe_run_startup_scrape() -> None:
 async def _start_scheduler() -> None:
     global _startup_task
     _ensure_scheduler_thread()
+    _ensure_apify_scheduler_thread()
     if _startup_task is None or _startup_task.done():
         _startup_task = asyncio.create_task(_maybe_run_startup_scrape())
 
 
 @app.on_event("shutdown")
 async def _stop_scheduler() -> None:
-    global _scheduler_thread, _scheduler_stop
+    global _scheduler_thread, _scheduler_stop, _apify_scheduler_thread, _apify_scheduler_stop
     if _scheduler_stop:
         _scheduler_stop.set()
+    if _apify_scheduler_stop:
+        _apify_scheduler_stop.set()
     if _scheduler_thread and _scheduler_thread.is_alive():
         _scheduler_thread.join(timeout=10)
+    if _apify_scheduler_thread and _apify_scheduler_thread.is_alive():
+        _apify_scheduler_thread.join(timeout=10)
 
 # ──────────────────────────────────────────────────────────────────────
 # Google Sheets helpers
