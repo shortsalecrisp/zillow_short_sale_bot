@@ -1848,6 +1848,31 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         reason = "withheld_low_conf_mix"
     else:
         reason = "no_personal_mobile"
+
+    if candidates:
+        top_candidates = sorted(
+            candidates.items(),
+            key=lambda item: item[1].get("score", float("-inf")),
+            reverse=True,
+        )
+        summary = []
+        for number, info in top_candidates[:5]:
+            summary.append(
+                "{} score={:.2f} src={} office_demoted={}".format(
+                    number,
+                    info.get("score", 0.0),
+                    ",".join(sorted(info.get("sources", []))) or "",
+                    info.get("office_demoted", False),
+                )
+            )
+        if summary:
+            LOG.info(
+                "PHONE DROP candidates for %s %s: %s",
+                agent,
+                state,
+                " | ".join(summary),
+            )
+
     result.update({
         "number": "",
         "confidence": "",
