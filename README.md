@@ -14,3 +14,12 @@ Agent contact details are looked up using the Google Custom Search API. Provide 
 * `CS_CX` or `GOOGLE_CX` – the Custom Search Engine ID
 
 With these variables set, the bot queries Google directly instead of relying on Apify for search results.
+
+## RapidAPI Zillow data
+
+The bot fetches listing details from the RapidAPI Zillow data source. Set your credentials via the environment:
+
+* `RAPID_KEY` – your RapidAPI key
+* `RAPID_HOST` – the RapidAPI host (defaults to `us-housing-market-data1.p.rapidapi.com`)
+
+If you previously used the old host (`zillow-com1.p.rapidapi.com`), update your environment to the new default so the RapidAPI requests continue to work.
