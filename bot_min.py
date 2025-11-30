@@ -98,7 +98,7 @@ SC_JSON        = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
 RAPID_KEY      = os.getenv("RAPID_KEY", "").strip()
-RAPID_HOST     = os.getenv("RAPID_HOST", "zillow-com1.p.rapidapi.com").strip()
+RAPID_HOST     = os.getenv("RAPID_HOST", "us-housing-market-data1.p.rapidapi.com").strip()
 GOOD_STATUS    = {"FOR_SALE", "ACTIVE", "COMING_SOON", "PENDING", "NEW_CONSTRUCTION"}
 
 TZ             = pytz.timezone(os.getenv("BOT_TIMEZONE", "US/Eastern"))
