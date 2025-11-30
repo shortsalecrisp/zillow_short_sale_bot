@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Zillow Short-Sale Scraper + SMS Bot
-Runs 8 AM – 8 PM Eastern at random 51–72-minute intervals.
+Runs hourly between 8 AM and 8 PM Eastern, seven days a week.
 """
 
 import json, re, sqlite3, time, random, requests, pytz, os, threading
@@ -668,24 +668,32 @@ def run_cycle() -> None:
 # ---------- 8. SCHEDULER ----------
 ET = pytz.timezone("US/Eastern")
 
-def snooze() -> None:
-    now = datetime.now(ET)
-    if now.hour < 8:
-        wake = now.replace(hour=8, minute=0, second=0, microsecond=0)
-    elif now.hour >= 20:
-        wake = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
-    else:
-        # random 51–72 minutes
-        wake = now + timedelta(seconds=random.randint(3060, 4320))
 
-    sleep_for = (wake - now).total_seconds()
-    nxt = datetime.now(ET) + timedelta(seconds=sleep_for)
-    print(
-        f"Sleeping {int(sleep_for/60)} min — next run {nxt.strftime('%I:%M %p %Z')}"
-    )
-    time.sleep(sleep_for)
+def _next_run_time(now: datetime) -> datetime:
+    """Return the next hourly run time between 8 AM and 8 PM Eastern."""
+
+    if now.hour < 8:
+        return now.replace(hour=8, minute=0, second=0, microsecond=0)
+    if now.hour >= 20:
+        return (now + timedelta(days=1)).replace(
+            hour=8, minute=0, second=0, microsecond=0
+        )
+    return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
 
 while True:
-    if 8 <= datetime.now(ET).hour < 20:
+    now = datetime.now(ET)
+    if 8 <= now.hour <= 20:
         run_cycle()
-    snooze()
+    else:
+        print(
+            "Outside run window; Zillow scrape resumes at",
+            _next_run_time(now).strftime("%I:%M %p %Z"),
+        )
+
+    wake = _next_run_time(datetime.now(ET))
+    sleep_for = max(0, (wake - datetime.now(ET)).total_seconds())
+    print(
+        f"Sleeping {int(sleep_for/60)} min — next run {wake.strftime('%I:%M %p %Z')}"
+    )
+    time.sleep(sleep_for)
