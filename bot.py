@@ -267,13 +267,36 @@ BROKER_PATTERNS = [
     "bhhs",
 ]
 
-def google_search_items(query: str) -> list[dict]:
-    """Return raw result items from Google Custom Search API."""
+def google_search_items(query: str) -> tuple[list[dict], bool]:
+    """Return raw result items from Google Custom Search API.
+
+    The second element of the return tuple indicates whether we observed a
+    rate-limit response (429 or related CSE error reasons). Callers can use
+    this to short-circuit additional CSE traffic.
+    """
+
     if not GOOGLE_API_KEY or not GOOGLE_CX:
-        return []
+        return [], False
+
     global _LAST_CSE_AT
     params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CX, "q": query, "num": 10}
-    session = new_session()
+
+    # Build a lightweight session with no automatic 429 retries to avoid
+    # stacking retries with our own backoff logic.
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        connect=1,
+        read=1,
+        backoff_factor=1.0,
+        status_forcelist=(500, 502, 503, 504),
+        allowed_methods=("GET", "HEAD"),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
     with _CSE_LOCK:
         delta = time.time() - _LAST_CSE_AT
         jitter = random.uniform(CSE_JITTER_LOW, CSE_JITTER_HIGH) if CSE_JITTER_HIGH > 0 else 0.0
@@ -281,6 +304,8 @@ def google_search_items(query: str) -> list[dict]:
         if delta < min_gap:
             time.sleep(min_gap - delta)
         _LAST_CSE_AT = time.time()
+
+    rate_limited = False
     for attempt in range(3):
         delay = 1.5 * (attempt + 1)
         headers = random_headers({"Accept": "application/json"})
@@ -311,21 +336,36 @@ def google_search_items(query: str) -> list[dict]:
             print(
                 f"Google search API issue (status {resp.status_code} reason {reason or 'unknown'})"
             )
-            if resp.status_code in (429, 503) or reason in {
+
+            if resp.status_code == 429 or reason in {
                 "rateLimitExceeded",
                 "userRateLimitExceeded",
                 "dailyLimitExceeded",
             }:
+                rate_limited = True
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        time.sleep(float(retry_after))
+                    except ValueError:
+                        time.sleep(delay * 2)
+                else:
+                    time.sleep(delay * 2)
+                break
+
+            if resp.status_code in (503,):
                 time.sleep(delay + random.uniform(0.5, 1.5))
                 continue
-            return []
+
+            return [], rate_limited
 
         items = payload.get("items", [])
         if items:
-            return items
+            return items, rate_limited
         # Empty responses are often transient; small pause before retrying
         time.sleep(delay)
-    return []
+
+    return [], rate_limited
 
 
 def build_phone_queries(name: str, state: str, brokerage: str = "") -> list[str]:
@@ -411,8 +451,13 @@ def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[st
         name, state, brokerage
     )
     items = []
+    cse_blocked = False
     for q in queries:
-        items.extend(google_search_items(q))
+        batch, rate_limited = google_search_items(q)
+        items.extend(batch)
+        if rate_limited:
+            cse_blocked = True
+            break
         if POST_CSE_DELAY_HIGH > 0:
             time.sleep(random.uniform(POST_CSE_DELAY_LOW, POST_CSE_DELAY_HIGH))
 
@@ -445,7 +490,7 @@ def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[st
 
     phone = ""
     email = ""
-    blocked = False
+    blocked = cse_blocked
 
     for it in items:
         cp = (it.get("pagemap", {}).get("contactpoint") or [{}])[0]
