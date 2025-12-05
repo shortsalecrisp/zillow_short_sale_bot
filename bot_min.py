@@ -1805,7 +1805,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         and candidates.get(best_number, {}).get("office_demoted")
         and best_non_office_mobile_number
         and best_non_office_mobile_number != best_number
-        and best_non_office_mobile_score >= override_threshold
     ):
         LOG.info(
             "PHONE OVERRIDE prefer_non_office_mobile: %s (%.2f) -> %s (%.2f)",
@@ -1818,19 +1817,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         best_score = best_non_office_mobile_score
         best_source = best_non_office_mobile_source
         best_is_mobile = True
-    elif (
-        best_number
-        and candidates.get(best_number, {}).get("office_demoted")
-        and best_non_office_mobile_number
-        and best_non_office_mobile_number != best_number
-        and best_non_office_mobile_score < override_threshold
-    ):
-        LOG.debug(
-            "PHONE override skipped: best mobile %s score %.2f below threshold %.2f",
-            best_non_office_mobile_number,
-            best_non_office_mobile_score,
-            override_threshold,
-        )
 
     result = {
         "number": "",
