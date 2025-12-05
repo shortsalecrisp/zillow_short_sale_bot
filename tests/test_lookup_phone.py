@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import types
@@ -731,3 +732,74 @@ def test_lookup_email_fallback_accepts_agent_match(monkeypatch):
     assert result["email"] == fake_email
     assert result["confidence"] == "low"
     assert result["source"] == "rapid_listed_by"
+
+
+def test_lookup_phone_uses_override(monkeypatch):
+    override_payload = {"jane agent|CA": {"phone": "555-101-2020"}}
+    monkeypatch.setenv("CONTACT_OVERRIDE_JSON", json.dumps(override_payload))
+
+    bot_min.cache_p.clear()
+    bot_min.cache_e.clear()
+    bot_min._contact_override_cache = {"raw": None, "map": {}}
+
+    def fail(*args, **kwargs):
+        raise AssertionError("should short-circuit before scraping")
+
+    monkeypatch.setattr(bot_min, "rapid_property", fail)
+    monkeypatch.setattr(bot_min, "build_q_phone", fail)
+    monkeypatch.setattr(bot_min, "pmap", fail)
+
+    result = bot_min.lookup_phone("Jane Agent", "CA", {"zpid": "12345"})
+
+    assert result["number"] == "555-101-2020"
+    assert result["confidence"] == "high"
+    assert result["source"] == "override"
+
+
+def test_process_rows_surfaces_override(monkeypatch):
+    override_payload = {"jane agent|CA": {"phone": "555-444-3333", "email": "jane@example.com"}}
+    monkeypatch.setenv("CONTACT_OVERRIDE_JSON", json.dumps(override_payload))
+
+    bot_min.cache_p.clear()
+    bot_min.cache_e.clear()
+    bot_min._contact_override_cache = {"raw": None, "map": {}}
+
+    monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(bot_min, "phone_exists", lambda *_: False)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("should short-circuit before scraping")
+
+    monkeypatch.setattr(bot_min, "rapid_property", fail)
+    monkeypatch.setattr(bot_min, "build_q_phone", fail)
+    monkeypatch.setattr(bot_min, "build_q_email", fail)
+    monkeypatch.setattr(bot_min, "google_items", fail)
+    monkeypatch.setattr(bot_min, "pmap", fail)
+
+    captured = {}
+
+    def fake_append_row(row_vals):
+        captured["row"] = row_vals
+        return 42
+
+    monkeypatch.setattr(bot_min, "append_row", fake_append_row)
+    monkeypatch.setattr(bot_min, "send_sms", lambda *args, **kwargs: None)
+
+    bot_min.process_rows(
+        [
+            {
+                "description": "short sale listing", 
+                "agentName": "Jane Agent",
+                "state": "CA",
+                "street": "123 Elm St",
+                "city": "Los Angeles",
+                "zpid": "abc",
+            }
+        ]
+    )
+
+    assert captured["row"][bot_min.COL_PHONE] == "555-444-3333"
+    assert captured["row"][bot_min.COL_EMAIL] == "jane@example.com"
+    assert captured["row"][bot_min.COL_PHONE_CONF] == "high"
+    assert captured["row"][bot_min.COL_EMAIL_CONF] == "high"
