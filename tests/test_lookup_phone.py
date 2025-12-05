@@ -631,6 +631,58 @@ def test_lookup_phone_uses_lower_mobile_override_threshold(monkeypatch):
     assert result["number"] == mobile_number
     assert result["source"] == "rapid_contact"
 
+
+def test_lookup_phone_prefers_mobile_over_high_scoring_office(monkeypatch):
+    office_number = "555-222-0101"
+    mobile_number = "555-222-0202"
+
+    def fake_rapid_property(zpid):
+        return {
+            "contact_recipients": [
+                {
+                    "display_name": "Jane Agent",
+                    "label": "Cell",
+                    "phones": [
+                        {"number": mobile_number},
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+
+    def fake_is_mobile(number):
+        return number == mobile_number
+
+    monkeypatch.setattr(bot_min, "is_mobile_number", fake_is_mobile)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
+
+    bot_min.cache_p.clear()
+
+    payload = {
+        "zpid": "12345",
+        "contact_recipients": [
+            {
+                "display_name": "Jane Agent",
+                "label": "Office",
+                "phones": [
+                    {"number": office_number},
+                ],
+            }
+        ],
+        "city": "Seattle",
+        "state": "WA",
+    }
+
+    result = bot_min.lookup_phone("Jane Agent", "WA", payload)
+
+    assert result["number"] == mobile_number
+    assert result["source"] == "rapid_contact"
+
 def test_lookup_phone_allows_nickname_in_page_guard(monkeypatch):
     page_html = """
     <html>
