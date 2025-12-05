@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import types
@@ -76,3 +77,31 @@ def test_lookup_email_accepts_generic_team_when_only_option(monkeypatch):
 
     assert result["email"] == "team@jonmccallteam.com"
     assert result["confidence"] == "low"
+
+
+def test_lookup_email_uses_override(monkeypatch):
+    override_payload = {"jane agent|CA": {"email": "jane@example.com"}}
+    monkeypatch.setenv("CONTACT_OVERRIDE_JSON", json.dumps(override_payload))
+
+    bot_min.cache_e.clear()
+    bot_min.cache_p.clear()
+    bot_min._contact_override_cache = {"raw": None, "map": {}}
+
+    def fail(*args, **kwargs):
+        raise AssertionError("should short-circuit before scraping")
+
+    monkeypatch.setattr(bot_min, "rapid_property", fail)
+    monkeypatch.setattr(bot_min, "build_q_email", fail)
+    monkeypatch.setattr(bot_min, "google_items", fail)
+    monkeypatch.setattr(bot_min, "pmap", fail)
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fail)
+
+    result = bot_min.lookup_email(
+        "Jane Agent",
+        "CA",
+        {"zpid": "123", "city": "Los Angeles", "state": "CA"},
+    )
+
+    assert result["email"] == "jane@example.com"
+    assert result["confidence"] == "high"
+    assert result["source"] == "override"

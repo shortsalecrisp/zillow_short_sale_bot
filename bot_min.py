@@ -148,6 +148,8 @@ CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
 CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
 CONTACT_PHONE_OVERRIDE_MIN = float(os.getenv("CONTACT_PHONE_OVERRIDE_MIN", "1.0"))
 CONTACT_PHONE_OVERRIDE_DELTA = float(os.getenv("CONTACT_PHONE_OVERRIDE_DELTA", "1.0"))
+CLOUDMERSIVE_MOBILE_BOOST = float(os.getenv("CLOUDMERSIVE_MOBILE_BOOST", "0.8"))
+CONTACT_OVERRIDE_JSON = os.getenv("CONTACT_OVERRIDE_JSON", "")
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -1171,6 +1173,59 @@ def _email_matches_name(agent: str, email: str) -> bool:
 cache_p: Dict[str, Dict[str, Any]] = {}
 cache_e: Dict[str, Dict[str, Any]] = {}
 domain_patterns: Dict[str, str] = {}
+_contact_override_cache: Dict[str, Any] = {"raw": None, "map": {}}
+
+
+def _normalize_override_key(agent: str, state: str) -> str:
+    agent_part = str(agent).strip().lower()
+    state_part = str(state).strip().upper()
+    return f"{agent_part}|{state_part}"
+
+
+def _load_contact_overrides() -> Dict[str, Dict[str, str]]:
+    global _contact_override_cache
+    raw = os.getenv("CONTACT_OVERRIDE_JSON", CONTACT_OVERRIDE_JSON).strip()
+    if raw == _contact_override_cache.get("raw"):
+        return _contact_override_cache.get("map", {})
+
+    overrides: Dict[str, Dict[str, str]] = {}
+    if raw:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            LOG.warning("Invalid CONTACT_OVERRIDE_JSON payload; ignoring")
+        else:
+            if isinstance(data, dict):
+                for key, val in data.items():
+                    if not isinstance(val, dict):
+                        continue
+                    if all(isinstance(v, dict) for v in val.values()):
+                        for state, payload in val.items():
+                            if not isinstance(payload, dict):
+                                continue
+                            cleaned = {
+                                k: str(v) for k, v in payload.items() if k in {"phone", "email"} and v
+                            }
+                            if cleaned:
+                                overrides[_normalize_override_key(str(key), str(state))] = cleaned
+                    else:
+                        cleaned = {k: str(v) for k, v in val.items() if k in {"phone", "email"} and v}
+                        if cleaned:
+                            if "|" in str(key):
+                                agent_key, state_key = str(key).split("|", 1)
+                            else:
+                                agent_key, state_key = str(key), ""
+                            norm_key = _normalize_override_key(agent_key, state_key)
+                            overrides[norm_key] = cleaned
+
+    _contact_override_cache = {"raw": raw, "map": overrides}
+    return overrides
+
+
+def _contact_override(agent: str, state: str) -> Dict[str, str]:
+    overrides = _load_contact_overrides()
+    key = _normalize_override_key(agent, state)
+    return overrides.get(key, {})
 
 
 def _agent_tokens(name: str) -> List[str]:
@@ -1338,6 +1393,20 @@ PHONE_SOURCE_BASE = {
 
 def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     key = f"{agent}|{state}"
+    override = _contact_override(agent, state)
+    override_phone = override.get("phone") if override else ""
+    if override_phone:
+        formatted = fmt_phone(str(override_phone))
+        if formatted and valid_phone(formatted):
+            result = {
+                "number": formatted,
+                "confidence": "high",
+                "score": max(CONTACT_PHONE_MIN_SCORE, CONTACT_PHONE_LOW_CONF + 0.5),
+                "source": "override",
+                "reason": "",
+            }
+            cache_p[key] = result
+            return result
     if key in cache_p:
         return cache_p[key]
 
@@ -1488,7 +1557,10 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             if tel:
                 _register(tel, "cse_contact", url=it.get("link", ""))
 
-    urls = [
+    hint_key = _normalize_override_key(agent, state)
+    hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
+    hint_urls = [url for url in hint_urls if url]
+    urls = hint_urls + [
         it.get("link", "")
         for items in pmap(google_items, queries)
         for it in items
@@ -1511,8 +1583,10 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             return False
         return True
 
-    def _process_page(url: str, page: str) -> bool:
-        if not page or not _page_has_name(page):
+    def _process_page(url: str, page: str, trusted: bool = False) -> bool:
+        if not page:
+            return False
+        if not trusted and not _page_has_name(page):
             return False
         page_viable = False
         ph, _, meta, info = extract_struct(page)
@@ -1571,13 +1645,15 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         low = url.lower()
         if low in processed_urls:
             return False
+        domain = _domain(url)
+        trusted = domain in TRUSTED_CONTACT_DOMAINS
         page, mirrored = fetch_contact_page(url)
         processed_urls.add(low)
         if mirrored:
-            mirror_hits.add(_domain(url))
+            mirror_hits.add(domain)
         if not page:
             return False
-        return _process_page(url, page)
+        return _process_page(url, page, trusted=trusted)
 
     processed = 0
     for url in non_portal:
@@ -1893,6 +1969,20 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
 def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     key = f"{agent}|{state}"
+    override = _contact_override(agent, state)
+    override_email = override.get("email") if override else ""
+    if override_email:
+        cleaned = clean_email(str(override_email))
+        if cleaned and ok_email(cleaned):
+            result = {
+                "email": cleaned,
+                "confidence": "high",
+                "score": max(CONTACT_EMAIL_MIN_SCORE, 1.0),
+                "source": "override",
+                "reason": "",
+            }
+            cache_e[key] = result
+            return result
     if key in cache_e:
         return cache_e[key]
 
@@ -2467,6 +2557,9 @@ def _digits_only(num: str) -> str:
 
 
 _line_type_cache: Dict[str, bool] = {}
+_line_type_verified: Dict[str, bool] = {}
+PROFILE_HINTS: Dict[str, List[str]] = {}
+TRUSTED_CONTACT_DOMAINS: Set[str] = set()
 
 
 def _is_explicit_mobile(value: Any) -> bool:
@@ -2479,6 +2572,8 @@ def is_mobile_number(phone: str) -> bool:
     """Return True if *phone* is classified as a mobile line via Cloudmersive."""
     if not phone:
         return False
+    if phone in _line_type_verified:
+        return _line_type_verified[phone]
     if phone in _line_type_cache:
         return _line_type_cache[phone]
     if not CLOUDMERSIVE_KEY:
