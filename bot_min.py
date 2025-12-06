@@ -45,7 +45,10 @@ _CONNECTION_ERRORS = (
     req_exc.Timeout,
     req_exc.ProxyError,
     req_exc.SSLError,
+    req_exc.RetryError,
 )
+
+_blocked_until: Dict[str, float] = {}
 
 def _http_get(
     url: str,
@@ -54,18 +57,33 @@ def _http_get(
     headers: Optional[Dict[str, str]] = None,
     extra_headers: Optional[Dict[str, str]] = None,
     timeout: int | float = _DEFAULT_TIMEOUT,
+    rotate_user_agent: bool = False,
+    respect_block: bool = True,
 ) -> requests.Response:
-    hdrs = {}
-    if headers:
-        hdrs.update(headers)
-    if extra_headers:
-        hdrs.update(extra_headers)
+    dom = urlparse(url).netloc
+
+    def _build_headers() -> Dict[str, str]:
+        hdrs = {}
+        if headers:
+            hdrs.update(headers)
+        if extra_headers:
+            hdrs.update(extra_headers)
+        if rotate_user_agent:
+            hdrs["User-Agent"] = random.choice(_USER_AGENT_POOL)
+        return hdrs
+
+    if respect_block and dom in _blocked_until and _blocked_until[dom] > time.time():
+        raise req_exc.RetryError(f"blocked: {dom}")
 
     attempts = 0
     while True:
         attempts += 1
+        hdrs = _build_headers()
         resp = _session.get(url, params=params, headers=hdrs or None, timeout=timeout)
-        if resp.status_code == 429 and attempts <= 5:
+        status = resp.status_code
+        if status in (403, 429) and dom:
+            _mark_block(dom)
+        if status == 429 and attempts <= 5:
             ra = resp.headers.get("Retry-After")
             sleep_s = int(ra) if ra and ra.isdigit() else min(30, 2 ** attempts) + random.uniform(0, 0.5)
             time.sleep(sleep_s)
@@ -73,7 +91,11 @@ def _http_get(
         try:
             resp.raise_for_status()
         except requests.HTTPError:
-            if attempts <= 1 and resp.status_code in (500, 502, 503, 504):
+            if status in (403, 429):
+                if attempts < 3:
+                    time.sleep(min(5.0, 1.5 * attempts) + random.uniform(0, 0.35))
+                    continue
+            if attempts <= 1 and status in (500, 502, 503, 504):
                 time.sleep(0.5 + random.uniform(0, 0.25))
                 continue
             raise
@@ -151,12 +173,28 @@ CONTACT_PHONE_OVERRIDE_DELTA = float(os.getenv("CONTACT_PHONE_OVERRIDE_DELTA", "
 CLOUDMERSIVE_MOBILE_BOOST = float(os.getenv("CLOUDMERSIVE_MOBILE_BOOST", "0.8"))
 CONTACT_OVERRIDE_JSON = os.getenv("CONTACT_OVERRIDE_JSON", "")
 
-BROWSER_HEADERS = {
-    "User-Agent": (
+_USER_AGENT_POOL = [
+    (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/125.0.0.0 Safari/537.36"
     ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) "
+        "Gecko/20100101 Firefox/126.0"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_6) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
+    ),
+]
+
+_BASE_BROWSER_HEADERS = {
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,image/apng,*/*;q=0.8"
@@ -166,6 +204,16 @@ BROWSER_HEADERS = {
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
 }
+
+def _browser_headers(domain: Optional[str] = None) -> Dict[str, str]:
+    headers = dict(_BASE_BROWSER_HEADERS)
+    headers["User-Agent"] = random.choice(_USER_AGENT_POOL)
+    if domain:
+        headers.setdefault("Referer", f"https://{domain}")
+    return headers
+
+# Backwards-compatible alias for callers expecting a module-level mapping.
+BROWSER_HEADERS = _browser_headers()
 
 _generic_domains_env = os.getenv("CONTACT_GENERIC_EMAIL_DOMAINS", "homelight.com,example.org")
 GENERIC_EMAIL_DOMAINS = {
@@ -568,16 +616,21 @@ def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
 def _jitter() -> None:
     time.sleep(random.uniform(0.8, 1.5))
 
-_blocked_until: Dict[str, float] = {}
-def _mark_block(dom: str) -> None:
-    _blocked_until[dom] = time.time() + 600
+def _mark_block(dom: str, *, seconds: float = 600) -> None:
+    _blocked_until[dom] = time.time() + seconds
+
+def _blocked(dom: str) -> bool:
+    return _blocked_until.get(dom, 0.0) > time.time()
 
 def _try_textise(dom: str, url: str) -> str:
     try:
+        mirror_url = f"https://r.jina.ai/http://{urlparse(url).netloc}{urlparse(url).path}"
         r = _http_get(
-            f"https://r.jina.ai/http://{urlparse(url).netloc}{urlparse(url).path}",
+            mirror_url,
             timeout=10,
-            headers=BROWSER_HEADERS,
+            headers=_browser_headers(dom),
+            rotate_user_agent=True,
+            respect_block=False,
         )
         if r.status_code == 200 and r.text.strip():
             return r.text
@@ -595,7 +648,7 @@ def _is_banned(dom: str) -> bool:
 
 def _should_fetch(url: str, strict: bool = True) -> bool:
     dom = _domain(url)
-    if dom in _blocked_until and _blocked_until[dom] > time.time():
+    if _blocked(dom):
         return False
     return not (_is_banned(dom) and strict)
 
@@ -605,7 +658,12 @@ def fetch_simple(u: str, strict: bool = True):
     dom = _domain(u)
     try:
         try:
-            r = _http_get(u, timeout=10, headers=BROWSER_HEADERS)
+            r = _http_get(
+                u,
+                timeout=10,
+                headers=_browser_headers(dom),
+                rotate_user_agent=True,
+            )
         except requests.HTTPError as exc:
             r = exc.response
             if r is None:
@@ -635,10 +693,17 @@ def fetch(u: str, strict: bool = True):
     z403 = ratelimit = 0
     backoff = 1.0
     for url in variants:
+        if _blocked(dom):
+            return None
         for _ in range(3):
             try:
                 try:
-                    r = _http_get(url, timeout=10, headers=BROWSER_HEADERS)
+                    r = _http_get(
+                        url,
+                        timeout=10,
+                        headers=_browser_headers(dom),
+                        rotate_user_agent=True,
+                    )
                 except requests.HTTPError as exc:
                     r = exc.response
                     if r is None:
@@ -660,17 +725,20 @@ def fetch(u: str, strict: bool = True):
                 if z403 >= MAX_ZILLOW_403:
                     return None
                 _mark_block(dom)
+                break
             elif r.status_code == 429:
                 ratelimit += 1
                 METRICS["fetch_429"] += 1
                 if ratelimit >= MAX_RATE_429:
                     _mark_block(dom)
                     return None
+                break
             elif r.status_code in (403, 451):
                 _mark_block(dom)
                 txt = _try_textise(dom, u)
                 if txt:
                     return txt
+                break
             else:
                 METRICS[f"fetch_other_{r.status_code}"] += 1
             _jitter()
@@ -717,11 +785,20 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                 sleep_for += random.uniform(0.25, CONTACT_DOMAIN_GAP_JITTER)
             time.sleep(max(0.0, sleep_for))
     for attempt, delay in enumerate(_CONTACT_FETCH_BACKOFFS, start=1):
+        if _blocked(dom):
+            blocked = True
+            LOG.warning("BLOCK cached -> abort %s/%s", attempt, tries)
+            break
         if delay:
             time.sleep(delay)
         try:
             try:
-                resp = _http_get(url, timeout=10, headers=BROWSER_HEADERS)
+                resp = _http_get(
+                    url,
+                    timeout=10,
+                    headers=_browser_headers(dom),
+                    rotate_user_agent=True,
+                )
             except requests.HTTPError as exc:
                 resp = exc.response
                 if resp is None:
@@ -731,8 +808,8 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
             if isinstance(exc, _CONNECTION_ERRORS):
                 blocked = True
                 _mark_block(dom)
-                LOG.warning("BLOCK connect -> retry %s/%s", attempt, tries)
-                continue
+                LOG.warning("BLOCK connect -> abort %s/%s", attempt, tries)
+                break
             break
         _CONTACT_DOMAIN_LAST_FETCH[dom] = time.time()
         status = resp.status_code
@@ -741,23 +818,29 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if status in (403, 429):
             blocked = True
             _mark_block(dom)
-            LOG.warning("BLOCK %s -> retry %s/%s", status, attempt, tries)
-            continue
+            LOG.warning("BLOCK %s -> abort %s/%s", status, attempt, tries)
+            break
         if status in (301, 302) and resp.headers.get("Location"):
             url = resp.headers["Location"]
             continue
         if status in (403, 451):
             blocked = True
             _mark_block(dom)
-            LOG.warning("BLOCK %s -> retry %s/%s", status, attempt, tries)
-            continue
+            LOG.warning("BLOCK %s -> abort %s/%s", status, attempt, tries)
+            break
         break
 
     if blocked:
         mirror = _mirror_url(url)
         if mirror:
             try:
-                mirror_resp = _http_get(mirror, timeout=10, headers=BROWSER_HEADERS)
+                mirror_resp = _http_get(
+                    mirror,
+                    timeout=10,
+                    headers=_browser_headers(_domain(mirror)),
+                    rotate_user_agent=True,
+                    respect_block=False,
+                )
                 if mirror_resp.status_code == 200 and mirror_resp.text.strip():
                     LOG.info("MIRROR FALLBACK used")
                     return mirror_resp.text, True
@@ -2253,7 +2336,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         dom = _domain(url)
         page, _ = fetch_contact_page(url)
         if not page:
-            if _blocked_until.get(dom, 0.0) > time.time():
+            if _blocked(dom):
                 blocked_domains.add(dom)
             continue
         _process_page(url, page)
@@ -2269,7 +2352,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             dom = _domain(url)
             page, _ = fetch_contact_page(url)
             if not page:
-                if _blocked_until.get(dom, 0.0) > time.time():
+                if _blocked(dom):
                     blocked_domains.add(dom)
                 continue
             _process_page(url, page)
