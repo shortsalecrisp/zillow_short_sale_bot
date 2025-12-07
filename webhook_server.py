@@ -34,6 +34,7 @@ DB_PATH     = "seen.db"
 TABLE_SQL   = "CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)"
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER   = get_sender(SMS_PROVIDER)
+SCRAPE_INCLUDE_WEEKENDS = os.getenv("SCRAPE_INCLUDE_WEEKENDS", "true").lower() == "true"
 
 # Google Sheets / Replies tab
 GSHEET_ID   = os.environ["GSHEET_ID"]
@@ -220,6 +221,8 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _within_work_hours(now: Optional[datetime] = None) -> bool:
     now = now or datetime.now(tz=TZ)
+    if not SCRAPE_INCLUDE_WEEKENDS and now.weekday() >= 5:
+        return False
     return WORK_START <= now.hour < WORK_END
 
 

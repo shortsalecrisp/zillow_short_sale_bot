@@ -2833,11 +2833,14 @@ def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
             start = datetime.now(tz=TZ)
             hour = start.hour
             if WORK_START <= hour < WORK_END:
-                LOG.info("Starting follow-up pass at %s", start.isoformat())
-                try:
-                    _follow_up_pass()
-                except Exception as exc:
-                    LOG.exception("Error during follow-up pass: %s", exc)
+                if _is_weekend(start):
+                    LOG.info("Weekend; skipping follow-up pass")
+                else:
+                    LOG.info("Starting follow-up pass at %s", start.isoformat())
+                    try:
+                        _follow_up_pass()
+                    except Exception as exc:
+                        LOG.exception("Error during follow-up pass: %s", exc)
             else:
                 LOG.info(
                     "Current hour %s outside work hours (%s–%s); skipping follow-up",
@@ -2881,6 +2884,10 @@ def _follow_up_pass():
         return
 
     now = datetime.now(tz=TZ)
+    if _is_weekend(now):
+        LOG.debug("Weekend – skipping follow-up pass")
+        return
+
     last_row_idx = len(all_rows)
     # look back over recent rows for potential follow‑ups
     start_row_idx = max(2, last_row_idx - FU_LOOKBACK_ROWS)
