@@ -132,8 +132,20 @@ def _ensure_apify_scheduler_thread() -> None:
 
     def _runner() -> None:
         logger.info("Apify hourly scheduler thread starting")
+        next_run = _next_scrape_run(datetime.now(tz=TZ))
         while not _apify_scheduler_stop.is_set():
             try:
+                now = datetime.now(tz=TZ)
+                sleep_secs = max(0, (next_run - now).total_seconds())
+                if sleep_secs:
+                    logger.debug(
+                        "Apify scheduler sleeping %.0f seconds until %s",
+                        sleep_secs,
+                        next_run.isoformat(),
+                    )
+                if _apify_scheduler_stop.wait(timeout=sleep_secs):
+                    break
+
                 now = datetime.now(tz=TZ)
                 if _within_work_hours(now):
                     logger.info("Triggering hourly Apify scrape at %s", now.isoformat())
@@ -150,12 +162,7 @@ def _ensure_apify_scheduler_thread() -> None:
                         WORK_END,
                     )
 
-                next_run = _next_scrape_run(datetime.now(tz=TZ))
-                sleep_secs = max(
-                    0, (next_run - datetime.now(tz=TZ)).total_seconds()
-                )
-                if _apify_scheduler_stop.wait(timeout=sleep_secs):
-                    break
+                next_run = _next_scrape_run(now)
             except Exception:
                 logger.exception(
                     "Apify scheduler crashed; restarting in 30 seconds"
