@@ -2887,6 +2887,7 @@ def _follow_up_pass():
     if _is_weekend(now):
         LOG.debug("Weekend – skipping follow-up pass")
         return
+
     last_row_idx = len(all_rows)
     # look back over recent rows for potential follow‑ups
     start_row_idx = max(2, last_row_idx - FU_LOOKBACK_ROWS)
