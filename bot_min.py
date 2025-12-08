@@ -1609,13 +1609,10 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 info["office_demoted"] = True
                 LOG.debug("PHONE DEMOTE office: %s", formatted)
         if office_flag and not info["office_demoted"]:
-            if trusted_domain:
-                info["score"] += 0.25
-            else:
-                info["score"] -= 1.0
-                info["score"] -= 0.7
-                info["office_demoted"] = True
-                LOG.debug("PHONE DEMOTE office: %s", formatted)
+            info["score"] -= 1.0
+            info["score"] -= 0.7
+            info["office_demoted"] = True
+            LOG.debug("PHONE DEMOTE office: %s", formatted)
         if trusted_domain and not office_flag:
             info["score"] += 0.25
         if office_flag and trusted_domain:
