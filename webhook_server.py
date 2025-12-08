@@ -12,7 +12,7 @@ import threading
 from typing import Any, Dict, List, Optional
 
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -375,6 +375,11 @@ def send_sms(phone: str, message: str) -> None:
 @app.get("/")
 def root():
     return {"status": "ok"}
+
+
+@app.head("/")
+def root_head():
+    return Response(status_code=200)
 
 
 @app.get("/export-zpids")

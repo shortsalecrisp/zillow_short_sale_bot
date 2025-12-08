@@ -128,6 +128,7 @@ FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (pauses at 9 pm)
+FOLLOWUP_INCLUDE_WEEKENDS = os.getenv("FOLLOWUP_INCLUDE_WEEKENDS", "true").lower() == "true"
 
 _sms_enable_env = os.getenv("SMS_ENABLE")
 if _sms_enable_env is None:
@@ -2833,8 +2834,8 @@ def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
             start = datetime.now(tz=TZ)
             hour = start.hour
             if WORK_START <= hour < WORK_END:
-                if _is_weekend(start):
-                    LOG.info("Weekend; skipping follow-up pass")
+                if not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(start):
+                    LOG.info("Weekend; skipping follow-up pass (FOLLOWUP_INCLUDE_WEEKENDS=false)")
                 else:
                     LOG.info("Starting follow-up pass at %s", start.isoformat())
                     try:
