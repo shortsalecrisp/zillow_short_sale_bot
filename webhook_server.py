@@ -73,6 +73,7 @@ if _APIFY_ACTOR_ID_RAW and "/" in _APIFY_ACTOR_ID_RAW and "~" not in _APIFY_ACTO
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN")
 APIFY_TIMEOUT = int(os.getenv("APIFY_ACTOR_TIMEOUT", "150"))
 APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "1024"))
+APIFY_IGNORE_WORK_HOURS = os.getenv("APIFY_IGNORE_WORK_HOURS", "true").lower() == "true"
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
 
@@ -148,7 +149,7 @@ def _ensure_apify_scheduler_thread() -> None:
                     break
 
                 now = datetime.now(tz=TZ)
-                if _within_work_hours(now):
+                if APIFY_IGNORE_WORK_HOURS or _within_work_hours(now):
                     logger.info("Triggering hourly Apify scrape at %s", now.isoformat())
                     try:
                         rows = _run_apify_actor()
@@ -252,7 +253,16 @@ def _run_apify_actor() -> List[Dict[str, Any]]:
     if APIFY_INPUT is not None:
         req_kwargs["json"] = APIFY_INPUT
     resp = requests.post(url, **req_kwargs)
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError:
+        body_preview = resp.text[:500] if resp.text else "<no body>"
+        logger.error(
+            "Apify actor call failed with status %s: %s",
+            resp.status_code,
+            body_preview,
+        )
+        return []
     data = resp.json()
     if not isinstance(data, list):
         logger.warning("Unexpected Apify response – expected list, got %s", type(data))
@@ -265,7 +275,7 @@ async def _maybe_run_startup_scrape() -> None:
     if not RUN_ON_DEPLOY:
         logger.info("RUN_SCRAPE_ON_DEPLOY disabled; skipping startup scrape")
         return
-    if not _within_work_hours():
+    if not APIFY_IGNORE_WORK_HOURS and not _within_work_hours():
         logger.info("Startup scrape skipped – outside work hours (%s-%s)", WORK_START, WORK_END)
         return
 
