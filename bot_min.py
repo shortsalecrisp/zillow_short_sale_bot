@@ -396,6 +396,20 @@ seen_phones: Set[str] = set(_preloaded)
 
 SCRAPE_SITES:  List[str] = []
 DYNAMIC_SITES: Set[str]  = set()
+PORTAL_DOMAINS: Set[str] = {
+    "zillow.com",
+    "realtor.com",
+    "redfin.com",
+    "homes.com",
+    "trulia.com",
+    "apartments.com",
+    "homesnap.com",
+    "har.com",
+    "mlspin.com",
+}
+# Keep portals in sync with any scrape-site hints that get loaded later.
+PORTAL_DOMAINS.update(SCRAPE_SITES)
+
 BAN_KEYWORDS = {
     "zillow.com", "realtor.com", "redfin.com", "homes.com",
     "linkedin.com", "twitter.com", "instagram.com", "pinterest.com", "facebook.com", "legacy.com",
@@ -1489,9 +1503,10 @@ def _build_trusted_domains(agent: str, urls: Iterable[str]) -> Set[str]:
     first, last = parts[0].lower(), parts[-1].lower()
     tokens = {first, last, f"{first}{last}", f"{first}-{last}"}
     trusted = set()
+    portal_domains = set(PORTAL_DOMAINS) | set(SCRAPE_SITES) | set(DYNAMIC_SITES)
     for url in urls:
         dom = _domain(url)
-        if not dom or dom in PORTAL_DOMAINS:
+        if not dom or dom in portal_domains:
             continue
         low_dom = dom.lower()
         if any(tok and tok in low_dom for tok in tokens):

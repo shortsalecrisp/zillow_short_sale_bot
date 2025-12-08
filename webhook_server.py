@@ -199,7 +199,12 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     logger.debug("Sample fields on first fresh row: %s", list(fresh_rows[0].keys())[:15])
 
-    sms_jobs = process_rows(fresh_rows) or []
+    try:
+        sms_jobs = process_rows(fresh_rows) or []
+    except Exception:
+        logger.exception("process_rows failed; skipping batch to keep server alive")
+        conn.close()
+        return {"status": "error", "rows": len(fresh_rows)}
 
     for job in sms_jobs:
         try:
