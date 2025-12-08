@@ -73,7 +73,7 @@ if _APIFY_ACTOR_ID_RAW and "/" in _APIFY_ACTOR_ID_RAW and "~" not in _APIFY_ACTO
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN")
 APIFY_TIMEOUT = int(os.getenv("APIFY_ACTOR_TIMEOUT", "150"))
 APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "1024"))
-APIFY_IGNORE_WORK_HOURS = os.getenv("APIFY_IGNORE_WORK_HOURS", "true").lower() == "true"
+APIFY_IGNORE_WORK_HOURS = os.getenv("APIFY_IGNORE_WORK_HOURS", "false").lower() == "true"
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
 
@@ -133,8 +133,13 @@ def _ensure_apify_scheduler_thread() -> None:
     _apify_scheduler_stop = threading.Event()
 
     def _runner() -> None:
-        logger.info("Apify hourly scheduler thread starting")
         next_run = _next_scrape_run(datetime.now(tz=TZ))
+        logger.info(
+            "Apify hourly scheduler thread starting (work hours %s-%s, next run %s)",
+            WORK_START,
+            WORK_END,
+            next_run.isoformat(),
+        )
         while not _apify_scheduler_stop.is_set():
             try:
                 now = datetime.now(tz=TZ)
