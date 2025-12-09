@@ -48,6 +48,20 @@ import pytest
 import bot_min
 
 
+def test_build_q_phone_prefers_locality_tokens():
+    queries = bot_min.build_q_phone(
+        "Antonio Flores",
+        "TX",
+        city="Seguin",
+        postal_code="78155",
+        brokerage="Flores Realty Group",
+    )
+
+    assert queries[0].startswith('"Antonio Flores" Seguin TX 78155')
+    assert any("Flores Realty Group" in q for q in queries)
+    assert any("Seguin" in q for q in queries)
+
+
 def test_realtor_office_label_cloudmersive_override(monkeypatch):
     """Ensure realtor.com style Office label stays when Cloudmersive marks mobile."""
     test_number = "555-867-5309"
@@ -66,7 +80,7 @@ def test_realtor_office_label_cloudmersive_override(monkeypatch):
         }
 
     monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
     monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
     monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
@@ -117,7 +131,7 @@ def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
         "rapid_property",
         fake_rapid_property,
     )
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
     monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
     monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
@@ -160,7 +174,7 @@ def test_trusted_domain_office_number_demoted(monkeypatch):
     mobile_number = "555-333-4444"
 
     monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query", "query2"])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: ["query", "query2"])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
     monkeypatch.setattr(
         bot_min,
@@ -223,7 +237,7 @@ def test_cloudmersive_boost_applied_to_mobile(monkeypatch):
         }
 
     monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
     monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
     monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
@@ -260,7 +274,7 @@ def test_trusted_contact_pages_not_penalized(monkeypatch):
         return {}
 
     monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query", "query2"])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: ["query", "query2"])
 
     monkeypatch.setattr(
         bot_min,
@@ -314,7 +328,7 @@ def test_profile_hint_urls_are_used(monkeypatch):
         return {}
 
     monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
     monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
 
@@ -379,7 +393,7 @@ def test_lookup_phone_mismatched_rapid_does_not_override(monkeypatch):
         }
 
     monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
     monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
     monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
@@ -413,7 +427,7 @@ def test_lookup_phone_continues_search_after_nonproductive_page(monkeypatch):
         }
 
     monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query", "query2"])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: ["query", "query2"])
 
     google_results = [
         [],
@@ -465,7 +479,7 @@ def test_lookup_phone_requires_location_cue(monkeypatch):
     right_number_raw = "(555) 999-8888"
 
     monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: ["query"])
     monkeypatch.setattr(bot_min, "google_items", lambda query: [
         {"link": "https://wrong.example"},
         {"link": "https://right.example"},
@@ -521,7 +535,7 @@ def test_lookup_phone_unlabeled_number_with_full_name(monkeypatch):
     target_number = "708-407-4942"
 
     monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: ["query"])
     monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://name-only.example"}])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
 
@@ -558,7 +572,7 @@ def test_lookup_phone_team_context_not_demoted(monkeypatch):
     mobile_number = "555-222-3333"
 
     monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: ["query"])
     monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://team.example"}])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
 
@@ -594,7 +608,7 @@ def test_lookup_phone_penalizes_template_number(monkeypatch):
     direct_number = "352-725-7206"
 
     monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: ["query"])
     monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://contact.example"}])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
 
@@ -649,7 +663,7 @@ def test_lookup_phone_uses_lower_mobile_override_threshold(monkeypatch):
         }
 
     monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
     monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
     monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
@@ -701,7 +715,7 @@ def test_lookup_phone_prefers_mobile_over_high_scoring_office(monkeypatch):
         }
 
     monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: [])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
     monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
     monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
@@ -751,7 +765,7 @@ def test_lookup_phone_allows_nickname_in_page_guard(monkeypatch):
         return page_html, "text/html"
 
     monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
-    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state: ["query"])
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: ["query"])
     monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://example.com/profile"}])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
     monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
@@ -787,7 +801,7 @@ def test_lookup_email_allows_first_name_variants(monkeypatch):
     monkeypatch.setattr(
         bot_min,
         "build_q_email",
-        lambda agent, state, brokerage, domain_hint, mls_id: ["query"],
+        lambda agent, state, brokerage, domain_hint, mls_id, **kwargs: ["query"],
     )
     monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://example.com/profile"}])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
