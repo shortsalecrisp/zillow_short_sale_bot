@@ -105,3 +105,11 @@ def test_lookup_email_uses_override(monkeypatch):
     assert result["email"] == "jane@example.com"
     assert result["confidence"] == "high"
     assert result["source"] == "override"
+
+
+def test_is_generic_email_flags_placeholder():
+    assert bot_min._is_generic_email("name@yoursite.com")
+
+
+def test_is_generic_email_allows_real_agent_email():
+    assert not bot_min._is_generic_email("jane.doe@realtyworld.com")

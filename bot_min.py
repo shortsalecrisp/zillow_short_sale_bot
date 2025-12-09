@@ -216,7 +216,10 @@ def _browser_headers(domain: Optional[str] = None) -> Dict[str, str]:
 # Backwards-compatible alias for callers expecting a module-level mapping.
 BROWSER_HEADERS = _browser_headers()
 
-_generic_domains_env = os.getenv("CONTACT_GENERIC_EMAIL_DOMAINS", "homelight.com,example.org")
+_generic_domains_env = os.getenv(
+    "CONTACT_GENERIC_EMAIL_DOMAINS",
+    "homelight.com,example.org,example.com,yoursite.com,yourdomain.com",
+)
 GENERIC_EMAIL_DOMAINS = {
     d.strip().lower()
     for d in _generic_domains_env.split(",")
@@ -234,6 +237,10 @@ GENERIC_EMAIL_PREFIXES = {
     "frontdesk",
     "marketing",
     "admin",
+    "name",
+    "yourname",
+    "email",
+    "firstnamelastname",
 }
 
 STATE_ABBR_TO_NAME = {
