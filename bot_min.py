@@ -82,7 +82,8 @@ def _http_get(
         resp = _session.get(url, params=params, headers=hdrs or None, timeout=timeout)
         status = resp.status_code
         if status in (403, 429) and dom:
-            _mark_block(dom)
+            block_for = CSE_BLOCK_SECONDS if "googleapis.com" in dom else BLOCK_SECONDS
+            _mark_block(dom, seconds=block_for)
         if status == 429 and attempts <= 5:
             ra = resp.headers.get("Retry-After")
             sleep_s = int(ra) if ra and ra.isdigit() else min(30, 2 ** attempts) + random.uniform(0, 0.5)
@@ -112,9 +113,31 @@ except ImportError:
 
 # ───────────────────── configuration & constants ─────────────────────
 # Google Custom Search credentials. Prefer CS_* names but fall back to
-# GOOGLE_API_KEY / GOOGLE_CX if provided.
-CS_API_KEY     = os.getenv("CS_API_KEY") or os.environ["GOOGLE_API_KEY"]
-CS_CX          = os.getenv("CS_CX") or os.environ["GOOGLE_CX"]
+# GOOGLE_API_KEY / GOOGLE_CX if provided. Comma-separated pools allow
+# rotation when a key/engine pair is throttled.
+def _env_default(*names: str) -> str:
+    for name in names:
+        val = os.getenv(name)
+        if val:
+            return val
+    # Fall back to raising on the last name to preserve the previous behavior
+    return os.environ[names[-1]]
+
+
+def _parse_pool(env_name: str, fallback: str) -> List[str]:
+    raw = os.getenv(env_name, "")
+    vals = [v.strip() for v in raw.split(",") if v.strip()]
+    return vals or ([fallback] if fallback else [])
+
+
+CS_API_KEY     = _env_default("CS_API_KEY", "GOOGLE_API_KEY")
+CS_CX          = _env_default("CS_CX", "GOOGLE_CX")
+_CSE_KEY_POOL  = _parse_pool("CS_API_KEYS", CS_API_KEY)
+_CSE_CX_POOL   = _parse_pool("CS_CXS", CS_CX)
+if len(_CSE_CX_POOL) == 1 and len(_CSE_KEY_POOL) > 1:
+    _CSE_CX_POOL = _CSE_CX_POOL * len(_CSE_KEY_POOL)
+_CSE_CRED_POOL: List[Tuple[str, str]] = list(zip(_CSE_KEY_POOL, _CSE_CX_POOL))
+_CSE_CRED_INDEX = 0
 GSHEET_ID      = os.environ["GSHEET_ID"]
 SC_JSON        = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -156,11 +179,15 @@ SMS_FU_TEMPLATE   = (
 SMS_RETRY_ATTEMPTS = int(os.getenv("SMS_RETRY_ATTEMPTS", "2"))
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
-CSE_MIN_INTERVAL = float(os.getenv("CSE_MIN_INTERVAL", "2.2"))
-_cse_jitter_low = float(os.getenv("CSE_JITTER_LOW", "0.35"))
-_cse_jitter_high = float(os.getenv("CSE_JITTER_HIGH", "0.85"))
+CSE_MIN_INTERVAL = float(os.getenv("CSE_MIN_INTERVAL", "4.0"))
+_cse_jitter_low = float(os.getenv("CSE_JITTER_LOW", "0.9"))
+_cse_jitter_high = float(os.getenv("CSE_JITTER_HIGH", "1.8"))
 if _cse_jitter_high < _cse_jitter_low:
     _cse_jitter_low, _cse_jitter_high = _cse_jitter_high, _cse_jitter_low
+
+# How long to back off from a domain after a block (403/429). Default 15 minutes.
+BLOCK_SECONDS = float(os.getenv("BLOCK_SECONDS", "900"))
+CSE_BLOCK_SECONDS = float(os.getenv("CSE_BLOCK_SECONDS", str(BLOCK_SECONDS)))
 
 CONTACT_DOMAIN_MIN_GAP = float(os.getenv("CONTACT_DOMAIN_MIN_GAP", "4.0"))
 CONTACT_DOMAIN_GAP_JITTER = float(os.getenv("CONTACT_DOMAIN_GAP_JITTER", "1.5"))
@@ -638,7 +665,7 @@ def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
 def _jitter() -> None:
     time.sleep(random.uniform(0.8, 1.5))
 
-def _mark_block(dom: str, *, seconds: float = 600) -> None:
+def _mark_block(dom: str, *, seconds: float = BLOCK_SECONDS) -> None:
     _blocked_until[dom] = time.time() + seconds
 
 def _blocked(dom: str) -> bool:
@@ -871,38 +898,84 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
     return "", False
 
 # ───────────────────── Google CSE helpers ─────────────────────
+
 _cse_cache: Dict[str, List[Dict[str, Any]]] = {}
 _last_cse_ts = 0.0
 _cse_lock = threading.Lock()
 
+
+def _cse_key(q: str) -> str:
+    return re.sub(r"\s+", " ", q or "").strip().lower()
+
+
+def _pick_cse_cred(prev_idx: Optional[int], *, advance: bool = False) -> Tuple[str, str, int]:
+    global _CSE_CRED_INDEX
+    if not _CSE_CRED_POOL:
+        raise RuntimeError("No Google CSE credentials configured")
+    with _cse_lock:
+        if prev_idx is None:
+            idx = _CSE_CRED_INDEX
+        elif advance:
+            idx = (prev_idx + 1) % len(_CSE_CRED_POOL)
+        else:
+            idx = prev_idx
+        _CSE_CRED_INDEX = idx
+        key, cx = _CSE_CRED_POOL[idx]
+    return key, cx, idx
+
+
+def _dedupe_queries(queries: Iterable[str]) -> List[str]:
+    seen: Set[str] = set()
+    uniq: List[str] = []
+    for q in queries:
+        norm = _cse_key(q)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        uniq.append(q)
+    return uniq
+
 def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
     global _last_cse_ts
+    norm_key = _cse_key(q)
     with _cse_lock:
-        if q in _cse_cache:
-            return _cse_cache[q]
+        if norm_key and norm_key in _cse_cache:
+            return _cse_cache[norm_key]
         delta = time.time() - _last_cse_ts
         jitter = random.uniform(_cse_jitter_low, _cse_jitter_high) if _cse_jitter_high > 0 else 0.0
         min_gap = max(0.0, CSE_MIN_INTERVAL + jitter)
         if delta < min_gap:
             time.sleep(min_gap - delta)
         _last_cse_ts = time.time()
+
     backoff = 1.0
+    cred_idx: Optional[int] = None
+    rotate = False
     for _ in range(tries):
+        key, cx, cred_idx = _pick_cse_cred(cred_idx, advance=(rotate or cred_idx is None))
+        rotate = False
         try:
             j = _http_get(
                 "https://www.googleapis.com/customsearch/v1",
-                params={"key": CS_API_KEY, "cx": CS_CX, "q": q, "num": 10},
+                params={"key": key, "cx": cx, "q": q, "num": 10},
                 timeout=10,
             ).json()
             items = j.get("items", [])
             with _cse_lock:
-                _cse_cache[q] = items
+                if norm_key:
+                    _cse_cache[norm_key] = items
             return items
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                status = exc.response.status_code
+                if status in (403, 429):
+                    rotate = True
+                    _mark_block("www.googleapis.com", seconds=CSE_BLOCK_SECONDS)
             time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
             backoff *= BACKOFF_FACTOR
     with _cse_lock:
-        _cse_cache[q] = []
+        if norm_key:
+            _cse_cache[norm_key] = []
     return []
 
 # ───────────────────── page‑parsing helpers ─────────────────────
@@ -1731,14 +1804,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         *[hint for hint in location_extras if hint],
     )
 
-    queries = build_q_phone(
-        agent,
-        state,
-        city=row_payload.get("city", ""),
-        postal_code=row_payload.get("zip", ""),
-        brokerage=brokerage_hint,
+    queries = _dedupe_queries(
+        build_q_phone(
+            agent,
+            state,
+            city=row_payload.get("city", ""),
+            postal_code=row_payload.get("zip", ""),
+            brokerage=brokerage_hint,
+        )
     )
-    google_hits = list(pmap(google_items, queries))
+    google_hits = list(pmap(google_items, _dedupe_queries(queries)))
     trusted_domains = _build_trusted_domains(
         agent,
         [it.get("link", "") for items in google_hits for it in items],
@@ -1886,7 +1961,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             extras=extras,
         )
         if alt_queries:
-            alt_results = list(pmap(google_items, alt_queries))
+            alt_results = list(pmap(google_items, _dedupe_queries(alt_queries)))
             for items in alt_results:
                 for it in items:
                     tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
@@ -2369,7 +2444,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         city=row_payload.get("city", ""),
         postal_code=row_payload.get("zip", ""),
     )
-    google_hits = list(pmap(google_items, queries))
+    google_hits = list(pmap(google_items, _dedupe_queries(queries)))
     trusted_domains.update(
         _build_trusted_domains(
             agent,
