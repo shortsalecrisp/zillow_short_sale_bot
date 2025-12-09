@@ -2069,13 +2069,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                     info.get("office_demoted", False),
                 )
             )
-        if summary:
-            LOG.info(
-                "PHONE DROP candidates for %s %s: %s",
-                agent,
-                state,
-                " | ".join(summary),
-            )
+        LOG.warning(
+            "PHONE DROP candidates for %s %s (had_candidates=%s): %s",
+            agent,
+            state,
+            had_candidates,
+            " | ".join(summary) if summary else "<none>",
+        )
 
     result.update({
         "number": "",
@@ -2087,11 +2087,12 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     cache_p[key] = result
     METRICS["phone_no_verified_mobile"] += 1
     LOG.warning(
-        "PHONE DROP no verified mobile for %s %s zpid=%s reason=%s",
+        "PHONE DROP no verified mobile for %s %s zpid=%s reason=%s had_candidates=%s",
         agent,
         state,
         zpid or "",
         reason,
+        had_candidates,
     )
     return result
 
