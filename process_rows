@@ -67,11 +67,15 @@ WHITELIST_DOMAINS = [
 ]
 
 MLS_TLDS = {"mls", "realtor", "realestate"}
+PORTAL_DOMAINS = {"homes.com", "realty.com", "movoto.com", "estately.com"}
 
 
-def _is_whitelisted(netloc: str) -> bool:
+def _is_whitelisted(netloc: str, whitelist: list[str] | None = None) -> bool:
     """Return True if the domain appears in our whitelist or matches MLS/association TLDs."""
-    if any(dom in netloc for dom in WHITELIST_DOMAINS):
+
+    whitelist = whitelist or WHITELIST_DOMAINS
+
+    if any(dom in netloc for dom in whitelist):
         return True
     tld = netloc.rsplit(".", 1)[-1]
     return tld in MLS_TLDS or "mls" in netloc
@@ -116,6 +120,48 @@ def _init_cache(conn: sqlite3.Connection) -> None:
 
 # how long to trust cached contact info (seconds)
 CONTACT_TTL = 60 * 60 * 24 * 365  # 1 year
+
+
+def _root_domain(url: str | None) -> str | None:
+    if not url:
+        return None
+    netloc = urlparse(url).netloc.lower()
+    if not netloc:
+        return None
+    parts = netloc.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return netloc
+
+
+def _score_contact(
+    phone: str | None,
+    email: str | None,
+    source_domain: str | None,
+    broker_domain: str | None,
+    office: bool = False,
+) -> float:
+    if not phone and not email:
+        return float("-inf")
+
+    score = 0.0
+    if phone:
+        score += 5.0
+    if email:
+        score += 2.0
+
+    if source_domain and broker_domain and broker_domain in source_domain:
+        score += 5.0
+    elif source_domain and any(dom in source_domain for dom in WHITELIST_DOMAINS):
+        score += 1.5
+
+    if source_domain and any(dom in source_domain for dom in PORTAL_DOMAINS):
+        score -= 1.0
+
+    if office:
+        score -= 3.0
+
+    return score
 
 # ------------------  utility funcs ------------------
 
@@ -193,9 +239,10 @@ null if not found.
 
 
 def _regex_extract_contact(html_text: str):
-    """Extract phone/email from raw HTML using label-aware regex."""
+    """Extract phone/email from raw HTML using label-aware regex and return office flag."""
     soup = BeautifulSoup(html_text, "html.parser")
     phone = email = None
+    office = False
 
     tel = soup.select_one("a[href^='tel']")
     if tel:
@@ -213,14 +260,14 @@ def _regex_extract_contact(html_text: str):
         m = PHONE_RE.search(text)
         if m:
             snippet = text[max(0, m.start() - 25) : m.end() + 25]
-            if not OFFICE_RE.search(snippet):
-                phone = m.group(0)
+            office = bool(OFFICE_RE.search(snippet))
+            phone = m.group(0)
     if not email:
         m = EMAIL_RE.search(text)
         if m:
             email = m.group(0)
     soup.decompose()
-    return phone, email
+    return phone, email, office
 
 
 def _parse_detail_contact(url: str):
@@ -228,7 +275,7 @@ def _parse_detail_contact(url: str):
     try:
         html_text = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
     except Exception:
-        return None, None
+        return None, None, False
     return _regex_extract_contact(html_text)
 
 
@@ -237,6 +284,12 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
     # crude state extraction from address string
     address = row.get("address", "")
     state = address.split(",")[-2].strip().split()[0] if "," in address else ""
+    detail_url = row.get("detailUrl")
+    broker_domain = _root_domain(detail_url)
+
+    combined_whitelist = WHITELIST_DOMAINS.copy()
+    if broker_domain and broker_domain not in combined_whitelist:
+        combined_whitelist.insert(0, broker_domain)
 
     cached = cache_conn.execute(
         "SELECT phone, email, last_seen FROM contacts WHERE agent=? AND state=?",
@@ -245,26 +298,32 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
     if cached and (time.time() - cached[2] < CONTACT_TTL):
         return cached[0], cached[1]
 
+    best = {"phone": None, "email": None, "score": float("-inf")}
+
+    def _consider(phone: str | None, email: str | None, source: str | None, office: bool = False):
+        score = _score_contact(phone, email, source, broker_domain, office)
+        if score > best["score"]:
+            best.update({"phone": phone, "email": email, "score": score})
+
     # first try to parse contact info from the listing detail page
-    detail_url = row.get("detailUrl")
     if detail_url:
-        phone, email = _parse_detail_contact(detail_url)
-        if phone or email:
-            cache_conn.execute(
-                "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
-                (agent, state, phone or "", email or "", time.time()),
-            )
-            cache_conn.commit()
-            return phone, email
+        phone, email, office = _parse_detail_contact(detail_url)
+        _consider(phone, email, urlparse(detail_url).netloc, office)
 
     # Google search focused on whitelisted domains
     queries = []
-    for domain in WHITELIST_DOMAINS:
+    for domain in combined_whitelist:
         for pattern in QUERY_PATTERNS:
             q = pattern.format(name=agent, domain=domain)
             if state:
                 q += f" {state}"
             queries.append(q)
+        email_query = f'"{agent}" email site:{domain}'
+        contact_query = f'"{agent}" contact "real estate" site:{domain}'
+        if state:
+            email_query += f" {state}"
+            contact_query += f" {state}"
+        queries.extend([email_query, contact_query])
     # broader MLS / association search patterns
     if state:
         queries.extend(
@@ -272,6 +331,7 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
                 f'"{agent}" realtor {state} mls',
                 f'"{agent}" "cell" mls {state}',
                 f'"{agent}" email mls {state}',
+                f'"{agent}" contact "real estate" {state}',
             ]
         )
     else:
@@ -280,6 +340,7 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
                 f'"{agent}" realtor mls',
                 f'"{agent}" "cell" mls',
                 f'"{agent}" email mls',
+                f'"{agent}" contact "real estate"',
             ]
         )
     queries.append(f'"{agent}" real estate {state} phone')
@@ -291,22 +352,25 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
                 continue
             seen_links.add(link)
             netloc = urlparse(link).netloc
-            if not _is_whitelisted(netloc):
+            if not _is_whitelisted(netloc, combined_whitelist):
                 continue
             try:
                 html_text = requests.get(link, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
             except Exception:
                 continue
-            phone, email = _regex_extract_contact(html_text)
+            phone, email, office = _regex_extract_contact(html_text)
             if not phone and not email:
                 phone, email = _extract_with_gpt(link, html_text)
-            if phone or email:
-                cache_conn.execute(
-                    "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
-                    (agent, state, phone or "", email or "", time.time()),
-                )
-                cache_conn.commit()
-                return phone, email
+                office = False
+            _consider(phone, email, netloc, office)
+
+    if best["score"] > float("-inf"):
+        cache_conn.execute(
+            "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
+            (agent, state, best["phone"] or "", best["email"] or "", time.time()),
+        )
+        cache_conn.commit()
+        return best["phone"], best["email"]
 
     return None, None  # fallback if nothing found
 
