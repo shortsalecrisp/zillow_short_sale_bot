@@ -49,7 +49,7 @@ import bot_min
 
 def test_lookup_email_accepts_generic_team_when_only_option(monkeypatch):
     monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
-    monkeypatch.setattr(bot_min, "build_q_email", lambda *args: ["query"])
+    monkeypatch.setattr(bot_min, "build_q_email", lambda *args, **kwargs: ["query"])
     monkeypatch.setattr(bot_min, "google_items", lambda query: [{"link": "https://team.example"}])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
 
@@ -77,6 +77,20 @@ def test_lookup_email_accepts_generic_team_when_only_option(monkeypatch):
 
     assert result["email"] == "team@jonmccallteam.com"
     assert result["confidence"] == "low"
+
+
+def test_build_q_email_includes_locality_tokens():
+    queries = bot_min.build_q_email(
+        "Antonio Flores",
+        "TX",
+        brokerage="Flores Realty Group",
+        city="Seguin",
+        postal_code="78155",
+    )
+
+    assert queries[0].startswith('"Antonio Flores" Seguin TX 78155')
+    assert any("Seguin" in q for q in queries)
+    assert any("Flores Realty Group" in q for q in queries)
 
 
 def test_lookup_email_uses_override(monkeypatch):

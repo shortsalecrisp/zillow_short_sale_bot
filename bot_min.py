@@ -1060,13 +1060,40 @@ def proximity_scan(t: str, first_name: str = "", last_name: str = ""):
         entry["snippets"].append(" ".join(snippet.split()))
     return out
 
-def build_q_phone(name: str, state: str) -> List[str]:
-    base = f'"{name}" {state}'
-    return [
-        f"{base} realtor phone",
-        f"{base} real estate cell",
-        f"{base} mobile",
-    ]
+def _compact_tokens(*parts: str) -> str:
+    return " ".join(p.strip() for p in parts if p and p.strip()).strip()
+
+
+def build_q_phone(
+    name: str,
+    state: str,
+    *,
+    city: str = "",
+    postal_code: str = "",
+    brokerage: str = "",
+) -> List[str]:
+    queries: List[str] = []
+
+    def _add(q: str) -> None:
+        if q and q not in queries:
+            queries.append(q)
+
+    localized_base = _compact_tokens(f'"{name}"', city, state, postal_code)
+    state_base = _compact_tokens(f'"{name}"', state)
+    name_only = f'"{name}"'.strip()
+
+    for base in (localized_base, state_base, name_only):
+        if not base:
+            continue
+        _add(f"{base} realtor phone")
+        _add(f"{base} real estate cell")
+        _add(f"{base} mobile")
+
+    if brokerage:
+        _add(f'"{name}" "{brokerage}" phone')
+        _add(f'"{brokerage}" {state} "phone"')
+
+    return queries
 
 
 def build_alt_q_phone(
@@ -1098,7 +1125,14 @@ def build_alt_q_phone(
     return alt_queries
 
 def build_q_email(
-    name: str, state: str, brokerage: str = "", domain_hint: str = "", mls_id: str = ""
+    name: str,
+    state: str,
+    brokerage: str = "",
+    domain_hint: str = "",
+    mls_id: str = "",
+    *,
+    city: str = "",
+    postal_code: str = "",
 ) -> List[str]:
     queries: List[str] = []
 
@@ -1106,11 +1140,16 @@ def build_q_email(
         if q and q not in queries:
             queries.append(q)
 
-    base = f'"{name}" {state}'.strip()
-    _add(f"{base} realtor email")
-    _add(f"{base} real estate email")
-    _add(f"{base} contact email")
-    _add(f"{base} email address")
+    localized_base = _compact_tokens(f'"{name}"', city, state, postal_code)
+    state_base = _compact_tokens(f'"{name}"', state)
+
+    for base in (localized_base, state_base):
+        if not base:
+            continue
+        _add(f"{base} realtor email")
+        _add(f"{base} real estate email")
+        _add(f"{base} contact email")
+        _add(f"{base} email address")
 
     parts = [p for p in name.split() if p]
     if len(parts) >= 2:
@@ -1692,7 +1731,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         *[hint for hint in location_extras if hint],
     )
 
-    queries = build_q_phone(agent, state)
+    queries = build_q_phone(
+        agent,
+        state,
+        city=row_payload.get("city", ""),
+        postal_code=row_payload.get("zip", ""),
+        brokerage=brokerage_hint,
+    )
     google_hits = list(pmap(google_items, queries))
     trusted_domains = _build_trusted_domains(
         agent,
@@ -2315,7 +2360,15 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         *[hint for hint in location_extras if hint],
     )
 
-    queries = build_q_email(agent, state, brokerage, domain_hint, mls_id)
+    queries = build_q_email(
+        agent,
+        state,
+        brokerage,
+        domain_hint,
+        mls_id,
+        city=row_payload.get("city", ""),
+        postal_code=row_payload.get("zip", ""),
+    )
     google_hits = list(pmap(google_items, queries))
     trusted_domains.update(
         _build_trusted_domains(
