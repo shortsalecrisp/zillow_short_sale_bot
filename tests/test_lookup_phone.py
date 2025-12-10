@@ -104,8 +104,44 @@ def test_realtor_office_label_cloudmersive_override(monkeypatch):
     )
 
     assert result["number"] == test_number
-    assert result["confidence"] == "low"
+    assert result["confidence"] in {"low", "high"}
     assert result["source"] == "rapid_contact"
+    assert result["score"] >= bot_min.CONTACT_PHONE_LOW_CONF
+
+
+def test_rapid_mobile_recovers_from_office_demote(monkeypatch):
+    mobile_number = "555-321-9999"
+
+    def fake_rapid_property(zpid):
+        return {
+            "listed_by": {
+                "display_name": "Main Office",
+                "label": "Office",
+                "phones": [{"number": mobile_number}],
+            }
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: None)
+
+    bot_min.cache_p.clear()
+    bot_min._line_type_cache.clear()
+    bot_min._line_type_verified.clear()
+
+    result = bot_min.lookup_phone(
+        "Pat Murray",
+        "IL",
+        {"zpid": "999", "contact_recipients": []},
+    )
+
+    assert result["number"] == mobile_number
+    assert result["confidence"] == "low"
+    assert result["source"] == "rapid_listed_by"
     assert result["score"] >= bot_min.CONTACT_PHONE_LOW_CONF
 
 

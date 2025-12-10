@@ -1724,6 +1724,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "name_match": False,
                 "direct_ok": None,
                 "template_penalized": False,
+                "office_flag_rapid": False,
             },
         )
         prev_score = info["score"]
@@ -1760,6 +1761,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             info["score"] -= 0.7
             info["office_demoted"] = True
             LOG.debug("PHONE DEMOTE office: %s", formatted)
+            if source in {"rapid_contact", "rapid_listed_by"}:
+                info["office_flag_rapid"] = True
         if trusted_domain and not office_flag:
             info["score"] += 0.25
         if office_flag and trusted_domain:
@@ -2074,6 +2077,17 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             if info.get("office_demoted"):
                 mobile_bonus += 0.4
             info["score"] += mobile_bonus
+            if (
+                info.get("office_demoted")
+                and info.get("office_flag_rapid")
+                and info["score"] < CONTACT_PHONE_LOW_CONF
+            ):
+                info["score"] = CONTACT_PHONE_LOW_CONF
+                LOG.info(
+                    "PHONE RECOVER rapid mobile after office demotion: %s -> %.2f",
+                    number,
+                    info["score"],
+                )
         else:
             info["score"] -= 1.0
         info["final_score"] = info["score"]
@@ -2712,6 +2726,12 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "confidence": "",
     }
 
+    normalized_brokerage_tokens = [
+        tok
+        for tok in re.sub(r"[^a-z0-9]+", " ", brokerage.lower()).split()
+        if len(tok) >= 4
+    ] if brokerage else []
+
     if best_email and best_score >= CONTACT_EMAIL_MIN_SCORE:
         info = candidates.get(best_email, {})
         if info.get("generic"):
@@ -2750,13 +2770,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         domain = info.get("domain", best_email.split("@", 1)[1].lower()) if best_email else ""
         domain_l = domain.lower()
         domain_root = _domain(domain_l)
-        normalized_brokerage_tokens = []
-        if brokerage:
-            normalized_brokerage_tokens = [
-                tok
-                for tok in re.sub(r"[^a-z0-9]+", " ", brokerage.lower()).split()
-                if len(tok) >= 4
-            ]
         domain_hint_hit = bool(domain_hint and domain_l.endswith(domain_hint.lower()))
         brokerage_domain_ok = any(
             candidate in BROKERAGE_EMAIL_DOMAINS
@@ -2798,6 +2811,63 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             cache_e[key] = result
             LOG.info(
                 "EMAIL WIN (fallback) %s via %s score=%.2f", best_email, best_source or "unknown", best_score
+            )
+            return result
+
+    def _domain_signals(email: str, info: Dict[str, Any]) -> Tuple[bool, bool, bool, bool, str, str]:
+        domain = info.get("domain", email.split("@", 1)[1].lower()) if email else ""
+        domain_l = domain.lower()
+        domain_root = _domain(domain_l)
+        domain_hint_hit = bool(domain_hint and domain_l.endswith(domain_hint.lower()))
+        brokerage_domain_ok = any(
+            candidate in BROKERAGE_EMAIL_DOMAINS for candidate in (domain_l, domain_root)
+        )
+        brokerage_hit = any(tok in domain_l or tok in domain_root for tok in normalized_brokerage_tokens)
+        agent_token_hit = any(
+            tok and (tok in domain_l or tok in domain_root) for tok in tokens if len(tok) >= 3
+        )
+        return domain_hint_hit, brokerage_domain_ok, brokerage_hit, agent_token_hit, domain_l, domain_root
+
+    if not result.get("confidence") and candidates:
+        rapidish_sources = {"rapid_listed_by", "rapid_contact", "payload_contact", "cse_contact"}
+        fallback_email = ""
+        fallback_source = ""
+        fallback_score = float("-inf")
+        for email, info in candidates.items():
+            if not (info.get("sources", set()) & rapidish_sources):
+                continue
+            domain_hint_hit, brokerage_domain_ok, brokerage_hit, agent_token_hit, domain_l, domain_root = _domain_signals(email, info)
+            if not (
+                domain_hint_hit
+                or brokerage_domain_ok
+                or brokerage_hit
+                or agent_token_hit
+                or domain_l in trusted_domains
+                or domain_root in trusted_domains
+            ):
+                continue
+            score = info.get("final_score", info.get("score", 0.0))
+            if score > fallback_score:
+                fallback_score = score
+                fallback_email = email
+                fallback_source = info.get("best_source") or fallback_source or next(iter(info.get("sources", [])), "")
+        if fallback_email:
+            adjusted_score = max(fallback_score, CONTACT_EMAIL_FALLBACK_SCORE)
+            result.update(
+                {
+                    "email": fallback_email,
+                    "confidence": "low",
+                    "source": fallback_source,
+                    "score": adjusted_score,
+                }
+            )
+            cache_e[key] = result
+            LOG.info(
+                "EMAIL WIN (rapid/portal fallback) %s via %s score=%.2f raw=%.2f",
+                fallback_email,
+                fallback_source or "unknown",
+                adjusted_score,
+                fallback_score,
             )
             return result
 
