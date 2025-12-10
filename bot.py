@@ -24,6 +24,7 @@ openai.api_key = CFG["openai_api_key"]
 ua = UserAgent()
 GOOGLE_API_KEY = CFG.get("google_api_key")
 GOOGLE_CX = CFG.get("google_cx")
+CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
 
 def _cfg_float(key: str, default: float) -> float:
@@ -81,6 +82,7 @@ _CSE_BACKOFF_UNTIL = 0.0
 _CSE_LOCK = threading.Lock()
 
 _CONTACT_DOMAIN_LAST_FETCH = {}
+_LINE_TYPE_CACHE: dict[str, bool] = {}
 
 def random_headers(extra=None) -> dict:
     headers = {
@@ -383,32 +385,82 @@ def google_search_items(query: str) -> tuple[list[dict], bool]:
     return [], rate_limited
 
 
-def build_phone_queries(name: str, state: str, brokerage: str = "") -> list[str]:
-    """Generate targeted phone search strings."""
-    base = f'"{name}" {state}' if state else f'"{name}"'
-    out = [
-        f"{base} mobile",
-        f"{base} cell",
-        f"{base} phone",
-    ]
-    if brokerage:
-        out.append(f'"{name}" "{brokerage}" phone')
-    return out
+def _compact_tokens(*parts: str) -> str:
+    return " ".join(p.strip() for p in parts if p and p.strip())
 
 
-def build_email_queries(name: str, state: str, brokerage: str = "", domain_hint: str = "") -> list[str]:
-    """Generate targeted email search strings."""
-    base = f'"{name}" {state}' if state else f'"{name}"'
-    out = [
-        f"{base} email",
-        f"{base} contact email",
-        f"{base} real estate email",
-    ]
+def build_phone_queries(
+    name: str,
+    state: str,
+    brokerage: str = "",
+    *,
+    city: str = "",
+    postal_code: str = "",
+    address: str = "",
+) -> list[str]:
+    """Generate targeted phone search strings with location context."""
+
+    queries: list[str] = []
+
+    def _add(q: str) -> None:
+        if q and q not in queries:
+            queries.append(q)
+
+    address_base = _compact_tokens(f'"{name}"', address)
+    localized_base = _compact_tokens(f'"{name}"', city, state, postal_code)
+    state_base = _compact_tokens(f'"{name}"', state)
+    name_only = f'"{name}"'.strip()
+
+    for base in (address_base, localized_base, state_base, name_only):
+        if not base:
+            continue
+        _add(f"{base} realtor phone")
+        _add(f"{base} real estate cell")
+        _add(f"{base} mobile")
+
     if brokerage:
-        out.append(f'"{name}" "{brokerage}" email')
+        _add(f'"{name}" "{brokerage}" phone')
+        _add(f'"{brokerage}" {state} "phone"')
+
+    return queries
+
+
+def build_email_queries(
+    name: str,
+    state: str,
+    brokerage: str = "",
+    domain_hint: str = "",
+    *,
+    city: str = "",
+    postal_code: str = "",
+    address: str = "",
+) -> list[str]:
+    """Generate targeted email search strings with location context."""
+
+    queries: list[str] = []
+
+    def _add(q: str) -> None:
+        if q and q not in queries:
+            queries.append(q)
+
+    address_base = _compact_tokens(f'"{name}"', address)
+    localized_base = _compact_tokens(f'"{name}"', city, state, postal_code)
+    state_base = _compact_tokens(f'"{name}"', state)
+    name_only = f'"{name}"'.strip()
+
+    for base in (address_base, localized_base, state_base, name_only):
+        if not base:
+            continue
+        _add(f"{base} email")
+        _add(f"{base} contact email")
+        _add(f"{base} real estate email")
+
+    if brokerage:
+        _add(f'"{name}" "{brokerage}" email')
     if domain_hint:
-        out.append(f'site:{domain_hint} "{name}" email')
-    return out
+        _add(f'site:{domain_hint} "{name}" email')
+
+    return queries
 
 def extract_contact(html: str):
     """Return lists of phone tuples and emails from HTML."""
@@ -445,12 +497,70 @@ def extract_contact(html: str):
                     seen_emails.add(match)
     return phones, emails
 
+def _digits_only(num: str) -> str:
+    digits = re.sub(r"\D", "", num or "")
+    if len(digits) == 10:
+        digits = "1" + digits
+    return digits
+
+
+def is_mobile_number(phone: str) -> bool:
+    """Return True if *phone* is classified as a mobile line via Cloudmersive."""
+
+    if not phone:
+        return False
+    cached = _LINE_TYPE_CACHE.get(phone)
+    if cached is not None:
+        return cached
+    if not CLOUDMERSIVE_KEY:
+        return True
+    digits = _digits_only(phone)
+    try:
+        resp = requests.post(
+            "https://api.cloudmersive.com/validate/phonenumber/basic",
+            json={"PhoneNumber": digits, "DefaultCountryCode": "US"},
+            headers={"Apikey": CLOUDMERSIVE_KEY},
+            timeout=6,
+        )
+        data = resp.json()
+    except Exception as exc:
+        print(f"Cloudmersive lookup failed for {phone}: {exc}")
+        _LINE_TYPE_CACHE[phone] = False
+        return False
+
+    phone_type = str(data.get("PhoneNumberType", "")).strip().lower()
+    line_type = str(data.get("LineType", "")).strip().lower()
+    is_mobile = bool(data.get("IsMobile"))
+    if not is_mobile:
+        if phone_type in {"mobile", "fixedlineormobile"}:
+            is_mobile = True
+        elif line_type == "fixedlineormobile":
+            is_mobile = True
+
+    print(f"Cloudmersive classified {digits} as mobile={is_mobile}")
+    _LINE_TYPE_CACHE[phone] = is_mobile
+    return is_mobile
+
+
 def select_best_phone(phones):
-    """Prefer numbers labeled mobile/cell/direct."""
+    """Prefer numbers labeled mobile/cell/direct and validated as mobile."""
+
+    if not phones:
+        return ""
+
+    prioritized = []
+    fallback = []
     for num, ctx in phones:
-        if any(k in ctx for k in ("mobile", "cell", "direct")):
+        if not num:
+            continue
+        target = prioritized if any(k in ctx for k in ("mobile", "cell", "direct")) else fallback
+        target.append((num.strip(), ctx))
+
+    ordered = prioritized + fallback
+    for num, _ in ordered:
+        if is_mobile_number(num):
             return num
-    return phones[0][0] if phones else ""
+    return ordered[0][0] if ordered else ""
 
 
 def brokerage_domain_url(brokerage: str) -> str:
@@ -464,7 +574,13 @@ def brokerage_domain_url(brokerage: str) -> str:
     return f"https://{slug}.com"
 
 def search_agent_profile(
-    name: str, state: str, brokerage: str = "", prop_addr: str = ""
+    name: str,
+    state: str,
+    brokerage: str = "",
+    prop_addr: str = "",
+    *,
+    city: str = "",
+    postal_code: str = "",
 ) -> tuple[str, str, bool]:
     """Search Google for agent contact info using multiple targeted queries.
 
@@ -483,8 +599,20 @@ def search_agent_profile(
             f"Skipping profile search for {name} due to active CSE backoff until {retry_at}"
         )
         return "", "", True
-    queries = build_phone_queries(name, state, brokerage) + build_email_queries(
-        name, state, brokerage
+    queries = build_phone_queries(
+        name,
+        state,
+        brokerage,
+        city=city,
+        postal_code=postal_code,
+        address=prop_addr,
+    ) + build_email_queries(
+        name,
+        state,
+        brokerage,
+        city=city,
+        postal_code=postal_code,
+        address=prop_addr,
     )
     items = []
     cse_blocked = False
@@ -730,14 +858,23 @@ def run_cycle() -> None:
         addr_parts = [p.strip() for p in address.split(",")]
         street = addr_parts[0] if len(addr_parts) >= 1 else ""
         city = addr_parts[1] if len(addr_parts) >= 2 else ""
-        state = addr_parts[2].split()[0] if len(addr_parts) >= 3 else ""
+        state_zip = addr_parts[2].split() if len(addr_parts) >= 3 else []
+        state = state_zip[0] if state_zip else ""
+        postal_code = state_zip[1] if len(state_zip) >= 2 else ""
         brokerage = home.get("brokerageName", "") or home.get("brokerName", "")
 
         phone = ""
         email = ""
         blocked = False
         try:
-            phone, email, blocked = search_agent_profile(name, state, brokerage, address)
+            phone, email, blocked = search_agent_profile(
+                name,
+                state,
+                brokerage,
+                address,
+                city=city,
+                postal_code=postal_code,
+            )
         except Exception as exc:
             print("Agent profile search error:", exc)
 
