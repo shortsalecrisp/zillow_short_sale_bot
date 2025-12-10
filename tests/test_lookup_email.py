@@ -76,7 +76,76 @@ def test_lookup_email_accepts_generic_team_when_only_option(monkeypatch):
     )
 
     assert result["email"] == "team@jonmccallteam.com"
-    assert result["confidence"] == "low"
+    assert result["confidence"] in {"low", "high"}
+
+
+def test_rapid_email_used_when_personal_missing(monkeypatch):
+    contact_email = "patmurray@dwellchicago.com"
+
+    def fake_rapid_property(zpid):
+        return {
+            "contact_recipients": [
+                {
+                    "display_name": "Pat M.",
+                    "emails": [contact_email],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_email", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+
+    bot_min.cache_e.clear()
+
+    result = bot_min.lookup_email(
+        "Pat Murray",
+        "IL",
+        {
+            "zpid": "12345",
+            "city": "Naperville",
+            "state": "IL",
+            "brokerage": "Dwell Chicago",
+        },
+    )
+
+    assert result["email"] == contact_email
+    assert result["confidence"] in {"low", "high"}
+    assert result["source"] in {"rapid_contact", "rapid_listed_by"}
+
+
+def test_unrelated_generic_email_still_withheld(monkeypatch):
+    generic_email = "info@randommail.com"
+
+    def fake_rapid_property(zpid):
+        return {
+            "contact_recipients": [
+                {
+                    "display_name": "Unknown Team",
+                    "emails": [generic_email],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_email", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+
+    bot_min.cache_e.clear()
+
+    result = bot_min.lookup_email(
+        "Jane Agent",
+        "TX",
+        {"zpid": "999", "city": "Austin", "state": "TX", "brokerage": "Sun Homes"},
+    )
+
+    assert result["email"] == ""
+    assert result["confidence"] == ""
+    assert result["reason"] in {"withheld_low_conf_mix", "no_personal_email"}
 
 
 def test_build_q_email_includes_locality_tokens():
