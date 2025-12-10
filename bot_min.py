@@ -1509,6 +1509,24 @@ def _guess_domain_from_brokerage(brokerage: str) -> str:
             best_hits = hits
     return best_domain if best_hits else ""
 
+
+def _infer_domain_from_text(value: str) -> str:
+    """Derive a plausible custom domain from free-form text (e.g., brokerage name).
+
+    Example: "The Campos Group" → "thecamposgroup.com".
+    Returns an empty string when a confident slug cannot be built.
+    """
+    if not value:
+        return ""
+    tokens = [re.sub(r"[^a-z0-9]", "", part.lower()) for part in value.split()]
+    tokens = [tok for tok in tokens if len(tok) >= 3]
+    if len(tokens) < 2:
+        return ""
+    slug = "".join(tokens)
+    if len(slug) < 5:
+        return ""
+    return f"{slug}.com"
+
 def _split_portals(urls):
     portals, non = [], []
     for u in urls:
@@ -2048,10 +2066,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 info["template_penalized"] = True
         mobile = is_mobile_number(number)
         info["is_mobile"] = mobile
-        if not mobile:
-            info["score"] -= 1.0
-        else:
+        if mobile:
             mobile_candidates.append((number, info))
+            mobile_bonus = 0.35
+            if any(src in info.get("sources", set()) for src in {"rapid_contact", "rapid_listed_by"}):
+                mobile_bonus += 0.25
+            if info.get("office_demoted"):
+                mobile_bonus += 0.4
+            info["score"] += mobile_bonus
+        else:
+            info["score"] -= 1.0
         info["final_score"] = info["score"]
         source = preferred_source
         if info["score"] > best_score:
@@ -2260,6 +2284,12 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     location_extras: List[str] = [brokerage] if brokerage else []
     blocked_domains: Set[str] = set()
     trusted_domains: Set[str] = set()
+
+    inferred_domain_hint = _infer_domain_from_text(brokerage) or _infer_domain_from_text(agent)
+    if inferred_domain_hint and not domain_hint:
+        domain_hint = inferred_domain_hint
+    if domain_hint:
+        trusted_domains.add(domain_hint.lower())
 
     tokens = _agent_tokens(agent)
     IDENTITY_SOURCES = {
@@ -2479,7 +2509,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     first_variants, last_token = _first_last_tokens(agent)
 
-    def _page_has_name(page_text: str) -> bool:
+    def _page_has_name(page_text: str, *, domain_hint_hit: bool = False) -> bool:
+        if domain_hint_hit:
+            return True
         if not (last_token or first_variants):
             return False
         low = page_text.lower()
@@ -2492,13 +2524,17 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         return True
 
     def _process_page(url: str, page: str) -> None:
-        if not page or not _page_has_name(page):
+        if not page:
+            return
+        dom = _domain(url)
+        domain_hint_hit = bool(domain_hint and dom.endswith(domain_hint.lower()))
+        if not _page_has_name(page, domain_hint_hit=domain_hint_hit):
             return
         _, ems, meta, info = extract_struct(page)
         page_title = info.get("title", "")
         seen: Set[str] = set()
-        domain = _domain(url)
-        trusted_hit = domain in trusted_domains
+        domain = dom
+        trusted_hit = domain in trusted_domains or domain_hint_hit
         if domain in BROKERAGE_EMAIL_DOMAINS:
             for mail in _extract_remax_emails(page):
                 if mail in seen:
