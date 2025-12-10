@@ -77,6 +77,7 @@ BLOCKED_DOMAINS = {
 }
 
 _LAST_CSE_AT = 0.0
+_CSE_BACKOFF_UNTIL = 0.0
 _CSE_LOCK = threading.Lock()
 
 _CONTACT_DOMAIN_LAST_FETCH = {}
@@ -278,6 +279,15 @@ def google_search_items(query: str) -> tuple[list[dict], bool]:
     if not GOOGLE_API_KEY or not GOOGLE_CX:
         return [], False
 
+    global _CSE_BACKOFF_UNTIL
+    now = time.time()
+    if now < _CSE_BACKOFF_UNTIL:
+        wait_for = int(_CSE_BACKOFF_UNTIL - now)
+        print(
+            f"Skipping CSE query due to active backoff window ({wait_for}s remaining)"
+        )
+        return [], True
+
     global _LAST_CSE_AT
     params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CX, "q": query, "num": 10}
 
@@ -344,13 +354,18 @@ def google_search_items(query: str) -> tuple[list[dict], bool]:
             }:
                 rate_limited = True
                 retry_after = resp.headers.get("Retry-After")
+                backoff_for = delay * 2
                 if retry_after:
                     try:
-                        time.sleep(float(retry_after))
+                        backoff_for = float(retry_after)
+                        time.sleep(backoff_for)
                     except ValueError:
                         time.sleep(delay * 2)
-                else:
-                    time.sleep(delay * 2)
+                _CSE_BACKOFF_UNTIL = max(_CSE_BACKOFF_UNTIL, time.time() + backoff_for)
+                retry_at = datetime.fromtimestamp(_CSE_BACKOFF_UNTIL)
+                print(
+                    f"CSE rate-limit detected; deferring further lookups until {retry_at}"
+                )
                 break
 
             if resp.status_code in (503,):
@@ -437,16 +452,37 @@ def select_best_phone(phones):
             return num
     return phones[0][0] if phones else ""
 
-def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[str, str, bool]:
+
+def brokerage_domain_url(brokerage: str) -> str:
+    """Return a best-guess brokerage homepage derived from the name."""
+
+    if not brokerage:
+        return ""
+    slug = re.sub(r"[^a-z0-9]", "", brokerage.lower())
+    if not slug:
+        return ""
+    return f"https://{slug}.com"
+
+def search_agent_profile(
+    name: str, state: str, brokerage: str = "", prop_addr: str = ""
+) -> tuple[str, str, bool]:
     """Search Google for agent contact info using multiple targeted queries.
 
     Returns (phone, email, blocked_flag).  The blocked flag indicates whether we
     detected a probable access block while crawling supporting pages.  In that
     case callers should skip marking the listing as processed so it can be
-    retried later.
+    retried later.  When blocked, a lightweight brokerage scrape and ChatGPT
+    lookup are attempted as fallbacks before giving up.
     """
 
     session = new_session()
+
+    if time.time() < _CSE_BACKOFF_UNTIL:
+        retry_at = datetime.fromtimestamp(_CSE_BACKOFF_UNTIL)
+        print(
+            f"Skipping profile search for {name} due to active CSE backoff until {retry_at}"
+        )
+        return "", "", True
     queries = build_phone_queries(name, state, brokerage) + build_email_queries(
         name, state, brokerage
     )
@@ -549,7 +585,33 @@ def search_agent_profile(name: str, state: str, brokerage: str = "") -> tuple[st
         fetches += 1
         time.sleep(random.uniform(0.5, 1.0))
 
-    return phone, email, blocked
+    if cse_blocked and not email:
+        fallback_url = brokerage_domain_url(brokerage)
+        if fallback_url:
+            try:
+                resp = session.get(fallback_url, headers=random_headers(), timeout=10)
+                if looks_like_block(resp):
+                    blocked = True
+                    print(
+                        f"Block detected while fetching brokerage fallback {fallback_url}"
+                    )
+                else:
+                    phones, emails = extract_contact(resp.text)
+                    if not phone:
+                        phone = select_best_phone(phones)
+                    if not email and emails:
+                        email = emails[0]
+            except requests.RequestException as exc:
+                print(f"Error fetching brokerage fallback {fallback_url}: {exc}")
+
+        if not email and prop_addr:
+            chat_phone, chat_email = get_contact_info(name, prop_addr)
+            if not phone:
+                phone = chat_phone
+            if chat_email:
+                email = chat_email
+
+    return phone, email, blocked or cse_blocked
 
 # ---------- 3. CHATGPT LOOKUP ----------
 def get_contact_info(name: str, prop_addr: str) -> tuple[str, str]:
@@ -675,7 +737,7 @@ def run_cycle() -> None:
         email = ""
         blocked = False
         try:
-            phone, email, blocked = search_agent_profile(name, state, brokerage)
+            phone, email, blocked = search_agent_profile(name, state, brokerage, address)
         except Exception as exc:
             print("Agent profile search error:", exc)
 
