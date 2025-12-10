@@ -144,6 +144,16 @@ SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
 RAPID_KEY      = os.getenv("RAPID_KEY", "").strip()
 RAPID_HOST     = os.getenv("RAPID_HOST", "us-housing-market-data1.p.rapidapi.com").strip()
+# Guard against the deprecated RapidAPI host; auto-upgrade to the renamed endpoint.
+if RAPID_HOST in {"zillow-com1.p.rapidapi.com", "zillow-com.p.rapidapi.com"}:
+    logging.warning(
+        "Deprecated RAPID_HOST %s detected; switching to us-housing-market-data1.p.rapidapi.com",
+        RAPID_HOST,
+    )
+    RAPID_HOST = "us-housing-market-data1.p.rapidapi.com"
+
+if not RAPID_KEY:
+    logging.warning("RAPID_KEY is empty; RapidAPI listing enrichment will be skipped")
 GOOD_STATUS    = {"FOR_SALE", "ACTIVE", "COMING_SOON", "PENDING", "NEW_CONSTRUCTION"}
 
 TZ             = pytz.timezone(os.getenv("BOT_TIMEZONE", "US/Eastern"))
