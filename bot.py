@@ -12,7 +12,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import openai
 from sms_providers import get_sender
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -270,6 +270,19 @@ BROKER_PATTERNS = [
     "bhhs",
 ]
 
+BROKERAGE_DOMAINS = {
+    "keller williams": "kw.com",
+    "kw": "kw.com",
+    "re/max": "remax.com",
+    "remax": "remax.com",
+    "compass": "compass.com",
+    "century 21": "century21.com",
+    "century21": "century21.com",
+    "coldwell banker": "coldwellbanker.com",
+    "exp": "exprealty.com",
+    "bhhs": "bhhs.com",
+}
+
 def google_search_items(query: str) -> tuple[list[dict], bool]:
     """Return raw result items from Google Custom Search API.
 
@@ -363,7 +376,12 @@ def google_search_items(query: str) -> tuple[list[dict], bool]:
                         time.sleep(backoff_for)
                     except ValueError:
                         time.sleep(delay * 2)
-                _CSE_BACKOFF_UNTIL = max(_CSE_BACKOFF_UNTIL, time.time() + backoff_for)
+                next_window = (
+                    datetime.now()
+                    .replace(minute=0, second=0, microsecond=0)
+                    + timedelta(hours=1)
+                ).timestamp()
+                _CSE_BACKOFF_UNTIL = max(_CSE_BACKOFF_UNTIL, next_window)
                 retry_at = datetime.fromtimestamp(_CSE_BACKOFF_UNTIL)
                 print(
                     f"CSE rate-limit detected; deferring further lookups until {retry_at}"
@@ -387,6 +405,75 @@ def google_search_items(query: str) -> tuple[list[dict], bool]:
 
 def _compact_tokens(*parts: str) -> str:
     return " ".join(p.strip() for p in parts if p and p.strip())
+
+
+def brokerage_domain_hint(brokerage: str) -> str:
+    if not brokerage:
+        return ""
+    broker_key = brokerage.lower().strip()
+    for key, domain in BROKERAGE_DOMAINS.items():
+        if key in broker_key:
+            return domain
+    slug = re.sub(r"[^a-z0-9]", "", broker_key)
+    if slug:
+        return f"{slug}.com"
+    return ""
+
+
+def jina_reader_fetch(url: str) -> str:
+    """Fetch *url* via Jina Reader to reduce blocking and return the body text."""
+
+    if not url:
+        return ""
+    cleaned = url
+    if not cleaned.startswith("http://") and not cleaned.startswith("https://"):
+        cleaned = "https://" + cleaned
+    proxy_url = f"https://r.jina.ai/{cleaned}"
+    try:
+        resp = requests.get(
+            proxy_url,
+            headers=random_headers({"Accept": "text/plain"}),
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            return resp.text
+    except requests.RequestException as exc:
+        print(f"Jina Reader fetch failed for {url}: {exc}")
+    return ""
+
+
+def duckduckgo_search(query: str, limit: int = 5) -> list[dict]:
+    """Lightweight alternative search provider to avoid CSE when throttled."""
+
+    search_url = "https://duckduckgo.com/html/"
+    params = {"q": query}
+    try:
+        resp = requests.get(
+            search_url,
+            params=params,
+            headers=random_headers(),
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        print(f"DuckDuckGo search error: {exc}")
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    links: list[dict] = []
+    for a in soup.select("a.result__a"):
+        href = a.get("href", "")
+        if not href:
+            continue
+        parsed = urlparse(href)
+        if parsed.path.startswith("/l/"):
+            real = parse_qs(parsed.query).get("uddg", [href])[0]
+        else:
+            real = href
+        if real.startswith("http") and domain_from_url(real) not in BLOCKED_DOMAINS:
+            links.append({"link": real})
+        if len(links) >= limit:
+            break
+    return links
 
 
 def build_phone_queries(
@@ -566,12 +653,12 @@ def select_best_phone(phones):
 def brokerage_domain_url(brokerage: str) -> str:
     """Return a best-guess brokerage homepage derived from the name."""
 
-    if not brokerage:
+    hint = brokerage_domain_hint(brokerage)
+    if not hint:
         return ""
-    slug = re.sub(r"[^a-z0-9]", "", brokerage.lower())
-    if not slug:
-        return ""
-    return f"https://{slug}.com"
+    if hint.startswith("http"):
+        return hint
+    return f"https://{hint}"
 
 def search_agent_profile(
     name: str,
@@ -593,12 +680,40 @@ def search_agent_profile(
 
     session = new_session()
 
+    domain_hint = brokerage_domain_hint(brokerage)
+    phone = ""
+    email = ""
+    blocked = False
+
+    # 1) Try brokerage/domain-specific fetches via Jina Reader before any CSE usage
+    if domain_hint:
+        site_queries = [
+            f'site:{domain_hint} "{name}" {state}',
+            f'"{name}" "{brokerage}" {state}',
+        ]
+        for q in site_queries:
+            for it in duckduckgo_search(q, limit=3):
+                html = jina_reader_fetch(it.get("link", ""))
+                if not html:
+                    continue
+                phones, emails = extract_contact(html)
+                if not phone:
+                    phone = select_best_phone(phones)
+                if not email and emails:
+                    email = emails[0]
+                if phone and email:
+                    return phone, email, False
+            if phone and email:
+                break
+
     if time.time() < _CSE_BACKOFF_UNTIL:
         retry_at = datetime.fromtimestamp(_CSE_BACKOFF_UNTIL)
         print(
             f"Skipping profile search for {name} due to active CSE backoff until {retry_at}"
         )
-        return "", "", True
+        cse_blocked = True
+    else:
+        cse_blocked = False
     queries = build_phone_queries(
         name,
         state,
@@ -610,20 +725,29 @@ def search_agent_profile(
         name,
         state,
         brokerage,
+        domain_hint=domain_hint,
         city=city,
         postal_code=postal_code,
         address=prop_addr,
     )
     items = []
-    cse_blocked = False
-    for q in queries:
-        batch, rate_limited = google_search_items(q)
-        items.extend(batch)
-        if rate_limited:
-            cse_blocked = True
-            break
-        if POST_CSE_DELAY_HIGH > 0:
-            time.sleep(random.uniform(POST_CSE_DELAY_LOW, POST_CSE_DELAY_HIGH))
+    if not cse_blocked:
+        for q in queries:
+            batch, rate_limited = google_search_items(q)
+            items.extend(batch)
+            if rate_limited:
+                cse_blocked = True
+                break
+            if POST_CSE_DELAY_HIGH > 0:
+                time.sleep(random.uniform(POST_CSE_DELAY_LOW, POST_CSE_DELAY_HIGH))
+    else:
+        # Once CSE is paused, immediately pivot to DuckDuckGo to avoid further throttle.
+        for q in queries[:4]:
+            items.extend(duckduckgo_search(q, limit=4))
+
+    if cse_blocked and not items:
+        for q in queries[:4]:
+            items.extend(duckduckgo_search(q, limit=4))
 
     dedup: dict[str, dict] = {}
     for it in items:
@@ -652,9 +776,7 @@ def search_agent_profile(
     if len(items) > 12:
         items = items[:12]
 
-    phone = ""
-    email = ""
-    blocked = cse_blocked
+    blocked = blocked or cse_blocked
 
     for it in items:
         cp = (it.get("pagemap", {}).get("contactpoint") or [{}])[0]
@@ -690,21 +812,26 @@ def search_agent_profile(
         domain_last_hit[domain] = now
         _CONTACT_DOMAIN_LAST_FETCH[domain] = now
 
-        try:
-            resp = session.get(link, headers=random_headers(), timeout=15)
-        except requests.RequestException as exc:
-            print(f"Error fetching {link}: {exc}")
-            continue
+        if cse_blocked:
+            html = jina_reader_fetch(link)
+            if not html:
+                continue
+        else:
+            try:
+                resp = session.get(link, headers=random_headers(), timeout=15)
+            except requests.RequestException as exc:
+                print(f"Error fetching {link}: {exc}")
+                continue
 
-        if looks_like_block(resp):
-            blocked = True
-            print(
-                f"Block detected while fetching {link} (status {resp.status_code})."
-            )
-            time.sleep(random.uniform(6, 10))
-            break
+            if looks_like_block(resp):
+                blocked = True
+                print(
+                    f"Block detected while fetching {link} (status {resp.status_code})."
+                )
+                time.sleep(random.uniform(6, 10))
+                break
 
-        html = resp.text
+            html = resp.text
         phones, emails = extract_contact(html)
         if not phone:
             phone = select_best_phone(phones)
@@ -716,21 +843,13 @@ def search_agent_profile(
     if cse_blocked and not email:
         fallback_url = brokerage_domain_url(brokerage)
         if fallback_url:
-            try:
-                resp = session.get(fallback_url, headers=random_headers(), timeout=10)
-                if looks_like_block(resp):
-                    blocked = True
-                    print(
-                        f"Block detected while fetching brokerage fallback {fallback_url}"
-                    )
-                else:
-                    phones, emails = extract_contact(resp.text)
-                    if not phone:
-                        phone = select_best_phone(phones)
-                    if not email and emails:
-                        email = emails[0]
-            except requests.RequestException as exc:
-                print(f"Error fetching brokerage fallback {fallback_url}: {exc}")
+            html = jina_reader_fetch(fallback_url)
+            if html:
+                phones, emails = extract_contact(html)
+                if not phone:
+                    phone = select_best_phone(phones)
+                if not email and emails:
+                    email = emails[0]
 
         if not email and prop_addr:
             chat_phone, chat_email = get_contact_info(name, prop_addr)
