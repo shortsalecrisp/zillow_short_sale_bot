@@ -49,6 +49,7 @@ _CONNECTION_ERRORS = (
 )
 
 _blocked_until: Dict[str, float] = {}
+_cse_blocked_until: float = 0.0
 
 def _http_get(
     url: str,
@@ -678,6 +679,10 @@ def _jitter() -> None:
 def _mark_block(dom: str, *, seconds: float = BLOCK_SECONDS) -> None:
     _blocked_until[dom] = time.time() + seconds
 
+
+def _cse_blocked() -> bool:
+    return _blocked("www.googleapis.com") or _cse_blocked_until > time.time()
+
 def _blocked(dom: str) -> bool:
     return _blocked_until.get(dom, 0.0) > time.time()
 
@@ -951,6 +956,9 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
     with _cse_lock:
         if norm_key and norm_key in _cse_cache:
             return _cse_cache[norm_key]
+        if _cse_blocked():
+            LOG.warning("CSE SKIP blocked=%s query=%s", True, q)
+            return []
         delta = time.time() - _last_cse_ts
         jitter = random.uniform(_cse_jitter_low, _cse_jitter_high) if _cse_jitter_high > 0 else 0.0
         min_gap = max(0.0, CSE_MIN_INTERVAL + jitter)
@@ -961,6 +969,7 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
     backoff = 1.0
     cred_idx: Optional[int] = None
     rotate = False
+    blocked_hits = 0
     for _ in range(tries):
         key, cx, cred_idx = _pick_cse_cred(cred_idx, advance=(rotate or cred_idx is None))
         rotate = False
@@ -976,13 +985,32 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
                     _cse_cache[norm_key] = items
             return items
         except Exception as exc:
+            blocked = False
             if isinstance(exc, requests.HTTPError) and exc.response is not None:
                 status = exc.response.status_code
                 if status in (403, 429):
                     rotate = True
+                    blocked = True
+                    blocked_hits += 1
                     _mark_block("www.googleapis.com", seconds=CSE_BLOCK_SECONDS)
+            elif isinstance(exc, req_exc.RetryError):
+                blocked = True
+                blocked_hits += 1
+            if blocked:
+                global _cse_blocked_until
+                _cse_blocked_until = max(_cse_blocked_until, time.time() + CSE_BLOCK_SECONDS)
+                LOG.warning(
+                    "CSE throttled (hit %s/%s); backing off for %.0fs",
+                    blocked_hits,
+                    tries,
+                    CSE_BLOCK_SECONDS,
+                )
             time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
             backoff *= BACKOFF_FACTOR
+
+    if blocked_hits:
+        LOG.error("CSE exhausted due to rate limits; giving up on query %s", q)
+        return []
     with _cse_lock:
         if norm_key:
             _cse_cache[norm_key] = []
@@ -2298,6 +2326,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     location_extras: List[str] = [brokerage] if brokerage else []
     blocked_domains: Set[str] = set()
     trusted_domains: Set[str] = set()
+    cse_rate_limited = False
 
     inferred_domain_hint = _infer_domain_from_text(brokerage) or _infer_domain_from_text(agent)
     if inferred_domain_hint and not domain_hint:
@@ -2499,6 +2528,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         postal_code=row_payload.get("zip", ""),
     )
     google_hits = list(pmap(google_items, _dedupe_queries(queries)))
+    if not any(google_hits) and _cse_blocked():
+        cse_rate_limited = True
     trusted_domains.update(
         _build_trusted_domains(
             agent,
@@ -2872,7 +2903,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             return result
 
     if not had_candidates:
-        reason = "no_personal_email"
+        reason = "cse_rate_limited" if cse_rate_limited else "no_personal_email"
     else:
         reason = "withheld_low_conf_mix"
     result.update({
@@ -2882,7 +2913,14 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "source": best_source,
         "confidence": "",
     })
-    cache_e[key] = result
+    if cse_rate_limited:
+        LOG.warning(
+            "EMAIL DEFER for %s %s – CSE blocked/rate limited, leaving uncached",
+            agent,
+            state,
+        )
+    else:
+        cache_e[key] = result
     LOG.debug(
         "EMAIL FAIL for %s %s – personalised e-mail not found (%s)",
         agent,
