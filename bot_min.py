@@ -3194,6 +3194,25 @@ def get_line_info(phone: str) -> Dict[str, Any]:
 
     LOG.debug("Cloudmersive response for %s: status=%s data=%s", digits, status, data)
 
+    if status != 200:
+        LOG.warning(
+            "Cloudmersive lookup for %s failed with status %s; falling back to local validation",
+            phone,
+            status,
+        )
+        info["mobile"] = True
+        _line_info_cache[phone] = info
+        return info
+
+    if not isinstance(data, dict) or "IsValid" not in data:
+        LOG.warning(
+            "Cloudmersive response for %s missing IsValid; falling back to local validation",
+            phone,
+        )
+        info["mobile"] = True
+        _line_info_cache[phone] = info
+        return info
+
     info["valid"] = bool(data.get("IsValid"))
     info["country"] = str(data.get("CountryCode") or "US").upper()
     line_type = data.get("LineType")

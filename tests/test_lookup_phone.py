@@ -398,6 +398,31 @@ def test_lookup_phone_rejects_invalid_cloudmersive_numbers(monkeypatch):
     assert result["score"] == 0.0
 
 
+def test_cloudmersive_error_falls_back_to_local_validation(monkeypatch):
+    phone = "216-403-9603"
+
+    class DummyResp:
+        status_code = 429
+
+        def json(self):
+            return {"Message": "Rate limit"}
+
+    old_key = bot_min.CLOUDMERSIVE_KEY
+    monkeypatch.setattr(bot_min, "CLOUDMERSIVE_KEY", "dummy")
+    monkeypatch.setattr(bot_min.requests, "post", lambda *args, **kwargs: DummyResp())
+
+    bot_min._line_info_cache.clear()
+
+    try:
+        info = bot_min.get_line_info(phone)
+    finally:
+        bot_min.CLOUDMERSIVE_KEY = old_key
+
+    assert info["valid"] is True
+    assert info["mobile"] is True
+    assert info["country"] == "US"
+
+
 def test_profile_hint_urls_are_used(monkeypatch):
     mobile_number = "555-303-4040"
 
