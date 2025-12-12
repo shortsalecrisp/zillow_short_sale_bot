@@ -357,6 +357,72 @@ def test_trusted_contact_pages_not_penalized(monkeypatch):
     assert result["score"] >= bot_min.PHONE_SOURCE_BASE["agent_card_dom"]
 
 
+def test_lookup_phone_rejects_invalid_cloudmersive_numbers(monkeypatch):
+    bad_number = "040-135-5597"
+
+    def fake_rapid_property(zpid):
+        return {}
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+
+    def fake_fetch(url):
+        return f"<html><body>Jane Agent NY <a href=\"tel:{bad_number}\">Call</a></body></html>", False
+
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+
+    def fake_extract(page):
+        return (
+            [],
+            [],
+            [],
+            {"tel": [{"phone": bad_number, "context": "Office"}], "title": "Profile"},
+        )
+
+    monkeypatch.setattr(bot_min, "extract_struct", fake_extract)
+    monkeypatch.setattr(bot_min, "get_line_info", lambda number: {"valid": False, "mobile": False, "country": "US"})
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
+
+    bot_min.cache_p.clear()
+    bot_min._line_info_cache.clear()
+
+    result = bot_min.lookup_phone(
+        "Jane Agent",
+        "NY",
+        {"zpid": "abc", "city": "Bronx", "state": "NY"},
+    )
+
+    assert result["number"] == ""
+    assert result["score"] == 0.0
+
+
+def test_cloudmersive_error_falls_back_to_local_validation(monkeypatch):
+    phone = "216-403-9603"
+
+    class DummyResp:
+        status_code = 429
+
+        def json(self):
+            return {"Message": "Rate limit"}
+
+    old_key = bot_min.CLOUDMERSIVE_KEY
+    monkeypatch.setattr(bot_min, "CLOUDMERSIVE_KEY", "dummy")
+    monkeypatch.setattr(bot_min.requests, "post", lambda *args, **kwargs: DummyResp())
+
+    bot_min._line_info_cache.clear()
+
+    try:
+        info = bot_min.get_line_info(phone)
+    finally:
+        bot_min.CLOUDMERSIVE_KEY = old_key
+
+    assert info["valid"] is True
+    assert info["mobile"] is True
+    assert info["country"] == "US"
+
+
 def test_profile_hint_urls_are_used(monkeypatch):
     mobile_number = "555-303-4040"
 
