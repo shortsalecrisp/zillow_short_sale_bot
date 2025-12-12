@@ -8,7 +8,7 @@ import os
 import re
 import sys
 import threading
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -191,8 +191,10 @@ SMS_RETRY_ATTEMPTS = int(os.getenv("SMS_RETRY_ATTEMPTS", "2"))
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
 CSE_MIN_INTERVAL = float(os.getenv("CSE_MIN_INTERVAL", "4.0"))
-_cse_jitter_low = float(os.getenv("CSE_JITTER_LOW", "0.9"))
-_cse_jitter_high = float(os.getenv("CSE_JITTER_HIGH", "1.8"))
+_cse_jitter_low = float(os.getenv("CSE_JITTER_LOW", "1.0"))
+_cse_jitter_high = float(os.getenv("CSE_JITTER_HIGH", "2.6"))
+_cse_window_seconds = float(os.getenv("CSE_WINDOW_SECONDS", "60"))
+_cse_max_in_window = int(os.getenv("CSE_MAX_IN_WINDOW", "12"))
 if _cse_jitter_high < _cse_jitter_low:
     _cse_jitter_low, _cse_jitter_high = _cse_jitter_high, _cse_jitter_low
 
@@ -641,6 +643,47 @@ def _emails_from_block(blk: Dict[str, Any]) -> List[str]:
         out.append(clean_email(e))
     return [e for e in out if ok_email(e)]
 
+
+def _rapid_profile_urls(data: Dict[str, Any]) -> List[str]:
+    if not data:
+        return []
+    urls: Set[str] = set()
+    blocks: List[Dict[str, Any]] = []
+    lb = data.get("listed_by") or {}
+    if isinstance(lb, dict) and lb:
+        blocks.append(lb)
+    contacts = data.get("contact_recipients") or []
+    if isinstance(contacts, list):
+        blocks.extend([blk for blk in contacts if isinstance(blk, dict)])
+
+    url_keys = {
+        "profile_url",
+        "profileUrl",
+        "profile",
+        "agent_url",
+        "agentUrl",
+        "url",
+        "website",
+        "web_url",
+        "webUrl",
+        "link",
+    }
+
+    def _add_url(val: Any) -> None:
+        if isinstance(val, str) and val.startswith(("http://", "https://")):
+            urls.add(val.strip())
+
+    for blk in blocks:
+        for key in url_keys:
+            _add_url(blk.get(key))
+        for bucket_key in ("urls", "links"):
+            bucket = blk.get(bucket_key)
+            if isinstance(bucket, list):
+                for item in bucket:
+                    _add_url(item)
+
+    return list(urls)
+
 def _names_match(a: str, b: str) -> bool:
     if not a or not b:
         return False
@@ -917,6 +960,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
 _cse_cache: Dict[str, List[Dict[str, Any]]] = {}
 _last_cse_ts = 0.0
 _cse_lock = threading.Lock()
+_cse_recent: deque[float] = deque()
 
 
 def _cse_key(q: str) -> str:
@@ -962,17 +1006,30 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
         delta = time.time() - _last_cse_ts
         jitter = random.uniform(_cse_jitter_low, _cse_jitter_high) if _cse_jitter_high > 0 else 0.0
         min_gap = max(0.0, CSE_MIN_INTERVAL + jitter)
-        if delta < min_gap:
-            time.sleep(min_gap - delta)
-        _last_cse_ts = time.time()
+        sleep_for = min_gap - delta if delta < min_gap else 0.0
+        now = time.time()
+        while _cse_recent and (now - _cse_recent[0]) > _cse_window_seconds:
+            _cse_recent.popleft()
+        if len(_cse_recent) >= _cse_max_in_window:
+            sleep_for = max(
+                sleep_for,
+                _cse_window_seconds - (now - _cse_recent[0]) + random.uniform(0.1, 0.6),
+            )
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        ts = time.time()
+        _last_cse_ts = ts
+        _cse_recent.append(ts)
 
     backoff = 1.0
     cred_idx: Optional[int] = None
-    rotate = False
     blocked_hits = 0
-    for _ in range(tries):
-        key, cx, cred_idx = _pick_cse_cred(cred_idx, advance=(rotate or cred_idx is None))
-        rotate = False
+    max_attempts = max(1, tries) * max(1, len(_CSE_CRED_POOL))
+    cred_fail_counts: Dict[int, int] = defaultdict(int)
+    for attempt in range(max_attempts):
+        key, cx, cred_idx = _pick_cse_cred(cred_idx, advance=(attempt > 0 or cred_idx is None))
+        if cred_fail_counts[cred_idx] >= tries:
+            continue
         try:
             j = _http_get(
                 "https://www.googleapis.com/customsearch/v1",
@@ -989,7 +1046,6 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
             if isinstance(exc, requests.HTTPError) and exc.response is not None:
                 status = exc.response.status_code
                 if status in (403, 429):
-                    rotate = True
                     blocked = True
                     blocked_hits += 1
                     _mark_block("www.googleapis.com", seconds=CSE_BLOCK_SECONDS)
@@ -997,6 +1053,7 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
                 blocked = True
                 blocked_hits += 1
             if blocked:
+                cred_fail_counts[cred_idx] += 1
                 global _cse_blocked_until
                 _cse_blocked_until = max(_cse_blocked_until, time.time() + CSE_BLOCK_SECONDS)
                 LOG.warning(
@@ -1425,8 +1482,6 @@ def _email_matches_name(agent: str, email: str) -> bool:
         return True
     return False
 
-cache_p: Dict[str, Dict[str, Any]] = {}
-cache_e: Dict[str, Dict[str, Any]] = {}
 domain_patterns: Dict[str, str] = {}
 _contact_override_cache: Dict[str, Any] = {"raw": None, "map": {}}
 
@@ -1690,7 +1745,6 @@ def _build_trusted_domains(agent: str, urls: Iterable[str]) -> Set[str]:
 
 
 def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
-    key = f"{agent}|{state}"
     override = _contact_override(agent, state)
     override_phone = override.get("phone") if override else ""
     if override_phone:
@@ -1703,10 +1757,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "source": "override",
                 "reason": "",
             }
-            cache_p[key] = result
             return result
-    if key in cache_p:
-        return cache_p[key]
 
     candidates: Dict[str, Dict[str, Any]] = {}
     had_candidates = False
@@ -1714,6 +1765,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     location_extras: List[str] = [brokerage_hint] if brokerage_hint else []
     processed_urls: Set[str] = set()
     mirror_hits: Set[str] = set()
+    trusted_domains: Set[str] = set()
 
     def _register(
         phone: Any,
@@ -1872,23 +1924,10 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             brokerage=brokerage_hint,
         )
     )
-    google_hits = list(pmap(google_items, _dedupe_queries(queries)))
-    trusted_domains = _build_trusted_domains(
-        agent,
-        [it.get("link", "") for items in google_hits for it in items],
-    )
-
-    for items in google_hits:
-        for it in items:
-            tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
-            if tel:
-                _register(tel, "cse_contact", url=it.get("link", ""))
-
+    rapid_urls = list(dict.fromkeys(_rapid_profile_urls(rapid)))
     hint_key = _normalize_override_key(agent, state)
     hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
     hint_urls = [url for url in hint_urls if url]
-    urls = hint_urls + [it.get("link", "") for items in google_hits for it in items][:20]
-    non_portal, portal = _split_portals(urls)
     parts = [p for p in agent.split() if p]
     first_name = re.sub(r"[^a-z]", "", parts[0].lower()) if parts else ""
     last_name = re.sub(r"[^a-z]", "", (parts[-1] if len(parts) > 1 else parts[0]).lower()) if parts else ""
@@ -1982,6 +2021,48 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if not page:
             return False
         return _process_page(url, page, trusted=trusted or domain in trusted_domains)
+
+    priority_urls = list(dict.fromkeys(rapid_urls + hint_urls))
+    trusted_domains.update(_build_trusted_domains(agent, priority_urls))
+    priority_non_portal, priority_portal = _split_portals(priority_urls)
+
+    processed = 0
+    for url in priority_non_portal:
+        if _handle_url(url) and _has_viable_phone_candidate():
+            break
+        if url:
+            processed += 1
+        if processed >= 3 and candidates:
+            break
+
+    if not candidates:
+        processed = 0
+        for url in priority_portal:
+            if _handle_url(url) and _has_viable_phone_candidate():
+                break
+            if url:
+                processed += 1
+            if processed >= 3 and candidates:
+                break
+
+    urls: List[str] = list(priority_urls)
+    google_hits: List[List[Dict[str, Any]]] = []
+    if not _has_viable_phone_candidate():
+        google_hits = list(pmap(google_items, _dedupe_queries(queries)))
+        trusted_domains.update(
+            _build_trusted_domains(
+                agent,
+                [it.get("link", "") for items in google_hits for it in items],
+            )
+        )
+        for items in google_hits:
+            for it in items:
+                tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
+                if tel:
+                    _register(tel, "cse_contact", url=it.get("link", ""))
+        urls.extend([it.get("link", "") for items in google_hits for it in items][:20])
+    urls = list(dict.fromkeys(urls))
+    non_portal, portal = _split_portals(urls)
 
     processed = 0
     for url in non_portal:
@@ -2217,7 +2298,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "score": adjusted_score,
                 "source": best_source,
             })
-            cache_p[key] = result
             return result
 
     if candidates:
@@ -2248,7 +2328,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                     "source": office_source,
                 }
             )
-            cache_p[key] = result
             return result
 
     if had_candidates or best_number:
@@ -2287,7 +2366,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "score": best_score if best_score != float("-inf") else 0.0,
         "source": best_source,
     })
-    cache_p[key] = result
     METRICS["phone_no_verified_mobile"] += 1
     LOG.warning(
         "PHONE DROP no verified mobile for %s %s zpid=%s reason=%s had_candidates=%s",
@@ -2300,7 +2378,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     return result
 
 def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
-    key = f"{agent}|{state}"
     override = _contact_override(agent, state)
     override_email = override.get("email") if override else ""
     if override_email:
@@ -2313,10 +2390,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "source": "override",
                 "reason": "",
             }
-            cache_e[key] = result
             return result
-    if key in cache_e:
-        return cache_e[key]
 
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     domain_hint = mls_id = ""
@@ -2471,6 +2545,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 _register(em, "payload_contact", context=ctx, meta_name=blk.get("display_name", ""))
 
     zpid = str(row_payload.get("zpid", ""))
+    rapid: Dict[str, Any] = {}
     if zpid:
         rapid = rapid_property(zpid)
         if rapid:
@@ -2527,30 +2602,10 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         city=row_payload.get("city", ""),
         postal_code=row_payload.get("zip", ""),
     )
-    google_hits = list(pmap(google_items, _dedupe_queries(queries)))
-    if not any(google_hits) and _cse_blocked():
-        cse_rate_limited = True
-    trusted_domains.update(
-        _build_trusted_domains(
-            agent,
-            [it.get("link", "") for items in google_hits for it in items],
-        )
-    )
-
-    for items in google_hits:
-        for it in items:
-            mail = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email") or "")
-            if mail:
-                link = it.get("link", "")
-                _register(
-                    mail,
-                    "cse_contact",
-                    url=link,
-                    trusted=_domain(link) in trusted_domains,
-                )
-
-    urls = [it.get("link", "") for items in google_hits for it in items][:20]
-    non_portal, portal = _split_portals(urls)
+    rapid_urls = list(dict.fromkeys(_rapid_profile_urls(rapid) if zpid else []))
+    hint_key = _normalize_override_key(agent, state)
+    hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
+    hint_urls = [url for url in hint_urls if url]
 
     first_variants, last_token = _first_last_tokens(agent)
 
@@ -2650,6 +2705,70 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     def _has_viable_email_candidate() -> bool:
         return any(info.get("score", 0.0) >= CONTACT_EMAIL_FALLBACK_SCORE for info in candidates.values())
+
+    priority_urls = list(dict.fromkeys(rapid_urls + hint_urls))
+    trusted_domains.update(_build_trusted_domains(agent, priority_urls))
+    priority_non_portal, priority_portal = _split_portals(priority_urls)
+
+    processed = 0
+    for url in priority_non_portal:
+        dom = _domain(url)
+        page, _ = fetch_contact_page(url)
+        if not page:
+            if _blocked(dom):
+                blocked_domains.add(dom)
+            continue
+        _process_page(url, page)
+        if _has_viable_email_candidate():
+            break
+        processed += 1
+        if processed >= 4 and candidates:
+            break
+
+    if not candidates:
+        processed = 0
+        for url in priority_portal:
+            dom = _domain(url)
+            page, _ = fetch_contact_page(url)
+            if not page:
+                if _blocked(dom):
+                    blocked_domains.add(dom)
+                continue
+            _process_page(url, page)
+            if _has_viable_email_candidate():
+                break
+            processed += 1
+            if processed >= 4 and candidates:
+                break
+
+    urls: List[str] = list(priority_urls)
+    google_hits: List[List[Dict[str, Any]]] = []
+    if not _has_viable_email_candidate():
+        google_hits = list(pmap(google_items, _dedupe_queries(queries)))
+        if not any(google_hits) and _cse_blocked():
+            cse_rate_limited = True
+        trusted_domains.update(
+            _build_trusted_domains(
+                agent,
+                [it.get("link", "") for items in google_hits for it in items],
+            )
+        )
+
+        for items in google_hits:
+            for it in items:
+                mail = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email") or "")
+                if mail:
+                    link = it.get("link", "")
+                    _register(
+                        mail,
+                        "cse_contact",
+                        url=link,
+                        trusted=_domain(link) in trusted_domains,
+                    )
+
+        urls.extend([it.get("link", "") for items in google_hits for it in items][:20])
+    urls = list(dict.fromkeys(urls))
+    non_portal, portal = _split_portals(urls)
 
     processed = 0
     for url in non_portal:
@@ -2767,7 +2886,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         info = candidates.get(best_email, {})
         if info.get("generic"):
             result["confidence"] = "low"
-            cache_e[key] = result
             LOG.info(
                 "EMAIL WIN (generic) %s via %s score=%.2f",
                 best_email,
@@ -2776,7 +2894,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             )
             return result
         result["confidence"] = "high"
-        cache_e[key] = result
         LOG.debug(
             "EMAIL WIN %s via %s score=%.2f",
             best_email,
@@ -2839,7 +2956,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         )
         if fallback_ok:
             result["confidence"] = "low"
-            cache_e[key] = result
             LOG.info(
                 "EMAIL WIN (fallback) %s via %s score=%.2f", best_email, best_source or "unknown", best_score
             )
@@ -2892,7 +3008,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                     "score": adjusted_score,
                 }
             )
-            cache_e[key] = result
             LOG.info(
                 "EMAIL WIN (rapid/portal fallback) %s via %s score=%.2f raw=%.2f",
                 fallback_email,
@@ -2915,12 +3030,10 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     })
     if cse_rate_limited:
         LOG.warning(
-            "EMAIL DEFER for %s %s – CSE blocked/rate limited, leaving uncached",
+            "EMAIL DEFER for %s %s – CSE blocked/rate limited",
             agent,
             state,
         )
-    else:
-        cache_e[key] = result
     LOG.debug(
         "EMAIL FAIL for %s %s – personalised e-mail not found (%s)",
         agent,
