@@ -50,6 +50,7 @@ _CONNECTION_ERRORS = (
 
 _blocked_until: Dict[str, float] = {}
 _cse_blocked_until: float = 0.0
+cache_p: Dict[str, Any] = {}
 
 def _http_get(
     url: str,
@@ -469,7 +470,20 @@ def pmap(fn, iterable): return list(_executor.map(fn, iterable))
 
 # ───────────────────── phone / email formatting helpers ─────────────────────
 def _is_bad_area(area: str) -> bool:
-    return area in BAD_AREA or area.startswith("1")
+    """Return True when *area* is clearly not a valid US area code.
+
+    Reject toll-free prefixes, anything starting with ``1``, and any prefix not
+    present in ``US_AREA_CODES`` (e.g., "040"), so obviously malformed numbers
+    never pass initial formatting/validation.
+    """
+
+    if not area:
+        return True
+    if area.startswith("1"):
+        return True
+    if area in BAD_AREA:
+        return True
+    return area not in US_AREA_CODES
 
 def fmt_phone(r: str) -> str:
     d = re.sub(r"\D", "", r)
@@ -2176,7 +2190,14 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             if info.get("direct_ok") is False and not info.get("template_penalized"):
                 info["score"] -= 2.0
                 info["template_penalized"] = True
-        mobile = is_mobile_number(number)
+        line_info = get_line_info(number)
+        if not line_info.get("valid"):
+            LOG.debug("PHONE DROP invalid number: %s", number)
+            continue
+        if line_info.get("country") and line_info.get("country") != "US":
+            LOG.debug("PHONE DROP non-US number: %s (%s)", number, line_info.get("country"))
+            continue
+        mobile = bool(line_info.get("mobile"))
         info["is_mobile"] = mobile
         if mobile:
             mobile_candidates.append((number, info))
@@ -3123,6 +3144,7 @@ def _digits_only(num: str) -> str:
 
 _line_type_cache: Dict[str, bool] = {}
 _line_type_verified: Dict[str, bool] = {}
+_line_info_cache: Dict[str, Dict[str, Any]] = {}
 PROFILE_HINTS: Dict[str, List[str]] = {}
 TRUSTED_CONTACT_DOMAINS: Set[str] = set()
 
@@ -3133,17 +3155,29 @@ def _is_explicit_mobile(value: Any) -> bool:
     return str(value).strip().lower() == "mobile"
 
 
-def is_mobile_number(phone: str) -> bool:
-    """Return True if *phone* is classified as a mobile line via Cloudmersive."""
+def get_line_info(phone: str) -> Dict[str, Any]:
+    """Return Cloudmersive classification for *phone* with caching.
+
+    The result dictionary contains ``valid`` (bool), ``mobile`` (bool), and
+    ``country`` (upper-case ISO code or empty string). If Cloudmersive is
+    unavailable, we fall back to lightweight validation and treat the number as
+    mobile to avoid overly aggressive filtering.
+    """
+
     if not phone:
-        return False
-    if phone in _line_type_verified:
-        return _line_type_verified[phone]
-    if phone in _line_type_cache:
-        return _line_type_cache[phone]
+        return {"valid": False, "mobile": False, "country": ""}
+    if phone in _line_info_cache:
+        return _line_info_cache[phone]
+
+    info = {"valid": valid_phone(phone), "mobile": False, "country": "US"}
     if not CLOUDMERSIVE_KEY:
-        return True
+        info["mobile"] = True
+        _line_info_cache[phone] = info
+        return info
+
     digits = _digits_only(phone)
+    data: Dict[str, Any] = {}
+    status: Any = "n/a"
     try:
         resp = requests.post(
             "https://api.cloudmersive.com/validate/phonenumber/basic",
@@ -3151,17 +3185,17 @@ def is_mobile_number(phone: str) -> bool:
             headers={"Apikey": CLOUDMERSIVE_KEY},
             timeout=6,
         )
+        status = resp.status_code
         data = resp.json()
     except Exception as exc:
         LOG.warning("Cloudmersive lookup failed for %s (%s)", phone, exc)
-        _line_type_cache[phone] = False
-        return False
-    LOG.debug(
-        "Cloudmersive response for %s: status=%s data=%s",
-        digits,
-        resp.status_code,
-        data,
-    )
+        _line_info_cache[phone] = info
+        return info
+
+    LOG.debug("Cloudmersive response for %s: status=%s data=%s", digits, status, data)
+
+    info["valid"] = bool(data.get("IsValid"))
+    info["country"] = str(data.get("CountryCode") or "US").upper()
     line_type = data.get("LineType")
     phone_type = data.get("PhoneNumberType")
     is_mobile = bool(data.get("IsMobile"))
@@ -3172,13 +3206,20 @@ def is_mobile_number(phone: str) -> bool:
             is_mobile = True
     if not is_mobile:
         if normalized_line == "fixedlineormobile" or normalized_type == "fixedlineormobile":
-            # Cloudmersive returns "FixedLineOrMobile" when it cannot definitively
-            # classify the line type. Treat it as usable so we do not drop real
-            # mobile numbers that happen to be marked ambiguous.
             is_mobile = True
+    info["mobile"] = is_mobile
+
+    _line_info_cache[phone] = info
     _line_type_cache[phone] = is_mobile
-    LOG.debug("Cloudmersive classified %s as mobile=%s", digits, is_mobile)
-    return is_mobile
+    _line_type_verified[phone] = is_mobile
+    return info
+
+
+def is_mobile_number(phone: str) -> bool:
+    """Return True if *phone* is classified as a mobile line via Cloudmersive."""
+
+    info = get_line_info(phone)
+    return bool(info.get("mobile"))
 
 
 def send_sms(
