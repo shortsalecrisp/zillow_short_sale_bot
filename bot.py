@@ -25,6 +25,7 @@ ua = UserAgent()
 GOOGLE_API_KEY = CFG.get("google_api_key")
 GOOGLE_CX = CFG.get("google_cx")
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
+GOOGLE_PROXY = (CFG.get("google_proxy") or os.getenv("GOOGLE_PROXY", "")).strip()
 
 
 def _cfg_float(key: str, default: float) -> float:
@@ -32,6 +33,12 @@ def _cfg_float(key: str, default: float) -> float:
         return float(CFG.get(key, default))
     except (TypeError, ValueError):
         return float(default)
+
+
+def google_proxies():
+    if GOOGLE_PROXY:
+        return {"http": GOOGLE_PROXY, "https": GOOGLE_PROXY}
+    return None
 
 
 CSE_MIN_INTERVAL = _cfg_float("google_cse_min_interval", 2.2)
@@ -340,6 +347,7 @@ def google_search_items(query: str) -> tuple[list[dict], bool]:
                 params=params,
                 headers=headers,
                 timeout=15,
+                proxies=google_proxies(),
             )
         except requests.RequestException as exc:
             print("Google search error:", exc)
@@ -685,15 +693,21 @@ def search_agent_profile(
     email = ""
     blocked = False
 
-    # 1) Try brokerage/domain-specific fetches via Jina Reader before any CSE usage
-    if domain_hint:
-        site_queries = [
-            f'site:{domain_hint} "{name}" {state}',
-            f'"{name}" "{brokerage}" {state}',
-        ]
-        for q in site_queries:
-            for it in duckduckgo_search(q, limit=3):
-                html = jina_reader_fetch(it.get("link", ""))
+    non_cse_fetch_limit = 10
+    cse_fetch_limit = 4
+    ddg_query_limit = 6
+
+    def run_jina_pass(queries: list[str], per_query_limit: int = 3) -> None:
+        nonlocal phone, email
+        seen_links: set[str] = set()
+        fetches = 0
+        for q in queries:
+            for it in duckduckgo_search(q, limit=per_query_limit):
+                link = it.get("link", "")
+                if not link or link in seen_links:
+                    continue
+                seen_links.add(link)
+                html = jina_reader_fetch(link)
                 if not html:
                     continue
                 phones, emails = extract_contact(html)
@@ -701,10 +715,21 @@ def search_agent_profile(
                     phone = select_best_phone(phones)
                 if not email and emails:
                     email = emails[0]
+                fetches += 1
                 if phone and email:
-                    return phone, email, False
-            if phone and email:
-                break
+                    return
+                if fetches >= non_cse_fetch_limit:
+                    return
+
+    # 1) Try brokerage/domain-specific fetches via Jina Reader before any CSE usage
+    if domain_hint:
+        site_queries = [
+            f'site:{domain_hint} "{name}" {state}',
+            f'"{name}" "{brokerage}" {state}',
+        ]
+        run_jina_pass(site_queries, per_query_limit=3)
+        if phone or email:
+            return phone, email, False
 
     if time.time() < _CSE_BACKOFF_UNTIL:
         retry_at = datetime.fromtimestamp(_CSE_BACKOFF_UNTIL)
@@ -730,23 +755,25 @@ def search_agent_profile(
         postal_code=postal_code,
         address=prop_addr,
     )
+    run_jina_pass(queries[:ddg_query_limit], per_query_limit=3)
+    if phone or email:
+        return phone, email, False
+
     items = []
-    if not cse_blocked:
-        for q in queries:
+    if not cse_blocked and not (phone or email):
+        cse_query_limit = 3
+        for q in queries[:cse_query_limit]:
             batch, rate_limited = google_search_items(q)
             items.extend(batch)
             if rate_limited:
                 cse_blocked = True
                 break
+            if batch:
+                break
             if POST_CSE_DELAY_HIGH > 0:
                 time.sleep(random.uniform(POST_CSE_DELAY_LOW, POST_CSE_DELAY_HIGH))
-    else:
-        # Once CSE is paused, immediately pivot to DuckDuckGo to avoid further throttle.
-        for q in queries[:4]:
-            items.extend(duckduckgo_search(q, limit=4))
-
-    if cse_blocked and not items:
-        for q in queries[:4]:
+    if (cse_blocked or not items) and not (phone or email):
+        for q in queries[:ddg_query_limit]:
             items.extend(duckduckgo_search(q, limit=4))
 
     dedup: dict[str, dict] = {}
@@ -773,6 +800,13 @@ def search_agent_profile(
         return sc
 
     items.sort(key=_score, reverse=True)
+    if domain_hint:
+        preferred = [
+            it for it in items if domain_hint in domain_from_url(it.get("link", ""))
+        ]
+        others = [it for it in items if it not in preferred]
+        if preferred:
+            items = preferred + others
     if len(items) > 12:
         items = items[:12]
 
@@ -786,7 +820,7 @@ def search_agent_profile(
             return phone, email, False
 
     domain_last_hit: dict[str, float] = {}
-    max_fetches = 6
+    max_fetches = cse_fetch_limit if not cse_blocked else non_cse_fetch_limit
     fetches = 0
     for it in items:
         if phone and email:
@@ -818,7 +852,12 @@ def search_agent_profile(
                 continue
         else:
             try:
-                resp = session.get(link, headers=random_headers(), timeout=15)
+                resp = session.get(
+                    link,
+                    headers=random_headers(),
+                    timeout=15,
+                    proxies=google_proxies(),
+                )
             except requests.RequestException as exc:
                 print(f"Error fetching {link}: {exc}")
                 continue
