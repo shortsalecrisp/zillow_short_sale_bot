@@ -54,6 +54,9 @@ if POST_CSE_DELAY_HIGH < POST_CSE_DELAY_LOW:
 
 CONTACT_DOMAIN_MIN_DELAY = _cfg_float("contact_domain_min_delay", 4.0)
 CONTACT_DOMAIN_DELAY_JITTER = _cfg_float("contact_domain_delay_jitter", 1.4)
+SECONDARY_SEARCH_ENDPOINT = os.getenv(
+    "SECONDARY_SEARCH_ENDPOINT", "https://ddg-api.herokuapp.com/search"
+).strip()
 
 # expose SMS Gateway credentials
 os.environ.setdefault("SMS_GATEWAY_API_KEY", CFG.get("sms_gateway_api_key", ""))
@@ -668,6 +671,139 @@ def brokerage_domain_url(brokerage: str) -> str:
         return hint
     return f"https://{hint}"
 
+
+def secondary_search_items(query: str, limit: int = 5) -> list[dict]:
+    """Query a lightweight secondary search API to avoid CSE usage."""
+
+    if not SECONDARY_SEARCH_ENDPOINT:
+        return []
+
+    try:
+        resp = requests.get(
+            SECONDARY_SEARCH_ENDPOINT,
+            params={"q": query},
+            headers=random_headers(),
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        print(f"Secondary search error: {exc}")
+        return []
+
+    if resp.status_code != 200:
+        return []
+
+    try:
+        payload = resp.json()
+    except ValueError:
+        return []
+
+    results = payload.get("results") or payload.get("data") or payload.get("items")
+    if not isinstance(results, list):
+        return []
+
+    items: list[dict] = []
+    for it in results:
+        link = it.get("link") or it.get("url") or it.get("href") or ""
+        if link:
+            items.append({"link": link})
+        if len(items) >= limit:
+            break
+    return items
+
+
+def validate_email_guess(
+    email: str, domain_hint: str = "", brokerage_html: str = "", *, strict: bool = True
+) -> bool:
+    """Validate a guessed email by checking known sources and open search."""
+
+    if not email:
+        return False
+
+    email_lc = email.lower()
+    if brokerage_html and email_lc in brokerage_html.lower():
+        return True
+
+    check_queries = [f'"{email}"']
+    if domain_hint:
+        check_queries.append(f'"{email}" site:{domain_hint}')
+
+    for q in check_queries:
+        for hit in duckduckgo_search(q, limit=2 if strict else 3):
+            link = hit.get("link", "")
+            if email_lc in link.lower():
+                return True
+            html = jina_reader_fetch(link)
+            if html and email_lc in html.lower():
+                return True
+    return False
+
+
+def guess_brokerage_email(name: str, domain_hint: str, brokerage_html: str = "") -> str:
+    """Generate and validate pattern-based emails for the brokerage domain."""
+
+    if not domain_hint or not name:
+        return ""
+
+    domain = domain_hint
+    if domain.startswith("http"):
+        domain = urlparse(domain).netloc
+
+    parts = [p for p in re.sub(r"[^a-zA-Z\s]", " ", name).split() if p]
+    if not parts:
+        return ""
+    first = parts[0].lower()
+    last = parts[-1].lower() if len(parts) > 1 else ""
+    initial = first[0] if first else ""
+
+    bases = []
+    if first and last:
+        bases.extend([f"{first}.{last}", f"{first}{last}", f"{initial}{last}"])
+    if first:
+        bases.append(first)
+
+    guesses = [f"{b}@{domain}" for b in bases]
+    for guess in guesses:
+        if validate_email_guess(guess, domain, brokerage_html, strict=True):
+            return guess
+    for guess in guesses:
+        if validate_email_guess(guess, domain, brokerage_html, strict=False):
+            return guess
+    return ""
+
+
+def mirror_scrape_zillow_profile(name: str, state: str = "", prop_addr: str = "") -> tuple[str, str]:
+    """Mirror-scrape Zillow profile pages via Jina Reader for contact info."""
+
+    queries = [
+        f'site:zillow.com/profile "{name}" {state}',
+        f'"{name}" Zillow agent profile {state}',
+    ]
+    if prop_addr:
+        queries.append(f'"{name}" "{prop_addr}" Zillow profile')
+
+    phone = ""
+    email = ""
+    seen_links: set[str] = set()
+    for q in queries:
+        for it in duckduckgo_search(q, limit=4):
+            link = it.get("link", "")
+            if not link or link in seen_links:
+                continue
+            seen_links.add(link)
+            if "zillow.com" not in link:
+                continue
+            html = jina_reader_fetch(link)
+            if not html:
+                continue
+            phones, emails = extract_contact(html)
+            if not phone:
+                phone = select_best_phone(phones)
+            if not email and emails:
+                email = emails[0]
+            if phone and email:
+                return phone, email
+    return phone, email
+
 def search_agent_profile(
     name: str,
     state: str,
@@ -692,6 +828,7 @@ def search_agent_profile(
     phone = ""
     email = ""
     blocked = False
+    brokerage_html = ""
 
     non_cse_fetch_limit = 10
     cse_fetch_limit = 4
@@ -772,6 +909,23 @@ def search_agent_profile(
                 break
             if POST_CSE_DELAY_HIGH > 0:
                 time.sleep(random.uniform(POST_CSE_DELAY_LOW, POST_CSE_DELAY_HIGH))
+
+    if cse_blocked:
+        if domain_hint and not brokerage_html:
+            brokerage_html = jina_reader_fetch(brokerage_domain_url(brokerage))
+        if not (phone or email):
+            z_phone, z_email = mirror_scrape_zillow_profile(name, state, prop_addr)
+            if z_phone:
+                phone = phone or z_phone
+            if z_email:
+                email = email or z_email
+        if domain_hint and not email:
+            guessed = guess_brokerage_email(name, domain_hint, brokerage_html)
+            if guessed:
+                email = guessed
+        if not items and not (phone and email):
+            for q in queries[:ddg_query_limit]:
+                items.extend(secondary_search_items(q, limit=3))
     if (cse_blocked or not items) and not (phone or email):
         for q in queries[:ddg_query_limit]:
             items.extend(duckduckgo_search(q, limit=4))
