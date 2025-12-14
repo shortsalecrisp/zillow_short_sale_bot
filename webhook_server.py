@@ -232,8 +232,6 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _within_work_hours(now: Optional[datetime] = None) -> bool:
     now = now or datetime.now(tz=TZ)
-    if not SCRAPE_INCLUDE_WEEKENDS and now.weekday() >= 5:
-        return False
     return WORK_START <= now.hour < WORK_END
 
 
