@@ -23,6 +23,16 @@ from requests import exceptions as req_exc
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build as gapi_build
 from sms_providers import get_sender
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:  # pragma: no cover - optional dependency
+    sync_playwright = None
+try:
+    import dns.resolver  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    dns = None
+else:
+    dns = dns.resolver
 
 _session = requests.Session()
 _retries = Retry(
@@ -37,6 +47,26 @@ _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
 
 _DEFAULT_TIMEOUT = 25
+_PROXY_TARGETS = {"zillow.com", "www.zillow.com", "kw.com", "kellerwilliams.com"}
+
+def _parse_proxy_pool(env_name: str, fallback: str = "") -> List[str]:
+    raw = os.getenv(env_name, fallback) or ""
+    return [v.strip() for v in raw.split(",") if v.strip()]
+
+_RESIDENTIAL_PROXIES = _parse_proxy_pool("RESIDENTIAL_PROXIES")
+_MOBILE_PROXIES = _parse_proxy_pool("MOBILE_PROXIES")
+_PROXY_POOL = _MOBILE_PROXIES + _RESIDENTIAL_PROXIES
+_PROXY_REDACT = os.getenv("PROXY_LOG_REDACT", "***")
+_SCRAPER_COOKIE_POOL = [c.strip() for c in os.getenv("SCRAPER_COOKIE_POOL", "").split("|||") if c.strip()]
+_ACCEPT_LANGUAGE_POOL = [
+    "en-US,en;q=0.9",
+    "en-US,en;q=0.8,es;q=0.5",
+    "en-CA,en;q=0.8",
+    "en-GB,en;q=0.9",
+]
+HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
+HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "12000"))
+HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
 
 _CONNECTION_ERRORS = (
     req_exc.ConnectionError,
@@ -61,6 +91,7 @@ def _http_get(
     timeout: int | float = _DEFAULT_TIMEOUT,
     rotate_user_agent: bool = False,
     respect_block: bool = True,
+    proxy: Optional[str] = None,
 ) -> requests.Response:
     dom = urlparse(url).netloc
 
@@ -81,7 +112,14 @@ def _http_get(
     while True:
         attempts += 1
         hdrs = _build_headers()
-        resp = _session.get(url, params=params, headers=hdrs or None, timeout=timeout)
+        proxy_cfg = {"http": proxy, "https": proxy} if proxy else None
+        resp = _session.get(
+            url,
+            params=params,
+            headers=hdrs or None,
+            timeout=timeout,
+            proxies=proxy_cfg,
+        )
         status = resp.status_code
         if status in (403, 429) and dom:
             block_for = CSE_BLOCK_SECONDS if "googleapis.com" in dom else BLOCK_SECONDS
@@ -242,14 +280,21 @@ _BASE_BROWSER_HEADERS = {
         "image/avif,image/webp,image/apng,*/*;q=0.8"
     ),
     "Accept-Encoding": "gzip, deflate, br",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": _ACCEPT_LANGUAGE_POOL[0],
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
 }
 
+def _random_cookie_header() -> Dict[str, str]:
+    if not _SCRAPER_COOKIE_POOL:
+        return {}
+    return {"Cookie": random.choice(_SCRAPER_COOKIE_POOL)}
+
 def _browser_headers(domain: Optional[str] = None) -> Dict[str, str]:
     headers = dict(_BASE_BROWSER_HEADERS)
     headers["User-Agent"] = random.choice(_USER_AGENT_POOL)
+    headers["Accept-Language"] = random.choice(_ACCEPT_LANGUAGE_POOL)
+    headers.update(_random_cookie_header())
     if domain:
         headers.setdefault("Referer", f"https://{domain}")
     return headers
@@ -283,6 +328,7 @@ GENERIC_EMAIL_PREFIXES = {
     "email",
     "firstnamelastname",
 }
+ENABLE_SYNTH_EMAIL_FALLBACK = os.getenv("ENABLE_SYNTH_EMAIL_FALLBACK", "false").lower() == "true"
 
 STATE_ABBR_TO_NAME = {
     "AL": "Alabama",
@@ -764,6 +810,25 @@ def _domain(host_or_url: str) -> str:
     parts = host.lower().split(".")
     return ".".join(parts[-2:]) if len(parts) >= 2 else host.lower()
 
+def _proxy_for_domain(domain: str) -> str:
+    dom = _domain(domain)
+    if not _PROXY_POOL or not dom:
+        return ""
+    if dom in _PROXY_TARGETS or any(dom.endswith(t) for t in _PROXY_TARGETS):
+        if dom.endswith("kw.com") or dom.endswith("kellerwilliams.com"):
+            pool = _MOBILE_PROXIES or _PROXY_POOL
+        else:
+            pool = _PROXY_POOL
+        return random.choice(pool) if pool else ""
+    return ""
+
+def _redact_proxy(proxy_url: str) -> str:
+    if not proxy_url:
+        return ""
+    if "@" in proxy_url:
+        return proxy_url.split("@", 1)[-1]
+    return proxy_url if proxy_url.startswith(_PROXY_REDACT) else _PROXY_REDACT
+
 def _is_banned(dom: str) -> bool:
     return any(bad in dom for bad in BAN_KEYWORDS)
 
@@ -805,6 +870,7 @@ def fetch(u: str, strict: bool = True):
     if not _should_fetch(u, strict):
         return None
     dom = _domain(u)
+    proxy_url = _proxy_for_domain(dom)
     bare = re.sub(r"^https?://", "", u)
     variants = [
         u,
@@ -824,6 +890,7 @@ def fetch(u: str, strict: bool = True):
                         timeout=10,
                         headers=_browser_headers(dom),
                         rotate_user_agent=True,
+                        proxy=proxy_url,
                     )
                 except requests.HTTPError as exc:
                     r = exc.response
@@ -877,6 +944,11 @@ def fetch_relaxed(u: str):
 _CONTACT_FETCH_BACKOFFS = (0.0, 2.5, 6.0)
 
 _CONTACT_DOMAIN_LAST_FETCH: Dict[str, float] = {}
+_REALTOR_DOMAINS = {"realtor.com", "www.realtor.com"}
+_REALTOR_MAX_RETRIES = int(os.getenv("REALTOR_MAX_RETRIES", "5"))
+_REALTOR_BACKOFF_BASE = float(os.getenv("REALTOR_BACKOFF_BASE", "3.0"))
+_REALTOR_BACKOFF_CAP = float(os.getenv("REALTOR_BACKOFF_CAP", "20.0"))
+_REALTOR_BACKOFF_JITTER = float(os.getenv("REALTOR_BACKOFF_JITTER", "1.75"))
 
 
 def _mirror_url(url: str) -> str:
@@ -895,7 +967,40 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         return "", False
     dom = _domain(url)
     blocked = False
+    proxy_url = _proxy_for_domain(dom)
     tries = len(_CONTACT_FETCH_BACKOFFS)
+    if dom in _REALTOR_DOMAINS:
+        tries = max(tries, _REALTOR_MAX_RETRIES)
+
+    def _fallback(reason: str) -> Tuple[str, bool]:
+        mirror = _mirror_url(url)
+        if mirror:
+            try:
+                mirror_resp = _http_get(
+                    mirror,
+                    timeout=10,
+                    headers=_browser_headers(_domain(mirror)),
+                    rotate_user_agent=True,
+                    respect_block=False,
+                    proxy=proxy_url,
+                )
+                if mirror_resp.status_code == 200 and mirror_resp.text.strip():
+                    LOG.info("MIRROR FALLBACK used for %s (%s)", dom, reason)
+                    return mirror_resp.text, True
+            except Exception as exc:
+                LOG.debug("mirror fetch failed %s on %s", exc, mirror)
+        if HEADLESS_ENABLED and sync_playwright:
+            rendered = _headless_fetch(url, proxy_url=proxy_url, domain=dom)
+            if rendered.strip():
+                LOG.info(
+                    "BROWSER FALLBACK used for %s (proxy=%s reason=%s)",
+                    dom,
+                    bool(proxy_url),
+                    reason,
+                )
+                return rendered, True
+        return "", False
+
     last_seen = _CONTACT_DOMAIN_LAST_FETCH.get(dom, 0.0)
     if CONTACT_DOMAIN_MIN_GAP > 0 and last_seen:
         gap = time.time() - last_seen
@@ -905,7 +1010,10 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
             if CONTACT_DOMAIN_GAP_JITTER > 0:
                 sleep_for += random.uniform(0.25, CONTACT_DOMAIN_GAP_JITTER)
             time.sleep(max(0.0, sleep_for))
-    for attempt, delay in enumerate(_CONTACT_FETCH_BACKOFFS, start=1):
+    attempt = 0
+    while attempt < tries:
+        attempt += 1
+        delay = _CONTACT_FETCH_BACKOFFS[min(attempt - 1, len(_CONTACT_FETCH_BACKOFFS) - 1)]
         if _blocked(dom):
             blocked = True
             LOG.warning("BLOCK cached -> abort %s/%s", attempt, tries)
@@ -919,6 +1027,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                     timeout=10,
                     headers=_browser_headers(dom),
                     rotate_user_agent=True,
+                    proxy=proxy_url,
                 )
             except requests.HTTPError as exc:
                 resp = exc.response
@@ -934,12 +1043,37 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
             break
         _CONTACT_DOMAIN_LAST_FETCH[dom] = time.time()
         status = resp.status_code
-        if status == 200:
-            return resp.text, False
-        if status in (403, 429):
+        body = (resp.text or "").strip() if resp is not None else ""
+        if status == 200 and body:
+            if proxy_url:
+                LOG.info("CONTACT fetched via proxy %s (%s)", _redact_proxy(proxy_url), dom)
+            return body, False
+        if status == 403 or (status == 200 and not body):
             blocked = True
             _mark_block(dom)
-            LOG.warning("BLOCK %s -> abort %s/%s", status, attempt, tries)
+            LOG.warning("BLOCK %s -> attempt headless for %s/%s", status, attempt, tries)
+            html, used_fallback = _fallback("403")
+            if html:
+                return html, used_fallback
+            break
+        if status == 429:
+            blocked = True
+            if dom in _REALTOR_DOMAINS:
+                delay = min(
+                    _REALTOR_BACKOFF_BASE * (1.8 ** (attempt - 1)),
+                    _REALTOR_BACKOFF_CAP,
+                )
+                delay += random.uniform(0, _REALTOR_BACKOFF_JITTER)
+                LOG.warning(
+                    "Realtor.com throttled (429) attempt %s/%s; backing off %.1fs",
+                    attempt,
+                    tries,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+            _mark_block(dom)
+            LOG.warning("BLOCK 429 -> abort %s/%s", attempt, tries)
             break
         if status in (301, 302) and resp.headers.get("Location"):
             url = resp.headers["Location"]
@@ -952,22 +1086,47 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         break
 
     if blocked:
-        mirror = _mirror_url(url)
-        if mirror:
-            try:
-                mirror_resp = _http_get(
-                    mirror,
-                    timeout=10,
-                    headers=_browser_headers(_domain(mirror)),
-                    rotate_user_agent=True,
-                    respect_block=False,
-                )
-                if mirror_resp.status_code == 200 and mirror_resp.text.strip():
-                    LOG.info("MIRROR FALLBACK used")
-                    return mirror_resp.text, True
-            except Exception as exc:
-                LOG.debug("mirror fetch failed %s on %s", exc, mirror)
+        html, used_fallback = _fallback("blocked")
+        if html:
+            return html, used_fallback
     return "", False
+
+def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "") -> str:
+    if not HEADLESS_ENABLED or not sync_playwright:
+        return ""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
+            context = browser.new_context(
+                user_agent=random.choice(_USER_AGENT_POOL),
+                locale=accept_language.split(",")[0],
+                extra_http_headers={
+                    "Accept-Language": accept_language,
+                    **_random_cookie_header(),
+                },
+                proxy={"server": proxy_url} if proxy_url else None,
+            )
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=HEADLESS_TIMEOUT_MS)
+            page.wait_for_timeout(HEADLESS_WAIT_MS)
+            content = page.content() or ""
+            context.close()
+            browser.close()
+            if not content.strip():
+                return ""
+            LOG.debug(
+                "Headless fetch ok for %s (proxy=%s)",
+                domain or _domain(url),
+                bool(proxy_url),
+            )
+            return content
+    except Exception as exc:  # pragma: no cover - network/env specific
+        LOG.warning("Headless fetch failed for %s (%s)", domain or _domain(url), exc)
+        return ""
 
 # ───────────────────── Google CSE helpers ─────────────────────
 
@@ -1315,6 +1474,7 @@ def build_q_email(
     *,
     city: str = "",
     postal_code: str = "",
+    include_realtor_probe: bool = False,
 ) -> List[str]:
     queries: List[str] = []
 
@@ -1357,6 +1517,11 @@ def build_q_email(
         _add(f'"{name}" "{mls_id}" email')
         if brokerage:
             _add(f'"{mls_id}" "{brokerage}" email')
+
+    if include_realtor_probe:
+        _add(f'"{name}" realtor.com email')
+        if state:
+            _add(f'"{name}" realtor.com email {state}')
 
     return queries
 
@@ -1497,6 +1662,7 @@ def _email_matches_name(agent: str, email: str) -> bool:
     return False
 
 domain_patterns: Dict[str, str] = {}
+_MX_CACHE: Dict[str, bool] = {}
 _contact_override_cache: Dict[str, Any] = {"raw": None, "map": {}}
 
 
@@ -1584,6 +1750,41 @@ def _synth_email(name: str, domain: str) -> str:
     fi, li = first[0], last[0]
     local = patt.format(first=first, last=last, fi=fi, li=li)
     return f"{local}@{domain}"
+
+def _has_mx(domain: str) -> bool:
+    if domain in _MX_CACHE:
+        return _MX_CACHE[domain]
+    if not dns:
+        _MX_CACHE[domain] = True
+        return True
+    try:
+        answers = dns.resolve(domain, "MX")  # type: ignore[attr-defined]
+        _MX_CACHE[domain] = bool(answers)
+    except Exception:
+        _MX_CACHE[domain] = False
+    return _MX_CACHE[domain]
+
+def _synth_from_tokens(name: str, domains: Set[str]) -> List[str]:
+    parts = [re.sub(r"[^a-z]", "", p.lower()) for p in name.split() if p]
+    if len(parts) < 2 or not domains:
+        return []
+    first, last = parts[0], parts[-1]
+    combos = [
+        f"{first}.{last}",
+        f"{first}{last}",
+        f"{first[0]}{last}",
+        f"{first}{last[0]}",
+    ]
+    emails: List[str] = []
+    for dom in domains:
+        dom = dom.lower().strip()
+        if not dom or not _has_mx(dom):
+            continue
+        for local in combos:
+            addr = f"{local}@{dom}"
+            if ok_email(addr):
+                emails.append(addr)
+    return list(dict.fromkeys(emails))
 
 def _guess_domain_from_brokerage(brokerage: str) -> str:
     if not brokerage:
@@ -1676,7 +1877,7 @@ EMAIL_SOURCE_BASE = {
 }
 
 
-BROKERAGE_EMAIL_DOMAINS = {"remax.com", "remax.net"}
+BROKERAGE_EMAIL_DOMAINS = {"remax.com", "remax.net", "kw.com", "kellerwilliams.com"}
 
 
 def _is_generic_email(email: str) -> bool:
@@ -2622,6 +2823,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         mls_id,
         city=row_payload.get("city", ""),
         postal_code=row_payload.get("zip", ""),
+        include_realtor_probe=True,
     )
     rapid_urls = list(dict.fromkeys(_rapid_profile_urls(rapid) if zpid else []))
     hint_key = _normalize_override_key(agent, state)
@@ -3035,6 +3237,35 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 fallback_source or "unknown",
                 adjusted_score,
                 fallback_score,
+            )
+            return result
+
+    if not had_candidates and ENABLE_SYNTH_EMAIL_FALLBACK:
+        synth_domains: Set[str] = set()
+        if domain_hint:
+            synth_domains.add(domain_hint)
+        synth_domains.update(trusted_domains)
+        if brokerage:
+            guessed_dom = _guess_domain_from_brokerage(brokerage)
+            if guessed_dom:
+                synth_domains.add(guessed_dom)
+        synth_domains = {d for d in synth_domains if d}
+        synthetic_candidates = _synth_from_tokens(agent, synth_domains)
+        if synthetic_candidates:
+            synthetic_email = synthetic_candidates[0]
+            result.update(
+                {
+                    "email": synthetic_email,
+                    "confidence": "low",
+                    "source": "synthetic_pattern",
+                    "score": max(best_score, CONTACT_EMAIL_FALLBACK_SCORE - 0.05),
+                    "reason": "",
+                }
+            )
+            LOG.info(
+                "EMAIL WIN (synthetic pattern) %s via %s",
+                synthetic_email,
+                ",".join(sorted(synth_domains)) or "<unknown>",
             )
             return result
 

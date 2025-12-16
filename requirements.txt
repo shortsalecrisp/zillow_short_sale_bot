@@ -8,6 +8,8 @@ apscheduler==3.10.4          # ← new
 
 # parsing / scraping
 beautifulsoup4==4.12.3
+dnspython>=2.6.1
+playwright>=1.45.0
 
 # Google Sheets & Auth
 gspread==6.1.0

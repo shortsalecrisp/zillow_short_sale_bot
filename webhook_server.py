@@ -9,6 +9,8 @@ import os
 import re
 import sqlite3
 import threading
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -22,6 +24,7 @@ from bot_min import (
     TZ,
     WORK_END,
     WORK_START,
+    fetch_contact_page,
     process_rows,
     run_hourly_scheduler,
 )
@@ -71,8 +74,11 @@ APIFY_ACTOR_ID = (
 if _APIFY_ACTOR_ID_RAW and "/" in _APIFY_ACTOR_ID_RAW and "~" not in _APIFY_ACTOR_ID_RAW:
     logger.info("Normalizing APIFY_ACTOR_ID from %s to %s", _APIFY_ACTOR_ID_RAW, APIFY_ACTOR_ID)
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN")
-APIFY_TIMEOUT = int(os.getenv("APIFY_ACTOR_TIMEOUT", "150"))
-APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "1024"))
+APIFY_TIMEOUT = int(os.getenv("APIFY_ACTOR_TIMEOUT", "240"))
+APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "2048"))
+APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
+APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
+APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
 APIFY_IGNORE_WORK_HOURS = os.getenv("APIFY_IGNORE_WORK_HOURS", "false").lower() == "true"
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
@@ -235,6 +241,46 @@ def _within_work_hours(now: Optional[datetime] = None) -> bool:
     return WORK_START <= now.hour < WORK_END
 
 
+def _record_apify_degradation(reason: str, status: Optional[int] = None) -> None:
+    payload = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "reason": reason,
+    }
+    if status is not None:
+        payload["status"] = status
+    try:
+        APIFY_STATUS_PATH.write_text(json.dumps(payload))
+    except Exception:
+        logger.debug("Unable to write Apify degradation marker", exc_info=True)
+
+
+def _clear_apify_degradation() -> None:
+    try:
+        if APIFY_STATUS_PATH.exists():
+            APIFY_STATUS_PATH.unlink()
+    except Exception:
+        logger.debug("Unable to clear Apify degradation marker", exc_info=True)
+
+
+def _lightweight_apify_scrape() -> List[Dict[str, Any]]:
+    """Fallback scraper that hits startUrls directly with proxy/headless helpers."""
+    urls: List[str] = []
+    if isinstance(APIFY_INPUT, dict):
+        for item in APIFY_INPUT.get("startUrls", []) or []:
+            if isinstance(item, dict) and item.get("url"):
+                urls.append(item["url"])
+            elif isinstance(item, str):
+                urls.append(item)
+    results: List[Dict[str, Any]] = []
+    for url in urls:
+        html, _ = fetch_contact_page(url)
+        if html:
+            results.append({"url": url, "html": html, "source": "apify_fallback"})
+    if results:
+        logger.info("Lightweight Apify fallback scraped %d urls", len(results))
+    return results
+
+
 def _run_apify_actor() -> List[Dict[str, Any]]:
     if not APIFY_ACTOR_ID or not APIFY_TOKEN:
         logger.info("Skipping startup Apify run – missing APIFY_ACTOR_ID or token")
@@ -255,23 +301,41 @@ def _run_apify_actor() -> List[Dict[str, Any]]:
     req_kwargs: Dict[str, Any] = {"params": params, "timeout": APIFY_TIMEOUT + 30}
     if APIFY_INPUT is not None:
         req_kwargs["json"] = APIFY_INPUT
-    resp = requests.post(url, **req_kwargs)
-    try:
-        resp.raise_for_status()
-    except requests.HTTPError:
-        body_preview = resp.text[:500] if resp.text else "<no body>"
-        logger.error(
-            "Apify actor call failed with status %s: %s",
-            resp.status_code,
-            body_preview,
-        )
-        return []
-    data = resp.json()
-    if not isinstance(data, list):
-        logger.warning("Unexpected Apify response – expected list, got %s", type(data))
-        return []
-    logger.info("Apify actor returned %d rows", len(data))
-    return data
+
+    for attempt in range(1, APIFY_MAX_RETRIES + 1):
+        resp = requests.post(url, **req_kwargs)
+        timed_out = False
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError:
+            status = resp.status_code
+            body_preview = resp.text[:500] if resp.text else "<no body>"
+            timed_out = status in (408, 504) or "TIMED-OUT" in body_preview.upper()
+            logger.error(
+                "Apify actor call failed (attempt %s/%s) with status %s: %s",
+                attempt,
+                APIFY_MAX_RETRIES,
+                status,
+                body_preview,
+            )
+            if timed_out and attempt < APIFY_MAX_RETRIES:
+                sleep_for = min(APIFY_TIMEOUT, (APIFY_RETRY_BACKOFF ** (attempt - 1)) * 5)
+                logger.info("Retrying Apify actor after %.1fs due to timeout", sleep_for)
+                time.sleep(sleep_for)
+                continue
+            _record_apify_degradation("timed_out", status=status)
+            fallback_rows = _lightweight_apify_scrape()
+            return fallback_rows
+        data = resp.json()
+        if not isinstance(data, list):
+            logger.warning("Unexpected Apify response – expected list, got %s", type(data))
+            _record_apify_degradation("invalid_response")
+            return _lightweight_apify_scrape()
+        _clear_apify_degradation()
+        logger.info("Apify actor returned %d rows", len(data))
+        return data
+    _record_apify_degradation("exhausted_retries")
+    return _lightweight_apify_scrape()
 
 
 async def _maybe_run_startup_scrape() -> None:
