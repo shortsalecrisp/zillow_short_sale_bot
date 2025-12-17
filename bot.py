@@ -896,160 +896,200 @@ def search_agent_profile(
     if phone or email:
         return phone, email, False
 
-    items = []
-    if not cse_blocked and not (phone or email):
+    def dedup_and_sort(items: list[dict]) -> list[dict]:
+        dedup: dict[str, dict] = {}
+        for it in items:
+            link = it.get("link", "")
+            if not link:
+                continue
+            domain = domain_from_url(link)
+            if domain in BLOCKED_DOMAINS:
+                continue
+            if link not in dedup:
+                dedup[link] = it
+        items = list(dedup.values())
+
+        def _score(it: dict) -> int:
+            url = it.get("link", "").lower()
+            sc = 0
+            if all(tok.lower() in url for tok in name.split() if tok):
+                sc += 2
+            if brokerage and brokerage.lower().replace(" ", "") in url:
+                sc += 2
+            if any(pat in url for pat in BROKER_PATTERNS):
+                sc += 1
+            return sc
+
+        items.sort(key=_score, reverse=True)
+        if domain_hint:
+            preferred = [
+                it for it in items if domain_hint in domain_from_url(it.get("link", ""))
+            ]
+            others = [it for it in items if it not in preferred]
+            if preferred:
+                items = preferred + others
+        if len(items) > 12:
+            items = items[:12]
+        return items
+
+    def process_items(items: list[dict], max_fetches: int, prefer_jina: bool) -> None:
+        nonlocal phone, email, blocked
+        domain_last_hit: dict[str, float] = {}
+        fetches = 0
+        for it in items:
+            if phone and email:
+                break
+            if fetches >= max_fetches:
+                break
+            link = it.get("link", "")
+            if not link or link in processed_links:
+                continue
+            processed_links.add(link)
+            domain = domain_from_url(link)
+            if domain in BLOCKED_DOMAINS:
+                continue
+            last = domain_last_hit.get(domain) or _CONTACT_DOMAIN_LAST_FETCH.get(domain)
+            if last:
+                elapsed = time.time() - last
+                min_gap = CONTACT_DOMAIN_MIN_DELAY
+                if elapsed < min_gap:
+                    wait = min_gap - elapsed
+                    if CONTACT_DOMAIN_DELAY_JITTER > 0:
+                        wait += random.uniform(0.2, CONTACT_DOMAIN_DELAY_JITTER)
+                    time.sleep(max(0.0, wait))
+            now = time.time()
+            domain_last_hit[domain] = now
+            _CONTACT_DOMAIN_LAST_FETCH[domain] = now
+
+            if prefer_jina:
+                html = jina_reader_fetch(link)
+                if not html:
+                    continue
+            else:
+                try:
+                    resp = session.get(
+                        link,
+                        headers=random_headers(),
+                        timeout=15,
+                        proxies=google_proxies(),
+                    )
+                except requests.RequestException as exc:
+                    print(f"Error fetching {link}: {exc}")
+                    continue
+
+                if looks_like_block(resp):
+                    blocked = True
+                    print(
+                        f"Block detected while fetching {link} (status {resp.status_code})."
+                    )
+                    time.sleep(random.uniform(6, 10))
+                    break
+
+                html = resp.text
+            phones, emails = extract_contact(html)
+            if not phone:
+                phone = select_best_phone(phones)
+            if not email and emails:
+                email = emails[0]
+            fetches += 1
+            time.sleep(random.uniform(0.5, 1.0))
+
+    processed_links: set[str] = set()
+    items: list[dict] = []
+
+    # Collect non-CSE results first (secondary search then DuckDuckGo scraping)
+    for q in queries[:ddg_query_limit]:
+        items.extend(secondary_search_items(q, limit=3))
+    print(f"Secondary search produced {len(items)} candidates for {name}.")
+
+    for q in queries[:ddg_query_limit]:
+        items.extend(duckduckgo_search(q, limit=4))
+    print(f"DuckDuckGo scraping produced {len(items)} total candidates for {name}.")
+
+    items = dedup_and_sort(items)
+
+    blocked = blocked or cse_blocked
+
+    for it in items:
+        link = it.get("link", "")
+        if not link or link in processed_links:
+            continue
+        cp = (it.get("pagemap", {}).get("contactpoint") or [{}])[0]
+        phone = phone or cp.get("telephone", "")
+        email = email or cp.get("email", "")
+        if phone and email:
+            print("Skipping CSE: found contact info from secondary/DDG metadata.")
+            return phone, email, blocked
+
+    process_items(items, max_fetches=non_cse_fetch_limit, prefer_jina=cse_blocked)
+
+    if phone or email:
+        print("Skipping CSE: found contact info from secondary/DDG fetches.")
+        return phone, email, blocked
+
+    # CSE query only if earlier steps failed
+    if cse_blocked:
+        print(
+            f"Skipping CSE for {name} due to backoff; proceeding to fallbacks if needed."
+        )
+    else:
         cse_query_limit = 3
+        print(f"Starting CSE query loop for {name} after secondary/DDG attempts.")
         for q in queries[:cse_query_limit]:
             batch, rate_limited = google_search_items(q)
             items.extend(batch)
             if rate_limited:
                 cse_blocked = True
+                print(f"CSE rate limit hit while querying '{q}' for {name}.")
                 break
             if batch:
                 break
             if POST_CSE_DELAY_HIGH > 0:
                 time.sleep(random.uniform(POST_CSE_DELAY_LOW, POST_CSE_DELAY_HIGH))
 
-    if cse_blocked:
-        if domain_hint and not brokerage_html:
-            brokerage_html = jina_reader_fetch(brokerage_domain_url(brokerage))
-        if not (phone or email):
-            z_phone, z_email = mirror_scrape_zillow_profile(name, state, prop_addr)
-            if z_phone:
-                phone = phone or z_phone
-            if z_email:
-                email = email or z_email
-        if domain_hint and not email:
-            guessed = guess_brokerage_email(name, domain_hint, brokerage_html)
-            if guessed:
-                email = guessed
-        if not items and not (phone and email):
-            for q in queries[:ddg_query_limit]:
-                items.extend(secondary_search_items(q, limit=3))
-    if (cse_blocked or not items) and not (phone or email):
-        for q in queries[:ddg_query_limit]:
-            items.extend(duckduckgo_search(q, limit=4))
+    if not cse_blocked:
+        items = dedup_and_sort(items)
 
-    dedup: dict[str, dict] = {}
-    for it in items:
-        link = it.get("link", "")
-        if not link:
-            continue
-        domain = domain_from_url(link)
-        if domain in BLOCKED_DOMAINS:
-            continue
-        if link not in dedup:
-            dedup[link] = it
-    items = list(dedup.values())
-
-    def _score(it: dict) -> int:
-        url = it.get("link", "").lower()
-        sc = 0
-        if all(tok.lower() in url for tok in name.split() if tok):
-            sc += 2
-        if brokerage and brokerage.lower().replace(" ", "") in url:
-            sc += 2
-        if any(pat in url for pat in BROKER_PATTERNS):
-            sc += 1
-        return sc
-
-    items.sort(key=_score, reverse=True)
-    if domain_hint:
-        preferred = [
-            it for it in items if domain_hint in domain_from_url(it.get("link", ""))
-        ]
-        others = [it for it in items if it not in preferred]
-        if preferred:
-            items = preferred + others
-    if len(items) > 12:
-        items = items[:12]
-
-    blocked = blocked or cse_blocked
-
-    for it in items:
-        cp = (it.get("pagemap", {}).get("contactpoint") or [{}])[0]
-        phone = phone or cp.get("telephone", "")
-        email = email or cp.get("email", "")
-        if phone and email:
-            return phone, email, False
-
-    domain_last_hit: dict[str, float] = {}
-    max_fetches = cse_fetch_limit if not cse_blocked else non_cse_fetch_limit
-    fetches = 0
-    for it in items:
-        if phone and email:
-            break
-        if fetches >= max_fetches:
-            break
-        link = it.get("link", "")
-        if not link:
-            continue
-        domain = domain_from_url(link)
-        if domain in BLOCKED_DOMAINS:
-            continue
-        last = domain_last_hit.get(domain) or _CONTACT_DOMAIN_LAST_FETCH.get(domain)
-        if last:
-            elapsed = time.time() - last
-            min_gap = CONTACT_DOMAIN_MIN_DELAY
-            if elapsed < min_gap:
-                wait = min_gap - elapsed
-                if CONTACT_DOMAIN_DELAY_JITTER > 0:
-                    wait += random.uniform(0.2, CONTACT_DOMAIN_DELAY_JITTER)
-                time.sleep(max(0.0, wait))
-        now = time.time()
-        domain_last_hit[domain] = now
-        _CONTACT_DOMAIN_LAST_FETCH[domain] = now
-
-        if cse_blocked:
-            html = jina_reader_fetch(link)
-            if not html:
+        for it in items:
+            link = it.get("link", "")
+            if not link or link in processed_links:
                 continue
-        else:
-            try:
-                resp = session.get(
-                    link,
-                    headers=random_headers(),
-                    timeout=15,
-                    proxies=google_proxies(),
-                )
-            except requests.RequestException as exc:
-                print(f"Error fetching {link}: {exc}")
-                continue
+            cp = (it.get("pagemap", {}).get("contactpoint") or [{}])[0]
+            phone = phone or cp.get("telephone", "")
+            email = email or cp.get("email", "")
+            if phone and email:
+                return phone, email, False
 
-            if looks_like_block(resp):
-                blocked = True
-                print(
-                    f"Block detected while fetching {link} (status {resp.status_code})."
-                )
-                time.sleep(random.uniform(6, 10))
-                break
+        process_items(items, max_fetches=cse_fetch_limit, prefer_jina=False)
 
-            html = resp.text
-        phones, emails = extract_contact(html)
+    if phone or email:
+        return phone, email, blocked or cse_blocked
+
+    # Zillow mirror / ChatGPT fallbacks only after CSE stage is exhausted
+    if domain_hint and not brokerage_html:
+        brokerage_html = jina_reader_fetch(brokerage_domain_url(brokerage))
+    if not (phone or email):
+        z_phone, z_email = mirror_scrape_zillow_profile(name, state, prop_addr)
+        if z_phone:
+            phone = phone or z_phone
+        if z_email:
+            email = email or z_email
+    if domain_hint and not email:
+        guessed = guess_brokerage_email(name, domain_hint, brokerage_html)
+        if guessed:
+            email = guessed
+
+    if not email and prop_addr:
+        chat_phone, chat_email = get_contact_info(name, prop_addr)
         if not phone:
-            phone = select_best_phone(phones)
-        if not email and emails:
-            email = emails[0]
-        fetches += 1
-        time.sleep(random.uniform(0.5, 1.0))
+            phone = chat_phone
+        if chat_email:
+            email = chat_email
 
-    if cse_blocked and not email:
-        fallback_url = brokerage_domain_url(brokerage)
-        if fallback_url:
-            html = jina_reader_fetch(fallback_url)
-            if html:
-                phones, emails = extract_contact(html)
-                if not phone:
-                    phone = select_best_phone(phones)
-                if not email and emails:
-                    email = emails[0]
-
-        if not email and prop_addr:
-            chat_phone, chat_email = get_contact_info(name, prop_addr)
-            if not phone:
-                phone = chat_phone
-            if chat_email:
-                email = chat_email
+    if phone or email:
+        print(
+            f"Contact info resolved via fallbacks after skipping/exhausting CSE for {name}."
+        )
 
     return phone, email, blocked or cse_blocked
 
