@@ -179,6 +179,8 @@ if len(_CSE_CX_POOL) == 1 and len(_CSE_KEY_POOL) > 1:
 _CSE_CRED_POOL: List[Tuple[str, str]] = list(zip(_CSE_KEY_POOL, _CSE_CX_POOL))
 _CSE_CRED_INDEX = 0
 GSHEET_ID      = os.environ["GSHEET_ID"]
+GSHEET_TAB     = os.getenv("GSHEET_TAB", "Sheet1")
+GSHEET_RANGE   = os.getenv("GSHEET_RANGE", f"{GSHEET_TAB}!A1")
 SC_JSON        = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -480,7 +482,7 @@ ALT_PHONE_SITES: Tuple[str, ...] = (
 creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 sheets_service  = gapi_build("sheets", "v4", credentials=creds, cache_discovery=False)
 gc              = gspread.authorize(creds)
-ws              = gc.open_by_key(GSHEET_ID).sheet1
+ws              = gc.open_by_key(GSHEET_ID).worksheet(GSHEET_TAB)
 
 try:
     _preloaded = ws.col_values(COL_PHONE + 1)
@@ -3308,9 +3310,9 @@ def is_active_listing(zpid):
 def mark_sent(row_idx: int, msg_id: str):
     ts = datetime.now(tz=TZ).isoformat()
     data = [
-        {"range": f"Sheet1!H{row_idx}", "values": [["x"]]},
-        {"range": f"Sheet1!W{row_idx}", "values": [[ts]]},
-        {"range": f"Sheet1!L{row_idx}", "values": [[msg_id]]},
+        {"range": f"{GSHEET_TAB}!H{row_idx}", "values": [["x"]]},
+        {"range": f"{GSHEET_TAB}!W{row_idx}", "values": [[ts]]},
+        {"range": f"{GSHEET_TAB}!L{row_idx}", "values": [[msg_id]]},
     ]
     try:
         sheets_service.spreadsheets().values().batchUpdate(
@@ -3324,8 +3326,8 @@ def mark_sent(row_idx: int, msg_id: str):
 def mark_followup(row_idx: int):
     ts = datetime.now(tz=TZ).isoformat()
     data = [
-        {"range": f"Sheet1!I{row_idx}", "values": [["x"]]},
-        {"range": f"Sheet1!X{row_idx}", "values": [[ts]]},
+        {"range": f"{GSHEET_TAB}!I{row_idx}", "values": [["x"]]},
+        {"range": f"{GSHEET_TAB}!X{row_idx}", "values": [[ts]]},
     ]
     try:
         sheets_service.spreadsheets().values().batchUpdate(
@@ -3339,8 +3341,8 @@ def mark_followup(row_idx: int):
 def mark_reply(row_idx: int):
     ts = datetime.now(tz=TZ).isoformat()
     data = [
-        {"range": f"Sheet1!I{row_idx}", "values": [["x"]]},
-        {"range": f"Sheet1!K{row_idx}", "values": [[ts]]},
+        {"range": f"{GSHEET_TAB}!I{row_idx}", "values": [["x"]]},
+        {"range": f"{GSHEET_TAB}!K{row_idx}", "values": [[ts]]},
     ]
     try:
         sheets_service.spreadsheets().values().batchUpdate(
@@ -3354,7 +3356,7 @@ def mark_reply(row_idx: int):
 def append_row(vals) -> int:
     resp = sheets_service.spreadsheets().values().append(
         spreadsheetId=GSHEET_ID,
-        range="Sheet1!A1",
+        range=GSHEET_RANGE,
         valueInputOption="RAW",
         body={"values": [vals]},
     ).execute()
@@ -3582,7 +3584,7 @@ def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
 def _follow_up_pass():
     resp = sheets_service.spreadsheets().values().get(
         spreadsheetId=GSHEET_ID,
-        range="Sheet1!A:AA",
+        range=f"{GSHEET_TAB}!A:AA",
         majorDimension="ROWS",
         valueRenderOption="FORMATTED_VALUE",
     ).execute()
