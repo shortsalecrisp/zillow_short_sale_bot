@@ -181,6 +181,8 @@ _CSE_CRED_INDEX = 0
 GSHEET_ID      = os.environ["GSHEET_ID"]
 GSHEET_TAB     = os.getenv("GSHEET_TAB", "Sheet1")
 GSHEET_RANGE   = os.getenv("GSHEET_RANGE", f"{GSHEET_TAB}!A1")
+GSHEET_NEXT_ROW_HINT = int(os.getenv("GSHEET_NEXT_ROW_HINT", "2566"))
+GSHEET_ROW_SCAN_WINDOW = int(os.getenv("GSHEET_ROW_SCAN_WINDOW", "200"))
 SC_JSON        = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -3353,15 +3355,45 @@ def mark_reply(row_idx: int):
     except Exception as e:
         LOG.error("GSheet mark_reply error %s", e)
 
+def _row_is_empty(row_vals: List[Any]) -> bool:
+    return not any(str(v).strip() for v in row_vals)
+
+
+def _find_next_open_row(start_row: Optional[int] = None) -> int:
+    row = start_row or GSHEET_NEXT_ROW_HINT
+    window = max(1, GSHEET_ROW_SCAN_WINDOW)
+    while True:
+        end_row = row + window - 1
+        resp = sheets_service.spreadsheets().values().get(
+            spreadsheetId=GSHEET_ID,
+            range=f"{GSHEET_TAB}!A{row}:A{end_row}",
+            majorDimension="ROWS",
+        ).execute()
+        values = resp.get("values", [])
+        for offset, row_vals in enumerate(values):
+            if _row_is_empty(row_vals):
+                return row + offset
+        if len(values) < window:
+            return row + len(values)
+        row += window
+
+
+_next_row_hint = GSHEET_NEXT_ROW_HINT
+
+
 def append_row(vals) -> int:
-    resp = sheets_service.spreadsheets().values().append(
+    global _next_row_hint
+    row_idx = _find_next_open_row(_next_row_hint)
+    resp = sheets_service.spreadsheets().values().update(
         spreadsheetId=GSHEET_ID,
-        range=GSHEET_RANGE,
+        range=f"{GSHEET_TAB}!A{row_idx}",
         valueInputOption="RAW",
         body={"values": [vals]},
     ).execute()
-    row_idx = int(resp["updates"]["updatedRange"].split("!")[1].split(":")[0][1:])
-    LOG.info("Row appended to sheet (row %s)", row_idx)
+    updated_range = resp.get("updatedRange") or resp.get("range") or f"{GSHEET_TAB}!A{row_idx}"
+    row_idx = int(updated_range.split("!")[1].split(":")[0][1:])
+    _next_row_hint = row_idx + 1
+    LOG.info("Row appended to sheet (row %s); next hint %s", row_idx, _next_row_hint)
     return row_idx
 
 def phone_exists(p):
