@@ -142,6 +142,34 @@ def _http_get(
             raise
         return resp
 
+
+def _search_sleep() -> None:
+    low, high = SEARCH_BACKOFF_RANGE
+    if high <= 0:
+        return
+    jitter = random.uniform(low, high) if high > low else low
+    if jitter > 0:
+        time.sleep(jitter)
+
+
+def _pick_search_proxy() -> Optional[str]:
+    if not _PROXY_POOL:
+        return None
+    return random.choice(_PROXY_POOL)
+
+
+def _search_disabled(engine: str) -> bool:
+    circuit = _SEARCH_CIRCUIT.get(engine)
+    return bool(circuit and circuit.get("disabled"))
+
+
+def _record_timeout(engine: str) -> None:
+    circuit = _SEARCH_CIRCUIT[engine]
+    circuit["timeouts"] += 1
+    if circuit["timeouts"] >= SEARCH_TIMEOUT_TRIP:
+        circuit["disabled"] = True
+        LOG.warning("Search engine %s disabled for run after %s timeouts", engine, circuit["timeouts"])
+
 try:
     import phonenumbers
 except ImportError:
@@ -412,7 +440,7 @@ MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
 BACKOFF_FACTOR      = 1.7
 MAX_BACKOFF_SECONDS = 12
-GOOGLE_CONCURRENCY  = 2
+GOOGLE_CONCURRENCY  = 1
 METRICS: Counter    = Counter()
 
 logging.basicConfig(
@@ -542,6 +570,13 @@ BAN_KEYWORDS = {
     "obituary", "obituaries", "funeral",
     ".gov", ".edu", ".mil",
 }
+
+SEARCH_BACKOFF_RANGE = (
+    float(os.getenv("SEARCH_BACKOFF_MIN", "0.4")),
+    float(os.getenv("SEARCH_BACKOFF_MAX", "1.2")),
+)
+SEARCH_TIMEOUT_TRIP = int(os.getenv("SEARCH_TIMEOUT_TRIP", "2"))
+_SEARCH_CIRCUIT: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"timeouts": 0, "disabled": False})
 
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY)
 def pmap(fn, iterable): return list(_executor.map(fn, iterable))
@@ -1201,6 +1236,9 @@ def _dedupe_queries(queries: Iterable[str]) -> List[str]:
 
 def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
     global _last_cse_ts
+    if _search_disabled("google"):
+        LOG.debug("Skipping google CSE (circuit open)")
+        return []
     norm_key = _cse_key(q)
     with _cse_lock:
         if norm_key and norm_key in _cse_cache:
@@ -1226,6 +1264,7 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
         _last_cse_ts = ts
         _cse_recent.append(ts)
 
+    _search_sleep()
     backoff = 1.0
     cred_idx: Optional[int] = None
     blocked_hits = 0
@@ -1240,6 +1279,7 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
                 "https://www.googleapis.com/customsearch/v1",
                 params={"key": key, "cx": cx, "q": q, "num": 10},
                 timeout=10,
+                proxy=_pick_search_proxy(),
             ).json()
             items = j.get("items", [])
             with _cse_lock:
@@ -1248,6 +1288,10 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
             return items
         except Exception as exc:
             blocked = False
+            if isinstance(exc, _CONNECTION_ERRORS):
+                _record_timeout("google")
+                if _search_disabled("google"):
+                    break
             if isinstance(exc, requests.HTTPError) and exc.response is not None:
                 status = exc.response.status_code
                 if status in (403, 429):
@@ -1284,6 +1328,11 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
 def duckduckgo_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """Lightweight DuckDuckGo HTML search to reduce reliance on Google CSE."""
 
+    if _search_disabled("duckduckgo"):
+        LOG.debug("Skipping duckduckgo (circuit open)")
+        return []
+    _search_sleep()
+
     params = {"q": query, "t": "h_", "ia": "web"}
     headers = {
         "User-Agent": random.choice(_USER_AGENT_POOL),
@@ -1296,10 +1345,13 @@ def duckduckgo_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             headers=headers,
             timeout=12,
             respect_block=False,
+            proxy=_pick_search_proxy(),
         )
         soup = BeautifulSoup(resp.text, "html.parser") if BeautifulSoup else None
     except Exception as exc:
         LOG.warning("duckduckgo search failed for %s (%s)", query, exc)
+        if isinstance(exc, _CONNECTION_ERRORS) or isinstance(exc, req_exc.RetryError):
+            _record_timeout("duckduckgo")
         return []
 
     hits: List[Dict[str, Any]] = []
@@ -1314,6 +1366,75 @@ def duckduckgo_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         if len(hits) >= limit:
             break
     return hits
+
+
+def bing_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    if _search_disabled("bing"):
+        LOG.debug("Skipping bing (circuit open)")
+        return []
+
+    _search_sleep()
+    params = {"q": query}
+    headers = {
+        "User-Agent": random.choice(_USER_AGENT_POOL),
+        "Accept-Language": random.choice(_ACCEPT_LANGUAGE_POOL),
+    }
+    try:
+        resp = _http_get(
+            "https://www.bing.com/search",
+            params=params,
+            headers=headers,
+            timeout=12,
+            respect_block=False,
+            proxy=_pick_search_proxy(),
+        )
+        soup = BeautifulSoup(resp.text, "html.parser") if BeautifulSoup else None
+    except Exception as exc:
+        LOG.warning("bing search failed for %s (%s)", query, exc)
+        if isinstance(exc, _CONNECTION_ERRORS) or isinstance(exc, req_exc.RetryError):
+            _record_timeout("bing")
+        return []
+
+    hits: List[Dict[str, Any]] = []
+    if not soup:
+        return hits
+    for a in soup.select("li.b_algo h2 a"):
+        href = a.get("href") or ""
+        title = a.get_text(strip=True) or ""
+        if not href:
+            continue
+        hits.append({"link": href, "title": title})
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def search_round_robin(queries: Iterable[str], per_query_limit: int = 4) -> List[List[Tuple[str, List[Dict[str, Any]]]]]:
+    engines: List[Tuple[str, Any]] = [
+        ("bing", lambda q, limit: bing_search(q, limit=limit)),
+        ("duckduckgo", lambda q, limit: duckduckgo_search(q, limit=limit)),
+        ("google", lambda q, limit: google_items(q, tries=3)),
+    ]
+
+    deduped = _dedupe_queries(queries)
+    results: List[List[Tuple[str, List[Dict[str, Any]]]]] = []
+    if not deduped:
+        return results
+
+    for idx, q in enumerate(deduped):
+        start = idx % len(engines)
+        ordered = engines[start:] + engines[:start]
+        attempts: List[Tuple[str, List[Dict[str, Any]]]] = []
+        for name, fn in ordered:
+            if _search_disabled(name):
+                LOG.debug("Search engine %s skipped (circuit open) for query=%s", name, q)
+                continue
+            hits = fn(q, per_query_limit)
+            attempts.append((name, hits))
+            if hits:
+                break
+        results.append(attempts)
+    return results
 
 # ───────────────────── page‑parsing helpers ─────────────────────
 def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]], Dict[str, Any]]:
@@ -2370,30 +2491,31 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 for site in CONTACT_SITE_PRIORITY
             ]
         )
-        ddg_hits = list(pmap(lambda q: duckduckgo_search(q, limit=3), ddg_queries))
-        urls.extend([it.get("link", "") for items in ddg_hits for it in items if it.get("link")])
-
-    google_hits: List[List[Dict[str, Any]]] = []
-    if not _has_viable_phone_candidate():
-        google_hits = list(pmap(google_items, _dedupe_queries(queries)))
-        trusted_domains.update(
-            _build_trusted_domains(
-                agent,
-                [it.get("link", "") for items in google_hits for it in items],
-            )
+        search_hits = search_round_robin(ddg_queries, per_query_limit=3)
+        urls.extend(
+            [
+                it.get("link", "")
+                for attempts in search_hits
+                for engine, items in attempts
+                for it in items
+                if it.get("link")
+                and (engine != "google" or _domain(it.get("link", "")) not in GOOGLE_PORTAL_DENYLIST)
+            ]
         )
-        for items in google_hits:
-            for it in items:
-                tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
-                if tel:
-                    _register(tel, "cse_contact", url=it.get("link", ""))
-        for items in google_hits:
-            for it in items:
-                link = it.get("link", "")
-                dom = _domain(link)
-                if not link or dom in GOOGLE_PORTAL_DENYLIST:
-                    continue
-                urls.append(link)
+
+        for attempts in search_hits:
+            for engine, items in attempts:
+                if engine == "google":
+                    for it in items:
+                        tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
+                        if tel:
+                            _register(tel, "cse_contact", url=it.get("link", ""))
+                    trusted_domains.update(
+                        _build_trusted_domains(
+                            agent,
+                            [it.get("link", "") for it in items],
+                        )
+                    )
         urls = urls[:20] if len(urls) > 20 else urls
     urls = list(dict.fromkeys(urls))
     non_portal, portal = _split_portals(urls)
@@ -3122,40 +3244,41 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 for site in CONTACT_SITE_PRIORITY
             ]
         )
-        ddg_hits = list(pmap(lambda q: duckduckgo_search(q, limit=4), ddg_queries))
-        urls.extend([it.get("link", "") for items in ddg_hits for it in items if it.get("link")])
-
-    google_hits: List[List[Dict[str, Any]]] = []
-    if not _has_viable_email_candidate():
-        google_hits = list(pmap(google_items, _dedupe_queries(queries)))
-        if not any(google_hits) and _cse_blocked():
-            cse_rate_limited = True
-        trusted_domains.update(
-            _build_trusted_domains(
-                agent,
-                [it.get("link", "") for items in google_hits for it in items],
-            )
+        search_hits = search_round_robin(ddg_queries, per_query_limit=4)
+        urls.extend(
+            [
+                it.get("link", "")
+                for attempts in search_hits
+                for engine, items in attempts
+                for it in items
+                if it.get("link")
+                and (engine != "google" or _domain(it.get("link", "")) not in GOOGLE_PORTAL_DENYLIST)
+            ]
         )
 
-        for items in google_hits:
-            for it in items:
-                mail = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email") or "")
-                if mail:
-                    link = it.get("link", "")
-                    _register(
-                        mail,
-                        "cse_contact",
-                        url=link,
-                        trusted=_domain(link) in trusted_domains,
+        for attempts in search_hits:
+            for engine, items in attempts:
+                if engine == "google":
+                    if not items and (_cse_blocked() or _search_disabled("google")):
+                        cse_rate_limited = True
+                    trusted_domains.update(
+                        _build_trusted_domains(
+                            agent,
+                            [it.get("link", "") for it in items],
+                        )
                     )
-
-        for items in google_hits:
-            for it in items:
-                link = it.get("link", "")
-                dom = _domain(link)
-                if not link or dom in GOOGLE_PORTAL_DENYLIST:
-                    continue
-                urls.append(link)
+                    for it in items:
+                        mail = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email") or "")
+                        if mail:
+                            link = it.get("link", "")
+                            _register(
+                                mail,
+                                "cse_contact",
+                                url=link,
+                                trusted=_domain(link) in trusted_domains,
+                            )
+        if not any(items for attempts in search_hits for _, items in attempts) and (_cse_blocked() or _search_disabled("google")):
+            cse_rate_limited = True
         urls = urls[:20] if len(urls) > 20 else urls
     urls = list(dict.fromkeys(urls))
     non_portal, portal = _split_portals(urls)
