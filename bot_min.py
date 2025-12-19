@@ -480,6 +480,34 @@ ALT_PHONE_SITES: Tuple[str, ...] = (
     "realtor.com",
 )
 
+CONTACT_SITE_PRIORITY: Tuple[str, ...] = (
+    "realtor.com",
+    "zillow.com",
+    "remax.com",
+    "kw.com",
+    "kellerwilliams.com",
+    "bhhs.com",
+    "compass.com",
+    "coldwellbankerhomes.com",
+    "facebook.com",
+    "linkedin.com",
+    "instagram.com",
+)
+
+GOOGLE_PORTAL_DENYLIST: Set[str] = {
+    "zillow.com",
+    "www.zillow.com",
+    "realtor.com",
+    "www.realtor.com",
+    "redfin.com",
+    "homes.com",
+    "www.homes.com",
+    "trulia.com",
+    "www.trulia.com",
+    "yelp.com",
+    "www.yelp.com",
+}
+
 # ───────────────────── Google / Sheets setup ─────────────────────
 creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 sheets_service  = gapi_build("sheets", "v4", credentials=creds, cache_discovery=False)
@@ -1249,6 +1277,43 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
         if norm_key:
             _cse_cache[norm_key] = []
     return []
+
+
+# ───────────────────── alternate search helpers ─────────────────────
+
+def duckduckgo_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Lightweight DuckDuckGo HTML search to reduce reliance on Google CSE."""
+
+    params = {"q": query, "t": "h_", "ia": "web"}
+    headers = {
+        "User-Agent": random.choice(_USER_AGENT_POOL),
+        "Accept-Language": random.choice(_ACCEPT_LANGUAGE_POOL),
+    }
+    try:
+        resp = _http_get(
+            "https://duckduckgo.com/html/",
+            params=params,
+            headers=headers,
+            timeout=12,
+            respect_block=False,
+        )
+        soup = BeautifulSoup(resp.text, "html.parser") if BeautifulSoup else None
+    except Exception as exc:
+        LOG.warning("duckduckgo search failed for %s (%s)", query, exc)
+        return []
+
+    hits: List[Dict[str, Any]] = []
+    if not soup:
+        return hits
+    for a in soup.select("a.result__a"):
+        href = a.get("href") or ""
+        title = a.get_text(strip=True) or ""
+        if not href:
+            continue
+        hits.append({"link": href, "title": title})
+        if len(hits) >= limit:
+            break
+    return hits
 
 # ───────────────────── page‑parsing helpers ─────────────────────
 def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]], Dict[str, Any]]:
@@ -2128,6 +2193,38 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             ]
         )
 
+    def _rapid_mobile_shortcut() -> Optional[Dict[str, Any]]:
+        rapid_candidates: List[Tuple[float, str, Dict[str, Any]]] = []
+        for num, info in candidates.items():
+            if not (info.get("sources", set()) & {"rapid_contact", "rapid_listed_by"}):
+                continue
+            rapid_candidates.append((info.get("score", 0.0), num, info))
+        rapid_candidates.sort(reverse=True)
+        for _, num, info in rapid_candidates:
+            line_info = get_line_info(num)
+            if not line_info.get("valid"):
+                continue
+            if line_info.get("mobile"):
+                src = info.get("best_source") or next(iter(info.get("sources", [])), "rapid")
+                base_score = max(
+                    info.get("score", 0.0) + 0.25,
+                    CONTACT_PHONE_LOW_CONF + 0.4,
+                    CONTACT_PHONE_MIN_SCORE,
+                )
+                LOG.info("PHONE RAPID mobile shortcut: %s via %s", num, src)
+                return {
+                    "number": num,
+                    "confidence": "high",
+                    "score": base_score,
+                    "source": f"{src}_cloudmersive_mobile",
+                    "reason": "cloudmersive_mobile_rapid",
+                }
+        return None
+
+    shortcut_result = _rapid_mobile_shortcut()
+    if shortcut_result:
+        return shortcut_result
+
     location_tokens, location_digits = _collect_location_hints(
         row_payload,
         state,
@@ -2265,6 +2362,17 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 break
 
     urls: List[str] = list(priority_urls)
+    if not _has_viable_phone_candidate():
+        ddg_queries = _dedupe_queries(
+            [
+                f"{q} site:{site}"
+                for q in queries
+                for site in CONTACT_SITE_PRIORITY
+            ]
+        )
+        ddg_hits = list(pmap(lambda q: duckduckgo_search(q, limit=3), ddg_queries))
+        urls.extend([it.get("link", "") for items in ddg_hits for it in items if it.get("link")])
+
     google_hits: List[List[Dict[str, Any]]] = []
     if not _has_viable_phone_candidate():
         google_hits = list(pmap(google_items, _dedupe_queries(queries)))
@@ -2279,7 +2387,14 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
                 if tel:
                     _register(tel, "cse_contact", url=it.get("link", ""))
-        urls.extend([it.get("link", "") for items in google_hits for it in items][:20])
+        for items in google_hits:
+            for it in items:
+                link = it.get("link", "")
+                dom = _domain(link)
+                if not link or dom in GOOGLE_PORTAL_DENYLIST:
+                    continue
+                urls.append(link)
+        urls = urls[:20] if len(urls) > 20 else urls
     urls = list(dict.fromkeys(urls))
     non_portal, portal = _split_portals(urls)
 
@@ -2334,6 +2449,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                         continue
                     low = link.lower()
                     if low in processed_urls:
+                        continue
+                    if _domain(link) in GOOGLE_PORTAL_DENYLIST:
                         continue
                     alt_urls.append(link)
             alt_urls = alt_urls[:15]
@@ -2620,6 +2737,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     domain_hint = mls_id = ""
+    zpid = str(row_payload.get("zpid", ""))
+    rapid = rapid_property(zpid) if zpid else {}
     candidates: Dict[str, Dict[str, Any]] = {}
     generic_seen: Set[str] = set()
     had_candidates = False
@@ -2643,6 +2762,34 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "cse_contact",
         "pattern",
     }
+
+    def _authoritative_rapid_email() -> str:
+        if not rapid:
+            return ""
+        blocks: List[Dict[str, Any]] = []
+        lb = rapid.get("listed_by") or {}
+        if lb:
+            blocks.append(lb)
+        blocks.extend(rapid.get("contact_recipients", []) or [])
+        for blk in blocks:
+            for em in _emails_from_block(blk):
+                raw = str(em or "").strip()
+                if not raw:
+                    continue
+                cleaned = clean_email(raw) or raw
+                return cleaned
+        return ""
+
+    rapid_authoritative_email = _authoritative_rapid_email()
+    if rapid_authoritative_email:
+        score = max(CONTACT_EMAIL_MIN_SCORE, CONTACT_EMAIL_FALLBACK_SCORE + 0.2)
+        return {
+            "email": rapid_authoritative_email,
+            "confidence": "high",
+            "score": score,
+            "source": "rapid_email_authoritative",
+            "reason": "",
+        }
 
     def _register(
         email: str,
@@ -2772,46 +2919,44 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     zpid = str(row_payload.get("zpid", ""))
     rapid: Dict[str, Any] = {}
-    if zpid:
-        rapid = rapid_property(zpid)
-        if rapid:
-            lb = rapid.get("listed_by") or {}
-            brokerage = (lb.get("brokerageName", "") or brokerage).strip()
-            if brokerage and brokerage not in location_extras:
-                location_extras.append(brokerage)
-            mls_id = lb.get("listingAgentMlsId", "")
-            lb_display = lb.get("display_name", "")
-            lb_ctx = " ".join(str(lb.get(k, "")) for k in ("title", "label", "role") if lb.get(k))
-            for em in _emails_from_block(lb):
-                name_match = not lb_display or _names_match(agent, lb_display)
+    if rapid:
+        lb = rapid.get("listed_by") or {}
+        brokerage = (lb.get("brokerageName", "") or brokerage).strip()
+        if brokerage and brokerage not in location_extras:
+            location_extras.append(brokerage)
+        mls_id = lb.get("listingAgentMlsId", "")
+        lb_display = lb.get("display_name", "")
+        lb_ctx = " ".join(str(lb.get(k, "")) for k in ("title", "label", "role") if lb.get(k))
+        for em in _emails_from_block(lb):
+            name_match = not lb_display or _names_match(agent, lb_display)
+            _register(
+                em,
+                "rapid_listed_by",
+                meta_name=lb_display,
+                context=lb_ctx,
+                penalty=0.4 if not name_match else 0.0,
+            )
+        for blk in rapid.get("contact_recipients", []) or []:
+            ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
+            for em in _emails_from_block(blk):
+                display_name = blk.get("display_name", "")
+                name_match = not display_name or _names_match(agent, display_name)
                 _register(
                     em,
-                    "rapid_listed_by",
-                    meta_name=lb_display,
-                    context=lb_ctx,
+                    "rapid_contact",
+                    context=ctx,
+                    meta_name=display_name,
                     penalty=0.4 if not name_match else 0.0,
                 )
-            for blk in rapid.get("contact_recipients", []) or []:
-                ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
-                for em in _emails_from_block(blk):
-                    display_name = blk.get("display_name", "")
-                    name_match = not display_name or _names_match(agent, display_name)
-                    _register(
-                        em,
-                        "rapid_contact",
-                        context=ctx,
-                        meta_name=display_name,
-                        penalty=0.4 if not name_match else 0.0,
-                    )
-            address_info = rapid.get("address") or {}
-            location_extras.extend(
-                [
-                    rapid.get("city", ""),
-                    rapid.get("state", ""),
-                    address_info.get("city", ""),
-                    address_info.get("state", ""),
-                ]
-            )
+        address_info = rapid.get("address") or {}
+        location_extras.extend(
+            [
+                rapid.get("city", ""),
+                rapid.get("state", ""),
+                address_info.get("city", ""),
+                address_info.get("state", ""),
+            ]
+        )
 
     location_tokens, location_digits = _collect_location_hints(
         row_payload,
@@ -2969,6 +3114,17 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 break
 
     urls: List[str] = list(priority_urls)
+    if not _has_viable_email_candidate():
+        ddg_queries = _dedupe_queries(
+            [
+                f"{q} site:{site}"
+                for q in queries
+                for site in CONTACT_SITE_PRIORITY
+            ]
+        )
+        ddg_hits = list(pmap(lambda q: duckduckgo_search(q, limit=4), ddg_queries))
+        urls.extend([it.get("link", "") for items in ddg_hits for it in items if it.get("link")])
+
     google_hits: List[List[Dict[str, Any]]] = []
     if not _has_viable_email_candidate():
         google_hits = list(pmap(google_items, _dedupe_queries(queries)))
@@ -2993,7 +3149,14 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                         trusted=_domain(link) in trusted_domains,
                     )
 
-        urls.extend([it.get("link", "") for items in google_hits for it in items][:20])
+        for items in google_hits:
+            for it in items:
+                link = it.get("link", "")
+                dom = _domain(link)
+                if not link or dom in GOOGLE_PORTAL_DENYLIST:
+                    continue
+                urls.append(link)
+        urls = urls[:20] if len(urls) > 20 else urls
     urls = list(dict.fromkeys(urls))
     non_portal, portal = _split_portals(urls)
 
