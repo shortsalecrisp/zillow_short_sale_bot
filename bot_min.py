@@ -6,11 +6,13 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 import threading
+import importlib.util
 from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 import time, random
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -1027,6 +1029,355 @@ def _mirror_url(url: str) -> str:
     if parsed.query:
         mirror = f"{mirror}?{parsed.query}"
     return mirror
+
+
+# ───────────────────── Jina Reader cache helpers ─────────────────────
+_CACHE_DB_PATH = os.path.join(os.path.dirname(__file__), "jina_cache.sqlite")
+_CACHE_LOCK = threading.Lock()
+_CACHE_DOMAIN_LAST_FETCH: Dict[str, float] = {}
+_CACHE_DEDUPE_RUN: Set[str] = set()
+_TRACKING_QUERY_KEYS = {
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "fbclid",
+    "gclid",
+    "mc_cid",
+    "mc_eid",
+}
+
+
+def normalize_url(url: str) -> str:
+    parsed = urlparse(url)
+    filtered_qs = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+        if k.lower() not in _TRACKING_QUERY_KEYS and not k.lower().startswith("utm_")
+    ]
+    new_query = urlencode(filtered_qs)
+    cleaned = parsed._replace(query=new_query, fragment="")
+    return urlunparse(cleaned)
+
+
+def _cache_conn() -> sqlite3.Connection:
+    with _CACHE_LOCK:
+        need_init = not os.path.exists(_CACHE_DB_PATH)
+        conn = sqlite3.connect(_CACHE_DB_PATH, timeout=10)
+        if need_init:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jina_cache (
+                    url TEXT PRIMARY KEY,
+                    fetched_at REAL,
+                    ttl_seconds REAL,
+                    http_status INTEGER,
+                    extracted_text TEXT,
+                    final_url TEXT
+                )
+                """
+            )
+            conn.commit()
+        return conn
+
+
+def cache_get(url: str) -> Optional[Dict[str, Any]]:
+    norm = normalize_url(url)
+    conn = _cache_conn()
+    cur = conn.execute(
+        "SELECT url, fetched_at, ttl_seconds, http_status, extracted_text, final_url FROM jina_cache WHERE url=?",
+        (norm,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    fetched_at, ttl_seconds = row[1], row[2]
+    if fetched_at is None or ttl_seconds is None:
+        return None
+    if (fetched_at + ttl_seconds) < time.time():
+        return None
+    return {
+        "url": row[0],
+        "fetched_at": fetched_at,
+        "ttl_seconds": ttl_seconds,
+        "http_status": row[3],
+        "extracted_text": row[4] or "",
+        "final_url": row[5] or norm,
+    }
+
+
+def cache_set(
+    url: str,
+    extracted_text: str,
+    http_status: int,
+    final_url: str,
+    ttl_seconds: int,
+) -> None:
+    norm = normalize_url(url)
+    conn = _cache_conn()
+    conn.execute(
+        "REPLACE INTO jina_cache (url, fetched_at, ttl_seconds, http_status, extracted_text, final_url) VALUES (?, ?, ?, ?, ?, ?)",
+        (norm, time.time(), ttl_seconds, http_status, extracted_text, final_url or norm),
+    )
+    conn.commit()
+
+
+def _respect_domain_delay(url: str) -> None:
+    dom = _domain(url)
+    if not dom:
+        return
+    last = _CACHE_DOMAIN_LAST_FETCH.get(dom, 0.0)
+    delay = random.uniform(2.0, 4.0)
+    now = time.time()
+    if last and now - last < delay:
+        time.sleep(delay - (now - last))
+    _CACHE_DOMAIN_LAST_FETCH[dom] = time.time()
+
+
+def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
+    norm = normalize_url(url)
+    if norm in _CACHE_DEDUPE_RUN:
+        cached = cache_get(norm)
+        if cached:
+            return cached
+    cached = cache_get(norm)
+    if cached:
+        return cached
+
+    _respect_domain_delay(norm)
+    mirror = _mirror_url(norm) or f"https://r.jina.ai/{norm}"
+    try:
+        resp = _http_get(
+            mirror,
+            timeout=12,
+            headers=_browser_headers(_domain(mirror)),
+            rotate_user_agent=True,
+            respect_block=False,
+        )
+        text = resp.text if resp and resp.text else ""
+        status = resp.status_code if resp else 0
+        final_url = getattr(resp, "url", norm) if resp else norm
+    except Exception:
+        text = ""
+        status = 0
+        final_url = norm
+    ttl_seconds = int(ttl_days * 86400)
+    cache_set(norm, text, status, final_url, ttl_seconds)
+    _CACHE_DEDUPE_RUN.add(norm)
+    return {
+        "url": norm,
+        "fetched_at": time.time(),
+        "ttl_seconds": ttl_seconds,
+        "http_status": status,
+        "extracted_text": text,
+        "final_url": final_url,
+    }
+
+
+# ───────────────────── contact candidate extraction & reranking ─────────────────────
+_OPENAI_SPEC = importlib.util.find_spec("openai")
+if _OPENAI_SPEC:
+    import openai  # type: ignore
+else:
+    openai = None  # type: ignore
+
+
+def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List[str]:
+    urls: List[str] = []
+    zpid = str(row_payload.get("zpid", ""))
+    rapid = rapid_property(zpid) if zpid else {}
+    urls.extend(_rapid_profile_urls(rapid))
+    hint_key = _normalize_override_key(agent, state)
+    hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
+    urls.extend(hint_urls or [])
+    queries = _dedupe_queries(
+        build_q_phone(
+            agent,
+            state,
+            city=row_payload.get("city", ""),
+            postal_code=row_payload.get("zip", ""),
+            brokerage=(row_payload.get("brokerageName") or row_payload.get("brokerage") or ""),
+        )
+    )
+    search_hits: List[str] = []
+    for q in queries[:5]:
+        for it in google_items(q, tries=1):
+            link = it.get("link", "")
+            if link:
+                search_hits.append(link)
+    urls.extend(search_hits)
+    return list(dict.fromkeys(urls))
+
+
+def _extract_candidates_from_text(text: str, source_url: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    if not text:
+        return candidates
+    seen: Set[Tuple[str, str]] = set()
+    for m in PHONE_RE.finditer(text):
+        phone = fmt_phone(m.group())
+        if not (phone and valid_phone(phone)):
+            continue
+        snippet = text[max(0, m.start() - 120): m.end() + 120]
+        key = ("phone", phone)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            {
+                "source_url": source_url,
+                "evidence_snippet": " ".join(snippet.split()),
+                "phones": [phone],
+                "emails": [],
+            }
+        )
+    for m in EMAIL_RE.finditer(text):
+        email = clean_email(m.group())
+        if not (email and ok_email(email)):
+            continue
+        snippet = text[max(0, m.start() - 120): m.end() + 120]
+        key = ("email", email)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            {
+                "source_url": source_url,
+                "evidence_snippet": " ".join(snippet.split()),
+                "phones": [],
+                "emails": [email],
+            }
+        )
+    return candidates
+
+
+def _score_contact_candidate(snippet: str, value: str, kind: str) -> float:
+    low = snippet.lower()
+    score = 1.0
+    for good in ("cell", "mobile", "direct", "text"):
+        if good in low:
+            score += 1.2
+    for bad in ("office", "main", "fax", "ext", "switchboard", "toll free"):
+        if bad in low:
+            score -= 0.8
+    if kind == "email" and _is_generic_email(value):
+        score -= 0.5
+    return score
+
+
+def _heuristic_rerank(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    best_phone = ("", 0.0, "", "")
+    best_email = ("", 0.0, "", "")
+    for cand in candidates:
+        snippet = cand.get("evidence_snippet", "")
+        url = cand.get("source_url", "")
+        for phone in cand.get("phones", []):
+            score = _score_contact_candidate(snippet, phone, "phone")
+            if score > best_phone[1]:
+                best_phone = (phone, score, url, snippet)
+        for email in cand.get("emails", []):
+            score = _score_contact_candidate(snippet, email, "email")
+            if score > best_email[1]:
+                best_email = (email, score, url, snippet)
+    return {
+        "best_phone": best_phone[0],
+        "best_phone_confidence": max(0, min(100, int(best_phone[1] * 18))),
+        "best_phone_source_url": best_phone[2],
+        "best_phone_evidence": best_phone[3],
+        "best_email": best_email[0],
+        "best_email_confidence": max(0, min(100, int(best_email[1] * 18))),
+        "best_email_source_url": best_email[2],
+        "best_email_evidence": best_email[3],
+    }
+
+
+def _openai_rerank(candidates: List[Dict[str, Any]], agent: str) -> Optional[Dict[str, Any]]:
+    if not openai or not os.getenv("OPENAI_API_KEY"):
+        return None
+    items = []
+    for cand in candidates:
+        items.append(
+            {
+                "source_url": cand.get("source_url", ""),
+                "snippet": cand.get("evidence_snippet", "")[:600],
+                "phones": cand.get("phones", []),
+                "emails": cand.get("emails", []),
+            }
+        )
+    prompt = (
+        "You are Rina, a diligent contact info reranker. "
+        "Given extracted snippets, choose the best direct mobile/cell phone and direct email for agent "
+        f"{agent}. Prefer numbers/emails labeled cell, mobile, direct or text. Downrank office/main/fax/ext/switchboard/toll free. "
+        "Prefer personal style emails (first.last or gmail) over generic info/office/hello. "
+        "Respond with strict JSON with keys best_phone, best_phone_confidence (0-100), best_phone_source_url, best_phone_evidence, "
+        "best_email, best_email_confidence (0-100), best_email_source_url, best_email_evidence."
+    )
+    try:
+        resp = openai.ChatCompletion.create(
+            model=os.getenv("OPENAI_RERANK_MODEL", "gpt-4o-mini"),
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(items) if items else "[]",
+                },
+            ],
+        )
+        content = resp["choices"][0]["message"]["content"] if resp else ""
+        data = json.loads(content or "{}") if content else {}
+        required_keys = {
+            "best_phone",
+            "best_phone_confidence",
+            "best_phone_source_url",
+            "best_phone_evidence",
+            "best_email",
+            "best_email_confidence",
+            "best_email_source_url",
+            "best_email_evidence",
+        }
+        if not required_keys.issubset(data):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def rerank_contact_candidates(candidates: List[Dict[str, Any]], agent: str) -> Dict[str, Any]:
+    if not candidates:
+        return {
+            "best_phone": "",
+            "best_phone_confidence": 0,
+            "best_phone_source_url": "",
+            "best_phone_evidence": "",
+            "best_email": "",
+            "best_email_confidence": 0,
+            "best_email_source_url": "",
+            "best_email_evidence": "",
+        }
+    ai_choice = _openai_rerank(candidates, agent)
+    if ai_choice:
+        return ai_choice
+    return _heuristic_rerank(candidates)
+
+
+def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
+    urls = _candidate_urls(agent, state, row_payload)
+    candidates: List[Dict[str, Any]] = []
+    for url in urls:
+        fetched = fetch_text_cached(url)
+        text = fetched.get("extracted_text", "")
+        candidates.extend(_extract_candidates_from_text(text, fetched.get("final_url") or url))
+    return rerank_contact_candidates(candidates, agent)
+
+
+def _contact_enrichment(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
+    cache_key = "_contact_enrichment"
+    if cache_key not in row_payload:
+        row_payload[cache_key] = enrich_contact(agent, state, row_payload)
+    return row_payload.get(cache_key, {})
 
 
 def fetch_contact_page(url: str) -> Tuple[str, bool]:
@@ -2164,6 +2515,21 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             }
             return result
 
+    enrichment = _contact_enrichment(agent, state, row_payload)
+    enriched_phone = enrichment.get("best_phone", "")
+    if enriched_phone:
+        confidence_score = enrichment.get("best_phone_confidence", 0)
+        confidence = "high" if confidence_score >= 80 else "low"
+        result = {
+            "number": enriched_phone,
+            "confidence": confidence,
+            "score": max(CONTACT_PHONE_LOW_CONF, confidence_score / 25),
+            "source": enrichment.get("best_phone_source_url", "enrichment"),
+            "reason": "",
+            "evidence": enrichment.get("best_phone_evidence", ""),
+        }
+        return result
+
     candidates: Dict[str, Dict[str, Any]] = {}
     had_candidates = False
     brokerage_hint = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
@@ -2856,6 +3222,21 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "reason": "",
             }
             return result
+
+    enrichment = _contact_enrichment(agent, state, row_payload)
+    enriched_email = enrichment.get("best_email", "")
+    if enriched_email:
+        confidence_score = enrichment.get("best_email_confidence", 0)
+        confidence = "high" if confidence_score >= 80 else "low"
+        result = {
+            "email": enriched_email,
+            "confidence": confidence,
+            "score": max(CONTACT_EMAIL_LOW_CONF, confidence_score / 25),
+            "source": enrichment.get("best_email_source_url", "enrichment"),
+            "reason": "",
+            "evidence": enrichment.get("best_email_evidence", ""),
+        }
+        return result
 
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     domain_hint = mls_id = ""
