@@ -12,7 +12,7 @@ import threading
 import importlib.util
 from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
 
 import time, random
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -1176,6 +1176,47 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
     }
 
 
+def _decode_duckduckgo_link(raw: str) -> str:
+    parsed = urlparse(raw)
+    qs = dict(parse_qsl(parsed.query))
+    target = qs.get("uddg") or ""
+    return unquote(target) if target else raw
+
+
+def jina_cached_search(query: str, *, max_results: int = 6, ttl_days: int = 14) -> List[str]:
+    if not query:
+        return []
+    try:
+        search_url = f"https://duckduckgo.com/html/?{urlencode({'q': query})}"
+        cached = fetch_text_cached(search_url, ttl_days=ttl_days)
+        body = cached.get("extracted_text", "")
+    except Exception:
+        return []
+    if not body:
+        return []
+
+    hits: List[str] = []
+    seen: Set[str] = set()
+    for m in re.finditer(r"https?://duckduckgo\.com/l/\?[^\s\"]+", body):
+        decoded = _decode_duckduckgo_link(html.unescape(m.group()))
+        if decoded and decoded not in seen:
+            seen.add(decoded)
+            hits.append(decoded)
+            if len(hits) >= max_results:
+                return hits
+
+    for m in re.finditer(r"https?://[\w./?&%#=\-]+", body):
+        candidate = html.unescape(m.group())
+        if "duckduckgo.com" in candidate:
+            continue
+        if candidate not in seen:
+            seen.add(candidate)
+            hits.append(candidate)
+            if len(hits) >= max_results:
+                break
+    return hits
+
+
 # ───────────────────── contact candidate extraction & reranking ─────────────────────
 _OPENAI_SPEC = importlib.util.find_spec("openai")
 if _OPENAI_SPEC:
@@ -1202,6 +1243,9 @@ def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List
         )
     )
     search_hits: List[str] = []
+    for q in queries[:5]:
+        for link in jina_cached_search(q):
+            search_hits.append(link)
     for q in queries[:5]:
         for it in google_items(q, tries=1):
             link = it.get("link", "")
