@@ -37,7 +37,6 @@ DB_PATH     = "seen.db"
 TABLE_SQL   = "CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)"
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER   = get_sender(SMS_PROVIDER)
-SCRAPE_INCLUDE_WEEKENDS = os.getenv("SCRAPE_INCLUDE_WEEKENDS", "true").lower() == "true"
 
 # Google Sheets / Replies tab
 GSHEET_ID   = os.environ["GSHEET_ID"]
@@ -122,13 +121,24 @@ def _ensure_scheduler_thread() -> None:
 
 
 def _next_scrape_run(now: datetime) -> datetime:
+    """Return the next top-of-the-hour run time honoring work hours unless ignored."""
+
+    now = now.replace(second=0, microsecond=0)
+
+    if APIFY_IGNORE_WORK_HOURS:
+        return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
     if now.hour >= WORK_END:
         return (now + timedelta(days=1)).replace(
             hour=WORK_START, minute=0, second=0, microsecond=0
         )
+
     if now.hour < WORK_START:
         return now.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
-    return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+    return (now + timedelta(hours=1)).replace(
+        minute=0, second=0, microsecond=0
+    )
 
 
 def _ensure_apify_scheduler_thread() -> None:
@@ -141,9 +151,8 @@ def _ensure_apify_scheduler_thread() -> None:
     def _runner() -> None:
         next_run = _next_scrape_run(datetime.now(tz=TZ))
         logger.info(
-            "Apify hourly scheduler thread starting (work hours %s-%s, next run %s)",
-            WORK_START,
-            WORK_END,
+            "Apify hourly scheduler thread starting (hourly%s; next run %s)",
+            " (ignoring work hours)" if APIFY_IGNORE_WORK_HOURS else " during work hours",
             next_run.isoformat(),
         )
         while not _apify_scheduler_stop.is_set():
@@ -160,20 +169,13 @@ def _ensure_apify_scheduler_thread() -> None:
                     break
 
                 now = datetime.now(tz=TZ)
-                if APIFY_IGNORE_WORK_HOURS or _within_work_hours(now):
-                    logger.info("Triggering hourly Apify scrape at %s", now.isoformat())
-                    try:
-                        rows = _run_apify_actor()
-                        if rows:
-                            _process_incoming_rows(rows)
-                    except Exception:
-                        logger.exception("Hourly Apify scrape failed")
-                else:
-                    logger.info(
-                        "Outside work hours (%s-%s); skipping Apify scrape",
-                        WORK_START,
-                        WORK_END,
-                    )
+                logger.info("Triggering hourly Apify scrape at %s", now.isoformat())
+                try:
+                    rows = _run_apify_actor()
+                    if rows:
+                        _process_incoming_rows(rows)
+                except Exception:
+                    logger.exception("Hourly Apify scrape failed")
 
                 next_run = _next_scrape_run(now)
             except Exception:
@@ -341,9 +343,6 @@ def _run_apify_actor() -> List[Dict[str, Any]]:
 async def _maybe_run_startup_scrape() -> None:
     if not RUN_ON_DEPLOY:
         logger.info("RUN_SCRAPE_ON_DEPLOY disabled; skipping startup scrape")
-        return
-    if not APIFY_IGNORE_WORK_HOURS and not _within_work_hours():
-        logger.info("Startup scrape skipped – outside work hours (%s-%s)", WORK_START, WORK_END)
         return
 
     try:
