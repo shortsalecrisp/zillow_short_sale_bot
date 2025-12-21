@@ -234,7 +234,7 @@ TZ             = pytz.timezone(os.getenv("BOT_TIMEZONE", "US/Eastern"))
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
-WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (pauses at 9 pm)
+WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (final run starts at 8 pm)
 FOLLOWUP_INCLUDE_WEEKENDS = os.getenv("FOLLOWUP_INCLUDE_WEEKENDS", "true").lower() == "true"
 
 _sms_enable_env = os.getenv("SMS_ENABLE")
@@ -1246,11 +1246,6 @@ def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List
     for q in queries[:5]:
         for link in jina_cached_search(q):
             search_hits.append(link)
-    for q in queries[:5]:
-        for it in google_items(q, tries=1):
-            link = it.get("link", "")
-            if link:
-                search_hits.append(link)
     urls.extend(search_hits)
     return list(dict.fromkeys(urls))
 
@@ -1389,6 +1384,19 @@ def _openai_rerank(candidates: List[Dict[str, Any]], agent: str) -> Optional[Dic
         return None
 
 
+def _rina_rerank(candidates: List[Dict[str, Any]], agent: str) -> Optional[Dict[str, Any]]:
+    """Apply an LLM-based reranker ("Rina") when available.
+
+    Falls back to the OpenAI helper when installed, otherwise returns ``None``
+    so heuristic reranking can take over.
+    """
+
+    try:
+        return _openai_rerank(candidates, agent)
+    except Exception:
+        return None
+
+
 def rerank_contact_candidates(candidates: List[Dict[str, Any]], agent: str) -> Dict[str, Any]:
     if not candidates:
         return {
@@ -1401,19 +1409,108 @@ def rerank_contact_candidates(candidates: List[Dict[str, Any]], agent: str) -> D
             "best_email_source_url": "",
             "best_email_evidence": "",
         }
-    ai_choice = _openai_rerank(candidates, agent)
+    ai_choice = _rina_rerank(candidates, agent)
     if ai_choice:
         return ai_choice
     return _heuristic_rerank(candidates)
 
 
+def _candidate_quality(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    phone_snippets: List[str] = []
+    phones: List[str] = []
+    emails: List[str] = []
+    office_terms = {"office", "main", "fax", "switchboard", "toll free"}
+    mobile_terms = {"cell", "mobile", "text", "direct"}
+
+    for cand in candidates:
+        snippet = cand.get("evidence_snippet", "").lower()
+        if snippet:
+            phone_snippets.append(snippet)
+        for phone in cand.get("phones", []):
+            phones.append(phone)
+        for email in cand.get("emails", []):
+            emails.append(email)
+
+    def _all_office(snips: List[str]) -> bool:
+        if not snips:
+            return False
+        all_office = True
+        for snip in snips:
+            has_office = any(term in snip for term in office_terms)
+            has_mobile = any(term in snip for term in mobile_terms)
+            if not has_office or has_mobile:
+                all_office = False
+                break
+        return all_office
+
+    return {
+        "phones_found": len(phones),
+        "emails_found": len(emails),
+        "all_office": _all_office(phone_snippets),
+        "all_generic_email": bool(emails) and all(_is_generic_email(e) for e in emails),
+    }
+
+
+def _fallback_jina_queries(agent: str, state: str, row_payload: Dict[str, Any]) -> List[str]:
+    brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
+    city = str(row_payload.get("city", "")).strip()
+    variants = [
+        f"{agent} realtor {state} phone email",
+        f"{agent} Realtor {state} {brokerage} contact".strip(),
+        f"{agent} {city} {state} realtor cell".strip(),
+    ]
+    return [v for v in variants if v]
+
+
 def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     urls = _candidate_urls(agent, state, row_payload)
     candidates: List[Dict[str, Any]] = []
-    for url in urls:
-        fetched = fetch_text_cached(url)
-        text = fetched.get("extracted_text", "")
-        candidates.extend(_extract_candidates_from_text(text, fetched.get("final_url") or url))
+
+    def _collect_from_urls(urls_to_fetch: Iterable[str]) -> None:
+        for url in urls_to_fetch:
+            if not url:
+                continue
+            fetched = fetch_text_cached(url)
+            text = fetched.get("extracted_text", "")
+            candidates.extend(_extract_candidates_from_text(text, fetched.get("final_url") or url))
+
+    # RapidAPI emails are trusted and accepted immediately.
+    zpid = str(row_payload.get("zpid", ""))
+    rapid = rapid_property(zpid) if zpid else {}
+    rapid_emails: List[str] = []
+    if rapid:
+        lb = rapid.get("listed_by") or {}
+        rapid_emails.extend(_emails_from_block(lb))
+        for blk in rapid.get("contact_recipients", []) or []:
+            rapid_emails.extend(_emails_from_block(blk))
+    rapid_emails = [e for e in rapid_emails if e]
+    if rapid_emails:
+        best = rapid_emails[0]
+        return {
+            "best_phone": "",
+            "best_phone_confidence": 0,
+            "best_phone_source_url": "",
+            "best_phone_evidence": "",
+            "best_email": best,
+            "best_email_confidence": 95,
+            "best_email_source_url": "rapidapi",
+            "best_email_evidence": "rapidapi listing contact",
+        }
+
+    _collect_from_urls(urls)
+    quality = _candidate_quality(candidates)
+    needs_fallback = (
+        (quality["phones_found"] == 0 and quality["emails_found"] == 0)
+        or (quality["phones_found"] > 0 and quality["all_office"])
+        or (quality["emails_found"] > 0 and quality["all_generic_email"])
+    )
+
+    if needs_fallback:
+        fallback_urls: List[str] = []
+        for fq in _fallback_jina_queries(agent, state, row_payload):
+            fallback_urls.extend(jina_cached_search(fq))
+        _collect_from_urls(fallback_urls)
+
     return rerank_contact_candidates(candidates, agent)
 
 
