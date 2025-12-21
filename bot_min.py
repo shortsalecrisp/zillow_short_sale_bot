@@ -4360,7 +4360,8 @@ def check_reply(phone: str, since_iso: str) -> bool:
 
 # ───────────────────── scheduler helpers ─────────────────────
 def _next_scheduler_run(now: datetime) -> datetime:
-    if now.hour >= WORK_END - 1:
+    now = now.replace(second=0, microsecond=0)
+    if now.hour >= WORK_END:
         return (now + timedelta(days=1)).replace(
             hour=WORK_START, minute=0, second=0, microsecond=0
         )
@@ -4374,18 +4375,33 @@ def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
         "Hourly scheduler loop starting (thread=%s)",
         threading.current_thread().name,
     )
+    next_run = _next_scheduler_run(datetime.now(tz=TZ))
     while True:
         if stop_event and stop_event.is_set():
             LOG.info("Hourly scheduler stop requested; exiting loop")
             break
         try:
-            start = datetime.now(tz=TZ)
-            hour = start.hour
-            if WORK_START <= hour < WORK_END:
-                if not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(start):
+            now = datetime.now(tz=TZ)
+            sleep_secs = max(0, (next_run - now).total_seconds())
+            if sleep_secs > 0:
+                LOG.debug(
+                    "Sleeping %.0f seconds until next run at %s",
+                    sleep_secs,
+                    next_run.isoformat(),
+                )
+            if stop_event and stop_event.wait(timeout=sleep_secs):
+                LOG.info("Hourly scheduler stop requested; exiting loop")
+                break
+            elif not stop_event:
+                time.sleep(sleep_secs)
+
+            run_time = datetime.now(tz=TZ)
+            hour = run_time.hour
+            if WORK_START <= hour <= WORK_END:
+                if not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(run_time):
                     LOG.info("Weekend; skipping follow-up pass (FOLLOWUP_INCLUDE_WEEKENDS=false)")
                 else:
-                    LOG.info("Starting follow-up pass at %s", start.isoformat())
+                    LOG.info("Starting follow-up pass at %s", run_time.isoformat())
                     try:
                         _follow_up_pass()
                     except Exception as exc:
@@ -4398,21 +4414,7 @@ def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
                     WORK_END,
                 )
 
-            now = datetime.now(tz=TZ)
-            next_run = _next_scheduler_run(now)
-            sleep_secs = max(0, (next_run - datetime.now(tz=TZ)).total_seconds())
-            if sleep_secs > 0:
-                LOG.debug(
-                    "Sleeping %.0f seconds until next run at %s",
-                    sleep_secs,
-                    next_run.isoformat(),
-                )
-            if stop_event:
-                if stop_event.wait(timeout=sleep_secs):
-                    LOG.info("Hourly scheduler stop requested; exiting loop")
-                    break
-            else:
-                time.sleep(sleep_secs)
+            next_run = _next_scheduler_run(run_time)
         except Exception as exc:
             LOG.exception("Hourly scheduler crashed; retrying in 30 seconds: %s", exc)
             if stop_event and stop_event.wait(timeout=30):
