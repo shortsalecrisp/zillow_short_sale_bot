@@ -68,7 +68,7 @@ _APIFY_ACTOR_ID_RAW = os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACT
 # Apify actor "unique names" use `user~actor`, but many configs still include
 # a slash. Normalize here so `user/actor` works too and avoids 404s.
 APIFY_ACTOR_ID = (
-    _APIFY_ACTOR_ID_RAW.replace("/", "~") if _APIFY_ACTOR_ID_RAW else None
+_APIFY_ACTOR_ID_RAW.replace("/", "~") if _APIFY_ACTOR_ID_RAW else None
 )
 if _APIFY_ACTOR_ID_RAW and "/" in _APIFY_ACTOR_ID_RAW and "~" not in _APIFY_ACTOR_ID_RAW:
     logger.info("Normalizing APIFY_ACTOR_ID from %s to %s", _APIFY_ACTOR_ID_RAW, APIFY_ACTOR_ID)
@@ -78,6 +78,7 @@ APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "2048"))
 APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
 APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
 APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
+APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "apify_last_run.json"))
 APIFY_IGNORE_WORK_HOURS = os.getenv("APIFY_IGNORE_WORK_HOURS", "false").lower() == "true"
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
@@ -120,6 +121,29 @@ def _ensure_scheduler_thread() -> None:
     _scheduler_thread.start()
 
 
+def _hour_floor(dt: datetime) -> datetime:
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def _load_last_apify_run() -> Optional[datetime]:
+    try:
+        if not APIFY_LAST_RUN_PATH.exists():
+            return None
+        data = json.loads(APIFY_LAST_RUN_PATH.read_text())
+        ts = data.get("ts")
+        return datetime.fromisoformat(ts) if ts else None
+    except Exception:
+        logger.debug("Unable to read Apify last-run marker", exc_info=True)
+        return None
+
+
+def _write_last_apify_run(ts: datetime) -> None:
+    try:
+        APIFY_LAST_RUN_PATH.write_text(json.dumps({"ts": ts.isoformat()}))
+    except Exception:
+        logger.debug("Unable to persist Apify last-run marker", exc_info=True)
+
+
 def _next_scrape_run(now: datetime) -> datetime:
     """Return the next top-of-the-hour run time honoring work hours unless ignored."""
 
@@ -149,7 +173,30 @@ def _ensure_apify_scheduler_thread() -> None:
     _apify_scheduler_stop = threading.Event()
 
     def _runner() -> None:
-        next_run = _next_scrape_run(datetime.now(tz=TZ))
+        now = datetime.now(tz=TZ)
+        current_slot = _hour_floor(now)
+        last_run = _load_last_apify_run()
+        should_catch_up = (
+            (last_run is None or last_run < current_slot)
+            and (APIFY_IGNORE_WORK_HOURS or _within_work_hours(now))
+        )
+        if should_catch_up:
+            logger.info(
+                "Apify scheduler catching up missed slot at %s (last run %s)",
+                current_slot.isoformat(),
+                last_run.isoformat() if last_run else "never",
+            )
+            try:
+                rows = _run_apify_actor()
+                if rows:
+                    _process_incoming_rows(rows)
+            except Exception:
+                logger.exception("Catch-up Apify scrape failed")
+            _write_last_apify_run(current_slot)
+            now = datetime.now(tz=TZ)
+            current_slot = _hour_floor(now)
+
+        next_run = _next_scrape_run(now)
         logger.info(
             "Apify hourly scheduler thread starting (hourly%s; next run %s)",
             " (ignoring work hours)" if APIFY_IGNORE_WORK_HOURS else " during work hours",
@@ -176,6 +223,8 @@ def _ensure_apify_scheduler_thread() -> None:
                         _process_incoming_rows(rows)
                 except Exception:
                     logger.exception("Hourly Apify scrape failed")
+
+                _write_last_apify_run(_hour_floor(now))
 
                 next_run = _next_scrape_run(now)
             except Exception:
