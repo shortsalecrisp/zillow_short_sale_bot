@@ -18,7 +18,7 @@ https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2
 
 import os, json, html, textwrap, datetime, sqlite3, requests, re, time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 
 import openai
 import gspread
@@ -181,7 +181,10 @@ def _fetch_via_jina(url: str) -> str:
             headers={"User-Agent": "Mozilla/5.0 (compatible; jina/1.0)"},
         )
         if resp.status_code == 200:
-            return resp.text
+            text = resp.text or ""
+            if text.strip().lower() in {"", "none", "null"}:
+                return ""
+            return text
     except Exception:
         return ""
     return ""
@@ -238,63 +241,36 @@ def gpt_is_short_sale(description: str) -> bool:
 SEARCH_ACTOR = "apify/google-search-scraper"
 
 
-def _google_cse_search(query: str, max_links: int = 5) -> list[str]:
-    if not (CS_API_KEY and CS_CX):
-        return []
-    try:
-        resp = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params={
-                "key": CS_API_KEY,
-                "cx": CS_CX,
-                "q": query,
-                "num": max_links,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("items") or []
-        return [it.get("link") for it in items if it.get("link")][:max_links]
-    except Exception:
-        return []
-
-
 def _scrape_google(query: str, cache_conn: sqlite3.Connection, max_links: int = 5):
-    """Return a list of top result URLs using Google CSE with caching and jina fallback."""
+    """Return a list of top DuckDuckGo result URLs using jina reader with caching."""
 
     cached = _search_cache_get(cache_conn, query)
     if cached:
         return cached[:max_links]
 
-    links = _google_cse_search(query, max_links=max_links)
-    if not links:
-        # extreme fallback to Apify only if CSE is unavailable or fails
-        try:
-            resp = requests.post(
-                f"https://api.apify.com/v2/acts/{SEARCH_ACTOR}/run-sync-get-dataset-items",
-                params={
-                    "token": APIFY_TOKEN,
-                    "memory": 256,
-                    "timeout": 60,
-                    "clean": 1,
-                    "format": "json",
-                },
-                json={
-                    "queries": [query],
-                    "resultsPerPage": max_links,
-                    "maxPagesPerQuery": 1,
-                },
-                timeout=90,
-            )
-            items = resp.json()
-            links = [itm.get("url") for itm in items if itm.get("url")]
-        except Exception:
-            links = []
+    search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
+    html_text = _fetch_via_jina(search_url)
+    links: list[str] = []
 
+    if html_text:
+        soup = BeautifulSoup(html_text, "html.parser")
+        for anchor in soup.select("a.result__a, a.result__url"):
+            href = anchor.get("href")
+            if not href:
+                continue
+            if href.startswith("//"):
+                href = f"https:{href}"
+            if href.startswith("/"):
+                continue
+            links.append(href)
+            if len(links) >= max_links:
+                break
+        soup.decompose()
+
+    links = list(dict.fromkeys(links))[:max_links]
     if links:
         _search_cache_set(cache_conn, query, links)
-    return links[:max_links]
+    return links
 
 
 def _extract_with_gpt(url: str, html_text: str):
@@ -370,10 +346,6 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
     detail_url = row.get("detailUrl")
     broker_domain = _root_domain(detail_url)
 
-    combined_whitelist = WHITELIST_DOMAINS.copy()
-    if broker_domain and broker_domain not in combined_whitelist:
-        combined_whitelist.insert(0, broker_domain)
-
     cached = cache_conn.execute(
         "SELECT phone, email, last_seen FROM contacts WHERE agent=? AND state=?",
         (agent, state),
@@ -393,44 +365,32 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
         phone, email, office = _parse_detail_contact(detail_url)
         _consider(phone, email, urlparse(detail_url).netloc, office)
 
-    # Google search focused on whitelisted domains
-    queries = []
-    for domain in combined_whitelist:
-        for pattern in QUERY_PATTERNS:
-            q = pattern.format(name=agent, domain=domain)
-            if state:
-                q += f" {state}"
-            queries.append(q)
-        email_query = f'"{agent}" email site:{domain}'
-        contact_query = f'"{agent}" contact "real estate" site:{domain}'
-        if state:
-            email_query += f" {state}"
-            contact_query += f" {state}"
-        queries.extend([email_query, contact_query])
-    # broader MLS / association search patterns
+    query_parts = []
+    if agent:
+        query_parts.append(f'"{agent}"')
+    query_parts.append("realtor")
     if state:
-        queries.extend(
-            [
-                f'"{agent}" realtor {state} mls',
-                f'"{agent}" "cell" mls {state}',
-                f'"{agent}" email mls {state}',
-                f'"{agent}" contact "real estate" {state}',
-            ]
-        )
-    else:
-        queries.extend(
-            [
-                f'"{agent}" realtor mls',
-                f'"{agent}" "cell" mls',
-                f'"{agent}" email mls',
-                f'"{agent}" contact "real estate"',
-            ]
-        )
-    queries.append(f'"{agent}" real estate {state} phone')
+        query_parts.append(state)
+    base_query = " ".join(query_parts).strip()
+
+    searches = [
+        base_query,
+        " ".join(filter(None, [base_query, "phone", "email"])).strip(),
+        " ".join(filter(None, [f'"{agent}" realtor', address])).strip(),
+    ]
 
     seen_links = set()
-    for query in queries:
-        for link in _scrape_google(query, cache_conn):
+    processed_links = 0
+    combined_whitelist = WHITELIST_DOMAINS.copy()
+    if broker_domain and broker_domain not in combined_whitelist:
+        combined_whitelist.insert(0, broker_domain)
+
+    for query in searches:
+        if not query:
+            continue
+        for link in _scrape_google(query, cache_conn, max_links=5):
+            if processed_links >= 15:
+                break
             if link in seen_links:
                 continue
             seen_links.add(link)
@@ -441,11 +401,16 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
                 html_text = _fetch_via_jina(link)
             except Exception:
                 continue
+            if not html_text:
+                continue
             phone, email, office = _regex_extract_contact(html_text)
             if not phone and not email:
                 phone, email = _extract_with_gpt(link, html_text)
                 office = False
             _consider(phone, email, netloc, office)
+            processed_links += 1
+        if processed_links >= 15:
+            break
 
     if best["score"] > float("-inf"):
         cache_conn.execute(
@@ -455,7 +420,9 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
         cache_conn.commit()
         return best["phone"], best["email"]
 
-    return None, None  # fallback if nothing found
+    fallback_phone = row.get("phone") or row.get("agentPhone") or row.get("agentPhoneNumber")
+    fallback_email = row.get("email") or row.get("agentEmail")
+    return fallback_phone, fallback_email  # fallback if nothing found
 
 # --------------  main pipeline called by webhook_server.py --------------
 
