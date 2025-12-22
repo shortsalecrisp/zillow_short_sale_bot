@@ -1807,185 +1807,25 @@ def _dedupe_queries(queries: Iterable[str]) -> List[str]:
     return uniq
 
 def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
-    global _last_cse_ts
-    if _search_disabled("google"):
-        LOG.debug("Skipping google CSE (circuit open)")
-        return []
-    norm_key = _cse_key(q)
-    with _cse_lock:
-        if norm_key and norm_key in _cse_cache:
-            return _cse_cache[norm_key]
-        if _cse_blocked():
-            LOG.warning("CSE SKIP blocked=%s query=%s", True, q)
-            return []
-        delta = time.time() - _last_cse_ts
-        jitter = random.uniform(_cse_jitter_low, _cse_jitter_high) if _cse_jitter_high > 0 else 0.0
-        min_gap = max(0.0, CSE_MIN_INTERVAL + jitter)
-        sleep_for = min_gap - delta if delta < min_gap else 0.0
-        now = time.time()
-        while _cse_recent and (now - _cse_recent[0]) > _cse_window_seconds:
-            _cse_recent.popleft()
-        if len(_cse_recent) >= _cse_max_in_window:
-            sleep_for = max(
-                sleep_for,
-                _cse_window_seconds - (now - _cse_recent[0]) + random.uniform(0.1, 0.6),
-            )
-        if sleep_for > 0:
-            time.sleep(sleep_for)
-        ts = time.time()
-        _last_cse_ts = ts
-        _cse_recent.append(ts)
-
-    _search_sleep()
-    backoff = 1.0
-    cred_idx: Optional[int] = None
-    blocked_hits = 0
-    max_attempts = max(1, tries) * max(1, len(_CSE_CRED_POOL))
-    cred_fail_counts: Dict[int, int] = defaultdict(int)
-    for attempt in range(max_attempts):
-        key, cx, cred_idx = _pick_cse_cred(cred_idx, advance=(attempt > 0 or cred_idx is None))
-        if cred_fail_counts[cred_idx] >= tries:
-            continue
-        try:
-            j = _http_get(
-                "https://www.googleapis.com/customsearch/v1",
-                params={"key": key, "cx": cx, "q": q, "num": 10},
-                timeout=10,
-                proxy=_pick_search_proxy(),
-            ).json()
-            items = j.get("items", [])
-            with _cse_lock:
-                if norm_key:
-                    _cse_cache[norm_key] = items
-            return items
-        except Exception as exc:
-            blocked = False
-            if isinstance(exc, _CONNECTION_ERRORS):
-                _record_timeout("google")
-                if _search_disabled("google"):
-                    break
-            if isinstance(exc, requests.HTTPError) and exc.response is not None:
-                status = exc.response.status_code
-                if status in (403, 429):
-                    blocked = True
-                    blocked_hits += 1
-                    _mark_block("www.googleapis.com", seconds=CSE_BLOCK_SECONDS)
-            elif isinstance(exc, req_exc.RetryError):
-                blocked = True
-                blocked_hits += 1
-            if blocked:
-                cred_fail_counts[cred_idx] += 1
-                global _cse_blocked_until
-                _cse_blocked_until = max(_cse_blocked_until, time.time() + CSE_BLOCK_SECONDS)
-                LOG.warning(
-                    "CSE throttled (hit %s/%s); backing off for %.0fs",
-                    blocked_hits,
-                    tries,
-                    CSE_BLOCK_SECONDS,
-                )
-            time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
-            backoff *= BACKOFF_FACTOR
-
-    if blocked_hits:
-        LOG.error("CSE exhausted due to rate limits; giving up on query %s", q)
-        return []
-    with _cse_lock:
-        if norm_key:
-            _cse_cache[norm_key] = []
-    return []
+    links = jina_cached_search(q, max_results=10)
+    return [{"link": link} for link in links if link]
 
 
 # ───────────────────── alternate search helpers ─────────────────────
 
 def duckduckgo_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-    """Lightweight DuckDuckGo HTML search to reduce reliance on Google CSE."""
-
-    if _search_disabled("duckduckgo"):
-        LOG.debug("Skipping duckduckgo (circuit open)")
-        return []
-    _search_sleep()
-
-    params = {"q": query, "t": "h_", "ia": "web"}
-    headers = {
-        "User-Agent": random.choice(_USER_AGENT_POOL),
-        "Accept-Language": random.choice(_ACCEPT_LANGUAGE_POOL),
-    }
-    try:
-        resp = _http_get(
-            "https://duckduckgo.com/html/",
-            params=params,
-            headers=headers,
-            timeout=12,
-            respect_block=False,
-            proxy=_pick_search_proxy(),
-        )
-        soup = BeautifulSoup(resp.text, "html.parser") if BeautifulSoup else None
-    except Exception as exc:
-        LOG.warning("duckduckgo search failed for %s (%s)", query, exc)
-        if isinstance(exc, _CONNECTION_ERRORS) or isinstance(exc, req_exc.RetryError):
-            _record_timeout("duckduckgo")
-        return []
-
-    hits: List[Dict[str, Any]] = []
-    if not soup:
-        return hits
-    for a in soup.select("a.result__a"):
-        href = a.get("href") or ""
-        title = a.get_text(strip=True) or ""
-        if not href:
-            continue
-        hits.append({"link": href, "title": title})
-        if len(hits) >= limit:
-            break
-    return hits
+    links = jina_cached_search(query, max_results=limit)
+    return [{"link": link} for link in links if link]
 
 
 def bing_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-    if _search_disabled("bing"):
-        LOG.debug("Skipping bing (circuit open)")
-        return []
-
-    _search_sleep()
-    params = {"q": query}
-    headers = {
-        "User-Agent": random.choice(_USER_AGENT_POOL),
-        "Accept-Language": random.choice(_ACCEPT_LANGUAGE_POOL),
-    }
-    try:
-        resp = _http_get(
-            "https://www.bing.com/search",
-            params=params,
-            headers=headers,
-            timeout=12,
-            respect_block=False,
-            proxy=_pick_search_proxy(),
-        )
-        soup = BeautifulSoup(resp.text, "html.parser") if BeautifulSoup else None
-    except Exception as exc:
-        LOG.warning("bing search failed for %s (%s)", query, exc)
-        if isinstance(exc, _CONNECTION_ERRORS) or isinstance(exc, req_exc.RetryError):
-            _record_timeout("bing")
-        return []
-
-    hits: List[Dict[str, Any]] = []
-    if not soup:
-        return hits
-    for a in soup.select("li.b_algo h2 a"):
-        href = a.get("href") or ""
-        title = a.get_text(strip=True) or ""
-        if not href:
-            continue
-        hits.append({"link": href, "title": title})
-        if len(hits) >= limit:
-            break
-    return hits
+    links = jina_cached_search(query, max_results=limit)
+    return [{"link": link} for link in links if link]
 
 
 def search_round_robin(queries: Iterable[str], per_query_limit: int = 4) -> List[List[Tuple[str, List[Dict[str, Any]]]]]:
     engines: List[Tuple[str, Any]] = [
-        ("bing", lambda q, limit: bing_search(q, limit=limit)),
-        ("duckduckgo", lambda q, limit: duckduckgo_search(q, limit=limit)),
-        ("google", lambda q, limit: google_items(q, tries=3)),
+        ("jina", lambda q, limit: duckduckgo_search(q, limit=limit)),
     ]
 
     deduped = _dedupe_queries(queries)
@@ -1998,9 +1838,6 @@ def search_round_robin(queries: Iterable[str], per_query_limit: int = 4) -> List
         ordered = engines[start:] + engines[:start]
         attempts: List[Tuple[str, List[Dict[str, Any]]]] = []
         for name, fn in ordered:
-            if _search_disabled(name):
-                LOG.debug("Search engine %s skipped (circuit open) for query=%s", name, q)
-                continue
             hits = fn(q, per_query_limit)
             attempts.append((name, hits))
             if hits:
@@ -3851,35 +3688,21 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             [
                 it.get("link", "")
                 for attempts in search_hits
-                for engine, items in attempts
+                for _, items in attempts
                 for it in items
                 if it.get("link")
-                and (engine != "google" or _domain(it.get("link", "")) not in GOOGLE_PORTAL_DENYLIST)
             ]
         )
 
         for attempts in search_hits:
-            for engine, items in attempts:
-                if engine == "google":
-                    if not items and (_cse_blocked() or _search_disabled("google")):
-                        cse_rate_limited = True
-                    trusted_domains.update(
-                        _build_trusted_domains(
-                            agent,
-                            [it.get("link", "") for it in items],
-                        )
+            for _, items in attempts:
+                trusted_domains.update(
+                    _build_trusted_domains(
+                        agent,
+                        [it.get("link", "") for it in items],
                     )
-                    for it in items:
-                        mail = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("email") or "")
-                        if mail:
-                            link = it.get("link", "")
-                            _register(
-                                mail,
-                                "cse_contact",
-                                url=link,
-                                trusted=_domain(link) in trusted_domains,
-                            )
-        if not any(items for attempts in search_hits for _, items in attempts) and (_cse_blocked() or _search_disabled("google")):
+                )
+        if not any(items for attempts in search_hits for _, items in attempts):
             cse_rate_limited = True
         urls = urls[:20] if len(urls) > 20 else urls
     urls = list(dict.fromkeys(urls))
