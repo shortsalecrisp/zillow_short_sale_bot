@@ -4450,6 +4450,7 @@ def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
 
 # ───────────────────── follow‑up pass (UPDATED) ─────────────────────
 def _follow_up_pass():
+    now = datetime.now(tz=TZ)
     resp = sheets_service.spreadsheets().values().get(
         spreadsheetId=GSHEET_ID,
         range=f"{GSHEET_TAB}!A:AA",
