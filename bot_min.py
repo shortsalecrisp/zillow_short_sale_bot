@@ -1183,38 +1183,57 @@ def _decode_duckduckgo_link(raw: str) -> str:
     return unquote(target) if target else raw
 
 
-def jina_cached_search(query: str, *, max_results: int = 6, ttl_days: int = 14) -> List[str]:
+def jina_cached_search(query: str, *, max_results: int = 18, ttl_days: int = 14) -> List[str]:
     if not query:
         return []
-    try:
-        search_url = f"https://duckduckgo.com/html/?{urlencode({'q': query})}"
-        cached = fetch_text_cached(search_url, ttl_days=ttl_days)
-        body = cached.get("extracted_text", "")
-    except Exception:
-        return []
-    if not body:
-        return []
+
+    def _extract_hits(body: str, seen: Set[str]) -> List[str]:
+        hits: List[str] = []
+        for m in re.finditer(r"https?://duckduckgo\.com/l/\?[^\s\"]+", body):
+            decoded = _decode_duckduckgo_link(html.unescape(m.group()))
+            if decoded and decoded not in seen:
+                seen.add(decoded)
+                hits.append(decoded)
+        for m in re.finditer(r"https?://[\w./?&%#=\-]+", body):
+            candidate = html.unescape(m.group())
+            if "duckduckgo.com" in candidate:
+                continue
+            if candidate not in seen:
+                seen.add(candidate)
+                hits.append(candidate)
+        return hits
 
     hits: List[str] = []
     seen: Set[str] = set()
-    for m in re.finditer(r"https?://duckduckgo\.com/l/\?[^\s\"]+", body):
-        decoded = _decode_duckduckgo_link(html.unescape(m.group()))
-        if decoded and decoded not in seen:
-            seen.add(decoded)
-            hits.append(decoded)
-            if len(hits) >= max_results:
-                return hits
+    offset = 0
+    page = 0
+    max_pages = max(1, min(5, (max_results + 9) // 10))
 
-    for m in re.finditer(r"https?://[\w./?&%#=\-]+", body):
-        candidate = html.unescape(m.group())
-        if "duckduckgo.com" in candidate:
-            continue
-        if candidate not in seen:
-            seen.add(candidate)
-            hits.append(candidate)
-            if len(hits) >= max_results:
-                break
-    return hits
+    while len(hits) < max_results and page < max_pages:
+        try:
+            params = {"q": query}
+            if offset:
+                params["s"] = str(offset)
+            search_url = f"https://duckduckgo.com/html/?{urlencode(params)}"
+            cached = fetch_text_cached(search_url, ttl_days=ttl_days)
+            body = cached.get("extracted_text", "")
+        except Exception:
+            break
+
+        if not body:
+            break
+
+        before = len(hits)
+        hits.extend(_extract_hits(body, seen))
+        if len(hits) >= max_results:
+            break
+        if len(hits) == before:
+            break
+
+        offset += 30
+        page += 1
+
+    return hits[:max_results]
 
 
 # ───────────────────── contact candidate extraction & reranking ─────────────────────
@@ -1233,17 +1252,55 @@ def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List
     hint_key = _normalize_override_key(agent, state)
     hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
     urls.extend(hint_urls or [])
+    city = row_payload.get("city", "")
+    postal_code = row_payload.get("zip", "")
+    brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
+    domain_hint = (
+        row_payload.get("domain_hint", "").strip()
+        or _infer_domain_from_text(brokerage)
+        or _infer_domain_from_text(agent)
+    )
+
+    site_targets: List[str] = []
+    if domain_hint:
+        site_targets.append(domain_hint)
+    for site in CONTACT_SITE_PRIORITY:
+        if site not in site_targets:
+            site_targets.append(site)
+    for site in ALT_PHONE_SITES:
+        if site not in site_targets:
+            site_targets.append(site)
+
     queries = _dedupe_queries(
-        build_q_phone(
-            agent,
-            state,
-            city=row_payload.get("city", ""),
-            postal_code=row_payload.get("zip", ""),
-            brokerage=(row_payload.get("brokerageName") or row_payload.get("brokerage") or ""),
-        )
+        [
+            *build_q_phone(
+                agent,
+                state,
+                city=city,
+                postal_code=postal_code,
+                brokerage=brokerage,
+            ),
+            *build_q_email(
+                agent,
+                state,
+                brokerage=brokerage,
+                domain_hint=domain_hint,
+                city=city,
+                postal_code=postal_code,
+                include_realtor_probe=True,
+            ),
+            *(
+                f'"{agent}" {state} site:{site} phone'
+                for site in site_targets
+            ),
+            *(
+                f'"{agent}" {state} site:{site} email'
+                for site in site_targets
+            ),
+        ]
     )
     search_hits: List[str] = []
-    for q in queries[:5]:
+    for q in queries[:12]:
         for link in jina_cached_search(q):
             search_hits.append(link)
     urls.extend(search_hits)
@@ -1454,12 +1511,35 @@ def _candidate_quality(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
 def _fallback_jina_queries(agent: str, state: str, row_payload: Dict[str, Any]) -> List[str]:
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     city = str(row_payload.get("city", "")).strip()
+    domain_hint = (
+        row_payload.get("domain_hint", "").strip()
+        or _infer_domain_from_text(brokerage)
+        or _infer_domain_from_text(agent)
+    )
+
+    site_targets: List[str] = []
+    if domain_hint:
+        site_targets.append(domain_hint)
+    for site in CONTACT_SITE_PRIORITY:
+        if site not in site_targets:
+            site_targets.append(site)
+    for site in ALT_PHONE_SITES:
+        if site not in site_targets:
+            site_targets.append(site)
+
     variants = [
         f"{agent} realtor {state} phone email",
         f"{agent} Realtor {state} {brokerage} contact".strip(),
         f"{agent} {city} {state} realtor cell".strip(),
+        f"{agent} {state} {brokerage} email".strip(),
+        f"{agent} {state} contact email".strip(),
     ]
-    return [v for v in variants if v]
+
+    for site in site_targets:
+        variants.append(f'"{agent}" {state} site:{site} phone')
+        variants.append(f'"{agent}" {state} site:{site} contact email')
+
+    return [v for v in _dedupe_queries(variants) if v]
 
 
 def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
