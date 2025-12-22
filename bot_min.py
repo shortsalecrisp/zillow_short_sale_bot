@@ -235,7 +235,7 @@ FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (final run starts at 8 pm)
-FOLLOWUP_INCLUDE_WEEKENDS = os.getenv("FOLLOWUP_INCLUDE_WEEKENDS", "false").lower() == "true"
+FOLLOWUP_INCLUDE_WEEKENDS = os.getenv("FOLLOWUP_INCLUDE_WEEKENDS", "true").lower() == "true"
 
 _sms_enable_env = os.getenv("SMS_ENABLE")
 if _sms_enable_env is None:
@@ -4360,6 +4360,7 @@ def check_reply(phone: str, since_iso: str) -> bool:
 
 # ───────────────────── scheduler helpers ─────────────────────
 def _hour_floor(dt: datetime) -> datetime:
+    dt = dt.astimezone(TZ)
     return dt.replace(minute=0, second=0, microsecond=0)
 
 
@@ -4376,12 +4377,12 @@ def _next_scheduler_run(now: datetime) -> datetime:
     if base.hour < WORK_START:
         return base.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
 
-    candidate = base + timedelta(hours=1)
-    if candidate.hour >= WORK_END:
+    next_slot = base if now == base else base + timedelta(hours=1)
+    if next_slot.hour >= WORK_END:
         return (base + timedelta(days=1)).replace(
             hour=WORK_START, minute=0, second=0, microsecond=0
         )
-    return candidate
+    return next_slot
 
 
 def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
@@ -4409,26 +4410,25 @@ def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
             elif not stop_event:
                 time.sleep(sleep_secs)
 
-            run_time = datetime.now(tz=TZ)
+            run_time = _hour_floor(datetime.now(tz=TZ))
             hour = run_time.hour
-            if WORK_START <= hour < WORK_END:
-                if not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(run_time):
-                    LOG.info("Weekend; skipping follow-up pass (FOLLOWUP_INCLUDE_WEEKENDS=false)")
-                else:
-                    LOG.info("Starting follow-up pass at %s", run_time.isoformat())
-                    try:
-                        _follow_up_pass()
-                    except Exception as exc:
-                        LOG.exception("Error during follow-up pass: %s", exc)
-            else:
+            if hour >= WORK_END:
                 LOG.info(
                     "Current hour %s outside work hours (%s–%s); skipping follow-up",
                     hour,
                     WORK_START,
                     WORK_END,
                 )
+            elif not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(run_time):
+                LOG.info("Weekend; skipping follow-up pass (FOLLOWUP_INCLUDE_WEEKENDS=false)")
+            else:
+                LOG.info("Starting follow-up pass at %s", run_time.isoformat())
+                try:
+                    _follow_up_pass()
+                except Exception as exc:
+                    LOG.exception("Error during follow-up pass: %s", exc)
 
-            next_run = _next_scheduler_run(run_time)
+            next_run = _next_scheduler_run(run_time + timedelta(seconds=1))
         except Exception as exc:
             LOG.exception("Hourly scheduler crashed; retrying in 30 seconds: %s", exc)
             if stop_event and stop_event.wait(timeout=30):
