@@ -25,6 +25,13 @@ By default the webhook server launches the hourly Apify scheduler. Deployments t
 
 * `DISABLE_APIFY_SCHEDULER=true`
 
+## Follow-up scheduling
+
+Follow-up passes run during configured work hours. They now skip weekends by default to avoid contacting agents on
+Saturday or Sunday. To include weekends, explicitly opt in by setting the environment variable:
+
+* `FOLLOWUP_INCLUDE_WEEKENDS=true`
+
 ## RapidAPI Zillow data
 
 The bot fetches listing details from the RapidAPI Zillow data source. Set your credentials via the environment:
