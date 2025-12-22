@@ -701,9 +701,6 @@ def business_hours_elapsed(start_ts: datetime, now: datetime) -> float:
     return total
 
 # ───────────────────── scraping / lookup helpers (UNCHANGED) ─────────────────────
-_RAPID_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-RAPID_TTL_SEC = 15 * 60
-
 def _phone_obj_to_str(obj: Dict[str, str]) -> str:
     if not obj:
         return ""
@@ -724,12 +721,7 @@ def _phone_obj_to_str(obj: Dict[str, str]) -> str:
     return fmt_phone(digits)
 
 def rapid_property(zpid: str) -> Dict[str, Any]:
-    now = time.time()
-    entry = _RAPID_CACHE.get(zpid)
-    if entry and now - entry[0] < RAPID_TTL_SEC:
-        return entry[1]
     if not RAPID_KEY:
-        _RAPID_CACHE[zpid] = (now, {})
         return {}
     try:
         headers = {"X-RapidAPI-Key": RAPID_KEY, "X-RapidAPI-Host": RAPID_HOST}
@@ -748,8 +740,14 @@ def rapid_property(zpid: str) -> Dict[str, Any]:
     except Exception as exc:
         LOG.debug("Rapid‑API fetch error %s for zpid=%s", exc, zpid)
         data = {}
-    _RAPID_CACHE[zpid] = (now, data)
     return data
+
+
+def _rapid_from_payload(row_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Fetch Rapid API property details for this row without caching results."""
+
+    zpid = str(row_payload.get("zpid", ""))
+    return rapid_property(zpid) if zpid else {}
 
 def _phones_from_block(blk: Dict[str, Any]) -> List[str]:
     out = []
@@ -1343,7 +1341,7 @@ else:
 def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List[str]:
     urls: List[str] = []
     zpid = str(row_payload.get("zpid", ""))
-    rapid = rapid_property(zpid) if zpid else {}
+    rapid = _rapid_from_payload(row_payload)
     urls.extend(_rapid_profile_urls(rapid))
     hint_key = _normalize_override_key(agent, state)
     hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
@@ -1400,7 +1398,8 @@ def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List
         ranked_hits = _rank_urls(jina_cached_search(q), agent, brokerage, limit=5)
         search_hits.extend(ranked_hits)
     urls.extend(_rank_urls(search_hits, agent, brokerage, limit=40))
-    return list(dict.fromkeys(urls))
+    deduped = list(dict.fromkeys(urls))
+    return deduped[:MAX_CONTACT_URLS]
 
 
 def _extract_candidates_from_text(text: str, source_url: str) -> List[Dict[str, Any]]:
@@ -1656,7 +1655,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
 
     # RapidAPI emails are trusted and accepted immediately.
     zpid = str(row_payload.get("zpid", ""))
-    rapid = rapid_property(zpid) if zpid else {}
+    rapid = _rapid_from_payload(row_payload)
     rapid_emails: List[str] = []
     if rapid:
         lb = rapid.get("listed_by") or {}
@@ -2634,6 +2633,9 @@ PHONE_SOURCE_BASE = {
 }
 
 
+MAX_CONTACT_URLS = 15
+
+
 def _build_trusted_domains(agent: str, urls: Iterable[str]) -> Set[str]:
     """Return domains that look like they belong to *agent*.
 
@@ -2674,20 +2676,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             }
             return result
 
-    enrichment = _contact_enrichment(agent, state, row_payload)
-    enriched_phone = enrichment.get("best_phone", "")
-    if enriched_phone:
-        confidence_score = enrichment.get("best_phone_confidence", 0)
-        confidence = "high" if confidence_score >= 80 else "low"
-        result = {
-            "number": enriched_phone,
-            "confidence": confidence,
-            "score": max(CONTACT_PHONE_LOW_CONF, confidence_score / 25),
-            "source": enrichment.get("best_phone_source_url", "enrichment"),
-            "reason": "",
-            "evidence": enrichment.get("best_phone_evidence", ""),
-        }
-        return result
+    zpid = str(row_payload.get("zpid", ""))
+    rapid = _rapid_from_payload(row_payload)
 
     candidates: Dict[str, Dict[str, Any]] = {}
     had_candidates = False
@@ -2871,6 +2861,22 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     if shortcut_result:
         return shortcut_result
 
+    # Only search the web if Rapid did not yield a verified mobile.
+    enrichment = _contact_enrichment(agent, state, row_payload)
+    enriched_phone = enrichment.get("best_phone", "")
+    if enriched_phone:
+        confidence_score = enrichment.get("best_phone_confidence", 0)
+        confidence = "high" if confidence_score >= 80 else "low"
+        result = {
+            "number": enriched_phone,
+            "confidence": confidence,
+            "score": max(CONTACT_PHONE_LOW_CONF, confidence_score / 25),
+            "source": enrichment.get("best_phone_source_url", "enrichment"),
+            "reason": "",
+            "evidence": enrichment.get("best_phone_evidence", ""),
+        }
+        return result
+
     location_tokens, location_digits = _collect_location_hints(
         row_payload,
         state,
@@ -3041,8 +3047,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                             [it.get("link", "") for it in items],
                         )
                     )
-        urls = urls[:20] if len(urls) > 20 else urls
     urls = list(dict.fromkeys(urls))
+    if len(urls) > MAX_CONTACT_URLS:
+        urls = urls[:MAX_CONTACT_URLS]
     non_portal, portal = _split_portals(urls)
 
     processed = 0
@@ -3400,7 +3407,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     domain_hint = mls_id = ""
     zpid = str(row_payload.get("zpid", ""))
-    rapid = rapid_property(zpid) if zpid else {}
+    rapid = _rapid_from_payload(row_payload)
     candidates: Dict[str, Dict[str, Any]] = {}
     generic_seen: Set[str] = set()
     had_candidates = False
@@ -3805,8 +3812,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 )
         if not any(items for attempts in search_hits for _, items in attempts):
             cse_rate_limited = True
-        urls = urls[:20] if len(urls) > 20 else urls
     urls = list(dict.fromkeys(urls))
+    if len(urls) > MAX_CONTACT_URLS:
+        urls = urls[:MAX_CONTACT_URLS]
     non_portal, portal = _split_portals(urls)
 
     processed = 0
@@ -4534,6 +4542,7 @@ def process_rows(rows: List[Dict[str, Any]]):
             LOG.debug("SKIP missing agent name for %s (%s)", r.get("street"), r.get("zpid"))
             continue
         state = r.get("state", "")
+        _rapid_from_payload(r)
         phone_info = lookup_phone(name, state, r)
         phone = phone_info.get("number", "")
         email_info = lookup_email(name, state, r)
