@@ -8,12 +8,22 @@ SMS sending uses [SMS Gateway for Android](https://api.smstext.app).  Provide th
 
 ## Google Custom Search
 
-Agent contact details are looked up using the Google Custom Search API. Provide credentials via environment variables:
+Agent contact details are looked up using the Google Custom Search API with responses fetched through the Jina Reader
+(`https://r.jina.ai/...`) to avoid rate limits. Search results are cached locally to minimize repeated queries. Provide
+credentials via environment variables:
 
 * `CS_API_KEY` or `GOOGLE_API_KEY` – your Google API key
 * `CS_CX` or `GOOGLE_CX` – the Custom Search Engine ID
 
-With these variables set, the bot queries Google directly instead of relying on Apify for search results.
+With these variables set, the bot queries Google directly instead of relying on Apify for search results. If the
+credentials are missing or a request fails, the bot will fall back to the Apify Google Search actor.
+
+## Apify scheduler control
+
+By default the webhook server launches the hourly Apify scheduler. Deployments that already receive listings via the
+`/apify-hook` webhook can disable the scheduler (and avoid the hourly Apify run) by setting:
+
+* `DISABLE_APIFY_SCHEDULER=true`
 
 ## RapidAPI Zillow data
 

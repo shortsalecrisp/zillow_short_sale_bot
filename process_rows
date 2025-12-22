@@ -91,6 +91,8 @@ openai.api_key = os.environ["OPENAI_API_KEY"]
 APIFY_TOKEN    = os.environ["APIFY_API_TOKEN"]
 SMS_PROVIDER   = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER     = get_sender(SMS_PROVIDER)
+CS_API_KEY     = os.getenv("CS_API_KEY") or os.getenv("GOOGLE_API_KEY")
+CS_CX          = os.getenv("CS_CX") or os.getenv("GOOGLE_CX")
 
 # optional – write service‑account json from env‑var
 if "GOOGLE_SVC_JSON" in os.environ and not Path("service_account.json").exists():
@@ -117,9 +119,13 @@ def _init_cache(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS contacts (agent TEXT, state TEXT, phone TEXT, email TEXT, last_seen REAL, PRIMARY KEY(agent, state))"
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS search_cache (query TEXT PRIMARY KEY, results TEXT, last_seen REAL)"
+    )
 
 # how long to trust cached contact info (seconds)
 CONTACT_TTL = 60 * 60 * 24 * 365  # 1 year
+SEARCH_TTL = 60 * 60 * 24 * 7  # 1 week
 
 
 def _root_domain(url: str | None) -> str | None:
@@ -163,6 +169,46 @@ def _score_contact(
 
     return score
 
+
+def _fetch_via_jina(url: str) -> str:
+    """Fetch page content through jina reader to avoid blocks."""
+
+    mirror = f"https://r.jina.ai/{url}"
+    try:
+        resp = requests.get(
+            mirror,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; jina/1.0)"},
+        )
+        if resp.status_code == 200:
+            return resp.text
+    except Exception:
+        return ""
+    return ""
+
+
+def _search_cache_get(conn: sqlite3.Connection, query: str) -> list[str] | None:
+    row = conn.execute(
+        "SELECT results, last_seen FROM search_cache WHERE query=?", (query,),
+    ).fetchone()
+    if not row:
+        return None
+    results, last_seen = row
+    if time.time() - last_seen > SEARCH_TTL:
+        return None
+    try:
+        return json.loads(results)
+    except Exception:
+        return None
+
+
+def _search_cache_set(conn: sqlite3.Connection, query: str, results: list[str]) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO search_cache (query, results, last_seen) VALUES (?,?,?)",
+        (query, json.dumps(results), time.time()),
+    )
+    conn.commit()
+
 # ------------------  utility funcs ------------------
 
 def send_sms(to: str, body: str):
@@ -192,26 +238,63 @@ def gpt_is_short_sale(description: str) -> bool:
 SEARCH_ACTOR = "apify/google-search-scraper"
 
 
-def _scrape_google(query: str, max_links: int = 5):
-    """Return a list of top result URLs for the query using Apify Google Search."""
-    resp = requests.post(
-        f"https://api.apify.com/v2/acts/{SEARCH_ACTOR}/run-sync-get-dataset-items",
-        params={
-            "token": APIFY_TOKEN,
-            "memory": 256,
-            "timeout": 60,
-            "clean": 1,
-            "format": "json",
-        },
-        json={
-            "queries": [query],
-            "resultsPerPage": max_links,
-            "maxPagesPerQuery": 1,
-        },
-        timeout=90,
-    )
-    items = resp.json()
-    return [itm.get("url") for itm in items][:max_links]
+def _google_cse_search(query: str, max_links: int = 5) -> list[str]:
+    if not (CS_API_KEY and CS_CX):
+        return []
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={
+                "key": CS_API_KEY,
+                "cx": CS_CX,
+                "q": query,
+                "num": max_links,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("items") or []
+        return [it.get("link") for it in items if it.get("link")][:max_links]
+    except Exception:
+        return []
+
+
+def _scrape_google(query: str, cache_conn: sqlite3.Connection, max_links: int = 5):
+    """Return a list of top result URLs using Google CSE with caching and jina fallback."""
+
+    cached = _search_cache_get(cache_conn, query)
+    if cached:
+        return cached[:max_links]
+
+    links = _google_cse_search(query, max_links=max_links)
+    if not links:
+        # extreme fallback to Apify only if CSE is unavailable or fails
+        try:
+            resp = requests.post(
+                f"https://api.apify.com/v2/acts/{SEARCH_ACTOR}/run-sync-get-dataset-items",
+                params={
+                    "token": APIFY_TOKEN,
+                    "memory": 256,
+                    "timeout": 60,
+                    "clean": 1,
+                    "format": "json",
+                },
+                json={
+                    "queries": [query],
+                    "resultsPerPage": max_links,
+                    "maxPagesPerQuery": 1,
+                },
+                timeout=90,
+            )
+            items = resp.json()
+            links = [itm.get("url") for itm in items if itm.get("url")]
+        except Exception:
+            links = []
+
+    if links:
+        _search_cache_set(cache_conn, query, links)
+    return links[:max_links]
 
 
 def _extract_with_gpt(url: str, html_text: str):
@@ -273,7 +356,7 @@ def _regex_extract_contact(html_text: str):
 def _parse_detail_contact(url: str):
     """Fetch the listing detail page and try simple regex parsing for contact info."""
     try:
-        html_text = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
+        html_text = _fetch_via_jina(url)
     except Exception:
         return None, None, False
     return _regex_extract_contact(html_text)
@@ -347,7 +430,7 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
 
     seen_links = set()
     for query in queries:
-        for link in _scrape_google(query):
+        for link in _scrape_google(query, cache_conn):
             if link in seen_links:
                 continue
             seen_links.add(link)
@@ -355,7 +438,7 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
             if not _is_whitelisted(netloc, combined_whitelist):
                 continue
             try:
-                html_text = requests.get(link, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).text
+                html_text = _fetch_via_jina(link)
             except Exception:
                 continue
             phone, email, office = _regex_extract_contact(html_text)

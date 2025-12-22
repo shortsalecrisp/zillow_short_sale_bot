@@ -82,6 +82,7 @@ APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "apify_last_run.json
 APIFY_IGNORE_WORK_HOURS = os.getenv("APIFY_IGNORE_WORK_HOURS", "false").lower() == "true"
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
+DISABLE_APIFY_SCHEDULER = os.getenv("DISABLE_APIFY_SCHEDULER", "false").lower() == "true"
 
 try:
     APIFY_INPUT: Optional[Dict[str, Any]] = (
@@ -411,7 +412,10 @@ async def _maybe_run_startup_scrape() -> None:
 async def _start_scheduler() -> None:
     global _startup_task
     _ensure_scheduler_thread()
-    _ensure_apify_scheduler_thread()
+    if DISABLE_APIFY_SCHEDULER:
+        logger.info("Apify scheduler disabled via DISABLE_APIFY_SCHEDULER=true")
+    else:
+        _ensure_apify_scheduler_thread()
     if _startup_task is None or _startup_task.done():
         _startup_task = asyncio.create_task(_maybe_run_startup_scrape())
 
