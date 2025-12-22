@@ -1147,7 +1147,22 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
         return cached
 
     _respect_domain_delay(norm)
+
+    def _screenshot_mirror(u: str) -> str:
+        parsed = urlparse(u)
+        if not parsed.netloc:
+            return ""
+        bare = f"{parsed.netloc}{parsed.path}"
+        if parsed.query:
+            bare = f"{bare}?{parsed.query}"
+        return f"https://r.jina.ai/http://screenshot/{bare}"
+
     mirror = _mirror_url(norm) or f"https://r.jina.ai/{norm}"
+    text = ""
+    status = 0
+    final_url = norm
+    retry_needed = False
+
     try:
         resp = _http_get(
             mirror,
@@ -1163,9 +1178,49 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
         text = ""
         status = 0
         final_url = norm
-    ttl_seconds = int(ttl_days * 86400)
-    cache_set(norm, text, status, final_url, ttl_seconds)
-    _CACHE_DEDUPE_RUN.add(norm)
+
+    dom = _domain(norm)
+    blocked_statuses = {403, 429, 451}
+    if status in blocked_statuses and dom:
+        LOG.info(
+            "Jina fetch blocked for %s with %s; marking domain for retry", dom, status
+        )
+        _mark_block(dom)
+    success = bool(text.strip()) and 200 <= status < 300
+
+    if not success:
+        retry_needed = True
+        # Try a screenshot/textise mirror to salvage blocked or empty responses.
+        alt_url = _screenshot_mirror(norm)
+        if alt_url:
+            try:
+                alt_resp = _http_get(
+                    alt_url,
+                    timeout=12,
+                    headers=_browser_headers(_domain(alt_url)),
+                    rotate_user_agent=True,
+                    respect_block=False,
+                )
+                if alt_resp and alt_resp.status_code == 200 and alt_resp.text.strip():
+                    text = alt_resp.text
+                    status = alt_resp.status_code
+                    final_url = getattr(alt_resp, "url", final_url)
+                    success = True
+            except Exception:
+                pass
+
+    if not success and dom:
+        textise = _try_textise(dom, norm)
+        if textise:
+            text = textise
+            status = status or 200
+            success = True
+
+    ttl_seconds = int(ttl_days * 86400 if success else 900)
+    if success or text or status:
+        cache_set(norm, text, status, final_url, ttl_seconds)
+        _CACHE_DEDUPE_RUN.add(norm)
+
     return {
         "url": norm,
         "fetched_at": time.time(),
@@ -1173,6 +1228,7 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
         "http_status": status,
         "extracted_text": text,
         "final_url": final_url,
+        "retry_needed": retry_needed,
     }
 
 
@@ -1234,6 +1290,46 @@ def jina_cached_search(query: str, *, max_results: int = 18, ttl_days: int = 14)
         page += 1
 
     return hits[:max_results]
+
+
+def _score_contact_url(url: str, agent_tokens: List[str], brokerage: str) -> float:
+    if not url:
+        return -float("inf")
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    score = 0.0
+
+    if any(tok and tok in host for tok in agent_tokens):
+        score += 1.5
+    if any(tok and tok in path for tok in agent_tokens):
+        score += 2.5
+    if "contact" in path:
+        score += 2.0
+    if any(key in path for key in ("agent", "realtor", "profile")):
+        score += 1.5
+    if any(key in path for key in ("cell", "mobile", "text")):
+        score += 1.5
+    if brokerage and brokerage.lower().replace(" ", "") in path:
+        score += 0.5
+    if any(bad in path for bad in ("/office", "contact-us", "about", "careers")):
+        score -= 2.0
+    if path.count("/") <= 1:
+        score -= 0.25
+    return score
+
+
+def _rank_urls(
+    urls: Iterable[str], agent: str, brokerage: str, limit: int = 10
+) -> List[str]:
+    agent_tokens = [tok.lower() for tok in agent.split() if tok]
+    scored = [
+        (_score_contact_url(u, agent_tokens, brokerage), u)
+        for u in urls
+        if u
+    ]
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return [u for _, u in scored[:limit]]
 
 
 # ───────────────────── contact candidate extraction & reranking ─────────────────────
@@ -1301,9 +1397,9 @@ def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List
     )
     search_hits: List[str] = []
     for q in queries[:12]:
-        for link in jina_cached_search(q):
-            search_hits.append(link)
-    urls.extend(search_hits)
+        ranked_hits = _rank_urls(jina_cached_search(q), agent, brokerage, limit=5)
+        search_hits.extend(ranked_hits)
+    urls.extend(_rank_urls(search_hits, agent, brokerage, limit=40))
     return list(dict.fromkeys(urls))
 
 
@@ -1533,16 +1629,20 @@ def _fallback_jina_queries(agent: str, state: str, row_payload: Dict[str, Any]) 
         f"{agent} {city} {state} realtor cell".strip(),
         f"{agent} {state} {brokerage} email".strip(),
         f"{agent} {state} contact email".strip(),
+        f"{agent} {state} cell phone mobile email".strip(),
+        f"{agent} {state} {brokerage} text mobile number".strip(),
     ]
 
     for site in site_targets:
         variants.append(f'"{agent}" {state} site:{site} phone')
         variants.append(f'"{agent}" {state} site:{site} contact email')
+        variants.append(f'"{agent}" {state} site:{site} mobile cell')
 
     return [v for v in _dedupe_queries(variants) if v]
 
 
 def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
+    brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     urls = _candidate_urls(agent, state, row_payload)
     candidates: List[Dict[str, Any]] = []
 
@@ -1588,8 +1688,9 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     if needs_fallback:
         fallback_urls: List[str] = []
         for fq in _fallback_jina_queries(agent, state, row_payload):
-            fallback_urls.extend(jina_cached_search(fq))
-        _collect_from_urls(fallback_urls)
+            ranked = _rank_urls(jina_cached_search(fq), agent, brokerage, limit=5)
+            fallback_urls.extend(ranked)
+        _collect_from_urls(_rank_urls(fallback_urls, agent, brokerage, limit=30))
 
     return rerank_contact_candidates(candidates, agent)
 

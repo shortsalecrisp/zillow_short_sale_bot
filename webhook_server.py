@@ -79,6 +79,7 @@ APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
 APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
 APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
 APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "apify_last_run.json"))
+APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_IGNORE_WORK_HOURS = os.getenv("APIFY_IGNORE_WORK_HOURS", "false").lower() == "true"
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
@@ -344,6 +345,8 @@ def _run_apify_actor() -> List[Dict[str, Any]]:
         "timeout": APIFY_TIMEOUT,
         "memory": APIFY_MEMORY,
         "clean": 1,
+        "limit": APIFY_MAX_ITEMS,
+        "desc": 1,
     }
     logger.info(
         "Triggering Apify actor %s for startup scrape (%s input)",
@@ -395,6 +398,15 @@ async def _maybe_run_startup_scrape() -> None:
         logger.info("RUN_SCRAPE_ON_DEPLOY disabled; skipping startup scrape")
         return
 
+    current_slot = _hour_floor(datetime.now(tz=TZ))
+    last_run = _load_last_apify_run()
+    if last_run and last_run >= current_slot:
+        logger.info(
+            "Skipping startup Apify run – already executed at %s",
+            last_run.isoformat(),
+        )
+        return
+
     try:
         rows = await asyncio.to_thread(_run_apify_actor)
         if not rows:
@@ -404,6 +416,7 @@ async def _maybe_run_startup_scrape() -> None:
             "Startup scrape complete – %s",
             result.get("status", "no status"),
         )
+        _write_last_apify_run(current_slot)
     except Exception:
         logger.exception("Startup Apify scrape failed")
 
