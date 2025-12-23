@@ -200,6 +200,20 @@ def _parse_pool(env_name: str, fallback: str) -> List[str]:
     return vals or ([fallback] if fallback else [])
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    """Return a boolean flag from environment variables.
+
+    Accepts common truthy values ("1", "true", "yes", "y", "on"). Any other
+    value is treated as false, and the provided ``default`` is used when the
+    variable is unset.
+    """
+
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 CS_API_KEY     = _env_default("CS_API_KEY", "GOOGLE_API_KEY")
 CS_CX          = _env_default("CS_CX", "GOOGLE_CX")
 _CSE_KEY_POOL  = _parse_pool("CS_API_KEYS", CS_API_KEY)
@@ -235,7 +249,7 @@ FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (final run starts at 8 pm)
-FOLLOWUP_INCLUDE_WEEKENDS = os.getenv("FOLLOWUP_INCLUDE_WEEKENDS", "true").lower() == "true"
+FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
 
 _sms_enable_env = os.getenv("SMS_ENABLE")
 if _sms_enable_env is None:
