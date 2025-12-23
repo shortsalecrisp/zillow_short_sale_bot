@@ -24,6 +24,7 @@ from bot_min import (
     TZ,
     WORK_END,
     WORK_START,
+    _hour_floor,
     fetch_contact_page,
     process_rows,
     run_hourly_scheduler,
@@ -60,8 +61,6 @@ EXPORTED_ZPIDS: set[str] = set()
 
 _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
-_apify_scheduler_thread: Optional[threading.Thread] = None
-_apify_scheduler_stop: Optional[threading.Event] = None
 _startup_task: Optional[asyncio.Task] = None
 
 _APIFY_ACTOR_ID_RAW = os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACTOR_ID")
@@ -80,10 +79,8 @@ APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
 APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
 APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "apify_last_run.json"))
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
-APIFY_IGNORE_WORK_HOURS = os.getenv("APIFY_IGNORE_WORK_HOURS", "false").lower() == "true"
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
-DISABLE_APIFY_SCHEDULER = os.getenv("DISABLE_APIFY_SCHEDULER", "false").lower() == "true"
 
 try:
     APIFY_INPUT: Optional[Dict[str, Any]] = (
@@ -94,7 +91,7 @@ except json.JSONDecodeError:
     APIFY_INPUT = None
 
 
-def _ensure_scheduler_thread() -> None:
+def _ensure_scheduler_thread(hourly_callbacks: Optional[List] = None) -> None:
     global _scheduler_thread, _scheduler_stop
     if _scheduler_thread and _scheduler_thread.is_alive():
         return
@@ -105,7 +102,10 @@ def _ensure_scheduler_thread() -> None:
         logger.info("Background hourly scheduler thread starting")
         while not _scheduler_stop.is_set():
             try:
-                run_hourly_scheduler(stop_event=_scheduler_stop)
+                run_hourly_scheduler(
+                    stop_event=_scheduler_stop,
+                    hourly_callbacks=hourly_callbacks,
+                )
                 break
             except Exception:
                 logger.exception(
@@ -121,10 +121,6 @@ def _ensure_scheduler_thread() -> None:
         daemon=True,
     )
     _scheduler_thread.start()
-
-
-def _hour_floor(dt: datetime) -> datetime:
-    return dt.replace(minute=0, second=0, microsecond=0)
 
 
 def _load_last_apify_run() -> Optional[datetime]:
@@ -146,103 +142,20 @@ def _write_last_apify_run(ts: datetime) -> None:
         logger.debug("Unable to persist Apify last-run marker", exc_info=True)
 
 
-def _next_scrape_run(now: datetime) -> datetime:
-    """Return the next top-of-the-hour run time honoring work hours unless ignored."""
-
-    now = now.replace(second=0, microsecond=0)
-
-    if APIFY_IGNORE_WORK_HOURS:
-        return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-
-    if now.hour >= WORK_END:
-        return (now + timedelta(days=1)).replace(
-            hour=WORK_START, minute=0, second=0, microsecond=0
+def _apify_hourly_task(run_time: datetime) -> None:
+    current_slot = _hour_floor(run_time)
+    last_run = _load_last_apify_run()
+    if last_run and last_run >= current_slot:
+        logger.debug(
+            "Apify scrape already executed for slot %s; skipping", current_slot.isoformat()
         )
-
-    if now.hour < WORK_START:
-        return now.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
-
-    return (now + timedelta(hours=1)).replace(
-        minute=0, second=0, microsecond=0
-    )
-
-
-def _ensure_apify_scheduler_thread() -> None:
-    global _apify_scheduler_thread, _apify_scheduler_stop
-    if _apify_scheduler_thread and _apify_scheduler_thread.is_alive():
         return
 
-    _apify_scheduler_stop = threading.Event()
-
-    def _runner() -> None:
-        now = datetime.now(tz=TZ)
-        current_slot = _hour_floor(now)
-        last_run = _load_last_apify_run()
-        should_catch_up = (
-            (last_run is None or last_run < current_slot)
-            and (APIFY_IGNORE_WORK_HOURS or _within_work_hours(now))
-        )
-        if should_catch_up:
-            logger.info(
-                "Apify scheduler catching up missed slot at %s (last run %s)",
-                current_slot.isoformat(),
-                last_run.isoformat() if last_run else "never",
-            )
-            try:
-                rows = _run_apify_actor()
-                if rows:
-                    _process_incoming_rows(rows)
-            except Exception:
-                logger.exception("Catch-up Apify scrape failed")
-            _write_last_apify_run(current_slot)
-            now = datetime.now(tz=TZ)
-            current_slot = _hour_floor(now)
-
-        next_run = _next_scrape_run(now)
-        logger.info(
-            "Apify hourly scheduler thread starting (hourly%s; next run %s)",
-            " (ignoring work hours)" if APIFY_IGNORE_WORK_HOURS else " during work hours",
-            next_run.isoformat(),
-        )
-        while not _apify_scheduler_stop.is_set():
-            try:
-                now = datetime.now(tz=TZ)
-                sleep_secs = max(0, (next_run - now).total_seconds())
-                if sleep_secs:
-                    logger.debug(
-                        "Apify scheduler sleeping %.0f seconds until %s",
-                        sleep_secs,
-                        next_run.isoformat(),
-                    )
-                if _apify_scheduler_stop.wait(timeout=sleep_secs):
-                    break
-
-                now = datetime.now(tz=TZ)
-                logger.info("Triggering hourly Apify scrape at %s", now.isoformat())
-                try:
-                    rows = _run_apify_actor()
-                    if rows:
-                        _process_incoming_rows(rows)
-                except Exception:
-                    logger.exception("Hourly Apify scrape failed")
-
-                _write_last_apify_run(_hour_floor(now))
-
-                next_run = _next_scrape_run(now)
-            except Exception:
-                logger.exception(
-                    "Apify scheduler crashed; restarting in 30 seconds"
-                )
-                if _apify_scheduler_stop.wait(timeout=30):
-                    break
-        logger.info("Apify hourly scheduler thread stopped")
-
-    _apify_scheduler_thread = threading.Thread(
-        target=_runner,
-        name="apify-hourly-scheduler",
-        daemon=True,
-    )
-    _apify_scheduler_thread.start()
+    logger.info("Triggering hourly Apify scrape at %s", run_time.isoformat())
+    rows = _run_apify_actor()
+    if rows:
+        _process_incoming_rows(rows)
+    _write_last_apify_run(current_slot)
 
 
 def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -287,11 +200,6 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     conn.close()
 
     return {"status": "processed", "rows": len(fresh_rows)}
-
-
-def _within_work_hours(now: Optional[datetime] = None) -> bool:
-    now = now or datetime.now(tz=TZ)
-    return WORK_START <= now.hour < WORK_END
 
 
 def _record_apify_degradation(reason: str, status: Optional[int] = None) -> None:
@@ -424,26 +332,18 @@ async def _maybe_run_startup_scrape() -> None:
 @app.on_event("startup")
 async def _start_scheduler() -> None:
     global _startup_task
-    _ensure_scheduler_thread()
-    if DISABLE_APIFY_SCHEDULER:
-        logger.info("Apify scheduler disabled via DISABLE_APIFY_SCHEDULER=true")
-    else:
-        _ensure_apify_scheduler_thread()
+    _ensure_scheduler_thread(hourly_callbacks=[_apify_hourly_task])
     if _startup_task is None or _startup_task.done():
         _startup_task = asyncio.create_task(_maybe_run_startup_scrape())
 
 
 @app.on_event("shutdown")
 async def _stop_scheduler() -> None:
-    global _scheduler_thread, _scheduler_stop, _apify_scheduler_thread, _apify_scheduler_stop
+    global _scheduler_thread, _scheduler_stop
     if _scheduler_stop:
         _scheduler_stop.set()
-    if _apify_scheduler_stop:
-        _apify_scheduler_stop.set()
     if _scheduler_thread and _scheduler_thread.is_alive():
         _scheduler_thread.join(timeout=10)
-    if _apify_scheduler_thread and _apify_scheduler_thread.is_alive():
-        _apify_scheduler_thread.join(timeout=10)
 
 # ──────────────────────────────────────────────────────────────────────
 # Google Sheets helpers
