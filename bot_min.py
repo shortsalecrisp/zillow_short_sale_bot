@@ -1405,54 +1405,46 @@ def _candidate_urls(
         )
 
     allowed_domains = _allowed_contact_domains(domain_hint)
-    site_targets: List[str] = []
-    if domain_hint:
-        site_targets.append(_domain(domain_hint))
-    for site in SOCIAL_DOMAINS:
-        if site not in site_targets:
-            site_targets.append(site)
+    base_query_parts = [f'"{agent}"', "realtor", state, city, postal_code]
+    base_query = " ".join(p for p in base_query_parts if p).strip()
 
-    queries = _dedupe_queries(
-        [
-            *build_q_phone(
-                agent,
-                state,
-                city=city,
-                postal_code=postal_code,
-                brokerage=brokerage,
-            ),
-            *build_q_email(
-                agent,
-                state,
-                brokerage=brokerage,
-                domain_hint=domain_hint,
-                city=city,
-                postal_code=postal_code,
-                include_realtor_probe=True,
-            ),
-            *(
-                f'"{agent}" {state} site:{site} phone'
-                for site in site_targets
-            ),
-            *(
-                f'"{agent}" {state} site:{site} email'
-                for site in site_targets
-            ),
-        ]
-    )
+    brokerage_domain = _domain(domain_hint) if domain_hint else ""
+    secondary_query = ""
+    if brokerage_domain:
+        secondary_query = " ".join(
+            p for p in [f'"{agent}"', brokerage, state, f"site:{brokerage_domain}"] if p
+        ).strip()
+    elif brokerage:
+        secondary_query = " ".join(
+            p for p in [f'"{agent}"', brokerage, state, "contact"] if p
+        ).strip()
+
+    queries = _dedupe_queries([q for q in (base_query, secondary_query) if q])
+
     search_hits: List[str] = []
-    for q in queries[:8]:
+    for q in queries:
         ranked_hits = _rank_urls(
-            jina_cached_search(q, max_results=8, allowed_domains=allowed_domains),
+            jina_cached_search(
+                q,
+                max_results=SEARCH_CONTACT_URL_LIMIT,
+                allowed_domains=allowed_domains,
+            ),
             agent,
             brokerage,
             domain_hint=domain_hint,
-            limit=3,
+            limit=SEARCH_CONTACT_URL_LIMIT,
         )
-        search_hits.extend(ranked_hits)
-    urls.extend(_rank_urls(search_hits, agent, brokerage, domain_hint=domain_hint, limit=25))
+        for hit in ranked_hits:
+            if hit not in search_hits:
+                search_hits.append(hit)
+            if len(search_hits) >= SEARCH_CONTACT_URL_LIMIT:
+                break
+        if len(search_hits) >= SEARCH_CONTACT_URL_LIMIT:
+            break
+
+    urls.extend(search_hits)
     deduped = list(dict.fromkeys(urls))
-    return deduped[:MAX_CONTACT_URLS]
+    return deduped[:SEARCH_CONTACT_URL_LIMIT]
 
 
 def _extract_candidates_from_text(text: str, source_url: str) -> List[Dict[str, Any]]:
@@ -2224,8 +2216,7 @@ def build_q_phone(
     for base in (localized_base, state_base, name_only):
         if not base:
             continue
-        _add(f"{base} realtor phone")
-        _add(f"{base} real estate cell")
+        _add(f"{base} contact phone")
         _add(f"{base} mobile")
 
     if brokerage:
@@ -2286,8 +2277,6 @@ def build_q_email(
     for base in (localized_base, state_base):
         if not base:
             continue
-        _add(f"{base} realtor email")
-        _add(f"{base} real estate email")
         _add(f"{base} contact email")
         _add(f"{base} email address")
 
@@ -2315,11 +2304,6 @@ def build_q_email(
         _add(f'"{name}" "{mls_id}" email')
         if brokerage:
             _add(f'"{mls_id}" "{brokerage}" email')
-
-    if include_realtor_probe:
-        _add(f'"{name}" realtor.com email')
-        if state:
-            _add(f'"{name}" realtor.com email {state}')
 
     return queries
 
@@ -2733,6 +2717,7 @@ PHONE_SOURCE_BASE = {
 
 
 MAX_CONTACT_URLS = 15
+SEARCH_CONTACT_URL_LIMIT = 6
 
 
 def _build_trusted_domains(agent: str, urls: Iterable[str]) -> Set[str]:
@@ -3740,7 +3725,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         mls_id,
         city=row_payload.get("city", ""),
         postal_code=row_payload.get("zip", ""),
-        include_realtor_probe=True,
     )
     rapid_urls = list(dict.fromkeys(_rapid_profile_urls(rapid) if zpid else []))
     hint_key = _normalize_override_key(agent, state)
