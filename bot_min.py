@@ -1211,6 +1211,24 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
         _mark_block(dom)
     success = bool(text.strip()) and 200 <= status < 300
 
+    if status == 200 and not text.strip() and "duckduckgo.com/html" in norm:
+        try:
+            ddg_resp = _http_get(
+                norm,
+                timeout=12,
+                headers=_browser_headers(_domain(norm)),
+                rotate_user_agent=True,
+                respect_block=False,
+            )
+            if ddg_resp and ddg_resp.status_code == 200 and ddg_resp.text.strip():
+                text = ddg_resp.text
+                status = ddg_resp.status_code
+                final_url = getattr(ddg_resp, "url", norm)
+                success = True
+                retry_needed = False
+        except Exception:
+            pass
+
     if not success:
         retry_needed = True
         # Try a screenshot/textise mirror to salvage blocked or empty responses.
@@ -1678,41 +1696,11 @@ def _candidate_quality(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _fallback_jina_queries(
-    agent: str, state: str, row_payload: Dict[str, Any], *, domain_hint: str = ""
-) -> List[str]:
+def _fallback_contact_query(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     city = str(row_payload.get("city", "")).strip()
-    if not domain_hint:
-        domain_hint = (
-            row_payload.get("domain_hint", "").strip()
-            or _infer_domain_from_text(brokerage)
-            or _infer_domain_from_text(agent)
-        )
-
-    site_targets: List[str] = []
-    if domain_hint:
-        site_targets.append(_domain(domain_hint))
-    for site in SOCIAL_DOMAINS:
-        if site not in site_targets:
-            site_targets.append(site)
-
-    variants = [
-        f"{agent} realtor {state} phone email",
-        f"{agent} Realtor {state} {brokerage} contact".strip(),
-        f"{agent} {city} {state} realtor cell".strip(),
-        f"{agent} {state} {brokerage} email".strip(),
-        f"{agent} {state} contact email".strip(),
-        f"{agent} {state} cell phone mobile email".strip(),
-        f"{agent} {state} {brokerage} text mobile number".strip(),
-    ]
-
-    for site in site_targets:
-        variants.append(f'"{agent}" {state} site:{site} phone')
-        variants.append(f'"{agent}" {state} site:{site} contact email')
-        variants.append(f'"{agent}" {state} site:{site} mobile cell')
-
-    return [v for v in _dedupe_queries(variants) if v]
+    parts = [part for part in [agent, "realtor", city, state, brokerage] if part]
+    return " ".join(parts)
 
 
 def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1766,18 +1754,32 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     )
 
     if needs_fallback:
+        allowed_domains = _allowed_contact_domains(domain_hint or brokerage)
+        fallback_query = _fallback_contact_query(agent, state, row_payload)
+        search_hits = search_round_robin(
+            [fallback_query],
+            per_query_limit=5,
+            allowed_domains=allowed_domains,
+            engine_limit=10,
+        )
         fallback_urls: List[str] = []
-        for fq in _fallback_jina_queries(agent, state, row_payload, domain_hint=domain_hint):
-            ranked = _rank_urls(
-                jina_cached_search(fq, allowed_domains=_allowed_contact_domains(domain_hint)),
-                agent,
-                brokerage,
-                domain_hint=domain_hint,
-                limit=5,
-            )
-            fallback_urls.extend(ranked)
+        for attempts in search_hits:
+            for _, items in attempts:
+                for it in items:
+                    link = it.get("link", "")
+                    if not link or _domain(link) in PORTAL_DOMAINS:
+                        continue
+                    if link in fallback_urls:
+                        continue
+                    fallback_urls.append(link)
+                    if len(fallback_urls) >= 5:
+                        break
+                if len(fallback_urls) >= 5:
+                    break
+            if len(fallback_urls) >= 5:
+                break
         _collect_from_urls(
-            _rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=30)
+            _rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=5)
         )
 
     return rerank_contact_candidates(
@@ -2004,8 +2006,13 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
 
 # ───────────────────── alternate search helpers ─────────────────────
 
-def duckduckgo_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-    links = jina_cached_search(query, max_results=limit)
+def duckduckgo_search(
+    query: str,
+    limit: int = 5,
+    *,
+    allowed_domains: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
+    links = jina_cached_search(query, max_results=limit, allowed_domains=allowed_domains)
     return [{"link": link} for link in links if link]
 
 
@@ -2014,9 +2021,22 @@ def bing_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     return [{"link": link} for link in links if link]
 
 
-def search_round_robin(queries: Iterable[str], per_query_limit: int = 4) -> List[List[Tuple[str, List[Dict[str, Any]]]]]:
+def search_round_robin(
+    queries: Iterable[str],
+    per_query_limit: int = 4,
+    *,
+    allowed_domains: Optional[Set[str]] = None,
+    engine_limit: Optional[int] = None,
+) -> List[List[Tuple[str, List[Dict[str, Any]]]]]:
     engines: List[Tuple[str, Any]] = [
-        ("jina", lambda q, limit: duckduckgo_search(q, limit=limit)),
+        (
+            "jina",
+            lambda q, limit: duckduckgo_search(
+                q,
+                limit=limit,
+                allowed_domains=allowed_domains,
+            ),
+        ),
     ]
 
     deduped = _dedupe_queries(queries)
@@ -2029,7 +2049,7 @@ def search_round_robin(queries: Iterable[str], per_query_limit: int = 4) -> List
         ordered = engines[start:] + engines[:start]
         attempts: List[Tuple[str, List[Dict[str, Any]]]] = []
         for name, fn in ordered:
-            hits = fn(q, per_query_limit)
+            hits = fn(q, engine_limit or per_query_limit)
             attempts.append((name, hits))
             if hits:
                 break
@@ -2770,6 +2790,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     processed_urls: Set[str] = set()
     mirror_hits: Set[str] = set()
     trusted_domains: Set[str] = set()
+    domain_hint = (
+        row_payload.get("domain_hint", "").strip()
+        or _infer_domain_from_text(brokerage_hint)
+        or _infer_domain_from_text(agent)
+    )
 
     def _register(
         phone: Any,
@@ -3099,38 +3124,33 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     urls: List[str] = list(priority_urls)
     if not _has_viable_phone_candidate():
-        ddg_queries = _dedupe_queries(
-            [
-                f"{q} site:{site}"
-                for q in queries
-                for site in CONTACT_SITE_PRIORITY
-            ]
+        fallback_query = _fallback_contact_query(agent, state, row_payload)
+        allowed_domains = _allowed_contact_domains(domain_hint or brokerage_hint)
+        search_hits = search_round_robin(
+            [fallback_query],
+            per_query_limit=5,
+            allowed_domains=allowed_domains,
+            engine_limit=10,
         )
-        search_hits = search_round_robin(ddg_queries, per_query_limit=3)
-        urls.extend(
-            [
-                it.get("link", "")
-                for attempts in search_hits
-                for engine, items in attempts
-                for it in items
-                if it.get("link")
-                and (engine != "google" or _domain(it.get("link", "")) not in GOOGLE_PORTAL_DENYLIST)
-            ]
-        )
-
+        fallback_urls: List[str] = []
         for attempts in search_hits:
-            for engine, items in attempts:
-                if engine == "google":
-                    for it in items:
-                        tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
-                        if tel:
-                            _register(tel, "cse_contact", url=it.get("link", ""))
-                    trusted_domains.update(
-                        _build_trusted_domains(
-                            agent,
-                            [it.get("link", "") for it in items],
-                        )
-                    )
+            for _, items in attempts:
+                for it in items:
+                    link = it.get("link", "")
+                    if not link or _domain(link) in PORTAL_DOMAINS:
+                        continue
+                    if link in fallback_urls:
+                        continue
+                    fallback_urls.append(link)
+                    if len(fallback_urls) >= 5:
+                        break
+                if len(fallback_urls) >= 5:
+                    break
+            if len(fallback_urls) >= 5:
+                break
+        urls.extend(fallback_urls)
+        if fallback_urls:
+            trusted_domains.update(_build_trusted_domains(agent, fallback_urls))
     urls = list(dict.fromkeys(urls))
     if len(urls) > MAX_CONTACT_URLS:
         urls = urls[:MAX_CONTACT_URLS]
@@ -3867,32 +3887,33 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     urls: List[str] = list(priority_urls)
     if not _has_viable_email_candidate():
-        ddg_queries = _dedupe_queries(
-            [
-                f"{q} site:{site}"
-                for q in queries
-                for site in CONTACT_SITE_PRIORITY
-            ]
+        fallback_query = _fallback_contact_query(agent, state, row_payload)
+        allowed_domains = _allowed_contact_domains(domain_hint or brokerage)
+        search_hits = search_round_robin(
+            [fallback_query],
+            per_query_limit=5,
+            allowed_domains=allowed_domains,
+            engine_limit=10,
         )
-        search_hits = search_round_robin(ddg_queries, per_query_limit=4)
-        urls.extend(
-            [
-                it.get("link", "")
-                for attempts in search_hits
-                for _, items in attempts
-                for it in items
-                if it.get("link")
-            ]
-        )
-
+        fallback_urls: List[str] = []
         for attempts in search_hits:
             for _, items in attempts:
-                trusted_domains.update(
-                    _build_trusted_domains(
-                        agent,
-                        [it.get("link", "") for it in items],
-                    )
-                )
+                for it in items:
+                    link = it.get("link", "")
+                    if not link or _domain(link) in PORTAL_DOMAINS:
+                        continue
+                    if link in fallback_urls:
+                        continue
+                    fallback_urls.append(link)
+                    if len(fallback_urls) >= 5:
+                        break
+                if len(fallback_urls) >= 5:
+                    break
+            if len(fallback_urls) >= 5:
+                break
+        urls.extend(fallback_urls)
+        if fallback_urls:
+            trusted_domains.update(_build_trusted_domains(agent, fallback_urls))
         if not any(items for attempts in search_hits for _, items in attempts):
             cse_rate_limited = True
     urls = list(dict.fromkeys(urls))
