@@ -35,5 +35,5 @@ signal.signal(signal.SIGINT, _handle_sigterm)
 
 if __name__ == "__main__":
     logger.info("Starting standalone hourly scheduler worker")
-    run_hourly_scheduler(stop_event=_stop_event)
+    run_hourly_scheduler(stop_event=_stop_event, run_immediately=True)
     logger.info("Scheduler worker exiting")
