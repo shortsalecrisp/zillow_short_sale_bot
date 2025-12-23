@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
 
 import time, random
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import gspread
 import pytz
@@ -4411,7 +4411,10 @@ def _next_scheduler_run(now: datetime) -> datetime:
     return next_slot
 
 
-def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
+def run_hourly_scheduler(
+    stop_event: Optional[threading.Event] = None,
+    hourly_callbacks: Optional[List[Callable[[datetime], None]]] = None,
+) -> None:
     LOG.info(
         "Hourly scheduler loop starting (thread=%s)",
         threading.current_thread().name,
@@ -4453,6 +4456,13 @@ def run_hourly_scheduler(stop_event: Optional[threading.Event] = None) -> None:
                     _follow_up_pass()
                 except Exception as exc:
                     LOG.exception("Error during follow-up pass: %s", exc)
+
+            callbacks = hourly_callbacks or []
+            for cb in callbacks:
+                try:
+                    cb(run_time)
+                except Exception as exc:
+                    LOG.exception("Error during hourly callback %s: %s", getattr(cb, "__name__", cb), exc)
 
             next_run = _next_scheduler_run(run_time + timedelta(seconds=1))
         except Exception as exc:
