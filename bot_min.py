@@ -288,6 +288,7 @@ if _cse_jitter_high < _cse_jitter_low:
 # How long to back off from a domain after a block (403/429). Default 15 minutes.
 BLOCK_SECONDS = float(os.getenv("BLOCK_SECONDS", "900"))
 CSE_BLOCK_SECONDS = float(os.getenv("CSE_BLOCK_SECONDS", str(BLOCK_SECONDS)))
+JINA_BLOCK_SECONDS = float(os.getenv("JINA_BLOCK_SECONDS", str(BLOCK_SECONDS)))
 
 CONTACT_DOMAIN_MIN_GAP = float(os.getenv("CONTACT_DOMAIN_MIN_GAP", "4.0"))
 CONTACT_DOMAIN_GAP_JITTER = float(os.getenv("CONTACT_DOMAIN_GAP_JITTER", "1.5"))
@@ -1161,6 +1162,20 @@ def _respect_domain_delay(url: str) -> None:
 
 def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
     norm = normalize_url(url)
+    dom = _domain(norm)
+    if dom and _blocked(dom):
+        LOG.warning(
+            "Skipping fetch for %s (blocked until %.0f)", dom, _blocked_until.get(dom, 0.0)
+        )
+        return {
+            "url": norm,
+            "fetched_at": time.time(),
+            "ttl_seconds": 120,
+            "http_status": 429,
+            "extracted_text": "",
+            "final_url": norm,
+            "retry_needed": True,
+        }
     if norm in _CACHE_DEDUPE_RUN:
         cached = cache_get(norm)
         if cached:
@@ -1202,13 +1217,17 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
         status = 0
         final_url = norm
 
-    dom = _domain(norm)
     blocked_statuses = {403, 429, 451}
     if status in blocked_statuses and dom:
+        block_for = (
+            JINA_BLOCK_SECONDS
+            if dom in {"r.jina.ai", "duckduckgo.com", "www.duckduckgo.com"}
+            else BLOCK_SECONDS
+        )
         LOG.info(
             "Jina fetch blocked for %s with %s; marking domain for retry", dom, status
         )
-        _mark_block(dom)
+        _mark_block(dom, seconds=block_for)
     success = bool(text.strip()) and 200 <= status < 300
 
     if status == 200 and not text.strip() and "duckduckgo.com/html" in norm:
@@ -1288,6 +1307,9 @@ def jina_cached_search(
     allowed_domains: Optional[Set[str]] = None,
 ) -> List[str]:
     if not query:
+        return []
+    if _blocked("r.jina.ai") or _blocked("duckduckgo.com") or _blocked("www.duckduckgo.com"):
+        LOG.warning("Jina/DuckDuckGo blocked; skipping search for query %s", query)
         return []
 
     def _allowed(host: str) -> bool:
@@ -1999,7 +2021,96 @@ def _dedupe_queries(queries: Iterable[str]) -> List[str]:
         uniq.append(q)
     return uniq
 
+def _cse_ready() -> bool:
+    return any(k and cx for k, cx in _CSE_CRED_POOL) and not _cse_blocked()
+
+
+def _next_cse_creds() -> Tuple[str, str]:
+    global _CSE_CRED_INDEX
+    if not _CSE_CRED_POOL:
+        return "", ""
+    key, cx = _CSE_CRED_POOL[_CSE_CRED_INDEX % len(_CSE_CRED_POOL)]
+    _CSE_CRED_INDEX = (_CSE_CRED_INDEX + 1) % len(_CSE_CRED_POOL)
+    return key, cx
+
+
+def _mark_cse_block() -> None:
+    global _cse_blocked_until
+    _cse_blocked_until = time.time() + CSE_BLOCK_SECONDS
+    LOG.warning("CSE blocked; cooling off for %.0f seconds", CSE_BLOCK_SECONDS)
+
+
+def _filter_allowed(link: str, allowed_domains: Optional[Set[str]]) -> bool:
+    if not allowed_domains:
+        return True
+    dom = _domain(link)
+    return any(dom == d or dom.endswith(f".{d}") for d in allowed_domains)
+
+
+def google_cse_search(
+    query: str,
+    limit: int = 5,
+    *,
+    allowed_domains: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
+    if not query or not _cse_ready():
+        return []
+    if _cse_blocked():
+        LOG.warning("Skipping Google CSE for %s due to active block", query)
+        return []
+
+    results: List[Dict[str, Any]] = []
+    attempts = 0
+    max_attempts = max(1, min(len(_CSE_CRED_POOL), 3))
+    for _ in range(max_attempts):
+        key, cx = _next_cse_creds()
+        if not key or not cx:
+            continue
+        attempts += 1
+        try:
+            resp = _http_get(
+                "https://www.googleapis.com/customsearch/v1",
+                params={
+                    "q": query,
+                    "key": key,
+                    "cx": cx,
+                    "num": min(limit, 10),
+                },
+                timeout=12,
+                rotate_user_agent=True,
+            )
+            payload = resp.json() if resp is not None else {}
+            for item in payload.get("items", []):
+                link = item.get("link")
+                if not link or not _filter_allowed(link, allowed_domains):
+                    continue
+                results.append({"link": link})
+                if len(results) >= limit:
+                    break
+            if results or payload.get("items") is not None:
+                break
+        except req_exc.RetryError:
+            _mark_cse_block()
+            break
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", 0)
+            if status in (403, 429):
+                _mark_cse_block()
+                break
+            if attempts >= max_attempts:
+                _record_timeout("google_cse")
+        except Exception:
+            if attempts >= max_attempts:
+                _record_timeout("google_cse")
+        _search_sleep()
+    return results[:limit]
+
+
 def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
+    if _cse_ready():
+        hits = google_cse_search(q, limit=10)
+        if hits:
+            return hits
     links = jina_cached_search(q, max_results=10)
     return [{"link": link} for link in links if link]
 
@@ -2028,7 +2139,21 @@ def search_round_robin(
     allowed_domains: Optional[Set[str]] = None,
     engine_limit: Optional[int] = None,
 ) -> List[List[Tuple[str, List[Dict[str, Any]]]]]:
-    engines: List[Tuple[str, Any]] = [
+    engines: List[Tuple[str, Any]] = []
+
+    if _cse_ready() and not _search_disabled("google_cse"):
+        engines.append(
+            (
+                "google_cse",
+                lambda q, limit: google_cse_search(
+                    q,
+                    limit=limit,
+                    allowed_domains=allowed_domains,
+                ),
+            )
+        )
+
+    engines.append(
         (
             "jina",
             lambda q, limit: duckduckgo_search(
@@ -2037,7 +2162,7 @@ def search_round_robin(
                 allowed_domains=allowed_domains,
             ),
         ),
-    ]
+    )
 
     deduped = _dedupe_queries(queries)
     results: List[List[Tuple[str, List[Dict[str, Any]]]]] = []

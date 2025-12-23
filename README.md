@@ -8,15 +8,16 @@ SMS sending uses [SMS Gateway for Android](https://api.smstext.app).  Provide th
 
 ## Google Custom Search
 
-Agent contact details are looked up using the Google Custom Search API with responses fetched through the Jina Reader
-(`https://r.jina.ai/...`) to avoid rate limits. Search results are cached locally to minimize repeated queries. Provide
-credentials via environment variables:
+Agent contact details are looked up using Google Custom Search first (when credentials are present), and the bot only
+falls back to DuckDuckGo via the Jina Reader (`https://r.jina.ai/...`) when Google returns no results or is blocked.
+Search results are cached locally to minimize repeated queries. Provide credentials via environment variables:
 
 * `CS_API_KEY` or `GOOGLE_API_KEY` – your Google API key
 * `CS_CX` or `GOOGLE_CX` – the Custom Search Engine ID
 
-With these variables set, the bot queries Google directly instead of relying on Apify for search results. If the
-credentials are missing or a request fails, the bot will fall back to the Apify Google Search actor.
+When a search source returns HTTP 403/429, the bot will pause further requests to that domain for a configurable cool‑off
+window (`CSE_BLOCK_SECONDS` for Google, `JINA_BLOCK_SECONDS` for Jina/DuckDuckGo). This prevents retry storms when
+search engines rate‑limit the deployment.
 
 ## Apify scheduler control
 
