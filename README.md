@@ -25,6 +25,10 @@ By default the webhook server launches the hourly Apify scheduler. Deployments t
 
 * `DISABLE_APIFY_SCHEDULER=true`
 
+If your deployment does **not** run `webhook_server.py` (for example, it only calls
+`bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main
+process so the hourly follow-up scheduler stays active.
+
 ## Follow-up scheduling
 
 Follow-up passes run during configured work hours. They now skip weekends by default to avoid contacting agents on
