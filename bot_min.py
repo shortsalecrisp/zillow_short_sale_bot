@@ -538,6 +538,8 @@ CONTACT_SITE_PRIORITY: Tuple[str, ...] = (
     "instagram.com",
 )
 
+SOCIAL_DOMAINS: Set[str] = {"facebook.com", "instagram.com", "linkedin.com"}
+
 GOOGLE_PORTAL_DENYLIST: Set[str] = {
     "zillow.com",
     "www.zillow.com",
@@ -890,6 +892,15 @@ def _domain(host_or_url: str) -> str:
     host = urlparse(host_or_url).netloc or host_or_url
     parts = host.lower().split(".")
     return ".".join(parts[-2:]) if len(parts) >= 2 else host.lower()
+
+
+def _allowed_contact_domains(domain_hint: str) -> Set[str]:
+    allowed = set(SOCIAL_DOMAINS)
+    if domain_hint:
+        dom = _domain(domain_hint)
+        if dom:
+            allowed.add(dom)
+    return allowed
 
 def _proxy_for_domain(domain: str) -> str:
     dom = _domain(domain)
@@ -1251,22 +1262,33 @@ def _decode_duckduckgo_link(raw: str) -> str:
     return unquote(target) if target else raw
 
 
-def jina_cached_search(query: str, *, max_results: int = 18, ttl_days: int = 14) -> List[str]:
+def jina_cached_search(
+    query: str,
+    *,
+    max_results: int = 18,
+    ttl_days: int = 14,
+    allowed_domains: Optional[Set[str]] = None,
+) -> List[str]:
     if not query:
         return []
+
+    def _allowed(host: str) -> bool:
+        if not allowed_domains:
+            return True
+        return any(host == dom or host.endswith(f".{dom}") for dom in allowed_domains)
 
     def _extract_hits(body: str, seen: Set[str]) -> List[str]:
         hits: List[str] = []
         for m in re.finditer(r"https?://duckduckgo\.com/l/\?[^\s\"]+", body):
             decoded = _decode_duckduckgo_link(html.unescape(m.group()))
-            if decoded and decoded not in seen:
+            if decoded and decoded not in seen and _allowed(_domain(decoded)):
                 seen.add(decoded)
                 hits.append(decoded)
         for m in re.finditer(r"https?://[\w./?&%#=\-]+", body):
             candidate = html.unescape(m.group())
             if "duckduckgo.com" in candidate:
                 continue
-            if candidate not in seen:
+            if candidate not in seen and _allowed(_domain(candidate)):
                 seen.add(candidate)
                 hits.append(candidate)
         return hits
@@ -1304,13 +1326,22 @@ def jina_cached_search(query: str, *, max_results: int = 18, ttl_days: int = 14)
     return hits[:max_results]
 
 
-def _score_contact_url(url: str, agent_tokens: List[str], brokerage: str) -> float:
+def _score_contact_url(
+    url: str, agent_tokens: List[str], brokerage: str, brokerage_domain: str
+) -> float:
     if not url:
         return -float("inf")
     parsed = urlparse(url)
     host = parsed.netloc.lower()
     path = parsed.path.lower()
     score = 0.0
+
+    if brokerage_domain and (host == brokerage_domain or host.endswith(f".{brokerage_domain}")):
+        score += 4.5
+    if any(host == dom or host.endswith(f".{dom}") for dom in SOCIAL_DOMAINS):
+        score += 4.0
+    if host in PORTAL_DOMAINS:
+        score -= 2.5
 
     if any(tok and tok in host for tok in agent_tokens):
         score += 1.5
@@ -1332,11 +1363,12 @@ def _score_contact_url(url: str, agent_tokens: List[str], brokerage: str) -> flo
 
 
 def _rank_urls(
-    urls: Iterable[str], agent: str, brokerage: str, limit: int = 10
+    urls: Iterable[str], agent: str, brokerage: str, *, domain_hint: str = "", limit: int = 10
 ) -> List[str]:
     agent_tokens = [tok.lower() for tok in agent.split() if tok]
+    brokerage_domain = _domain(domain_hint or _infer_domain_from_text(brokerage) or "")
     scored = [
-        (_score_contact_url(u, agent_tokens, brokerage), u)
+        (_score_contact_url(u, agent_tokens, brokerage, brokerage_domain), u)
         for u in urls
         if u
     ]
@@ -1352,7 +1384,9 @@ else:
     openai = None  # type: ignore
 
 
-def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List[str]:
+def _candidate_urls(
+    agent: str, state: str, row_payload: Dict[str, Any], *, domain_hint: str = ""
+) -> List[str]:
     urls: List[str] = []
     zpid = str(row_payload.get("zpid", ""))
     rapid = _rapid_from_payload(row_payload)
@@ -1363,19 +1397,18 @@ def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List
     city = row_payload.get("city", "")
     postal_code = row_payload.get("zip", "")
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
-    domain_hint = (
-        row_payload.get("domain_hint", "").strip()
-        or _infer_domain_from_text(brokerage)
-        or _infer_domain_from_text(agent)
-    )
+    if not domain_hint:
+        domain_hint = (
+            row_payload.get("domain_hint", "").strip()
+            or _infer_domain_from_text(brokerage)
+            or _infer_domain_from_text(agent)
+        )
 
+    allowed_domains = _allowed_contact_domains(domain_hint)
     site_targets: List[str] = []
     if domain_hint:
-        site_targets.append(domain_hint)
-    for site in CONTACT_SITE_PRIORITY:
-        if site not in site_targets:
-            site_targets.append(site)
-    for site in ALT_PHONE_SITES:
+        site_targets.append(_domain(domain_hint))
+    for site in SOCIAL_DOMAINS:
         if site not in site_targets:
             site_targets.append(site)
 
@@ -1408,10 +1441,16 @@ def _candidate_urls(agent: str, state: str, row_payload: Dict[str, Any]) -> List
         ]
     )
     search_hits: List[str] = []
-    for q in queries[:12]:
-        ranked_hits = _rank_urls(jina_cached_search(q), agent, brokerage, limit=5)
+    for q in queries[:8]:
+        ranked_hits = _rank_urls(
+            jina_cached_search(q, max_results=8, allowed_domains=allowed_domains),
+            agent,
+            brokerage,
+            domain_hint=domain_hint,
+            limit=3,
+        )
         search_hits.extend(ranked_hits)
-    urls.extend(_rank_urls(search_hits, agent, brokerage, limit=40))
+    urls.extend(_rank_urls(search_hits, agent, brokerage, domain_hint=domain_hint, limit=25))
     deduped = list(dict.fromkeys(urls))
     return deduped[:MAX_CONTACT_URLS]
 
@@ -1458,7 +1497,14 @@ def _extract_candidates_from_text(text: str, source_url: str) -> List[Dict[str, 
     return candidates
 
 
-def _score_contact_candidate(snippet: str, value: str, kind: str) -> float:
+def _score_contact_candidate(
+    snippet: str,
+    value: str,
+    kind: str,
+    *,
+    source_url: str = "",
+    brokerage_domain: str = "",
+) -> float:
     low = snippet.lower()
     score = 1.0
     for good in ("cell", "mobile", "direct", "text"):
@@ -1469,21 +1515,42 @@ def _score_contact_candidate(snippet: str, value: str, kind: str) -> float:
             score -= 0.8
     if kind == "email" and _is_generic_email(value):
         score -= 0.5
+    host = _domain(source_url) if source_url else ""
+    if any(host == dom or host.endswith(f".{dom}") for dom in SOCIAL_DOMAINS):
+        score += 2.0
+    if brokerage_domain and (host == brokerage_domain or host.endswith(f".{brokerage_domain}")):
+        score += 1.5
+    if host in PORTAL_DOMAINS:
+        score -= 1.5
     return score
 
 
-def _heuristic_rerank(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _heuristic_rerank(
+    candidates: List[Dict[str, Any]], *, brokerage_domain: str = ""
+) -> Dict[str, Any]:
     best_phone = ("", 0.0, "", "")
     best_email = ("", 0.0, "", "")
     for cand in candidates:
         snippet = cand.get("evidence_snippet", "")
         url = cand.get("source_url", "")
         for phone in cand.get("phones", []):
-            score = _score_contact_candidate(snippet, phone, "phone")
+            score = _score_contact_candidate(
+                snippet,
+                phone,
+                "phone",
+                source_url=url,
+                brokerage_domain=brokerage_domain,
+            )
             if score > best_phone[1]:
                 best_phone = (phone, score, url, snippet)
         for email in cand.get("emails", []):
-            score = _score_contact_candidate(snippet, email, "email")
+            score = _score_contact_candidate(
+                snippet,
+                email,
+                "email",
+                source_url=url,
+                brokerage_domain=brokerage_domain,
+            )
             if score > best_email[1]:
                 best_email = (email, score, url, snippet)
     return {
@@ -1563,7 +1630,9 @@ def _rina_rerank(candidates: List[Dict[str, Any]], agent: str) -> Optional[Dict[
         return None
 
 
-def rerank_contact_candidates(candidates: List[Dict[str, Any]], agent: str) -> Dict[str, Any]:
+def rerank_contact_candidates(
+    candidates: List[Dict[str, Any]], agent: str, *, brokerage_domain: str = ""
+) -> Dict[str, Any]:
     if not candidates:
         return {
             "best_phone": "",
@@ -1578,7 +1647,7 @@ def rerank_contact_candidates(candidates: List[Dict[str, Any]], agent: str) -> D
     ai_choice = _rina_rerank(candidates, agent)
     if ai_choice:
         return ai_choice
-    return _heuristic_rerank(candidates)
+    return _heuristic_rerank(candidates, brokerage_domain=brokerage_domain)
 
 
 def _candidate_quality(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1617,22 +1686,22 @@ def _candidate_quality(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _fallback_jina_queries(agent: str, state: str, row_payload: Dict[str, Any]) -> List[str]:
+def _fallback_jina_queries(
+    agent: str, state: str, row_payload: Dict[str, Any], *, domain_hint: str = ""
+) -> List[str]:
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     city = str(row_payload.get("city", "")).strip()
-    domain_hint = (
-        row_payload.get("domain_hint", "").strip()
-        or _infer_domain_from_text(brokerage)
-        or _infer_domain_from_text(agent)
-    )
+    if not domain_hint:
+        domain_hint = (
+            row_payload.get("domain_hint", "").strip()
+            or _infer_domain_from_text(brokerage)
+            or _infer_domain_from_text(agent)
+        )
 
     site_targets: List[str] = []
     if domain_hint:
-        site_targets.append(domain_hint)
-    for site in CONTACT_SITE_PRIORITY:
-        if site not in site_targets:
-            site_targets.append(site)
-    for site in ALT_PHONE_SITES:
+        site_targets.append(_domain(domain_hint))
+    for site in SOCIAL_DOMAINS:
         if site not in site_targets:
             site_targets.append(site)
 
@@ -1656,7 +1725,13 @@ def _fallback_jina_queries(agent: str, state: str, row_payload: Dict[str, Any]) 
 
 def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
-    urls = _candidate_urls(agent, state, row_payload)
+    domain_hint = (
+        row_payload.get("domain_hint", "").strip()
+        or _infer_domain_from_text(brokerage)
+        or _infer_domain_from_text(agent)
+    )
+    brokerage_domain = _domain(domain_hint or brokerage)
+    urls = _candidate_urls(agent, state, row_payload, domain_hint=domain_hint)
     candidates: List[Dict[str, Any]] = []
 
     def _collect_from_urls(urls_to_fetch: Iterable[str]) -> None:
@@ -1700,12 +1775,22 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
 
     if needs_fallback:
         fallback_urls: List[str] = []
-        for fq in _fallback_jina_queries(agent, state, row_payload):
-            ranked = _rank_urls(jina_cached_search(fq), agent, brokerage, limit=5)
+        for fq in _fallback_jina_queries(agent, state, row_payload, domain_hint=domain_hint):
+            ranked = _rank_urls(
+                jina_cached_search(fq, allowed_domains=_allowed_contact_domains(domain_hint)),
+                agent,
+                brokerage,
+                domain_hint=domain_hint,
+                limit=5,
+            )
             fallback_urls.extend(ranked)
-        _collect_from_urls(_rank_urls(fallback_urls, agent, brokerage, limit=30))
+        _collect_from_urls(
+            _rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=30)
+        )
 
-    return rerank_contact_candidates(candidates, agent)
+    return rerank_contact_candidates(
+        candidates, agent, brokerage_domain=brokerage_domain
+    )
 
 
 def _contact_enrichment(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
