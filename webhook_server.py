@@ -105,6 +105,7 @@ def _ensure_scheduler_thread(hourly_callbacks: Optional[List] = None) -> None:
                 run_hourly_scheduler(
                     stop_event=_scheduler_stop,
                     hourly_callbacks=hourly_callbacks,
+                    run_immediately=True,
                 )
                 break
             except Exception:

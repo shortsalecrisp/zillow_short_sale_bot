@@ -4488,7 +4488,12 @@ def _next_scheduler_run(now: datetime) -> datetime:
     if base.hour < WORK_START:
         return base.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
 
-    next_slot = base if now == base else base + timedelta(hours=1)
+    if now.minute == 0 and now.second == 0 and now.microsecond == 0:
+        next_slot = base
+    elif now < base + timedelta(seconds=1):
+        next_slot = base
+    else:
+        next_slot = base + timedelta(hours=1)
     if next_slot.hour >= WORK_END:
         return (base + timedelta(days=1)).replace(
             hour=WORK_START, minute=0, second=0, microsecond=0
@@ -4496,15 +4501,68 @@ def _next_scheduler_run(now: datetime) -> datetime:
     return next_slot
 
 
+def _within_work_hours(slot: datetime) -> bool:
+    """Return True when ``slot`` falls inside working hours for follow-ups."""
+
+    slot = slot.astimezone(TZ)
+    if slot.hour < WORK_START or slot.hour >= WORK_END:
+        return False
+    if not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(slot):
+        return False
+    return True
+
+
+def _run_hourly_cycle(
+    run_time: datetime,
+    hourly_callbacks: Optional[List[Callable[[datetime], None]]] = None,
+) -> None:
+    """Execute one hourly cycle: follow-ups + callbacks."""
+
+    if _within_work_hours(run_time):
+        LOG.info("Starting follow-up pass at %s", run_time.isoformat())
+        try:
+            _follow_up_pass()
+        except Exception as exc:
+            LOG.exception("Error during follow-up pass: %s", exc)
+    else:
+        LOG.info(
+            "Current hour %s outside work hours (%s–%s); skipping follow-up",
+            run_time.hour,
+            WORK_START,
+            WORK_END,
+        )
+
+    callbacks = hourly_callbacks or []
+    for cb in callbacks:
+        try:
+            cb(run_time)
+        except Exception as exc:
+            LOG.exception(
+                "Error during hourly callback %s: %s",
+                getattr(cb, "__name__", cb),
+                exc,
+            )
+
+
 def run_hourly_scheduler(
     stop_event: Optional[threading.Event] = None,
     hourly_callbacks: Optional[List[Callable[[datetime], None]]] = None,
+    *,
+    run_immediately: bool = False,
 ) -> None:
     LOG.info(
         "Hourly scheduler loop starting (thread=%s)",
         threading.current_thread().name,
     )
-    next_run = _next_scheduler_run(datetime.now(tz=TZ))
+    now = datetime.now(tz=TZ)
+    next_run = _next_scheduler_run(now)
+
+    if run_immediately:
+        initial_run = _hour_floor(now)
+        LOG.info("Running immediate follow-up + callbacks for slot %s", initial_run)
+        _run_hourly_cycle(initial_run, hourly_callbacks)
+        next_run = _next_scheduler_run(initial_run + timedelta(seconds=1))
+
     while True:
         if stop_event and stop_event.is_set():
             LOG.info("Hourly scheduler stop requested; exiting loop")
@@ -4524,30 +4582,8 @@ def run_hourly_scheduler(
             elif not stop_event:
                 time.sleep(sleep_secs)
 
-            run_time = _hour_floor(datetime.now(tz=TZ))
-            hour = run_time.hour
-            if hour >= WORK_END:
-                LOG.info(
-                    "Current hour %s outside work hours (%s–%s); skipping follow-up",
-                    hour,
-                    WORK_START,
-                    WORK_END,
-                )
-            elif not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(run_time):
-                LOG.info("Weekend; skipping follow-up pass (FOLLOWUP_INCLUDE_WEEKENDS=false)")
-            else:
-                LOG.info("Starting follow-up pass at %s", run_time.isoformat())
-                try:
-                    _follow_up_pass()
-                except Exception as exc:
-                    LOG.exception("Error during follow-up pass: %s", exc)
-
-            callbacks = hourly_callbacks or []
-            for cb in callbacks:
-                try:
-                    cb(run_time)
-                except Exception as exc:
-                    LOG.exception("Error during hourly callback %s: %s", getattr(cb, "__name__", cb), exc)
+            run_time = next_run
+            _run_hourly_cycle(run_time, hourly_callbacks)
 
             next_run = _next_scheduler_run(run_time + timedelta(seconds=1))
         except Exception as exc:
@@ -4704,4 +4740,4 @@ if __name__ == "__main__":
         LOG.info("Finished processing payload; exiting.")
     else:
         LOG.info("No JSON payload detected; entering hourly scheduler mode.")
-        run_hourly_scheduler()
+        run_hourly_scheduler(run_immediately=True)
