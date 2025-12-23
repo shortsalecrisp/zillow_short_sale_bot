@@ -4515,6 +4515,8 @@ def _within_work_hours(slot: datetime) -> bool:
 def _run_hourly_cycle(
     run_time: datetime,
     hourly_callbacks: Optional[List[Callable[[datetime], None]]] = None,
+    *,
+    skip_callbacks: bool = False,
 ) -> None:
     """Execute one hourly cycle: follow-ups + callbacks."""
 
@@ -4531,6 +4533,9 @@ def _run_hourly_cycle(
             WORK_START,
             WORK_END,
         )
+
+    if skip_callbacks:
+        return
 
     callbacks = hourly_callbacks or []
     for cb in callbacks:
@@ -4549,6 +4554,7 @@ def run_hourly_scheduler(
     hourly_callbacks: Optional[List[Callable[[datetime], None]]] = None,
     *,
     run_immediately: bool = False,
+    initial_callbacks: bool = True,
 ) -> None:
     LOG.info(
         "Hourly scheduler loop starting (thread=%s)",
@@ -4560,7 +4566,11 @@ def run_hourly_scheduler(
     if run_immediately:
         initial_run = _hour_floor(now)
         LOG.info("Running immediate follow-up + callbacks for slot %s", initial_run)
-        _run_hourly_cycle(initial_run, hourly_callbacks)
+        _run_hourly_cycle(
+            initial_run,
+            hourly_callbacks,
+            skip_callbacks=not initial_callbacks,
+        )
         next_run = _next_scheduler_run(initial_run + timedelta(seconds=1))
 
     while True:
@@ -4739,5 +4749,14 @@ if __name__ == "__main__":
         process_rows(payload["listings"])
         LOG.info("Finished processing payload; exiting.")
     else:
+        enable_scheduler = (
+            os.getenv("ENABLE_STANDALONE_SCHEDULER", "false").lower() == "true"
+        )
+        if not enable_scheduler:
+            LOG.info(
+                "ENABLE_STANDALONE_SCHEDULER=false; skipping standalone scheduler startup"
+            )
+            sys.exit(0)
+
         LOG.info("No JSON payload detected; entering hourly scheduler mode.")
         run_hourly_scheduler(run_immediately=True)

@@ -91,7 +91,11 @@ except json.JSONDecodeError:
     APIFY_INPUT = None
 
 
-def _ensure_scheduler_thread(hourly_callbacks: Optional[List] = None) -> None:
+def _ensure_scheduler_thread(
+    hourly_callbacks: Optional[List] = None,
+    *,
+    initial_callbacks: bool = True,
+) -> None:
     global _scheduler_thread, _scheduler_stop
     if _scheduler_thread and _scheduler_thread.is_alive():
         return
@@ -106,6 +110,7 @@ def _ensure_scheduler_thread(hourly_callbacks: Optional[List] = None) -> None:
                     stop_event=_scheduler_stop,
                     hourly_callbacks=hourly_callbacks,
                     run_immediately=True,
+                    initial_callbacks=initial_callbacks,
                 )
                 break
             except Exception:
@@ -333,7 +338,10 @@ async def _maybe_run_startup_scrape() -> None:
 @app.on_event("startup")
 async def _start_scheduler() -> None:
     global _startup_task
-    _ensure_scheduler_thread(hourly_callbacks=[_apify_hourly_task])
+    _ensure_scheduler_thread(
+        hourly_callbacks=[_apify_hourly_task],
+        initial_callbacks=False,
+    )
     if _startup_task is None or _startup_task.done():
         _startup_task = asyncio.create_task(_maybe_run_startup_scrape())
 
