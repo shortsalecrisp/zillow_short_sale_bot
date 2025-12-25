@@ -30,6 +30,16 @@ If your deployment does **not** run `webhook_server.py` (for example, it only ca
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main
 process so the hourly follow-up scheduler stays active.
 
+### Render deployment guidance
+
+On Render, prefer running the scheduler as a **Worker** process using `python scheduler_worker.py` so it is not tied to
+HTTP traffic or subject to web-service auto-suspend. When doing so:
+
+1) Create a Worker service that runs `python scheduler_worker.py` with the same environment variables as the web service.
+2) Set `DISABLE_APIFY_SCHEDULER=true` on the Web Service so the background thread does not duplicate the Worker runs.
+3) If you cannot run a Worker, either disable auto-suspend (paid plan) or keep the web process warm with an uptime
+   monitor so the scheduler thread inside `webhook_server.py` hits each top-of-hour slot.
+
 ## Follow-up scheduling
 
 Follow-up passes run during configured work hours. They now skip weekends by default to avoid contacting agents on

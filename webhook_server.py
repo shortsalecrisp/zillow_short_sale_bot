@@ -38,6 +38,7 @@ DB_PATH     = "seen.db"
 TABLE_SQL   = "CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)"
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER   = get_sender(SMS_PROVIDER)
+DISABLE_APIFY_SCHEDULER = os.getenv("DISABLE_APIFY_SCHEDULER", "false").lower() == "true"
 
 # Google Sheets / Replies tab
 GSHEET_ID   = os.environ["GSHEET_ID"]
@@ -338,6 +339,9 @@ async def _maybe_run_startup_scrape() -> None:
 @app.on_event("startup")
 async def _start_scheduler() -> None:
     global _startup_task
+    if DISABLE_APIFY_SCHEDULER:
+        logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
+        return
     _ensure_scheduler_thread(
         hourly_callbacks=[_apify_hourly_task],
         initial_callbacks=False,
