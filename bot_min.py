@@ -278,10 +278,12 @@ SMS_RETRY_ATTEMPTS = int(os.getenv("SMS_RETRY_ATTEMPTS", "2"))
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
 CSE_MIN_INTERVAL = float(os.getenv("CSE_MIN_INTERVAL", "4.0"))
+CSE_PER_KEY_MIN_INTERVAL = float(os.getenv("CSE_PER_KEY_MIN_INTERVAL", "0.4"))
 _cse_jitter_low = float(os.getenv("CSE_JITTER_LOW", "1.0"))
 _cse_jitter_high = float(os.getenv("CSE_JITTER_HIGH", "2.6"))
 _cse_window_seconds = float(os.getenv("CSE_WINDOW_SECONDS", "60"))
 _cse_max_in_window = int(os.getenv("CSE_MAX_IN_WINDOW", "12"))
+CSE_MAX_ATTEMPTS = int(os.getenv("CSE_MAX_ATTEMPTS", "3"))
 if _cse_jitter_high < _cse_jitter_low:
     _cse_jitter_low, _cse_jitter_high = _cse_jitter_high, _cse_jitter_low
 
@@ -1784,6 +1786,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
             allowed_domains=allowed_domains,
             engine_limit=10,
         )
+        cse_status = _cse_last_state
         fallback_urls: List[str] = []
         for attempts in search_hits:
             for _, items in attempts:
@@ -1988,6 +1991,8 @@ _cse_cache: Dict[str, List[Dict[str, Any]]] = {}
 _last_cse_ts = 0.0
 _cse_lock = threading.Lock()
 _cse_recent: deque[float] = deque()
+_cse_last_state = "idle"
+_cse_last_ts_per_key: Dict[Tuple[str, str], float] = {}
 
 
 def _cse_key(q: str) -> str:
@@ -2053,20 +2058,31 @@ def google_cse_search(
     *,
     allowed_domains: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
+    global _cse_last_state
+    _cse_last_state = "idle"
     if not query or not _cse_ready():
+        _cse_last_state = "disabled"
         return []
     if _cse_blocked():
+        _cse_last_state = "blocked"
         LOG.warning("Skipping Google CSE for %s due to active block", query)
         return []
 
     results: List[Dict[str, Any]] = []
     attempts = 0
-    max_attempts = max(1, min(len(_CSE_CRED_POOL), 3))
+    seen_throttled = False
+    max_attempts = max(1, min(len(_CSE_CRED_POOL), CSE_MAX_ATTEMPTS))
     for _ in range(max_attempts):
         key, cx = _next_cse_creds()
         if not key or not cx:
             continue
         attempts += 1
+        # Light per-key spacing to avoid rapid-fire throttling.
+        last_ts = _cse_last_ts_per_key.get((key, cx), 0.0)
+        if last_ts:
+            gap = time.time() - last_ts
+            if gap < CSE_PER_KEY_MIN_INTERVAL:
+                time.sleep((CSE_PER_KEY_MIN_INTERVAL - gap) + random.uniform(0.05, 0.2))
         try:
             resp = _http_get(
                 "https://www.googleapis.com/customsearch/v1",
@@ -2080,6 +2096,7 @@ def google_cse_search(
                 rotate_user_agent=True,
             )
             payload = resp.json() if resp is not None else {}
+            _cse_last_ts_per_key[(key, cx)] = time.time()
             for item in payload.get("items", []):
                 link = item.get("link")
                 if not link or not _filter_allowed(link, allowed_domains):
@@ -2087,14 +2104,24 @@ def google_cse_search(
                 results.append({"link": link})
                 if len(results) >= limit:
                     break
-            if results or payload.get("items") is not None:
+            if results:
+                _cse_last_state = "ok"
+                break
+            # Empty result set is treated as a normal miss, not a throttle.
+            if payload.get("items") is not None:
+                _cse_last_state = "no_results"
                 break
         except req_exc.RetryError:
             _mark_cse_block()
+            _cse_last_state = "throttled"
             break
         except requests.HTTPError as exc:
             status = getattr(exc.response, "status_code", 0)
             if status in (403, 429):
+                seen_throttled = True
+                retry_after = exc.response.headers.get("Retry-After") if exc.response else None
+                if retry_after and retry_after.isdigit():
+                    time.sleep(min(float(retry_after), CSE_BLOCK_SECONDS))
                 _mark_cse_block()
                 break
             if attempts >= max_attempts:
@@ -2103,6 +2130,8 @@ def google_cse_search(
             if attempts >= max_attempts:
                 _record_timeout("google_cse")
         _search_sleep()
+    if not results and _cse_last_state == "idle":
+        _cse_last_state = "throttled" if seen_throttled else "no_results"
     return results[:limit]
 
 
@@ -3644,6 +3673,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     blocked_domains: Set[str] = set()
     trusted_domains: Set[str] = set()
     cse_rate_limited = False
+    cse_status: str = "idle"
 
     inferred_domain_hint = _infer_domain_from_text(brokerage) or _infer_domain_from_text(agent)
     if inferred_domain_hint and not domain_hint:
@@ -4040,7 +4070,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if fallback_urls:
             trusted_domains.update(_build_trusted_domains(agent, fallback_urls))
         if not any(items for attempts in search_hits for _, items in attempts):
-            cse_rate_limited = True
+            cse_status = _cse_last_state
+            cse_rate_limited = cse_status in {"throttled", "blocked"}
     urls = list(dict.fromkeys(urls))
     if len(urls) > MAX_CONTACT_URLS:
         urls = urls[:MAX_CONTACT_URLS]
