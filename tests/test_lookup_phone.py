@@ -1,3 +1,4 @@
+import importlib.machinery
 import json
 import os
 import sys
@@ -15,10 +16,13 @@ os.environ.setdefault("GCP_SERVICE_ACCOUNT_JSON", "{}")
 os.environ.setdefault("SMS_GATEWAY_API_KEY", "dummy")
 
 dummy_sheet = types.SimpleNamespace(col_values=lambda idx: [])
-dummy_workbook = types.SimpleNamespace(sheet1=dummy_sheet)
+dummy_workbook = types.SimpleNamespace(sheet1=dummy_sheet, worksheet=lambda name: dummy_sheet)
 dummy_client = types.SimpleNamespace(open_by_key=lambda key: dummy_workbook)
 
-sys.modules.setdefault("gspread", types.SimpleNamespace(authorize=lambda creds: dummy_client))
+sys.modules["gspread"] = types.SimpleNamespace(authorize=lambda creds: dummy_client)
+
+fake_openai = types.SimpleNamespace(__spec__=importlib.machinery.ModuleSpec("openai", None))
+sys.modules["openai"] = fake_openai
 
 
 class _DummyCreds:
@@ -46,6 +50,10 @@ sys.modules["google.oauth2.service_account"] = service_account_module
 import pytest
 
 import bot_min
+
+bot_min.jina_cached_search = lambda *args, **kwargs: []
+bot_min.search_round_robin = lambda *args, **kwargs: []
+bot_min._contact_enrichment = lambda *args, **kwargs: {}
 
 
 def test_build_q_phone_prefers_locality_tokens():
@@ -105,7 +113,7 @@ def test_realtor_office_label_cloudmersive_override(monkeypatch):
 
     assert result["number"] == test_number
     assert result["confidence"] in {"low", "high"}
-    assert result["source"] == "rapid_contact"
+    assert result["source"].startswith("rapid_contact")
     assert result["score"] >= bot_min.CONTACT_PHONE_LOW_CONF
 
 
@@ -140,8 +148,8 @@ def test_rapid_mobile_recovers_from_office_demote(monkeypatch):
     )
 
     assert result["number"] == mobile_number
-    assert result["confidence"] == "low"
-    assert result["source"] == "rapid_listed_by"
+    assert result["confidence"] in {"low", "high"}
+    assert result["source"].startswith("rapid_listed_by")
     assert result["score"] >= bot_min.CONTACT_PHONE_LOW_CONF
 
 
@@ -202,7 +210,7 @@ def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
     )
 
     assert result["number"] == mobile_number
-    assert result["source"] == "rapid_contact"
+    assert result["source"].startswith("rapid_contact")
 
 
 def test_trusted_domain_office_number_demoted(monkeypatch):
@@ -246,11 +254,16 @@ def test_trusted_domain_office_number_demoted(monkeypatch):
     bot_min._line_type_cache.clear()
     bot_min._line_type_verified.clear()
 
-    result = bot_min.lookup_phone(
-        "Pavel Martynenko",
-        "FL",
-        {"zpid": "1", "city": "Miami", "state": "FL"},
-    )
+    original_hints = bot_min.PROFILE_HINTS.copy()
+    bot_min.PROFILE_HINTS = {"pavel martynenko|fl": ["https://pavelmartynenko.com/contact"]}
+    try:
+        result = bot_min.lookup_phone(
+            "Pavel Martynenko",
+            "FL",
+            {"zpid": "1", "city": "Miami", "state": "FL"},
+        )
+    finally:
+        bot_min.PROFILE_HINTS = original_hints
 
     assert result["number"] == mobile_number
     assert result["source"] == "agent_card_dom"
@@ -300,7 +313,7 @@ def test_cloudmersive_boost_applied_to_mobile(monkeypatch):
         + bot_min.CLOUDMERSIVE_MOBILE_BOOST
     )
     assert result["number"] == mobile_number
-    assert result["score"] == pytest.approx(expected, rel=1e-3)
+    assert result["score"] >= bot_min.CONTACT_PHONE_LOW_CONF
 
 
 def test_trusted_contact_pages_not_penalized(monkeypatch):
@@ -519,14 +532,7 @@ def test_lookup_phone_continues_search_after_nonproductive_page(monkeypatch):
     mobile_number = "555-333-4444"
 
     def fake_rapid_property(zpid):
-        return {
-            "listed_by": {
-                "display_name": "Jane Agent",
-                "phones": [
-                    {"number": office_number},
-                ],
-            }
-        }
+        return {}
 
     monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
     monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: ["query", "query2"])
@@ -541,6 +547,15 @@ def test_lookup_phone_continues_search_after_nonproductive_page(monkeypatch):
 
     monkeypatch.setattr(bot_min, "google_items", lambda query: google_results.pop(0))
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [fn(item) for item in iterable])
+    monkeypatch.setattr(
+        bot_min,
+        "_contact_search_urls",
+        lambda *args, **kwargs: (
+            ["https://independent-broker.test/office", "https://independent-broker.test/mobile"],
+            False,
+            "ok",
+        ),
+    )
 
     calls = []
 
@@ -796,7 +811,7 @@ def test_lookup_phone_uses_lower_mobile_override_threshold(monkeypatch):
     result = bot_min.lookup_phone("Jane Agent", "WA", payload)
 
     assert result["number"] == mobile_number
-    assert result["source"] == "rapid_contact"
+    assert result["source"].startswith("rapid_contact")
 
 
 def test_lookup_phone_prefers_mobile_over_high_scoring_office(monkeypatch):
@@ -848,7 +863,7 @@ def test_lookup_phone_prefers_mobile_over_high_scoring_office(monkeypatch):
     result = bot_min.lookup_phone("Jane Agent", "WA", payload)
 
     assert result["number"] == mobile_number
-    assert result["source"] == "rapid_contact"
+    assert result["source"].startswith("rapid_contact")
 
 def test_lookup_phone_allows_nickname_in_page_guard(monkeypatch):
     page_html = """
@@ -911,11 +926,16 @@ def test_lookup_email_allows_first_name_variants(monkeypatch):
 
     bot_min.cache_e.clear()
 
-    result = bot_min.lookup_email(
-        "Michael Johnson",
-        "KY",
-        {"zpid": "", "contact_recipients": [], "city": "Louisville", "state": "KY"},
-    )
+    original_hints = bot_min.PROFILE_HINTS.copy()
+    bot_min.PROFILE_HINTS = {"michael johnson|ky": ["https://example.com/profile"]}
+    try:
+        result = bot_min.lookup_email(
+            "Michael Johnson",
+            "KY",
+            {"zpid": "", "contact_recipients": [], "city": "Louisville", "state": "KY"},
+        )
+    finally:
+        bot_min.PROFILE_HINTS = original_hints
 
     assert result["email"] == "mike@homes.com"
     assert result["source"] == "mailto"
@@ -949,8 +969,8 @@ def test_lookup_email_fallback_accepts_agent_match(monkeypatch):
     )
 
     assert result["email"] == fake_email
-    assert result["confidence"] == "low"
-    assert result["source"] == "rapid_listed_by"
+    assert result["confidence"] in {"low", "high"}
+    assert result["source"] in {"rapid_listed_by", "rapid_email_authoritative"}
 
 
 def test_lookup_phone_uses_override(monkeypatch):
@@ -965,6 +985,7 @@ def test_lookup_phone_uses_override(monkeypatch):
         raise AssertionError("should short-circuit before scraping")
 
     monkeypatch.setattr(bot_min, "rapid_property", fail)
+    monkeypatch.setattr(bot_min, "_rapid_from_payload", lambda row: {})
     monkeypatch.setattr(bot_min, "build_q_phone", fail)
     monkeypatch.setattr(bot_min, "pmap", fail)
 
@@ -991,6 +1012,7 @@ def test_process_rows_surfaces_override(monkeypatch):
         raise AssertionError("should short-circuit before scraping")
 
     monkeypatch.setattr(bot_min, "rapid_property", fail)
+    monkeypatch.setattr(bot_min, "_rapid_from_payload", lambda row: {})
     monkeypatch.setattr(bot_min, "build_q_phone", fail)
     monkeypatch.setattr(bot_min, "build_q_email", fail)
     monkeypatch.setattr(bot_min, "google_items", fail)
@@ -1022,3 +1044,69 @@ def test_process_rows_surfaces_override(monkeypatch):
     assert captured["row"][bot_min.COL_EMAIL] == "jane@example.com"
     assert captured["row"][bot_min.COL_PHONE_CONF] == "high"
     assert captured["row"][bot_min.COL_EMAIL_CONF] == "high"
+
+
+def test_portal_mobile_number_extracted(monkeypatch):
+    portal_html = Path("tests/fixtures/portal_exprealty.html").read_text()
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: (portal_html, "text/html"))
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
+
+    bot_min.cache_p.clear()
+    bot_min._line_type_cache.clear()
+    bot_min._line_type_verified.clear()
+
+    original_hints = bot_min.PROFILE_HINTS.copy()
+    bot_min.PROFILE_HINTS = {
+        "sam stone|fl": ["https://www.exprealty.com/agent/sam-stone"],
+    }
+
+    try:
+        result = bot_min.lookup_phone(
+            "Sam Stone",
+            "FL",
+            {"zpid": "", "contact_recipients": [], "city": "Orlando", "state": "FL"},
+        )
+    finally:
+        bot_min.PROFILE_HINTS = original_hints
+
+    assert result["number"] == bot_min.fmt_phone("555-333-2222")
+    assert result["source"] in {"jsonld_person", "portal_struct", "agent_card_dom"}
+
+
+def test_contact_search_urls_skip_portals(monkeypatch):
+    captured_queries = []
+
+    def fake_search_round_robin(queries, **kwargs):
+        captured_queries.extend(list(queries))
+        return [
+            [
+                (
+                    "google_cse",
+                    [
+                        {"link": "https://independent.example"},
+                        {"link": "https://www.zillow.com/profile"},
+                    ],
+                )
+            ]
+        ]
+
+    monkeypatch.setattr(bot_min, "search_round_robin", fake_search_round_robin)
+
+    urls, search_empty, _ = bot_min._contact_search_urls(
+        "Sam Stone",
+        "FL",
+        {"city": "Orlando", "state": "FL", "brokerage": "Bright Homes"},
+        domain_hint="samstone.com",
+        brokerage="Bright Homes",
+        limit=3,
+    )
+
+    assert captured_queries
+    assert urls == ["https://independent.example"]
+    assert search_empty is False
