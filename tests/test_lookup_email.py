@@ -1,5 +1,6 @@
 import importlib.machinery
 import json
+import logging
 import os
 import sys
 import types
@@ -269,3 +270,108 @@ def test_synthetic_email_created_when_search_empty(monkeypatch):
 
     assert result["email"].startswith("john.doe@brighthomes.com")
     assert result["source"] in {"synthetic_pattern", "pattern"}
+
+
+def test_enrich_contact_allows_brokerage_domains_without_hint(monkeypatch):
+    monkeypatch.setattr(bot_min, "_contact_enrichment", bot_min.enrich_contact)
+    monkeypatch.setattr(bot_min, "_rapid_from_payload", lambda payload: {})
+    monkeypatch.setattr(bot_min, "_rapid_profile_urls", lambda rapid: [])
+    monkeypatch.setattr(
+        bot_min,
+        "jina_cached_search",
+        lambda *args, **kwargs: ["https://remax.com/agents/jane-agent"],
+    )
+
+    def fake_fetch(url):
+        html = """
+        <html><body>
+        <h1>Jane Agent</h1>
+        <a href="mailto:jane.agent@remax.com">Email Jane</a>
+        </body></html>
+        """
+        return html, True
+
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+    monkeypatch.setattr(
+        bot_min,
+        "fetch_text_cached",
+        lambda url: {"extracted_text": "", "final_url": url},
+    )
+
+    bot_min.cache_e.clear()
+
+    result = bot_min.enrich_contact(
+        "Jane Agent",
+        "FL",
+        {"zpid": "", "city": "Tampa", "state": "FL", "brokerageName": "RE/MAX Anchor Realty"},
+    )
+
+    assert result["best_email"] == "jane.agent@remax.com"
+
+
+def test_lookup_email_logs_diagnostics_on_empty(monkeypatch, caplog):
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_email", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+    monkeypatch.setattr(bot_min, "_contact_search_urls", lambda *args, **kwargs: ([], True, "blocked"))
+
+    bot_min.cache_e.clear()
+    bot_min._cse_last_state = "blocked"
+    old_flag = bot_min.ENABLE_SYNTH_EMAIL_FALLBACK
+    bot_min.ENABLE_SYNTH_EMAIL_FALLBACK = False
+
+    with caplog.at_level(logging.WARNING):
+        result = bot_min.lookup_email(
+            "Sam Agent",
+            "TX",
+            {"zpid": "0", "city": "Austin", "state": "TX"},
+        )
+    bot_min.ENABLE_SYNTH_EMAIL_FALLBACK = old_flag
+
+    assert result["email"] == ""
+    assert any("cse_state=blocked" in rec.message for rec in caplog.records)
+    assert any("search_empty=True" in rec.message for rec in caplog.records)
+
+
+def test_enrich_contact_uses_js_rendered_contact_page(monkeypatch):
+    monkeypatch.setattr(bot_min, "_contact_enrichment", bot_min.enrich_contact)
+    monkeypatch.setattr(bot_min, "_rapid_from_payload", lambda payload: {})
+    monkeypatch.setattr(bot_min, "_rapid_profile_urls", lambda rapid: [])
+    captured = []
+
+    def fake_fetch(url):
+        captured.append(url)
+        html = """
+        <html><body>
+        <h1>Alex Agent</h1>
+        <a href="mailto:alex.agent@dynamic.com">Email</a>
+        <a href="tel:5558889999">Call</a>
+        </body></html>
+        """
+        return html, True
+
+    monkeypatch.setattr(bot_min, "fetch_contact_page", fake_fetch)
+    monkeypatch.setattr(
+        bot_min,
+        "fetch_text_cached",
+        lambda url: {"extracted_text": "", "final_url": url},
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "jina_cached_search",
+        lambda *args, **kwargs: ["https://dynamic.example/contact"],
+    )
+
+    bot_min.cache_e.clear()
+
+    result = bot_min.enrich_contact(
+        "Alex Agent",
+        "WA",
+        {"zpid": "", "city": "Seattle", "state": "WA"},
+    )
+
+    assert captured == ["https://dynamic.example/contact"]
+    assert result["best_email"] == "alex.agent@dynamic.com"
+    assert result["best_phone"] == "555-888-9999"

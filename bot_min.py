@@ -69,6 +69,7 @@ _ACCEPT_LANGUAGE_POOL = [
 HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "12000"))
 HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
+HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "2"))
 
 _CONNECTION_ERRORS = (
     req_exc.ConnectionError,
@@ -899,13 +900,18 @@ def _domain(host_or_url: str) -> str:
     return ".".join(parts[-2:]) if len(parts) >= 2 else host.lower()
 
 
-def _allowed_contact_domains(domain_hint: str) -> Set[str]:
+def _allowed_contact_domains(domain_hint: str) -> Optional[Set[str]]:
     allowed = set(SOCIAL_DOMAINS)
-    if domain_hint:
-        dom = _domain(domain_hint)
-        if dom:
-            allowed.add(dom)
-    return allowed
+    fallback_domains = set(ALT_PHONE_SITES) | set(CONTACT_SITE_PRIORITY)
+    dom = _domain(domain_hint)
+    if not dom and domain_hint:
+        dom = _infer_domain_from_text(domain_hint)
+        dom = _domain(dom) if dom else ""
+    if dom:
+        allowed.add(dom)
+    else:
+        allowed.update(fallback_domains)
+    return allowed or None
 
 def _proxy_for_domain(domain: str) -> str:
     dom = _domain(domain)
@@ -1838,12 +1844,28 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     brokerage_domain = _domain(domain_hint or brokerage)
     urls = _candidate_urls(agent, state, row_payload, domain_hint=domain_hint)
     candidates: List[Dict[str, Any]] = []
+    headless_budget = HEADLESS_CONTACT_BUDGET
 
-    def _collect_from_urls(urls_to_fetch: Iterable[str]) -> None:
+    def _collect_from_urls(urls_to_fetch: Iterable[str], *, prefer_headless: bool = False) -> None:
+        nonlocal headless_budget
         for url in urls_to_fetch:
             if not url:
                 continue
-            fetched = fetch_text_cached(url)
+            fetched: Dict[str, Any] = {}
+            use_headless = prefer_headless and headless_budget > 0
+            if use_headless:
+                page, _ = fetch_contact_page(url)
+                if page:
+                    fetched = {
+                        "url": url,
+                        "extracted_text": page,
+                        "final_url": url,
+                    }
+                    headless_budget -= 1
+                else:
+                    fetched = fetch_text_cached(url)
+            else:
+                fetched = fetch_text_cached(url)
             text = fetched.get("extracted_text", "")
             candidates.extend(_extract_candidates_from_text(text, fetched.get("final_url") or url))
 
@@ -1870,7 +1892,9 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
             "best_email_evidence": "rapidapi listing contact",
         }
 
-    _collect_from_urls(urls)
+    _collect_from_urls(urls[:max(1, HEADLESS_CONTACT_BUDGET)], prefer_headless=True)
+    if len(urls) > HEADLESS_CONTACT_BUDGET:
+        _collect_from_urls(urls[HEADLESS_CONTACT_BUDGET:])
     quality = _candidate_quality(candidates)
     needs_fallback = (
         (quality["phones_found"] == 0 and quality["emails_found"] == 0)
@@ -1878,8 +1902,10 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
         or (quality["emails_found"] > 0 and quality["all_generic_email"])
     )
 
+    search_empty = False
+    cse_status = _cse_last_state
     if needs_fallback:
-        fallback_urls, _, _ = _contact_search_urls(
+        fallback_urls, search_empty, cse_status = _contact_search_urls(
             agent,
             state,
             row_payload,
@@ -1889,9 +1915,26 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
         )
         _collect_from_urls(_rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=5))
 
-    return rerank_contact_candidates(
+    result = rerank_contact_candidates(
         candidates, agent, brokerage_domain=brokerage_domain
     )
+    if not result.get("best_email") and not result.get("best_phone"):
+        blocked_state = {
+            _domain(u): _blocked_until.get(_domain(u), 0.0) - time.time()
+            for u in urls
+            if _blocked(_domain(u))
+        }
+        LOG.warning(
+            "ENRICH CONTACT miss for %s %s – quality=%s search_empty=%s cse_state=%s blocked=%s candidates=%s",
+            agent,
+            state,
+            quality,
+            search_empty,
+            cse_status,
+            {k: round(v, 2) for k, v in blocked_state.items()},
+            len(candidates),
+        )
+    return result
 
 
 def _contact_enrichment(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -3187,6 +3230,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     processed_urls: Set[str] = set()
     mirror_hits: Set[str] = set()
     trusted_domains: Set[str] = set()
+    search_empty = False
+    cse_status = _cse_last_state
     domain_hint = (
         row_payload.get("domain_hint", "").strip()
         or _infer_domain_from_text(brokerage_hint)
@@ -3556,7 +3601,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     urls: List[str] = list(priority_urls)
     if not _has_viable_phone_candidate():
-        fallback_urls, _, _ = _contact_search_urls(
+        fallback_urls, search_empty, cse_status = _contact_search_urls(
             agent,
             state,
             row_payload,
@@ -3902,13 +3947,25 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "source": best_source,
     })
     METRICS["phone_no_verified_mobile"] += 1
+    blocked_state = {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains}
+    candidate_quality = {
+        "phones_found": len(candidates),
+        "emails_found": 0,
+        "all_office": all(info.get("office_demoted") for info in candidates.values()) if candidates else False,
+        "all_generic_email": False,
+    }
     LOG.warning(
-        "PHONE DROP no verified mobile for %s %s zpid=%s reason=%s had_candidates=%s",
+        "PHONE DROP no verified mobile for %s %s zpid=%s reason=%s had_candidates=%s cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
         agent,
         state,
         zpid or "",
         reason,
         had_candidates,
+        cse_status,
+        search_empty,
+        {k: round(v, 2) for k, v in blocked_state.items()},
+        len(candidates),
+        candidate_quality,
     )
     return result
 
@@ -3954,6 +4011,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     trusted_domains: Set[str] = set()
     cse_rate_limited = False
     cse_status: str = "idle"
+    search_empty = False
 
     inferred_domain_hint = _infer_domain_from_text(brokerage) or _infer_domain_from_text(agent)
     if inferred_domain_hint and not domain_hint:
@@ -4681,15 +4739,30 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     })
     if cse_rate_limited:
         LOG.warning(
-            "EMAIL DEFER for %s %s – CSE blocked/rate limited",
+            "EMAIL DEFER for %s %s – CSE blocked/rate limited (cse_state=%s search_empty=%s blocked_domains=%s candidates=%s)",
             agent,
             state,
+            cse_status,
+            search_empty,
+            {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains},
+            len(candidates),
         )
-    LOG.debug(
-        "EMAIL FAIL for %s %s – personalised e-mail not found (%s)",
+    candidate_quality = {
+        "phones_found": 0,
+        "emails_found": len(candidates),
+        "all_office": False,
+        "all_generic_email": all(info.get("generic") for info in candidates.values()) if candidates else False,
+    }
+    LOG.warning(
+        "EMAIL FAIL for %s %s – personalised e-mail not found (%s) cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
         agent,
         state,
         reason,
+        cse_status,
+        search_empty,
+        {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains},
+        len(candidates),
+        candidate_quality,
     )
     return result
 
