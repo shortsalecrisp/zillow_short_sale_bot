@@ -1,3 +1,4 @@
+import importlib.machinery
 import json
 import os
 import sys
@@ -16,10 +17,13 @@ os.environ.setdefault("SMS_GATEWAY_API_KEY", "dummy")
 
 
 dummy_sheet = types.SimpleNamespace(col_values=lambda idx: [])
-dummy_workbook = types.SimpleNamespace(sheet1=dummy_sheet)
+dummy_workbook = types.SimpleNamespace(sheet1=dummy_sheet, worksheet=lambda name: dummy_sheet)
 dummy_client = types.SimpleNamespace(open_by_key=lambda key: dummy_workbook)
 
-sys.modules.setdefault("gspread", types.SimpleNamespace(authorize=lambda creds: dummy_client))
+sys.modules["gspread"] = types.SimpleNamespace(authorize=lambda creds: dummy_client)
+
+fake_openai = types.SimpleNamespace(__spec__=importlib.machinery.ModuleSpec("openai", None))
+sys.modules["openai"] = fake_openai
 
 
 class _DummyCreds:
@@ -46,6 +50,9 @@ sys.modules["google.oauth2.service_account"] = service_account_module
 
 import bot_min
 
+bot_min.jina_cached_search = lambda *args, **kwargs: []
+bot_min._contact_enrichment = lambda *args, **kwargs: {}
+
 
 def test_lookup_email_accepts_generic_team_when_only_option(monkeypatch):
     monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
@@ -69,11 +76,16 @@ def test_lookup_email_accepts_generic_team_when_only_option(monkeypatch):
 
     bot_min.cache_e.clear()
 
-    result = bot_min.lookup_email(
-        "Jon McCall",
-        "FL",
-        {"zpid": "1", "city": "Hudson", "state": "FL"},
-    )
+    original_hints = bot_min.PROFILE_HINTS.copy()
+    bot_min.PROFILE_HINTS = {"jon mccall|fl": ["https://team.example/contact"]}
+    try:
+        result = bot_min.lookup_email(
+            "Jon McCall",
+            "FL",
+            {"zpid": "1", "city": "Hudson", "state": "FL"},
+        )
+    finally:
+        bot_min.PROFILE_HINTS = original_hints
 
     assert result["email"] == "team@jonmccallteam.com"
     assert result["confidence"] in {"low", "high"}
@@ -113,7 +125,7 @@ def test_rapid_email_used_when_personal_missing(monkeypatch):
 
     assert result["email"] == contact_email
     assert result["confidence"] in {"low", "high"}
-    assert result["source"] in {"rapid_contact", "rapid_listed_by"}
+    assert result["source"] in {"rapid_contact", "rapid_listed_by", "rapid_email_authoritative"}
 
 
 def test_unrelated_generic_email_still_withheld(monkeypatch):
@@ -196,3 +208,64 @@ def test_is_generic_email_flags_placeholder():
 
 def test_is_generic_email_allows_real_agent_email():
     assert not bot_min._is_generic_email("jane.doe@realtyworld.com")
+
+
+def test_fallback_contact_query_adds_contact_tokens():
+    query = bot_min._fallback_contact_query(
+        "Mary Agent",
+        "FL",
+        {"city": "Tampa", "brokerage": "Bright Homes"},
+    )
+    assert "mobile" in query
+    assert "brighthomes.com" in query
+
+
+def test_portal_jsonld_email_extracted(monkeypatch):
+    portal_html = Path("tests/fixtures/portal_realtor.html").read_text()
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_email", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: (portal_html, "text/html"))
+
+    bot_min.cache_e.clear()
+    original_hints = bot_min.PROFILE_HINTS.copy()
+    bot_min.PROFILE_HINTS = {"mary agent|fl": ["https://www.realtor.com/agent/mary-agent"]}
+
+    try:
+        result = bot_min.lookup_email(
+            "Mary Agent",
+            "FL",
+            {"zpid": "0", "city": "Tampa", "state": "FL"},
+        )
+    finally:
+        bot_min.PROFILE_HINTS = original_hints
+
+    assert result["email"] == "mary.agent@kw.com"
+    assert result["source"] in {"jsonld_person", "portal_struct", "mailto"}
+
+
+def test_synthetic_email_created_when_search_empty(monkeypatch):
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {})
+    monkeypatch.setattr(bot_min, "build_q_email", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+    monkeypatch.setattr(bot_min, "search_round_robin", lambda *args, **kwargs: [])
+
+    bot_min.cache_e.clear()
+    old_flag = bot_min.ENABLE_SYNTH_EMAIL_FALLBACK
+    bot_min.ENABLE_SYNTH_EMAIL_FALLBACK = True
+
+    try:
+        result = bot_min.lookup_email(
+            "John Doe",
+            "TX",
+            {"zpid": "", "city": "Austin", "state": "TX", "brokerage": "Bright Homes"},
+        )
+    finally:
+        bot_min.ENABLE_SYNTH_EMAIL_FALLBACK = old_flag
+
+    assert result["email"].startswith("john.doe@brighthomes.com")
+    assert result["source"] in {"synthetic_pattern", "pattern"}

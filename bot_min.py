@@ -83,6 +83,7 @@ _CONNECTION_ERRORS = (
 _blocked_until: Dict[str, float] = {}
 _cse_blocked_until: float = 0.0
 cache_p: Dict[str, Any] = {}
+cache_e: Dict[str, Any] = {}
 
 def _http_get(
     url: str,
@@ -297,6 +298,7 @@ CONTACT_DOMAIN_GAP_JITTER = float(os.getenv("CONTACT_DOMAIN_GAP_JITTER", "1.5"))
 
 CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
 CONTACT_EMAIL_FALLBACK_SCORE = float(os.getenv("CONTACT_EMAIL_FALLBACK_SCORE", "0.45"))
+CONTACT_EMAIL_LOW_CONF = float(os.getenv("CONTACT_EMAIL_LOW_CONF", str(CONTACT_EMAIL_FALLBACK_SCORE)))
 CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
 CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
 CONTACT_PHONE_OVERRIDE_MIN = float(os.getenv("CONTACT_PHONE_OVERRIDE_MIN", "1.0"))
@@ -1723,8 +1725,107 @@ def _candidate_quality(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
 def _fallback_contact_query(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     city = str(row_payload.get("city", "")).strip()
-    parts = [part for part in [agent, "realtor", city, state, brokerage] if part]
+    domain_hint = (
+        row_payload.get("domain_hint", "").strip()
+        or _infer_domain_from_text(brokerage)
+        or _infer_domain_from_text(agent)
+    )
+    contact_tokens = "email contact cell mobile direct gmail outlook"
+    parts = [
+        part
+        for part in [
+            f'"{agent}"',
+            "realtor",
+            city,
+            state,
+            brokerage,
+            _domain(domain_hint) if domain_hint else "",
+            contact_tokens,
+        ]
+        if part
+    ]
     return " ".join(parts)
+
+
+def _fallback_contact_queries(agent: str, state: str, row_payload: Dict[str, Any]) -> List[str]:
+    """Return enriched fallback queries for contact enrichment/lookup."""
+    base = _fallback_contact_query(agent, state, row_payload)
+    brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
+    domain_hint = (
+        row_payload.get("domain_hint", "").strip()
+        or _infer_domain_from_text(brokerage)
+        or _infer_domain_from_text(agent)
+    )
+    city = str(row_payload.get("city", "")).strip()
+    queries: List[str] = [base]
+    contact_tokens = "email OR phone OR contact cell mobile direct gmail outlook".replace("OR", "")
+    if domain_hint:
+        dom = _domain(domain_hint)
+        queries.append(f'{base} "{dom}" {contact_tokens}')
+        queries.append(f'"{agent}" {dom} {city} {state} contact mobile email')
+    if brokerage:
+        queries.append(f'{base} "{brokerage}" contact cell mobile email')
+    deduped: List[str] = []
+    for q in queries:
+        if q and q not in deduped:
+            deduped.append(q)
+    return deduped
+
+
+def _contact_search_urls(
+    agent: str,
+    state: str,
+    row_payload: Dict[str, Any],
+    *,
+    domain_hint: str = "",
+    brokerage: str = "",
+    limit: int = 5,
+) -> Tuple[List[str], bool, str]:
+    """Issue enriched contact queries and return candidate URLs.
+
+    Returns (urls, search_empty, cse_status).
+    """
+    base_queries = _fallback_contact_queries(agent, state, row_payload)
+    queries: List[str] = []
+    for q in base_queries:
+        if q and "mobile" not in q.lower():
+            queries.append(f"{q} mobile")
+        queries.append(q)
+    if agent and state:
+        queries.insert(0, f'"{agent}" {state} mobile contact email')
+    if not queries:
+        fallback_q = _fallback_contact_query(agent, state, row_payload)
+        if fallback_q:
+            queries.append(fallback_q)
+    queries = [str(q) for q in queries if q]
+    allowed_domains = _allowed_contact_domains(domain_hint or brokerage)
+    search_hits = search_round_robin(
+        queries,
+        per_query_limit=limit,
+        allowed_domains=allowed_domains,
+        engine_limit=10,
+    )
+    fallback_urls: List[str] = []
+    search_empty = True
+    for attempts in search_hits:
+        for _, items in attempts:
+            if items:
+                search_empty = False
+            for it in items:
+                link = it.get("link", "")
+                if not link or _domain(link) in PORTAL_DOMAINS:
+                    continue
+                if link in fallback_urls:
+                    continue
+                fallback_urls.append(link)
+                if len(fallback_urls) >= limit:
+                    break
+            if len(fallback_urls) >= limit:
+                break
+        if len(fallback_urls) >= limit:
+            break
+    cse_status = _cse_last_state
+    return fallback_urls[:limit], search_empty, cse_status
 
 
 def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1778,34 +1879,15 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     )
 
     if needs_fallback:
-        allowed_domains = _allowed_contact_domains(domain_hint or brokerage)
-        fallback_query = _fallback_contact_query(agent, state, row_payload)
-        search_hits = search_round_robin(
-            [fallback_query],
-            per_query_limit=5,
-            allowed_domains=allowed_domains,
-            engine_limit=10,
+        fallback_urls, _, _ = _contact_search_urls(
+            agent,
+            state,
+            row_payload,
+            domain_hint=domain_hint or brokerage,
+            brokerage=brokerage,
+            limit=5,
         )
-        cse_status = _cse_last_state
-        fallback_urls: List[str] = []
-        for attempts in search_hits:
-            for _, items in attempts:
-                for it in items:
-                    link = it.get("link", "")
-                    if not link or _domain(link) in PORTAL_DOMAINS:
-                        continue
-                    if link in fallback_urls:
-                        continue
-                    fallback_urls.append(link)
-                    if len(fallback_urls) >= 5:
-                        break
-                if len(fallback_urls) >= 5:
-                    break
-            if len(fallback_urls) >= 5:
-                break
-        _collect_from_urls(
-            _rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=5)
-        )
+        _collect_from_urls(_rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=5))
 
     return rerank_contact_candidates(
         candidates, agent, brokerage_domain=brokerage_domain
@@ -2618,6 +2700,8 @@ def _email_matches_name(agent: str, email: str) -> bool:
     return False
 
 domain_patterns: Dict[str, str] = {}
+_BROKERAGE_DOMAIN_CACHE: Dict[str, str] = {}
+_DOMAIN_INFER_CACHE: Dict[str, str] = {}
 _MX_CACHE: Dict[str, bool] = {}
 _contact_override_cache: Dict[str, Any] = {"raw": None, "map": {}}
 
@@ -2717,7 +2801,7 @@ def _has_mx(domain: str) -> bool:
         answers = dns.resolve(domain, "MX")  # type: ignore[attr-defined]
         _MX_CACHE[domain] = bool(answers)
     except Exception:
-        _MX_CACHE[domain] = False
+        _MX_CACHE[domain] = True
     return _MX_CACHE[domain]
 
 def _synth_from_tokens(name: str, domains: Set[str]) -> List[str]:
@@ -2745,6 +2829,9 @@ def _synth_from_tokens(name: str, domains: Set[str]) -> List[str]:
 def _guess_domain_from_brokerage(brokerage: str) -> str:
     if not brokerage:
         return ""
+    cache_key = brokerage.strip().lower()
+    if cache_key in _BROKERAGE_DOMAIN_CACHE:
+        return _BROKERAGE_DOMAIN_CACHE[cache_key]
     tokens = {
         re.sub(r"[^a-z]", "", part.lower())
         for part in brokerage.split()
@@ -2761,7 +2848,17 @@ def _guess_domain_from_brokerage(brokerage: str) -> str:
         if hits > best_hits:
             best_domain = dom
             best_hits = hits
-    return best_domain if best_hits else ""
+    if best_domain and best_hits:
+        _BROKERAGE_DOMAIN_CACHE[cache_key] = best_domain
+        return best_domain
+    scrub = [tok for tok in tokens if tok not in {"realty", "real", "estate", "properties", "group", "team", "company", "homes"}]
+    slug = "".join(scrub or list(tokens))
+    if len(slug) >= 5:
+        guessed = f"{slug}.com"
+        _BROKERAGE_DOMAIN_CACHE[cache_key] = guessed
+        return guessed
+    _BROKERAGE_DOMAIN_CACHE[cache_key] = ""
+    return ""
 
 
 def _infer_domain_from_text(value: str) -> str:
@@ -2770,16 +2867,27 @@ def _infer_domain_from_text(value: str) -> str:
     Example: "The Campos Group" → "thecamposgroup.com".
     Returns an empty string when a confident slug cannot be built.
     """
+    cache_key = value.strip().lower()
+    if cache_key in _DOMAIN_INFER_CACHE:
+        return _DOMAIN_INFER_CACHE[cache_key]
     if not value:
+        _DOMAIN_INFER_CACHE[cache_key] = ""
         return ""
     tokens = [re.sub(r"[^a-z0-9]", "", part.lower()) for part in value.split()]
     tokens = [tok for tok in tokens if len(tok) >= 3]
+    filtered = [tok for tok in tokens if tok not in {"real", "estate", "realty", "group", "team", "properties", "homes", "llc", "inc"}]
+    if len(filtered) >= 2:
+        tokens = filtered
     if len(tokens) < 2:
+        _DOMAIN_INFER_CACHE[cache_key] = ""
         return ""
     slug = "".join(tokens)
     if len(slug) < 5:
+        _DOMAIN_INFER_CACHE[cache_key] = ""
         return ""
-    return f"{slug}.com"
+    inferred = f"{slug}.com"
+    _DOMAIN_INFER_CACHE[cache_key] = inferred
+    return inferred
 
 def _split_portals(urls):
     portals, non = [], []
@@ -2817,6 +2925,141 @@ def _extract_remax_emails(page: str) -> Set[str]:
         if cleaned and ok_email(cleaned):
             emails.add(cleaned)
     return emails
+
+
+PORTAL_PROFILE_DOMAINS: Set[str] = {
+    "realtor.com",
+    "kw.com",
+    "kellerwilliams.com",
+    "exprealty.com",
+    "realbroker.com",
+    "realbrokerllc.com",
+    "compass.com",
+}
+
+
+def _portal_contact_details(
+    url: str,
+    page: str,
+    *,
+    agent: str = "",
+    location_tokens: Optional[Set[str]] = None,
+    location_digits: Optional[Set[str]] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    results: Dict[str, List[Dict[str, Any]]] = {"phones": [], "emails": []}
+    dom = _domain(url)
+    if dom not in PORTAL_PROFILE_DOMAINS:
+        return results
+    if not page:
+        return results
+    location_tokens = location_tokens or set()
+    location_digits = location_digits or set()
+
+    def add_phone(num: Any, *, label: str = "", context: str = "", name: str = "", source: str = "portal_struct") -> None:
+        formatted = fmt_phone(str(num))
+        if not formatted:
+            return
+        results["phones"].append(
+            {
+                "phone": formatted,
+                "label": label.lower(),
+                "context": context,
+                "name": name,
+                "source": source,
+            }
+        )
+
+    def add_email(addr: Any, *, label: str = "", context: str = "", name: str = "", source: str = "portal_struct") -> None:
+        cleaned = clean_email(str(addr))
+        if not (cleaned and ok_email(cleaned)):
+            return
+        results["emails"].append(
+            {
+                "email": cleaned,
+                "label": label.lower(),
+                "context": context,
+                "name": name,
+                "source": source,
+            }
+        )
+
+    def name_ok(name_val: str) -> bool:
+        if not agent:
+            return True
+        return _names_match(agent, name_val)
+
+    # JSON-LD is the most reliable signal on portals.
+    try:
+        soup = BeautifulSoup(page, "html.parser") if BeautifulSoup else None
+    except Exception:
+        soup = None
+
+    if soup:
+        for sc in soup.find_all("script", {"type": "application/ld+json"}):
+            try:
+                data = json.loads(sc.string or "")
+            except Exception:
+                continue
+            nodes = data if isinstance(data, list) else [data]
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                node_type = node.get("@type")
+                types = node_type if isinstance(node_type, list) else [node_type]
+                is_person = any(
+                    t and isinstance(t, str) and ("Person" in t or "Agent" in t)
+                    for t in types
+                )
+                meta_name = str(node.get("name", ""))
+                if is_person and meta_name and not name_ok(meta_name):
+                    continue
+                tel_vals = node.get("telephone") or []
+                if isinstance(tel_vals, str):
+                    tel_vals = [tel_vals]
+                for tel in tel_vals:
+                    add_phone(tel, label="jsonld", name=meta_name, source="jsonld_person")
+                email_vals = node.get("email") or []
+                if isinstance(email_vals, str):
+                    email_vals = [email_vals]
+                for em in email_vals:
+                    add_email(em, label="jsonld", name=meta_name, source="jsonld_person")
+                for cp in node.get("contactPoint") or []:
+                    if not isinstance(cp, dict):
+                        continue
+                    tel = cp.get("telephone")
+                    if tel:
+                        add_phone(tel, label=str(cp.get("contactType") or ""), name=meta_name, source="jsonld_person")
+                    email = cp.get("email")
+                    if email:
+                        add_email(email, label=str(cp.get("contactType") or ""), name=meta_name, source="jsonld_person")
+
+        contact_nodes = soup.find_all(
+            lambda tag: tag.name in {"a", "div", "span", "p"}
+            and any(cls in (tag.get("class") or []) for cls in ["contact", "agent-contact", "agent-phone", "agent-info"])
+        )
+        for node in contact_nodes:
+            text = node.get_text(" ", strip=True)
+            low = text.lower()
+            phone_match = re.search(r"(\+?[\d\-\.\(\)\s]{7,})", text)
+            if phone_match:
+                label = ""
+                for term in ("cell", "mobile", "direct", "text"):
+                    if term in low:
+                        label = term
+                        break
+                add_phone(phone_match.group(1), label=label, context=text)
+            for mail_match in EMAIL_RE.finditer(text):
+                add_email(mail_match.group(0), context=text)
+
+    if location_tokens or location_digits:
+        if not _page_has_location(page, location_tokens, location_digits):
+            return {"phones": [], "emails": []}
+
+    labeled_phone_re = re.compile(r"(cell|mobile|direct|text)[^\d]{0,12}(\+?[\d\s\-().]{7,})", re.I)
+    for match in labeled_phone_re.finditer(page):
+        add_phone(match.group(2), label=match.group(1), context=match.group(0))
+
+    return results
 
 
 EMAIL_SOURCE_BASE = {
@@ -2950,6 +3193,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         or _infer_domain_from_text(agent)
     )
 
+    mobile_terms = {"cell", "mobile", "text", "direct", "sms"}
+
     def _register(
         phone: Any,
         source: str,
@@ -2962,6 +3207,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         bonus: float = 0.0,
         office_flag: bool = False,
         trusted: bool = False,
+        mobile_hint: bool = False,
     ) -> bool:
         nonlocal had_candidates
         formatted = fmt_phone(str(phone))
@@ -3011,16 +3257,24 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         info["sources"].add(source)
         if context:
             ctx = context.lower()
+            mobile_hint = mobile_hint or any(term in ctx for term in mobile_terms)
             info["contexts"].append(ctx)
-            if not info["office_demoted"] and not trusted_domain and any(
-                term in ctx for term in PHONE_OFFICE_TERMS
-            ):
-                info["score"] -= 0.6
-                info["score"] -= 0.35
-                info["office_demoted"] = True
-                LOG.debug("PHONE DEMOTE office: %s", formatted)
+            if not info["office_demoted"] and not trusted_domain:
+                if any(term in ctx for term in PHONE_OFFICE_TERMS):
+                    info["score"] -= 0.6
+                    info["score"] -= 0.35
+                    if "fax" in ctx:
+                        info["score"] -= 0.4
+                    info["office_demoted"] = True
+                    LOG.debug("PHONE DEMOTE office: %s", formatted)
+            if mobile_hint and not info["office_demoted"]:
+                info["score"] += 0.55
+                info["direct_ok"] = True
+        elif mobile_hint and not info["office_demoted"]:
+            info["score"] += 0.55
+            info["direct_ok"] = True
         if office_flag and not info["office_demoted"]:
-            info["score"] -= 1.0
+            info["score"] -= 1.2
             info["score"] -= 0.7
             info["office_demoted"] = True
             LOG.debug("PHONE DEMOTE office: %s", formatted)
@@ -3095,11 +3349,18 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     def _rapid_mobile_shortcut() -> Optional[Dict[str, Any]]:
         rapid_candidates: List[Tuple[float, str, Dict[str, Any]]] = []
         for num, info in candidates.items():
-            if not (info.get("sources", set()) & {"rapid_contact", "rapid_listed_by"}):
+            if "rapid_contact" not in info.get("sources", set()):
                 continue
             rapid_candidates.append((info.get("score", 0.0), num, info))
         rapid_candidates.sort(reverse=True)
         for _, num, info in rapid_candidates:
+            if info.get("office_flag_rapid"):
+                continue
+            if not info.get("name_match"):
+                continue
+            direct_flag = _looks_direct(num, agent, state)
+            if direct_flag is False:
+                continue
             line_info = get_line_info(num)
             if not line_info.get("valid"):
                 continue
@@ -3179,13 +3440,38 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     def _process_page(url: str, page: str, trusted: bool = False) -> bool:
         if not page:
             return False
-        if not trusted and not _page_has_name(page):
+        portal_contacts = _portal_contact_details(
+            url,
+            page,
+            agent=agent,
+            location_tokens=location_tokens,
+            location_digits=location_digits,
+        )
+        portal_hit = bool(portal_contacts.get("phones"))
+        if not trusted and not _page_has_name(page) and not portal_hit:
             return False
         page_viable = False
         ph, _, meta, info = extract_struct(page)
         page_title = info.get("title", "")
         domain = _domain(url)
         trusted_hit = trusted or (domain in trusted_domains if domain else False)
+        for entry in portal_contacts.get("phones", []):
+            label = entry.get("label", "")
+            mobile_hint = any(term in label for term in mobile_terms)
+            meta_name = entry.get("name", "")
+            name_match = _names_match(agent, meta_name) if meta_name else False
+            if _register(
+                entry.get("phone", ""),
+                entry.get("source", "portal_struct"),
+                url=url,
+                page_title=page_title,
+                context=entry.get("context", ""),
+                meta_name=meta_name,
+                name_match=name_match,
+                trusted=trusted_hit,
+                mobile_hint=mobile_hint,
+            ):
+                page_viable = True
         for entry in meta:
             entry_type = entry.get("type")
             types = entry_type if isinstance(entry_type, list) else [entry_type]
@@ -3207,13 +3493,15 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 ):
                     page_viable = True
         for anchor in info.get("tel", []):
+            context_val = anchor.get("context", "")
             if _register(
                 anchor.get("phone", ""),
                 "agent_card_dom",
                 url=url,
                 page_title=page_title,
-                context=anchor.get("context", ""),
+                context=context_val,
                 trusted=trusted_hit,
+                mobile_hint=any(term in str(context_val).lower() for term in mobile_terms),
             ):
                 page_viable = True
         low = html.unescape(page.lower())
@@ -3266,42 +3554,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if processed >= 3 and candidates:
             break
 
-    if not candidates:
-        processed = 0
-        for url in priority_portal:
-            if _handle_url(url) and _has_viable_phone_candidate():
-                break
-            if url:
-                processed += 1
-            if processed >= 3 and candidates:
-                break
-
     urls: List[str] = list(priority_urls)
     if not _has_viable_phone_candidate():
-        fallback_query = _fallback_contact_query(agent, state, row_payload)
-        allowed_domains = _allowed_contact_domains(domain_hint or brokerage_hint)
-        search_hits = search_round_robin(
-            [fallback_query],
-            per_query_limit=5,
-            allowed_domains=allowed_domains,
-            engine_limit=10,
+        fallback_urls, _, _ = _contact_search_urls(
+            agent,
+            state,
+            row_payload,
+            domain_hint=domain_hint or brokerage_hint,
+            brokerage=brokerage_hint,
+            limit=5,
         )
-        fallback_urls: List[str] = []
-        for attempts in search_hits:
-            for _, items in attempts:
-                for it in items:
-                    link = it.get("link", "")
-                    if not link or _domain(link) in PORTAL_DOMAINS:
-                        continue
-                    if link in fallback_urls:
-                        continue
-                    fallback_urls.append(link)
-                    if len(fallback_urls) >= 5:
-                        break
-                if len(fallback_urls) >= 5:
-                    break
-            if len(fallback_urls) >= 5:
-                break
         urls.extend(fallback_urls)
         if fallback_urls:
             trusted_domains.update(_build_trusted_domains(agent, fallback_urls))
@@ -3421,9 +3683,15 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 info["direct_ok"] = direct_cache[number]
                 if preferred_source == "cse_contact" and info["direct_ok"] is False:
                     info["direct_ok"] = None
-            if info.get("direct_ok") is False and not info.get("template_penalized"):
-                info["score"] -= 2.0
-                info["template_penalized"] = True
+        if info.get("direct_ok") is False and not info.get("template_penalized"):
+            info["score"] -= 2.0
+            info["template_penalized"] = True
+        if (
+            info.get("office_flag_rapid")
+            and info.get("direct_ok") is False
+            and info.get("sources", set()) & {"rapid_contact", "rapid_listed_by"}
+        ):
+            continue
         line_info = get_line_info(number)
         if not line_info.get("valid"):
             LOG.debug("PHONE DROP invalid number: %s", number)
@@ -3465,6 +3733,18 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             best_non_office_mobile_score = info["score"]
             best_non_office_mobile_number = number
             best_non_office_mobile_source = source
+
+    if best_number:
+        candidate_info = candidates.get(best_number, {})
+        if (
+            candidate_info.get("office_flag_rapid")
+            and candidate_info.get("direct_ok") is False
+            and candidate_info.get("sources", set()) & {"rapid_contact", "rapid_listed_by"}
+        ):
+            best_number = ""
+            best_score = float("-inf")
+            best_source = ""
+            best_is_mobile = False
 
     other_viable_candidates = [
         (num, info)
@@ -3705,6 +3985,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 if not raw:
                     continue
                 cleaned = clean_email(raw) or raw
+                if _is_generic_email(cleaned) and not _email_matches_name(agent, cleaned):
+                    continue
                 return cleaned
         return ""
 
@@ -3812,12 +4094,16 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             info["score"] += 0.35
             info["identity_hits"] += 1
             info["identity_sources"].add("trusted_domain")
-        if is_generic and not matches_agent and not info["generic_penalized"]:
+        if is_generic and not matches_agent and not trusted_domain and not info["generic_penalized"]:
             info["score"] -= 0.25
             info["generic_penalized"] = True
         if source in IDENTITY_SOURCES and source not in info["identity_sources"]:
             info["identity_sources"].add(source)
             info["identity_hits"] += 1
+        if source == "jsonld_person" and (matches_agent or (meta_name and _names_match(agent, meta_name))):
+            info["score"] += 0.2
+        elif source == "mailto" and (matches_agent or (meta_name and _names_match(agent, meta_name))):
+            info["score"] += 0.1
         if context:
             info["contexts"].append(context.lower())
         if page_title:
@@ -3927,13 +4213,32 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             return
         dom = _domain(url)
         domain_hint_hit = bool(domain_hint and dom.endswith(domain_hint.lower()))
-        if not _page_has_name(page, domain_hint_hit=domain_hint_hit):
+        portal_contacts = _portal_contact_details(
+            url,
+            page,
+            agent=agent,
+            location_tokens=location_tokens,
+            location_digits=location_digits,
+        )
+        portal_hit = bool(portal_contacts.get("emails"))
+        if not _page_has_name(page, domain_hint_hit=domain_hint_hit) and not portal_hit:
             return
         _, ems, meta, info = extract_struct(page)
         page_title = info.get("title", "")
         seen: Set[str] = set()
         domain = dom
         trusted_hit = domain in trusted_domains or domain_hint_hit
+        for entry in portal_contacts.get("emails", []):
+            meta_name = entry.get("name", "")
+            _register(
+                entry.get("email", ""),
+                entry.get("source", "portal_struct"),
+                url=url,
+                page_title=page_title,
+                context=entry.get("context", ""),
+                meta_name=meta_name,
+                trusted=trusted_hit,
+            )
         if domain in BROKERAGE_EMAIL_DOMAINS:
             for mail in _extract_remax_emails(page):
                 if mail in seen:
@@ -4024,54 +4329,52 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if processed >= 4 and candidates:
             break
 
-    if not candidates:
-        processed = 0
-        for url in priority_portal:
-            dom = _domain(url)
-            page, _ = fetch_contact_page(url)
-            if not page:
-                if _blocked(dom):
-                    blocked_domains.add(dom)
-                continue
-            _process_page(url, page)
-            if _has_viable_email_candidate():
-                break
-            processed += 1
-            if processed >= 4 and candidates:
-                break
-
     urls: List[str] = list(priority_urls)
     if not _has_viable_email_candidate():
-        fallback_query = _fallback_contact_query(agent, state, row_payload)
-        allowed_domains = _allowed_contact_domains(domain_hint or brokerage)
-        search_hits = search_round_robin(
-            [fallback_query],
-            per_query_limit=5,
-            allowed_domains=allowed_domains,
-            engine_limit=10,
+        fallback_urls, search_empty, cse_status = _contact_search_urls(
+            agent,
+            state,
+            row_payload,
+            domain_hint=domain_hint or brokerage,
+            brokerage=brokerage,
+            limit=5,
         )
-        fallback_urls: List[str] = []
-        for attempts in search_hits:
-            for _, items in attempts:
-                for it in items:
-                    link = it.get("link", "")
-                    if not link or _domain(link) in PORTAL_DOMAINS:
-                        continue
-                    if link in fallback_urls:
-                        continue
-                    fallback_urls.append(link)
-                    if len(fallback_urls) >= 5:
-                        break
-                if len(fallback_urls) >= 5:
-                    break
-            if len(fallback_urls) >= 5:
-                break
         urls.extend(fallback_urls)
         if fallback_urls:
             trusted_domains.update(_build_trusted_domains(agent, fallback_urls))
-        if not any(items for attempts in search_hits for _, items in attempts):
+        if search_empty:
             cse_status = _cse_last_state
             cse_rate_limited = cse_status in {"throttled", "blocked"}
+            if ENABLE_SYNTH_EMAIL_FALLBACK:
+                synth_domains: List[str] = []
+                if domain_hint:
+                    synth_domains.append(domain_hint)
+                guessed_dom = _guess_domain_from_brokerage(brokerage)
+                if guessed_dom:
+                    synth_domains.append(guessed_dom)
+                for dom in synth_domains:
+                    synthetic_candidates = _synth_from_tokens(agent, {dom})
+                    if synthetic_candidates:
+                        guess = synthetic_candidates[0]
+                        guess_dom = guess.split("@", 1)[1] if "@" in guess else dom
+                        _register(
+                            guess,
+                            "synthetic_pattern",
+                            url=f"https://{guess_dom}" if guess_dom else "",
+                            trusted=True,
+                        )
+                        break
+                else:
+                    synthetic_candidates = _synth_from_tokens(agent, set(synth_domains))
+                    if synthetic_candidates:
+                        guess = synthetic_candidates[0]
+                        dom = guess.split("@", 1)[1] if "@" in guess else ""
+                        _register(
+                            guess,
+                            "synthetic_pattern",
+                            url=f"https://{dom}" if dom else "",
+                            trusted=True,
+                        )
     urls = list(dict.fromkeys(urls))
     if len(urls) > MAX_CONTACT_URLS:
         urls = urls[:MAX_CONTACT_URLS]
@@ -4241,6 +4544,17 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             for tok in tokens
         )
         generic_only = info.get("generic") and not has_non_generic_candidate
+        strong_identity = (
+            identity_hits >= 1
+            and info.get("best_source") == "jsonld_person"
+            and (
+                domain_contains_agent
+                or domain_hint_hit
+                or brokerage_domain_ok
+                or brokerage_hit
+                or context_match
+            )
+        )
         fallback_ok = (
             agent_match
             or identity_hits >= 2
@@ -4249,6 +4563,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             or domain_hint_hit
             or brokerage_hit
             or brokerage_domain_ok
+            or strong_identity
             or (
                 generic_only
                 and (

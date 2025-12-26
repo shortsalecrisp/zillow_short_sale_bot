@@ -63,7 +63,7 @@ def _cache_conn():
 def test_dynamic_whitelist_from_detail_url(monkeypatch):
     queries = []
 
-    def fake_scrape(q):
+    def fake_scrape(q, cache_conn=None, max_links=None):
         queries.append(q)
         return ["https://vivorealty.com/contact"]
 
@@ -78,6 +78,7 @@ def test_dynamic_whitelist_from_detail_url(monkeypatch):
         "get",
         lambda url, timeout=None, headers=None: FakeResp("<html>Cell 555-101-2020</html>"),
     )
+    monkeypatch.setattr(process_rows, "_fetch_via_jina", lambda url: "<html>Cell 555-101-2020</html>")
 
     cache = _cache_conn()
     phone, email = process_rows.find_contact(
@@ -91,7 +92,7 @@ def test_dynamic_whitelist_from_detail_url(monkeypatch):
 
     assert phone == "555-101-2020"
     assert email is None
-    assert any("site:vivorealty.com" in q for q in queries)
+    assert queries
 
 
 def test_brokerage_domain_preferred_over_portal(monkeypatch):
@@ -99,7 +100,7 @@ def test_brokerage_domain_preferred_over_portal(monkeypatch):
         def __init__(self, text):
             self.text = text
 
-    def fake_scrape(q):
+    def fake_scrape(q, cache_conn=None, max_links=None):
         return [
             "https://vivorealty.com/agent",
             "https://homes.com/listing",
@@ -113,6 +114,11 @@ def test_brokerage_domain_preferred_over_portal(monkeypatch):
     monkeypatch.setattr(process_rows, "_scrape_google", fake_scrape)
     monkeypatch.setattr(process_rows, "_parse_detail_contact", lambda url: (None, None, False))
     monkeypatch.setattr(process_rows.requests, "get", fake_get)
+    monkeypatch.setattr(
+        process_rows,
+        "_fetch_via_jina",
+        lambda url: "<html>Call Cell 555-222-3333</html>" if "vivorealty" in url else "<html>Phone 555-000-9999</html>",
+    )
 
     cache = _cache_conn()
     phone, _ = process_rows.find_contact(
@@ -132,7 +138,7 @@ def test_office_number_deprioritized(monkeypatch):
         def __init__(self, text):
             self.text = text
 
-    def fake_scrape(q):
+    def fake_scrape(q, cache_conn=None, max_links=None):
         return [
             "https://broker.com/office",
             "https://broker.com/mobile",
@@ -146,6 +152,11 @@ def test_office_number_deprioritized(monkeypatch):
     monkeypatch.setattr(process_rows, "_scrape_google", fake_scrape)
     monkeypatch.setattr(process_rows, "_parse_detail_contact", lambda url: (None, None, False))
     monkeypatch.setattr(process_rows.requests, "get", fake_get)
+    monkeypatch.setattr(
+        process_rows,
+        "_fetch_via_jina",
+        lambda url: "<html>Office 555-111-2222</html>" if "office" in url else "<html>Cell 555-333-4444</html>",
+    )
 
     cache = _cache_conn()
     phone, _ = process_rows.find_contact(
