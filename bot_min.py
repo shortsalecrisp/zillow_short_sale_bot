@@ -12,7 +12,7 @@ import threading
 import importlib.util
 from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote, urljoin
 
 import time, random
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
@@ -660,6 +660,7 @@ SEARCH_BACKOFF_RANGE = (
     float(os.getenv("SEARCH_BACKOFF_MAX", "1.2")),
 )
 SEARCH_TIMEOUT_TRIP = int(os.getenv("SEARCH_TIMEOUT_TRIP", "2"))
+MAX_SEARCH_QUERIES = 3
 _SEARCH_CIRCUIT: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"timeouts": 0, "disabled": False})
 
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=GOOGLE_CONCURRENCY)
@@ -1552,6 +1553,41 @@ def _brokerage_contact_urls(agent: str, brokerage: str, domain_hint: str = "") -
     return list(dict.fromkeys(urls))
 
 
+def _extract_jsonld_contacts_first(
+    html_text: str,
+    source_url: str,
+    *,
+    agent: str = "",
+    row_payload: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], bool, bool, Any]:
+    candidates: List[Dict[str, Any]] = []
+    agent_hit = False
+    contact_found = False
+    entries, soup = _jsonld_person_contacts(html_text)
+    sameas_links: List[str] = []
+    for entry in entries:
+        meta_name = entry.get("name", "")
+        if meta_name:
+            agent_hit = agent_hit or _names_match(agent, meta_name)
+        phones = entry.get("phones", [])
+        emails = entry.get("emails", [])
+        sameas_links.extend(entry.get("sameas", []))
+        if not phones and not emails:
+            continue
+        contact_found = True
+        candidates.append(
+            {
+                "source_url": source_url,
+                "phones": [p for p in phones if p and valid_phone(p)],
+                "emails": [e for e in emails if e and ok_email(e)],
+                "evidence_snippet": "jsonld Person",
+            }
+        )
+    if row_payload is not None:
+        _record_sameas_links(row_payload, sameas_links)
+    return candidates, agent_hit, contact_found, soup
+
+
 def _extract_structured_candidates(html_text: str, source_url: str) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     if not html_text:
@@ -2026,6 +2062,121 @@ def _candidate_quality(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _plausible_agent_url(link: str, agent: str, brokerage: str = "", domain_hint: str = "") -> bool:
+    if not link:
+        return False
+    parsed = urlparse(link)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    agent_tokens = [re.sub(r"[^a-z0-9]", "", part.lower()) for part in agent.split() if part.strip()]
+    brokerage_slug = re.sub(r"[^a-z0-9]", "", brokerage.lower()) if brokerage else ""
+    domain_hint_slug = re.sub(r"[^a-z0-9]", "", domain_hint.lower()) if domain_hint else ""
+    directory_terms = (
+        "agent",
+        "agents",
+        "team",
+        "our-team",
+        "people",
+        "realtor",
+        "staff",
+        "directory",
+    )
+    real_estate_terms = (
+        "realty",
+        "realestate",
+        "realtor",
+        "homes",
+        "properties",
+        "estate",
+        "broker",
+        "mls",
+        "kw.com",
+        "kellerwilliams",
+        "compass",
+        "remax",
+    )
+    if any(tok and tok in host for tok in agent_tokens):
+        return True
+    if any(tok and tok in path for tok in agent_tokens):
+        return True
+    if brokerage_slug and (brokerage_slug in host or brokerage_slug in path):
+        return True
+    if domain_hint_slug and (domain_hint_slug in host or domain_hint_slug in path):
+        return True
+    if host in PORTAL_DOMAINS:
+        return True
+    if any(term in path for term in directory_terms):
+        return True
+    if any(term in host for term in real_estate_terms):
+        return True
+    if path.count("/") <= 1 and (brokerage_slug or any(term in host for term in real_estate_terms)):
+        return True
+    return False
+
+
+def _looks_directory_page(url: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path.strip("/").lower()
+    if not path or path in {"", "home", "index"}:
+        return True
+    return any(term in path for term in ("agents", "agent", "team", "our-team", "realtor", "people", "staff", "directory"))
+
+
+def _page_mentions_agent(text: str, agent: str, soup: Any = None) -> bool:
+    tokens = [part.lower() for part in agent.split() if len(part) > 1]
+    if not tokens:
+        return False
+    low = text.lower()
+    hits = sum(1 for tok in tokens if tok in low)
+    if hits >= max(1, len(tokens) - 1):
+        return True
+    if soup and soup.title and soup.title.string:
+        title_low = soup.title.string.lower()
+        hits = sum(1 for tok in tokens if tok in title_low)
+        if hits >= max(1, len(tokens) - 1):
+            return True
+    return False
+
+
+def _discover_agent_links(
+    soup: Any,
+    base_url: str,
+    agent: str,
+    *,
+    brokerage: str = "",
+    include_predictable: bool = False,
+    limit: int = 10,
+) -> Set[str]:
+    discovered: Set[str] = set()
+    parsed = urlparse(base_url)
+    root = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+    if include_predictable and root:
+        for path in ("/agents/", "/agent/", "/our-team/", "/team/", "/realtors/", "/people/"):
+            discovered.add(urljoin(root, path))
+    if not soup or not BeautifulSoup:
+        return set(list(discovered)[:limit])
+    agent_tokens = [tok.lower() for tok in agent.split() if tok]
+    brokerage_slug = re.sub(r"[^a-z0-9]", "", brokerage.lower()) if brokerage else ""
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "")
+        if not href:
+            continue
+        full = urljoin(base_url, href)
+        path = urlparse(full).path.lower()
+        text = a.get_text(" ", strip=True).lower()
+        if _plausible_agent_url(full, agent, brokerage, brokerage) or any(tok and (tok in text or tok in path) for tok in agent_tokens):
+            discovered.add(full)
+            continue
+        if brokerage_slug and brokerage_slug in path:
+            discovered.add(full)
+            continue
+        if any(term in path for term in ("agent", "agents", "team", "our-team", "realtor", "people", "staff")):
+            discovered.add(full)
+    if len(discovered) > limit:
+        discovered = set(list(discovered)[:limit])
+    return discovered
+
+
 def _contact_cse_queries(
     agent: str,
     state: str,
@@ -2082,7 +2233,7 @@ def _contact_search_urls(
 
     Returns (urls, search_empty, cse_status).
     """
-    allowed_domains = _allowed_contact_domains(domain_hint or brokerage)
+    allowed_domains = None
     strict_queries, relaxed_queries = _contact_cse_queries(
         agent,
         state,
@@ -2091,6 +2242,16 @@ def _contact_search_urls(
         domain_hint=domain_hint,
     )
     brokerage_domain = _domain(domain_hint or brokerage)
+    stop_at = max(1, min(3, limit))
+    query_budget = MAX_SEARCH_QUERIES
+
+    def _consume_budget(queries: List[str]) -> List[str]:
+        nonlocal query_budget
+        if query_budget <= 0:
+            return []
+        allowed = queries[: query_budget]
+        query_budget -= len(allowed)
+        return allowed
 
     def _collect_urls(
         queries: List[str],
@@ -2116,11 +2277,10 @@ def _contact_search_urls(
                     dom = _domain(link)
                     if (
                         not link
-                        or dom in PORTAL_DOMAINS
                         or dom in _CONTACT_DENYLIST
                         or link in collected
                         or link in existing
-                    ):
+                    ) or not _plausible_agent_url(link, agent, brokerage, domain_hint):
                         if dom in _CONTACT_DENYLIST:
                             _mark_block(dom, reason="denylist")
                         continue
@@ -2128,6 +2288,8 @@ def _contact_search_urls(
                     existing.add(link)
                     if len(collected) >= limit:
                         break
+                if len(collected) >= stop_at:
+                    break
                 if len(collected) >= limit:
                     break
             if len(collected) >= limit:
@@ -2138,9 +2300,10 @@ def _contact_search_urls(
         fallback_urls: List[str] = []
         search_empty = True
         seen_links: Set[str] = set()
-        if strict_queries:
+        strict_set = _consume_budget(strict_queries)
+        if strict_set:
             strict_urls, strict_empty = _collect_urls(
-                strict_queries,
+                strict_set,
                 per_query_limit=limit,
                 current_allowed=current_allowed,
                 existing=seen_links,
@@ -2148,14 +2311,17 @@ def _contact_search_urls(
             fallback_urls.extend(strict_urls)
             if not strict_empty:
                 search_empty = False
+            if len(fallback_urls) >= stop_at:
+                return fallback_urls[:stop_at], False, _cse_last_state
 
         cse_status = _cse_last_state
         blocked_search = cse_status in {"blocked", "throttled"}
         if not fallback_urls and blocked_search:
             search_empty = False
-        if not fallback_urls and relaxed_queries and not blocked_search:
+        relaxed_set = _consume_budget(relaxed_queries) if not blocked_search else []
+        if not fallback_urls and relaxed_set:
             relaxed_urls, relaxed_empty = _collect_urls(
-                relaxed_queries,
+                relaxed_set,
                 per_query_limit=limit - len(fallback_urls),
                 current_allowed=current_allowed,
                 existing=seen_links,
@@ -2163,14 +2329,21 @@ def _contact_search_urls(
             fallback_urls.extend(relaxed_urls)
             if not relaxed_empty:
                 search_empty = False
-        if len(fallback_urls) < limit and _cse_last_state in {"blocked", "disabled", "no_results", "throttled"}:
+            if len(fallback_urls) >= stop_at:
+                return fallback_urls[:stop_at], False, cse_status
+        if (
+            len(fallback_urls) < stop_at
+            and query_budget > 0
+            and _cse_last_state in {"blocked", "disabled", "no_results", "throttled"}
+        ):
             ddg_queries = _dedupe_queries(
                 [
                     _compact_tokens(f'"{agent}"', state, "contact phone"),
                     _compact_tokens(f'"{agent}"', brokerage, state, "mobile contact"),
                 ]
             )
-            for q in ddg_queries:
+            for q in ddg_queries[:query_budget]:
+                query_budget -= 1
                 hits = duckduckgo_search(
                     q,
                     limit=limit - len(fallback_urls),
@@ -2183,19 +2356,21 @@ def _contact_search_urls(
                     dom = _domain(link)
                     if (
                         not link
-                        or dom in PORTAL_DOMAINS
                         or dom in _CONTACT_DENYLIST
                         or link in fallback_urls
                         or link in seen_links
+                        or not _plausible_agent_url(link, agent, brokerage, domain_hint)
                     ):
                         if dom in _CONTACT_DENYLIST:
                             _mark_block(dom, reason="denylist")
                         continue
-                fallback_urls.append(link)
-                seen_links.add(link)
-                if len(fallback_urls) >= limit:
+                    fallback_urls.append(link)
+                    seen_links.add(link)
+                    if len(fallback_urls) >= stop_at:
+                        break
+                if len(fallback_urls) >= stop_at:
                     break
-                if len(fallback_urls) >= limit:
+                if len(fallback_urls) >= stop_at:
                     break
 
         if not fallback_urls and not blocked_search:
@@ -2233,8 +2408,12 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     candidates: List[Dict[str, Any]] = []
     headless_budget = HEADLESS_CONTACT_BUDGET
 
-    def _collect_from_urls(urls_to_fetch: Iterable[str], *, prefer_headless: bool = False) -> None:
+    def _collect_from_urls(
+        urls_to_fetch: Iterable[str], *, prefer_headless: bool = False
+    ) -> Tuple[Set[str], bool]:
         nonlocal headless_budget
+        discovered: Set[str] = set()
+        agent_seen = False
         for url in urls_to_fetch:
             if not url:
                 continue
@@ -2261,8 +2440,48 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                 fetched = fetch_text_cached(url)
             text = fetched.get("extracted_text", "")
             final_url = fetched.get("final_url") or url
-            candidates.extend(_extract_structured_candidates(text, final_url))
-            candidates.extend(_extract_candidates_from_text(text, final_url))
+            if not text:
+                continue
+            jsonld_cands, jsonld_hit, jsonld_contact, soup = _extract_jsonld_contacts_first(
+                text, final_url, agent=agent, row_payload=row_payload
+            )
+            if jsonld_cands:
+                candidates.extend(jsonld_cands)
+            agent_seen = agent_seen or jsonld_hit
+            if jsonld_contact:
+                discovered.update(
+                    _discover_agent_links(
+                        soup,
+                        final_url,
+                        agent,
+                        brokerage=brokerage,
+                        include_predictable=_looks_directory_page(final_url),
+                    )
+                )
+                continue
+            structured_candidates = _extract_structured_candidates(text, final_url)
+            if structured_candidates:
+                candidates.extend(structured_candidates)
+            text_candidates = _extract_candidates_from_text(text, final_url)
+            if text_candidates:
+                candidates.extend(text_candidates)
+            if not soup and BeautifulSoup:
+                try:
+                    soup = BeautifulSoup(text, "html.parser")
+                except Exception:
+                    soup = None
+            discovered.update(
+                _discover_agent_links(
+                    soup,
+                    final_url,
+                    agent,
+                    brokerage=brokerage,
+                    include_predictable=_looks_directory_page(final_url),
+                )
+            )
+            if _page_mentions_agent(text, agent, soup):
+                agent_seen = True
+        return discovered, agent_seen
 
     # RapidAPI emails are trusted and accepted immediately.
     zpid = str(row_payload.get("zpid", ""))
@@ -2287,9 +2506,38 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
             "best_email_evidence": "rapidapi listing contact",
         }
 
-    _collect_from_urls(urls[:max(1, HEADLESS_CONTACT_BUDGET)], prefer_headless=True)
-    if len(urls) > HEADLESS_CONTACT_BUDGET:
-        _collect_from_urls(urls[HEADLESS_CONTACT_BUDGET:])
+    pending_urls: deque[str] = deque(urls[:MAX_CONTACT_URLS])
+    seen_urls: Set[str] = set()
+    agent_page_seen = False
+
+    def _enqueue(new_urls: Iterable[str]) -> None:
+        for nu in new_urls:
+            if not nu or nu in seen_urls or nu in pending_urls:
+                continue
+            if len(seen_urls) + len(pending_urls) >= MAX_CONTACT_URLS:
+                break
+            pending_urls.append(nu)
+
+    while pending_urls and len(seen_urls) < MAX_CONTACT_URLS:
+        batch: List[str] = []
+        while pending_urls and len(batch) < max(1, HEADLESS_CONTACT_BUDGET):
+            next_url = pending_urls.popleft()
+            if next_url in seen_urls:
+                continue
+            seen_urls.add(next_url)
+            batch.append(next_url)
+        if not batch:
+            break
+        discovered, seen_agent = _collect_from_urls(batch, prefer_headless=True)
+        agent_page_seen = agent_page_seen or seen_agent
+        ranked_new = _rank_urls(
+            discovered,
+            agent,
+            brokerage,
+            domain_hint=domain_hint,
+            limit=MAX_CONTACT_URLS,
+        )
+        _enqueue(ranked_new)
     quality = _candidate_quality(candidates)
     needs_fallback = (
         (quality["phones_found"] == 0 and quality["emails_found"] == 0)
@@ -2308,12 +2556,57 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
             brokerage=brokerage,
             limit=5,
         )
-        _collect_from_urls(_rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=5))
+        ranked_fallback = _rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=5)
+        _enqueue(ranked_fallback)
+        while pending_urls and len(seen_urls) < MAX_CONTACT_URLS:
+            batch: List[str] = []
+            while pending_urls and len(batch) < max(1, HEADLESS_CONTACT_BUDGET):
+                nxt = pending_urls.popleft()
+                if nxt in seen_urls:
+                    continue
+                seen_urls.add(nxt)
+                batch.append(nxt)
+            if not batch:
+                break
+            discovered, seen_agent = _collect_from_urls(batch, prefer_headless=True)
+            agent_page_seen = agent_page_seen or seen_agent
+            ranked_new = _rank_urls(
+                discovered,
+                agent,
+                brokerage,
+                domain_hint=domain_hint,
+                limit=MAX_CONTACT_URLS,
+            )
+            _enqueue(ranked_new)
+
+    if agent_page_seen and not candidates:
+        domain_pool = {
+            _domain(u)
+            for u in seen_urls
+            if _domain(u) and _domain(u) not in PORTAL_DOMAINS and _domain(u) not in _CONTACT_DENYLIST
+        }
+        hint_domain = _domain(domain_hint or brokerage)
+        if hint_domain:
+            domain_pool.add(hint_domain)
+        if not domain_pool:
+            domain_pool = {_domain(u) for u in seen_urls if _domain(u)}
+        synth_emails = _synth_from_tokens(agent, domain_pool)
+        for email in synth_emails:
+            candidates.append(
+                {
+                    "source_url": next(iter(seen_urls), ""),
+                    "phones": [],
+                    "emails": [email],
+                    "evidence_snippet": "synthetic web low confidence",
+                }
+            )
 
     result = rerank_contact_candidates(
         candidates, agent, brokerage_domain=brokerage_domain
     )
     if (not result.get("best_email") and not result.get("best_phone")) and candidates:
+        result = _apply_phone_type_boost(_best_effort_contact(candidates))
+    if agent_page_seen and (not result.get("best_email") and not result.get("best_phone")) and candidates:
         result = _apply_phone_type_boost(_best_effort_contact(candidates))
     if not result.get("best_email") and not result.get("best_phone"):
         blocked_state = {
