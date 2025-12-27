@@ -49,7 +49,21 @@ _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
 
 _DEFAULT_TIMEOUT = 25
-_PROXY_TARGETS = {"zillow.com", "www.zillow.com", "kw.com", "kellerwilliams.com"}
+_PROXY_TARGETS = {
+    "zillow.com",
+    "www.zillow.com",
+    "kw.com",
+    "kellerwilliams.com",
+    "facebook.com",
+    "www.facebook.com",
+    "instagram.com",
+    "www.instagram.com",
+    "linkedin.com",
+    "www.linkedin.com",
+    "remax.com",
+    "coldwellbankerhomes.com",
+    "compass.com",
+}
 
 def _parse_proxy_pool(env_name: str, fallback: str = "") -> List[str]:
     raw = os.getenv(env_name, fallback) or ""
@@ -69,7 +83,7 @@ _ACCEPT_LANGUAGE_POOL = [
 HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "12000"))
 HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
-HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "2"))
+HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
 
 _CONNECTION_ERRORS = (
     req_exc.ConnectionError,
@@ -917,7 +931,8 @@ def _proxy_for_domain(domain: str) -> str:
     dom = _domain(domain)
     if not _PROXY_POOL or not dom:
         return ""
-    if dom in _PROXY_TARGETS or any(dom.endswith(t) for t in _PROXY_TARGETS):
+    proxy_targets = set(_PROXY_TARGETS) | set(CONTACT_SITE_PRIORITY) | set(ALT_PHONE_SITES) | SOCIAL_DOMAINS
+    if dom in proxy_targets or any(dom.endswith(t) for t in proxy_targets):
         if dom.endswith("kw.com") or dom.endswith("kellerwilliams.com"):
             pool = _MOBILE_PROXIES or _PROXY_POOL
         else:
@@ -1426,12 +1441,136 @@ def _rank_urls(
     return [u for _, u in scored[:limit]]
 
 
+def _slugify_agent(agent: str) -> str:
+    tokens = [re.sub(r"[^a-z0-9]", "", part.lower()) for part in agent.split() if part.strip()]
+    tokens = [tok for tok in tokens if tok]
+    return "-".join(tokens)
+
+
+def _brokerage_contact_urls(agent: str, brokerage: str, domain_hint: str = "") -> List[str]:
+    if not (domain_hint or brokerage):
+        return []
+    domain = _domain(domain_hint or _infer_domain_from_text(brokerage) or _guess_domain_from_brokerage(brokerage))
+    if not domain:
+        return []
+    base = f"https://{domain}".rstrip("/")
+    slug = _slugify_agent(agent)
+    slug_variants = [slug] if slug else []
+    if slug and "-" in slug:
+        slug_variants.append(slug.replace("-", ""))
+    paths = [
+        "/agents/",
+        "/agents",
+        "/our-team/",
+        "/our-team",
+        "/team/",
+        "/team",
+    ]
+    for sv in slug_variants:
+        paths.extend(
+            [
+                f"/agent/{sv}",
+                f"/agents/{sv}",
+                f"/our-team/{sv}",
+            ]
+        )
+    urls = [f"{base}{p}" for p in paths]
+    return list(dict.fromkeys(urls))
+
+
+def _extract_structured_candidates(html_text: str, source_url: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    if not html_text:
+        return candidates
+    phones, mails, meta, info = extract_struct(html_text)
+    seen: Set[Tuple[str, str]] = set()
+
+    def _add(phone_list: List[str], email_list: List[str], evidence: str) -> None:
+        nonlocal seen
+        for ph in phone_list:
+            if not (ph and valid_phone(ph)):
+                continue
+            key = ("phone", ph)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "source_url": source_url,
+                    "phones": [ph],
+                    "emails": [],
+                    "evidence_snippet": evidence,
+                }
+            )
+        for em in email_list:
+            cleaned = clean_email(em)
+            if not (cleaned and ok_email(cleaned)):
+                continue
+            key = ("email", cleaned)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "source_url": source_url,
+                    "phones": [],
+                    "emails": [cleaned],
+                    "evidence_snippet": evidence,
+                }
+            )
+
+    for anchor in info.get("tel", []):
+        _add([anchor.get("phone", "")], [], anchor.get("context", ""))
+    for anchor in info.get("mailto", []):
+        _add([], [anchor.get("email", "")], anchor.get("context", ""))
+
+    if phones or mails:
+        _add(phones, mails, info.get("title") or "structured contact")
+
+    for entry in meta:
+        entry_phones = entry.get("phones", [])
+        entry_emails = entry.get("emails", [])
+        if not entry_phones and not entry_emails:
+            continue
+        context = entry.get("name") or entry.get("type") or "jsonld"
+        _add(entry_phones, entry_emails, str(context))
+    return candidates
+
+
 # ───────────────────── contact candidate extraction & reranking ─────────────────────
 _OPENAI_SPEC = importlib.util.find_spec("openai")
 if _OPENAI_SPEC:
     import openai  # type: ignore
 else:
     openai = None  # type: ignore
+
+
+def _authority_contact_urls(
+    agent: str, state: str, brokerage: str, domain_hint: str = "", limit: int = 4
+) -> List[str]:
+    queries = _dedupe_queries(
+        [
+            _compact_tokens(f'"{agent}"', state, "real estate license lookup"),
+            _compact_tokens(f'"{agent}"', state, "real estate commission phone email"),
+            _compact_tokens(f'"{agent}"', "REALTOR roster"),
+            _compact_tokens(f'"{agent}"', brokerage, "agent roster"),
+        ]
+    )
+    urls: List[str] = []
+    allowed = {"realtor.com", "nar.realtor"}
+    for q in queries:
+        for item in google_items(q, tries=2):
+            link = item.get("link", "")
+            if not link or link in urls:
+                continue
+            dom = _domain(link)
+            if dom.endswith(".gov") or dom in allowed:
+                urls.append(link)
+            if len(urls) >= limit:
+                break
+        if len(urls) >= limit:
+            break
+    return urls[:limit]
 
 
 def _candidate_urls(
@@ -1453,6 +1592,14 @@ def _candidate_urls(
             or _infer_domain_from_text(brokerage)
             or _infer_domain_from_text(agent)
         )
+
+    brokerage_domain_hint = domain_hint if brokerage else ""
+    if brokerage and not brokerage_domain_hint:
+        brokerage_domain_hint = _infer_domain_from_text(brokerage) or _guess_domain_from_brokerage(brokerage)
+
+    urls = _brokerage_contact_urls(agent, brokerage, brokerage_domain_hint) + _authority_contact_urls(
+        agent, state, brokerage, domain_hint
+    ) + urls
 
     allowed_domains = _allowed_contact_domains(domain_hint)
     base_query_parts = [f'"{agent}"', "realtor", state, city, postal_code]
@@ -1567,6 +1714,19 @@ def _score_contact_candidate(
     return score
 
 
+def _confidence_with_phone_type(score: float, phone: str) -> Tuple[int, str]:
+    conf = max(0, min(100, int(score * 18)))
+    if not phone:
+        return conf, ""
+    info = get_line_info(phone)
+    phone_type = "mobile" if info.get("mobile") else "landline"
+    if info.get("mobile"):
+        conf = min(100, conf + 15)
+    elif not info.get("valid"):
+        conf = max(10, conf - 10)
+    return conf, phone_type
+
+
 def _heuristic_rerank(
     candidates: List[Dict[str, Any]], *, brokerage_domain: str = ""
 ) -> Dict[str, Any]:
@@ -1595,9 +1755,11 @@ def _heuristic_rerank(
             )
             if score > best_email[1]:
                 best_email = (email, score, url, snippet)
+    phone_conf, phone_type = _confidence_with_phone_type(best_phone[1], best_phone[0])
     return {
         "best_phone": best_phone[0],
-        "best_phone_confidence": max(0, min(100, int(best_phone[1] * 18))),
+        "best_phone_confidence": phone_conf,
+        "best_phone_type": phone_type,
         "best_phone_source_url": best_phone[2],
         "best_phone_evidence": best_phone[3],
         "best_email": best_email[0],
@@ -1605,6 +1767,24 @@ def _heuristic_rerank(
         "best_email_source_url": best_email[2],
         "best_email_evidence": best_email[3],
     }
+
+
+def _apply_phone_type_boost(result: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return result
+    phone = result.get("best_phone", "")
+    if not phone:
+        return result
+    conf = int(result.get("best_phone_confidence", 0) or 0)
+    info = get_line_info(phone)
+    phone_type = "mobile" if info.get("mobile") else "landline"
+    if info.get("mobile"):
+        conf = min(100, conf + 15)
+    elif not info.get("valid"):
+        conf = max(10, conf - 10)
+    result["best_phone_confidence"] = conf
+    result["best_phone_type"] = phone_type
+    return result
 
 
 def _openai_rerank(candidates: List[Dict[str, Any]], agent: str) -> Optional[Dict[str, Any]]:
@@ -1688,8 +1868,45 @@ def rerank_contact_candidates(
         }
     ai_choice = _rina_rerank(candidates, agent)
     if ai_choice:
-        return ai_choice
-    return _heuristic_rerank(candidates, brokerage_domain=brokerage_domain)
+        return _apply_phone_type_boost(ai_choice)
+    return _apply_phone_type_boost(_heuristic_rerank(candidates, brokerage_domain=brokerage_domain))
+
+
+def _best_effort_contact(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    best_phone = ("", 0, "", "")
+    best_email = ("", 0, "", "")
+    for cand in candidates:
+        url = cand.get("source_url", "")
+        snippet = cand.get("evidence_snippet", "")
+        for phone in cand.get("phones", []):
+            if not valid_phone(phone):
+                continue
+            info = get_line_info(phone)
+            conf = 30
+            if info.get("mobile"):
+                conf += 15
+            if not info.get("valid"):
+                conf = max(10, conf - 8)
+            if conf > best_phone[1]:
+                best_phone = (phone, conf, url, snippet)
+        for email in cand.get("emails", []):
+            if not ok_email(email):
+                continue
+            conf = 35
+            if _is_generic_email(email):
+                conf = 20
+            if conf > best_email[1]:
+                best_email = (email, conf, url, snippet)
+    return {
+        "best_phone": best_phone[0],
+        "best_phone_confidence": best_phone[1],
+        "best_phone_source_url": best_phone[2],
+        "best_phone_evidence": best_phone[3],
+        "best_email": best_email[0],
+        "best_email_confidence": best_email[1],
+        "best_email_source_url": best_email[2],
+        "best_email_evidence": best_email[3],
+    }
 
 
 def _candidate_quality(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1813,15 +2030,7 @@ def _contact_search_urls(
             break
 
     cse_status = _cse_last_state
-    if not fallback_urls and cse_status == "no_results":
-        LOG.info(
-            "CSE returned no results for %s %s; skipping fallback scraping to avoid blocks",
-            agent,
-            state,
-        )
-        return [], True, cse_status
-
-    if len(fallback_urls) < limit and _cse_last_state in {"blocked", "disabled"}:
+    if len(fallback_urls) < limit and _cse_last_state in {"blocked", "disabled", "no_results"}:
         ddg_queries = _dedupe_queries(
             [
                 _compact_tokens(f'"{agent}"', state, "contact phone"),
@@ -1860,7 +2069,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
         or _infer_domain_from_text(agent)
     )
     brokerage_domain = _domain(domain_hint or brokerage)
-    urls = _candidate_urls(agent, state, row_payload, domain_hint=domain_hint)
+    urls = list(dict.fromkeys(_candidate_urls(agent, state, row_payload, domain_hint=domain_hint)))
     candidates: List[Dict[str, Any]] = []
     headless_budget = HEADLESS_CONTACT_BUDGET
 
@@ -1885,7 +2094,9 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
             else:
                 fetched = fetch_text_cached(url)
             text = fetched.get("extracted_text", "")
-            candidates.extend(_extract_candidates_from_text(text, fetched.get("final_url") or url))
+            final_url = fetched.get("final_url") or url
+            candidates.extend(_extract_structured_candidates(text, final_url))
+            candidates.extend(_extract_candidates_from_text(text, final_url))
 
     # RapidAPI emails are trusted and accepted immediately.
     zpid = str(row_payload.get("zpid", ""))
@@ -1936,6 +2147,8 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     result = rerank_contact_candidates(
         candidates, agent, brokerage_domain=brokerage_domain
     )
+    if (not result.get("best_email") and not result.get("best_phone")) and candidates:
+        result = _apply_phone_type_boost(_best_effort_contact(candidates))
     if not result.get("best_email") and not result.get("best_phone"):
         blocked_state = {
             _domain(u): _blocked_until.get(_domain(u), 0.0) - time.time()
@@ -2634,6 +2847,23 @@ def build_q_email(
 
     return queries
 
+def _fallback_contact_query(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
+    city = str(row_payload.get("city", "")).strip()
+    brokerage = str(row_payload.get("brokerage") or row_payload.get("brokerageName") or "").strip()
+    domain_hint = _infer_domain_from_text(brokerage) or _guess_domain_from_brokerage(brokerage)
+    tokens = [
+        f'"{agent}"',
+        state,
+        city,
+        brokerage,
+        domain_hint,
+        "mobile",
+        "contact",
+        "phone",
+        "email",
+    ]
+    return " ".join(t for t in tokens if t)
+
 # nickname mapping for email‑matching heuristic
 _NICK_MAP = {
     "bob": "robert", "rob": "robert", "bobby": "robert",
@@ -3258,6 +3488,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     processed_urls: Set[str] = set()
     mirror_hits: Set[str] = set()
     trusted_domains: Set[str] = set()
+    blocked_domains: Set[str] = set()
     search_empty = False
     cse_status = _cse_last_state
     domain_hint = (
