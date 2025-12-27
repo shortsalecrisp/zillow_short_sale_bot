@@ -1789,16 +1789,24 @@ def _contact_search_urls(
         )
     )
 
-    for q in cse_queries:
-        hits = google_cse_search(q, limit=limit, allowed_domains=allowed_domains)
-        cse_status = _cse_last_state
-        if hits:
-            search_empty = False
-        for it in hits:
-            link = it.get("link", "")
-            if not link or _domain(link) in PORTAL_DOMAINS or link in fallback_urls:
-                continue
-            fallback_urls.append(link)
+    rr_results = search_round_robin(
+        cse_queries,
+        per_query_limit=limit,
+        allowed_domains=allowed_domains,
+        engine_limit=limit,
+    )
+
+    for attempts in rr_results:
+        for _, hits in attempts:
+            if hits:
+                search_empty = False
+            for it in hits:
+                link = it.get("link", "")
+                if not link or _domain(link) in PORTAL_DOMAINS or link in fallback_urls:
+                    continue
+                fallback_urls.append(link)
+                if len(fallback_urls) >= limit:
+                    break
             if len(fallback_urls) >= limit:
                 break
         if len(fallback_urls) >= limit:
