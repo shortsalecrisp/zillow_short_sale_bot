@@ -36,12 +36,18 @@ except ImportError:  # pragma: no cover - optional dependency
 else:
     dns = dns.resolver
 
+
+class DomainBlockedError(RuntimeError):
+    """Raised when a domain is blocked for the remainder of the run."""
+
 _session = requests.Session()
 _retries = Retry(
-    total=5, connect=5, read=5,
-    backoff_factor=0.6,
-    status_forcelist=(429, 500, 502, 503, 504),
-    allowed_methods=("GET",),
+    total=0,
+    connect=0,
+    read=0,
+    backoff_factor=0.0,
+    status_forcelist=(),
+    allowed_methods=None,
     raise_on_status=False,
 )
 _adapter = HTTPAdapter(max_retries=_retries)
@@ -97,6 +103,9 @@ _CONNECTION_ERRORS = (
 
 _blocked_until: Dict[str, float] = {}
 _cse_blocked_until: float = 0.0
+_blocked_domains: Dict[str, str] = {}
+_timeout_counts: Dict[str, int] = {}
+_realtor_fetch_seen = False
 cache_p: Dict[str, Any] = {}
 cache_e: Dict[str, Any] = {}
 CONTACT_CACHE_TTL_SECONDS = int(os.getenv("CONTACT_CACHE_TTL_SECONDS", str(24 * 3600)))
@@ -169,33 +178,32 @@ def _http_get(
         attempts += 1
         hdrs = _build_headers()
         proxy_cfg = {"http": proxy, "https": proxy} if proxy else None
-        resp = _session.get(
-            url,
-            params=params,
-            headers=hdrs or None,
-            timeout=timeout,
-            proxies=proxy_cfg,
-        )
+        if dom and dom in _blocked_domains:
+            raise DomainBlockedError(f"blocked: {dom}")
+        if respect_block and dom in _blocked_until and _blocked_until[dom] > time.time():
+            raise DomainBlockedError(f"blocked: {dom}")
+        try:
+            resp = _session.get(
+                url,
+                params=params,
+                headers=hdrs or None,
+                timeout=timeout,
+                proxies=proxy_cfg,
+            )
+        except req_exc.Timeout as exc:
+            _record_domain_timeout(dom)
+            raise
+        except _CONNECTION_ERRORS:
+            _reset_timeout(dom)
+            raise
+        _reset_timeout(dom)
         status = resp.status_code
         if status in (403, 429) and dom:
             block_for = CSE_BLOCK_SECONDS if "googleapis.com" in dom else BLOCK_SECONDS
-            _mark_block(dom, seconds=block_for)
-        if status == 429 and attempts <= 5:
-            ra = resp.headers.get("Retry-After")
-            sleep_s = int(ra) if ra and ra.isdigit() else min(30, 2 ** attempts) + random.uniform(0, 0.5)
-            time.sleep(sleep_s)
-            continue
-        try:
-            resp.raise_for_status()
-        except requests.HTTPError:
-            if status in (403, 429):
-                if attempts < 3:
-                    time.sleep(min(5.0, 1.5 * attempts) + random.uniform(0, 0.35))
-                    continue
-            if attempts <= 1 and status in (500, 502, 503, 504):
-                time.sleep(0.5 + random.uniform(0, 0.25))
-                continue
-            raise
+            reason = f"{status}"
+            _mark_block(dom, seconds=block_for, reason=reason)
+            raise DomainBlockedError(f"{status} received for {dom}")
+        resp.raise_for_status()
         return resp
 
 
@@ -920,15 +928,34 @@ def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
 def _jitter() -> None:
     time.sleep(random.uniform(0.8, 1.5))
 
-def _mark_block(dom: str, *, seconds: float = BLOCK_SECONDS) -> None:
+def _mark_block(dom: str, *, seconds: float = BLOCK_SECONDS, reason: str = "blocked") -> None:
+    if not dom:
+        return
     _blocked_until[dom] = time.time() + seconds
+    _blocked_domains.setdefault(dom, reason)
+
+
+def _reset_timeout(dom: str) -> None:
+    if dom in _timeout_counts:
+        _timeout_counts.pop(dom, None)
+
+
+def _record_domain_timeout(dom: str) -> None:
+    if not dom:
+        return
+    _timeout_counts[dom] = _timeout_counts.get(dom, 0) + 1
+    if _timeout_counts[dom] >= 2:
+        _mark_block(dom, reason="timeouts")
+        raise DomainBlockedError(f"timeout threshold reached for {dom}")
 
 
 def _cse_blocked() -> bool:
     return _blocked("www.googleapis.com") or _cse_blocked_until > time.time()
 
 def _blocked(dom: str) -> bool:
-    return _blocked_until.get(dom, 0.0) > time.time()
+    if not dom:
+        return False
+    return dom in _blocked_domains or _blocked_until.get(dom, 0.0) > time.time()
 
 def _try_textise(dom: str, url: str) -> str:
     try:
@@ -953,16 +980,13 @@ def _domain(host_or_url: str) -> str:
 
 
 def _allowed_contact_domains(domain_hint: str) -> Optional[Set[str]]:
-    allowed = set(SOCIAL_DOMAINS)
-    fallback_domains = set(ALT_PHONE_SITES) | set(CONTACT_SITE_PRIORITY)
+    allowed = set(SOCIAL_DOMAINS) | set(ALT_PHONE_SITES) | set(CONTACT_SITE_PRIORITY)
     dom = _domain(domain_hint)
     if not dom and domain_hint:
         dom = _infer_domain_from_text(domain_hint)
         dom = _domain(dom) if dom else ""
     if dom:
         allowed.add(dom)
-    else:
-        allowed.update(fallback_domains)
     return allowed or None
 
 def _proxy_for_domain(domain: str) -> str:
@@ -992,6 +1016,9 @@ def _should_fetch(url: str, strict: bool = True) -> bool:
     dom = _domain(url)
     if _blocked(dom):
         return False
+    if strict and dom in _CONTACT_DENYLIST:
+        _mark_block(dom, reason="denylist")
+        return False
     return not (_is_banned(dom) and strict)
 
 def fetch_simple(u: str, strict: bool = True):
@@ -999,17 +1026,22 @@ def fetch_simple(u: str, strict: bool = True):
         return None
     dom = _domain(u)
     try:
-        try:
-            r = _http_get(
-                u,
-                timeout=10,
-                headers=_browser_headers(dom),
-                rotate_user_agent=True,
-            )
-        except requests.HTTPError as exc:
-            r = exc.response
-            if r is None:
-                raise
+        r = _http_get(
+            u,
+            timeout=10,
+            headers=_browser_headers(dom),
+            rotate_user_agent=True,
+        )
+    except DomainBlockedError:
+        return None
+    except requests.HTTPError as exc:
+        r = exc.response
+        if r is None:
+            raise
+    except Exception as exc:
+        LOG.debug("fetch_simple error %s on %s", exc, u)
+        return None
+    try:
         if r.status_code == 200:
             return r.text
         if r.status_code in (403, 429):
@@ -1018,8 +1050,8 @@ def fetch_simple(u: str, strict: bool = True):
             txt = _try_textise(dom, u)
             if txt:
                 return txt
-    except Exception as exc:
-        LOG.debug("fetch_simple error %s on %s", exc, u)
+    except DomainBlockedError:
+        return None
     return None
 
 def fetch(u: str, strict: bool = True):
@@ -1038,56 +1070,54 @@ def fetch(u: str, strict: bool = True):
     for url in variants:
         if _blocked(dom):
             return None
-        for _ in range(3):
-            try:
-                try:
-                    r = _http_get(
-                        url,
-                        timeout=10,
-                        headers=_browser_headers(dom),
-                        rotate_user_agent=True,
-                        proxy=proxy_url,
-                    )
-                except requests.HTTPError as exc:
-                    r = exc.response
-                    if r is None:
-                        raise
-            except Exception as exc:
-                METRICS["fetch_error"] += 1
-                LOG.debug("fetch error %s on %s", exc, url)
-                break
+        try:
+            r = _http_get(
+                url,
+                timeout=10,
+                headers=_browser_headers(dom),
+                rotate_user_agent=True,
+                proxy=proxy_url,
+            )
+        except DomainBlockedError:
+            return None
+        except requests.HTTPError as exc:
+            r = exc.response
             if r is None:
+                raise
+        except Exception as exc:
+            METRICS["fetch_error"] += 1
+            LOG.debug("fetch error %s on %s", exc, url)
+            break
+        if r is None:
+            break
+        if r.status_code == 200:
+            if "unusual traffic" in r.text[:700].lower():
+                METRICS["fetch_unusual"] += 1
                 break
-            if r.status_code == 200:
-                if "unusual traffic" in r.text[:700].lower():
-                    METRICS["fetch_unusual"] += 1
-                    break
-                return r.text
-            if r.status_code == 403 and "zillow.com" in url:
-                z403 += 1
-                METRICS["fetch_403"] += 1
-                if z403 >= MAX_ZILLOW_403:
-                    return None
-                _mark_block(dom)
-                break
-            elif r.status_code == 429:
-                ratelimit += 1
-                METRICS["fetch_429"] += 1
-                if ratelimit >= MAX_RATE_429:
-                    _mark_block(dom)
-                    return None
-                break
-            elif r.status_code in (403, 451):
-                _mark_block(dom)
-                txt = _try_textise(dom, u)
-                if txt:
-                    return txt
-                break
-            else:
-                METRICS[f"fetch_other_{r.status_code}"] += 1
-            _jitter()
-            time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
-            backoff *= BACKOFF_FACTOR
+            return r.text
+        if r.status_code == 403 and "zillow.com" in url:
+            z403 += 1
+            METRICS["fetch_403"] += 1
+            if z403 >= MAX_ZILLOW_403:
+                return None
+            _mark_block(dom)
+            break
+        elif r.status_code == 429:
+            ratelimit += 1
+            METRICS["fetch_429"] += 1
+            _mark_block(dom, reason="429")
+            return None
+        elif r.status_code in (403, 451):
+            _mark_block(dom, reason=str(r.status_code))
+            txt = _try_textise(dom, u)
+            if txt:
+                return txt
+            break
+        else:
+            METRICS[f"fetch_other_{r.status_code}"] += 1
+        _jitter()
+        time.sleep(min(backoff, MAX_BACKOFF_SECONDS))
+        backoff *= BACKOFF_FACTOR
     return None
 
 def fetch_simple_relaxed(u: str):
@@ -1101,6 +1131,12 @@ _CONTACT_FETCH_BACKOFFS = (0.0, 2.5, 6.0)
 
 _CONTACT_DOMAIN_LAST_FETCH: Dict[str, float] = {}
 _REALTOR_DOMAINS = {"realtor.com", "www.realtor.com"}
+_CONTACT_DENYLIST = {
+    "forrent.com",
+    "apartmenthomeliving.com",
+    "rent.com",
+    "apartments.com",
+}
 _REALTOR_MAX_RETRIES = int(os.getenv("REALTOR_MAX_RETRIES", "5"))
 _REALTOR_BACKOFF_BASE = float(os.getenv("REALTOR_BACKOFF_BASE", "3.0"))
 _REALTOR_BACKOFF_CAP = float(os.getenv("REALTOR_BACKOFF_CAP", "20.0"))
@@ -2047,8 +2083,6 @@ def _contact_search_urls(
     Returns (urls, search_empty, cse_status).
     """
     allowed_domains = _allowed_contact_domains(domain_hint or brokerage)
-    fallback_urls: List[str] = []
-    search_empty = True
     strict_queries, relaxed_queries = _contact_cse_queries(
         agent,
         state,
@@ -2056,14 +2090,21 @@ def _contact_search_urls(
         brokerage=brokerage,
         domain_hint=domain_hint,
     )
+    brokerage_domain = _domain(domain_hint or brokerage)
 
-    def _collect_urls(queries: List[str], *, per_query_limit: int) -> List[str]:
-        nonlocal search_empty
+    def _collect_urls(
+        queries: List[str],
+        *,
+        per_query_limit: int,
+        current_allowed: Optional[Set[str]],
+        existing: Set[str],
+    ) -> Tuple[List[str], bool]:
         collected: List[str] = []
+        search_empty = True
         rr_results = search_round_robin(
             queries,
             per_query_limit=per_query_limit,
-            allowed_domains=allowed_domains,
+            allowed_domains=current_allowed,
             engine_limit=per_query_limit,
         )
         for attempts in rr_results:
@@ -2072,53 +2113,110 @@ def _contact_search_urls(
                     search_empty = False
                 for it in hits:
                     link = it.get("link", "")
-                    if not link or _domain(link) in PORTAL_DOMAINS or link in fallback_urls or link in collected:
+                    dom = _domain(link)
+                    if (
+                        not link
+                        or dom in PORTAL_DOMAINS
+                        or dom in _CONTACT_DENYLIST
+                        or link in collected
+                        or link in existing
+                    ):
+                        if dom in _CONTACT_DENYLIST:
+                            _mark_block(dom, reason="denylist")
                         continue
                     collected.append(link)
-                    if len(fallback_urls) + len(collected) >= limit:
+                    existing.add(link)
+                    if len(collected) >= limit:
                         break
-                if len(fallback_urls) + len(collected) >= limit:
+                if len(collected) >= limit:
                     break
-            if len(fallback_urls) + len(collected) >= limit:
+            if len(collected) >= limit:
                 break
-        return collected
+        return collected, search_empty
 
-    if strict_queries:
-        fallback_urls.extend(_collect_urls(strict_queries, per_query_limit=limit))
-
-    cse_status = _cse_last_state
-    blocked_search = cse_status in {"blocked", "throttled"}
-    if not fallback_urls and blocked_search:
-        search_empty = False
-    if not fallback_urls and relaxed_queries and not blocked_search:
-        fallback_urls.extend(_collect_urls(relaxed_queries, per_query_limit=limit - len(fallback_urls)))
-    if len(fallback_urls) < limit and _cse_last_state in {"blocked", "disabled", "no_results", "throttled"}:
-        ddg_queries = _dedupe_queries(
-            [
-                _compact_tokens(f'"{agent}"', state, "contact phone"),
-                _compact_tokens(f'"{agent}"', brokerage, state, "mobile contact"),
-            ]
-        )
-        for q in ddg_queries:
-            hits = duckduckgo_search(
-                q,
-                limit=limit - len(fallback_urls),
-                allowed_domains=allowed_domains,
+    def _run_search(current_allowed: Optional[Set[str]]) -> Tuple[List[str], bool, str]:
+        fallback_urls: List[str] = []
+        search_empty = True
+        seen_links: Set[str] = set()
+        if strict_queries:
+            strict_urls, strict_empty = _collect_urls(
+                strict_queries,
+                per_query_limit=limit,
+                current_allowed=current_allowed,
+                existing=seen_links,
             )
-            if hits:
+            fallback_urls.extend(strict_urls)
+            if not strict_empty:
                 search_empty = False
-            for it in hits:
-                link = it.get("link", "")
-                if not link or _domain(link) in PORTAL_DOMAINS or link in fallback_urls:
-                    continue
+
+        cse_status = _cse_last_state
+        blocked_search = cse_status in {"blocked", "throttled"}
+        if not fallback_urls and blocked_search:
+            search_empty = False
+        if not fallback_urls and relaxed_queries and not blocked_search:
+            relaxed_urls, relaxed_empty = _collect_urls(
+                relaxed_queries,
+                per_query_limit=limit - len(fallback_urls),
+                current_allowed=current_allowed,
+                existing=seen_links,
+            )
+            fallback_urls.extend(relaxed_urls)
+            if not relaxed_empty:
+                search_empty = False
+        if len(fallback_urls) < limit and _cse_last_state in {"blocked", "disabled", "no_results", "throttled"}:
+            ddg_queries = _dedupe_queries(
+                [
+                    _compact_tokens(f'"{agent}"', state, "contact phone"),
+                    _compact_tokens(f'"{agent}"', brokerage, state, "mobile contact"),
+                ]
+            )
+            for q in ddg_queries:
+                hits = duckduckgo_search(
+                    q,
+                    limit=limit - len(fallback_urls),
+                    allowed_domains=current_allowed,
+                )
+                if hits:
+                    search_empty = False
+                for it in hits:
+                    link = it.get("link", "")
+                    dom = _domain(link)
+                    if (
+                        not link
+                        or dom in PORTAL_DOMAINS
+                        or dom in _CONTACT_DENYLIST
+                        or link in fallback_urls
+                        or link in seen_links
+                    ):
+                        if dom in _CONTACT_DENYLIST:
+                            _mark_block(dom, reason="denylist")
+                        continue
                 fallback_urls.append(link)
+                seen_links.add(link)
                 if len(fallback_urls) >= limit:
                     break
-            if len(fallback_urls) >= limit:
-                break
+                if len(fallback_urls) >= limit:
+                    break
 
-    if not fallback_urls and not blocked_search:
-        search_empty = True
+        if not fallback_urls and not blocked_search:
+            search_empty = True
+
+        return fallback_urls[:limit], search_empty, cse_status
+
+    def _widen_allowed_domains(current_allowed: Optional[Set[str]]) -> Optional[Set[str]]:
+        widened = set(current_allowed or [])
+        if brokerage_domain:
+            widened.add(brokerage_domain)
+        widened.update({"realtor.com", "nar.realtor"})
+        return widened or None
+
+    fallback_urls, search_empty, cse_status = _run_search(allowed_domains)
+    blocked_search = cse_status in {"blocked", "throttled"}
+    if not fallback_urls and search_empty and not blocked_search:
+        widened_allowed = _widen_allowed_domains(allowed_domains)
+        fallback_urls, search_empty, cse_status = _run_search(widened_allowed)
+        if not fallback_urls and widened_allowed is not None:
+            fallback_urls, search_empty, cse_status = _run_search(None)
 
     return fallback_urls[:limit], search_empty, cse_status
 
@@ -2139,6 +2237,12 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
         nonlocal headless_budget
         for url in urls_to_fetch:
             if not url:
+                continue
+            dom = _domain(url)
+            if dom in _CONTACT_DENYLIST:
+                _mark_block(dom, reason="denylist")
+                continue
+            if _blocked(dom):
                 continue
             fetched: Dict[str, Any] = {}
             use_headless = prefer_headless and headless_budget > 0
@@ -2241,6 +2345,12 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
     if not _should_fetch(url, strict=False):
         return "", False
     dom = _domain(url)
+    if dom in _REALTOR_DOMAINS:
+        global _realtor_fetch_seen
+        if _realtor_fetch_seen:
+            _mark_block(dom, reason="realtor-once")
+            return "", False
+        _realtor_fetch_seen = True
     blocked = False
     proxy_url = _proxy_for_domain(dom)
     tries = len(_CONTACT_FETCH_BACKOFFS)
@@ -2264,7 +2374,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                     return mirror_resp.text, True
             except Exception as exc:
                 LOG.debug("mirror fetch failed %s on %s", exc, mirror)
-        if HEADLESS_ENABLED and sync_playwright:
+        if HEADLESS_ENABLED and sync_playwright and not _blocked(dom):
             rendered = _headless_fetch(url, proxy_url=proxy_url, domain=dom)
             if rendered.strip():
                 LOG.info(
@@ -2296,18 +2406,21 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if delay:
             time.sleep(delay)
         try:
-            try:
-                resp = _http_get(
-                    url,
-                    timeout=10,
-                    headers=_browser_headers(dom),
-                    rotate_user_agent=True,
-                    proxy=proxy_url,
-                )
-            except requests.HTTPError as exc:
-                resp = exc.response
-                if resp is None:
-                    raise
+            resp = _http_get(
+                url,
+                timeout=10,
+                headers=_browser_headers(dom),
+                rotate_user_agent=True,
+                proxy=proxy_url,
+            )
+        except DomainBlockedError:
+            blocked = True
+            _mark_block(dom, reason="blocked")
+            break
+        except requests.HTTPError as exc:
+            resp = exc.response
+            if resp is None:
+                raise
         except Exception as exc:
             LOG.debug("fetch_contact_page error %s on %s", exc, url)
             if isinstance(exc, _CONNECTION_ERRORS):
@@ -2356,6 +2469,9 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
             LOG.warning("BLOCK %s -> abort %s/%s", status, attempt, tries)
             break
         break
+
+    if dom in _REALTOR_DOMAINS:
+        _mark_block(dom, reason="realtor-once")
 
     if blocked:
         html, used_fallback = _fallback("blocked")
@@ -2534,6 +2650,10 @@ def google_cse_search(
         except req_exc.RetryError:
             _mark_cse_block()
             _cse_last_state = "throttled"
+            break
+        except DomainBlockedError:
+            _mark_cse_block()
+            _cse_last_state = "blocked"
             break
         except requests.HTTPError as exc:
             status = getattr(exc.response, "status_code", 0)
