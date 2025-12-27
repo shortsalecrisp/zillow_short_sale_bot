@@ -1728,54 +1728,39 @@ def _candidate_quality(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _fallback_contact_query(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
-    brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
+def _contact_cse_queries(
+    agent: str,
+    state: str,
+    row_payload: Dict[str, Any],
+    *,
+    brokerage: str = "",
+    domain_hint: str = "",
+) -> List[str]:
     city = str(row_payload.get("city", "")).strip()
-    domain_hint = (
-        row_payload.get("domain_hint", "").strip()
-        or _infer_domain_from_text(brokerage)
-        or _infer_domain_from_text(agent)
-    )
-    contact_tokens = "email contact cell mobile direct gmail outlook"
-    parts = [
-        part
-        for part in [
-            f'"{agent}"',
-            "realtor",
-            city,
-            state,
-            brokerage,
-            _domain(domain_hint) if domain_hint else "",
-            contact_tokens,
-        ]
-        if part
-    ]
-    return " ".join(parts)
+    postal_code = str(row_payload.get("zip", "")).strip()
+    agent_norm = _normalize_agent_for_query(agent)
+    broker_domain = _domain(domain_hint) if domain_hint else ""
 
+    def _add(q: str, bucket: List[str]) -> None:
+        q = q.strip()
+        if q and q not in bucket:
+            bucket.append(q)
 
-def _fallback_contact_queries(agent: str, state: str, row_payload: Dict[str, Any]) -> List[str]:
-    """Return enriched fallback queries for contact enrichment/lookup."""
-    base = _fallback_contact_query(agent, state, row_payload)
-    brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
-    domain_hint = (
-        row_payload.get("domain_hint", "").strip()
-        or _infer_domain_from_text(brokerage)
-        or _infer_domain_from_text(agent)
-    )
-    city = str(row_payload.get("city", "")).strip()
-    queries: List[str] = [base]
-    contact_tokens = "email OR phone OR contact cell mobile direct gmail outlook".replace("OR", "")
-    if domain_hint:
-        dom = _domain(domain_hint)
-        queries.append(f'{base} "{dom}" {contact_tokens}')
-        queries.append(f'"{agent}" {dom} {city} {state} contact mobile email')
-    if brokerage:
-        queries.append(f'{base} "{brokerage}" contact cell mobile email')
-    deduped: List[str] = []
-    for q in queries:
-        if q and q not in deduped:
-            deduped.append(q)
-    return deduped
+    queries: List[str] = []
+    base = _compact_tokens(f'"{agent_norm}"', city, state, postal_code)
+    state_base = _compact_tokens(f'"{agent_norm}"', state)
+    broker_base = _compact_tokens(f'"{agent_norm}"', brokerage, state)
+
+    for seed in (base, state_base):
+        if seed:
+            _add(f"{seed} realtor mobile contact", queries)
+            _add(f"{seed} contact phone email", queries)
+    if broker_base:
+        _add(f"{broker_base} contact phone email", queries)
+    if broker_domain:
+        _add(f'"{agent_norm}" {state} site:{broker_domain} contact phone email', queries)
+
+    return queries
 
 
 def _contact_search_urls(
@@ -1791,46 +1776,71 @@ def _contact_search_urls(
 
     Returns (urls, search_empty, cse_status).
     """
-    base_queries = _fallback_contact_queries(agent, state, row_payload)
-    queries: List[str] = []
-    for q in base_queries:
-        if q and "mobile" not in q.lower():
-            queries.append(f"{q} mobile")
-        queries.append(q)
-    if agent and state:
-        queries.insert(0, f'"{agent}" {state} mobile contact email')
-    if not queries:
-        fallback_q = _fallback_contact_query(agent, state, row_payload)
-        if fallback_q:
-            queries.append(fallback_q)
-    queries = [str(q) for q in queries if q]
     allowed_domains = _allowed_contact_domains(domain_hint or brokerage)
-    search_hits = search_round_robin(
-        queries,
-        per_query_limit=limit,
-        allowed_domains=allowed_domains,
-        engine_limit=10,
-    )
     fallback_urls: List[str] = []
     search_empty = True
-    for attempts in search_hits:
-        for _, items in attempts:
-            if items:
+    cse_queries = _dedupe_queries(
+        _contact_cse_queries(
+            agent,
+            state,
+            row_payload,
+            brokerage=brokerage,
+            domain_hint=domain_hint,
+        )
+    )
+
+    for q in cse_queries:
+        hits = google_cse_search(q, limit=limit, allowed_domains=allowed_domains)
+        cse_status = _cse_last_state
+        if hits:
+            search_empty = False
+        for it in hits:
+            link = it.get("link", "")
+            if not link or _domain(link) in PORTAL_DOMAINS or link in fallback_urls:
+                continue
+            fallback_urls.append(link)
+            if len(fallback_urls) >= limit:
+                break
+        if len(fallback_urls) >= limit:
+            break
+
+    cse_status = _cse_last_state
+    if not fallback_urls and cse_status == "no_results":
+        LOG.info(
+            "CSE returned no results for %s %s; skipping fallback scraping to avoid blocks",
+            agent,
+            state,
+        )
+        return [], True, cse_status
+
+    if len(fallback_urls) < limit and _cse_last_state in {"blocked", "disabled"}:
+        ddg_queries = _dedupe_queries(
+            [
+                _compact_tokens(f'"{agent}"', state, "contact phone"),
+                _compact_tokens(f'"{agent}"', brokerage, state, "mobile contact"),
+            ]
+        )
+        for q in ddg_queries:
+            hits = duckduckgo_search(
+                q,
+                limit=limit - len(fallback_urls),
+                allowed_domains=allowed_domains,
+            )
+            if hits:
                 search_empty = False
-            for it in items:
+            for it in hits:
                 link = it.get("link", "")
-                if not link or _domain(link) in PORTAL_DOMAINS:
-                    continue
-                if link in fallback_urls:
+                if not link or _domain(link) in PORTAL_DOMAINS or link in fallback_urls:
                     continue
                 fallback_urls.append(link)
                 if len(fallback_urls) >= limit:
                     break
             if len(fallback_urls) >= limit:
                 break
-        if len(fallback_urls) >= limit:
-            break
-    cse_status = _cse_last_state
+
+    if not fallback_urls:
+        search_empty = True
+
     return fallback_urls[:limit], search_empty, cse_status
 
 
@@ -2040,22 +2050,19 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
             break
         if status == 429:
             blocked = True
+            _mark_block(dom)
             if dom in _REALTOR_DOMAINS:
-                delay = min(
-                    _REALTOR_BACKOFF_BASE * (1.8 ** (attempt - 1)),
-                    _REALTOR_BACKOFF_CAP,
-                )
-                delay += random.uniform(0, _REALTOR_BACKOFF_JITTER)
                 LOG.warning(
-                    "Realtor.com throttled (429) attempt %s/%s; backing off %.1fs",
+                    "Realtor.com throttled (429) attempt %s/%s; short-circuiting further attempts",
                     attempt,
                     tries,
-                    delay,
                 )
-                time.sleep(delay)
-                continue
-            _mark_block(dom)
-            LOG.warning("BLOCK 429 -> abort %s/%s", attempt, tries)
+            else:
+                LOG.warning(
+                    "BLOCK 429 -> short-circuiting further attempts for %s/%s",
+                    attempt,
+                    tries,
+                )
             break
         if status in (301, 302) and resp.headers.get("Location"):
             url = resp.headers["Location"]
@@ -2234,6 +2241,11 @@ def google_cse_search(
                 break
             # Empty result set is treated as a normal miss, not a throttle.
             if payload.get("items") is not None:
+                LOG.info(
+                    "CSE empty for query=%r allowed=%s",
+                    query,
+                    sorted(allowed_domains) if allowed_domains else "any",
+                )
                 _cse_last_state = "no_results"
                 break
         except req_exc.RetryError:
@@ -2492,6 +2504,14 @@ def proximity_scan(t: str, first_name: str = "", last_name: str = ""):
 
 def _compact_tokens(*parts: str) -> str:
     return " ".join(p.strip() for p in parts if p and p.strip()).strip()
+
+
+def _normalize_agent_for_query(name: str) -> str:
+    """Trim noisy middle parts of an agent name for search queries."""
+    parts = [p.strip() for p in name.split() if p.strip()]
+    if len(parts) >= 3:
+        parts = [parts[0], parts[-1]]
+    return " ".join(parts)
 
 
 def build_q_phone(
