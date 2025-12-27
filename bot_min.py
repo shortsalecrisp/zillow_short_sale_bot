@@ -99,6 +99,44 @@ _blocked_until: Dict[str, float] = {}
 _cse_blocked_until: float = 0.0
 cache_p: Dict[str, Any] = {}
 cache_e: Dict[str, Any] = {}
+CONTACT_CACHE_TTL_SECONDS = int(os.getenv("CONTACT_CACHE_TTL_SECONDS", str(24 * 3600)))
+
+
+def _contact_cache_key(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
+    brokerage_val = (
+        row_payload.get("brokerageName")
+        or row_payload.get("brokerage")
+        or row_payload.get("broker")
+        or ""
+    )
+    market = (
+        row_payload.get("market")
+        or row_payload.get("city")
+        or state
+        or ""
+    )
+    agent_norm = re.sub(r"\s+", " ", agent.strip().lower())
+    brokerage_norm = re.sub(r"\s+", " ", str(brokerage_val).strip().lower())
+    market_norm = re.sub(r"\s+", " ", str(market).strip().lower())
+    return "|".join([agent_norm, brokerage_norm, market_norm])
+
+
+def _contact_cache_get(cache_store: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
+    entry = cache_store.get(key)
+    if not entry:
+        return None
+    expires_at = entry.get("expires_at", 0.0)
+    if expires_at and expires_at < time.time():
+        cache_store.pop(key, None)
+        return None
+    return entry.get("result")
+
+
+def _contact_cache_set(cache_store: Dict[str, Any], key: str, result: Dict[str, Any]) -> None:
+    cache_store[key] = {
+        "result": result,
+        "expires_at": time.time() + CONTACT_CACHE_TTL_SECONDS,
+    }
 
 def _http_get(
     url: str,
@@ -1616,7 +1654,14 @@ def _candidate_urls(
             p for p in [f'"{agent}"', brokerage, state, "contact"] if p
         ).strip()
 
-    queries = _dedupe_queries([q for q in (base_query, secondary_query) if q])
+    strong_queries: List[str] = []
+    if brokerage_domain:
+        strong_queries.append(_compact_tokens(f'"{agent}"', f"site:{brokerage_domain}", "contact"))
+    strong_queries.append(_compact_tokens(f'"{agent}"', '"Real Estate Agent"', '"Mobile"', state))
+    if brokerage:
+        strong_queries.append(_compact_tokens(f'"{agent}"', '"Direct"', f'"{brokerage}"'))
+
+    queries = _dedupe_queries(strong_queries + [q for q in (base_query, secondary_query) if q])
 
     search_hits: List[str] = []
     for q in queries:
@@ -1952,7 +1997,7 @@ def _contact_cse_queries(
     *,
     brokerage: str = "",
     domain_hint: str = "",
-) -> List[str]:
+) -> Tuple[List[str], List[str]]:
     city = str(row_payload.get("city", "")).strip()
     postal_code = str(row_payload.get("zip", "")).strip()
     agent_norm = _normalize_agent_for_query(agent)
@@ -1963,21 +2008,29 @@ def _contact_cse_queries(
         if q and q not in bucket:
             bucket.append(q)
 
-    queries: List[str] = []
+    strict_queries: List[str] = []
+    relaxed_queries: List[str] = []
     base = _compact_tokens(f'"{agent_norm}"', city, state, postal_code)
     state_base = _compact_tokens(f'"{agent_norm}"', state)
     broker_base = _compact_tokens(f'"{agent_norm}"', brokerage, state)
 
+    high_signal = _compact_tokens(f'"{agent_norm}"', '"Real Estate Agent"', '"Mobile"', state)
+    _add(high_signal, strict_queries)
+    if brokerage:
+        _add(_compact_tokens(f'"{agent_norm}"', '"Direct"', f'"{brokerage}"'), strict_queries)
+    if broker_domain:
+        _add(_compact_tokens(f'"{agent_norm}"', state, f"site:{broker_domain}", "contact"), strict_queries)
+
     for seed in (base, state_base):
         if seed:
-            _add(f"{seed} realtor mobile contact", queries)
-            _add(f"{seed} contact phone email", queries)
+            _add(f"{seed} realtor mobile contact", relaxed_queries)
+            _add(f"{seed} contact phone email", relaxed_queries)
     if broker_base:
-        _add(f"{broker_base} contact phone email", queries)
+        _add(f"{broker_base} contact phone email", relaxed_queries)
     if broker_domain:
-        _add(f'"{agent_norm}" {state} site:{broker_domain} contact phone email', queries)
+        _add(f'"{agent_norm}" {state} site:{broker_domain} contact phone email', relaxed_queries)
 
-    return queries
+    return _dedupe_queries(strict_queries), _dedupe_queries(relaxed_queries)
 
 
 def _contact_search_urls(
@@ -1996,41 +2049,50 @@ def _contact_search_urls(
     allowed_domains = _allowed_contact_domains(domain_hint or brokerage)
     fallback_urls: List[str] = []
     search_empty = True
-    cse_queries = _dedupe_queries(
-        _contact_cse_queries(
-            agent,
-            state,
-            row_payload,
-            brokerage=brokerage,
-            domain_hint=domain_hint,
+    strict_queries, relaxed_queries = _contact_cse_queries(
+        agent,
+        state,
+        row_payload,
+        brokerage=brokerage,
+        domain_hint=domain_hint,
+    )
+
+    def _collect_urls(queries: List[str], *, per_query_limit: int) -> List[str]:
+        nonlocal search_empty
+        collected: List[str] = []
+        rr_results = search_round_robin(
+            queries,
+            per_query_limit=per_query_limit,
+            allowed_domains=allowed_domains,
+            engine_limit=per_query_limit,
         )
-    )
-
-    rr_results = search_round_robin(
-        cse_queries,
-        per_query_limit=limit,
-        allowed_domains=allowed_domains,
-        engine_limit=limit,
-    )
-
-    for attempts in rr_results:
-        for _, hits in attempts:
-            if hits:
-                search_empty = False
-            for it in hits:
-                link = it.get("link", "")
-                if not link or _domain(link) in PORTAL_DOMAINS or link in fallback_urls:
-                    continue
-                fallback_urls.append(link)
-                if len(fallback_urls) >= limit:
+        for attempts in rr_results:
+            for _, hits in attempts:
+                if hits:
+                    search_empty = False
+                for it in hits:
+                    link = it.get("link", "")
+                    if not link or _domain(link) in PORTAL_DOMAINS or link in fallback_urls or link in collected:
+                        continue
+                    collected.append(link)
+                    if len(fallback_urls) + len(collected) >= limit:
+                        break
+                if len(fallback_urls) + len(collected) >= limit:
                     break
-            if len(fallback_urls) >= limit:
+            if len(fallback_urls) + len(collected) >= limit:
                 break
-        if len(fallback_urls) >= limit:
-            break
+        return collected
+
+    if strict_queries:
+        fallback_urls.extend(_collect_urls(strict_queries, per_query_limit=limit))
 
     cse_status = _cse_last_state
-    if len(fallback_urls) < limit and _cse_last_state in {"blocked", "disabled", "no_results"}:
+    blocked_search = cse_status in {"blocked", "throttled"}
+    if not fallback_urls and blocked_search:
+        search_empty = False
+    if not fallback_urls and relaxed_queries and not blocked_search:
+        fallback_urls.extend(_collect_urls(relaxed_queries, per_query_limit=limit - len(fallback_urls)))
+    if len(fallback_urls) < limit and _cse_last_state in {"blocked", "disabled", "no_results", "throttled"}:
         ddg_queries = _dedupe_queries(
             [
                 _compact_tokens(f'"{agent}"', state, "contact phone"),
@@ -2055,7 +2117,7 @@ def _contact_search_urls(
             if len(fallback_urls) >= limit:
                 break
 
-    if not fallback_urls:
+    if not fallback_urls and not blocked_search:
         search_empty = True
 
     return fallback_urls[:limit], search_empty, cse_status
@@ -2569,6 +2631,102 @@ def search_round_robin(
     return results
 
 # ───────────────────── page‑parsing helpers ─────────────────────
+def _record_sameas_links(row_payload: Dict[str, Any], links: Iterable[str]) -> None:
+    if not links:
+        return
+    existing: List[str] = []
+    if "_sameas_links" in row_payload and isinstance(row_payload["_sameas_links"], list):
+        existing = row_payload["_sameas_links"]
+    seen = set(existing)
+    for link in links:
+        if not link:
+            continue
+        cleaned = str(link).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        existing.append(cleaned)
+        seen.add(cleaned)
+    if existing:
+        row_payload["_sameas_links"] = existing
+
+
+def _jsonld_person_contacts(html_text: str, soup: Any = None) -> Tuple[List[Dict[str, Any]], Any]:
+    entries: List[Dict[str, Any]] = []
+    if not BeautifulSoup:
+        return entries, None
+    if soup is None:
+        try:
+            soup = BeautifulSoup(html_text, "html.parser")
+        except Exception:
+            soup = None
+    if not soup:
+        return entries, None
+
+    def _as_list(value: Any) -> List[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    for sc in soup.find_all("script", {"type": "application/ld+json"}):
+        try:
+            raw_json = sc.string or sc.get_text()
+            data = json.loads(raw_json or "")
+        except Exception:
+            continue
+        nodes = data if isinstance(data, list) else [data]
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_type = node.get("@type")
+            types = node_type if isinstance(node_type, list) else [node_type]
+            if not any(t and isinstance(t, str) and "Person" in t for t in types):
+                continue
+            entry: Dict[str, Any] = {}
+            name_val = node.get("name", "")
+            if name_val:
+                entry["name"] = str(name_val)
+            phones: List[str] = []
+            emails: List[str] = []
+            same_as: List[str] = []
+            for tel_val in _as_list(node.get("telephone")):
+                formatted = fmt_phone(str(tel_val))
+                if formatted:
+                    phones.append(formatted)
+            for cp in _as_list(node.get("contactPoint")):
+                if not isinstance(cp, dict):
+                    continue
+                for tel_val in _as_list(cp.get("telephone")):
+                    formatted = fmt_phone(str(tel_val))
+                    if formatted:
+                        phones.append(formatted)
+                for mail_val in _as_list(cp.get("email")):
+                    cleaned = clean_email(str(mail_val))
+                    if cleaned and ok_email(cleaned):
+                        emails.append(cleaned)
+            for mail_val in _as_list(node.get("email")):
+                cleaned = clean_email(str(mail_val))
+                if cleaned and ok_email(cleaned):
+                    emails.append(cleaned)
+            for same_val in _as_list(node.get("sameAs")):
+                if not same_val:
+                    continue
+                cleaned = str(same_val).strip()
+                if cleaned:
+                    same_as.append(cleaned)
+            if phones:
+                entry["phones"] = list(dict.fromkeys(phones))
+            if emails:
+                entry["emails"] = list(dict.fromkeys(emails))
+            if same_as:
+                entry["sameas"] = list(dict.fromkeys(same_as))
+            if entry:
+                entries.append(entry)
+
+    return entries, soup
+
+
 def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]], Dict[str, Any]]:
     phones, mails, meta = [], [], []
     info: Dict[str, Any] = {"title": "", "mailto": [], "tel": []}
@@ -2742,12 +2900,21 @@ def build_q_phone(
     city: str = "",
     postal_code: str = "",
     brokerage: str = "",
+    domain_hint: str = "",
 ) -> List[str]:
     queries: List[str] = []
 
     def _add(q: str) -> None:
         if q and q not in queries:
             queries.append(q)
+
+    broker_domain = _domain(domain_hint) if domain_hint else ""
+    high_signal = _compact_tokens(f'"{name}"', '"Real Estate Agent"', '"Mobile"', state)
+    _add(high_signal)
+    if brokerage:
+        _add(_compact_tokens(f'"{name}"', '"Direct"', f'"{brokerage}"'))
+    if broker_domain:
+        _add(_compact_tokens(f'"{name}"', f"site:{broker_domain}", "contact"))
 
     localized_base = _compact_tokens(f'"{name}"', city, state, postal_code)
     state_base = _compact_tokens(f'"{name}"', state)
@@ -2810,6 +2977,13 @@ def build_q_email(
     def _add(q: str) -> None:
         if q and q not in queries:
             queries.append(q)
+
+    broker_domain = _domain(domain_hint) if domain_hint else ""
+    _add(_compact_tokens(f'"{name}"', '"Real Estate Agent"', "email"))
+    if brokerage:
+        _add(_compact_tokens(f'"{name}"', '"Direct"', f'"{brokerage}"', "email"))
+    if broker_domain:
+        _add(_compact_tokens(f'"{name}"', f"site:{broker_domain}", "email"))
 
     localized_base = _compact_tokens(f'"{name}"', city, state, postal_code)
     state_base = _compact_tokens(f'"{name}"', state)
@@ -3246,6 +3420,7 @@ def _portal_contact_details(
     agent: str = "",
     location_tokens: Optional[Set[str]] = None,
     location_digits: Optional[Set[str]] = None,
+    soup: Any = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     results: Dict[str, List[Dict[str, Any]]] = {"phones": [], "emails": []}
     dom = _domain(url)
@@ -3291,7 +3466,7 @@ def _portal_contact_details(
 
     # JSON-LD is the most reliable signal on portals.
     try:
-        soup = BeautifulSoup(page, "html.parser") if BeautifulSoup else None
+        soup = soup or (BeautifulSoup(page, "html.parser") if BeautifulSoup else None)
     except Exception:
         soup = None
 
@@ -3464,6 +3639,12 @@ def _build_trusted_domains(agent: str, urls: Iterable[str]) -> Set[str]:
 
 
 def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
+    cache_key = _contact_cache_key(agent, state, row_payload)
+
+    def _finalize(res: Dict[str, Any]) -> Dict[str, Any]:
+        _contact_cache_set(cache_p, cache_key, res)
+        return res
+
     override = _contact_override(agent, state)
     override_phone = override.get("phone") if override else ""
     if override_phone:
@@ -3476,7 +3657,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "source": "override",
                 "reason": "",
             }
-            return result
+            return _finalize(result)
+
+    cached = _contact_cache_get(cache_p, cache_key)
+    if cached is not None:
+        return cached
 
     zpid = str(row_payload.get("zpid", ""))
     rapid = _rapid_from_payload(row_payload)
@@ -3687,7 +3872,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     shortcut_result = _rapid_mobile_shortcut()
     if shortcut_result:
-        return shortcut_result
+        return _finalize(shortcut_result)
 
     # Only search the web if Rapid did not yield a verified mobile.
     enrichment = _contact_enrichment(agent, state, row_payload)
@@ -3703,7 +3888,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "reason": "",
             "evidence": enrichment.get("best_phone_evidence", ""),
         }
-        return result
+        return _finalize(result)
 
     location_tokens, location_digits = _collect_location_hints(
         row_payload,
@@ -3718,6 +3903,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             city=row_payload.get("city", ""),
             postal_code=row_payload.get("zip", ""),
             brokerage=brokerage_hint,
+            domain_hint=domain_hint or brokerage_hint,
         )
     )
     rapid_urls = list(dict.fromkeys(_rapid_profile_urls(rapid)))
@@ -3744,21 +3930,49 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     def _process_page(url: str, page: str, trusted: bool = False) -> bool:
         if not page:
             return False
+        domain = _domain(url)
+        trusted_hit = trusted or (domain in trusted_domains if domain else False)
+        page_title = ""
+        jsonld_entries, soup = _jsonld_person_contacts(page)
+        if soup and soup.title and soup.title.string:
+            page_title = soup.title.string.strip()
+        if jsonld_entries:
+            sameas_links: List[str] = []
+            jsonld_phone_found = False
+            for entry in jsonld_entries:
+                meta_name = entry.get("name", "")
+                name_match = _names_match(agent, meta_name) if meta_name else False
+                for tel in entry.get("phones", []):
+                    if _register(
+                        tel,
+                        "jsonld_person",
+                        url=url,
+                        page_title=page_title,
+                        meta_name=meta_name,
+                        name_match=name_match,
+                        trusted=trusted_hit,
+                        bonus=0.25,
+                    ):
+                        jsonld_phone_found = True
+                sameas_links.extend(entry.get("sameas", []))
+            _record_sameas_links(row_payload, sameas_links)
+            if jsonld_phone_found:
+                return True
+
         portal_contacts = _portal_contact_details(
             url,
             page,
             agent=agent,
             location_tokens=location_tokens,
             location_digits=location_digits,
+            soup=soup,
         )
         portal_hit = bool(portal_contacts.get("phones"))
         if not trusted and not _page_has_name(page) and not portal_hit:
             return False
         page_viable = False
         ph, _, meta, info = extract_struct(page)
-        page_title = info.get("title", "")
-        domain = _domain(url)
-        trusted_hit = trusted or (domain in trusted_domains if domain else False)
+        page_title = page_title or info.get("title", "")
         for entry in portal_contacts.get("phones", []):
             label = entry.get("label", "")
             mobile_hint = any(term in label for term in mobile_terms)
@@ -4137,7 +4351,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "score": adjusted_score,
                 "source": best_source,
             })
-            return result
+            return _finalize(result)
 
     if candidates:
         office_choice = max(
@@ -4167,7 +4381,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                     "source": office_source,
                 }
             )
-            return result
+            return _finalize(result)
 
     if had_candidates or best_number:
         reason = "withheld_low_conf_mix"
@@ -4226,9 +4440,15 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         len(candidates),
         candidate_quality,
     )
-    return result
+    return _finalize(result)
 
 def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
+    cache_key = _contact_cache_key(agent, state, row_payload)
+
+    def _finalize(res: Dict[str, Any]) -> Dict[str, Any]:
+        _contact_cache_set(cache_e, cache_key, res)
+        return res
+
     override = _contact_override(agent, state)
     override_email = override.get("email") if override else ""
     if override_email:
@@ -4241,7 +4461,11 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "source": "override",
                 "reason": "",
             }
-            return result
+            return _finalize(result)
+
+    cached = _contact_cache_get(cache_e, cache_key)
+    if cached is not None:
+        return cached
 
     enrichment = _contact_enrichment(agent, state, row_payload)
     enriched_email = enrichment.get("best_email", "")
@@ -4256,7 +4480,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "reason": "",
             "evidence": enrichment.get("best_email_evidence", ""),
         }
-        return result
+        return _finalize(result)
 
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     domain_hint = mls_id = ""
@@ -4310,13 +4534,13 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     rapid_authoritative_email = _authoritative_rapid_email()
     if rapid_authoritative_email:
         score = max(CONTACT_EMAIL_MIN_SCORE, CONTACT_EMAIL_FALLBACK_SCORE + 0.2)
-        return {
+        return _finalize({
             "email": rapid_authoritative_email,
             "confidence": "high",
             "score": score,
             "source": "rapid_email_authoritative",
             "reason": "",
-        }
+        })
 
     def _register(
         email: str,
@@ -4530,21 +4754,50 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             return
         dom = _domain(url)
         domain_hint_hit = bool(domain_hint and dom.endswith(domain_hint.lower()))
+        page_title = ""
+        seen: Set[str] = set()
+        jsonld_entries, soup = _jsonld_person_contacts(page)
+        if soup and soup.title and soup.title.string:
+            page_title = soup.title.string.strip()
+        trusted_hit = dom in trusted_domains or domain_hint_hit
+        if jsonld_entries:
+            sameas_links: List[str] = []
+            jsonld_email_found = False
+            for entry in jsonld_entries:
+                meta_name = entry.get("name", "")
+                sameas_links.extend(entry.get("sameas", []))
+                for mail in entry.get("emails", []):
+                    seen.add(mail)
+                    _register(
+                        mail,
+                        "jsonld_person",
+                        url=url,
+                        page_title=page_title,
+                        meta_name=meta_name,
+                        trusted=trusted_hit,
+                    )
+                    patt = _pattern_from_example(mail, agent)
+                    if patt:
+                        domain_patterns.setdefault(_domain(mail), patt)
+                    jsonld_email_found = True
+            _record_sameas_links(row_payload, sameas_links)
+            if jsonld_email_found:
+                return
+
         portal_contacts = _portal_contact_details(
             url,
             page,
             agent=agent,
             location_tokens=location_tokens,
             location_digits=location_digits,
+            soup=soup,
         )
         portal_hit = bool(portal_contacts.get("emails"))
         if not _page_has_name(page, domain_hint_hit=domain_hint_hit) and not portal_hit:
             return
         _, ems, meta, info = extract_struct(page)
-        page_title = info.get("title", "")
-        seen: Set[str] = set()
+        page_title = page_title or info.get("title", "")
         domain = dom
-        trusted_hit = domain in trusted_domains or domain_hint_hit
         for entry in portal_contacts.get("emails", []):
             meta_name = entry.get("name", "")
             _register(
@@ -4819,7 +5072,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 best_source or "unknown",
                 best_score,
             )
-            return result
+            return _finalize(result)
         result["confidence"] = "high"
         LOG.debug(
             "EMAIL WIN %s via %s score=%.2f",
@@ -4827,7 +5080,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             best_source or "unknown",
             best_score,
         )
-        return result
+        return _finalize(result)
 
     fallback_ok = False
     if best_email and best_score >= CONTACT_EMAIL_FALLBACK_SCORE:
@@ -4898,7 +5151,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             LOG.info(
                 "EMAIL WIN (fallback) %s via %s score=%.2f", best_email, best_source or "unknown", best_score
             )
-            return result
+            return _finalize(result)
 
     def _domain_signals(email: str, info: Dict[str, Any]) -> Tuple[bool, bool, bool, bool, str, str]:
         domain = info.get("domain", email.split("@", 1)[1].lower()) if email else ""
@@ -4954,7 +5207,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 adjusted_score,
                 fallback_score,
             )
-            return result
+            return _finalize(result)
 
     if not had_candidates and ENABLE_SYNTH_EMAIL_FALLBACK:
         synth_domains: Set[str] = set()
@@ -4983,7 +5236,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 synthetic_email,
                 ",".join(sorted(synth_domains)) or "<unknown>",
             )
-            return result
+            return _finalize(result)
 
     if not had_candidates:
         reason = "cse_rate_limited" if cse_rate_limited else "no_personal_email"
@@ -5023,7 +5276,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         len(candidates),
         candidate_quality,
     )
-    return result
+    return _finalize(result)
 
 
 def is_active_listing(zpid):

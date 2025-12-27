@@ -170,7 +170,7 @@ def test_build_q_email_includes_locality_tokens():
         postal_code="78155",
     )
 
-    assert queries[0].startswith('"Antonio Flores" Seguin TX 78155')
+    assert queries[0].startswith('"Antonio Flores" "Real Estate Agent" email')
     assert any("Seguin" in q for q in queries)
     assert any("Flores Realty Group" in q for q in queries)
 
