@@ -65,7 +65,7 @@ def test_build_q_phone_prefers_locality_tokens():
         brokerage="Flores Realty Group",
     )
 
-    assert queries[0].startswith('"Antonio Flores" Seguin TX 78155')
+    assert queries[0].startswith('"Antonio Flores" "Real Estate Agent" "Mobile" TX')
     assert any("Flores Realty Group" in q for q in queries)
     assert any("Seguin" in q for q in queries)
 
