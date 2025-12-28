@@ -11,6 +11,7 @@ import sys
 import threading
 import importlib.util
 from collections import Counter, defaultdict, deque
+from pathlib import Path
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote, urljoin
 
@@ -313,6 +314,7 @@ FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (final run starts at 8 pm)
 FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
+APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
 
 _sms_enable_env = os.getenv("SMS_ENABLE")
 if _sms_enable_env is None:
@@ -6061,6 +6063,47 @@ def check_reply(phone: str, since_iso: str) -> bool:
     return False
 
 # ───────────────────── scheduler helpers ─────────────────────
+_APIFY_DECISION_LOCK = threading.Lock()
+
+
+def apify_hour_key(slot: datetime) -> str:
+    slot = slot.astimezone(SCHEDULER_TZ)
+    return slot.strftime("%Y-%m-%d-%H")
+
+
+def apify_work_hours_status(run_time: datetime) -> Tuple[int, bool]:
+    local_dt = run_time.astimezone(SCHEDULER_TZ)
+    local_hour = local_dt.hour
+    within_work_hours = 8 <= local_hour < 20
+    return local_hour, within_work_hours
+
+
+def apify_acquire_decision_slot(slot: datetime) -> bool:
+    hour_key = apify_hour_key(slot)
+    with _APIFY_DECISION_LOCK:
+        try:
+            lock_file = APIFY_DECISION_LOCK_PATH.with_name(
+                f"{APIFY_DECISION_LOCK_PATH.name}.{hour_key}"
+            )
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            LOG.debug("Unable to prepare Apify decision guard path", exc_info=True)
+            return False
+        try:
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        except Exception:
+            LOG.debug("Unable to acquire Apify decision guard", exc_info=True)
+            return False
+        try:
+            os.close(fd)
+        except Exception:
+            LOG.debug("Unable to close Apify decision guard fd", exc_info=True)
+            return False
+        return True
+
+
 def _hour_floor(dt: datetime) -> datetime:
     dt = dt.astimezone(SCHEDULER_TZ)
     return dt.replace(minute=0, second=0, microsecond=0)

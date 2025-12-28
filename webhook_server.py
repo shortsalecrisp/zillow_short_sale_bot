@@ -24,8 +24,10 @@ from bot_min import (
     WORK_END,
     WORK_START,
     SCHEDULER_TZ,
+    apify_acquire_decision_slot,
+    apify_hour_key,
+    apify_work_hours_status,
     _hour_floor,
-    _within_work_hours,
     fetch_contact_page,
     process_rows,
     run_hourly_scheduler,
@@ -131,11 +133,6 @@ def _ensure_scheduler_thread(
     _scheduler_thread.start()
 
 
-def _hour_key(slot: datetime) -> str:
-    slot = slot.astimezone(SCHEDULER_TZ)
-    return slot.strftime("%Y-%m-%d-%H")
-
-
 def _load_last_apify_run() -> Optional[datetime]:
     try:
         if not APIFY_LAST_RUN_PATH.exists():
@@ -163,7 +160,7 @@ def _load_last_apify_run() -> Optional[datetime]:
 
 
 def _write_last_apify_run(ts: datetime) -> None:
-    hour_key = _hour_key(ts)
+    hour_key = apify_hour_key(ts)
     try:
         APIFY_LAST_RUN_PATH.write_text(hour_key)
     except Exception:
@@ -173,21 +170,32 @@ def _write_last_apify_run(ts: datetime) -> None:
 def _apify_hourly_task(run_time: datetime) -> None:
     try:
         current_slot = _hour_floor(run_time)
-        hour_key = _hour_key(current_slot)
-        if not _within_work_hours(current_slot):
+        hour_key = apify_hour_key(current_slot)
+        if not apify_acquire_decision_slot(current_slot):
+            logger.debug("Apify hourly decision already handled for %s", hour_key)
+            return
+
+        local_hour, within_work_hours = apify_work_hours_status(current_slot)
+        logger.info(
+            "Apify work-hours check: local_hour=%s within_work_hours=%s",
+            local_hour,
+            within_work_hours,
+        )
+        if not within_work_hours:
             logger.info("Apify hourly decision: skip %s (outside work hours)", hour_key)
             return
 
         last_run = _load_last_apify_run()
-        if last_run and _hour_key(last_run) == hour_key:
+        if last_run and apify_hour_key(last_run) == hour_key:
             logger.info("Apify hourly decision: skip %s (already ran)", hour_key)
             return
 
         logger.info("Apify hourly decision: run %s", hour_key)
-        _write_last_apify_run(current_slot)
         triggered = _run_apify_actor()
         if not triggered:
             logger.warning("Apify actor did not start for hour %s", hour_key)
+            return
+        _write_last_apify_run(current_slot)
     except Exception:
         logger.exception("Apify hourly task failed for %s", run_time.isoformat())
 
