@@ -23,7 +23,9 @@ from bot_min import (
     TZ,
     WORK_END,
     WORK_START,
+    SCHEDULER_TZ,
     _hour_floor,
+    _within_work_hours,
     fetch_contact_page,
     process_rows,
     run_hourly_scheduler,
@@ -77,7 +79,7 @@ APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "2048"))
 APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
 APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
 APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
-APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "apify_last_run.json"))
+APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "/tmp/last_hour_run.txt"))
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
@@ -129,39 +131,65 @@ def _ensure_scheduler_thread(
     _scheduler_thread.start()
 
 
+def _hour_key(slot: datetime) -> str:
+    slot = slot.astimezone(SCHEDULER_TZ)
+    return slot.strftime("%Y-%m-%d-%H")
+
+
 def _load_last_apify_run() -> Optional[datetime]:
     try:
         if not APIFY_LAST_RUN_PATH.exists():
             return None
-        data = json.loads(APIFY_LAST_RUN_PATH.read_text())
-        ts = data.get("ts")
-        return datetime.fromisoformat(ts) if ts else None
+        raw = APIFY_LAST_RUN_PATH.read_text().strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.strptime(raw, "%Y-%m-%d-%H")
+            return SCHEDULER_TZ.localize(parsed)
+        except ValueError:
+            data = json.loads(raw)
+            ts = data.get("ts")
+            if not ts:
+                return None
+            parsed_dt = datetime.fromisoformat(ts)
+            return (
+                parsed_dt.astimezone(SCHEDULER_TZ)
+                if parsed_dt.tzinfo
+                else SCHEDULER_TZ.localize(parsed_dt)
+            )
     except Exception:
         logger.debug("Unable to read Apify last-run marker", exc_info=True)
         return None
 
 
 def _write_last_apify_run(ts: datetime) -> None:
+    hour_key = _hour_key(ts)
     try:
-        APIFY_LAST_RUN_PATH.write_text(json.dumps({"ts": ts.isoformat()}))
+        APIFY_LAST_RUN_PATH.write_text(hour_key)
     except Exception:
         logger.debug("Unable to persist Apify last-run marker", exc_info=True)
 
 
 def _apify_hourly_task(run_time: datetime) -> None:
-    current_slot = _hour_floor(run_time)
-    last_run = _load_last_apify_run()
-    if last_run and last_run >= current_slot:
-        logger.debug(
-            "Apify scrape already executed for slot %s; skipping", current_slot.isoformat()
-        )
-        return
+    try:
+        current_slot = _hour_floor(run_time)
+        hour_key = _hour_key(current_slot)
+        if not _within_work_hours(current_slot):
+            logger.info("Apify hourly decision: skip %s (outside work hours)", hour_key)
+            return
 
-    logger.info("Triggering hourly Apify scrape at %s", run_time.isoformat())
-    triggered = _run_apify_actor()
-    if not triggered:
-        logger.warning("Apify actor did not start for slot %s", current_slot.isoformat())
-    _write_last_apify_run(current_slot)
+        last_run = _load_last_apify_run()
+        if last_run and _hour_key(last_run) == hour_key:
+            logger.info("Apify hourly decision: skip %s (already ran)", hour_key)
+            return
+
+        logger.info("Apify hourly decision: run %s", hour_key)
+        _write_last_apify_run(current_slot)
+        triggered = _run_apify_actor()
+        if not triggered:
+            logger.warning("Apify actor did not start for hour %s", hour_key)
+    except Exception:
+        logger.exception("Apify hourly task failed for %s", run_time.isoformat())
 
 
 def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -275,20 +303,9 @@ async def _maybe_run_startup_scrape() -> None:
         logger.info("RUN_SCRAPE_ON_DEPLOY disabled; skipping startup scrape")
         return
 
-    current_slot = _hour_floor(datetime.now(tz=TZ))
-    last_run = _load_last_apify_run()
-    if last_run and last_run >= current_slot:
-        logger.info(
-            "Skipping startup Apify run – already executed at %s",
-            last_run.isoformat(),
-        )
-        return
-
     try:
-        triggered = await asyncio.to_thread(_run_apify_actor)
-        if triggered:
-            logger.info("Startup Apify run dispatched; awaiting webhook delivery")
-            _write_last_apify_run(current_slot)
+        current_slot = _hour_floor(datetime.now(tz=SCHEDULER_TZ))
+        await asyncio.to_thread(_apify_hourly_task, current_slot)
     except Exception:
         logger.exception("Startup Apify scrape failed")
 
@@ -301,7 +318,7 @@ async def _start_scheduler() -> None:
         return
     _ensure_scheduler_thread(
         hourly_callbacks=[_apify_hourly_task],
-        initial_callbacks=False,
+        initial_callbacks=True,
     )
     if _startup_task is None or _startup_task.done():
         _startup_task = asyncio.create_task(_maybe_run_startup_scrape())
