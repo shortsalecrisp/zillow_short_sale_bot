@@ -9,7 +9,6 @@ import os
 import re
 import sqlite3
 import threading
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -159,9 +158,9 @@ def _apify_hourly_task(run_time: datetime) -> None:
         return
 
     logger.info("Triggering hourly Apify scrape at %s", run_time.isoformat())
-    rows = _run_apify_actor()
-    if rows:
-        _process_incoming_rows(rows)
+    triggered = _run_apify_actor()
+    if not triggered:
+        logger.warning("Apify actor did not start for slot %s", current_slot.isoformat())
     _write_last_apify_run(current_slot)
 
 
@@ -230,82 +229,45 @@ def _clear_apify_degradation() -> None:
         logger.debug("Unable to clear Apify degradation marker", exc_info=True)
 
 
-def _lightweight_apify_scrape() -> List[Dict[str, Any]]:
-    """Fallback scraper that hits startUrls directly with proxy/headless helpers."""
-    urls: List[str] = []
-    if isinstance(APIFY_INPUT, dict):
-        for item in APIFY_INPUT.get("startUrls", []) or []:
-            if isinstance(item, dict) and item.get("url"):
-                urls.append(item["url"])
-            elif isinstance(item, str):
-                urls.append(item)
-    results: List[Dict[str, Any]] = []
-    for url in urls:
-        html, _ = fetch_contact_page(url)
-        if html:
-            results.append({"url": url, "html": html, "source": "apify_fallback"})
-    if results:
-        logger.info("Lightweight Apify fallback scraped %d urls", len(results))
-    return results
-
-
-def _run_apify_actor() -> List[Dict[str, Any]]:
+def _run_apify_actor() -> bool:
     if not APIFY_ACTOR_ID or not APIFY_TOKEN:
-        logger.info("Skipping startup Apify run – missing APIFY_ACTOR_ID or token")
-        return []
+        logger.info("Skipping Apify run – missing APIFY_ACTOR_ID or token")
+        return False
 
-    url = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/run-sync-get-dataset-items"
+    url = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/runs"
     params = {
         "token": APIFY_TOKEN,
         "timeout": APIFY_TIMEOUT,
         "memory": APIFY_MEMORY,
         "clean": 1,
-        "limit": APIFY_MAX_ITEMS,
-        "desc": 1,
     }
     logger.info(
-        "Triggering Apify actor %s for startup scrape (%s input)",
+        "Triggering Apify actor %s (webhook will deliver dataset items)",
         APIFY_ACTOR_ID,
-        "custom" if APIFY_INPUT is not None else "default",
     )
     req_kwargs: Dict[str, Any] = {"params": params, "timeout": APIFY_TIMEOUT + 30}
     if APIFY_INPUT is not None:
         req_kwargs["json"] = APIFY_INPUT
 
-    for attempt in range(1, APIFY_MAX_RETRIES + 1):
+    resp: Optional[requests.Response] = None
+    try:
         resp = requests.post(url, **req_kwargs)
-        timed_out = False
-        try:
-            resp.raise_for_status()
-        except requests.HTTPError:
-            status = resp.status_code
-            body_preview = resp.text[:500] if resp.text else "<no body>"
-            timed_out = status in (408, 504) or "TIMED-OUT" in body_preview.upper()
-            logger.error(
-                "Apify actor call failed (attempt %s/%s) with status %s: %s",
-                attempt,
-                APIFY_MAX_RETRIES,
-                status,
-                body_preview,
-            )
-            if timed_out and attempt < APIFY_MAX_RETRIES:
-                sleep_for = min(APIFY_TIMEOUT, (APIFY_RETRY_BACKOFF ** (attempt - 1)) * 5)
-                logger.info("Retrying Apify actor after %.1fs due to timeout", sleep_for)
-                time.sleep(sleep_for)
-                continue
-            _record_apify_degradation("timed_out", status=status)
-            fallback_rows = _lightweight_apify_scrape()
-            return fallback_rows
-        data = resp.json()
-        if not isinstance(data, list):
-            logger.warning("Unexpected Apify response – expected list, got %s", type(data))
-            _record_apify_degradation("invalid_response")
-            return _lightweight_apify_scrape()
-        _clear_apify_degradation()
-        logger.info("Apify actor returned %d rows", len(data))
-        return data
-    _record_apify_degradation("exhausted_retries")
-    return _lightweight_apify_scrape()
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        status = resp.status_code if resp is not None else None
+        logger.error("Apify actor trigger failed with status %s: %s", status, exc)
+        _record_apify_degradation("trigger_failed", status=status)
+        return False
+
+    run_info: Dict[str, Any] = {}
+    try:
+        run_info = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+    except ValueError:
+        run_info = {}
+    run_id = run_info.get("id")
+    logger.info("Apify actor run started (run_id=%s); awaiting webhook results", run_id or "unknown")
+    _clear_apify_degradation()
+    return True
 
 
 async def _maybe_run_startup_scrape() -> None:
@@ -323,15 +285,10 @@ async def _maybe_run_startup_scrape() -> None:
         return
 
     try:
-        rows = await asyncio.to_thread(_run_apify_actor)
-        if not rows:
-            return
-        result = await asyncio.to_thread(_process_incoming_rows, rows)
-        logger.info(
-            "Startup scrape complete – %s",
-            result.get("status", "no status"),
-        )
-        _write_last_apify_run(current_slot)
+        triggered = await asyncio.to_thread(_run_apify_actor)
+        if triggered:
+            logger.info("Startup Apify run dispatched; awaiting webhook delivery")
+            _write_last_apify_run(current_slot)
     except Exception:
         logger.exception("Startup Apify scrape failed")
 
@@ -485,6 +442,10 @@ async def apify_hook(request: Request):
             return {"error": "dataset_id missing and no listings provided"}
         rows = fetch_rows(dataset_id)
         logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
+
+    if not rows:
+        logger.info("apify-hook: 0 listings received; no Apify retries scheduled")
+        return {"status": "no rows"}
 
     return _process_incoming_rows(rows)
 
