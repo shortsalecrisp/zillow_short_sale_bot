@@ -307,6 +307,7 @@ if not RAPID_KEY:
 GOOD_STATUS    = {"FOR_SALE", "ACTIVE", "COMING_SOON", "PENDING", "NEW_CONSTRUCTION"}
 
 TZ             = pytz.timezone(os.getenv("BOT_TIMEZONE", "US/Eastern"))
+SCHEDULER_TZ   = pytz.timezone("America/New_York")
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
@@ -6061,14 +6062,14 @@ def check_reply(phone: str, since_iso: str) -> bool:
 
 # ───────────────────── scheduler helpers ─────────────────────
 def _hour_floor(dt: datetime) -> datetime:
-    dt = dt.astimezone(TZ)
+    dt = dt.astimezone(SCHEDULER_TZ)
     return dt.replace(minute=0, second=0, microsecond=0)
 
 
 def _next_scheduler_run(now: datetime) -> datetime:
     """Return the next top-of-hour slot within work hours (7 days/week)."""
 
-    now = now.astimezone(TZ)
+    now = now.astimezone(SCHEDULER_TZ)
     base = _hour_floor(now)
 
     if base.hour >= WORK_END:
@@ -6094,7 +6095,7 @@ def _next_scheduler_run(now: datetime) -> datetime:
 def _within_work_hours(slot: datetime) -> bool:
     """Return True when ``slot`` falls inside working hours for follow-ups."""
 
-    slot = slot.astimezone(TZ)
+    slot = slot.astimezone(SCHEDULER_TZ)
     if slot.hour < WORK_START or slot.hour >= WORK_END:
         return False
     if not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(slot):
@@ -6150,12 +6151,10 @@ def run_hourly_scheduler(
         "Hourly scheduler loop starting (thread=%s)",
         threading.current_thread().name,
     )
-    now = datetime.now(tz=TZ)
-    next_run = _next_scheduler_run(now)
+    next_run = _next_scheduler_run(datetime.now(tz=SCHEDULER_TZ))
 
     if run_immediately:
-        initial_run = _hour_floor(now)
-        LOG.info("Running immediate follow-up + callbacks for slot %s", initial_run)
+        initial_run = _hour_floor(datetime.now(tz=SCHEDULER_TZ))
         _run_hourly_cycle(
             initial_run,
             hourly_callbacks,
@@ -6164,18 +6163,13 @@ def run_hourly_scheduler(
         next_run = _next_scheduler_run(initial_run + timedelta(seconds=1))
 
     while True:
-        if stop_event and stop_event.is_set():
-            LOG.info("Hourly scheduler stop requested; exiting loop")
-            break
         try:
-            now = datetime.now(tz=TZ)
+            if stop_event and stop_event.is_set():
+                LOG.info("Hourly scheduler stop requested; exiting loop")
+                break
+
+            now = datetime.now(tz=SCHEDULER_TZ)
             sleep_secs = max(0, (next_run - now).total_seconds())
-            if sleep_secs > 0:
-                LOG.debug(
-                    "Sleeping %.0f seconds until next run at %s",
-                    sleep_secs,
-                    next_run.isoformat(),
-                )
             if stop_event and stop_event.wait(timeout=sleep_secs):
                 LOG.info("Hourly scheduler stop requested; exiting loop")
                 break
@@ -6183,14 +6177,20 @@ def run_hourly_scheduler(
                 time.sleep(sleep_secs)
 
             run_time = next_run
-            _run_hourly_cycle(run_time, hourly_callbacks)
-
             next_run = _next_scheduler_run(run_time + timedelta(seconds=1))
-        except Exception as exc:
-            LOG.exception("Hourly scheduler crashed; retrying in 30 seconds: %s", exc)
-            if stop_event and stop_event.wait(timeout=30):
-                LOG.info("Hourly scheduler stop requested during backoff; exiting loop")
+            LOG.info(
+                "Scheduler wake at %s; next wake at %s",
+                run_time.isoformat(),
+                next_run.isoformat(),
+            )
+            _run_hourly_cycle(run_time, hourly_callbacks)
+        except Exception:
+            LOG.exception("Hourly scheduler crashed; continuing")
+            if stop_event and stop_event.is_set():
                 break
+            time.sleep(30)
+            next_run = _next_scheduler_run(datetime.now(tz=SCHEDULER_TZ))
+            continue
     LOG.info("Hourly scheduler loop terminated (thread=%s)", threading.current_thread().name)
 
 # ───────────────────── follow‑up pass (UPDATED) ─────────────────────
