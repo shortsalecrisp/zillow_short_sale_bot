@@ -42,6 +42,10 @@ TABLE_SQL   = "CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)"
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER   = get_sender(SMS_PROVIDER)
 DISABLE_APIFY_SCHEDULER = os.getenv("DISABLE_APIFY_SCHEDULER", "false").lower() == "true"
+# Optional self-ping to keep Render (or other idle-suspending platforms) awake.
+KEEPALIVE_URL = os.getenv("KEEPALIVE_URL")
+KEEPALIVE_PERIOD_SECONDS = int(os.getenv("KEEPALIVE_PERIOD_SECONDS", "300"))
+KEEPALIVE_TIMEOUT_SECONDS = float(os.getenv("KEEPALIVE_TIMEOUT_SECONDS", "8"))
 
 # Google Sheets / Replies tab
 GSHEET_ID   = os.environ["GSHEET_ID"]
@@ -65,6 +69,8 @@ EXPORTED_ZPIDS: set[str] = set()
 
 _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
+_keepalive_thread: Optional[threading.Thread] = None
+_keepalive_stop: Optional[threading.Event] = None
 _startup_task: Optional[asyncio.Task] = None
 
 _APIFY_ACTOR_ID_RAW = os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACTOR_ID")
@@ -131,6 +137,46 @@ def _ensure_scheduler_thread(
         daemon=True,
     )
     _scheduler_thread.start()
+
+
+def _ensure_keepalive_thread() -> None:
+    """Periodically hit KEEPALIVE_URL so the platform sees traffic and stays warm."""
+
+    global _keepalive_thread, _keepalive_stop
+    if not KEEPALIVE_URL:
+        return
+    if _keepalive_thread and _keepalive_thread.is_alive():
+        return
+
+    _keepalive_stop = threading.Event()
+
+    def _runner() -> None:
+        logger.info(
+            "Keepalive pinger enabled for %s (every %ss)",
+            KEEPALIVE_URL,
+            KEEPALIVE_PERIOD_SECONDS,
+        )
+        while not _keepalive_stop.wait(KEEPALIVE_PERIOD_SECONDS):
+            try:
+                resp = requests.get(
+                    KEEPALIVE_URL,
+                    timeout=KEEPALIVE_TIMEOUT_SECONDS,
+                )
+                logger.debug(
+                    "Keepalive ping %s -> %s",
+                    KEEPALIVE_URL,
+                    resp.status_code,
+                )
+            except Exception:
+                logger.warning("Keepalive ping failed", exc_info=True)
+        logger.info("Keepalive pinger stopped")
+
+    _keepalive_thread = threading.Thread(
+        target=_runner,
+        name="keepalive-pinger",
+        daemon=True,
+    )
+    _keepalive_thread.start()
 
 
 def _load_last_apify_run() -> Optional[datetime]:
@@ -328,6 +374,7 @@ async def _start_scheduler() -> None:
         hourly_callbacks=[_apify_hourly_task],
         initial_callbacks=True,
     )
+    _ensure_keepalive_thread()
     if _startup_task is None or _startup_task.done():
         _startup_task = asyncio.create_task(_maybe_run_startup_scrape())
 
@@ -339,6 +386,11 @@ async def _stop_scheduler() -> None:
         _scheduler_stop.set()
     if _scheduler_thread and _scheduler_thread.is_alive():
         _scheduler_thread.join(timeout=10)
+    global _keepalive_thread, _keepalive_stop
+    if _keepalive_stop:
+        _keepalive_stop.set()
+    if _keepalive_thread and _keepalive_thread.is_alive():
+        _keepalive_thread.join(timeout=5)
 
 # ──────────────────────────────────────────────────────────────────────
 # Google Sheets helpers
