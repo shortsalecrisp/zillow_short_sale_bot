@@ -6111,29 +6111,14 @@ def _hour_floor(dt: datetime) -> datetime:
 
 
 def _next_scheduler_run(now: datetime) -> datetime:
-    """Return the next top-of-hour slot within work hours (7 days/week)."""
+    """Return the next top-of-hour slot in the scheduler timezone."""
 
     now = now.astimezone(SCHEDULER_TZ)
     base = _hour_floor(now)
 
-    if base.hour >= WORK_END:
-        return (base + timedelta(days=1)).replace(
-            hour=WORK_START, minute=0, second=0, microsecond=0
-        )
-    if base.hour < WORK_START:
-        return base.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
-
-    if now.minute == 0 and now.second == 0 and now.microsecond == 0:
-        next_slot = base
-    elif now < base + timedelta(seconds=1):
-        next_slot = base
-    else:
-        next_slot = base + timedelta(hours=1)
-    if next_slot.hour >= WORK_END:
-        return (base + timedelta(days=1)).replace(
-            hour=WORK_START, minute=0, second=0, microsecond=0
-        )
-    return next_slot
+    if now < base + timedelta(seconds=1):
+        return base
+    return base + timedelta(hours=1)
 
 
 def _within_work_hours(slot: datetime) -> bool:
