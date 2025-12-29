@@ -28,6 +28,7 @@ from bot_min import (
     apify_hour_key,
     apify_work_hours_status,
     _hour_floor,
+    dedupe_rows_by_zpid,
     fetch_contact_page,
     process_rows,
     run_hourly_scheduler,
@@ -247,30 +248,35 @@ def _apify_hourly_task(run_time: datetime) -> None:
 
 
 def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    fresh_rows = dedupe_rows_by_zpid(rows, logger)
+    if not fresh_rows:
+        logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
+        return {"status": "no new rows"}
+
     conn = ensure_table()
-    fresh_rows: List[Dict[str, Any]] = []
-    for r in rows:
+    db_filtered: List[Dict[str, Any]] = []
+    for r in fresh_rows:
         zpid = r.get("zpid")
         if zpid in EXPORTED_ZPIDS:
             continue
         if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
             EXPORTED_ZPIDS.add(zpid)
             continue
-        fresh_rows.append(r)
+        db_filtered.append(r)
 
-    if not fresh_rows:
+    if not db_filtered:
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
         conn.close()
         return {"status": "no new rows"}
 
-    logger.debug("Sample fields on first fresh row: %s", list(fresh_rows[0].keys())[:15])
+    logger.debug("Sample fields on first fresh row: %s", list(db_filtered[0].keys())[:15])
 
     try:
-        sms_jobs = process_rows(fresh_rows) or []
+        sms_jobs = process_rows(db_filtered, skip_dedupe=True) or []
     except Exception:
         logger.exception("process_rows failed; skipping batch to keep server alive")
         conn.close()
-        return {"status": "error", "rows": len(fresh_rows)}
+        return {"status": "error", "rows": len(db_filtered)}
 
     for job in sms_jobs:
         try:
@@ -278,16 +284,16 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         except Exception:
             logger.exception("send_sms failed for %s", job)
 
-    EXPORTED_ZPIDS.update(r.get("zpid") for r in fresh_rows)
+    EXPORTED_ZPIDS.update(r.get("zpid") for r in db_filtered)
 
     conn.executemany(
         "INSERT OR IGNORE INTO listings (zpid) VALUES (?)",
-        [(r["zpid"],) for r in fresh_rows],
+        [(r["zpid"],) for r in db_filtered],
     )
     conn.commit()
     conn.close()
 
-    return {"status": "processed", "rows": len(fresh_rows)}
+    return {"status": "processed", "rows": len(db_filtered)}
 
 
 def _record_apify_degradation(reason: str, status: Optional[int] = None) -> None:
