@@ -110,6 +110,7 @@ _realtor_fetch_seen = False
 cache_p: Dict[str, Any] = {}
 cache_e: Dict[str, Any] = {}
 CONTACT_CACHE_TTL_SECONDS = int(os.getenv("CONTACT_CACHE_TTL_SECONDS", str(24 * 3600)))
+SEEN_ZPID_CACHE_SECONDS = int(os.getenv("SEEN_ZPID_CACHE_SECONDS", "300"))
 
 
 def _contact_cache_key(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
@@ -530,7 +531,8 @@ COL_FU_TS       = 23  # X
 COL_PHONE_CONF  = 24  # Y
 COL_CONTACT_REASON = 25  # Z
 COL_EMAIL_CONF  = 26  # AA
-MIN_COLS        = 27
+COL_ZPID        = 27  # AB
+MIN_COLS        = 28
 
 MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
@@ -645,6 +647,67 @@ try:
 except Exception:
     _preloaded = []
 seen_phones: Set[str] = set(_preloaded)
+seen_zpids: Set[str] = set()
+_seen_zpids_loaded_at = 0.0
+_seen_zpids_lock = threading.Lock()
+
+
+def load_seen_zpids(force: bool = False) -> Set[str]:
+    """Load ZPIDs present in the Google Sheet with a short-lived cache."""
+
+    global seen_zpids, _seen_zpids_loaded_at
+    with _seen_zpids_lock:
+        now = time.time()
+        if seen_zpids and not force and (now - _seen_zpids_loaded_at) < SEEN_ZPID_CACHE_SECONDS:
+            return set(seen_zpids)
+        try:
+            col_vals = ws.col_values(COL_ZPID + 1)
+        except Exception as exc:
+            LOG.warning("Unable to refresh seen ZPIDs from sheet: %s", exc)
+            return set(seen_zpids)
+        refreshed = {
+            str(val).strip()
+            for val in col_vals
+            if str(val).strip()
+        }
+        refreshed = {z for z in refreshed if re.fullmatch(r"\d+", z)}
+        seen_zpids = refreshed
+        _seen_zpids_loaded_at = now
+        return set(seen_zpids)
+
+
+def record_seen_zpid(zpid: str) -> None:
+    if not zpid:
+        return
+    cleaned = str(zpid).strip()
+    if not cleaned:
+        return
+    with _seen_zpids_lock:
+        seen_zpids.add(cleaned)
+
+
+def dedupe_rows_by_zpid(rows: List[Dict[str, Any]], logger_obj: Optional[logging.Logger] = None) -> List[Dict[str, Any]]:
+    """Filter *rows* against ZPIDs already present in the sheet cache."""
+
+    cached = load_seen_zpids()
+    fresh_rows: List[Dict[str, Any]] = []
+    already_seen = 0
+    for row in rows:
+        zpid = str(row.get("zpid", "")).strip()
+        if zpid and zpid in cached:
+            already_seen += 1
+            continue
+        if zpid:
+            cached.add(zpid)
+        fresh_rows.append(row)
+    if logger_obj:
+        logger_obj.info(
+            "DEDUP received=%s already_seen=%s processing=%s",
+            len(rows),
+            already_seen,
+            len(fresh_rows),
+        )
+    return fresh_rows
 
 SCRAPE_SITES:  List[str] = []
 DYNAMIC_SITES: Set[str]  = set()
@@ -668,6 +731,46 @@ BAN_KEYWORDS = {
     "obituary", "obituaries", "funeral",
     ".gov", ".edu", ".mil",
 }
+EMAIL_ENRICH_DENYLIST: Set[str] = {
+    "science.gov",
+    "nih.gov",
+    "ncbi.nlm.nih.gov",
+    "pmc.ncbi.nlm.nih.gov",
+}
+EMAIL_ENRICH_DENY_TERMS = {
+    "pubmed",
+    "ncbi",
+    "nih",
+    "science",
+    "journal",
+    "research",
+    "pmc",
+    "clinical",
+    "medical",
+    "medicine",
+    "health",
+    "hospital",
+    "obituary",
+    "obituaries",
+    "memorial",
+}
+_LICENSING_TERMS = {
+    "realestate",
+    "real-estate",
+    "real_estate",
+    "realtor",
+    "realty",
+    "license",
+    "licensing",
+    "dre",
+    "dora",
+    "mls",
+    "broker",
+    "division-of-real-estate",
+    "department-of-real-estate",
+    "real-estate-commission",
+}
+EMAIL_ALLOWED_PORTALS: Set[str] = set(PORTAL_DOMAINS) | {f"www.{dom}" for dom in PORTAL_DOMAINS}
 
 SEARCH_BACKOFF_RANGE = (
     float(os.getenv("SEARCH_BACKOFF_MIN", "0.4")),
@@ -993,12 +1096,14 @@ def _rapid_select_email(agent: str, emails: List[Dict[str, str]], payload_text: 
 
 def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, str]:
     fallback: Tuple[str, str] = ("", "")
+    invalid_seen = 0
     for entry in phones:
         phone = entry.get("value", "")
         if not phone:
             continue
         info = get_line_info(phone)
         if not info.get("valid"):
+            invalid_seen += 1
             continue
         ctx = " ".join([entry.get("context", ""), entry.get("text", "")]).lower()
         office_hint = any(term in ctx for term in ("office", "main", "brokerage", "company", "fax", "switchboard"))
@@ -1008,6 +1113,8 @@ def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, 
         if not fallback[0]:
             reason = "rapid_landline_office" if office_hint else "rapid_landline_fallback"
             fallback = (phone, reason)
+    if not fallback[0] and invalid_seen:
+        return "", "rapid_invalid"
     return fallback
 
 
@@ -1231,6 +1338,67 @@ def _redact_proxy(proxy_url: str) -> str:
 
 def _is_banned(dom: str) -> bool:
     return any(bad in dom for bad in BAN_KEYWORDS)
+
+
+def _is_publication_domain(host: str) -> bool:
+    low = host.lower()
+    if low in EMAIL_ENRICH_DENYLIST:
+        return True
+    return any(term in low for term in EMAIL_ENRICH_DENY_TERMS)
+
+
+def _looks_real_estate_gov(host: str, path: str) -> bool:
+    low_host = host.lower()
+    low_path = path.lower()
+    return any(term in low_host or term in low_path for term in _LICENSING_TERMS)
+
+
+def _contact_source_allowed(
+    url: str,
+    brokerage_domain: str,
+    trusted_domains: Set[str],
+) -> bool:
+    if not url:
+        return True
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    dom = _domain(host)
+    path = parsed.path or ""
+    low_url = url.lower()
+
+    if not host:
+        return False
+    if host in EMAIL_ENRICH_DENYLIST or dom in EMAIL_ENRICH_DENYLIST:
+        return False
+    if host.startswith("data.") and dom.endswith(".gov"):
+        return False
+    if dom.endswith(".gov") or host.endswith(".gov"):
+        if not _looks_real_estate_gov(host, path):
+            return False
+    if _is_publication_domain(host):
+        return False
+    if any(term in low_url for term in EMAIL_ENRICH_DENY_TERMS):
+        return False
+    if "obituary" in low_url or "obituaries" in low_url:
+        return False
+
+    trusted_pool = set(trusted_domains) | set(TRUSTED_CONTACT_DOMAINS)
+    if brokerage_domain:
+        trusted_pool.add(brokerage_domain)
+    if host in trusted_pool or dom in trusted_pool or any(host.endswith(f".{td}") for td in trusted_pool):
+        return True
+    if host in SOCIAL_DOMAINS or dom in SOCIAL_DOMAINS:
+        return True
+    if host in EMAIL_ALLOWED_PORTALS or dom in EMAIL_ALLOWED_PORTALS:
+        return True
+    if _looks_real_estate_gov(host, path):
+        return True
+    if _is_real_estate_domain(host):
+        return True
+    directory_terms = ("mls", "realtor", "association", "board", "listing-agent")
+    if any(term in path.lower() for term in directory_terms):
+        return True
+    return False
 
 def _should_fetch(url: str, strict: bool = True) -> bool:
     dom = _domain(url)
@@ -2713,9 +2881,18 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
         or _infer_domain_from_text(brokerage)
         or _infer_domain_from_text(agent)
     )
-    brokerage_domain = _domain(domain_hint or brokerage)
+    brokerage_domain_hint = _domain(domain_hint or brokerage)
+    brokerage_domain_guess = _guess_domain_from_brokerage(brokerage)
+    brokerage_domain = brokerage_domain_hint or brokerage_domain_guess
     urls, search_exhausted = _candidate_urls(agent, state, row_payload, domain_hint=domain_hint)
     urls = list(dict.fromkeys(urls))
+    trusted_domains = _build_trusted_domains(agent, urls)
+    if brokerage_domain:
+        trusted_domains.add(brokerage_domain)
+    trusted_domains.update(TRUSTED_CONTACT_DOMAINS)
+    urls = [
+        u for u in urls if _contact_source_allowed(u, brokerage_domain, trusted_domains)
+    ]
     search_disabled = bool(urls)
     candidates: List[Dict[str, Any]] = []
     headless_budget = HEADLESS_CONTACT_BUDGET
@@ -2730,6 +2907,8 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
         agent_seen = False
         for url in urls_to_fetch:
             if not url:
+                continue
+            if not _contact_source_allowed(url, brokerage_domain, trusted_domains):
                 continue
             dom = _domain(url)
             if dom in _CONTACT_DENYLIST:
@@ -2760,6 +2939,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
             jsonld_cands, jsonld_hit, jsonld_contact, soup = _extract_jsonld_contacts_first(
                 text, final_url, agent=agent, row_payload=row_payload
             )
+            trusted_domains.update(_build_trusted_domains(agent, [final_url]))
             if jsonld_cands:
                 candidates.extend(jsonld_cands)
                 if any(c.get("phones") or c.get("emails") for c in jsonld_cands):
@@ -2843,11 +3023,15 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                 continue
             if len(seen_urls) + len(pending_urls) >= MAX_CONTACT_URLS:
                 break
+            if not _contact_source_allowed(path, brokerage_domain, trusted_domains):
+                continue
             pending_urls.appendleft(path)
 
     def _enqueue(new_urls: Iterable[str]) -> None:
         for nu in new_urls:
             if not nu or nu in seen_urls or nu in pending_urls:
+                continue
+            if not _contact_source_allowed(nu, brokerage_domain, trusted_domains):
                 continue
             if len(seen_urls) + len(pending_urls) >= MAX_CONTACT_URLS:
                 break
@@ -5265,7 +5449,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     had_candidates = False
     location_extras: List[str] = [brokerage] if brokerage else []
     blocked_domains: Set[str] = set()
-    trusted_domains: Set[str] = set()
+    trusted_domains: Set[str] = set(TRUSTED_CONTACT_DOMAINS)
+    brokerage_domain_guess = _guess_domain_from_brokerage(brokerage)
+    brokerage_domain = _domain(domain_hint or brokerage_domain_guess or brokerage)
     cse_rate_limited = False
     cse_status: str = "idle"
     search_empty = False
@@ -5274,7 +5460,12 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     if inferred_domain_hint and not domain_hint:
         domain_hint = inferred_domain_hint
     if domain_hint:
-        trusted_domains.add(domain_hint.lower())
+        hint_domain = _domain(domain_hint) or domain_hint.lower()
+        trusted_domains.add(hint_domain)
+    if brokerage_domain:
+        trusted_domains.add(brokerage_domain)
+    if brokerage_domain_guess and brokerage_domain_guess != brokerage_domain:
+        trusted_domains.add(brokerage_domain_guess)
 
     tokens = _agent_tokens(agent)
     IDENTITY_SOURCES = {
@@ -5326,6 +5517,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         cleaned = clean_email(email)
         if not cleaned or not ok_email(cleaned):
             return
+        if url and not _contact_source_allowed(url, brokerage_domain, trusted_domains):
+            return
         low = cleaned.lower()
         matches_agent = _email_matches_name(agent, cleaned)
         is_generic = _is_generic_email(cleaned)
@@ -5338,6 +5531,12 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
         domain = _domain(url) if url else ""
         trusted_domain = trusted or (domain in trusted_domains if domain else False)
+        if not trusted_domain and brokerage_domain:
+            trusted_domain = bool(domain) and (
+                domain == brokerage_domain or domain.endswith(f".{brokerage_domain}")
+            )
+        haystack_components = [context, page_title, meta_name]
+        page_agent_hit = _page_mentions_agent(" ".join(haystack_components), agent) if any(haystack_components) else False
 
         if source in IDENTITY_SOURCES:
             identity_ok = False
@@ -5385,6 +5584,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "generic": False,
                 "generic_penalized": False,
                 "penalty_applied": False,
+                "trusted_hit": False,
+                "agent_on_page": False,
             },
         )
         if is_generic:
@@ -5404,6 +5605,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             info["score"] += 0.35
             info["identity_hits"] += 1
             info["identity_sources"].add("trusted_domain")
+            info["trusted_hit"] = True
         if is_generic and not matches_agent and not trusted_domain and not info["generic_penalized"]:
             info["score"] -= 0.25
             info["generic_penalized"] = True
@@ -5414,6 +5616,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             info["score"] += 0.2
         elif source == "mailto" and (matches_agent or (meta_name and _names_match(agent, meta_name))):
             info["score"] += 0.1
+        if page_agent_hit and not info.get("agent_on_page"):
+            info["agent_on_page"] = True
         if context:
             info["contexts"].append(context.lower())
         if page_title:
@@ -5763,6 +5967,32 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if guess:
             _register(guess, "pattern")
 
+    normalized_brokerage_tokens = [
+        tok
+        for tok in re.sub(r"[^a-z0-9]+", " ", brokerage.lower()).split()
+        if len(tok) >= 4
+    ] if brokerage else []
+
+    filtered_candidates: Dict[str, Dict[str, Any]] = {}
+    for email, info in candidates.items():
+        domain_hint_hit, brokerage_domain_ok, brokerage_hit, agent_token_hit, domain_l, domain_root = _domain_signals(email, info)
+        haystacks: List[str] = []
+        haystacks.extend(info.get("contexts", []))
+        haystacks.extend(info.get("page_titles", []))
+        haystacks.extend(info.get("meta_names", []))
+        agent_on_page = info.get("agent_on_page") or _page_mentions_agent(" ".join(haystacks), agent)
+        trusted_hit = info.get("trusted_hit") or domain_l in trusted_domains or domain_root in trusted_domains
+        if not _email_matches_name(agent, email):
+            continue
+        if not (agent_on_page or brokerage_domain_ok or domain_hint_hit or trusted_hit or brokerage_hit):
+            continue
+        filtered_candidates[email] = info
+    agent_match_filtered = bool(candidates) and not filtered_candidates
+    if filtered_candidates:
+        candidates = filtered_candidates
+    elif agent_match_filtered:
+        candidates = {}
+
     best_email = ""
     best_score = 0.0
     best_source = ""
@@ -5818,12 +6048,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "reason": reason,
         "confidence": "",
     }
-
-    normalized_brokerage_tokens = [
-        tok
-        for tok in re.sub(r"[^a-z0-9]+", " ", brokerage.lower()).split()
-        if len(tok) >= 4
-    ] if brokerage else []
 
     if best_email and best_score >= CONTACT_EMAIL_MIN_SCORE:
         info = candidates.get(best_email, {})
@@ -6003,6 +6227,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     if not had_candidates:
         reason = "cse_rate_limited" if cse_rate_limited else "no_personal_email"
+    elif not candidates or agent_match_filtered:
+        reason = "no_agent_match"
     else:
         reason = "withheld_low_conf_mix"
     result.update({
@@ -6028,17 +6254,29 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "all_office": False,
         "all_generic_email": all(info.get("generic") for info in candidates.values()) if candidates else False,
     }
-    LOG.warning(
-        "EMAIL FAIL for %s %s – personalised e-mail not found (%s) cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
-        agent,
-        state,
-        reason,
-        cse_status,
-        search_empty,
-        {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains},
-        len(candidates),
-        candidate_quality,
-    )
+    if reason == "no_agent_match":
+        LOG.warning(
+            "EMAIL FAIL – no agent-matching email for %s %s cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
+            agent,
+            state,
+            cse_status,
+            search_empty,
+            {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains},
+            len(candidates),
+            candidate_quality,
+        )
+    else:
+        LOG.warning(
+            "EMAIL FAIL for %s %s – personalised e-mail not found (%s) cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
+            agent,
+            state,
+            reason,
+            cse_status,
+            search_empty,
+            {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains},
+            len(candidates),
+            candidate_quality,
+        )
     return _finalize(result)
 
 
@@ -6136,6 +6374,8 @@ def append_row(vals) -> int:
     updated_range = resp.get("updatedRange") or resp.get("range") or f"{GSHEET_TAB}!A{row_idx}"
     row_idx = int(updated_range.split("!")[1].split(":")[0][1:])
     _next_row_hint = row_idx + 1
+    if len(vals) > COL_ZPID and vals[COL_ZPID]:
+        record_seen_zpid(str(vals[COL_ZPID]))
     LOG.info("Row appended to sheet (row %s); next hint %s", row_idx, _next_row_hint)
     return row_idx
 
@@ -6160,7 +6400,8 @@ TRUSTED_CONTACT_DOMAINS: Set[str] = set()
 def _is_explicit_mobile(value: Any) -> bool:
     if value is None:
         return False
-    return str(value).strip().lower() == "mobile"
+    val = str(value).strip().lower()
+    return any(tok in val for tok in ("mobile", "wireless", "cellular"))
 
 
 def get_line_info(phone: str) -> Dict[str, Any]:
@@ -6223,18 +6464,17 @@ def get_line_info(phone: str) -> Dict[str, Any]:
 
     info["valid"] = bool(data.get("IsValid"))
     info["country"] = str(data.get("CountryCode") or "US").upper()
+    if not info["valid"]:
+        _line_info_cache[phone] = info
+        _line_type_cache[phone] = False
+        _line_type_verified[phone] = False
+        return info
     line_type = data.get("LineType")
     phone_type = data.get("PhoneNumberType")
     is_mobile = bool(data.get("IsMobile"))
-    normalized_line = str(line_type or "").strip().lower()
-    normalized_type = str(phone_type or "").strip().lower()
-    if not is_mobile:
-        if _is_explicit_mobile(line_type) or _is_explicit_mobile(phone_type):
-            is_mobile = True
-    if not is_mobile:
-        if normalized_line == "fixedlineormobile" or normalized_type == "fixedlineormobile":
-            is_mobile = True
-    info["mobile"] = is_mobile
+    if _is_explicit_mobile(line_type) or _is_explicit_mobile(phone_type):
+        is_mobile = True
+    info["mobile"] = bool(is_mobile)
 
     _line_info_cache[phone] = info
     _line_type_cache[phone] = is_mobile
@@ -6457,7 +6697,7 @@ def _follow_up_pass():
     now = datetime.now(tz=TZ)
     resp = sheets_service.spreadsheets().values().get(
         spreadsheetId=GSHEET_ID,
-        range=f"{GSHEET_TAB}!A:AA",
+        range=f"{GSHEET_TAB}!A:AB",
         majorDimension="ROWS",
         valueRenderOption="FORMATTED_VALUE",
     ).execute()
@@ -6528,7 +6768,12 @@ def _follow_up_pass():
 def _expand_row(l: List[str], n: int = MIN_COLS) -> List[str]:
     return l + [""] * (n - len(l)) if len(l) < n else l
 
-def process_rows(rows: List[Dict[str, Any]]):
+def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
+    if not skip_dedupe:
+        rows = dedupe_rows_by_zpid(rows, LOG)
+        if not rows:
+            LOG.info("No fresh rows after de-duplication; skipping enrichment run")
+            return
     for r in rows:
         txt = (r.get("description", "") + " " + r.get("openai_summary", "")).strip()
         if not is_short_sale(txt):
@@ -6585,6 +6830,7 @@ def process_rows(rows: List[Dict[str, Any]]):
         row_vals[COL_CITY]    = r.get("city", "")
         row_vals[COL_STATE]   = state
         row_vals[COL_INIT_TS] = now_iso
+        row_vals[COL_ZPID]    = zpid
         row_idx = append_row(row_vals)
         if phone:
             seen_phones.add(phone)
