@@ -148,6 +148,17 @@ def _contact_cache_set(cache_store: Dict[str, Any], key: str, result: Dict[str, 
         "expires_at": time.time() + CONTACT_CACHE_TTL_SECONDS,
     }
 
+# RapidAPI request coordination/state
+_rapid_cache: Dict[str, Dict[str, Any]] = {}
+_rapid_fetch_events: Dict[str, threading.Event] = {}
+_rapid_cache_lock = threading.Lock()
+_rapid_request_lock = threading.Lock()
+_rapid_cooldown_until: float = 0.0
+_rapid_logged: Set[str] = set()
+_rapid_contact_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+RAPID_MIN_INTERVAL = float(os.getenv("RAPID_MIN_INTERVAL", "0.75"))
+RAPID_COOLDOWN_SECONDS = float(os.getenv("RAPID_COOLDOWN_SECONDS", "18.0"))
+
 def _http_get(
     url: str,
     *,
@@ -806,26 +817,92 @@ def _phone_obj_to_str(obj: Dict[str, str]) -> str:
     digits = "".join(parts)[:10]
     return fmt_phone(digits)
 
+def _rapid_status(zpid: str) -> Optional[int]:
+    with _rapid_cache_lock:
+        entry = _rapid_cache.get(zpid)
+        if entry:
+            return entry.get("status")
+    return None
+
+
 def rapid_property(zpid: str) -> Dict[str, Any]:
-    if not RAPID_KEY:
+    if not (RAPID_KEY and zpid):
         return {}
-    try:
-        headers = {"X-RapidAPI-Key": RAPID_KEY, "X-RapidAPI-Host": RAPID_HOST}
-        r = _http_get(
-            f"https://{RAPID_HOST}/property",
-            params={"zpid": zpid},
-            extra_headers=headers,
-            timeout=15,
-        )
-        if r.status_code == 429:
-            LOG.error("Rapid‑API quota exhausted (HTTP 429)")
-            data = {}
+
+    with _rapid_cache_lock:
+        cached = _rapid_cache.get(zpid)
+        if cached and cached.get("status") == 200:
+            return cached.get("data", {}) or {}
+        if cached and cached.get("status") is not None:
+            return cached.get("data", {}) or {}
+        waiter = _rapid_fetch_events.get(zpid)
+        if waiter:
+            event = waiter
         else:
-            r.raise_for_status()
-            data = r.json().get("data") or r.json()
-    except Exception as exc:
-        LOG.debug("Rapid‑API fetch error %s for zpid=%s", exc, zpid)
-        data = {}
+            event = threading.Event()
+            _rapid_fetch_events[zpid] = event
+            waiter = None
+
+    # Another caller is already fetching this ZPID; wait for it to finish.
+    if waiter:
+        event.wait(timeout=20)
+        with _rapid_cache_lock:
+            cached = _rapid_cache.get(zpid, {})
+            return cached.get("data", {}) or {}
+
+    status: Optional[int] = None
+    data: Dict[str, Any] = {}
+    now = time.time()
+    global _rapid_cooldown_until
+
+    if _rapid_cooldown_until and now < _rapid_cooldown_until:
+        LOG.warning(
+            "RapidAPI cooldown in effect for zpid=%s (%.1fs remaining)",
+            zpid,
+            _rapid_cooldown_until - now,
+        )
+        status = 429
+    else:
+        with _rapid_request_lock:
+            delay = max(0.0, RAPID_MIN_INTERVAL - (time.time() - getattr(rapid_property, "_last_call", 0.0)))
+            if delay > 0:
+                time.sleep(delay)
+            setattr(rapid_property, "_last_call", time.time())
+            try:
+                headers = {"X-RapidAPI-Key": RAPID_KEY, "X-RapidAPI-Host": RAPID_HOST}
+                resp = _session.get(
+                    f"https://{RAPID_HOST}/property",
+                    params={"zpid": zpid},
+                    headers=headers,
+                    timeout=15,
+                )
+                status = resp.status_code
+                if status == 200:
+                    payload = resp.json()
+                    data = payload.get("data") or payload
+                elif status == 429:
+                    _rapid_cooldown_until = time.time() + RAPID_COOLDOWN_SECONDS
+                    LOG.warning("RapidAPI 429 for zpid=%s; entering cooldown", zpid)
+                else:
+                    LOG.debug("RapidAPI non-200 status=%s for zpid=%s", status, zpid)
+            except Exception as exc:
+                LOG.debug("Rapid‑API fetch error %s for zpid=%s", exc, zpid)
+                status = 520
+
+    with _rapid_cache_lock:
+        existing = _rapid_cache.get(zpid)
+        if existing and existing.get("status") == 200:
+            data = existing.get("data", {}) or data
+            status = existing.get("status", status)
+        final_status = status if status is not None else (existing.get("status") if existing else None)
+        _rapid_cache[zpid] = {
+            "data": data,
+            "status": final_status,
+            "timestamp": time.time(),
+        }
+        event = _rapid_fetch_events.pop(zpid, None)
+        if event:
+            event.set()
     return data
 
 
@@ -834,6 +911,159 @@ def _rapid_from_payload(row_payload: Dict[str, Any]) -> Dict[str, Any]:
 
     zpid = str(row_payload.get("zpid", ""))
     return rapid_property(zpid) if zpid else {}
+
+
+def _rapid_walk(payload: Any) -> Iterable[Tuple[str, str]]:
+    stack: List[Tuple[str, Any]] = [("", payload)]
+    while stack:
+        path, value = stack.pop()
+        if isinstance(value, dict):
+            for key, val in value.items():
+                new_path = f"{path}.{key}" if path else str(key)
+                stack.append((new_path, val))
+        elif isinstance(value, list):
+            for idx, val in enumerate(value):
+                new_path = f"{path}[{idx}]" if path else f"[{idx}]"
+                stack.append((new_path, val))
+        else:
+            if value is None:
+                continue
+            text = str(value)
+            if text.strip():
+                yield path, text
+
+
+def _rapid_collect_contacts(payload: Any) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], str]:
+    phones: List[Dict[str, str]] = []
+    emails: List[Dict[str, str]] = []
+    joined: List[str] = []
+    seen_phone: Set[str] = set()
+    seen_email: Set[str] = set()
+    for path, text in _rapid_walk(payload):
+        joined.append(text)
+        for em in EMAIL_RE.finditer(text):
+            cleaned = clean_email(em.group())
+            if not cleaned or cleaned in seen_email:
+                continue
+            seen_email.add(cleaned)
+            emails.append({"value": cleaned, "context": path, "text": text})
+        for pm in PHONE_RE.finditer(text):
+            formatted = fmt_phone(pm.group())
+            if not formatted or formatted in seen_phone:
+                continue
+            seen_phone.add(formatted)
+            phones.append({"value": formatted, "context": path, "text": text})
+        digits_only = re.sub(r"\D", "", text)
+        if digits_only and len(digits_only) >= 10:
+            formatted = fmt_phone(digits_only[:10])
+            if formatted and formatted not in seen_phone:
+                seen_phone.add(formatted)
+                phones.append({"value": formatted, "context": path, "text": text})
+    joined_text = " ".join(joined)
+    return phones, emails, joined_text
+
+
+def _rapid_email_allowed(agent: str, email: str, *, context: str, payload_text: str) -> bool:
+    if not email:
+        return False
+    domain = email.split("@", 1)[1].lower() if "@" in email else ""
+    if domain.endswith(".gov") or ".gov." in domain or domain.endswith(".mil"):
+        return False
+    haystack = f"{context} {payload_text}".lower()
+    for bad in ("obituary", "obituaries", "memorial", "medical", "clinic", "hospital", "pdf"):
+        if bad in haystack:
+            return False
+    name_match = _email_matches_name(agent, email)
+    page_name_hit = _page_mentions_agent(haystack, agent)
+    return bool(name_match or page_name_hit)
+
+
+def _rapid_select_email(agent: str, emails: List[Dict[str, str]], payload_text: str) -> Tuple[str, str]:
+    for entry in emails:
+        email = entry.get("value", "")
+        context = " ".join([entry.get("context", ""), entry.get("text", "")]).strip()
+        if not email or not ok_email(email):
+            continue
+        if not _rapid_email_allowed(agent, email, context=context, payload_text=payload_text):
+            continue
+        reason = "rapid_name_match" if _email_matches_name(agent, email) else "rapid_context_match"
+        return email, reason
+    return "", ""
+
+
+def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, str]:
+    fallback: Tuple[str, str] = ("", "")
+    for entry in phones:
+        phone = entry.get("value", "")
+        if not phone:
+            continue
+        info = get_line_info(phone)
+        if not info.get("valid"):
+            continue
+        ctx = " ".join([entry.get("context", ""), entry.get("text", "")]).lower()
+        office_hint = any(term in ctx for term in ("office", "main", "brokerage", "company", "fax", "switchboard"))
+        if info.get("mobile"):
+            reason = "rapid_cloudmersive_mobile"
+            return phone, reason
+        if not fallback[0]:
+            reason = "rapid_landline_office" if office_hint else "rapid_landline_fallback"
+            fallback = (phone, reason)
+    return fallback
+
+
+def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
+    zpid = str(row_payload.get("zpid", "")).strip()
+    if not zpid:
+        return {
+            "status": None,
+            "data": {},
+            "phones": [],
+            "emails": [],
+            "selected_phone": "",
+            "phone_reason": "",
+            "selected_email": "",
+            "email_reason": "",
+        }
+
+    cache_key = (zpid, agent.strip().lower())
+    with _rapid_cache_lock:
+        cached = _rapid_contact_cache.get(cache_key)
+        if cached:
+            return cached
+
+    data = rapid_property(zpid)
+    status = _rapid_status(zpid)
+    phones, emails, joined_text = _rapid_collect_contacts(data)
+    selected_phone, phone_reason = _rapid_select_phone(agent, phones)
+    selected_email, email_reason = _rapid_select_email(agent, emails, joined_text)
+
+    snapshot = {
+        "status": status,
+        "data": data,
+        "phones": phones,
+        "emails": emails,
+        "selected_phone": selected_phone,
+        "phone_reason": phone_reason,
+        "selected_email": selected_email,
+        "email_reason": email_reason,
+    }
+
+    with _rapid_cache_lock:
+        _rapid_contact_cache[cache_key] = snapshot
+        if zpid not in _rapid_logged:
+            LOG.info(
+                "Rapid summary zpid=%s status=%s phones_found=%s emails_found=%s selected_phone=%s phone_reason=%s selected_email=%s email_reason=%s",
+                zpid,
+                status,
+                len(phones),
+                len(emails),
+                selected_phone,
+                phone_reason or "<none>",
+                selected_email,
+                email_reason or "<none>",
+            )
+            _rapid_logged.add(zpid)
+    return snapshot
 
 def _phones_from_block(blk: Dict[str, Any]) -> List[str]:
     out = []
@@ -909,24 +1139,10 @@ def _names_match(a: str, b: str) -> bool:
     return bool(ta & tb)
 
 def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
-    data = rapid_property(zpid)
-    if not data:
-        return "", ""
-    cand, allp = [], set()
-    for blk in data.get("contact_recipients", []):
-        for pn in _phones_from_block(blk):
-            allp.add(pn)
-            if _names_match(agent_name, blk.get("display_name", "")):
-                cand.append(("rapid:contact_recipients", pn))
-    lb = data.get("listed_by", {})
-    for pn in _phones_from_block(lb):
-        allp.add(pn)
-        if _names_match(agent_name, lb.get("display_name", "")):
-            cand.append(("rapid:listed_by", pn))
-    if cand:
-        return cand[0][1], cand[0][0]
-    if len(allp) == 1:
-        return next(iter(allp)), "rapid:fallback_single"
+    snapshot = _rapid_contact_snapshot(agent_name, {"zpid": zpid})
+    phone = snapshot.get("selected_phone", "") if snapshot else ""
+    if phone:
+        return phone, snapshot.get("phone_reason", "rapid")
     return "", ""
 
 def _jitter() -> None:
@@ -2591,25 +2807,18 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
 
     # RapidAPI emails are trusted and accepted immediately.
     zpid = str(row_payload.get("zpid", ""))
-    rapid = _rapid_from_payload(row_payload)
-    rapid_emails: List[str] = []
-    if rapid:
-        lb = rapid.get("listed_by") or {}
-        rapid_emails.extend(_emails_from_block(lb))
-        for blk in rapid.get("contact_recipients", []) or []:
-            rapid_emails.extend(_emails_from_block(blk))
-    rapid_emails = [e for e in rapid_emails if e]
-    if rapid_emails:
-        best = rapid_emails[0]
+    rapid_snapshot = _rapid_contact_snapshot(agent, row_payload)
+    rapid_email = rapid_snapshot.get("selected_email", "")
+    if rapid_email:
         return {
             "best_phone": "",
             "best_phone_confidence": 0,
             "best_phone_source_url": "",
             "best_phone_evidence": "",
-            "best_email": best,
+            "best_email": rapid_email,
             "best_email_confidence": 95,
             "best_email_source_url": "rapidapi",
-            "best_email_evidence": "rapidapi listing contact",
+            "best_email_evidence": rapid_snapshot.get("email_reason", "rapidapi listing contact"),
         }
 
     pending_urls: deque[str] = deque(urls[:MAX_CONTACT_URLS])
@@ -4197,7 +4406,20 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         return cached
 
     zpid = str(row_payload.get("zpid", ""))
-    rapid = _rapid_from_payload(row_payload)
+    rapid_snapshot = _rapid_contact_snapshot(agent, row_payload)
+    rapid = rapid_snapshot.get("data", {}) if rapid_snapshot else {}
+    rapid_selected_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
+    rapid_phone_reason = rapid_snapshot.get("phone_reason", "") if rapid_snapshot else ""
+    rapid_fallback_phone = rapid_selected_phone if rapid_selected_phone and rapid_phone_reason != "rapid_cloudmersive_mobile" else ""
+
+    if rapid_selected_phone and rapid_phone_reason == "rapid_cloudmersive_mobile":
+        return _finalize({
+            "number": rapid_selected_phone,
+            "confidence": "high",
+            "score": max(CONTACT_PHONE_MIN_SCORE, CONTACT_PHONE_LOW_CONF + 0.75),
+            "source": "rapid_mobile",
+            "reason": rapid_phone_reason,
+        })
 
     candidates: Dict[str, Dict[str, Any]] = {}
     had_candidates = False
@@ -4325,8 +4547,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         for p in _phones_from_block(blk):
             _register(p, "payload_contact", context=ctx, meta_name=meta_name, name_match=match)
 
-    zpid = str(row_payload.get("zpid", ""))
-    rapid = rapid_property(zpid) if zpid else {}
     lb: Dict[str, Any] = {}
     if rapid:
         lb = rapid.get("listed_by") or {}
@@ -4337,27 +4557,6 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             if not brokerage_hint:
                 brokerage_hint = brokerage_from_lb
         match = _names_match(agent, lb_name)
-        for p in _phones_from_block(lb):
-            _register(
-                p,
-                "rapid_listed_by",
-                meta_name=lb_name,
-                name_match=match,
-                office_flag=not match and bool(lb_name),
-            )
-        for blk in rapid.get("contact_recipients", []) or []:
-            blk_name = blk.get("display_name", "")
-            match = _names_match(agent, blk_name)
-            ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
-            for p in _phones_from_block(blk):
-                _register(
-                    p,
-                    "rapid_contact",
-                    context=ctx,
-                    meta_name=blk_name,
-                    name_match=match,
-                    office_flag=not match and bool(blk_name),
-                )
         address_info = rapid.get("address") or {}
         location_extras.extend(
             [
@@ -4366,6 +4565,25 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 address_info.get("city", ""),
                 address_info.get("state", ""),
             ]
+        )
+    for entry in rapid_snapshot.get("phones", []) if rapid_snapshot else []:
+        phone_val = entry.get("value", "")
+        if not phone_val:
+            continue
+        info = get_line_info(phone_val)
+        if not info.get("valid"):
+            continue
+        ctx = entry.get("context", "")
+        meta_name = ""
+        office_flag = not info.get("mobile") or any(term in ctx.lower() for term in PHONE_OFFICE_TERMS)
+        _register(
+            phone_val,
+            "rapid_contact",
+            context=ctx,
+            meta_name=meta_name,
+            name_match=_names_match(agent, ctx),
+            office_flag=office_flag,
+            mobile_hint=bool(info.get("mobile")),
         )
 
     def _rapid_mobile_shortcut() -> Optional[Dict[str, Any]]:
@@ -4886,6 +5104,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             })
             return _finalize(result)
 
+    if rapid_fallback_phone:
+        result.update({
+            "number": rapid_fallback_phone,
+            "confidence": "low",
+            "score": max(result.get("score", 0.0), CONTACT_PHONE_OVERRIDE_MIN),
+            "source": "rapid_fallback",
+            "reason": rapid_phone_reason or "rapid_fallback_landline",
+        })
+        return _finalize(result)
+
     if candidates:
         office_choice = max(
             (
@@ -5000,6 +5228,20 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     if cached is not None:
         return cached
 
+    rapid_snapshot = _rapid_contact_snapshot(agent, row_payload)
+    rapid = rapid_snapshot.get("data", {}) if rapid_snapshot else {}
+    rapid_selected_email = rapid_snapshot.get("selected_email", "") if rapid_snapshot else ""
+    rapid_email_reason = rapid_snapshot.get("email_reason", "") if rapid_snapshot else ""
+
+    if rapid_selected_email:
+        return _finalize({
+            "email": rapid_selected_email,
+            "confidence": "high",
+            "score": max(CONTACT_EMAIL_MIN_SCORE, CONTACT_EMAIL_FALLBACK_SCORE + 0.25),
+            "source": "rapidapi",
+            "reason": rapid_email_reason or "rapid_contact_match",
+        })
+
     enrichment = _contact_enrichment(agent, state, row_payload)
     enriched_email = enrichment.get("best_email", "")
     if enriched_email:
@@ -5018,7 +5260,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     domain_hint = mls_id = ""
     zpid = str(row_payload.get("zpid", ""))
-    rapid = _rapid_from_payload(row_payload)
     candidates: Dict[str, Dict[str, Any]] = {}
     generic_seen: Set[str] = set()
     had_candidates = False
@@ -5046,22 +5287,17 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     }
 
     def _authoritative_rapid_email() -> str:
-        if not rapid:
-            return ""
-        blocks: List[Dict[str, Any]] = []
-        lb = rapid.get("listed_by") or {}
-        if lb:
-            blocks.append(lb)
-        blocks.extend(rapid.get("contact_recipients", []) or [])
-        for blk in blocks:
-            for em in _emails_from_block(blk):
-                raw = str(em or "").strip()
-                if not raw:
-                    continue
-                cleaned = clean_email(raw) or raw
-                if _is_generic_email(cleaned) and not _email_matches_name(agent, cleaned):
-                    continue
-                return cleaned
+        if rapid_selected_email:
+            return rapid_selected_email
+        payload_text = " ".join(entry.get("text", "") for entry in (rapid_snapshot.get("emails", []) if rapid_snapshot else []))
+        for entry in (rapid_snapshot.get("emails", []) if rapid_snapshot else []):
+            candidate = entry.get("value", "")
+            context = " ".join([entry.get("context", ""), entry.get("text", "")])
+            if not candidate:
+                continue
+            if not _rapid_email_allowed(agent, candidate, context=context, payload_text=payload_text):
+                continue
+            return candidate
         return ""
 
     rapid_authoritative_email = _authoritative_rapid_email()
@@ -5206,7 +5442,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 _register(em, "payload_contact", context=ctx, meta_name=blk.get("display_name", ""))
 
     zpid = str(row_payload.get("zpid", ""))
-    rapid: Dict[str, Any] = {}
     if rapid:
         lb = rapid.get("listed_by") or {}
         brokerage = (lb.get("brokerageName", "") or brokerage).strip()
@@ -5215,27 +5450,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         mls_id = lb.get("listingAgentMlsId", "")
         lb_display = lb.get("display_name", "")
         lb_ctx = " ".join(str(lb.get(k, "")) for k in ("title", "label", "role") if lb.get(k))
-        for em in _emails_from_block(lb):
-            name_match = not lb_display or _names_match(agent, lb_display)
-            _register(
-                em,
-                "rapid_listed_by",
-                meta_name=lb_display,
-                context=lb_ctx,
-                penalty=0.4 if not name_match else 0.0,
-            )
-        for blk in rapid.get("contact_recipients", []) or []:
-            ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
-            for em in _emails_from_block(blk):
-                display_name = blk.get("display_name", "")
-                name_match = not display_name or _names_match(agent, display_name)
-                _register(
-                    em,
-                    "rapid_contact",
-                    context=ctx,
-                    meta_name=display_name,
-                    penalty=0.4 if not name_match else 0.0,
-                )
         address_info = rapid.get("address") or {}
         location_extras.extend(
             [
@@ -5244,6 +5458,22 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 address_info.get("city", ""),
                 address_info.get("state", ""),
             ]
+        )
+    rapid_payload_text = " ".join(entry.get("text", "") for entry in (rapid_snapshot.get("emails", []) if rapid_snapshot else []))
+    for entry in (rapid_snapshot.get("emails", []) if rapid_snapshot else []):
+        email_val = entry.get("value", "")
+        if not email_val:
+            continue
+        context = " ".join([entry.get("context", ""), entry.get("text", "")])
+        if not _rapid_email_allowed(agent, email_val, context=context, payload_text=rapid_payload_text):
+            continue
+        name_match = _email_matches_name(agent, email_val)
+        _register(
+            email_val,
+            "rapid_contact",
+            context=context,
+            meta_name="",
+            penalty=0.4 if not name_match else 0.0,
         )
 
     location_tokens, location_digits = _collect_location_hints(
