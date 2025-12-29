@@ -2382,6 +2382,7 @@ def _contact_search_urls(
         return collected, search_empty
 
     def _run_search(current_allowed: Optional[Set[str]]) -> Tuple[List[str], bool, str]:
+        nonlocal search_disabled, query_budget
         fallback_urls: List[str] = []
         search_empty = True
         seen_links: Set[str] = set()
@@ -6332,9 +6333,17 @@ def process_rows(rows: List[Dict[str, Any]]):
             continue
         state = r.get("state", "")
         _rapid_from_payload(r)
-        phone_info = lookup_phone(name, state, r)
+        try:
+            phone_info = lookup_phone(name, state, r)
+        except Exception as exc:
+            LOG.exception("lookup_phone failed for %s (%s)", name, zpid)
+            phone_info = {"number": "", "confidence": "", "reason": "lookup_error"}
+        try:
+            email_info = lookup_email(name, state, r)
+        except Exception as exc:
+            LOG.exception("lookup_email failed for %s (%s)", name, zpid)
+            email_info = {"email": "", "confidence": "", "reason": "lookup_error"}
         phone = phone_info.get("number", "")
-        email_info = lookup_email(name, state, r)
         email = email_info.get("email", "")
         if phone and phone_exists(phone):
             continue
