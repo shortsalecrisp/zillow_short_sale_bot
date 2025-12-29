@@ -458,6 +458,8 @@ GENERIC_EMAIL_PREFIXES = {
     "firstnamelastname",
 }
 ENABLE_SYNTH_EMAIL_FALLBACK = os.getenv("ENABLE_SYNTH_EMAIL_FALLBACK", "false").lower() == "true"
+ROLE_EMAIL_PREFIXES = {"info", "office", "admin"}
+ALLOW_ROLE_EMAIL_FALLBACK = os.getenv("ALLOW_ROLE_EMAIL_FALLBACK", "false").lower() == "true"
 
 STATE_ABBR_TO_NAME = {
     "AL": "Alabama",
@@ -617,10 +619,37 @@ CONTACT_SITE_PRIORITY: Tuple[str, ...] = (
     "coldwellbankerhomes.com",
     "facebook.com",
     "linkedin.com",
-    "instagram.com",
 )
 
-SOCIAL_DOMAINS: Set[str] = {"facebook.com", "instagram.com", "linkedin.com"}
+SOCIAL_DOMAINS: Set[str] = {"facebook.com", "linkedin.com"}
+CONTACT_ALLOWLIST_BASE: Set[str] = {
+    "realtor.com",
+    "nar.realtor",
+    "facebook.com",
+    "linkedin.com",
+    "zillow.com",
+    "kw.com",
+    "kellerwilliams.com",
+    "remax.com",
+    "compass.com",
+    "bhhs.com",
+    "coldwellbankerhomes.com",
+    "century21.com",
+    "exprealty.com",
+    "realbroker.com",
+    "realbrokerllc.com",
+}
+CONTACT_DIRECTORY_TERMS: Set[str] = {
+    "mls",
+    "realtor",
+    "association",
+    "board",
+    "directory",
+    "agent",
+    "broker",
+    "realestate",
+    "realty",
+}
 
 GOOGLE_PORTAL_DENYLIST: Set[str] = {
     "zillow.com",
@@ -1087,6 +1116,8 @@ def _rapid_select_email(agent: str, emails: List[Dict[str, str]], payload_text: 
         context = " ".join([entry.get("context", ""), entry.get("text", "")]).strip()
         if not email or not ok_email(email):
             continue
+        if _is_role_email(email) and not ALLOW_ROLE_EMAIL_FALLBACK:
+            continue
         if not _rapid_email_allowed(agent, email, context=context, payload_text=payload_text):
             continue
         reason = "rapid_name_match" if _email_matches_name(agent, email) else "rapid_context_match"
@@ -1107,11 +1138,20 @@ def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, 
             continue
         ctx = " ".join([entry.get("context", ""), entry.get("text", "")]).lower()
         office_hint = any(term in ctx for term in ("office", "main", "brokerage", "company", "fax", "switchboard"))
-        if info.get("mobile"):
+        phone_type = info.get("type") or "unknown"
+        type_norm = str(phone_type).lower()
+        if info.get("mobile_verified"):
             reason = "rapid_cloudmersive_mobile"
             return phone, reason
         if not fallback[0]:
-            reason = "rapid_landline_office" if office_hint else "rapid_landline_fallback"
+            if type_norm in {"fixedlineormobile", "fixed line or mobile"}:
+                reason = "rapid_cloudmersive_ambiguous"
+            elif type_norm in {"landline", "fixedline", "fixed line"}:
+                reason = "rapid_cloudmersive_landline"
+            elif not info.get("valid"):
+                reason = "rapid_cloudmersive_invalid"
+            else:
+                reason = "rapid_cloudmersive_landline" if office_hint else "rapid_cloudmersive_unknown"
             fallback = (phone, reason)
     if not fallback[0] and invalid_seen:
         return "", "rapid_invalid"
@@ -1143,6 +1183,13 @@ def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str
     phones, emails, joined_text = _rapid_collect_contacts(data)
     selected_phone, phone_reason = _rapid_select_phone(agent, phones)
     selected_email, email_reason = _rapid_select_email(agent, emails, joined_text)
+    cm_info = get_line_info(selected_phone) if selected_phone else {}
+    phone_type = cm_info.get("type") or "unknown"
+    phone_verified_mobile = bool(
+        selected_phone
+        and phone_reason == "rapid_cloudmersive_mobile"
+        and cm_info.get("mobile_verified")
+    )
 
     snapshot = {
         "status": status,
@@ -1153,6 +1200,8 @@ def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str
         "phone_reason": phone_reason,
         "selected_email": selected_email,
         "email_reason": email_reason,
+        "cloudmersive_type": phone_type,
+        "phone_verified_mobile": phone_verified_mobile,
     }
 
     with _rapid_cache_lock:
@@ -1170,6 +1219,12 @@ def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str
                 email_reason or "<none>",
             )
             _rapid_logged.add(zpid)
+            LOG.info(
+                "phone_gate: rapid_verified_mobile=%s type=%s chosen=%s",
+                phone_verified_mobile,
+                phone_type or "unknown",
+                selected_phone or "",
+            )
     return snapshot
 
 def _phones_from_block(blk: Dict[str, Any]) -> List[str]:
@@ -1307,7 +1362,7 @@ def _domain(host_or_url: str) -> str:
 
 
 def _allowed_contact_domains(domain_hint: str) -> Optional[Set[str]]:
-    allowed = set(SOCIAL_DOMAINS) | set(ALT_PHONE_SITES) | set(CONTACT_SITE_PRIORITY)
+    allowed = set(CONTACT_ALLOWLIST_BASE) | set(SOCIAL_DOMAINS)
     dom = _domain(domain_hint)
     if not dom and domain_hint:
         dom = _infer_domain_from_text(domain_hint)
@@ -1381,13 +1436,20 @@ def _contact_source_allowed(
         return False
     if "obituary" in low_url or "obituaries" in low_url:
         return False
+    if path.lower().endswith(".pdf") or ".pdf" in path.lower():
+        return False
 
     trusted_pool = set(trusted_domains) | set(TRUSTED_CONTACT_DOMAINS)
     if brokerage_domain:
         trusted_pool.add(brokerage_domain)
-    if host in trusted_pool or dom in trusted_pool or any(host.endswith(f".{td}") for td in trusted_pool):
+    allowed_pool = set(CONTACT_ALLOWLIST_BASE) | trusted_pool
+    if host in allowed_pool or dom in allowed_pool or any(host.endswith(f".{td}") for td in allowed_pool):
         return True
     if host in SOCIAL_DOMAINS or dom in SOCIAL_DOMAINS:
+        return True
+    if dom in {"zillow.com", "www.zillow.com"}:
+        if not re.search(r"/profile|/agent|/real-estate-agent", path.lower()):
+            return False
         return True
     if host in EMAIL_ALLOWED_PORTALS or dom in EMAIL_ALLOWED_PORTALS:
         return True
@@ -1395,8 +1457,7 @@ def _contact_source_allowed(
         return True
     if _is_real_estate_domain(host):
         return True
-    directory_terms = ("mls", "realtor", "association", "board", "listing-agent")
-    if any(term in path.lower() for term in directory_terms):
+    if any(term in host for term in CONTACT_DIRECTORY_TERMS) or any(term in path.lower() for term in CONTACT_DIRECTORY_TERMS):
         return True
     return False
 
@@ -2690,7 +2751,19 @@ def _contact_search_urls(
 
     Returns (urls, search_empty, cse_status, search_exhausted).
     """
-    allowed_domains = None
+
+    def _contact_search_allowlist() -> Set[str]:
+        allowed = set(CONTACT_ALLOWLIST_BASE)
+        broker_dom = _domain(domain_hint or brokerage) if (domain_hint or brokerage) else ""
+        if not broker_dom and brokerage:
+            broker_dom = _domain(_infer_domain_from_text(brokerage) or _guess_domain_from_brokerage(brokerage) or "")
+        if broker_dom:
+            allowed.add(broker_dom)
+        return {d for d in allowed if d}
+
+    allowed_domains = _contact_search_allowlist()
+    if not allowed_domains:
+        allowed_domains = None
     strict_queries, relaxed_queries = _contact_cse_queries(
         agent,
         state,
@@ -2854,6 +2927,7 @@ def _contact_search_urls(
 
     def _widen_allowed_domains(current_allowed: Optional[Set[str]]) -> Optional[Set[str]]:
         widened = set(current_allowed or [])
+        widened.update(CONTACT_ALLOWLIST_BASE)
         if brokerage_domain:
             widened.add(brokerage_domain)
         widened.update({"realtor.com", "nar.realtor"})
@@ -2893,6 +2967,13 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     urls = [
         u for u in urls if _contact_source_allowed(u, brokerage_domain, trusted_domains)
     ]
+    selected_domains = sorted(
+        {d for d in (_domain(u) for u in urls) if d}
+    )
+    LOG.info(
+        "search_sources_used: %s",
+        ",".join(selected_domains) if selected_domains else "<none>",
+    )
     search_disabled = bool(urls)
     candidates: List[Dict[str, Any]] = []
     headless_budget = HEADLESS_CONTACT_BUDGET
@@ -4497,6 +4578,11 @@ def _is_generic_email(email: str) -> bool:
             return True
     return False
 
+def _is_role_email(email: str) -> bool:
+    local = email.split("@", 1)[0]
+    local_key = re.sub(r"[^a-z0-9]", "", local.lower())
+    return any(local_key.startswith(prefix) for prefix in ROLE_EMAIL_PREFIXES)
+
 def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> Optional[bool]:
     if not phone:
         return None
@@ -4568,6 +4654,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     cache_key = _contact_cache_key(agent, state, row_payload)
 
     def _finalize(res: Dict[str, Any]) -> Dict[str, Any]:
+        res.setdefault("verified_mobile", False)
         _contact_cache_set(cache_p, cache_key, res)
         return res
 
@@ -4594,15 +4681,17 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     rapid = rapid_snapshot.get("data", {}) if rapid_snapshot else {}
     rapid_selected_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
     rapid_phone_reason = rapid_snapshot.get("phone_reason", "") if rapid_snapshot else ""
-    rapid_fallback_phone = rapid_selected_phone if rapid_selected_phone and rapid_phone_reason != "rapid_cloudmersive_mobile" else ""
+    rapid_verified_mobile = bool(rapid_snapshot.get("phone_verified_mobile"))
+    rapid_fallback_phone = rapid_selected_phone if rapid_selected_phone and not rapid_verified_mobile else ""
 
-    if rapid_selected_phone and rapid_phone_reason == "rapid_cloudmersive_mobile":
+    if rapid_selected_phone and rapid_verified_mobile:
         return _finalize({
             "number": rapid_selected_phone,
             "confidence": "high",
             "score": max(CONTACT_PHONE_MIN_SCORE, CONTACT_PHONE_LOW_CONF + 0.75),
             "source": "rapid_mobile",
             "reason": rapid_phone_reason,
+            "verified_mobile": True,
         })
 
     candidates: Dict[str, Dict[str, Any]] = {}
@@ -4788,7 +4877,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             line_info = get_line_info(num)
             if not line_info.get("valid"):
                 continue
-            if line_info.get("mobile"):
+            if line_info.get("mobile_verified"):
                 src = info.get("best_source") or next(iter(info.get("sources", [])), "rapid")
                 base_score = max(
                     info.get("score", 0.0) + 0.25,
@@ -4802,6 +4891,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                     "score": base_score,
                     "source": f"{src}_cloudmersive_mobile",
                     "reason": "cloudmersive_mobile_rapid",
+                    "verified_mobile": True,
                 }
         return None
 
@@ -4813,6 +4903,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     enrichment = _contact_enrichment(agent, state, row_payload)
     enriched_phone = enrichment.get("best_phone", "")
     if enriched_phone:
+        line_info = get_line_info(enriched_phone)
+        verified_mobile = bool(line_info.get("mobile_verified"))
         confidence_score = enrichment.get("best_phone_confidence", 0)
         confidence = "high" if confidence_score >= 80 else "low"
         result = {
@@ -4822,6 +4914,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "source": enrichment.get("best_phone_source_url", "enrichment"),
             "reason": "",
             "evidence": enrichment.get("best_phone_evidence", ""),
+            "verified_mobile": verified_mobile,
         }
         return _finalize(result)
 
@@ -5238,6 +5331,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "score": best_score if best_score != float("-inf") else 0.0,
         "source": best_source,
         "reason": "",
+        "verified_mobile": False,
     }
 
     if best_number:
@@ -5280,11 +5374,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             confidence = ""
         if confidence:
             best_score = adjusted_score
+            verified_mobile = bool(get_line_info(best_number).get("mobile_verified"))
             result.update({
                 "number": best_number,
                 "confidence": confidence,
                 "score": adjusted_score,
                 "source": best_source,
+                "verified_mobile": verified_mobile,
             })
             return _finalize(result)
 
@@ -5295,6 +5391,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "score": max(result.get("score", 0.0), CONTACT_PHONE_OVERRIDE_MIN),
             "source": "rapid_fallback",
             "reason": rapid_phone_reason or "rapid_fallback_landline",
+            "verified_mobile": False,
         })
         return _finalize(result)
 
@@ -5324,6 +5421,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                     "confidence": "low",
                     "score": office_score,
                     "source": office_source,
+                    "verified_mobile": False,
                 }
             )
             return _finalize(result)
@@ -5517,6 +5615,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         cleaned = clean_email(email)
         if not cleaned or not ok_email(cleaned):
             return
+        role_email = _is_role_email(cleaned)
+        if role_email and not ALLOW_ROLE_EMAIL_FALLBACK:
+            return
         if url and not _contact_source_allowed(url, brokerage_domain, trusted_domains):
             return
         low = cleaned.lower()
@@ -5586,6 +5687,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "penalty_applied": False,
                 "trusted_hit": False,
                 "agent_on_page": False,
+                "role_email": role_email,
             },
         )
         if is_generic:
@@ -5616,6 +5718,13 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             info["score"] += 0.2
         elif source == "mailto" and (matches_agent or (meta_name and _names_match(agent, meta_name))):
             info["score"] += 0.1
+        if role_email:
+            info["role_email"] = True
+            if not ALLOW_ROLE_EMAIL_FALLBACK:
+                info["penalty_applied"] = True
+                info["score"] -= 0.5
+            else:
+                info["score"] -= 0.35
         if page_agent_hit and not info.get("agent_on_page"):
             info["agent_on_page"] = True
         if context:
@@ -5974,6 +6083,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     ] if brokerage else []
 
     filtered_candidates: Dict[str, Dict[str, Any]] = {}
+    domain_match_required = bool(domain_hint or brokerage_domain or trusted_domains)
     for email, info in candidates.items():
         domain_hint_hit, brokerage_domain_ok, brokerage_hit, agent_token_hit, domain_l, domain_root = _domain_signals(email, info)
         haystacks: List[str] = []
@@ -5982,9 +6092,16 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         haystacks.extend(info.get("meta_names", []))
         agent_on_page = info.get("agent_on_page") or _page_mentions_agent(" ".join(haystacks), agent)
         trusted_hit = info.get("trusted_hit") or domain_l in trusted_domains or domain_root in trusted_domains
-        if not _email_matches_name(agent, email):
+        role_email = info.get("role_email")
+        if role_email and not ALLOW_ROLE_EMAIL_FALLBACK:
             continue
-        if not (agent_on_page or brokerage_domain_ok or domain_hint_hit or trusted_hit or brokerage_hit):
+        name_match = _email_matches_name(agent, email)
+        if not (name_match or agent_on_page):
+            continue
+        domain_matches_known = brokerage_domain_ok or domain_hint_hit or brokerage_hit or trusted_hit or agent_token_hit
+        if domain_match_required and not domain_matches_known:
+            continue
+        if not domain_match_required and not (domain_matches_known or agent_on_page):
             continue
         filtered_candidates[email] = info
     agent_match_filtered = bool(candidates) and not filtered_candidates
@@ -6254,29 +6371,17 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         "all_office": False,
         "all_generic_email": all(info.get("generic") for info in candidates.values()) if candidates else False,
     }
-    if reason == "no_agent_match":
-        LOG.warning(
-            "EMAIL FAIL – no agent-matching email for %s %s cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
-            agent,
-            state,
-            cse_status,
-            search_empty,
-            {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains},
-            len(candidates),
-            candidate_quality,
-        )
-    else:
-        LOG.warning(
-            "EMAIL FAIL for %s %s – personalised e-mail not found (%s) cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
-            agent,
-            state,
-            reason,
-            cse_status,
-            search_empty,
-            {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains},
-            len(candidates),
-            candidate_quality,
-        )
+    LOG.warning(
+        "EMAIL FAIL – no agent-matching email for %s %s reason=%s cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
+        agent,
+        state,
+        reason,
+        cse_status,
+        search_empty,
+        {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains},
+        len(candidates),
+        candidate_quality,
+    )
     return _finalize(result)
 
 
@@ -6407,20 +6512,27 @@ def _is_explicit_mobile(value: Any) -> bool:
 def get_line_info(phone: str) -> Dict[str, Any]:
     """Return Cloudmersive classification for *phone* with caching.
 
-    The result dictionary contains ``valid`` (bool), ``mobile`` (bool), and
-    ``country`` (upper-case ISO code or empty string). If Cloudmersive is
-    unavailable, we fall back to lightweight validation and treat the number as
-    mobile to avoid overly aggressive filtering.
+    The result dictionary contains ``valid`` (bool), ``mobile`` (bool),
+    ``mobile_verified`` (bool when explicitly Mobile/Wireless), ``country``
+    (upper-case ISO code or empty string) and ``type`` (Cloudmersive line
+    classification). When Cloudmersive is unavailable we still return basic
+    validation but do not treat the number as verified mobile.
     """
 
     if not phone:
-        return {"valid": False, "mobile": False, "country": ""}
+        return {"valid": False, "mobile": False, "mobile_verified": False, "country": "", "type": ""}
     if phone in _line_info_cache:
         return _line_info_cache[phone]
 
-    info = {"valid": valid_phone(phone), "mobile": False, "country": "US"}
+    info = {
+        "valid": valid_phone(phone),
+        "mobile": False,
+        "mobile_verified": False,
+        "country": "US",
+        "type": "unknown",
+    }
     if not CLOUDMERSIVE_KEY:
-        info["mobile"] = True
+        info["mobile"] = info["valid"]
         _line_info_cache[phone] = info
         return info
 
@@ -6449,7 +6561,6 @@ def get_line_info(phone: str) -> Dict[str, Any]:
             phone,
             status,
         )
-        info["mobile"] = True
         _line_info_cache[phone] = info
         return info
 
@@ -6458,27 +6569,30 @@ def get_line_info(phone: str) -> Dict[str, Any]:
             "Cloudmersive response for %s missing IsValid; falling back to local validation",
             phone,
         )
-        info["mobile"] = True
         _line_info_cache[phone] = info
         return info
 
     info["valid"] = bool(data.get("IsValid"))
     info["country"] = str(data.get("CountryCode") or "US").upper()
+    type_label = str(data.get("LineType") or data.get("PhoneNumberType") or "").strip()
+    normalized_type = type_label.lower()
+    explicit_mobile = normalized_type in {"mobile", "wireless"}
+    ambiguous_mobile = normalized_type in {"fixedlineormobile", "fixed line or mobile"}
+    info["type"] = type_label or ("Unknown" if data else "")
     if not info["valid"]:
         _line_info_cache[phone] = info
         _line_type_cache[phone] = False
         _line_type_verified[phone] = False
         return info
-    line_type = data.get("LineType")
-    phone_type = data.get("PhoneNumberType")
-    is_mobile = bool(data.get("IsMobile"))
-    if _is_explicit_mobile(line_type) or _is_explicit_mobile(phone_type):
-        is_mobile = True
+
+    is_mobile = bool(data.get("IsMobile")) or explicit_mobile
+    info["mobile_verified"] = explicit_mobile
     info["mobile"] = bool(is_mobile)
+    info["ambiguous_mobile"] = ambiguous_mobile
 
     _line_info_cache[phone] = info
-    _line_type_cache[phone] = is_mobile
-    _line_type_verified[phone] = is_mobile
+    _line_type_cache[phone] = bool(is_mobile)
+    _line_type_verified[phone] = bool(explicit_mobile)
     return info
 
 
@@ -6814,7 +6928,8 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         row_vals[COL_LAST]    = " ".join(last)
         row_vals[COL_PHONE]   = phone
         row_vals[COL_EMAIL]   = email
-        row_vals[COL_PHONE_CONF] = phone_info.get("confidence", "")
+        needs_confirmation = bool(phone and not phone_info.get("verified_mobile"))
+        row_vals[COL_PHONE_CONF] = "needs_confirmation" if needs_confirmation else phone_info.get("confidence", "")
         row_vals[COL_EMAIL_CONF] = email_info.get("confidence", "")
         reason = ""
         phone_reason = phone_info.get("reason", "")
@@ -6825,6 +6940,8 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             reason = "no_personal_mobile"
         elif email_reason == "no_personal_email":
             reason = "no_personal_email"
+        elif needs_confirmation:
+            reason = "needs_confirmation"
         row_vals[COL_CONTACT_REASON] = reason
         row_vals[COL_STREET]  = r.get("street", "")
         row_vals[COL_CITY]    = r.get("city", "")
@@ -6834,7 +6951,15 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         row_idx = append_row(row_vals)
         if phone:
             seen_phones.add(phone)
-            send_sms(phone, first, r.get("street", ""), row_idx)
+            if phone_info.get("verified_mobile"):
+                send_sms(phone, first, r.get("street", ""), row_idx)
+            else:
+                LOG.info(
+                    "Initial SMS deferred (needs confirmation) for %s (%s) verified_mobile=%s",
+                    phone,
+                    zpid or "<no-zpid>",
+                    phone_info.get("verified_mobile"),
+                )
 
 # ───────────────────── main entry point & scheduler ─────────────────────
 if __name__ == "__main__":
