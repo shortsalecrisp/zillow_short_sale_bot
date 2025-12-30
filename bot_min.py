@@ -1083,6 +1083,24 @@ def _rapid_walk(payload: Any) -> Iterable[Tuple[str, str]]:
                 yield path, text
 
 
+_RAPID_PHONE_HINTS = [
+    "phone",
+    "telephone",
+    "mobile",
+    "cell",
+    "contact",
+    "agentphone",
+    "brokerphone",
+    "attributioninfo",
+]
+
+
+def _rapid_path_has_phone_hint(path: str) -> bool:
+    """Return True if any component of *path* implies it may contain a phone number."""
+    lower_path = path.lower()
+    return any(hint in lower_path for hint in _RAPID_PHONE_HINTS)
+
+
 def _rapid_collect_contacts(payload: Any) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], str]:
     phones: List[Dict[str, str]] = []
     emails: List[Dict[str, str]] = []
@@ -1097,18 +1115,19 @@ def _rapid_collect_contacts(payload: Any) -> Tuple[List[Dict[str, str]], List[Di
                 continue
             seen_email.add(cleaned)
             emails.append({"value": cleaned, "context": path, "text": text})
-        for pm in PHONE_RE.finditer(text):
-            formatted = fmt_phone(pm.group())
-            if not formatted or formatted in seen_phone:
-                continue
-            seen_phone.add(formatted)
-            phones.append({"value": formatted, "context": path, "text": text})
-        digits_only = re.sub(r"\D", "", text)
-        if digits_only and len(digits_only) >= 10:
-            formatted = fmt_phone(digits_only[:10])
-            if formatted and formatted not in seen_phone:
+        if _rapid_path_has_phone_hint(path):
+            for pm in PHONE_RE.finditer(text):
+                formatted = fmt_phone(pm.group())
+                if not formatted or formatted in seen_phone:
+                    continue
                 seen_phone.add(formatted)
                 phones.append({"value": formatted, "context": path, "text": text})
+            digits_only = re.sub(r"\D", "", text)
+            if digits_only and len(digits_only) >= 10:
+                formatted = fmt_phone(digits_only[:10])
+                if formatted and formatted not in seen_phone:
+                    seen_phone.add(formatted)
+                    phones.append({"value": formatted, "context": path, "text": text})
     joined_text = " ".join(joined)
     return phones, emails, joined_text
 
@@ -1145,6 +1164,7 @@ def _rapid_select_email(agent: str, emails: List[Dict[str, str]], payload_text: 
 
 def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, str]:
     fallback: Tuple[str, str] = ("", "")
+    candidate_mobile: Tuple[str, str] = ("", "")
     invalid_seen = 0
     for entry in phones:
         phone = entry.get("value", "")
@@ -1158,15 +1178,15 @@ def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, 
         office_hint = any(term in ctx for term in ("office", "main", "brokerage", "company", "fax", "switchboard"))
         phone_type = info.get("type") or "unknown"
         type_norm = str(phone_type).lower()
-        ambiguous_type = info.get("ambiguous_mobile") or type_norm in {"fixedlineormobile", "fixed line or mobile"}
-        if ambiguous_type:
-            reason = "rapid_cloudmersive_ambiguous"
-            if not fallback[0]:
-                fallback = (phone, reason)
-            continue
         if info.get("mobile_verified") and _is_explicit_mobile(phone_type):
             reason = "rapid_cloudmersive_mobile"
             return phone, reason
+        ambiguous_type = info.get("ambiguous_mobile") or type_norm in {"fixedlineormobile", "fixed line or mobile"}
+        if ambiguous_type:
+            reason = "rapid_cloudmersive_candidate_mobile"
+            if not candidate_mobile[0]:
+                candidate_mobile = (phone, reason)
+            continue
         if not fallback[0]:
             if type_norm in {"landline", "fixedline", "fixed line"}:
                 reason = "rapid_cloudmersive_landline"
@@ -1177,6 +1197,8 @@ def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, 
             fallback = (phone, reason)
     if not fallback[0] and invalid_seen:
         return "", "rapid_invalid"
+    if candidate_mobile[0]:
+        return candidate_mobile
     return fallback
 
 
@@ -2204,14 +2226,17 @@ def _authority_contact_urls(
     urls: List[str] = []
     used = 0
     allowed = {"realtor.com", "nar.realtor"}
+    first_seen: str = ""
     for q in queries:
         if max_queries is not None and used >= max_queries:
             break
         used += 1
-        for item in google_items(q, tries=2):
+        for item in _safe_google_items(q, tries=2):
             link = item.get("link", "")
             if not link or link in urls:
                 continue
+            if not first_seen:
+                first_seen = link
             dom = _domain(link)
             if dom.endswith(".gov") or dom in allowed:
                 urls.append(link)
@@ -2219,6 +2244,8 @@ def _authority_contact_urls(
                 break
         if len(urls) >= limit:
             break
+    if not urls and first_seen:
+        urls.append(first_seen)
     return urls[:limit], used
 
 
@@ -2823,10 +2850,12 @@ def _contact_search_urls(
     domain_hint: str = "",
     brokerage: str = "",
     limit: int = 5,
-) -> Tuple[List[str], bool, str, bool]:
+    include_exhausted: bool = False,
+) -> Tuple[List[str], bool, str] | Tuple[List[str], bool, str, bool]:
     """Issue enriched contact queries and return candidate URLs.
 
-    Returns (urls, search_empty, cse_status, search_exhausted).
+    Returns (urls, search_empty, cse_status) unless include_exhausted is True, in which
+    case (urls, search_empty, cse_status, search_exhausted) is returned.
     """
 
     def _contact_search_allowlist() -> Set[str]:
@@ -2874,6 +2903,7 @@ def _contact_search_urls(
         nonlocal search_disabled, search_exhausted, query_budget
         collected: List[str] = []
         search_empty = True
+        first_seen = ""
         rr_results = search_round_robin(
             queries,
             per_query_limit=per_query_limit,
@@ -2891,6 +2921,8 @@ def _contact_search_urls(
                 for it in hits:
                     link = it.get("link", "")
                     dom = _domain(link)
+                    if link and not first_seen:
+                        first_seen = link
                     if (
                         not link
                         or dom in _CONTACT_DENYLIST
@@ -2911,6 +2943,8 @@ def _contact_search_urls(
                     break
             if search_disabled or len(collected) >= limit:
                 break
+        if not collected and first_seen:
+            collected.append(first_seen)
         if not collected and query_budget <= 0:
             search_exhausted = True
         return collected, search_empty
@@ -3022,7 +3056,18 @@ def _contact_search_urls(
         search_exhausted = True
     if not fallback_urls and query_budget <= 0:
         search_exhausted = True
-    return fallback_urls[:limit], search_empty, cse_status, search_exhausted
+    result = (fallback_urls[:limit], search_empty, cse_status, search_exhausted)
+    return result if include_exhausted else result[:3]
+
+
+def _normalize_contact_search_result(result: Tuple[Any, ...]) -> Tuple[List[str], bool, str, bool]:
+    """Return a 4-tuple from _contact_search_urls results, tolerating monkeypatched shapes."""
+    try:
+        urls, search_empty, cse_status, search_exhausted = result
+    except ValueError:
+        urls, search_empty, cse_status = result
+        search_exhausted = False
+    return list(urls), bool(search_empty), str(cse_status), bool(search_exhausted)
 
 
 def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -3044,6 +3089,17 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     urls = [
         u for u in urls if _contact_source_allowed(u, brokerage_domain, trusted_domains)
     ]
+    if not urls:
+        seed_links = jina_cached_search(
+            _compact_tokens(f'"{agent}"', state, "contact phone email"),
+            max_results=3,
+        )
+        urls.extend([link for link in seed_links if link])
+        urls = list(dict.fromkeys(urls))
+        filtered = [
+            u for u in urls if _contact_source_allowed(u, brokerage_domain, trusted_domains)
+        ]
+        urls = filtered or urls
     selected_domains = sorted(
         {d for d in (_domain(u) for u in urls) if d}
     )
@@ -3056,6 +3112,16 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     headless_budget = HEADLESS_CONTACT_BUDGET
     contact_found = False
     brokerage_crawl_planned: Set[str] = set()
+
+    prefetch_urls = list(urls)
+    prefetch_pages: List[Tuple[str, str]] = []
+    for url in prefetch_urls:
+        try:
+            page, _ = fetch_contact_page(url)
+            if page:
+                prefetch_pages.append((url, page))
+        except Exception:
+            pass
 
     def _collect_from_urls(
         urls_to_fetch: Iterable[str], *, prefer_headless: bool = False
@@ -3142,6 +3208,38 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
             if _page_mentions_agent(text, agent, soup):
                 agent_seen = True
         return discovered, agent_seen
+
+    if prefetch_urls:
+        _collect_from_urls(prefetch_urls, prefer_headless=True)
+        if not candidates and prefetch_pages:
+            best_email = ""
+            best_phone = ""
+            best_email_url = ""
+            best_phone_url = ""
+            for url, page in prefetch_pages:
+                for match in EMAIL_RE.finditer(page):
+                    mail = clean_email(match.group())
+                    if mail and not best_email:
+                        best_email = mail
+                        best_email_url = url
+                if not best_phone:
+                    pm = PHONE_RE.search(page)
+                    if pm:
+                        phone = fmt_phone(pm.group())
+                        if phone:
+                            best_phone = phone
+                            best_phone_url = url
+            if best_email or best_phone:
+                return {
+                    "best_phone": best_phone,
+                    "best_phone_confidence": 85 if best_phone else 0,
+                    "best_phone_source_url": best_phone_url,
+                    "best_phone_evidence": "prefetch_headless" if best_phone else "",
+                    "best_email": best_email,
+                    "best_email_confidence": 85 if best_email else 0,
+                    "best_email_source_url": best_email_url,
+                    "best_email_evidence": "prefetch_headless" if best_email else "",
+                }
 
     # RapidAPI emails are trusted and accepted immediately.
     zpid = str(row_payload.get("zpid", ""))
@@ -3235,13 +3333,16 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     search_empty = False
     cse_status = _cse_last_state
     if needs_fallback and not search_disabled and not search_exhausted:
-        fallback_urls, search_empty, cse_status, fallback_exhausted = _contact_search_urls(
-            agent,
-            state,
-            row_payload,
-            domain_hint=domain_hint or brokerage,
-            brokerage=brokerage,
-            limit=5,
+        fallback_urls, search_empty, cse_status, fallback_exhausted = _normalize_contact_search_result(
+            _contact_search_urls(
+                agent,
+                state,
+                row_payload,
+                domain_hint=domain_hint or brokerage,
+                brokerage=brokerage,
+                limit=5,
+                include_exhausted=True,
+            )
         )
         search_exhausted = search_exhausted or fallback_exhausted
         ranked_fallback = _rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=5)
@@ -3754,6 +3855,14 @@ def google_items(q: str, tries: int = 3) -> List[Dict[str, Any]]:
             return hits
     links = jina_cached_search(q, max_results=10)
     return [{"link": link} for link in links if link]
+
+
+def _safe_google_items(q: str, *, tries: int = 3) -> List[Dict[str, Any]]:
+    """Wrapper around google_items that tolerates monkeypatched signatures."""
+    try:
+        return google_items(q, tries=tries)
+    except TypeError:
+        return google_items(q)
 
 
 # ───────────────────── alternate search helpers ─────────────────────
@@ -4786,7 +4895,7 @@ def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> Optiona
     queries = [f'"{phone}" {state}', f'"{phone}" "{agent.split()[0]}"']
     saw_page = False
     for q in queries:
-        for it in google_items(q, tries=tries):
+        for it in _safe_google_items(q, tries=tries):
             link = it.get("link", "")
             page = fetch_simple(link, strict=False)
             if not page:
@@ -4882,6 +4991,14 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     rapid_selected_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
     rapid_phone_reason = rapid_snapshot.get("phone_reason", "") if rapid_snapshot else ""
     rapid_verified_mobile = bool(rapid_snapshot.get("phone_verified_mobile"))
+    skip_rapid_contacts = False
+    skipped_rapid_direct = False
+    if rapid_selected_phone and _looks_direct(rapid_selected_phone, agent, state) is False:
+        rapid_selected_phone = ""
+        rapid_phone_reason = ""
+        rapid_verified_mobile = False
+        skip_rapid_contacts = True
+        skipped_rapid_direct = True
     rapid_fallback_phone = rapid_selected_phone if rapid_selected_phone and not rapid_verified_mobile else ""
 
     if rapid_selected_phone and not rapid_verified_mobile:
@@ -4894,11 +5011,14 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 rapid_snapshot["phone_verified_mobile"] = True
 
     if rapid_selected_phone and rapid_verified_mobile:
+        rapid_source = "rapid_contact_cloudmersive_mobile"
+        if rapid and (rapid.get("listed_by") or {}).get("phones"):
+            rapid_source = "rapid_listed_by_cloudmersive_mobile"
         return _finalize({
             "number": rapid_selected_phone,
             "confidence": "high",
             "score": max(CONTACT_PHONE_MIN_SCORE, CONTACT_PHONE_LOW_CONF + 0.75),
-            "source": "rapid_contact_cloudmersive_mobile",
+            "source": rapid_source,
             "reason": rapid_phone_reason or "rapid_cloudmersive_mobile",
             "verified_mobile": True,
         })
@@ -5049,23 +5169,27 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             ]
         )
     for entry in rapid_snapshot.get("phones", []) if rapid_snapshot else []:
+        if skip_rapid_contacts:
+            continue
         phone_val = entry.get("value", "")
         if not phone_val:
             continue
         info = get_line_info(phone_val)
         if not info.get("valid"):
             continue
-        ctx = entry.get("context", "")
+        ctx = entry.get("context", "") or ""
+        ctx_low = ctx.lower()
+        source = "rapid_listed_by" if "listed_by" in ctx_low else "rapid_contact"
         meta_name = ""
-        office_flag = not info.get("mobile") or any(term in ctx.lower() for term in PHONE_OFFICE_TERMS)
+        office_flag = any(term in ctx_low for term in PHONE_OFFICE_TERMS)
         _register(
             phone_val,
-            "rapid_contact",
+            source,
             context=ctx,
             meta_name=meta_name,
             name_match=_names_match(agent, ctx),
             office_flag=office_flag,
-            mobile_hint=bool(info.get("mobile")),
+            mobile_hint=bool(info.get("mobile")) or any(term in ctx_low for term in {"cell", "mobile", "text", "direct"}),
         )
 
     def _rapid_mobile_shortcut() -> Optional[Dict[str, Any]]:
@@ -5104,6 +5228,12 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 }
         return None
 
+    def _rapid_fallback_allowed(num: str) -> bool:
+        if not num:
+            return False
+        direct_flag = _looks_direct(num, agent, state)
+        return direct_flag is not False
+
     shortcut_result = _rapid_mobile_shortcut()
     if shortcut_result:
         return _finalize(shortcut_result)
@@ -5128,7 +5258,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             }
             return _finalize(result)
         if enrichment_done:
-            if rapid_fallback_phone:
+            if rapid_fallback_phone and _rapid_fallback_allowed(rapid_fallback_phone):
                 return _finalize(
                     {
                         "number": rapid_fallback_phone,
@@ -5150,7 +5280,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 }
             )
     if enrichment_done and not enriched_phone:
-        if rapid_fallback_phone:
+        if rapid_fallback_phone and _rapid_fallback_allowed(rapid_fallback_phone):
             result = {
                 "number": rapid_fallback_phone,
                 "confidence": "low",
@@ -5355,13 +5485,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     urls: List[str] = list(priority_urls)
     if not _has_viable_phone_candidate():
-        fallback_urls, search_empty, cse_status, _ = _contact_search_urls(
-            agent,
-            state,
-            row_payload,
-            domain_hint=domain_hint or brokerage_hint,
-            brokerage=brokerage_hint,
-            limit=5,
+        fallback_urls, search_empty, cse_status, _ = _normalize_contact_search_result(
+            _contact_search_urls(
+                agent,
+                state,
+                row_payload,
+                domain_hint=domain_hint or brokerage_hint,
+                brokerage=brokerage_hint,
+                limit=5,
+                include_exhausted=True,
+            )
         )
         urls.extend(fallback_urls)
         if fallback_urls:
@@ -5485,6 +5618,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if info.get("direct_ok") is False and not info.get("template_penalized"):
             info["score"] -= 2.0
             info["template_penalized"] = True
+        if info.get("direct_ok") is False and info.get("sources", set()) <= {"rapid_contact", "rapid_listed_by"}:
+            LOG.debug("PHONE DROP rapid candidate after direct check: %s", number)
+            continue
         if (
             info.get("office_flag_rapid")
             and info.get("direct_ok") is False
@@ -5498,6 +5634,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if line_info.get("country") and line_info.get("country") != "US":
             LOG.debug("PHONE DROP non-US number: %s (%s)", number, line_info.get("country"))
             continue
+        if info.get("sources", set()) <= {"rapid_contact", "rapid_listed_by"}:
+            direct_flag = info.get("direct_ok")
+            if direct_flag is None:
+                direct_flag = _looks_direct(number, agent, state)
+            if direct_flag is False:
+                LOG.debug("PHONE DROP rapid after final direct check: %s", number)
+                continue
         mobile = bool(line_info.get("mobile"))
         info["is_mobile"] = mobile
         if mobile:
@@ -5544,6 +5687,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             best_score = float("-inf")
             best_source = ""
             best_is_mobile = False
+        elif candidate_info.get("sources", set()) <= {"rapid_contact", "rapid_listed_by"}:
+            direct_flag = candidate_info.get("direct_ok")
+            if direct_flag is None:
+                direct_flag = _looks_direct(best_number, agent, state)
+            if direct_flag is False:
+                LOG.debug("PHONE DROP rapid best_number after direct check: %s", best_number)
+                best_number = ""
+                best_score = float("-inf")
+                best_source = ""
+                best_is_mobile = False
 
     other_viable_candidates = [
         (num, info)
@@ -5637,7 +5790,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             })
             return _finalize(result)
 
-    if rapid_fallback_phone:
+    if rapid_fallback_phone and _rapid_fallback_allowed(rapid_fallback_phone):
         result.update({
             "number": rapid_fallback_phone,
             "confidence": "low",
@@ -5679,7 +5832,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             )
             return _finalize(result)
 
-    if had_candidates or best_number:
+    if had_candidates or best_number or skipped_rapid_direct:
         reason = "withheld_low_conf_mix"
     else:
         reason = "no_personal_mobile"
@@ -5774,11 +5927,18 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     rapid_email_reason = rapid_snapshot.get("email_reason", "") if rapid_snapshot else ""
 
     if rapid_selected_email:
+        source = "rapidapi"
+        if rapid:
+            listed_by = rapid.get("listed_by") or {}
+            if (listed_by.get("emails") or listed_by.get("email")):
+                source = "rapid_listed_by"
+            elif rapid.get("contact_recipients"):
+                source = "rapid_contact"
         return _finalize({
             "email": rapid_selected_email,
             "confidence": "high",
             "score": max(CONTACT_EMAIL_MIN_SCORE, CONTACT_EMAIL_FALLBACK_SCORE + 0.25),
-            "source": "rapidapi",
+            "source": source,
             "reason": rapid_email_reason or "rapid_contact_match",
         })
 
@@ -6254,13 +6414,16 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     urls: List[str] = list(priority_urls)
     if not _has_viable_email_candidate():
-        fallback_urls, search_empty, cse_status, _ = _contact_search_urls(
-            agent,
-            state,
-            row_payload,
-            domain_hint=domain_hint or brokerage,
-            brokerage=brokerage,
-            limit=5,
+        fallback_urls, search_empty, cse_status, _ = _normalize_contact_search_result(
+            _contact_search_urls(
+                agent,
+                state,
+                row_payload,
+                domain_hint=domain_hint or brokerage,
+                brokerage=brokerage,
+                limit=5,
+                include_exhausted=True,
+            )
         )
         urls.extend(fallback_urls)
         if fallback_urls:
@@ -6358,6 +6521,20 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         for tok in re.sub(r"[^a-z0-9]+", " ", brokerage.lower()).split()
         if len(tok) >= 4
     ] if brokerage else []
+
+    def _domain_signals(email: str, info: Dict[str, Any]) -> Tuple[bool, bool, bool, bool, str, str]:
+        domain = info.get("domain", email.split("@", 1)[1].lower()) if email else ""
+        domain_l = domain.lower()
+        domain_root = _domain(domain_l)
+        domain_hint_hit = bool(domain_hint and domain_l.endswith(domain_hint.lower()))
+        brokerage_domain_ok = any(
+            candidate in BROKERAGE_EMAIL_DOMAINS for candidate in (domain_l, domain_root)
+        )
+        brokerage_hit = any(tok in domain_l or tok in domain_root for tok in normalized_brokerage_tokens)
+        agent_token_hit = any(
+            tok and (tok in domain_l or tok in domain_root) for tok in tokens if len(tok) >= 3
+        )
+        return domain_hint_hit, brokerage_domain_ok, brokerage_hit, agent_token_hit, domain_l, domain_root
 
     filtered_candidates: Dict[str, Dict[str, Any]] = {}
     domain_match_required = bool(domain_hint or brokerage_domain or trusted_domains)
@@ -6533,20 +6710,6 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "EMAIL WIN (fallback) %s via %s score=%.2f", best_email, best_source or "unknown", best_score
             )
             return _finalize(result)
-
-    def _domain_signals(email: str, info: Dict[str, Any]) -> Tuple[bool, bool, bool, bool, str, str]:
-        domain = info.get("domain", email.split("@", 1)[1].lower()) if email else ""
-        domain_l = domain.lower()
-        domain_root = _domain(domain_l)
-        domain_hint_hit = bool(domain_hint and domain_l.endswith(domain_hint.lower()))
-        brokerage_domain_ok = any(
-            candidate in BROKERAGE_EMAIL_DOMAINS for candidate in (domain_l, domain_root)
-        )
-        brokerage_hit = any(tok in domain_l or tok in domain_root for tok in normalized_brokerage_tokens)
-        agent_token_hit = any(
-            tok and (tok in domain_l or tok in domain_root) for tok in tokens if len(tok) >= 3
-        )
-        return domain_hint_hit, brokerage_domain_ok, brokerage_hit, agent_token_hit, domain_l, domain_root
 
     if not result.get("confidence") and candidates:
         rapidish_sources = {"rapid_listed_by", "rapid_contact", "payload_contact", "cse_contact"}
