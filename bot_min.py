@@ -5195,7 +5195,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     def _rapid_mobile_shortcut() -> Optional[Dict[str, Any]]:
         rapid_candidates: List[Tuple[float, str, Dict[str, Any]]] = []
         for num, info in candidates.items():
-            if "rapid_contact" not in info.get("sources", set()):
+            sources = info.get("sources", set())
+            if not (sources & {"rapid_contact", "rapid_listed_by"}):
                 continue
             rapid_candidates.append((info.get("score", 0.0), num, info))
         rapid_candidates.sort(reverse=True)
