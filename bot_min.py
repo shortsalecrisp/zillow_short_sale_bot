@@ -1257,16 +1257,24 @@ def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, 
             continue
         ctx = " ".join([entry.get("context", ""), entry.get("text", "")]).lower()
         office_hint = any(term in ctx for term in ("office", "main", "brokerage", "company", "fax", "switchboard"))
+        toll_free_hint = "toll free" in ctx
         phone_type = info.get("type") or "unknown"
         type_norm = str(phone_type).lower()
-        if info.get("mobile_verified") and _is_explicit_mobile(phone_type):
+        explicit_mobile = bool(info.get("mobile_verified") and _is_explicit_mobile(phone_type))
+        if explicit_mobile:
             reason = "rapid_cloudmersive_mobile"
             return phone, reason
         ambiguous_type = info.get("ambiguous_mobile") or type_norm in {"fixedlineormobile", "fixed line or mobile"}
+        if info.get("mobile") and not (office_hint or toll_free_hint):
+            reason = "rapid_cloudmersive_mobile" if explicit_mobile else "rapid_cloudmersive_likely_mobile"
+            return phone, reason
         if ambiguous_type:
             reason = "rapid_cloudmersive_candidate_mobile"
             if not candidate_mobile[0]:
                 candidate_mobile = (phone, reason)
+            continue
+        if info.get("mobile") and not candidate_mobile[0]:
+            candidate_mobile = (phone, "rapid_cloudmersive_candidate_mobile")
             continue
         if not fallback[0]:
             if type_norm in {"landline", "fixedline", "fixed line"}:
@@ -1311,8 +1319,13 @@ def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str
     cm_info = get_line_info(selected_phone) if selected_phone else {}
     phone_type = cm_info.get("type") or "unknown"
     phone_ambiguous = bool(cm_info.get("ambiguous_mobile"))
-    if selected_phone and phone_ambiguous and phone_reason == "rapid_cloudmersive_mobile":
-        phone_reason = "rapid_cloudmersive_ambiguous"
+    digits_only = _digits_only(selected_phone) if selected_phone else ""
+    area_code = digits_only[-10:-7] if len(digits_only) >= 10 else ""
+    toll_free = area_code in BAD_AREA or ("toll" in str(phone_type).lower())
+    if selected_phone and phone_reason in {"rapid_cloudmersive_mobile", "rapid_cloudmersive_likely_mobile"}:
+        explicit_landline = str(phone_type).lower() in {"landline", "fixedline", "fixed line"}
+        if explicit_landline or toll_free or (phone_ambiguous and phone_reason == "rapid_cloudmersive_mobile"):
+            phone_reason = "rapid_cloudmersive_ambiguous"
     phone_verified_mobile = bool(
         selected_phone
         and phone_reason == "rapid_cloudmersive_mobile"
