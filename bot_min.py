@@ -689,11 +689,26 @@ def load_seen_zpids(force: bool = False) -> Set[str]:
         now = time.time()
         if seen_zpids and not force and (now - _seen_zpids_loaded_at) < SEEN_ZPID_CACHE_SECONDS:
             return set(seen_zpids)
+        col_idx = COL_ZPID + 1
         try:
-            col_vals = ws.col_values(COL_ZPID + 1)
+            col_vals = ws.col_values(col_idx)
         except Exception as exc:
             LOG.warning("Unable to refresh seen ZPIDs from sheet: %s", exc)
             return set(seen_zpids)
+        loaded_from = col_idx
+        if not any(str(val).strip() for val in col_vals):
+            alt_idx = max(1, COL_ZPID)
+            if alt_idx != col_idx:
+                try:
+                    alt_vals = ws.col_values(alt_idx)
+                    if any(str(val).strip() for val in alt_vals):
+                        col_vals = alt_vals
+                        loaded_from = alt_idx
+                        LOG.warning(
+                            "Primary ZPID column %s empty; using fallback column %s", col_idx, loaded_from
+                        )
+                except Exception as exc:
+                    LOG.warning("Unable to refresh fallback ZPID column %s: %s", alt_idx, exc)
         refreshed = {
             str(val).strip()
             for val in col_vals
@@ -702,6 +717,9 @@ def load_seen_zpids(force: bool = False) -> Set[str]:
         refreshed = {z for z in refreshed if re.fullmatch(r"\d+", z)}
         seen_zpids = refreshed
         _seen_zpids_loaded_at = now
+        LOG.info("seen_zpids_loaded=%s column=%s", len(refreshed), loaded_from)
+        if not refreshed:
+            LOG.warning("seen_zpids_loaded=0 from column=%s; dedupe may be ineffective", loaded_from)
         return set(seen_zpids)
 
 
@@ -1520,7 +1538,6 @@ def fetch(u: str, strict: bool = True):
     variants = [
         u,
         f"https://r.jina.ai/http://{bare}",
-        f"https://r.jina.ai/http://screenshot/{bare}",
     ]
     z403 = ratelimit = 0
     backoff = 1.0
@@ -1743,13 +1760,8 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
     _respect_domain_delay(norm)
 
     def _screenshot_mirror(u: str) -> str:
-        parsed = urlparse(u)
-        if not parsed.netloc:
-            return ""
-        bare = f"{parsed.netloc}{parsed.path}"
-        if parsed.query:
-            bare = f"{bare}?{parsed.query}"
-        return f"https://r.jina.ai/http://screenshot/{bare}"
+        # Disabled because the upstream endpoint returns 400 and wastes time.
+        return ""
 
     mirror = _mirror_url(norm) or f"https://r.jina.ai/{norm}"
     text = ""
@@ -1804,24 +1816,6 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
 
     if not success:
         retry_needed = True
-        # Try a screenshot/textise mirror to salvage blocked or empty responses.
-        alt_url = _screenshot_mirror(norm)
-        if alt_url:
-            try:
-                alt_resp = _http_get(
-                    alt_url,
-                    timeout=12,
-                    headers=_browser_headers(_domain(alt_url)),
-                    rotate_user_agent=True,
-                    respect_block=False,
-                )
-                if alt_resp and alt_resp.status_code == 200 and alt_resp.text.strip():
-                    text = alt_resp.text
-                    status = alt_resp.status_code
-                    final_url = getattr(alt_resp, "url", final_url)
-                    success = True
-            except Exception:
-                pass
 
     if not success and dom:
         textise = _try_textise(dom, norm)
@@ -1885,7 +1879,40 @@ def jina_cached_search(
             if candidate not in seen and _allowed(_domain(candidate)):
                 seen.add(candidate)
                 hits.append(candidate)
-    return hits
+        return hits
+
+    hits: List[str] = []
+    seen: Set[str] = set()
+    offset = 0
+    page = 0
+    max_pages = max(1, min(5, (max_results + 9) // 10))
+
+    while len(hits) < max_results and page < max_pages:
+        try:
+            params = {"q": query}
+            if offset:
+                params["s"] = str(offset)
+            search_url = f"https://duckduckgo.com/html/?{urlencode(params)}"
+            cached = fetch_text_cached(search_url, ttl_days=ttl_days)
+            body = cached.get("extracted_text", "")
+        except Exception as exc:
+            LOG.debug("jina_cached_search failed for %s: %s", query, exc)
+            break
+
+        if not body:
+            break
+
+        before = len(hits)
+        hits.extend(_extract_hits(body, seen))
+        if len(hits) >= max_results:
+            break
+        if len(hits) == before:
+            break
+
+        offset += 30
+        page += 1
+
+    return hits[:max_results]
 
 
 def _targeted_contact_link_allowed(link: str, agent: str, brokerage: str = "", domain_hint: str = "") -> bool:
@@ -3274,7 +3301,15 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
 def _contact_enrichment(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     cache_key = "_contact_enrichment"
     if cache_key not in row_payload:
-        row_payload[cache_key] = _two_stage_contact_search(agent, state, row_payload)
+        try:
+            row_payload[cache_key] = _two_stage_contact_search(agent, state, row_payload)
+        except Exception:
+            LOG.exception("two_stage_contact_search failed for %s %s", agent, state)
+            row_payload[cache_key] = {
+                "_two_stage_done": False,
+                "_two_stage_candidates": 0,
+                "_blocked_engines": ["error"],
+            }
     return row_payload.get(cache_key, {})
 
 
@@ -3292,65 +3327,89 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
     google_candidates: List[Dict[str, Any]] = []
     blocked_engines: Set[str] = set()
 
+    def _empty_result() -> Dict[str, Any]:
+        return {
+            "_two_stage_done": False,
+            "_two_stage_candidates": len(candidates),
+            "_blocked_engines": sorted(blocked_engines),
+            "best_email": "",
+            "best_email_confidence": 0,
+            "best_email_source_url": "",
+            "best_email_evidence": "",
+        }
+
     def _collect_from_engine(engine: str) -> Tuple[List[Dict[str, Any]], bool]:
         urls: List[str] = []
         blocked = False
         hits: List[Dict[str, Any]] = []
-        if engine == "google":
-            hits = google_cse_search(query, limit=8)
-            if _cse_last_state in {"blocked", "throttled"}:
-                blocked = True
-        elif engine == "duckduckgo":
-            hits = duckduckgo_search(query, limit=8)
-        else:
-            return [], False
-        for it in hits:
-            link = it.get("link", "")
-            if not _targeted_contact_link_allowed(link, agent, brokerage, domain_hint):
-                continue
-            urls.append(link)
-            if len(urls) >= 5:
-                break
-        if not urls and blocked:
+        try:
+            if engine == "google":
+                hits = google_cse_search(query, limit=8)
+                if _cse_last_state in {"blocked", "throttled"}:
+                    blocked = True
+            elif engine == "duckduckgo":
+                hits, blocked = duckduckgo_search(query, limit=8, with_blocked=True)
+            else:
+                return [], False
+            for it in hits:
+                link = it.get("link", "")
+                if not _targeted_contact_link_allowed(link, agent, brokerage, domain_hint):
+                    continue
+                urls.append(link)
+                if len(urls) >= 5:
+                    break
+            if not urls and blocked:
+                return [], True
+            engine_candidates, page_blocked = _collect_targeted_candidates(urls, agent, row_payload)
+            return engine_candidates, bool(blocked or page_blocked)
+        except DomainBlockedError:
+            LOG.warning("two_stage engine %s blocked for %s %s", engine, agent, state)
             return [], True
-        engine_candidates, page_blocked = _collect_targeted_candidates(urls, agent, row_payload)
-        return engine_candidates, bool(blocked or page_blocked)
+        except Exception:
+            LOG.exception("two_stage engine %s failed for %s %s", engine, agent, state)
+            return [], True
 
-    google_candidates, google_blocked = _collect_from_engine("google")
-    if google_blocked:
-        blocked_engines.add("google")
-    candidates.extend(google_candidates)
+    try:
+        google_candidates, google_blocked = _collect_from_engine("google")
+        if google_blocked:
+            blocked_engines.add("google")
+        candidates.extend(google_candidates)
 
-    def _has_strong_contact(res: Dict[str, Any]) -> bool:
-        phone_conf = int(res.get("best_phone_confidence", 0) or 0)
-        email_conf = int(res.get("best_email_confidence", 0) or 0)
-        strong_phone = phone_conf >= 80
-        strong_email = email_conf >= 70
-        return bool(strong_phone or strong_email)
+        def _has_strong_contact(res: Dict[str, Any]) -> bool:
+            phone_conf = int(res.get("best_phone_confidence", 0) or 0)
+            email_conf = int(res.get("best_email_confidence", 0) or 0)
+            strong_phone = phone_conf >= 80
+            strong_email = email_conf >= 70
+            return bool(strong_phone or strong_email)
 
-    google_ranked = rerank_contact_candidates(google_candidates, agent, brokerage_domain=_domain(domain_hint or brokerage))
-    google_ranked = _apply_phone_type_boost(google_ranked)
+        google_ranked = rerank_contact_candidates(
+            google_candidates, agent, brokerage_domain=_domain(domain_hint or brokerage)
+        )
+        google_ranked = _apply_phone_type_boost(google_ranked)
 
-    if not _has_strong_contact(google_ranked):
-        duck_candidates, duck_blocked = _collect_from_engine("duckduckgo")
-        if duck_blocked:
-            blocked_engines.add("duckduckgo")
-        candidates.extend(duck_candidates)
+        if not _has_strong_contact(google_ranked):
+            duck_candidates, duck_blocked = _collect_from_engine("duckduckgo")
+            if duck_blocked:
+                blocked_engines.add("duckduckgo")
+            candidates.extend(duck_candidates)
 
-    ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=_domain(domain_hint or brokerage))
-    ranked = _apply_phone_type_boost(ranked)
+        ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=_domain(domain_hint or brokerage))
+        ranked = _apply_phone_type_boost(ranked)
 
-    email = ranked.get("best_email", "")
-    if email and not _email_matches_name(agent, email):
-        ranked["best_email"] = ""
-        ranked["best_email_confidence"] = 0
-        ranked["best_email_source_url"] = ""
-        ranked["best_email_evidence"] = ""
+        email = ranked.get("best_email", "")
+        if email and not _email_matches_name(agent, email):
+            ranked["best_email"] = ""
+            ranked["best_email_confidence"] = 0
+            ranked["best_email_source_url"] = ""
+            ranked["best_email_evidence"] = ""
 
-    ranked["_two_stage_done"] = bool(candidates)
-    ranked["_two_stage_candidates"] = len(candidates)
-    ranked["_blocked_engines"] = sorted(blocked_engines)
-    return ranked
+        ranked["_two_stage_done"] = bool(candidates)
+        ranked["_two_stage_candidates"] = len(candidates)
+        ranked["_blocked_engines"] = sorted(blocked_engines)
+        return ranked
+    except Exception:
+        LOG.exception("two_stage_contact_search failed during ranking for %s %s", agent, state)
+        return _empty_result()
 
 
 def fetch_contact_page(url: str) -> Tuple[str, bool]:
@@ -3704,9 +3763,19 @@ def duckduckgo_search(
     limit: int = 5,
     *,
     allowed_domains: Optional[Set[str]] = None,
-) -> List[Dict[str, Any]]:
-    links = jina_cached_search(query, max_results=limit, allowed_domains=allowed_domains)
-    return [{"link": link} for link in links if link]
+    with_blocked: bool = False,
+) -> List[Dict[str, Any]] | Tuple[List[Dict[str, Any]], bool]:
+    blocked = False
+    links: List[str] = []
+    try:
+        links = jina_cached_search(query, max_results=limit, allowed_domains=allowed_domains)
+    except DomainBlockedError:
+        blocked = True
+    except Exception:
+        blocked = True
+        LOG.exception("duckduckgo_search failed for %s", query)
+    hits = [{"link": link} for link in links if link]
+    return (hits, blocked) if with_blocked else hits
 
 
 def bing_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
@@ -6008,6 +6077,14 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     hint_key = _normalize_override_key(agent, state)
     hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
     hint_urls = [url for url in hint_urls if url]
+    brokerage_urls = _brokerage_contact_urls(agent, brokerage, domain_hint or brokerage_domain or "")
+    authority_urls, _ = _authority_contact_urls(
+        agent,
+        state,
+        brokerage,
+        domain_hint or brokerage,
+        max_queries=2,
+    )
 
     first_variants, last_token = _first_last_tokens(agent)
 
@@ -6156,7 +6233,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     def _has_viable_email_candidate() -> bool:
         return any(info.get("score", 0.0) >= CONTACT_EMAIL_FALLBACK_SCORE for info in candidates.values())
 
-    priority_urls = list(dict.fromkeys(rapid_urls + hint_urls))
+    priority_urls = list(dict.fromkeys(brokerage_urls + authority_urls + rapid_urls + hint_urls))
     trusted_domains.update(_build_trusted_domains(agent, priority_urls))
     priority_non_portal, priority_portal = _split_portals(priority_urls)
 
