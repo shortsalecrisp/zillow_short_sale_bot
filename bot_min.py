@@ -1140,13 +1140,17 @@ def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, 
         office_hint = any(term in ctx for term in ("office", "main", "brokerage", "company", "fax", "switchboard"))
         phone_type = info.get("type") or "unknown"
         type_norm = str(phone_type).lower()
-        if info.get("mobile_verified"):
+        ambiguous_type = info.get("ambiguous_mobile") or type_norm in {"fixedlineormobile", "fixed line or mobile"}
+        if ambiguous_type:
+            reason = "rapid_cloudmersive_ambiguous"
+            if not fallback[0]:
+                fallback = (phone, reason)
+            continue
+        if info.get("mobile_verified") and _is_explicit_mobile(phone_type):
             reason = "rapid_cloudmersive_mobile"
             return phone, reason
         if not fallback[0]:
-            if type_norm in {"fixedlineormobile", "fixed line or mobile"}:
-                reason = "rapid_cloudmersive_ambiguous"
-            elif type_norm in {"landline", "fixedline", "fixed line"}:
+            if type_norm in {"landline", "fixedline", "fixed line"}:
                 reason = "rapid_cloudmersive_landline"
             elif not info.get("valid"):
                 reason = "rapid_cloudmersive_invalid"
@@ -1185,10 +1189,14 @@ def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str
     selected_email, email_reason = _rapid_select_email(agent, emails, joined_text)
     cm_info = get_line_info(selected_phone) if selected_phone else {}
     phone_type = cm_info.get("type") or "unknown"
+    phone_ambiguous = bool(cm_info.get("ambiguous_mobile"))
+    if selected_phone and phone_ambiguous and phone_reason == "rapid_cloudmersive_mobile":
+        phone_reason = "rapid_cloudmersive_ambiguous"
     phone_verified_mobile = bool(
         selected_phone
         and phone_reason == "rapid_cloudmersive_mobile"
         and cm_info.get("mobile_verified")
+        and not phone_ambiguous
     )
 
     snapshot = {
@@ -6574,11 +6582,20 @@ def get_line_info(phone: str) -> Dict[str, Any]:
 
     info["valid"] = bool(data.get("IsValid"))
     info["country"] = str(data.get("CountryCode") or "US").upper()
-    type_label = str(data.get("LineType") or data.get("PhoneNumberType") or "").strip()
+    line_type_label = str(data.get("LineType") or "").strip()
+    phone_number_type_label = str(data.get("PhoneNumberType") or "").strip()
+    type_label = line_type_label or phone_number_type_label
     normalized_type = type_label.lower()
-    explicit_mobile = normalized_type in {"mobile", "wireless"}
-    ambiguous_mobile = normalized_type in {"fixedlineormobile", "fixed line or mobile"}
-    info["type"] = type_label or ("Unknown" if data else "")
+    normalized_phone_type = phone_number_type_label.lower()
+    ambiguous_mobile = normalized_type in {"fixedlineormobile", "fixed line or mobile"} or normalized_phone_type in {
+        "fixedlineormobile",
+        "fixed line or mobile",
+    }
+    explicit_mobile = (
+        (_is_explicit_mobile(line_type_label) or _is_explicit_mobile(phone_number_type_label))
+        and not ambiguous_mobile
+    )
+    info["type"] = type_label or phone_number_type_label or ("Unknown" if data else "")
     if not info["valid"]:
         _line_info_cache[phone] = info
         _line_type_cache[phone] = False
@@ -6928,8 +6945,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         row_vals[COL_LAST]    = " ".join(last)
         row_vals[COL_PHONE]   = phone
         row_vals[COL_EMAIL]   = email
-        needs_confirmation = bool(phone and not phone_info.get("verified_mobile"))
-        row_vals[COL_PHONE_CONF] = "needs_confirmation" if needs_confirmation else phone_info.get("confidence", "")
+        row_vals[COL_PHONE_CONF] = phone_info.get("confidence", "") if phone else ""
         row_vals[COL_EMAIL_CONF] = email_info.get("confidence", "")
         reason = ""
         phone_reason = phone_info.get("reason", "")
@@ -6940,8 +6956,6 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             reason = "no_personal_mobile"
         elif email_reason == "no_personal_email":
             reason = "no_personal_email"
-        elif needs_confirmation:
-            reason = "needs_confirmation"
         row_vals[COL_CONTACT_REASON] = reason
         row_vals[COL_STREET]  = r.get("street", "")
         row_vals[COL_CITY]    = r.get("city", "")
@@ -6951,15 +6965,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         row_idx = append_row(row_vals)
         if phone:
             seen_phones.add(phone)
-            if phone_info.get("verified_mobile"):
-                send_sms(phone, first, r.get("street", ""), row_idx)
-            else:
-                LOG.info(
-                    "Initial SMS deferred (needs confirmation) for %s (%s) verified_mobile=%s",
-                    phone,
-                    zpid or "<no-zpid>",
-                    phone_info.get("verified_mobile"),
-                )
+            send_sms(phone, first, r.get("street", ""), row_idx)
 
 # ───────────────────── main entry point & scheduler ─────────────────────
 if __name__ == "__main__":
