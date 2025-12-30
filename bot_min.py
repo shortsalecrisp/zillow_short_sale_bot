@@ -621,12 +621,13 @@ CONTACT_SITE_PRIORITY: Tuple[str, ...] = (
     "linkedin.com",
 )
 
-SOCIAL_DOMAINS: Set[str] = {"facebook.com", "linkedin.com"}
+SOCIAL_DOMAINS: Set[str] = {"facebook.com", "linkedin.com", "instagram.com"}
 CONTACT_ALLOWLIST_BASE: Set[str] = {
     "realtor.com",
     "nar.realtor",
     "facebook.com",
     "linkedin.com",
+    "instagram.com",
     "zillow.com",
     "kw.com",
     "kellerwilliams.com",
@@ -638,6 +639,27 @@ CONTACT_ALLOWLIST_BASE: Set[str] = {
     "exprealty.com",
     "realbroker.com",
     "realbrokerllc.com",
+}
+CONTACT_RESULT_DENYLIST: Set[str] = {
+    "zillow.com",
+    "realtor.com",
+    "redfin.com",
+    "homes.com",
+    "trulia.com",
+    "yelp.com",
+}
+CONTACT_MEDICAL_TERMS: Set[str] = {
+    "clinic",
+    "hospital",
+    "health",
+    "dental",
+    "dentist",
+    "orthopedic",
+    "urgentcare",
+    "cardio",
+    "dermatology",
+    "pediatric",
+    "medical",
 }
 CONTACT_DIRECTORY_TERMS: Set[str] = {
     "mls",
@@ -1084,14 +1106,16 @@ def _rapid_walk(payload: Any) -> Iterable[Tuple[str, str]]:
 
 
 _RAPID_PHONE_HINTS = [
-    "phone",
-    "telephone",
-    "mobile",
-    "cell",
-    "contact",
     "agentphone",
-    "brokerphone",
-    "attributioninfo",
+    "agent_phone",
+    "agentmobilephone",
+    "agent_mobile_phone",
+    "agentphonenumber",
+    "mobilephone",
+    "mobile_phone",
+    "agentmobile",
+    "contact_recipients",
+    "listed_by",
 ]
 
 
@@ -1102,11 +1126,69 @@ def _rapid_path_has_phone_hint(path: str) -> bool:
 
 
 def _rapid_collect_contacts(payload: Any) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], str]:
-    phones: List[Dict[str, str]] = []
+    phone_entries: List[Tuple[int, int, Dict[str, str]]] = []
     emails: List[Dict[str, str]] = []
     joined: List[str] = []
     seen_phone: Set[str] = set()
     seen_email: Set[str] = set()
+    phone_counter = 0
+
+    def _phone_rank(path: str) -> int:
+        low = path.lower()
+        if "mobile" in low:
+            return 0
+        if "agent" in low:
+            return 1
+        return 2
+
+    def _block_phone_rank(label: str) -> int:
+        low = label.lower()
+        if any(term in low for term in ("cell", "mobile")):
+            return 0
+        if any(term in low for term in ("phone", "direct", "call")):
+            return 1
+        if any(term in low for term in ("office", "main", "brokerage")):
+            return 3
+        return 2
+
+    def _add_phone_entry(number: Any, context: str, text: str, rank: int) -> None:
+        nonlocal phone_counter
+        formatted = fmt_phone(str(number))
+        if not formatted or formatted in seen_phone:
+            return
+        seen_phone.add(formatted)
+        phone_entries.append((rank, phone_counter, {"value": formatted, "context": context, "text": text}))
+        phone_counter += 1
+
+    def _iter_contact_blocks() -> Iterable[Dict[str, Any]]:
+        blocks: List[Dict[str, Any]] = []
+        lb = payload.get("listed_by") or {}
+        if isinstance(lb, dict) and lb:
+            blocks.append(lb)
+        contacts = payload.get("contact_recipients") or []
+        if isinstance(contacts, list):
+            blocks.extend([blk for blk in contacts if isinstance(blk, dict)])
+        return blocks
+
+    for blk in _iter_contact_blocks():
+        label = str(blk.get("label", "") or blk.get("title", "") or "")
+        context = " ".join([label, str(blk.get("display_name") or blk.get("full_name") or blk.get("name") or "")]).strip()
+        rank = _block_phone_rank(label)
+        phones_field = blk.get("phones") or blk.get("phone")
+        if isinstance(phones_field, list):
+            for ph in phones_field:
+                if isinstance(ph, dict):
+                    _add_phone_entry(ph.get("number") or ph.get("phone") or ph.get("value") or "", context or "contact_block", str(ph), rank)
+                elif ph:
+                    _add_phone_entry(ph, context or "contact_block", str(ph), rank)
+        elif isinstance(phones_field, dict):
+            _add_phone_entry(phones_field.get("number") or phones_field.get("phone") or "", context or "contact_block", str(phones_field), rank)
+        elif phones_field:
+            _add_phone_entry(phones_field, context or "contact_block", str(phones_field), rank)
+        for key in ("agentPhone", "agentMobilePhone", "mobilePhone", "agent_phone", "agent_mobile_phone"):
+            if blk.get(key):
+                _add_phone_entry(blk[key], context or key, str(blk), 0)
+
     for path, text in _rapid_walk(payload):
         joined.append(text)
         for em in EMAIL_RE.finditer(text):
@@ -1116,20 +1198,19 @@ def _rapid_collect_contacts(payload: Any) -> Tuple[List[Dict[str, str]], List[Di
             seen_email.add(cleaned)
             emails.append({"value": cleaned, "context": path, "text": text})
         if _rapid_path_has_phone_hint(path):
+            rank = _phone_rank(path)
             for pm in PHONE_RE.finditer(text):
-                formatted = fmt_phone(pm.group())
-                if not formatted or formatted in seen_phone:
-                    continue
-                seen_phone.add(formatted)
-                phones.append({"value": formatted, "context": path, "text": text})
+                _add_phone_entry(pm.group(), path, text, rank)
             digits_only = re.sub(r"\D", "", text)
             if digits_only and len(digits_only) >= 10:
-                formatted = fmt_phone(digits_only[:10])
-                if formatted and formatted not in seen_phone:
-                    seen_phone.add(formatted)
-                    phones.append({"value": formatted, "context": path, "text": text})
+                _add_phone_entry(digits_only[:10], path, text, rank)
     joined_text = " ".join(joined)
-    return phones, emails, joined_text
+    ordered: List[Dict[str, str]] = []
+    for _, _, entry in sorted(phone_entries, key=lambda t: (t[0], t[1])):
+        ordered.append(entry)
+        if len(ordered) >= 2:
+            break
+    return ordered, emails, joined_text
 
 
 def _rapid_email_allowed(agent: str, email: str, *, context: str, payload_text: str) -> bool:
@@ -1953,6 +2034,49 @@ def _targeted_contact_link_allowed(link: str, agent: str, brokerage: str = "", d
         return True
     return _plausible_agent_url(link, agent, brokerage, domain_hint)
 
+def _focused_contact_link_allowed(link: str, agent: str, brokerage: str = "", domain_hint: str = "") -> bool:
+    if not link:
+        return False
+    parsed = urlparse(link)
+    host = parsed.netloc.lower()
+    dom = _domain(link)
+    if not dom:
+        return False
+    if dom.endswith(".gov") or host.endswith(".gov") or dom.endswith(".edu") or host.endswith(".edu"):
+        return False
+    if dom in CONTACT_RESULT_DENYLIST or host in CONTACT_RESULT_DENYLIST or dom in PORTAL_DOMAINS:
+        return False
+    if any(term in host for term in CONTACT_MEDICAL_TERMS):
+        return False
+    broker_dom = _domain(domain_hint or brokerage) if (domain_hint or brokerage) else ""
+    if broker_dom and (dom == broker_dom or host.endswith(f".{broker_dom}")):
+        return True
+    if dom in SOCIAL_DOMAINS or host.endswith(tuple(SOCIAL_DOMAINS)):
+        return True
+    if _is_real_estate_domain(host):
+        return True
+    path = parsed.path.lower()
+    directory_terms = (
+        "agent",
+        "realtor",
+        "mls",
+        "idx",
+        "real-estate",
+        "realestate",
+        "properties",
+        "homes",
+        "listing",
+        "listings",
+        "brokerage",
+        "team",
+        "our-team",
+        "people",
+        "office",
+    )
+    if any(term in path for term in directory_terms):
+        return True
+    return _plausible_agent_url(link, agent, brokerage, domain_hint)
+
 
 def _collect_targeted_candidates(
     urls: Iterable[str],
@@ -2384,6 +2508,97 @@ def _extract_candidates_from_text(text: str, source_url: str) -> List[Dict[str, 
     return candidates
 
 
+def _agent_contact_candidates_from_html(html_text: str, source_url: str, agent: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    if not (html_text and agent.strip()):
+        return candidates
+    tokens = _agent_tokens(agent)
+    parts = agent.split()
+    first = parts[0] if parts else ""
+    last = parts[-1] if parts else ""
+    seen: Set[Tuple[str, str]] = set()
+
+    def _add(phone_list: List[str], email_list: List[str], evidence: str) -> None:
+        for ph in phone_list:
+            if not (ph and valid_phone(ph)):
+                continue
+            key = ("phone", ph)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "source_url": source_url,
+                    "phones": [ph],
+                    "emails": [],
+                    "evidence_snippet": evidence,
+                }
+            )
+        for em in email_list:
+            cleaned = clean_email(em)
+            if not (cleaned and ok_email(cleaned) and _email_matches_name(agent, cleaned)):
+                continue
+            key = ("email", cleaned)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "source_url": source_url,
+                    "phones": [],
+                    "emails": [cleaned],
+                    "evidence_snippet": evidence,
+                }
+            )
+
+    def _context_hits_agent(ctx: str) -> bool:
+        low = ctx.lower()
+        has_label = any(term in low for term in ("mobile", "cell", "direct", "phone", "tel", "call", "text"))
+        has_name = any(tok and tok in low for tok in tokens)
+        return has_label or has_name
+
+    jsonld_entries, soup = _jsonld_person_contacts(html_text)
+    for entry in jsonld_entries:
+        meta_name = entry.get("name", "")
+        if meta_name and not _names_match(agent, meta_name):
+            continue
+        _add(entry.get("phones", []), entry.get("emails", []), meta_name or "jsonld person")
+
+    phones, mails, meta, info = extract_struct(html_text)
+    for anchor in info.get("tel", []):
+        context = anchor.get("context", "")
+        if not _context_hits_agent(context):
+            continue
+        _add([anchor.get("phone", "")], [], context)
+    for anchor in info.get("mailto", []):
+        _add([], [anchor.get("email", "")], anchor.get("context", "") or "mailto")
+    for entry in meta:
+        meta_name = entry.get("name", "")
+        entry_type = entry.get("type", "")
+        name_match = bool(meta_name and _names_match(agent, meta_name))
+        personish = isinstance(entry_type, str) and ("person" in entry_type.lower() or "agent" in entry_type.lower())
+        if not name_match and not personish:
+            continue
+        _add(entry.get("phones", []), entry.get("emails", []), meta_name or entry_type or "jsonld")
+
+    low = html.unescape(html_text.lower())
+    for num, details in proximity_scan(low, first_name=first.lower(), last_name=last.lower()).items():
+        if details.get("weight", 0) < 2:
+            continue
+        snippet = " ".join(details.get("snippets", []))
+        _add([num], [], snippet or "proximity")
+
+    for m in EMAIL_RE.finditer(html_text):
+        email = clean_email(m.group())
+        if not (email and _email_matches_name(agent, email)):
+            continue
+        snippet = html_text[max(0, m.start() - 80): m.end() + 80]
+        _add([], [email], " ".join(snippet.split()))
+
+    soup.decompose() if soup else None
+    return candidates
+
+
 def _score_contact_candidate(
     snippet: str,
     value: str,
@@ -2807,39 +3022,9 @@ def _contact_cse_queries(
     brokerage: str = "",
     domain_hint: str = "",
 ) -> Tuple[List[str], List[str]]:
-    city = str(row_payload.get("city", "")).strip()
-    postal_code = str(row_payload.get("zip", "")).strip()
     agent_norm = _normalize_agent_for_query(agent)
-    broker_domain = _domain(domain_hint) if domain_hint else ""
-
-    def _add(q: str, bucket: List[str]) -> None:
-        q = q.strip()
-        if q and q not in bucket:
-            bucket.append(q)
-
-    strict_queries: List[str] = []
-    relaxed_queries: List[str] = []
-    base = _compact_tokens(f'"{agent_norm}"', city, state, postal_code)
-    state_base = _compact_tokens(f'"{agent_norm}"', state)
-    broker_base = _compact_tokens(f'"{agent_norm}"', brokerage, state)
-
-    high_signal = _compact_tokens(f'"{agent_norm}"', '"Real Estate Agent"', '"Mobile"', state)
-    _add(high_signal, strict_queries)
-    if brokerage:
-        _add(_compact_tokens(f'"{agent_norm}"', '"Direct"', f'"{brokerage}"'), strict_queries)
-    if broker_domain:
-        _add(_compact_tokens(f'"{agent_norm}"', state, f"site:{broker_domain}", "contact"), strict_queries)
-
-    for seed in (base, state_base):
-        if seed:
-            _add(f"{seed} realtor mobile contact", relaxed_queries)
-            _add(f"{seed} contact phone email", relaxed_queries)
-    if broker_base:
-        _add(f"{broker_base} contact phone email", relaxed_queries)
-    if broker_domain:
-        _add(f'"{agent_norm}" {state} site:{broker_domain} contact phone email', relaxed_queries)
-
-    return _dedupe_queries(strict_queries), _dedupe_queries(relaxed_queries)
+    one_query = _compact_tokens(f'"{agent_norm}"', "realtor", state, "phone", "email")
+    return [one_query], []
 
 
 def _contact_search_urls(
@@ -2858,205 +3043,59 @@ def _contact_search_urls(
     case (urls, search_empty, cse_status, search_exhausted) is returned.
     """
 
-    def _contact_search_allowlist() -> Set[str]:
-        allowed = set(CONTACT_ALLOWLIST_BASE)
-        broker_dom = _domain(domain_hint or brokerage) if (domain_hint or brokerage) else ""
-        if not broker_dom and brokerage:
-            broker_dom = _domain(_infer_domain_from_text(brokerage) or _guess_domain_from_brokerage(brokerage) or "")
-        if broker_dom:
-            allowed.add(broker_dom)
-        return {d for d in allowed if d}
-
-    allowed_domains = _contact_search_allowlist()
-    if not allowed_domains:
-        allowed_domains = None
-    strict_queries, relaxed_queries = _contact_cse_queries(
+    brokerage_domain = _domain(domain_hint or brokerage)
+    strict_queries, _ = _contact_cse_queries(
         agent,
         state,
         row_payload,
         brokerage=brokerage,
         domain_hint=domain_hint,
     )
-    brokerage_domain = _domain(domain_hint or brokerage)
-    stop_at = max(1, min(3, limit))
-    query_budget = MAX_SEARCH_QUERIES
-    search_disabled = False
+    urls: List[str] = []
+    search_empty = False
     search_exhausted = False
-
-    def _consume_budget(queries: List[str]) -> List[str]:
-        nonlocal query_budget
-        if search_disabled:
-            return []
-        if query_budget <= 0:
-            return []
-        allowed = queries[: query_budget]
-        query_budget -= len(allowed)
-        return allowed
-
-    def _collect_urls(
-        queries: List[str],
-        *,
-        per_query_limit: int,
-        current_allowed: Optional[Set[str]],
-        existing: Set[str],
-    ) -> Tuple[List[str], bool]:
-        nonlocal search_disabled, search_exhausted, query_budget
-        collected: List[str] = []
-        search_empty = True
-        first_seen = ""
-        rr_results = search_round_robin(
-            queries,
-            per_query_limit=per_query_limit,
-            allowed_domains=current_allowed,
-            engine_limit=per_query_limit,
-        )
-        for attempts in rr_results:
-            if search_disabled:
-                break
-            for _, hits in attempts:
-                if search_disabled:
-                    break
-                if hits:
-                    search_empty = False
-                for it in hits:
-                    link = it.get("link", "")
-                    dom = _domain(link)
-                    if link and not first_seen:
-                        first_seen = link
-                    if (
-                        not link
-                        or dom in _CONTACT_DENYLIST
-                        or link in collected
-                        or link in existing
-                    ) or not _plausible_agent_url(link, agent, brokerage, domain_hint):
-                        if dom in _CONTACT_DENYLIST:
-                            _mark_block(dom, reason="denylist")
-                        continue
-                    collected.append(link)
-                    existing.add(link)
-                    search_disabled = True
-                    query_budget = 0
-                    break
-                if search_disabled or len(collected) >= stop_at:
-                    break
-                if len(collected) >= limit:
-                    break
-            if search_disabled or len(collected) >= limit:
-                break
-        if not collected and first_seen:
-            collected.append(first_seen)
-        if not collected and query_budget <= 0:
-            search_exhausted = True
-        return collected, search_empty
-
-    def _run_search(current_allowed: Optional[Set[str]]) -> Tuple[List[str], bool, str]:
-        nonlocal search_disabled, query_budget
-        fallback_urls: List[str] = []
-        search_empty = True
-        seen_links: Set[str] = set()
-        strict_set = _consume_budget(strict_queries)
-        if strict_set and not search_disabled:
-            strict_urls, strict_empty = _collect_urls(
-                strict_set,
-                per_query_limit=limit,
-                current_allowed=current_allowed,
-                existing=seen_links,
-            )
-            fallback_urls.extend(strict_urls)
-            if not strict_empty:
-                search_empty = False
-            if len(fallback_urls) >= stop_at:
-                search_disabled = True
-                return fallback_urls[:stop_at], False, _cse_last_state
-
-        cse_status = _cse_last_state
-        blocked_search = cse_status in {"blocked", "throttled"}
-        if not fallback_urls and blocked_search:
-            search_empty = False
-        relaxed_set = _consume_budget(relaxed_queries) if not blocked_search else []
-        if not fallback_urls and relaxed_set and not search_disabled:
-            relaxed_urls, relaxed_empty = _collect_urls(
-                relaxed_set,
-                per_query_limit=limit - len(fallback_urls),
-                current_allowed=current_allowed,
-                existing=seen_links,
-            )
-            fallback_urls.extend(relaxed_urls)
-            if not relaxed_empty:
-                search_empty = False
-            if len(fallback_urls) >= stop_at:
-                search_disabled = True
-                return fallback_urls[:stop_at], False, cse_status
-        if (
-            len(fallback_urls) < stop_at
-            and query_budget > 0
-            and _cse_last_state in {"blocked", "disabled", "no_results", "throttled"}
-        ):
-            ddg_queries = _dedupe_queries(
-                [
-                    _compact_tokens(f'"{agent}"', state, "contact phone"),
-                    _compact_tokens(f'"{agent}"', brokerage, state, "mobile contact"),
-                ]
-            )
-            for q in ddg_queries[:query_budget]:
-                query_budget -= 1
-                if search_disabled:
-                    break
-                hits = duckduckgo_search(
-                    q,
-                    limit=limit - len(fallback_urls),
-                    allowed_domains=current_allowed,
-                )
-                if hits:
-                    search_empty = False
-                for it in hits:
-                    link = it.get("link", "")
-                    dom = _domain(link)
-                    if (
-                        not link
-                        or dom in _CONTACT_DENYLIST
-                        or link in fallback_urls
-                        or link in seen_links
-                        or not _plausible_agent_url(link, agent, brokerage, domain_hint)
-                    ):
-                        if dom in _CONTACT_DENYLIST:
-                            _mark_block(dom, reason="denylist")
-                        continue
-                    fallback_urls.append(link)
-                    seen_links.add(link)
-                    search_disabled = True
-                    query_budget = 0
-                    if len(fallback_urls) >= stop_at:
-                        break
-                if search_disabled or len(fallback_urls) >= stop_at:
-                    break
-
-        if not fallback_urls and not blocked_search:
+    cse_status = _cse_last_state
+    try:
+        query = strict_queries[0] if strict_queries else ""
+        if not query:
             search_empty = True
-
-        return fallback_urls[:limit], search_empty, cse_status
-
-    def _widen_allowed_domains(current_allowed: Optional[Set[str]]) -> Optional[Set[str]]:
-        widened = set(current_allowed or [])
-        widened.update(CONTACT_ALLOWLIST_BASE)
-        if brokerage_domain:
-            widened.add(brokerage_domain)
-        widened.update({"realtor.com", "nar.realtor"})
-        return widened or None
-
-    fallback_urls, search_empty, cse_status = _run_search(allowed_domains)
-    blocked_search = cse_status in {"blocked", "throttled"}
-    if not fallback_urls and search_empty and not blocked_search and not search_disabled:
-        widened_allowed = _widen_allowed_domains(allowed_domains)
-        fallback_urls, search_empty, cse_status = _run_search(widened_allowed)
-        if not fallback_urls and widened_allowed is not None and not search_disabled:
-            fallback_urls, search_empty, cse_status = _run_search(None)
-
-    if query_budget <= 0 or search_disabled:
+        else:
+            rr_results = search_round_robin(
+                [query],
+                per_query_limit=max(limit, 5),
+                engine_limit=1,
+            )
+            seen: Set[str] = set()
+            for attempts in rr_results:
+                for _, hits in attempts:
+                    for it in hits:
+                        link = it.get("link", "")
+                        dom = _domain(link)
+                        if not link or dom in _CONTACT_DENYLIST:
+                            if dom in _CONTACT_DENYLIST:
+                                _mark_block(dom, reason="denylist")
+                            continue
+                        if link in seen or link in urls:
+                            continue
+                        if not _focused_contact_link_allowed(link, agent, brokerage, domain_hint):
+                            continue
+                        seen.add(link)
+                        urls.append(link)
+                        if len(urls) >= limit:
+                            break
+                    if len(urls) >= limit:
+                        break
+                if len(urls) >= limit:
+                    break
+            cse_status = _cse_last_state
+            search_empty = not bool(urls)
         search_exhausted = True
-    if not fallback_urls and query_budget <= 0:
+    except Exception:
+        LOG.exception("contact search failed for %s %s", agent, state)
+        search_empty = True
         search_exhausted = True
-    result = (fallback_urls[:limit], search_empty, cse_status, search_exhausted)
+        cse_status = _cse_last_state or "error"
+    result = (urls[:limit], search_empty, cse_status, search_exhausted)
     return result if include_exhausted else result[:3]
 
 
@@ -3423,10 +3462,9 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         or _infer_domain_from_text(brokerage)
         or _infer_domain_from_text(agent)
     )
-    query = _compact_tokens(f'"{agent}"', "realtor", state, "phone", "email")
     candidates: List[Dict[str, Any]] = []
-    google_candidates: List[Dict[str, Any]] = []
     blocked_engines: Set[str] = set()
+    brokerage_domain = _domain(domain_hint or brokerage)
 
     def _empty_result() -> Dict[str, Any]:
         return {
@@ -3439,62 +3477,37 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             "best_email_evidence": "",
         }
 
-    def _collect_from_engine(engine: str) -> Tuple[List[Dict[str, Any]], bool]:
-        urls: List[str] = []
-        blocked = False
-        hits: List[Dict[str, Any]] = []
-        try:
-            if engine == "google":
-                hits = google_cse_search(query, limit=8)
-                if _cse_last_state in {"blocked", "throttled"}:
-                    blocked = True
-            elif engine == "duckduckgo":
-                hits, blocked = duckduckgo_search(query, limit=8, with_blocked=True)
-            else:
-                return [], False
-            for it in hits:
-                link = it.get("link", "")
-                if not _targeted_contact_link_allowed(link, agent, brokerage, domain_hint):
-                    continue
-                urls.append(link)
-                if len(urls) >= 5:
-                    break
-            if not urls and blocked:
-                return [], True
-            engine_candidates, page_blocked = _collect_targeted_candidates(urls, agent, row_payload)
-            return engine_candidates, bool(blocked or page_blocked)
-        except DomainBlockedError:
-            LOG.warning("two_stage engine %s blocked for %s %s", engine, agent, state)
-            return [], True
-        except Exception:
-            LOG.exception("two_stage engine %s failed for %s %s", engine, agent, state)
-            return [], True
-
     try:
-        google_candidates, google_blocked = _collect_from_engine("google")
-        if google_blocked:
-            blocked_engines.add("google")
-        candidates.extend(google_candidates)
-
-        def _has_strong_contact(res: Dict[str, Any]) -> bool:
-            phone_conf = int(res.get("best_phone_confidence", 0) or 0)
-            email_conf = int(res.get("best_email_confidence", 0) or 0)
-            strong_phone = phone_conf >= 80
-            strong_email = email_conf >= 70
-            return bool(strong_phone or strong_email)
-
-        google_ranked = rerank_contact_candidates(
-            google_candidates, agent, brokerage_domain=_domain(domain_hint or brokerage)
+        urls, search_empty, cse_status, _ = _normalize_contact_search_result(
+            _contact_search_urls(
+                agent,
+                state,
+                row_payload,
+                domain_hint=domain_hint or brokerage,
+                brokerage=brokerage,
+                limit=5,
+                include_exhausted=True,
+            )
         )
-        google_ranked = _apply_phone_type_boost(google_ranked)
+        if cse_status in {"blocked", "throttled"}:
+            blocked_engines.add("google")
+        if search_empty and not urls and cse_status in {"blocked", "throttled"}:
+            return _empty_result()
 
-        if not _has_strong_contact(google_ranked):
-            duck_candidates, duck_blocked = _collect_from_engine("duckduckgo")
-            if duck_blocked:
-                blocked_engines.add("duckduckgo")
-            candidates.extend(duck_candidates)
+        for url in urls:
+            fetched = fetch_text_cached(url, ttl_days=14)
+            status = int(fetched.get("http_status", 0) or 0)
+            final_url = fetched.get("final_url") or url
+            if status in {403, 429, 451}:
+                _mark_block(_domain(final_url), reason="cse-block")
+                blocked_engines.add("google")
+                continue
+            page = fetched.get("extracted_text", "")
+            if not page:
+                continue
+            candidates.extend(_agent_contact_candidates_from_html(page, final_url, agent))
 
-        ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=_domain(domain_hint or brokerage))
+        ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
         ranked = _apply_phone_type_boost(ranked)
 
         email = ranked.get("best_email", "")
@@ -3923,6 +3936,9 @@ def search_round_robin(
             ),
         ),
     )
+
+    if engine_limit is not None:
+        engines = engines[: max(1, min(len(engines), engine_limit))]
 
     deduped = _dedupe_queries(queries)
     results: List[List[Tuple[str, List[Dict[str, Any]]]]] = []
