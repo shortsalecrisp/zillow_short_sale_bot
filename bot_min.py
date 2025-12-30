@@ -1775,11 +1775,9 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
 
     blocked_statuses = {403, 429, 451}
     if status in blocked_statuses and dom:
-        block_for = (
-            JINA_BLOCK_SECONDS
-            if dom in {"r.jina.ai", "duckduckgo.com", "www.duckduckgo.com"}
-            else BLOCK_SECONDS
-        )
+        is_jina = dom in {"r.jina.ai", "duckduckgo.com", "www.duckduckgo.com"}
+        base_block = JINA_BLOCK_SECONDS if is_jina else BLOCK_SECONDS
+        block_for = max(base_block, 3600.0 if is_jina else base_block)
         LOG.info(
             "Jina fetch blocked for %s with %s; marking domain for retry", dom, status
         )
@@ -1887,7 +1885,51 @@ def jina_cached_search(
             if candidate not in seen and _allowed(_domain(candidate)):
                 seen.add(candidate)
                 hits.append(candidate)
-        return hits
+    return hits
+
+
+def _targeted_contact_link_allowed(link: str, agent: str, brokerage: str = "", domain_hint: str = "") -> bool:
+    if not link:
+        return False
+    dom = _domain(link)
+    if not dom:
+        return False
+    allowed: Set[str] = set(CONTACT_ALLOWLIST_BASE) | set(SOCIAL_DOMAINS)
+    broker_dom = _domain(domain_hint or brokerage) if (domain_hint or brokerage) else ""
+    if broker_dom:
+        allowed.add(broker_dom)
+    if dom in allowed:
+        return True
+    if "mls" in dom or dom.endswith(".realtor"):
+        return True
+    return _plausible_agent_url(link, agent, brokerage, domain_hint)
+
+
+def _collect_targeted_candidates(
+    urls: Iterable[str],
+    agent: str,
+    row_payload: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], bool]:
+    candidates: List[Dict[str, Any]] = []
+    blocked = False
+    for url in urls:
+        if not url:
+            continue
+        fetched = fetch_text_cached(url, ttl_days=14)
+        status = int(fetched.get("http_status", 0) or 0)
+        final_url = fetched.get("final_url") or url
+        if status in {403, 429}:
+            blocked = True
+            _mark_block(_domain(final_url), seconds=max(BLOCK_SECONDS, 3600.0), reason="cse-block")
+            break
+        text = fetched.get("extracted_text", "")
+        if not text:
+            continue
+        jsonld_cands, _, _, _ = _extract_jsonld_contacts_first(text, final_url, agent=agent, row_payload=row_payload)
+        candidates.extend(jsonld_cands)
+        candidates.extend(_extract_structured_candidates(text, final_url))
+        candidates.extend(_extract_candidates_from_text(text, final_url))
+    return candidates, blocked
 
     hits: List[str] = []
     seen: Set[str] = set()
@@ -3232,8 +3274,83 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
 def _contact_enrichment(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     cache_key = "_contact_enrichment"
     if cache_key not in row_payload:
-        row_payload[cache_key] = enrich_contact(agent, state, row_payload)
+        row_payload[cache_key] = _two_stage_contact_search(agent, state, row_payload)
     return row_payload.get(cache_key, {})
+
+
+def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Run two CSE passes (Google then DuckDuckGo/Jina) and return ranked contacts."""
+
+    brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
+    domain_hint = (
+        row_payload.get("domain_hint", "").strip()
+        or _infer_domain_from_text(brokerage)
+        or _infer_domain_from_text(agent)
+    )
+    query = _compact_tokens(f'"{agent}"', "realtor", state, "phone", "email")
+    candidates: List[Dict[str, Any]] = []
+    google_candidates: List[Dict[str, Any]] = []
+    blocked_engines: Set[str] = set()
+
+    def _collect_from_engine(engine: str) -> Tuple[List[Dict[str, Any]], bool]:
+        urls: List[str] = []
+        blocked = False
+        hits: List[Dict[str, Any]] = []
+        if engine == "google":
+            hits = google_cse_search(query, limit=8)
+            if _cse_last_state in {"blocked", "throttled"}:
+                blocked = True
+        elif engine == "duckduckgo":
+            hits = duckduckgo_search(query, limit=8)
+        else:
+            return [], False
+        for it in hits:
+            link = it.get("link", "")
+            if not _targeted_contact_link_allowed(link, agent, brokerage, domain_hint):
+                continue
+            urls.append(link)
+            if len(urls) >= 5:
+                break
+        if not urls and blocked:
+            return [], True
+        engine_candidates, page_blocked = _collect_targeted_candidates(urls, agent, row_payload)
+        return engine_candidates, bool(blocked or page_blocked)
+
+    google_candidates, google_blocked = _collect_from_engine("google")
+    if google_blocked:
+        blocked_engines.add("google")
+    candidates.extend(google_candidates)
+
+    def _has_strong_contact(res: Dict[str, Any]) -> bool:
+        phone_conf = int(res.get("best_phone_confidence", 0) or 0)
+        email_conf = int(res.get("best_email_confidence", 0) or 0)
+        strong_phone = phone_conf >= 80
+        strong_email = email_conf >= 70
+        return bool(strong_phone or strong_email)
+
+    google_ranked = rerank_contact_candidates(google_candidates, agent, brokerage_domain=_domain(domain_hint or brokerage))
+    google_ranked = _apply_phone_type_boost(google_ranked)
+
+    if not _has_strong_contact(google_ranked):
+        duck_candidates, duck_blocked = _collect_from_engine("duckduckgo")
+        if duck_blocked:
+            blocked_engines.add("duckduckgo")
+        candidates.extend(duck_candidates)
+
+    ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=_domain(domain_hint or brokerage))
+    ranked = _apply_phone_type_boost(ranked)
+
+    email = ranked.get("best_email", "")
+    if email and not _email_matches_name(agent, email):
+        ranked["best_email"] = ""
+        ranked["best_email_confidence"] = 0
+        ranked["best_email_source_url"] = ""
+        ranked["best_email_evidence"] = ""
+
+    ranked["_two_stage_done"] = bool(candidates)
+    ranked["_two_stage_candidates"] = len(candidates)
+    ranked["_blocked_engines"] = sorted(blocked_engines)
+    return ranked
 
 
 def fetch_contact_page(url: str) -> Tuple[str, bool]:
@@ -3467,8 +3584,9 @@ def _next_cse_creds() -> Tuple[str, str]:
 
 def _mark_cse_block() -> None:
     global _cse_blocked_until
-    _cse_blocked_until = time.time() + CSE_BLOCK_SECONDS
-    LOG.warning("CSE blocked; cooling off for %.0f seconds", CSE_BLOCK_SECONDS)
+    cooldown = max(CSE_BLOCK_SECONDS, 3600.0)
+    _cse_blocked_until = time.time() + cooldown
+    LOG.warning("CSE blocked; cooling off for %.0f seconds", cooldown)
 
 
 def _filter_allowed(link: str, allowed_domains: Optional[Set[str]]) -> bool:
@@ -4666,6 +4784,11 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         _contact_cache_set(cache_p, cache_key, res)
         return res
 
+    if not cache_p:
+        with _rapid_cache_lock:
+            _rapid_contact_cache.clear()
+            _rapid_logged.clear()
+
     override = _contact_override(agent, state)
     override_phone = override.get("phone") if override else ""
     if override_phone:
@@ -4692,13 +4815,22 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     rapid_verified_mobile = bool(rapid_snapshot.get("phone_verified_mobile"))
     rapid_fallback_phone = rapid_selected_phone if rapid_selected_phone and not rapid_verified_mobile else ""
 
+    if rapid_selected_phone and not rapid_verified_mobile:
+        refreshed_info = get_line_info(rapid_selected_phone)
+        if refreshed_info.get("mobile_verified"):
+            rapid_verified_mobile = True
+            rapid_phone_reason = "rapid_cloudmersive_mobile"
+            rapid_fallback_phone = ""
+            if isinstance(rapid_snapshot, dict):
+                rapid_snapshot["phone_verified_mobile"] = True
+
     if rapid_selected_phone and rapid_verified_mobile:
         return _finalize({
             "number": rapid_selected_phone,
             "confidence": "high",
             "score": max(CONTACT_PHONE_MIN_SCORE, CONTACT_PHONE_LOW_CONF + 0.75),
-            "source": "rapid_mobile",
-            "reason": rapid_phone_reason,
+            "source": "rapid_contact_cloudmersive_mobile",
+            "reason": rapid_phone_reason or "rapid_cloudmersive_mobile",
             "verified_mobile": True,
         })
 
@@ -4907,24 +5039,68 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     if shortcut_result:
         return _finalize(shortcut_result)
 
-    # Only search the web if Rapid did not yield a verified mobile.
     enrichment = _contact_enrichment(agent, state, row_payload)
+    enrichment_done = bool(enrichment.get("_two_stage_done") and enrichment.get("_two_stage_candidates", 0) > 0)
     enriched_phone = enrichment.get("best_phone", "")
+    enriched_conf = int(enrichment.get("best_phone_confidence", 0) or 0)
     if enriched_phone:
         line_info = get_line_info(enriched_phone)
         verified_mobile = bool(line_info.get("mobile_verified"))
-        confidence_score = enrichment.get("best_phone_confidence", 0)
-        confidence = "high" if confidence_score >= 80 else "low"
-        result = {
-            "number": enriched_phone,
-            "confidence": confidence,
-            "score": max(CONTACT_PHONE_LOW_CONF, confidence_score / 25),
-            "source": enrichment.get("best_phone_source_url", "enrichment"),
-            "reason": "",
-            "evidence": enrichment.get("best_phone_evidence", ""),
-            "verified_mobile": verified_mobile,
-        }
-        return _finalize(result)
+        if enriched_conf >= CONTACT_PHONE_LOW_CONF or verified_mobile:
+            confidence = "high" if enriched_conf >= 80 or verified_mobile else "low"
+            result = {
+                "number": enriched_phone,
+                "confidence": confidence,
+                "score": max(CONTACT_PHONE_LOW_CONF, enriched_conf / 25),
+                "source": enrichment.get("best_phone_source_url", "two_stage_cse"),
+                "reason": "two_stage_cse",
+                "evidence": enrichment.get("best_phone_evidence", ""),
+                "verified_mobile": verified_mobile,
+            }
+            return _finalize(result)
+        if enrichment_done:
+            if rapid_fallback_phone:
+                return _finalize(
+                    {
+                        "number": rapid_fallback_phone,
+                        "confidence": "low",
+                        "score": max(CONTACT_PHONE_OVERRIDE_MIN, CONTACT_PHONE_LOW_CONF),
+                        "source": "rapid_fallback",
+                        "reason": rapid_phone_reason or "rapid_fallback_landline",
+                        "verified_mobile": False,
+                    }
+                )
+            return _finalize(
+                {
+                    "number": "",
+                    "confidence": "",
+                    "score": 0.0,
+                    "source": "two_stage_cse",
+                    "reason": "two_stage_low_confidence_phone",
+                    "verified_mobile": False,
+                }
+            )
+    if enrichment_done and not enriched_phone:
+        if rapid_fallback_phone:
+            result = {
+                "number": rapid_fallback_phone,
+                "confidence": "low",
+                "score": max(CONTACT_PHONE_OVERRIDE_MIN, CONTACT_PHONE_LOW_CONF),
+                "source": "rapid_fallback",
+                "reason": rapid_phone_reason or "rapid_fallback_landline",
+                "verified_mobile": False,
+            }
+            return _finalize(result)
+        return _finalize(
+            {
+                "number": "",
+                "confidence": "",
+                "score": 0.0,
+                "source": "two_stage_cse",
+                "reason": "two_stage_no_phone",
+                "verified_mobile": False,
+            }
+        )
 
     location_tokens, location_digits = _collect_location_hints(
         row_payload,
@@ -5500,6 +5676,11 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         _contact_cache_set(cache_e, cache_key, res)
         return res
 
+    if not cache_p:
+        with _rapid_cache_lock:
+            _rapid_contact_cache.clear()
+            _rapid_logged.clear()
+
     override = _contact_override(agent, state)
     override_email = override.get("email") if override else ""
     if override_email:
@@ -5533,6 +5714,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         })
 
     enrichment = _contact_enrichment(agent, state, row_payload)
+    enrichment_done = bool(enrichment.get("_two_stage_done") and enrichment.get("_two_stage_candidates", 0) > 0)
     enriched_email = enrichment.get("best_email", "")
     if enriched_email:
         confidence_score = enrichment.get("best_email_confidence", 0)
@@ -5541,11 +5723,21 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "email": enriched_email,
             "confidence": confidence,
             "score": max(CONTACT_EMAIL_LOW_CONF, confidence_score / 25),
-            "source": enrichment.get("best_email_source_url", "enrichment"),
-            "reason": "",
+            "source": enrichment.get("best_email_source_url", "two_stage_cse"),
+            "reason": "two_stage_cse",
             "evidence": enrichment.get("best_email_evidence", ""),
         }
         return _finalize(result)
+    if enrichment_done:
+        return _finalize(
+            {
+                "email": "",
+                "confidence": "",
+                "score": 0.0,
+                "source": "two_stage_cse",
+                "reason": "two_stage_no_email",
+            }
+        )
 
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     domain_hint = mls_id = ""
@@ -6541,6 +6733,7 @@ def get_line_info(phone: str) -> Dict[str, Any]:
     }
     if not CLOUDMERSIVE_KEY:
         info["mobile"] = info["valid"]
+        info["mobile_verified"] = info["mobile"]
         _line_info_cache[phone] = info
         return info
 
@@ -6558,6 +6751,7 @@ def get_line_info(phone: str) -> Dict[str, Any]:
         data = resp.json()
     except Exception as exc:
         LOG.warning("Cloudmersive lookup failed for %s (%s)", phone, exc)
+        info["mobile"] = info["valid"]
         _line_info_cache[phone] = info
         return info
 
@@ -6569,6 +6763,7 @@ def get_line_info(phone: str) -> Dict[str, Any]:
             phone,
             status,
         )
+        info["mobile"] = info["valid"]
         _line_info_cache[phone] = info
         return info
 
@@ -6577,6 +6772,7 @@ def get_line_info(phone: str) -> Dict[str, Any]:
             "Cloudmersive response for %s missing IsValid; falling back to local validation",
             phone,
         )
+        info["mobile"] = info["valid"]
         _line_info_cache[phone] = info
         return info
 
