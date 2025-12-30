@@ -2072,6 +2072,7 @@ def _focused_contact_link_allowed(link: str, agent: str, brokerage: str = "", do
         "our-team",
         "people",
         "office",
+        "contact",
     )
     if any(term in path for term in directory_terms):
         return True
@@ -2426,43 +2427,33 @@ def _candidate_urls(
     if brokerage:
         strong_queries.append(_compact_tokens(f'"{agent}"', '"Direct"', f'"{brokerage}"'))
 
-    queries = _dedupe_queries(strong_queries + [q for q in (base_query, secondary_query) if q])
+    contact_query = _dedupe_queries(strong_queries + [q for q in (base_query, secondary_query) if q])
+    primary_query = contact_query[0] if contact_query else ""
+    row_payload["_primary_contact_query"] = primary_query
 
-    search_hits: List[str] = []
-    query_budget = MAX_SEARCH_QUERIES
-    search_exhausted = False
-    for q in queries:
-        if query_budget <= 0:
-            search_exhausted = True
-            break
-        query_budget -= 1
-        ranked_hits = _rank_urls(
-            jina_cached_search(
-                q,
-                max_results=SEARCH_CONTACT_URL_LIMIT,
-                allowed_domains=allowed_domains,
-            ),
-            agent,
-            brokerage,
-            domain_hint=domain_hint,
-            limit=SEARCH_CONTACT_URL_LIMIT,
-        )
-        for hit in ranked_hits:
-            if hit not in search_hits:
-                search_hits.append(hit)
-            if len(search_hits) >= SEARCH_CONTACT_URL_LIMIT:
-                break
-        if search_hits:
-            query_budget = 0
-            search_exhausted = True
-            break
-        if len(search_hits) >= SEARCH_CONTACT_URL_LIMIT:
-            break
+    if urls or not primary_query:
+        deduped = list(dict.fromkeys(urls))
+        return deduped[:SEARCH_CONTACT_URL_LIMIT], False
 
-    urls.extend(search_hits)
+    search_hits, _, _, search_exhausted = _contact_search_urls(
+        agent,
+        state,
+        row_payload,
+        domain_hint=domain_hint,
+        brokerage=brokerage,
+        limit=SEARCH_CONTACT_URL_LIMIT,
+        include_exhausted=True,
+        engine="google",
+    )
+    ranked_hits = _rank_urls(
+        search_hits,
+        agent,
+        brokerage,
+        domain_hint=domain_hint,
+        limit=SEARCH_CONTACT_URL_LIMIT,
+    )
+    urls.extend(ranked_hits)
     deduped = list(dict.fromkeys(urls))
-    if not deduped and query_budget <= 0:
-        search_exhausted = True
     return deduped[:SEARCH_CONTACT_URL_LIMIT], search_exhausted
 
 
@@ -3036,6 +3027,7 @@ def _contact_search_urls(
     brokerage: str = "",
     limit: int = 5,
     include_exhausted: bool = False,
+    engine: str = "google",
 ) -> Tuple[List[str], bool, str] | Tuple[List[str], bool, str, bool]:
     """Issue enriched contact queries and return candidate URLs.
 
@@ -3055,39 +3047,79 @@ def _contact_search_urls(
     search_empty = False
     search_exhausted = False
     cse_status = _cse_last_state
+    search_cache = row_payload.setdefault("_contact_search_cache", {})
     try:
+        cache_key = ""
         query = strict_queries[0] if strict_queries else ""
         if not query:
             search_empty = True
         else:
-            rr_results = search_round_robin(
-                [query],
-                per_query_limit=max(limit, 5),
-                engine_limit=1,
-            )
+            cache_key = f"{engine}:{limit}:{query}"
+            if cache_key in search_cache:
+                cached = search_cache[cache_key]
+                return cached if include_exhausted else cached[:3]
+
+            attempts: List[Tuple[str, List[Dict[str, Any]]]] = []
+            allowed_domains = _allowed_contact_domains(domain_hint)
+            if engine == "google":
+                rr_results = search_round_robin(
+                    [query],
+                    per_query_limit=max(limit, 5),
+                    engine_limit=1,
+                    allowed_domains=allowed_domains,
+                )
+                attempts = rr_results[0] if rr_results else []
+                if not attempts:
+                    attempts = [("google_cse", google_items(query))]
+            elif engine in {"duckduckgo", "jina"}:
+                hits, blocked = duckduckgo_search(
+                    query,
+                    limit=max(limit, 5),
+                    allowed_domains=allowed_domains,
+                    with_blocked=True,
+                )
+                attempts.append(("duckduckgo", hits))
+                if blocked:
+                    _mark_block("duckduckgo.com", reason="blocked")
+                cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
+            else:
+                attempts = []
+
             seen: Set[str] = set()
-            for attempts in rr_results:
-                for _, hits in attempts:
-                    for it in hits:
-                        link = it.get("link", "")
-                        dom = _domain(link)
-                        if not link or dom in _CONTACT_DENYLIST:
-                            if dom in _CONTACT_DENYLIST:
-                                _mark_block(dom, reason="denylist")
-                            continue
-                        if link in seen or link in urls:
-                            continue
-                        if not _focused_contact_link_allowed(link, agent, brokerage, domain_hint):
-                            continue
-                        seen.add(link)
-                        urls.append(link)
-                        if len(urls) >= limit:
-                            break
+            for _, hits in attempts:
+                for it in hits:
+                    link = it.get("link", "")
+                    dom = _domain(link)
+                    if not link or dom in _CONTACT_DENYLIST:
+                        if dom in _CONTACT_DENYLIST:
+                            _mark_block(dom, reason="denylist")
+                        break
+                    if dom in PORTAL_DOMAINS:
+                        continue
+                    if link in seen or link in urls:
+                        continue
+                    seen.add(link)
+                    urls.append(link)
                     if len(urls) >= limit:
                         break
                 if len(urls) >= limit:
                     break
-            cse_status = _cse_last_state
+            if engine == "google" and not urls:
+                for it in google_items(query):
+                    link = it.get("link", "")
+                    dom = _domain(link)
+                    if not link or dom in _CONTACT_DENYLIST:
+                        if dom in _CONTACT_DENYLIST:
+                            _mark_block(dom, reason="denylist")
+                        continue
+                    if dom in PORTAL_DOMAINS:
+                        continue
+                    if link in urls:
+                        continue
+                    urls.append(link)
+                    if len(urls) >= limit:
+                        break
+            cse_status = _cse_last_state if engine == "google" else cse_status or engine
             search_empty = not bool(urls)
         search_exhausted = True
     except Exception:
@@ -3096,6 +3128,8 @@ def _contact_search_urls(
         search_exhausted = True
         cse_status = _cse_last_state or "error"
     result = (urls[:limit], search_empty, cse_status, search_exhausted)
+    if cache_key:
+        search_cache[cache_key] = result
     return result if include_exhausted else result[:3]
 
 
@@ -3371,18 +3405,23 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
 
     search_empty = False
     cse_status = _cse_last_state
-    if needs_fallback and not search_disabled and not search_exhausted:
-        fallback_urls, search_empty, cse_status, fallback_exhausted = _normalize_contact_search_result(
-            _contact_search_urls(
-                agent,
-                state,
-                row_payload,
-                domain_hint=domain_hint or brokerage,
-                brokerage=brokerage,
-                limit=5,
-                include_exhausted=True,
+    if needs_fallback and not search_exhausted:
+        fallback_urls: List[str] = []
+        fallback_exhausted = False
+        if not row_payload.get("_duckduckgo_search_done"):
+            fallback_urls, search_empty, cse_status, fallback_exhausted = _normalize_contact_search_result(
+                _contact_search_urls(
+                    agent,
+                    state,
+                    row_payload,
+                    domain_hint=domain_hint or brokerage,
+                    brokerage=brokerage,
+                    limit=5,
+                    include_exhausted=True,
+                    engine="duckduckgo",
+                )
             )
-        )
+            row_payload["_duckduckgo_search_done"] = True
         search_exhausted = search_exhausted or fallback_exhausted
         ranked_fallback = _rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=5)
         if ranked_fallback:
@@ -3466,6 +3505,9 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
     blocked_engines: Set[str] = set()
     brokerage_domain = _domain(domain_hint or brokerage)
 
+    def _has_high_confidence(res: Dict[str, Any]) -> bool:
+        return (res.get("best_phone_confidence", 0) or 0) >= 80 or (res.get("best_email_confidence", 0) or 0) >= 80
+
     def _empty_result() -> Dict[str, Any]:
         return {
             "_two_stage_done": False,
@@ -3516,6 +3558,32 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             ranked["best_email_confidence"] = 0
             ranked["best_email_source_url"] = ""
             ranked["best_email_evidence"] = ""
+
+        if not _has_high_confidence(ranked) and not row_payload.get("_duckduckgo_search_done"):
+            ddg_urls, ddg_empty, ddg_status, _ = _normalize_contact_search_result(
+                _contact_search_urls(
+                    agent,
+                    state,
+                    row_payload,
+                    domain_hint=domain_hint or brokerage,
+                    brokerage=brokerage,
+                    limit=5,
+                    include_exhausted=True,
+                    engine="duckduckgo",
+                )
+            )
+            row_payload["_duckduckgo_search_done"] = True
+            if ddg_status in {"duckduckgo-blocked"}:
+                blocked_engines.add("duckduckgo")
+            for url in ddg_urls:
+                fetched = fetch_text_cached(url, ttl_days=14)
+                page = fetched.get("extracted_text", "")
+                final_url = fetched.get("final_url") or url
+                if not page:
+                    continue
+                candidates.extend(_agent_contact_candidates_from_html(page, final_url, agent))
+            ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
+            ranked = _apply_phone_type_boost(ranked)
 
         ranked["_two_stage_done"] = bool(candidates)
         ranked["_two_stage_candidates"] = len(candidates)
@@ -4906,26 +4974,8 @@ def _is_role_email(email: str) -> bool:
 def _looks_direct(phone: str, agent: str, state: str, tries: int = 2) -> Optional[bool]:
     if not phone:
         return None
-    last = agent.split()[-1].lower()
-    digits = re.sub(r"\D", "", phone)
-    queries = [f'"{phone}" {state}', f'"{phone}" "{agent.split()[0]}"']
-    saw_page = False
-    for q in queries:
-        for it in _safe_google_items(q, tries=tries):
-            link = it.get("link", "")
-            page = fetch_simple(link, strict=False)
-            if not page:
-                continue
-            saw_page = True
-            low_digits = re.sub(r"\D", "", page)
-            if digits not in low_digits:
-                continue
-            pos = low_digits.find(digits)
-            if pos == -1:
-                continue
-            if last in page.lower()[max(0, pos - 200): pos + 200]:
-                return True
-    return False if saw_page else None
+    # Reverse phone lookups via web search are disabled; rely on Cloudmersive only.
+    return None
 
 PHONE_SOURCE_BASE = {
     "payload_contact": 2.6,
@@ -5550,41 +5600,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         return True
 
     if _fallback_needed():
-        extras = [e for e in location_extras if e]
-        alt_queries = build_alt_q_phone(
-            agent,
-            state,
-            brokerage=brokerage_hint,
-            extras=extras,
-        )
-        if alt_queries:
-            alt_results = list(pmap(google_items, _dedupe_queries(alt_queries)))
-            for items in alt_results:
-                for it in items:
-                    tel = (it.get("pagemap", {}).get("contactpoint", [{}])[0].get("telephone") or "")
-                    if tel:
-                        _register(tel, "cse_contact", url=it.get("link", ""))
-            alt_urls = []
-            for items in alt_results:
-                for it in items:
-                    link = it.get("link", "")
-                    if not link:
-                        continue
-                    low = link.lower()
-                    if low in processed_urls:
-                        continue
-                    if _domain(link) in GOOGLE_PORTAL_DENYLIST:
-                        continue
-                    alt_urls.append(link)
-            alt_urls = alt_urls[:15]
-            alt_non_portal, alt_portal = _split_portals(alt_urls)
-            for url in alt_non_portal:
-                if _handle_url(url) and _has_viable_phone_candidate():
-                    break
-            if not _has_viable_phone_candidate():
-                for url in alt_portal:
-                    if _handle_url(url) and _has_viable_phone_candidate():
-                        break
+        LOG.info("PHONE LOOKUP fallback: skipping alt search to honor single-search budget")
 
     tokens = _agent_tokens(agent)
     direct_cache: Dict[str, Optional[bool]] = {}
