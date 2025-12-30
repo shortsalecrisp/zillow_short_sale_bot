@@ -153,6 +153,29 @@ def test_rapid_mobile_recovers_from_office_demote(monkeypatch):
     assert result["score"] >= bot_min.CONTACT_PHONE_LOW_CONF
 
 
+def test_rapid_likely_mobile_kept(monkeypatch):
+    rapid_number = "555-303-9090"
+    cm_info = {
+        "valid": True,
+        "mobile": True,
+        "mobile_verified": False,
+        "type": "FixedLineOrMobile",
+        "ambiguous_mobile": True,
+    }
+
+    monkeypatch.setattr(bot_min, "rapid_property", lambda zpid: {"contact_recipients": [{"phones": [{"number": rapid_number}]}]})
+    monkeypatch.setattr(bot_min, "get_line_info", lambda phone: cm_info)
+
+    bot_min._rapid_contact_cache.clear()
+    bot_min._rapid_logged.clear()
+    bot_min._rapid_cache.clear()
+
+    snapshot = bot_min._rapid_contact_snapshot("Jane Agent", {"zpid": "abc"})
+
+    assert snapshot["selected_phone"] == rapid_number
+    assert snapshot["phone_reason"] == "rapid_cloudmersive_likely_mobile"
+
+
 def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
     office_number = "555-000-1111"
     mobile_number = "555-222-3333"
