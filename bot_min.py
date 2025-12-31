@@ -604,13 +604,11 @@ ALT_PHONE_SITES: Tuple[str, ...] = (
     "exprealty.com",
     "compass.com",
     "realtyonegroup.com",
-    "zillow.com",
     "realtor.com",
 )
 
 CONTACT_SITE_PRIORITY: Tuple[str, ...] = (
     "realtor.com",
-    "zillow.com",
     "remax.com",
     "kw.com",
     "kellerwilliams.com",
@@ -628,7 +626,6 @@ CONTACT_ALLOWLIST_BASE: Set[str] = {
     "facebook.com",
     "linkedin.com",
     "instagram.com",
-    "zillow.com",
     "kw.com",
     "kellerwilliams.com",
     "remax.com",
@@ -636,6 +633,8 @@ CONTACT_ALLOWLIST_BASE: Set[str] = {
     "bhhs.com",
     "coldwellbankerhomes.com",
     "century21.com",
+    "century21judgefite.com",
+    "har.com",
     "exprealty.com",
     "realbroker.com",
     "realbrokerllc.com",
@@ -1564,6 +1563,8 @@ def _contact_source_allowed(
 
     if not host:
         return False
+    if dom in {"zillow.com", "www.zillow.com"}:
+        return False
     if host in EMAIL_ENRICH_DENYLIST or dom in EMAIL_ENRICH_DENYLIST:
         return False
     if host.startswith("data.") and dom.endswith(".gov"):
@@ -1587,10 +1588,6 @@ def _contact_source_allowed(
     if host in allowed_pool or dom in allowed_pool or any(host.endswith(f".{td}") for td in allowed_pool):
         return True
     if host in SOCIAL_DOMAINS or dom in SOCIAL_DOMAINS:
-        return True
-    if dom in {"zillow.com", "www.zillow.com"}:
-        if not re.search(r"/profile|/agent|/real-estate-agent", path.lower()):
-            return False
         return True
     if host in EMAIL_ALLOWED_PORTALS or dom in EMAIL_ALLOWED_PORTALS:
         return True
@@ -1725,6 +1722,7 @@ _CONTACT_DENYLIST = {
     "apartmenthomeliving.com",
     "rent.com",
     "apartments.com",
+    "zillow.com",
 }
 _REALTOR_MAX_RETRIES = int(os.getenv("REALTOR_MAX_RETRIES", "5"))
 _REALTOR_BACKOFF_BASE = float(os.getenv("REALTOR_BACKOFF_BASE", "3.0"))
@@ -2981,7 +2979,7 @@ def _contact_cse_queries(
     domain_hint: str = "",
 ) -> Tuple[List[str], List[str]]:
     agent_norm = _normalize_agent_for_query(agent)
-    one_query = _compact_tokens(f'"{agent_norm}"', "realtor", state, "phone", "email")
+    one_query = _compact_tokens(f'"{agent_norm}"', "realtor", state)
     return [one_query], []
 
 
@@ -3795,6 +3793,7 @@ TOP5_BROKERAGE_ALLOW = {
     "coldwellbanker.com",
     "bhhs.com",
     "century21.com",
+    "century21judgefite.com",
     "compass.com",
     "exprealty.com",
     "sothebysrealty.com",
@@ -3809,6 +3808,7 @@ TOP5_BROKERAGE_ALLOW = {
     "howardhanna.com",
     "windermere.com",
     "cbharper.com",
+    "har.com",
 }
 TOP5_DOMAIN_HINT_TOKENS = {
     "realty",
