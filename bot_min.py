@@ -3001,6 +3001,7 @@ def _contact_search_urls(
     """
 
     limit = 5
+    top5_log = row_payload.setdefault("_top5_log", {})
     strict_queries, _ = _contact_cse_queries(
         agent,
         state,
@@ -3009,6 +3010,7 @@ def _contact_search_urls(
         domain_hint=domain_hint,
     )
     urls: List[str] = []
+    rejected_urls: List[Tuple[str, str]] = []
     search_empty = False
     search_exhausted = False
     cse_status = _cse_last_state
@@ -3026,54 +3028,81 @@ def _contact_search_urls(
 
             raw_results: List[Dict[str, Any]] = []
             fallback_results: List[Dict[str, Any]] = []
+            selected_urls: List[str] = []
             if engine == "google":
-                raw_results = google_cse_search(query, limit=5)
+                raw_results = google_cse_search(
+                    query,
+                    limit=CONTACT_CSE_FETCH_LIMIT,
+                )
+                fetch_ok = _cse_last_state not in {"disabled"}
+                relaxed_mode = _cse_last_state in {"disabled"}
+                if not raw_results and _cse_last_state == "disabled":
+                    try:
+                        raw_results = google_items(query)
+                    except Exception:
+                        raw_results = []
+                if not raw_results and _cse_last_state == "disabled":
+                    rr = search_round_robin([query], per_query_limit=CONTACT_CSE_FETCH_LIMIT, engine_limit=1)
+                    for attempt in rr:
+                        for _, hits in attempt:
+                            if hits:
+                                raw_results = hits
+                                break
+                        if raw_results:
+                            break
+                selected_urls, rejected_urls = select_top_5_urls(
+                    raw_results,
+                    fetch_check=fetch_ok,
+                    relaxed=relaxed_mode,
+                )
+                if not selected_urls and _cse_last_state in {"blocked", "throttled", "disabled"}:
+                    fallback_results, blocked = duckduckgo_search(
+                        query,
+                        limit=CONTACT_CSE_FETCH_LIMIT,
+                        allowed_domains=None,
+                        with_blocked=True,
+                    )
+                    if blocked:
+                        _mark_block("duckduckgo.com", reason="blocked")
+                    cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
+                    fb_selected, fb_rejected = select_top_5_urls(
+                        fallback_results,
+                        fetch_check=fetch_ok,
+                        relaxed=relaxed_mode,
+                    )
+                    if fb_selected:
+                        selected_urls = fb_selected
+                    rejected_urls.extend(fb_rejected)
             elif engine in {"duckduckgo", "jina"}:
+                fetch_ok = _cse_last_state not in {"disabled"}
+                relaxed_mode = _cse_last_state in {"disabled"}
                 fallback_results, blocked = duckduckgo_search(
                     query,
-                    limit=5,
+                    limit=CONTACT_CSE_FETCH_LIMIT,
                     allowed_domains=None,
                     with_blocked=True,
                 )
                 if blocked:
                     _mark_block("duckduckgo.com", reason="blocked")
                 cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
-            selected_partial: List[str] = []
-            try:
-                urls = select_top_5_urls(raw_results or fallback_results)
-            except TopUrlSelectionError as exc:
-                selected_partial = exc.partial
-                if engine != "duckduckgo":
-                    ddg_hits, blocked = duckduckgo_search(
-                        query,
-                        limit=5,
-                        allowed_domains=None,
-                        with_blocked=True,
-                    )
-                    fallback_results = ddg_hits
-                    if blocked:
-                        _mark_block("duckduckgo.com", reason="blocked")
-                        cse_status = "duckduckgo-blocked"
-                    try:
-                        urls = select_top_5_urls(fallback_results)
-                    except TopUrlSelectionError as exc_fb:
-                        LOG.warning(
-                            "TOP5_ENFORCED_FAIL search_engine=%s raw=%d fallback=%d",
-                            engine,
-                            len(raw_results),
-                            len(fallback_results),
-                        )
-                        urls = exc_fb.partial or selected_partial
-                else:
-                    LOG.warning(
-                        "TOP5_ENFORCED_FAIL search_engine=%s raw=%d fallback=%d",
-                        engine,
-                        len(raw_results),
-                        len(fallback_results),
-                    )
-                    urls = selected_partial
+                selected_urls, rejected_urls = select_top_5_urls(
+                    fallback_results,
+                    fetch_check=fetch_ok,
+                    relaxed=relaxed_mode,
+                )
             cse_status = _cse_last_state if engine == "google" else cse_status or engine
-            search_empty = not bool(urls)
+            search_empty = not bool(selected_urls)
+            urls = selected_urls
+            if selected_urls or rejected_urls:
+                top5_log[engine] = {
+                    "urls": selected_urls[:limit],
+                    "rejected": rejected_urls,
+                }
+                LOG.info(
+                    "TOP5_SELECTED urls=%s rejected=%s",
+                    selected_urls[:limit],
+                    rejected_urls,
+                )
         search_exhausted = True
     except Exception:
         LOG.exception("contact search failed for %s %s", agent, state)
@@ -3125,6 +3154,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                 prefetch_pages.append((url, page))
         except Exception:
             pass
+    prefetch_cache = {u: p for u, p in prefetch_pages}
 
     def _collect_from_urls(
         urls_to_fetch: Iterable[str], *, prefer_headless: bool = False
@@ -3143,8 +3173,15 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                 continue
             is_portal = dom in PORTAL_DOMAINS
             fetched: Dict[str, Any] = {}
-            use_headless = prefer_headless and headless_budget > 0
-            if use_headless:
+            cached_prefetch = prefetch_cache.get(url)
+            use_headless = prefer_headless and headless_budget > 0 and cached_prefetch is None
+            if cached_prefetch is not None:
+                fetched = {
+                    "url": url,
+                    "extracted_text": cached_prefetch,
+                    "final_url": url,
+                }
+            elif use_headless:
                 page, _ = fetch_contact_page(url)
                 if page:
                     fetched = {
@@ -3400,7 +3437,13 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         or _infer_domain_from_text(brokerage)
         or _infer_domain_from_text(agent)
     )
+    rapid_urls = _rapid_profile_urls(_rapid_from_payload(row_payload))
+    hint_key = _normalize_override_key(agent, state)
+    hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
+    preferred_urls = [u for u in rapid_urls + (hint_urls or []) if u]
+    preferred_set = set(preferred_urls)
     candidates: List[Dict[str, Any]] = []
+    email_candidates_info: List[Dict[str, str]] = []
     blocked_engines: Set[str] = set()
     brokerage_domain = _domain(domain_hint or brokerage)
 
@@ -3416,6 +3459,8 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             "best_email_confidence": 0,
             "best_email_source_url": "",
             "best_email_evidence": "",
+            "_email_candidates": [],
+            "_email_rejected": [],
         }
 
     try:
@@ -3430,6 +3475,9 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 include_exhausted=True,
             )
         )
+        urls = list(dict.fromkeys(preferred_urls + urls))[:SEARCH_CONTACT_URL_LIMIT]
+        if preferred_urls:
+            search_empty = False
         if cse_status in {"blocked", "throttled"}:
             blocked_engines.add("google")
         if search_empty and not urls and cse_status in {"blocked", "throttled"}:
@@ -3444,19 +3492,47 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 blocked_engines.add("google")
                 continue
             page = fetched.get("extracted_text", "")
+            if url in preferred_set or not page:
+                page, _ = fetch_contact_page(final_url)
             if not page:
                 continue
-            candidates.extend(_agent_contact_candidates_from_html(page, final_url, agent))
+            page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
+            for cand in page_candidates:
+                src = cand.get("source_url", final_url)
+                for em in cand.get("emails", []):
+                    email_candidates_info.append({"email": em, "source": src})
+            candidates.extend(page_candidates)
 
         ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
         ranked = _apply_phone_type_boost(ranked)
 
         email = ranked.get("best_email", "")
-        if email and not _email_matches_name(agent, email):
+        rejected_email_reasons: List[Tuple[str, str, str]] = []
+        seen_rejects: Set[Tuple[str, str, str]] = set()
+        def _track_reject(val: str, reason: str, source: str = "") -> None:
+            key = (val, reason, source or "")
+            if key in seen_rejects:
+                return
+            seen_rejects.add(key)
+            rejected_email_reasons.append(key)
+        def _email_ok(val: str, source: str = "") -> bool:
+            if not _email_matches_name(agent, val):
+                _track_reject(val, "name_mismatch", source)
+                return False
+            if _is_generic_email(val) and not _email_matches_name(agent, val):
+                _track_reject(val, "junk_domain", source)
+                return False
+            if _is_junk_email(val):
+                _track_reject(val, "junk_domain", source)
+                return False
+            return True
+
+        if email and not _email_ok(email, ranked.get("best_email_source_url", "")):
             ranked["best_email"] = ""
             ranked["best_email_confidence"] = 0
             ranked["best_email_source_url"] = ""
             ranked["best_email_evidence"] = ""
+
 
         if not _has_high_confidence(ranked) and not row_payload.get("_duckduckgo_search_done"):
             ddg_urls, ddg_empty, ddg_status, _ = _normalize_contact_search_result(
@@ -3478,15 +3554,38 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 fetched = fetch_text_cached(url, ttl_days=14)
                 page = fetched.get("extracted_text", "")
                 final_url = fetched.get("final_url") or url
+                if url in preferred_set or not page:
+                    page, _ = fetch_contact_page(final_url)
                 if not page:
                     continue
-                candidates.extend(_agent_contact_candidates_from_html(page, final_url, agent))
+                page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
+                for cand in page_candidates:
+                    src = cand.get("source_url", final_url)
+                    for em in cand.get("emails", []):
+                        email_candidates_info.append({"email": em, "source": src})
+                candidates.extend(page_candidates)
             ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
             ranked = _apply_phone_type_boost(ranked)
+            email = ranked.get("best_email", "")
+            if email and not _email_ok(email, ranked.get("best_email_source_url", "")):
+                ranked["best_email"] = ""
+                ranked["best_email_confidence"] = 0
+                ranked["best_email_source_url"] = ""
+                ranked["best_email_evidence"] = ""
 
         ranked["_two_stage_done"] = bool(candidates)
         ranked["_two_stage_candidates"] = len(candidates)
         ranked["_blocked_engines"] = sorted(blocked_engines)
+        for cand in email_candidates_info:
+            em = cand.get("email", "")
+            if not em:
+                continue
+            _email_ok(em, cand.get("source", ""))
+        final_email = ranked.get("best_email", "")
+        if final_email:
+            _email_ok(final_email, ranked.get("best_email_source_url", ""))
+        ranked["_email_candidates"] = email_candidates_info
+        ranked["_email_rejected"] = rejected_email_reasons
         return ranked
     except Exception:
         LOG.exception("two_stage_contact_search failed during ranking for %s %s", agent, state)
@@ -3676,12 +3775,81 @@ _cse_lock = threading.Lock()
 _cse_recent: deque[float] = deque()
 _cse_last_state = "idle"
 _cse_last_ts_per_key: Dict[Tuple[str, str], float] = {}
+CONTACT_CSE_FETCH_LIMIT = int(os.getenv("CONTACT_CSE_FETCH_LIMIT", "15"))
+
+TOP5_DENYLIST_DOMAINS = {
+    "zillow.com",
+    "realtor.com",
+    "trulia.com",
+    "redfin.com",
+    "homes.com",
+    "loopnet.com",
+    "crexi.com",
+}
+TOP5_SOCIAL_ALLOW = {"facebook.com", "linkedin.com", "instagram.com"}
+TOP5_BROKERAGE_ALLOW = {
+    "kw.com",
+    "remax.com",
+    "coldwellbanker.com",
+    "bhhs.com",
+    "century21.com",
+    "compass.com",
+    "exprealty.com",
+    "sothebysrealty.com",
+    "corcoran.com",
+    "betterhomesandgardens.com",
+    "weichert.com",
+    "longandfoster.com",
+    "era.com",
+    "realtyonegroup.com",
+    "homesmart.com",
+    "allentate.com",
+    "howardhanna.com",
+    "windermere.com",
+    "cbharper.com",
+}
+TOP5_DOMAIN_HINT_TOKENS = {
+    "realty",
+    "realtor",
+    "homes",
+    "properties",
+    "team",
+    "group",
+    "brokerage",
+}
+TOP5_PATH_HINT_TOKENS = {
+    "agent",
+    "agents",
+    "realtor",
+    "team",
+    "our-team",
+    "profile",
+    "about",
+}
+TOP5_LISTING_HINTS = {"listing", "for-sale", "homedetails", "property"}
+
+DISPOSABLE_EMAIL_DOMAINS = {
+    "mailinator.com",
+    "tempmail.com",
+    "tempmailo.com",
+    "guerrillamail.com",
+    "yopmail.com",
+    "10minutemail.com",
+    "sharklasers.com",
+}
+SPAMMY_TLDS = {"xyz", "icu", "top", "click"}
 
 
 class TopUrlSelectionError(Exception):
-    def __init__(self, message: str, partial: Optional[List[str]] = None):
+    def __init__(
+        self,
+        message: str,
+        partial: Optional[List[str]] = None,
+        rejected: Optional[List[Tuple[str, str]]] = None,
+    ):
         super().__init__(message)
         self.partial = partial or []
+        self.rejected = rejected or []
 
 
 def _cse_key(q: str) -> str:
@@ -3716,7 +3884,13 @@ def _dedupe_queries(queries: Iterable[str]) -> List[str]:
     return uniq
 
 def _cse_ready() -> bool:
-    return any(k and cx for k, cx in _CSE_CRED_POOL) and not _cse_blocked()
+    if not any(k and cx for k, cx in _CSE_CRED_POOL):
+        return False
+    if all((k or "").lower() in {"test", "dummy"} for k, _ in _CSE_CRED_POOL):
+        return False
+    if all((cx or "").lower() in {"test", "dummy"} for _, cx in _CSE_CRED_POOL):
+        return False
+    return not _cse_blocked()
 
 
 def _next_cse_creds() -> Tuple[str, str]:
@@ -3742,26 +3916,50 @@ def _filter_allowed(link: str, allowed_domains: Optional[Set[str]]) -> bool:
     return any(dom == d or dom.endswith(f".{d}") for d in allowed_domains)
 
 
-def _is_agent_url(link: str) -> bool:
-    dom = _domain(link)
+def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
+    if not link:
+        return False, "no_link"
+    parsed = urlparse(link)
+    dom = parsed.netloc.lower()
+    path = parsed.path.lower()
     if not dom:
-        return False
-    banned = {"zillow.com", "realtor.com", "redfin.com", "loopnet.com"}
-    if dom.lower() in banned:
-        return False
-    social_allowed = {"linkedin.com", "facebook.com"}
-    if dom in social_allowed:
-        return True
-    path = urlparse(link).path.lower()
-    directory_terms = ("agent", "agents", "realtor", "team", "our-team", "people", "staff", "directory")
-    if _is_real_estate_domain(dom) or any(term in path for term in directory_terms):
-        return True
-    return False
+        return False, "no_domain"
+    root = _domain(link) or dom
+    if root in TOP5_DENYLIST_DOMAINS or any(root.endswith(f".{d}") for d in TOP5_DENYLIST_DOMAINS):
+        return False, "denylist_domain"
+    if root.endswith(".gov") or root.endswith(".edu") or dom.endswith(".gov") or dom.endswith(".edu"):
+        return False, "gov_edu"
+    if path.endswith(".pdf") or ".pdf" in path:
+        return False, "pdf"
+    if any(hint in path for hint in TOP5_LISTING_HINTS) and re.search(r"/\d{3,}", path):
+        return False, "listing_detail"
+
+    allow = False
+    if root in TOP5_SOCIAL_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_SOCIAL_ALLOW):
+        allow = True
+    elif root in TOP5_BROKERAGE_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_BROKERAGE_ALLOW):
+        allow = True
+    elif any(tok in root for tok in TOP5_DOMAIN_HINT_TOKENS):
+        allow = True
+    elif any(tok in path for tok in TOP5_PATH_HINT_TOKENS):
+        allow = True
+
+    if not allow:
+        if relaxed:
+            return True, "relaxed_allow"
+        return False, "non_agent_domain"
+    return True, "allowed"
 
 
-def select_top_5_urls(results: Iterable[Dict[str, Any] | str]) -> List[str]:
+def select_top_5_urls(
+    results: Iterable[Dict[str, Any] | str],
+    *,
+    fetch_check: bool = True,
+    relaxed: bool = False,
+) -> Tuple[List[str], List[Tuple[str, str]]]:
     filtered: List[str] = []
-    seen_domains: Set[str] = set()
+    rejected: List[Tuple[str, str]] = []
+    seen_links: Set[str] = set()
     for item in results:
         link = ""
         if isinstance(item, str):
@@ -3770,18 +3968,27 @@ def select_top_5_urls(results: Iterable[Dict[str, Any] | str]) -> List[str]:
             link = str(item.get("link") or item.get("url") or "")
         if not link:
             continue
-        dom = _domain(link)
-        if not dom or dom in seen_domains:
+        norm = normalize_url(link)
+        if norm in seen_links:
             continue
-        if not _is_agent_url(link):
+        seen_links.add(norm)
+        allowed, reason = _top_url_allowed(norm, relaxed=relaxed)
+        if not allowed:
+            rejected.append((norm, reason))
             continue
-        seen_domains.add(dom)
-        filtered.append(link)
+        final_url = norm
+        if fetch_check:
+            fetched = fetch_text_cached(norm, ttl_days=7)
+            final_url = fetched.get("final_url") or norm
+            status = int(fetched.get("http_status", 0) or 0)
+            text = fetched.get("extracted_text", "")
+            if fetched.get("retry_needed") or status == 0 or not text.strip():
+                rejected.append((final_url, "fetch_failed"))
+                continue
+        filtered.append(final_url)
         if len(filtered) >= 5:
             break
-    if len(filtered) < 5:
-        raise TopUrlSelectionError(f"selected {len(filtered)} urls", filtered)
-    return filtered[:5]
+    return filtered[:5], rejected
 
 
 def google_cse_search(
@@ -3818,13 +4025,14 @@ def google_cse_search(
             if gap < CSE_PER_KEY_MIN_INTERVAL:
                 time.sleep((CSE_PER_KEY_MIN_INTERVAL - gap) + random.uniform(0.05, 0.2))
         try:
+            num_param = max(5, min(limit, 15))
             resp = _http_get(
                 "https://www.googleapis.com/customsearch/v1",
                 params={
                     "q": query,
                     "key": key,
                     "cx": cx,
-                    "num": 5,
+                    "num": num_param,
                 },
                 timeout=12,
                 rotate_user_agent=True,
@@ -4667,8 +4875,10 @@ def _synth_from_tokens(name: str, domains: Set[str]) -> List[str]:
     return list(dict.fromkeys(emails))
 
 def _guess_domain_from_brokerage(brokerage: str) -> str:
-    _BROKERAGE_DOMAIN_CACHE[brokerage.strip().lower()] = ""
-    return ""
+    cleaned = re.sub(r"[^a-z0-9]", "", brokerage.lower())
+    domain = f"{cleaned}.com" if cleaned else ""
+    _BROKERAGE_DOMAIN_CACHE[brokerage.strip().lower()] = domain
+    return domain
 
 
 def _infer_domain_from_text(value: str) -> str:
@@ -4883,6 +5093,29 @@ def _is_generic_email(email: str) -> bool:
             return True
     return False
 
+
+def _is_junk_email(email: str) -> bool:
+    if "@" not in email:
+        return True
+    local, domain = email.split("@", 1)
+    domain_l = domain.lower()
+    root = _domain(domain_l) or domain_l
+    if domain_l in DISPOSABLE_EMAIL_DOMAINS or root in DISPOSABLE_EMAIL_DOMAINS:
+        return True
+    if any(root.endswith(f".{tld}") for tld in SPAMMY_TLDS):
+        return True
+    local_key = re.sub(r"[^a-z0-9]", "", local.lower())
+    if len(local_key) <= 2:
+        return True
+    if re.fullmatch(r"[a-z]*\d{4,}", local_key):
+        return True
+    core = root.split(".", 1)[0]
+    vowels = sum(1 for ch in core if ch in "aeiou")
+    consonants = sum(1 for ch in core if ch.isalpha() and ch not in "aeiou")
+    if consonants >= 6 and vowels == 0:
+        return True
+    return False
+
 def _is_role_email(email: str) -> bool:
     local = email.split("@", 1)[0]
     local_key = re.sub(r"[^a-z0-9]", "", local.lower())
@@ -4940,9 +5173,26 @@ def _build_trusted_domains(agent: str, urls: Iterable[str]) -> Set[str]:
 def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     cache_key = _contact_cache_key(agent, state, row_payload)
 
+    rapid_invalid_reason = ""
+
+    def _log_final_phone(res: Dict[str, Any]) -> None:
+        label = "web_unverified"
+        if res.get("source", "") == "rapid_fallback" or (
+            res.get("source", "").startswith("rapid") and not res.get("verified_mobile")
+        ):
+            label = "rapid_fallback"
+        elif res.get("verified_mobile"):
+            label = "web_verified"
+        LOG.info(
+            "FINAL_PHONE source=%s phone=%s",
+            label,
+            res.get("number", "") or "<blank>",
+        )
+
     def _finalize(res: Dict[str, Any]) -> Dict[str, Any]:
         res.setdefault("verified_mobile", False)
         _contact_cache_set(cache_p, cache_key, res)
+        _log_final_phone(res)
         return res
 
     if not cache_p:
@@ -4966,6 +5216,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     cached = _contact_cache_get(cache_p, cache_key)
     if cached is not None:
+        _log_final_phone(cached)
         return cached
 
     zpid = str(row_payload.get("zpid", ""))
@@ -4982,6 +5233,10 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         rapid_verified_mobile = False
         skip_rapid_contacts = True
         skipped_rapid_direct = True
+    rapid_fallback_info = get_line_info(rapid_selected_phone) if rapid_selected_phone else {}
+    if rapid_selected_phone and (not rapid_fallback_info.get("valid") or (rapid_fallback_info.get("country") and rapid_fallback_info.get("country") != "US")):
+        rapid_invalid_reason = "cloudmersive_invalid"
+        rapid_selected_phone = ""
     rapid_fallback_phone = rapid_selected_phone if rapid_selected_phone and not rapid_verified_mobile else ""
 
     if rapid_selected_phone and not rapid_verified_mobile:
@@ -4993,6 +5248,15 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             if isinstance(rapid_snapshot, dict):
                 rapid_snapshot["phone_verified_mobile"] = True
 
+    rapid_invalid_reason = rapid_invalid_reason or (
+        rapid_phone_reason if not rapid_selected_phone and rapid_phone_reason.startswith("rapid_invalid") else ""
+    )
+    LOG.info(
+        "RAPID_FALLBACK_PHONE=%s rapid_verified_mobile=%s rapid_invalid_reason=%s",
+        rapid_fallback_phone or "<blank>",
+        rapid_verified_mobile,
+        rapid_invalid_reason or "<none>",
+    )
     if rapid_selected_phone and rapid_verified_mobile:
         rapid_source = "rapid_contact_cloudmersive_mobile"
         if rapid and (rapid.get("listed_by") or {}).get("phones"):
@@ -5214,6 +5478,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     def _rapid_fallback_allowed(num: str) -> bool:
         if not num:
+            return False
+        info = get_line_info(num)
+        if not info.get("valid") or (info.get("country") and info.get("country") != "US"):
             return False
         direct_flag = _looks_direct(num, agent, state)
         return direct_flag is not False
@@ -5843,9 +6110,19 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
 def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     cache_key = _contact_cache_key(agent, state, row_payload)
+    email_rejections: List[Tuple[str, str]] = []
+
+    def _log_final_email(res: Dict[str, Any]) -> None:
+        LOG.info(
+            "FINAL_EMAIL source=%s email=%s rejected_candidates=%s",
+            res.get("source", "") or "",
+            res.get("email", "") or "<blank>",
+            email_rejections,
+        )
 
     def _finalize(res: Dict[str, Any]) -> Dict[str, Any]:
         _contact_cache_set(cache_e, cache_key, res)
+        _log_final_email(res)
         return res
 
     if not cache_p:
@@ -5869,6 +6146,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     cached = _contact_cache_get(cache_e, cache_key)
     if cached is not None:
+        _log_final_email(cached)
         return cached
 
     rapid_snapshot = _rapid_contact_snapshot(agent, row_payload)
@@ -5892,17 +6170,68 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "reason": rapid_email_reason or "rapid_contact_match",
         })
 
+    hint_key = _normalize_override_key(agent, state)
+    hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
+    for url in hint_urls or []:
+        try:
+            page, _ = fetch_contact_page(url)
+        except Exception:
+            continue
+        if not page:
+            continue
+        candidates = _agent_contact_candidates_from_html(page, url, agent)
+        page_low = page.lower()
+        for cand in candidates:
+            for em in cand.get("emails", []):
+                cleaned = clean_email(em)
+                if not cleaned:
+                    continue
+                if not _email_matches_name(agent, cleaned) or _is_junk_email(cleaned):
+                    continue
+                evidence = str(cand.get("evidence_snippet", "") or "")
+                if f"mailto:{cleaned.lower()}" in page_low:
+                    source_label = "mailto"
+                elif "application/ld+json" in page_low:
+                    source_label = "jsonld_person"
+                elif evidence:
+                    source_label = evidence.replace(" ", "_")
+                else:
+                    source_label = "hint_url"
+                result = {
+                    "email": cleaned,
+                    "confidence": "low",
+                    "score": max(CONTACT_EMAIL_LOW_CONF, CONTACT_EMAIL_FALLBACK_SCORE),
+                    "source": source_label,
+                    "source_url": url,
+                    "reason": "hint_url",
+                    "evidence": cand.get("evidence_snippet", ""),
+                }
+                return _finalize(result)
+
     enrichment = _contact_enrichment(agent, state, row_payload)
+    email_rejections = enrichment.get("_email_rejected", []) or []
     enrichment_done = bool(enrichment.get("_two_stage_done") and enrichment.get("_two_stage_candidates", 0) > 0)
     enriched_email = enrichment.get("best_email", "")
     if enriched_email:
         confidence_score = enrichment.get("best_email_confidence", 0)
         confidence = "high" if confidence_score >= 80 else "low"
+        source_label = (
+            enrichment.get("best_email_evidence")
+            or enrichment.get("best_email_source_url", "two_stage_cse")
+        )
+        source_label = str(source_label or "")
+        if "://" in source_label:
+            if str(enrichment.get("best_email_source_url", "")).startswith("mailto:"):
+                source_label = "mailto"
+            else:
+                source_label = "web_page"
+        source_label = source_label.replace(" ", "_")
         result = {
             "email": enriched_email,
             "confidence": confidence,
             "score": max(CONTACT_EMAIL_LOW_CONF, confidence_score / 25),
-            "source": enrichment.get("best_email_source_url", "two_stage_cse"),
+            "source": source_label,
+            "source_url": enrichment.get("best_email_source_url", ""),
             "reason": "two_stage_cse",
             "evidence": enrichment.get("best_email_evidence", ""),
         }
