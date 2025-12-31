@@ -1506,9 +1506,6 @@ def _domain(host_or_url: str) -> str:
 def _allowed_contact_domains(domain_hint: str) -> Optional[Set[str]]:
     allowed = set(CONTACT_ALLOWLIST_BASE) | set(SOCIAL_DOMAINS)
     dom = _domain(domain_hint)
-    if not dom and domain_hint:
-        dom = _infer_domain_from_text(domain_hint)
-        dom = _domain(dom) if dom else ""
     if dom:
         allowed.add(dom)
     return allowed or None
@@ -2191,7 +2188,7 @@ def _rank_urls(
     urls: Iterable[str], agent: str, brokerage: str, *, domain_hint: str = "", limit: int = 10
 ) -> List[str]:
     agent_tokens = [tok.lower() for tok in agent.split() if tok]
-    brokerage_domain = _domain(domain_hint or _infer_domain_from_text(brokerage) or "")
+    brokerage_domain = _domain(domain_hint or brokerage)
     scored = [
         (_score_contact_url(u, agent_tokens, brokerage, brokerage_domain), u)
         for u in urls
@@ -2400,47 +2397,14 @@ def _candidate_urls(
     city = row_payload.get("city", "")
     postal_code = row_payload.get("zip", "")
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
-    if not domain_hint:
-        domain_hint = (
-            row_payload.get("domain_hint", "").strip()
-            or _infer_domain_from_text(brokerage)
-            or _infer_domain_from_text(agent)
-        )
-
-    brokerage_domain_hint = domain_hint if brokerage else ""
-    if brokerage and not brokerage_domain_hint:
-        brokerage_domain_hint = _infer_domain_from_text(brokerage) or _guess_domain_from_brokerage(brokerage)
-
-    urls = _brokerage_contact_urls(agent, brokerage, brokerage_domain_hint) + _authority_contact_urls(
-        agent, state, brokerage, domain_hint
-    )[0] + urls
     if urls:
         deduped = list(dict.fromkeys(urls))
         return deduped[:SEARCH_CONTACT_URL_LIMIT], False
 
-    allowed_domains = _allowed_contact_domains(domain_hint)
     base_query_parts = [f'"{agent}"', "realtor", state, city, postal_code]
     base_query = " ".join(p for p in base_query_parts if p).strip()
 
-    brokerage_domain = _domain(domain_hint) if domain_hint else ""
-    secondary_query = ""
-    if brokerage_domain:
-        secondary_query = " ".join(
-            p for p in [f'"{agent}"', brokerage, state, f"site:{brokerage_domain}"] if p
-        ).strip()
-    elif brokerage:
-        secondary_query = " ".join(
-            p for p in [f'"{agent}"', brokerage, state, "contact"] if p
-        ).strip()
-
-    strong_queries: List[str] = []
-    if brokerage_domain:
-        strong_queries.append(_compact_tokens(f'"{agent}"', f"site:{brokerage_domain}", "contact"))
-    strong_queries.append(_compact_tokens(f'"{agent}"', '"Real Estate Agent"', '"Mobile"', state))
-    if brokerage:
-        strong_queries.append(_compact_tokens(f'"{agent}"', '"Direct"', f'"{brokerage}"'))
-
-    contact_query = _dedupe_queries(strong_queries + [q for q in (base_query, secondary_query) if q])
+    contact_query = _dedupe_queries([base_query])
     primary_query = contact_query[0] if contact_query else ""
     row_payload["_primary_contact_query"] = primary_query
 
@@ -2871,7 +2835,7 @@ def _plausible_agent_url(link: str, agent: str, brokerage: str = "", domain_hint
     agent_tokens = [re.sub(r"[^a-z0-9]", "", part.lower()) for part in agent.split() if part.strip()]
     brokerage_slug = re.sub(r"[^a-z0-9]", "", brokerage.lower()) if brokerage else ""
     domain_hint_slug = re.sub(r"[^a-z0-9]", "", domain_hint.lower()) if domain_hint else ""
-    brokerage_domain = _domain(domain_hint or _infer_domain_from_text(brokerage) or "")
+    brokerage_domain = _domain(domain_hint or brokerage)
     directory_terms = (
         "agent",
         "agents",
@@ -2927,15 +2891,6 @@ def _looks_directory_page(url: str) -> bool:
         return True
     return any(term in path for term in ("agents", "agent", "team", "our-team", "realtor", "people", "staff", "directory"))
 
-BROKERAGE_PATH_ORDER: Tuple[str, ...] = (
-    "/agents/",
-    "/agent/",
-    "/our-team/",
-    "/team/",
-    "/people/",
-    "/realtors/",
-)
-
 
 def _page_mentions_agent(text: str, agent: str, soup: Any = None) -> bool:
     tokens = [part.lower() for part in agent.split() if len(part) > 1]
@@ -2965,9 +2920,6 @@ def _discover_agent_links(
     discovered: Set[str] = set()
     parsed = urlparse(base_url)
     root = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
-    if include_predictable and root:
-        for path in BROKERAGE_PATH_ORDER:
-            discovered.add(urljoin(root, path))
     if not soup or not BeautifulSoup:
         return set(list(discovered)[:limit])
     agent_tokens = [tok.lower() for tok in agent.split() if tok]
@@ -3048,7 +3000,7 @@ def _contact_search_urls(
     case (urls, search_empty, cse_status, search_exhausted) is returned.
     """
 
-    brokerage_domain = _domain(domain_hint or brokerage)
+    limit = 5
     strict_queries, _ = _contact_cse_queries(
         agent,
         state,
@@ -3072,66 +3024,54 @@ def _contact_search_urls(
                 cached = search_cache[cache_key]
                 return cached if include_exhausted else cached[:3]
 
-            attempts: List[Tuple[str, List[Dict[str, Any]]]] = []
-            allowed_domains = _allowed_contact_domains(domain_hint)
+            raw_results: List[Dict[str, Any]] = []
+            fallback_results: List[Dict[str, Any]] = []
             if engine == "google":
-                rr_results = search_round_robin(
-                    [query],
-                    per_query_limit=max(limit, 5),
-                    engine_limit=1,
-                    allowed_domains=allowed_domains,
-                )
-                attempts = rr_results[0] if rr_results else []
-                if not attempts:
-                    attempts = [("google_cse", google_items(query))]
+                raw_results = google_cse_search(query, limit=5)
             elif engine in {"duckduckgo", "jina"}:
-                hits, blocked = duckduckgo_search(
+                fallback_results, blocked = duckduckgo_search(
                     query,
-                    limit=max(limit, 5),
-                    allowed_domains=allowed_domains,
+                    limit=5,
+                    allowed_domains=None,
                     with_blocked=True,
                 )
-                attempts.append(("duckduckgo", hits))
                 if blocked:
                     _mark_block("duckduckgo.com", reason="blocked")
                 cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
-            else:
-                attempts = []
-
-            seen: Set[str] = set()
-            for _, hits in attempts:
-                for it in hits:
-                    link = it.get("link", "")
-                    dom = _domain(link)
-                    if not link or dom in _CONTACT_DENYLIST:
-                        if dom in _CONTACT_DENYLIST:
-                            _mark_block(dom, reason="denylist")
-                        break
-                    if dom in PORTAL_DOMAINS:
-                        continue
-                    if link in seen or link in urls:
-                        continue
-                    seen.add(link)
-                    urls.append(link)
-                    if len(urls) >= limit:
-                        break
-                if len(urls) >= limit:
-                    break
-            if engine == "google" and not urls:
-                for it in google_items(query):
-                    link = it.get("link", "")
-                    dom = _domain(link)
-                    if not link or dom in _CONTACT_DENYLIST:
-                        if dom in _CONTACT_DENYLIST:
-                            _mark_block(dom, reason="denylist")
-                        continue
-                    if dom in PORTAL_DOMAINS:
-                        continue
-                    if link in urls:
-                        continue
-                    urls.append(link)
-                    if len(urls) >= limit:
-                        break
+            selected_partial: List[str] = []
+            try:
+                urls = select_top_5_urls(raw_results or fallback_results)
+            except TopUrlSelectionError as exc:
+                selected_partial = exc.partial
+                if engine != "duckduckgo":
+                    ddg_hits, blocked = duckduckgo_search(
+                        query,
+                        limit=5,
+                        allowed_domains=None,
+                        with_blocked=True,
+                    )
+                    fallback_results = ddg_hits
+                    if blocked:
+                        _mark_block("duckduckgo.com", reason="blocked")
+                        cse_status = "duckduckgo-blocked"
+                    try:
+                        urls = select_top_5_urls(fallback_results)
+                    except TopUrlSelectionError as exc_fb:
+                        LOG.warning(
+                            "TOP5_ENFORCED_FAIL search_engine=%s raw=%d fallback=%d",
+                            engine,
+                            len(raw_results),
+                            len(fallback_results),
+                        )
+                        urls = exc_fb.partial or selected_partial
+                else:
+                    LOG.warning(
+                        "TOP5_ENFORCED_FAIL search_engine=%s raw=%d fallback=%d",
+                        engine,
+                        len(raw_results),
+                        len(fallback_results),
+                    )
+                    urls = selected_partial
             cse_status = _cse_last_state if engine == "google" else cse_status or engine
             search_empty = not bool(urls)
         search_exhausted = True
@@ -3158,34 +3098,11 @@ def _normalize_contact_search_result(result: Tuple[Any, ...]) -> Tuple[List[str]
 
 def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
-    domain_hint = (
-        row_payload.get("domain_hint", "").strip()
-        or _infer_domain_from_text(brokerage)
-        or _infer_domain_from_text(agent)
-    )
+    domain_hint = row_payload.get("domain_hint", "").strip()
     brokerage_domain_hint = _domain(domain_hint or brokerage)
-    brokerage_domain_guess = _guess_domain_from_brokerage(brokerage)
-    brokerage_domain = brokerage_domain_hint or brokerage_domain_guess
+    brokerage_domain = brokerage_domain_hint
     urls, search_exhausted = _candidate_urls(agent, state, row_payload, domain_hint=domain_hint)
     urls = list(dict.fromkeys(urls))
-    trusted_domains = _build_trusted_domains(agent, urls)
-    if brokerage_domain:
-        trusted_domains.add(brokerage_domain)
-    trusted_domains.update(TRUSTED_CONTACT_DOMAINS)
-    urls = [
-        u for u in urls if _contact_source_allowed(u, brokerage_domain, trusted_domains)
-    ]
-    if not urls:
-        seed_links = jina_cached_search(
-            _compact_tokens(f'"{agent}"', state, "contact phone email"),
-            max_results=3,
-        )
-        urls.extend([link for link in seed_links if link])
-        urls = list(dict.fromkeys(urls))
-        filtered = [
-            u for u in urls if _contact_source_allowed(u, brokerage_domain, trusted_domains)
-        ]
-        urls = filtered or urls
     selected_domains = sorted(
         {d for d in (_domain(u) for u in urls) if d}
     )
@@ -3218,8 +3135,6 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
         for url in urls_to_fetch:
             if not url:
                 continue
-            if not _contact_source_allowed(url, brokerage_domain, trusted_domains):
-                continue
             dom = _domain(url)
             if dom in _CONTACT_DENYLIST:
                 _mark_block(dom, reason="denylist")
@@ -3249,7 +3164,6 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
             jsonld_cands, jsonld_hit, jsonld_contact, soup = _extract_jsonld_contacts_first(
                 text, final_url, agent=agent, row_payload=row_payload
             )
-            trusted_domains.update(_build_trusted_domains(agent, [final_url]))
             if jsonld_cands:
                 candidates.extend(jsonld_cands)
                 if any(c.get("phones") or c.get("emails") for c in jsonld_cands):
@@ -3347,41 +3261,13 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     seen_urls: Set[str] = set()
     agent_page_seen = False
 
-    def _schedule_brokerage_paths(base_url: str) -> None:
-        parsed = urlparse(base_url)
-        if not parsed.scheme or not parsed.netloc:
-            return
-        dom = _domain(parsed.netloc)
-        if not dom or dom in PORTAL_DOMAINS or dom in brokerage_crawl_planned:
-            return
-        is_hint_match = brokerage_domain and (dom == brokerage_domain or dom.endswith(f".{brokerage_domain}"))
-        if not is_hint_match and not _looks_directory_page(base_url) and not _is_real_estate_domain(parsed.netloc):
-            return
-        brokerage_crawl_planned.add(dom)
-        root = f"{parsed.scheme}://{parsed.netloc}"
-        predictable = [urljoin(root, path) for path in BROKERAGE_PATH_ORDER]
-        for path in reversed(predictable):
-            if path in seen_urls or path in pending_urls:
-                continue
-            if len(seen_urls) + len(pending_urls) >= MAX_CONTACT_URLS:
-                break
-            if not _contact_source_allowed(path, brokerage_domain, trusted_domains):
-                continue
-            pending_urls.appendleft(path)
-
     def _enqueue(new_urls: Iterable[str]) -> None:
         for nu in new_urls:
             if not nu or nu in seen_urls or nu in pending_urls:
                 continue
-            if not _contact_source_allowed(nu, brokerage_domain, trusted_domains):
-                continue
             if len(seen_urls) + len(pending_urls) >= MAX_CONTACT_URLS:
                 break
             pending_urls.append(nu)
-            _schedule_brokerage_paths(nu)
-
-    for seed_url in list(pending_urls):
-        _schedule_brokerage_paths(seed_url)
 
     def _process_queue() -> None:
         nonlocal agent_page_seen, contact_found
@@ -3792,6 +3678,12 @@ _cse_last_state = "idle"
 _cse_last_ts_per_key: Dict[Tuple[str, str], float] = {}
 
 
+class TopUrlSelectionError(Exception):
+    def __init__(self, message: str, partial: Optional[List[str]] = None):
+        super().__init__(message)
+        self.partial = partial or []
+
+
 def _cse_key(q: str) -> str:
     return re.sub(r"\s+", " ", q or "").strip().lower()
 
@@ -3850,6 +3742,48 @@ def _filter_allowed(link: str, allowed_domains: Optional[Set[str]]) -> bool:
     return any(dom == d or dom.endswith(f".{d}") for d in allowed_domains)
 
 
+def _is_agent_url(link: str) -> bool:
+    dom = _domain(link)
+    if not dom:
+        return False
+    banned = {"zillow.com", "realtor.com", "redfin.com", "loopnet.com"}
+    if dom.lower() in banned:
+        return False
+    social_allowed = {"linkedin.com", "facebook.com"}
+    if dom in social_allowed:
+        return True
+    path = urlparse(link).path.lower()
+    directory_terms = ("agent", "agents", "realtor", "team", "our-team", "people", "staff", "directory")
+    if _is_real_estate_domain(dom) or any(term in path for term in directory_terms):
+        return True
+    return False
+
+
+def select_top_5_urls(results: Iterable[Dict[str, Any] | str]) -> List[str]:
+    filtered: List[str] = []
+    seen_domains: Set[str] = set()
+    for item in results:
+        link = ""
+        if isinstance(item, str):
+            link = item
+        elif isinstance(item, dict):
+            link = str(item.get("link") or item.get("url") or "")
+        if not link:
+            continue
+        dom = _domain(link)
+        if not dom or dom in seen_domains:
+            continue
+        if not _is_agent_url(link):
+            continue
+        seen_domains.add(dom)
+        filtered.append(link)
+        if len(filtered) >= 5:
+            break
+    if len(filtered) < 5:
+        raise TopUrlSelectionError(f"selected {len(filtered)} urls", filtered)
+    return filtered[:5]
+
+
 def google_cse_search(
     query: str,
     limit: int = 5,
@@ -3866,10 +3800,12 @@ def google_cse_search(
         LOG.warning("Skipping Google CSE for %s due to active block", query)
         return []
 
+    limit = 5
     results: List[Dict[str, Any]] = []
     attempts = 0
     seen_throttled = False
     max_attempts = max(1, min(len(_CSE_CRED_POOL), CSE_MAX_ATTEMPTS))
+    fallback_results: List[Dict[str, Any]] = []
     for _ in range(max_attempts):
         key, cx = _next_cse_creds()
         if not key or not cx:
@@ -3888,21 +3824,32 @@ def google_cse_search(
                     "q": query,
                     "key": key,
                     "cx": cx,
-                    "num": min(limit, 10),
+                    "num": 5,
                 },
                 timeout=12,
                 rotate_user_agent=True,
             )
             payload = resp.json() if resp is not None else {}
             _cse_last_ts_per_key[(key, cx)] = time.time()
-            for item in payload.get("items", []):
+            items = payload.get("items", []) or []
+            for item in items:
                 link = item.get("link")
                 if not link or not _filter_allowed(link, allowed_domains):
                     continue
                 results.append({"link": link})
                 if len(results) >= limit:
                     break
-            if results:
+            if len(items) < 5:
+                LOG.info("CSE fallback triggered cse_items=%d", len(items))
+                fallback_results, blocked = duckduckgo_search(
+                    query,
+                    limit=5,
+                    allowed_domains=allowed_domains,
+                    with_blocked=True,
+                )
+                if blocked:
+                    _mark_block("duckduckgo.com", reason="blocked")
+            if results or fallback_results:
                 _cse_last_state = "ok"
                 break
             # Empty result set is treated as a normal miss, not a throttle.
@@ -3937,6 +3884,16 @@ def google_cse_search(
             if attempts >= max_attempts:
                 _record_timeout("google_cse")
         _search_sleep()
+    if fallback_results and len(results) < 5:
+        for item in fallback_results:
+            link = item.get("link", "")
+            if not link or not _filter_allowed(link, allowed_domains):
+                continue
+            if link in [r.get("link") for r in results]:
+                continue
+            results.append({"link": link})
+            if len(results) >= 5:
+                break
     if not results and _cse_last_state == "idle":
         _cse_last_state = "throttled" if seen_throttled else "no_results"
     return results[:limit]
@@ -4710,67 +4667,14 @@ def _synth_from_tokens(name: str, domains: Set[str]) -> List[str]:
     return list(dict.fromkeys(emails))
 
 def _guess_domain_from_brokerage(brokerage: str) -> str:
-    if not brokerage:
-        return ""
-    cache_key = brokerage.strip().lower()
-    if cache_key in _BROKERAGE_DOMAIN_CACHE:
-        return _BROKERAGE_DOMAIN_CACHE[cache_key]
-    tokens = {
-        re.sub(r"[^a-z]", "", part.lower())
-        for part in brokerage.split()
-        if len(part) > 2
-    }
-    tokens.discard("")
-    if not tokens:
-        return ""
-    best_domain = ""
-    best_hits = 0
-    for dom in domain_patterns.keys():
-        dom_tokens = {seg for seg in re.split(r"[^a-z]", dom.lower()) if seg}
-        hits = len(tokens & dom_tokens)
-        if hits > best_hits:
-            best_domain = dom
-            best_hits = hits
-    if best_domain and best_hits:
-        _BROKERAGE_DOMAIN_CACHE[cache_key] = best_domain
-        return best_domain
-    scrub = [tok for tok in tokens if tok not in {"realty", "real", "estate", "properties", "group", "team", "company", "homes"}]
-    slug = "".join(scrub or list(tokens))
-    if len(slug) >= 5:
-        guessed = f"{slug}.com"
-        _BROKERAGE_DOMAIN_CACHE[cache_key] = guessed
-        return guessed
-    _BROKERAGE_DOMAIN_CACHE[cache_key] = ""
+    _BROKERAGE_DOMAIN_CACHE[brokerage.strip().lower()] = ""
     return ""
 
 
 def _infer_domain_from_text(value: str) -> str:
-    """Derive a plausible custom domain from free-form text (e.g., brokerage name).
-
-    Example: "The Campos Group" → "thecamposgroup.com".
-    Returns an empty string when a confident slug cannot be built.
-    """
     cache_key = value.strip().lower()
-    if cache_key in _DOMAIN_INFER_CACHE:
-        return _DOMAIN_INFER_CACHE[cache_key]
-    if not value:
-        _DOMAIN_INFER_CACHE[cache_key] = ""
-        return ""
-    tokens = [re.sub(r"[^a-z0-9]", "", part.lower()) for part in value.split()]
-    tokens = [tok for tok in tokens if len(tok) >= 3]
-    filtered = [tok for tok in tokens if tok not in {"real", "estate", "realty", "group", "team", "properties", "homes", "llc", "inc"}]
-    if len(filtered) >= 2:
-        tokens = filtered
-    if len(tokens) < 2:
-        _DOMAIN_INFER_CACHE[cache_key] = ""
-        return ""
-    slug = "".join(tokens)
-    if len(slug) < 5:
-        _DOMAIN_INFER_CACHE[cache_key] = ""
-        return ""
-    inferred = f"{slug}.com"
-    _DOMAIN_INFER_CACHE[cache_key] = inferred
-    return inferred
+    _DOMAIN_INFER_CACHE[cache_key] = ""
+    return ""
 
 def _split_portals(urls):
     portals, non = [], []
@@ -6283,14 +6187,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     hint_key = _normalize_override_key(agent, state)
     hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
     hint_urls = [url for url in hint_urls if url]
-    brokerage_urls = _brokerage_contact_urls(agent, brokerage, domain_hint or brokerage_domain or "")
-    authority_urls, _ = _authority_contact_urls(
-        agent,
-        state,
-        brokerage,
-        domain_hint or brokerage,
-        max_queries=2,
-    )
+    brokerage_urls: List[str] = []
+    authority_urls: List[str] = []
 
     first_variants, last_token = _first_last_tokens(agent)
 
