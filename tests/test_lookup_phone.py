@@ -176,6 +176,41 @@ def test_rapid_likely_mobile_kept(monkeypatch):
     assert snapshot["phone_reason"] == "rapid_cloudmersive_likely_mobile"
 
 
+def test_rapid_candidate_not_dropped_on_invalid(monkeypatch):
+    valid_number = "479-305-2241"
+    invalid_number = "1563-118-1910"
+
+    def fake_line_info(phone):
+        if phone == valid_number:
+            return {
+                "valid": True,
+                "mobile": False,
+                "mobile_verified": False,
+                "type": "FixedLineOrMobile",
+                "ambiguous_mobile": True,
+            }
+        return {
+            "valid": False,
+            "mobile": False,
+            "mobile_verified": False,
+            "type": "Unknown",
+            "ambiguous_mobile": False,
+        }
+
+    monkeypatch.setattr(bot_min, "get_line_info", fake_line_info)
+
+    phone, reason = bot_min._rapid_select_phone(
+        "Patricia Padilla",
+        [
+            {"value": valid_number},
+            {"value": invalid_number},
+        ],
+    )
+
+    assert phone == valid_number
+    assert reason.startswith("rapid_cloudmersive_candidate_mobile")
+
+
 def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
     office_number = "555-000-1111"
     mobile_number = "555-222-3333"
@@ -1133,3 +1168,26 @@ def test_contact_search_urls_skip_portals(monkeypatch):
     assert captured_queries
     assert urls == ["https://independent.example"]
     assert search_empty is False
+
+
+def test_select_top5_relaxes_when_empty(monkeypatch):
+    urls = [
+        "https://example.com/about",
+        "https://example.gov/agent",
+    ]
+
+    def fake_fetch_cached(url, ttl_days=7):
+        return {
+            "final_url": url,
+            "http_status": 200,
+            "extracted_text": "ok",
+            "retry_needed": False,
+        }
+
+    monkeypatch.setattr(bot_min, "fetch_text_cached", fake_fetch_cached)
+
+    filtered, rejected = bot_min.select_top_5_urls(urls, fetch_check=True, relaxed=False)
+
+    assert any("example.com/about" in url for url in filtered)
+    assert all("example.gov" not in url for url in filtered)
+    assert any(reason == "gov_edu" for _, reason in rejected)

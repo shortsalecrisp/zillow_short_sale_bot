@@ -1284,10 +1284,12 @@ def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, 
             else:
                 reason = "rapid_cloudmersive_landline" if office_hint else "rapid_cloudmersive_unknown"
             fallback = (phone, reason)
-    if not fallback[0] and invalid_seen:
-        return "", "rapid_invalid"
     if candidate_mobile[0]:
         return candidate_mobile
+    if fallback[0]:
+        return fallback
+    if invalid_seen:
+        return "", "rapid_invalid"
     return fallback
 
 
@@ -3957,37 +3959,48 @@ def select_top_5_urls(
     fetch_check: bool = True,
     relaxed: bool = False,
 ) -> Tuple[List[str], List[Tuple[str, str]]]:
-    filtered: List[str] = []
-    rejected: List[Tuple[str, str]] = []
-    seen_links: Set[str] = set()
-    for item in results:
-        link = ""
-        if isinstance(item, str):
-            link = item
-        elif isinstance(item, dict):
-            link = str(item.get("link") or item.get("url") or "")
-        if not link:
-            continue
-        norm = normalize_url(link)
-        if norm in seen_links:
-            continue
-        seen_links.add(norm)
-        allowed, reason = _top_url_allowed(norm, relaxed=relaxed)
-        if not allowed:
-            rejected.append((norm, reason))
-            continue
-        final_url = norm
-        if fetch_check:
-            fetched = fetch_text_cached(norm, ttl_days=7)
-            final_url = fetched.get("final_url") or norm
-            status = int(fetched.get("http_status", 0) or 0)
-            text = fetched.get("extracted_text", "")
-            if fetched.get("retry_needed") or status == 0 or not text.strip():
-                rejected.append((final_url, "fetch_failed"))
+    items = list(results)
+
+    def _select(relax: bool) -> Tuple[List[str], List[Tuple[str, str]]]:
+        filtered: List[str] = []
+        rejected: List[Tuple[str, str]] = []
+        seen_links: Set[str] = set()
+        for item in items:
+            link = ""
+            if isinstance(item, str):
+                link = item
+            elif isinstance(item, dict):
+                link = str(item.get("link") or item.get("url") or "")
+            if not link:
                 continue
-        filtered.append(final_url)
-        if len(filtered) >= 5:
-            break
+            norm = normalize_url(link)
+            if norm in seen_links:
+                continue
+            seen_links.add(norm)
+            allowed, reason = _top_url_allowed(norm, relaxed=relax)
+            if not allowed:
+                rejected.append((norm, reason))
+                continue
+            final_url = norm
+            if fetch_check:
+                fetched = fetch_text_cached(norm, ttl_days=7)
+                final_url = fetched.get("final_url") or norm
+                status = int(fetched.get("http_status", 0) or 0)
+                text = fetched.get("extracted_text", "")
+                if fetched.get("retry_needed") or status == 0 or not text.strip():
+                    rejected.append((final_url, "fetch_failed"))
+                    continue
+            filtered.append(final_url)
+            if len(filtered) >= 5:
+                break
+        return filtered[:5], rejected
+
+    filtered, rejected = _select(relaxed)
+    if not filtered and not relaxed:
+        filtered_relaxed, rejected_relaxed = _select(True)
+        if filtered_relaxed:
+            filtered = filtered_relaxed
+            rejected.extend(rejected_relaxed)
     return filtered[:5], rejected
 
 
