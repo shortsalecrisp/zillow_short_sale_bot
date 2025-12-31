@@ -31,7 +31,7 @@ NOT_SHORT_RE = re.compile(r"not a\s+short\s+sale", re.I)
 PHONE_RE = re.compile(r"(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 LABELLED_PHONE_RE = re.compile(
-    r"(?:Cell|Mobile|Direct|Text)[^0-9]{0,20}(\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4})",
+    r"(?:Cell|Mobile|Direct|Text|Call|Message)[^0-9]{0,25}(\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4})",
     re.I,
 )
 OFFICE_RE = re.compile(r"Office|Main|Brokerage|Team", re.I)
@@ -122,6 +122,7 @@ def _init_cache(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS search_cache (query TEXT PRIMARY KEY, results TEXT, last_seen REAL)"
     )
+    _init_candidate_cache(conn)
 
 # how long to trust cached contact info (seconds)
 CONTACT_TTL = 60 * 60 * 24 * 365  # 1 year
@@ -146,6 +147,7 @@ def _score_contact(
     source_domain: str | None,
     broker_domain: str | None,
     office: bool = False,
+    label_score: float = 0.0,
 ) -> float:
     if not phone and not email:
         return float("-inf")
@@ -156,6 +158,8 @@ def _score_contact(
     if email:
         score += 2.0
 
+    score += label_score
+
     if source_domain and broker_domain and broker_domain in source_domain:
         score += 5.0
     elif source_domain and any(dom in source_domain for dom in WHITELIST_DOMAINS):
@@ -165,7 +169,7 @@ def _score_contact(
         score -= 1.0
 
     if office:
-        score -= 3.0
+        score -= 1.5
 
     return score
 
@@ -212,12 +216,89 @@ def _search_cache_set(conn: sqlite3.Connection, query: str, results: list[str]) 
     )
     conn.commit()
 
+
+def _init_candidate_cache(conn: sqlite3.Connection) -> None:
+    """Ensure the multi-candidate cache exists."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS contact_candidates (agent TEXT, state TEXT, candidates TEXT, last_seen REAL, PRIMARY KEY(agent, state))"
+    )
+
 # ------------------  utility funcs ------------------
 
 def send_sms(to: str, body: str):
     """Send SMS using configured provider."""
     SMS_SENDER.send(to, body)
 
+
+def _normalize_obfuscation(text: str) -> str:
+    """Normalize common email/phone obfuscations before regex scanning."""
+    replacements = {
+        "(at)": "@",
+        "[at]": "@",
+        " at ": "@",
+        " AT ": "@",
+        "(dot)": ".",
+        "[dot]": ".",
+        " dot ": ".",
+        " DOT ": ".",
+    }
+    cleaned = text
+    for k, v in replacements.items():
+        cleaned = cleaned.replace(k, v)
+    cleaned = cleaned.replace("\u200b", "").replace("\ufeff", "")
+    cleaned = re.sub(r"\s*\(\s*\)\s*", "", cleaned)  # remove empty parens between digits
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _label_hints(snippet: str) -> tuple[float, bool]:
+    """Return label score adjustment and office flag from nearby text."""
+    snippet_lower = snippet.lower()
+    mobile_terms = ["cell", "mobile", "direct", "text", "sms", "message", "call"]
+    office_terms = ["office", "main", "brokerage", "team", "corporate"]
+
+    score = 0.0
+    office = False
+    if any(term in snippet_lower for term in mobile_terms):
+        score += 2.0
+    if any(term in snippet_lower for term in office_terms):
+        office = True
+        score -= 1.0
+    return score, office
+
+
+def _parse_jsonld_contacts(soup: BeautifulSoup):
+    """Extract phone/email hints from JSON-LD blocks."""
+    phones: list[tuple[str, str]] = []
+    emails: list[str] = []
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+        except Exception:
+            continue
+
+        def _collect(obj):
+            nonlocal phones, emails
+            if isinstance(obj, list):
+                for item in obj:
+                    _collect(item)
+                return
+            if not isinstance(obj, dict):
+                return
+            tel = obj.get("telephone") or obj.get("phone")
+            if tel:
+                phones.append((tel, "jsonld"))
+            if obj.get("email"):
+                emails.append(obj["email"])
+            contact_point = obj.get("contactPoint") or obj.get("contactPoints")
+            if contact_point:
+                _collect(contact_point)
+            for key in ("agent", "seller", "employee", "author"):
+                if obj.get(key):
+                    _collect(obj[key])
+
+        _collect(data)
+    return phones, emails
 
 def gpt_is_short_sale(description: str) -> bool:
     if NOT_SHORT_RE.search(description or ""):
@@ -273,12 +354,13 @@ def _scrape_google(query: str, cache_conn: sqlite3.Connection, max_links: int = 
     return links
 
 
-def _extract_with_gpt(url: str, html_text: str):
+def _extract_with_gpt(url: str, html_text: str, candidate_hints: list[str] | None = None):
     prompt = textwrap.dedent(
         f"""
         You are a data extractor. Examine the HTML snippet from {url}.
-        Return strictly JSON like {{"phone":"...","email":"..."}}. Use 
-null if not found.
+        When multiple numbers exist, prefer mobile/cell/direct/text numbers over office/main.
+        Return strictly JSON like {{"phone":"...","office_phone":"...","email":"..."}}. Use null if not found.
+        Possible hints from other scrapers: {candidate_hints or []}
         Do NOT invent values.
 
         HTML snippet:\n{html.escape(html_text[:3500])}
@@ -292,41 +374,127 @@ null if not found.
     )
     try:
         data = json.loads(resp.choices[0].message.content)
-        return data.get("phone"), data.get("email")
+        return data.get("phone"), data.get("email"), data.get("office_phone")
     except Exception:
-        return None, None
+        return None, None, None
 
 
-def _regex_extract_contact(html_text: str):
+def _regex_extract_contact(html_text: str, source_domain: str | None, broker_domain: str | None):
     """Extract phone/email from raw HTML using label-aware regex and return office flag."""
+    soup = BeautifulSoup(html_text, "html.parser")
+    phone_candidates: list[dict] = []
+    email_candidates: list[str] = []
+
+    jsonld_phones, jsonld_emails = _parse_jsonld_contacts(soup)
+    for p, label in jsonld_phones:
+        score, office = _label_hints(label)
+        phone_candidates.append(
+            {"phone": p, "label_score": score, "office": office, "source": f"{source_domain or ''}:jsonld"}
+        )
+    email_candidates.extend(jsonld_emails)
+
+    for tel in soup.select("a[href^='tel'], button[href^='tel']"):
+        phone_raw = tel.get("href", "").split(":", 1)[-1]
+        label = (tel.get_text(" ", strip=True) or "") + " " + (tel.get("aria-label", "") or "")
+        score, office = _label_hints(label)
+        phone_candidates.append(
+            {"phone": phone_raw, "label_score": score, "office": office, "source": f"{source_domain or ''}:tel"}
+        )
+    for mail in soup.select("a[href^='mailto'], button[href^='mailto']"):
+        email_candidates.append(mail.get("href", "").split(":", 1)[-1])
+
+    attrs_to_check = ["data-phone", "data-contact", "data-mobile", "aria-label", "title"]
+    for attr in attrs_to_check:
+        for el in soup.select(f"[{attr}]"):
+            val = el.get(attr)
+            if not val:
+                continue
+            norm = _normalize_obfuscation(val)
+            m_phone = PHONE_RE.search(norm)
+            m_email = EMAIL_RE.search(norm)
+            if m_phone:
+                score, office = _label_hints(norm)
+                phone_candidates.append(
+                    {"phone": m_phone.group(0), "label_score": score, "office": office, "source": f"{source_domain or ''}:{attr}"}
+                )
+            if m_email:
+                email_candidates.append(m_email.group(0))
+
+    text = _normalize_obfuscation(soup.get_text(" ", strip=True))
+    for m in LABELLED_PHONE_RE.finditer(text):
+        snippet = text[max(0, m.start() - 25) : m.end() + 25]
+        score, office = _label_hints(snippet)
+        phone_candidates.append(
+            {"phone": m.group(1), "label_score": score, "office": office, "source": f"{source_domain or ''}:label"}
+        )
+    for m in PHONE_RE.finditer(text):
+        snippet = text[max(0, m.start() - 25) : m.end() + 25]
+        score, office = _label_hints(snippet)
+        phone_candidates.append(
+            {"phone": m.group(0), "label_score": score, "office": office, "source": f"{source_domain or ''}:regex"}
+        )
+    for m in EMAIL_RE.finditer(text):
+        email_candidates.append(m.group(0))
+
+    soup.decompose()
+
+    def _pick_best_phone():
+        best_phone = None
+        best_score = float("-inf")
+        for cand in phone_candidates:
+            score = _score_contact(cand["phone"], None, source_domain, broker_domain, cand.get("office", False), cand.get("label_score", 0.0))
+            if score > best_score:
+                best_score = score
+                best_phone = (cand["phone"], cand.get("office", False), cand.get("label_score", 0.0))
+        if best_phone:
+            return best_phone[0], best_phone[1], best_phone[2], phone_candidates
+        return None, False, 0.0, phone_candidates
+
+    phone, office, label_score, candidates = _pick_best_phone()
+    email = email_candidates[0] if email_candidates else None
+    return phone, email, office, label_score, candidates, email_candidates
+
+
+def _domain_specific_extract(url: str, html_text: str):
+    """Handle high-signal domains before generic parsing."""
+    netloc = urlparse(url).netloc.lower()
     soup = BeautifulSoup(html_text, "html.parser")
     phone = email = None
     office = False
+    label_score = 0.0
+    candidates: list[dict] = []
+    email_candidates: list[str] = []
 
-    tel = soup.select_one("a[href^='tel']")
-    if tel:
-        phone = tel.get("href", "").split(":", 1)[-1]
-    mail = soup.select_one("a[href^='mailto']")
-    if mail:
-        email = mail.get("href", "").split(":", 1)[-1]
+    def _record(phone_val, lbl):
+        nonlocal phone, label_score, office
+        score, is_office = _label_hints(lbl)
+        phone = phone_val
+        label_score = score
+        office = is_office
 
-    text = soup.get_text(" ", strip=True)
-    if not phone:
-        m = LABELLED_PHONE_RE.search(text)
-        if m:
-            phone = m.group(1)
-    if not phone:
-        m = PHONE_RE.search(text)
-        if m:
-            snippet = text[max(0, m.start() - 25) : m.end() + 25]
-            office = bool(OFFICE_RE.search(snippet))
-            phone = m.group(0)
-    if not email:
-        m = EMAIL_RE.search(text)
-        if m:
-            email = m.group(0)
+    if "facebook.com" in netloc:
+        for el in soup.select("[role='button'], a, div, span"):
+            text = (el.get_text(" ", strip=True) or "") + " " + (el.get("aria-label", "") or "")
+            norm = _normalize_obfuscation(text)
+            m = PHONE_RE.search(norm)
+            if m:
+                _record(m.group(0), norm)
+                break
+    if "har.com" in netloc:
+        for sel in [".agent-contact", ".agent-phone", "[data-phone]"]:
+            el = soup.select_one(sel)
+            if el:
+                text = _normalize_obfuscation(el.get_text(" ", strip=True) or el.get("data-phone", ""))
+                m = PHONE_RE.search(text)
+                if m:
+                    _record(m.group(0), text)
+                    break
+        mail = soup.select_one(".agent-email a[href^='mailto'], a[href^='mailto']")
+        if mail and not email:
+            email = mail.get("href", "").split(":", 1)[-1]
+
     soup.decompose()
-    return phone, email, office
+    return phone, email, office, label_score, candidates, email_candidates
 
 
 def _parse_detail_contact(url: str):
@@ -334,8 +502,35 @@ def _parse_detail_contact(url: str):
     try:
         html_text = _fetch_via_jina(url)
     except Exception:
-        return None, None, False
-    return _regex_extract_contact(html_text)
+        return None, None, False, 0.0, [], []
+    specific = _domain_specific_extract(url, html_text)
+    phone, email, office, label_score, candidates, email_candidates = specific
+    if phone or email:
+        return phone, email, office, label_score, candidates, email_candidates
+    return _regex_extract_contact(html_text, urlparse(url).netloc, _root_domain(url))
+
+
+def _load_cached_candidates(cache_conn: sqlite3.Connection, agent: str, state: str):
+    row = cache_conn.execute(
+        "SELECT candidates, last_seen FROM contact_candidates WHERE agent=? AND state=?",
+        (agent, state),
+    ).fetchone()
+    if not row:
+        return None
+    if time.time() - row[1] > CONTACT_TTL:
+        return None
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return None
+
+
+def _save_cached_candidates(cache_conn: sqlite3.Connection, agent: str, state: str, candidates: list[dict], emails: list[str]):
+    cache_conn.execute(
+        "INSERT OR REPLACE INTO contact_candidates (agent, state, candidates, last_seen) VALUES (?,?,?,?)",
+        (agent, state, json.dumps({"phones": candidates, "emails": emails}), time.time()),
+    )
+    cache_conn.commit()
 
 
 def find_contact(row: dict, cache_conn: sqlite3.Connection):
@@ -353,17 +548,49 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
     if cached and (time.time() - cached[2] < CONTACT_TTL):
         return cached[0], cached[1]
 
-    best = {"phone": None, "email": None, "score": float("-inf")}
+    cached_candidates = _load_cached_candidates(cache_conn, agent, state)
+    if cached_candidates:
+        best_phone = best_email = None
+        best_score = float("-inf")
+        for cand in cached_candidates.get("phones", []):
+            score = _score_contact(
+                cand.get("phone"),
+                None,
+                cand.get("source"),
+                broker_domain,
+                cand.get("office", False),
+                cand.get("label_score", 0.0),
+            )
+            if score > best_score:
+                best_score = score
+                best_phone = cand.get("phone")
+        if cached_candidates.get("emails"):
+            best_email = cached_candidates["emails"][0]
+        if best_phone or best_email:
+            return best_phone, best_email
 
-    def _consider(phone: str | None, email: str | None, source: str | None, office: bool = False):
-        score = _score_contact(phone, email, source, broker_domain, office)
+    best = {"phone": None, "email": None, "score": float("-inf"), "office_phone": None}
+    phone_candidates: list[dict] = []
+    email_candidates: list[str] = []
+
+    def _consider(phone: str | None, email: str | None, source: str | None, office: bool = False, label_score: float = 0.0):
+        score = _score_contact(phone, email, source, broker_domain, office, label_score)
         if score > best["score"]:
             best.update({"phone": phone, "email": email, "score": score})
 
     # first try to parse contact info from the listing detail page
     if detail_url:
-        phone, email, office = _parse_detail_contact(detail_url)
-        _consider(phone, email, urlparse(detail_url).netloc, office)
+        detail_result = _parse_detail_contact(detail_url)
+        if len(detail_result) == 3:
+            phone, email, office = detail_result
+            label_score, candidates, extra_emails = 0.0, [], []
+        else:
+            phone, email, office, label_score, candidates, extra_emails = detail_result
+        phone_candidates.extend(candidates)
+        email_candidates.extend(extra_emails)
+        _consider(phone, email, urlparse(detail_url).netloc, office, label_score)
+        if office and phone and not best.get("office_phone"):
+            best["office_phone"] = phone
 
     query_parts = []
     if agent:
@@ -403,22 +630,36 @@ def find_contact(row: dict, cache_conn: sqlite3.Connection):
                 continue
             if not html_text:
                 continue
-            phone, email, office = _regex_extract_contact(html_text)
+            phone, email, office, label_score, candidates, extra_emails = _regex_extract_contact(html_text, netloc, broker_domain)
+            phone_candidates.extend(candidates)
+            email_candidates.extend(extra_emails)
             if not phone and not email:
-                phone, email = _extract_with_gpt(link, html_text)
+                hints = [c.get("phone") for c in candidates if c.get("phone")]
+                phone, email, office_phone = _extract_with_gpt(link, html_text, hints)
+                if office_phone:
+                    phone_candidates.append({"phone": office_phone, "label_score": 0.0, "office": True, "source": f"{netloc}:gpt"})
+                if office_phone and not best.get("office_phone"):
+                    best["office_phone"] = office_phone
                 office = False
-            _consider(phone, email, netloc, office)
+            _consider(phone, email, netloc, office, label_score)
             processed_links += 1
         if processed_links >= 15:
             break
 
     if best["score"] > float("-inf"):
+        _save_cached_candidates(cache_conn, agent, state, phone_candidates, email_candidates)
         cache_conn.execute(
             "INSERT OR REPLACE INTO contacts (agent, state, phone, email, last_seen) VALUES (?,?,?,?,?)",
-            (agent, state, best["phone"] or "", best["email"] or "", time.time()),
+            (
+                agent,
+                state,
+                best["phone"] or best.get("office_phone") or "",
+                best["email"] or "",
+                time.time(),
+            ),
         )
         cache_conn.commit()
-        return best["phone"], best["email"]
+        return best["phone"] or best.get("office_phone"), best["email"]
 
     fallback_phone = row.get("phone") or row.get("agentPhone") or row.get("agentPhoneNumber")
     fallback_email = row.get("email") or row.get("agentEmail")
@@ -473,4 +714,3 @@ def process_rows(rows: list[dict]):
             imported += 1
 
     print("process_rows finished – imported", imported)
-
