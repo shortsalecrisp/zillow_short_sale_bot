@@ -3199,6 +3199,59 @@ def _normalize_contact_search_result(result: Tuple[Any, ...]) -> Tuple[List[str]
     return list(urls), bool(search_empty), str(cse_status), bool(search_exhausted)
 
 
+def _phone_candidates_from_email_search(
+    agent: str,
+    state: str,
+    email: str,
+    row_payload: Dict[str, Any],
+    *,
+    brokerage: str = "",
+) -> List[Dict[str, Any]]:
+    cleaned = clean_email(email)
+    if not cleaned:
+        return []
+    cache = row_payload.setdefault("_phone_email_probe_cache", {})
+    cache_key = cleaned.lower()
+    if cache_key in cache:
+        return cache.get(cache_key, [])
+
+    queries = [
+        _compact_tokens(f'"{cleaned}"', f'"{agent}"', "phone"),
+        _compact_tokens(f'"{cleaned}"', state, "realtor", "phone"),
+    ]
+    if brokerage:
+        queries.append(_compact_tokens(f'"{cleaned}"', f'"{brokerage}"', "phone"))
+
+    candidates: List[Dict[str, Any]] = []
+    for query in queries:
+        if not query:
+            continue
+        try:
+            results = google_cse_search(query, limit=CONTACT_CSE_FETCH_LIMIT)
+            selected, _ = select_top_5_urls(results, fetch_check=True, relaxed=False)
+            if not selected and _cse_last_state in {"blocked", "throttled", "disabled"}:
+                fallback_results, _ = duckduckgo_search(
+                    query,
+                    limit=CONTACT_CSE_FETCH_LIMIT,
+                    allowed_domains=None,
+                    with_blocked=False,
+                )
+                selected, _ = select_top_5_urls(fallback_results, fetch_check=True, relaxed=True)
+            for url in selected:
+                page, _ = fetch_contact_page(url)
+                if not page:
+                    continue
+                candidates.extend(_agent_contact_candidates_from_html(page, url, agent))
+            if candidates:
+                break
+        except Exception:
+            LOG.exception("email+phone CSE probe failed for %s", query)
+            continue
+
+    cache[cache_key] = candidates
+    return candidates
+
+
 def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     domain_hint = row_payload.get("domain_hint", "").strip()
@@ -3943,7 +3996,7 @@ TOP5_PATH_HINT_TOKENS = {
     "profile",
     "about",
 }
-TOP5_LISTING_HINTS = {"listing", "for-sale", "homedetails", "property"}
+TOP5_LISTING_HINTS = {"listing", "listings", "for-sale", "homedetails", "property", "newlisting", "mls", "idx"}
 
 DISPOSABLE_EMAIL_DOMAINS = {
     "mailinator.com",
@@ -4032,6 +4085,36 @@ def _filter_allowed(link: str, allowed_domains: Optional[Set[str]]) -> bool:
     dom = _domain(link)
     return any(dom == d or dom.endswith(f".{d}") for d in allowed_domains)
 
+_LISTING_PATH_RE = re.compile(r"/(?:idx|mls|listing|listings|newlisting|homedetails|property)[^/]*", re.I)
+_LISTING_BOILERPLATE_TERMS = (
+    "copyright",
+    "dmca",
+    "mls",
+    "multiple listing service",
+    "listing provided by",
+    "idx",
+    "information deemed reliable",
+)
+
+
+def _listing_path_blocked(path: str) -> bool:
+    if not path:
+        return False
+    return bool(_LISTING_PATH_RE.search(path) or any(hint in path for hint in TOP5_LISTING_HINTS))
+
+
+def _looks_listing_boilerplate(text: str, path: str = "") -> bool:
+    if _listing_path_blocked(path):
+        return True
+    if not text:
+        return False
+    low = text.lower()
+    hits = sum(low.count(term) for term in _LISTING_BOILERPLATE_TERMS)
+    if hits >= 3:
+        return True
+    words = len(low.split())
+    return bool(words and hits >= 2 and (hits / max(words, 1)) > 0.01)
+
 
 def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
     if not link:
@@ -4048,7 +4131,7 @@ def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
         return False, "gov_edu"
     if path.endswith(".pdf") or ".pdf" in path:
         return False, "pdf"
-    if any(hint in path for hint in TOP5_LISTING_HINTS) and re.search(r"/\d{3,}", path):
+    if _listing_path_blocked(path):
         return False, "listing_detail"
 
     allow = False
@@ -4104,6 +4187,10 @@ def select_top_5_urls(
                 text = fetched.get("extracted_text", "")
                 if fetched.get("retry_needed") or status == 0 or not text.strip():
                     rejected.append((final_url, "fetch_failed"))
+                    continue
+                final_path = urlparse(final_url).path.lower()
+                if _looks_listing_boilerplate(text, final_path):
+                    rejected.append((final_url, "listing_boilerplate"))
                     continue
             filtered.append(final_url)
             if len(filtered) >= 5:
@@ -5300,6 +5387,7 @@ PHONE_SOURCE_BASE = {
     "crawler_unverified": 0.9,
     "contact_us": 0.0,
     "cse_contact": 1.6,
+    "email_probe": 1.8,
 }
 
 
@@ -5551,6 +5639,46 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             if was_new or prev_score < CONTACT_PHONE_LOW_CONF:
                 triggered = True
         return triggered
+
+    email_probe_candidates: List[Dict[str, Any]] = []
+    email_probe_value = ""
+    if rapid_fallback_phone and not rapid_verified_mobile:
+        probe_email = rapid_snapshot.get("selected_email", "") if rapid_snapshot else ""
+        if not probe_email:
+            for entry in rapid_snapshot.get("emails", []) if rapid_snapshot else []:
+                candidate_email = clean_email(entry.get("value", ""))
+                if candidate_email:
+                    probe_email = candidate_email
+                    break
+        if probe_email:
+            email_probe_value = probe_email
+            email_probe_candidates = _phone_candidates_from_email_search(
+                agent,
+                state,
+                probe_email,
+                row_payload,
+                brokerage=brokerage_hint,
+            )
+    if email_probe_candidates:
+        LOG.info(
+            "EMAIL PHONE PROBE: %s candidates via %s",
+            len(email_probe_candidates),
+            email_probe_value or "<unknown>",
+        )
+    for cand in email_probe_candidates:
+        ctx = cand.get("evidence_snippet", "") or ""
+        mobile_hint = any(term in ctx.lower() for term in mobile_terms)
+        name_match = _page_mentions_agent(ctx, agent) or _names_match(agent, ctx)
+        source_url = cand.get("source_url", "")
+        for num in cand.get("phones", []):
+            _register(
+                num,
+                "email_probe",
+                url=source_url,
+                context=ctx,
+                name_match=name_match,
+                mobile_hint=mobile_hint,
+            )
     for blk in (row_payload.get("contact_recipients") or []):
         ctx = " ".join(str(blk.get(k, "")) for k in ("title", "label", "role") if blk.get(k))
         meta_name = blk.get("display_name", "")
@@ -7011,8 +7139,10 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         role_email = info.get("role_email")
         if role_email and not ALLOW_ROLE_EMAIL_FALLBACK:
             continue
+        sources = info.get("sources", set())
+        rapid_source = any(src.startswith("rapid") for src in sources)
         name_match = _email_matches_name(agent, email)
-        if not (name_match or agent_on_page):
+        if not name_match and not rapid_source:
             continue
         domain_matches_known = brokerage_domain_ok or domain_hint_hit or brokerage_hit or trusted_hit or agent_token_hit
         if domain_match_required and not domain_matches_known:
