@@ -91,6 +91,19 @@ HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "12000"))
 HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
 HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
+PLAYWRIGHT_CONTACT_DOMAINS = {
+    "facebook.com",
+    "remax.com",
+    "har.com",
+    "century21.com",
+}
+CONTACT_JS_DOMAINS = {
+    "boomtownroi.com",
+    "kvcore.com",
+    "realgeeks.com",
+    "idxbroker.com",
+    "placester.net",
+}
 
 _CONNECTION_ERRORS = (
     req_exc.ConnectionError,
@@ -1510,6 +1523,32 @@ def _allowed_contact_domains(domain_hint: str) -> Optional[Set[str]]:
     if dom:
         allowed.add(dom)
     return allowed or None
+
+def _should_use_playwright_for_contact(dom: str, body: str = "", *, js_hint: bool = False) -> bool:
+    domain = _domain(dom)
+    if domain in PLAYWRIGHT_CONTACT_DOMAINS:
+        return True
+    if js_hint or domain in CONTACT_JS_DOMAINS:
+        return True
+    if not (body or "").strip():
+        return True
+    return False
+
+def _combine_playwright_snapshot(snapshot: Dict[str, Any]) -> str:
+    if not snapshot:
+        return ""
+    meta = {
+        "playwright_final_url": snapshot.get("final_url", ""),
+        "playwright_visible_text": snapshot.get("visible_text", ""),
+        "playwright_mailto_links": snapshot.get("mailto_links", []),
+        "playwright_tel_links": snapshot.get("tel_links", []),
+    }
+    try:
+        meta_json = json.dumps(meta, ensure_ascii=False)
+    except Exception:
+        meta_json = ""
+    payload = f"<!--PLAYWRIGHT_SNAPSHOT {html.escape(meta_json)} -->" if meta_json else ""
+    return f"{snapshot.get('html', '')}\n{payload}"
 
 def _proxy_for_domain(domain: str) -> str:
     dom = _domain(domain)
@@ -3608,7 +3647,8 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
     if dom in _REALTOR_DOMAINS:
         tries = max(tries, _REALTOR_MAX_RETRIES)
 
-    def _fallback(reason: str) -> Tuple[str, bool]:
+    def _fallback(reason: str, last_body: str = "") -> Tuple[str, bool]:
+        js_hint = dom in CONTACT_JS_DOMAINS
         mirror = _mirror_url(url)
         if mirror:
             try:
@@ -3625,11 +3665,13 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                     return mirror_resp.text, True
             except Exception as exc:
                 LOG.debug("mirror fetch failed %s on %s", exc, mirror)
-        if HEADLESS_ENABLED and sync_playwright and not _blocked(dom):
-            rendered = _headless_fetch(url, proxy_url=proxy_url, domain=dom)
+        allow_playwright = _should_use_playwright_for_contact(dom, last_body, js_hint=js_hint)
+        if HEADLESS_ENABLED and sync_playwright and not _blocked(dom) and allow_playwright:
+            snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom)
+            rendered = _combine_playwright_snapshot(snapshot)
             if rendered.strip():
                 LOG.info(
-                    "BROWSER FALLBACK used for %s (proxy=%s reason=%s)",
+                    "PLAYWRIGHT FALLBACK used for %s (proxy=%s reason=%s)",
                     dom,
                     bool(proxy_url),
                     reason,
@@ -3691,7 +3733,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
             blocked = True
             _mark_block(dom)
             LOG.warning("BLOCK %s -> attempt headless for %s/%s", status, attempt, tries)
-            html, used_fallback = _fallback("403")
+            html, used_fallback = _fallback("403", body)
             if html:
                 return html, used_fallback
             break
@@ -3725,14 +3767,14 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         _mark_block(dom, reason="realtor-once")
 
     if blocked:
-        html, used_fallback = _fallback("blocked")
+        html, used_fallback = _fallback("blocked", "")
         if html:
             return html, used_fallback
     return "", False
 
-def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "") -> str:
+def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "") -> Dict[str, Any]:
     if not HEADLESS_ENABLED or not sync_playwright:
-        return ""
+        return {}
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -3753,19 +3795,41 @@ def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "") -> str:
             page.goto(url, wait_until="domcontentloaded", timeout=HEADLESS_TIMEOUT_MS)
             page.wait_for_timeout(HEADLESS_WAIT_MS)
             content = page.content() or ""
+            visible_text = ""
+            try:
+                visible_text = page.inner_text("body", timeout=2000) or ""
+            except Exception:
+                visible_text = ""
+            mail_links: List[str] = []
+            tel_links: List[str] = []
+            try:
+                hrefs = page.eval_on_selector_all(
+                    "a[href]",
+                    "els => els.map(el => el.getAttribute('href') || '')",
+                ) or []
+                mail_links = [h for h in hrefs if h and h.lower().startswith("mailto:")]
+                tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
+            except Exception:
+                pass
             context.close()
             browser.close()
             if not content.strip():
-                return ""
+                return {}
             LOG.debug(
                 "Headless fetch ok for %s (proxy=%s)",
                 domain or _domain(url),
                 bool(proxy_url),
             )
-            return content
+            return {
+                "html": content,
+                "visible_text": visible_text,
+                "mailto_links": mail_links,
+                "tel_links": tel_links,
+                "final_url": page.url,
+            }
     except Exception as exc:  # pragma: no cover - network/env specific
         LOG.warning("Headless fetch failed for %s (%s)", domain or _domain(url), exc)
-        return ""
+        return {}
 
 # ───────────────────── Google CSE helpers ─────────────────────
 
