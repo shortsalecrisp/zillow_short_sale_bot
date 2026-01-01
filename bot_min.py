@@ -575,6 +575,8 @@ PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?1[\s\-\.]*)?\(?\d{3}\)?[\s\-\.]*\d{3}[\s\-\.]*\d{4}(?!\d)"
 )
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+OBFUSCATED_AT_RE = re.compile(r"(?:\[\s*at\s*\]|\(\s*at\s*\)|\{\s*at\s*\}|\bat\b)", re.I)
+OBFUSCATED_DOT_RE = re.compile(r"(?:\[\s*dot\s*\]|\(\s*dot\s*\)|\{\s*dot\s*\}|\bdot\b)", re.I)
 
 LABEL_TABLE = {
     "mobile": 4, "cell": 4, "direct": 4, "text": 4,
@@ -910,6 +912,35 @@ def ok_email(e: str) -> bool:
         and not e.lower().endswith(IMG_EXT)
         and not re.search(r"\.(gov|edu|mil)$", e, re.I)
     )
+
+
+def _normalize_obfuscated_email_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = OBFUSCATED_AT_RE.sub("@", text)
+    normalized = OBFUSCATED_DOT_RE.sub(".", normalized)
+    normalized = re.sub(r"\s*@\s*", "@", normalized)
+    normalized = re.sub(r"\s*\.\s*", ".", normalized)
+    return normalized
+
+
+def _extract_emails_with_obfuscation(text: str) -> List[Tuple[str, str]]:
+    """Return emails (with snippets) after handling basic obfuscation tokens."""
+    if not text:
+        return []
+    normalized = _normalize_obfuscated_email_text(text)
+    results: List[Tuple[str, str]] = []
+    seen: Set[str] = set()
+    for match in EMAIL_RE.finditer(normalized):
+        cleaned = clean_email(match.group())
+        if not (cleaned and ok_email(cleaned)):
+            continue
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        snippet = normalized[max(0, match.start() - 80): match.end() + 80]
+        results.append((cleaned, " ".join(snippet.split())))
+    return results
 
 
 def decode_cfemail(data: str) -> str:
@@ -1767,6 +1798,8 @@ _REALTOR_MAX_RETRIES = int(os.getenv("REALTOR_MAX_RETRIES", "5"))
 _REALTOR_BACKOFF_BASE = float(os.getenv("REALTOR_BACKOFF_BASE", "3.0"))
 _REALTOR_BACKOFF_CAP = float(os.getenv("REALTOR_BACKOFF_CAP", "20.0"))
 _REALTOR_BACKOFF_JITTER = float(os.getenv("REALTOR_BACKOFF_JITTER", "1.75"))
+_CONTACT_PAGE_CACHE: Dict[str, Tuple[str, bool]] = {}
+_CONTACT_PAGE_CACHE_LOCK = threading.Lock()
 
 
 def _mirror_url(url: str) -> str:
@@ -2601,6 +2634,8 @@ def _agent_contact_candidates_from_html(html_text: str, source_url: str, agent: 
             continue
         snippet = html_text[max(0, m.start() - 80): m.end() + 80]
         _add([], [email], " ".join(snippet.split()))
+    for email, snippet in _extract_emails_with_obfuscation(html_text):
+        _add([], [email], snippet)
 
     soup.decompose() if soup else None
     return candidates
@@ -3634,6 +3669,16 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
 def fetch_contact_page(url: str) -> Tuple[str, bool]:
     if not _should_fetch(url, strict=False):
         return "", False
+    cache_key = normalize_url(url)
+    with _CONTACT_PAGE_CACHE_LOCK:
+        if cache_key in _CONTACT_PAGE_CACHE:
+            return _CONTACT_PAGE_CACHE[cache_key]
+
+    def _cache_result(html: str, used_fallback: bool) -> Tuple[str, bool]:
+        with _CONTACT_PAGE_CACHE_LOCK:
+            _CONTACT_PAGE_CACHE[cache_key] = (html, used_fallback)
+        return html, used_fallback
+
     dom = _domain(url)
     if dom in _REALTOR_DOMAINS:
         global _realtor_fetch_seen
@@ -3662,12 +3707,12 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                 )
                 if mirror_resp.status_code == 200 and mirror_resp.text.strip():
                     LOG.info("MIRROR FALLBACK used for %s (%s)", dom, reason)
-                    return mirror_resp.text, True
+                    return _cache_result(mirror_resp.text, True)
             except Exception as exc:
                 LOG.debug("mirror fetch failed %s on %s", exc, mirror)
         allow_playwright = _should_use_playwright_for_contact(dom, last_body, js_hint=js_hint)
         if HEADLESS_ENABLED and sync_playwright and not _blocked(dom) and allow_playwright:
-            snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom)
+            snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)
             rendered = _combine_playwright_snapshot(snapshot)
             if rendered.strip():
                 LOG.info(
@@ -3676,7 +3721,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                     bool(proxy_url),
                     reason,
                 )
-                return rendered, True
+                return _cache_result(rendered, True)
         return "", False
 
     last_seen = _CONTACT_DOMAIN_LAST_FETCH.get(dom, 0.0)
@@ -3728,14 +3773,14 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if status == 200 and body:
             if proxy_url:
                 LOG.info("CONTACT fetched via proxy %s (%s)", _redact_proxy(proxy_url), dom)
-            return body, False
+            return _cache_result(body, False)
         if status == 403 or (status == 200 and not body):
             blocked = True
             _mark_block(dom)
             LOG.warning("BLOCK %s -> attempt headless for %s/%s", status, attempt, tries)
             html, used_fallback = _fallback("403", body)
             if html:
-                return html, used_fallback
+                return _cache_result(html, used_fallback)
             break
         if status == 429:
             blocked = True
@@ -3769,10 +3814,10 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
     if blocked:
         html, used_fallback = _fallback("blocked", "")
         if html:
-            return html, used_fallback
-    return "", False
+            return _cache_result(html, used_fallback)
+    return _cache_result("", False)
 
-def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "") -> Dict[str, Any]:
+def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: str = "") -> Dict[str, Any]:
     if not HEADLESS_ENABLED or not sync_playwright:
         return {}
     try:
@@ -3792,6 +3837,12 @@ def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "") -> Dict[
                 proxy={"server": proxy_url} if proxy_url else None,
             )
             page = context.new_page()
+            LOG.info(
+                "PLAYWRIGHT_FETCH used for %s reason=%s proxy=%s",
+                url,
+                reason or "fallback",
+                bool(proxy_url),
+            )
             page.goto(url, wait_until="domcontentloaded", timeout=HEADLESS_TIMEOUT_MS)
             page.wait_for_timeout(HEADLESS_WAIT_MS)
             content = page.content() or ""
@@ -4300,6 +4351,38 @@ def _record_sameas_links(row_payload: Dict[str, Any], links: Iterable[str]) -> N
         row_payload["_sameas_links"] = existing
 
 
+def _iter_jsonld_nodes(data: Any) -> Iterable[Dict[str, Any]]:
+    """Yield all dict nodes from a JSON-LD payload, including @graph entries."""
+    stack: List[Any] = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        yield node
+        graph = node.get("@graph")
+        if isinstance(graph, list):
+            stack.extend(graph)
+
+
+def _extract_emails_from_scripts(soup: Any) -> List[Tuple[str, str]]:
+    results: List[Tuple[str, str]] = []
+    if not soup:
+        return results
+    for sc in soup.find_all("script"):
+        try:
+            content = sc.string or sc.get_text() or ""
+        except Exception:
+            continue
+        if not content:
+            continue
+        for email, snippet in _extract_emails_with_obfuscation(content):
+            results.append((email, snippet))
+    return results
+
+
 def _jsonld_person_contacts(html_text: str, soup: Any = None) -> Tuple[List[Dict[str, Any]], Any]:
     entries: List[Dict[str, Any]] = []
     if not BeautifulSoup:
@@ -4325,10 +4408,7 @@ def _jsonld_person_contacts(html_text: str, soup: Any = None) -> Tuple[List[Dict
             data = json.loads(raw_json or "")
         except Exception:
             continue
-        nodes = data if isinstance(data, list) else [data]
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
+        for node in _iter_jsonld_nodes(data):
             node_type = node.get("@type")
             types = node_type if isinstance(node_type, list) else [node_type]
             if not any(t and isinstance(t, str) and "Person" in t for t in types):
@@ -4419,17 +4499,10 @@ def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]],
 
     for sc in soup.find_all("script", {"type": "application/ld+json"}):
         try:
-            data = json.loads(sc.string or "")
+            data = json.loads(sc.string or sc.get_text() or "")
         except Exception:
             continue
-        if isinstance(data, list):
-            if not data:
-                continue
-            # Zillow pages often wrap the Person node in an array; iterate all.
-            nodes = [d for d in data if isinstance(d, dict)]
-        else:
-            nodes = [data] if isinstance(data, dict) else []
-        for node in nodes:
+        for node in _iter_jsonld_nodes(data):
             entry: Dict[str, Any] = {"raw": node}
             collected_phones: List[str] = []
             for tel_val in _as_list(node.get("telephone")) + _contact_values(node, "telephone"):
@@ -4488,6 +4561,16 @@ def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]],
                 "email": cleaned,
                 "context": _context_for(cf_node).lower(),
             })
+
+    for email, snippet in _extract_emails_from_scripts(soup):
+        if email in seen_emails:
+            continue
+        mails.append(email)
+        seen_emails.add(email)
+        info.setdefault("script_emails", []).append({
+            "email": email,
+            "context": snippet.lower(),
+        })
 
     soup.decompose()
     return phones, mails, meta, info
@@ -5144,6 +5227,8 @@ EMAIL_SOURCE_BASE = {
     "jsonld_person": 1.0,
     "jsonld_other": 0.7,
     "mailto": 0.8,
+    "script_blob": 0.8,
+    "obfuscated": 0.75,
     "dom": 0.6,
     "pattern": 0.5,
     "cse_contact": 0.7,
@@ -6719,6 +6804,21 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 context=item.get("context", ""),
                 trusted=trusted_hit,
             )
+        for item in info.get("script_emails", []):
+            mail = item.get("email", "")
+            if not mail:
+                continue
+            if mail in seen:
+                continue
+            seen.add(mail)
+            _register(
+                mail,
+                "script_blob",
+                url=url,
+                page_title=page_title,
+                context=item.get("context", ""),
+                trusted=trusted_hit,
+            )
         for mail in ems:
             if mail in seen:
                 continue
@@ -6737,6 +6837,18 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 url=url,
                 page_title=page_title,
                 context=" ".join(snippet.split()),
+                trusted=trusted_hit,
+            )
+        for mail, snippet in _extract_emails_with_obfuscation(page):
+            if mail in seen:
+                continue
+            seen.add(mail)
+            _register(
+                mail,
+                "obfuscated",
+                url=url,
+                page_title=page_title,
+                context=snippet,
                 trusted=trusted_hit,
             )
 
