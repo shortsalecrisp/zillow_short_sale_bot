@@ -3784,10 +3784,9 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         return "", False
 
     def _finalize(html: str, used_fallback: bool, reason: str) -> Tuple[str, bool]:
-        headless_html, headless_used = _run_playwright_review(reason)
+        headless_html, _ = _run_playwright_review(reason)
         if headless_html:
             html = headless_html
-            used_fallback = True
         return _cache_result(html, used_fallback)
 
     last_seen = _CONTACT_DOMAIN_LAST_FETCH.get(dom, 0.0)
