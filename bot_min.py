@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import sys
+import subprocess
 import threading
 import importlib.util
 from collections import Counter, defaultdict, deque
@@ -92,6 +93,8 @@ HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "12000"))
 HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
 HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
+AUTO_INSTALL_PLAYWRIGHT = os.getenv("AUTO_INSTALL_PLAYWRIGHT", "true").lower() == "true"
+PLAYWRIGHT_INSTALL_TIMEOUT = int(os.getenv("PLAYWRIGHT_INSTALL_TIMEOUT", "240"))
 PLAYWRIGHT_CONTACT_DOMAINS = {
     "facebook.com",
     "remax.com",
@@ -564,6 +567,92 @@ logging.basicConfig(
 )
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
+_playwright_install_attempted = False
+
+
+def _playwright_browser_roots() -> List[Path]:
+    roots: List[Path] = []
+    env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+    if env_path:
+        roots.append(Path(env_path))
+    roots.extend(
+        [
+            Path.home() / ".cache" / "ms-playwright",
+            Path("/opt/render/.cache/ms-playwright"),
+        ]
+    )
+    seen: Set[Path] = set()
+    deduped: List[Path] = []
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        deduped.append(root)
+    return deduped
+
+
+def _playwright_browsers_installed() -> bool:
+    patterns = (
+        "chromium-*/chrome-linux/chrome",
+        "chromium-*/chrome-win/chrome.exe",
+        "chromium-*/chrome-mac/*/Chromium.app/Contents/MacOS/Chromium",
+        "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
+    )
+    for root in _playwright_browser_roots():
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            if any(root.glob(pattern)):
+                return True
+    return False
+
+
+def _ensure_playwright_browsers(logger: Optional[logging.Logger] = None) -> bool:
+    sink = logger or LOG
+    if not HEADLESS_ENABLED or async_playwright is None:
+        return False
+    if _playwright_browsers_installed():
+        return True
+    global _playwright_install_attempted
+    if not AUTO_INSTALL_PLAYWRIGHT:
+        sink.warning(
+            "PLAYWRIGHT_BROWSER_MISSING no Chromium download found under %s – run `python -m playwright install --with-deps chromium`",
+            ", ".join(str(p) for p in _playwright_browser_roots()),
+        )
+        return False
+    if _playwright_install_attempted:
+        sink.warning("PLAYWRIGHT_INSTALL already attempted; still missing browsers")
+        return False
+    _playwright_install_attempted = True
+    cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+    sink.info("PLAYWRIGHT_INSTALL starting (%s)", " ".join(cmd))
+    proc: Optional[subprocess.CompletedProcess[str]] = None
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=PLAYWRIGHT_INSTALL_TIMEOUT,
+        )
+        sink.info("PLAYWRIGHT_INSTALL_OK stdout=%s", (proc.stdout or "").strip() or "<empty>")
+    except subprocess.TimeoutExpired:
+        sink.error(
+            "PLAYWRIGHT_INSTALL_FAIL timed out after %ss while downloading browsers",
+            PLAYWRIGHT_INSTALL_TIMEOUT,
+        )
+        return False
+    except Exception as exc:
+        stdout = (proc.stdout if proc else "").strip()
+        stderr = (proc.stderr if proc else "").strip()
+        sink.error(
+            "PLAYWRIGHT_INSTALL_FAIL err=%s stdout=%s stderr=%s",
+            exc,
+            stdout or "<empty>",
+            stderr or "<empty>",
+        )
+        return False
+    return _playwright_browsers_installed()
 
 
 def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
@@ -581,6 +670,12 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
     if async_playwright is None:
         sink.warning(
             "PLAYWRIGHT_MISSING playwright not installed – install with `python -m playwright install --with-deps chromium`"
+        )
+        return
+    if not _ensure_playwright_browsers(sink):
+        sink.warning(
+            "PLAYWRIGHT_BROWSER_MISSING headless Chromium not found under %s",
+            ", ".join(str(p) for p in _playwright_browser_roots()),
         )
         return
     sink.info("PLAYWRIGHT_READY headless reviews enabled (HEADLESS_FALLBACK=%s)", HEADLESS_ENABLED)
