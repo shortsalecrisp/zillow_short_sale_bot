@@ -58,6 +58,8 @@ If you already use a custom build script, append `python -m playwright install -
 If you see `PLAYWRIGHT_MISSING` in the logs, your build is skipping the install step above; add it so headless reviews run.
 Set `HEADLESS_FALLBACK=true` (default) to keep Playwright enabled, or expect `PLAYWRIGHT_DISABLED` warnings otherwise.
 
+The bot will also attempt a one-time `python -m playwright install chromium` at startup when headless mode is enabled and no downloaded browser is found under `~/.cache/ms-playwright` or `/opt/render/.cache/ms-playwright`. Set `AUTO_INSTALL_PLAYWRIGHT=false` to skip this auto-download, or adjust `PLAYWRIGHT_BROWSERS_PATH`/`PLAYWRIGHT_INSTALL_TIMEOUT` if your platform needs a different cache location or longer download window.
+
 ## Follow-up scheduling
 
 Follow-up passes run during configured work hours. They now skip weekends by default to avoid contacting agents on
