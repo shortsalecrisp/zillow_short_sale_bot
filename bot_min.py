@@ -3745,8 +3745,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
     if dom in _REALTOR_DOMAINS:
         tries = max(tries, _REALTOR_MAX_RETRIES)
 
-    def _fallback(reason: str, last_body: str = "") -> Tuple[str, bool]:
-        js_hint = dom in CONTACT_JS_DOMAINS
+    def _fallback(reason: str) -> Tuple[str, bool]:
         mirror = _mirror_url(url)
         if mirror:
             try:
@@ -3760,22 +3759,36 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                 )
                 if mirror_resp.status_code == 200 and mirror_resp.text.strip():
                     LOG.info("MIRROR FALLBACK used for %s (%s)", dom, reason)
-                    return _cache_result(mirror_resp.text, True)
+                    return mirror_resp.text, True
             except Exception as exc:
                 LOG.debug("mirror fetch failed %s on %s", exc, mirror)
-        allow_playwright = _should_use_playwright_for_contact(dom, last_body, js_hint=js_hint)
-        if HEADLESS_ENABLED and sync_playwright and not _blocked(dom) and allow_playwright:
-            snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)
-            rendered = _combine_playwright_snapshot(snapshot)
-            if rendered.strip():
-                LOG.info(
-                    "PLAYWRIGHT FALLBACK used for %s (proxy=%s reason=%s)",
-                    dom,
-                    bool(proxy_url),
-                    reason,
-                )
-                return _cache_result(rendered, True)
         return "", False
+
+    def _run_playwright_review(reason: str) -> Tuple[str, bool]:
+        if not HEADLESS_ENABLED or not sync_playwright:
+            return "", False
+        allow_playwright = _should_use_playwright_for_contact(dom, "", js_hint=dom in CONTACT_JS_DOMAINS)
+        if not allow_playwright:
+            return "", False
+        snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)
+        rendered = _combine_playwright_snapshot(snapshot)
+        if rendered.strip():
+            LOG.info(
+                "PLAYWRIGHT REVIEW used for %s (proxy=%s reason=%s)",
+                dom,
+                bool(proxy_url),
+                reason,
+            )
+            return rendered, True
+        LOG.info("PLAYWRIGHT REVIEW empty for %s (reason=%s)", dom, reason)
+        return "", False
+
+    def _finalize(html: str, used_fallback: bool, reason: str) -> Tuple[str, bool]:
+        headless_html, headless_used = _run_playwright_review(reason)
+        if headless_html:
+            html = headless_html
+            used_fallback = True
+        return _cache_result(html, used_fallback)
 
     last_seen = _CONTACT_DOMAIN_LAST_FETCH.get(dom, 0.0)
     if CONTACT_DOMAIN_MIN_GAP > 0 and last_seen:
@@ -3826,15 +3839,13 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if status == 200 and body:
             if proxy_url:
                 LOG.info("CONTACT fetched via proxy %s (%s)", _redact_proxy(proxy_url), dom)
-            return _cache_result(body, False)
+            return _finalize(body, False, "post-fast-fetch")
         if status == 403 or (status == 200 and not body):
             blocked = True
             _mark_block(dom)
             LOG.warning("BLOCK %s -> attempt headless for %s/%s", status, attempt, tries)
-            html, used_fallback = _fallback("403", body)
-            if html:
-                return _cache_result(html, used_fallback)
-            break
+            html, used_fallback = _fallback("403")
+            return _finalize(html, used_fallback, "post-mirror-403")
         if status == 429:
             blocked = True
             _mark_block(dom)
@@ -3865,10 +3876,9 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         _mark_block(dom, reason="realtor-once")
 
     if blocked:
-        html, used_fallback = _fallback("blocked", "")
-        if html:
-            return _cache_result(html, used_fallback)
-    return _cache_result("", False)
+        html, used_fallback = _fallback("blocked")
+        return _finalize(html, used_fallback, "post-mirror-blocked")
+    return _finalize("", False, "post-fast-fetch-empty")
 
 def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: str = "") -> Dict[str, Any]:
     if not HEADLESS_ENABLED or not sync_playwright:
