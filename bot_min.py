@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import html
 import json
@@ -27,9 +28,9 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build as gapi_build
 from sms_providers import get_sender
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.async_api import async_playwright
 except ImportError:  # pragma: no cover - optional dependency
-    sync_playwright = None
+    async_playwright = None
 try:
     import dns.resolver  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -3765,7 +3766,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         return "", False
 
     def _run_playwright_review(reason: str) -> Tuple[str, bool]:
-        if not HEADLESS_ENABLED or not sync_playwright:
+        if not HEADLESS_ENABLED or not async_playwright:
             return "", False
         allow_playwright = _should_use_playwright_for_contact(dom, "", js_hint=dom in CONTACT_JS_DOMAINS)
         if not allow_playwright:
@@ -3879,17 +3880,33 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         return _finalize(html, used_fallback, "post-mirror-blocked")
     return _finalize("", False, "post-fast-fetch-empty")
 
-def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: str = "") -> Dict[str, Any]:
-    if not HEADLESS_ENABLED or not sync_playwright:
+def _unwrap_jina_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.netloc != "r.jina.ai":
+        return url
+    inner = parsed.path.lstrip("/")
+    if inner.startswith("http://") or inner.startswith("https://"):
+        # Preserve query string if present on the outer URL.
+        if parsed.query:
+            return f"{inner}?{parsed.query}"
+        return inner
+    return url
+
+
+async def _headless_fetch_async(
+    url: str, *, proxy_url: str = "", domain: str = "", reason: str = ""
+) -> Dict[str, Any]:
+    if not HEADLESS_ENABLED or not async_playwright:
         return {}
+    target_url = _unwrap_jina_url(url)
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
                 headless=True,
                 args=["--disable-blink-features=AutomationControlled"],
             )
             accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
-            context = browser.new_context(
+            context = await browser.new_context(
                 user_agent=random.choice(_USER_AGENT_POOL),
                 locale=accept_language.split(",")[0],
                 extra_http_headers={
@@ -3898,25 +3915,41 @@ def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: 
                 },
                 proxy={"server": proxy_url} if proxy_url else None,
             )
-            page = context.new_page()
+            page = await context.new_page()
             LOG.info(
-                "PLAYWRIGHT_FETCH used for %s reason=%s proxy=%s",
-                url,
+                "PLAYWRIGHT_START url=%s reason=%s proxy=%s",
+                target_url,
                 reason or "fallback",
                 bool(proxy_url),
             )
-            page.goto(url, wait_until="domcontentloaded", timeout=HEADLESS_TIMEOUT_MS)
-            page.wait_for_timeout(HEADLESS_WAIT_MS)
-            content = page.content() or ""
+            try:
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=HEADLESS_TIMEOUT_MS)
+                await page.wait_for_timeout(HEADLESS_WAIT_MS)
+            except Exception as exc:
+                LOG.warning(
+                    "PLAYWRIGHT_FAIL url=%s err=%s",
+                    target_url,
+                    exc,
+                )
+                await context.close()
+                await browser.close()
+                return {}
+            try:
+                content = await page.content() or ""
+            except Exception as exc:
+                LOG.warning("PLAYWRIGHT_FAIL url=%s err=%s", target_url, exc)
+                await context.close()
+                await browser.close()
+                return {}
             visible_text = ""
             try:
-                visible_text = page.inner_text("body", timeout=2000) or ""
+                visible_text = await page.inner_text("body", timeout=2000) or ""
             except Exception:
                 visible_text = ""
             mail_links: List[str] = []
             tel_links: List[str] = []
             try:
-                hrefs = page.eval_on_selector_all(
+                hrefs = await page.eval_on_selector_all(
                     "a[href]",
                     "els => els.map(el => el.getAttribute('href') || '')",
                 ) or []
@@ -3924,13 +3957,19 @@ def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: 
                 tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
             except Exception:
                 pass
-            context.close()
-            browser.close()
+            await context.close()
+            await browser.close()
             if not content.strip():
+                LOG.info("PLAYWRIGHT_FAIL url=%s err=%s", target_url, "empty-content")
                 return {}
+            LOG.info(
+                "PLAYWRIGHT_OK url=%s bytes=%s",
+                target_url,
+                len(content.encode("utf-8")),
+            )
             LOG.debug(
                 "Headless fetch ok for %s (proxy=%s)",
-                domain or _domain(url),
+                domain or _domain(target_url),
                 bool(proxy_url),
             )
             return {
@@ -3941,8 +3980,34 @@ def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: 
                 "final_url": page.url,
             }
     except Exception as exc:  # pragma: no cover - network/env specific
-        LOG.warning("Headless fetch failed for %s (%s)", domain or _domain(url), exc)
+        LOG.warning("PLAYWRIGHT_FAIL url=%s err=%s", target_url, exc)
         return {}
+
+
+def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: str = "") -> Dict[str, Any]:
+    if not HEADLESS_ENABLED or not async_playwright:
+        return {}
+
+    async def _runner() -> Dict[str, Any]:
+        return await _headless_fetch_async(url, proxy_url=proxy_url, domain=domain, reason=reason)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_runner())
+    else:  # pragma: no cover - depends on runtime context
+        result: Dict[str, Any] = {}
+        def _target() -> None:
+            nonlocal result
+            try:
+                result = asyncio.run(_runner())
+            except Exception:
+                LOG.exception("PLAYWRIGHT_FAIL url=%s err=%s", url, "thread-runner")
+                result = {}
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+        t.join()
+        return result
 
 # ───────────────────── Google CSE helpers ─────────────────────
 
