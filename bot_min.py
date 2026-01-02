@@ -1558,6 +1558,10 @@ def _allowed_contact_domains(domain_hint: str) -> Optional[Set[str]]:
 
 def _should_use_playwright_for_contact(dom: str, body: str = "", *, js_hint: bool = False) -> bool:
     domain = _domain(dom)
+    if not domain:
+        return False
+    if domain in _CONTACT_DENYLIST or _blocked(domain):
+        return False
     if domain in PLAYWRIGHT_CONTACT_DOMAINS:
         return True
     if js_hint or domain in CONTACT_JS_DOMAINS:
@@ -4190,6 +4194,10 @@ def _looks_listing_boilerplate(text: str, path: str = "") -> bool:
     return bool(words and hits >= 2 and (hits / max(words, 1)) > 0.01)
 
 
+def _is_social_root(root: str) -> bool:
+    return root in TOP5_SOCIAL_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_SOCIAL_ALLOW)
+
+
 def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
     if not link:
         return False, "no_link"
@@ -4209,20 +4217,25 @@ def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
         return False, "listing_detail"
 
     allow = False
-    if root in TOP5_SOCIAL_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_SOCIAL_ALLOW):
+    allow_reason = ""
+    if _is_social_root(root):
         allow = True
+        allow_reason = "social_allow"
     elif root in TOP5_BROKERAGE_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_BROKERAGE_ALLOW):
         allow = True
+        allow_reason = "brokerage_allow"
     elif any(tok in root for tok in TOP5_DOMAIN_HINT_TOKENS):
         allow = True
+        allow_reason = "domain_hint"
     elif any(tok in path for tok in TOP5_PATH_HINT_TOKENS):
         allow = True
+        allow_reason = "path_hint"
 
     if not allow:
         if relaxed:
             return True, "relaxed_allow"
         return False, "non_agent_domain"
-    return True, "allowed"
+    return True, allow_reason or "allowed"
 
 
 def select_top_5_urls(
@@ -4237,7 +4250,9 @@ def select_top_5_urls(
         filtered: List[str] = []
         rejected: List[Tuple[str, str]] = []
         seen_links: Set[str] = set()
-        for item in items:
+        candidates: List[Tuple[str, bool]] = []
+        max_candidates = max(5, min(len(items), 15))
+        for item in items[:max_candidates]:
             link = ""
             if isinstance(item, str):
                 link = item
@@ -4266,9 +4281,19 @@ def select_top_5_urls(
                 if _looks_listing_boilerplate(text, final_path):
                     rejected.append((final_url, "listing_boilerplate"))
                     continue
-            filtered.append(final_url)
-            if len(filtered) >= 5:
-                break
+            root = _domain(final_url) or _domain(norm) or ""
+            candidates.append((final_url, _is_social_root(root)))
+
+        filtered_candidates = candidates[:5]
+        if filtered_candidates and not any(not is_social for _, is_social in filtered_candidates):
+            fallback = next((cand for cand in candidates[5:] if not cand[1]), None)
+            if fallback:
+                if len(filtered_candidates) >= 5:
+                    filtered_candidates = filtered_candidates[:-1] + [fallback]
+                else:
+                    filtered_candidates.append(fallback)
+
+        filtered = [url for url, _ in filtered_candidates]
         return filtered[:5], rejected
 
     filtered, rejected = _select(relaxed)

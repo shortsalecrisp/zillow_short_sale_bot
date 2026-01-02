@@ -48,6 +48,14 @@ HTTP traffic or subject to web-service auto-suspend. When doing so:
 3) If you cannot run a Worker, either disable auto-suspend (paid plan) or keep the web process warm with an uptime
    monitor so the scheduler thread inside `webhook_server.py` hits each top-of-hour slot.
 
+When building on Render, include the Playwright installation step in your **Build Command** so Chromium is available at runtime:
+
+```
+pip install -r requirements.txt && python -m playwright install --with-deps chromium
+```
+
+If you already use a custom build script, append `python -m playwright install --with-deps chromium` after installing the Python dependencies.
+
 ## Follow-up scheduling
 
 Follow-up passes run during configured work hours. They now skip weekends by default to avoid contacting agents on
