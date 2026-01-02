@@ -595,7 +595,7 @@ def _playwright_browsers_installed() -> bool:
     patterns = (
         "chromium-*/chrome-linux/chrome",
         "chromium-*/chrome-win/chrome.exe",
-        "chromium-*/chrome-mac/*/Chromium.app/Contents/MacOS/Chromium",
+        "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
         "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
     )
     for root in _playwright_browser_roots():
