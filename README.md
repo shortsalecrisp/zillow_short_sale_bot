@@ -55,6 +55,8 @@ pip install -r requirements.txt && python -m playwright install --with-deps chro
 ```
 
 If you already use a custom build script, append `python -m playwright install --with-deps chromium` after installing the Python dependencies.
+If you see `PLAYWRIGHT_MISSING` in the logs, your build is skipping the install step above; add it so headless reviews run.
+Set `HEADLESS_FALLBACK=true` (default) to keep Playwright enabled, or expect `PLAYWRIGHT_DISABLED` warnings otherwise.
 
 ## Follow-up scheduling
 

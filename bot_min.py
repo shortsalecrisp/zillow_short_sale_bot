@@ -563,6 +563,27 @@ logging.basicConfig(
     force=True,
 )
 LOG = logging.getLogger("bot_min")
+_playwright_status_logged = False
+
+
+def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
+    """Emit a one-time status line explaining whether Playwright will run."""
+    global _playwright_status_logged
+    if _playwright_status_logged:
+        return
+    _playwright_status_logged = True
+    sink = logger or LOG
+    if not HEADLESS_ENABLED:
+        sink.warning(
+            "PLAYWRIGHT_DISABLED HEADLESS_FALLBACK=false – set HEADLESS_FALLBACK=true to enable headless reviews"
+        )
+        return
+    if async_playwright is None:
+        sink.warning(
+            "PLAYWRIGHT_MISSING playwright not installed – install with `python -m playwright install --with-deps chromium`"
+        )
+        return
+    sink.info("PLAYWRIGHT_READY headless reviews enabled (HEADLESS_FALLBACK=%s)", HEADLESS_ENABLED)
 
 # ───────────────────── regexes & misc helpers ─────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
@@ -8096,6 +8117,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
 
 # ───────────────────── main entry point & scheduler ─────────────────────
 if __name__ == "__main__":
+    log_headless_status()
     try:
         stdin_txt = sys.stdin.read().strip()
         payload = json.loads(stdin_txt) if stdin_txt else None
