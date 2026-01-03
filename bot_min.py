@@ -3173,8 +3173,8 @@ def _contact_cse_queries(
     brokerage: str = "",
     domain_hint: str = "",
 ) -> Tuple[List[str], List[str]]:
-    agent_norm = _normalize_agent_for_query(agent)
-    one_query = _compact_tokens(f'"{agent_norm}"', "realtor", state)
+    city = str(row_payload.get("city") or "").strip()
+    one_query = _compact_tokens(f'"{agent}"', "realtor", city, state)
     return [one_query], []
 
 
@@ -3249,6 +3249,7 @@ def _contact_search_urls(
                     raw_results,
                     fetch_check=fetch_ok,
                     relaxed=relaxed_mode,
+                    property_state=state,
                 )
                 if not selected_urls and _cse_last_state in {"blocked", "throttled", "disabled"}:
                     fallback_results, blocked = duckduckgo_search(
@@ -3264,6 +3265,7 @@ def _contact_search_urls(
                         fallback_results,
                         fetch_check=fetch_ok,
                         relaxed=relaxed_mode,
+                        property_state=state,
                     )
                     if fb_selected:
                         selected_urls = fb_selected
@@ -3284,6 +3286,7 @@ def _contact_search_urls(
                     fallback_results,
                     fetch_check=fetch_ok,
                     relaxed=relaxed_mode,
+                    property_state=state,
                 )
             cse_status = _cse_last_state if engine == "google" else cse_status or engine
             search_empty = not bool(selected_urls)
@@ -3349,7 +3352,12 @@ def _phone_candidates_from_email_search(
             continue
         try:
             results = google_cse_search(query, limit=CONTACT_CSE_FETCH_LIMIT)
-            selected, _ = select_top_5_urls(results, fetch_check=True, relaxed=False)
+            selected, _ = select_top_5_urls(
+                results,
+                fetch_check=True,
+                relaxed=False,
+                property_state=state,
+            )
             if not selected and _cse_last_state in {"blocked", "throttled", "disabled"}:
                 fallback_results, _ = duckduckgo_search(
                     query,
@@ -3357,7 +3365,12 @@ def _phone_candidates_from_email_search(
                     allowed_domains=None,
                     with_blocked=False,
                 )
-                selected, _ = select_top_5_urls(fallback_results, fetch_check=True, relaxed=True)
+                selected, _ = select_top_5_urls(
+                    fallback_results,
+                    fetch_check=True,
+                    relaxed=True,
+                    property_state=state,
+                )
             for url in selected:
                 page, _ = fetch_contact_page(url)
                 if not page:
@@ -4354,13 +4367,123 @@ def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
     return True, allow_reason or "allowed"
 
 
+US_STATE_ABBR = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC",
+}
+_STATE_NAME_MAP = {
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
+    "district of columbia": "DC",
+}
+_STATE_PATTERN = re.compile(r"\b(" + "|".join(sorted(US_STATE_ABBR)) + r")\b")
+_STATE_ZIP_PATTERN = re.compile(r"\b(" + "|".join(sorted(US_STATE_ABBR)) + r")[\s,]+\d{5}(?:-\d{4})?\b")
+_STATE_NAME_PATTERN = re.compile(r"\b(" + "|".join(re.escape(k) for k in _STATE_NAME_MAP.keys()) + r")\b", re.IGNORECASE)
+
+
+def _state_hints_from_url(link: str) -> Set[str]:
+    hints: Set[str] = set()
+    if not link:
+        return hints
+    parsed = urlparse(link)
+    for segment in parsed.path.split("/"):
+        seg_clean = segment.strip()
+        if len(seg_clean) == 2 and seg_clean.isupper() and seg_clean in US_STATE_ABBR:
+            hints.add(seg_clean)
+        for part in seg_clean.split("-"):
+            part_clean = part.strip().upper()
+            if len(part_clean) == 2 and part_clean in US_STATE_ABBR:
+                hints.add(part_clean)
+    return hints
+
+
+def _state_hints_from_text(text: str) -> Set[str]:
+    hints: Set[str] = set()
+    if not text:
+        return hints
+    for regex in (_STATE_ZIP_PATTERN, _STATE_PATTERN):
+        for match in regex.finditer(text):
+            token = match.group(1).upper()
+            if token in US_STATE_ABBR:
+                hints.add(token)
+    for match in _STATE_NAME_PATTERN.finditer(text):
+        abbr = _STATE_NAME_MAP.get(match.group(1).lower())
+        if abbr:
+            hints.add(abbr)
+    return hints
+
+
+def _state_mismatch(link: str, text: str, property_state: str) -> bool:
+    state = property_state.strip().upper()
+    if not state:
+        return False
+    hints = _state_hints_from_url(link)
+    hints.update(_state_hints_from_text(text))
+    if not hints:
+        return False
+    return state not in hints
+
+
 def select_top_5_urls(
     results: Iterable[Dict[str, Any] | str],
     *,
     fetch_check: bool = True,
     relaxed: bool = False,
+    property_state: str = "",
 ) -> Tuple[List[str], List[Tuple[str, str]]]:
     items = list(results)
+    property_state = property_state.strip().upper()
 
     def _select(relax: bool) -> Tuple[List[str], List[Tuple[str, str]]]:
         filtered: List[str] = []
@@ -4396,6 +4519,9 @@ def select_top_5_urls(
                 final_path = urlparse(final_url).path.lower()
                 if _looks_listing_boilerplate(text, final_path):
                     rejected.append((final_url, "listing_boilerplate"))
+                    continue
+                if property_state and _state_mismatch(final_url, text, property_state):
+                    rejected.append((final_url, "state_mismatch"))
                     continue
             root = _domain(final_url) or _domain(norm) or ""
             candidates.append((final_url, _is_social_root(root)))
