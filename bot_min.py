@@ -1676,6 +1676,8 @@ def _should_use_playwright_for_contact(dom: str, body: str = "", *, js_hint: boo
     domain = _domain(dom)
     if not domain:
         return False
+    if domain in _ALWAYS_SKIP_DOMAINS:
+        return False
     if domain in _CONTACT_DENYLIST or _blocked(domain):
         return False
     if domain in PLAYWRIGHT_CONTACT_DOMAINS:
@@ -1792,6 +1794,9 @@ def _contact_source_allowed(
 
 def _should_fetch(url: str, strict: bool = True) -> bool:
     dom = _domain(url)
+    if dom in _ALWAYS_SKIP_DOMAINS:
+        _mark_block(dom, reason="always_skip")
+        return False
     if _blocked(dom):
         return False
     if strict and dom in _CONTACT_DENYLIST:
@@ -1915,6 +1920,7 @@ _CONTACT_DENYLIST = {
     "apartments.com",
     "zillow.com",
 }
+_ALWAYS_SKIP_DOMAINS = {"zillow.com", "www.zillow.com", "realtor.com", "www.realtor.com"}
 _REALTOR_MAX_RETRIES = int(os.getenv("REALTOR_MAX_RETRIES", "5"))
 _REALTOR_BACKOFF_BASE = float(os.getenv("REALTOR_BACKOFF_BASE", "3.0"))
 _REALTOR_BACKOFF_CAP = float(os.getenv("REALTOR_BACKOFF_CAP", "20.0"))
@@ -3185,7 +3191,7 @@ def _contact_search_urls(
     *,
     domain_hint: str = "",
     brokerage: str = "",
-    limit: int = 5,
+    limit: int = 10,
     include_exhausted: bool = False,
     engine: str = "google",
 ) -> Tuple[List[str], bool, str] | Tuple[List[str], bool, str, bool]:
@@ -3195,7 +3201,7 @@ def _contact_search_urls(
     case (urls, search_empty, cse_status, search_exhausted) is returned.
     """
 
-    limit = 5
+    limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
     top5_log = row_payload.setdefault("_top5_log", {})
     strict_queries, _ = _contact_cse_queries(
         agent,
@@ -3250,6 +3256,7 @@ def _contact_search_urls(
                     fetch_check=fetch_ok,
                     relaxed=relaxed_mode,
                     property_state=state,
+                    limit=limit,
                 )
                 if not selected_urls and _cse_last_state in {"blocked", "throttled", "disabled"}:
                     fallback_results, blocked = duckduckgo_search(
@@ -3266,6 +3273,7 @@ def _contact_search_urls(
                         fetch_check=fetch_ok,
                         relaxed=relaxed_mode,
                         property_state=state,
+                        limit=limit,
                     )
                     if fb_selected:
                         selected_urls = fb_selected
@@ -3287,6 +3295,7 @@ def _contact_search_urls(
                     fetch_check=fetch_ok,
                     relaxed=relaxed_mode,
                     property_state=state,
+                    limit=limit,
                 )
             cse_status = _cse_last_state if engine == "google" else cse_status or engine
             search_empty = not bool(selected_urls)
@@ -3613,14 +3622,20 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                     row_payload,
                     domain_hint=domain_hint or brokerage,
                     brokerage=brokerage,
-                    limit=5,
+                    limit=SEARCH_CONTACT_URL_LIMIT,
                     include_exhausted=True,
                     engine="duckduckgo",
                 )
             )
             row_payload["_duckduckgo_search_done"] = True
         search_exhausted = search_exhausted or fallback_exhausted
-        ranked_fallback = _rank_urls(fallback_urls, agent, brokerage, domain_hint=domain_hint, limit=5)
+        ranked_fallback = _rank_urls(
+            fallback_urls,
+            agent,
+            brokerage,
+            domain_hint=domain_hint,
+            limit=SEARCH_CONTACT_URL_LIMIT,
+        )
         if ranked_fallback:
             search_disabled = True
             _enqueue(ranked_fallback)
@@ -3732,7 +3747,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 row_payload,
                 domain_hint=domain_hint or brokerage,
                 brokerage=brokerage,
-                limit=5,
+                limit=SEARCH_CONTACT_URL_LIMIT,
                 include_exhausted=True,
             )
         )
@@ -3803,7 +3818,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                     row_payload,
                     domain_hint=domain_hint or brokerage,
                     brokerage=brokerage,
-                    limit=5,
+                    limit=SEARCH_CONTACT_URL_LIMIT,
                     include_exhausted=True,
                     engine="duckduckgo",
                 )
@@ -4481,8 +4496,10 @@ def select_top_5_urls(
     fetch_check: bool = True,
     relaxed: bool = False,
     property_state: str = "",
+    limit: int = 10,
 ) -> Tuple[List[str], List[Tuple[str, str]]]:
     items = list(results)
+    limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
     property_state = property_state.strip().upper()
 
     def _select(relax: bool) -> Tuple[List[str], List[Tuple[str, str]]]:
@@ -4490,7 +4507,7 @@ def select_top_5_urls(
         rejected: List[Tuple[str, str]] = []
         seen_links: Set[str] = set()
         candidates: List[Tuple[str, bool]] = []
-        max_candidates = max(5, min(len(items), 15))
+        max_candidates = max(limit, min(len(items), 15))
         for item in items[:max_candidates]:
             link = ""
             if isinstance(item, str):
@@ -4526,17 +4543,17 @@ def select_top_5_urls(
             root = _domain(final_url) or _domain(norm) or ""
             candidates.append((final_url, _is_social_root(root)))
 
-        filtered_candidates = candidates[:5]
+        filtered_candidates = candidates[:limit]
         if filtered_candidates and not any(not is_social for _, is_social in filtered_candidates):
-            fallback = next((cand for cand in candidates[5:] if not cand[1]), None)
+            fallback = next((cand for cand in candidates[limit:] if not cand[1]), None)
             if fallback:
-                if len(filtered_candidates) >= 5:
+                if len(filtered_candidates) >= limit:
                     filtered_candidates = filtered_candidates[:-1] + [fallback]
                 else:
                     filtered_candidates.append(fallback)
 
         filtered = [url for url, _ in filtered_candidates]
-        return filtered[:5], rejected
+        return filtered[:limit], rejected
 
     filtered, rejected = _select(relaxed)
     if not filtered and not relaxed:
@@ -4544,12 +4561,12 @@ def select_top_5_urls(
         if filtered_relaxed:
             filtered = filtered_relaxed
             rejected.extend(rejected_relaxed)
-    return filtered[:5], rejected
+    return filtered[:limit], rejected
 
 
 def google_cse_search(
     query: str,
-    limit: int = 5,
+    limit: int = 10,
     *,
     allowed_domains: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
@@ -4563,7 +4580,7 @@ def google_cse_search(
         LOG.warning("Skipping Google CSE for %s due to active block", query)
         return []
 
-    limit = 5
+    limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
     results: List[Dict[str, Any]] = []
     attempts = 0
     seen_throttled = False
@@ -4603,11 +4620,11 @@ def google_cse_search(
                 results.append({"link": link})
                 if len(results) >= limit:
                     break
-            if len(items) < 5:
-                LOG.info("CSE fallback triggered cse_items=%d", len(items))
+            if len(items) < limit:
+                LOG.info("CSE fallback triggered cse_items=%d limit=%d", len(items), limit)
                 fallback_results, blocked = duckduckgo_search(
                     query,
-                    limit=5,
+                    limit=limit,
                     allowed_domains=allowed_domains,
                     with_blocked=True,
                 )
@@ -4648,7 +4665,7 @@ def google_cse_search(
             if attempts >= max_attempts:
                 _record_timeout("google_cse")
         _search_sleep()
-    if fallback_results and len(results) < 5:
+    if fallback_results and len(results) < limit:
         for item in fallback_results:
             link = item.get("link", "")
             if not link or not _filter_allowed(link, allowed_domains):
@@ -4656,7 +4673,7 @@ def google_cse_search(
             if link in [r.get("link") for r in results]:
                 continue
             results.append({"link": link})
-            if len(results) >= 5:
+            if len(results) >= limit:
                 break
     if not results and _cse_last_state == "idle":
         _cse_last_state = "throttled" if seen_throttled else "no_results"
@@ -4684,7 +4701,7 @@ def _safe_google_items(q: str, *, tries: int = 3) -> List[Dict[str, Any]]:
 
 def duckduckgo_search(
     query: str,
-    limit: int = 5,
+    limit: int = 10,
     *,
     allowed_domains: Optional[Set[str]] = None,
     with_blocked: bool = False,
@@ -4702,7 +4719,7 @@ def duckduckgo_search(
     return (hits, blocked) if with_blocked else hits
 
 
-def bing_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+def bing_search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
     links = jina_cached_search(query, max_results=limit)
     return [{"link": link} for link in links if link]
 
@@ -5733,7 +5750,7 @@ PHONE_SOURCE_BASE = {
 
 
 MAX_CONTACT_URLS = 15
-SEARCH_CONTACT_URL_LIMIT = 6
+SEARCH_CONTACT_URL_LIMIT = 10
 
 
 def _build_trusted_domains(agent: str, urls: Iterable[str]) -> Set[str]:
@@ -6374,7 +6391,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 row_payload,
                 domain_hint=domain_hint or brokerage_hint,
                 brokerage=brokerage_hint,
-                limit=5,
+                limit=SEARCH_CONTACT_URL_LIMIT,
                 include_exhausted=True,
             )
         )
@@ -7352,7 +7369,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 row_payload,
                 domain_hint=domain_hint or brokerage,
                 brokerage=brokerage,
-                limit=5,
+                limit=SEARCH_CONTACT_URL_LIMIT,
                 include_exhausted=True,
             )
         )
