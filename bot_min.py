@@ -4582,10 +4582,55 @@ def google_cse_search(
 
     limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
     results: List[Dict[str, Any]] = []
+    seen_results: Set[str] = set()
     attempts = 0
     seen_throttled = False
+    seen_http_error = False
     max_attempts = max(1, min(len(_CSE_CRED_POOL), CSE_MAX_ATTEMPTS))
     fallback_results: List[Dict[str, Any]] = []
+
+    def _fetch_cse_page(
+        start: int,
+        num: int,
+        key: str,
+        cx: str,
+    ) -> Dict[str, Any]:
+        params = {
+            "q": query,
+            "key": key,
+            "cx": cx,
+            "num": max(1, min(num, 10)),
+        }
+        if start > 1:
+            params["start"] = start
+        try:
+            resp = _http_get(
+                "https://www.googleapis.com/customsearch/v1",
+                params=params,
+                timeout=12,
+                rotate_user_agent=True,
+            )
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", 0)
+            LOG.warning(
+                "CSE HTTP error status=%s query=%r start=%d num=%d",
+                status or "unknown",
+                query,
+                start,
+                params["num"],
+            )
+            if params["num"] != 10:
+                params["num"] = 10
+                resp = _http_get(
+                    "https://www.googleapis.com/customsearch/v1",
+                    params=params,
+                    timeout=12,
+                    rotate_user_agent=True,
+                )
+            else:
+                raise
+        return resp.json() if resp is not None else {}
+
     for _ in range(max_attempts):
         key, cx = _next_cse_creds()
         if not key or not cx:
@@ -4598,30 +4643,36 @@ def google_cse_search(
             if gap < CSE_PER_KEY_MIN_INTERVAL:
                 time.sleep((CSE_PER_KEY_MIN_INTERVAL - gap) + random.uniform(0.05, 0.2))
         try:
-            num_param = max(5, min(limit, 15))
-            resp = _http_get(
-                "https://www.googleapis.com/customsearch/v1",
-                params={
-                    "q": query,
-                    "key": key,
-                    "cx": cx,
-                    "num": num_param,
-                },
-                timeout=12,
-                rotate_user_agent=True,
-            )
-            payload = resp.json() if resp is not None else {}
-            _cse_last_ts_per_key[(key, cx)] = time.time()
-            items = payload.get("items", []) or []
-            for item in items:
-                link = item.get("link")
+            pages = [(1, min(limit, 10))]
+            if limit > 10:
+                pages.append((11, min(limit - 10, 10)))
+            raw_links: List[str] = []
+            seen_raw_links: Set[str] = set()
+            for start, num_param in pages:
+                payload = _fetch_cse_page(start, num_param, key, cx)
+                _cse_last_ts_per_key[(key, cx)] = time.time()
+                items = payload.get("items", []) or []
+                for item in items:
+                    link = item.get("link")
+                    if not link:
+                        continue
+                    norm = normalize_url(link)
+                    if norm in seen_raw_links:
+                        continue
+                    seen_raw_links.add(norm)
+                    raw_links.append(link)
+            for link in raw_links:
                 if not link or not _filter_allowed(link, allowed_domains):
                     continue
+                norm = normalize_url(link)
+                if norm in seen_results:
+                    continue
+                seen_results.add(norm)
                 results.append({"link": link})
                 if len(results) >= limit:
                     break
-            if len(items) < limit:
-                LOG.info("CSE fallback triggered cse_items=%d limit=%d", len(items), limit)
+            if len(raw_links) < limit:
+                LOG.info("CSE fallback triggered cse_items=%d limit=%d", len(raw_links), limit)
                 fallback_results, blocked = duckduckgo_search(
                     query,
                     limit=limit,
@@ -4652,6 +4703,7 @@ def google_cse_search(
             break
         except requests.HTTPError as exc:
             status = getattr(exc.response, "status_code", 0)
+            seen_http_error = True
             if status in (403, 429):
                 seen_throttled = True
                 retry_after = exc.response.headers.get("Retry-After") if exc.response else None
@@ -4670,13 +4722,18 @@ def google_cse_search(
             link = item.get("link", "")
             if not link or not _filter_allowed(link, allowed_domains):
                 continue
-            if link in [r.get("link") for r in results]:
+            norm = normalize_url(link)
+            if norm in seen_results:
                 continue
+            seen_results.add(norm)
             results.append({"link": link})
             if len(results) >= limit:
                 break
     if not results and _cse_last_state == "idle":
-        _cse_last_state = "throttled" if seen_throttled else "no_results"
+        if seen_http_error:
+            _cse_last_state = "error"
+        else:
+            _cse_last_state = "throttled" if seen_throttled else "no_results"
     return results[:limit]
 
 
