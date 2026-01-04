@@ -30,8 +30,10 @@ from googleapiclient.discovery import build as gapi_build
 from sms_providers import get_sender
 try:
     from playwright.async_api import async_playwright
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 except ImportError:  # pragma: no cover - optional dependency
     async_playwright = None
+    PlaywrightTimeoutError = None  # type: ignore
 try:
     import dns.resolver  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -92,6 +94,7 @@ _ACCEPT_LANGUAGE_POOL = [
 HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "12000"))
 HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
+HEADLESS_FACEBOOK_TIMEOUT_MS = int(os.getenv("HEADLESS_FACEBOOK_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS + 8000)))
 HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
 AUTO_INSTALL_PLAYWRIGHT = os.getenv("AUTO_INSTALL_PLAYWRIGHT", "true").lower() == "true"
 PLAYWRIGHT_INSTALL_TIMEOUT = int(os.getenv("PLAYWRIGHT_INSTALL_TIMEOUT", "240"))
@@ -1024,11 +1027,21 @@ def clean_email(e: str) -> str:
 
 def ok_email(e: str) -> bool:
     e = clean_email(e)
-    return (
-        e and "@" in e
-        and not e.lower().endswith(IMG_EXT)
-        and not re.search(r"\.(gov|edu|mil)$", e, re.I)
-    )
+    if not e or "@" not in e:
+        return False
+    if e.startswith("@"):
+        return False
+    if e.lower().endswith(IMG_EXT):
+        return False
+    local, _, domain = e.rpartition("@")
+    if not (local and domain and "." in domain):
+        return False
+    tld = domain.rsplit(".", 1)[-1]
+    if not (2 <= len(tld) <= 8 and re.fullmatch(r"[A-Za-z]{2,8}", tld)):
+        return False
+    if re.search(r"\.(gov|edu|mil)$", domain, re.I):
+        return False
+    return True
 
 
 def _normalize_obfuscated_email_text(text: str) -> str:
@@ -4098,6 +4111,36 @@ async def _headless_fetch_async(
     if not HEADLESS_ENABLED or not async_playwright:
         return {}
     target_url = _unwrap_jina_url(url)
+    nav_timeout = HEADLESS_FACEBOOK_TIMEOUT_MS if "facebook.com" in target_url else HEADLESS_TIMEOUT_MS
+
+    async def _progressive_scroll(page) -> None:
+        for _ in range(3):
+            try:
+                await page.mouse.wheel(0, 1800)
+            except Exception:
+                break
+            await page.wait_for_timeout(400)
+
+    async def _expand_facebook(page) -> None:
+        try:
+            await _progressive_scroll(page)
+            labels = ("About", "Contact info", "Contact", "About info", "See more")
+            for label in labels:
+                try:
+                    locator = page.get_by_role("button", name=re.compile(label, re.I))  # type: ignore[attr-defined]
+                    await locator.first.click(timeout=1500)
+                    await page.wait_for_timeout(450)
+                    continue
+                except Exception:
+                    pass
+                try:
+                    locator = page.locator(f"text={label}")
+                    await locator.first.click(timeout=1500)
+                    await page.wait_for_timeout(450)
+                except Exception:
+                    continue
+        except Exception:
+            return
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -4122,40 +4165,65 @@ async def _headless_fetch_async(
                 bool(proxy_url),
             )
             try:
-                await page.goto(target_url, wait_until="domcontentloaded", timeout=HEADLESS_TIMEOUT_MS)
+                try:
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=nav_timeout)
+                except Exception as exc:
+                    if PlaywrightTimeoutError and isinstance(exc, PlaywrightTimeoutError):
+                        LOG.warning("PLAYWRIGHT_TIMEOUT first nav url=%s err=%s", target_url, exc)
+                        try:
+                            await page.goto(
+                                target_url,
+                                wait_until="networkidle",
+                                timeout=min(nav_timeout + 6000, nav_timeout * 2),
+                            )
+                        except Exception as exc2:
+                            LOG.warning("PLAYWRIGHT_FAIL retry url=%s err=%s", target_url, exc2)
+                            await context.close()
+                            await browser.close()
+                            return {}
+                    else:
+                        LOG.warning("PLAYWRIGHT_FAIL url=%s err=%s", target_url, exc)
+                        await context.close()
+                        await browser.close()
+                        return {}
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
                 await page.wait_for_timeout(HEADLESS_WAIT_MS)
-            except Exception as exc:
-                LOG.warning(
-                    "PLAYWRIGHT_FAIL url=%s err=%s",
-                    target_url,
-                    exc,
-                )
-                await context.close()
-                await browser.close()
-                return {}
-            try:
-                content = await page.content() or ""
+                await _progressive_scroll(page)
+                if "facebook.com" in (domain or _domain(target_url) or ""):
+                    await _expand_facebook(page)
+                    await page.wait_for_timeout(600)
             except Exception as exc:
                 LOG.warning("PLAYWRIGHT_FAIL url=%s err=%s", target_url, exc)
                 await context.close()
                 await browser.close()
                 return {}
-            visible_text = ""
+
             try:
-                visible_text = await page.inner_text("body", timeout=2000) or ""
-            except Exception:
+                content = await page.content() or ""
                 visible_text = ""
-            mail_links: List[str] = []
-            tel_links: List[str] = []
-            try:
-                hrefs = await page.eval_on_selector_all(
-                    "a[href]",
-                    "els => els.map(el => el.getAttribute('href') || '')",
-                ) or []
-                mail_links = [h for h in hrefs if h and h.lower().startswith("mailto:")]
-                tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
-            except Exception:
-                pass
+                try:
+                    visible_text = await page.inner_text("body", timeout=2000) or ""
+                except Exception:
+                    visible_text = ""
+                mail_links: List[str] = []
+                tel_links: List[str] = []
+                try:
+                    hrefs = await page.eval_on_selector_all(
+                        "a[href]",
+                        "els => els.map(el => el.getAttribute('href') || '')",
+                    ) or []
+                    mail_links = [h for h in hrefs if h and h.lower().startswith("mailto:")]
+                    tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
+                except Exception:
+                    pass
+            except Exception as exc:
+                LOG.warning("PLAYWRIGHT_FAIL url=%s err=%s", target_url, exc)
+                await context.close()
+                await browser.close()
+                return {}
             await context.close()
             await browser.close()
             if not content.strip():
@@ -4393,6 +4461,20 @@ def _looks_listing_boilerplate(text: str, path: str = "") -> bool:
 def _is_social_root(root: str) -> bool:
     return root in TOP5_SOCIAL_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_SOCIAL_ALLOW)
 
+def _low_signal_social_path(root: str, path: str) -> bool:
+    if not _is_social_root(root):
+        return False
+    low_terms = (
+        "/reel",
+        "/reels",
+        "/stories",
+        "/story",
+        "/watch",
+        "/explore",
+        "/search",
+    )
+    return any(term in path for term in low_terms)
+
 
 def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
     if not link:
@@ -4411,6 +4493,10 @@ def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
         return False, "pdf"
     if _listing_path_blocked(path):
         return False, "listing_detail"
+    if _low_signal_social_path(root, path):
+        return False, "social_low_signal"
+    if path in {"/search", "/results"} or "/search?" in link:
+        return False, "search_page"
 
     allow = False
     allow_reason = ""
@@ -4579,19 +4665,12 @@ def select_top_5_urls(
         normalize_url(u) for u in (existing or []) if u
     }
 
-    def _needs_more(candidates: List[Tuple[str, bool]]) -> bool:
-        if len(candidates) < target:
-            return True
-        first_slice = candidates[:target]
-        return bool(first_slice) and all(is_social for _, is_social in first_slice)
-
     def _select(relax: bool) -> Tuple[List[str], List[Tuple[str, str]]]:
         rejected: List[Tuple[str, str]] = []
         seen_links: Set[str] = set(existing_norms)
         candidates: List[Tuple[str, bool]] = []
+        overflow: List[Tuple[str, bool]] = []
         for item in items:
-            if not _needs_more(candidates):
-                break
             link = ""
             snippet = ""
             title = ""
@@ -4635,19 +4714,25 @@ def select_top_5_urls(
                     rejected.append((final_url, "state_mismatch"))
                     continue
             root = _domain(final_url) or _domain(norm) or ""
-            candidates.append((final_url, _is_social_root(root)))
+            entry = (final_url, _is_social_root(root))
+            if len(candidates) < target:
+                candidates.append(entry)
+            else:
+                overflow.append(entry)
 
-        filtered_candidates = candidates[:target]
-        if filtered_candidates and not any(not is_social for _, is_social in filtered_candidates):
-            fallback = next((cand for cand in candidates[target:] if not cand[1]), None)
-            if fallback:
-                if len(filtered_candidates) >= target:
-                    filtered_candidates = filtered_candidates[:-1] + [fallback]
-                else:
-                    filtered_candidates.append(fallback)
+        def _merge_with_preference() -> List[Tuple[str, bool]]:
+            preferred: List[Tuple[str, bool]] = []
+            all_candidates = candidates + overflow
+            non_social = [c for c in all_candidates if not c[1]]
+            social = [c for c in all_candidates if c[1]]
+            preferred.extend(non_social[:target])
+            if len(preferred) < target:
+                preferred.extend(social[: target - len(preferred)])
+            return preferred[:target]
 
+        filtered_candidates = _merge_with_preference()
         filtered = [url for url, _ in filtered_candidates]
-        return filtered[:target], rejected
+        return filtered, rejected
 
     filtered, rejected = _select(relaxed)
     if (len(filtered) < target) and not relaxed:
