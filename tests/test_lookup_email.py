@@ -375,3 +375,41 @@ def test_enrich_contact_uses_js_rendered_contact_page(monkeypatch):
     assert captured == ["https://dynamic.example/contact"]
     assert result["best_email"] == "alex.agent@dynamic.com"
     assert result["best_phone"] == "555-888-9999"
+
+
+def test_ok_email_rejects_social_handles_and_needs_domain():
+    assert not bot_min.ok_email("@j.ziegelbaum")
+    assert not bot_min.ok_email("agent@instagram")
+    assert bot_min.ok_email("agent@example.com")
+
+
+def test_select_top_5_prioritizes_non_social_and_filters_low_signal(monkeypatch):
+    items = [
+        {"link": "https://www.instagram.com/reel/abc123"},
+        {"link": "https://www.facebook.com/search/top?q=josh"},
+        {"link": "https://agent-site.com/profile/josh-agent"},
+        {"link": "https://broker.com/team/josh"},
+        {"link": "https://homes.example.com/agents/josh"},
+        {"link": "https://team.example.com/contact"},
+        {"link": "https://www.facebook.com/josh.agent"},
+    ]
+
+    def fake_fetch(url, ttl_days=7):
+        return {"extracted_text": "profile page", "http_status": 200, "final_url": url}
+
+    monkeypatch.setattr(bot_min, "fetch_text_cached", fake_fetch)
+
+    selected, rejected = bot_min.select_top_5_urls(
+        items,
+        fetch_check=True,
+        property_state="",
+        property_city="",
+        limit=10,
+    )
+
+    assert len(selected) == 5
+    assert not any("instagram.com/reel" in url for url in selected)
+    assert not any("facebook.com/search" in url for url in selected)
+    assert selected[:4] and all(
+        not bot_min._is_social_root(bot_min._domain(url) or "") for url in selected[:4]
+    )
