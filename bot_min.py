@@ -3184,6 +3184,10 @@ def _contact_cse_queries(
     return [one_query], []
 
 
+def _broaden_contact_query(agent: str, state: str, city: str, brokerage: str) -> str:
+    return _compact_tokens(f'"{agent}"', state, city, "email", brokerage, "contact")
+
+
 def _contact_search_urls(
     agent: str,
     state: str,
@@ -3202,6 +3206,8 @@ def _contact_search_urls(
     """
 
     limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
+    target_count = min(limit, 5)
+    city = str(row_payload.get("city") or "").strip()
     top5_log = row_payload.setdefault("_top5_log", {})
     strict_queries, _ = _contact_cse_queries(
         agent,
@@ -3230,11 +3236,14 @@ def _contact_search_urls(
             raw_results: List[Dict[str, Any]] = []
             fallback_results: List[Dict[str, Any]] = []
             selected_urls: List[str] = []
+            broadened_used = False
             if engine == "google":
+                used_queries: List[str] = []
                 raw_results = google_cse_search(
                     query,
                     limit=CONTACT_CSE_FETCH_LIMIT,
                 )
+                used_queries.append(query)
                 fetch_ok = _cse_last_state not in {"disabled"}
                 relaxed_mode = _cse_last_state in {"disabled"}
                 if not raw_results and _cse_last_state == "disabled":
@@ -3256,28 +3265,61 @@ def _contact_search_urls(
                     fetch_check=fetch_ok,
                     relaxed=relaxed_mode,
                     property_state=state,
-                    limit=limit,
+                    property_city=city,
+                    limit=target_count,
+                    location_hint=query,
                 )
-                if not selected_urls and _cse_last_state in {"blocked", "throttled", "disabled"}:
-                    fallback_results, blocked = duckduckgo_search(
-                        query,
-                        limit=CONTACT_CSE_FETCH_LIMIT,
-                        allowed_domains=None,
-                        with_blocked=True,
-                    )
-                    if blocked:
-                        _mark_block("duckduckgo.com", reason="blocked")
-                    cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
-                    fb_selected, fb_rejected = select_top_5_urls(
-                        fallback_results,
-                        fetch_check=fetch_ok,
-                        relaxed=relaxed_mode,
-                        property_state=state,
-                        limit=limit,
-                    )
-                    if fb_selected:
-                        selected_urls = fb_selected
-                    rejected_urls.extend(fb_rejected)
+                if len(selected_urls) < target_count:
+                    broadened_query = _broaden_contact_query(agent, state, city, brokerage)
+                    if broadened_query and broadened_query not in used_queries:
+                        used_queries.append(broadened_query)
+                        broadened_results = google_cse_search(
+                            broadened_query,
+                            limit=CONTACT_CSE_FETCH_LIMIT,
+                        )
+                        broadened_selected, broadened_rejected = select_top_5_urls(
+                            broadened_results,
+                            fetch_check=fetch_ok,
+                            relaxed=relaxed_mode,
+                            property_state=state,
+                            property_city=city,
+                            limit=target_count,
+                            existing=selected_urls,
+                            location_hint=broadened_query,
+                        )
+                        broadened_used = bool(broadened_selected or broadened_results)
+                        rejected_urls.extend(broadened_rejected)
+                        for url in broadened_selected:
+                            if url not in selected_urls:
+                                selected_urls.append(url)
+                if len(selected_urls) < target_count and _cse_last_state in {"blocked", "throttled", "disabled"}:
+                    ddg_queries = used_queries or [query]
+                    for ddg_query in ddg_queries:
+                        fallback_results, blocked = duckduckgo_search(
+                            ddg_query,
+                            limit=CONTACT_CSE_FETCH_LIMIT,
+                            allowed_domains=None,
+                            with_blocked=True,
+                        )
+                        if blocked:
+                            _mark_block("duckduckgo.com", reason="blocked")
+                        cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
+                        fb_selected, fb_rejected = select_top_5_urls(
+                            fallback_results,
+                            fetch_check=fetch_ok,
+                            relaxed=relaxed_mode,
+                            property_state=state,
+                            property_city=city,
+                            limit=target_count,
+                            existing=selected_urls,
+                            location_hint=ddg_query,
+                        )
+                        rejected_urls.extend(fb_rejected)
+                        for url in fb_selected:
+                            if url not in selected_urls:
+                                selected_urls.append(url)
+                        if len(selected_urls) >= target_count:
+                            break
             elif engine in {"duckduckgo", "jina"}:
                 fetch_ok = _cse_last_state not in {"disabled"}
                 relaxed_mode = _cse_last_state in {"disabled"}
@@ -3295,19 +3337,26 @@ def _contact_search_urls(
                     fetch_check=fetch_ok,
                     relaxed=relaxed_mode,
                     property_state=state,
-                    limit=limit,
+                    property_city=city,
+                    limit=target_count,
+                    location_hint=query,
                 )
-            cse_status = _cse_last_state if engine == "google" else cse_status or engine
+            if engine == "google":
+                cse_status = _cse_last_state
+                if broadened_used:
+                    cse_status = f"{cse_status}-broadened"
+            else:
+                cse_status = cse_status or engine
             search_empty = not bool(selected_urls)
             urls = selected_urls
             if selected_urls or rejected_urls:
                 top5_log[engine] = {
-                    "urls": selected_urls[:limit],
+                    "urls": selected_urls[:target_count],
                     "rejected": rejected_urls,
                 }
                 LOG.info(
                     "TOP5_SELECTED urls=%s rejected=%s",
-                    selected_urls[:limit],
+                    selected_urls[:target_count],
                     rejected_urls,
                 )
         search_exhausted = True
@@ -3366,6 +3415,7 @@ def _phone_candidates_from_email_search(
                 fetch_check=True,
                 relaxed=False,
                 property_state=state,
+                location_hint=query,
             )
             if not selected and _cse_last_state in {"blocked", "throttled", "disabled"}:
                 fallback_results, _ = duckduckgo_search(
@@ -3379,6 +3429,7 @@ def _phone_candidates_from_email_search(
                     fetch_check=True,
                     relaxed=True,
                     property_state=state,
+                    location_hint=query,
                 )
             for url in selected:
                 page, _ = fetch_contact_page(url)
@@ -4165,7 +4216,7 @@ _cse_lock = threading.Lock()
 _cse_recent: deque[float] = deque()
 _cse_last_state = "idle"
 _cse_last_ts_per_key: Dict[Tuple[str, str], float] = {}
-CONTACT_CSE_FETCH_LIMIT = int(os.getenv("CONTACT_CSE_FETCH_LIMIT", "15"))
+CONTACT_CSE_FETCH_LIMIT = int(os.getenv("CONTACT_CSE_FETCH_LIMIT", "30"))
 
 TOP5_DENYLIST_DOMAINS = {
     "zillow.com",
@@ -4173,6 +4224,7 @@ TOP5_DENYLIST_DOMAINS = {
     "trulia.com",
     "redfin.com",
     "homes.com",
+    "home.com",
     "loopnet.com",
     "crexi.com",
 }
@@ -4490,41 +4542,79 @@ def _state_mismatch(link: str, text: str, property_state: str) -> bool:
     return state not in hints
 
 
+def _location_matches(link: str, text: str, snippet: str, property_state: str, city: str = "") -> bool:
+    state = property_state.strip().upper()
+    if not state:
+        return True
+    combined = " ".join(part for part in (text or "", snippet or "") if part)
+    hints = _state_hints_from_url(link)
+    hints.update(_state_hints_from_text(combined.upper()))
+    if state in hints:
+        return True
+    city_clean = city.strip().lower()
+    if city_clean:
+        low = combined.lower()
+        if city_clean in low and state.lower() in low:
+            return True
+    return False
+
+
 def select_top_5_urls(
     results: Iterable[Dict[str, Any] | str],
     *,
     fetch_check: bool = True,
     relaxed: bool = False,
     property_state: str = "",
+    property_city: str = "",
     limit: int = 10,
+    existing: Optional[Iterable[str]] = None,
+    location_hint: str = "",
 ) -> Tuple[List[str], List[Tuple[str, str]]]:
     items = list(results)
     limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
     property_state = property_state.strip().upper()
+    property_city = property_city.strip()
+    target = min(limit, 5)
+    existing_norms: Set[str] = {
+        normalize_url(u) for u in (existing or []) if u
+    }
+
+    def _needs_more(candidates: List[Tuple[str, bool]]) -> bool:
+        if len(candidates) < target:
+            return True
+        first_slice = candidates[:target]
+        return bool(first_slice) and all(is_social for _, is_social in first_slice)
 
     def _select(relax: bool) -> Tuple[List[str], List[Tuple[str, str]]]:
-        filtered: List[str] = []
         rejected: List[Tuple[str, str]] = []
-        seen_links: Set[str] = set()
+        seen_links: Set[str] = set(existing_norms)
         candidates: List[Tuple[str, bool]] = []
-        max_candidates = max(limit, min(len(items), 15))
-        for item in items[:max_candidates]:
+        for item in items:
+            if not _needs_more(candidates):
+                break
             link = ""
+            snippet = ""
+            title = ""
             if isinstance(item, str):
                 link = item
             elif isinstance(item, dict):
                 link = str(item.get("link") or item.get("url") or "")
+                snippet = str(item.get("snippet") or item.get("htmlSnippet") or "")
+                title = str(item.get("title") or "")
             if not link:
                 continue
             norm = normalize_url(link)
             if norm in seen_links:
                 continue
-            seen_links.add(norm)
             allowed, reason = _top_url_allowed(norm, relaxed=relax)
             if not allowed:
                 rejected.append((norm, reason))
                 continue
+            seen_links.add(norm)
             final_url = norm
+            text = ""
+            snippet_text = " ".join(part for part in (title, snippet) if part)
+            location_context = " ".join(part for part in (snippet_text, location_hint) if part)
             if fetch_check:
                 fetched = fetch_text_cached(norm, ttl_days=7)
                 final_url = fetched.get("final_url") or norm
@@ -4537,31 +4627,35 @@ def select_top_5_urls(
                 if _looks_listing_boilerplate(text, final_path):
                     rejected.append((final_url, "listing_boilerplate"))
                     continue
-                if property_state and _state_mismatch(final_url, text, property_state):
+                if property_state and not _location_matches(final_url, text, location_context, property_state, property_city):
+                    rejected.append((final_url, "state_mismatch"))
+                    continue
+            else:
+                if property_state and not _location_matches(final_url, "", location_context, property_state, property_city):
                     rejected.append((final_url, "state_mismatch"))
                     continue
             root = _domain(final_url) or _domain(norm) or ""
             candidates.append((final_url, _is_social_root(root)))
 
-        filtered_candidates = candidates[:limit]
+        filtered_candidates = candidates[:target]
         if filtered_candidates and not any(not is_social for _, is_social in filtered_candidates):
-            fallback = next((cand for cand in candidates[limit:] if not cand[1]), None)
+            fallback = next((cand for cand in candidates[target:] if not cand[1]), None)
             if fallback:
-                if len(filtered_candidates) >= limit:
+                if len(filtered_candidates) >= target:
                     filtered_candidates = filtered_candidates[:-1] + [fallback]
                 else:
                     filtered_candidates.append(fallback)
 
         filtered = [url for url, _ in filtered_candidates]
-        return filtered[:limit], rejected
+        return filtered[:target], rejected
 
     filtered, rejected = _select(relaxed)
-    if not filtered and not relaxed:
+    if (len(filtered) < target) and not relaxed:
         filtered_relaxed, rejected_relaxed = _select(True)
         if filtered_relaxed:
             filtered = filtered_relaxed
             rejected.extend(rejected_relaxed)
-    return filtered[:limit], rejected
+    return filtered[:target], rejected
 
 
 def google_cse_search(
@@ -4643,10 +4737,15 @@ def google_cse_search(
             if gap < CSE_PER_KEY_MIN_INTERVAL:
                 time.sleep((CSE_PER_KEY_MIN_INTERVAL - gap) + random.uniform(0.05, 0.2))
         try:
-            pages = [(1, min(limit, 10))]
-            if limit > 10:
-                pages.append((11, min(limit - 10, 10)))
-            raw_links: List[str] = []
+            pages: List[Tuple[int, int]] = []
+            remaining = limit
+            start_idx = 1
+            while remaining > 0:
+                batch = min(remaining, 10)
+                pages.append((start_idx, batch))
+                remaining -= batch
+                start_idx += 10
+            raw_links: List[Dict[str, Any] | str] = []
             seen_raw_links: Set[str] = set()
             for start, num_param in pages:
                 payload = _fetch_cse_page(start, num_param, key, cx)
@@ -4660,15 +4759,26 @@ def google_cse_search(
                     if norm in seen_raw_links:
                         continue
                     seen_raw_links.add(norm)
-                    raw_links.append(link)
+                    raw_links.append({
+                        "link": link,
+                        "title": item.get("title"),
+                        "snippet": item.get("snippet") or item.get("htmlSnippet"),
+                    })
             for link in raw_links:
-                if not link or not _filter_allowed(link, allowed_domains):
+                link_url = link if isinstance(link, str) else link.get("link", "")
+                if not link_url or not _filter_allowed(link_url, allowed_domains):
                     continue
-                norm = normalize_url(link)
+                norm = normalize_url(link_url)
                 if norm in seen_results:
                     continue
                 seen_results.add(norm)
-                results.append({"link": link})
+                results.append(
+                    {
+                        "link": link_url,
+                        "title": link.get("title") if isinstance(link, dict) else "",
+                        "snippet": link.get("snippet") if isinstance(link, dict) else "",
+                    }
+                )
                 if len(results) >= limit:
                     break
             if len(raw_links) < limit:
