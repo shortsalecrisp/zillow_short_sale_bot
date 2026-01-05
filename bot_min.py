@@ -3211,6 +3211,7 @@ def _contact_search_urls(
     limit: int = 10,
     include_exhausted: bool = False,
     engine: str = "google",
+    allow_portals: bool = False,
 ) -> Tuple[List[str], bool, str] | Tuple[List[str], bool, str, bool]:
     """Issue enriched contact queries and return candidate URLs.
 
@@ -3277,6 +3278,7 @@ def _contact_search_urls(
                     raw_results,
                     fetch_check=fetch_ok,
                     relaxed=relaxed_mode,
+                    allow_portals=allow_portals,
                     property_state=state,
                     property_city=city,
                     limit=target_count,
@@ -3294,6 +3296,7 @@ def _contact_search_urls(
                             broadened_results,
                             fetch_check=fetch_ok,
                             relaxed=relaxed_mode,
+                            allow_portals=allow_portals,
                             property_state=state,
                             property_city=city,
                             limit=target_count,
@@ -3321,6 +3324,7 @@ def _contact_search_urls(
                             fallback_results,
                             fetch_check=fetch_ok,
                             relaxed=relaxed_mode,
+                            allow_portals=allow_portals,
                             property_state=state,
                             property_city=city,
                             limit=target_count,
@@ -3349,6 +3353,7 @@ def _contact_search_urls(
                     fallback_results,
                     fetch_check=fetch_ok,
                     relaxed=relaxed_mode,
+                    allow_portals=allow_portals,
                     property_state=state,
                     property_city=city,
                     limit=target_count,
@@ -3823,25 +3828,29 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         if search_empty and not urls and cse_status in {"blocked", "throttled"}:
             return _empty_result()
 
-        for url in urls:
-            fetched = fetch_text_cached(url, ttl_days=14)
-            status = int(fetched.get("http_status", 0) or 0)
-            final_url = fetched.get("final_url") or url
-            if status in {403, 429, 451}:
-                _mark_block(_domain(final_url), reason="cse-block")
-                blocked_engines.add("google")
-                continue
-            page = fetched.get("extracted_text", "")
-            if url in preferred_set or not page:
-                page, _ = fetch_contact_page(final_url)
-            if not page:
-                continue
-            page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
-            for cand in page_candidates:
-                src = cand.get("source_url", final_url)
-                for em in cand.get("emails", []):
-                    email_candidates_info.append({"email": em, "source": src})
-            candidates.extend(page_candidates)
+        def _ingest_urls(urls_to_process: Iterable[str], *, engine_label: str) -> None:
+            for url in urls_to_process:
+                fetched = fetch_text_cached(url, ttl_days=14)
+                status = int(fetched.get("http_status", 0) or 0)
+                final_url = fetched.get("final_url") or url
+                if status in {403, 429, 451}:
+                    _mark_block(_domain(final_url), reason="cse-block")
+                    if engine_label:
+                        blocked_engines.add(engine_label)
+                    continue
+                page = fetched.get("extracted_text", "")
+                if url in preferred_set or not page:
+                    page, _ = fetch_contact_page(final_url)
+                if not page:
+                    continue
+                page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
+                for cand in page_candidates:
+                    src = cand.get("source_url", final_url)
+                    for em in cand.get("emails", []):
+                        email_candidates_info.append({"email": em, "source": src})
+                candidates.extend(page_candidates)
+
+        _ingest_urls(urls, engine_label="google")
 
         ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
         ranked = _apply_phone_type_boost(ranked)
@@ -3890,20 +3899,35 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             row_payload["_duckduckgo_search_done"] = True
             if ddg_status in {"duckduckgo-blocked"}:
                 blocked_engines.add("duckduckgo")
-            for url in ddg_urls:
-                fetched = fetch_text_cached(url, ttl_days=14)
-                page = fetched.get("extracted_text", "")
-                final_url = fetched.get("final_url") or url
-                if url in preferred_set or not page:
-                    page, _ = fetch_contact_page(final_url)
-                if not page:
-                    continue
-                page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
-                for cand in page_candidates:
-                    src = cand.get("source_url", final_url)
-                    for em in cand.get("emails", []):
-                        email_candidates_info.append({"email": em, "source": src})
-                candidates.extend(page_candidates)
+            _ingest_urls(ddg_urls, engine_label="duckduckgo")
+            ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
+            ranked = _apply_phone_type_boost(ranked)
+            email = ranked.get("best_email", "")
+            if email and not _email_ok(email, ranked.get("best_email_source_url", "")):
+                ranked["best_email"] = ""
+                ranked["best_email_confidence"] = 0
+                ranked["best_email_source_url"] = ""
+                ranked["best_email_evidence"] = ""
+
+        portal_email_done = bool(row_payload.get("_portal_email_done"))
+        if not ranked.get("best_email") and not portal_email_done:
+            portal_urls, _, portal_status, _ = _normalize_contact_search_result(
+                _contact_search_urls(
+                    agent,
+                    state,
+                    row_payload,
+                    domain_hint=domain_hint or brokerage,
+                    brokerage=brokerage,
+                    limit=min(SEARCH_CONTACT_URL_LIMIT, 8),
+                    include_exhausted=True,
+                    engine="duckduckgo",
+                    allow_portals=True,
+                )
+            )
+            row_payload["_portal_email_done"] = True
+            if portal_status in {"duckduckgo-blocked"}:
+                blocked_engines.add("duckduckgo")
+            _ingest_urls(portal_urls, engine_label="duckduckgo")
             ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
             ranked = _apply_phone_type_boost(ranked)
             email = ranked.get("best_email", "")
@@ -3933,6 +3957,13 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
 
 
 def fetch_contact_page(url: str) -> Tuple[str, bool]:
+    if not url:
+        return "", False
+    if _domain(url) == "r.jina.ai":
+        unwrapped = _unwrap_jina_url(url)
+        if unwrapped:
+            LOG.debug("fetch_contact_page unwrap jina mirror -> %s", unwrapped)
+            url = unwrapped
     if not _should_fetch(url, strict=False):
         return "", False
     cache_key = normalize_url(url)
@@ -4476,7 +4507,7 @@ def _low_signal_social_path(root: str, path: str) -> bool:
     return any(term in path for term in low_terms)
 
 
-def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
+def _top_url_allowed(link: str, *, relaxed: bool = False, allow_portals: bool = False) -> Tuple[bool, str]:
     if not link:
         return False, "no_link"
     parsed = urlparse(link)
@@ -4485,8 +4516,14 @@ def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
     if not dom:
         return False, "no_domain"
     root = _domain(link) or dom
+    allow = False
+    allow_reason = ""
     if root in TOP5_DENYLIST_DOMAINS or any(root.endswith(f".{d}") for d in TOP5_DENYLIST_DOMAINS):
-        return False, "denylist_domain"
+        if allow_portals and root in PORTAL_DOMAINS:
+            allow = True
+            allow_reason = "portal_allow"
+        else:
+            return False, "denylist_domain"
     if root.endswith(".gov") or root.endswith(".edu") or dom.endswith(".gov") or dom.endswith(".edu"):
         return False, "gov_edu"
     if path.endswith(".pdf") or ".pdf" in path:
@@ -4498,8 +4535,6 @@ def _top_url_allowed(link: str, *, relaxed: bool = False) -> Tuple[bool, str]:
     if path in {"/search", "/results"} or "/search?" in link:
         return False, "search_page"
 
-    allow = False
-    allow_reason = ""
     if _is_social_root(root):
         allow = True
         allow_reason = "social_allow"
@@ -4650,6 +4685,7 @@ def select_top_5_urls(
     *,
     fetch_check: bool = True,
     relaxed: bool = False,
+    allow_portals: bool = False,
     property_state: str = "",
     property_city: str = "",
     limit: int = 10,
@@ -4685,7 +4721,7 @@ def select_top_5_urls(
             norm = normalize_url(link)
             if norm in seen_links:
                 continue
-            allowed, reason = _top_url_allowed(norm, relaxed=relax)
+            allowed, reason = _top_url_allowed(norm, relaxed=relax, allow_portals=allow_portals)
             if not allowed:
                 rejected.append((norm, reason))
                 continue
@@ -6145,6 +6181,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         or _infer_domain_from_text(brokerage_hint)
         or _infer_domain_from_text(agent)
     )
+    allow_portals_phone = bool(rapid_fallback_phone and not rapid_verified_mobile)
 
     mobile_terms = {"cell", "mobile", "text", "direct", "sms"}
 
@@ -6645,6 +6682,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 brokerage=brokerage_hint,
                 limit=SEARCH_CONTACT_URL_LIMIT,
                 include_exhausted=True,
+                allow_portals=allow_portals_phone,
             )
         )
         urls.extend(fallback_urls)
