@@ -3122,6 +3122,15 @@ def _page_mentions_agent(text: str, agent: str, soup: Any = None) -> bool:
     return False
 
 
+def _agent_matches_context(agent: str, *, text: str = "", snippet: str = "", title: str = "") -> bool:
+    if not agent.strip():
+        return True
+    context = " ".join(part for part in (title, snippet, text) if part).strip()
+    if not context:
+        return False
+    return _page_mentions_agent(context, agent)
+
+
 def _discover_agent_links(
     soup: Any,
     base_url: str,
@@ -3193,8 +3202,10 @@ def _contact_cse_queries(
     domain_hint: str = "",
 ) -> Tuple[List[str], List[str]]:
     city = str(row_payload.get("city") or "").strip()
-    one_query = _compact_tokens(f'"{agent}"', "realtor", city, state)
-    return [one_query], []
+    base_query = _compact_tokens(f'"{agent}"', "realtor", state)
+    city_query = _compact_tokens(f'"{agent}"', "realtor", city, state)
+    queries = [q for q in (base_query, city_query) if q]
+    return queries, []
 
 
 def _broaden_contact_query(agent: str, state: str, city: str, brokerage: str) -> str:
@@ -3238,11 +3249,11 @@ def _contact_search_urls(
     search_cache = row_payload.setdefault("_contact_search_cache", {})
     try:
         cache_key = ""
-        query = strict_queries[0] if strict_queries else ""
-        if not query:
+        primary_query = strict_queries[0] if strict_queries else ""
+        if not primary_query:
             search_empty = True
         else:
-            cache_key = f"{engine}:{limit}:{query}"
+            cache_key = f"{engine}:{limit}:{primary_query}"
             if cache_key in search_cache:
                 cached = search_cache[cache_key]
                 return cached if include_exhausted else cached[:3]
@@ -3253,37 +3264,48 @@ def _contact_search_urls(
             broadened_used = False
             if engine == "google":
                 used_queries: List[str] = []
-                raw_results = google_cse_search(
-                    query,
-                    limit=CONTACT_CSE_FETCH_LIMIT,
-                )
-                used_queries.append(query)
                 fetch_ok = _cse_last_state not in {"disabled"}
                 relaxed_mode = _cse_last_state in {"disabled"}
-                if not raw_results and _cse_last_state == "disabled":
-                    try:
-                        raw_results = google_items(query)
-                    except Exception:
-                        raw_results = []
-                if not raw_results and _cse_last_state == "disabled":
-                    rr = search_round_robin([query], per_query_limit=CONTACT_CSE_FETCH_LIMIT, engine_limit=1)
-                    for attempt in rr:
-                        for _, hits in attempt:
-                            if hits:
-                                raw_results = hits
+                search_queries = strict_queries or [primary_query]
+                for query in search_queries:
+                    used_queries.append(query)
+                    raw_results = google_cse_search(
+                        query,
+                        limit=CONTACT_CSE_FETCH_LIMIT,
+                    )
+                    if not raw_results and _cse_last_state == "disabled":
+                        try:
+                            raw_results = google_items(query)
+                        except Exception:
+                            raw_results = []
+                    if not raw_results and _cse_last_state == "disabled":
+                        rr = search_round_robin([query], per_query_limit=CONTACT_CSE_FETCH_LIMIT, engine_limit=1)
+                        for attempt in rr:
+                            for _, hits in attempt:
+                                if hits:
+                                    raw_results = hits
+                                    break
+                            if raw_results:
                                 break
-                        if raw_results:
-                            break
-                selected_urls, rejected_urls = select_top_5_urls(
-                    raw_results,
-                    fetch_check=fetch_ok,
-                    relaxed=relaxed_mode,
-                    allow_portals=allow_portals,
-                    property_state=state,
-                    property_city=city,
-                    limit=target_count,
-                    location_hint=query,
-                )
+                    selected, rejected = select_top_5_urls(
+                        raw_results,
+                        fetch_check=fetch_ok,
+                        relaxed=relaxed_mode,
+                        allow_portals=allow_portals,
+                        property_state=state,
+                        property_city=city,
+                        limit=target_count,
+                        existing=selected_urls,
+                        location_hint=query,
+                        agent=agent,
+                        brokerage=brokerage,
+                    )
+                    rejected_urls.extend(rejected)
+                    for url in selected:
+                        if url not in selected_urls:
+                            selected_urls.append(url)
+                    if len(selected_urls) >= target_count:
+                        break
                 if len(selected_urls) < target_count:
                     broadened_query = _broaden_contact_query(agent, state, city, brokerage)
                     if broadened_query and broadened_query not in used_queries:
@@ -3302,6 +3324,8 @@ def _contact_search_urls(
                             limit=target_count,
                             existing=selected_urls,
                             location_hint=broadened_query,
+                            agent=agent,
+                            brokerage=brokerage,
                         )
                         broadened_used = bool(broadened_selected or broadened_results)
                         rejected_urls.extend(broadened_rejected)
@@ -3309,7 +3333,7 @@ def _contact_search_urls(
                             if url not in selected_urls:
                                 selected_urls.append(url)
                 if len(selected_urls) < target_count and _cse_last_state in {"blocked", "throttled", "disabled"}:
-                    ddg_queries = used_queries or [query]
+                    ddg_queries = used_queries or [primary_query]
                     for ddg_query in ddg_queries:
                         fallback_results, blocked = duckduckgo_search(
                             ddg_query,
@@ -3330,6 +3354,8 @@ def _contact_search_urls(
                             limit=target_count,
                             existing=selected_urls,
                             location_hint=ddg_query,
+                            agent=agent,
+                            brokerage=brokerage,
                         )
                         rejected_urls.extend(fb_rejected)
                         for url in fb_selected:
@@ -3358,6 +3384,8 @@ def _contact_search_urls(
                     property_city=city,
                     limit=target_count,
                     location_hint=query,
+                    agent=agent,
+                    brokerage=brokerage,
                 )
             if engine == "google":
                 cse_status = _cse_last_state
@@ -3407,6 +3435,7 @@ def _phone_candidates_from_email_search(
     *,
     brokerage: str = "",
 ) -> List[Dict[str, Any]]:
+    city = str(row_payload.get("city") or "").strip()
     cleaned = clean_email(email)
     if not cleaned:
         return []
@@ -3434,6 +3463,9 @@ def _phone_candidates_from_email_search(
                 relaxed=False,
                 property_state=state,
                 location_hint=query,
+                property_city=city,
+                agent=agent,
+                brokerage=brokerage,
             )
             if not selected and _cse_last_state in {"blocked", "throttled", "disabled"}:
                 fallback_results, _ = duckduckgo_search(
@@ -3448,6 +3480,9 @@ def _phone_candidates_from_email_search(
                     relaxed=True,
                     property_state=state,
                     location_hint=query,
+                    property_city=city,
+                    agent=agent,
+                    brokerage=brokerage,
                 )
             for url in selected:
                 page, _ = fetch_contact_page(url)
@@ -4370,6 +4405,27 @@ TOP5_PATH_HINT_TOKENS = {
     "about",
 }
 TOP5_LISTING_HINTS = {"listing", "listings", "for-sale", "homedetails", "property", "newlisting", "mls", "idx"}
+TOP5_GOOD_PATH_HINTS = (
+    "/agent/",
+    "/agents/",
+    "/team/",
+    "/teams/",
+    "/realtor",
+    "/realtors",
+    "/about",
+    "/bio",
+    "/profile",
+    "/our-team",
+)
+TOP5_GOOD_TEXT_HINTS = (
+    "our agents",
+    "meet the team",
+    "our team",
+    "find an agent",
+    "find a realtor",
+    "broker roster",
+)
+TOP5_BAD_SOCIAL_PATTERNS = ("/groups/", "/posts/", "/p/")
 
 DISPOSABLE_EMAIL_DOMAINS = {
     "mailinator.com",
@@ -4504,6 +4560,10 @@ def _low_signal_social_path(root: str, path: str) -> bool:
         "/explore",
         "/search",
     )
+    if root.endswith("facebook.com") and any(term in path for term in ("/groups/", "/posts/")):
+        return True
+    if root.endswith("instagram.com") and "/p/" in path:
+        return True
     return any(term in path for term in low_terms)
 
 
@@ -4530,7 +4590,7 @@ def _top_url_allowed(link: str, *, relaxed: bool = False, allow_portals: bool = 
         return False, "pdf"
     if _listing_path_blocked(path):
         return False, "listing_detail"
-    if _low_signal_social_path(root, path):
+    if _low_signal_social_path(root, path) or (_is_social_root(root) and any(term in path for term in TOP5_BAD_SOCIAL_PATTERNS)):
         return False, "social_low_signal"
     if path in {"/search", "/results"} or "/search?" in link:
         return False, "search_page"
@@ -4663,7 +4723,14 @@ def _state_mismatch(link: str, text: str, property_state: str) -> bool:
     return state not in hints
 
 
-def _location_matches(link: str, text: str, snippet: str, property_state: str, city: str = "") -> bool:
+def _location_matches(
+    link: str,
+    text: str,
+    snippet: str,
+    property_state: str,
+    city: str = "",
+    brokerage: str = "",
+) -> bool:
     state = property_state.strip().upper()
     if not state:
         return True
@@ -4677,6 +4744,11 @@ def _location_matches(link: str, text: str, snippet: str, property_state: str, c
         low = combined.lower()
         if city_clean in low and state.lower() in low:
             return True
+    brokerage_clean = brokerage.strip().lower()
+    if brokerage_clean:
+        low = combined.lower()
+        if brokerage_clean in low and (state in hints or state.lower() in low):
+            return True
     return False
 
 
@@ -4688,6 +4760,8 @@ def select_top_5_urls(
     allow_portals: bool = False,
     property_state: str = "",
     property_city: str = "",
+    brokerage: str = "",
+    agent: str = "",
     limit: int = 10,
     existing: Optional[Iterable[str]] = None,
     location_hint: str = "",
@@ -4700,13 +4774,35 @@ def select_top_5_urls(
     existing_norms: Set[str] = {
         normalize_url(u) for u in (existing or []) if u
     }
+    original_order: Dict[str, int] = {}
+
+    def _good_candidate_score(url: str, *, snippet: str = "", text: str = "") -> int:
+        parsed = urlparse(url)
+        root = _domain(url) or parsed.netloc.lower()
+        path = parsed.path.lower()
+        context = " ".join(part for part in (snippet, text) if part).lower()
+        score = 0
+        if any(hint in path for hint in TOP5_GOOD_PATH_HINTS):
+            score += 6
+        if any(term in context for term in TOP5_GOOD_TEXT_HINTS):
+            score += 4
+        if _looks_directory_page(url):
+            score += 2
+        if root in TOP5_BROKERAGE_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_BROKERAGE_ALLOW):
+            score += 3
+        if _is_social_root(root):
+            score -= 3
+        if allow_portals and (root in PORTAL_DOMAINS):
+            score += 1
+        score += max(0, 2 - path.count("/"))
+        return score
 
     def _select(relax: bool) -> Tuple[List[str], List[Tuple[str, str]]]:
         rejected: List[Tuple[str, str]] = []
         seen_links: Set[str] = set(existing_norms)
-        candidates: List[Tuple[str, bool]] = []
-        overflow: List[Tuple[str, bool]] = []
-        for item in items:
+        candidates: List[Tuple[str, bool, int]] = []
+        overflow: List[Tuple[str, bool, int]] = []
+        for idx, item in enumerate(items):
             link = ""
             snippet = ""
             title = ""
@@ -4721,6 +4817,7 @@ def select_top_5_urls(
             norm = normalize_url(link)
             if norm in seen_links:
                 continue
+            original_order.setdefault(norm, idx)
             allowed, reason = _top_url_allowed(norm, relaxed=relax, allow_portals=allow_portals)
             if not allowed:
                 rejected.append((norm, reason))
@@ -4742,15 +4839,23 @@ def select_top_5_urls(
                 if _looks_listing_boilerplate(text, final_path):
                     rejected.append((final_url, "listing_boilerplate"))
                     continue
-                if property_state and not _location_matches(final_url, text, location_context, property_state, property_city):
+                if property_state and not _location_matches(final_url, text, location_context, property_state, property_city, brokerage):
                     rejected.append((final_url, "state_mismatch"))
+                    continue
+                if agent and not _agent_matches_context(agent, text=text, snippet=location_context, title=title):
+                    rejected.append((final_url, "agent_mismatch"))
                     continue
             else:
-                if property_state and not _location_matches(final_url, "", location_context, property_state, property_city):
+                if property_state and not _location_matches(final_url, "", location_context, property_state, property_city, brokerage):
                     rejected.append((final_url, "state_mismatch"))
                     continue
+                if agent and not _agent_matches_context(agent, snippet=location_context, title=title):
+                    rejected.append((final_url, "agent_mismatch"))
+                    continue
+            original_order.setdefault(normalize_url(final_url), original_order.get(norm, idx))
             root = _domain(final_url) or _domain(norm) or ""
-            entry = (final_url, _is_social_root(root))
+            score = _good_candidate_score(final_url, snippet=snippet_text, text=text)
+            entry = (final_url, _is_social_root(root), score)
             if len(candidates) < target:
                 candidates.append(entry)
             else:
@@ -4759,12 +4864,19 @@ def select_top_5_urls(
         def _merge_with_preference() -> List[Tuple[str, bool]]:
             preferred: List[Tuple[str, bool]] = []
             all_candidates = candidates + overflow
+            all_candidates.sort(
+                key=lambda c: (
+                    -c[2],
+                    c[1],
+                    original_order.get(normalize_url(c[0]), original_order.get(c[0], 0)),
+                )
+            )
             non_social = [c for c in all_candidates if not c[1]]
             social = [c for c in all_candidates if c[1]]
             preferred.extend(non_social[:target])
             if len(preferred) < target:
                 preferred.extend(social[: target - len(preferred)])
-            return preferred[:target]
+            return [(url, is_social) for url, is_social, _ in preferred[:target]]
 
         filtered_candidates = _merge_with_preference()
         filtered = [url for url, _ in filtered_candidates]
