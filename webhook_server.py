@@ -90,6 +90,7 @@ APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
 APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
 APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
 APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "/tmp/last_hour_run.txt"))
+APIFY_FORCE_EVERY_HOUR = os.getenv("APIFY_FORCE_EVERY_HOUR", "false").lower() == "true"
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
@@ -220,7 +221,7 @@ def _apify_hourly_task(run_time: datetime) -> None:
         current_slot = _hour_floor(run_time)
         hour_key = apify_hour_key(current_slot)
         if not apify_acquire_decision_slot(current_slot):
-            logger.debug("Apify hourly decision already handled for %s", hour_key)
+            logger.info("Apify hourly decision already handled for %s (decision lock)", hour_key)
             return
 
         local_hour, within_work_hours = apify_work_hours_status(current_slot)
@@ -229,14 +230,30 @@ def _apify_hourly_task(run_time: datetime) -> None:
             local_hour,
             within_work_hours,
         )
-        if not within_work_hours:
+        if not within_work_hours and not APIFY_FORCE_EVERY_HOUR:
             logger.info("Apify hourly decision: skip %s (outside work hours)", hour_key)
             return
+        if not within_work_hours and APIFY_FORCE_EVERY_HOUR:
+            logger.info(
+                "Apify hourly decision: outside work hours but APIFY_FORCE_EVERY_HOUR enabled; proceeding"
+            )
 
         last_run = _load_last_apify_run()
+        logger.info(
+            "Apify last_run marker=%s force_every_hour=%s current_hour_key=%s",
+            apify_hour_key(last_run) if last_run else None,
+            APIFY_FORCE_EVERY_HOUR,
+            hour_key,
+        )
         if last_run and apify_hour_key(last_run) == hour_key:
-            logger.info("Apify hourly decision: skip %s (already ran)", hour_key)
-            return
+            if APIFY_FORCE_EVERY_HOUR:
+                logger.info(
+                    "Apify hourly decision: already ran %s but APIFY_FORCE_EVERY_HOUR enabled; proceeding",
+                    hour_key,
+                )
+            else:
+                logger.info("Apify hourly decision: skip %s (already ran)", hour_key)
+                return
 
         logger.info("Apify hourly decision: run %s", hour_key)
         triggered = _run_apify_actor()

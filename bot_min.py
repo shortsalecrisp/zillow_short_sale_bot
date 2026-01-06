@@ -8775,6 +8775,7 @@ def _run_hourly_cycle(
         return
 
     callbacks = hourly_callbacks or []
+    LOG.info("Executing %s hourly callbacks", len(callbacks))
     for cb in callbacks:
         try:
             cb(run_time)
@@ -8799,6 +8800,12 @@ def run_hourly_scheduler(
     )
     next_run = _next_scheduler_run(datetime.now(tz=SCHEDULER_TZ))
 
+    LOG.info(
+        "Hourly scheduler initialized; first scheduled wake at %s (run_immediately=%s)",
+        next_run.isoformat(),
+        run_immediately,
+    )
+
     if run_immediately:
         initial_run = _hour_floor(datetime.now(tz=SCHEDULER_TZ))
         _run_hourly_cycle(
@@ -8816,6 +8823,12 @@ def run_hourly_scheduler(
 
             now = datetime.now(tz=SCHEDULER_TZ)
             sleep_secs = max(0, (next_run - now).total_seconds())
+            LOG.info(
+                "Scheduler sleeping %.2fs until next wake at %s (now=%s)",
+                sleep_secs,
+                next_run.isoformat(),
+                now.isoformat(),
+            )
             if stop_event and stop_event.wait(timeout=sleep_secs):
                 LOG.info("Hourly scheduler stop requested; exiting loop")
                 break
