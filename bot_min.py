@@ -1073,6 +1073,25 @@ def _extract_emails_with_obfuscation(text: str) -> List[Tuple[str, str]]:
     return results
 
 
+VCARD_EMAIL_RE = re.compile(r"email[^:]*[:;]\s*([^\s;]+)", re.I)
+VCARD_TEL_RE = re.compile(r"tel[^:]*[:;]\s*([+0-9(). -]+)", re.I)
+
+def _extract_vcard_contacts(text: str) -> Tuple[List[str], List[str]]:
+    emails: List[str] = []
+    phones: List[str] = []
+    if not text or "vcard" not in text.lower():
+        return emails, phones
+    for mail_match in VCARD_EMAIL_RE.finditer(text):
+        cleaned = clean_email(mail_match.group(1))
+        if cleaned and ok_email(cleaned):
+            emails.append(cleaned)
+    for tel_match in VCARD_TEL_RE.finditer(text):
+        formatted = fmt_phone(tel_match.group(1))
+        if formatted and valid_phone(formatted):
+            phones.append(formatted)
+    return emails, phones
+
+
 def decode_cfemail(data: str) -> str:
     """Decode Cloudflare obfuscated email strings."""
     if not data:
@@ -2685,6 +2704,46 @@ def _extract_candidates_from_text(text: str, source_url: str) -> List[Dict[str, 
                 "emails": [email],
             }
         )
+    for mail, snippet in _extract_emails_with_obfuscation(text):
+        key = ("email", mail)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            {
+                "source_url": source_url,
+                "evidence_snippet": " ".join(snippet.split()),
+                "phones": [],
+                "emails": [mail],
+            }
+        )
+    vcard_emails, vcard_phones = _extract_vcard_contacts(text)
+    for phone in vcard_phones:
+        key = ("phone", phone)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            {
+                "source_url": source_url,
+                "evidence_snippet": "vcard",
+                "phones": [phone],
+                "emails": [],
+            }
+        )
+    for mail in vcard_emails:
+        key = ("email", mail)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            {
+                "source_url": source_url,
+                "evidence_snippet": "vcard",
+                "phones": [],
+                "emails": [mail],
+            }
+        )
     return candidates
 
 
@@ -3192,6 +3251,16 @@ def _is_real_estate_domain(host: str) -> bool:
     )
     return any(term in low for term in terms)
 
+def _preferred_email_domains_for_text(*parts: str) -> Set[str]:
+    haystack = " ".join(p.lower() for p in parts if p)
+    matches: Set[str] = set()
+    if not haystack:
+        return matches
+    for brand, domains in PREFERRED_BROKERAGE_EMAIL_DOMAINS.items():
+        if brand in haystack:
+            matches.update(domains)
+    return matches
+
 
 def _contact_cse_queries(
     agent: str,
@@ -3202,10 +3271,25 @@ def _contact_cse_queries(
     domain_hint: str = "",
 ) -> Tuple[List[str], List[str]]:
     city = str(row_payload.get("city") or "").strip()
-    base_query = _compact_tokens(f'"{agent}"', "realtor", state)
-    city_query = _compact_tokens(f'"{agent}"', "realtor", city, state)
-    queries = [q for q in (base_query, city_query) if q]
-    return queries, []
+    name_term = f'"{agent}"'
+    location_anchor = _compact_tokens(city, state)
+    queries: List[str] = []
+
+    def _add(q: str) -> None:
+        if q and q not in queries:
+            queries.append(q)
+
+    _add(_compact_tokens(name_term, '"realtor"', location_anchor, "email"))
+    _add(_compact_tokens(name_term, '"real estate agent"', location_anchor, "contact"))
+    _add(_compact_tokens(name_term, '"realtor"', state, "contact", "profile"))
+    if brokerage:
+        _add(_compact_tokens(name_term, '"realtor"', brokerage, state, "email"))
+        _add(_compact_tokens(name_term, '"real estate agent"', brokerage, "contact", state))
+    if domain_hint:
+        _add(_compact_tokens(name_term, f"site:{domain_hint}", "contact"))
+        _add(_compact_tokens(name_term, f"site:{domain_hint}", "email"))
+    _add(_compact_tokens(name_term, '"realtor"', state, "phone", "email"))
+    return _dedupe_queries(queries), []
 
 
 def _broaden_contact_query(agent: str, state: str, city: str, brokerage: str) -> str:
@@ -3247,6 +3331,42 @@ def _contact_search_urls(
     search_exhausted = False
     cse_status = _cse_last_state
     search_cache = row_payload.setdefault("_contact_search_cache", {})
+
+    def _select_until_target(
+        raw_results: List[Dict[str, Any]],
+        *,
+        location_hint: str,
+        existing: List[str],
+        relaxed_mode: bool,
+        fetch_ok: bool,
+    ) -> Tuple[List[str], List[Tuple[str, str]]]:
+        qualified: List[str] = []
+        rejected: List[Tuple[str, str]] = []
+        if not raw_results:
+            return qualified, rejected
+        page_size = 10
+        for start in range(0, len(raw_results), page_size):
+            batch = raw_results[start : start + page_size]
+            filtered, rejected_batch = select_top_5_urls(
+                batch,
+                fetch_check=fetch_ok,
+                relaxed=relaxed_mode,
+                allow_portals=allow_portals,
+                property_state=state,
+                property_city=city,
+                limit=target_count,
+                existing=existing + qualified,
+                location_hint=location_hint,
+                agent=agent,
+                brokerage=brokerage,
+            )
+            rejected.extend(rejected_batch)
+            for url in filtered:
+                if url not in qualified and url not in existing:
+                    qualified.append(url)
+            if len(qualified) >= target_count:
+                break
+        return qualified[:target_count], rejected
     try:
         cache_key = ""
         primary_query = strict_queries[0] if strict_queries else ""
@@ -3287,18 +3407,12 @@ def _contact_search_urls(
                                     break
                             if raw_results:
                                 break
-                    selected, rejected = select_top_5_urls(
+                    selected, rejected = _select_until_target(
                         raw_results,
-                        fetch_check=fetch_ok,
-                        relaxed=relaxed_mode,
-                        allow_portals=allow_portals,
-                        property_state=state,
-                        property_city=city,
-                        limit=target_count,
-                        existing=selected_urls,
                         location_hint=query,
-                        agent=agent,
-                        brokerage=brokerage,
+                        existing=selected_urls,
+                        relaxed_mode=relaxed_mode,
+                        fetch_ok=fetch_ok,
                     )
                     rejected_urls.extend(rejected)
                     for url in selected:
@@ -3314,18 +3428,12 @@ def _contact_search_urls(
                             broadened_query,
                             limit=CONTACT_CSE_FETCH_LIMIT,
                         )
-                        broadened_selected, broadened_rejected = select_top_5_urls(
+                        broadened_selected, broadened_rejected = _select_until_target(
                             broadened_results,
-                            fetch_check=fetch_ok,
-                            relaxed=relaxed_mode,
-                            allow_portals=allow_portals,
-                            property_state=state,
-                            property_city=city,
-                            limit=target_count,
-                            existing=selected_urls,
                             location_hint=broadened_query,
-                            agent=agent,
-                            brokerage=brokerage,
+                            existing=selected_urls,
+                            relaxed_mode=relaxed_mode,
+                            fetch_ok=fetch_ok,
                         )
                         broadened_used = bool(broadened_selected or broadened_results)
                         rejected_urls.extend(broadened_rejected)
@@ -3344,18 +3452,12 @@ def _contact_search_urls(
                         if blocked:
                             _mark_block("duckduckgo.com", reason="blocked")
                         cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
-                        fb_selected, fb_rejected = select_top_5_urls(
+                        fb_selected, fb_rejected = _select_until_target(
                             fallback_results,
-                            fetch_check=fetch_ok,
-                            relaxed=relaxed_mode,
-                            allow_portals=allow_portals,
-                            property_state=state,
-                            property_city=city,
-                            limit=target_count,
-                            existing=selected_urls,
                             location_hint=ddg_query,
-                            agent=agent,
-                            brokerage=brokerage,
+                            existing=selected_urls,
+                            relaxed_mode=relaxed_mode,
+                            fetch_ok=fetch_ok,
                         )
                         rejected_urls.extend(fb_rejected)
                         for url in fb_selected:
@@ -3366,8 +3468,9 @@ def _contact_search_urls(
             elif engine in {"duckduckgo", "jina"}:
                 fetch_ok = _cse_last_state not in {"disabled"}
                 relaxed_mode = _cse_last_state in {"disabled"}
+                ddg_query = primary_query or (strict_queries[0] if strict_queries else "")
                 fallback_results, blocked = duckduckgo_search(
-                    query,
+                    ddg_query,
                     limit=CONTACT_CSE_FETCH_LIMIT,
                     allowed_domains=None,
                     with_blocked=True,
@@ -3375,17 +3478,12 @@ def _contact_search_urls(
                 if blocked:
                     _mark_block("duckduckgo.com", reason="blocked")
                 cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
-                selected_urls, rejected_urls = select_top_5_urls(
+                selected_urls, rejected_urls = _select_until_target(
                     fallback_results,
-                    fetch_check=fetch_ok,
-                    relaxed=relaxed_mode,
-                    allow_portals=allow_portals,
-                    property_state=state,
-                    property_city=city,
-                    limit=target_count,
-                    location_hint=query,
-                    agent=agent,
-                    brokerage=brokerage,
+                    location_hint=ddg_query,
+                    existing=[],
+                    relaxed_mode=relaxed_mode,
+                    fetch_ok=fetch_ok,
                 )
             if engine == "google":
                 cse_status = _cse_last_state
@@ -3400,11 +3498,12 @@ def _contact_search_urls(
                     "urls": selected_urls[:target_count],
                     "rejected": rejected_urls,
                 }
-                LOG.info(
-                    "TOP5_SELECTED urls=%s rejected=%s",
-                    selected_urls[:target_count],
-                    rejected_urls,
-                )
+                if search_empty or len(selected_urls) >= target_count:
+                    LOG.info(
+                        "TOP5_SELECTED urls=%s rejected=%s",
+                        selected_urls[:target_count],
+                        rejected_urls,
+                    )
         search_exhausted = True
     except Exception:
         LOG.exception("contact search failed for %s %s", agent, state)
@@ -4403,6 +4502,7 @@ TOP5_PATH_HINT_TOKENS = {
     "our-team",
     "profile",
     "about",
+    "contact",
 }
 TOP5_LISTING_HINTS = {"listing", "listings", "for-sale", "homedetails", "property", "newlisting", "mls", "idx"}
 TOP5_GOOD_PATH_HINTS = (
@@ -4415,6 +4515,8 @@ TOP5_GOOD_PATH_HINTS = (
     "/about",
     "/bio",
     "/profile",
+    "/contact",
+    "/contact-us",
     "/our-team",
 )
 TOP5_GOOD_TEXT_HINTS = (
@@ -4426,6 +4528,36 @@ TOP5_GOOD_TEXT_HINTS = (
     "broker roster",
 )
 TOP5_BAD_SOCIAL_PATTERNS = ("/groups/", "/posts/", "/p/")
+TOP5_HARD_PATH_BLOCKS = (
+    "/search",
+    "/results",
+    "/listings",
+    "/homes-for-sale",
+    "/property/",
+    "/mls/",
+    "/idx/",
+)
+TOP5_OFF_TOPIC_HINTS = (
+    "forum",
+    "chamber",
+    "school",
+    "pta",
+    "library",
+    "blogspot",
+)
+TOP5_ASSOCIATION_HINTS = {"realtor", "mls", "association", "board-of-realtors"}
+PREFERRED_BROKERAGE_EMAIL_DOMAINS: Dict[str, Set[str]] = {
+    "keller williams": {"kw.com", "kellerwilliams.com"},
+    "re/max": {"remax.com", "remax.net"},
+    "remax": {"remax.com", "remax.net"},
+    "compass": {"compass.com"},
+    "coldwell banker": {"cbrealty.com", "coldwellbankerhomes.com", "coldwellbanker.com"},
+    "century 21": {"century21.com"},
+    "bhhs": {"bhhs.com", "berkshirehathawayhs.com"},
+    "berkshire hathaway": {"bhhs.com", "berkshirehathawayhs.com"},
+    "kw": {"kw.com"},
+}
+PREFERRED_SOCIAL_PATHS = ("/in/", "/profile.php", "/people/", "/business/")
 
 DISPOSABLE_EMAIL_DOMAINS = {
     "mailinator.com",
@@ -4588,12 +4720,18 @@ def _top_url_allowed(link: str, *, relaxed: bool = False, allow_portals: bool = 
         return False, "gov_edu"
     if path.endswith(".pdf") or ".pdf" in path:
         return False, "pdf"
+    if any(block in path for block in TOP5_HARD_PATH_BLOCKS):
+        return False, "hard_block_path"
     if _listing_path_blocked(path):
         return False, "listing_detail"
     if _low_signal_social_path(root, path) or (_is_social_root(root) and any(term in path for term in TOP5_BAD_SOCIAL_PATTERNS)):
         return False, "social_low_signal"
     if path in {"/search", "/results"} or "/search?" in link:
         return False, "search_page"
+    if any(tok in root for tok in TOP5_OFF_TOPIC_HINTS) and not _is_real_estate_domain(root):
+        return False, "off_topic_domain"
+    if any(tok in path for tok in TOP5_OFF_TOPIC_HINTS) and not _is_real_estate_domain(root):
+        return False, "off_topic_path"
 
     if _is_social_root(root):
         allow = True
@@ -4601,6 +4739,9 @@ def _top_url_allowed(link: str, *, relaxed: bool = False, allow_portals: bool = 
     elif root in TOP5_BROKERAGE_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_BROKERAGE_ALLOW):
         allow = True
         allow_reason = "brokerage_allow"
+    elif any(tok in root for tok in TOP5_ASSOCIATION_HINTS):
+        allow = True
+        allow_reason = "association_allow"
     elif any(tok in root for tok in TOP5_DOMAIN_HINT_TOKENS):
         allow = True
         allow_reason = "domain_hint"
@@ -4774,6 +4915,9 @@ def select_top_5_urls(
     existing_norms: Set[str] = {
         normalize_url(u) for u in (existing or []) if u
     }
+    agent_tokens = [re.sub(r"[^a-z0-9]", "", part.lower()) for part in agent.split() if part.strip()]
+    brokerage_token = re.sub(r"[^a-z0-9]", "", brokerage.lower()) if brokerage else ""
+    city_token = property_city.lower()
     original_order: Dict[str, int] = {}
 
     def _good_candidate_score(url: str, *, snippet: str = "", text: str = "") -> int:
@@ -4782,17 +4926,38 @@ def select_top_5_urls(
         path = parsed.path.lower()
         context = " ".join(part for part in (snippet, text) if part).lower()
         score = 0
+        contactish_terms = {"contact", "about", "team", "profile", "agent", "realtor", "bio"}
         if any(hint in path for hint in TOP5_GOOD_PATH_HINTS):
-            score += 6
+            score += 7
         if any(term in context for term in TOP5_GOOD_TEXT_HINTS):
-            score += 4
+            score += 5
+        if any(term in path for term in contactish_terms):
+            score += 3
+        if any(term in context for term in contactish_terms):
+            score += 2
+        if brokerage_token and (brokerage_token in root or brokerage_token in path or brokerage_token in context):
+            score += 3
+        if city_token and city_token in context:
+            score += 2
+        if property_state and property_state in context.upper():
+            score += 2
+        if agent_tokens and any(tok and (tok in path or tok in context) for tok in agent_tokens):
+            score += 3
         if _looks_directory_page(url):
             score += 2
         if root in TOP5_BROKERAGE_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_BROKERAGE_ALLOW):
-            score += 3
+            score += 5
         if _is_social_root(root):
-            score -= 3
+            score -= 2
+            if any(path.startswith(p) or p in path for p in PREFERRED_SOCIAL_PATHS):
+                score += 2
         if allow_portals and (root in PORTAL_DOMAINS):
+            score += 1
+        if any(term in root for term in TOP5_ASSOCIATION_HINTS):
+            score += 2
+        if "contact" in path:
+            score += 1
+        if "email" in context or "phone" in context:
             score += 1
         score += max(0, 2 - path.count("/"))
         return score
@@ -5407,6 +5572,30 @@ def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]],
                 "context": _context_for(cf_node).lower(),
             })
 
+    for node in soup.select('[itemprop="email"], [itemprop="telephone"]'):
+        prop = node.get("itemprop", "")
+        content_val = node.get("content", "")
+        value = content_val or node.get_text(" ", strip=True)
+        if not value:
+            continue
+        if "email" in prop:
+            cleaned = clean_email(value)
+            if cleaned and ok_email(cleaned) and cleaned not in seen_emails:
+                mails.append(cleaned)
+                seen_emails.add(cleaned)
+                info["mailto"].append({
+                    "email": cleaned,
+                    "context": "microdata",
+                })
+        if "telephone" in prop:
+            formatted = fmt_phone(value)
+            if formatted:
+                phones.append(formatted)
+                info["tel"].append({
+                    "phone": formatted,
+                    "context": "microdata",
+                })
+
     for email, snippet in _extract_emails_from_scripts(soup):
         if email in seen_emails:
             continue
@@ -5416,6 +5605,24 @@ def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]],
             "email": email,
             "context": snippet.lower(),
         })
+
+    text_blob = soup.get_text(" ", strip=True)
+    vcard_emails, vcard_phones = _extract_vcard_contacts(text_blob)
+    for phone in vcard_phones:
+        if phone:
+            phones.append(phone)
+            info["tel"].append({
+                "phone": phone,
+                "context": "vcard",
+            })
+    for mail in vcard_emails:
+        if mail and mail not in seen_emails:
+            mails.append(mail)
+            seen_emails.add(mail)
+            info["mailto"].append({
+                "email": mail,
+                "context": "vcard",
+            })
 
     soup.decompose()
     return phones, mails, meta, info
@@ -7322,6 +7529,18 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         trusted_domains.add(brokerage_domain)
     if brokerage_domain_guess and brokerage_domain_guess != brokerage_domain:
         trusted_domains.add(brokerage_domain_guess)
+    preferred_email_domains: Set[str] = set()
+    preferred_email_domains.update(_preferred_email_domains_for_text(brokerage))
+    preferred_email_domains.update(
+        _preferred_email_domains_for_text(
+            row_payload.get("brokerageName", ""),
+            row_payload.get("company", ""),
+        )
+    )
+    if brokerage_domain:
+        preferred_email_domains.add(brokerage_domain)
+    if domain_hint:
+        preferred_email_domains.add(_domain(domain_hint) or domain_hint.lower())
 
     tokens = _agent_tokens(agent)
     IDENTITY_SOURCES = {
@@ -7381,6 +7600,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         low = cleaned.lower()
         matches_agent = _email_matches_name(agent, cleaned)
         is_generic = _is_generic_email(cleaned)
+        email_domain = cleaned.split("@", 1)[1].lower() if "@" in cleaned else ""
+        preferred_hit = email_domain in preferred_email_domains
         if is_generic and not matches_agent:
             if low in generic_seen:
                 return
@@ -7446,6 +7667,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "trusted_hit": False,
                 "agent_on_page": False,
                 "role_email": role_email,
+                "preferred_domains": set(),
+                "preferred_bonus": False,
             },
         )
         if is_generic:
@@ -7469,6 +7692,10 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if is_generic and not matches_agent and not trusted_domain and not info["generic_penalized"]:
             info["score"] -= 0.25
             info["generic_penalized"] = True
+        if preferred_hit and not info.get("preferred_bonus"):
+            info["preferred_bonus"] = True
+            info["preferred_domains"].add(email_domain)
+            info["score"] += 0.4
         if source in IDENTITY_SOURCES and source not in info["identity_sources"]:
             info["identity_sources"].add(source)
             info["identity_hits"] += 1
@@ -7595,6 +7822,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         jsonld_entries, soup = _jsonld_person_contacts(page)
         if soup and soup.title and soup.title.string:
             page_title = soup.title.string.strip()
+        preferred_email_domains.update(_preferred_email_domains_for_text(page[:4000], brokerage, page_title))
         trusted_hit = dom in trusted_domains or domain_hint_hit
         if jsonld_entries:
             sameas_links: List[str] = []
