@@ -43,7 +43,10 @@ def fetch_rows(dataset_id: str) -> list[dict]:
         row = cur.fetchone()
         offset = row[0] if row else 0
 
-        url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?format=json&clean=1&offset=0"
+        url = (
+            "https://api.apify.com/v2/datasets/"
+            f"{dataset_id}/items?clean=true&offset={offset}"
+        )
         response = requests.get(url, headers=HEADERS)
         response.raise_for_status()
         items = response.json()
