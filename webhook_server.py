@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 import sqlite3
 import threading
 from pathlib import Path
@@ -529,23 +530,70 @@ async def apify_hook(request: Request):
     Accepts:
       • {"datasetId": "..."} – fetch rows from that dataset
     """
-    payload = await request.json()
+    body = await request.body()
+    payload: Any = {}
+    if body:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            content_type = request.headers.get("content-type", "")
+            if "application/x-www-form-urlencoded" in content_type:
+                parsed = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
+                payload = {
+                    key: values[0] if len(values) == 1 else values
+                    for key, values in parsed.items()
+                }
+            else:
+                payload = {}
     logger.info("RAW Apify webhook payload: %s", payload)
-    logger.debug("Incoming webhook payload: %s", json.dumps(payload))
-
-    dataset_id = payload.get("datasetId")
-    if not dataset_id:
-        logger.error(
-            "Webhook received but no datasetId in payload. Keys=%s",
-            list(payload.keys()),
-        )
-        return {"status": "ignored", "reason": "missing datasetId"}
     try:
-        rows = fetch_rows(dataset_id)
-    except Exception:
-        logger.exception("Failed to fetch dataset items for datasetId=%s", dataset_id)
-        return {"status": "error", "reason": "fetch_rows_failed"}
-    logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
+        logger.debug("Incoming webhook payload: %s", json.dumps(payload))
+    except TypeError:
+        logger.debug("Incoming webhook payload: %r", payload)
+
+    dataset_id = None
+    rows: Optional[List[Dict[str, Any]]] = None
+    query_params = request.query_params
+
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        dataset_id = (
+            payload.get("datasetId")
+            or payload.get("dataset_id")
+            or payload.get("datasetID")
+        )
+        if isinstance(payload.get("items"), list):
+            rows = payload.get("items")
+        elif isinstance(payload.get("data"), list):
+            rows = payload.get("data")
+
+        resource = payload.get("resource")
+        if isinstance(payload.get("eventData"), dict) and not resource:
+            resource = payload["eventData"].get("resource")
+        if isinstance(payload.get("data"), dict) and not resource:
+            resource = payload["data"].get("resource")
+        if isinstance(resource, dict):
+            dataset_id = dataset_id or resource.get("datasetId") or resource.get("defaultDatasetId")
+
+    dataset_id = dataset_id or query_params.get("datasetId") or query_params.get("dataset_id")
+    if not dataset_id:
+        if rows:
+            logger.info("apify-hook: processing %d rows included in webhook payload", len(rows))
+        else:
+            payload_keys = list(payload.keys()) if isinstance(payload, dict) else []
+            logger.error(
+                "Webhook received but no datasetId in payload. Keys=%s",
+                payload_keys,
+            )
+            return {"status": "ignored", "reason": "missing datasetId"}
+    if rows is None:
+        try:
+            rows = fetch_rows(dataset_id)
+        except Exception:
+            logger.exception("Failed to fetch dataset items for datasetId=%s", dataset_id)
+            return {"status": "error", "reason": "fetch_rows_failed"}
+        logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
 
     if not rows:
         logger.info("apify-hook: 0 listings received; no Apify retries scheduled")
