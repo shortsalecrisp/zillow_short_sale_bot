@@ -8692,7 +8692,7 @@ def apify_hour_key(slot: datetime) -> str:
 def apify_work_hours_status(run_time: datetime) -> Tuple[int, bool]:
     local_dt = run_time.astimezone(SCHEDULER_TZ)
     local_hour = local_dt.hour
-    within_work_hours = 8 <= local_hour < 20
+    within_work_hours = WORK_START <= local_hour < WORK_END
     return local_hour, within_work_hours
 
 
@@ -8734,8 +8734,12 @@ def _next_scheduler_run(now: datetime) -> datetime:
     base = _hour_floor(now)
 
     if now < base + timedelta(seconds=1):
-        return base
-    return base + timedelta(hours=1)
+        candidate = base
+    else:
+        candidate = base + timedelta(hours=1)
+    if _within_work_hours(candidate):
+        return candidate
+    return _next_work_start(candidate)
 
 
 def _within_work_hours(slot: datetime) -> bool:
@@ -8747,6 +8751,28 @@ def _within_work_hours(slot: datetime) -> bool:
     if not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(slot):
         return False
     return True
+
+
+def _next_work_start(slot: datetime) -> datetime:
+    slot = slot.astimezone(SCHEDULER_TZ)
+    candidate = slot
+
+    while True:
+        if not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(candidate):
+            candidate = (candidate + timedelta(days=1)).replace(
+                hour=WORK_START, minute=0, second=0, microsecond=0
+            )
+            continue
+        if candidate.hour < WORK_START:
+            return candidate.replace(
+                hour=WORK_START, minute=0, second=0, microsecond=0
+            )
+        if candidate.hour >= WORK_END:
+            candidate = (candidate + timedelta(days=1)).replace(
+                hour=WORK_START, minute=0, second=0, microsecond=0
+            )
+            continue
+        return candidate
 
 
 def _run_hourly_cycle(
@@ -8798,6 +8824,13 @@ def run_hourly_scheduler(
         "Hourly scheduler loop starting (thread=%s)",
         threading.current_thread().name,
     )
+    LOG.info(
+        "Working hours configured: %02d:00-%02d:00 %s (include_weekends=%s)",
+        WORK_START,
+        WORK_END,
+        SCHEDULER_TZ,
+        FOLLOWUP_INCLUDE_WEEKENDS,
+    )
     next_run = _next_scheduler_run(datetime.now(tz=SCHEDULER_TZ))
 
     LOG.info(
@@ -8808,12 +8841,18 @@ def run_hourly_scheduler(
 
     if run_immediately:
         initial_run = _hour_floor(datetime.now(tz=SCHEDULER_TZ))
-        _run_hourly_cycle(
-            initial_run,
-            hourly_callbacks,
-            skip_callbacks=not initial_callbacks,
-        )
-        next_run = _next_scheduler_run(initial_run + timedelta(seconds=1))
+        if _within_work_hours(initial_run):
+            _run_hourly_cycle(
+                initial_run,
+                hourly_callbacks,
+                skip_callbacks=not initial_callbacks,
+            )
+            next_run = _next_scheduler_run(initial_run + timedelta(seconds=1))
+        else:
+            LOG.info(
+                "Skipping immediate run outside work hours; next scheduled run at %s",
+                next_run.isoformat(),
+            )
 
     while True:
         try:
