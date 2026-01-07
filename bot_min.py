@@ -75,6 +75,11 @@ _PROXY_TARGETS = {
     "coldwellbankerhomes.com",
     "compass.com",
 }
+BLOCKED_DOMAINS = ("zillow.com", "www.zillow.com")
+
+
+def is_blocked_url(url: str) -> bool:
+    return bool(url) and any(d in url.lower() for d in BLOCKED_DOMAINS)
 
 def _parse_proxy_pool(env_name: str, fallback: str = "") -> List[str]:
     raw = os.getenv(env_name, fallback) or ""
@@ -554,7 +559,9 @@ COL_PHONE_CONF  = 24  # Y
 COL_CONTACT_REASON = 25  # Z
 COL_EMAIL_CONF  = 26  # AA
 COL_ZPID        = 27  # AB
-MIN_COLS        = 28
+COL_STATUS      = 28  # AC
+COL_NOTES       = 29  # AD
+MIN_COLS        = 30
 
 MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
@@ -571,6 +578,10 @@ logging.basicConfig(
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
 _playwright_install_attempted = False
+
+
+def _log_blocked_url(url: str) -> None:
+    LOG.info("URL_BLOCKED url=%s", url)
 
 
 def _playwright_browser_roots() -> List[Path]:
@@ -1612,7 +1623,11 @@ def _rapid_profile_urls(data: Dict[str, Any]) -> List[str]:
 
     def _add_url(val: Any) -> None:
         if isinstance(val, str) and val.startswith(("http://", "https://")):
-            urls.add(val.strip())
+            cleaned = val.strip()
+            if is_blocked_url(cleaned):
+                _log_blocked_url(cleaned)
+                return
+            urls.add(cleaned)
 
     for blk in blocks:
         for key in url_keys:
@@ -1676,6 +1691,9 @@ def _blocked(dom: str) -> bool:
     return dom in _blocked_domains or _blocked_until.get(dom, 0.0) > time.time()
 
 def _try_textise(dom: str, url: str) -> str:
+    if is_blocked_url(url):
+        _log_blocked_url(url)
+        return ""
     try:
         mirror_url = f"https://r.jina.ai/http://{urlparse(url).netloc}{urlparse(url).path}"
         r = _http_get(
@@ -1780,6 +1798,9 @@ def _contact_source_allowed(
 ) -> bool:
     if not url:
         return True
+    if is_blocked_url(url):
+        _log_blocked_url(url)
+        return False
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower()
     dom = _domain(host)
@@ -1825,6 +1846,9 @@ def _contact_source_allowed(
     return False
 
 def _should_fetch(url: str, strict: bool = True) -> bool:
+    if is_blocked_url(url):
+        _log_blocked_url(url)
+        return False
     dom = _domain(url)
     if dom in _ALWAYS_SKIP_DOMAINS:
         _mark_block(dom, reason="always_skip")
@@ -2079,6 +2103,17 @@ def _respect_domain_delay(url: str) -> None:
 
 def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
     norm = normalize_url(url)
+    if is_blocked_url(norm):
+        _log_blocked_url(norm)
+        return {
+            "url": norm,
+            "fetched_at": time.time(),
+            "ttl_seconds": 120,
+            "http_status": 451,
+            "extracted_text": "",
+            "final_url": norm,
+            "retry_needed": False,
+        }
     dom = _domain(norm)
     if dom and _blocked(dom):
         LOG.warning(
@@ -2213,12 +2248,18 @@ def jina_cached_search(
         hits: List[str] = []
         for m in re.finditer(r"https?://duckduckgo\.com/l/\?[^\s\"]+", body):
             decoded = _decode_duckduckgo_link(html.unescape(m.group()))
+            if is_blocked_url(decoded):
+                _log_blocked_url(decoded)
+                continue
             if decoded and decoded not in seen and _allowed(_domain(decoded)):
                 seen.add(decoded)
                 hits.append(decoded)
         for m in re.finditer(r"https?://[\w./?&%#=\-]+", body):
             candidate = html.unescape(m.group())
             if "duckduckgo.com" in candidate:
+                continue
+            if is_blocked_url(candidate):
+                _log_blocked_url(candidate)
                 continue
             if candidate not in seen and _allowed(_domain(candidate)):
                 seen.add(candidate)
@@ -2262,6 +2303,9 @@ def jina_cached_search(
 def _targeted_contact_link_allowed(link: str, agent: str, brokerage: str = "", domain_hint: str = "") -> bool:
     if not link:
         return False
+    if is_blocked_url(link):
+        _log_blocked_url(link)
+        return False
     dom = _domain(link)
     if not dom:
         return False
@@ -2277,6 +2321,9 @@ def _targeted_contact_link_allowed(link: str, agent: str, brokerage: str = "", d
 
 def _focused_contact_link_allowed(link: str, agent: str, brokerage: str = "", domain_hint: str = "") -> bool:
     if not link:
+        return False
+    if is_blocked_url(link):
+        _log_blocked_url(link)
         return False
     parsed = urlparse(link)
     host = parsed.netloc.lower()
@@ -2329,6 +2376,9 @@ def _collect_targeted_candidates(
     blocked = False
     for url in urls:
         if not url:
+            continue
+        if is_blocked_url(url):
+            _log_blocked_url(url)
             continue
         fetched = fetch_text_cached(url, ttl_days=14)
         status = int(fetched.get("http_status", 0) or 0)
@@ -2420,11 +2470,14 @@ def _rank_urls(
 ) -> List[str]:
     agent_tokens = [tok.lower() for tok in agent.split() if tok]
     brokerage_domain = _domain(domain_hint or brokerage)
-    scored = [
-        (_score_contact_url(u, agent_tokens, brokerage, brokerage_domain), u)
-        for u in urls
-        if u
-    ]
+    scored: List[Tuple[float, str]] = []
+    for url in urls:
+        if not url:
+            continue
+        if is_blocked_url(url):
+            _log_blocked_url(url)
+            continue
+        scored.append((_score_contact_url(url, agent_tokens, brokerage, brokerage_domain), url))
     scored.sort(key=lambda t: t[0], reverse=True)
     return [u for _, u in scored[:limit]]
 
@@ -2440,6 +2493,9 @@ def _brokerage_contact_urls(agent: str, brokerage: str, domain_hint: str = "") -
         return []
     domain = _domain(domain_hint or _infer_domain_from_text(brokerage) or _guess_domain_from_brokerage(brokerage))
     if not domain:
+        return []
+    if is_blocked_url(domain):
+        _log_blocked_url(domain)
         return []
     base = f"https://{domain}".rstrip("/")
     slug = _slugify_agent(agent)
@@ -2467,7 +2523,13 @@ def _brokerage_contact_urls(agent: str, brokerage: str, domain_hint: str = "") -
             ]
         )
     urls = [f"{base}{p}" for p in paths]
-    return list(dict.fromkeys(urls))
+    filtered: List[str] = []
+    for url in urls:
+        if is_blocked_url(url):
+            _log_blocked_url(url)
+            continue
+        filtered.append(url)
+    return list(dict.fromkeys(filtered))
 
 
 def _extract_jsonld_contacts_first(
@@ -2601,6 +2663,9 @@ def _authority_contact_urls(
             link = item.get("link", "")
             if not link or link in urls:
                 continue
+            if is_blocked_url(link):
+                _log_blocked_url(link)
+                continue
             if not first_seen:
                 first_seen = link
             dom = _domain(link)
@@ -2624,7 +2689,13 @@ def _candidate_urls(
     urls.extend(_rapid_profile_urls(rapid))
     hint_key = _normalize_override_key(agent, state)
     hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
-    urls.extend(hint_urls or [])
+    for hint_url in hint_urls or []:
+        if not hint_url:
+            continue
+        if is_blocked_url(hint_url):
+            _log_blocked_url(hint_url)
+            continue
+        urls.append(hint_url)
     city = row_payload.get("city", "")
     postal_code = row_payload.get("zip", "")
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
@@ -3211,6 +3282,9 @@ def _discover_agent_links(
         if not href:
             continue
         full = urljoin(base_url, href)
+        if is_blocked_url(full):
+            _log_blocked_url(full)
+            continue
         path = urlparse(full).path.lower()
         text = a.get_text(" ", strip=True).lower()
         if _plausible_agent_url(full, agent, brokerage, brokerage) or any(tok and (tok in text or tok in path) for tok in agent_tokens):
@@ -4098,6 +4172,9 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if unwrapped:
             LOG.debug("fetch_contact_page unwrap jina mirror -> %s", unwrapped)
             url = unwrapped
+    if is_blocked_url(url):
+        _log_blocked_url(url)
+        return "", False
     if not _should_fetch(url, strict=False):
         return "", False
     cache_key = normalize_url(url)
@@ -4144,6 +4221,9 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
 
     def _run_playwright_review(reason: str) -> Tuple[str, bool]:
         if not HEADLESS_ENABLED or not async_playwright:
+            return "", False
+        if is_blocked_url(url):
+            LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", url)
             return "", False
         allow_playwright = _should_use_playwright_for_contact(dom, "", js_hint=dom in CONTACT_JS_DOMAINS)
         if not allow_playwright:
@@ -4276,7 +4356,13 @@ async def _headless_fetch_async(
     if not HEADLESS_ENABLED or not async_playwright:
         return {}
     target_url = _unwrap_jina_url(url)
+    if is_blocked_url(target_url):
+        LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", target_url)
+        return {}
     nav_timeout = HEADLESS_FACEBOOK_TIMEOUT_MS if "facebook.com" in target_url else HEADLESS_TIMEOUT_MS
+    nav_timeout = max(10000, min(nav_timeout, 15000))
+    default_timeout = max(10000, min(HEADLESS_TIMEOUT_MS, 15000))
+    overall_timeout = 28
 
     async def _progressive_scroll(page) -> None:
         for _ in range(3):
@@ -4306,51 +4392,43 @@ async def _headless_fetch_async(
                     continue
         except Exception:
             return
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
-            context = await browser.new_context(
-                user_agent=random.choice(_USER_AGENT_POOL),
-                locale=accept_language.split(",")[0],
-                extra_http_headers={
-                    "Accept-Language": accept_language,
-                    **_random_cookie_header(),
-                },
-                proxy={"server": proxy_url} if proxy_url else None,
-            )
-            page = await context.new_page()
-            LOG.info(
-                "PLAYWRIGHT_START url=%s reason=%s proxy=%s",
-                target_url,
-                reason or "fallback",
-                bool(proxy_url),
-            )
-            try:
+    async def _run() -> Dict[str, Any]:
+        browser = None
+        context = None
+        page = None
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
+                context = await browser.new_context(
+                    user_agent=random.choice(_USER_AGENT_POOL),
+                    locale=accept_language.split(",")[0],
+                    extra_http_headers={
+                        "Accept-Language": accept_language,
+                        **_random_cookie_header(),
+                    },
+                    proxy={"server": proxy_url} if proxy_url else None,
+                )
+                page = await context.new_page()
+                page.set_default_timeout(default_timeout)
+                page.set_default_navigation_timeout(default_timeout)
+                LOG.info(
+                    "PLAYWRIGHT_START url=%s reason=%s proxy=%s",
+                    target_url,
+                    reason or "fallback",
+                    bool(proxy_url),
+                )
                 try:
                     await page.goto(target_url, wait_until="domcontentloaded", timeout=nav_timeout)
                 except Exception as exc:
                     if PlaywrightTimeoutError and isinstance(exc, PlaywrightTimeoutError):
-                        LOG.warning("PLAYWRIGHT_TIMEOUT first nav url=%s err=%s", target_url, exc)
-                        try:
-                            await page.goto(
-                                target_url,
-                                wait_until="networkidle",
-                                timeout=min(nav_timeout + 6000, nav_timeout * 2),
-                            )
-                        except Exception as exc2:
-                            LOG.warning("PLAYWRIGHT_FAIL retry url=%s err=%s", target_url, exc2)
-                            await context.close()
-                            await browser.close()
-                            return {}
+                        LOG.warning("PLAYWRIGHT_TIMEOUT nav url=%s err=%s", target_url, exc)
                     else:
-                        LOG.warning("PLAYWRIGHT_FAIL url=%s err=%s", target_url, exc)
-                        await context.close()
-                        await browser.close()
-                        return {}
+                        LOG.warning("PLAYWRIGHT_ERROR nav url=%s err=%s", target_url, exc)
+                    return {}
                 try:
                     await page.wait_for_load_state("networkidle", timeout=3000)
                 except Exception:
@@ -4360,13 +4438,7 @@ async def _headless_fetch_async(
                 if "facebook.com" in (domain or _domain(target_url) or ""):
                     await _expand_facebook(page)
                     await page.wait_for_timeout(600)
-            except Exception as exc:
-                LOG.warning("PLAYWRIGHT_FAIL url=%s err=%s", target_url, exc)
-                await context.close()
-                await browser.close()
-                return {}
 
-            try:
                 content = await page.content() or ""
                 visible_text = ""
                 try:
@@ -4384,35 +4456,53 @@ async def _headless_fetch_async(
                     tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
                 except Exception:
                     pass
-            except Exception as exc:
-                LOG.warning("PLAYWRIGHT_FAIL url=%s err=%s", target_url, exc)
-                await context.close()
-                await browser.close()
-                return {}
-            await context.close()
-            await browser.close()
-            if not content.strip():
-                LOG.info("PLAYWRIGHT_FAIL url=%s err=%s", target_url, "empty-content")
-                return {}
-            LOG.info(
-                "PLAYWRIGHT_OK url=%s bytes=%s",
-                target_url,
-                len(content.encode("utf-8")),
-            )
-            LOG.debug(
-                "Headless fetch ok for %s (proxy=%s)",
-                domain or _domain(target_url),
-                bool(proxy_url),
-            )
-            return {
-                "html": content,
-                "visible_text": visible_text,
-                "mailto_links": mail_links,
-                "tel_links": tel_links,
-                "final_url": page.url,
-            }
-    except Exception as exc:  # pragma: no cover - network/env specific
-        LOG.warning("PLAYWRIGHT_FAIL url=%s err=%s", target_url, exc)
+                if not content.strip():
+                    LOG.info("PLAYWRIGHT_ERROR url=%s err=%s", target_url, "empty-content")
+                    return {}
+                LOG.info(
+                    "PLAYWRIGHT_OK url=%s bytes=%s",
+                    target_url,
+                    len(content.encode("utf-8")),
+                )
+                LOG.debug(
+                    "Headless fetch ok for %s (proxy=%s)",
+                    domain or _domain(target_url),
+                    bool(proxy_url),
+                )
+                return {
+                    "html": content,
+                    "visible_text": visible_text,
+                    "mailto_links": mail_links,
+                    "tel_links": tel_links,
+                    "final_url": page.url,
+                }
+        except Exception as exc:  # pragma: no cover - network/env specific
+            LOG.warning("PLAYWRIGHT_ERROR url=%s err=%s", target_url, exc)
+            return {}
+        finally:
+            try:
+                if page:
+                    await page.close()
+            except Exception:
+                pass
+            try:
+                if context:
+                    await context.close()
+            except Exception:
+                pass
+            try:
+                if browser:
+                    await browser.close()
+            except Exception:
+                pass
+
+    try:
+        return await asyncio.wait_for(_run(), timeout=overall_timeout)
+    except asyncio.TimeoutError:
+        LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", target_url, "overall_timeout")
+        return {}
+    except Exception as exc:
+        LOG.warning("PLAYWRIGHT_ERROR url=%s err=%s", target_url, exc)
         return {}
 
 
@@ -4979,6 +5069,10 @@ def select_top_5_urls(
                 title = str(item.get("title") or "")
             if not link:
                 continue
+            if is_blocked_url(link):
+                _log_blocked_url(link)
+                rejected.append((link, "blocked_domain"))
+                continue
             norm = normalize_url(link)
             if norm in seen_links:
                 continue
@@ -4995,6 +5089,10 @@ def select_top_5_urls(
             if fetch_check:
                 fetched = fetch_text_cached(norm, ttl_days=7)
                 final_url = fetched.get("final_url") or norm
+                if is_blocked_url(final_url):
+                    _log_blocked_url(final_url)
+                    rejected.append((final_url, "blocked_domain"))
+                    continue
                 status = int(fetched.get("http_status", 0) or 0)
                 text = fetched.get("extracted_text", "")
                 if fetched.get("retry_needed") or status == 0 or not text.strip():
@@ -5153,6 +5251,9 @@ def google_cse_search(
                     link = item.get("link")
                     if not link:
                         continue
+                    if is_blocked_url(link):
+                        _log_blocked_url(link)
+                        continue
                     norm = normalize_url(link)
                     if norm in seen_raw_links:
                         continue
@@ -5229,6 +5330,9 @@ def google_cse_search(
         for item in fallback_results:
             link = item.get("link", "")
             if not link or not _filter_allowed(link, allowed_domains):
+                continue
+            if is_blocked_url(link):
+                _log_blocked_url(link)
                 continue
             norm = normalize_url(link)
             if norm in seen_results:
@@ -5353,6 +5457,9 @@ def _record_sameas_links(row_payload: Dict[str, Any], links: Iterable[str]) -> N
         if not link:
             continue
         cleaned = str(link).strip()
+        if is_blocked_url(cleaned):
+            _log_blocked_url(cleaned)
+            continue
         if not cleaned or cleaned in seen:
             continue
         existing.append(cleaned)
@@ -8991,49 +9098,90 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             LOG.debug("SKIP missing agent name for %s (%s)", r.get("street"), r.get("zpid"))
             continue
         state = r.get("state", "")
-        _rapid_from_payload(r)
         try:
-            phone_info = lookup_phone(name, state, r)
+            rapid_snapshot = _rapid_contact_snapshot(name, r)
         except Exception as exc:
-            LOG.exception("lookup_phone failed for %s (%s)", name, zpid)
-            phone_info = {"number": "", "confidence": "", "reason": "lookup_error"}
-        try:
-            email_info = lookup_email(name, state, r)
-        except Exception as exc:
-            LOG.exception("lookup_email failed for %s (%s)", name, zpid)
-            email_info = {"email": "", "confidence": "", "reason": "lookup_error"}
-        phone = phone_info.get("number", "")
-        email = email_info.get("email", "")
-        if phone and phone_exists(phone):
-            continue
+            LOG.exception("Rapid snapshot failed for %s (%s)", name, zpid)
+            rapid_snapshot = {}
+        selected_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
+        selected_email = rapid_snapshot.get("selected_email", "") if rapid_snapshot else ""
+
         first, *last = name.split()
         now_iso = datetime.now(tz=TZ).isoformat()
+        pulled_at = str(r.get("pulled_at") or now_iso)
         row_vals = [""] * MIN_COLS
         row_vals[COL_FIRST]   = first
         row_vals[COL_LAST]    = " ".join(last)
-        row_vals[COL_PHONE]   = phone
-        row_vals[COL_EMAIL]   = email
-        row_vals[COL_PHONE_CONF] = phone_info.get("confidence", "") if phone else ""
-        row_vals[COL_EMAIL_CONF] = email_info.get("confidence", "")
-        reason = ""
-        phone_reason = phone_info.get("reason", "")
-        email_reason = email_info.get("reason", "")
-        if "withheld_low_conf_mix" in {phone_reason, email_reason}:
-            reason = "withheld_low_conf_mix"
-        elif phone_reason == "no_personal_mobile":
-            reason = "no_personal_mobile"
-        elif email_reason == "no_personal_email":
-            reason = "no_personal_email"
-        row_vals[COL_CONTACT_REASON] = reason
+        row_vals[COL_PHONE]   = selected_phone
+        row_vals[COL_EMAIL]   = selected_email
+        row_vals[COL_PHONE_CONF] = "low" if selected_phone else ""
+        row_vals[COL_EMAIL_CONF] = ""
+        row_vals[COL_CONTACT_REASON] = ""
         row_vals[COL_STREET]  = r.get("street", "")
         row_vals[COL_CITY]    = r.get("city", "")
         row_vals[COL_STATE]   = state
-        row_vals[COL_INIT_TS] = now_iso
+        row_vals[COL_INIT_TS] = pulled_at
         row_vals[COL_ZPID]    = zpid
+        row_vals[COL_STATUS]  = "partial" if selected_email else "needs_email"
+        row_vals[COL_NOTES]   = "Zillow blocked; enrichment best-effort"
         row_idx = append_row(row_vals)
-        if phone:
-            seen_phones.add(phone)
-            send_sms(phone, first, r.get("street", ""), row_idx)
+        LOG.info(
+            "SHEET_APPEND_OK zpid=%s agent=%s phone=%s email=%s",
+            zpid,
+            name,
+            selected_phone or "",
+            selected_email or "",
+        )
+        if selected_phone and not phone_exists(selected_phone):
+            seen_phones.add(selected_phone)
+            send_sms(selected_phone, first, r.get("street", ""), row_idx)
+
+        phone_info = {"number": "", "confidence": "", "reason": ""}
+        email_info = {"email": "", "confidence": "", "reason": ""}
+        try:
+            phone_info = lookup_phone(name, state, r)
+        except Exception as exc:
+            LOG.error("ENRICHMENT_FAILED zpid=%s agent=%s err=%s", zpid, name, exc)
+        try:
+            email_info = lookup_email(name, state, r)
+        except Exception as exc:
+            LOG.error("ENRICHMENT_FAILED zpid=%s agent=%s err=%s", zpid, name, exc)
+
+        enriched_phone = phone_info.get("number", "") if phone_info else ""
+        enriched_email = email_info.get("email", "") if email_info else ""
+        if enriched_phone or enriched_email:
+            update_phone = enriched_phone and enriched_phone != selected_phone
+            update_email = enriched_email and enriched_email != selected_email
+            if update_phone or update_email:
+                data_updates: List[Dict[str, Any]] = []
+                if update_phone:
+                    data_updates.append({"range": f"{GSHEET_TAB}!C{row_idx}", "values": [[enriched_phone]]})
+                    data_updates.append({"range": f"{GSHEET_TAB}!Y{row_idx}", "values": [[phone_info.get("confidence", "")]]})
+                if update_email:
+                    data_updates.append({"range": f"{GSHEET_TAB}!D{row_idx}", "values": [[enriched_email]]})
+                    data_updates.append({"range": f"{GSHEET_TAB}!AA{row_idx}", "values": [[email_info.get("confidence", "")]]})
+                reason = ""
+                phone_reason = phone_info.get("reason", "")
+                email_reason = email_info.get("reason", "")
+                if "withheld_low_conf_mix" in {phone_reason, email_reason}:
+                    reason = "withheld_low_conf_mix"
+                elif phone_reason == "no_personal_mobile":
+                    reason = "no_personal_mobile"
+                elif email_reason == "no_personal_email":
+                    reason = "no_personal_email"
+                if reason:
+                    data_updates.append({"range": f"{GSHEET_TAB}!Z{row_idx}", "values": [[reason]]})
+                if data_updates:
+                    try:
+                        sheets_service.spreadsheets().values().batchUpdate(
+                            spreadsheetId=GSHEET_ID,
+                            body={"valueInputOption": "RAW", "data": data_updates},
+                        ).execute()
+                    except Exception as exc:
+                        LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
+            if enriched_phone and not phone_exists(enriched_phone):
+                seen_phones.add(enriched_phone)
+                send_sms(enriched_phone, first, r.get("street", ""), row_idx)
 
 # ───────────────────── main entry point & scheduler ─────────────────────
 if __name__ == "__main__":
