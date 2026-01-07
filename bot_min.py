@@ -9122,8 +9122,6 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         row_vals[COL_STATE]   = state
         row_vals[COL_INIT_TS] = pulled_at
         row_vals[COL_ZPID]    = zpid
-        row_vals[COL_STATUS]  = "partial" if selected_email else "needs_email"
-        row_vals[COL_NOTES]   = "Zillow blocked; enrichment best-effort"
         row_idx = append_row(row_vals)
         LOG.info(
             "SHEET_APPEND_OK zpid=%s agent=%s phone=%s email=%s",
