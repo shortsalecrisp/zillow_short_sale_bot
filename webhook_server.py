@@ -568,6 +568,8 @@ async def apify_hook(request: Request):
             rows = payload.get("items")
         elif isinstance(payload.get("data"), list):
             rows = payload.get("data")
+        elif isinstance(payload.get("listings"), list):
+            rows = payload.get("listings")
 
         resource = payload.get("resource")
         if isinstance(payload.get("eventData"), dict) and not resource:
