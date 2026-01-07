@@ -545,6 +545,9 @@ async def apify_hook(request: Request):
                 }
             else:
                 payload = {}
+    if payload == {}:
+        logger.info("apify-hook: empty payload (ignored)")
+        return {"status": "ignored", "reason": "empty payload"}
     logger.info("RAW Apify webhook payload: %s", payload)
     try:
         logger.debug("Incoming webhook payload: %s", json.dumps(payload))
@@ -585,18 +588,34 @@ async def apify_hook(request: Request):
             logger.info("apify-hook: processing %d rows included in webhook payload", len(rows))
         else:
             payload_keys = list(payload.keys()) if isinstance(payload, dict) else []
-            logger.error(
-                "Webhook received but no datasetId in payload. Keys=%s",
+            logger.info(
+                "apify-hook: ping received without datasetId or listings. Keys=%s",
                 payload_keys,
             )
             return {"status": "ignored", "reason": "missing datasetId"}
     if rows is None:
-        try:
-            rows = fetch_rows(dataset_id)
-        except Exception:
-            logger.exception("Failed to fetch dataset items for datasetId=%s", dataset_id)
-            return {"status": "error", "reason": "fetch_rows_failed"}
-        logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
+        fetch_attempts = 3
+        rows = []
+        for attempt in range(1, fetch_attempts + 1):
+            try:
+                rows = fetch_rows(dataset_id)
+            except Exception:
+                logger.exception("Failed to fetch dataset items for datasetId=%s", dataset_id)
+                return {"status": "error", "reason": "fetch_rows_failed"}
+            if rows:
+                break
+            logger.debug(
+                "apify-hook: dataset %s returned 0 rows on attempt %d/%d",
+                dataset_id,
+                attempt,
+                fetch_attempts,
+            )
+            if attempt < fetch_attempts:
+                await asyncio.sleep(1.5 * attempt)
+        if rows:
+            logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
+        else:
+            logger.info("apify-hook: dataset %s empty after retries", dataset_id)
 
     if not rows:
         logger.info("apify-hook: 0 listings received; no Apify retries scheduled")
