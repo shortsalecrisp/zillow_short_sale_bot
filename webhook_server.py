@@ -562,6 +562,7 @@ async def apify_hook(request: Request):
             payload.get("datasetId")
             or payload.get("dataset_id")
             or payload.get("datasetID")
+            or payload.get("defaultDatasetId")
         )
         if isinstance(payload.get("items"), list):
             rows = payload.get("items")
