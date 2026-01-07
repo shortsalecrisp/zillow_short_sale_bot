@@ -97,12 +97,14 @@ _ACCEPT_LANGUAGE_POOL = [
     "en-GB,en;q=0.9",
 ]
 HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
-HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "12000"))
+HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "20000"))
+HEADLESS_NAV_TIMEOUT_MS = int(os.getenv("HEADLESS_NAV_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS)))
 HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
-HEADLESS_FACEBOOK_TIMEOUT_MS = int(os.getenv("HEADLESS_FACEBOOK_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS + 8000)))
+HEADLESS_FACEBOOK_TIMEOUT_MS = int(os.getenv("HEADLESS_FACEBOOK_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS + 12000)))
 HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
 AUTO_INSTALL_PLAYWRIGHT = os.getenv("AUTO_INSTALL_PLAYWRIGHT", "true").lower() == "true"
 PLAYWRIGHT_INSTALL_TIMEOUT = int(os.getenv("PLAYWRIGHT_INSTALL_TIMEOUT", "240"))
+HEADLESS_OVERALL_TIMEOUT_S = int(os.getenv("HEADLESS_OVERALL_TIMEOUT_S", "50"))
 PLAYWRIGHT_CONTACT_DOMAINS = {
     "facebook.com",
     "remax.com",
@@ -136,6 +138,27 @@ cache_p: Dict[str, Any] = {}
 cache_e: Dict[str, Any] = {}
 CONTACT_CACHE_TTL_SECONDS = int(os.getenv("CONTACT_CACHE_TTL_SECONDS", str(24 * 3600)))
 SEEN_ZPID_CACHE_SECONDS = int(os.getenv("SEEN_ZPID_CACHE_SECONDS", "300"))
+_headless_loop: Optional[asyncio.AbstractEventLoop] = None
+_headless_loop_thread: Optional[threading.Thread] = None
+_headless_loop_lock = threading.Lock()
+
+
+def _ensure_headless_loop() -> asyncio.AbstractEventLoop:
+    global _headless_loop, _headless_loop_thread
+    if _headless_loop and _headless_loop.is_running():
+        return _headless_loop
+    with _headless_loop_lock:
+        if _headless_loop and _headless_loop.is_running():
+            return _headless_loop
+        loop = asyncio.new_event_loop()
+        def _runner() -> None:
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+        thread = threading.Thread(target=_runner, name="playwright-loop", daemon=True)
+        thread.start()
+        _headless_loop = loop
+        _headless_loop_thread = thread
+    return loop
 
 
 def _contact_cache_key(agent: str, state: str, row_payload: Dict[str, Any]) -> str:
@@ -4219,13 +4242,13 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                 LOG.debug("mirror fetch failed %s on %s", exc, mirror)
         return "", False
 
-    def _run_playwright_review(reason: str) -> Tuple[str, bool]:
+    def _run_playwright_review(reason: str, body: str = "") -> Tuple[str, bool]:
         if not HEADLESS_ENABLED or not async_playwright:
             return "", False
         if is_blocked_url(url):
             LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", url)
             return "", False
-        allow_playwright = _should_use_playwright_for_contact(dom, "", js_hint=dom in CONTACT_JS_DOMAINS)
+        allow_playwright = _should_use_playwright_for_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
         if not allow_playwright:
             return "", False
         snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)
@@ -4241,8 +4264,8 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         LOG.info("PLAYWRIGHT REVIEW empty for %s (reason=%s)", dom, reason)
         return "", False
 
-    def _finalize(html: str, used_fallback: bool, reason: str) -> Tuple[str, bool]:
-        headless_html, _ = _run_playwright_review(reason)
+    def _finalize(html: str, used_fallback: bool, reason: str, body: str = "") -> Tuple[str, bool]:
+        headless_html, _ = _run_playwright_review(reason, body)
         if headless_html:
             html = headless_html
         return _cache_result(html, used_fallback)
@@ -4296,13 +4319,13 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if status == 200 and body:
             if proxy_url:
                 LOG.info("CONTACT fetched via proxy %s (%s)", _redact_proxy(proxy_url), dom)
-            return _finalize(body, False, "post-fast-fetch")
+            return _finalize(body, False, "post-fast-fetch", body)
         if status == 403 or (status == 200 and not body):
             blocked = True
             _mark_block(dom)
             LOG.warning("BLOCK %s -> attempt headless for %s/%s", status, attempt, tries)
             html, used_fallback = _fallback("403")
-            return _finalize(html, used_fallback, "post-mirror-403")
+            return _finalize(html, used_fallback, "post-mirror-403", html)
         if status == 429:
             blocked = True
             _mark_block(dom)
@@ -4334,8 +4357,8 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
 
     if blocked:
         html, used_fallback = _fallback("blocked")
-        return _finalize(html, used_fallback, "post-mirror-blocked")
-    return _finalize("", False, "post-fast-fetch-empty")
+        return _finalize(html, used_fallback, "post-mirror-blocked", html)
+    return _finalize("", False, "post-fast-fetch-empty", "")
 
 def _unwrap_jina_url(url: str) -> str:
     parsed = urlparse(url)
@@ -4359,10 +4382,10 @@ async def _headless_fetch_async(
     if is_blocked_url(target_url):
         LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", target_url)
         return {}
-    nav_timeout = HEADLESS_FACEBOOK_TIMEOUT_MS if "facebook.com" in target_url else HEADLESS_TIMEOUT_MS
-    nav_timeout = max(10000, min(nav_timeout, 15000))
-    default_timeout = max(10000, min(HEADLESS_TIMEOUT_MS, 15000))
-    overall_timeout = 28
+    nav_timeout = HEADLESS_FACEBOOK_TIMEOUT_MS if "facebook.com" in target_url else HEADLESS_NAV_TIMEOUT_MS
+    nav_timeout = max(10000, nav_timeout)
+    default_timeout = max(10000, HEADLESS_TIMEOUT_MS)
+    overall_timeout = HEADLESS_OVERALL_TIMEOUT_S
 
     async def _progressive_scroll(page) -> None:
         for _ in range(3):
@@ -4421,14 +4444,32 @@ async def _headless_fetch_async(
                     reason or "fallback",
                     bool(proxy_url),
                 )
-                try:
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=nav_timeout)
-                except Exception as exc:
-                    if PlaywrightTimeoutError and isinstance(exc, PlaywrightTimeoutError):
-                        LOG.warning("PLAYWRIGHT_TIMEOUT nav url=%s err=%s", target_url, exc)
-                    else:
-                        LOG.warning("PLAYWRIGHT_ERROR nav url=%s err=%s", target_url, exc)
-                    return {}
+                for attempt in range(2):
+                    try:
+                        await page.goto(target_url, wait_until="domcontentloaded", timeout=nav_timeout)
+                        break
+                    except Exception as exc:
+                        if PlaywrightTimeoutError and isinstance(exc, PlaywrightTimeoutError):
+                            LOG.warning(
+                                "PLAYWRIGHT_TIMEOUT nav url=%s attempt=%s err=%s",
+                                target_url,
+                                attempt + 1,
+                                exc,
+                            )
+                        else:
+                            LOG.warning(
+                                "PLAYWRIGHT_ERROR nav url=%s attempt=%s err=%s",
+                                target_url,
+                                attempt + 1,
+                                exc,
+                            )
+                        if attempt == 0:
+                            try:
+                                await page.wait_for_timeout(800)
+                            except Exception:
+                                pass
+                            continue
+                        return {}
                 try:
                     await page.wait_for_load_state("networkidle", timeout=3000)
                 except Exception:
@@ -4510,26 +4551,18 @@ def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: 
     if not HEADLESS_ENABLED or not async_playwright:
         return {}
 
-    async def _runner() -> Dict[str, Any]:
-        return await _headless_fetch_async(url, proxy_url=proxy_url, domain=domain, reason=reason)
-
+    loop = _ensure_headless_loop()
+    coro = _headless_fetch_async(url, proxy_url=proxy_url, domain=domain, reason=reason)
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(_runner())
-    else:  # pragma: no cover - depends on runtime context
-        result: Dict[str, Any] = {}
-        def _target() -> None:
-            nonlocal result
-            try:
-                result = asyncio.run(_runner())
-            except Exception:
-                LOG.exception("PLAYWRIGHT_FAIL url=%s err=%s", url, "thread-runner")
-                result = {}
-        t = threading.Thread(target=_target, daemon=True)
-        t.start()
-        t.join()
-        return result
+        return future.result(timeout=HEADLESS_OVERALL_TIMEOUT_S + 5)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", url, "thread-timeout")
+        return {}
+    except Exception:
+        LOG.exception("PLAYWRIGHT_FAIL url=%s err=%s", url, "thread-runner")
+        return {}
 
 # ───────────────────── Google CSE helpers ─────────────────────
 
