@@ -578,7 +578,7 @@ async def apify_hook(request: Request):
 
     dataset_id = dataset_id or query_params.get("datasetId") or query_params.get("dataset_id")
     if not dataset_id:
-        if rows:
+        if rows is not None:
             logger.info("apify-hook: processing %d rows included in webhook payload", len(rows))
         else:
             payload_keys = list(payload.keys()) if isinstance(payload, dict) else []
