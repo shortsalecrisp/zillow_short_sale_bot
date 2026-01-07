@@ -530,19 +530,34 @@ async def apify_hook(request: Request):
       • {"dataset_id": "..."}       – fetch rows from that dataset
       • {"listings": [ {...}, ...]} – rows already provided inline
     """
-    body = await request.json()
-    logger.debug("Incoming webhook payload: %s", json.dumps(body))
+    payload = await request.json()
+    logger.info("RAW Apify webhook payload: %s", payload)
+    logger.debug("Incoming webhook payload: %s", json.dumps(payload))
 
     # --- obtain raw rows ------------------------------------------------------
-    if isinstance(body.get("listings"), list):
-        rows = body["listings"]
+    if isinstance(payload.get("listings"), list):
+        rows = payload["listings"]
         logger.info("apify-hook: received %d listings directly in payload", len(rows))
     else:
-        dataset_id = body.get("dataset_id") or request.query_params.get("dataset_id")
+        dataset_id = (
+            payload.get("defaultDatasetId")
+            or payload.get("data", {}).get("defaultDatasetId")
+            or payload.get("resource", {}).get("defaultDatasetId")
+            or payload.get("eventData", {}).get("defaultDatasetId")
+        )
         if not dataset_id:
-            logger.error("apify-hook: missing dataset_id and no listings array found")
-            return {"error": "dataset_id missing and no listings provided"}
-        rows = fetch_rows(dataset_id)
+            logger.error(
+                "Webhook received but no dataset id in payload. Keys=%s",
+                list(payload.keys()),
+            )
+            return {"status": "ignored", "reason": "missing dataset id"}
+        try:
+            rows = fetch_rows(dataset_id)
+        except Exception:
+            logger.exception(
+                "Failed to fetch dataset items for dataset_id=%s", dataset_id
+            )
+            return {"status": "error", "reason": "fetch_rows_failed"}
         logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
 
     if not rows:

@@ -43,9 +43,8 @@ def fetch_rows(dataset_id: str) -> list[dict]:
         row = cur.fetchone()
         offset = row[0] if row else 0
 
-        url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
-        params = {"format": "json", "clean": 1, "offset": offset}
-        response = requests.get(url, params=params, headers=HEADERS)
+        url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?format=json&clean=1&offset=0"
+        response = requests.get(url, headers=HEADERS)
         response.raise_for_status()
         items = response.json()
 
@@ -63,4 +62,3 @@ def fetch_rows(dataset_id: str) -> list[dict]:
             conn.commit()
 
     return items
-
