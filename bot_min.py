@@ -861,14 +861,68 @@ sheets_service  = gapi_build("sheets", "v4", credentials=creds, cache_discovery=
 gc              = gspread.authorize(creds)
 ws              = gc.open_by_key(GSHEET_ID).worksheet(GSHEET_TAB)
 
-try:
-    _preloaded = ws.col_values(COL_PHONE + 1)
-except Exception:
-    _preloaded = []
-seen_phones: Set[str] = set(_preloaded)
+def _normalize_phone_for_dedupe(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 10:
+        digits = "1" + digits
+    return digits
+
+
+def _normalize_agent_name(name: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", (name or "").lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+seen_phones: Set[str] = set()
+seen_agents: Set[str] = set()
 seen_zpids: Set[str] = set()
 _seen_zpids_loaded_at = 0.0
+_seen_contacts_loaded_at = 0.0
 _seen_zpids_lock = threading.Lock()
+_seen_contacts_lock = threading.Lock()
+
+
+def load_seen_contacts(force: bool = False) -> Tuple[Set[str], Set[str]]:
+    """Load agent names and phones present in the Google Sheet with caching."""
+
+    global seen_phones, seen_agents, _seen_contacts_loaded_at
+    with _seen_contacts_lock:
+        now = time.time()
+        if (seen_phones or seen_agents) and not force and (now - _seen_contacts_loaded_at) < SEEN_ZPID_CACHE_SECONDS:
+            return set(seen_phones), set(seen_agents)
+        try:
+            resp = sheets_service.spreadsheets().values().get(
+                spreadsheetId=GSHEET_ID,
+                range=f"{GSHEET_TAB}!A:C",
+                majorDimension="ROWS",
+                valueRenderOption="FORMATTED_VALUE",
+            ).execute()
+        except Exception as exc:
+            LOG.warning("Unable to refresh seen contacts from sheet: %s", exc)
+            return set(seen_phones), set(seen_agents)
+        rows = resp.get("values", [])
+        phone_set: Set[str] = set()
+        agent_set: Set[str] = set()
+        for row in rows[1:]:
+            row += [""] * 3
+            first = str(row[COL_FIRST]).strip()
+            last = str(row[COL_LAST]).strip()
+            agent = _normalize_agent_name(f"{first} {last}".strip())
+            if agent:
+                agent_set.add(agent)
+            phone = _normalize_phone_for_dedupe(str(row[COL_PHONE]))
+            if phone:
+                phone_set.add(phone)
+        seen_phones = phone_set
+        seen_agents = agent_set
+        _seen_contacts_loaded_at = now
+        LOG.info(
+            "seen_contacts_loaded phones=%s agents=%s rows=%s",
+            len(seen_phones),
+            len(seen_agents),
+            max(0, len(rows) - 1),
+        )
+        return set(seen_phones), set(seen_agents)
 
 
 def load_seen_zpids(force: bool = False) -> Set[str]:
@@ -8645,7 +8699,8 @@ def append_row(vals) -> int:
     return row_idx
 
 def phone_exists(p):
-    return p in seen_phones
+    normalized = _normalize_phone_for_dedupe(p or "")
+    return bool(normalized) and normalized in seen_phones
 
 def _digits_only(num: str) -> str:
     """Keep digits, prefix 1 if US local (10 digits)."""
@@ -9113,6 +9168,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         if not rows:
             LOG.info("No fresh rows after de-duplication; skipping enrichment run")
             return
+    load_seen_contacts()
     for r in rows:
         txt = (r.get("description", "") + " " + r.get("openai_summary", "")).strip()
         if not is_short_sale(txt):
@@ -9131,6 +9187,10 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             LOG.debug("SKIP missing agent name for %s (%s)", r.get("street"), r.get("zpid"))
             continue
         state = r.get("state", "")
+        normalized_agent = _normalize_agent_name(name)
+        if normalized_agent and normalized_agent in seen_agents:
+            LOG.info("SKIP already-contacted agent %s (%s)", name, r.get("zpid"))
+            continue
         try:
             rapid_snapshot = _rapid_contact_snapshot(name, r)
         except Exception as exc:
@@ -9138,6 +9198,14 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             rapid_snapshot = {}
         selected_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
         selected_email = rapid_snapshot.get("selected_email", "") if rapid_snapshot else ""
+        if selected_phone and phone_exists(selected_phone):
+            LOG.info(
+                "SKIP already-contacted phone %s for agent %s (%s)",
+                selected_phone,
+                name,
+                r.get("zpid"),
+            )
+            continue
 
         first, *last = name.split()
         now_iso = datetime.now(tz=TZ).isoformat()
@@ -9163,8 +9231,10 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             selected_phone or "",
             selected_email or "",
         )
+        if normalized_agent:
+            seen_agents.add(normalized_agent)
         if selected_phone and not phone_exists(selected_phone):
-            seen_phones.add(selected_phone)
+            seen_phones.add(_normalize_phone_for_dedupe(selected_phone))
             send_sms(selected_phone, first, r.get("street", ""), row_idx)
 
         phone_info = {"number": "", "confidence": "", "reason": ""}
@@ -9202,16 +9272,16 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                     reason = "no_personal_email"
                 if reason:
                     data_updates.append({"range": f"{GSHEET_TAB}!Z{row_idx}", "values": [[reason]]})
-                if data_updates:
-                    try:
-                        sheets_service.spreadsheets().values().batchUpdate(
-                            spreadsheetId=GSHEET_ID,
-                            body={"valueInputOption": "RAW", "data": data_updates},
-                        ).execute()
-                    except Exception as exc:
-                        LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
+            if data_updates:
+                try:
+                    sheets_service.spreadsheets().values().batchUpdate(
+                        spreadsheetId=GSHEET_ID,
+                        body={"valueInputOption": "RAW", "data": data_updates},
+                    ).execute()
+                except Exception as exc:
+                    LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
             if enriched_phone and not phone_exists(enriched_phone):
-                seen_phones.add(enriched_phone)
+                seen_phones.add(_normalize_phone_for_dedupe(enriched_phone))
                 send_sms(enriched_phone, first, r.get("street", ""), row_idx)
 
 # ───────────────────── main entry point & scheduler ─────────────────────
