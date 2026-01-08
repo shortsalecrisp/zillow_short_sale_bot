@@ -217,6 +217,8 @@ def _http_get(
     timeout: int | float = _DEFAULT_TIMEOUT,
     rotate_user_agent: bool = False,
     respect_block: bool = True,
+    block_on_status: bool = True,
+    record_timeout: bool = True,
     proxy: Optional[str] = None,
 ) -> requests.Response:
     dom = urlparse(url).netloc
@@ -252,14 +254,15 @@ def _http_get(
                 proxies=proxy_cfg,
             )
         except req_exc.Timeout as exc:
-            _record_domain_timeout(dom)
+            if record_timeout:
+                _record_domain_timeout(dom)
             raise
         except _CONNECTION_ERRORS:
             _reset_timeout(dom)
             raise
         _reset_timeout(dom)
         status = resp.status_code
-        if status in (403, 429) and dom:
+        if status in (403, 429) and dom and block_on_status:
             block_for = CSE_BLOCK_SECONDS if "googleapis.com" in dom else BLOCK_SECONDS
             reason = f"{status}"
             _mark_block(dom, seconds=block_for, reason=reason)
@@ -2178,7 +2181,13 @@ def _respect_domain_delay(url: str) -> None:
     _CACHE_DOMAIN_LAST_FETCH[dom] = time.time()
 
 
-def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
+def fetch_text_cached(
+    url: str,
+    ttl_days: int = 14,
+    *,
+    respect_block: bool = True,
+    allow_blocking: bool = True,
+) -> Dict[str, Any]:
     norm = normalize_url(url)
     if is_blocked_url(norm):
         _log_blocked_url(norm)
@@ -2192,7 +2201,7 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
             "retry_needed": False,
         }
     dom = _domain(norm)
-    if dom and _blocked(dom):
+    if respect_block and dom and _blocked(dom):
         LOG.warning(
             "Skipping fetch for %s (blocked until %.0f)", dom, _blocked_until.get(dom, 0.0)
         )
@@ -2232,7 +2241,14 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
             headers=_browser_headers(_domain(mirror)),
             rotate_user_agent=True,
             respect_block=False,
+            block_on_status=allow_blocking,
+            record_timeout=allow_blocking,
         )
+        text = resp.text if resp and resp.text else ""
+        status = resp.status_code if resp else 0
+        final_url = getattr(resp, "url", norm) if resp else norm
+    except requests.HTTPError as exc:
+        resp = exc.response
         text = resp.text if resp and resp.text else ""
         status = resp.status_code if resp else 0
         final_url = getattr(resp, "url", norm) if resp else norm
@@ -2242,7 +2258,7 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
         final_url = norm
 
     blocked_statuses = {403, 429, 451}
-    if status in blocked_statuses and dom:
+    if status in blocked_statuses and dom and allow_blocking:
         is_jina = dom in {"r.jina.ai", "duckduckgo.com", "www.duckduckgo.com"}
         base_block = JINA_BLOCK_SECONDS if is_jina else BLOCK_SECONDS
         block_for = max(base_block, 3600.0 if is_jina else base_block)
@@ -2260,6 +2276,8 @@ def fetch_text_cached(url: str, ttl_days: int = 14) -> Dict[str, Any]:
                 headers=_browser_headers(_domain(norm)),
                 rotate_user_agent=True,
                 respect_block=False,
+                block_on_status=allow_blocking,
+                record_timeout=allow_blocking,
             )
             if ddg_resp and ddg_resp.status_code == 200 and ddg_resp.text.strip():
                 text = ddg_resp.text
@@ -4059,7 +4077,7 @@ def _contact_enrichment(agent: str, state: str, row_payload: Dict[str, Any]) -> 
 
 
 def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Run two CSE passes (Google then DuckDuckGo/Jina) and return ranked contacts."""
+    """Run Google CSE + contact extraction and return ranked contacts."""
 
     brokerage = (row_payload.get("brokerageName") or row_payload.get("brokerage") or "").strip()
     domain_hint = (
@@ -4067,18 +4085,10 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         or _infer_domain_from_text(brokerage)
         or _infer_domain_from_text(agent)
     )
-    rapid_urls = _rapid_profile_urls(_rapid_from_payload(row_payload))
-    hint_key = _normalize_override_key(agent, state)
-    hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
-    preferred_urls = [u for u in rapid_urls + (hint_urls or []) if u]
-    preferred_set = set(preferred_urls)
     candidates: List[Dict[str, Any]] = []
     email_candidates_info: List[Dict[str, str]] = []
     blocked_engines: Set[str] = set()
     brokerage_domain = _domain(domain_hint or brokerage)
-
-    def _has_high_confidence(res: Dict[str, Any]) -> bool:
-        return (res.get("best_phone_confidence", 0) or 0) >= 80 or (res.get("best_email_confidence", 0) or 0) >= 80
 
     def _empty_result() -> Dict[str, Any]:
         return {
@@ -4093,6 +4103,57 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             "_email_rejected": [],
         }
 
+    def _has_verifiable_contacts() -> bool:
+        quality = _candidate_quality(candidates)
+        return bool(quality["phones_found"] or quality["emails_found"])
+
+    def _collect_page(page: str, final_url: str) -> None:
+        page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
+        for cand in page_candidates:
+            src = cand.get("source_url", final_url)
+            for em in cand.get("emails", []):
+                email_candidates_info.append({"email": em, "source": src})
+        candidates.extend(page_candidates)
+
+    def _direct_fetch(url: str) -> Tuple[str, str, int]:
+        dom = _domain(url)
+        proxy_url = _proxy_for_domain(dom)
+        proxy_cfg = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        tries = len(_CONTACT_FETCH_BACKOFFS)
+        last_status = 0
+        final_url = url
+        for attempt in range(1, tries + 1):
+            if attempt > 1:
+                delay = _CONTACT_FETCH_BACKOFFS[min(attempt - 1, len(_CONTACT_FETCH_BACKOFFS) - 1)]
+                if delay:
+                    time.sleep(delay)
+            try:
+                resp = _session.get(
+                    url,
+                    timeout=10,
+                    headers=_browser_headers(dom),
+                    proxies=proxy_cfg,
+                )
+            except req_exc.Timeout:
+                LOG.debug("CONTACT direct timeout url=%s attempt=%s", url, attempt)
+                continue
+            except _CONNECTION_ERRORS as exc:
+                LOG.debug("CONTACT direct error %s on %s", exc, url)
+                continue
+            except Exception as exc:
+                LOG.debug("CONTACT direct error %s on %s", exc, url)
+                break
+            final_url = getattr(resp, "url", url) or url
+            last_status = int(resp.status_code or 0)
+            body = (resp.text or "").strip()
+            if last_status == 200 and body:
+                return body, final_url, last_status
+            if last_status in {403, 429, 451}:
+                LOG.info("CONTACT direct blocked status=%s url=%s", last_status, final_url)
+                return "", final_url, last_status
+            break
+        return "", final_url, last_status
+
     try:
         urls, search_empty, cse_status, _ = _normalize_contact_search_result(
             _contact_search_urls(
@@ -4101,41 +4162,49 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 row_payload,
                 domain_hint=domain_hint or brokerage,
                 brokerage=brokerage,
-                limit=SEARCH_CONTACT_URL_LIMIT,
+                limit=CONTACT_CSE_FETCH_LIMIT,
                 include_exhausted=True,
+                engine="google",
             )
         )
-        urls = list(dict.fromkeys(preferred_urls + urls))[:SEARCH_CONTACT_URL_LIMIT]
-        if preferred_urls:
-            search_empty = False
+        urls = list(dict.fromkeys(urls))[:5]
         if cse_status in {"blocked", "throttled"}:
             blocked_engines.add("google")
-        if search_empty and not urls and cse_status in {"blocked", "throttled"}:
+        if search_empty or not urls:
             return _empty_result()
 
-        def _ingest_urls(urls_to_process: Iterable[str], *, engine_label: str) -> None:
-            for url in urls_to_process:
-                fetched = fetch_text_cached(url, ttl_days=14)
-                status = int(fetched.get("http_status", 0) or 0)
-                final_url = fetched.get("final_url") or url
-                if status in {403, 429, 451}:
-                    _mark_block(_domain(final_url), reason="cse-block")
-                    if engine_label:
-                        blocked_engines.add(engine_label)
-                    continue
-                page = fetched.get("extracted_text", "")
-                if url in preferred_set or not page:
-                    page, _ = fetch_contact_page(final_url)
-                if not page:
-                    continue
-                page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
-                for cand in page_candidates:
-                    src = cand.get("source_url", final_url)
-                    for em in cand.get("emails", []):
-                        email_candidates_info.append({"email": em, "source": src})
-                candidates.extend(page_candidates)
+        for url in urls:
+            page, final_url, status = _direct_fetch(url)
+            if status in {403, 429, 451}:
+                continue
+            if not page:
+                continue
+            _collect_page(page, final_url)
 
-        _ingest_urls(urls, engine_label="google")
+        if not _has_verifiable_contacts():
+            for url in urls:
+                fetched = fetch_text_cached(url, ttl_days=14, respect_block=False, allow_blocking=False)
+                status = int(fetched.get("http_status", 0) or 0)
+                if status in {403, 429, 451}:
+                    continue
+                page = fetched.get("extracted_text", "") or ""
+                final_url = fetched.get("final_url") or url
+                if not page.strip():
+                    continue
+                _collect_page(page, final_url)
+
+        if not _has_verifiable_contacts():
+            for url in urls:
+                dom = _domain(url)
+                if not _should_use_playwright_for_contact(dom, "", js_hint=dom in CONTACT_JS_DOMAINS):
+                    continue
+                proxy_url = _proxy_for_domain(dom)
+                snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason="cse-top5")
+                rendered = _combine_playwright_snapshot(snapshot)
+                if not rendered.strip():
+                    continue
+                final_url = snapshot.get("final_url") or url
+                _collect_page(rendered, final_url)
 
         ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
         ranked = _apply_phone_type_boost(ranked)
@@ -4143,12 +4212,14 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         email = ranked.get("best_email", "")
         rejected_email_reasons: List[Tuple[str, str, str]] = []
         seen_rejects: Set[Tuple[str, str, str]] = set()
+
         def _track_reject(val: str, reason: str, source: str = "") -> None:
             key = (val, reason, source or "")
             if key in seen_rejects:
                 return
             seen_rejects.add(key)
             rejected_email_reasons.append(key)
+
         def _email_ok(val: str, source: str = "") -> bool:
             if not _email_matches_name(agent, val):
                 _track_reject(val, "name_mismatch", source)
@@ -4166,61 +4237,6 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             ranked["best_email_confidence"] = 0
             ranked["best_email_source_url"] = ""
             ranked["best_email_evidence"] = ""
-
-
-        if not _has_high_confidence(ranked) and not row_payload.get("_duckduckgo_search_done"):
-            ddg_urls, ddg_empty, ddg_status, _ = _normalize_contact_search_result(
-                _contact_search_urls(
-                    agent,
-                    state,
-                    row_payload,
-                    domain_hint=domain_hint or brokerage,
-                    brokerage=brokerage,
-                    limit=SEARCH_CONTACT_URL_LIMIT,
-                    include_exhausted=True,
-                    engine="duckduckgo",
-                )
-            )
-            row_payload["_duckduckgo_search_done"] = True
-            if ddg_status in {"duckduckgo-blocked"}:
-                blocked_engines.add("duckduckgo")
-            _ingest_urls(ddg_urls, engine_label="duckduckgo")
-            ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
-            ranked = _apply_phone_type_boost(ranked)
-            email = ranked.get("best_email", "")
-            if email and not _email_ok(email, ranked.get("best_email_source_url", "")):
-                ranked["best_email"] = ""
-                ranked["best_email_confidence"] = 0
-                ranked["best_email_source_url"] = ""
-                ranked["best_email_evidence"] = ""
-
-        portal_email_done = bool(row_payload.get("_portal_email_done"))
-        if not ranked.get("best_email") and not portal_email_done:
-            portal_urls, _, portal_status, _ = _normalize_contact_search_result(
-                _contact_search_urls(
-                    agent,
-                    state,
-                    row_payload,
-                    domain_hint=domain_hint or brokerage,
-                    brokerage=brokerage,
-                    limit=min(SEARCH_CONTACT_URL_LIMIT, 8),
-                    include_exhausted=True,
-                    engine="duckduckgo",
-                    allow_portals=True,
-                )
-            )
-            row_payload["_portal_email_done"] = True
-            if portal_status in {"duckduckgo-blocked"}:
-                blocked_engines.add("duckduckgo")
-            _ingest_urls(portal_urls, engine_label="duckduckgo")
-            ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
-            ranked = _apply_phone_type_boost(ranked)
-            email = ranked.get("best_email", "")
-            if email and not _email_ok(email, ranked.get("best_email_source_url", "")):
-                ranked["best_email"] = ""
-                ranked["best_email_confidence"] = 0
-                ranked["best_email_source_url"] = ""
-                ranked["best_email_evidence"] = ""
 
         ranked["_two_stage_done"] = bool(candidates)
         ranked["_two_stage_candidates"] = len(candidates)
@@ -5174,7 +5190,7 @@ def select_top_5_urls(
             snippet_text = " ".join(part for part in (title, snippet) if part)
             location_context = " ".join(part for part in (snippet_text, location_hint) if part)
             if fetch_check:
-                fetched = fetch_text_cached(norm, ttl_days=7)
+                fetched = fetch_text_cached(norm, ttl_days=7, respect_block=False, allow_blocking=False)
                 final_url = fetched.get("final_url") or norm
                 if is_blocked_url(final_url):
                     _log_blocked_url(final_url)
@@ -9250,11 +9266,11 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
 
         enriched_phone = phone_info.get("number", "") if phone_info else ""
         enriched_email = email_info.get("email", "") if email_info else ""
+        data_updates: List[Dict[str, Any]] = []
         if enriched_phone or enriched_email:
             update_phone = enriched_phone and enriched_phone != selected_phone
             update_email = enriched_email and enriched_email != selected_email
             if update_phone or update_email:
-                data_updates: List[Dict[str, Any]] = []
                 if update_phone:
                     data_updates.append({"range": f"{GSHEET_TAB}!C{row_idx}", "values": [[enriched_phone]]})
                     data_updates.append({"range": f"{GSHEET_TAB}!Y{row_idx}", "values": [[phone_info.get("confidence", "")]]})
