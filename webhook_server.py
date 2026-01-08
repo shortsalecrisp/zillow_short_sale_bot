@@ -595,6 +595,7 @@ async def apify_hook(request: Request):
         elif isinstance(payload.get("listings"), list):
             rows = payload.get("listings")
 
+        run_id = payload.get("actorRunId") or payload.get("runId")
         resource = payload.get("resource")
         event_data = payload.get("eventData") if isinstance(payload.get("eventData"), dict) else None
         data_payload = payload.get("data") if isinstance(payload.get("data"), dict) else None
