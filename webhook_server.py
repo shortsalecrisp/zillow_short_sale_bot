@@ -95,6 +95,7 @@ APIFY_FORCE_EVERY_HOUR = os.getenv("APIFY_FORCE_EVERY_HOUR", "false").lower() ==
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
 APIFY_FETCH_BACKOFF_SECONDS = float(os.getenv("APIFY_FETCH_BACKOFF_SECONDS", "2.0"))
+APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "300"))
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
 
@@ -379,6 +380,23 @@ def _run_apify_actor() -> bool:
     return True
 
 
+def _get_apify_run_status(run_id: str) -> Optional[str]:
+    if not APIFY_TOKEN:
+        return None
+    url = f"https://api.apify.com/v2/actor-runs/{run_id}"
+    try:
+        resp = requests.get(url, params={"token": APIFY_TOKEN}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException:
+        logger.debug("Failed to fetch Apify run status for %s", run_id, exc_info=True)
+        return None
+    except ValueError:
+        return None
+    status = data.get("data", {}).get("status")
+    return status
+
+
 async def _maybe_run_startup_scrape() -> None:
     if not RUN_ON_DEPLOY:
         logger.info("RUN_SCRAPE_ON_DEPLOY disabled; skipping startup scrape")
@@ -558,6 +576,7 @@ async def apify_hook(request: Request):
 
     dataset_id = None
     rows: Optional[List[Dict[str, Any]]] = None
+    run_id = None
     query_params = request.query_params
 
     if isinstance(payload, list):
@@ -585,10 +604,15 @@ async def apify_hook(request: Request):
             resource = data_payload.get("resource")
         if isinstance(resource, dict):
             dataset_id = dataset_id or resource.get("datasetId") or resource.get("defaultDatasetId")
+            run_id = resource.get("id") or resource.get("runId") or run_id
         if not dataset_id and event_data:
             dataset_id = event_data.get("datasetId")
         if not dataset_id and data_payload:
             dataset_id = data_payload.get("datasetId")
+        if event_data and not run_id:
+            run_id = event_data.get("id") or event_data.get("runId")
+        if data_payload and not run_id:
+            run_id = data_payload.get("id") or data_payload.get("runId")
 
         if rows is None and event_data:
             if isinstance(event_data.get("items"), list):
@@ -615,7 +639,11 @@ async def apify_hook(request: Request):
     if rows is None:
         fetch_attempts = max(APIFY_FETCH_ATTEMPTS, 1)
         rows = []
-        for attempt in range(1, fetch_attempts + 1):
+        deadline = datetime.utcnow() + timedelta(seconds=APIFY_FETCH_MAX_WAIT_SECONDS)
+        attempt = 0
+        last_status: Optional[str] = None
+        while attempt < fetch_attempts and datetime.utcnow() <= deadline:
+            attempt += 1
             try:
                 rows = fetch_rows(dataset_id)
             except Exception:
@@ -623,6 +651,15 @@ async def apify_hook(request: Request):
                 return {"status": "error", "reason": "fetch_rows_failed"}
             if rows:
                 break
+            if run_id:
+                last_status = _get_apify_run_status(run_id)
+                if last_status in {"SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"}:
+                    logger.info(
+                        "apify-hook: run %s finished with status %s; dataset still empty",
+                        run_id,
+                        last_status,
+                    )
+                    break
             logger.debug(
                 "apify-hook: dataset %s returned 0 rows on attempt %d/%d",
                 dataset_id,
