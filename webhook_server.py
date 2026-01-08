@@ -93,6 +93,8 @@ APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
 APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "/tmp/last_hour_run.txt"))
 APIFY_FORCE_EVERY_HOUR = os.getenv("APIFY_FORCE_EVERY_HOUR", "false").lower() == "true"
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
+APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
+APIFY_FETCH_BACKOFF_SECONDS = float(os.getenv("APIFY_FETCH_BACKOFF_SECONDS", "2.0"))
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
 
@@ -575,12 +577,29 @@ async def apify_hook(request: Request):
             rows = payload.get("listings")
 
         resource = payload.get("resource")
-        if isinstance(payload.get("eventData"), dict) and not resource:
-            resource = payload["eventData"].get("resource")
-        if isinstance(payload.get("data"), dict) and not resource:
-            resource = payload["data"].get("resource")
+        event_data = payload.get("eventData") if isinstance(payload.get("eventData"), dict) else None
+        data_payload = payload.get("data") if isinstance(payload.get("data"), dict) else None
+        if event_data and not resource:
+            resource = event_data.get("resource")
+        if data_payload and not resource:
+            resource = data_payload.get("resource")
         if isinstance(resource, dict):
             dataset_id = dataset_id or resource.get("datasetId") or resource.get("defaultDatasetId")
+        if not dataset_id and event_data:
+            dataset_id = event_data.get("datasetId")
+        if not dataset_id and data_payload:
+            dataset_id = data_payload.get("datasetId")
+
+        if rows is None and event_data:
+            if isinstance(event_data.get("items"), list):
+                rows = event_data.get("items")
+            elif isinstance(event_data.get("item"), dict):
+                rows = [event_data.get("item")]
+        if rows is None and data_payload:
+            if isinstance(data_payload.get("items"), list):
+                rows = data_payload.get("items")
+            elif isinstance(data_payload.get("item"), dict):
+                rows = [data_payload.get("item")]
 
     dataset_id = dataset_id or query_params.get("datasetId") or query_params.get("dataset_id")
     if not dataset_id:
@@ -594,7 +613,7 @@ async def apify_hook(request: Request):
             )
             return {"status": "ignored", "reason": "missing datasetId"}
     if rows is None:
-        fetch_attempts = 3
+        fetch_attempts = max(APIFY_FETCH_ATTEMPTS, 1)
         rows = []
         for attempt in range(1, fetch_attempts + 1):
             try:
@@ -611,7 +630,7 @@ async def apify_hook(request: Request):
                 fetch_attempts,
             )
             if attempt < fetch_attempts:
-                await asyncio.sleep(1.5 * attempt)
+                await asyncio.sleep(APIFY_FETCH_BACKOFF_SECONDS * attempt)
         if rows:
             logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
         else:
