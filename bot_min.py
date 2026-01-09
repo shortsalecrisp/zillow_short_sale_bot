@@ -1204,12 +1204,16 @@ _LISTING_TEXT_FIELDS = (
     "agentRemarks",
     "listingRemarks",
     "shortSaleDescription",
+    "whatsSpecial",
+    "whatsSpecialText",
 )
 
 _LISTING_TEXT_PATHS = (
     ("hdpData", "homeInfo", "description"),
     ("hdpData", "homeInfo", "homeDescription"),
     ("hdpData", "homeInfo", "listingDescription"),
+    ("hdpData", "homeInfo", "whatsSpecial"),
+    ("hdpData", "homeInfo", "whatsSpecialText"),
     ("property", "description"),
     ("property", "remarks"),
     ("listing", "description"),
