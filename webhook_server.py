@@ -347,11 +347,20 @@ def _load_last_apify_run() -> Optional[datetime]:
                 parsed = datetime.strptime(raw, "%Y-%m-%d-%H")
                 return SCHEDULER_TZ.localize(parsed)
             except ValueError:
-                data = json.loads(raw)
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.debug(
+                        "Invalid Apify last-run marker in %s; skipping", path, exc_info=True
+                    )
+                    continue
                 ts = data.get("ts")
                 if not ts:
                     continue
-                parsed_dt = datetime.fromisoformat(ts)
+                try:
+                    parsed_dt = datetime.fromisoformat(ts)
+                except ValueError:
+                    continue
                 return (
                     parsed_dt.astimezone(SCHEDULER_TZ)
                     if parsed_dt.tzinfo
