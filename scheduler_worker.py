@@ -10,7 +10,6 @@ import logging
 import os
 import signal
 import threading
-from datetime import datetime
 from types import FrameType
 from typing import Callable, Optional
 
@@ -28,9 +27,7 @@ _stop_event = threading.Event()
 
 
 def _should_run_immediately() -> bool:
-    if os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true":
-        return True
-    return datetime.now().minute < 2
+    return os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true"
 
 
 def _handle_sigterm(signum: int, frame: Optional[FrameType]) -> None:
