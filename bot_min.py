@@ -1218,7 +1218,23 @@ _LISTING_TEXT_PATHS = (
     ("property", "remarks"),
     ("listing", "description"),
     ("listing", "remarks"),
+    ("listing", "listingRemarks"),
+    ("property", "listingRemarks"),
 )
+
+
+def _collect_listing_text_fields(payload: Any) -> List[str]:
+    parts: List[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in _LISTING_TEXT_FIELDS:
+                parts.extend(_extract_text_fragments(value))
+            else:
+                parts.extend(_collect_listing_text_fields(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            parts.extend(_collect_listing_text_fields(item))
+    return parts
 
 
 def _listing_text_from_payload(payload: Dict[str, Any]) -> str:
@@ -1228,6 +1244,8 @@ def _listing_text_from_payload(payload: Dict[str, Any]) -> str:
     for path in _LISTING_TEXT_PATHS:
         parts.extend(_extract_text_fragments(_nested_value(payload, list(path))))
     if not parts:
+        parts.extend(_collect_listing_text_fields(payload))
+    if not parts:
         return ""
     seen: Set[str] = set()
     deduped: List[str] = []
@@ -1236,6 +1254,63 @@ def _listing_text_from_payload(payload: Dict[str, Any]) -> str:
             seen.add(part)
             deduped.append(part)
     return " ".join(deduped).strip()
+
+
+def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
+    address = payload.get("address") or payload.get("property", {}).get("address") or {}
+    if isinstance(address, str):
+        return {"street": address.strip()} if address.strip() else {}
+    if not isinstance(address, dict):
+        address = {}
+    street_candidates = [
+        address.get("street"),
+        address.get("streetAddress"),
+        address.get("streetAddress1"),
+        address.get("line1"),
+        payload.get("streetAddress"),
+    ]
+    street = next((val for val in street_candidates if isinstance(val, str) and val.strip()), "")
+    city = address.get("city") if isinstance(address.get("city"), str) else payload.get("city", "")
+    state = address.get("state") if isinstance(address.get("state"), str) else payload.get("state", "")
+    postal = address.get("zipcode") or address.get("zip") or address.get("postalCode") or payload.get("zipcode") or payload.get("zip")
+    result: Dict[str, str] = {}
+    if street:
+        result["street"] = street.strip()
+    if isinstance(city, str) and city.strip():
+        result["city"] = city.strip()
+    if isinstance(state, str) and state.strip():
+        result["state"] = state.strip()
+    if isinstance(postal, str) and postal.strip():
+        result["zip"] = postal.strip()
+    return result
+
+
+def _merge_rapid_listing_data(row: Dict[str, Any], rapid_payload: Dict[str, Any]) -> None:
+    if not row or not rapid_payload:
+        return
+    if not row.get("agentName"):
+        for path in (
+            ("listed_by", "name"),
+            ("listingAgent", "name"),
+            ("agent", "name"),
+            ("listing_agent", "name"),
+        ):
+            agent_name = _nested_value(rapid_payload, list(path))
+            if isinstance(agent_name, str) and agent_name.strip():
+                row["agentName"] = agent_name.strip()
+                break
+    address_fields = _extract_address_fields(rapid_payload)
+    if address_fields:
+        if not row.get("street") and address_fields.get("street"):
+            row["street"] = address_fields["street"]
+        if not row.get("address") and address_fields.get("street"):
+            row["address"] = address_fields["street"]
+        if not row.get("city") and address_fields.get("city"):
+            row["city"] = address_fields["city"]
+        if not row.get("state") and address_fields.get("state"):
+            row["state"] = address_fields["state"]
+        if not row.get("zip") and address_fields.get("zip"):
+            row["zip"] = address_fields["zip"]
 
 
 def _short_sale_flag(payload: Dict[str, Any]) -> bool:
@@ -9259,6 +9334,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         if not listing_text:
             rapid_payload = _rapid_from_payload(r)
             if rapid_payload:
+                _merge_rapid_listing_data(r, rapid_payload)
                 listing_text = _listing_text_from_payload(rapid_payload)
                 short_sale_flag = short_sale_flag or _short_sale_flag(rapid_payload)
         if not listing_text:
