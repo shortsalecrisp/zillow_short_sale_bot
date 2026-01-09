@@ -200,6 +200,87 @@ def extract_description(row: Dict[str, Any]) -> str:
     return ""
 
 
+def _normalize_apify_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(row, dict):
+        return row
+    normalized = dict(row)
+
+    agent_name = row.get("agentName")
+    if not agent_name:
+        for path in (
+            ("listingAgent", "name"),
+            ("agent", "name"),
+            ("agentName",),
+        ):
+            current: Any = row
+            for key in path:
+                if not isinstance(current, dict):
+                    current = None
+                    break
+                current = current.get(key)
+            if isinstance(current, str) and current.strip():
+                agent_name = current.strip()
+                break
+    if agent_name:
+        normalized["agentName"] = agent_name
+
+    address = row.get("address") or row.get("street")
+    if isinstance(address, dict):
+        street_parts = [
+            address.get("street"),
+            address.get("streetAddress"),
+            address.get("streetAddress1"),
+        ]
+        street = next((p for p in street_parts if isinstance(p, str) and p.strip()), "")
+        city = address.get("city") if isinstance(address.get("city"), str) else ""
+        state = address.get("state") if isinstance(address.get("state"), str) else ""
+        zip_code = address.get("zipcode") or address.get("zip")
+        if street:
+            normalized.setdefault("street", street)
+            normalized.setdefault("address", street)
+        if city:
+            normalized.setdefault("city", city)
+        if state:
+            normalized.setdefault("state", state)
+        if isinstance(zip_code, str):
+            normalized.setdefault("zip", zip_code)
+    elif isinstance(address, str) and address.strip():
+        normalized.setdefault("address", address.strip())
+        normalized.setdefault("street", address.strip())
+
+    detail_url = row.get("detailUrl") or row.get("detailURL") or row.get("url")
+    if isinstance(detail_url, str) and detail_url.strip():
+        normalized["detailUrl"] = detail_url.strip()
+
+    if not normalized.get("listing_description"):
+        normalized["listing_description"] = extract_description(row)
+
+    return normalized
+
+
+def _row_has_listing_text(row: Dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    for key in (
+        "description",
+        "listing_description",
+        "listingDescription",
+        "homeDescription",
+        "remarks",
+        "whatsSpecial",
+        "whatsSpecialText",
+    ):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    nested = (row.get("hdpData") or {}).get("homeInfo") or {}
+    for key in ("description", "homeDescription", "whatsSpecial", "whatsSpecialText"):
+        value = nested.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
 def _load_last_apify_run() -> Optional[datetime]:
     try:
         if not APIFY_LAST_RUN_PATH.exists():
@@ -284,7 +365,8 @@ def _apify_hourly_task(run_time: datetime) -> None:
 
 
 def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    fresh_rows = dedupe_rows_by_zpid(rows, logger)
+    normalized_rows = [_normalize_apify_row(row) if isinstance(row, dict) else row for row in rows]
+    fresh_rows = dedupe_rows_by_zpid(normalized_rows, logger)
     if not fresh_rows:
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
         return {"status": "no new rows"}
@@ -304,6 +386,29 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
         conn.close()
         return {"status": "no new rows"}
+
+    rows_with_text = []
+    missing_text = 0
+    for row in db_filtered:
+        if _row_has_listing_text(row):
+            rows_with_text.append(row)
+        else:
+            missing_text += 1
+            logger.warning(
+                "apify-hook: zpid-only payload detected zpid=%s keys=%s",
+                row.get("zpid"),
+                list(row.keys()),
+            )
+    if missing_text:
+        logger.warning(
+            "apify-hook: filtered %d rows missing listing text (check webhook payload mapping)",
+            missing_text,
+        )
+    db_filtered = rows_with_text
+    if not db_filtered:
+        logger.info("apify-hook: no rows with listing text after validation")
+        conn.close()
+        return {"status": "no rows", "reason": "missing listing text"}
 
     if APIFY_MAX_ITEMS and len(db_filtered) > APIFY_MAX_ITEMS:
         original_count = len(db_filtered)
@@ -695,10 +800,12 @@ async def apify_hook(request: Request):
     dataset_id = None
     rows: Optional[List[Dict[str, Any]]] = None
     run_id = None
+    row_source = "none"
     query_params = request.query_params
 
     if isinstance(payload, list):
         rows = payload
+        row_source = "payload_list"
     elif isinstance(payload, dict):
         dataset_id = (
             payload.get("datasetId")
@@ -708,10 +815,13 @@ async def apify_hook(request: Request):
         )
         if isinstance(payload.get("items"), list):
             rows = payload.get("items")
+            row_source = "payload.items"
         elif isinstance(payload.get("data"), list):
             rows = payload.get("data")
+            row_source = "payload.data"
         elif isinstance(payload.get("listings"), list):
             rows = payload.get("listings")
+            row_source = "payload.listings"
 
         run_id = payload.get("actorRunId") or payload.get("runId")
         resource = payload.get("resource")
@@ -736,13 +846,20 @@ async def apify_hook(request: Request):
         if rows is None and event_data:
             if isinstance(event_data.get("items"), list):
                 rows = event_data.get("items")
+                row_source = "eventData.items"
             elif isinstance(event_data.get("item"), dict):
                 rows = [event_data.get("item")]
+                row_source = "eventData.item"
         if rows is None and data_payload:
             if isinstance(data_payload.get("items"), list):
                 rows = data_payload.get("items")
+                row_source = "data.items"
             elif isinstance(data_payload.get("item"), dict):
                 rows = [data_payload.get("item")]
+                row_source = "data.item"
+            elif isinstance(data_payload.get("listings"), list):
+                rows = data_payload.get("listings")
+                row_source = "data.listings"
 
     dataset_id = dataset_id or query_params.get("datasetId") or query_params.get("dataset_id")
     if not dataset_id:
@@ -758,6 +875,7 @@ async def apify_hook(request: Request):
     if rows is None:
         fetch_attempts = max(APIFY_FETCH_ATTEMPTS, 1)
         rows = []
+        row_source = "dataset_fetch"
         deadline = datetime.utcnow() + timedelta(seconds=APIFY_FETCH_MAX_WAIT_SECONDS)
         attempt = 0
         last_status: Optional[str] = None
@@ -793,9 +911,16 @@ async def apify_hook(request: Request):
             logger.info("apify-hook: dataset %s empty after retries", dataset_id)
 
     if rows:
+        if row_source == "none":
+            row_source = "payload"
+        logger.info("apify-hook: row source=%s count=%d", row_source, len(rows))
+        normalized_rows: List[Dict[str, Any]] = []
         for row in rows:
             if isinstance(row, dict):
-                row["listing_description"] = extract_description(row)
+                normalized_rows.append(_normalize_apify_row(row))
+            else:
+                normalized_rows.append(row)
+        rows = normalized_rows
 
     if not rows:
         logger.info("apify-hook: 0 listings received; no Apify retries scheduled")
