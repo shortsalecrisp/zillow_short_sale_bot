@@ -88,7 +88,7 @@ APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "2048"))
 APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
 APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
 APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
-APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "/tmp/last_hour_run.txt"))
+APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "apify_last_run.txt"))
 APIFY_FORCE_EVERY_HOUR = os.getenv("APIFY_FORCE_EVERY_HOUR", "false").lower() == "true"
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
@@ -103,6 +103,13 @@ try:
 except json.JSONDecodeError:
     logger.error("Invalid JSON in APIFY_ACTOR_INPUT – startup runs will omit custom input")
     APIFY_INPUT = None
+
+
+def _should_run_immediately() -> bool:
+    if os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true":
+        return True
+    now_local = datetime.now(SCHEDULER_TZ)
+    return now_local.minute < 2
 
 
 def _ensure_scheduler_thread(
@@ -123,7 +130,7 @@ def _ensure_scheduler_thread(
                 run_hourly_scheduler(
                     stop_event=_scheduler_stop,
                     hourly_callbacks=hourly_callbacks,
-                    run_immediately=True,
+                    run_immediately=_should_run_immediately(),
                     initial_callbacks=initial_callbacks,
                 )
                 break
@@ -357,6 +364,7 @@ def _load_last_apify_run() -> Optional[datetime]:
 def _write_last_apify_run(ts: datetime) -> None:
     hour_key = apify_hour_key(ts)
     try:
+        APIFY_LAST_RUN_PATH.parent.mkdir(parents=True, exist_ok=True)
         APIFY_LAST_RUN_PATH.write_text(hour_key)
     except Exception:
         logger.debug("Unable to persist Apify last-run marker", exc_info=True)
@@ -526,10 +534,7 @@ def _run_apify_actor() -> bool:
         "memory": APIFY_MEMORY,
         "clean": 1,
     }
-    logger.info(
-        "Triggering Apify actor %s (webhook will deliver dataset items)",
-        APIFY_ACTOR_ID,
-    )
+    logger.info("Triggering Apify actor %s", APIFY_ACTOR_ID)
     req_kwargs: Dict[str, Any] = {"params": params, "timeout": APIFY_TIMEOUT + 30}
     if APIFY_INPUT is not None:
         req_kwargs["json"] = APIFY_INPUT
@@ -550,7 +555,10 @@ def _run_apify_actor() -> bool:
     except ValueError:
         run_info = {}
     run_id = run_info.get("id")
-    logger.info("Apify actor run started (run_id=%s); awaiting webhook results", run_id or "unknown")
+    logger.info(
+        "Apify actor run started (run_id=%s); awaiting listings POST",
+        run_id or "unknown",
+    )
     _clear_apify_degradation()
     return True
 
@@ -819,7 +827,9 @@ def reset_zpids():
 async def apify_hook(request: Request):
     """
     Accepts:
-      • {"datasetId": "..."} – fetch rows from that dataset
+      • {"listings": [...]} – direct POST of listings (preferred)
+      • {"items": [...]} or {"data": [...]} – alternate list payloads
+      • {"datasetId": "..."} – fetch rows from that dataset (legacy webhooks)
     """
     body = await request.body()
     payload: Any = {}
