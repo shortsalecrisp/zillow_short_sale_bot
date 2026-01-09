@@ -90,6 +90,7 @@ APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
 APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
 APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
 APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "/tmp/apify_last_run.txt"))
+APIFY_LAST_RUN_FALLBACK_PATH = Path("/tmp/apify_last_run.txt")
 APIFY_FORCE_EVERY_HOUR = os.getenv("APIFY_FORCE_EVERY_HOUR", "false").lower() == "true"
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
@@ -195,17 +196,49 @@ def _ensure_keepalive_thread() -> None:
 
 def extract_description(row: Dict[str, Any]) -> str:
     # Prefer top-level fields if present
-    for key in ("description", "homeDescription", "remarks", "whatsSpecial", "listingText"):
+    for key in (
+        "description",
+        "listing_description",
+        "listingDescription",
+        "homeDescription",
+        "marketingDescription",
+        "openai_summary",
+        "remarks",
+        "publicRemarks",
+        "brokerRemarks",
+        "agentRemarks",
+        "listingRemarks",
+        "shortSaleDescription",
+        "whatsSpecial",
+        "whatsSpecialText",
+        "listingText",
+    ):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
 
     # Fallback to nested hdpData.homeInfo if present
     home_info = (row.get("hdpData") or {}).get("homeInfo") or {}
-    for key in ("description", "homeDescription", "whatsSpecialText", "whatsSpecial"):
+    for key in (
+        "description",
+        "listingDescription",
+        "homeDescription",
+        "whatsSpecialText",
+        "whatsSpecial",
+    ):
         value = home_info.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+
+    for path in (("property", "description"), ("property", "remarks"), ("listing", "description"), ("listing", "remarks")):
+        current: Any = row
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        if isinstance(current, str) and current.strip():
+            return current.strip()
 
     return ""
 
@@ -271,47 +304,7 @@ def _normalize_apify_row(row: Dict[str, Any]) -> Dict[str, Any]:
 def _row_has_listing_text(row: Dict[str, Any]) -> bool:
     if not isinstance(row, dict):
         return False
-    for key in (
-        "description",
-        "listing_description",
-        "openai_summary",
-        "listingText",
-        "listingDescription",
-        "homeDescription",
-        "marketingDescription",
-        "remarks",
-        "publicRemarks",
-        "brokerRemarks",
-        "agentRemarks",
-        "listingRemarks",
-        "shortSaleDescription",
-        "whatsSpecial",
-        "whatsSpecialText",
-    ):
-        value = row.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    hdp_info = (row.get("hdpData") or {}).get("homeInfo") or {}
-    for key in (
-        "description",
-        "homeDescription",
-        "listingDescription",
-        "whatsSpecial",
-        "whatsSpecialText",
-    ):
-        value = hdp_info.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    for path in (("property", "description"), ("property", "remarks"), ("listing", "description"), ("listing", "remarks")):
-        current: Any = row
-        for key in path:
-            if not isinstance(current, dict):
-                current = None
-                break
-            current = current.get(key)
-        if isinstance(current, str) and current.strip():
-            return True
-    return False
+    return bool(extract_description(row))
 
 
 def _row_has_expected_fields(row: Dict[str, Any]) -> bool:
@@ -341,25 +334,30 @@ def _row_has_expected_fields(row: Dict[str, Any]) -> bool:
 
 def _load_last_apify_run() -> Optional[datetime]:
     try:
-        if not APIFY_LAST_RUN_PATH.exists():
-            return None
-        raw = APIFY_LAST_RUN_PATH.read_text().strip()
-        if not raw:
-            return None
-        try:
-            parsed = datetime.strptime(raw, "%Y-%m-%d-%H")
-            return SCHEDULER_TZ.localize(parsed)
-        except ValueError:
-            data = json.loads(raw)
-            ts = data.get("ts")
-            if not ts:
-                return None
-            parsed_dt = datetime.fromisoformat(ts)
-            return (
-                parsed_dt.astimezone(SCHEDULER_TZ)
-                if parsed_dt.tzinfo
-                else SCHEDULER_TZ.localize(parsed_dt)
-            )
+        paths = [APIFY_LAST_RUN_PATH]
+        if APIFY_LAST_RUN_FALLBACK_PATH not in paths:
+            paths.append(APIFY_LAST_RUN_FALLBACK_PATH)
+        for path in paths:
+            if not path.exists():
+                continue
+            raw = path.read_text().strip()
+            if not raw:
+                continue
+            try:
+                parsed = datetime.strptime(raw, "%Y-%m-%d-%H")
+                return SCHEDULER_TZ.localize(parsed)
+            except ValueError:
+                data = json.loads(raw)
+                ts = data.get("ts")
+                if not ts:
+                    continue
+                parsed_dt = datetime.fromisoformat(ts)
+                return (
+                    parsed_dt.astimezone(SCHEDULER_TZ)
+                    if parsed_dt.tzinfo
+                    else SCHEDULER_TZ.localize(parsed_dt)
+                )
+        return None
     except Exception:
         logger.debug("Unable to read Apify last-run marker", exc_info=True)
         return None
