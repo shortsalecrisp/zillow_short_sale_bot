@@ -563,6 +563,17 @@ def _parse_listing_timestamp(value: Any) -> Optional[datetime]:
         raw = value.strip()
         if not raw:
             return None
+        if re.fullmatch(r"-?\d+(\.\d+)?", raw):
+            try:
+                ts = float(raw)
+            except ValueError:
+                return None
+            if ts > 1e12:
+                ts /= 1000.0
+            try:
+                return datetime.utcfromtimestamp(ts)
+            except (OverflowError, OSError, ValueError):
+                return None
         relative = _parse_relative_time(raw)
         if relative:
             return relative
