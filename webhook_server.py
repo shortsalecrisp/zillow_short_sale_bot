@@ -73,6 +73,7 @@ _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
 _keepalive_thread: Optional[threading.Thread] = None
 _keepalive_stop: Optional[threading.Event] = None
+_last_triggered_apify_run_id: Optional[str] = None
 
 _APIFY_ACTOR_ID_RAW = os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACTOR_ID")
 # Apify actor "unique names" use `user~actor`, but many configs still include
@@ -88,12 +89,14 @@ APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "2048"))
 APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
 APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
 APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
-APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "apify_last_run.txt"))
+APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "/var/data/apify_last_run.txt"))
 APIFY_FORCE_EVERY_HOUR = os.getenv("APIFY_FORCE_EVERY_HOUR", "false").lower() == "true"
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
 APIFY_FETCH_BACKOFF_SECONDS = float(os.getenv("APIFY_FETCH_BACKOFF_SECONDS", "2.0"))
 APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "300"))
+APIFY_TASK_ID = "GPBSVcMBIK6CyJzBm"
+APIFY_WEBHOOK_URL = "https://zillow-short-sale-bot.onrender.com/apify-hook"
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 
 try:
@@ -106,10 +109,7 @@ except json.JSONDecodeError:
 
 
 def _should_run_immediately() -> bool:
-    if os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true":
-        return True
-    now_local = datetime.now(SCHEDULER_TZ)
-    return now_local.minute < 2
+    return os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true"
 
 
 def _ensure_scheduler_thread(
@@ -370,6 +370,28 @@ def _write_last_apify_run(ts: datetime) -> None:
         logger.debug("Unable to persist Apify last-run marker", exc_info=True)
 
 
+def _redact_tokens(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: Dict[str, Any] = {}
+        for key, item in value.items():
+            if "token" in key.lower():
+                redacted[key] = "***"
+            else:
+                redacted[key] = _redact_tokens(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_tokens(item) for item in value]
+    return value
+
+
+def _apify_run_source(run_id: Optional[str]) -> str:
+    if not run_id:
+        return "unknown"
+    if run_id == _last_triggered_apify_run_id:
+        return "render"
+    return "apify"
+
+
 def _apify_hourly_task(run_time: datetime) -> None:
     try:
         current_slot = _hour_floor(run_time)
@@ -523,6 +545,7 @@ def _clear_apify_degradation() -> None:
 
 
 def _run_apify_actor() -> bool:
+    global _last_triggered_apify_run_id
     if not APIFY_ACTOR_ID or not APIFY_TOKEN:
         logger.info("Skipping Apify run – missing APIFY_ACTOR_ID or token")
         return False
@@ -534,10 +557,23 @@ def _run_apify_actor() -> bool:
         "memory": APIFY_MEMORY,
         "clean": 1,
     }
-    logger.info("Triggering Apify actor %s", APIFY_ACTOR_ID)
-    req_kwargs: Dict[str, Any] = {"params": params, "timeout": APIFY_TIMEOUT + 30}
-    if APIFY_INPUT is not None:
-        req_kwargs["json"] = APIFY_INPUT
+    logger.info("Triggering Apify actor %s (trigger_source=render)", APIFY_ACTOR_ID)
+    payload: Dict[str, Any] = dict(APIFY_INPUT or {})
+    payload.update(
+        {
+            "taskId": APIFY_TASK_ID,
+            "POST_TO_WEBHOOK": True,
+            "webhookUrl": APIFY_WEBHOOK_URL,
+        }
+    )
+
+    redacted_payload = _redact_tokens(payload)
+    logger.info("Apify actor payload: %s", json.dumps(redacted_payload, sort_keys=True))
+    req_kwargs: Dict[str, Any] = {
+        "params": params,
+        "timeout": APIFY_TIMEOUT + 30,
+        "json": payload,
+    }
 
     resp: Optional[requests.Response] = None
     try:
@@ -555,6 +591,7 @@ def _run_apify_actor() -> bool:
     except ValueError:
         run_info = {}
     run_id = run_info.get("id")
+    _last_triggered_apify_run_id = run_id
     logger.info(
         "Apify actor run started (run_id=%s); awaiting listings POST",
         run_id or "unknown",
@@ -919,6 +956,8 @@ async def apify_hook(request: Request):
                 row_source = "data.listings"
 
     dataset_id = dataset_id or query_params.get("datasetId") or query_params.get("dataset_id")
+    if run_id:
+        logger.info("apify-hook: run source=%s run_id=%s", _apify_run_source(run_id), run_id)
     if not dataset_id:
         if rows is not None:
             logger.info("apify-hook: processing %d rows included in webhook payload", len(rows))
