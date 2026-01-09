@@ -10,6 +10,7 @@ import logging
 import os
 import signal
 import threading
+from datetime import datetime
 from types import FrameType
 from typing import Callable, Optional
 
@@ -24,6 +25,12 @@ logger = logging.getLogger("scheduler_worker")
 
 ENABLE_APIFY_HOURLY = os.getenv("ENABLE_APIFY_HOURLY", "false").lower() == "true"
 _stop_event = threading.Event()
+
+
+def _should_run_immediately() -> bool:
+    if os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true":
+        return True
+    return datetime.now().minute < 2
 
 
 def _handle_sigterm(signum: int, frame: Optional[FrameType]) -> None:
@@ -61,7 +68,7 @@ if __name__ == "__main__":
     run_hourly_scheduler(
         stop_event=_stop_event,
         hourly_callbacks=callbacks,
-        run_immediately=True,
+        run_immediately=_should_run_immediately(),
         initial_callbacks=bool(callbacks),
     )
     logger.info("Scheduler worker exiting")
