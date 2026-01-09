@@ -96,7 +96,10 @@ APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
 APIFY_FETCH_BACKOFF_SECONDS = float(os.getenv("APIFY_FETCH_BACKOFF_SECONDS", "2.0"))
 APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "300"))
 APIFY_TASK_ID = "GPBSVcMBIK6CyJzBm"
-APIFY_WEBHOOK_URL = "https://zillow-short-sale-bot.onrender.com/apify-hook"
+APIFY_WEBHOOK_URL = os.getenv(
+    "APIFY_WEBHOOK_URL",
+    "https://zillow-short-sale-bot.onrender.com/apify-hook",
+)
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
 
 try:
@@ -464,28 +467,20 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         conn.close()
         return {"status": "no new rows"}
 
-    rows_with_text = []
     missing_text = 0
     for row in db_filtered:
-        if _row_has_listing_text(row):
-            rows_with_text.append(row)
-        else:
+        if not _row_has_listing_text(row):
             missing_text += 1
             logger.warning(
-                "apify-hook: zpid-only payload detected zpid=%s keys=%s",
+                "apify-hook: listing text missing for zpid=%s keys=%s",
                 row.get("zpid"),
                 list(row.keys()),
             )
     if missing_text:
         logger.warning(
-            "apify-hook: filtered %d rows missing listing text (check webhook payload mapping)",
+            "apify-hook: %d rows missing listing text; continuing to allow RapidAPI enrichment",
             missing_text,
         )
-    db_filtered = rows_with_text
-    if not db_filtered:
-        logger.info("apify-hook: no rows with listing text after validation")
-        conn.close()
-        return {"status": "no rows", "reason": "missing listing text"}
 
     if APIFY_MAX_ITEMS and len(db_filtered) > APIFY_MAX_ITEMS:
         original_count = len(db_filtered)
@@ -884,8 +879,20 @@ async def apify_hook(request: Request):
             else:
                 payload = {}
     if payload == {}:
-        logger.info("apify-hook: empty payload (ignored)")
-        return {"status": "ignored", "reason": "empty payload"}
+        dataset_qs = request.query_params.get("datasetId") or request.query_params.get(
+            "dataset_id"
+        )
+        if not dataset_qs:
+            logger.info(
+                "apify-hook: empty payload (ignored). content_type=%s content_length=%s",
+                request.headers.get("content-type"),
+                request.headers.get("content-length"),
+            )
+            return {"status": "ignored", "reason": "empty payload"}
+        logger.info(
+            "apify-hook: empty payload but datasetId provided via query params: %s",
+            dataset_qs,
+        )
     try:
         logger.debug("Incoming webhook payload: %s", json.dumps(payload))
     except TypeError:
