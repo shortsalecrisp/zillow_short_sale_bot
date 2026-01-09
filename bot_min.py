@@ -1207,6 +1207,121 @@ def is_short_sale(text: str) -> bool:
     return SHORT_RE.search(text) and not BAD_RE.search(text)
 
 
+def _normalize_listing_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = html.unescape(str(text))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _extract_text_fragments(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = _normalize_listing_text(value)
+        return [cleaned] if cleaned else []
+    if isinstance(value, (int, float)):
+        cleaned = _normalize_listing_text(str(value))
+        return [cleaned] if cleaned else []
+    if isinstance(value, (list, tuple, set)):
+        parts: List[str] = []
+        for item in value:
+            parts.extend(_extract_text_fragments(item))
+        return parts
+    if isinstance(value, dict):
+        for key in ("text", "description", "remarks", "summary"):
+            if key in value:
+                return _extract_text_fragments(value.get(key))
+    return []
+
+
+def _nested_value(payload: Dict[str, Any], path: List[str]) -> Any:
+    cur: Any = payload
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+_LISTING_TEXT_FIELDS = (
+    "description",
+    "openai_summary",
+    "listingDescription",
+    "homeDescription",
+    "marketingDescription",
+    "remarks",
+    "publicRemarks",
+    "brokerRemarks",
+    "agentRemarks",
+    "listingRemarks",
+    "shortSaleDescription",
+)
+
+_LISTING_TEXT_PATHS = (
+    ("hdpData", "homeInfo", "description"),
+    ("hdpData", "homeInfo", "homeDescription"),
+    ("hdpData", "homeInfo", "listingDescription"),
+    ("property", "description"),
+    ("property", "remarks"),
+    ("listing", "description"),
+    ("listing", "remarks"),
+)
+
+
+def _listing_text_from_payload(payload: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for key in _LISTING_TEXT_FIELDS:
+        parts.extend(_extract_text_fragments(payload.get(key)))
+    for path in _LISTING_TEXT_PATHS:
+        parts.extend(_extract_text_fragments(_nested_value(payload, list(path))))
+    if not parts:
+        return ""
+    seen: Set[str] = set()
+    deduped: List[str] = []
+    for part in parts:
+        if part and part not in seen:
+            seen.add(part)
+            deduped.append(part)
+    return " ".join(deduped).strip()
+
+
+def _short_sale_flag(payload: Dict[str, Any]) -> bool:
+    if not payload:
+        return False
+    for key in (
+        "shortSale",
+        "isShortSale",
+        "is_short_sale",
+        "shortSaleListing",
+        "isShortSaleListing",
+    ):
+        value = payload.get(key)
+        if isinstance(value, bool) and value:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {"true", "yes", "short sale", "shortsale"}:
+            return True
+    listing_sub_type = payload.get("listingSubType") or payload.get("listingSubTypeText")
+    if isinstance(listing_sub_type, str) and "short" in listing_sub_type.lower():
+        return True
+    if isinstance(listing_sub_type, dict):
+        for entry in listing_sub_type.values():
+            if isinstance(entry, str) and "short" in entry.lower():
+                return True
+    for path in (
+        ("hdpData", "homeInfo", "shortSale"),
+        ("hdpData", "homeInfo", "isShortSale"),
+        ("property", "shortSale"),
+    ):
+        value = _nested_value(payload, list(path))
+        if isinstance(value, bool) and value:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {"true", "yes", "short sale", "shortsale"}:
+            return True
+    return False
+
+
 def _is_weekend(d: datetime) -> bool:
     """Return True if ``d`` falls on a weekend (Saturday/Sunday)."""
     return d.weekday() >= 5
@@ -9186,15 +9301,32 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             return
     load_seen_contacts()
     for r in rows:
-        txt = (r.get("description", "") + " " + r.get("openai_summary", "")).strip()
-        if not is_short_sale(txt):
-            LOG.debug("SKIP non-short-sale %s (%s)", r.get("street"), r.get("zpid"))
+        zpid = str(r.get("zpid", ""))
+        listing_text = _listing_text_from_payload(r)
+        short_sale_flag = _short_sale_flag(r)
+        rapid_payload: Dict[str, Any] = {}
+        if not listing_text:
+            rapid_payload = _rapid_from_payload(r)
+            if rapid_payload:
+                listing_text = _listing_text_from_payload(rapid_payload)
+                short_sale_flag = short_sale_flag or _short_sale_flag(rapid_payload)
+        if not listing_text:
+            LOG.debug(
+                "SHORT_SALE_TEXT_EMPTY zpid=%s street=%s",
+                zpid,
+                r.get("street"),
+            )
+        if not short_sale_flag and not is_short_sale(listing_text or ""):
+            LOG.debug(
+                "SKIP non-short-sale %s (%s)",
+                r.get("street"),
+                r.get("zpid"),
+            )
             continue
         street = (r.get("street") or r.get("address") or "").strip()
         if street == "(Undisclosed Address)":
             LOG.debug("SKIP undisclosed address zpid %s", r.get("zpid"))
             continue
-        zpid = str(r.get("zpid", ""))
         if zpid and not is_active_listing(zpid):
             LOG.info("Skip stale/off-market zpid %s", zpid)
             continue

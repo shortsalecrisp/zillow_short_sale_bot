@@ -2,7 +2,7 @@
 #                     **and now records inbound SMS replies via a webhook**
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -291,6 +291,15 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         conn.close()
         return {"status": "no new rows"}
 
+    if APIFY_MAX_ITEMS and len(db_filtered) > APIFY_MAX_ITEMS:
+        original_count = len(db_filtered)
+        db_filtered = _select_recent_rows(db_filtered, APIFY_MAX_ITEMS)
+        logger.info(
+            "apify-hook: limiting to %d most recent listings (from %d)",
+            len(db_filtered),
+            original_count,
+        )
+
     logger.debug("Sample fields on first fresh row: %s", list(db_filtered[0].keys())[:15])
 
     try:
@@ -507,6 +516,107 @@ def send_sms(phone: str, message: str) -> None:
         logger.info("SMS sent OK to %s", digits)
     except Exception as exc:
         logger.exception("SMS send failed: %s", exc)
+
+
+_RELATIVE_TIME_RE = re.compile(
+    r"(?P<count>\d+)\s*(?P<unit>minute|min|hour|hr|day|week|month|year)s?",
+    re.IGNORECASE,
+)
+
+
+def _parse_relative_time(text: str) -> Optional[datetime]:
+    matches = list(_RELATIVE_TIME_RE.finditer(text or ""))
+    if not matches:
+        return None
+    now = datetime.utcnow()
+    total = timedelta()
+    for match in matches:
+        count = int(match.group("count"))
+        unit = match.group("unit").lower()
+        if unit in {"minute", "min"}:
+            total += timedelta(minutes=count)
+        elif unit in {"hour", "hr"}:
+            total += timedelta(hours=count)
+        elif unit == "day":
+            total += timedelta(days=count)
+        elif unit == "week":
+            total += timedelta(weeks=count)
+        elif unit == "month":
+            total += timedelta(days=30 * count)
+        elif unit == "year":
+            total += timedelta(days=365 * count)
+    return now - total if total else None
+
+
+def _parse_listing_timestamp(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e12:
+            ts /= 1000.0
+        try:
+            return datetime.utcfromtimestamp(ts)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        relative = _parse_relative_time(raw)
+        if relative:
+            return relative
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    return None
+
+
+def _extract_listing_timestamp(row: Dict[str, Any]) -> Optional[datetime]:
+    for key in (
+        "datePosted",
+        "listedDate",
+        "listingDate",
+        "datePostedString",
+        "timeOnZillowTimestamp",
+        "timeOnZillow",
+    ):
+        if key in row:
+            ts = _parse_listing_timestamp(row.get(key))
+            if ts:
+                return ts
+    hdp_info = row.get("hdpData") or {}
+    if isinstance(hdp_info, dict):
+        home_info = hdp_info.get("homeInfo") or {}
+        if isinstance(home_info, dict):
+            for key in ("datePosted", "timeOnZillow", "timeOnZillowTimestamp"):
+                ts = _parse_listing_timestamp(home_info.get(key))
+                if ts:
+                    return ts
+    return None
+
+
+def _select_recent_rows(rows: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    if limit <= 0 or len(rows) <= limit:
+        return rows
+    annotated: List[tuple] = []
+    for idx, row in enumerate(rows):
+        ts = _extract_listing_timestamp(row)
+        annotated.append((ts, idx, row))
+    if not any(ts for ts, _, _ in annotated):
+        return rows[:limit]
+    annotated.sort(
+        key=lambda item: (
+            item[0] is None,
+            -(item[0].timestamp()) if item[0] else 0,
+            item[1],
+        )
+    )
+    return [row for _, _, row in annotated[:limit]]
 
 
 # ──────────────────────────────────────────────────────────────────────
