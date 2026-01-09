@@ -264,19 +264,41 @@ def _row_has_listing_text(row: Dict[str, Any]) -> bool:
     for key in (
         "description",
         "listing_description",
+        "openai_summary",
         "listingDescription",
         "homeDescription",
+        "marketingDescription",
         "remarks",
+        "publicRemarks",
+        "brokerRemarks",
+        "agentRemarks",
+        "listingRemarks",
+        "shortSaleDescription",
         "whatsSpecial",
         "whatsSpecialText",
     ):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return True
-    nested = (row.get("hdpData") or {}).get("homeInfo") or {}
-    for key in ("description", "homeDescription", "whatsSpecial", "whatsSpecialText"):
-        value = nested.get(key)
+    hdp_info = (row.get("hdpData") or {}).get("homeInfo") or {}
+    for key in (
+        "description",
+        "homeDescription",
+        "listingDescription",
+        "whatsSpecial",
+        "whatsSpecialText",
+    ):
+        value = hdp_info.get(key)
         if isinstance(value, str) and value.strip():
+            return True
+    for path in (("property", "description"), ("property", "remarks"), ("listing", "description"), ("listing", "remarks")):
+        current: Any = row
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        if isinstance(current, str) and current.strip():
             return True
     return False
 
