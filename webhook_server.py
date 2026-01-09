@@ -183,6 +183,23 @@ def _ensure_keepalive_thread() -> None:
     _keepalive_thread.start()
 
 
+def extract_description(row: Dict[str, Any]) -> str:
+    # Prefer top-level fields if present
+    for key in ("description", "homeDescription", "remarks", "whatsSpecial"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    # Fallback to nested hdpData.homeInfo if present
+    home_info = (row.get("hdpData") or {}).get("homeInfo") or {}
+    for key in ("description", "homeDescription", "whatsSpecialText", "whatsSpecial"):
+        value = home_info.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return ""
+
+
 def _load_last_apify_run() -> Optional[datetime]:
     try:
         if not APIFY_LAST_RUN_PATH.exists():
@@ -774,6 +791,11 @@ async def apify_hook(request: Request):
             logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
         else:
             logger.info("apify-hook: dataset %s empty after retries", dataset_id)
+
+    if rows:
+        for row in rows:
+            if isinstance(row, dict):
+                row["listing_description"] = extract_description(row)
 
     if not rows:
         logger.info("apify-hook: 0 listings received; no Apify retries scheduled")
