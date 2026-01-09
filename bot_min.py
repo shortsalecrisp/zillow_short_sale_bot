@@ -75,7 +75,8 @@ _PROXY_TARGETS = {
     "coldwellbankerhomes.com",
     "compass.com",
 }
-BLOCKED_DOMAINS = ("zillow.com", "www.zillow.com")
+ZILLOW_DOMAINS = ("zillow.com", "www.zillow.com")
+BLOCKED_DOMAINS = ZILLOW_DOMAINS
 
 
 def is_blocked_url(url: str) -> bool:
@@ -811,8 +812,7 @@ CONTACT_ALLOWLIST_BASE: Set[str] = {
     "realbroker.com",
     "realbrokerllc.com",
 }
-CONTACT_RESULT_DENYLIST: Set[str] = {
-    "zillow.com",
+CONTACT_RESULT_DENYLIST: Set[str] = set(ZILLOW_DOMAINS) | {
     "realtor.com",
     "redfin.com",
     "homes.com",
@@ -842,20 +842,6 @@ CONTACT_DIRECTORY_TERMS: Set[str] = {
     "broker",
     "realestate",
     "realty",
-}
-
-GOOGLE_PORTAL_DENYLIST: Set[str] = {
-    "zillow.com",
-    "www.zillow.com",
-    "realtor.com",
-    "www.realtor.com",
-    "redfin.com",
-    "homes.com",
-    "www.homes.com",
-    "trulia.com",
-    "www.trulia.com",
-    "yelp.com",
-    "www.yelp.com",
 }
 
 # ───────────────────── Google / Sheets setup ─────────────────────
@@ -1005,8 +991,7 @@ def dedupe_rows_by_zpid(rows: List[Dict[str, Any]], logger_obj: Optional[logging
 
 SCRAPE_SITES:  List[str] = []
 DYNAMIC_SITES: Set[str]  = set()
-PORTAL_DOMAINS: Set[str] = {
-    "zillow.com",
+PORTAL_DOMAINS: Set[str] = set(ZILLOW_DOMAINS) | {
     "realtor.com",
     "redfin.com",
     "homes.com",
@@ -2004,8 +1989,6 @@ def _contact_source_allowed(
 
     if not host:
         return False
-    if dom in {"zillow.com", "www.zillow.com"}:
-        return False
     if host in EMAIL_ENRICH_DENYLIST or dom in EMAIL_ENRICH_DENYLIST:
         return False
     if host.startswith("data.") and dom.endswith(".gov"):
@@ -2164,14 +2147,13 @@ _CONTACT_FETCH_BACKOFFS = (0.0, 2.5, 6.0)
 
 _CONTACT_DOMAIN_LAST_FETCH: Dict[str, float] = {}
 _REALTOR_DOMAINS = {"realtor.com", "www.realtor.com"}
-_CONTACT_DENYLIST = {
+_CONTACT_DENYLIST = set(ZILLOW_DOMAINS) | {
     "forrent.com",
     "apartmenthomeliving.com",
     "rent.com",
     "apartments.com",
-    "zillow.com",
 }
-_ALWAYS_SKIP_DOMAINS = {"zillow.com", "www.zillow.com", "realtor.com", "www.realtor.com"}
+_ALWAYS_SKIP_DOMAINS = set(ZILLOW_DOMAINS) | _REALTOR_DOMAINS
 _REALTOR_MAX_RETRIES = int(os.getenv("REALTOR_MAX_RETRIES", "5"))
 _REALTOR_BACKOFF_BASE = float(os.getenv("REALTOR_BACKOFF_BASE", "3.0"))
 _REALTOR_BACKOFF_CAP = float(os.getenv("REALTOR_BACKOFF_CAP", "20.0"))

@@ -74,7 +74,6 @@ _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
 _keepalive_thread: Optional[threading.Thread] = None
 _keepalive_stop: Optional[threading.Event] = None
-_startup_task: Optional[asyncio.Task] = None
 
 _APIFY_ACTOR_ID_RAW = os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACTOR_ID")
 # Apify actor "unique names" use `user~actor`, but many configs still include
@@ -97,7 +96,6 @@ APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
 APIFY_FETCH_BACKOFF_SECONDS = float(os.getenv("APIFY_FETCH_BACKOFF_SECONDS", "2.0"))
 APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "300"))
 _apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
-RUN_ON_DEPLOY = os.getenv("RUN_SCRAPE_ON_DEPLOY", "true").lower() == "true"
 
 try:
     APIFY_INPUT: Optional[Dict[str, Any]] = (
@@ -406,21 +404,8 @@ def _get_apify_run_status(run_id: str) -> Optional[str]:
     return status
 
 
-async def _maybe_run_startup_scrape() -> None:
-    if not RUN_ON_DEPLOY:
-        logger.info("RUN_SCRAPE_ON_DEPLOY disabled; skipping startup scrape")
-        return
-
-    try:
-        current_slot = _hour_floor(datetime.now(tz=SCHEDULER_TZ))
-        await asyncio.to_thread(_apify_hourly_task, current_slot)
-    except Exception:
-        logger.exception("Startup Apify scrape failed")
-
-
 @app.on_event("startup")
 async def _start_scheduler() -> None:
-    global _startup_task
     log_headless_status(logger)
     if DISABLE_APIFY_SCHEDULER:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
@@ -430,8 +415,6 @@ async def _start_scheduler() -> None:
         initial_callbacks=True,
     )
     _ensure_keepalive_thread()
-    if _startup_task is None or _startup_task.done():
-        _startup_task = asyncio.create_task(_maybe_run_startup_scrape())
 
 
 @app.on_event("shutdown")
@@ -689,7 +672,6 @@ async def apify_hook(request: Request):
     if payload == {}:
         logger.info("apify-hook: empty payload (ignored)")
         return {"status": "ignored", "reason": "empty payload"}
-    logger.info("RAW Apify webhook payload: %s", payload)
     try:
         logger.debug("Incoming webhook payload: %s", json.dumps(payload))
     except TypeError:
