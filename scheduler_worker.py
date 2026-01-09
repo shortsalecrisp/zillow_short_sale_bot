@@ -13,7 +13,7 @@ import threading
 from types import FrameType
 from typing import Callable, Optional
 
-from bot_min import log_headless_status, run_hourly_scheduler
+from bot_min import run_hourly_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,7 +56,6 @@ def _load_apify_hourly_callback() -> Optional[Callable]:
 
 if __name__ == "__main__":
     logger.info("Starting standalone hourly scheduler worker")
-    log_headless_status(logger)
     apify_cb = _load_apify_hourly_callback()
     callbacks = [apify_cb] if apify_cb else None
     run_hourly_scheduler(
