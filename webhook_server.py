@@ -89,7 +89,7 @@ APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "2048"))
 APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
 APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
 APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
-APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "/var/data/apify_last_run.txt"))
+APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "/tmp/apify_last_run.txt"))
 APIFY_FORCE_EVERY_HOUR = os.getenv("APIFY_FORCE_EVERY_HOUR", "false").lower() == "true"
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
@@ -195,7 +195,7 @@ def _ensure_keepalive_thread() -> None:
 
 def extract_description(row: Dict[str, Any]) -> str:
     # Prefer top-level fields if present
-    for key in ("description", "homeDescription", "remarks", "whatsSpecial"):
+    for key in ("description", "homeDescription", "remarks", "whatsSpecial", "listingText"):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -275,6 +275,7 @@ def _row_has_listing_text(row: Dict[str, Any]) -> bool:
         "description",
         "listing_description",
         "openai_summary",
+        "listingText",
         "listingDescription",
         "homeDescription",
         "marketingDescription",
@@ -369,8 +370,15 @@ def _write_last_apify_run(ts: datetime) -> None:
     try:
         APIFY_LAST_RUN_PATH.parent.mkdir(parents=True, exist_ok=True)
         APIFY_LAST_RUN_PATH.write_text(hour_key)
+        logger.info("Persisted Apify last-run marker to %s", APIFY_LAST_RUN_PATH)
     except Exception:
-        logger.debug("Unable to persist Apify last-run marker", exc_info=True)
+        fallback = Path("/tmp/apify_last_run.txt")
+        try:
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            fallback.write_text(hour_key)
+            logger.info("Persisted Apify last-run marker to fallback %s", fallback)
+        except Exception:
+            logger.debug("Unable to persist Apify last-run marker", exc_info=True)
 
 
 def _redact_tokens(value: Any) -> Any:
@@ -585,7 +593,7 @@ def _run_apify_actor() -> bool:
         run_info = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
     except ValueError:
         run_info = {}
-    run_id = run_info.get("id")
+    run_id = run_info.get("data", {}).get("id") or run_info.get("id")
     _last_triggered_apify_run_id = run_id
     logger.info(
         "Apify actor run started (run_id=%s); awaiting listings POST",
