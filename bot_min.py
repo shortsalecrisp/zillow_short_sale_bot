@@ -1193,6 +1193,7 @@ def _nested_value(payload: Dict[str, Any], path: List[str]) -> Any:
 
 _LISTING_TEXT_FIELDS = (
     "description",
+    "listing_description",
     "openai_summary",
     "listingDescription",
     "homeDescription",
