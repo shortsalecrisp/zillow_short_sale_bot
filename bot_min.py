@@ -9,7 +9,6 @@ import os
 import re
 import sqlite3
 import sys
-import subprocess
 import threading
 import importlib.util
 from collections import Counter, defaultdict, deque
@@ -103,8 +102,6 @@ HEADLESS_NAV_TIMEOUT_MS = int(os.getenv("HEADLESS_NAV_TIMEOUT_MS", str(HEADLESS_
 HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
 HEADLESS_FACEBOOK_TIMEOUT_MS = int(os.getenv("HEADLESS_FACEBOOK_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS + 12000)))
 HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
-AUTO_INSTALL_PLAYWRIGHT = os.getenv("AUTO_INSTALL_PLAYWRIGHT", "true").lower() == "true"
-PLAYWRIGHT_INSTALL_TIMEOUT = int(os.getenv("PLAYWRIGHT_INSTALL_TIMEOUT", "240"))
 HEADLESS_OVERALL_TIMEOUT_S = int(os.getenv("HEADLESS_OVERALL_TIMEOUT_S", "50"))
 PLAYWRIGHT_CONTACT_DOMAINS = {
     "facebook.com",
@@ -604,7 +601,6 @@ logging.basicConfig(
 )
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
-_playwright_install_attempted = False
 
 
 def _log_blocked_url(url: str) -> None:
@@ -654,46 +650,11 @@ def _ensure_playwright_browsers(logger: Optional[logging.Logger] = None) -> bool
         return False
     if _playwright_browsers_installed():
         return True
-    global _playwright_install_attempted
-    if not AUTO_INSTALL_PLAYWRIGHT:
-        sink.warning(
-            "PLAYWRIGHT_BROWSER_MISSING no Chromium download found under %s – run `python -m playwright install --with-deps chromium`",
-            ", ".join(str(p) for p in _playwright_browser_roots()),
-        )
-        return False
-    if _playwright_install_attempted:
-        sink.warning("PLAYWRIGHT_INSTALL already attempted; still missing browsers")
-        return False
-    _playwright_install_attempted = True
-    cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
-    sink.info("PLAYWRIGHT_INSTALL starting (%s)", " ".join(cmd))
-    proc: Optional[subprocess.CompletedProcess[str]] = None
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=PLAYWRIGHT_INSTALL_TIMEOUT,
-        )
-        sink.info("PLAYWRIGHT_INSTALL_OK stdout=%s", (proc.stdout or "").strip() or "<empty>")
-    except subprocess.TimeoutExpired:
-        sink.error(
-            "PLAYWRIGHT_INSTALL_FAIL timed out after %ss while downloading browsers",
-            PLAYWRIGHT_INSTALL_TIMEOUT,
-        )
-        return False
-    except Exception as exc:
-        stdout = (proc.stdout if proc else "").strip()
-        stderr = (proc.stderr if proc else "").strip()
-        sink.error(
-            "PLAYWRIGHT_INSTALL_FAIL err=%s stdout=%s stderr=%s",
-            exc,
-            stdout or "<empty>",
-            stderr or "<empty>",
-        )
-        return False
-    return _playwright_browsers_installed()
+    sink.warning(
+        "PLAYWRIGHT_BROWSER_MISSING no Chromium download found under %s – run `python -m playwright install --with-deps chromium`",
+        ", ".join(str(p) for p in _playwright_browser_roots()),
+    )
+    return False
 
 
 def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
@@ -4716,6 +4677,9 @@ async def _headless_fetch_async(
 
 def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: str = "") -> Dict[str, Any]:
     if not HEADLESS_ENABLED or not async_playwright:
+        return {}
+    log_headless_status()
+    if not _ensure_playwright_browsers():
         return {}
 
     loop = _ensure_headless_loop()
@@ -9416,7 +9380,6 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
 
 # ───────────────────── main entry point & scheduler ─────────────────────
 if __name__ == "__main__":
-    log_headless_status()
     try:
         stdin_txt = sys.stdin.read().strip()
         payload = json.loads(stdin_txt) if stdin_txt else None

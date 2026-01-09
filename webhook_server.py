@@ -31,7 +31,6 @@ from bot_min import (
     _hour_floor,
     dedupe_rows_by_zpid,
     fetch_contact_page,
-    log_headless_status,
     process_rows,
     run_hourly_scheduler,
 )
@@ -406,7 +405,6 @@ def _get_apify_run_status(run_id: str) -> Optional[str]:
 
 @app.on_event("startup")
 async def _start_scheduler() -> None:
-    log_headless_status(logger)
     if DISABLE_APIFY_SCHEDULER:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
         return
