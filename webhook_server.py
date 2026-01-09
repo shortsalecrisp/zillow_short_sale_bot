@@ -281,6 +281,31 @@ def _row_has_listing_text(row: Dict[str, Any]) -> bool:
     return False
 
 
+def _row_has_expected_fields(row: Dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    address = row.get("address") or row.get("street")
+    if isinstance(address, str) and address.strip():
+        return True
+    if isinstance(address, dict):
+        for key in ("street", "streetAddress", "streetAddress1", "city", "state", "zip", "zipcode"):
+            value = address.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+    agent_name = row.get("agentName")
+    if isinstance(agent_name, str) and agent_name.strip():
+        return True
+    for container_key in ("listingAgent", "agent"):
+        agent = row.get(container_key)
+        if isinstance(agent, dict):
+            name = agent.get("name")
+            if isinstance(name, str) and name.strip():
+                return True
+    if _row_has_listing_text(row):
+        return True
+    return False
+
+
 def _load_last_apify_run() -> Optional[datetime]:
     try:
         if not APIFY_LAST_RUN_PATH.exists():
@@ -872,6 +897,39 @@ async def apify_hook(request: Request):
                 payload_keys,
             )
             return {"status": "ignored", "reason": "missing datasetId"}
+
+    if rows is not None:
+        normalized_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, dict):
+                normalized_rows.append(_normalize_apify_row(row))
+            else:
+                normalized_rows.append(row)
+        rows = normalized_rows
+
+        zpid_only_count = sum(1 for row in rows if not _row_has_expected_fields(row))
+        if zpid_only_count == len(rows):
+            logger.warning(
+                "apify-hook: zpid-only payload received (rows=%d); %s",
+                len(rows),
+                "fetching dataset instead" if dataset_id else "rejecting payload",
+            )
+            if dataset_id:
+                rows = None
+                row_source = "none"
+            else:
+                return {"status": "rejected", "reason": "zpid-only payload"}
+        elif zpid_only_count:
+            logger.warning(
+                "apify-hook: dropping %d rows missing address/agent/description fields",
+                zpid_only_count,
+            )
+            rows = [row for row in rows if _row_has_expected_fields(row)]
+            if not rows and dataset_id:
+                rows = None
+                row_source = "none"
+            elif not rows:
+                return {"status": "rejected", "reason": "missing required fields"}
     if rows is None:
         fetch_attempts = max(APIFY_FETCH_ATTEMPTS, 1)
         rows = []
@@ -914,13 +972,6 @@ async def apify_hook(request: Request):
         if row_source == "none":
             row_source = "payload"
         logger.info("apify-hook: row source=%s count=%d", row_source, len(rows))
-        normalized_rows: List[Dict[str, Any]] = []
-        for row in rows:
-            if isinstance(row, dict):
-                normalized_rows.append(_normalize_apify_row(row))
-            else:
-                normalized_rows.append(row)
-        rows = normalized_rows
 
     if not rows:
         logger.info("apify-hook: 0 listings received; no Apify retries scheduled")
