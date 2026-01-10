@@ -645,6 +645,22 @@ def _playwright_browsers_installed() -> bool:
     return False
 
 
+def _playwright_chromium_paths() -> List[Path]:
+    patterns = (
+        "chromium-*/chrome-linux/chrome",
+        "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
+        "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        "chromium-*/chrome-win/chrome.exe",
+    )
+    matches: List[Path] = []
+    for root in _playwright_browser_roots():
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            matches.extend(root.glob(pattern))
+    return matches
+
+
 def _ensure_playwright_browsers(logger: Optional[logging.Logger] = None) -> bool:
     sink = logger or LOG
     if not HEADLESS_ENABLED or async_playwright is None:
@@ -681,7 +697,19 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
             ", ".join(str(p) for p in _playwright_browser_roots()),
         )
         return
-    sink.info("PLAYWRIGHT_READY headless reviews enabled (HEADLESS_FALLBACK=%s)", HEADLESS_ENABLED)
+    chromium_paths = _playwright_chromium_paths()
+    chromium_hint = chromium_paths[0] if chromium_paths else ""
+    if chromium_hint:
+        sink.info(
+            "PLAYWRIGHT_READY headless reviews enabled (HEADLESS_FALLBACK=%s) chromium_path=%s",
+            HEADLESS_ENABLED,
+            chromium_hint,
+        )
+    else:
+        sink.info(
+            "PLAYWRIGHT_READY headless reviews enabled (HEADLESS_FALLBACK=%s)",
+            HEADLESS_ENABLED,
+        )
 
 # ───────────────────── regexes & misc helpers ─────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
@@ -2231,7 +2259,7 @@ _REALTOR_MAX_RETRIES = int(os.getenv("REALTOR_MAX_RETRIES", "5"))
 _REALTOR_BACKOFF_BASE = float(os.getenv("REALTOR_BACKOFF_BASE", "3.0"))
 _REALTOR_BACKOFF_CAP = float(os.getenv("REALTOR_BACKOFF_CAP", "20.0"))
 _REALTOR_BACKOFF_JITTER = float(os.getenv("REALTOR_BACKOFF_JITTER", "1.75"))
-_CONTACT_PAGE_CACHE: Dict[str, Tuple[str, bool]] = {}
+_CONTACT_PAGE_CACHE: Dict[str, Tuple[str, bool, str]] = {}
 _CONTACT_PAGE_CACHE_LOCK = threading.Lock()
 
 
@@ -2266,13 +2294,32 @@ _TRACKING_QUERY_KEYS = {
 
 def normalize_url(url: str) -> str:
     parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    if netloc.endswith(":80"):
+        netloc = netloc[:-3]
+    elif netloc.endswith(":443"):
+        netloc = netloc[:-4]
+    path = parsed.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
     filtered_qs = [
         (k, v)
         for k, v in parse_qsl(parsed.query, keep_blank_values=True)
         if k.lower() not in _TRACKING_QUERY_KEYS and not k.lower().startswith("utm_")
     ]
     new_query = urlencode(filtered_qs)
-    cleaned = parsed._replace(query=new_query, fragment="")
+    cleaned = parsed._replace(
+        scheme=scheme,
+        netloc=netloc,
+        path=path,
+        query=new_query,
+        fragment="",
+    )
     return urlunparse(cleaned)
 
 
@@ -3632,6 +3679,16 @@ def _broaden_contact_query(agent: str, state: str, city: str, brokerage: str) ->
     return _compact_tokens(f'"{agent}"', state, city, "email", brokerage, "contact")
 
 
+def _compact_url_log(urls: Iterable[str]) -> List[Dict[str, str]]:
+    compact: List[Dict[str, str]] = []
+    for url in urls:
+        if not url:
+            continue
+        dom = _domain(url) or urlparse(url).netloc
+        compact.append({"domain": dom, "url": url})
+    return compact
+
+
 def _contact_search_urls(
     agent: str,
     state: str,
@@ -3750,6 +3807,20 @@ def _contact_search_urls(
                         relaxed_mode=relaxed_mode,
                         fetch_ok=fetch_ok,
                     )
+                    LOG.info(
+                        "EMAIL_SEARCH_RESULTS engine=%s query=%s returned=%s eligible=%s rejected=%s",
+                        engine,
+                        query,
+                        len(raw_results),
+                        len(selected),
+                        len(rejected),
+                    )
+                    if selected:
+                        LOG.info(
+                            "EMAIL_SEARCH_SHORTLIST engine=%s urls=%s",
+                            engine,
+                            json.dumps(_compact_url_log(selected), separators=(",", ":")),
+                        )
                     rejected_urls.extend(rejected)
                     for url in selected:
                         if url not in selected_urls:
@@ -3771,6 +3842,20 @@ def _contact_search_urls(
                             relaxed_mode=relaxed_mode,
                             fetch_ok=fetch_ok,
                         )
+                        LOG.info(
+                            "EMAIL_SEARCH_RESULTS engine=%s query=%s returned=%s eligible=%s rejected=%s",
+                            engine,
+                            broadened_query,
+                            len(broadened_results),
+                            len(broadened_selected),
+                            len(broadened_rejected),
+                        )
+                        if broadened_selected:
+                            LOG.info(
+                                "EMAIL_SEARCH_SHORTLIST engine=%s urls=%s",
+                                engine,
+                                json.dumps(_compact_url_log(broadened_selected), separators=(",", ":")),
+                            )
                         broadened_used = bool(broadened_selected or broadened_results)
                         rejected_urls.extend(broadened_rejected)
                         for url in broadened_selected:
@@ -3795,6 +3880,18 @@ def _contact_search_urls(
                             relaxed_mode=relaxed_mode,
                             fetch_ok=fetch_ok,
                         )
+                        LOG.info(
+                            "EMAIL_SEARCH_RESULTS engine=duckduckgo query=%s returned=%s eligible=%s rejected=%s",
+                            ddg_query,
+                            len(fallback_results),
+                            len(fb_selected),
+                            len(fb_rejected),
+                        )
+                        if fb_selected:
+                            LOG.info(
+                                "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
+                                json.dumps(_compact_url_log(fb_selected), separators=(",", ":")),
+                            )
                         rejected_urls.extend(fb_rejected)
                         for url in fb_selected:
                             if url not in selected_urls:
@@ -3821,6 +3918,18 @@ def _contact_search_urls(
                     relaxed_mode=relaxed_mode,
                     fetch_ok=fetch_ok,
                 )
+                LOG.info(
+                    "EMAIL_SEARCH_RESULTS engine=duckduckgo query=%s returned=%s eligible=%s rejected=%s",
+                    ddg_query,
+                    len(fallback_results),
+                    len(selected_urls),
+                    len(rejected_urls),
+                )
+                if selected_urls:
+                    LOG.info(
+                        "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
+                        json.dumps(_compact_url_log(selected_urls), separators=(",", ":")),
+                    )
             if engine == "google":
                 cse_status = _cse_last_state
                 if broadened_used:
@@ -3920,7 +4029,7 @@ def _phone_candidates_from_email_search(
                     brokerage=brokerage,
                 )
             for url in selected:
-                page, _ = fetch_contact_page(url)
+                page, _, _ = fetch_contact_page(url)
                 if not page:
                     continue
                 candidates.extend(_agent_contact_candidates_from_html(page, url, agent))
@@ -3958,7 +4067,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     prefetch_pages: List[Tuple[str, str]] = []
     for url in prefetch_urls:
         try:
-            page, _ = fetch_contact_page(url)
+            page, _, _ = fetch_contact_page(url)
             if page:
                 prefetch_pages.append((url, page))
         except Exception:
@@ -3991,7 +4100,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                     "final_url": url,
                 }
             elif use_headless:
-                page, _ = fetch_contact_page(url)
+                page, _, _ = fetch_contact_page(url)
                 if page:
                     fetched = {
                         "url": url,
@@ -4408,9 +4517,9 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         return _empty_result()
 
 
-def fetch_contact_page(url: str) -> Tuple[str, bool]:
+def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
     if not url:
-        return "", False
+        return "", False, "empty"
     if _domain(url) == "r.jina.ai":
         unwrapped = _unwrap_jina_url(url)
         if unwrapped:
@@ -4418,25 +4527,25 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
             url = unwrapped
     if is_blocked_url(url):
         _log_blocked_url(url)
-        return "", False
+        return "", False, "blocked"
     if not _should_fetch(url, strict=False):
-        return "", False
+        return "", False, "skipped"
     cache_key = normalize_url(url)
     with _CONTACT_PAGE_CACHE_LOCK:
         if cache_key in _CONTACT_PAGE_CACHE:
             return _CONTACT_PAGE_CACHE[cache_key]
 
-    def _cache_result(html: str, used_fallback: bool) -> Tuple[str, bool]:
+    def _cache_result(html: str, used_fallback: bool, method: str) -> Tuple[str, bool, str]:
         with _CONTACT_PAGE_CACHE_LOCK:
-            _CONTACT_PAGE_CACHE[cache_key] = (html, used_fallback)
-        return html, used_fallback
+            _CONTACT_PAGE_CACHE[cache_key] = (html, used_fallback, method)
+        return html, used_fallback, method
 
     dom = _domain(url)
     if dom in _REALTOR_DOMAINS:
         global _realtor_fetch_seen
         if _realtor_fetch_seen:
             _mark_block(dom, reason="realtor-once")
-            return "", False
+            return "", False, "blocked"
         _realtor_fetch_seen = True
     blocked = False
     proxy_url = _proxy_for_domain(dom)
@@ -4444,7 +4553,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
     if dom in _REALTOR_DOMAINS:
         tries = max(tries, _REALTOR_MAX_RETRIES)
 
-    def _fallback(reason: str) -> Tuple[str, bool]:
+    def _fallback(reason: str) -> Tuple[str, bool, str]:
         mirror = _mirror_url(url)
         if mirror:
             try:
@@ -4458,20 +4567,20 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                 )
                 if mirror_resp.status_code == 200 and mirror_resp.text.strip():
                     LOG.info("MIRROR FALLBACK used for %s (%s)", dom, reason)
-                    return mirror_resp.text, True
+                    return mirror_resp.text, True, "jina_cache"
             except Exception as exc:
                 LOG.debug("mirror fetch failed %s on %s", exc, mirror)
-        return "", False
+        return "", False, "jina_cache"
 
-    def _run_playwright_review(reason: str, body: str = "") -> Tuple[str, bool]:
+    def _run_playwright_review(reason: str, body: str = "") -> Tuple[str, bool, str]:
         if not HEADLESS_ENABLED or not async_playwright:
-            return "", False
+            return "", False, ""
         if is_blocked_url(url):
             LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", url)
-            return "", False
+            return "", False, ""
         allow_playwright = _should_use_playwright_for_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
         if not allow_playwright:
-            return "", False
+            return "", False, ""
         snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)
         rendered = _combine_playwright_snapshot(snapshot)
         if rendered.strip():
@@ -4481,15 +4590,23 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
                 bool(proxy_url),
                 reason,
             )
-            return rendered, True
+            return rendered, True, "playwright"
         LOG.info("PLAYWRIGHT REVIEW empty for %s (reason=%s)", dom, reason)
-        return "", False
+        return "", False, ""
 
-    def _finalize(html: str, used_fallback: bool, reason: str, body: str = "") -> Tuple[str, bool]:
-        headless_html, _ = _run_playwright_review(reason, body)
+    def _finalize(
+        html: str,
+        used_fallback: bool,
+        reason: str,
+        body: str = "",
+        method: str = "direct",
+    ) -> Tuple[str, bool, str]:
+        headless_html, headless_used, headless_method = _run_playwright_review(reason, body)
         if headless_html:
             html = headless_html
-        return _cache_result(html, used_fallback)
+            used_fallback = used_fallback or headless_used
+            method = headless_method or method
+        return _cache_result(html, used_fallback, method)
 
     last_seen = _CONTACT_DOMAIN_LAST_FETCH.get(dom, 0.0)
     if CONTACT_DOMAIN_MIN_GAP > 0 and last_seen:
@@ -4540,13 +4657,13 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         if status == 200 and body:
             if proxy_url:
                 LOG.info("CONTACT fetched via proxy %s (%s)", _redact_proxy(proxy_url), dom)
-            return _finalize(body, False, "post-fast-fetch", body)
+            return _finalize(body, False, "post-fast-fetch", body, method="direct")
         if status == 403 or (status == 200 and not body):
             blocked = True
             _mark_block(dom)
             LOG.warning("BLOCK %s -> attempt headless for %s/%s", status, attempt, tries)
-            html, used_fallback = _fallback("403")
-            return _finalize(html, used_fallback, "post-mirror-403", html)
+            html, used_fallback, method = _fallback("403")
+            return _finalize(html, used_fallback, "post-mirror-403", html, method=method or "jina_cache")
         if status == 429:
             blocked = True
             _mark_block(dom)
@@ -4577,8 +4694,8 @@ def fetch_contact_page(url: str) -> Tuple[str, bool]:
         _mark_block(dom, reason="realtor-once")
 
     if blocked:
-        html, used_fallback = _fallback("blocked")
-        return _finalize(html, used_fallback, "post-mirror-blocked", html)
+        html, used_fallback, method = _fallback("blocked")
+        return _finalize(html, used_fallback, "post-mirror-blocked", html, method=method or "jina_cache")
     return _finalize("", False, "post-fast-fetch-empty", "")
 
 def _unwrap_jina_url(url: str) -> str:
@@ -4808,6 +4925,28 @@ TOP5_DENYLIST_DOMAINS = {
     "loopnet.com",
     "crexi.com",
 }
+TOP5_LONGFORM_DOMAINS = {
+    "archive.org",
+    "books.google.com",
+    "openlibrary.org",
+    "gutenberg.org",
+    "projectgutenberg.org",
+    "scribd.com",
+}
+TOP5_JUNK_DOMAINS = {
+    "wikipedia.org",
+    "youtube.com",
+    "twitter.com",
+    "tiktok.com",
+    "pinterest.com",
+    "yelp.com",
+}
+TOP5_REALTOR_ALLOW_PATHS = (
+    "/realestateagents",
+    "/realestateagent",
+    "/realestateandhomes-search",
+    "/realestateagents/agency",
+)
 TOP5_SOCIAL_ALLOW = {"facebook.com", "linkedin.com", "instagram.com"}
 TOP5_BROKERAGE_ALLOW = {
     "kw.com",
@@ -4883,6 +5022,13 @@ TOP5_HARD_PATH_BLOCKS = (
     "/property/",
     "/mls/",
     "/idx/",
+    "/books/",
+    "/book/",
+    "/ebook/",
+    "/ebooks/",
+    "/pdf/",
+    "/download/",
+    "/wp-content/uploads",
 )
 TOP5_OFF_TOPIC_HINTS = (
     "forum",
@@ -5055,10 +5201,20 @@ def _top_url_allowed(link: str, *, relaxed: bool = False, allow_portals: bool = 
     if not dom:
         return False, "no_domain"
     root = _domain(link) or dom
+    if root in TOP5_LONGFORM_DOMAINS or any(root.endswith(f".{d}") for d in TOP5_LONGFORM_DOMAINS):
+        return False, "longform_domain"
+    if root in TOP5_JUNK_DOMAINS or any(root.endswith(f".{d}") for d in TOP5_JUNK_DOMAINS):
+        return False, "junk_domain"
+    realtor_allowed = root.endswith("realtor.com") and any(path.startswith(p) for p in TOP5_REALTOR_ALLOW_PATHS)
+    if root.endswith("realtor.com") and not realtor_allowed:
+        return False, "realtor_non_profile"
     allow = False
     allow_reason = ""
     if root in TOP5_DENYLIST_DOMAINS or any(root.endswith(f".{d}") for d in TOP5_DENYLIST_DOMAINS):
-        if allow_portals and root in PORTAL_DOMAINS:
+        if realtor_allowed:
+            allow = True
+            allow_reason = "realtor_profile"
+        elif allow_portals and root in PORTAL_DOMAINS:
             allow = True
             allow_reason = "portal_allow"
         else:
@@ -5290,6 +5446,8 @@ def select_top_5_urls(
             score += 2
         if agent_tokens and any(tok and (tok in path or tok in context) for tok in agent_tokens):
             score += 3
+        if agent_tokens and any(tok and (tok in root) for tok in agent_tokens):
+            score += 4
         if _looks_directory_page(url):
             score += 2
         if root in TOP5_BROKERAGE_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_BROKERAGE_ALLOW):
@@ -6999,6 +7157,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     first_name = re.sub(r"[^a-z]", "", parts[0].lower()) if parts else ""
     last_name = re.sub(r"[^a-z]", "", (parts[-1] if len(parts) > 1 else parts[0]).lower()) if parts else ""
     first_variants, last_token = _first_last_tokens(agent)
+    location_hint = " ".join(
+        part for part in (str(row_payload.get("city") or "").strip(), state) if part
+    )
 
     def _page_has_name(page_text: str) -> bool:
         if not (last_token or first_variants):
@@ -7136,7 +7297,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             return False
         domain = _domain(url)
         trusted = domain in TRUSTED_CONTACT_DOMAINS
-        page, mirrored = fetch_contact_page(url)
+        page, mirrored, _ = fetch_contact_page(url)
         processed_urls.add(low)
         if mirrored:
             mirror_hits.add(domain)
@@ -7567,6 +7728,27 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     cache_key = _contact_cache_key(agent, state, row_payload)
     email_rejections: List[Tuple[str, str]] = []
+    reviewed_urls: Set[str] = set()
+    shortlisted_urls: Set[str] = set()
+    pipeline_summary = {
+        "shortlist": 0,
+        "reviewed": 0,
+        "emails_found": 0,
+    }
+
+    def _log_pipeline_summary(res: Dict[str, Any]) -> None:
+        pipeline_summary["shortlist"] = len(shortlisted_urls)
+        pipeline_summary["reviewed"] = len(reviewed_urls)
+        LOG.info(
+            "EMAIL_PIPELINE_SUMMARY agent=%s state=%s shortlist=%s reviewed=%s emails_found=%s chosen=%s reason=%s",
+            agent,
+            state,
+            pipeline_summary["shortlist"],
+            pipeline_summary["reviewed"],
+            pipeline_summary["emails_found"],
+            res.get("email", "") or "<blank>",
+            res.get("reason", "") or "",
+        )
 
     def _log_final_email(res: Dict[str, Any]) -> None:
         LOG.info(
@@ -7578,7 +7760,15 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     def _finalize(res: Dict[str, Any]) -> Dict[str, Any]:
         _contact_cache_set(cache_e, cache_key, res)
+        LOG.info(
+            "EMAIL_DECISION chosen=%s reason=%s source=%s score=%.2f",
+            res.get("email", "") or "<blank>",
+            res.get("reason", "") or "",
+            res.get("source", "") or "",
+            float(res.get("score", 0.0) or 0.0),
+        )
         _log_final_email(res)
+        _log_pipeline_summary(res)
         return res
 
     if not cache_p:
@@ -7609,7 +7799,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     hint_urls = PROFILE_HINTS.get(hint_key) or PROFILE_HINTS.get(hint_key.lower(), [])
     for url in hint_urls or []:
         try:
-            page, _ = fetch_contact_page(url)
+            page, _, _ = fetch_contact_page(url)
         except Exception:
             continue
         if not page:
@@ -7930,9 +8120,69 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             return False
         return True
 
-    def _process_page(url: str, page: str) -> None:
+    def _shortlist_urls(
+        urls: Iterable[str],
+        *,
+        stage: str,
+        relaxed: bool = False,
+        allow_portals: bool = False,
+    ) -> List[str]:
+        selected, rejected = select_top_5_urls(
+            urls,
+            fetch_check=False,
+            relaxed=relaxed,
+            allow_portals=allow_portals,
+            property_state=state,
+            property_city=str(row_payload.get("city") or ""),
+            brokerage=brokerage,
+            agent=agent,
+            limit=5,
+            existing=list(reviewed_urls),
+            location_hint=location_hint,
+        )
+        for url in selected:
+            shortlisted_urls.add(normalize_url(url))
+        LOG.info(
+            "EMAIL_SHORTLIST stage=%s eligible=%s rejected=%s urls=%s",
+            stage,
+            len(selected),
+            len(rejected),
+            json.dumps(_compact_url_log(selected), separators=(",", ":")),
+        )
+        if rejected:
+            LOG.info("EMAIL_SHORTLIST_REJECTED stage=%s rejected=%s", stage, rejected)
+        return selected
+
+    def _review_url(url: str, *, stage: str) -> int:
+        dom = _domain(url)
+        page, _, method = fetch_contact_page(url)
+        reviewed_urls.add(normalize_url(url))
         if not page:
-            return
+            if _blocked(dom):
+                blocked_domains.add(dom)
+            LOG.info(
+                "EMAIL_REVIEW url=%s domain=%s method=%s candidates=0 stage=%s",
+                url,
+                dom,
+                method or "unknown",
+                stage,
+            )
+            return 0
+        new_count = _process_page(url, page)
+        LOG.info(
+            "EMAIL_REVIEW url=%s domain=%s method=%s candidates=%s stage=%s",
+            url,
+            dom,
+            method or "unknown",
+            new_count,
+            stage,
+        )
+        return new_count
+
+    def _process_page(url: str, page: str) -> int:
+        if not page:
+            return 0
+        before = set(candidates.keys())
         dom = _domain(url)
         domain_hint_hit = bool(domain_hint and dom.endswith(domain_hint.lower()))
         page_title = ""
@@ -7964,7 +8214,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                     jsonld_email_found = True
             _record_sameas_links(row_payload, sameas_links)
             if jsonld_email_found:
-                return
+                return len(set(candidates.keys()) - before)
 
         portal_contacts = _portal_contact_details(
             url,
@@ -7976,7 +8226,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         )
         portal_hit = bool(portal_contacts.get("emails"))
         if not _page_has_name(page, domain_hint_hit=domain_hint_hit) and not portal_hit:
-            return
+            return len(set(candidates.keys()) - before)
         _, ems, meta, info = extract_struct(page)
         page_title = page_title or info.get("title", "")
         domain = dom
@@ -8085,23 +8335,26 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 context=snippet,
                 trusted=trusted_hit,
             )
+        return len(set(candidates.keys()) - before)
 
     def _has_viable_email_candidate() -> bool:
         return any(info.get("score", 0.0) >= CONTACT_EMAIL_FALLBACK_SCORE for info in candidates.values())
 
     priority_urls = list(dict.fromkeys(brokerage_urls + authority_urls + hint_urls))
     trusted_domains.update(_build_trusted_domains(agent, priority_urls))
-    priority_non_portal, priority_portal = _split_portals(priority_urls)
+    priority_review_urls = _shortlist_urls(priority_urls, stage="priority")
+    if len(priority_review_urls) < 2 and priority_urls:
+        priority_review_urls = _shortlist_urls(
+            priority_urls,
+            stage="priority-broadened",
+            relaxed=True,
+            allow_portals=True,
+        )
+    priority_non_portal, priority_portal = _split_portals(priority_review_urls)
 
     processed = 0
     for url in priority_non_portal:
-        dom = _domain(url)
-        page, _ = fetch_contact_page(url)
-        if not page:
-            if _blocked(dom):
-                blocked_domains.add(dom)
-            continue
-        _process_page(url, page)
+        _review_url(url, stage="priority")
         if _has_viable_email_candidate():
             break
         processed += 1
@@ -8160,17 +8413,19 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     urls = list(dict.fromkeys(urls))
     if len(urls) > MAX_CONTACT_URLS:
         urls = urls[:MAX_CONTACT_URLS]
-    non_portal, portal = _split_portals(urls)
+    review_urls = _shortlist_urls(urls, stage="search")
+    if len(review_urls) < 2 and urls:
+        review_urls = _shortlist_urls(
+            urls,
+            stage="search-broadened",
+            relaxed=True,
+            allow_portals=True,
+        )
+    non_portal, portal = _split_portals(review_urls)
 
     processed = 0
     for url in non_portal:
-        dom = _domain(url)
-        page, _ = fetch_contact_page(url)
-        if not page:
-            if _blocked(dom):
-                blocked_domains.add(dom)
-            continue
-        _process_page(url, page)
+        _review_url(url, stage="search")
         if _has_viable_email_candidate():
             break
         processed += 1
@@ -8180,13 +8435,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     if not candidates:
         processed = 0
         for url in portal:
-            dom = _domain(url)
-            page, _ = fetch_contact_page(url)
-            if not page:
-                if _blocked(dom):
-                    blocked_domains.add(dom)
-                continue
-            _process_page(url, page)
+            _review_url(url, stage="portal")
             if _has_viable_email_candidate():
                 break
             processed += 1
@@ -8305,6 +8554,30 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             best_email = email
             best_score = final_score
             best_source = source
+
+    pipeline_summary["emails_found"] = len(candidates)
+    if candidates:
+        candidate_log = []
+        for email, info in sorted(
+            candidates.items(),
+            key=lambda item: item[1].get("final_score", item[1].get("score", 0.0)),
+            reverse=True,
+        )[:8]:
+            candidate_log.append(
+                {
+                    "email": email,
+                    "score": round(info.get("final_score", info.get("score", 0.0)), 3),
+                    "source": info.get("best_source") or next(iter(info.get("sources", [])), ""),
+                    "domain": info.get("domain", ""),
+                }
+            )
+        LOG.info(
+            "EMAIL_FINAL_CANDIDATES count=%s candidates=%s",
+            len(candidates),
+            json.dumps(candidate_log, separators=(",", ":")),
+        )
+    else:
+        LOG.info("EMAIL_FINAL_CANDIDATES count=0 candidates=[]")
 
     reason = ""
     has_non_generic_candidate = any(
@@ -9269,6 +9542,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
 
 # ───────────────────── main entry point & scheduler ─────────────────────
 if __name__ == "__main__":
+    log_headless_status()
     try:
         stdin_txt = sys.stdin.read().strip()
         payload = json.loads(stdin_txt) if stdin_txt else None
