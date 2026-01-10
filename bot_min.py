@@ -1440,8 +1440,9 @@ def rapid_property(zpid: str) -> Dict[str, Any]:
             _rapid_fetch_events[zpid] = event
             waiter = None
 
-    # Another caller is already fetching this ZPID; return cached data to avoid blocking.
+    # Another caller is already fetching this ZPID; wait briefly for cache to fill.
     if waiter:
+        event.wait(timeout=20)
         with _rapid_cache_lock:
             cached = _rapid_cache.get(zpid, {})
             return cached.get("data", {}) or {}
