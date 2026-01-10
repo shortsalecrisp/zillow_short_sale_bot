@@ -4,6 +4,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
 import logging
 import os
 import re
@@ -251,6 +252,7 @@ def _normalize_apify_row(row: Dict[str, Any]) -> Dict[str, Any]:
     agent_name = row.get("agentName")
     if not agent_name:
         for path in (
+            ("attributionInfo", "agentName"),
             ("listingAgent", "name"),
             ("agent", "name"),
             ("agentName",),
@@ -295,8 +297,16 @@ def _normalize_apify_row(row: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(detail_url, str) and detail_url.strip():
         normalized["detailUrl"] = detail_url.strip()
 
-    if not normalized.get("listing_description"):
-        normalized["listing_description"] = extract_description(row)
+    listing_text = extract_description(row)
+    if listing_text:
+        normalized.setdefault("listingText", listing_text)
+        normalized.setdefault("listing_description", listing_text)
+        normalized.setdefault(
+            "listingTextHash",
+            hashlib.sha256(listing_text.encode("utf-8")).hexdigest(),
+        )
+    elif not normalized.get("listing_description"):
+        normalized["listing_description"] = ""
 
     return normalized
 
@@ -305,6 +315,37 @@ def _row_has_listing_text(row: Dict[str, Any]) -> bool:
     if not isinstance(row, dict):
         return False
     return bool(extract_description(row))
+
+
+def _row_has_detail_marker(row: Dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _row_has_listing_text(row):
+        return True
+    return bool(
+        row.get("detailScrapedAt")
+        or row.get("detail_scraped_at")
+        or row.get("detailScrapeAt")
+    )
+
+
+def _prefer_detail_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    preferred: Dict[str, Dict[str, Any]] = {}
+    extras: List[Dict[str, Any]] = []
+    for row in rows:
+        zpid = str(row.get("zpid", "")).strip() if isinstance(row, dict) else ""
+        if not zpid:
+            extras.append(row)
+            continue
+        existing = preferred.get(zpid)
+        if not existing:
+            preferred[zpid] = row
+            continue
+        if _row_has_detail_marker(existing):
+            continue
+        if _row_has_detail_marker(row):
+            preferred[zpid] = row
+    return list(preferred.values()) + extras
 
 
 def _row_has_expected_fields(row: Dict[str, Any]) -> bool:
@@ -461,6 +502,7 @@ def _apify_hourly_task(run_time: datetime) -> None:
 
 def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     normalized_rows = [_normalize_apify_row(row) if isinstance(row, dict) else row for row in rows]
+    normalized_rows = _prefer_detail_rows(normalized_rows)
     fresh_rows = dedupe_rows_by_zpid(normalized_rows, logger)
     if not fresh_rows:
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
@@ -521,12 +563,19 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         except Exception:
             logger.exception("send_sms failed for %s", job)
 
-    EXPORTED_ZPIDS.update(r.get("zpid") for r in db_filtered)
+    detail_seen: List[str] = []
+    for row in db_filtered:
+        if _row_has_detail_marker(row):
+            zpid = row.get("zpid")
+            if zpid:
+                detail_seen.append(zpid)
 
-    conn.executemany(
-        "INSERT OR IGNORE INTO listings (zpid) VALUES (?)",
-        [(r["zpid"],) for r in db_filtered],
-    )
+    EXPORTED_ZPIDS.update(detail_seen)
+    if detail_seen:
+        conn.executemany(
+            "INSERT OR IGNORE INTO listings (zpid) VALUES (?)",
+            [(zpid,) for zpid in detail_seen],
+        )
     conn.commit()
     conn.close()
 
