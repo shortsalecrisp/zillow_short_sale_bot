@@ -717,6 +717,13 @@ BAD_RE   = re.compile(
     r"\b(?:approved short sale|short sale approved|not a\s+short\s+sale)\b",
     re.I,
 )
+APPROVED_RE = re.compile(r"\bapproved\b", re.I)
+NEGOTIATOR_RE = re.compile(r"\bnegotiator\b", re.I)
+ATTORNEY_CONTEXT_RE = re.compile(
+    r"(?:\battorney\b.{0,60}\b(?:negotiat|negotiation|negotiate|handling|handle|approval|short sale|third party)\b"
+    r"|\b(?:negotiat|negotiation|negotiate|handling|handle|approval|short sale|third party)\b.{0,60}\battorney\b)",
+    re.I,
+)
 TEAM_RE  = re.compile(r"^\s*the\b|\bteam\b", re.I)
 IMG_EXT  = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
 PHONE_RE = re.compile(
@@ -1283,6 +1290,61 @@ def _listing_text_from_payload(payload: Dict[str, Any]) -> str:
             seen.add(part)
             deduped.append(part)
     return " ".join(deduped).strip()
+
+
+def _format_special_listing_conditions(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _normalize_listing_text(value)
+    if isinstance(value, (list, tuple, set)):
+        parts = [_normalize_listing_text(str(item)) for item in value if str(item).strip()]
+        parts = [part for part in parts if part]
+        return ", ".join(parts)
+    return _normalize_listing_text(str(value))
+
+
+def _extract_special_listing_conditions(payload: Dict[str, Any]) -> str:
+    if not payload:
+        return ""
+    for path in (
+        ("resoFacts", "specialListingConditions"),
+        ("hdpData", "homeInfo", "resoFacts", "specialListingConditions"),
+    ):
+        value = _nested_value(payload, list(path))
+        if value:
+            return _format_special_listing_conditions(value)
+    return ""
+
+
+def _short_sale_text_from_payload(listing_text: str, special_conditions: str) -> str:
+    parts: List[str] = []
+    if listing_text:
+        parts.append(_normalize_listing_text(listing_text))
+    if special_conditions:
+        parts.append(_normalize_listing_text(special_conditions))
+    return " ".join(parts).strip().lower()
+
+
+def _short_sale_exclusion_reason(text: str) -> Optional[str]:
+    if not text:
+        return None
+    if BAD_RE.search(text):
+        return "existing_rule"
+    if APPROVED_RE.search(text):
+        return "approved"
+    if NEGOTIATOR_RE.search(text):
+        return "negotiator"
+    if ATTORNEY_CONTEXT_RE.search(text):
+        return "attorney"
+    return None
+
+
+def _special_listing_conditions_match(conditions: str) -> bool:
+    if not conditions:
+        return False
+    normalized = conditions.lower()
+    return "short sale" in normalized or "third party approval" in normalized
 
 
 def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
@@ -9422,6 +9484,22 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
     for r in rows:
         zpid = str(r.get("zpid", ""))
         listing_text = _listing_text_from_payload(r)
+        special_conditions = _extract_special_listing_conditions(r)
+        if special_conditions:
+            LOG.info(
+                "SS_COND zpid=%s conditions=%s",
+                zpid,
+                special_conditions,
+            )
+        short_sale_text = _short_sale_text_from_payload(listing_text, special_conditions)
+        exclusion_reason = _short_sale_exclusion_reason(short_sale_text)
+        if exclusion_reason:
+            LOG.info(
+                "SHORT_SALE_EXCLUDE zpid=%s reason=%s",
+                zpid,
+                exclusion_reason,
+            )
+            continue
         short_sale_flag = _short_sale_flag(r)
         if not listing_text:
             LOG.debug(
@@ -9429,13 +9507,21 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                 zpid,
                 r.get("street"),
             )
-        if not short_sale_flag and not is_short_sale(listing_text or ""):
+        description_match = short_sale_flag or is_short_sale(listing_text or "")
+        special_match = _special_listing_conditions_match(special_conditions)
+        if not description_match and not special_match:
             LOG.debug(
                 "SKIP non-short-sale %s (%s)",
                 r.get("street"),
                 r.get("zpid"),
             )
             continue
+        match_source = "description" if description_match else "specialListingConditions"
+        LOG.info(
+            "SHORT_SALE_MATCH zpid=%s source=%s",
+            zpid,
+            match_source,
+        )
         street = (r.get("street") or r.get("address") or "").strip()
         if street == "(Undisclosed Address)":
             LOG.debug("SKIP undisclosed address zpid %s", r.get("zpid"))

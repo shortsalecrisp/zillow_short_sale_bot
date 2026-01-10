@@ -11,7 +11,6 @@ import re
 import urllib.parse
 import sqlite3
 import threading
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -26,10 +25,6 @@ from bot_min import (
     WORK_END,
     WORK_START,
     SCHEDULER_TZ,
-    apify_acquire_decision_slot,
-    apify_hour_key,
-    apify_work_hours_status,
-    _hour_floor,
     dedupe_rows_by_zpid,
     fetch_contact_page,
     process_rows,
@@ -74,43 +69,11 @@ _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
 _keepalive_thread: Optional[threading.Thread] = None
 _keepalive_stop: Optional[threading.Event] = None
-_last_triggered_apify_run_id: Optional[str] = None
-
-_APIFY_ACTOR_ID_RAW = os.getenv("APIFY_ZILLOW_ACTOR_ID") or os.getenv("APIFY_ACTOR_ID")
-# Apify actor "unique names" use `user~actor`, but many configs still include
-# a slash. Normalize here so `user/actor` works too and avoids 404s.
-APIFY_ACTOR_ID = (
-_APIFY_ACTOR_ID_RAW.replace("/", "~") if _APIFY_ACTOR_ID_RAW else None
-)
-if _APIFY_ACTOR_ID_RAW and "/" in _APIFY_ACTOR_ID_RAW and "~" not in _APIFY_ACTOR_ID_RAW:
-    logger.info("Normalizing APIFY_ACTOR_ID from %s to %s", _APIFY_ACTOR_ID_RAW, APIFY_ACTOR_ID)
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN")
-APIFY_TIMEOUT = int(os.getenv("APIFY_ACTOR_TIMEOUT", "240"))
-APIFY_MEMORY = int(os.getenv("APIFY_ACTOR_MEMORY", "2048"))
-APIFY_MAX_RETRIES = int(os.getenv("APIFY_ACTOR_MAX_RETRIES", "3"))
-APIFY_RETRY_BACKOFF = float(os.getenv("APIFY_ACTOR_RETRY_BACKOFF", "1.8"))
-APIFY_STATUS_PATH = Path(os.getenv("APIFY_STATUS_PATH", "apify_status.json"))
-APIFY_LAST_RUN_PATH = Path(os.getenv("APIFY_LAST_RUN_PATH", "/tmp/apify_last_run.txt"))
-APIFY_LAST_RUN_FALLBACK_PATH = Path("/tmp/apify_last_run.txt")
-APIFY_FORCE_EVERY_HOUR = os.getenv("APIFY_FORCE_EVERY_HOUR", "false").lower() == "true"
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
 APIFY_FETCH_BACKOFF_SECONDS = float(os.getenv("APIFY_FETCH_BACKOFF_SECONDS", "2.0"))
 APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "300"))
-APIFY_TASK_ID = "GPBSVcMBIK6CyJzBm"
-APIFY_WEBHOOK_URL = os.getenv(
-    "APIFY_WEBHOOK_URL",
-    "https://zillow-short-sale-bot.onrender.com/apify-hook",
-)
-_apify_input_raw = os.getenv("APIFY_ACTOR_INPUT", "").strip()
-
-try:
-    APIFY_INPUT: Optional[Dict[str, Any]] = (
-        json.loads(_apify_input_raw) if _apify_input_raw else None
-    )
-except json.JSONDecodeError:
-    logger.error("Invalid JSON in APIFY_ACTOR_INPUT – startup runs will omit custom input")
-    APIFY_INPUT = None
 
 
 def _should_run_immediately() -> bool:
@@ -374,131 +337,8 @@ def _row_has_expected_fields(row: Dict[str, Any]) -> bool:
     return False
 
 
-def _load_last_apify_run() -> Optional[datetime]:
-    try:
-        paths = [APIFY_LAST_RUN_PATH]
-        if APIFY_LAST_RUN_FALLBACK_PATH not in paths:
-            paths.append(APIFY_LAST_RUN_FALLBACK_PATH)
-        for path in paths:
-            if not path.exists():
-                continue
-            raw = path.read_text().strip()
-            if not raw:
-                continue
-            try:
-                parsed = datetime.strptime(raw, "%Y-%m-%d-%H")
-                return SCHEDULER_TZ.localize(parsed)
-            except ValueError:
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    logger.debug(
-                        "Invalid Apify last-run marker in %s; skipping", path, exc_info=True
-                    )
-                    continue
-                ts = data.get("ts")
-                if not ts:
-                    continue
-                try:
-                    parsed_dt = datetime.fromisoformat(ts)
-                except ValueError:
-                    continue
-                return (
-                    parsed_dt.astimezone(SCHEDULER_TZ)
-                    if parsed_dt.tzinfo
-                    else SCHEDULER_TZ.localize(parsed_dt)
-                )
-        return None
-    except Exception:
-        logger.debug("Unable to read Apify last-run marker", exc_info=True)
-        return None
-
-
-def _write_last_apify_run(ts: datetime) -> None:
-    hour_key = apify_hour_key(ts)
-    try:
-        APIFY_LAST_RUN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        APIFY_LAST_RUN_PATH.write_text(hour_key)
-        logger.info("Persisted Apify last-run marker to %s", APIFY_LAST_RUN_PATH)
-    except Exception:
-        fallback = Path("/tmp/apify_last_run.txt")
-        try:
-            fallback.parent.mkdir(parents=True, exist_ok=True)
-            fallback.write_text(hour_key)
-            logger.info("Persisted Apify last-run marker to fallback %s", fallback)
-        except Exception:
-            logger.debug("Unable to persist Apify last-run marker", exc_info=True)
-
-
-def _redact_tokens(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: Dict[str, Any] = {}
-        for key, item in value.items():
-            if "token" in key.lower():
-                redacted[key] = "***"
-            else:
-                redacted[key] = _redact_tokens(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_tokens(item) for item in value]
-    return value
-
-
 def _apify_run_source(run_id: Optional[str]) -> str:
-    if not run_id:
-        return "unknown"
-    if run_id == _last_triggered_apify_run_id:
-        return "render"
     return "apify"
-
-
-def _apify_hourly_task(run_time: datetime) -> None:
-    try:
-        current_slot = _hour_floor(run_time)
-        hour_key = apify_hour_key(current_slot)
-        if not apify_acquire_decision_slot(current_slot):
-            logger.info("Apify hourly decision already handled for %s (decision lock)", hour_key)
-            return
-
-        local_hour, within_work_hours = apify_work_hours_status(current_slot)
-        logger.info(
-            "Apify work-hours check: local_hour=%s within_work_hours=%s",
-            local_hour,
-            within_work_hours,
-        )
-        if not within_work_hours and not APIFY_FORCE_EVERY_HOUR:
-            logger.info("Apify hourly decision: skip %s (outside work hours)", hour_key)
-            return
-        if not within_work_hours and APIFY_FORCE_EVERY_HOUR:
-            logger.info(
-                "Apify hourly decision: outside work hours but APIFY_FORCE_EVERY_HOUR enabled; proceeding"
-            )
-
-        last_run = _load_last_apify_run()
-        logger.info(
-            "Apify last_run marker=%s force_every_hour=%s current_hour_key=%s",
-            apify_hour_key(last_run) if last_run else None,
-            APIFY_FORCE_EVERY_HOUR,
-            hour_key,
-        )
-        if last_run and apify_hour_key(last_run) == hour_key:
-            if APIFY_FORCE_EVERY_HOUR:
-                logger.info(
-                    "Apify hourly decision: already ran %s but APIFY_FORCE_EVERY_HOUR enabled; proceeding",
-                    hour_key,
-                )
-            else:
-                logger.info("Apify hourly decision: skip %s (already ran)", hour_key)
-                return
-
-        logger.info("Apify hourly decision: run %s", hour_key)
-        triggered = _run_apify_actor()
-        if not triggered:
-            logger.warning("Apify actor did not start for hour %s", hour_key)
-            return
-        _write_last_apify_run(current_slot)
-    except Exception:
-        logger.exception("Apify hourly task failed for %s", run_time.isoformat())
 
 
 def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -583,83 +423,6 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"status": "processed", "rows": len(db_filtered)}
 
 
-def _record_apify_degradation(reason: str, status: Optional[int] = None) -> None:
-    payload = {
-        "ts": datetime.utcnow().isoformat() + "Z",
-        "reason": reason,
-    }
-    if status is not None:
-        payload["status"] = status
-    try:
-        APIFY_STATUS_PATH.write_text(json.dumps(payload))
-    except Exception:
-        logger.debug("Unable to write Apify degradation marker", exc_info=True)
-
-
-def _clear_apify_degradation() -> None:
-    try:
-        if APIFY_STATUS_PATH.exists():
-            APIFY_STATUS_PATH.unlink()
-    except Exception:
-        logger.debug("Unable to clear Apify degradation marker", exc_info=True)
-
-
-def _run_apify_actor() -> bool:
-    global _last_triggered_apify_run_id
-    if not APIFY_ACTOR_ID or not APIFY_TOKEN:
-        logger.info("Skipping Apify run – missing APIFY_ACTOR_ID or token")
-        return False
-
-    url = f"https://api.apify.com/v2/acts/{APIFY_ACTOR_ID}/runs"
-    params = {
-        "token": APIFY_TOKEN,
-        "timeout": APIFY_TIMEOUT,
-        "memory": APIFY_MEMORY,
-        "clean": 1,
-    }
-    logger.info("Triggering Apify actor %s (trigger_source=render)", APIFY_ACTOR_ID)
-    payload: Dict[str, Any] = dict(APIFY_INPUT or {})
-    payload.update(
-        {
-            "taskId": APIFY_TASK_ID,
-            "POST_TO_WEBHOOK": True,
-            "webhookUrl": APIFY_WEBHOOK_URL,
-        }
-    )
-
-    redacted_payload = _redact_tokens(payload)
-    logger.info("Apify actor payload: %s", json.dumps(redacted_payload, sort_keys=True))
-    req_kwargs: Dict[str, Any] = {
-        "params": params,
-        "timeout": APIFY_TIMEOUT + 30,
-        "json": payload,
-    }
-
-    resp: Optional[requests.Response] = None
-    try:
-        resp = requests.post(url, **req_kwargs)
-        resp.raise_for_status()
-    except requests.RequestException as exc:
-        status = resp.status_code if resp is not None else None
-        logger.error("Apify actor trigger failed with status %s: %s", status, exc)
-        _record_apify_degradation("trigger_failed", status=status)
-        return False
-
-    run_info: Dict[str, Any] = {}
-    try:
-        run_info = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-    except ValueError:
-        run_info = {}
-    run_id = run_info.get("data", {}).get("id") or run_info.get("id")
-    _last_triggered_apify_run_id = run_id
-    logger.info(
-        "Apify actor run started (run_id=%s); awaiting listings POST",
-        run_id or "unknown",
-    )
-    _clear_apify_degradation()
-    return True
-
-
 def _get_apify_run_status(run_id: str) -> Optional[str]:
     if not APIFY_TOKEN:
         return None
@@ -679,12 +442,13 @@ def _get_apify_run_status(run_id: str) -> Optional[str]:
 
 @app.on_event("startup")
 async def _start_scheduler() -> None:
+    logger.info("RENDER_APIFY_TRIGGER_DISABLED=true")
     if DISABLE_APIFY_SCHEDULER:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
         return
     _ensure_scheduler_thread(
-        hourly_callbacks=[_apify_hourly_task],
-        initial_callbacks=True,
+        hourly_callbacks=None,
+        initial_callbacks=False,
     )
     _ensure_keepalive_thread()
 
@@ -1049,6 +813,15 @@ async def apify_hook(request: Request):
             else:
                 normalized_rows.append(row)
         rows = normalized_rows
+        detail_count = sum(1 for row in rows if _row_has_detail_marker(row))
+        if detail_count == len(rows):
+            logger.info("DETAIL_ENRICHED_PAYLOAD count=%d", detail_count)
+        else:
+            logger.warning(
+                "DETAIL_ENRICHED_MISSING missing=%d total=%d",
+                len(rows) - detail_count,
+                len(rows),
+            )
 
         zpid_only_count = sum(1 for row in rows if not _row_has_expected_fields(row))
         if zpid_only_count == len(rows):
