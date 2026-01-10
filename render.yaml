@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: zillow-short-sale-bot
+    env: python
+    buildCommand: pip install -r requirements.txt && python -m playwright install --with-deps chromium
+    startCommand: bash -c "python bot_min.py & uvicorn webhook_server:app --host 0.0.0.0 --port ${PORT:-10000}"
