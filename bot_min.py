@@ -7114,24 +7114,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                     "verified_mobile": False,
                 }
             )
-    if enrichment_done and not enriched_phone:
-        return _finalize(
-            {
-                "number": "",
-                "confidence": "",
-                "score": 0.0,
-                "source": "two_stage_cse",
-                "reason": "two_stage_no_phone",
-                "verified_mobile": False,
-            }
-        )
+    # If two-stage search produced no phone, continue to other sources (including RapidAPI).
 
     location_tokens, location_digits = _collect_location_hints(
         row_payload,
         state,
         *[hint for hint in location_extras if hint],
     )
-
     queries = _dedupe_queries(
         build_q_phone(
             agent,
@@ -8079,6 +8068,9 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         row_payload,
         state,
         *[hint for hint in location_extras if hint],
+    )
+    location_hint = " ".join(
+        part for part in (str(row_payload.get("city") or "").strip(), state) if part
     )
 
     queries = build_q_email(
