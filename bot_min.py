@@ -1292,38 +1292,10 @@ def _listing_text_from_payload(payload: Dict[str, Any]) -> str:
     return " ".join(deduped).strip()
 
 
-def _format_special_listing_conditions(value: Any) -> str:
-    if value is None:
+def _short_sale_text_from_payload(listing_text: str) -> str:
+    if not listing_text:
         return ""
-    if isinstance(value, str):
-        return _normalize_listing_text(value)
-    if isinstance(value, (list, tuple, set)):
-        parts = [_normalize_listing_text(str(item)) for item in value if str(item).strip()]
-        parts = [part for part in parts if part]
-        return ", ".join(parts)
-    return _normalize_listing_text(str(value))
-
-
-def _extract_special_listing_conditions(payload: Dict[str, Any]) -> str:
-    if not payload:
-        return ""
-    for path in (
-        ("resoFacts", "specialListingConditions"),
-        ("hdpData", "homeInfo", "resoFacts", "specialListingConditions"),
-    ):
-        value = _nested_value(payload, list(path))
-        if value:
-            return _format_special_listing_conditions(value)
-    return ""
-
-
-def _short_sale_text_from_payload(listing_text: str, special_conditions: str) -> str:
-    parts: List[str] = []
-    if listing_text:
-        parts.append(_normalize_listing_text(listing_text))
-    if special_conditions:
-        parts.append(_normalize_listing_text(special_conditions))
-    return " ".join(parts).strip().lower()
+    return _normalize_listing_text(listing_text).strip().lower()
 
 
 def _short_sale_exclusion_reason(text: str) -> Optional[str]:
@@ -1338,13 +1310,6 @@ def _short_sale_exclusion_reason(text: str) -> Optional[str]:
     if ATTORNEY_CONTEXT_RE.search(text):
         return "attorney"
     return None
-
-
-def _special_listing_conditions_match(conditions: str) -> bool:
-    if not conditions:
-        return False
-    normalized = conditions.lower()
-    return "short sale" in normalized or "third party approval" in normalized
 
 
 def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
@@ -1402,41 +1367,6 @@ def _merge_rapid_listing_data(row: Dict[str, Any], rapid_payload: Dict[str, Any]
             row["state"] = address_fields["state"]
         if not row.get("zip") and address_fields.get("zip"):
             row["zip"] = address_fields["zip"]
-
-
-def _short_sale_flag(payload: Dict[str, Any]) -> bool:
-    if not payload:
-        return False
-    for key in (
-        "shortSale",
-        "isShortSale",
-        "is_short_sale",
-        "shortSaleListing",
-        "isShortSaleListing",
-    ):
-        value = payload.get(key)
-        if isinstance(value, bool) and value:
-            return True
-        if isinstance(value, str) and value.strip().lower() in {"true", "yes", "short sale", "shortsale"}:
-            return True
-    listing_sub_type = payload.get("listingSubType") or payload.get("listingSubTypeText")
-    if isinstance(listing_sub_type, str) and "short" in listing_sub_type.lower():
-        return True
-    if isinstance(listing_sub_type, dict):
-        for entry in listing_sub_type.values():
-            if isinstance(entry, str) and "short" in entry.lower():
-                return True
-    for path in (
-        ("hdpData", "homeInfo", "shortSale"),
-        ("hdpData", "homeInfo", "isShortSale"),
-        ("property", "shortSale"),
-    ):
-        value = _nested_value(payload, list(path))
-        if isinstance(value, bool) and value:
-            return True
-        if isinstance(value, str) and value.strip().lower() in {"true", "yes", "short sale", "shortsale"}:
-            return True
-    return False
 
 
 def _is_weekend(d: datetime) -> bool:
@@ -9484,14 +9414,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
     for r in rows:
         zpid = str(r.get("zpid", ""))
         listing_text = _listing_text_from_payload(r)
-        special_conditions = _extract_special_listing_conditions(r)
-        if special_conditions:
-            LOG.info(
-                "SS_COND zpid=%s conditions=%s",
-                zpid,
-                special_conditions,
-            )
-        short_sale_text = _short_sale_text_from_payload(listing_text, special_conditions)
+        short_sale_text = _short_sale_text_from_payload(listing_text)
         exclusion_reason = _short_sale_exclusion_reason(short_sale_text)
         if exclusion_reason:
             LOG.info(
@@ -9500,27 +9423,24 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                 exclusion_reason,
             )
             continue
-        short_sale_flag = _short_sale_flag(r)
         if not listing_text:
             LOG.debug(
                 "SHORT_SALE_TEXT_EMPTY zpid=%s street=%s",
                 zpid,
                 r.get("street"),
             )
-        description_match = short_sale_flag or is_short_sale(listing_text or "")
-        special_match = _special_listing_conditions_match(special_conditions)
-        if not description_match and not special_match:
+        description_match = is_short_sale(listing_text or "")
+        if not description_match:
             LOG.debug(
                 "SKIP non-short-sale %s (%s)",
                 r.get("street"),
                 r.get("zpid"),
             )
             continue
-        match_source = "description" if description_match else "specialListingConditions"
         LOG.info(
             "SHORT_SALE_MATCH zpid=%s source=%s",
             zpid,
-            match_source,
+            "description",
         )
         street = (r.get("street") or r.get("address") or "").strip()
         if street == "(Undisclosed Address)":
