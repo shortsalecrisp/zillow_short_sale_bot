@@ -375,6 +375,7 @@ FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (final run starts at 8 pm)
 FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
+SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=True)
 APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
 
 _sms_enable_env = os.getenv("SMS_ENABLE")
@@ -8845,6 +8846,8 @@ def apify_work_hours_status(run_time: datetime) -> Tuple[int, bool]:
     local_dt = run_time.astimezone(SCHEDULER_TZ)
     local_hour = local_dt.hour
     within_work_hours = WORK_START <= local_hour < WORK_END
+    if not SCHEDULER_INCLUDE_WEEKENDS and _is_weekend(local_dt):
+        within_work_hours = False
     return local_hour, within_work_hours
 
 
@@ -8891,7 +8894,7 @@ def _next_scheduler_run(now: datetime) -> datetime:
         candidate = base + timedelta(hours=1)
     if _within_scheduler_hours(candidate):
         return candidate
-    return _next_work_start(candidate, include_weekends=True)
+    return _next_work_start(candidate, include_weekends=SCHEDULER_INCLUDE_WEEKENDS)
 
 
 def _within_work_hours(slot: datetime) -> bool:
@@ -8909,6 +8912,8 @@ def _within_scheduler_hours(slot: datetime) -> bool:
     """Return True when ``slot`` falls inside hourly scheduler run windows."""
 
     slot = slot.astimezone(SCHEDULER_TZ)
+    if not SCHEDULER_INCLUDE_WEEKENDS and _is_weekend(slot):
+        return False
     return WORK_START <= slot.hour < WORK_END
 
 
@@ -8984,11 +8989,18 @@ def run_hourly_scheduler(
         threading.current_thread().name,
     )
     LOG.info(
-        "Working hours configured: %02d:00-%02d:00 %s (include_weekends=%s)",
+        "Follow-up hours configured: %02d:00-%02d:00 %s (include_weekends=%s)",
         WORK_START,
         WORK_END,
         SCHEDULER_TZ,
         FOLLOWUP_INCLUDE_WEEKENDS,
+    )
+    LOG.info(
+        "Scheduler hours configured: %02d:00-%02d:00 %s (include_weekends=%s)",
+        WORK_START,
+        WORK_END,
+        SCHEDULER_TZ,
+        SCHEDULER_INCLUDE_WEEKENDS,
     )
     next_run = _next_scheduler_run(datetime.now(tz=SCHEDULER_TZ))
 
