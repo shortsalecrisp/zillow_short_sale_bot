@@ -8889,9 +8889,9 @@ def _next_scheduler_run(now: datetime) -> datetime:
         candidate = base
     else:
         candidate = base + timedelta(hours=1)
-    if _within_work_hours(candidate):
+    if _within_scheduler_hours(candidate):
         return candidate
-    return _next_work_start(candidate)
+    return _next_work_start(candidate, include_weekends=True)
 
 
 def _within_work_hours(slot: datetime) -> bool:
@@ -8905,12 +8905,19 @@ def _within_work_hours(slot: datetime) -> bool:
     return True
 
 
-def _next_work_start(slot: datetime) -> datetime:
+def _within_scheduler_hours(slot: datetime) -> bool:
+    """Return True when ``slot`` falls inside hourly scheduler run windows."""
+
+    slot = slot.astimezone(SCHEDULER_TZ)
+    return WORK_START <= slot.hour < WORK_END
+
+
+def _next_work_start(slot: datetime, *, include_weekends: bool) -> datetime:
     slot = slot.astimezone(SCHEDULER_TZ)
     candidate = slot
 
     while True:
-        if not FOLLOWUP_INCLUDE_WEEKENDS and _is_weekend(candidate):
+        if not include_weekends and _is_weekend(candidate):
             candidate = (candidate + timedelta(days=1)).replace(
                 hour=WORK_START, minute=0, second=0, microsecond=0
             )
@@ -8993,7 +9000,7 @@ def run_hourly_scheduler(
 
     if run_immediately:
         initial_run = _hour_floor(datetime.now(tz=SCHEDULER_TZ))
-        if _within_work_hours(initial_run):
+        if _within_scheduler_hours(initial_run):
             _run_hourly_cycle(
                 initial_run,
                 hourly_callbacks,
