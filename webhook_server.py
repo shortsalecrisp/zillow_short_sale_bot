@@ -300,7 +300,8 @@ def _normalize_apify_row(row: Dict[str, Any]) -> Dict[str, Any]:
     listing_text = extract_description(row)
     if listing_text:
         normalized.setdefault("listingText", listing_text)
-        normalized.setdefault("listing_description", listing_text)
+        if not normalized.get("listing_description"):
+            normalized["listing_description"] = listing_text
         normalized.setdefault(
             "listingTextHash",
             hashlib.sha256(listing_text.encode("utf-8")).hexdigest(),
