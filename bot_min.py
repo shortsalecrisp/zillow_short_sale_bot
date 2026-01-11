@@ -97,7 +97,6 @@ _ACCEPT_LANGUAGE_POOL = [
     "en-GB,en;q=0.9",
 ]
 HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
-HEADLESS_REMOTE_ONLY = os.getenv("HEADLESS_REMOTE_ONLY", "true").lower() == "true"
 PLAYWRIGHT_REMOTE_URL = os.getenv("PLAYWRIGHT_REMOTE_URL", "").strip()
 PLAYWRIGHT_REMOTE_MODE = os.getenv("PLAYWRIGHT_REMOTE_MODE", "cdp").strip().lower()
 HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "20000"))
@@ -614,33 +613,6 @@ def _log_blocked_url(url: str) -> None:
 def _playwright_remote_configured() -> bool:
     return bool(PLAYWRIGHT_REMOTE_URL)
 
-def _resolve_playwright_browsers_path(logger: logging.Logger) -> Path:
-    raw_path = (os.getenv("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
-    fallback = Path("~/.cache/ms-playwright").expanduser()
-    if raw_path and raw_path != "0":
-        candidate = Path(raw_path).expanduser()
-        if candidate.is_dir():
-            logger.info("PLAYWRIGHT_BROWSERS_PATH using configured path=%s", candidate)
-            return candidate
-        logger.warning(
-            "PLAYWRIGHT_BROWSERS_PATH missing path=%s falling back to %s",
-            candidate,
-            fallback,
-        )
-        return fallback
-    logger.info("PLAYWRIGHT_BROWSERS_PATH not set; falling back to %s", fallback)
-    return fallback
-
-def _ensure_playwright_browsers_path(logger: logging.Logger) -> None:
-    resolved = _resolve_playwright_browsers_path(logger)
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(resolved)
-    logger.info(
-        "PLAYWRIGHT_BROWSERS_PATH resolved path=%s dir_listing=%s",
-        resolved,
-        "OK" if resolved.is_dir() else "MISSING",
-    )
-
-
 async def _connect_remote_browser(p) -> Any:
     if PLAYWRIGHT_REMOTE_MODE == "playwright":
         return await p.chromium.connect(PLAYWRIGHT_REMOTE_URL)
@@ -650,8 +622,10 @@ async def _connect_remote_browser(p) -> Any:
 async def _connect_playwright_browser(p) -> Tuple[Any, str]:
     if _playwright_remote_configured():
         return await _connect_remote_browser(p), "remote"
-    _ensure_playwright_browsers_path(LOG)
-    return await p.chromium.launch(headless=True), "local"
+    executable_path = p.chromium.executable_path
+    browser = await p.chromium.launch(headless=True)
+    LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", executable_path)
+    return browser, "local"
 
 
 async def _check_playwright_runtime_async(
@@ -688,12 +662,6 @@ def _check_playwright_runtime(logger: logging.Logger) -> None:
             PLAYWRIGHT_REMOTE_URL,
         )
         return
-    if HEADLESS_REMOTE_ONLY and not _playwright_remote_configured():
-        logger.warning(
-            "PLAYWRIGHT_REMOTE_MISSING remote endpoint not configured (PLAYWRIGHT_REMOTE_URL=%s)",
-            PLAYWRIGHT_REMOTE_URL,
-        )
-        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -722,11 +690,6 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
     if async_playwright is None:
         sink.warning(
             "PLAYWRIGHT_MISSING playwright not installed – add Playwright to requirements"
-        )
-        return
-    if HEADLESS_REMOTE_ONLY and not _playwright_remote_configured():
-        sink.warning(
-            "PLAYWRIGHT_REMOTE_MISSING set PLAYWRIGHT_REMOTE_URL to enable headless reviews"
         )
         return
     if not _playwright_remote_configured():
@@ -4739,9 +4702,6 @@ async def _headless_fetch_async(
 ) -> Dict[str, Any]:
     if not HEADLESS_ENABLED or not async_playwright:
         return {}
-    if HEADLESS_REMOTE_ONLY and not _playwright_remote_configured():
-        LOG.warning("PLAYWRIGHT_REMOTE_MISSING headless disabled url=%s", url)
-        return {}
     target_url = _unwrap_jina_url(url)
     if is_blocked_url(target_url):
         LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", target_url)
@@ -4909,8 +4869,6 @@ async def _headless_fetch_async(
 
 def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: str = "") -> Dict[str, Any]:
     if not HEADLESS_ENABLED or not async_playwright:
-        return {}
-    if HEADLESS_REMOTE_ONLY and not _playwright_remote_configured():
         return {}
     log_headless_status()
 
