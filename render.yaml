@@ -4,6 +4,7 @@ services:
     env: python
     buildCommand: |
       pip install -r requirements.txt
+      playwright install --with-deps chromium
     startCommand: bash ./start.sh
     envVars:
       - key: PLAYWRIGHT_REMOTE_URL
