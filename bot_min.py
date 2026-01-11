@@ -621,21 +621,28 @@ async def _connect_remote_browser(p) -> Any:
     return await p.chromium.connect_over_cdp(PLAYWRIGHT_REMOTE_URL)
 
 
+async def _connect_playwright_browser(p) -> Tuple[Any, str]:
+    if _playwright_remote_configured():
+        return await _connect_remote_browser(p), "remote"
+    return await p.chromium.launch(headless=True), "local"
+
+
 async def _check_playwright_runtime_async(
     logger: logging.Logger,
 ) -> None:
     try:
         async with async_playwright() as p:
-            browser = await _connect_remote_browser(p)
+            browser, runtime_mode = await _connect_playwright_browser(p)
             await browser.close()
         logger.info(
-            "PLAYWRIGHT_READY remote chromium connect OK mode=%s url=%s",
+            "PLAYWRIGHT_READY %s chromium connect OK mode=%s url=%s",
+            runtime_mode,
             PLAYWRIGHT_REMOTE_MODE,
             PLAYWRIGHT_REMOTE_URL,
         )
     except Exception as exc:
         logger.error(
-            "PLAYWRIGHT_BROWSER_ERROR remote connect failed mode=%s url=%s env_HEADLESS_FALLBACK=%s err=%s",
+            "PLAYWRIGHT_BROWSER_ERROR connect failed mode=%s url=%s env_HEADLESS_FALLBACK=%s err=%s",
             PLAYWRIGHT_REMOTE_MODE,
             PLAYWRIGHT_REMOTE_URL,
             os.getenv("HEADLESS_FALLBACK"),
@@ -654,7 +661,7 @@ def _check_playwright_runtime(logger: logging.Logger) -> None:
             PLAYWRIGHT_REMOTE_URL,
         )
         return
-    if not _playwright_remote_configured():
+    if HEADLESS_REMOTE_ONLY and not _playwright_remote_configured():
         logger.warning(
             "PLAYWRIGHT_REMOTE_MISSING remote endpoint not configured (PLAYWRIGHT_REMOTE_URL=%s)",
             PLAYWRIGHT_REMOTE_URL,
@@ -690,9 +697,15 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
             "PLAYWRIGHT_MISSING playwright not installed – add Playwright to requirements"
         )
         return
-    if not _playwright_remote_configured():
+    if HEADLESS_REMOTE_ONLY and not _playwright_remote_configured():
         sink.warning(
             "PLAYWRIGHT_REMOTE_MISSING set PLAYWRIGHT_REMOTE_URL to enable headless reviews"
+        )
+        return
+    if not _playwright_remote_configured():
+        sink.info(
+            "PLAYWRIGHT_READY local headless reviews enabled (HEADLESS_FALLBACK=%s)",
+            HEADLESS_ENABLED,
         )
         return
     sink.info(
@@ -4745,7 +4758,7 @@ async def _headless_fetch_async(
         page = None
         try:
             async with async_playwright() as p:
-                browser = await _connect_remote_browser(p)
+                browser, runtime_mode = await _connect_playwright_browser(p)
                 accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
                 context = await browser.new_context(
                     user_agent=random.choice(_USER_AGENT_POOL),
@@ -4762,7 +4775,7 @@ async def _headless_fetch_async(
                     "PLAYWRIGHT_START url=%s reason=%s remote=%s",
                     target_url,
                     reason or "fallback",
-                    True,
+                    runtime_mode == "remote",
                 )
                 for attempt in range(2):
                     try:
@@ -4828,7 +4841,7 @@ async def _headless_fetch_async(
                 LOG.debug(
                     "Headless fetch ok for %s (remote=%s)",
                     domain or _domain(target_url),
-                    True,
+                    runtime_mode == "remote",
                 )
                 return {
                     "html": content,
