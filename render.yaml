@@ -5,4 +5,188 @@ services:
     dockerfile: Dockerfile
     envVars:
       - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /opt/render/project/.cache/ms-playwright
+        value: /ms-playwright
+      - key: APIFY_API_TOKEN
+        value: REPLACE_ME
+      - key: APIFY_TOKEN
+        value: REPLACE_ME
+      - key: APIFY_MAX_ITEMS
+        value: "5"
+      - key: APIFY_FETCH_ATTEMPTS
+        value: "6"
+      - key: APIFY_FETCH_BACKOFF_SECONDS
+        value: "2.0"
+      - key: APIFY_FETCH_MAX_WAIT_SECONDS
+        value: "300"
+      - key: APIFY_DECISION_LOCK_PATH
+        value: /tmp/apify_hourly_decision.txt
+      - key: ALLOW_ROLE_EMAIL_FALLBACK
+        value: "false"
+      - key: BLOCK_SECONDS
+        value: "900"
+      - key: BOT_TIMEZONE
+        value: US/Eastern
+      - key: CLOUDMERSIVE_KEY
+        value: REPLACE_ME
+      - key: CLOUDMERSIVE_MOBILE_BOOST
+        value: "0.8"
+      - key: CONTACT_CACHE_TTL_SECONDS
+        value: "86400"
+      - key: CONTACT_CSE_FETCH_LIMIT
+        value: "30"
+      - key: CONTACT_DOMAIN_GAP_JITTER
+        value: "1.5"
+      - key: CONTACT_DOMAIN_MIN_GAP
+        value: "4.0"
+      - key: CONTACT_EMAIL_FALLBACK_SCORE
+        value: "0.45"
+      - key: CONTACT_EMAIL_LOW_CONF
+        value: "0.45"
+      - key: CONTACT_EMAIL_MIN_SCORE
+        value: "0.75"
+      - key: CONTACT_OVERRIDE_JSON
+        value: ""
+      - key: CONTACT_PHONE_LOW_CONF
+        value: "1.5"
+      - key: CONTACT_PHONE_MIN_SCORE
+        value: "2.25"
+      - key: CONTACT_PHONE_OVERRIDE_DELTA
+        value: "1.0"
+      - key: CONTACT_PHONE_OVERRIDE_MIN
+        value: "1.0"
+      - key: CS_API_KEY
+        value: REPLACE_ME
+      - key: CS_CX
+        value: REPLACE_ME
+      - key: CS_API_KEYS
+        value: ""
+      - key: CS_CXS
+        value: ""
+      - key: CSE_BLOCK_SECONDS
+        value: "900"
+      - key: CSE_JITTER_HIGH
+        value: "2.6"
+      - key: CSE_JITTER_LOW
+        value: "1.0"
+      - key: CSE_MAX_ATTEMPTS
+        value: "3"
+      - key: CSE_MAX_IN_WINDOW
+        value: "12"
+      - key: CSE_MIN_INTERVAL
+        value: "4.0"
+      - key: CSE_PER_KEY_MIN_INTERVAL
+        value: "0.4"
+      - key: CSE_WINDOW_SECONDS
+        value: "60"
+      - key: DISABLE_APIFY_SCHEDULER
+        value: "false"
+      - key: ENABLE_STANDALONE_SCHEDULER
+        value: "false"
+      - key: ENABLE_SYNTH_EMAIL_FALLBACK
+        value: "false"
+      - key: FOLLOWUP_INCLUDE_WEEKENDS
+        value: "false"
+      - key: FOLLOW_UP_HOURS
+        value: "6"
+      - key: FU_LOOKBACK_ROWS
+        value: "50"
+      - key: GCP_SERVICE_ACCOUNT_JSON
+        value: REPLACE_ME
+      - key: GOOGLE_API_KEY
+        value: REPLACE_ME
+      - key: GOOGLE_CX
+        value: REPLACE_ME
+      - key: GSHEET_ID
+        value: REPLACE_ME
+      - key: GSHEET_NEXT_ROW_HINT
+        value: "2566"
+      - key: GSHEET_RANGE
+        value: Sheet1!A1
+      - key: GSHEET_ROW_SCAN_WINDOW
+        value: "200"
+      - key: GSHEET_TAB
+        value: Sheet1
+      - key: HEADLESS_CONTACT_BUDGET
+        value: "4"
+      - key: HEADLESS_FACEBOOK_TIMEOUT_MS
+        value: "32000"
+      - key: HEADLESS_FALLBACK
+        value: "true"
+      - key: HEADLESS_FETCH_TIMEOUT_MS
+        value: "20000"
+      - key: HEADLESS_FETCH_WAIT_MS
+        value: "1200"
+      - key: HEADLESS_NAV_TIMEOUT_MS
+        value: "20000"
+      - key: HEADLESS_OVERALL_TIMEOUT_S
+        value: "50"
+      - key: JINA_BLOCK_SECONDS
+        value: "900"
+      - key: KEEPALIVE_PERIOD_SECONDS
+        value: "300"
+      - key: KEEPALIVE_TIMEOUT_SECONDS
+        value: "8"
+      - key: KEEPALIVE_URL
+        value: ""
+      - key: LOGLEVEL
+        value: DEBUG
+      - key: NOTIFY_PHONE
+        value: ""
+      - key: OPENAI_API_KEY
+        value: REPLACE_ME
+      - key: OPENAI_RERANK_MODEL
+        value: gpt-4o-mini
+      - key: PROXY_LOG_REDACT
+        value: "***"
+      - key: RAPID_COOLDOWN_SECONDS
+        value: "18.0"
+      - key: RAPID_HOST
+        value: us-housing-market-data1.p.rapidapi.com
+      - key: RAPID_KEY
+        value: REPLACE_ME
+      - key: RAPID_MIN_INTERVAL
+        value: "0.75"
+      - key: REALTOR_BACKOFF_BASE
+        value: "3.0"
+      - key: REALTOR_BACKOFF_CAP
+        value: "20.0"
+      - key: REALTOR_BACKOFF_JITTER
+        value: "1.75"
+      - key: REALTOR_MAX_RETRIES
+        value: "5"
+      - key: SCHEDULER_INCLUDE_WEEKENDS
+        value: "true"
+      - key: SCHEDULER_RUN_IMMEDIATELY
+        value: "false"
+      - key: SCRAPER_COOKIE_POOL
+        value: ""
+      - key: SEARCH_BACKOFF_MAX
+        value: "1.2"
+      - key: SEARCH_BACKOFF_MIN
+        value: "0.4"
+      - key: SEARCH_TIMEOUT_TRIP
+        value: "2"
+      - key: SEEN_ZPID_CACHE_SECONDS
+        value: "300"
+      - key: SEND_SMS
+        value: ""
+      - key: SMSM_WEBHOOK_TOKEN
+        value: REPLACE_ME
+      - key: SMS_API_KEY
+        value: REPLACE_ME
+      - key: SMS_ENABLE
+        value: "false"
+      - key: SMS_GATEWAY_API_KEY
+        value: REPLACE_ME
+      - key: SMS_PROVIDER
+        value: android_gateway
+      - key: SMS_RETRY_ATTEMPTS
+        value: "2"
+      - key: SMS_TEST_MODE
+        value: "true"
+      - key: SMS_TEST_NUMBER
+        value: ""
+      - key: WORK_END_HOUR
+        value: "21"
+      - key: WORK_START_HOUR
+        value: "8"
