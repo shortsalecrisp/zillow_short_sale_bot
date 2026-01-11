@@ -610,10 +610,14 @@ def _log_blocked_url(url: str) -> None:
 
 
 def _playwright_browser_root() -> Path:
-    path = os.environ.setdefault(
-        "PLAYWRIGHT_BROWSERS_PATH",
-        "/opt/render/.cache/ms-playwright",
-    )
+    default_path = "/opt/render/project/.cache/ms-playwright"
+    legacy_path = "/opt/render/.cache/ms-playwright"
+    if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
+        if Path(default_path).exists():
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_path
+        else:
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = legacy_path
+    path = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
     return Path(path)
 
 
