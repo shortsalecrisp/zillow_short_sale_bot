@@ -55,6 +55,15 @@ container will fail to build if Playwright cannot start.
 If you see `PLAYWRIGHT_MISSING` in the logs, confirm the service is using the Docker deployment and that no overrides are
 skipping the Docker build.
 
+### How to recreate service on Render using Blueprint
+
+1) In the Render dashboard, click **New** → **Blueprint**.
+2) Connect the GitHub repository for this project if it is not already connected.
+3) Select the repository and branch, then click **Continue**.
+4) Review the services preview (it should show a Docker web service), then click **Apply**.
+5) In the service settings, update any `REPLACE_ME` environment variables with real values, then click **Save Changes**.
+6) Trigger a deploy from **Manual Deploy** → **Deploy latest commit**.
+
 ## Follow-up scheduling
 
 Follow-up passes run during configured work hours. They now skip weekends by default to avoid contacting agents on
