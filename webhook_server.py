@@ -26,6 +26,7 @@ from bot_min import (
     WORK_START,
     SCHEDULER_TZ,
     dedupe_rows_by_zpid,
+    filter_first_unseen,
     fetch_contact_page,
     log_headless_status,
     process_rows,
@@ -386,14 +387,18 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             missing_text,
         )
 
-    if APIFY_MAX_ITEMS and len(db_filtered) > APIFY_MAX_ITEMS:
+    if APIFY_MAX_ITEMS:
         original_count = len(db_filtered)
-        db_filtered = _select_recent_rows(db_filtered, APIFY_MAX_ITEMS)
+        db_filtered = filter_first_unseen(db_filtered, limit=APIFY_MAX_ITEMS)
         logger.info(
-            "apify-hook: limiting to %d most recent listings (from %d)",
+            "apify-hook: selecting up to %d unseen listings (from %d)",
             len(db_filtered),
             original_count,
         )
+        if not db_filtered:
+            logger.info("apify-hook: no unseen rows to process after filter")
+            conn.close()
+            return {"status": "no new rows"}
 
     logger.debug("Sample fields on first fresh row: %s", list(db_filtered[0].keys())[:15])
 
