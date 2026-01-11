@@ -887,6 +887,135 @@ _seen_zpids_loaded_at = 0.0
 _seen_contacts_loaded_at = 0.0
 _seen_zpids_lock = threading.Lock()
 _seen_contacts_lock = threading.Lock()
+SEEN_DB_PATH = os.getenv("SEEN_DB_PATH", "/var/data/seen_zpids.sqlite")
+SEEN_DB_FALLBACK_PATH = "./seen_zpids.sqlite"
+SEEN_RETENTION_DAYS = int(os.getenv("SEEN_RETENTION_DAYS", "30"))
+_seen_db_lock = threading.Lock()
+_seen_db_initialized_path: Optional[str] = None
+
+
+def _connect_seen_db(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=5, check_same_thread=False)
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    return conn
+
+
+def _prune_seen_db(conn: sqlite3.Connection, *, now_ts: Optional[int] = None) -> None:
+    if SEEN_RETENTION_DAYS <= 0:
+        LOG.info(
+            "SEEN_ZPID_RETENTION_DISABLED retention_days=%s",
+            SEEN_RETENTION_DAYS,
+        )
+        return
+    ts = int(now_ts or time.time())
+    cutoff = ts - (SEEN_RETENTION_DAYS * 86400)
+    cursor = conn.execute(
+        "DELETE FROM seen_zpids WHERE first_seen_ts < ?",
+        (cutoff,),
+    )
+    deleted = cursor.rowcount or 0
+    LOG.info(
+        "SEEN_ZPID_PRUNE deleted=%s cutoff_ts=%s retention_days=%s",
+        deleted,
+        cutoff,
+        SEEN_RETENTION_DAYS,
+    )
+
+
+def _initialize_seen_db(conn: sqlite3.Connection, db_path: str) -> None:
+    global _seen_db_initialized_path
+    with _seen_db_lock:
+        if _seen_db_initialized_path == db_path:
+            return
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seen_zpids (
+                    zpid TEXT PRIMARY KEY,
+                    first_seen_ts INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_seen_zpids_first_seen_ts
+                ON seen_zpids (first_seen_ts)
+                """
+            )
+            _prune_seen_db(conn)
+        _seen_db_initialized_path = db_path
+
+
+def _open_seen_db() -> tuple[sqlite3.Connection, str]:
+    preferred_path = SEEN_DB_PATH
+    try:
+        conn = _connect_seen_db(preferred_path)
+        db_path = preferred_path
+    except sqlite3.Error as exc:
+        LOG.warning(
+            "SEEN_ZPID_DB_OPEN_FAILED path=%s err=%s; falling back to %s",
+            preferred_path,
+            exc,
+            SEEN_DB_FALLBACK_PATH,
+        )
+        conn = _connect_seen_db(SEEN_DB_FALLBACK_PATH)
+        db_path = SEEN_DB_FALLBACK_PATH
+    _initialize_seen_db(conn, db_path)
+    return conn, db_path
+
+
+def filter_first_unseen(listings: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
+    total_candidates = len(listings)
+    if not listings or limit <= 0:
+        LOG.info(
+            "SEEN_ZPID_FILTER total=%s already_seen=%s selected=%s limit=%s",
+            total_candidates,
+            0,
+            0,
+            limit,
+        )
+        return []
+
+    conn, _ = _open_seen_db()
+    selected: List[Dict[str, Any]] = []
+    already_seen = 0
+    now_ts = int(time.time())
+    try:
+        with conn:
+            cursor = conn.cursor()
+            for item in listings:
+                if len(selected) >= limit:
+                    break
+                zpid = str(item.get("zpid") or item.get("id") or "").strip()
+                if not zpid:
+                    continue
+                if cursor.execute(
+                    "SELECT 1 FROM seen_zpids WHERE zpid = ?",
+                    (zpid,),
+                ).fetchone():
+                    already_seen += 1
+                    continue
+                selected.append(item)
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO seen_zpids (zpid, first_seen_ts)
+                    VALUES (?, ?)
+                    """,
+                    (zpid, now_ts),
+                )
+    finally:
+        conn.close()
+
+    LOG.info(
+        "SEEN_ZPID_FILTER total=%s already_seen=%s selected=%s limit=%s",
+        total_candidates,
+        already_seen,
+        len(selected),
+        limit,
+    )
+    return selected
 
 
 def load_seen_contacts(force: bool = False) -> Tuple[Set[str], Set[str]]:
