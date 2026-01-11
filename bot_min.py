@@ -610,7 +610,11 @@ def _log_blocked_url(url: str) -> None:
 
 
 def _playwright_browser_root() -> Path:
-    return Path(os.getenv("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/project/.cache/ms-playwright"))
+    path = os.environ.setdefault(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        "/opt/render/project/.cache/ms-playwright",
+    )
+    return Path(path)
 
 
 def _playwright_browser_roots() -> List[Path]:
@@ -669,6 +673,27 @@ def _log_playwright_browser_dir_listings(logger: logging.Logger) -> None:
     )
 
 
+async def _check_playwright_runtime_async(
+    logger: logging.Logger,
+    root: Path,
+) -> None:
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            await browser.close()
+        logger.info("PLAYWRIGHT_READY runtime chromium launch OK path=%s", root)
+    except Exception as exc:
+        _, entries = _playwright_browser_dir_snapshot(root)
+        logger.error(
+            "PLAYWRIGHT_BROWSER_ERROR expected_path=%s env_PLAYWRIGHT_BROWSERS_PATH=%s env_HEADLESS_FALLBACK=%s dir_listing=%s err=%s",
+            root,
+            os.getenv("PLAYWRIGHT_BROWSERS_PATH"),
+            os.getenv("HEADLESS_FALLBACK"),
+            entries,
+            exc,
+        )
+
+
 def _check_playwright_runtime(logger: logging.Logger) -> None:
     global _playwright_runtime_checked
     if _playwright_runtime_checked:
@@ -683,23 +708,16 @@ def _check_playwright_runtime(logger: logging.Logger) -> None:
             root,
         )
         return
-    from playwright.sync_api import sync_playwright
-
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            browser.close()
-        logger.info("PLAYWRIGHT_READY runtime chromium launch OK path=%s", root)
-    except Exception as exc:
-        _, entries = _playwright_browser_dir_snapshot(root)
-        logger.error(
-            "PLAYWRIGHT_BROWSER_ERROR expected_path=%s env_PLAYWRIGHT_BROWSERS_PATH=%s env_HEADLESS_FALLBACK=%s dir_listing=%s err=%s",
-            root,
-            os.getenv("PLAYWRIGHT_BROWSERS_PATH"),
-            os.getenv("HEADLESS_FALLBACK"),
-            entries,
-            exc,
-        )
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        loop.create_task(_check_playwright_runtime_async(logger, root))
+        return
+
+    asyncio.run(_check_playwright_runtime_async(logger, root))
 
 
 def _ensure_playwright_browsers(logger: Optional[logging.Logger] = None) -> bool:
