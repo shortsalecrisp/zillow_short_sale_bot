@@ -7,6 +7,30 @@ echo "STARTUP_PWD=$(pwd)"
 
 echo "STARTUP_PLAYWRIGHT_REMOTE_URL=${PLAYWRIGHT_REMOTE_URL:-}"
 echo "STARTUP_PLAYWRIGHT_REMOTE_MODE=${PLAYWRIGHT_REMOTE_MODE:-cdp}"
+echo "STARTUP_PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-}"
+
+echo "STARTUP_PLAYWRIGHT_CHROMIUM_CHECK starting"
+set +e
+python - <<'PY'
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    chromium_path = Path(p.chromium.executable_path)
+
+print(f"STARTUP_PLAYWRIGHT_CHROMIUM_PATH={chromium_path}")
+print(f"STARTUP_PLAYWRIGHT_CHROMIUM_EXISTS={chromium_path.exists()}")
+if not chromium_path.exists():
+    raise SystemExit(10)
+print("STARTUP_PLAYWRIGHT_CHROMIUM_OK")
+PY
+chromium_status=$?
+set -e
+if [ "${chromium_status}" -ne 0 ]; then
+  echo "STARTUP_PLAYWRIGHT_CHROMIUM_INSTALL starting"
+  python -m playwright install chromium
+  echo "STARTUP_PLAYWRIGHT_CHROMIUM_INSTALL_DONE"
+fi
 
 if [ -n "${PLAYWRIGHT_REMOTE_URL:-}" ]; then
   echo "STARTUP_PLAYWRIGHT_REMOTE_SMOKE starting"
