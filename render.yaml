@@ -3,25 +3,15 @@ services:
     name: zillow-short-sale-bot
     env: python
     buildCommand: |
-      pip install -r requirements.txt &&
-      export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/tmp/ms-playwright}" &&
-      mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}" &&
-      test -w "${PLAYWRIGHT_BROWSERS_PATH}" &&
-      python -m playwright install chromium &&
-      test -d "${PLAYWRIGHT_BROWSERS_PATH}" && ls -la "${PLAYWRIGHT_BROWSERS_PATH}" &&
-      python - <<'PY'
-      from playwright.sync_api import sync_playwright
-      import os
-      print("PLAYWRIGHT_BROWSERS_PATH=", os.getenv("PLAYWRIGHT_BROWSERS_PATH"))
-      with sync_playwright() as p:
-          b = p.chromium.launch(headless=True)
-          b.close()
-      print("SMOKE_TEST_OK")
-      PY
+      pip install -r requirements.txt
     startCommand: bash ./start.sh
     envVars:
-      - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /tmp/ms-playwright
+      - key: PLAYWRIGHT_REMOTE_URL
+        value: REPLACE_ME
+      - key: PLAYWRIGHT_REMOTE_MODE
+        value: cdp
+      - key: HEADLESS_REMOTE_ONLY
+        value: "true"
       - key: APIFY_API_TOKEN
         value: REPLACE_ME
       - key: APIFY_TOKEN

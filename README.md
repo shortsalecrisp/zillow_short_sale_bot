@@ -48,12 +48,9 @@ HTTP traffic or subject to web-service auto-suspend. When doing so:
 3) If you cannot run a Worker, either disable auto-suspend (paid plan) or keep the web process warm with an uptime
    monitor so the scheduler thread inside `webhook_server.py` hits each top-of-hour slot.
 
-For reliable Playwright installs, deploy this service to Render as a **Docker** service using the repo `Dockerfile`. The
-Docker build runs `python -m playwright install --with-deps chromium` and a smoke test that launches Chromium, so the
-container will fail to build if Playwright cannot start.
-
-If you see `PLAYWRIGHT_MISSING` in the logs, confirm the service is using the Docker deployment and that no overrides are
-skipping the Docker build.
+Configure Playwright to use a dedicated remote browser service by setting `PLAYWRIGHT_REMOTE_URL` (and optionally
+`PLAYWRIGHT_REMOTE_MODE=cdp` or `playwright`). The startup script will run a remote smoke test if a URL is configured,
+and headless reviews will stay disabled until the remote endpoint is reachable.
 
 ### How to recreate service on Render using Blueprint
 
