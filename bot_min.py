@@ -612,8 +612,14 @@ def _log_blocked_url(url: str) -> None:
 
 def _playwright_browser_root() -> Path:
     env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if env_path:
-        return Path(env_path)
+    if env_path is not None:
+        if env_path:
+            return Path(env_path)
+        LOG.warning(
+            "PLAYWRIGHT_BROWSERS_PATH is set but empty; using default %s",
+            DEFAULT_PLAYWRIGHT_BROWSER_ROOT,
+        )
+        return DEFAULT_PLAYWRIGHT_BROWSER_ROOT
     canonical_path = str(DEFAULT_PLAYWRIGHT_BROWSER_ROOT)
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = canonical_path
     LOG.info(
