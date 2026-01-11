@@ -2,8 +2,24 @@ services:
   - type: web
     name: zillow-short-sale-bot
     env: python
-    startCommand: ./start.sh
+    buildCommand: |
+      pip install -r requirements.txt &&
+      mkdir -p /tmp/ms-playwright &&
+      PLAYWRIGHT_BROWSERS_PATH=/tmp/ms-playwright python -m playwright install --with-deps chromium &&
+      test -d /tmp/ms-playwright && ls -la /tmp/ms-playwright &&
+      python - <<'PY'
+      from playwright.sync_api import sync_playwright
+      import os
+      print("PLAYWRIGHT_BROWSERS_PATH=", os.getenv("PLAYWRIGHT_BROWSERS_PATH"))
+      with sync_playwright() as p:
+          b = p.chromium.launch(headless=True)
+          b.close()
+      print("SMOKE_TEST_OK")
+      PY
+    startCommand: python bot_min.py & uvicorn webhook_server:app --host 0.0.0.0 --port "${PORT:-10000}"
     envVars:
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /tmp/ms-playwright
       - key: APIFY_API_TOKEN
         value: REPLACE_ME
       - key: APIFY_TOKEN
