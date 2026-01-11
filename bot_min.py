@@ -614,6 +614,32 @@ def _log_blocked_url(url: str) -> None:
 def _playwright_remote_configured() -> bool:
     return bool(PLAYWRIGHT_REMOTE_URL)
 
+def _resolve_playwright_browsers_path(logger: logging.Logger) -> Path:
+    raw_path = (os.getenv("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    fallback = Path("~/.cache/ms-playwright").expanduser()
+    if raw_path and raw_path != "0":
+        candidate = Path(raw_path).expanduser()
+        if candidate.is_dir():
+            logger.info("PLAYWRIGHT_BROWSERS_PATH using configured path=%s", candidate)
+            return candidate
+        logger.warning(
+            "PLAYWRIGHT_BROWSERS_PATH missing path=%s falling back to %s",
+            candidate,
+            fallback,
+        )
+        return fallback
+    logger.info("PLAYWRIGHT_BROWSERS_PATH not set; falling back to %s", fallback)
+    return fallback
+
+def _ensure_playwright_browsers_path(logger: logging.Logger) -> None:
+    resolved = _resolve_playwright_browsers_path(logger)
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(resolved)
+    logger.info(
+        "PLAYWRIGHT_BROWSERS_PATH resolved path=%s dir_listing=%s",
+        resolved,
+        "OK" if resolved.is_dir() else "MISSING",
+    )
+
 
 async def _connect_remote_browser(p) -> Any:
     if PLAYWRIGHT_REMOTE_MODE == "playwright":
@@ -624,6 +650,7 @@ async def _connect_remote_browser(p) -> Any:
 async def _connect_playwright_browser(p) -> Tuple[Any, str]:
     if _playwright_remote_configured():
         return await _connect_remote_browser(p), "remote"
+    _ensure_playwright_browsers_path(LOG)
     return await p.chromium.launch(headless=True), "local"
 
 
