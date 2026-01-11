@@ -57,6 +57,7 @@ pip install -r requirements.txt && python -m playwright install --with-deps chro
 If you already use a custom build script, append `python -m playwright install --with-deps chromium` after installing the Python dependencies.
 If you see `PLAYWRIGHT_MISSING` in the logs, your build is skipping the install step above; add it so headless reviews run.
 Set `HEADLESS_FALLBACK=true` (default) to keep Playwright enabled, or expect `PLAYWRIGHT_DISABLED` warnings otherwise.
+Set `PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright` to ensure the bot checks the same location where Chromium is installed on Render.
 
 For Render native Python services, keep the **Start Command** limited to the bot and webhook server, for example:
 
