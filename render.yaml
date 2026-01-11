@@ -5,4 +5,4 @@ services:
     dockerfile: Dockerfile
     envVars:
       - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /opt/render/project/.cache/ms-playwright
+        value: /ms-playwright
