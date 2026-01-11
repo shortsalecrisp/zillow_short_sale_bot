@@ -624,21 +624,19 @@ async def _connect_remote_browser(p) -> Any:
 async def _connect_playwright_browser(p) -> Tuple[Any, str]:
     if _playwright_remote_configured():
         return await _connect_remote_browser(p), "remote"
-    _ensure_playwright_chromium(LOG)
+    await _ensure_playwright_chromium(LOG)
     executable_path = p.chromium.executable_path
     browser = await p.chromium.launch(headless=True)
     LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", executable_path)
     return browser, "local"
 
 
-def _ensure_playwright_chromium(logger: logging.Logger) -> None:
+async def _ensure_playwright_chromium(logger: logging.Logger) -> None:
     global _playwright_install_checked
     if _playwright_install_checked or async_playwright is None:
         return
     _playwright_install_checked = True
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
+    async with async_playwright() as p:
         executable_path = Path(p.chromium.executable_path)
     if executable_path.exists():
         return
