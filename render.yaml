@@ -1,11 +1,9 @@
 services:
   - type: web
     name: zillow-short-sale-bot
-    env: docker
-    dockerfile: Dockerfile
+    env: python
+    startCommand: bash -c "./start.sh"
     envVars:
-      - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /ms-playwright
       - key: APIFY_API_TOKEN
         value: REPLACE_ME
       - key: APIFY_TOKEN

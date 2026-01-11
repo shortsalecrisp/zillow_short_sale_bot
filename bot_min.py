@@ -603,7 +603,7 @@ logging.basicConfig(
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
 _playwright_runtime_checked = False
-DEFAULT_PLAYWRIGHT_BROWSER_ROOT = Path("/opt/render/project/.cache/ms-playwright")
+DEFAULT_PLAYWRIGHT_BROWSER_ROOT = Path("/tmp/ms-playwright")
 
 
 def _log_blocked_url(url: str) -> None:
@@ -620,13 +620,6 @@ def _playwright_browser_root() -> Path:
             DEFAULT_PLAYWRIGHT_BROWSER_ROOT,
         )
         return DEFAULT_PLAYWRIGHT_BROWSER_ROOT
-    canonical_path = str(DEFAULT_PLAYWRIGHT_BROWSER_ROOT)
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = canonical_path
-    LOG.info(
-        "PLAYWRIGHT_BROWSERS_PATH set to %s (was %s)",
-        canonical_path,
-        env_path,
-    )
     return DEFAULT_PLAYWRIGHT_BROWSER_ROOT
 
 
