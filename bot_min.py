@@ -603,7 +603,8 @@ logging.basicConfig(
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
 _playwright_runtime_checked = False
-DEFAULT_PLAYWRIGHT_BROWSER_ROOT = Path("/opt/render/project/.cache/ms-playwright")
+_playwright_path_logged = False
+DEFAULT_PLAYWRIGHT_BROWSER_ROOT = Path("/ms-playwright")
 
 
 def _log_blocked_url(url: str) -> None:
@@ -611,23 +612,45 @@ def _log_blocked_url(url: str) -> None:
 
 
 def _playwright_browser_root() -> Path:
+    global _playwright_path_logged
     env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
     if env_path is not None:
         if env_path:
-            return Path(env_path)
+            root = Path(env_path)
+            if not _playwright_path_logged:
+                _playwright_path_logged = True
+                exists, entries = _playwright_browser_dir_snapshot(root)
+                LOG.info(
+                    "PLAYWRIGHT_BROWSERS_PATH resolved=%s exists=%s entries=%s",
+                    root,
+                    exists,
+                    entries,
+                )
+            return root
         LOG.warning(
             "PLAYWRIGHT_BROWSERS_PATH is set but empty; using default %s",
             DEFAULT_PLAYWRIGHT_BROWSER_ROOT,
         )
-        return DEFAULT_PLAYWRIGHT_BROWSER_ROOT
-    canonical_path = str(DEFAULT_PLAYWRIGHT_BROWSER_ROOT)
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = canonical_path
-    LOG.info(
-        "PLAYWRIGHT_BROWSERS_PATH set to %s (was %s)",
-        canonical_path,
-        env_path,
-    )
-    return DEFAULT_PLAYWRIGHT_BROWSER_ROOT
+        root = DEFAULT_PLAYWRIGHT_BROWSER_ROOT
+    else:
+        canonical_path = str(DEFAULT_PLAYWRIGHT_BROWSER_ROOT)
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = canonical_path
+        LOG.info(
+            "PLAYWRIGHT_BROWSERS_PATH set to %s (was %s)",
+            canonical_path,
+            env_path,
+        )
+        root = DEFAULT_PLAYWRIGHT_BROWSER_ROOT
+    if not _playwright_path_logged:
+        _playwright_path_logged = True
+        exists, entries = _playwright_browser_dir_snapshot(root)
+        LOG.info(
+            "PLAYWRIGHT_BROWSERS_PATH resolved=%s exists=%s entries=%s",
+            root,
+            exists,
+            entries,
+        )
+    return root
 
 
 def _playwright_browsers_installed() -> bool:
