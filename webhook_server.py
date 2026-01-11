@@ -27,6 +27,7 @@ from bot_min import (
     SCHEDULER_TZ,
     dedupe_rows_by_zpid,
     fetch_contact_page,
+    log_headless_status,
     process_rows,
     run_hourly_scheduler,
 )
@@ -61,6 +62,11 @@ logger = logging.getLogger("webhook_server")
 
 # FastAPI app
 app            = FastAPI()
+
+
+@app.on_event("startup")
+async def _log_playwright_status() -> None:
+    log_headless_status(logger)
 
 # In-memory de-dupe cache of exported ZPIDs
 EXPORTED_ZPIDS: set[str] = set()

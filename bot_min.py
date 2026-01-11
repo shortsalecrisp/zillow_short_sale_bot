@@ -661,6 +661,50 @@ def _playwright_chromium_paths() -> List[Path]:
     return matches
 
 
+def _log_playwright_browser_dir_listing(
+    path: Path,
+    *,
+    logger: logging.Logger,
+    label: str,
+) -> None:
+    if not path.exists():
+        logger.warning(
+            "PLAYWRIGHT_BROWSERS_DIR_MISSING label=%s path=%s",
+            label,
+            path,
+        )
+        return
+    if not path.is_dir():
+        logger.warning(
+            "PLAYWRIGHT_BROWSERS_DIR_NOT_DIR label=%s path=%s",
+            label,
+            path,
+        )
+        return
+    entries = sorted(entry.name for entry in path.iterdir())
+    logger.warning(
+        "PLAYWRIGHT_BROWSERS_DIR_LISTING label=%s path=%s entries=%s",
+        label,
+        path,
+        entries,
+    )
+
+
+def _log_playwright_browser_dir_listings(logger: logging.Logger) -> None:
+    env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+    if env_path:
+        _log_playwright_browser_dir_listing(
+            Path(env_path),
+            logger=logger,
+            label="PLAYWRIGHT_BROWSERS_PATH",
+        )
+    _log_playwright_browser_dir_listing(
+        Path("/opt/render/.cache/ms-playwright"),
+        logger=logger,
+        label="RENDER_FALLBACK_CACHE",
+    )
+
+
 def _ensure_playwright_browsers(logger: Optional[logging.Logger] = None) -> bool:
     sink = logger or LOG
     if not HEADLESS_ENABLED or async_playwright is None:
@@ -696,6 +740,7 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
             "PLAYWRIGHT_BROWSER_MISSING headless Chromium not found under %s",
             ", ".join(str(p) for p in _playwright_browser_roots()),
         )
+        _log_playwright_browser_dir_listings(sink)
         return
     chromium_paths = _playwright_chromium_paths()
     chromium_hint = chromium_paths[0] if chromium_paths else ""
