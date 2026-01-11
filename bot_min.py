@@ -612,13 +612,24 @@ def _log_blocked_url(url: str) -> None:
 def _playwright_browser_root() -> Path:
     path = os.environ.setdefault(
         "PLAYWRIGHT_BROWSERS_PATH",
-        "/opt/render/project/.cache/ms-playwright",
+        "/opt/render/.cache/ms-playwright",
     )
     return Path(path)
 
 
 def _playwright_browser_roots() -> List[Path]:
-    return [_playwright_browser_root()]
+    roots = [
+        _playwright_browser_root(),
+        Path("/opt/render/project/.cache/ms-playwright"),
+    ]
+    seen: set[Path] = set()
+    ordered: List[Path] = []
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        ordered.append(root)
+    return ordered
 
 
 def _playwright_browsers_installed() -> bool:
