@@ -7,11 +7,11 @@ services:
     startCommand: bash ./start.sh
     envVars:
       - key: PLAYWRIGHT_REMOTE_URL
-        value: REPLACE_ME
+        value: ""
       - key: PLAYWRIGHT_REMOTE_MODE
         value: cdp
       - key: HEADLESS_REMOTE_ONLY
-        value: "true"
+        value: "false"
       - key: APIFY_API_TOKEN
         value: REPLACE_ME
       - key: APIFY_TOKEN
@@ -117,7 +117,7 @@ services:
       - key: HEADLESS_FACEBOOK_TIMEOUT_MS
         value: "32000"
       - key: HEADLESS_FALLBACK
-        value: "true"
+        value: "false"
       - key: HEADLESS_FETCH_TIMEOUT_MS
         value: "20000"
       - key: HEADLESS_FETCH_WAIT_MS

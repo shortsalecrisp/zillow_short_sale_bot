@@ -679,12 +679,12 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
         return
     _playwright_status_logged = True
     sink = logger or LOG
-    _check_playwright_runtime(sink)
     if not HEADLESS_ENABLED:
         sink.warning(
             "PLAYWRIGHT_DISABLED HEADLESS_FALLBACK=false – set HEADLESS_FALLBACK=true to enable headless reviews"
         )
         return
+    _check_playwright_runtime(sink)
     if async_playwright is None:
         sink.warning(
             "PLAYWRIGHT_MISSING playwright not installed – add Playwright to requirements"
