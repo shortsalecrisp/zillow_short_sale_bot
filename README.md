@@ -48,22 +48,12 @@ HTTP traffic or subject to web-service auto-suspend. When doing so:
 3) If you cannot run a Worker, either disable auto-suspend (paid plan) or keep the web process warm with an uptime
    monitor so the scheduler thread inside `webhook_server.py` hits each top-of-hour slot.
 
-When building on Render, include the Playwright installation step in your **Build Command** so Chromium is available at runtime:
+For reliable Playwright installs, deploy this service to Render as a **Docker** service using the repo `Dockerfile`. The
+Docker build runs `python -m playwright install --with-deps chromium` and a smoke test that launches Chromium, so the
+container will fail to build if Playwright cannot start.
 
-```
-pip install -r requirements.txt && python -m playwright install --with-deps chromium
-```
-
-If you already use a custom build script, append `python -m playwright install --with-deps chromium` after installing the Python dependencies.
-If you see `PLAYWRIGHT_MISSING` in the logs, your build is skipping the install step above; add it so headless reviews run.
-Set `HEADLESS_FALLBACK=true` (default) to keep Playwright enabled, or expect `PLAYWRIGHT_DISABLED` warnings otherwise.
-Set `PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright` to ensure the bot checks the same location where Chromium is installed on Render.
-
-For Render native Python services, keep the **Start Command** limited to the bot and webhook server, for example:
-
-```
-bash -c "python bot_min.py & uvicorn webhook_server:app --host 0.0.0.0 --port 10000"
-```
+If you see `PLAYWRIGHT_MISSING` in the logs, confirm the service is using the Docker deployment and that no overrides are
+skipping the Docker build.
 
 ## Follow-up scheduling
 
