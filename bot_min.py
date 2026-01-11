@@ -603,24 +603,17 @@ logging.basicConfig(
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
 _playwright_runtime_checked = False
-DEFAULT_PLAYWRIGHT_BROWSER_ROOT = Path("/tmp/ms-playwright")
 
 
 def _log_blocked_url(url: str) -> None:
     LOG.info("URL_BLOCKED url=%s", url)
 
 
-def _playwright_browser_root() -> Path:
+def _playwright_browser_root() -> Optional[Path]:
     env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if env_path is not None:
-        if env_path:
-            return Path(env_path)
-        LOG.warning(
-            "PLAYWRIGHT_BROWSERS_PATH is set but empty; using default %s",
-            DEFAULT_PLAYWRIGHT_BROWSER_ROOT,
-        )
-        return DEFAULT_PLAYWRIGHT_BROWSER_ROOT
-    return DEFAULT_PLAYWRIGHT_BROWSER_ROOT
+    if env_path:
+        return Path(env_path)
+    return None
 
 
 def _playwright_browsers_installed() -> bool:
@@ -631,7 +624,7 @@ def _playwright_browsers_installed() -> bool:
         "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
     )
     root = _playwright_browser_root()
-    if not root.exists():
+    if root is None or not root.exists():
         return False
     for pattern in patterns:
         if any(root.glob(pattern)):
@@ -648,14 +641,16 @@ def _playwright_chromium_paths() -> List[Path]:
     )
     matches: List[Path] = []
     root = _playwright_browser_root()
-    if not root.exists():
+    if root is None or not root.exists():
         return matches
     for pattern in patterns:
         matches.extend(root.glob(pattern))
     return matches
 
 
-def _playwright_browser_dir_snapshot(path: Path) -> Tuple[bool, str]:
+def _playwright_browser_dir_snapshot(path: Optional[Path]) -> Tuple[bool, str]:
+    if path is None:
+        return False, "MISSING_ENV"
     if not path.exists():
         return False, "MISSING"
     if not path.is_dir():
@@ -666,6 +661,9 @@ def _playwright_browser_dir_snapshot(path: Path) -> Tuple[bool, str]:
 
 def _log_playwright_browser_dir_listings(logger: logging.Logger) -> None:
     root = _playwright_browser_root()
+    if root is None:
+        logger.warning("PLAYWRIGHT_BROWSERS_PATH not set at runtime")
+        return
     exists, entries = _playwright_browser_dir_snapshot(root)
     logger.info(
         "PLAYWRIGHT_BROWSERS_DIR_LISTING path=%s exists=%s entries=%s",
@@ -706,6 +704,9 @@ def _check_playwright_runtime(logger: logging.Logger) -> None:
         return
     _playwright_runtime_checked = True
     root = _playwright_browser_root()
+    if root is None:
+        logger.warning("PLAYWRIGHT_BROWSERS_PATH not set at runtime")
+        return
     logger.info("PLAYWRIGHT_BROWSERS_PATH value=%s", root)
     _log_playwright_browser_dir_listings(logger)
     if async_playwright is None:
@@ -732,9 +733,10 @@ def _ensure_playwright_browsers(logger: Optional[logging.Logger] = None) -> bool
         return False
     if _playwright_browsers_installed():
         return True
+    root = _playwright_browser_root()
     sink.warning(
         "PLAYWRIGHT_BROWSER_MISSING no Chromium download found under %s – run `python -m playwright install --with-deps chromium`",
-        _playwright_browser_root(),
+        root,
     )
     return False
 
