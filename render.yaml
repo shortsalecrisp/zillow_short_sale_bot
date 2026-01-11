@@ -2,7 +2,7 @@ services:
   - type: web
     name: zillow-short-sale-bot
     env: python
-    startCommand: bash -c "./start.sh"
+    startCommand: ./start.sh
     envVars:
       - key: APIFY_API_TOKEN
         value: REPLACE_ME
