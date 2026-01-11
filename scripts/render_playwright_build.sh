@@ -1,22 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CANONICAL_PATH="/opt/render/project/.cache/ms-playwright"
+CANONICAL_PATH="/tmp/ms-playwright"
 
 printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "${PLAYWRIGHT_BROWSERS_PATH:-}"
 printf 'HOME=%s\n' "${HOME:-}"
-
-mapfile -t found_dirs < <(find /opt/render -maxdepth 5 -type d -name ms-playwright -print || true)
-printf '%s\n' "${found_dirs[@]}"
 
 candidate_dirs=("${CANONICAL_PATH}")
 if [[ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
   candidate_dirs+=("${PLAYWRIGHT_BROWSERS_PATH}")
 fi
-
-for dir in "${found_dirs[@]}"; do
-  candidate_dirs+=("${dir}")
-done
 
 for dir in "${candidate_dirs[@]}"; do
   ls -la "${dir}" || true
