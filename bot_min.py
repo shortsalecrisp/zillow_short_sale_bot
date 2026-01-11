@@ -12,7 +12,6 @@ import sys
 import threading
 import importlib.util
 from collections import Counter, defaultdict, deque
-from pathlib import Path
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote, urljoin
 
@@ -97,6 +96,9 @@ _ACCEPT_LANGUAGE_POOL = [
     "en-GB,en;q=0.9",
 ]
 HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
+HEADLESS_REMOTE_ONLY = os.getenv("HEADLESS_REMOTE_ONLY", "true").lower() == "true"
+PLAYWRIGHT_REMOTE_URL = os.getenv("PLAYWRIGHT_REMOTE_URL", "").strip()
+PLAYWRIGHT_REMOTE_MODE = os.getenv("PLAYWRIGHT_REMOTE_MODE", "cdp").strip().lower()
 HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "20000"))
 HEADLESS_NAV_TIMEOUT_MS = int(os.getenv("HEADLESS_NAV_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS)))
 HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
@@ -608,92 +610,34 @@ _playwright_runtime_checked = False
 def _log_blocked_url(url: str) -> None:
     LOG.info("URL_BLOCKED url=%s", url)
 
-
-def _playwright_browser_root() -> Optional[Path]:
-    env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if env_path:
-        return Path(env_path)
-    return None
+def _playwright_remote_configured() -> bool:
+    return bool(PLAYWRIGHT_REMOTE_URL)
 
 
-def _playwright_browsers_installed() -> bool:
-    patterns = (
-        "chromium-*/chrome-linux/chrome",
-        "chromium-*/chrome-win/chrome.exe",
-        "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-        "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
-    )
-    root = _playwright_browser_root()
-    if root is None or not root.exists():
-        return False
-    for pattern in patterns:
-        if any(root.glob(pattern)):
-            return True
-    return False
-
-
-def _playwright_chromium_paths() -> List[Path]:
-    patterns = (
-        "chromium-*/chrome-linux/chrome",
-        "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
-        "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-        "chromium-*/chrome-win/chrome.exe",
-    )
-    matches: List[Path] = []
-    root = _playwright_browser_root()
-    if root is None or not root.exists():
-        return matches
-    for pattern in patterns:
-        matches.extend(root.glob(pattern))
-    return matches
-
-
-def _playwright_browser_dir_snapshot(path: Optional[Path]) -> Tuple[bool, str]:
-    if path is None:
-        return False, "MISSING_ENV"
-    if not path.exists():
-        return False, "MISSING"
-    if not path.is_dir():
-        return False, "NOT_DIR"
-    entries = sorted(entry.name for entry in path.iterdir())
-    return True, ",".join(entries)
-
-
-def _log_playwright_browser_dir_listings(logger: logging.Logger) -> None:
-    root = _playwright_browser_root()
-    if root is None:
-        logger.warning("PLAYWRIGHT_BROWSERS_PATH not set at runtime")
-        return
-    exists, entries = _playwright_browser_dir_snapshot(root)
-    logger.info(
-        "PLAYWRIGHT_BROWSERS_DIR_LISTING path=%s exists=%s entries=%s",
-        root,
-        exists,
-        entries,
-    )
+async def _connect_remote_browser(p) -> Any:
+    if PLAYWRIGHT_REMOTE_MODE == "playwright":
+        return await p.chromium.connect(PLAYWRIGHT_REMOTE_URL)
+    return await p.chromium.connect_over_cdp(PLAYWRIGHT_REMOTE_URL)
 
 
 async def _check_playwright_runtime_async(
     logger: logging.Logger,
-    root: Path,
 ) -> None:
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await _connect_remote_browser(p)
             await browser.close()
         logger.info(
-            "PLAYWRIGHT_READY runtime chromium launch OK path=%s executable=%s",
-            root,
-            p.chromium.executable_path,
+            "PLAYWRIGHT_READY remote chromium connect OK mode=%s url=%s",
+            PLAYWRIGHT_REMOTE_MODE,
+            PLAYWRIGHT_REMOTE_URL,
         )
     except Exception as exc:
-        _, entries = _playwright_browser_dir_snapshot(root)
         logger.error(
-            "PLAYWRIGHT_BROWSER_ERROR expected_path=%s env_PLAYWRIGHT_BROWSERS_PATH=%s env_HEADLESS_FALLBACK=%s dir_listing=%s err=%s",
-            root,
-            os.getenv("PLAYWRIGHT_BROWSERS_PATH"),
+            "PLAYWRIGHT_BROWSER_ERROR remote connect failed mode=%s url=%s env_HEADLESS_FALLBACK=%s err=%s",
+            PLAYWRIGHT_REMOTE_MODE,
+            PLAYWRIGHT_REMOTE_URL,
             os.getenv("HEADLESS_FALLBACK"),
-            entries,
             exc,
         )
 
@@ -703,16 +647,16 @@ def _check_playwright_runtime(logger: logging.Logger) -> None:
     if _playwright_runtime_checked:
         return
     _playwright_runtime_checked = True
-    root = _playwright_browser_root()
-    if root is None:
-        logger.warning("PLAYWRIGHT_BROWSERS_PATH not set at runtime")
-        return
-    logger.info("PLAYWRIGHT_BROWSERS_PATH value=%s", root)
-    _log_playwright_browser_dir_listings(logger)
     if async_playwright is None:
         logger.warning(
-            "PLAYWRIGHT_MISSING playwright not installed (PLAYWRIGHT_BROWSERS_PATH=%s)",
-            root,
+            "PLAYWRIGHT_MISSING playwright not installed (PLAYWRIGHT_REMOTE_URL=%s)",
+            PLAYWRIGHT_REMOTE_URL,
+        )
+        return
+    if not _playwright_remote_configured():
+        logger.warning(
+            "PLAYWRIGHT_REMOTE_MISSING remote endpoint not configured (PLAYWRIGHT_REMOTE_URL=%s)",
+            PLAYWRIGHT_REMOTE_URL,
         )
         return
     try:
@@ -721,24 +665,10 @@ def _check_playwright_runtime(logger: logging.Logger) -> None:
         loop = None
 
     if loop and loop.is_running():
-        loop.create_task(_check_playwright_runtime_async(logger, root))
+        loop.create_task(_check_playwright_runtime_async(logger))
         return
 
-    asyncio.run(_check_playwright_runtime_async(logger, root))
-
-
-def _ensure_playwright_browsers(logger: Optional[logging.Logger] = None) -> bool:
-    sink = logger or LOG
-    if not HEADLESS_ENABLED or async_playwright is None:
-        return False
-    if _playwright_browsers_installed():
-        return True
-    root = _playwright_browser_root()
-    sink.warning(
-        "PLAYWRIGHT_BROWSER_MISSING no Chromium download found under %s – run `python -m playwright install --with-deps chromium`",
-        root,
-    )
-    return False
+    asyncio.run(_check_playwright_runtime_async(logger))
 
 
 def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
@@ -756,29 +686,20 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
         return
     if async_playwright is None:
         sink.warning(
-            "PLAYWRIGHT_MISSING playwright not installed – install with `python -m playwright install --with-deps chromium`"
+            "PLAYWRIGHT_MISSING playwright not installed – add Playwright to requirements"
         )
         return
-    if not _ensure_playwright_browsers(sink):
+    if not _playwright_remote_configured():
         sink.warning(
-            "PLAYWRIGHT_BROWSER_MISSING headless Chromium not found under %s",
-            _playwright_browser_root(),
+            "PLAYWRIGHT_REMOTE_MISSING set PLAYWRIGHT_REMOTE_URL to enable headless reviews"
         )
-        _log_playwright_browser_dir_listings(sink)
         return
-    chromium_paths = _playwright_chromium_paths()
-    chromium_hint = chromium_paths[0] if chromium_paths else ""
-    if chromium_hint:
-        sink.info(
-            "PLAYWRIGHT_READY headless reviews enabled (HEADLESS_FALLBACK=%s) chromium_path=%s",
-            HEADLESS_ENABLED,
-            chromium_hint,
-        )
-    else:
-        sink.info(
-            "PLAYWRIGHT_READY headless reviews enabled (HEADLESS_FALLBACK=%s)",
-            HEADLESS_ENABLED,
-        )
+    sink.info(
+        "PLAYWRIGHT_READY remote headless reviews enabled (HEADLESS_FALLBACK=%s) mode=%s url=%s",
+        HEADLESS_ENABLED,
+        PLAYWRIGHT_REMOTE_MODE,
+        PLAYWRIGHT_REMOTE_URL,
+    )
 
 # ───────────────────── regexes & misc helpers ─────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
@@ -4777,6 +4698,9 @@ async def _headless_fetch_async(
 ) -> Dict[str, Any]:
     if not HEADLESS_ENABLED or not async_playwright:
         return {}
+    if HEADLESS_REMOTE_ONLY and not _playwright_remote_configured():
+        LOG.warning("PLAYWRIGHT_REMOTE_MISSING headless disabled url=%s", url)
+        return {}
     target_url = _unwrap_jina_url(url)
     if is_blocked_url(target_url):
         LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", target_url)
@@ -4820,10 +4744,7 @@ async def _headless_fetch_async(
         page = None
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled"],
-                )
+                browser = await _connect_remote_browser(p)
                 accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
                 context = await browser.new_context(
                     user_agent=random.choice(_USER_AGENT_POOL),
@@ -4832,16 +4753,15 @@ async def _headless_fetch_async(
                         "Accept-Language": accept_language,
                         **_random_cookie_header(),
                     },
-                    proxy={"server": proxy_url} if proxy_url else None,
                 )
                 page = await context.new_page()
                 page.set_default_timeout(default_timeout)
                 page.set_default_navigation_timeout(default_timeout)
                 LOG.info(
-                    "PLAYWRIGHT_START url=%s reason=%s proxy=%s",
+                    "PLAYWRIGHT_START url=%s reason=%s remote=%s",
                     target_url,
                     reason or "fallback",
-                    bool(proxy_url),
+                    True,
                 )
                 for attempt in range(2):
                     try:
@@ -4905,9 +4825,9 @@ async def _headless_fetch_async(
                     len(content.encode("utf-8")),
                 )
                 LOG.debug(
-                    "Headless fetch ok for %s (proxy=%s)",
+                    "Headless fetch ok for %s (remote=%s)",
                     domain or _domain(target_url),
-                    bool(proxy_url),
+                    True,
                 )
                 return {
                     "html": content,
@@ -4949,9 +4869,9 @@ async def _headless_fetch_async(
 def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: str = "") -> Dict[str, Any]:
     if not HEADLESS_ENABLED or not async_playwright:
         return {}
-    log_headless_status()
-    if not _ensure_playwright_browsers():
+    if HEADLESS_REMOTE_ONLY and not _playwright_remote_configured():
         return {}
+    log_headless_status()
 
     loop = _ensure_headless_loop()
     coro = _headless_fetch_async(url, proxy_url=proxy_url, domain=domain, reason=reason)

@@ -1,36 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CANONICAL_PATH="/tmp/ms-playwright"
+printf 'PLAYWRIGHT_REMOTE_URL=%s\n' "${PLAYWRIGHT_REMOTE_URL:-}"
+printf 'PLAYWRIGHT_REMOTE_MODE=%s\n' "${PLAYWRIGHT_REMOTE_MODE:-cdp}"
 
-printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "${PLAYWRIGHT_BROWSERS_PATH:-}"
-printf 'HOME=%s\n' "${HOME:-}"
-
-candidate_dirs=("${CANONICAL_PATH}")
-if [[ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
-  candidate_dirs+=("${PLAYWRIGHT_BROWSERS_PATH}")
-fi
-
-for dir in "${candidate_dirs[@]}"; do
-  ls -la "${dir}" || true
-done
-
-PLAYWRIGHT_BROWSERS_PATH="${CANONICAL_PATH}" python -m playwright install --with-deps chromium
-
-if [[ ! -d "${CANONICAL_PATH}" ]]; then
-  echo "Expected Playwright browsers path missing at ${CANONICAL_PATH}" >&2
-  exit 1
-fi
-
-ls -la "${CANONICAL_PATH}"
-
-PLAYWRIGHT_BROWSERS_PATH="${CANONICAL_PATH}" python - <<'PY'
-from playwright.sync_api import sync_playwright
+if [[ -n "${PLAYWRIGHT_REMOTE_URL:-}" ]]; then
+  python - <<'PY'
 import os
+from playwright.sync_api import sync_playwright
 
-print("SMOKE_TEST_PLAYWRIGHT_BROWSERS_PATH", os.environ.get("PLAYWRIGHT_BROWSERS_PATH"))
+remote_url = os.environ.get("PLAYWRIGHT_REMOTE_URL", "")
+mode = os.environ.get("PLAYWRIGHT_REMOTE_MODE", "cdp").lower()
+
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    print("SMOKE_TEST_EXECUTABLE", p.chromium.executable_path)
+    if mode == "playwright":
+        browser = p.chromium.connect(remote_url)
+    else:
+        browser = p.chromium.connect_over_cdp(remote_url)
     browser.close()
+print("SMOKE_TEST_REMOTE_OK")
 PY
+else
+  echo "SMOKE_TEST_REMOTE_SKIPPED (PLAYWRIGHT_REMOTE_URL missing)"
+fi
