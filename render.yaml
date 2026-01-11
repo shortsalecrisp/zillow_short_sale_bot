@@ -4,8 +4,9 @@ services:
     env: python
     envVars:
       - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /opt/render/.cache/ms-playwright
+        value: /opt/render/project/src/.cache/ms-playwright
     buildCommand: |
+      export PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.cache/ms-playwright
       pip install -r requirements.txt
       python -m playwright install --with-deps chromium
-    startCommand: bash -c "python bot_min.py & uvicorn webhook_server:app --host 0.0.0.0 --port ${PORT:-10000}"
+    startCommand: bash -c "python bot_min.py & uvicorn webhook_server:app --host 0.0.0.0 --port 10000"
