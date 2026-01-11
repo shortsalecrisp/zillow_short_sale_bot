@@ -602,31 +602,19 @@ logging.basicConfig(
 )
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
+_playwright_runtime_checked = False
 
 
 def _log_blocked_url(url: str) -> None:
     LOG.info("URL_BLOCKED url=%s", url)
 
 
+def _playwright_browser_root() -> Path:
+    return Path(os.getenv("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/project/.cache/ms-playwright"))
+
+
 def _playwright_browser_roots() -> List[Path]:
-    roots: List[Path] = []
-    env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
-    if env_path:
-        roots.append(Path(env_path))
-    roots.extend(
-        [
-            Path.home() / ".cache" / "ms-playwright",
-            Path("/opt/render/.cache/ms-playwright"),
-        ]
-    )
-    seen: Set[Path] = set()
-    deduped: List[Path] = []
-    for root in roots:
-        if root in seen:
-            continue
-        seen.add(root)
-        deduped.append(root)
-    return deduped
+    return [_playwright_browser_root()]
 
 
 def _playwright_browsers_installed() -> bool:
@@ -661,48 +649,57 @@ def _playwright_chromium_paths() -> List[Path]:
     return matches
 
 
-def _log_playwright_browser_dir_listing(
-    path: Path,
-    *,
-    logger: logging.Logger,
-    label: str,
-) -> None:
+def _playwright_browser_dir_snapshot(path: Path) -> Tuple[bool, str]:
     if not path.exists():
-        logger.warning(
-            "PLAYWRIGHT_BROWSERS_DIR_MISSING label=%s path=%s",
-            label,
-            path,
-        )
-        return
+        return False, "MISSING"
     if not path.is_dir():
-        logger.warning(
-            "PLAYWRIGHT_BROWSERS_DIR_NOT_DIR label=%s path=%s",
-            label,
-            path,
-        )
-        return
+        return False, "NOT_DIR"
     entries = sorted(entry.name for entry in path.iterdir())
-    logger.warning(
-        "PLAYWRIGHT_BROWSERS_DIR_LISTING label=%s path=%s entries=%s",
-        label,
-        path,
+    return True, ",".join(entries)
+
+
+def _log_playwright_browser_dir_listings(logger: logging.Logger) -> None:
+    root = _playwright_browser_root()
+    exists, entries = _playwright_browser_dir_snapshot(root)
+    logger.info(
+        "PLAYWRIGHT_BROWSERS_DIR_LISTING path=%s exists=%s entries=%s",
+        root,
+        exists,
         entries,
     )
 
 
-def _log_playwright_browser_dir_listings(logger: logging.Logger) -> None:
-    env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
-    if env_path:
-        _log_playwright_browser_dir_listing(
-            Path(env_path),
-            logger=logger,
-            label="PLAYWRIGHT_BROWSERS_PATH",
+def _check_playwright_runtime(logger: logging.Logger) -> None:
+    global _playwright_runtime_checked
+    if _playwright_runtime_checked:
+        return
+    _playwright_runtime_checked = True
+    root = _playwright_browser_root()
+    logger.info("PLAYWRIGHT_BROWSERS_PATH value=%s", root)
+    _log_playwright_browser_dir_listings(logger)
+    if async_playwright is None:
+        logger.warning(
+            "PLAYWRIGHT_MISSING playwright not installed (PLAYWRIGHT_BROWSERS_PATH=%s)",
+            root,
         )
-    _log_playwright_browser_dir_listing(
-        Path("/opt/render/.cache/ms-playwright"),
-        logger=logger,
-        label="RENDER_FALLBACK_CACHE",
-    )
+        return
+    from playwright.sync_api import sync_playwright
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        logger.info("PLAYWRIGHT_READY runtime chromium launch OK path=%s", root)
+    except Exception as exc:
+        _, entries = _playwright_browser_dir_snapshot(root)
+        logger.error(
+            "PLAYWRIGHT_BROWSER_ERROR expected_path=%s env_PLAYWRIGHT_BROWSERS_PATH=%s env_HEADLESS_FALLBACK=%s dir_listing=%s err=%s",
+            root,
+            os.getenv("PLAYWRIGHT_BROWSERS_PATH"),
+            os.getenv("HEADLESS_FALLBACK"),
+            entries,
+            exc,
+        )
 
 
 def _ensure_playwright_browsers(logger: Optional[logging.Logger] = None) -> bool:
@@ -725,6 +722,7 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
         return
     _playwright_status_logged = True
     sink = logger or LOG
+    _check_playwright_runtime(sink)
     if not HEADLESS_ENABLED:
         sink.warning(
             "PLAYWRIGHT_DISABLED HEADLESS_FALLBACK=false – set HEADLESS_FALLBACK=true to enable headless reviews"
