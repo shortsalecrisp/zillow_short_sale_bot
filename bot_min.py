@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import threading
 import importlib.util
@@ -605,6 +606,7 @@ logging.basicConfig(
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
 _playwright_runtime_checked = False
+_playwright_install_checked = False
 
 
 def _log_blocked_url(url: str) -> None:
@@ -622,10 +624,35 @@ async def _connect_remote_browser(p) -> Any:
 async def _connect_playwright_browser(p) -> Tuple[Any, str]:
     if _playwright_remote_configured():
         return await _connect_remote_browser(p), "remote"
+    _ensure_playwright_chromium(LOG)
     executable_path = p.chromium.executable_path
     browser = await p.chromium.launch(headless=True)
     LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", executable_path)
     return browser, "local"
+
+
+def _ensure_playwright_chromium(logger: logging.Logger) -> None:
+    global _playwright_install_checked
+    if _playwright_install_checked or async_playwright is None:
+        return
+    _playwright_install_checked = True
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        executable_path = Path(p.chromium.executable_path)
+    if executable_path.exists():
+        return
+    logger.warning(
+        "PLAYWRIGHT_MISSING_EXECUTABLE path=%s; installing chromium",
+        executable_path,
+    )
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+        )
+    except Exception as exc:
+        logger.error("PLAYWRIGHT_INSTALL_FAILED err=%s", exc)
 
 
 async def _check_playwright_runtime_async(
