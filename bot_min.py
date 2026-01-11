@@ -612,12 +612,22 @@ def _log_blocked_url(url: str) -> None:
 def _playwright_browser_root() -> Path:
     default_path = "/opt/render/project/.cache/ms-playwright"
     legacy_path = "/opt/render/.cache/ms-playwright"
-    if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
-        if Path(default_path).exists():
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_path
-        else:
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = legacy_path
-    path = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
+    env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if not env_path:
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_path
+        env_path = default_path
+        LOG.warning(
+            "PLAYWRIGHT_BROWSERS_PATH not set; defaulting to %s (legacy=%s)",
+            default_path,
+            legacy_path,
+        )
+    path = env_path
+    if not Path(path).exists() and Path(legacy_path).exists():
+        LOG.warning(
+            "PLAYWRIGHT_BROWSERS_PATH missing at %s but legacy path exists at %s",
+            path,
+            legacy_path,
+        )
     return Path(path)
 
 
