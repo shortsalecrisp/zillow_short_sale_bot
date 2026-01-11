@@ -603,6 +603,7 @@ logging.basicConfig(
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
 _playwright_runtime_checked = False
+PLAYWRIGHT_BROWSER_ROOT = Path("/opt/render/project/.cache/ms-playwright")
 
 
 def _log_blocked_url(url: str) -> None:
@@ -610,40 +611,16 @@ def _log_blocked_url(url: str) -> None:
 
 
 def _playwright_browser_root() -> Path:
-    default_path = "/opt/render/project/.cache/ms-playwright"
-    legacy_path = "/opt/render/.cache/ms-playwright"
     env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if not env_path:
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_path
-        env_path = default_path
-        LOG.warning(
-            "PLAYWRIGHT_BROWSERS_PATH not set; defaulting to %s (legacy=%s)",
-            default_path,
-            legacy_path,
+    canonical_path = str(PLAYWRIGHT_BROWSER_ROOT)
+    if env_path != canonical_path:
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = canonical_path
+        LOG.info(
+            "PLAYWRIGHT_BROWSERS_PATH set to %s (was %s)",
+            canonical_path,
+            env_path,
         )
-    path = env_path
-    if not Path(path).exists() and Path(legacy_path).exists():
-        LOG.warning(
-            "PLAYWRIGHT_BROWSERS_PATH missing at %s but legacy path exists at %s",
-            path,
-            legacy_path,
-        )
-    return Path(path)
-
-
-def _playwright_browser_roots() -> List[Path]:
-    roots = [
-        _playwright_browser_root(),
-        Path("/opt/render/project/.cache/ms-playwright"),
-    ]
-    seen: set[Path] = set()
-    ordered: List[Path] = []
-    for root in roots:
-        if root in seen:
-            continue
-        seen.add(root)
-        ordered.append(root)
-    return ordered
+    return PLAYWRIGHT_BROWSER_ROOT
 
 
 def _playwright_browsers_installed() -> bool:
@@ -653,12 +630,12 @@ def _playwright_browsers_installed() -> bool:
         "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
         "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
     )
-    for root in _playwright_browser_roots():
-        if not root.exists():
-            continue
-        for pattern in patterns:
-            if any(root.glob(pattern)):
-                return True
+    root = _playwright_browser_root()
+    if not root.exists():
+        return False
+    for pattern in patterns:
+        if any(root.glob(pattern)):
+            return True
     return False
 
 
@@ -670,11 +647,11 @@ def _playwright_chromium_paths() -> List[Path]:
         "chromium-*/chrome-win/chrome.exe",
     )
     matches: List[Path] = []
-    for root in _playwright_browser_roots():
-        if not root.exists():
-            continue
-        for pattern in patterns:
-            matches.extend(root.glob(pattern))
+    root = _playwright_browser_root()
+    if not root.exists():
+        return matches
+    for pattern in patterns:
+        matches.extend(root.glob(pattern))
     return matches
 
 
@@ -706,7 +683,11 @@ async def _check_playwright_runtime_async(
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             await browser.close()
-        logger.info("PLAYWRIGHT_READY runtime chromium launch OK path=%s", root)
+        logger.info(
+            "PLAYWRIGHT_READY runtime chromium launch OK path=%s executable=%s",
+            root,
+            p.chromium.executable_path,
+        )
     except Exception as exc:
         _, entries = _playwright_browser_dir_snapshot(root)
         logger.error(
@@ -753,7 +734,7 @@ def _ensure_playwright_browsers(logger: Optional[logging.Logger] = None) -> bool
         return True
     sink.warning(
         "PLAYWRIGHT_BROWSER_MISSING no Chromium download found under %s – run `python -m playwright install --with-deps chromium`",
-        ", ".join(str(p) for p in _playwright_browser_roots()),
+        _playwright_browser_root(),
     )
     return False
 
@@ -779,7 +760,7 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
     if not _ensure_playwright_browsers(sink):
         sink.warning(
             "PLAYWRIGHT_BROWSER_MISSING headless Chromium not found under %s",
-            ", ".join(str(p) for p in _playwright_browser_roots()),
+            _playwright_browser_root(),
         )
         _log_playwright_browser_dir_listings(sink)
         return
