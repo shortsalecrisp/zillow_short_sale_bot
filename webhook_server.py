@@ -350,16 +350,22 @@ def _apify_run_source(run_id: Optional[str]) -> str:
 
 def _merge_rows_by_zpid(primary: List[Dict[str, Any]], secondary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
     for row in primary + secondary:
         if not isinstance(row, dict):
             merged.append(row)
             continue
         zpid = str(row.get("zpid", "")).strip()
         if zpid:
-            if zpid in seen:
+            existing_index = seen.get(zpid)
+            if existing_index is None:
+                seen[zpid] = len(merged)
+                merged.append(row)
                 continue
-            seen.add(zpid)
+            existing = merged[existing_index]
+            if not _row_has_detail_marker(existing) and _row_has_detail_marker(row):
+                merged[existing_index] = row
+            continue
         merged.append(row)
     return merged
 

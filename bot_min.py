@@ -953,7 +953,7 @@ def _open_seen_db() -> tuple[sqlite3.Connection, str]:
         preferred_parent.mkdir(parents=True, exist_ok=True)
         conn = _connect_seen_db(preferred_path)
         db_path = preferred_path
-    except sqlite3.Error as exc:
+    except (OSError, sqlite3.Error) as exc:
         LOG.warning(
             "SEEN_ZPID_DB_OPEN_FAILED path=%s err=%s; falling back to %s",
             preferred_path,
