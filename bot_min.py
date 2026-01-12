@@ -885,7 +885,7 @@ _seen_zpids_loaded_at = 0.0
 _seen_contacts_loaded_at = 0.0
 _seen_zpids_lock = threading.Lock()
 _seen_contacts_lock = threading.Lock()
-SEEN_DB_PATH = os.getenv("SEEN_DB_PATH", "/var/data/seen_zpids.sqlite")
+SEEN_DB_PATH = os.getenv("SEEN_DB_PATH") or os.getenv("SEEN_ZPID_DB_PATH") or "/var/data/seen_zpids.sqlite"
 SEEN_DB_FALLBACK_PATH = "./seen_zpids.sqlite"
 SEEN_RETENTION_DAYS = int(os.getenv("SEEN_RETENTION_DAYS", "30"))
 _seen_db_lock = threading.Lock()
@@ -949,6 +949,8 @@ def _initialize_seen_db(conn: sqlite3.Connection, db_path: str) -> None:
 def _open_seen_db() -> tuple[sqlite3.Connection, str]:
     preferred_path = SEEN_DB_PATH
     try:
+        preferred_parent = Path(preferred_path).expanduser().parent
+        preferred_parent.mkdir(parents=True, exist_ok=True)
         conn = _connect_seen_db(preferred_path)
         db_path = preferred_path
     except sqlite3.Error as exc:
@@ -958,6 +960,8 @@ def _open_seen_db() -> tuple[sqlite3.Connection, str]:
             exc,
             SEEN_DB_FALLBACK_PATH,
         )
+        fallback_parent = Path(SEEN_DB_FALLBACK_PATH).expanduser().parent
+        fallback_parent.mkdir(parents=True, exist_ok=True)
         conn = _connect_seen_db(SEEN_DB_FALLBACK_PATH)
         db_path = SEEN_DB_FALLBACK_PATH
     _initialize_seen_db(conn, db_path)
