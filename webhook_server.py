@@ -28,6 +28,7 @@ from bot_min import (
     append_seen_zpids,
     dedupe_rows_by_zpid,
     fetch_contact_page,
+    load_seen_zpids,
     log_headless_status,
     process_rows,
     run_hourly_scheduler,
@@ -368,10 +369,95 @@ def _merge_rows_by_zpid(primary: List[Dict[str, Any]], secondary: List[Dict[str,
     return merged
 
 
-def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _format_listing_address(row: Dict[str, Any]) -> str:
+    address = row.get("address") or row.get("street")
+    if isinstance(address, str):
+        return address.strip()
+    if isinstance(address, dict):
+        parts: List[str] = []
+        street = (
+            address.get("streetAddress")
+            or address.get("streetAddress1")
+            or address.get("street")
+            or address.get("addressLine1")
+        )
+        if isinstance(street, str) and street.strip():
+            parts.append(street.strip())
+        city = address.get("city")
+        state = address.get("state")
+        zipcode = address.get("zip") or address.get("zipcode")
+        locality = ", ".join(part.strip() for part in [city, state] if isinstance(part, str) and part.strip())
+        if locality:
+            parts.append(locality)
+        if isinstance(zipcode, str) and zipcode.strip():
+            parts.append(zipcode.strip())
+        return ", ".join(parts)
+    return ""
+
+
+def _extract_hard_skip_zpids(payload: Dict[str, Any]) -> set[str]:
+    candidates: List[Any] = []
+    for key in ("hard_skip", "hardSkip", "hard_skip_zpids", "hardSkipZpids"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+        elif isinstance(value, str):
+            candidates.append(value)
+    return {str(val).strip() for val in candidates if str(val).strip()}
+
+
+def _select_payload_listings(payload: Dict[str, Any]) -> Dict[str, Any]:
+    received_rows = payload.get("listings")
+    if not isinstance(received_rows, list):
+        return {"rows": [], "received": 0, "hard_skipped": 0, "already_seen": 0, "selected": 0}
+    seen_set = load_seen_zpids()
+    hard_skip = _extract_hard_skip_zpids(payload)
+    selected_rows: List[Dict[str, Any]] = []
+    selected_zpids: List[str] = []
+    selected_addresses: List[str] = []
+    hard_skipped = 0
+    already_seen = 0
+    for row in received_rows:
+        if not isinstance(row, dict):
+            continue
+        zpid = str(row.get("zpid", "")).strip()
+        if not zpid:
+            continue
+        if zpid in hard_skip:
+            hard_skipped += 1
+            continue
+        if zpid in seen_set:
+            already_seen += 1
+            continue
+        if len(selected_rows) < 5:
+            selected_rows.append(row)
+            selected_zpids.append(zpid)
+            selected_addresses.append(_format_listing_address(row))
+    if selected_zpids:
+        append_seen_zpids(selected_zpids)
+    return {
+        "rows": selected_rows,
+        "received": len(received_rows),
+        "hard_skipped": hard_skipped,
+        "already_seen": already_seen,
+        "selected": len(selected_rows),
+        "selected_zpids": selected_zpids,
+        "selected_addresses": [addr for addr in selected_addresses if addr],
+    }
+
+
+def _process_incoming_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    skip_seen_dedupe: bool = False,
+    skip_seen_append: bool = False,
+) -> Dict[str, Any]:
     normalized_rows = [_normalize_apify_row(row) if isinstance(row, dict) else row for row in rows]
     normalized_rows = _prefer_detail_rows(normalized_rows)
-    fresh_rows = dedupe_rows_by_zpid(normalized_rows, logger, append_seen=False)
+    if skip_seen_dedupe:
+        fresh_rows = normalized_rows
+    else:
+        fresh_rows = dedupe_rows_by_zpid(normalized_rows, logger, append_seen=False)
     if not fresh_rows:
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
         return {"status": "no new rows"}
@@ -414,13 +500,14 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             logger.info("apify-hook: no unseen rows to process after filter")
             return {"status": "no new rows"}
 
-    append_seen_zpids(
-        [
-            str(row.get("zpid")).strip()
-            for row in db_filtered
-            if str(row.get("zpid", "")).strip()
-        ]
-    )
+    if not skip_seen_append:
+        append_seen_zpids(
+            [
+                str(row.get("zpid")).strip()
+                for row in db_filtered
+                if str(row.get("zpid", "")).strip()
+            ]
+        )
 
     logger.debug("Sample fields on first fresh row: %s", list(db_filtered[0].keys())[:15])
 
@@ -723,10 +810,10 @@ async def apify_hook(request: Request):
             "apify-hook: empty payload but datasetId provided via query params: %s",
             dataset_qs,
         )
-    try:
-        logger.debug("Incoming webhook payload: %s", json.dumps(payload))
-    except TypeError:
-        logger.debug("Incoming webhook payload: %r", payload)
+    if isinstance(payload, dict):
+        logger.debug("Incoming webhook payload keys=%s", list(payload.keys()))
+    elif isinstance(payload, list):
+        logger.debug("Incoming webhook payload list length=%s", len(payload))
 
     dataset_id = None
     rows: Optional[List[Dict[str, Any]]] = None
@@ -734,6 +821,7 @@ async def apify_hook(request: Request):
     row_source = "none"
     query_params = request.query_params
 
+    payload_listings = None
     if isinstance(payload, list):
         rows = payload
         row_source = "payload_list"
@@ -753,6 +841,7 @@ async def apify_hook(request: Request):
         elif isinstance(payload.get("listings"), list):
             rows = payload.get("listings")
             row_source = "payload.listings"
+            payload_listings = rows
 
         run_id = payload.get("actorRunId") or payload.get("runId")
         resource = payload.get("resource")
@@ -806,6 +895,22 @@ async def apify_hook(request: Request):
             )
             return {"status": "ignored", "reason": "missing datasetId"}
 
+    if payload_listings is not None:
+        selection = _select_payload_listings(payload)
+        logger.info(
+            "apify-hook: selection received=%s hard_skipped=%s already_seen=%s selected=%s",
+            selection["received"],
+            selection["hard_skipped"],
+            selection["already_seen"],
+            selection["selected"],
+        )
+        if selection.get("selected_zpids"):
+            logger.info("apify-hook: selected zpids=%s", selection["selected_zpids"])
+        if selection.get("selected_addresses"):
+            logger.info("apify-hook: selected addresses=%s", selection["selected_addresses"])
+        rows = selection["rows"]
+        row_source = "payload.listings"
+
     if rows is not None:
         normalized_rows: List[Dict[str, Any]] = []
         for row in rows:
@@ -824,30 +929,31 @@ async def apify_hook(request: Request):
                 len(rows),
             )
 
-        zpid_only_count = sum(1 for row in rows if not _row_has_expected_fields(row))
-        if zpid_only_count == len(rows):
-            logger.warning(
-                "apify-hook: zpid-only payload received (rows=%d); %s",
-                len(rows),
-                "fetching dataset instead" if dataset_id else "rejecting payload",
-            )
-            if dataset_id:
-                rows = None
-                row_source = "none"
-            else:
-                return {"status": "rejected", "reason": "zpid-only payload"}
-        elif zpid_only_count:
-            logger.warning(
-                "apify-hook: dropping %d rows missing address/agent/description fields",
-                zpid_only_count,
-            )
-            rows = [row for row in rows if _row_has_expected_fields(row)]
-            if not rows and dataset_id:
-                rows = None
-                row_source = "none"
-            elif not rows:
-                return {"status": "rejected", "reason": "missing required fields"}
-    if dataset_id and rows is not None:
+        if payload_listings is None:
+            zpid_only_count = sum(1 for row in rows if not _row_has_expected_fields(row))
+            if zpid_only_count == len(rows):
+                logger.warning(
+                    "apify-hook: zpid-only payload received (rows=%d); %s",
+                    len(rows),
+                    "fetching dataset instead" if dataset_id else "rejecting payload",
+                )
+                if dataset_id:
+                    rows = None
+                    row_source = "none"
+                else:
+                    return {"status": "rejected", "reason": "zpid-only payload"}
+            elif zpid_only_count:
+                logger.warning(
+                    "apify-hook: dropping %d rows missing address/agent/description fields",
+                    zpid_only_count,
+                )
+                rows = [row for row in rows if _row_has_expected_fields(row)]
+                if not rows and dataset_id:
+                    rows = None
+                    row_source = "none"
+                elif not rows:
+                    return {"status": "rejected", "reason": "missing required fields"}
+    if dataset_id and rows is not None and payload_listings is None:
         try:
             fetched_rows = fetch_rows(dataset_id)
         except Exception:
@@ -912,7 +1018,11 @@ async def apify_hook(request: Request):
         logger.info("apify-hook: 0 listings received; no Apify retries scheduled")
         return {"status": "no rows"}
 
-    return _process_incoming_rows(rows)
+    return _process_incoming_rows(
+        rows,
+        skip_seen_dedupe=payload_listings is not None,
+        skip_seen_append=payload_listings is not None,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

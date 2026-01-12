@@ -349,6 +349,7 @@ _CSE_CRED_POOL: List[Tuple[str, str]] = list(zip(_CSE_KEY_POOL, _CSE_CX_POOL))
 _CSE_CRED_INDEX = 0
 GSHEET_ID      = os.environ["GSHEET_ID"]
 GSHEET_TAB     = os.getenv("GSHEET_TAB", "Sheet1")
+SEEN_ZPID_TAB  = "Seen Zpids"
 GSHEET_RANGE   = os.getenv("GSHEET_RANGE", f"{GSHEET_TAB}!A1")
 GSHEET_NEXT_ROW_HINT = int(os.getenv("GSHEET_NEXT_ROW_HINT", "2566"))
 GSHEET_ROW_SCAN_WINDOW = int(os.getenv("GSHEET_ROW_SCAN_WINDOW", "200"))
@@ -821,6 +822,28 @@ creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 sheets_service  = gapi_build("sheets", "v4", credentials=creds, cache_discovery=False)
 gc              = gspread.authorize(creds)
 ws              = gc.open_by_key(GSHEET_ID).worksheet(GSHEET_TAB)
+_seen_zpid_ws: Optional[gspread.Worksheet] = None
+_seen_zpid_ws_lock = threading.Lock()
+
+
+def _get_seen_zpid_worksheet() -> gspread.Worksheet:
+    global _seen_zpid_ws
+    with _seen_zpid_ws_lock:
+        if _seen_zpid_ws:
+            return _seen_zpid_ws
+        workbook = gc.open_by_key(GSHEET_ID)
+        try:
+            seen_ws = workbook.worksheet(SEEN_ZPID_TAB)
+        except gspread.exceptions.WorksheetNotFound:
+            seen_ws = workbook.add_worksheet(title=SEEN_ZPID_TAB, rows=1000, cols=1)
+        try:
+            header = seen_ws.acell("A1").value
+            if not header or header.strip().lower() != "zpid":
+                seen_ws.update("A1", "zpid")
+        except Exception as exc:
+            LOG.warning("Unable to verify Seen Zpids header: %s", exc)
+        _seen_zpid_ws = seen_ws
+        return _seen_zpid_ws
 
 def _normalize_phone_for_dedupe(phone: str) -> str:
     digits = re.sub(r"\D", "", phone or "")
@@ -894,37 +917,29 @@ def load_seen_zpids(force: bool = False) -> Set[str]:
         now = time.time()
         if seen_zpids and not force and (now - _seen_zpids_loaded_at) < SEEN_ZPID_CACHE_SECONDS:
             return set(seen_zpids)
-        col_idx = COL_ZPID + 1
         try:
-            col_vals = ws.col_values(col_idx)
+            _get_seen_zpid_worksheet()
+            resp = sheets_service.spreadsheets().values().get(
+                spreadsheetId=GSHEET_ID,
+                range=f"'{SEEN_ZPID_TAB}'!A:A",
+                majorDimension="COLUMNS",
+                valueRenderOption="FORMATTED_VALUE",
+            ).execute()
         except Exception as exc:
             LOG.warning("Unable to refresh seen ZPIDs from sheet: %s", exc)
             return set(seen_zpids)
-        loaded_from = col_idx
-        if not any(str(val).strip() for val in col_vals):
-            alt_idx = max(1, COL_ZPID)
-            if alt_idx != col_idx:
-                try:
-                    alt_vals = ws.col_values(alt_idx)
-                    if any(str(val).strip() for val in alt_vals):
-                        col_vals = alt_vals
-                        loaded_from = alt_idx
-                        LOG.warning(
-                            "Primary ZPID column %s empty; using fallback column %s", col_idx, loaded_from
-                        )
-                except Exception as exc:
-                    LOG.warning("Unable to refresh fallback ZPID column %s: %s", alt_idx, exc)
+        col_vals = (resp.get("values") or [[]])[0]
         refreshed = {
             str(val).strip()
-            for val in col_vals
+            for val in col_vals[1:]
             if str(val).strip()
         }
         refreshed = {z for z in refreshed if re.fullmatch(r"\d+", z)}
         seen_zpids = refreshed
         _seen_zpids_loaded_at = now
-        LOG.info("seen_zpids_loaded=%s column=%s", len(refreshed), loaded_from)
+        LOG.info("seen_zpids_loaded=%s tab=%s", len(refreshed), SEEN_ZPID_TAB)
         if not refreshed:
-            LOG.warning("seen_zpids_loaded=0 from column=%s; dedupe may be ineffective", loaded_from)
+            LOG.warning("seen_zpids_loaded=0 from tab=%s; dedupe may be ineffective", SEEN_ZPID_TAB)
         return set(seen_zpids)
 
 
@@ -943,10 +958,11 @@ def append_seen_zpids(zpids: Iterable[str]) -> None:
             return
         seen_zpids.update(new_vals)
     try:
+        _get_seen_zpid_worksheet()
         data = [[val] for val in new_vals]
         sheets_service.spreadsheets().values().append(
             spreadsheetId=GSHEET_ID,
-            range=f"{GSHEET_TAB}!AB:AB",
+            range=f"'{SEEN_ZPID_TAB}'!A:A",
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
             body={"values": data},
