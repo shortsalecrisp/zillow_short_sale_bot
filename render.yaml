@@ -181,6 +181,8 @@ services:
         value: "0.4"
       - key: SEARCH_TIMEOUT_TRIP
         value: "2"
+      - key: SEEN_DB_PATH
+        value: /var/data/seen/seen_zpids.sqlite
       - key: SEEN_ZPID_CACHE_SECONDS
         value: "300"
       - key: SEND_SMS
