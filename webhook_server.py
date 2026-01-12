@@ -25,6 +25,7 @@ from bot_min import (
     WORK_END,
     WORK_START,
     SCHEDULER_TZ,
+    append_seen_zpids,
     dedupe_rows_by_zpid,
     fetch_contact_page,
     log_headless_status,
@@ -370,7 +371,7 @@ def _merge_rows_by_zpid(primary: List[Dict[str, Any]], secondary: List[Dict[str,
 def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     normalized_rows = [_normalize_apify_row(row) if isinstance(row, dict) else row for row in rows]
     normalized_rows = _prefer_detail_rows(normalized_rows)
-    fresh_rows = dedupe_rows_by_zpid(normalized_rows, logger)
+    fresh_rows = dedupe_rows_by_zpid(normalized_rows, logger, append_seen=False)
     if not fresh_rows:
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
         return {"status": "no new rows"}
@@ -412,6 +413,14 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not db_filtered:
             logger.info("apify-hook: no unseen rows to process after filter")
             return {"status": "no new rows"}
+
+    append_seen_zpids(
+        [
+            str(row.get("zpid")).strip()
+            for row in db_filtered
+            if str(row.get("zpid", "")).strip()
+        ]
+    )
 
     logger.debug("Sample fields on first fresh row: %s", list(db_filtered[0].keys())[:15])
 

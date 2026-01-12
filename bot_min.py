@@ -966,7 +966,12 @@ def record_seen_zpid(zpid: str) -> None:
         seen_zpids.add(cleaned)
 
 
-def dedupe_rows_by_zpid(rows: List[Dict[str, Any]], logger_obj: Optional[logging.Logger] = None) -> List[Dict[str, Any]]:
+def dedupe_rows_by_zpid(
+    rows: List[Dict[str, Any]],
+    logger_obj: Optional[logging.Logger] = None,
+    *,
+    append_seen: bool = True,
+) -> List[Dict[str, Any]]:
     """Filter *rows* against ZPIDs already present in the sheet cache."""
 
     cached = load_seen_zpids()
@@ -982,7 +987,7 @@ def dedupe_rows_by_zpid(rows: List[Dict[str, Any]], logger_obj: Optional[logging
             cached.add(zpid)
             fresh_zpids.append(zpid)
         fresh_rows.append(row)
-    if fresh_zpids:
+    if append_seen and fresh_zpids:
         append_seen_zpids(fresh_zpids)
     if logger_obj:
         logger_obj.info(
