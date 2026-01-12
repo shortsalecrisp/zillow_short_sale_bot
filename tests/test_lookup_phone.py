@@ -173,7 +173,7 @@ def test_rapid_likely_mobile_kept(monkeypatch):
     snapshot = bot_min._rapid_contact_snapshot("Jane Agent", {"zpid": "abc"})
 
     assert snapshot["selected_phone"] == rapid_number
-    assert snapshot["phone_reason"] == "rapid_cloudmersive_likely_mobile"
+    assert snapshot["phone_reason"] == "rapid_score_70_valid_non_mobile"
 
 
 def test_rapid_candidate_not_dropped_on_invalid(monkeypatch):
@@ -208,7 +208,153 @@ def test_rapid_candidate_not_dropped_on_invalid(monkeypatch):
     )
 
     assert phone == valid_number
-    assert reason.startswith("rapid_cloudmersive_candidate_mobile")
+    assert reason == "rapid_score_70_valid_non_mobile"
+
+
+def test_rapid_fallback_used_when_search_empty(monkeypatch):
+    rapid_numbers = ["555-111-2222", "555-333-4444"]
+    called = {"search": False}
+
+    def fake_rapid_property(zpid):
+        return {
+            "contact_recipients": [
+                {
+                    "phones": [
+                        {"number": rapid_numbers[0]},
+                        {"number": rapid_numbers[1]},
+                    ]
+                }
+            ]
+        }
+
+    def fake_build_q_phone(*args, **kwargs):
+        called["search"] = True
+        return []
+
+    def fake_line_info(phone):
+        return {
+            "valid": True,
+            "mobile": False,
+            "mobile_verified": False,
+            "type": "Unknown",
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_phone", fake_build_q_phone)
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", "", ""))
+    monkeypatch.setattr(bot_min, "_contact_enrichment", lambda *args, **kwargs: {})
+    monkeypatch.setattr(bot_min, "get_line_info", fake_line_info)
+
+    bot_min.cache_p.clear()
+    bot_min._rapid_contact_cache.clear()
+    bot_min._rapid_logged.clear()
+
+    result = bot_min.lookup_phone(
+        "Alex Agent",
+        "CA",
+        {"zpid": "111", "contact_recipients": []},
+    )
+
+    assert called["search"] is True
+    assert result["number"] == rapid_numbers[0]
+    assert result["source"] == "rapid_fallback"
+
+
+def test_rapid_verified_mobile_short_circuits_search(monkeypatch):
+    rapid_number = "555-222-9999"
+    called = {"search": False}
+
+    def fake_rapid_property(zpid):
+        return {
+            "contact_recipients": [
+                {"phones": [{"number": rapid_number}]},
+            ]
+        }
+
+    def fake_build_q_phone(*args, **kwargs):
+        called["search"] = True
+        return []
+
+    def fake_line_info(phone):
+        return {
+            "valid": True,
+            "mobile": True,
+            "mobile_verified": True,
+            "type": "Mobile",
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "build_q_phone", fake_build_q_phone)
+    monkeypatch.setattr(bot_min, "_contact_enrichment", lambda *args, **kwargs: {})
+    monkeypatch.setattr(bot_min, "get_line_info", fake_line_info)
+
+    bot_min.cache_p.clear()
+    bot_min._rapid_contact_cache.clear()
+    bot_min._rapid_logged.clear()
+
+    result = bot_min.lookup_phone(
+        "Jamie Agent",
+        "NV",
+        {"zpid": "222", "contact_recipients": []},
+    )
+
+    assert called["search"] is False
+    assert result["number"] == rapid_number
+    assert result["source"].startswith("rapid")
+
+
+def test_search_verified_mobile_beats_rapid_fallback(monkeypatch):
+    rapid_number = "555-111-0000"
+    search_number = "555-444-6666"
+
+    def fake_rapid_property(zpid):
+        return {
+            "contact_recipients": [
+                {"phones": [{"number": rapid_number}]},
+            ]
+        }
+
+    def fake_line_info(phone):
+        if phone == search_number:
+            return {
+                "valid": True,
+                "mobile": True,
+                "mobile_verified": True,
+                "type": "Mobile",
+            }
+        return {
+            "valid": True,
+            "mobile": False,
+            "mobile_verified": False,
+            "type": "Unknown",
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(
+        bot_min,
+        "_contact_enrichment",
+        lambda *args, **kwargs: {
+            "best_phone": search_number,
+            "best_phone_confidence": 90,
+            "best_phone_source_url": "two_stage_cse",
+        },
+    )
+    monkeypatch.setattr(bot_min, "get_line_info", fake_line_info)
+
+    bot_min.cache_p.clear()
+    bot_min._rapid_contact_cache.clear()
+    bot_min._rapid_logged.clear()
+
+    result = bot_min.lookup_phone(
+        "Morgan Agent",
+        "WA",
+        {"zpid": "333", "contact_recipients": []},
+    )
+
+    assert result["number"] == search_number
+    assert result["source"] == "two_stage_cse"
 
 
 def test_lookup_phone_prefers_non_office_mobile(monkeypatch):

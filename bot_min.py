@@ -1236,6 +1236,17 @@ def fmt_phone(r: str) -> str:
         return f"{d[:3]}-{d[3:6]}-{d[6:]}"
     return ""
 
+def _phone_to_e164(phone: str) -> str:
+    if not phone or not phonenumbers:
+        return ""
+    try:
+        parsed = phonenumbers.parse(phone, "US")
+        if not phonenumbers.is_possible_number(parsed):
+            return ""
+        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except Exception:
+        return ""
+
 def valid_phone(p: str) -> bool:
     if not p:
         return False
@@ -1751,10 +1762,16 @@ def _rapid_collect_contacts(payload: Any) -> Tuple[List[Dict[str, str]], List[Di
     def _add_phone_entry(number: Any, context: str, text: str, rank: int) -> None:
         nonlocal phone_counter
         formatted = fmt_phone(str(number))
-        if not formatted or formatted in seen_phone:
+        if not formatted:
             return
-        seen_phone.add(formatted)
-        phone_entries.append((rank, phone_counter, {"value": formatted, "context": context, "text": text}))
+        e164 = _phone_to_e164(formatted)
+        dedupe_key = e164 or formatted
+        if dedupe_key in seen_phone:
+            return
+        seen_phone.add(dedupe_key)
+        phone_entries.append(
+            (rank, phone_counter, {"value": formatted, "context": context, "text": text, "e164": e164})
+        )
         phone_counter += 1
 
     def _iter_contact_blocks() -> Iterable[Dict[str, Any]]:
@@ -1840,54 +1857,80 @@ def _rapid_select_email(agent: str, emails: List[Dict[str, str]], payload_text: 
     return "", ""
 
 
-def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, str]:
-    fallback: Tuple[str, str] = ("", "")
-    candidate_mobile: Tuple[str, str] = ("", "")
-    invalid_seen = 0
-    for entry in phones:
+def _rapid_plausible_phone(phone: str) -> bool:
+    digits = _digits_only(phone)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        return False
+    if digits == "5555555555":
+        return False
+    if len(set(digits)) == 1:
+        return False
+    if _is_bad_area(digits[:3]):
+        return False
+    return True
+
+
+def _rapid_rank_phones(agent: str, phones: List[Dict[str, str]]) -> Dict[str, Any]:
+    ranked: List[Dict[str, Any]] = []
+    for idx, entry in enumerate(phones):
         phone = entry.get("value", "")
         if not phone:
             continue
         info = get_line_info(phone)
-        if not info.get("valid"):
-            invalid_seen += 1
-            continue
-        ctx = " ".join([entry.get("context", ""), entry.get("text", "")]).lower()
-        office_hint = any(term in ctx for term in ("office", "main", "brokerage", "company", "fax", "switchboard"))
-        toll_free_hint = "toll free" in ctx
-        phone_type = info.get("type") or "unknown"
-        type_norm = str(phone_type).lower()
-        explicit_mobile = bool(info.get("mobile_verified") and _is_explicit_mobile(phone_type))
-        if explicit_mobile:
-            reason = "rapid_cloudmersive_mobile"
-            return phone, reason
-        ambiguous_type = info.get("ambiguous_mobile") or type_norm in {"fixedlineormobile", "fixed line or mobile"}
-        if info.get("mobile") and not (office_hint or toll_free_hint):
-            reason = "rapid_cloudmersive_mobile" if explicit_mobile else "rapid_cloudmersive_likely_mobile"
-            return phone, reason
-        if ambiguous_type:
-            reason = "rapid_cloudmersive_candidate_mobile"
-            if not candidate_mobile[0]:
-                candidate_mobile = (phone, reason)
-            continue
-        if info.get("mobile") and not candidate_mobile[0]:
-            candidate_mobile = (phone, "rapid_cloudmersive_candidate_mobile")
-            continue
-        if not fallback[0]:
-            if type_norm in {"landline", "fixedline", "fixed line"}:
-                reason = "rapid_cloudmersive_landline"
-            elif not info.get("valid"):
-                reason = "rapid_cloudmersive_invalid"
+        phone_type = str(info.get("type") or "unknown").strip()
+        type_norm = phone_type.lower()
+        valid = bool(info.get("valid"))
+        verified_mobile = bool(valid and info.get("mobile_verified"))
+        if verified_mobile:
+            score = 100
+            reason = "rapid_score_100_verified_mobile"
+        elif valid:
+            if type_norm in {"unknown", ""}:
+                reason = "rapid_score_70_valid_unknown"
             else:
-                reason = "rapid_cloudmersive_landline" if office_hint else "rapid_cloudmersive_unknown"
-            fallback = (phone, reason)
-    if candidate_mobile[0]:
-        return candidate_mobile
-    if fallback[0]:
-        return fallback
-    if invalid_seen:
-        return "", "rapid_invalid"
-    return fallback
+                reason = "rapid_score_70_valid_non_mobile"
+            score = 70
+        elif _rapid_plausible_phone(phone):
+            score = 40
+            reason = "rapid_score_40_plausible_invalid"
+        else:
+            score = 0
+            reason = "rapid_score_0_invalid"
+        ranked.append(
+            {
+                "idx": idx,
+                "phone": phone,
+                "e164": entry.get("e164", ""),
+                "score": score,
+                "score_reason": reason,
+                "verified_mobile": verified_mobile,
+                "valid": valid,
+                "type": phone_type or "unknown",
+            }
+        )
+    if not ranked:
+        return {
+            "selected_phone": "",
+            "selected_reason": "",
+            "selected_score": 0,
+            "selected_verified_mobile": False,
+            "candidates": [],
+        }
+    best = max(ranked, key=lambda item: (item["score"], -item["idx"]))
+    return {
+        "selected_phone": best["phone"],
+        "selected_reason": best["score_reason"],
+        "selected_score": best["score"],
+        "selected_verified_mobile": best["verified_mobile"],
+        "candidates": ranked,
+    }
+
+
+def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, str]:
+    ranked = _rapid_rank_phones(agent, phones)
+    return ranked.get("selected_phone", ""), ranked.get("selected_reason", "")
 
 
 def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1913,24 +1956,16 @@ def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str
     data = rapid_property(zpid)
     status = _rapid_status(zpid)
     phones, emails, joined_text = _rapid_collect_contacts(data)
-    selected_phone, phone_reason = _rapid_select_phone(agent, phones)
+    ranked = _rapid_rank_phones(agent, phones)
+    selected_phone = ranked.get("selected_phone", "")
+    phone_reason = ranked.get("selected_reason", "")
+    phone_score = ranked.get("selected_score", 0)
+    phone_verified_mobile = bool(ranked.get("selected_verified_mobile"))
     selected_email, email_reason = _rapid_select_email(agent, emails, joined_text)
     cm_info = get_line_info(selected_phone) if selected_phone else {}
     phone_type = cm_info.get("type") or "unknown"
-    phone_ambiguous = bool(cm_info.get("ambiguous_mobile"))
-    digits_only = _digits_only(selected_phone) if selected_phone else ""
-    area_code = digits_only[-10:-7] if len(digits_only) >= 10 else ""
-    toll_free = area_code in BAD_AREA or ("toll" in str(phone_type).lower())
-    if selected_phone and phone_reason in {"rapid_cloudmersive_mobile", "rapid_cloudmersive_likely_mobile"}:
-        explicit_landline = str(phone_type).lower() in {"landline", "fixedline", "fixed line"}
-        if explicit_landline or toll_free or (phone_ambiguous and phone_reason == "rapid_cloudmersive_mobile"):
-            phone_reason = "rapid_cloudmersive_ambiguous"
-    phone_verified_mobile = bool(
-        selected_phone
-        and phone_reason == "rapid_cloudmersive_mobile"
-        and cm_info.get("mobile_verified")
-        and not phone_ambiguous
-    )
+    rapid_fallback_phone = selected_phone if phones else ""
+    rapid_primary_phone = selected_phone if phone_verified_mobile else ""
 
     snapshot = {
         "status": status,
@@ -1939,6 +1974,10 @@ def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str
         "emails": emails,
         "selected_phone": selected_phone,
         "phone_reason": phone_reason,
+        "phone_score": phone_score,
+        "rapid_fallback_phone": rapid_fallback_phone,
+        "rapid_primary_phone": rapid_primary_phone,
+        "rapid_candidates": ranked.get("candidates", []),
         "selected_email": selected_email,
         "email_reason": email_reason,
         "cloudmersive_type": phone_type,
@@ -1980,6 +2019,10 @@ def _rapid_contact_normalized(agent: str, row_payload: Dict[str, Any]) -> Dict[s
         "emails": [],
         "selected_phone": "",
         "phone_reason": "",
+        "phone_score": 0,
+        "rapid_fallback_phone": "",
+        "rapid_primary_phone": "",
+        "rapid_candidates": [],
         "selected_email": "",
         "email_reason": "",
         "cloudmersive_type": "",
@@ -7048,6 +7091,12 @@ def _build_trusted_domains(agent: str, urls: Iterable[str]) -> Set[str]:
 def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     cache_key = _contact_cache_key(agent, state, row_payload)
 
+    def _redact_phone_value(phone: str) -> str:
+        digits = _digits_only(phone)
+        if not digits:
+            return "<blank>"
+        return f"...{digits[-4:]}"
+
     def _log_final_phone(res: Dict[str, Any]) -> None:
         label = "web_unverified"
         if res.get("source", "") == "rapid_fallback" or (
@@ -7060,6 +7109,23 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "FINAL_PHONE source=%s phone=%s",
             label,
             res.get("number", "") or "<blank>",
+        )
+
+    def _log_final_decision(phone: str, source: str, reason: str) -> None:
+        LOG.info(
+            "FINAL_PHONE_DECISION final_phone=%s source=%s reason=%s",
+            phone or "<blank>",
+            source or "none",
+            reason or "<none>",
+        )
+
+    def _log_search_phone(res: Dict[str, Any]) -> None:
+        LOG.info(
+            "SEARCH_PHONE_RESULT chosen=%s confidence=%s verified_mobile=%s source=%s",
+            res.get("number", "") or "<blank>",
+            res.get("confidence", "") or "<blank>",
+            res.get("verified_mobile", False),
+            res.get("source", "") or "<blank>",
         )
 
     def _finalize(res: Dict[str, Any]) -> Dict[str, Any]:
@@ -7093,6 +7159,93 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         return cached
 
     zpid = str(row_payload.get("zpid", ""))
+    rapid_snapshot = _rapid_contact_normalized(agent, row_payload)
+    rapid_candidates = rapid_snapshot.get("rapid_candidates", []) if rapid_snapshot else []
+    rapid_fallback_phone = rapid_snapshot.get("rapid_fallback_phone", "") if rapid_snapshot else ""
+    rapid_primary_phone = rapid_snapshot.get("rapid_primary_phone", "") if rapid_snapshot else ""
+    rapid_phone_reason = rapid_snapshot.get("phone_reason", "") if rapid_snapshot else ""
+    rapid_phone_score = rapid_snapshot.get("phone_score", 0) if rapid_snapshot else 0
+    redacted_rapid = [_redact_phone_value(item.get("phone", "")) for item in rapid_candidates]
+    LOG.info(
+        "RAPID_PHONE_CANDIDATES count=%s phones=%s selected=%s score_reason=%s score=%s",
+        len(rapid_candidates),
+        redacted_rapid,
+        rapid_fallback_phone or "<blank>",
+        rapid_phone_reason or "<none>",
+        rapid_phone_score,
+    )
+
+    if rapid_primary_phone:
+        rapid_result = {
+            "number": rapid_primary_phone,
+            "confidence": "high",
+            "score": max(CONTACT_PHONE_MIN_SCORE, CONTACT_PHONE_LOW_CONF + 0.5),
+            "source": "rapid_contact_cloudmersive_mobile",
+            "reason": rapid_phone_reason or "rapid_verified_mobile",
+            "verified_mobile": True,
+        }
+        _log_final_decision(rapid_primary_phone, "rapid_verified_mobile", rapid_phone_reason)
+        return _finalize(rapid_result)
+
+    def _apply_final_decision(search_res: Dict[str, Any]) -> Dict[str, Any]:
+        _log_search_phone(search_res)
+
+        def _search_is_profile_source(source: str) -> bool:
+            return source in {
+                "cse_contact",
+                "agent_card_dom",
+                "portal_struct",
+                "jsonld_person",
+                "jsonld_other",
+                "dom",
+                "crawler_unverified",
+                "payload_contact",
+                "portal_struct",
+            }
+
+        def _search_beats_rapid(res: Dict[str, Any]) -> bool:
+            if not res or not res.get("number"):
+                return False
+            if res.get("verified_mobile"):
+                return True
+            if not _rapid_plausible_phone(res.get("number", "")):
+                return False
+            source = res.get("source", "")
+            if source.startswith("rapid"):
+                return False
+            return _search_is_profile_source(source)
+
+        final_result = search_res
+        decision_source = "none"
+        decision_reason = ""
+        if search_res.get("number") and search_res.get("verified_mobile"):
+            decision_source = "search_verified_mobile"
+            decision_reason = "search_verified_mobile"
+        elif rapid_fallback_phone:
+            if _search_beats_rapid(search_res):
+                decision_source = "search_unverified"
+                decision_reason = "search_profile_unverified"
+            else:
+                final_result = {
+                    "number": rapid_fallback_phone,
+                    "confidence": "low",
+                    "score": max(search_res.get("score", 0.0), CONTACT_PHONE_OVERRIDE_MIN),
+                    "source": "rapid_fallback",
+                    "reason": rapid_phone_reason or "rapid_fallback",
+                    "verified_mobile": False,
+                }
+                decision_source = "rapid_fallback"
+                decision_reason = rapid_phone_reason or "rapid_fallback"
+        else:
+            if search_res.get("number"):
+                decision_source = "search_unverified"
+                decision_reason = "search_unverified"
+            else:
+                decision_source = "none"
+                decision_reason = "no_phone_candidates"
+
+        _log_final_decision(final_result.get("number", ""), decision_source, decision_reason)
+        return _finalize(final_result)
 
     candidates: Dict[str, Dict[str, Any]] = {}
     had_candidates = False
@@ -7221,15 +7374,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         for p in _phones_from_block(blk):
             _register(p, "payload_contact", context=ctx, meta_name=meta_name, name_match=match)
 
-    def _rapid_fallback_allowed(num: str) -> bool:
-        if not num:
-            return False
-        info = get_line_info(num)
-        if not info.get("valid") or (info.get("country") and info.get("country") != "US"):
-            return False
-        direct_flag = _looks_direct(num, agent, state)
-        return direct_flag is not False
-
+    search_result: Optional[Dict[str, Any]] = None
     enrichment = _contact_enrichment(agent, state, row_payload)
     enrichment_done = bool(enrichment.get("_two_stage_done") and enrichment.get("_two_stage_candidates", 0) > 0)
     enriched_phone = enrichment.get("best_phone", "")
@@ -7239,7 +7384,7 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         verified_mobile = bool(line_info.get("mobile_verified"))
         if enriched_conf >= CONTACT_PHONE_LOW_CONF or verified_mobile:
             confidence = "high" if enriched_conf >= 80 or verified_mobile else "low"
-            result = {
+            search_result = {
                 "number": enriched_phone,
                 "confidence": confidence,
                 "score": max(CONTACT_PHONE_LOW_CONF, enriched_conf / 25),
@@ -7248,19 +7393,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "evidence": enrichment.get("best_phone_evidence", ""),
                 "verified_mobile": verified_mobile,
             }
-            return _finalize(result)
-        if enrichment_done:
-            return _finalize(
-                {
-                    "number": "",
-                    "confidence": "",
-                    "score": 0.0,
-                    "source": "two_stage_cse",
-                    "reason": "two_stage_low_confidence_phone",
-                    "verified_mobile": False,
-                }
-            )
     # If two-stage search produced no phone, continue to other sources (including RapidAPI).
+    if search_result is not None:
+        return _apply_final_decision(search_result)
 
     location_tokens, location_digits = _collect_location_hints(
         row_payload,
@@ -7710,59 +7845,15 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if confidence:
             best_score = adjusted_score
             verified_mobile = bool(get_line_info(best_number).get("mobile_verified"))
-            result.update({
+            search_result = {
                 "number": best_number,
                 "confidence": confidence,
                 "score": adjusted_score,
                 "source": best_source,
                 "verified_mobile": verified_mobile,
-            })
-            return _finalize(result)
+            }
 
-    rapid_snapshot = {}
-    rapid_selected_phone = ""
-    rapid_phone_reason = ""
-    rapid_verified_mobile = False
-    rapid_invalid_reason = ""
-    if not best_number and (not candidates or not _has_viable_phone_candidate()):
-        rapid_snapshot = _rapid_contact_normalized(agent, row_payload)
-        rapid_selected_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
-        rapid_phone_reason = rapid_snapshot.get("phone_reason", "") if rapid_snapshot else ""
-        if rapid_selected_phone:
-            if _rapid_fallback_allowed(rapid_selected_phone):
-                info = get_line_info(rapid_selected_phone)
-                rapid_verified_mobile = bool(info.get("mobile_verified"))
-                reason = rapid_phone_reason or (
-                    "rapid_cloudmersive_mobile" if rapid_verified_mobile else "rapid_fallback_landline"
-                )
-                source = "rapid_contact_cloudmersive_mobile" if rapid_verified_mobile else "rapid_fallback"
-                LOG.info(
-                    "RAPID_FALLBACK_PHONE=%s verified_mobile=%s reason=%s",
-                    rapid_selected_phone,
-                    rapid_verified_mobile,
-                    reason or "<none>",
-                )
-                result.update(
-                    {
-                        "number": rapid_selected_phone,
-                        "confidence": "high" if rapid_verified_mobile else "low",
-                        "score": max(result.get("score", 0.0), CONTACT_PHONE_OVERRIDE_MIN),
-                        "source": source,
-                        "reason": reason,
-                        "verified_mobile": rapid_verified_mobile,
-                    }
-                )
-                return _finalize(result)
-            rapid_invalid_reason = "rapid_invalid"
-        if rapid_snapshot.get("status") is not None:
-            LOG.info(
-                "RAPID_FALLBACK_EMPTY zpid=%s selected=%s invalid_reason=%s",
-                zpid or "<blank>",
-                rapid_selected_phone or "<blank>",
-                rapid_invalid_reason or "<none>",
-            )
-
-    if candidates:
+    if search_result is None and candidates:
         office_choice = max(
             (
                 (number, info)
@@ -7791,66 +7882,69 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                     "verified_mobile": False,
                 }
             )
-            return _finalize(result)
+            search_result = result
 
-    if had_candidates or best_number:
-        reason = "withheld_low_conf_mix"
-    else:
-        reason = "no_personal_mobile"
+    if search_result is None:
+        if had_candidates or best_number:
+            reason = "withheld_low_conf_mix"
+        else:
+            reason = "no_personal_mobile"
 
-    if candidates:
-        top_candidates = sorted(
-            candidates.items(),
-            key=lambda item: item[1].get("score", float("-inf")),
-            reverse=True,
-        )
-        summary = []
-        for number, info in top_candidates[:5]:
-            summary.append(
-                "{} score={:.2f} src={} office_demoted={}".format(
-                    number,
-                    info.get("score", 0.0),
-                    ",".join(sorted(info.get("sources", []))) or "",
-                    info.get("office_demoted", False),
-                )
+        if candidates:
+            top_candidates = sorted(
+                candidates.items(),
+                key=lambda item: item[1].get("score", float("-inf")),
+                reverse=True,
             )
+            summary = []
+            for number, info in top_candidates[:5]:
+                summary.append(
+                    "{} score={:.2f} src={} office_demoted={}".format(
+                        number,
+                        info.get("score", 0.0),
+                        ",".join(sorted(info.get("sources", []))) or "",
+                        info.get("office_demoted", False),
+                    )
+                )
+            LOG.warning(
+                "PHONE DROP candidates for %s %s (had_candidates=%s): %s",
+                agent,
+                state,
+                had_candidates,
+                " | ".join(summary) if summary else "<none>",
+            )
+
+        result.update({
+            "number": "",
+            "confidence": "",
+            "reason": reason,
+            "score": best_score if best_score != float("-inf") else 0.0,
+            "source": best_source,
+        })
+        METRICS["phone_no_verified_mobile"] += 1
+        blocked_state = {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains}
+        candidate_quality = {
+            "phones_found": len(candidates),
+            "emails_found": 0,
+            "all_office": all(info.get("office_demoted") for info in candidates.values()) if candidates else False,
+            "all_generic_email": False,
+        }
         LOG.warning(
-            "PHONE DROP candidates for %s %s (had_candidates=%s): %s",
+            "PHONE DROP no verified mobile for %s %s zpid=%s reason=%s had_candidates=%s cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
             agent,
             state,
+            zpid or "",
+            reason,
             had_candidates,
-            " | ".join(summary) if summary else "<none>",
+            cse_status,
+            search_empty,
+            {k: round(v, 2) for k, v in blocked_state.items()},
+            len(candidates),
+            candidate_quality,
         )
+        search_result = result
 
-    result.update({
-        "number": "",
-        "confidence": "",
-        "reason": reason,
-        "score": best_score if best_score != float("-inf") else 0.0,
-        "source": best_source,
-    })
-    METRICS["phone_no_verified_mobile"] += 1
-    blocked_state = {dom: _blocked_until.get(dom, 0.0) - time.time() for dom in blocked_domains}
-    candidate_quality = {
-        "phones_found": len(candidates),
-        "emails_found": 0,
-        "all_office": all(info.get("office_demoted") for info in candidates.values()) if candidates else False,
-        "all_generic_email": False,
-    }
-    LOG.warning(
-        "PHONE DROP no verified mobile for %s %s zpid=%s reason=%s had_candidates=%s cse_state=%s search_empty=%s blocked_domains=%s candidates=%s quality=%s",
-        agent,
-        state,
-        zpid or "",
-        reason,
-        had_candidates,
-        cse_status,
-        search_empty,
-        {k: round(v, 2) for k, v in blocked_state.items()},
-        len(candidates),
-        candidate_quality,
-    )
-    return _finalize(result)
+    return _apply_final_decision(search_result)
 
 def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
     cache_key = _contact_cache_key(agent, state, row_payload)
