@@ -348,6 +348,22 @@ def _apify_run_source(run_id: Optional[str]) -> str:
     return "apify"
 
 
+def _merge_rows_by_zpid(primary: List[Dict[str, Any]], secondary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in primary + secondary:
+        if not isinstance(row, dict):
+            merged.append(row)
+            continue
+        zpid = str(row.get("zpid", "")).strip()
+        if zpid:
+            if zpid in seen:
+                continue
+            seen.add(zpid)
+        merged.append(row)
+    return merged
+
+
 def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     normalized_rows = [_normalize_apify_row(row) if isinstance(row, dict) else row for row in rows]
     normalized_rows = _prefer_detail_rows(normalized_rows)
@@ -857,6 +873,24 @@ async def apify_hook(request: Request):
                 row_source = "none"
             elif not rows:
                 return {"status": "rejected", "reason": "missing required fields"}
+    if dataset_id and rows is not None:
+        try:
+            fetched_rows = fetch_rows(dataset_id)
+        except Exception:
+            logger.exception("Failed to fetch dataset items for datasetId=%s", dataset_id)
+            fetched_rows = []
+        if fetched_rows:
+            if rows:
+                rows = _merge_rows_by_zpid(rows, fetched_rows)
+                row_source = f"{row_source}+dataset_fetch"
+            else:
+                rows = fetched_rows
+                row_source = "dataset_fetch"
+            logger.info(
+                "apify-hook: fetched %d rows from dataset %s (merged with payload)",
+                len(fetched_rows),
+                dataset_id,
+            )
     if rows is None:
         fetch_attempts = max(APIFY_FETCH_ATTEMPTS, 1)
         rows = []
