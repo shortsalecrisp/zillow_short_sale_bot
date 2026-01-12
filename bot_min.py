@@ -98,8 +98,6 @@ _ACCEPT_LANGUAGE_POOL = [
     "en-GB,en;q=0.9",
 ]
 HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
-PLAYWRIGHT_REMOTE_URL = os.getenv("PLAYWRIGHT_REMOTE_URL", "").strip()
-PLAYWRIGHT_REMOTE_MODE = os.getenv("PLAYWRIGHT_REMOTE_MODE", "cdp").strip().lower()
 HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "20000"))
 HEADLESS_NAV_TIMEOUT_MS = int(os.getenv("HEADLESS_NAV_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS)))
 HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
@@ -605,98 +603,73 @@ logging.basicConfig(
 )
 LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
-_playwright_runtime_checked = False
-_playwright_install_checked = False
+_playwright_ready = False
+_playwright_ready_lock = threading.Lock()
+PLAYWRIGHT_BROWSER_CACHE = "/tmp/ms-playwright"
 
 
 def _log_blocked_url(url: str) -> None:
     LOG.info("URL_BLOCKED url=%s", url)
 
-def _playwright_remote_configured() -> bool:
-    return bool(PLAYWRIGHT_REMOTE_URL)
-
-async def _connect_remote_browser(p) -> Any:
-    if PLAYWRIGHT_REMOTE_MODE == "playwright":
-        return await p.chromium.connect(PLAYWRIGHT_REMOTE_URL)
-    return await p.chromium.connect_over_cdp(PLAYWRIGHT_REMOTE_URL)
-
-
 async def _connect_playwright_browser(p) -> Tuple[Any, str]:
-    if _playwright_remote_configured():
-        return await _connect_remote_browser(p), "remote"
-    await _ensure_playwright_chromium(LOG)
-    executable_path = p.chromium.executable_path
     browser = await p.chromium.launch(headless=True)
-    LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", executable_path)
+    LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", p.chromium.executable_path)
     return browser, "local"
 
 
-async def _ensure_playwright_chromium(logger: logging.Logger) -> None:
-    global _playwright_install_checked
-    if _playwright_install_checked or async_playwright is None:
-        return
-    _playwright_install_checked = True
+async def _ensure_playwright_ready_async(logger: logging.Logger) -> bool:
+    if async_playwright is None:
+        logger.warning("PLAYWRIGHT_MISSING playwright not installed")
+        return False
+    if not os.getenv("PLAYWRIGHT_BROWSERS_PATH"):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_BROWSER_CACHE
     async with async_playwright() as p:
         executable_path = Path(p.chromium.executable_path)
-    if executable_path.exists():
-        return
-    logger.warning(
-        "PLAYWRIGHT_MISSING_EXECUTABLE path=%s; installing chromium",
-        executable_path,
-    )
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=True,
+    if not executable_path.exists():
+        logger.warning(
+            "PLAYWRIGHT_MISSING_EXECUTABLE path=%s; installing chromium",
+            executable_path,
         )
-    except Exception as exc:
-        logger.error("PLAYWRIGHT_INSTALL_FAILED err=%s", exc)
-
-
-async def _check_playwright_runtime_async(
-    logger: logging.Logger,
-) -> None:
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True,
+            )
+        except Exception as exc:
+            logger.error("PLAYWRIGHT_INSTALL_FAILED err=%s", exc)
+            return False
     try:
         async with async_playwright() as p:
-            browser, runtime_mode = await _connect_playwright_browser(p)
+            browser = await p.chromium.launch(headless=True)
             await browser.close()
-        logger.info(
-            "PLAYWRIGHT_READY %s chromium connect OK mode=%s url=%s",
-            runtime_mode,
-            PLAYWRIGHT_REMOTE_MODE,
-            PLAYWRIGHT_REMOTE_URL,
-        )
+        logger.info("PLAYWRIGHT_READY local chromium smoke test OK")
+        return True
     except Exception as exc:
-        logger.error(
-            "PLAYWRIGHT_BROWSER_ERROR connect failed mode=%s url=%s env_HEADLESS_FALLBACK=%s err=%s",
-            PLAYWRIGHT_REMOTE_MODE,
-            PLAYWRIGHT_REMOTE_URL,
-            os.getenv("HEADLESS_FALLBACK"),
-            exc,
-        )
+        logger.error("PLAYWRIGHT_BROWSER_ERROR smoke test failed err=%s", exc)
+        return False
 
 
-def _check_playwright_runtime(logger: logging.Logger) -> None:
-    global _playwright_runtime_checked
-    if _playwright_runtime_checked:
-        return
-    _playwright_runtime_checked = True
-    if async_playwright is None:
-        logger.warning(
-            "PLAYWRIGHT_MISSING playwright not installed (PLAYWRIGHT_REMOTE_URL=%s)",
-            PLAYWRIGHT_REMOTE_URL,
-        )
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        loop.create_task(_check_playwright_runtime_async(logger))
-        return
-
-    asyncio.run(_check_playwright_runtime_async(logger))
+def ensure_playwright_ready(logger: Optional[logging.Logger] = None) -> bool:
+    global _playwright_ready
+    sink = logger or LOG
+    if _playwright_ready:
+        return True
+    if not HEADLESS_ENABLED:
+        sink.warning("PLAYWRIGHT_DISABLED HEADLESS_FALLBACK=false – set HEADLESS_FALLBACK=true to enable headless reviews")
+        return False
+    with _playwright_ready_lock:
+        if _playwright_ready:
+            return True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(_ensure_playwright_ready_async(sink), _ensure_headless_loop())
+            _playwright_ready = bool(future.result())
+        else:
+            _playwright_ready = bool(asyncio.run(_ensure_playwright_ready_async(sink)))
+        return _playwright_ready
 
 
 def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
@@ -711,24 +684,7 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
             "PLAYWRIGHT_DISABLED HEADLESS_FALLBACK=false – set HEADLESS_FALLBACK=true to enable headless reviews"
         )
         return
-    _check_playwright_runtime(sink)
-    if async_playwright is None:
-        sink.warning(
-            "PLAYWRIGHT_MISSING playwright not installed – add Playwright to requirements"
-        )
-        return
-    if not _playwright_remote_configured():
-        sink.info(
-            "PLAYWRIGHT_READY local headless reviews enabled (HEADLESS_FALLBACK=%s)",
-            HEADLESS_ENABLED,
-        )
-        return
-    sink.info(
-        "PLAYWRIGHT_READY remote headless reviews enabled (HEADLESS_FALLBACK=%s) mode=%s url=%s",
-        HEADLESS_ENABLED,
-        PLAYWRIGHT_REMOTE_MODE,
-        PLAYWRIGHT_REMOTE_URL,
-    )
+    ensure_playwright_ready(sink)
 
 # ───────────────────── regexes & misc helpers ─────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
@@ -885,139 +841,6 @@ _seen_zpids_loaded_at = 0.0
 _seen_contacts_loaded_at = 0.0
 _seen_zpids_lock = threading.Lock()
 _seen_contacts_lock = threading.Lock()
-SEEN_DB_PATH = os.getenv("SEEN_DB_PATH") or os.getenv("SEEN_ZPID_DB_PATH") or "/var/data/seen_zpids.sqlite"
-SEEN_DB_FALLBACK_PATH = "./seen_zpids.sqlite"
-SEEN_RETENTION_DAYS = int(os.getenv("SEEN_RETENTION_DAYS", "30"))
-_seen_db_lock = threading.Lock()
-_seen_db_initialized_path: Optional[str] = None
-
-
-def _connect_seen_db(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=5, check_same_thread=False)
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    return conn
-
-
-def _prune_seen_db(conn: sqlite3.Connection, *, now_ts: Optional[int] = None) -> None:
-    if SEEN_RETENTION_DAYS <= 0:
-        LOG.info(
-            "SEEN_ZPID_RETENTION_DISABLED retention_days=%s",
-            SEEN_RETENTION_DAYS,
-        )
-        return
-    ts = int(now_ts or time.time())
-    cutoff = ts - (SEEN_RETENTION_DAYS * 86400)
-    cursor = conn.execute(
-        "DELETE FROM seen_zpids WHERE first_seen_ts < ?",
-        (cutoff,),
-    )
-    deleted = cursor.rowcount or 0
-    LOG.info(
-        "SEEN_ZPID_PRUNE deleted=%s cutoff_ts=%s retention_days=%s",
-        deleted,
-        cutoff,
-        SEEN_RETENTION_DAYS,
-    )
-
-
-def _initialize_seen_db(conn: sqlite3.Connection, db_path: str) -> None:
-    global _seen_db_initialized_path
-    with _seen_db_lock:
-        if _seen_db_initialized_path == db_path:
-            return
-        with conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS seen_zpids (
-                    zpid TEXT PRIMARY KEY,
-                    first_seen_ts INTEGER NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_seen_zpids_first_seen_ts
-                ON seen_zpids (first_seen_ts)
-                """
-            )
-            _prune_seen_db(conn)
-        _seen_db_initialized_path = db_path
-
-
-def _open_seen_db() -> tuple[sqlite3.Connection, str]:
-    preferred_path = SEEN_DB_PATH
-    try:
-        preferred_parent = Path(preferred_path).expanduser().parent
-        preferred_parent.mkdir(parents=True, exist_ok=True)
-        conn = _connect_seen_db(preferred_path)
-        db_path = preferred_path
-    except (OSError, sqlite3.Error) as exc:
-        LOG.warning(
-            "SEEN_ZPID_DB_OPEN_FAILED path=%s err=%s; falling back to %s",
-            preferred_path,
-            exc,
-            SEEN_DB_FALLBACK_PATH,
-        )
-        fallback_parent = Path(SEEN_DB_FALLBACK_PATH).expanduser().parent
-        fallback_parent.mkdir(parents=True, exist_ok=True)
-        conn = _connect_seen_db(SEEN_DB_FALLBACK_PATH)
-        db_path = SEEN_DB_FALLBACK_PATH
-    _initialize_seen_db(conn, db_path)
-    return conn, db_path
-
-
-def filter_first_unseen(listings: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
-    total_candidates = len(listings)
-    if not listings or limit <= 0:
-        LOG.info(
-            "SEEN_ZPID_FILTER total=%s already_seen=%s selected=%s limit=%s",
-            total_candidates,
-            0,
-            0,
-            limit,
-        )
-        return []
-
-    conn, _ = _open_seen_db()
-    selected: List[Dict[str, Any]] = []
-    already_seen = 0
-    now_ts = int(time.time())
-    try:
-        with conn:
-            cursor = conn.cursor()
-            for item in listings:
-                if len(selected) >= limit:
-                    break
-                zpid = str(item.get("zpid") or item.get("id") or "").strip()
-                if not zpid:
-                    continue
-                if cursor.execute(
-                    "SELECT 1 FROM seen_zpids WHERE zpid = ?",
-                    (zpid,),
-                ).fetchone():
-                    already_seen += 1
-                    continue
-                selected.append(item)
-                cursor.execute(
-                    """
-                    INSERT OR IGNORE INTO seen_zpids (zpid, first_seen_ts)
-                    VALUES (?, ?)
-                    """,
-                    (zpid, now_ts),
-                )
-    finally:
-        conn.close()
-
-    LOG.info(
-        "SEEN_ZPID_FILTER total=%s already_seen=%s selected=%s limit=%s",
-        total_candidates,
-        already_seen,
-        len(selected),
-        limit,
-    )
-    return selected
 
 
 def load_seen_contacts(force: bool = False) -> Tuple[Set[str], Set[str]]:
@@ -1105,6 +928,34 @@ def load_seen_zpids(force: bool = False) -> Set[str]:
         return set(seen_zpids)
 
 
+def append_seen_zpids(zpids: Iterable[str]) -> None:
+    cleaned: List[str] = []
+    for zpid in zpids:
+        val = str(zpid).strip()
+        if not val:
+            continue
+        cleaned.append(val)
+    if not cleaned:
+        return
+    with _seen_zpids_lock:
+        new_vals = [val for val in cleaned if val not in seen_zpids]
+        if not new_vals:
+            return
+        seen_zpids.update(new_vals)
+    try:
+        data = [[val] for val in new_vals]
+        sheets_service.spreadsheets().values().append(
+            spreadsheetId=GSHEET_ID,
+            range=f"{GSHEET_TAB}!AB:AB",
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body={"values": data},
+        ).execute()
+        LOG.info("seen_zpids_appended=%s", len(new_vals))
+    except Exception as exc:
+        LOG.warning("Unable to append seen ZPIDs to sheet: %s", exc)
+
+
 def record_seen_zpid(zpid: str) -> None:
     if not zpid:
         return
@@ -1121,6 +972,7 @@ def dedupe_rows_by_zpid(rows: List[Dict[str, Any]], logger_obj: Optional[logging
     cached = load_seen_zpids()
     fresh_rows: List[Dict[str, Any]] = []
     already_seen = 0
+    fresh_zpids: List[str] = []
     for row in rows:
         zpid = str(row.get("zpid", "")).strip()
         if zpid and zpid in cached:
@@ -1128,7 +980,10 @@ def dedupe_rows_by_zpid(rows: List[Dict[str, Any]], logger_obj: Optional[logging
             continue
         if zpid:
             cached.add(zpid)
+            fresh_zpids.append(zpid)
         fresh_rows.append(row)
+    if fresh_zpids:
+        append_seen_zpids(fresh_zpids)
     if logger_obj:
         logger_obj.info(
             "DEDUP received=%s already_seen=%s processing=%s",
@@ -1880,24 +1735,22 @@ def _rapid_rank_phones(agent: str, phones: List[Dict[str, str]]) -> Dict[str, An
             continue
         info = get_line_info(phone)
         phone_type = str(info.get("type") or "unknown").strip()
-        type_norm = phone_type.lower()
         valid = bool(info.get("valid"))
         verified_mobile = bool(valid and info.get("mobile_verified"))
+        digits = _digits_only(phone)
+        is_us_10 = len(digits) == 10 or (len(digits) == 11 and digits.startswith("1"))
         if verified_mobile:
             score = 100
-            reason = "rapid_score_100_verified_mobile"
-        elif valid:
-            if type_norm in {"unknown", ""}:
-                reason = "rapid_score_70_valid_unknown"
-            else:
-                reason = "rapid_score_70_valid_non_mobile"
-            score = 70
+            reason = "rapid_score_verified_mobile"
+        elif is_us_10:
+            score = 60
+            reason = "rapid_score_us_10_digit"
         elif _rapid_plausible_phone(phone):
             score = 40
-            reason = "rapid_score_40_plausible_invalid"
+            reason = "rapid_score_plausible_invalid"
         else:
-            score = 0
-            reason = "rapid_score_0_invalid"
+            score = 10
+            reason = "rapid_score_fallback"
         ranked.append(
             {
                 "idx": idx,
@@ -1908,6 +1761,7 @@ def _rapid_rank_phones(agent: str, phones: List[Dict[str, str]]) -> Dict[str, An
                 "verified_mobile": verified_mobile,
                 "valid": valid,
                 "type": phone_type or "unknown",
+                "is_us_10": is_us_10,
             }
         )
     if not ranked:
@@ -1918,7 +1772,12 @@ def _rapid_rank_phones(agent: str, phones: List[Dict[str, str]]) -> Dict[str, An
             "selected_verified_mobile": False,
             "candidates": [],
         }
-    best = max(ranked, key=lambda item: (item["score"], -item["idx"]))
+    verified = next((item for item in ranked if item["verified_mobile"]), None)
+    if verified:
+        best = verified
+    else:
+        us_10 = next((item for item in ranked if item["is_us_10"]), None)
+        best = us_10 or ranked[0]
     return {
         "selected_phone": best["phone"],
         "selected_reason": best["score_reason"],
@@ -5072,6 +4931,8 @@ def _headless_fetch(url: str, *, proxy_url: str = "", domain: str = "", reason: 
     if not HEADLESS_ENABLED or not async_playwright:
         return {}
     log_headless_status()
+    if not ensure_playwright_ready(LOG):
+        return {}
 
     loop = _ensure_headless_loop()
     coro = _headless_fetch_async(url, proxy_url=proxy_url, domain=domain, reason=reason)
@@ -7161,16 +7022,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     zpid = str(row_payload.get("zpid", ""))
     rapid_snapshot = _rapid_contact_normalized(agent, row_payload)
     rapid_candidates = rapid_snapshot.get("rapid_candidates", []) if rapid_snapshot else []
-    rapid_fallback_phone = rapid_snapshot.get("rapid_fallback_phone", "") if rapid_snapshot else ""
     rapid_primary_phone = rapid_snapshot.get("rapid_primary_phone", "") if rapid_snapshot else ""
     rapid_phone_reason = rapid_snapshot.get("phone_reason", "") if rapid_snapshot else ""
     rapid_phone_score = rapid_snapshot.get("phone_score", 0) if rapid_snapshot else 0
+    rapid_best_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
     redacted_rapid = [_redact_phone_value(item.get("phone", "")) for item in rapid_candidates]
     LOG.info(
         "RAPID_PHONE_CANDIDATES count=%s phones=%s selected=%s score_reason=%s score=%s",
         len(rapid_candidates),
         redacted_rapid,
-        rapid_fallback_phone or "<blank>",
+        rapid_best_phone or "<blank>",
         rapid_phone_reason or "<none>",
         rapid_phone_score,
     )
@@ -7190,52 +7051,23 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     def _apply_final_decision(search_res: Dict[str, Any]) -> Dict[str, Any]:
         _log_search_phone(search_res)
 
-        def _search_is_profile_source(source: str) -> bool:
-            return source in {
-                "cse_contact",
-                "agent_card_dom",
-                "portal_struct",
-                "jsonld_person",
-                "jsonld_other",
-                "dom",
-                "crawler_unverified",
-                "payload_contact",
-                "portal_struct",
-            }
-
-        def _search_beats_rapid(res: Dict[str, Any]) -> bool:
-            if not res or not res.get("number"):
-                return False
-            if res.get("verified_mobile"):
-                return True
-            if not _rapid_plausible_phone(res.get("number", "")):
-                return False
-            source = res.get("source", "")
-            if source.startswith("rapid"):
-                return False
-            return _search_is_profile_source(source)
-
         final_result = search_res
         decision_source = "none"
         decision_reason = ""
         if search_res.get("number") and search_res.get("verified_mobile"):
             decision_source = "search_verified_mobile"
             decision_reason = "search_verified_mobile"
-        elif rapid_fallback_phone:
-            if _search_beats_rapid(search_res):
-                decision_source = "search_unverified"
-                decision_reason = "search_profile_unverified"
-            else:
-                final_result = {
-                    "number": rapid_fallback_phone,
-                    "confidence": "low",
-                    "score": max(search_res.get("score", 0.0), CONTACT_PHONE_OVERRIDE_MIN),
-                    "source": "rapid_fallback",
-                    "reason": rapid_phone_reason or "rapid_fallback",
-                    "verified_mobile": False,
-                }
-                decision_source = "rapid_fallback"
-                decision_reason = rapid_phone_reason or "rapid_fallback"
+        elif rapid_best_phone:
+            final_result = {
+                "number": rapid_best_phone,
+                "confidence": "low",
+                "score": max(search_res.get("score", 0.0), CONTACT_PHONE_OVERRIDE_MIN),
+                "source": "rapid_fallback",
+                "reason": rapid_phone_reason or "rapid_fallback",
+                "verified_mobile": False,
+            }
+            decision_source = "rapid_fallback"
+            decision_reason = rapid_phone_reason or "rapid_fallback"
         else:
             if search_res.get("number"):
                 decision_source = "search_unverified"

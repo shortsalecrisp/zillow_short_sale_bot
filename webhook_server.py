@@ -9,12 +9,12 @@ import logging
 import os
 import re
 import urllib.parse
-import sqlite3
 import threading
 from typing import Any, Dict, List, Optional
 
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
+from starlette.requests import ClientDisconnect
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -26,7 +26,6 @@ from bot_min import (
     WORK_START,
     SCHEDULER_TZ,
     dedupe_rows_by_zpid,
-    filter_first_unseen,
     fetch_contact_page,
     log_headless_status,
     process_rows,
@@ -37,8 +36,6 @@ from sms_providers import get_sender
 # ──────────────────────────────────────────────────────────────────────
 # Configuration & logging
 # ──────────────────────────────────────────────────────────────────────
-DB_PATH     = "seen.db"
-TABLE_SQL   = "CREATE TABLE IF NOT EXISTS listings (zpid TEXT PRIMARY KEY)"
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER   = get_sender(SMS_PROVIDER)
 DISABLE_APIFY_SCHEDULER = os.getenv("DISABLE_APIFY_SCHEDULER", "false").lower() == "true"
@@ -378,20 +375,15 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
         return {"status": "no new rows"}
 
-    conn = ensure_table()
     db_filtered: List[Dict[str, Any]] = []
     for r in fresh_rows:
         zpid = r.get("zpid")
         if zpid in EXPORTED_ZPIDS:
             continue
-        if conn.execute("SELECT 1 FROM listings WHERE zpid=?", (zpid,)).fetchone():
-            EXPORTED_ZPIDS.add(zpid)
-            continue
         db_filtered.append(r)
 
     if not db_filtered:
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
-        conn.close()
         return {"status": "no new rows"}
 
     missing_text = 0
@@ -411,7 +403,7 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     if APIFY_MAX_ITEMS:
         original_count = len(db_filtered)
-        db_filtered = filter_first_unseen(db_filtered, limit=APIFY_MAX_ITEMS)
+        db_filtered = _select_recent_rows(db_filtered, APIFY_MAX_ITEMS)
         logger.info(
             "apify-hook: selecting up to %d unseen listings (from %d)",
             len(db_filtered),
@@ -419,7 +411,6 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         )
         if not db_filtered:
             logger.info("apify-hook: no unseen rows to process after filter")
-            conn.close()
             return {"status": "no new rows"}
 
     logger.debug("Sample fields on first fresh row: %s", list(db_filtered[0].keys())[:15])
@@ -428,7 +419,6 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         sms_jobs = process_rows(db_filtered, skip_dedupe=True) or []
     except Exception:
         logger.exception("process_rows failed; skipping batch to keep server alive")
-        conn.close()
         return {"status": "error", "rows": len(db_filtered)}
 
     for job in sms_jobs:
@@ -445,13 +435,6 @@ def _process_incoming_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                 detail_seen.append(zpid)
 
     EXPORTED_ZPIDS.update(detail_seen)
-    if detail_seen:
-        conn.executemany(
-            "INSERT OR IGNORE INTO listings (zpid) VALUES (?)",
-            [(zpid,) for zpid in detail_seen],
-        )
-    conn.commit()
-    conn.close()
 
     return {"status": "processed", "rows": len(db_filtered)}
 
@@ -517,15 +500,6 @@ def get_replies_ws():
         return ws
 
 REPLIES_WS = get_replies_ws()
-
-# ──────────────────────────────────────────────────────────────────────
-# Local helpers
-# ──────────────────────────────────────────────────────────────────────
-def ensure_table() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(TABLE_SQL)
-    return conn
-
 
 def _digits_only(num: str) -> str:
     """Keep digits, prefix 1 if US local (10 digits)."""
@@ -695,25 +669,6 @@ def root_head():
     return Response(status_code=200)
 
 
-@app.get("/export-zpids")
-def export_zpids():
-    conn  = ensure_table()
-    zpids = [row[0] for row in conn.execute("SELECT zpid FROM listings")]
-    conn.close()
-    EXPORTED_ZPIDS.update(zpids)
-    return {"zpids": zpids}
-
-
-@app.post("/reset-zpids")
-def reset_zpids():
-    conn = ensure_table()
-    conn.execute("DELETE FROM listings")
-    conn.commit()
-    conn.close()
-    EXPORTED_ZPIDS.clear()
-    return {"status": "cleared"}
-
-
 # ──────────────────────────────────────────────────────────────────────
 # Webhook – receives new listings from Apify
 # ──────────────────────────────────────────────────────────────────────
@@ -725,7 +680,11 @@ async def apify_hook(request: Request):
       • {"items": [...]} or {"data": [...]} – alternate list payloads
       • {"datasetId": "..."} – fetch rows from that dataset (legacy webhooks)
     """
-    body = await request.body()
+    try:
+        body = await request.body()
+    except ClientDisconnect:
+        logger.info("apify-hook: client disconnected while reading body")
+        return Response(status_code=200)
     payload: Any = {}
     if body:
         try:
