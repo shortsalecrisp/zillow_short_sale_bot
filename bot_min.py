@@ -9453,21 +9453,17 @@ def _follow_up_pass():
 
         try:
             ts = datetime.fromisoformat(row[COL_INIT_TS])
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=TZ)
         except Exception:
             continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=TZ)
+        else:
+            ts = ts.astimezone(TZ)
 
-        hrs = business_hours_elapsed(ts, now)
-        if hrs < FU_HOURS:
+        elapsed_hours = (now - ts).total_seconds() / 3600.0
+        if elapsed_hours < FU_HOURS:
             LOG.debug(
-                "FU‑skip row %s – %.2f business hours elapsed", sheet_row, hrs
-            )
-            continue
-
-        if now.hour < 9:
-            LOG.debug(
-                "FU‑skip row %s – before 9am", sheet_row
+                "FU‑skip row %s – %.2f hours elapsed", sheet_row, elapsed_hours
             )
             continue
 
