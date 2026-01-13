@@ -839,7 +839,7 @@ def _get_seen_zpid_worksheet() -> gspread.Worksheet:
         try:
             header = seen_ws.acell("A1").value
             if not header or header.strip().lower() != "zpid":
-                seen_ws.update("A1", "zpid")
+                seen_ws.update(values=[["zpid"]], range_name="A1")
         except Exception as exc:
             LOG.warning("Unable to verify Seen Zpids header: %s", exc)
         _seen_zpid_ws = seen_ws
@@ -923,7 +923,7 @@ def load_seen_zpids(force: bool = False) -> Set[str]:
                 spreadsheetId=GSHEET_ID,
                 range=f"'{SEEN_ZPID_TAB}'!A:A",
                 majorDimension="COLUMNS",
-                valueRenderOption="FORMATTED_VALUE",
+                valueRenderOption="UNFORMATTED_VALUE",
             ).execute()
         except Exception as exc:
             LOG.warning("Unable to refresh seen ZPIDs from sheet: %s", exc)
