@@ -375,9 +375,9 @@ SCHEDULER_TZ   = pytz.timezone("America/New_York")
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
-WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (final run starts at 8 pm)
+WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive (8 pm cutoff)
 FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
-SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=True)
+SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=False)
 APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
 
 _sms_enable_env = os.getenv("SMS_ENABLE")
@@ -9259,6 +9259,13 @@ def _within_work_hours(slot: datetime) -> bool:
     return True
 
 
+def _within_initial_hours(slot: datetime) -> bool:
+    """Return True when ``slot`` falls inside working hours for initial SMS."""
+
+    slot = slot.astimezone(SCHEDULER_TZ)
+    return WORK_START <= slot.hour < WORK_END
+
+
 def _within_scheduler_hours(slot: datetime) -> bool:
     """Return True when ``slot`` falls inside hourly scheduler run windows."""
 
@@ -9290,6 +9297,24 @@ def _next_work_start(slot: datetime, *, include_weekends: bool) -> datetime:
         return candidate
 
 
+def _sleep_until_initial_window(*, row_idx: Optional[int], phone: str) -> None:
+    now = datetime.now(tz=SCHEDULER_TZ)
+    if _within_initial_hours(now):
+        return
+    next_start = _next_work_start(now, include_weekends=True)
+    sleep_secs = max(0, (next_start - now).total_seconds())
+    row_label = f"row {row_idx}" if row_idx else "row <unknown>"
+    LOG.info(
+        "Initial SMS outside work hours; sleeping %.2fs until %s (now=%s, %s, phone=%s)",
+        sleep_secs,
+        next_start.isoformat(),
+        now.isoformat(),
+        row_label,
+        phone,
+    )
+    time.sleep(sleep_secs)
+
+
 def _run_hourly_cycle(
     run_time: datetime,
     hourly_callbacks: Optional[List[Callable[[datetime], None]]] = None,
@@ -9310,6 +9335,14 @@ def _run_hourly_cycle(
             run_time.hour,
             WORK_START,
             WORK_END,
+        )
+        next_followup = _next_work_start(
+            run_time + timedelta(seconds=1),
+            include_weekends=FOLLOWUP_INCLUDE_WEEKENDS,
+        )
+        LOG.info(
+            "Follow-up scheduler idle; sleeping until next work window at %s",
+            next_followup.isoformat(),
         )
 
     if skip_callbacks:
@@ -9578,6 +9611,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             seen_agents.add(normalized_agent)
         if selected_phone and not phone_exists(selected_phone):
             seen_phones.add(_normalize_phone_for_dedupe(selected_phone))
+            _sleep_until_initial_window(row_idx=row_idx, phone=selected_phone)
             send_sms(selected_phone, first, r.get("street", ""), row_idx)
 
         phone_info = {"number": "", "confidence": "", "reason": ""}
@@ -9625,6 +9659,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                     LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
             if enriched_phone and not phone_exists(enriched_phone):
                 seen_phones.add(_normalize_phone_for_dedupe(enriched_phone))
+                _sleep_until_initial_window(row_idx=row_idx, phone=enriched_phone)
                 send_sms(enriched_phone, first, r.get("street", ""), row_idx)
 
 # ───────────────────── main entry point & scheduler ─────────────────────
