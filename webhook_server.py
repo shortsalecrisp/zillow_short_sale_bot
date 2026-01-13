@@ -75,6 +75,9 @@ _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
 _keepalive_thread: Optional[threading.Thread] = None
 _keepalive_stop: Optional[threading.Event] = None
+_deferred_rows_lock = threading.Lock()
+_deferred_rows: List[Dict[str, Any]] = []
+_deferred_zpids: set[str] = set()
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN")
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
@@ -84,6 +87,63 @@ APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "
 
 def _should_run_immediately() -> bool:
     return os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true"
+
+
+def _within_initial_hours(slot: datetime) -> bool:
+    slot = slot.astimezone(SCHEDULER_TZ)
+    return WORK_START <= slot.hour < WORK_END
+
+
+def _next_initial_window(slot: datetime) -> datetime:
+    slot = slot.astimezone(SCHEDULER_TZ)
+    if slot.hour < WORK_START:
+        return slot.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
+    if slot.hour >= WORK_END:
+        next_day = slot + timedelta(days=1)
+        return next_day.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
+    return slot
+
+
+def _defer_rows(rows: List[Dict[str, Any]]) -> int:
+    accepted = 0
+    with _deferred_rows_lock:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            zpid = str(row.get("zpid", "")).strip()
+            if zpid and zpid in _deferred_zpids:
+                continue
+            if zpid:
+                _deferred_zpids.add(zpid)
+            _deferred_rows.append(row)
+            accepted += 1
+    return accepted
+
+
+def _drain_deferred_rows() -> List[Dict[str, Any]]:
+    with _deferred_rows_lock:
+        if not _deferred_rows:
+            return []
+        rows = list(_deferred_rows)
+        _deferred_rows.clear()
+        _deferred_zpids.clear()
+    return rows
+
+
+def _process_deferred_rows(run_time: datetime) -> None:
+    if not _within_initial_hours(run_time):
+        next_window = _next_initial_window(run_time)
+        logger.info(
+            "Deferred initial rows still outside work hours; next window at %s",
+            next_window.isoformat(),
+        )
+        return
+    rows = _drain_deferred_rows()
+    if not rows:
+        logger.info("No deferred initial rows to process")
+        return
+    logger.info("Processing %d deferred initial rows", len(rows))
+    _process_incoming_rows(rows, skip_seen_dedupe=False, skip_seen_append=False)
 
 
 def _ensure_scheduler_thread(
@@ -433,8 +493,6 @@ def _select_payload_listings(payload: Dict[str, Any]) -> Dict[str, Any]:
             selected_rows.append(row)
             selected_zpids.append(zpid)
             selected_addresses.append(_format_listing_address(row))
-    if selected_zpids:
-        append_seen_zpids(selected_zpids)
     return {
         "rows": selected_rows,
         "received": len(received_rows),
@@ -500,6 +558,18 @@ def _process_incoming_rows(
             logger.info("apify-hook: no unseen rows to process after filter")
             return {"status": "no new rows"}
 
+    now = datetime.now(tz=SCHEDULER_TZ)
+    if not _within_initial_hours(now):
+        deferred = _defer_rows(db_filtered)
+        next_window = _next_initial_window(now)
+        logger.info(
+            "Initial processing outside work hours; deferred=%d next_window=%s now=%s",
+            deferred,
+            next_window.isoformat(),
+            now.isoformat(),
+        )
+        return {"status": "deferred", "rows": deferred}
+
     if not skip_seen_append:
         append_seen_zpids(
             [
@@ -559,7 +629,7 @@ async def _start_scheduler() -> None:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
         return
     _ensure_scheduler_thread(
-        hourly_callbacks=None,
+        hourly_callbacks=[_process_deferred_rows],
         initial_callbacks=False,
     )
     _ensure_keepalive_thread()
@@ -1021,7 +1091,7 @@ async def apify_hook(request: Request):
     return _process_incoming_rows(
         rows,
         skip_seen_dedupe=payload_listings is not None,
-        skip_seen_append=payload_listings is not None,
+        skip_seen_append=False,
     )
 
 
