@@ -375,7 +375,7 @@ SCHEDULER_TZ   = pytz.timezone("America/New_York")
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
-WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive (8 pm cutoff)
+WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive (final run starts at 7 pm)
 FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
 SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=False)
 APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
@@ -9175,6 +9175,52 @@ def send_sms(
             time.sleep(5)
     LOG.error("SMS failed after %s attempts to %s", SMS_RETRY_ATTEMPTS, digits)
 
+
+def _within_initial_hours(slot: datetime) -> bool:
+    """Return True when ``slot`` falls inside working hours for initial texts."""
+
+    slot = slot.astimezone(SCHEDULER_TZ)
+    return WORK_START <= slot.hour < WORK_END
+
+
+def schedule_initial_sms(
+    phone: str,
+    first: str,
+    address: str,
+    row_idx: int,
+) -> None:
+    """Send initial SMS during working hours, waiting if needed."""
+
+    if not SMS_ENABLE or not phone:
+        LOG.debug("SMS disabled or missing phone; skipping initial schedule to %s", phone)
+        return
+
+    now = datetime.now(tz=SCHEDULER_TZ)
+    if _within_initial_hours(now):
+        send_sms(phone, first, address, row_idx)
+        return
+
+    next_start = _next_work_start(now, include_weekends=True)
+    sleep_secs = max(0, (next_start - now).total_seconds())
+    LOG.info(
+        "Initial SMS outside work hours; sleeping %.2fs until %s (now=%s)",
+        sleep_secs,
+        next_start.isoformat(),
+        now.isoformat(),
+    )
+
+    def _delayed_send() -> None:
+        if sleep_secs:
+            time.sleep(sleep_secs)
+        send_sms(phone, first, address, row_idx)
+
+    thread = threading.Thread(
+        target=_delayed_send,
+        name=f"initial-sms-{row_idx}",
+        daemon=True,
+    )
+    thread.start()
+
 def check_reply(phone: str, since_iso: str) -> bool:
     """Return True if a reply from *phone* has been received since *since_iso*.
 
@@ -9341,7 +9387,7 @@ def _run_hourly_cycle(
             include_weekends=FOLLOWUP_INCLUDE_WEEKENDS,
         )
         LOG.info(
-            "Follow-up scheduler idle; sleeping until next work window at %s",
+            "Follow-up scheduler sleeping until next work window at %s",
             next_followup.isoformat(),
         )
 
@@ -9611,8 +9657,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             seen_agents.add(normalized_agent)
         if selected_phone and not phone_exists(selected_phone):
             seen_phones.add(_normalize_phone_for_dedupe(selected_phone))
-            _sleep_until_initial_window(row_idx=row_idx, phone=selected_phone)
-            send_sms(selected_phone, first, r.get("street", ""), row_idx)
+            schedule_initial_sms(selected_phone, first, r.get("street", ""), row_idx)
 
         phone_info = {"number": "", "confidence": "", "reason": ""}
         email_info = {"email": "", "confidence": "", "reason": ""}
@@ -9659,8 +9704,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                     LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
             if enriched_phone and not phone_exists(enriched_phone):
                 seen_phones.add(_normalize_phone_for_dedupe(enriched_phone))
-                _sleep_until_initial_window(row_idx=row_idx, phone=enriched_phone)
-                send_sms(enriched_phone, first, r.get("street", ""), row_idx)
+                schedule_initial_sms(enriched_phone, first, r.get("street", ""), row_idx)
 
 # ───────────────────── main entry point & scheduler ─────────────────────
 if __name__ == "__main__":
