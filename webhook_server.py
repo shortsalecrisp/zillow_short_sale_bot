@@ -143,7 +143,12 @@ def _process_deferred_rows(run_time: datetime) -> None:
         logger.info("No deferred initial rows to process")
         return
     logger.info("Processing %d deferred initial rows", len(rows))
-    _process_incoming_rows(rows, skip_seen_dedupe=False, skip_seen_append=False)
+    _process_incoming_rows(
+        rows,
+        skip_seen_dedupe=False,
+        skip_seen_append=False,
+        allow_deferred_drain=False,
+    )
 
 
 def _ensure_scheduler_thread(
@@ -509,6 +514,7 @@ def _process_incoming_rows(
     *,
     skip_seen_dedupe: bool = False,
     skip_seen_append: bool = False,
+    allow_deferred_drain: bool = True,
 ) -> Dict[str, Any]:
     normalized_rows = [_normalize_apify_row(row) if isinstance(row, dict) else row for row in rows]
     normalized_rows = _prefer_detail_rows(normalized_rows)
@@ -559,6 +565,19 @@ def _process_incoming_rows(
             return {"status": "no new rows"}
 
     now = datetime.now(tz=SCHEDULER_TZ)
+    if allow_deferred_drain and _within_initial_hours(now):
+        deferred_rows = _drain_deferred_rows()
+        if deferred_rows:
+            logger.info(
+                "Draining %d deferred initial rows on webhook",
+                len(deferred_rows),
+            )
+            _process_incoming_rows(
+                deferred_rows,
+                skip_seen_dedupe=False,
+                skip_seen_append=False,
+                allow_deferred_drain=False,
+            )
     if not _within_initial_hours(now):
         deferred = _defer_rows(db_filtered)
         next_window = _next_initial_window(now)
