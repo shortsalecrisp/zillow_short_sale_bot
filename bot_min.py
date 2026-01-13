@@ -377,7 +377,7 @@ FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive (final run starts at 7 pm)
 FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
-SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=True)
+SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=False)
 APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
 
 _sms_enable_env = os.getenv("SMS_ENABLE")
@@ -9305,6 +9305,13 @@ def _within_work_hours(slot: datetime) -> bool:
     return True
 
 
+def _within_initial_hours(slot: datetime) -> bool:
+    """Return True when ``slot`` falls inside working hours for initial SMS."""
+
+    slot = slot.astimezone(SCHEDULER_TZ)
+    return WORK_START <= slot.hour < WORK_END
+
+
 def _within_scheduler_hours(slot: datetime) -> bool:
     """Return True when ``slot`` falls inside hourly scheduler run windows."""
 
@@ -9334,6 +9341,24 @@ def _next_work_start(slot: datetime, *, include_weekends: bool) -> datetime:
             )
             continue
         return candidate
+
+
+def _sleep_until_initial_window(*, row_idx: Optional[int], phone: str) -> None:
+    now = datetime.now(tz=SCHEDULER_TZ)
+    if _within_initial_hours(now):
+        return
+    next_start = _next_work_start(now, include_weekends=True)
+    sleep_secs = max(0, (next_start - now).total_seconds())
+    row_label = f"row {row_idx}" if row_idx else "row <unknown>"
+    LOG.info(
+        "Initial SMS outside work hours; sleeping %.2fs until %s (now=%s, %s, phone=%s)",
+        sleep_secs,
+        next_start.isoformat(),
+        now.isoformat(),
+        row_label,
+        phone,
+    )
+    time.sleep(sleep_secs)
 
 
 def _run_hourly_cycle(
