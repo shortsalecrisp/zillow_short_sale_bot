@@ -1413,45 +1413,74 @@ def _is_weekend(d: datetime) -> bool:
     return d.weekday() >= 5
 
 # ───────────────────── working‑hour elapsed helper (UPDATED) ─────────────────────
-def business_hours_elapsed(start_ts: datetime, now: datetime) -> float:
+def business_hours_elapsed(
+    start_ts: datetime,
+    now: datetime,
+    *,
+    include_weekends: bool = False,
+) -> float:
     """Return number of *working* hours elapsed between ``start_ts`` and ``now``.
 
-    Only time falling between ``WORK_START`` and ``WORK_END`` on weekdays is
-    counted.  Both datetimes are converted to the bot's timezone to avoid
-    mismatches.  The calculation walks in 15‑minute increments for reasonable
-    accuracy without being too expensive.
+    Only time falling between ``WORK_START`` and ``WORK_END`` is counted. When
+    ``include_weekends`` is False, weekend hours are excluded. The calculation
+    uses the scheduler timezone so it aligns with follow-up windows.
     """
 
     if start_ts.tzinfo is None:
-        start_ts = start_ts.replace(tzinfo=TZ)
+        start_ts = start_ts.replace(tzinfo=SCHEDULER_TZ)
     else:
-        start_ts = start_ts.astimezone(TZ)
+        start_ts = start_ts.astimezone(SCHEDULER_TZ)
 
     if now.tzinfo is None:
-        now = now.replace(tzinfo=TZ)
+        now = now.replace(tzinfo=SCHEDULER_TZ)
     else:
-        now = now.astimezone(TZ)
+        now = now.astimezone(SCHEDULER_TZ)
 
     if start_ts >= now:
         return 0.0
 
-    total = 0.0
-    cur = start_ts
-    step = timedelta(minutes=15)
-    while cur < now:
-        end_of_work = cur.replace(hour=WORK_END, minute=0, second=0, microsecond=0)
-        nxt = min(now, cur + step, end_of_work)
-        if nxt == cur:
-            cur = (cur + timedelta(days=1)).replace(
-                hour=WORK_START, minute=0, second=0, microsecond=0
-            )
-            LOG.debug("business_hours_elapsed skipped to next workday")
-            continue
-        if not _is_weekend(cur) and WORK_START <= cur.hour < WORK_END:
-            total += (nxt - cur).total_seconds() / 3600.0
-        cur = nxt
+    total_seconds = 0.0
+    current_day = start_ts.date()
+    end_day = now.date()
 
-    return total
+    while current_day <= end_day:
+        day_start = SCHEDULER_TZ.localize(
+            datetime(
+                current_day.year,
+                current_day.month,
+                current_day.day,
+                WORK_START,
+                0,
+                0,
+            )
+        )
+        day_end = SCHEDULER_TZ.localize(
+            datetime(
+                current_day.year,
+                current_day.month,
+                current_day.day,
+                WORK_END,
+                0,
+                0,
+            )
+        )
+        if not include_weekends and _is_weekend(day_start):
+            current_day += timedelta(days=1)
+            continue
+
+        window_start = day_start
+        window_end = day_end
+        if current_day == start_ts.date():
+            window_start = max(window_start, start_ts)
+        if current_day == now.date():
+            window_end = min(window_end, now)
+
+        if window_end > window_start:
+            total_seconds += (window_end - window_start).total_seconds()
+
+        current_day += timedelta(days=1)
+
+    return total_seconds / 3600.0
 
 # ───────────────────── scraping / lookup helpers (UNCHANGED) ─────────────────────
 def _phone_obj_to_str(obj: Dict[str, str]) -> str:
@@ -9494,7 +9523,7 @@ def run_hourly_scheduler(
 
 # ───────────────────── follow‑up pass (UPDATED) ─────────────────────
 def _follow_up_pass():
-    now = datetime.now(tz=TZ)
+    now = datetime.now(tz=SCHEDULER_TZ)
     resp = sheets_service.spreadsheets().values().get(
         spreadsheetId=GSHEET_ID,
         range=f"{GSHEET_TAB}!A:AB",
@@ -9535,11 +9564,15 @@ def _follow_up_pass():
         except Exception:
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=TZ)
+            ts = ts.replace(tzinfo=SCHEDULER_TZ)
         else:
-            ts = ts.astimezone(TZ)
+            ts = ts.astimezone(SCHEDULER_TZ)
 
-        elapsed_hours = (now - ts).total_seconds() / 3600.0
+        elapsed_hours = business_hours_elapsed(
+            ts,
+            now,
+            include_weekends=FOLLOWUP_INCLUDE_WEEKENDS,
+        )
         if elapsed_hours < FU_HOURS:
             LOG.debug(
                 "FU‑skip row %s – %.2f hours elapsed", sheet_row, elapsed_hours
