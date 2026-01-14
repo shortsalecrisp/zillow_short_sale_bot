@@ -9522,6 +9522,13 @@ def run_hourly_scheduler(
     LOG.info("Hourly scheduler loop terminated (thread=%s)", threading.current_thread().name)
 
 # ───────────────────── follow‑up pass (UPDATED) ─────────────────────
+def _redact_followup_phone(phone: str) -> str:
+    digits = _digits_only(phone or "")
+    if not digits:
+        return "<blank>"
+    return f"...{digits[-4:]}"
+
+
 def _follow_up_pass():
     now = datetime.now(tz=SCHEDULER_TZ)
     resp = sheets_service.spreadsheets().values().get(
@@ -9538,15 +9545,39 @@ def _follow_up_pass():
     # look back over recent rows for potential follow‑ups
     start_row_idx = max(2, last_row_idx - FU_LOOKBACK_ROWS)
     recent_rows = all_rows[start_row_idx - 1:]
+    LOG.info(
+        "Follow-up review scanning rows %s-%s (count=%s, lookback=%s)",
+        start_row_idx,
+        last_row_idx,
+        len(recent_rows),
+        FU_LOOKBACK_ROWS,
+    )
 
     for sheet_row, row in enumerate(recent_rows, start=start_row_idx):
         row += [""] * (MIN_COLS - len(row))  # pad
+        phone_redacted = _redact_followup_phone(row[COL_PHONE])
+        address = row[COL_STREET] or ""
 
         # skip if follow‑up already sent …
         if row[COL_FU_TS].strip():
+            LOG.info(
+                "FU-review row %s status=already_sent followup_ts=%s phone=%s address=%s",
+                sheet_row,
+                row[COL_FU_TS],
+                phone_redacted,
+                address,
+            )
             continue
         # … or if reply/manual note exists
         if row[COL_REPLY_FLAG].strip() or row[COL_MANUAL_NOTE].strip():
+            LOG.info(
+                "FU-review row %s status=skip_reply_or_manual reply=%s manual=%s phone=%s address=%s",
+                sheet_row,
+                bool(row[COL_REPLY_FLAG].strip()),
+                bool(row[COL_MANUAL_NOTE].strip()),
+                phone_redacted,
+                address,
+            )
             continue
 
         # auto-check for replies since initial message
@@ -9559,9 +9590,24 @@ def _follow_up_pass():
             mark_reply(sheet_row)
             continue
 
+        if not row[COL_INIT_TS].strip():
+            LOG.info(
+                "FU-review row %s status=skip_missing_init_ts phone=%s address=%s",
+                sheet_row,
+                phone_redacted,
+                address,
+            )
+            continue
         try:
             ts = datetime.fromisoformat(row[COL_INIT_TS])
         except Exception:
+            LOG.info(
+                "FU-review row %s status=skip_bad_init_ts init_ts=%s phone=%s address=%s",
+                sheet_row,
+                row[COL_INIT_TS],
+                phone_redacted,
+                address,
+            )
             continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=SCHEDULER_TZ)
@@ -9573,9 +9619,28 @@ def _follow_up_pass():
             now,
             include_weekends=FOLLOWUP_INCLUDE_WEEKENDS,
         )
+        remaining_hours = max(0.0, FU_HOURS - elapsed_hours)
+        LOG.info(
+            "FU-review row %s init_ts=%s elapsed_hours=%.2f remaining_hours=%.2f qualify=%s phone=%s address=%s",
+            sheet_row,
+            ts.isoformat(),
+            elapsed_hours,
+            remaining_hours,
+            elapsed_hours >= FU_HOURS,
+            phone_redacted,
+            address,
+        )
         if elapsed_hours < FU_HOURS:
             LOG.debug(
                 "FU‑skip row %s – %.2f hours elapsed", sheet_row, elapsed_hours
+            )
+            continue
+        if not row[COL_PHONE].strip():
+            LOG.info(
+                "FU-review row %s status=skip_missing_phone phone=%s address=%s",
+                sheet_row,
+                phone_redacted,
+                address,
             )
             continue
 
