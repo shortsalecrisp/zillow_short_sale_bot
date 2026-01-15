@@ -9822,7 +9822,7 @@ if __name__ == "__main__":
         LOG.info("Finished processing payload; exiting.")
     else:
         enable_scheduler = (
-            os.getenv("ENABLE_STANDALONE_SCHEDULER", "false").lower() == "true"
+            os.getenv("ENABLE_STANDALONE_SCHEDULER", "true").lower() == "true"
         )
         if not enable_scheduler:
             LOG.info(
