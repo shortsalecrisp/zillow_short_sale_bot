@@ -42,6 +42,9 @@ SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_API_KEY = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
 SMS_SENDER   = get_sender(SMS_PROVIDER)
 DISABLE_APIFY_SCHEDULER = os.getenv("DISABLE_APIFY_SCHEDULER", "false").lower() == "true"
+RENDER_APIFY_TRIGGER_DISABLED = (
+    os.getenv("RENDER_APIFY_TRIGGER_DISABLED", "false").lower() == "true"
+)
 # Optional self-ping to keep Render (or other idle-suspending platforms) awake.
 KEEPALIVE_URL = os.getenv("KEEPALIVE_URL")
 KEEPALIVE_PERIOD_SECONDS = int(os.getenv("KEEPALIVE_PERIOD_SECONDS", "300"))
