@@ -9114,6 +9114,13 @@ def _digits_only(num: str) -> str:
     return digits
 
 
+def _redact_phone(phone: str) -> str:
+    digits = _digits_only(phone or "")
+    if not digits:
+        return "<blank>"
+    return f"...{digits[-4:]}"
+
+
 _line_type_cache: Dict[str, bool] = {}
 _line_type_verified: Dict[str, bool] = {}
 _line_info_cache: Dict[str, Dict[str, Any]] = {}
@@ -9243,7 +9250,11 @@ def send_sms(
     follow_up: bool = False,
 ):
     if not SMS_ENABLE or not phone:
-        LOG.debug("SMS disabled or missing phone; skipping send to %s", phone)
+        LOG.info(
+            "SMS disabled or missing phone; skipping send to %s (row %s)",
+            _redact_phone(phone),
+            row_idx,
+        )
         return
     if SMS_TEST_MODE and SMS_TEST_NUMBER:
         phone = SMS_TEST_NUMBER
@@ -9287,7 +9298,11 @@ def schedule_initial_sms(
     """Send initial SMS during working hours, waiting if needed."""
 
     if not SMS_ENABLE or not phone:
-        LOG.debug("SMS disabled or missing phone; skipping initial schedule to %s", phone)
+        LOG.info(
+            "SMS disabled or missing phone; skipping initial schedule to %s (row %s)",
+            _redact_phone(phone),
+            row_idx,
+        )
         return
 
     now = datetime.now(tz=SCHEDULER_TZ)
@@ -9787,7 +9802,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         if selected_phone and phone_exists(selected_phone):
             LOG.info(
                 "SKIP already-contacted phone %s for agent %s (%s)",
-                selected_phone,
+                _redact_phone(selected_phone),
                 name,
                 r.get("zpid"),
             )
@@ -9866,7 +9881,14 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                     ).execute()
                 except Exception as exc:
                     LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
-            if enriched_phone and not phone_exists(enriched_phone):
+            if enriched_phone and phone_exists(enriched_phone):
+                LOG.info(
+                    "SKIP already-contacted enriched phone %s for agent %s (%s)",
+                    _redact_phone(enriched_phone),
+                    name,
+                    r.get("zpid"),
+                )
+            elif enriched_phone:
                 seen_phones.add(_normalize_phone_for_dedupe(enriched_phone))
                 schedule_initial_sms(enriched_phone, first, r.get("street", ""), row_idx)
 
