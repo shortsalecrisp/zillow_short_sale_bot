@@ -401,6 +401,12 @@ if SMS_TEST_MODE:
     )
 SMS_PROVIDER      = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER        = get_sender(SMS_PROVIDER)
+logging.info(
+    "SMS config: enabled=%s provider=%s api_key_present=%s",
+    SMS_ENABLE,
+    SMS_PROVIDER,
+    bool(_sms_api_key),
+)
 SMS_TEMPLATE      = (
     "Hey {first}, this is Yoni Kutler—I saw your short sale listing at "
     "{address} and wanted to introduce myself. I specialize in helping "
@@ -9634,6 +9640,7 @@ def _follow_up_pass():
         FU_LOOKBACK_ROWS,
     )
 
+    eligible_count = 0
     for sheet_row, row in enumerate(recent_rows, start=start_row_idx):
         row += [""] * (MIN_COLS - len(row))  # pad
         phone_redacted = _redact_followup_phone(row[COL_PHONE])
@@ -9737,6 +9744,15 @@ def _follow_up_pass():
             address=row[COL_STREET],
             row_idx=sheet_row,
             follow_up=True,
+        )
+        eligible_count += 1
+
+    if eligible_count == 0:
+        LOG.info(
+            "No eligible follow-ups found in rows %s-%s (lookback=%s).",
+            start_row_idx,
+            last_row_idx,
+            FU_LOOKBACK_ROWS,
         )
 
 # ───────────────────── core row processor (UNCHANGED) ─────────────────────
@@ -9851,6 +9867,11 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
 
         enriched_phone = phone_info.get("number", "") if phone_info else ""
         enriched_email = email_info.get("email", "") if email_info else ""
+        if not selected_phone and not enriched_phone:
+            LOG.info(
+                "No phone available for row %s after enrichment; initial SMS not scheduled",
+                row_idx,
+            )
         data_updates: List[Dict[str, Any]] = []
         if enriched_phone or enriched_email:
             update_phone = enriched_phone and enriched_phone != selected_phone
