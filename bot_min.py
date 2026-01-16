@@ -401,6 +401,12 @@ if SMS_TEST_MODE:
     )
 SMS_PROVIDER      = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER        = get_sender(SMS_PROVIDER)
+logging.info(
+    "SMS config: enabled=%s provider=%s api_key_present=%s",
+    SMS_ENABLE,
+    SMS_PROVIDER,
+    bool(_sms_api_key),
+)
 SMS_TEMPLATE      = (
     "Hey {first}, this is Yoni Kutler—I saw your short sale listing at "
     "{address} and wanted to introduce myself. I specialize in helping "
@@ -9114,6 +9120,13 @@ def _digits_only(num: str) -> str:
     return digits
 
 
+def _redact_phone(phone: str) -> str:
+    digits = _digits_only(phone or "")
+    if not digits:
+        return "<blank>"
+    return f"...{digits[-4:]}"
+
+
 _line_type_cache: Dict[str, bool] = {}
 _line_type_verified: Dict[str, bool] = {}
 _line_info_cache: Dict[str, Dict[str, Any]] = {}
@@ -9243,7 +9256,11 @@ def send_sms(
     follow_up: bool = False,
 ):
     if not SMS_ENABLE or not phone:
-        LOG.debug("SMS disabled or missing phone; skipping send to %s", phone)
+        LOG.info(
+            "SMS disabled or missing phone; skipping send to %s (row %s)",
+            _redact_phone(phone),
+            row_idx,
+        )
         return
     if SMS_TEST_MODE and SMS_TEST_NUMBER:
         phone = SMS_TEST_NUMBER
@@ -9287,7 +9304,11 @@ def schedule_initial_sms(
     """Send initial SMS during working hours, waiting if needed."""
 
     if not SMS_ENABLE or not phone:
-        LOG.debug("SMS disabled or missing phone; skipping initial schedule to %s", phone)
+        LOG.info(
+            "SMS disabled or missing phone; skipping initial schedule to %s (row %s)",
+            _redact_phone(phone),
+            row_idx,
+        )
         return
 
     now = datetime.now(tz=SCHEDULER_TZ)
@@ -9619,6 +9640,7 @@ def _follow_up_pass():
         FU_LOOKBACK_ROWS,
     )
 
+    eligible_count = 0
     for sheet_row, row in enumerate(recent_rows, start=start_row_idx):
         row += [""] * (MIN_COLS - len(row))  # pad
         phone_redacted = _redact_followup_phone(row[COL_PHONE])
@@ -9723,6 +9745,15 @@ def _follow_up_pass():
             row_idx=sheet_row,
             follow_up=True,
         )
+        eligible_count += 1
+
+    if eligible_count == 0:
+        LOG.info(
+            "No eligible follow-ups found in rows %s-%s (lookback=%s).",
+            start_row_idx,
+            last_row_idx,
+            FU_LOOKBACK_ROWS,
+        )
 
 # ───────────────────── core row processor (UNCHANGED) ─────────────────────
 def _expand_row(l: List[str], n: int = MIN_COLS) -> List[str]:
@@ -9787,7 +9818,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         if selected_phone and phone_exists(selected_phone):
             LOG.info(
                 "SKIP already-contacted phone %s for agent %s (%s)",
-                selected_phone,
+                _redact_phone(selected_phone),
                 name,
                 r.get("zpid"),
             )
@@ -9836,6 +9867,11 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
 
         enriched_phone = phone_info.get("number", "") if phone_info else ""
         enriched_email = email_info.get("email", "") if email_info else ""
+        if not selected_phone and not enriched_phone:
+            LOG.info(
+                "No phone available for row %s after enrichment; initial SMS not scheduled",
+                row_idx,
+            )
         data_updates: List[Dict[str, Any]] = []
         if enriched_phone or enriched_email:
             update_phone = enriched_phone and enriched_phone != selected_phone
@@ -9866,7 +9902,14 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                     ).execute()
                 except Exception as exc:
                     LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
-            if enriched_phone and not phone_exists(enriched_phone):
+            if enriched_phone and phone_exists(enriched_phone):
+                LOG.info(
+                    "SKIP already-contacted enriched phone %s for agent %s (%s)",
+                    _redact_phone(enriched_phone),
+                    name,
+                    r.get("zpid"),
+                )
+            elif enriched_phone:
                 seen_phones.add(_normalize_phone_for_dedupe(enriched_phone))
                 schedule_initial_sms(enriched_phone, first, r.get("street", ""), row_idx)
 
