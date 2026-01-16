@@ -816,6 +816,12 @@ CONTACT_DIRECTORY_TERMS: Set[str] = {
     "realestate",
     "realty",
 }
+ALLOWLIST_PARSE_ANYWAY_DOMAINS: Set[str] = {
+    "onekeymls.com",
+    "kw.com",
+    "c21sunbeltrealty.com",
+    "remax.com",
+}
 
 # ───────────────────── Google / Sheets setup ─────────────────────
 creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
@@ -2624,6 +2630,30 @@ def fetch_text_cached(
         "extracted_text": text,
         "final_url": final_url,
         "retry_needed": retry_needed,
+    }
+
+
+def parse_lite(url: str, text: str = "") -> Dict[str, List[str]]:
+    if not text:
+        fetched = fetch_text_cached(
+            url,
+            ttl_days=3,
+            respect_block=False,
+            allow_blocking=False,
+        )
+        text = fetched.get("extracted_text", "") or ""
+    emails = [email for email, _ in _extract_emails_with_obfuscation(text)]
+    vcard_emails, vcard_phones = _extract_vcard_contacts(text)
+    emails.extend(vcard_emails)
+    phones: List[str] = []
+    for match in PHONE_RE.finditer(text):
+        formatted = fmt_phone(match.group())
+        if formatted and valid_phone(formatted):
+            phones.append(formatted)
+    phones.extend(vcard_phones)
+    return {
+        "emails": list(dict.fromkeys(emails)),
+        "phones": list(dict.fromkeys(phones)),
     }
 
 
@@ -5588,6 +5618,7 @@ def select_top_5_urls(
             if not allowed:
                 rejected.append((norm, reason))
                 continue
+            allow_reason = reason
             seen_links.add(norm)
             final_url = norm
             text = ""
@@ -5606,9 +5637,31 @@ def select_top_5_urls(
                     rejected.append((final_url, "fetch_failed"))
                     continue
                 final_path = urlparse(final_url).path.lower()
+                root = _domain(final_url) or _domain(norm) or ""
+                allowlist_parse_anyway = root in ALLOWLIST_PARSE_ANYWAY_DOMAINS or any(
+                    root.endswith(f".{dom}") for dom in ALLOWLIST_PARSE_ANYWAY_DOMAINS
+                )
+                accept_reason = allow_reason
                 if _looks_listing_boilerplate(text, final_path):
-                    rejected.append((final_url, "listing_boilerplate"))
-                    continue
+                    reject_reason = "listing_boilerplate"
+                    if allowlist_parse_anyway:
+                        accept_reason = "allowlist_parse_anyway"
+                    else:
+                        lite = parse_lite(final_url, text=text)
+                        emails_found = len(lite.get("emails", []))
+                        phones_found = len(lite.get("phones", []))
+                        LOG.info(
+                            "URL_CANDIDATE_SOFT_REJECT url=%s reason=%s parsed_lite=True emails_found=%s phones_found=%s",
+                            final_url,
+                            reject_reason,
+                            emails_found,
+                            phones_found,
+                        )
+                        if emails_found or phones_found:
+                            accept_reason = f"{reject_reason}_parse_lite_contact"
+                        else:
+                            rejected.append((final_url, reject_reason))
+                            continue
                 if property_state and not _location_matches(final_url, text, location_context, property_state, property_city, brokerage):
                     rejected.append((final_url, "state_mismatch"))
                     continue
@@ -5616,6 +5669,7 @@ def select_top_5_urls(
                     rejected.append((final_url, "agent_mismatch"))
                     continue
             else:
+                accept_reason = allow_reason
                 if property_state and not _location_matches(final_url, "", location_context, property_state, property_city, brokerage):
                     rejected.append((final_url, "state_mismatch"))
                     continue
@@ -5624,6 +5678,7 @@ def select_top_5_urls(
                     continue
             original_order.setdefault(normalize_url(final_url), original_order.get(norm, idx))
             root = _domain(final_url) or _domain(norm) or ""
+            LOG.info("URL_CANDIDATE_ACCEPTED url=%s reason=%s", final_url, accept_reason or "accepted")
             score = _good_candidate_score(final_url, snippet=snippet_text, text=text)
             entry = (final_url, _is_social_root(root), score)
             if len(candidates) < target:
