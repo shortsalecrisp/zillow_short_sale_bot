@@ -380,14 +380,25 @@ FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False
 SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=False)
 APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
 
+_sms_api_key = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
 _sms_enable_env = os.getenv("SMS_ENABLE")
 if _sms_enable_env is None:
     # Enable SMS by default when any SMS API key is present
-    SMS_ENABLE = bool(os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY"))
+    SMS_ENABLE = bool(_sms_api_key)
 else:
     SMS_ENABLE = _sms_enable_env.lower() == "true"
+if SMS_ENABLE and not _sms_api_key:
+    logging.warning(
+        "SMS_ENABLE=true but no SMS gateway API key found; forcing SMS_ENABLE=false"
+    )
+    SMS_ENABLE = False
 SMS_TEST_MODE     = os.getenv("SMS_TEST_MODE", "true").lower() == "true"
 SMS_TEST_NUMBER   = os.getenv("SMS_TEST_NUMBER", "")
+if SMS_TEST_MODE:
+    logging.warning(
+        "SMS_TEST_MODE enabled%s",
+        f" (redirecting to {SMS_TEST_NUMBER})" if SMS_TEST_NUMBER else " (no test number set)",
+    )
 SMS_PROVIDER      = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER        = get_sender(SMS_PROVIDER)
 SMS_TEMPLATE      = (
