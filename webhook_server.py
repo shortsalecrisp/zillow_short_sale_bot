@@ -649,13 +649,10 @@ def _get_apify_run_status(run_id: str) -> Optional[str]:
 
 @app.on_event("startup")
 async def _start_scheduler() -> None:
-    logger.info("RENDER_APIFY_TRIGGER_DISABLED=%s", str(RENDER_APIFY_TRIGGER_DISABLED).lower())
-    if RENDER_APIFY_TRIGGER_DISABLED:
-        logger.info(
-            "Apify trigger disabled; new listings will not be fetched unless another source provides them."
-        )
-    else:
-        logger.info("Apify trigger enabled; new listings can be fetched.")
+    logger.info("RENDER_APIFY_TRIGGER_DISABLED=true")
+    logger.info(
+        "Apify trigger disabled; new listings will not be fetched unless another source provides them."
+    )
     if DISABLE_APIFY_SCHEDULER:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
         return
