@@ -1,8 +1,11 @@
+import logging
 import os
 import base64
 from typing import Optional
 
 import requests
+
+LOG = logging.getLogger(__name__)
 
 
 class SMSGatewayForAndroid:
@@ -18,6 +21,12 @@ class SMSGatewayForAndroid:
         payload = [{"mobile": to, "text": message}]
         r = requests.post(f"{self.base_url}/push", json=payload, headers=headers, timeout=15)
         r.raise_for_status()
+        response_preview = (r.text or "").strip().replace("\n", " ")[:200]
+        LOG.debug(
+            "SMS gateway accepted message: status=%s response=%s",
+            r.status_code,
+            response_preview or "<empty>",
+        )
         # API does not return a message id
         return None
 
