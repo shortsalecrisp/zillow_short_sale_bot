@@ -83,8 +83,8 @@ def _eligible_rows(
     return matches
 
 
-def _resolve_destination(phone: str, *, force_live: bool) -> str:
-    if not force_live and SMS_TEST_MODE and SMS_TEST_NUMBER:
+def _resolve_destination(phone: str) -> str:
+    if SMS_TEST_MODE and SMS_TEST_NUMBER:
         return SMS_TEST_NUMBER
     return phone
 
@@ -126,11 +126,6 @@ def main() -> int:
         action="store_true",
         help="Log what would be sent without sending SMS.",
     )
-    parser.add_argument(
-        "--force-live",
-        action="store_true",
-        help="Ignore SMS_TEST_MODE/SMS_TEST_NUMBER and send to real numbers.",
-    )
     args = parser.parse_args()
 
     if not SMS_ENABLE:
@@ -150,12 +145,12 @@ def main() -> int:
         return 0
 
     LOG.info("Replaying %s messages (since %s).", len(candidates), cutoff.isoformat())
-    if SMS_TEST_MODE and not SMS_TEST_NUMBER and not args.force_live:
+    if SMS_TEST_MODE and not SMS_TEST_NUMBER:
         LOG.warning("SMS_TEST_MODE is enabled without SMS_TEST_NUMBER.")
 
     sent = 0
     for row_idx, phone, first, address, kind in candidates:
-        destination = _resolve_destination(phone, force_live=args.force_live)
+        destination = _resolve_destination(phone)
         message = _format_message(kind, first, address)
         try:
             _send_sms(destination, message, dry_run=args.dry_run)
