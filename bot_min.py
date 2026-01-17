@@ -2681,47 +2681,101 @@ def _decode_duckduckgo_link(raw: str) -> str:
     return unquote(target) if target else raw
 
 
-def jina_cached_search(
-    query: str,
+def _duckduckgo_html_results(
+    body: str,
     *,
-    max_results: int = 18,
-    ttl_days: int = 14,
+    seen: Set[str],
     allowed_domains: Optional[Set[str]] = None,
-) -> List[str]:
-    if not query:
-        return []
-    if _blocked("r.jina.ai") or _blocked("duckduckgo.com") or _blocked("www.duckduckgo.com"):
-        LOG.warning("Jina/DuckDuckGo blocked; skipping search for query %s", query)
-        return []
+    max_results: int = 18,
+) -> List[Dict[str, str]]:
+    results: List[Dict[str, str]] = []
+    if not body:
+        return results
 
     def _allowed(host: str) -> bool:
         if not allowed_domains:
             return True
         return any(host == dom or host.endswith(f".{dom}") for dom in allowed_domains)
 
-    def _extract_hits(body: str, seen: Set[str]) -> List[str]:
-        hits: List[str] = []
-        for m in re.finditer(r"https?://duckduckgo\.com/l/\?[^\s\"]+", body):
-            decoded = _decode_duckduckgo_link(html.unescape(m.group()))
-            if is_blocked_url(decoded):
-                _log_blocked_url(decoded)
-                continue
-            if decoded and decoded not in seen and _allowed(_domain(decoded)):
-                seen.add(decoded)
-                hits.append(decoded)
+    def _append_result(link: str, title: str = "", snippet: str = "") -> None:
+        if not link:
+            return
+        decoded = _decode_duckduckgo_link(link)
+        if decoded.startswith("//"):
+            decoded = f"https:{decoded}"
+        if decoded.startswith("/"):
+            return
+        normalized = normalize_url(decoded)
+        if not normalized or normalized in seen:
+            return
+        if "duckduckgo.com" in normalized:
+            return
+        if is_blocked_url(normalized):
+            _log_blocked_url(normalized)
+            return
+        host = _domain(normalized)
+        if host and not _allowed(host):
+            return
+        seen.add(normalized)
+        results.append(
+            {
+                "link": normalized,
+                "title": title,
+                "snippet": snippet,
+            }
+        )
+
+    if BeautifulSoup:
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:
+            soup = None
+        if soup:
+            for result in soup.select("div.result, div.results > div.result, .result__body"):
+                anchor = result.select_one("a.result__a, a.result__url")
+                if not anchor:
+                    continue
+                href = anchor.get("href") or ""
+                title = anchor.get_text(" ", strip=True)
+                snippet_node = result.select_one(".result__snippet, .result__snippet--body, .snippet")
+                snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
+                _append_result(href, title=title, snippet=snippet)
+                if len(results) >= max_results:
+                    break
+            soup.decompose()
+
+    if len(results) < max_results:
+        for m in re.finditer(r"https?://duckduckgo\.com/l/\?[^\s\"']+", body):
+            _append_result(html.unescape(m.group()))
+            if len(results) >= max_results:
+                break
+
+    if len(results) < max_results:
         for m in re.finditer(r"https?://[\w./?&%#=\-]+", body):
             candidate = html.unescape(m.group())
             if "duckduckgo.com" in candidate:
                 continue
-            if is_blocked_url(candidate):
-                _log_blocked_url(candidate)
-                continue
-            if candidate not in seen and _allowed(_domain(candidate)):
-                seen.add(candidate)
-                hits.append(candidate)
-        return hits
+            _append_result(candidate)
+            if len(results) >= max_results:
+                break
 
-    hits: List[str] = []
+    return results
+
+
+def _duckduckgo_html_search(
+    query: str,
+    *,
+    max_results: int = 18,
+    ttl_days: int = 14,
+    allowed_domains: Optional[Set[str]] = None,
+) -> List[Dict[str, str]]:
+    if not query:
+        return []
+    if _blocked("r.jina.ai") or _blocked("duckduckgo.com") or _blocked("www.duckduckgo.com"):
+        LOG.warning("Jina/DuckDuckGo blocked; skipping search for query %s", query)
+        return []
+
+    hits: List[Dict[str, str]] = []
     seen: Set[str] = set()
     offset = 0
     page = 0
@@ -2736,23 +2790,44 @@ def jina_cached_search(
             cached = fetch_text_cached(search_url, ttl_days=ttl_days)
             body = cached.get("extracted_text", "")
         except Exception as exc:
-            LOG.debug("jina_cached_search failed for %s: %s", query, exc)
+            LOG.debug("duckduckgo html search failed for %s: %s", query, exc)
             break
 
         if not body:
             break
 
         before = len(hits)
-        hits.extend(_extract_hits(body, seen))
-        if len(hits) >= max_results:
-            break
-        if len(hits) == before:
+        hits.extend(
+            _duckduckgo_html_results(
+                body,
+                seen=seen,
+                allowed_domains=allowed_domains,
+                max_results=max_results - len(hits),
+            )
+        )
+        if len(hits) >= max_results or len(hits) == before:
             break
 
         offset += 30
         page += 1
 
     return hits[:max_results]
+
+
+def jina_cached_search(
+    query: str,
+    *,
+    max_results: int = 18,
+    ttl_days: int = 14,
+    allowed_domains: Optional[Set[str]] = None,
+) -> List[str]:
+    hits = _duckduckgo_html_search(
+        query,
+        max_results=max_results,
+        ttl_days=ttl_days,
+        allowed_domains=allowed_domains,
+    )
+    return [hit.get("link", "") for hit in hits if hit.get("link")]
 
 
 def _targeted_contact_link_allowed(link: str, agent: str, brokerage: str = "", domain_hint: str = "") -> bool:
@@ -3822,6 +3897,15 @@ def _broaden_contact_query(agent: str, state: str, city: str, brokerage: str) ->
     return _compact_tokens(f'"{agent}"', state, city, "email", brokerage, "contact")
 
 
+def _extra_ddg_query(agent: str, state: str, brokerage: str) -> str:
+    primary = _compact_tokens(f'"{agent}"', "realtor", state, "email")
+    if primary:
+        return primary
+    if brokerage:
+        return _compact_tokens(f'"{agent}"', brokerage, "email")
+    return _compact_tokens(f'"{agent}"', "site:linkedin.com", "email")
+
+
 def _compact_url_log(urls: Iterable[str]) -> List[Dict[str, str]]:
     compact: List[Dict[str, str]] = []
     for url in urls:
@@ -4041,6 +4125,40 @@ def _contact_search_urls(
                                 selected_urls.append(url)
                         if len(selected_urls) >= target_count:
                             break
+                    if len(selected_urls) < target_count:
+                        extra_query = _extra_ddg_query(agent, state, brokerage)
+                        if extra_query and extra_query not in ddg_queries:
+                            fallback_results, blocked = duckduckgo_search(
+                                extra_query,
+                                limit=CONTACT_CSE_FETCH_LIMIT,
+                                allowed_domains=None,
+                                with_blocked=True,
+                            )
+                            if blocked:
+                                _mark_block("duckduckgo.com", reason="blocked")
+                            fb_selected, fb_rejected = _select_until_target(
+                                fallback_results,
+                                location_hint=extra_query,
+                                existing=selected_urls,
+                                relaxed_mode=relaxed_mode,
+                                fetch_ok=fetch_ok,
+                            )
+                            LOG.info(
+                                "EMAIL_SEARCH_RESULTS engine=duckduckgo query=%s returned=%s eligible=%s rejected=%s",
+                                extra_query,
+                                len(fallback_results),
+                                len(fb_selected),
+                                len(fb_rejected),
+                            )
+                            if fb_selected:
+                                LOG.info(
+                                    "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
+                                    json.dumps(_compact_url_log(fb_selected), separators=(",", ":")),
+                                )
+                            rejected_urls.extend(fb_rejected)
+                            for url in fb_selected:
+                                if url not in selected_urls:
+                                    selected_urls.append(url)
             elif engine in {"duckduckgo", "jina"}:
                 fetch_ok = _cse_last_state not in {"disabled"}
                 relaxed_mode = _cse_last_state in {"disabled"}
@@ -4073,6 +4191,40 @@ def _contact_search_urls(
                         "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
                         json.dumps(_compact_url_log(selected_urls), separators=(",", ":")),
                     )
+                if len(selected_urls) < target_count:
+                    extra_query = _extra_ddg_query(agent, state, brokerage)
+                    if extra_query and extra_query != ddg_query:
+                        fallback_results, blocked = duckduckgo_search(
+                            extra_query,
+                            limit=CONTACT_CSE_FETCH_LIMIT,
+                            allowed_domains=None,
+                            with_blocked=True,
+                        )
+                        if blocked:
+                            _mark_block("duckduckgo.com", reason="blocked")
+                        extra_selected, extra_rejected = _select_until_target(
+                            fallback_results,
+                            location_hint=extra_query,
+                            existing=selected_urls,
+                            relaxed_mode=relaxed_mode,
+                            fetch_ok=fetch_ok,
+                        )
+                        LOG.info(
+                            "EMAIL_SEARCH_RESULTS engine=duckduckgo query=%s returned=%s eligible=%s rejected=%s",
+                            extra_query,
+                            len(fallback_results),
+                            len(extra_selected),
+                            len(extra_rejected),
+                        )
+                        if extra_selected:
+                            LOG.info(
+                                "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
+                                json.dumps(_compact_url_log(extra_selected), separators=(",", ":")),
+                            )
+                        rejected_urls.extend(extra_rejected)
+                        for url in extra_selected:
+                            if url not in selected_urls:
+                                selected_urls.append(url)
             if engine == "google":
                 cse_status = _cse_last_state
                 if broadened_used:
@@ -5575,7 +5727,11 @@ def select_top_5_urls(
             score += 5
         if any(term in path for term in contactish_terms):
             score += 3
+        if any(term in path for term in ("contact", "about", "team", "profile")):
+            score += 2
         if any(term in context for term in contactish_terms):
+            score += 2
+        if "@" in context:
             score += 2
         if brokerage_token and (brokerage_token in root or brokerage_token in path or brokerage_token in context):
             score += 3
@@ -5713,12 +5869,28 @@ def select_top_5_urls(
                     original_order.get(normalize_url(c[0]), original_order.get(c[0], 0)),
                 )
             )
-            non_social = [c for c in all_candidates if not c[1]]
-            social = [c for c in all_candidates if c[1]]
-            preferred.extend(non_social[:target])
+            domain_counts: Dict[str, int] = {}
+
+            def _domain_key(url: str) -> str:
+                return _domain(url) or urlparse(url).netloc.lower()
+
+            for url, is_social, _ in all_candidates:
+                dom = _domain_key(url)
+                if dom and domain_counts.get(dom, 0) >= 2:
+                    continue
+                preferred.append((url, is_social))
+                if dom:
+                    domain_counts[dom] = domain_counts.get(dom, 0) + 1
+                if len(preferred) >= target:
+                    break
             if len(preferred) < target:
-                preferred.extend(social[: target - len(preferred)])
-            return [(url, is_social) for url, is_social, _ in preferred[:target]]
+                for url, is_social, _ in all_candidates:
+                    if (url, is_social) in preferred:
+                        continue
+                    preferred.append((url, is_social))
+                    if len(preferred) >= target:
+                        break
+            return preferred[:target]
 
         filtered_candidates = _merge_with_preference()
         filtered = [url for url, _ in filtered_candidates]
@@ -5955,15 +6127,28 @@ def duckduckgo_search(
     with_blocked: bool = False,
 ) -> List[Dict[str, Any]] | Tuple[List[Dict[str, Any]], bool]:
     blocked = False
-    links: List[str] = []
+    results: List[Dict[str, str]] = []
+    effective_limit = limit if limit < 10 else min(limit, 15)
     try:
-        links = jina_cached_search(query, max_results=limit, allowed_domains=allowed_domains)
+        results = _duckduckgo_html_search(
+            query,
+            max_results=effective_limit,
+            allowed_domains=allowed_domains,
+        )
     except DomainBlockedError:
         blocked = True
     except Exception:
         blocked = True
         LOG.exception("duckduckgo_search failed for %s", query)
-    hits = [{"link": link} for link in links if link]
+    hits = [
+        {
+            "link": item.get("link", ""),
+            "title": item.get("title", ""),
+            "snippet": item.get("snippet", ""),
+        }
+        for item in results
+        if item.get("link")
+    ]
     return (hits, blocked) if with_blocked else hits
 
 
