@@ -3897,13 +3897,24 @@ def _broaden_contact_query(agent: str, state: str, city: str, brokerage: str) ->
     return _compact_tokens(f'"{agent}"', state, city, "email", brokerage, "contact")
 
 
-def _extra_ddg_query(agent: str, state: str, brokerage: str) -> str:
-    primary = _compact_tokens(f'"{agent}"', "realtor", state, "email")
-    if primary:
-        return primary
+def _ddg_expansion_queries(agent: str, state: str, brokerage: str, domain_hint: str) -> List[str]:
+    name_term = f'"{agent}"'
+    queries: List[str] = []
+
+    def _add(query: str) -> None:
+        if query and query not in queries:
+            queries.append(query)
+
+    _add(_compact_tokens(name_term, state, "realtor", "site:facebook.com"))
+    _add(_compact_tokens(name_term, state, "realtor", "site:linkedin.com"))
     if brokerage:
-        return _compact_tokens(f'"{agent}"', brokerage, "email")
-    return _compact_tokens(f'"{agent}"', "site:linkedin.com", "email")
+        _add(_compact_tokens(name_term, brokerage, "contact"))
+        _add(_compact_tokens(name_term, brokerage, "site:facebook.com"))
+        _add(_compact_tokens(name_term, brokerage, "site:linkedin.com"))
+    if domain_hint:
+        _add(_compact_tokens(name_term, f"site:{domain_hint}", "contact"))
+        _add(_compact_tokens(name_term, f"site:{domain_hint}", "profile"))
+    return _dedupe_queries(queries)
 
 
 def _compact_url_log(urls: Iterable[str]) -> List[Dict[str, str]]:
@@ -4126,8 +4137,10 @@ def _contact_search_urls(
                         if len(selected_urls) >= target_count:
                             break
                     if len(selected_urls) < target_count:
-                        extra_query = _extra_ddg_query(agent, state, brokerage)
-                        if extra_query and extra_query not in ddg_queries:
+                        expansion_queries = _ddg_expansion_queries(agent, state, brokerage, domain_hint)
+                        for extra_query in expansion_queries:
+                            if extra_query in ddg_queries:
+                                continue
                             fallback_results, blocked = duckduckgo_search(
                                 extra_query,
                                 limit=CONTACT_CSE_FETCH_LIMIT,
@@ -4159,6 +4172,8 @@ def _contact_search_urls(
                             for url in fb_selected:
                                 if url not in selected_urls:
                                     selected_urls.append(url)
+                            if len(selected_urls) >= target_count:
+                                break
             elif engine in {"duckduckgo", "jina"}:
                 fetch_ok = _cse_last_state not in {"disabled"}
                 relaxed_mode = _cse_last_state in {"disabled"}
@@ -4192,8 +4207,10 @@ def _contact_search_urls(
                         json.dumps(_compact_url_log(selected_urls), separators=(",", ":")),
                     )
                 if len(selected_urls) < target_count:
-                    extra_query = _extra_ddg_query(agent, state, brokerage)
-                    if extra_query and extra_query != ddg_query:
+                    expansion_queries = _ddg_expansion_queries(agent, state, brokerage, domain_hint)
+                    for extra_query in expansion_queries:
+                        if extra_query == ddg_query:
+                            continue
                         fallback_results, blocked = duckduckgo_search(
                             extra_query,
                             limit=CONTACT_CSE_FETCH_LIMIT,
@@ -4225,6 +4242,8 @@ def _contact_search_urls(
                         for url in extra_selected:
                             if url not in selected_urls:
                                 selected_urls.append(url)
+                        if len(selected_urls) >= target_count:
+                            break
             if engine == "google":
                 cse_status = _cse_last_state
                 if broadened_used:
