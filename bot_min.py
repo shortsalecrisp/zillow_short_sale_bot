@@ -4703,6 +4703,23 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 email_candidates_info.append({"email": em, "source": src})
         candidates.extend(page_candidates)
 
+    def _collect_parse_lite(page: str, final_url: str) -> None:
+        if not page:
+            return
+        lite = parse_lite(final_url, text=page)
+        emails = lite.get("emails", [])
+        phones = lite.get("phones", [])
+        if not emails and not phones:
+            return
+        candidates.append(
+            {
+                "source_url": final_url,
+                "evidence_snippet": "parse_lite",
+                "phones": phones,
+                "emails": emails,
+            }
+        )
+
     def _direct_fetch(url: str) -> Tuple[str, str, int]:
         dom = _domain(url)
         proxy_url = _proxy_for_domain(dom)
@@ -4780,6 +4797,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 if not page.strip():
                     continue
                 _collect_page(page, final_url)
+                _collect_parse_lite(page, final_url)
 
         if not _has_verifiable_contacts():
             for url in urls:
