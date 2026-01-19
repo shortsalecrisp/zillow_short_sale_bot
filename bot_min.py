@@ -2389,10 +2389,6 @@ def _normalize_jina_proxy_url(url: str) -> str:
     while "r.jina.ai/https://r.jina.ai/" in normalized or "r.jina.ai/http://r.jina.ai/" in normalized:
         normalized = normalized.replace("r.jina.ai/https://r.jina.ai/", "r.jina.ai/")
         normalized = normalized.replace("r.jina.ai/http://r.jina.ai/", "r.jina.ai/")
-    if normalized.startswith("https://r.jina.ai/http://"):
-        normalized = "https://r.jina.ai/https://" + normalized[len("https://r.jina.ai/http://") :]
-    if normalized.startswith("http://r.jina.ai/http://"):
-        normalized = "http://r.jina.ai/https://" + normalized[len("http://r.jina.ai/http://") :]
     return normalized
 
 
