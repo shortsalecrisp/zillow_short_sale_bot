@@ -2382,6 +2382,20 @@ _CONTACT_PAGE_CACHE: Dict[str, Tuple[str, bool, str]] = {}
 _CONTACT_PAGE_CACHE_LOCK = threading.Lock()
 
 
+def _normalize_jina_proxy_url(url: str) -> str:
+    if not url:
+        return url
+    normalized = url
+    while "r.jina.ai/https://r.jina.ai/" in normalized or "r.jina.ai/http://r.jina.ai/" in normalized:
+        normalized = normalized.replace("r.jina.ai/https://r.jina.ai/", "r.jina.ai/")
+        normalized = normalized.replace("r.jina.ai/http://r.jina.ai/", "r.jina.ai/")
+    if normalized.startswith("https://r.jina.ai/http://"):
+        normalized = "https://r.jina.ai/https://" + normalized[len("https://r.jina.ai/http://") :]
+    if normalized.startswith("http://r.jina.ai/http://"):
+        normalized = "http://r.jina.ai/https://" + normalized[len("http://r.jina.ai/http://") :]
+    return normalized
+
+
 def _mirror_url(url: str) -> str:
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
@@ -4834,6 +4848,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
 def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
     if not url:
         return "", False, "empty"
+    url = _normalize_jina_proxy_url(url)
     if _domain(url) == "r.jina.ai":
         unwrapped = _unwrap_jina_url(url)
         if unwrapped:
@@ -5013,7 +5028,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
     return _finalize("", False, "post-fast-fetch-empty", "")
 
 def _unwrap_jina_url(url: str) -> str:
-    parsed = urlparse(url)
+    parsed = urlparse(_normalize_jina_proxy_url(url))
     if parsed.netloc != "r.jina.ai":
         return url
     inner = parsed.path.lstrip("/")
