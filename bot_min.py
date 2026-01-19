@@ -5017,12 +5017,15 @@ def _unwrap_jina_url(url: str) -> str:
     if parsed.netloc != "r.jina.ai":
         return url
     inner = parsed.path.lstrip("/")
-    if inner.startswith("http://") or inner.startswith("https://"):
-        # Preserve query string if present on the outer URL.
-        if parsed.query:
-            return f"{inner}?{parsed.query}"
-        return inner
-    return url
+    if not inner:
+        return ""
+    if not (inner.startswith("http://") or inner.startswith("https://")):
+        inner = f"https://{inner}"
+    # Preserve query string if present on the outer URL.
+    if parsed.query:
+        joiner = "&" if "?" in inner else "?"
+        return f"{inner}{joiner}{parsed.query}"
+    return inner
 
 
 async def _headless_fetch_async(
@@ -5031,6 +5034,12 @@ async def _headless_fetch_async(
     if not HEADLESS_ENABLED or not async_playwright:
         return {}
     target_url = _unwrap_jina_url(url)
+    if not target_url:
+        LOG.info("PLAYWRIGHT_SKIPPED_JINA_EMPTY url=%s", url)
+        return {}
+    if _domain(target_url) == "r.jina.ai":
+        LOG.info("PLAYWRIGHT_SKIPPED_JINA_PROXY url=%s", url)
+        return {}
     if is_blocked_url(target_url):
         LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", target_url)
         return {}
