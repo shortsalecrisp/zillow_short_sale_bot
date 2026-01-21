@@ -104,7 +104,36 @@ if "GOOGLE_SVC_JSON" in os.environ and not Path("service_account.json").exists()
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", SCOPES)
 client = gspread.authorize(creds)
-SHEET = client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1
+_GSHEET_RETRY_STATUS = {429, 500, 503}
+
+
+def _should_retry_gspread_error(exc: Exception) -> bool:
+    if isinstance(exc, gspread.exceptions.APIError):
+        status = getattr(exc.response, "status_code", None)
+        return status in _GSHEET_RETRY_STATUS
+    return False
+
+
+def _retry_gspread_call(label: str, func):
+    delay = 1.0
+    for attempt in range(1, 4):
+        try:
+            return func()
+        except Exception as exc:
+            if attempt >= 3 or not _should_retry_gspread_error(exc):
+                raise
+            print(
+                f"Google Sheets {label} failed ({exc}); retrying in {delay:.1f}s "
+                f"(attempt {attempt}/3)"
+            )
+            time.sleep(delay)
+            delay *= 2
+
+
+SHEET = _retry_gspread_call(
+    "open sheet",
+    lambda: client.open_by_key("12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70").sheet1,
+)
 
 # ------------------  local dedupe DB ------------------
 SEEN_DB = "seen.db"
