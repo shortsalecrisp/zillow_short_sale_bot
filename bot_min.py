@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import importlib.util
+import unicodedata
 from pathlib import Path
 from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta
@@ -2085,9 +2086,39 @@ def _names_match(a: str, b: str) -> bool:
         a = str(a or "")
     if not isinstance(b, str):
         b = str(b or "")
-    ta = {t.lower().strip(".") for t in a.split() if len(t) > 1}
-    tb = {t.lower().strip(".") for t in b.split() if len(t) > 1}
-    return bool(ta & tb)
+    ta = {t for t in _normalize_name_tokens(a) if t}
+    tb = {t for t in _normalize_name_tokens(b) if t}
+    if ta & tb:
+        return True
+    if not ta or not tb:
+        return False
+    first_a, last_a = _first_last_name_tokens(a)
+    first_b, last_b = _first_last_name_tokens(b)
+    if last_a and last_a == last_b and first_a and first_b:
+        return first_a[0] == first_b[0]
+    return False
+
+
+def _normalize_name_value(value: str) -> str:
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFKD", value)
+    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return stripped.lower()
+
+
+def _normalize_name_tokens(name: str) -> List[str]:
+    if not name:
+        return []
+    normalized = _normalize_name_value(name)
+    return [re.sub(r"[^a-z]", "", part) for part in normalized.split() if part]
+
+
+def _first_last_name_tokens(name: str) -> Tuple[str, str]:
+    tokens = [tok for tok in _normalize_name_tokens(name) if tok]
+    if not tokens:
+        return "", ""
+    return tokens[0], tokens[-1]
 
 def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
     snapshot = _rapid_contact_snapshot(agent_name, {"zpid": zpid})
@@ -3828,28 +3859,75 @@ def _looks_directory_page(url: str) -> bool:
 
 
 def _page_mentions_agent(text: str, agent: str, soup: Any = None) -> bool:
-    tokens = [part.lower() for part in agent.split() if len(part) > 1]
+    tokens = [tok for tok in _normalize_name_tokens(agent) if len(tok) > 1]
     if not tokens:
         return False
-    low = text.lower()
-    hits = sum(1 for tok in tokens if tok in low)
+    low = _normalize_name_value(text)
+    hits = sum(1 for tok in tokens if tok and tok in low)
     if hits >= max(1, len(tokens) - 1):
         return True
+    first, last = _first_last_name_tokens(agent)
+    if last and first:
+        initial = re.escape(first[0])
+        last_re = re.escape(last)
+        if re.search(rf"\\b{initial}\\.?\\s+{last_re}\\b", low) or re.search(
+            rf"\\b{last_re}\\s*,\\s*{initial}\\.?\\b",
+            low,
+        ):
+            return True
     if soup and soup.title and soup.title.string:
-        title_low = soup.title.string.lower()
-        hits = sum(1 for tok in tokens if tok in title_low)
+        title_low = _normalize_name_value(soup.title.string)
+        hits = sum(1 for tok in tokens if tok and tok in title_low)
         if hits >= max(1, len(tokens) - 1):
             return True
     return False
 
 
-def _agent_matches_context(agent: str, *, text: str = "", snippet: str = "", title: str = "") -> bool:
+def _brand_handle_match(agent: str, context: str, domain: str) -> bool:
+    if not agent or not context or not domain:
+        return False
+    if not _is_known_profile_domain(domain):
+        return False
+    _, last = _first_last_name_tokens(agent)
+    if not last or len(last) < 3:
+        return False
+    normalized = _normalize_name_value(context)
+    tokens = re.findall(r"[a-z0-9]+", normalized)
+    if not tokens:
+        return False
+    suffixes = ("realty", "realestate", "homes", "properties", "group", "team", "brokerage", "realtors")
+    for token in tokens:
+        if last in token and any(token.endswith(suffix) for suffix in suffixes):
+            return True
+    return False
+
+
+def _is_known_profile_domain(domain: str) -> bool:
+    if not domain:
+        return False
+    root = _domain(domain)
+    return root in KNOWN_PROFILE_DOMAINS or any(
+        root.endswith(f".{dom}") for dom in KNOWN_PROFILE_DOMAINS
+    )
+
+
+def _agent_matches_context(
+    agent: str,
+    *,
+    text: str = "",
+    snippet: str = "",
+    title: str = "",
+    url: str = "",
+) -> bool:
     if not agent.strip():
         return True
     context = " ".join(part for part in (title, snippet, text) if part).strip()
     if not context:
         return False
-    return _page_mentions_agent(context, agent)
+    if _page_mentions_agent(context, agent):
+        return True
+    dom = _domain(url) if url else ""
+    return _brand_handle_match(agent, context, dom)
 
 
 def _discover_agent_links(
@@ -5999,17 +6077,51 @@ def select_top_5_urls(
                 if property_state and not _location_matches(final_url, text, location_context, property_state, property_city, brokerage):
                     rejected.append((final_url, "state_mismatch"))
                     continue
-                if agent and not _agent_matches_context(agent, text=text, snippet=location_context, title=title):
-                    rejected.append((final_url, "agent_mismatch"))
-                    continue
+                if agent and not _agent_matches_context(
+                    agent,
+                    text=text,
+                    snippet=location_context,
+                    title=title,
+                    url=final_url,
+                ):
+                    lite = parse_lite(final_url, text=text)
+                    emails_found = [
+                        em for em in lite.get("emails", []) if ok_email(em) and not _is_junk_email(em)
+                    ]
+                    phones_found = [ph for ph in lite.get("phones", []) if valid_phone(ph)]
+                    LOG.info(
+                        "URL_CANDIDATE_SOFT_REJECT url=%s reason=agent_mismatch parsed_lite=True emails_found=%s phones_found=%s",
+                        final_url,
+                        len(emails_found),
+                        len(phones_found),
+                    )
+                    if emails_found or phones_found:
+                        accept_reason = "agent_mismatch_parse_lite_contact"
+                    else:
+                        rejected.append((final_url, "agent_mismatch"))
+                        continue
             else:
                 accept_reason = allow_reason
                 if property_state and not _location_matches(final_url, "", location_context, property_state, property_city, brokerage):
                     rejected.append((final_url, "state_mismatch"))
                     continue
-                if agent and not _agent_matches_context(agent, snippet=location_context, title=title):
-                    rejected.append((final_url, "agent_mismatch"))
-                    continue
+                if agent and not _agent_matches_context(agent, snippet=location_context, title=title, url=final_url):
+                    lite = parse_lite(final_url)
+                    emails_found = [
+                        em for em in lite.get("emails", []) if ok_email(em) and not _is_junk_email(em)
+                    ]
+                    phones_found = [ph for ph in lite.get("phones", []) if valid_phone(ph)]
+                    LOG.info(
+                        "URL_CANDIDATE_SOFT_REJECT url=%s reason=agent_mismatch parsed_lite=True emails_found=%s phones_found=%s",
+                        final_url,
+                        len(emails_found),
+                        len(phones_found),
+                    )
+                    if emails_found or phones_found:
+                        accept_reason = "agent_mismatch_parse_lite_contact"
+                    else:
+                        rejected.append((final_url, "agent_mismatch"))
+                        continue
             original_order.setdefault(normalize_url(final_url), original_order.get(norm, idx))
             root = _domain(final_url) or _domain(norm) or ""
             LOG.info("URL_CANDIDATE_ACCEPTED url=%s reason=%s", final_url, accept_reason or "accepted")
@@ -7231,6 +7343,7 @@ PORTAL_PROFILE_DOMAINS: Set[str] = {
     "realbrokerllc.com",
     "compass.com",
 }
+KNOWN_PROFILE_DOMAINS: Set[str] = set(PORTAL_PROFILE_DOMAINS) | set(SOCIAL_DOMAINS)
 
 
 def _portal_contact_details(
