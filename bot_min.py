@@ -3945,6 +3945,33 @@ def _broaden_contact_query(agent: str, state: str, city: str, brokerage: str) ->
     return _compact_tokens(f'"{agent}"', state, city, "email", brokerage, "contact")
 
 
+def _contact_fallback_queries(agent: str, state: str, city: str, brokerage: str) -> List[str]:
+    tokens = [tok for tok in agent.split() if tok]
+    if not tokens:
+        return []
+    full_name = " ".join(tokens)
+    partials: List[str] = []
+    if len(tokens) >= 2:
+        partials.append(f"{tokens[0]} {tokens[-1]}")
+    if len(tokens) >= 3:
+        partials.append(f"{tokens[0]} {tokens[1]}")
+    partials = list(dict.fromkeys([full_name] + [p for p in partials if p]))
+    queries: List[str] = []
+
+    def _add(query: str) -> None:
+        if query and query not in queries:
+            queries.append(query)
+
+    _add(_compact_tokens(full_name, "email"))
+    for name in partials:
+        _add(_compact_tokens(name, "realtor", "email", state))
+    if brokerage:
+        for name in partials:
+            _add(_compact_tokens(name, f'"{brokerage}"', "email"))
+    _add(_compact_tokens(full_name, "contact"))
+    return _dedupe_queries(queries)
+
+
 def _ddg_expansion_queries(agent: str, state: str, brokerage: str, domain_hint: str) -> List[str]:
     name_term = f'"{agent}"'
     queries: List[str] = []
@@ -4061,6 +4088,7 @@ def _contact_search_urls(
             fallback_results: List[Dict[str, Any]] = []
             selected_urls: List[str] = []
             broadened_used = False
+            fallback_queries_used = False
             if engine == "google":
                 used_queries: List[str] = []
                 fetch_ok = _cse_last_state not in {"disabled"}
@@ -4113,6 +4141,46 @@ def _contact_search_urls(
                             selected_urls.append(url)
                     if len(selected_urls) >= target_count:
                         break
+                if not selected_urls:
+                    fallback_queries = _contact_fallback_queries(agent, state, city, brokerage)
+                    for fallback_query in fallback_queries:
+                        if fallback_query in used_queries:
+                            continue
+                        used_queries.append(fallback_query)
+                        raw_results = google_cse_search(
+                            fallback_query,
+                            limit=CONTACT_CSE_FETCH_LIMIT,
+                        )
+                        fallback_selected, fallback_rejected = _select_until_target(
+                            raw_results,
+                            location_hint=fallback_query,
+                            existing=selected_urls,
+                            relaxed_mode=relaxed_mode,
+                            fetch_ok=fetch_ok,
+                        )
+                        LOG.info(
+                            "EMAIL_SEARCH_RESULTS engine=%s query=%s returned=%s eligible=%s rejected=%s",
+                            engine,
+                            fallback_query,
+                            len(raw_results),
+                            len(fallback_selected),
+                            len(fallback_rejected),
+                        )
+                        if fallback_selected:
+                            LOG.info(
+                                "EMAIL_SEARCH_SHORTLIST engine=%s urls=%s",
+                                engine,
+                                json.dumps(_compact_url_log(fallback_selected), separators=(",", ":")),
+                            )
+                        fallback_queries_used = fallback_queries_used or bool(
+                            fallback_selected or raw_results
+                        )
+                        rejected_urls.extend(fallback_rejected)
+                        for url in fallback_selected:
+                            if url not in selected_urls:
+                                selected_urls.append(url)
+                        if len(selected_urls) >= target_count:
+                            break
                 if len(selected_urls) < target_count:
                     broadened_query = _broaden_contact_query(agent, state, city, brokerage)
                     if broadened_query and broadened_query not in used_queries:
@@ -4296,6 +4364,8 @@ def _contact_search_urls(
                 cse_status = _cse_last_state
                 if broadened_used:
                     cse_status = f"{cse_status}-broadened"
+                if fallback_queries_used:
+                    cse_status = f"{cse_status}-fallback"
             else:
                 cse_status = cse_status or engine
             search_empty = not bool(selected_urls)
@@ -6072,6 +6142,15 @@ def google_cse_search(
         if not key or not cx:
             continue
         attempts += 1
+        drop_counts = {
+            "missing_link": 0,
+            "blocked_domain": 0,
+            "mime_type": 0,
+            "duplicate": 0,
+            "disallowed_domain": 0,
+            "duplicate_filtered": 0,
+        }
+        raw_items_count = 0
         # Light per-key spacing to avoid rapid-fire throttling.
         last_ts = _cse_last_ts_per_key.get((key, cx), 0.0)
         if last_ts:
@@ -6093,15 +6172,23 @@ def google_cse_search(
                 payload = _fetch_cse_page(start, num_param, key, cx)
                 _cse_last_ts_per_key[(key, cx)] = time.time()
                 items = payload.get("items", []) or []
+                raw_items_count += len(items)
                 for item in items:
                     link = item.get("link")
                     if not link:
+                        drop_counts["missing_link"] += 1
+                        continue
+                    mime = str(item.get("mime") or item.get("fileFormat") or "").lower()
+                    if mime and mime in {"application/pdf", "application/x-pdf"}:
+                        drop_counts["mime_type"] += 1
                         continue
                     if is_blocked_url(link):
                         _log_blocked_url(link)
+                        drop_counts["blocked_domain"] += 1
                         continue
                     norm = normalize_url(link)
                     if norm in seen_raw_links:
+                        drop_counts["duplicate"] += 1
                         continue
                     seen_raw_links.add(norm)
                     raw_links.append({
@@ -6112,9 +6199,14 @@ def google_cse_search(
             for link in raw_links:
                 link_url = link if isinstance(link, str) else link.get("link", "")
                 if not link_url or not _filter_allowed(link_url, allowed_domains):
+                    if not link_url:
+                        drop_counts["missing_link"] += 1
+                    else:
+                        drop_counts["disallowed_domain"] += 1
                     continue
                 norm = normalize_url(link_url)
                 if norm in seen_results:
+                    drop_counts["duplicate_filtered"] += 1
                     continue
                 seen_results.add(norm)
                 results.append(
@@ -6126,6 +6218,20 @@ def google_cse_search(
                 )
                 if len(results) >= limit:
                     break
+            LOG.info(
+                "CSE_ITEM_COUNTS query=%r raw_items=%d raw_unique=%d dropped=%s",
+                query,
+                raw_items_count,
+                len(raw_links),
+                json.dumps(drop_counts, separators=(",", ":")),
+            )
+            if raw_items_count > 0 and not results:
+                LOG.warning(
+                    "CSE_EMPTY_AFTER_FILTER query=%r raw_items=%d dropped=%s",
+                    query,
+                    raw_items_count,
+                    json.dumps(drop_counts, separators=(",", ":")),
+                )
             if len(raw_links) < limit:
                 LOG.info("CSE fallback triggered cse_items=%d limit=%d", len(raw_links), limit)
                 fallback_results, blocked = duckduckgo_search(
