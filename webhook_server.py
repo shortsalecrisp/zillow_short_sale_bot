@@ -8,6 +8,7 @@ import hashlib
 import logging
 import os
 import re
+import time
 import urllib.parse
 import threading
 from typing import Any, Dict, List, Optional
@@ -685,14 +686,53 @@ async def _stop_scheduler() -> None:
 # ──────────────────────────────────────────────────────────────────────
 creds         = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 gclient       = gspread.authorize(creds)
+_GSHEET_RETRY_STATUS = {429, 500, 503}
+
+
+def _should_retry_gspread_error(exc: Exception) -> bool:
+    if isinstance(exc, gspread.exceptions.APIError):
+        status = getattr(exc.response, "status_code", None)
+        return status in _GSHEET_RETRY_STATUS
+    return False
+
+
+def _retry_gspread_call(label: str, func):
+    delay = 1.0
+    for attempt in range(1, 4):
+        try:
+            return func()
+        except Exception as exc:
+            if attempt >= 3 or not _should_retry_gspread_error(exc):
+                raise
+            logger.warning(
+                "Google Sheets %s failed (%s); retrying in %.1fs (attempt %s/3)",
+                label,
+                exc,
+                delay,
+                attempt,
+            )
+            time.sleep(delay)
+            delay *= 2
 
 def get_replies_ws():
     """Ensure a 'Replies' sheet exists and return the worksheet handle."""
     try:
-        return gclient.open_by_key(GSHEET_ID).worksheet("Replies")
+        workbook = _retry_gspread_call(
+            "open workbook",
+            lambda: gclient.open_by_key(GSHEET_ID),
+        )
+        return _retry_gspread_call(
+            "open Replies worksheet",
+            lambda: workbook.worksheet("Replies"),
+        )
     except gspread.WorksheetNotFound:
-        ws = gclient.open_by_key(GSHEET_ID).add_worksheet(
-            title="Replies", rows="1000", cols="3"
+        workbook = _retry_gspread_call(
+            "open workbook",
+            lambda: gclient.open_by_key(GSHEET_ID),
+        )
+        ws = _retry_gspread_call(
+            "create Replies worksheet",
+            lambda: workbook.add_worksheet(title="Replies", rows="1000", cols="3"),
         )
         ws.append_row(["phone", "time_received", "message"])
         return ws

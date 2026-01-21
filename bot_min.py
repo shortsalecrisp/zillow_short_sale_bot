@@ -844,7 +844,39 @@ ALLOWLIST_PARSE_ANYWAY_DOMAINS: Set[str] = {
 creds           = Credentials.from_service_account_info(SC_JSON, scopes=SCOPES)
 sheets_service  = gapi_build("sheets", "v4", credentials=creds, cache_discovery=False)
 gc              = gspread.authorize(creds)
-ws              = gc.open_by_key(GSHEET_ID).worksheet(GSHEET_TAB)
+_GSHEET_RETRY_STATUS = {429, 500, 503}
+
+
+def _should_retry_gspread_error(exc: Exception) -> bool:
+    if isinstance(exc, gspread.exceptions.APIError):
+        status = getattr(exc.response, "status_code", None)
+        return status in _GSHEET_RETRY_STATUS
+    return False
+
+
+def _retry_gspread_call(label: str, func):
+    delay = 1.0
+    for attempt in range(1, 4):
+        try:
+            return func()
+        except Exception as exc:
+            if attempt >= 3 or not _should_retry_gspread_error(exc):
+                raise
+            LOG.warning(
+                "Google Sheets %s failed (%s); retrying in %.1fs (attempt %s/3)",
+                label,
+                exc,
+                delay,
+                attempt,
+            )
+            time.sleep(delay)
+            delay *= 2
+
+
+ws = _retry_gspread_call(
+    "open worksheet",
+    lambda: gc.open_by_key(GSHEET_ID).worksheet(GSHEET_TAB),
+)
 _seen_zpid_ws: Optional[gspread.Worksheet] = None
 _seen_zpid_ws_lock = threading.Lock()
 
@@ -854,11 +886,17 @@ def _get_seen_zpid_worksheet() -> gspread.Worksheet:
     with _seen_zpid_ws_lock:
         if _seen_zpid_ws:
             return _seen_zpid_ws
-        workbook = gc.open_by_key(GSHEET_ID)
+        workbook = _retry_gspread_call("open workbook", lambda: gc.open_by_key(GSHEET_ID))
         try:
-            seen_ws = workbook.worksheet(SEEN_ZPID_TAB)
+            seen_ws = _retry_gspread_call(
+                "open seen worksheet",
+                lambda: workbook.worksheet(SEEN_ZPID_TAB),
+            )
         except gspread.exceptions.WorksheetNotFound:
-            seen_ws = workbook.add_worksheet(title=SEEN_ZPID_TAB, rows=1000, cols=1)
+            seen_ws = _retry_gspread_call(
+                "create seen worksheet",
+                lambda: workbook.add_worksheet(title=SEEN_ZPID_TAB, rows=1000, cols=1),
+            )
         try:
             header = seen_ws.acell("A1").value
             if not header or header.strip().lower() != "zpid":
