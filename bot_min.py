@@ -2862,6 +2862,22 @@ def _duckduckgo_html_search(
     return hits[:max_results]
 
 
+DDG_MIN_RESULTS = int(os.getenv("DDG_MIN_RESULTS", "10"))
+DDG_MAX_RESULTS = int(os.getenv("DDG_MAX_RESULTS", "15"))
+
+
+def _ddg_target_limit(limit: int) -> int:
+    return max(DDG_MIN_RESULTS, min(max(limit, 1), DDG_MAX_RESULTS))
+
+
+def _ddg_relaxed_query(query: str) -> str:
+    if not query:
+        return ""
+    cleaned = query.replace('"', " ")
+    tokens = [tok for tok in cleaned.split() if tok and not tok.lower().startswith("site:")]
+    return " ".join(tokens).strip()
+
+
 def jina_cached_search(
     query: str,
     *,
@@ -4089,6 +4105,8 @@ def _contact_search_urls(
             selected_urls: List[str] = []
             broadened_used = False
             fallback_queries_used = False
+            ddg_used = False
+            ddg_blocked = False
             if engine == "google":
                 used_queries: List[str] = []
                 fetch_ok = _cse_last_state not in {"disabled"}
@@ -4215,66 +4233,34 @@ def _contact_search_urls(
                         for url in broadened_selected:
                             if url not in selected_urls:
                                 selected_urls.append(url)
-                if len(selected_urls) < target_count and _cse_last_state in {"blocked", "throttled", "disabled"}:
+                if len(selected_urls) < target_count:
                     ddg_queries = used_queries or [primary_query]
-                    for ddg_query in ddg_queries:
-                        fallback_results, blocked = duckduckgo_search(
-                            ddg_query,
-                            limit=CONTACT_CSE_FETCH_LIMIT,
-                            allowed_domains=None,
-                            with_blocked=True,
-                        )
-                        if blocked:
-                            _mark_block("duckduckgo.com", reason="blocked")
-                        cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
-                        fb_selected, fb_rejected = _select_until_target(
-                            fallback_results,
-                            location_hint=ddg_query,
-                            existing=selected_urls,
-                            relaxed_mode=relaxed_mode,
-                            fetch_ok=fetch_ok,
-                        )
-                        LOG.info(
-                            "EMAIL_SEARCH_RESULTS engine=duckduckgo query=%s returned=%s eligible=%s rejected=%s",
-                            ddg_query,
-                            len(fallback_results),
-                            len(fb_selected),
-                            len(fb_rejected),
-                        )
-                        if fb_selected:
-                            LOG.info(
-                                "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
-                                json.dumps(_compact_url_log(fb_selected), separators=(",", ":")),
-                            )
-                        rejected_urls.extend(fb_rejected)
-                        for url in fb_selected:
-                            if url not in selected_urls:
-                                selected_urls.append(url)
-                        if len(selected_urls) >= target_count:
-                            break
-                    if len(selected_urls) < target_count:
-                        expansion_queries = _ddg_expansion_queries(agent, state, brokerage, domain_hint)
-                        for extra_query in expansion_queries:
-                            if extra_query in ddg_queries:
-                                continue
+
+                    def _run_ddg_queries(queries: List[str]) -> None:
+                        nonlocal ddg_used, ddg_blocked, cse_status
+                        for ddg_query in queries:
                             fallback_results, blocked = duckduckgo_search(
-                                extra_query,
+                                ddg_query,
                                 limit=CONTACT_CSE_FETCH_LIMIT,
                                 allowed_domains=None,
                                 with_blocked=True,
                             )
                             if blocked:
                                 _mark_block("duckduckgo.com", reason="blocked")
+                                ddg_blocked = True
+                            ddg_used = ddg_used or bool(fallback_results)
+                            if fallback_results or blocked:
+                                cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
                             fb_selected, fb_rejected = _select_until_target(
                                 fallback_results,
-                                location_hint=extra_query,
+                                location_hint=ddg_query,
                                 existing=selected_urls,
                                 relaxed_mode=relaxed_mode,
                                 fetch_ok=fetch_ok,
                             )
                             LOG.info(
                                 "EMAIL_SEARCH_RESULTS engine=duckduckgo query=%s returned=%s eligible=%s rejected=%s",
-                                extra_query,
+                                ddg_query,
                                 len(fallback_results),
                                 len(fb_selected),
                                 len(fb_rejected),
@@ -4290,6 +4276,12 @@ def _contact_search_urls(
                                     selected_urls.append(url)
                             if len(selected_urls) >= target_count:
                                 break
+
+                    _run_ddg_queries(ddg_queries)
+                    if len(selected_urls) < target_count:
+                        expansion_queries = _ddg_expansion_queries(agent, state, brokerage, domain_hint)
+                        expansion_queries = [q for q in expansion_queries if q not in ddg_queries]
+                        _run_ddg_queries(expansion_queries)
             elif engine in {"duckduckgo", "jina"}:
                 fetch_ok = _cse_last_state not in {"disabled"}
                 relaxed_mode = _cse_last_state in {"disabled"}
@@ -4366,6 +4358,10 @@ def _contact_search_urls(
                     cse_status = f"{cse_status}-broadened"
                 if fallback_queries_used:
                     cse_status = f"{cse_status}-fallback"
+                if ddg_blocked:
+                    cse_status = f"{cse_status}-ddg-blocked"
+                elif ddg_used:
+                    cse_status = f"{cse_status}-ddg"
             else:
                 cse_status = cse_status or engine
             search_empty = not bool(selected_urls)
@@ -6329,13 +6325,31 @@ def duckduckgo_search(
 ) -> List[Dict[str, Any]] | Tuple[List[Dict[str, Any]], bool]:
     blocked = False
     results: List[Dict[str, str]] = []
-    effective_limit = limit if limit < 10 else min(limit, 15)
+    effective_limit = _ddg_target_limit(limit)
     try:
         results = _duckduckgo_html_search(
             query,
             max_results=effective_limit,
             allowed_domains=allowed_domains,
         )
+        if len(results) < effective_limit:
+            relaxed_query = _ddg_relaxed_query(query)
+            if relaxed_query and relaxed_query != query:
+                extra_results = _duckduckgo_html_search(
+                    relaxed_query,
+                    max_results=effective_limit,
+                    allowed_domains=allowed_domains,
+                )
+                seen = {normalize_url(item.get("link", "")) for item in results}
+                for item in extra_results:
+                    link = item.get("link", "")
+                    norm = normalize_url(link)
+                    if not norm or norm in seen:
+                        continue
+                    results.append(item)
+                    seen.add(norm)
+                    if len(results) >= effective_limit:
+                        break
     except DomainBlockedError:
         blocked = True
     except Exception:
