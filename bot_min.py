@@ -2753,6 +2753,101 @@ def parse_lite(url: str, text: str = "") -> Dict[str, List[str]]:
     }
 
 
+SOCIAL_ABOUT_HINTS = ("about", "bio", "intro", "contact", "details", "info", "website")
+SOCIAL_URL_RE = re.compile(r"(https?://[^\s\"'<>]+)", re.I)
+SOCIAL_URL_PREFIX_RE = re.compile(r"\bwww\.[^\s\"'<>]+", re.I)
+
+
+def _unwrap_social_outbound_link(raw_url: str) -> str:
+    if not raw_url:
+        return raw_url
+    parsed = urlparse(raw_url)
+    host = (parsed.netloc or "").lower()
+    if not host:
+        return raw_url
+    if host.endswith(("facebook.com", "instagram.com")):
+        qs = dict(parse_qsl(parsed.query))
+        for key in ("u", "url", "target"):
+            target = qs.get(key)
+            if target:
+                return unquote(target)
+    return raw_url
+
+
+def _extract_social_about_contacts(page: str, base_url: str) -> Tuple[Set[str], Set[str]]:
+    if not page:
+        return set(), set()
+    emails: Set[str] = set()
+    links: Set[str] = set()
+
+    def _collect_text(text: str) -> None:
+        if not text:
+            return
+        for mail, _ in _extract_emails_with_obfuscation(text):
+            emails.add(mail)
+        for match in SOCIAL_URL_RE.findall(text):
+            links.add(match)
+        for match in SOCIAL_URL_PREFIX_RE.findall(text):
+            links.add(f"https://{match}")
+
+    if BeautifulSoup:
+        try:
+            soup = BeautifulSoup(page, "html.parser")
+        except Exception:
+            soup = None
+        if soup:
+            sections: List[Any] = []
+
+            def _has_hint(val: Any) -> bool:
+                if not val:
+                    return False
+                if isinstance(val, (list, tuple)):
+                    val = " ".join(str(v) for v in val)
+                low = str(val).lower()
+                return any(hint in low for hint in SOCIAL_ABOUT_HINTS)
+
+            for tag in soup.find_all(True):
+                if any(
+                    _has_hint(tag.get(attr))
+                    for attr in ("id", "class", "aria-label", "data-testid", "data-pagelet")
+                ):
+                    sections.append(tag)
+                elif tag.name in {"h1", "h2", "h3", "h4", "h5"}:
+                    if _has_hint(tag.get_text(" ", strip=True)):
+                        sections.append(tag.parent or tag)
+
+            if not sections:
+                sections = [soup]
+
+            for node in sections:
+                text = node.get_text(" ", strip=True)
+                _collect_text(text)
+                for anchor in node.select("a[href]"):
+                    href = anchor.get("href") or ""
+                    if not href:
+                        continue
+                    if href.startswith(("mailto:", "tel:")):
+                        continue
+                    links.add(href)
+            soup.decompose()
+    else:
+        _collect_text(page)
+
+    normalized_links: Set[str] = set()
+    for link in links:
+        if not link:
+            continue
+        if link.startswith("//"):
+            link = f"https:{link}"
+        if link.startswith("/"):
+            link = urljoin(base_url, link)
+        link = _unwrap_social_outbound_link(link)
+        normalized = normalize_url(link)
+        if normalized:
+            normalized_links.add(normalized)
+    return emails, normalized_links
+
+
 def _decode_duckduckgo_link(raw: str) -> str:
     parsed = urlparse(raw)
     qs = dict(parse_qsl(parsed.query))
@@ -7480,6 +7575,7 @@ EMAIL_SOURCE_BASE = {
     "mailto": 0.8,
     "script_blob": 0.8,
     "obfuscated": 0.75,
+    "social_about": 0.7,
     "dom": 0.6,
     "pattern": 0.5,
     "cse_contact": 0.7,
@@ -8574,6 +8670,8 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     cse_rate_limited = False
     cse_status: str = "idle"
     search_empty = False
+    social_follow_queue: List[str] = []
+    social_follow_seen: Set[str] = set()
 
     inferred_domain_hint = _infer_domain_from_text(brokerage) or _infer_domain_from_text(agent)
     if inferred_domain_hint and not domain_hint:
@@ -8883,6 +8981,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             page_title = soup.title.string.strip()
         preferred_email_domains.update(_preferred_email_domains_for_text(page[:4000], brokerage, page_title))
         trusted_hit = dom in trusted_domains or domain_hint_hit
+        is_social = _is_social_root(dom)
         if jsonld_entries:
             sameas_links: List[str] = []
             jsonld_email_found = False
@@ -8916,6 +9015,30 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             soup=soup,
         )
         portal_hit = bool(portal_contacts.get("emails"))
+        if is_social:
+            social_emails, social_links = _extract_social_about_contacts(page, url)
+            for mail in social_emails:
+                if mail in seen:
+                    continue
+                seen.add(mail)
+                _register(
+                    mail,
+                    "social_about",
+                    url=url,
+                    page_title=page_title,
+                    context="social_about",
+                    trusted=trusted_hit,
+                )
+            for link in social_links:
+                norm = normalize_url(link)
+                if not norm or norm in reviewed_urls or norm in social_follow_seen:
+                    continue
+                if is_blocked_url(norm):
+                    continue
+                if _is_social_root(_domain(norm) or ""):
+                    continue
+                social_follow_seen.add(norm)
+                social_follow_queue.append(norm)
         if not _page_has_name(page, domain_hint_hit=domain_hint_hit) and not portal_hit:
             return len(set(candidates.keys()) - before)
         _, ems, meta, info = extract_struct(page)
@@ -9031,6 +9154,17 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     def _has_viable_email_candidate() -> bool:
         return any(info.get("score", 0.0) >= CONTACT_EMAIL_FALLBACK_SCORE for info in candidates.values())
 
+    def _review_social_followups(stage: str, *, limit: int = 3) -> None:
+        processed = 0
+        while social_follow_queue and processed < limit:
+            follow_url = social_follow_queue.pop(0)
+            if not follow_url or follow_url in reviewed_urls:
+                continue
+            _review_url(follow_url, stage=stage)
+            processed += 1
+            if _has_viable_email_candidate():
+                break
+
     priority_urls = list(dict.fromkeys(brokerage_urls + authority_urls + hint_urls))
     trusted_domains.update(_build_trusted_domains(agent, priority_urls))
     priority_review_urls = _shortlist_urls(priority_urls, stage="priority")
@@ -9046,6 +9180,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     processed = 0
     for url in priority_non_portal:
         _review_url(url, stage="priority")
+        _review_social_followups("social-followup")
         if _has_viable_email_candidate():
             break
         processed += 1
@@ -9117,6 +9252,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     processed = 0
     for url in non_portal:
         _review_url(url, stage="search")
+        _review_social_followups("social-followup")
         if _has_viable_email_candidate():
             break
         processed += 1
@@ -9127,6 +9263,7 @@ def lookup_email(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         processed = 0
         for url in portal:
             _review_url(url, stage="portal")
+            _review_social_followups("social-followup")
             if _has_viable_email_candidate():
                 break
             processed += 1
