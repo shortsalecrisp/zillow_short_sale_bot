@@ -2479,7 +2479,12 @@ def _normalize_jina_proxy_url(url: str) -> str:
 
 
 def _mirror_url(url: str) -> str:
-    parsed = urlparse(url)
+    parsed = urlparse(_normalize_jina_proxy_url(url))
+    if parsed.netloc == "r.jina.ai":
+        unwrapped = _unwrap_jina_url(url)
+        if not unwrapped:
+            return ""
+        parsed = urlparse(unwrapped)
     if not parsed.scheme or not parsed.netloc:
         return ""
     base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
@@ -2508,7 +2513,12 @@ _TRACKING_QUERY_KEYS = {
 
 
 def normalize_url(url: str) -> str:
-    parsed = urlparse(url)
+    parsed = urlparse(_normalize_jina_proxy_url(url))
+    if parsed.netloc == "r.jina.ai":
+        unwrapped = _unwrap_jina_url(url)
+        if not unwrapped:
+            return url
+        parsed = urlparse(unwrapped)
     if not parsed.scheme or not parsed.netloc:
         return url
     scheme = parsed.scheme.lower()
@@ -2688,6 +2698,11 @@ def fetch_text_cached(
         text = ""
         status = 0
         final_url = norm
+
+    final_url = _normalize_jina_proxy_url(final_url)
+    if _domain(final_url) == "r.jina.ai":
+        unwrapped = _unwrap_jina_url(final_url)
+        final_url = unwrapped or norm
 
     blocked_statuses = {403, 429, 451}
     if status in blocked_statuses and dom and allow_blocking:
