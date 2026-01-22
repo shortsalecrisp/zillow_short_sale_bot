@@ -4026,6 +4026,78 @@ def _agent_matches_context(
     return _brand_handle_match(agent, context, dom)
 
 
+def _email_has_strong_domain_signal(email: str, *, brokerage: str = "", url: str = "") -> bool:
+    if not email or not ok_email(email):
+        return False
+    if _is_junk_email(email) or _is_generic_email(email):
+        return False
+    domain = email.split("@", 1)[1].lower()
+    domain_root = _domain(domain) or domain
+    url_root = _domain(url) or ""
+    if url_root and (
+        domain == url_root
+        or domain_root == url_root
+        or domain.endswith(f".{url_root}")
+    ):
+        return True
+    if domain in BROKERAGE_EMAIL_DOMAINS or domain_root in BROKERAGE_EMAIL_DOMAINS:
+        return True
+    preferred = _preferred_email_domains_for_text(brokerage)
+    if domain in preferred or domain_root in preferred:
+        return True
+    brokerage_key = re.sub(r"[^a-z0-9]", "", brokerage.lower()) if brokerage else ""
+    generic_terms = {
+        "realty",
+        "realestate",
+        "homes",
+        "properties",
+        "group",
+        "team",
+        "brokerage",
+        "realtor",
+        "realtors",
+    }
+    if brokerage_key and brokerage_key not in generic_terms and len(brokerage_key) >= 5:
+        if brokerage_key in domain_root:
+            return True
+    return False
+
+
+def _jsonld_email_name_override(agent: str, html_text: str) -> bool:
+    if not agent or not html_text:
+        return False
+    entries, _ = _jsonld_person_contacts(html_text)
+    for entry in entries:
+        name_val = str(entry.get("name") or "")
+        if not name_val or not _names_match(agent, name_val):
+            continue
+        for email in entry.get("emails", []):
+            if email and ok_email(email) and not _is_junk_email(email) and not _is_generic_email(email):
+                return True
+    return False
+
+
+def _email_present_override(
+    agent: str,
+    *,
+    brokerage: str,
+    url: str,
+    emails: Iterable[str],
+    html_text: str = "",
+) -> Tuple[bool, str]:
+    cleaned = [
+        em
+        for em in emails
+        if em and ok_email(em) and not _is_junk_email(em) and not _is_generic_email(em)
+    ]
+    for email in cleaned:
+        if _email_has_strong_domain_signal(email, brokerage=brokerage, url=url):
+            return True, "agent_mismatch_email_domain_override"
+    if html_text and _jsonld_email_name_override(agent, html_text):
+        return True, "agent_mismatch_jsonld_email_override"
+    return False, ""
+
+
 def _discover_agent_links(
     soup: Any,
     base_url: str,
@@ -6067,6 +6139,13 @@ def _location_matches(
     return False
 
 
+def _fetch_contact_page_html(url: str) -> str:
+    result = fetch_contact_page(url)
+    if isinstance(result, tuple):
+        return result[0] if result else ""
+    return str(result or "")
+
+
 def select_top_5_urls(
     results: Iterable[Dict[str, Any] | str],
     *,
@@ -6230,13 +6309,31 @@ def select_top_5_urls(
                         em for em in lite.get("emails", []) if ok_email(em) and not _is_junk_email(em)
                     ]
                     phones_found = [ph for ph in lite.get("phones", []) if valid_phone(ph)]
+                    override_ok, override_reason = _email_present_override(
+                        agent,
+                        brokerage=brokerage,
+                        url=final_url,
+                        emails=emails_found,
+                    )
+                    if not override_ok:
+                        html_page = _fetch_contact_page_html(final_url)
+                        override_ok, override_reason = _email_present_override(
+                            agent,
+                            brokerage=brokerage,
+                            url=final_url,
+                            emails=emails_found,
+                            html_text=html_page,
+                        )
                     LOG.info(
-                        "URL_CANDIDATE_SOFT_REJECT url=%s reason=agent_mismatch parsed_lite=True emails_found=%s phones_found=%s",
+                        "URL_CANDIDATE_SOFT_REJECT url=%s reason=agent_mismatch parsed_lite=True emails_found=%s phones_found=%s override_reason=%s",
                         final_url,
                         len(emails_found),
                         len(phones_found),
+                        override_reason or "",
                     )
-                    if emails_found or phones_found:
+                    if override_ok:
+                        accept_reason = override_reason
+                    elif phones_found:
                         accept_reason = "agent_mismatch_parse_lite_contact"
                     else:
                         rejected.append((final_url, "agent_mismatch"))
@@ -6252,13 +6349,31 @@ def select_top_5_urls(
                         em for em in lite.get("emails", []) if ok_email(em) and not _is_junk_email(em)
                     ]
                     phones_found = [ph for ph in lite.get("phones", []) if valid_phone(ph)]
+                    override_ok, override_reason = _email_present_override(
+                        agent,
+                        brokerage=brokerage,
+                        url=final_url,
+                        emails=emails_found,
+                    )
+                    if not override_ok:
+                        html_page = _fetch_contact_page_html(final_url)
+                        override_ok, override_reason = _email_present_override(
+                            agent,
+                            brokerage=brokerage,
+                            url=final_url,
+                            emails=emails_found,
+                            html_text=html_page,
+                        )
                     LOG.info(
-                        "URL_CANDIDATE_SOFT_REJECT url=%s reason=agent_mismatch parsed_lite=True emails_found=%s phones_found=%s",
+                        "URL_CANDIDATE_SOFT_REJECT url=%s reason=agent_mismatch parsed_lite=True emails_found=%s phones_found=%s override_reason=%s",
                         final_url,
                         len(emails_found),
                         len(phones_found),
+                        override_reason or "",
                     )
-                    if emails_found or phones_found:
+                    if override_ok:
+                        accept_reason = override_reason
+                    elif phones_found:
                         accept_reason = "agent_mismatch_parse_lite_contact"
                     else:
                         rejected.append((final_url, "agent_mismatch"))
@@ -6760,7 +6875,12 @@ def _jsonld_person_contacts(html_text: str, soup: Any = None) -> Tuple[List[Dict
         for node in _iter_jsonld_nodes(data):
             node_type = node.get("@type")
             types = node_type if isinstance(node_type, list) else [node_type]
-            if not any(t and isinstance(t, str) and "Person" in t for t in types):
+            if not any(
+                t
+                and isinstance(t, str)
+                and ("Person" in t or "Agent" in t)
+                for t in types
+            ):
                 continue
             entry: Dict[str, Any] = {}
             name_val = node.get("name", "")
