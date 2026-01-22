@@ -413,3 +413,43 @@ def test_select_top_5_prioritizes_non_social_and_filters_low_signal(monkeypatch)
     assert selected[:4] and all(
         not bot_min._is_social_root(bot_min._domain(url) or "") for url in selected[:4]
     )
+
+
+def test_select_top_5_keeps_jsonld_directory_email(monkeypatch):
+    items = [{"link": "https://broker.example/agents"}]
+    html = """
+    <html><body>
+    <h1>Our Team Directory</h1>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "RealEstateAgent",
+      "name": "Jane Agent",
+      "email": "jane@broker.example",
+      "contactPoint": {
+        "@type": "ContactPoint",
+        "email": "jane@broker.example"
+      }
+    }
+    </script>
+    </body></html>
+    """
+
+    def fake_fetch(url, ttl_days=7, respect_block=False, allow_blocking=False):
+        return {"extracted_text": "Our team directory page", "http_status": 200, "final_url": url}
+
+    monkeypatch.setattr(bot_min, "fetch_text_cached", fake_fetch)
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: (html, False, "ok"))
+
+    selected, rejected = bot_min.select_top_5_urls(
+        items,
+        fetch_check=True,
+        property_state="",
+        property_city="",
+        brokerage="Broker Example Realty",
+        agent="Jane Agent",
+        limit=5,
+    )
+
+    assert "https://broker.example/agents" in selected
+    assert ("https://broker.example/agents", "agent_mismatch") not in rejected
