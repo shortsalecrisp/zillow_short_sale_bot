@@ -3283,6 +3283,19 @@ def _extract_jsonld_contacts_first(
     sameas_links: List[str] = []
     for entry in entries:
         meta_name = entry.get("name", "")
+        entry_type = entry.get("type")
+        type_values = (
+            [entry_type]
+            if isinstance(entry_type, str)
+            else list(entry_type)
+            if isinstance(entry_type, list)
+            else []
+        )
+        is_person = any("Person" in t for t in type_values if isinstance(t, str))
+        is_agent = any("Agent" in t for t in type_values if isinstance(t, str))
+        allow_contact = is_person or (
+            is_agent and meta_name and _names_match(agent, meta_name)
+        )
         if meta_name:
             agent_hit = agent_hit or _names_match(agent, meta_name)
         phones = entry.get("phones", [])
@@ -3290,13 +3303,14 @@ def _extract_jsonld_contacts_first(
         sameas_links.extend(entry.get("sameas", []))
         if not phones and not emails:
             continue
-        contact_found = True
+        if allow_contact:
+            contact_found = True
         candidates.append(
             {
                 "source_url": source_url,
                 "phones": [p for p in phones if p and valid_phone(p)],
                 "emails": [e for e in emails if e and ok_email(e)],
-                "evidence_snippet": "jsonld Person",
+                "evidence_snippet": "jsonld Person" if is_person else "jsonld Agent",
             }
         )
     if row_payload is not None:
@@ -6941,14 +6955,12 @@ def _jsonld_person_contacts(html_text: str, soup: Any = None) -> Tuple[List[Dict
         for node in _iter_jsonld_nodes(data):
             node_type = node.get("@type")
             types = node_type if isinstance(node_type, list) else [node_type]
-            if not any(
-                t
-                and isinstance(t, str)
-                and ("Person" in t or "Agent" in t)
-                for t in types
-            ):
+            cleaned_types = [t for t in types if isinstance(t, str) and t]
+            if not any(("Person" in t or "Agent" in t) for t in cleaned_types):
                 continue
             entry: Dict[str, Any] = {}
+            if cleaned_types:
+                entry["type"] = cleaned_types
             name_val = node.get("name", "")
             if name_val:
                 entry["name"] = str(name_val)
