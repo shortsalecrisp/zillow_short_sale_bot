@@ -131,7 +131,8 @@ _CONNECTION_ERRORS = (
 )
 
 _blocked_until: Dict[str, float] = {}
-_cse_blocked_until: float = 0.0
+_cse_blocked_until_per_key: Dict[Tuple[str, str], float] = {}
+_cse_rate_limit_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _blocked_domains: Dict[str, str] = {}
 _timeout_counts: Dict[str, int] = {}
 _realtor_fetch_seen = False
@@ -2152,8 +2153,23 @@ def _record_domain_timeout(dom: str) -> None:
         raise DomainBlockedError(f"timeout threshold reached for {dom}")
 
 
-def _cse_blocked() -> bool:
-    return _blocked("www.googleapis.com") or _cse_blocked_until > time.time()
+def _cse_blocked(key: Optional[str] = None, cx: Optional[str] = None) -> bool:
+    if _blocked("www.googleapis.com"):
+        return True
+    now = time.time()
+    if key and cx:
+        return _cse_blocked_until_per_key.get((key, cx), 0.0) > now
+    if not _CSE_CRED_POOL:
+        return False
+    blocked = 0
+    total = 0
+    for pool_key, pool_cx in _CSE_CRED_POOL:
+        if not pool_key or not pool_cx:
+            continue
+        total += 1
+        if _cse_blocked_until_per_key.get((pool_key, pool_cx), 0.0) > now:
+            blocked += 1
+    return total > 0 and blocked >= total
 
 def _blocked(dom: str) -> bool:
     if not dom:
@@ -5864,16 +5880,55 @@ def _next_cse_creds() -> Tuple[str, str]:
     global _CSE_CRED_INDEX
     if not _CSE_CRED_POOL:
         return "", ""
-    key, cx = _CSE_CRED_POOL[_CSE_CRED_INDEX % len(_CSE_CRED_POOL)]
-    _CSE_CRED_INDEX = (_CSE_CRED_INDEX + 1) % len(_CSE_CRED_POOL)
-    return key, cx
+    with _cse_lock:
+        pool_len = len(_CSE_CRED_POOL)
+        for _ in range(pool_len):
+            idx = _CSE_CRED_INDEX % pool_len
+            key, cx = _CSE_CRED_POOL[idx]
+            _CSE_CRED_INDEX = (idx + 1) % pool_len
+            if not key or not cx:
+                continue
+            if _cse_blocked(key, cx):
+                continue
+            return key, cx
+    return "", ""
 
-
-def _mark_cse_block() -> None:
-    global _cse_blocked_until
-    cooldown = max(CSE_BLOCK_SECONDS, 3600.0)
-    _cse_blocked_until = time.time() + cooldown
-    LOG.warning("CSE blocked; cooling off for %.0f seconds", cooldown)
+def _mark_cse_block(
+    key: str,
+    cx: str,
+    *,
+    retry_after: Optional[float] = None,
+    status: Optional[int] = None,
+    reason: str = "throttled",
+) -> None:
+    if not key or not cx:
+        return
+    now = time.time()
+    state = _cse_rate_limit_state.get((key, cx), {})
+    count = int(state.get("count", 0)) + 1
+    if retry_after and retry_after > 0:
+        cooldown = min(float(retry_after), CSE_BLOCK_SECONDS)
+    else:
+        cooldown = min(120.0, max(30.0, 30.0 * (2 ** (count - 1))))
+    blocked_until = now + cooldown
+    _cse_blocked_until_per_key[(key, cx)] = blocked_until
+    _cse_rate_limit_state[(key, cx)] = {
+        "count": count,
+        "retry_after": retry_after,
+        "status": status,
+        "blocked_until": blocked_until,
+        "reason": reason,
+        "last_seen": now,
+    }
+    LOG.warning(
+        "CSE blocked for key=%s cx=%s cooldown=%.0fs reason=%s status=%s retry_after=%s",
+        key[:6],
+        cx[:6],
+        cooldown,
+        reason,
+        status or "unknown",
+        retry_after if retry_after is not None else "none",
+    )
 
 
 def _filter_allowed(link: str, allowed_domains: Optional[Set[str]]) -> bool:
@@ -6504,6 +6559,10 @@ def google_cse_search(
     for _ in range(max_attempts):
         key, cx = _next_cse_creds()
         if not key or not cx:
+            if _cse_blocked():
+                _cse_last_state = "blocked"
+                LOG.warning("Skipping Google CSE for %s due to all keys blocked", query)
+                break
             continue
         attempts += 1
         drop_counts = {
@@ -6619,23 +6678,30 @@ def google_cse_search(
                 _cse_last_state = "no_results"
                 break
         except req_exc.RetryError:
-            _mark_cse_block()
+            _mark_cse_block(key, cx, reason="retry_error")
+            seen_throttled = True
             _cse_last_state = "throttled"
-            break
+            continue
         except DomainBlockedError:
-            _mark_cse_block()
+            _mark_cse_block(key, cx, reason="domain_blocked")
             _cse_last_state = "blocked"
-            break
+            continue
         except requests.HTTPError as exc:
             status = getattr(exc.response, "status_code", 0)
             seen_http_error = True
             if status in (403, 429):
                 seen_throttled = True
                 retry_after = exc.response.headers.get("Retry-After") if exc.response else None
-                if retry_after and retry_after.isdigit():
-                    time.sleep(min(float(retry_after), CSE_BLOCK_SECONDS))
-                _mark_cse_block()
-                break
+                retry_seconds = float(retry_after) if retry_after and retry_after.isdigit() else None
+                _mark_cse_block(
+                    key,
+                    cx,
+                    retry_after=retry_seconds,
+                    status=status,
+                    reason="http_error",
+                )
+                _cse_last_state = "throttled"
+                continue
             if attempts >= max_attempts:
                 _record_timeout("google_cse")
         except Exception:
