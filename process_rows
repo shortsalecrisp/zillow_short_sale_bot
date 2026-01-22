@@ -25,6 +25,7 @@ import gspread
 from bs4 import BeautifulSoup
 from oauth2client.service_account import ServiceAccountCredentials
 from sms_providers import get_sender
+import bot_min
 
 # Phrase indicating the property is explicitly *not* a short sale
 NOT_SHORT_RE = re.compile(r"not a\s+short\s+sale", re.I)
@@ -206,7 +207,11 @@ def _score_contact(
 def _fetch_via_jina(url: str) -> str:
     """Fetch page content through jina reader to avoid blocks."""
 
-    mirror = f"https://r.jina.ai/{url}"
+    normalized = bot_min._normalize_jina_proxy_url(url)
+    # Avoid nested Jina URLs in process_rows to prevent 451 policy blocks.
+    unwrapped = bot_min._unwrap_jina_url(normalized)
+    target_url = unwrapped or normalized
+    mirror = f"https://r.jina.ai/{bot_min._normalize_jina_proxy_url(target_url)}"
     try:
         resp = requests.get(
             mirror,
