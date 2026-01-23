@@ -5565,7 +5565,7 @@ async def _headless_fetch_async(
         nav_timeout = max(nav_timeout, nav_timeout_ms)
     nav_timeout = max(10000, nav_timeout)
     default_timeout = max(10000, HEADLESS_TIMEOUT_MS)
-    overall_timeout = HEADLESS_OVERALL_TIMEOUT_S
+    overall_timeout = max(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 5))
 
     async def _progressive_scroll(page) -> None:
         for _ in range(3):
@@ -5612,6 +5612,16 @@ async def _headless_fetch_async(
                     },
                 )
                 page = await context.new_page()
+                try:
+                    async def _route_handler(route, request) -> None:
+                        if request.resource_type in {"image", "media", "font", "stylesheet"}:
+                            await route.abort()
+                        else:
+                            await route.continue_()
+
+                    await page.route("**/*", _route_handler)
+                except Exception:
+                    pass
                 page.set_default_timeout(default_timeout)
                 page.set_default_navigation_timeout(default_timeout)
                 LOG.info(
@@ -5760,14 +5770,6 @@ def _headless_fetch(
         return future.result(timeout=HEADLESS_OVERALL_TIMEOUT_S + 5)
     except concurrent.futures.TimeoutError:
         future.cancel()
-        try:
-            future.result(timeout=5)
-        except concurrent.futures.CancelledError:
-            pass
-        except concurrent.futures.TimeoutError:
-            pass
-        except Exception:
-            LOG.debug("PLAYWRIGHT_TIMEOUT cleanup failed url=%s", url, exc_info=True)
         LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", url, "thread-timeout")
         return {}
     except Exception:
@@ -5809,6 +5811,8 @@ TOP5_JUNK_DOMAINS = {
     "tiktok.com",
     "pinterest.com",
     "yelp.com",
+    "thetvdb.com",
+    "lemon8-app.com",
 }
 TOP5_REALTOR_ALLOW_PATHS = (
     "/realestateagents",
@@ -5906,6 +5910,22 @@ TOP5_OFF_TOPIC_HINTS = (
     "pta",
     "library",
     "blogspot",
+    "podcast",
+    "episode",
+    "season",
+    "allseasons",
+    "docs",
+    "spec",
+)
+TOP5_OFF_TOPIC_PATH_TOKENS = (
+    "/podcast",
+    "/episode",
+    "/episodes",
+    "/season",
+    "/allseasons",
+    "/spec",
+    "/specs",
+    "/tr/",
 )
 TOP5_ASSOCIATION_HINTS = {"realtor", "mls", "association", "board-of-realtors"}
 PREFERRED_BROKERAGE_EMAIL_DOMAINS: Dict[str, Set[str]] = {
@@ -6143,6 +6163,8 @@ def _top_url_allowed(link: str, *, relaxed: bool = False, allow_portals: bool = 
         return False, "off_topic_domain"
     if any(tok in path for tok in TOP5_OFF_TOPIC_HINTS) and not _is_real_estate_domain(root):
         return False, "off_topic_path"
+    if any(tok in path for tok in TOP5_OFF_TOPIC_PATH_TOKENS) and not _is_real_estate_domain(root):
+        return False, "off_topic_path"
 
     if _is_social_root(root):
         allow = True
@@ -6162,7 +6184,14 @@ def _top_url_allowed(link: str, *, relaxed: bool = False, allow_portals: bool = 
 
     if not allow:
         if relaxed:
-            return True, "relaxed_allow"
+            real_estate_signal = (
+                _is_real_estate_domain(root)
+                or any(tok in root for tok in TOP5_DOMAIN_HINT_TOKENS)
+                or any(tok in path for tok in TOP5_PATH_HINT_TOKENS)
+            )
+            if real_estate_signal:
+                return True, "relaxed_allow"
+            return False, "non_agent_domain"
         return False, "non_agent_domain"
     return True, allow_reason or "allowed"
 
@@ -6545,8 +6574,12 @@ def select_top_5_urls(
                         continue
             original_order.setdefault(normalize_url(final_url), original_order.get(norm, idx))
             root = _domain(final_url) or _domain(norm) or ""
-            LOG.info("URL_CANDIDATE_ACCEPTED url=%s reason=%s", final_url, accept_reason or "accepted")
             score = _good_candidate_score(final_url, snippet=snippet_text, text=text)
+            if relax and score <= 0 and not _is_social_root(root):
+                if agent and not _agent_matches_context(agent, text=text, snippet=location_context, title=title, url=final_url):
+                    rejected.append((final_url, "relaxed_low_score"))
+                    continue
+            LOG.info("URL_CANDIDATE_ACCEPTED url=%s reason=%s", final_url, accept_reason or "accepted")
             entry = (final_url, _is_social_root(root), score)
             if len(candidates) < target:
                 candidates.append(entry)
