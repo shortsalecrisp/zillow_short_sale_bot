@@ -18,7 +18,7 @@ https://docs.google.com/spreadsheets/d/12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2
 
 import os, json, html, textwrap, datetime, sqlite3, requests, re, time
 from pathlib import Path
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse
 
 import openai
 import gspread
@@ -156,7 +156,7 @@ def _init_cache(conn: sqlite3.Connection) -> None:
 
 # how long to trust cached contact info (seconds)
 CONTACT_TTL = 60 * 60 * 24 * 365  # 1 year
-SEARCH_TTL = 60 * 60 * 24 * 7  # 1 week
+SEARCH_TTL = 60 * 60 * 48  # 48 hours
 
 
 def _root_domain(url: str | None) -> str | None:
@@ -223,6 +223,21 @@ def _fetch_via_jina(url: str) -> str:
             if text.strip().lower() in {"", "none", "null"}:
                 return ""
             return text
+    except Exception:
+        return ""
+    return ""
+
+
+def _fetch_ddg_html(query: str) -> str:
+    try:
+        resp = requests.get(
+            "https://duckduckgo.com/html/",
+            params={"q": query},
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        if resp.status_code == 200:
+            return resp.text or ""
     except Exception:
         return ""
     return ""
@@ -357,14 +372,13 @@ SEARCH_ACTOR = "apify/google-search-scraper"
 
 
 def _scrape_google(query: str, cache_conn: sqlite3.Connection, max_links: int = 5):
-    """Return a list of top DuckDuckGo result URLs using jina reader with caching."""
+    """Return a list of top DuckDuckGo result URLs using cached HTML results."""
 
     cached = _search_cache_get(cache_conn, query)
     if cached:
         return cached[:max_links]
 
-    search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
-    html_text = _fetch_via_jina(search_url)
+    html_text = _fetch_ddg_html(query)
     links: list[str] = []
 
     if html_text:
@@ -383,8 +397,7 @@ def _scrape_google(query: str, cache_conn: sqlite3.Connection, max_links: int = 
         soup.decompose()
 
     links = list(dict.fromkeys(links))[:max_links]
-    if links:
-        _search_cache_set(cache_conn, query, links)
+    _search_cache_set(cache_conn, query, links)
     return links
 
 
