@@ -2550,22 +2550,30 @@ def normalize_url(url: str) -> str:
 
 def _cache_conn() -> sqlite3.Connection:
     with _CACHE_LOCK:
-        need_init = not os.path.exists(_CACHE_DB_PATH)
         conn = sqlite3.connect(_CACHE_DB_PATH, timeout=10)
-        if need_init:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS jina_cache (
-                    url TEXT PRIMARY KEY,
-                    fetched_at REAL,
-                    ttl_seconds REAL,
-                    http_status INTEGER,
-                    extracted_text TEXT,
-                    final_url TEXT
-                )
-                """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jina_cache (
+                url TEXT PRIMARY KEY,
+                fetched_at REAL,
+                ttl_seconds REAL,
+                http_status INTEGER,
+                extracted_text TEXT,
+                final_url TEXT
             )
-            conn.commit()
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ddg_serp_cache (
+                query TEXT PRIMARY KEY,
+                fetched_at REAL,
+                ttl_seconds REAL,
+                results TEXT
+            )
+            """
+        )
+        conn.commit()
         return conn
 
 
@@ -2609,6 +2617,51 @@ def cache_set(
         (norm, time.time(), ttl_seconds, http_status, extracted_text, final_url or norm),
     )
     conn.commit()
+
+
+def _normalize_ddg_query(query: str) -> str:
+    return " ".join(query.lower().split())
+
+
+def _ddg_cache_get(query: str) -> Optional[List[Dict[str, Any]]]:
+    norm = _normalize_ddg_query(query)
+    if not norm:
+        return None
+    conn = _cache_conn()
+    cur = conn.execute(
+        "SELECT fetched_at, ttl_seconds, results FROM ddg_serp_cache WHERE query=?",
+        (norm,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    fetched_at, ttl_seconds, payload = row
+    if fetched_at is None or ttl_seconds is None:
+        return None
+    if (fetched_at + ttl_seconds) < time.time():
+        return None
+    try:
+        results = json.loads(payload or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(results, list):
+        return None
+    return results
+
+
+def _ddg_cache_set(query: str, results: List[Dict[str, Any]], ttl_seconds: int) -> None:
+    norm = _normalize_ddg_query(query)
+    if not norm:
+        return
+    conn = _cache_conn()
+    conn.execute(
+        "REPLACE INTO ddg_serp_cache (query, fetched_at, ttl_seconds, results) VALUES (?, ?, ?, ?)",
+        (norm, time.time(), ttl_seconds, json.dumps(results)),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _respect_domain_delay(url: str) -> None:
@@ -2972,19 +3025,28 @@ def _duckduckgo_html_search(
     query: str,
     *,
     max_results: int = 18,
-    ttl_days: int = 14,
+    ttl_days: Optional[int] = None,
     allowed_domains: Optional[Set[str]] = None,
 ) -> List[Dict[str, str]]:
     if not query:
         return []
-    if _blocked("r.jina.ai") or _blocked("duckduckgo.com") or _blocked("www.duckduckgo.com"):
-        LOG.warning("Jina/DuckDuckGo blocked; skipping search for query %s", query)
+    ttl_seconds = (
+        DDG_SERP_TTL_SECONDS
+        if ttl_days is None
+        else int(max(24.0, min(ttl_days * 24.0, 72.0)) * 3600)
+    )
+    cached = _ddg_cache_get(query)
+    if cached:
+        return cached[:max_results]
+    if _blocked("duckduckgo.com") or _blocked("www.duckduckgo.com"):
+        LOG.warning("DuckDuckGo blocked; skipping search for query %s", query)
         return []
 
     hits: List[Dict[str, str]] = []
     seen: Set[str] = set()
     offset = 0
     page = 0
+    fetched_any = False
     max_pages = max(1, min(5, (max_results + 9) // 10))
 
     while len(hits) < max_results and page < max_pages:
@@ -2992,15 +3054,22 @@ def _duckduckgo_html_search(
             params = {"q": query}
             if offset:
                 params["s"] = str(offset)
-            search_url = f"https://duckduckgo.com/html/?{urlencode(params)}"
-            cached = fetch_text_cached(search_url, ttl_days=ttl_days)
-            body = cached.get("extracted_text", "")
+            resp = _http_get(
+                "https://duckduckgo.com/html/",
+                params=params,
+                headers=_browser_headers("duckduckgo.com"),
+                rotate_user_agent=True,
+            )
+            body = resp.text if resp and resp.text else ""
+        except DomainBlockedError:
+            raise
         except Exception as exc:
             LOG.debug("duckduckgo html search failed for %s: %s", query, exc)
             break
 
         if not body:
             break
+        fetched_any = True
 
         before = len(hits)
         hits.extend(
@@ -3016,12 +3085,19 @@ def _duckduckgo_html_search(
 
         offset += 30
         page += 1
+        _search_sleep()
+
+    if fetched_any:
+        _ddg_cache_set(query, hits, ttl_seconds)
 
     return hits[:max_results]
 
 
 DDG_MIN_RESULTS = int(os.getenv("DDG_MIN_RESULTS", "10"))
 DDG_MAX_RESULTS = int(os.getenv("DDG_MAX_RESULTS", "15"))
+_DDG_SERP_TTL_HOURS = float(os.getenv("DDG_SERP_TTL_HOURS", "48"))
+DDG_SERP_TTL_SECONDS = int(max(24.0, min(_DDG_SERP_TTL_HOURS, 72.0)) * 3600)
+CONTACT_SEARCH_TARGET = int(os.getenv("CONTACT_SEARCH_TARGET", "8"))
 
 
 def _ddg_target_limit(limit: int) -> int:
@@ -3040,7 +3116,7 @@ def jina_cached_search(
     query: str,
     *,
     max_results: int = 18,
-    ttl_days: int = 14,
+    ttl_days: Optional[int] = None,
     allowed_domains: Optional[Set[str]] = None,
 ) -> List[str]:
     hits = _duckduckgo_html_search(
@@ -4328,7 +4404,8 @@ def _contact_search_urls(
     """
 
     limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
-    target_count = min(limit, 5)
+    desired_target = max(5, min(CONTACT_SEARCH_TARGET, 10))
+    target_count = min(limit, desired_target)
     city = str(row_payload.get("city") or "").strip()
     top5_log = row_payload.setdefault("_top5_log", {})
     strict_queries, _ = _contact_cse_queries(
@@ -4530,6 +4607,8 @@ def _contact_search_urls(
                     def _run_ddg_queries(queries: List[str]) -> None:
                         nonlocal ddg_used, ddg_blocked, cse_status
                         for ddg_query in queries:
+                            if len(selected_urls) >= target_count or ddg_blocked:
+                                break
                             fallback_results, blocked = duckduckgo_search(
                                 ddg_query,
                                 limit=CONTACT_CSE_FETCH_LIMIT,
@@ -4565,11 +4644,11 @@ def _contact_search_urls(
                             for url in fb_selected:
                                 if url not in selected_urls:
                                     selected_urls.append(url)
-                            if len(selected_urls) >= target_count:
+                            if len(selected_urls) >= target_count or ddg_blocked:
                                 break
 
                     _run_ddg_queries(ddg_queries)
-                    if len(selected_urls) < target_count:
+                    if len(selected_urls) < target_count and not ddg_blocked:
                         expansion_queries = _ddg_expansion_queries(agent, state, brokerage, domain_hint)
                         expansion_queries = [q for q in expansion_queries if q not in ddg_queries]
                         _run_ddg_queries(expansion_queries)
@@ -4605,9 +4684,11 @@ def _contact_search_urls(
                         "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
                         json.dumps(_compact_url_log(selected_urls), separators=(",", ":")),
                     )
-                if len(selected_urls) < target_count:
+                if len(selected_urls) < target_count and not blocked:
                     expansion_queries = _ddg_expansion_queries(agent, state, brokerage, domain_hint)
                     for extra_query in expansion_queries:
+                        if blocked:
+                            break
                         if extra_query == ddg_query:
                             continue
                         fallback_results, blocked = duckduckgo_search(
