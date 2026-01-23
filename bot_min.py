@@ -106,6 +106,7 @@ HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
 HEADLESS_FACEBOOK_TIMEOUT_MS = int(os.getenv("HEADLESS_FACEBOOK_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS + 12000)))
 HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
 HEADLESS_OVERALL_TIMEOUT_S = int(os.getenv("HEADLESS_OVERALL_TIMEOUT_S", "50"))
+JINA_THIN_TEXT_CHARS = int(os.getenv("JINA_THIN_TEXT_CHARS", "450"))
 PLAYWRIGHT_CONTACT_DOMAINS = {
     "facebook.com",
     "remax.com",
@@ -2676,6 +2677,17 @@ def _respect_domain_delay(url: str) -> None:
     _CACHE_DOMAIN_LAST_FETCH[dom] = time.time()
 
 
+def _is_thin_jina_response(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return True
+    if len(cleaned) >= JINA_THIN_TEXT_CHARS:
+        return False
+    if EMAIL_RE.search(cleaned) or PHONE_RE.search(cleaned):
+        return False
+    return True
+
+
 def fetch_text_cached(
     url: str,
     ttl_days: int = 14,
@@ -2767,6 +2779,29 @@ def fetch_text_cached(
         )
         _mark_block(dom, seconds=block_for)
     success = bool(text.strip()) and 200 <= status < 300
+
+    if success and _is_thin_jina_response(text):
+        LOG.info("JINA_THIN_RESPONSE url=%s bytes=%s; retrying direct fetch", norm, len(text.encode("utf-8")))
+        try:
+            direct_resp = _http_get(
+                norm,
+                timeout=12,
+                headers=_browser_headers(_domain(norm)),
+                rotate_user_agent=True,
+                respect_block=respect_block,
+                block_on_status=allow_blocking,
+                record_timeout=allow_blocking,
+            )
+            if direct_resp and direct_resp.status_code == 200 and (direct_resp.text or "").strip():
+                text = direct_resp.text
+                status = direct_resp.status_code
+                final_url = getattr(direct_resp, "url", norm)
+                success = True
+                retry_needed = False
+            else:
+                retry_needed = True
+        except Exception:
+            retry_needed = True
 
     if status == 200 and not text.strip() and "duckduckgo.com/html" in norm:
         try:
@@ -5540,6 +5575,16 @@ def _unwrap_jina_url(url: str) -> str:
     return inner
 
 
+def _is_playwright_closed_error(exc: Exception) -> bool:
+    if exc is None:
+        return False
+    name = exc.__class__.__name__
+    if name in {"TargetClosedError", "BrowserClosedError"}:
+        return True
+    message = str(exc).lower()
+    return "target page" in message and "has been closed" in message
+
+
 async def _headless_fetch_async(
     url: str,
     *,
@@ -5595,7 +5640,7 @@ async def _headless_fetch_async(
                     continue
         except Exception:
             return
-    async def _run() -> Dict[str, Any]:
+    async def _run_once() -> Dict[str, Any]:
         browser = None
         context = None
         page = None
@@ -5703,9 +5748,6 @@ async def _headless_fetch_async(
                     "tel_links": tel_links,
                     "final_url": page.url,
                 }
-        except Exception as exc:  # pragma: no cover - network/env specific
-            LOG.warning("PLAYWRIGHT_ERROR url=%s err=%s", target_url, exc)
-            return {}
         finally:
             try:
                 if page:
@@ -5722,6 +5764,23 @@ async def _headless_fetch_async(
                     await asyncio.shield(browser.close())
             except Exception:
                 pass
+
+    async def _run() -> Dict[str, Any]:
+        for attempt in range(2):
+            try:
+                result = await _run_once()
+                if result:
+                    return result
+            except Exception as exc:  # pragma: no cover - network/env specific
+                if _is_playwright_closed_error(exc):
+                    LOG.warning("PLAYWRIGHT_RETRY url=%s err=%s attempt=%s", target_url, exc, attempt + 1)
+                    await asyncio.sleep(0.6)
+                    continue
+                LOG.warning("PLAYWRIGHT_ERROR url=%s err=%s", target_url, exc)
+                return {}
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+        return {}
 
     run_task = asyncio.create_task(_run())
     try:
@@ -5767,7 +5826,8 @@ def _headless_fetch(
     )
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
-        return future.result(timeout=HEADLESS_OVERALL_TIMEOUT_S + 5)
+        timeout_s = max(HEADLESS_OVERALL_TIMEOUT_S + 5, int((HEADLESS_FIRST_NAV_TIMEOUT_MS / 1000) + 10))
+        return future.result(timeout=timeout_s)
     except concurrent.futures.TimeoutError:
         future.cancel()
         LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", url, "thread-timeout")
