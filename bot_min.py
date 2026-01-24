@@ -2226,7 +2226,7 @@ def _should_use_playwright_for_contact(dom: str, body: str = "", *, js_hint: boo
     return False
 
 def _combine_playwright_snapshot(snapshot: Dict[str, Any]) -> str:
-    if not snapshot:
+    if not snapshot or snapshot.get("timeout"):
         return ""
     meta = {
         "playwright_final_url": snapshot.get("final_url", ""),
@@ -2740,6 +2740,7 @@ def fetch_text_cached(
     status = 0
     final_url = norm
     retry_needed = False
+    thin_response = False
 
     try:
         resp = _http_get(
@@ -2781,6 +2782,7 @@ def fetch_text_cached(
     success = bool(text.strip()) and 200 <= status < 300
 
     if success and _is_thin_jina_response(text):
+        thin_response = True
         LOG.info("JINA_THIN_RESPONSE url=%s bytes=%s; retrying direct fetch", norm, len(text.encode("utf-8")))
         try:
             direct_resp = _http_get(
@@ -2798,6 +2800,7 @@ def fetch_text_cached(
                 final_url = getattr(direct_resp, "url", norm)
                 success = True
                 retry_needed = False
+                thin_response = False
             else:
                 retry_needed = True
         except Exception:
@@ -2846,6 +2849,7 @@ def fetch_text_cached(
         "extracted_text": text,
         "final_url": final_url,
         "retry_needed": retry_needed,
+        "thin_response": thin_response,
     }
 
 
@@ -3356,6 +3360,8 @@ def _brokerage_contact_urls(agent: str, brokerage: str, domain_hint: str = "") -
         return []
     domain = _domain(domain_hint or _infer_domain_from_text(brokerage) or _guess_domain_from_brokerage(brokerage))
     if not domain:
+        return []
+    if domain.endswith("har.com"):
         return []
     if is_blocked_url(domain):
         _log_blocked_url(domain)
@@ -4390,6 +4396,42 @@ def _contact_fallback_queries(agent: str, state: str, city: str, brokerage: str)
     return _dedupe_queries(queries)
 
 
+def _contact_alternative_queries(
+    agent: str,
+    state: str,
+    row_payload: Dict[str, Any],
+    *,
+    brokerage: str = "",
+    domain_hint: str = "",
+) -> List[str]:
+    city = str(row_payload.get("city") or "").strip()
+    name_term = f'"{agent}"'
+    queries: List[str] = []
+
+    def _add(query: str) -> None:
+        if query and query not in queries:
+            queries.append(query)
+
+    if brokerage:
+        _add(_compact_tokens(name_term, brokerage, "agent", "directory"))
+        _add(_compact_tokens(name_term, brokerage, "agent", "contact"))
+        _add(_compact_tokens(name_term, brokerage, "brokerage", "directory"))
+    if domain_hint:
+        domain_root = _domain(domain_hint) or domain_hint
+        if domain_root and not domain_root.endswith("har.com"):
+            _add(_compact_tokens(name_term, f"site:{domain_root}", "agent"))
+            _add(_compact_tokens(name_term, f"site:{domain_root}", "directory"))
+    _add(_compact_tokens(name_term, city, state, "MLS", "agent"))
+    _add(_compact_tokens(name_term, state, "MLS", "directory"))
+    _add(_compact_tokens(name_term, state, "broker", "directory"))
+    _add(_compact_tokens(name_term, state, "brokerage", "directory"))
+    _add(_compact_tokens(name_term, state, "real estate", "directory"))
+    _add(_compact_tokens(name_term, state, "real estate", "google business"))
+    _add(_compact_tokens(name_term, "real estate", "business profile"))
+    _add(_compact_tokens(name_term, "real estate", "website"))
+    return _dedupe_queries(queries)
+
+
 def _ddg_expansion_queries(agent: str, state: str, brokerage: str, domain_hint: str) -> List[str]:
     name_term = f'"{agent}"'
     queries: List[str] = []
@@ -4456,6 +4498,14 @@ def _contact_search_urls(
     search_exhausted = False
     cse_status = _cse_last_state
     search_cache = row_payload.setdefault("_contact_search_cache", {})
+    blocked_domains: Set[str] = set()
+    needs_alternative_sources = False
+
+    def _note_rejections(rejected: List[Tuple[str, str]]) -> None:
+        nonlocal needs_alternative_sources
+        for url, reason in rejected:
+            if reason in {"blocked_status", "thin_response", "fetch_failed"}:
+                needs_alternative_sources = True
 
     def _select_until_target(
         raw_results: List[Dict[str, Any]],
@@ -4484,7 +4534,9 @@ def _contact_search_urls(
                 location_hint=location_hint,
                 agent=agent,
                 brokerage=brokerage,
+                blocked_domains=blocked_domains,
             )
+            _note_rejections(rejected_batch)
             rejected.extend(rejected_batch)
             for url in filtered:
                 if url not in qualified and url not in existing:
@@ -4636,6 +4688,49 @@ def _contact_search_urls(
                         for url in broadened_selected:
                             if url not in selected_urls:
                                 selected_urls.append(url)
+                if len(selected_urls) < target_count or needs_alternative_sources:
+                    alt_queries = _contact_alternative_queries(
+                        agent,
+                        state,
+                        row_payload,
+                        brokerage=brokerage,
+                        domain_hint=domain_hint,
+                    )
+                    for alt_query in alt_queries:
+                        if alt_query in used_queries:
+                            continue
+                        used_queries.append(alt_query)
+                        alt_results = google_cse_search(
+                            alt_query,
+                            limit=CONTACT_CSE_FETCH_LIMIT,
+                        )
+                        alt_selected, alt_rejected = _select_until_target(
+                            alt_results,
+                            location_hint=alt_query,
+                            existing=selected_urls,
+                            relaxed_mode=True,
+                            fetch_ok=fetch_ok,
+                        )
+                        LOG.info(
+                            "EMAIL_SEARCH_RESULTS engine=%s query=%s returned=%s eligible=%s rejected=%s",
+                            engine,
+                            alt_query,
+                            len(alt_results),
+                            len(alt_selected),
+                            len(alt_rejected),
+                        )
+                        if alt_selected:
+                            LOG.info(
+                                "EMAIL_SEARCH_SHORTLIST engine=%s urls=%s",
+                                engine,
+                                json.dumps(_compact_url_log(alt_selected), separators=(",", ":")),
+                            )
+                        rejected_urls.extend(alt_rejected)
+                        for url in alt_selected:
+                            if url not in selected_urls:
+                                selected_urls.append(url)
+                        if len(selected_urls) >= target_count:
+                            break
                 if len(selected_urls) < target_count:
                     ddg_queries = used_queries or [primary_query]
 
@@ -5183,6 +5278,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
     candidates: List[Dict[str, Any]] = []
     email_candidates_info: List[Dict[str, str]] = []
     blocked_engines: Set[str] = set()
+    blocked_domains: Set[str] = set()
     brokerage_domain = _domain(domain_hint or brokerage)
 
     def _empty_result() -> Dict[str, Any]:
@@ -5266,6 +5362,11 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             break
         return "", final_url, last_status
 
+    def _blocked_domain_from_url(url: str) -> None:
+        dom = _domain(url)
+        if dom:
+            blocked_domains.add(dom)
+
     try:
         urls, search_empty, cse_status, _ = _normalize_contact_search_result(
             _contact_search_urls(
@@ -5288,6 +5389,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         for url in urls:
             page, final_url, status = _direct_fetch(url)
             if status in {403, 429, 451}:
+                _blocked_domain_from_url(final_url or url)
                 continue
             if not page:
                 continue
@@ -5297,7 +5399,8 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             for url in urls:
                 fetched = fetch_text_cached(url, ttl_days=14, respect_block=False, allow_blocking=False)
                 status = int(fetched.get("http_status", 0) or 0)
-                if status in {403, 429, 451}:
+                if status in {403, 429, 451} or fetched.get("thin_response"):
+                    _blocked_domain_from_url(fetched.get("final_url") or url)
                     continue
                 page = fetched.get("extracted_text", "") or ""
                 final_url = fetched.get("final_url") or url
@@ -5320,11 +5423,53 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                     reason="cse-top5",
                     nav_timeout_ms=nav_timeout_ms,
                 )
+                if snapshot.get("timeout"):
+                    _blocked_domain_from_url(snapshot.get("final_url") or url)
                 rendered = _combine_playwright_snapshot(snapshot)
                 if not rendered.strip():
                     continue
                 final_url = snapshot.get("final_url") or url
                 _collect_page(rendered, final_url)
+
+        if not _has_verifiable_contacts() and blocked_domains:
+            alt_urls: List[str] = []
+            alt_urls.extend(_brokerage_contact_urls(agent, brokerage, domain_hint=domain_hint))
+            alt_queries = _contact_alternative_queries(
+                agent,
+                state,
+                row_payload,
+                brokerage=brokerage,
+                domain_hint=domain_hint,
+            )
+            for alt_query in alt_queries[:6]:
+                try:
+                    alt_results = google_cse_search(alt_query, limit=CONTACT_CSE_FETCH_LIMIT)
+                    selected, _ = select_top_5_urls(
+                        alt_results,
+                        fetch_check=True,
+                        relaxed=True,
+                        property_state=state,
+                        location_hint=alt_query,
+                        property_city=str(row_payload.get("city") or "").strip(),
+                        agent=agent,
+                        brokerage=brokerage,
+                        blocked_domains=blocked_domains,
+                    )
+                    alt_urls.extend(selected)
+                except Exception:
+                    continue
+            alt_urls = list(dict.fromkeys(alt_urls))[:8]
+            for url in alt_urls:
+                fetched = fetch_text_cached(url, ttl_days=7, respect_block=False, allow_blocking=False)
+                status = int(fetched.get("http_status", 0) or 0)
+                if status in {403, 429, 451} or fetched.get("thin_response"):
+                    continue
+                page = fetched.get("extracted_text", "") or ""
+                final_url = fetched.get("final_url") or url
+                if not page.strip():
+                    continue
+                _collect_page(page, final_url)
+                _collect_parse_lite(page, final_url)
 
         ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
         ranked = _apply_phone_type_boost(ranked)
@@ -5787,7 +5932,7 @@ async def _headless_fetch_async(
         return await asyncio.wait_for(run_task, timeout=overall_timeout)
     except asyncio.TimeoutError:
         LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", target_url, "overall_timeout")
-        return {}
+        return {"timeout": True, "final_url": target_url}
     except Exception as exc:
         LOG.warning("PLAYWRIGHT_ERROR url=%s err=%s", target_url, exc)
         return {}
@@ -5831,7 +5976,7 @@ def _headless_fetch(
     except concurrent.futures.TimeoutError:
         future.cancel()
         LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", url, "thread-timeout")
-        return {}
+        return {"timeout": True, "final_url": url}
     except Exception:
         LOG.exception("PLAYWRIGHT_FAIL url=%s err=%s", url, "thread-runner")
         return {}
@@ -5902,7 +6047,6 @@ TOP5_BROKERAGE_ALLOW = {
     "howardhanna.com",
     "windermere.com",
     "cbharper.com",
-    "har.com",
 }
 TOP5_DOMAIN_HINT_TOKENS = {
     "realty",
@@ -5922,6 +6066,7 @@ TOP5_PATH_HINT_TOKENS = {
     "profile",
     "about",
     "contact",
+    "directory",
 }
 TOP5_LISTING_HINTS = {"listing", "listings", "for-sale", "homedetails", "property", "newlisting", "mls", "idx"}
 TOP5_GOOD_PATH_HINTS = (
@@ -6413,6 +6558,7 @@ def select_top_5_urls(
     limit: int = 10,
     existing: Optional[Iterable[str]] = None,
     location_hint: str = "",
+    blocked_domains: Optional[Set[str]] = None,
 ) -> Tuple[List[str], List[Tuple[str, str]]]:
     items = list(results)
     limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
@@ -6499,6 +6645,13 @@ def select_top_5_urls(
             norm = normalize_url(link)
             if norm in seen_links:
                 continue
+            root_hint = _domain(norm) or urlparse(norm).netloc.lower()
+            if blocked_domains and root_hint:
+                if root_hint in blocked_domains or any(
+                    root_hint.endswith(f".{dom}") for dom in blocked_domains
+                ):
+                    rejected.append((norm, "blocked_domain"))
+                    continue
             original_order.setdefault(norm, idx)
             allowed, reason = _top_url_allowed(norm, relaxed=relax, allow_portals=allow_portals)
             if not allowed:
@@ -6519,6 +6672,17 @@ def select_top_5_urls(
                     continue
                 status = int(fetched.get("http_status", 0) or 0)
                 text = fetched.get("extracted_text", "")
+                fetch_root = _domain(final_url) or _domain(norm) or ""
+                if status in {403, 429}:
+                    if blocked_domains is not None and fetch_root:
+                        blocked_domains.add(fetch_root)
+                    rejected.append((final_url, "blocked_status"))
+                    continue
+                if fetched.get("thin_response"):
+                    if blocked_domains is not None and fetch_root:
+                        blocked_domains.add(fetch_root)
+                    rejected.append((final_url, "thin_response"))
+                    continue
                 if fetched.get("retry_needed") or status == 0 or not text.strip():
                     rejected.append((final_url, "fetch_failed"))
                     continue
@@ -6587,6 +6751,8 @@ def select_top_5_urls(
                     )
                     if override_ok:
                         accept_reason = override_reason
+                    elif emails_found and _looks_directory_page(final_url):
+                        accept_reason = "directory_page_email"
                     elif phones_found:
                         accept_reason = "agent_mismatch_parse_lite_contact"
                     else:
@@ -6627,6 +6793,8 @@ def select_top_5_urls(
                     )
                     if override_ok:
                         accept_reason = override_reason
+                    elif emails_found and _looks_directory_page(final_url):
+                        accept_reason = "directory_page_email"
                     elif phones_found:
                         accept_reason = "agent_mismatch_parse_lite_contact"
                     else:
