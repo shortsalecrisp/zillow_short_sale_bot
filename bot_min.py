@@ -4481,17 +4481,9 @@ def _contact_search_urls(
     """
 
     limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
-    desired_target = max(5, min(CONTACT_SEARCH_TARGET, 10))
-    target_count = min(limit, desired_target)
+    target_count = min(limit, 5)
     city = str(row_payload.get("city") or "").strip()
     top5_log = row_payload.setdefault("_top5_log", {})
-    strict_queries, _ = _contact_cse_queries(
-        agent,
-        state,
-        row_payload,
-        brokerage=brokerage,
-        domain_hint=domain_hint,
-    )
     urls: List[str] = []
     rejected_urls: List[Tuple[str, str]] = []
     search_empty = False
@@ -4499,54 +4491,85 @@ def _contact_search_urls(
     cse_status = _cse_last_state
     search_cache = row_payload.setdefault("_contact_search_cache", {})
     blocked_domains: Set[str] = set()
-    needs_alternative_sources = False
+    fetch_ok = _cse_last_state not in {"disabled"}
+    relaxed_mode = _cse_last_state in {"disabled"}
+    search_limit = min(CONTACT_CSE_FETCH_LIMIT, 15)
 
-    def _note_rejections(rejected: List[Tuple[str, str]]) -> None:
-        nonlocal needs_alternative_sources
-        for url, reason in rejected:
-            if reason in {"blocked_status", "thin_response", "fetch_failed"}:
-                needs_alternative_sources = True
-
-    def _select_until_target(
+    def _select_from_results(
         raw_results: List[Dict[str, Any]],
         *,
         location_hint: str,
         existing: List[str],
-        relaxed_mode: bool,
-        fetch_ok: bool,
     ) -> Tuple[List[str], List[Tuple[str, str]]]:
-        qualified: List[str] = []
-        rejected: List[Tuple[str, str]] = []
-        if not raw_results:
-            return qualified, rejected
-        page_size = 10
-        for start in range(0, len(raw_results), page_size):
-            batch = raw_results[start : start + page_size]
-            filtered, rejected_batch = select_top_5_urls(
-                batch,
-                fetch_check=fetch_ok,
-                relaxed=relaxed_mode,
-                allow_portals=allow_portals,
-                property_state=state,
-                property_city=city,
-                limit=target_count,
-                existing=existing + qualified,
-                location_hint=location_hint,
-                agent=agent,
-                brokerage=brokerage,
-                blocked_domains=blocked_domains,
+        filtered, rejected = select_top_5_urls(
+            raw_results[:search_limit],
+            fetch_check=fetch_ok,
+            relaxed=relaxed_mode,
+            allow_portals=allow_portals,
+            property_state=state,
+            property_city=city,
+            limit=target_count,
+            existing=existing,
+            location_hint=location_hint,
+            agent=agent,
+            brokerage=brokerage,
+            blocked_domains=blocked_domains,
+        )
+        return filtered[:target_count], rejected
+
+    def _log_results(
+        engine_name: str,
+        query: str,
+        raw: List[Dict[str, Any]],
+        selected: List[str],
+        rejected: List[Tuple[str, str]],
+    ) -> None:
+        LOG.info(
+            "EMAIL_SEARCH_RESULTS engine=%s query=%s returned=%s eligible=%s rejected=%s",
+            engine_name,
+            query,
+            len(raw),
+            len(selected),
+            len(rejected),
+        )
+        if selected:
+            LOG.info(
+                "EMAIL_SEARCH_SHORTLIST engine=%s urls=%s",
+                engine_name,
+                json.dumps(_compact_url_log(selected), separators=(",", ":")),
             )
-            _note_rejections(rejected_batch)
-            rejected.extend(rejected_batch)
-            for url in filtered:
-                if url not in qualified and url not in existing:
-                    qualified.append(url)
-            if len(qualified) >= target_count:
-                break
-        return qualified[:target_count], rejected
+
+    def _all_pages_blocked(
+        raw: List[Dict[str, Any]],
+        selected: List[str],
+        rejected: List[Tuple[str, str]],
+    ) -> bool:
+        if selected or not raw or not rejected:
+            return False
+        blocked_reasons = {"blocked_status", "thin_response", "fetch_failed"}
+        return all(reason in blocked_reasons for _, reason in rejected)
+
+    def _run_ddg(
+        query: str,
+        *,
+        existing: List[str],
+    ) -> Tuple[List[Dict[str, Any]], List[str], List[Tuple[str, str]], bool]:
+        ddg_results, blocked = duckduckgo_search(
+            query,
+            limit=search_limit,
+            allowed_domains=None,
+            with_blocked=True,
+        )
+        if blocked:
+            _mark_block("duckduckgo.com", reason="blocked")
+        selected, rejected = _select_from_results(ddg_results, location_hint=query, existing=existing)
+        return ddg_results, selected, rejected, blocked
+
     try:
         cache_key = ""
-        primary_query = strict_queries[0] if strict_queries else ""
+        name_term = f'"{agent}"'
+        primary_query = _compact_tokens(name_term, "realtor", state)
+        secondary_query = _compact_tokens(name_term, "realtor", city, state)
         if not primary_query:
             search_empty = True
         else:
@@ -4555,317 +4578,45 @@ def _contact_search_urls(
                 cached = search_cache[cache_key]
                 return cached if include_exhausted else cached[:3]
 
-            raw_results: List[Dict[str, Any]] = []
-            fallback_results: List[Dict[str, Any]] = []
             selected_urls: List[str] = []
-            broadened_used = False
-            fallback_queries_used = False
-            ddg_used = False
-            ddg_blocked = False
-            if engine == "google":
-                used_queries: List[str] = []
-                fetch_ok = _cse_last_state not in {"disabled"}
-                relaxed_mode = _cse_last_state in {"disabled"}
-                search_queries = strict_queries or [primary_query]
-                for query in search_queries:
-                    used_queries.append(query)
-                    raw_results = google_cse_search(
-                        query,
-                        limit=CONTACT_CSE_FETCH_LIMIT,
-                    )
-                    if not raw_results and _cse_last_state == "disabled":
-                        try:
-                            raw_results = google_items(query)
-                        except Exception:
-                            raw_results = []
-                    if not raw_results and _cse_last_state == "disabled":
-                        rr = search_round_robin([query], per_query_limit=CONTACT_CSE_FETCH_LIMIT, engine_limit=1)
-                        for attempt in rr:
-                            for _, hits in attempt:
-                                if hits:
-                                    raw_results = hits
-                                    break
-                            if raw_results:
-                                break
-                    selected, rejected = _select_until_target(
-                        raw_results,
-                        location_hint=query,
-                        existing=selected_urls,
-                        relaxed_mode=relaxed_mode,
-                        fetch_ok=fetch_ok,
-                    )
-                    LOG.info(
-                        "EMAIL_SEARCH_RESULTS engine=%s query=%s returned=%s eligible=%s rejected=%s",
-                        engine,
-                        query,
-                        len(raw_results),
-                        len(selected),
-                        len(rejected),
-                    )
-                    if selected:
-                        LOG.info(
-                            "EMAIL_SEARCH_SHORTLIST engine=%s urls=%s",
-                            engine,
-                            json.dumps(_compact_url_log(selected), separators=(",", ":")),
-                        )
-                    rejected_urls.extend(rejected)
-                    for url in selected:
-                        if url not in selected_urls:
-                            selected_urls.append(url)
-                    if len(selected_urls) >= target_count:
-                        break
-                if not selected_urls:
-                    fallback_queries = _contact_fallback_queries(agent, state, city, brokerage)
-                    for fallback_query in fallback_queries:
-                        if fallback_query in used_queries:
-                            continue
-                        used_queries.append(fallback_query)
-                        raw_results = google_cse_search(
-                            fallback_query,
-                            limit=CONTACT_CSE_FETCH_LIMIT,
-                        )
-                        fallback_selected, fallback_rejected = _select_until_target(
-                            raw_results,
-                            location_hint=fallback_query,
-                            existing=selected_urls,
-                            relaxed_mode=relaxed_mode,
-                            fetch_ok=fetch_ok,
-                        )
-                        LOG.info(
-                            "EMAIL_SEARCH_RESULTS engine=%s query=%s returned=%s eligible=%s rejected=%s",
-                            engine,
-                            fallback_query,
-                            len(raw_results),
-                            len(fallback_selected),
-                            len(fallback_rejected),
-                        )
-                        if fallback_selected:
-                            LOG.info(
-                                "EMAIL_SEARCH_SHORTLIST engine=%s urls=%s",
-                                engine,
-                                json.dumps(_compact_url_log(fallback_selected), separators=(",", ":")),
-                            )
-                        fallback_queries_used = fallback_queries_used or bool(
-                            fallback_selected or raw_results
-                        )
-                        rejected_urls.extend(fallback_rejected)
-                        for url in fallback_selected:
-                            if url not in selected_urls:
-                                selected_urls.append(url)
-                        if len(selected_urls) >= target_count:
-                            break
-                if len(selected_urls) < target_count:
-                    broadened_query = _broaden_contact_query(agent, state, city, brokerage)
-                    if broadened_query and broadened_query not in used_queries:
-                        used_queries.append(broadened_query)
-                        broadened_results = google_cse_search(
-                            broadened_query,
-                            limit=CONTACT_CSE_FETCH_LIMIT,
-                        )
-                        broadened_selected, broadened_rejected = _select_until_target(
-                            broadened_results,
-                            location_hint=broadened_query,
-                            existing=selected_urls,
-                            relaxed_mode=relaxed_mode,
-                            fetch_ok=fetch_ok,
-                        )
-                        LOG.info(
-                            "EMAIL_SEARCH_RESULTS engine=%s query=%s returned=%s eligible=%s rejected=%s",
-                            engine,
-                            broadened_query,
-                            len(broadened_results),
-                            len(broadened_selected),
-                            len(broadened_rejected),
-                        )
-                        if broadened_selected:
-                            LOG.info(
-                                "EMAIL_SEARCH_SHORTLIST engine=%s urls=%s",
-                                engine,
-                                json.dumps(_compact_url_log(broadened_selected), separators=(",", ":")),
-                            )
-                        broadened_used = bool(broadened_selected or broadened_results)
-                        rejected_urls.extend(broadened_rejected)
-                        for url in broadened_selected:
-                            if url not in selected_urls:
-                                selected_urls.append(url)
-                if len(selected_urls) < target_count or needs_alternative_sources:
-                    alt_queries = _contact_alternative_queries(
-                        agent,
-                        state,
-                        row_payload,
-                        brokerage=brokerage,
-                        domain_hint=domain_hint,
-                    )
-                    for alt_query in alt_queries:
-                        if alt_query in used_queries:
-                            continue
-                        used_queries.append(alt_query)
-                        alt_results = google_cse_search(
-                            alt_query,
-                            limit=CONTACT_CSE_FETCH_LIMIT,
-                        )
-                        alt_selected, alt_rejected = _select_until_target(
-                            alt_results,
-                            location_hint=alt_query,
-                            existing=selected_urls,
-                            relaxed_mode=True,
-                            fetch_ok=fetch_ok,
-                        )
-                        LOG.info(
-                            "EMAIL_SEARCH_RESULTS engine=%s query=%s returned=%s eligible=%s rejected=%s",
-                            engine,
-                            alt_query,
-                            len(alt_results),
-                            len(alt_selected),
-                            len(alt_rejected),
-                        )
-                        if alt_selected:
-                            LOG.info(
-                                "EMAIL_SEARCH_SHORTLIST engine=%s urls=%s",
-                                engine,
-                                json.dumps(_compact_url_log(alt_selected), separators=(",", ":")),
-                            )
-                        rejected_urls.extend(alt_rejected)
-                        for url in alt_selected:
-                            if url not in selected_urls:
-                                selected_urls.append(url)
-                        if len(selected_urls) >= target_count:
-                            break
-                if len(selected_urls) < target_count:
-                    ddg_queries = used_queries or [primary_query]
-
-                    def _run_ddg_queries(queries: List[str]) -> None:
-                        nonlocal ddg_used, ddg_blocked, cse_status
-                        for ddg_query in queries:
-                            if len(selected_urls) >= target_count or ddg_blocked:
-                                break
-                            fallback_results, blocked = duckduckgo_search(
-                                ddg_query,
-                                limit=CONTACT_CSE_FETCH_LIMIT,
-                                allowed_domains=None,
-                                with_blocked=True,
-                            )
-                            if blocked:
-                                _mark_block("duckduckgo.com", reason="blocked")
-                                ddg_blocked = True
-                            ddg_used = ddg_used or bool(fallback_results)
-                            if fallback_results or blocked:
-                                cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
-                            fb_selected, fb_rejected = _select_until_target(
-                                fallback_results,
-                                location_hint=ddg_query,
-                                existing=selected_urls,
-                                relaxed_mode=relaxed_mode,
-                                fetch_ok=fetch_ok,
-                            )
-                            LOG.info(
-                                "EMAIL_SEARCH_RESULTS engine=duckduckgo query=%s returned=%s eligible=%s rejected=%s",
-                                ddg_query,
-                                len(fallback_results),
-                                len(fb_selected),
-                                len(fb_rejected),
-                            )
-                            if fb_selected:
-                                LOG.info(
-                                    "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
-                                    json.dumps(_compact_url_log(fb_selected), separators=(",", ":")),
-                                )
-                            rejected_urls.extend(fb_rejected)
-                            for url in fb_selected:
-                                if url not in selected_urls:
-                                    selected_urls.append(url)
-                            if len(selected_urls) >= target_count or ddg_blocked:
-                                break
-
-                    _run_ddg_queries(ddg_queries)
-                    if len(selected_urls) < target_count and not ddg_blocked:
-                        expansion_queries = _ddg_expansion_queries(agent, state, brokerage, domain_hint)
-                        expansion_queries = [q for q in expansion_queries if q not in ddg_queries]
-                        _run_ddg_queries(expansion_queries)
-            elif engine in {"duckduckgo", "jina"}:
-                fetch_ok = _cse_last_state not in {"disabled"}
-                relaxed_mode = _cse_last_state in {"disabled"}
-                ddg_query = primary_query or (strict_queries[0] if strict_queries else "")
-                fallback_results, blocked = duckduckgo_search(
-                    ddg_query,
-                    limit=CONTACT_CSE_FETCH_LIMIT,
-                    allowed_domains=None,
-                    with_blocked=True,
+            raw_results = google_cse_search(primary_query, limit=search_limit)
+            selected, rejected = _select_from_results(
+                raw_results,
+                location_hint=primary_query,
+                existing=selected_urls,
+            )
+            rejected_urls.extend(rejected)
+            for url in selected:
+                if url not in selected_urls:
+                    selected_urls.append(url)
+            _log_results("google", primary_query, raw_results, selected, rejected)
+            google_blocked = _cse_last_state in {"blocked", "throttled", "disabled"}
+            google_all_blocked = _all_pages_blocked(raw_results, selected, rejected)
+            if google_blocked or google_all_blocked:
+                ddg_results, ddg_selected, ddg_rejected, ddg_blocked = _run_ddg(
+                    primary_query,
+                    existing=selected_urls,
                 )
-                if blocked:
-                    _mark_block("duckduckgo.com", reason="blocked")
-                cse_status = "duckduckgo-blocked" if blocked else "duckduckgo"
-                selected_urls, rejected_urls = _select_until_target(
-                    fallback_results,
-                    location_hint=ddg_query,
-                    existing=[],
-                    relaxed_mode=relaxed_mode,
-                    fetch_ok=fetch_ok,
-                )
-                LOG.info(
-                    "EMAIL_SEARCH_RESULTS engine=duckduckgo query=%s returned=%s eligible=%s rejected=%s",
-                    ddg_query,
-                    len(fallback_results),
-                    len(selected_urls),
-                    len(rejected_urls),
-                )
-                if selected_urls:
-                    LOG.info(
-                        "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
-                        json.dumps(_compact_url_log(selected_urls), separators=(",", ":")),
-                    )
-                if len(selected_urls) < target_count and not blocked:
-                    expansion_queries = _ddg_expansion_queries(agent, state, brokerage, domain_hint)
-                    for extra_query in expansion_queries:
-                        if blocked:
-                            break
-                        if extra_query == ddg_query:
-                            continue
-                        fallback_results, blocked = duckduckgo_search(
-                            extra_query,
-                            limit=CONTACT_CSE_FETCH_LIMIT,
-                            allowed_domains=None,
-                            with_blocked=True,
-                        )
-                        if blocked:
-                            _mark_block("duckduckgo.com", reason="blocked")
-                        extra_selected, extra_rejected = _select_until_target(
-                            fallback_results,
-                            location_hint=extra_query,
-                            existing=selected_urls,
-                            relaxed_mode=relaxed_mode,
-                            fetch_ok=fetch_ok,
-                        )
-                        LOG.info(
-                            "EMAIL_SEARCH_RESULTS engine=duckduckgo query=%s returned=%s eligible=%s rejected=%s",
-                            extra_query,
-                            len(fallback_results),
-                            len(extra_selected),
-                            len(extra_rejected),
-                        )
-                        if extra_selected:
-                            LOG.info(
-                                "EMAIL_SEARCH_SHORTLIST engine=duckduckgo urls=%s",
-                                json.dumps(_compact_url_log(extra_selected), separators=(",", ":")),
-                            )
-                        rejected_urls.extend(extra_rejected)
-                        for url in extra_selected:
-                            if url not in selected_urls:
-                                selected_urls.append(url)
-                        if len(selected_urls) >= target_count:
-                            break
-            if engine == "google":
-                cse_status = _cse_last_state
-                if broadened_used:
-                    cse_status = f"{cse_status}-broadened"
-                if fallback_queries_used:
-                    cse_status = f"{cse_status}-fallback"
-                if ddg_blocked:
-                    cse_status = f"{cse_status}-ddg-blocked"
-                elif ddg_used:
-                    cse_status = f"{cse_status}-ddg"
+                rejected_urls.extend(ddg_rejected)
+                for url in ddg_selected:
+                    if url not in selected_urls:
+                        selected_urls.append(url)
+                _log_results("duckduckgo", primary_query, ddg_results, ddg_selected, ddg_rejected)
+                cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
             else:
-                cse_status = cse_status or engine
+                cse_status = _cse_last_state
+            if len(selected_urls) < target_count and secondary_query:
+                ddg_results, ddg_selected, ddg_rejected, ddg_blocked = _run_ddg(
+                    secondary_query,
+                    existing=selected_urls,
+                )
+                rejected_urls.extend(ddg_rejected)
+                for url in ddg_selected:
+                    if url not in selected_urls:
+                        selected_urls.append(url)
+                _log_results("duckduckgo", secondary_query, ddg_results, ddg_selected, ddg_rejected)
+                cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
+
             search_empty = not bool(selected_urls)
             urls = selected_urls
             if selected_urls or rejected_urls:

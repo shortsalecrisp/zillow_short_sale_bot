@@ -1285,22 +1285,28 @@ def test_portal_mobile_number_extracted(monkeypatch):
 
 def test_contact_search_urls_skip_portals(monkeypatch):
     captured_queries = []
+    captured_ddg_queries = []
 
-    def fake_search_round_robin(queries, **kwargs):
-        captured_queries.extend(list(queries))
+    def fake_google_cse_search(query, limit=10, allowed_domains=None):
+        captured_queries.append(query)
         return [
-            [
-                (
-                    "google_cse",
-                    [
-                        {"link": "https://independent.example"},
-                        {"link": "https://www.zillow.com/profile"},
-                    ],
-                )
-            ]
+            {"link": "https://independent.example"},
+            {"link": "https://www.zillow.com/profile"},
         ]
 
-    monkeypatch.setattr(bot_min, "search_round_robin", fake_search_round_robin)
+    def fake_duckduckgo_search(query, **kwargs):
+        captured_ddg_queries.append(query)
+        return [], False
+
+    def fake_select_top_5_urls(raw_results, **kwargs):
+        urls = [item["link"] for item in raw_results]
+        filtered = [url for url in urls if "zillow" not in url]
+        rejected = [(url, "portal") for url in urls if "zillow" in url]
+        return filtered, rejected
+
+    monkeypatch.setattr(bot_min, "google_cse_search", fake_google_cse_search)
+    monkeypatch.setattr(bot_min, "duckduckgo_search", fake_duckduckgo_search)
+    monkeypatch.setattr(bot_min, "select_top_5_urls", fake_select_top_5_urls)
 
     urls, search_empty, _ = bot_min._contact_search_urls(
         "Sam Stone",
@@ -1312,6 +1318,7 @@ def test_contact_search_urls_skip_portals(monkeypatch):
     )
 
     assert captured_queries
+    assert captured_ddg_queries == ['"Sam Stone" realtor Orlando FL']
     assert urls == ["https://independent.example"]
     assert search_empty is False
 
