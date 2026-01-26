@@ -4768,15 +4768,23 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
     brokerage_crawl_planned: Set[str] = set()
 
     prefetch_urls = list(urls)
-    prefetch_pages: List[Tuple[str, str]] = []
+    prefetch_pages: List[Tuple[str, str, str]] = []
     for url in prefetch_urls:
         try:
-            page, _, _ = fetch_contact_page(url)
+            fetched = fetch_text_cached(url)
+            page = fetched.get("extracted_text", "") or ""
+            final_url = fetched.get("final_url") or url
             if page:
-                prefetch_pages.append((url, page))
+                LOG.info(
+                    "JINA_PREFETCH url=%s final_url=%s bytes=%s",
+                    url,
+                    final_url,
+                    len(page.encode("utf-8")),
+                )
+                prefetch_pages.append((url, page, final_url))
         except Exception:
             pass
-    prefetch_cache = {u: p for u, p in prefetch_pages}
+    prefetch_cache = {u: (p, f) for u, p, f in prefetch_pages}
 
     def _collect_from_urls(
         urls_to_fetch: Iterable[str], *, prefer_headless: bool = False
@@ -4784,6 +4792,67 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
         nonlocal headless_budget, contact_found
         discovered: Set[str] = set()
         agent_seen = False
+
+        def _parse_contact_page(text: str, final_url: str, is_portal: bool) -> Tuple[Set[str], bool, bool]:
+            page_candidates: List[Dict[str, Any]] = []
+            page_discovered: Set[str] = set()
+            page_agent_seen = False
+            page_contact_found = False
+            jsonld_cands, jsonld_hit, jsonld_contact, soup = _extract_jsonld_contacts_first(
+                text, final_url, agent=agent, row_payload=row_payload
+            )
+            if jsonld_cands:
+                page_candidates.extend(jsonld_cands)
+                if any(c.get("phones") or c.get("emails") for c in jsonld_cands):
+                    page_contact_found = True
+            page_agent_seen = page_agent_seen or jsonld_hit
+            if jsonld_contact:
+                page_discovered.update(
+                    _discover_agent_links(
+                        soup,
+                        final_url,
+                        agent,
+                        brokerage=brokerage,
+                        include_predictable=_looks_directory_page(final_url),
+                    )
+                )
+                candidates.extend(page_candidates)
+                return page_discovered, page_agent_seen, page_contact_found
+            if not is_portal:
+                structured_candidates = _extract_structured_candidates(text, final_url)
+                if structured_candidates:
+                    page_candidates.extend(structured_candidates)
+                    if any(c.get("phones") or c.get("emails") for c in structured_candidates):
+                        page_contact_found = True
+                text_candidates = _extract_candidates_from_text(text, final_url)
+                if text_candidates:
+                    page_candidates.extend(text_candidates)
+                    if any(c.get("phones") or c.get("emails") for c in text_candidates):
+                        page_contact_found = True
+            if not soup and BeautifulSoup:
+                try:
+                    soup = BeautifulSoup(text, "html.parser")
+                except Exception:
+                    soup = None
+            page_discovered.update(
+                _discover_agent_links(
+                    soup,
+                    final_url,
+                    agent,
+                    brokerage=brokerage,
+                    include_predictable=_looks_directory_page(final_url),
+                )
+            )
+            if _page_mentions_agent(text, agent, soup):
+                page_agent_seen = True
+            candidates.extend(page_candidates)
+            return page_discovered, page_agent_seen, page_contact_found
+
+        def _count_contacts(entries: Iterable[Dict[str, Any]]) -> Tuple[int, int]:
+            emails = sum(len(c.get("emails") or []) for c in entries)
+            phones = sum(len(c.get("phones") or []) for c in entries)
+            return emails, phones
+
         for url in urls_to_fetch:
             if not url:
                 continue
@@ -4796,76 +4865,57 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
             is_portal = dom in PORTAL_DOMAINS
             fetched: Dict[str, Any] = {}
             cached_prefetch = prefetch_cache.get(url)
-            use_headless = prefer_headless and headless_budget > 0 and cached_prefetch is None
             if cached_prefetch is not None:
+                cached_text, cached_final_url = cached_prefetch
                 fetched = {
                     "url": url,
-                    "extracted_text": cached_prefetch,
-                    "final_url": url,
+                    "extracted_text": cached_text,
+                    "final_url": cached_final_url or url,
+                    "source": "jina_prefetch",
                 }
-            elif use_headless:
-                page, _, _ = fetch_contact_page(url)
-                if page:
-                    fetched = {
-                        "url": url,
-                        "extracted_text": page,
-                        "final_url": url,
-                    }
-                    headless_budget -= 1
-                else:
-                    fetched = fetch_text_cached(url)
             else:
                 fetched = fetch_text_cached(url)
-            text = fetched.get("extracted_text", "")
+                fetched["source"] = "jina_cache"
+            text = fetched.get("extracted_text", "") or ""
             final_url = fetched.get("final_url") or url
-            if not text:
-                continue
-            jsonld_cands, jsonld_hit, jsonld_contact, soup = _extract_jsonld_contacts_first(
-                text, final_url, agent=agent, row_payload=row_payload
-            )
-            if jsonld_cands:
-                candidates.extend(jsonld_cands)
-                if any(c.get("phones") or c.get("emails") for c in jsonld_cands):
-                    contact_found = True
-            agent_seen = agent_seen or jsonld_hit
-            if jsonld_contact:
-                discovered.update(
-                    _discover_agent_links(
-                        soup,
-                        final_url,
-                        agent,
-                        brokerage=brokerage,
-                        include_predictable=_looks_directory_page(final_url),
-                    )
+            page_contact_found = False
+            if text:
+                page_candidates: List[Dict[str, Any]] = []
+                start_index = len(candidates)
+                page_discovered, page_agent_seen, page_contact_found = _parse_contact_page(
+                    text, final_url, is_portal
                 )
-                continue
-            if not is_portal:
-                structured_candidates = _extract_structured_candidates(text, final_url)
-                if structured_candidates:
-                    candidates.extend(structured_candidates)
-                    if any(c.get("phones") or c.get("emails") for c in structured_candidates):
-                        contact_found = True
-                text_candidates = _extract_candidates_from_text(text, final_url)
-                if text_candidates:
-                    candidates.extend(text_candidates)
-                    if any(c.get("phones") or c.get("emails") for c in text_candidates):
-                        contact_found = True
-            if not soup and BeautifulSoup:
-                try:
-                    soup = BeautifulSoup(text, "html.parser")
-                except Exception:
-                    soup = None
-            discovered.update(
-                _discover_agent_links(
-                    soup,
+                page_candidates = candidates[start_index:]
+                emails_found, phones_found = _count_contacts(page_candidates)
+                LOG.info(
+                    "JINA_PARSE_RESULT url=%s source=%s emails_found=%s phones_found=%s",
                     final_url,
-                    agent,
-                    brokerage=brokerage,
-                    include_predictable=_looks_directory_page(final_url),
+                    fetched.get("source", "jina_cache"),
+                    emails_found,
+                    phones_found,
                 )
-            )
-            if _page_mentions_agent(text, agent, soup):
-                agent_seen = True
+                if page_contact_found:
+                    contact_found = True
+                agent_seen = agent_seen or page_agent_seen
+                discovered.update(page_discovered)
+            else:
+                LOG.info(
+                    "JINA_PARSE_RESULT url=%s source=%s emails_found=0 phones_found=0 empty=True",
+                    final_url,
+                    fetched.get("source", "jina_cache"),
+                )
+            if prefer_headless and headless_budget > 0 and not page_contact_found:
+                LOG.info("PLAYWRIGHT_FALLBACK_TRIGGERED url=%s reason=jina_no_contacts", url)
+                page, _, _ = fetch_contact_page(url)
+                if page:
+                    headless_budget -= 1
+                    page_discovered, page_agent_seen, page_contact_found = _parse_contact_page(
+                        page, url, is_portal
+                    )
+                    if page_contact_found:
+                        contact_found = True
+                    agent_seen = agent_seen or page_agent_seen
+                    discovered.update(page_discovered)
         return discovered, agent_seen
 
     if prefetch_urls:
@@ -5529,7 +5579,7 @@ async def _headless_fetch_async(
         nav_timeout = max(nav_timeout, nav_timeout_ms)
     nav_timeout = max(10000, nav_timeout)
     default_timeout = max(10000, HEADLESS_TIMEOUT_MS)
-    overall_timeout = max(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 5))
+    overall_timeout = max(15, min(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 10)))
 
     async def _progressive_scroll(page) -> None:
         for _ in range(3):
@@ -5714,9 +5764,11 @@ async def _headless_fetch_async(
         if not run_task.done():
             run_task.cancel()
         try:
-            await run_task
+            await asyncio.wait_for(run_task, timeout=3)
         except asyncio.CancelledError:
             pass
+        except asyncio.TimeoutError:
+            LOG.debug("PLAYWRIGHT_CANCEL_TIMEOUT url=%s", target_url)
         except Exception:
             pass
 
@@ -5745,10 +5797,14 @@ def _headless_fetch(
     )
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
-        timeout_s = max(HEADLESS_OVERALL_TIMEOUT_S + 5, int((HEADLESS_FIRST_NAV_TIMEOUT_MS / 1000) + 10))
+        timeout_s = HEADLESS_OVERALL_TIMEOUT_S + 5
         return future.result(timeout=timeout_s)
     except concurrent.futures.TimeoutError:
         future.cancel()
+        try:
+            future.result(timeout=3)
+        except Exception:
+            pass
         LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", url, "thread-timeout")
         return {"timeout": True, "final_url": url}
     except Exception:
