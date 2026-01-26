@@ -2785,6 +2785,7 @@ def fetch_text_cached(
         thin_response = True
         LOG.info("JINA_THIN_RESPONSE url=%s bytes=%s; retrying direct fetch", norm, len(text.encode("utf-8")))
         try:
+            direct_status = 0
             direct_resp = _http_get(
                 norm,
                 timeout=12,
@@ -2794,6 +2795,7 @@ def fetch_text_cached(
                 block_on_status=allow_blocking,
                 record_timeout=allow_blocking,
             )
+            direct_status = direct_resp.status_code if direct_resp else 0
             if direct_resp and direct_resp.status_code == 200 and (direct_resp.text or "").strip():
                 text = direct_resp.text
                 status = direct_resp.status_code
@@ -2802,6 +2804,29 @@ def fetch_text_cached(
                 retry_needed = False
                 thin_response = False
             else:
+                if direct_status in {403, 429, 451}:
+                    dom_for_fallback = _domain(norm)
+                    if dom_for_fallback in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
+                        snapshot = _headless_fetch(norm, domain=dom_for_fallback, reason="thin-direct-blocked")
+                        rendered = _combine_playwright_snapshot(snapshot)
+                        if rendered.strip():
+                            text = rendered
+                            status = 200
+                            final_url = norm
+                            success = True
+                            retry_needed = False
+                            thin_response = False
+                            LOG.info("JINA_THIN_FALLBACK_HEADLESS url=%s", norm)
+                            return {
+                                "url": norm,
+                                "fetched_at": time.time(),
+                                "ttl_seconds": int(ttl_days * 86400),
+                                "http_status": status,
+                                "extracted_text": text,
+                                "final_url": final_url,
+                                "retry_needed": retry_needed,
+                                "thin_response": thin_response,
+                            }
                 retry_needed = True
         except Exception:
             retry_needed = True
@@ -5580,6 +5605,11 @@ async def _headless_fetch_async(
     nav_timeout = max(10000, nav_timeout)
     default_timeout = max(10000, HEADLESS_TIMEOUT_MS)
     overall_timeout = max(15, min(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 10)))
+    effective_domain = domain or _domain(target_url) or ""
+    if effective_domain in HEADLESS_SLOW_DOMAINS:
+        overall_timeout = max(overall_timeout, HEADLESS_OVERALL_TIMEOUT_S + 15)
+
+    last_snapshot: Dict[str, Any] = {}
 
     async def _progressive_scroll(page) -> None:
         for _ in range(3):
@@ -5676,6 +5706,12 @@ async def _headless_fetch_async(
                     pass
                 await page.wait_for_timeout(HEADLESS_WAIT_MS)
                 await _progressive_scroll(page)
+                try:
+                    last_snapshot["html"] = await page.content() or ""
+                    last_snapshot["visible_text"] = await page.inner_text("body", timeout=2000) or ""
+                    last_snapshot["final_url"] = page.url
+                except Exception:
+                    pass
                 if "facebook.com" in (domain or _domain(target_url) or ""):
                     await _expand_facebook(page)
                     await page.wait_for_timeout(600)
@@ -5756,6 +5792,10 @@ async def _headless_fetch_async(
         return await asyncio.wait_for(run_task, timeout=overall_timeout)
     except asyncio.TimeoutError:
         LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", target_url, "overall_timeout")
+        if last_snapshot.get("html"):
+            last_snapshot["timeout"] = True
+            last_snapshot.setdefault("final_url", target_url)
+            return last_snapshot
         return {"timeout": True, "final_url": target_url}
     except Exception as exc:
         LOG.warning("PLAYWRIGHT_ERROR url=%s err=%s", target_url, exc)
@@ -5938,6 +5978,23 @@ TOP5_HARD_PATH_BLOCKS = (
     "/download/",
     "/wp-content/uploads",
 )
+HEADLESS_SLOW_DOMAINS = {
+    "elliman.com",
+    "realtor.com",
+    "linkedin.com",
+    "kw.com",
+    "bhhsfloridarealty.com",
+    "douglaselliman.com",
+    "theviphome.team",
+}
+HEADLESS_THIN_FALLBACK_DOMAINS = {
+    "elliman.com",
+    "realtor.com",
+    "kw.com",
+    "bhhsfloridarealty.com",
+    "douglaselliman.com",
+    "theviphome.team",
+}
 TOP5_OFF_TOPIC_HINTS = (
     "forum",
     "chamber",
@@ -6371,8 +6428,36 @@ def _location_matches(
 def _fetch_contact_page_html(url: str) -> str:
     result = fetch_contact_page(url)
     if isinstance(result, tuple):
-        return result[0] if result else ""
-    return str(result or "")
+        html = result[0] if result else ""
+    else:
+        html = str(result or "")
+    if html.strip():
+        return html
+    dom = _domain(url)
+    if not dom or dom not in HEADLESS_THIN_FALLBACK_DOMAINS:
+        return html
+    if not HEADLESS_ENABLED or not async_playwright:
+        return html
+    if is_blocked_url(url):
+        return html
+    snapshot = _headless_fetch(url, domain=dom, reason="contact-empty-fallback")
+    rendered = _combine_playwright_snapshot(snapshot)
+    return rendered if rendered.strip() else html
+
+
+def _agent_slug_match(url: str, agent_tokens: List[str]) -> bool:
+    if not url or not agent_tokens:
+        return False
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    clean_tokens = [token for token in agent_tokens if token]
+    if len(clean_tokens) < 2 or not path:
+        return False
+    slug = "-".join(clean_tokens)
+    if slug in path:
+        return True
+    slug_pattern = r"[-_/]".join(re.escape(token) for token in clean_tokens)
+    return bool(re.search(slug_pattern, path))
 
 
 def select_top_5_urls(
@@ -6565,13 +6650,26 @@ def select_top_5_urls(
                     )
                     if not override_ok:
                         html_page = _fetch_contact_page_html(final_url)
-                        override_ok, override_reason = _email_present_override(
-                            agent,
-                            brokerage=brokerage,
-                            url=final_url,
-                            emails=emails_found,
-                            html_text=html_page,
-                        )
+                    override_ok, override_reason = _email_present_override(
+                        agent,
+                        brokerage=brokerage,
+                        url=final_url,
+                        emails=emails_found,
+                        html_text=html_page,
+                    )
+                    if not override_ok and _agent_slug_match(final_url, agent_tokens):
+                        slug_html = html_page or _fetch_contact_page_html(final_url)
+                        if slug_html.strip():
+                            slug_lite = parse_lite(final_url, text=slug_html)
+                            slug_emails = [
+                                em for em in slug_lite.get("emails", []) if ok_email(em) and not _is_junk_email(em)
+                            ]
+                            slug_phones = [ph for ph in slug_lite.get("phones", []) if valid_phone(ph)]
+                            emails_found.extend(slug_emails)
+                            phones_found.extend(slug_phones)
+                        if emails_found or phones_found or slug_html.strip():
+                            override_ok = True
+                            override_reason = "agent_slug_match_retry"
                     LOG.info(
                         "URL_CANDIDATE_SOFT_REJECT url=%s reason=agent_mismatch parsed_lite=True emails_found=%s phones_found=%s override_reason=%s",
                         final_url,
@@ -6614,6 +6712,19 @@ def select_top_5_urls(
                             emails=emails_found,
                             html_text=html_page,
                         )
+                    if not override_ok and _agent_slug_match(final_url, agent_tokens):
+                        slug_html = html_page or _fetch_contact_page_html(final_url)
+                        if slug_html.strip():
+                            slug_lite = parse_lite(final_url, text=slug_html)
+                            slug_emails = [
+                                em for em in slug_lite.get("emails", []) if ok_email(em) and not _is_junk_email(em)
+                            ]
+                            slug_phones = [ph for ph in slug_lite.get("phones", []) if valid_phone(ph)]
+                            emails_found.extend(slug_emails)
+                            phones_found.extend(slug_phones)
+                        if emails_found or phones_found or slug_html.strip():
+                            override_ok = True
+                            override_reason = "agent_slug_match_retry"
                     LOG.info(
                         "URL_CANDIDATE_SOFT_REJECT url=%s reason=agent_mismatch parsed_lite=True emails_found=%s phones_found=%s override_reason=%s",
                         final_url,
