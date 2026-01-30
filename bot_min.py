@@ -4595,6 +4595,7 @@ def _contact_search_urls(
         name_term = f'"{agent}"'
         primary_query = _compact_tokens(name_term, "realtor", state)
         secondary_query = _compact_tokens(name_term, "realtor", city, state)
+        retry_query = _compact_tokens(name_term, brokerage or domain_hint, "contact")
         if not primary_query:
             search_empty = True
         else:
@@ -4665,6 +4666,14 @@ def _contact_search_urls(
                     _log_results("duckduckgo", secondary_query, ddg_results, ddg_selected, ddg_rejected)
                     cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
 
+            def _low_quality_urls(url_list: List[str]) -> bool:
+                if not url_list:
+                    return True
+                non_social_count = sum(
+                    1 for u in url_list if not _is_social_root(_domain(u) or "")
+                )
+                return non_social_count < min(2, target_count)
+
             search_empty = not bool(selected_urls)
             urls = selected_urls
             if selected_urls or rejected_urls:
@@ -4673,6 +4682,64 @@ def _contact_search_urls(
                     "rejected": rejected_urls,
                 }
                 if search_empty or len(selected_urls) >= target_count:
+                    LOG.info(
+                        "TOP5_SELECTED urls=%s rejected=%s",
+                        selected_urls[:target_count],
+                        rejected_urls,
+                    )
+            if (
+                _low_quality_urls(selected_urls)
+                and not row_payload.get("_contact_search_retry")
+                and retry_query
+                and retry_query not in {primary_query, secondary_query}
+            ):
+                row_payload["_contact_search_retry"] = True
+                retry_selected: List[str] = []
+                retry_rejected: List[Tuple[str, str]] = []
+                if engine in {"duckduckgo", "jina"}:
+                    retry_results, retry_selected, retry_rejected, ddg_blocked = _run_ddg(
+                        retry_query,
+                        existing=selected_urls,
+                    )
+                    rejected_urls.extend(retry_rejected)
+                    for url in retry_selected:
+                        if url not in selected_urls:
+                            selected_urls.append(url)
+                    _log_results("duckduckgo", retry_query, retry_results, retry_selected, retry_rejected)
+                    cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
+                else:
+                    retry_results = google_cse_search(retry_query, limit=search_limit)
+                    retry_selected, retry_rejected = _select_from_results(
+                        retry_results,
+                        location_hint=retry_query,
+                        existing=selected_urls,
+                    )
+                    rejected_urls.extend(retry_rejected)
+                    for url in retry_selected:
+                        if url not in selected_urls:
+                            selected_urls.append(url)
+                    _log_results("google", retry_query, retry_results, retry_selected, retry_rejected)
+                    google_blocked = _cse_last_state in {"blocked", "throttled", "disabled"}
+                    if google_blocked:
+                        retry_results, retry_selected, retry_rejected, ddg_blocked = _run_ddg(
+                            retry_query,
+                            existing=selected_urls,
+                        )
+                        rejected_urls.extend(retry_rejected)
+                        for url in retry_selected:
+                            if url not in selected_urls:
+                                selected_urls.append(url)
+                        _log_results("duckduckgo", retry_query, retry_results, retry_selected, retry_rejected)
+                        cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
+                    else:
+                        cse_status = _cse_last_state
+                search_empty = not bool(selected_urls)
+                urls = selected_urls
+                if selected_urls or rejected_urls:
+                    top5_log[engine] = {
+                        "urls": selected_urls[:target_count],
+                        "rejected": rejected_urls,
+                    }
                     LOG.info(
                         "TOP5_SELECTED urls=%s rejected=%s",
                         selected_urls[:target_count],
@@ -5986,6 +6053,10 @@ HEADLESS_SLOW_DOMAINS = {
     "bhhsfloridarealty.com",
     "douglaselliman.com",
     "theviphome.team",
+    "remax.com",
+    "remaxofutah.com",
+    "ogden.remaxofutah.com",
+    "utahrealestate.com",
 }
 HEADLESS_THIN_FALLBACK_DOMAINS = {
     "elliman.com",
@@ -5994,6 +6065,10 @@ HEADLESS_THIN_FALLBACK_DOMAINS = {
     "bhhsfloridarealty.com",
     "douglaselliman.com",
     "theviphome.team",
+    "remax.com",
+    "remaxofutah.com",
+    "ogden.remaxofutah.com",
+    "utahrealestate.com",
 }
 TOP5_OFF_TOPIC_HINTS = (
     "forum",
@@ -6522,7 +6597,7 @@ def select_top_5_urls(
         if root in TOP5_BROKERAGE_ALLOW or any(root.endswith(f".{dom}") for dom in TOP5_BROKERAGE_ALLOW):
             score += 5
         if _is_social_root(root):
-            score -= 2
+            score -= 4
             if any(path.startswith(p) or p in path for p in PREFERRED_SOCIAL_PATHS):
                 score += 2
         if allow_portals and (root in PORTAL_DOMAINS):
@@ -6758,6 +6833,9 @@ def select_top_5_urls(
         def _merge_with_preference() -> List[Tuple[str, bool]]:
             preferred: List[Tuple[str, bool]] = []
             all_candidates = candidates + overflow
+            non_social = [c for c in all_candidates if not c[1]]
+            if len(non_social) >= target:
+                all_candidates = non_social
             all_candidates.sort(
                 key=lambda c: (
                     -c[2],
