@@ -2496,8 +2496,18 @@ def fetch_relaxed(u: str):
 
 # ───────────────────── contact fetch helpers ─────────────────────
 _CONTACT_FETCH_BACKOFFS = (0.0, 2.5, 6.0)
+CONTACT_HTTP_TIMEOUT = float(os.getenv("CONTACT_HTTP_TIMEOUT", "18"))
+CONTACT_HTTP_RETRY_ATTEMPTS = int(os.getenv("CONTACT_HTTP_RETRY_ATTEMPTS", "3"))
+CONTACT_HTTP_BACKOFF_BASE = float(os.getenv("CONTACT_HTTP_BACKOFF_BASE", "1.8"))
+CONTACT_HTTP_BACKOFF_CAP = float(os.getenv("CONTACT_HTTP_BACKOFF_CAP", "12.0"))
+CONTACT_HTTP_BACKOFF_JITTER = float(os.getenv("CONTACT_HTTP_BACKOFF_JITTER", "0.6"))
+CONTACT_FAILURE_THRESHOLD = int(os.getenv("CONTACT_FAILURE_THRESHOLD", "3"))
+CONTACT_FAILURE_LOG_INTERVAL = float(os.getenv("CONTACT_FAILURE_LOG_INTERVAL", "300"))
+CONTACT_PLAYWRIGHT_RETRIES = int(os.getenv("CONTACT_PLAYWRIGHT_RETRIES", "2"))
 
 _CONTACT_DOMAIN_LAST_FETCH: Dict[str, float] = {}
+_CONTACT_FAILURE_COUNTS: Dict[str, int] = {}
+_CONTACT_FAILURE_LAST_LOG: Dict[str, float] = {}
 _REALTOR_DOMAINS = {"realtor.com", "www.realtor.com"}
 _CONTACT_DENYLIST = set(ZILLOW_DOMAINS) | {
     "forrent.com",
@@ -2512,6 +2522,45 @@ _REALTOR_BACKOFF_CAP = float(os.getenv("REALTOR_BACKOFF_CAP", "20.0"))
 _REALTOR_BACKOFF_JITTER = float(os.getenv("REALTOR_BACKOFF_JITTER", "1.75"))
 _CONTACT_PAGE_CACHE: Dict[str, Tuple[str, bool, str]] = {}
 _CONTACT_PAGE_CACHE_LOCK = threading.Lock()
+
+
+def _contact_backoff(attempt: int) -> None:
+    backoff = min(CONTACT_HTTP_BACKOFF_CAP, CONTACT_HTTP_BACKOFF_BASE ** attempt)
+    time.sleep(backoff + random.uniform(0.0, CONTACT_HTTP_BACKOFF_JITTER))
+
+
+def _record_contact_failure(domain: str, *, url: str, err: str, status: Optional[int] = None) -> None:
+    if not domain:
+        return
+    count = _CONTACT_FAILURE_COUNTS.get(domain, 0) + 1
+    _CONTACT_FAILURE_COUNTS[domain] = count
+    now = time.time()
+    last_log = _CONTACT_FAILURE_LAST_LOG.get(domain, 0.0)
+    if count >= CONTACT_FAILURE_THRESHOLD and (now - last_log) >= CONTACT_FAILURE_LOG_INTERVAL:
+        LOG.warning(
+            "CONTACT_FETCH_ISSUE domain=%s count=%s status=%s err=%s url=%s",
+            domain,
+            count,
+            status,
+            err,
+            url,
+        )
+        _CONTACT_FAILURE_LAST_LOG[domain] = now
+
+
+def _contact_proxy_candidates(domain: str, preferred: str) -> List[str]:
+    candidates: List[str] = []
+    if preferred:
+        candidates.append(preferred)
+    if _PROXY_POOL:
+        shuffled = list(_PROXY_POOL)
+        random.shuffle(shuffled)
+        for entry in shuffled:
+            if entry not in candidates:
+                candidates.append(entry)
+    if "" not in candidates:
+        candidates.append("")
+    return candidates
 
 
 def _normalize_jina_proxy_url(url: str) -> str:
@@ -5516,9 +5565,10 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
         _realtor_fetch_seen = True
     blocked = False
     proxy_url = _proxy_for_domain(dom)
-    tries = len(_CONTACT_FETCH_BACKOFFS)
+    tries = max(len(_CONTACT_FETCH_BACKOFFS), max(1, CONTACT_HTTP_RETRY_ATTEMPTS))
     if dom in _REALTOR_DOMAINS:
         tries = max(tries, _REALTOR_MAX_RETRIES)
+    proxy_candidates = _contact_proxy_candidates(dom, proxy_url)
 
     def _fallback(reason: str) -> Tuple[str, bool, str]:
         mirror = _mirror_url(url)
@@ -5526,11 +5576,11 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
             try:
                 mirror_resp = _http_get(
                     mirror,
-                    timeout=10,
+                    timeout=CONTACT_HTTP_TIMEOUT,
                     headers=_browser_headers(_domain(mirror)),
                     rotate_user_agent=True,
                     respect_block=False,
-                    proxy=proxy_url,
+                    proxy=proxy_url or None,
                 )
                 if mirror_resp.status_code == 200 and mirror_resp.text.strip():
                     LOG.info("MIRROR FALLBACK used for %s (%s)", dom, reason)
@@ -5548,16 +5598,20 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
         allow_playwright = _should_use_playwright_for_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
         if not allow_playwright:
             return "", False, ""
-        snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)
-        rendered = _combine_playwright_snapshot(snapshot)
-        if rendered.strip():
-            LOG.info(
-                "PLAYWRIGHT REVIEW used for %s (proxy=%s reason=%s)",
-                dom,
-                bool(proxy_url),
-                reason,
-            )
-            return rendered, True, "playwright"
+        for attempt in range(1, max(1, CONTACT_PLAYWRIGHT_RETRIES) + 1):
+            snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)
+            rendered = _combine_playwright_snapshot(snapshot)
+            if rendered.strip():
+                LOG.info(
+                    "PLAYWRIGHT REVIEW used for %s (proxy=%s reason=%s)",
+                    dom,
+                    bool(proxy_url),
+                    reason,
+                )
+                return rendered, True, "playwright"
+            _record_contact_failure(dom, url=url, err="playwright_empty")
+            if attempt < CONTACT_PLAYWRIGHT_RETRIES:
+                _contact_backoff(attempt)
         LOG.info("PLAYWRIGHT REVIEW empty for %s (reason=%s)", dom, reason)
         return "", False, ""
 
@@ -5588,6 +5642,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
     while attempt < tries:
         attempt += 1
         delay = _CONTACT_FETCH_BACKOFFS[min(attempt - 1, len(_CONTACT_FETCH_BACKOFFS) - 1)]
+        proxy_url = proxy_candidates[min(attempt - 1, len(proxy_candidates) - 1)]
         if _blocked(dom):
             blocked = True
             LOG.warning("BLOCK cached -> abort %s/%s", attempt, tries)
@@ -5597,10 +5652,10 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
         try:
             resp = _http_get(
                 url,
-                timeout=10,
+                timeout=CONTACT_HTTP_TIMEOUT,
                 headers=_browser_headers(dom),
                 rotate_user_agent=True,
-                proxy=proxy_url,
+                proxy=proxy_url or None,
             )
         except DomainBlockedError:
             blocked = True
@@ -5612,11 +5667,11 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
                 raise
         except Exception as exc:
             LOG.debug("fetch_contact_page error %s on %s", exc, url)
+            _record_contact_failure(dom, url=url, err=str(exc))
             if isinstance(exc, _CONNECTION_ERRORS):
-                blocked = True
-                _mark_block(dom)
-                LOG.warning("BLOCK connect -> abort %s/%s", attempt, tries)
-                break
+                if attempt < tries:
+                    _contact_backoff(attempt)
+                    continue
             break
         _CONTACT_DOMAIN_LAST_FETCH[dom] = time.time()
         status = resp.status_code
@@ -5632,6 +5687,10 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
             html, used_fallback, method = _fallback("403")
             return _finalize(html, used_fallback, "post-mirror-403", html, method=method or "jina_cache")
         if status == 429:
+            _record_contact_failure(dom, url=url, err="http_429", status=status)
+            if attempt < tries:
+                _contact_backoff(attempt)
+                continue
             blocked = True
             _mark_block(dom)
             if dom in _REALTOR_DOMAINS:
@@ -5655,6 +5714,11 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
             _mark_block(dom)
             LOG.warning("BLOCK %s -> abort %s/%s", status, attempt, tries)
             break
+        if status in (408, 425, 500, 502, 503, 504):
+            _record_contact_failure(dom, url=url, err=f"http_{status}", status=status)
+            if attempt < tries:
+                _contact_backoff(attempt)
+                continue
         break
 
     if dom in _REALTOR_DOMAINS:
