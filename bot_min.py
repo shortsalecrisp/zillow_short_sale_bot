@@ -5565,7 +5565,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
         _realtor_fetch_seen = True
     blocked = False
     proxy_url = _proxy_for_domain(dom)
-    tries = max(len(_CONTACT_FETCH_BACKOFFS), max(1, CONTACT_HTTP_RETRY_ATTEMPTS))
+    tries = max(1, CONTACT_HTTP_RETRY_ATTEMPTS)
     if dom in _REALTOR_DOMAINS:
         tries = max(tries, _REALTOR_MAX_RETRIES)
     proxy_candidates = _contact_proxy_candidates(dom, proxy_url)
