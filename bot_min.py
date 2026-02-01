@@ -98,6 +98,12 @@ _ACCEPT_LANGUAGE_POOL = [
     "en-CA,en;q=0.8",
     "en-GB,en;q=0.9",
 ]
+HTTP_THROTTLE_LOW = float(os.getenv("HTTP_THROTTLE_LOW", "0.35"))
+HTTP_THROTTLE_HIGH = float(os.getenv("HTTP_THROTTLE_HIGH", "1.25"))
+HTTP_429_MAX_RETRIES = int(os.getenv("HTTP_429_MAX_RETRIES", "3"))
+HTTP_429_BACKOFF_BASE = float(os.getenv("HTTP_429_BACKOFF_BASE", "1.4"))
+HTTP_429_BACKOFF_CAP = float(os.getenv("HTTP_429_BACKOFF_CAP", "18.0"))
+HTTP_429_BACKOFF_JITTER = float(os.getenv("HTTP_429_BACKOFF_JITTER", "0.6"))
 HEADLESS_ENABLED = os.getenv("HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_TIMEOUT_MS = int(os.getenv("HEADLESS_FETCH_TIMEOUT_MS", "20000"))
 HEADLESS_NAV_TIMEOUT_MS = int(os.getenv("HEADLESS_NAV_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS)))
@@ -226,13 +232,22 @@ def _http_get(
 ) -> requests.Response:
     dom = urlparse(url).netloc
 
+    def _throttle_request() -> None:
+        if HTTP_THROTTLE_HIGH <= 0:
+            return
+        low = max(0.0, HTTP_THROTTLE_LOW)
+        high = max(low, HTTP_THROTTLE_HIGH)
+        delay = random.uniform(low, high) if high > low else low
+        if delay > 0:
+            time.sleep(delay)
+
     def _build_headers() -> Dict[str, str]:
         hdrs = {}
         if headers:
             hdrs.update(headers)
         if extra_headers:
             hdrs.update(extra_headers)
-        if rotate_user_agent:
+        if rotate_user_agent or "User-Agent" not in hdrs:
             hdrs["User-Agent"] = random.choice(_USER_AGENT_POOL)
         return hdrs
 
@@ -243,12 +258,14 @@ def _http_get(
     while True:
         attempts += 1
         hdrs = _build_headers()
-        proxy_cfg = {"http": proxy, "https": proxy} if proxy else None
+        selected_proxy = proxy or _proxy_for_domain(dom)
+        proxy_cfg = {"http": selected_proxy, "https": selected_proxy} if selected_proxy else None
         if dom and dom in _blocked_domains:
             raise DomainBlockedError(f"blocked: {dom}")
         if respect_block and dom in _blocked_until and _blocked_until[dom] > time.time():
             raise DomainBlockedError(f"blocked: {dom}")
         try:
+            _throttle_request()
             resp = _session.get(
                 url,
                 params=params,
@@ -265,7 +282,17 @@ def _http_get(
             raise
         _reset_timeout(dom)
         status = resp.status_code
-        if status in (403, 429) and dom and block_on_status:
+        if status == 429:
+            if attempts <= max(1, HTTP_429_MAX_RETRIES):
+                backoff = min(HTTP_429_BACKOFF_CAP, HTTP_429_BACKOFF_BASE ** attempts)
+                jitter = random.uniform(0.0, HTTP_429_BACKOFF_JITTER)
+                time.sleep(backoff + jitter)
+                continue
+            if dom and block_on_status:
+                block_for = CSE_BLOCK_SECONDS if "googleapis.com" in dom else BLOCK_SECONDS
+                _mark_block(dom, seconds=block_for, reason="429")
+                raise DomainBlockedError(f"429 received for {dom}")
+        if status in (403, 451) and dom and block_on_status:
             block_for = CSE_BLOCK_SECONDS if "googleapis.com" in dom else BLOCK_SECONDS
             reason = f"{status}"
             _mark_block(dom, seconds=block_for, reason=reason)
