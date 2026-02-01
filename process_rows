@@ -208,27 +208,36 @@ def _fetch_via_jina(url: str) -> str:
     """Fetch page content through jina reader to avoid blocks."""
 
     normalized = bot_min._normalize_jina_proxy_url(url)
+    if not bot_min._is_valid_jina_query(normalized):
+        return ""
     # Avoid nested Jina URLs in process_rows to prevent 451 policy blocks.
     unwrapped = bot_min._unwrap_jina_url(normalized)
     target_url = unwrapped or normalized
     mirror = f"https://r.jina.ai/{bot_min._normalize_jina_proxy_url(target_url)}"
-    try:
-        resp = requests.get(
-            mirror,
-            timeout=20,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; jina/1.0)"},
-        )
-        if resp.status_code == 200:
-            text = resp.text or ""
-            if text.strip().lower() in {"", "none", "null"}:
-                return ""
-            if bot_min._is_thin_jina_response(text):
-                fallback_html, _, _ = bot_min.fetch_contact_page(target_url)
-                if fallback_html.strip():
-                    return fallback_html
-            return text
-    except Exception:
-        return ""
+    attempts = max(1, bot_min.JINA_RETRY_ATTEMPTS)
+    for attempt in range(attempts):
+        try:
+            resp = requests.get(
+                mirror,
+                timeout=20,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; jina/1.0)"},
+            )
+            if resp.status_code == 200:
+                text = resp.text or ""
+                if text.strip().lower() in {"", "none", "null"}:
+                    text = ""
+                if text and bot_min._is_thin_jina_response(text):
+                    fallback_html, _, _ = bot_min.fetch_contact_page(target_url)
+                    if fallback_html.strip():
+                        return fallback_html
+                if text:
+                    return text
+            if attempt < attempts - 1:
+                time.sleep(bot_min._jina_backoff_delay(attempt))
+        except Exception:
+            if attempt < attempts - 1:
+                time.sleep(bot_min._jina_backoff_delay(attempt))
+            continue
     return ""
 
 
