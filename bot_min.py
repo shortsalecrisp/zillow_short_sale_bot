@@ -2606,6 +2606,10 @@ _TRACKING_QUERY_KEYS = {
     "mc_eid",
 }
 
+JINA_RETRY_ATTEMPTS = int(os.getenv("JINA_RETRY_ATTEMPTS", "3"))
+JINA_RETRY_BASE_SECONDS = float(os.getenv("JINA_RETRY_BASE_SECONDS", "0.75"))
+JINA_RETRY_MAX_SECONDS = float(os.getenv("JINA_RETRY_MAX_SECONDS", "6.0"))
+
 
 def normalize_url(url: str) -> str:
     parsed = urlparse(_normalize_jina_proxy_url(url))
@@ -2641,6 +2645,32 @@ def normalize_url(url: str) -> str:
         fragment="",
     )
     return urlunparse(cleaned)
+
+
+def _is_valid_jina_query(url: str) -> bool:
+    if not url or not isinstance(url, str):
+        return False
+    candidate = url.strip()
+    if not candidate:
+        return False
+    if any(ch in candidate for ch in ("\n", "\r", "\t")):
+        return False
+    parsed = urlparse(_normalize_jina_proxy_url(candidate))
+    if parsed.netloc == "r.jina.ai":
+        unwrapped = _unwrap_jina_url(candidate)
+        if not unwrapped:
+            return False
+        parsed = urlparse(unwrapped)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not parsed.netloc:
+        return False
+    return True
+
+
+def _jina_backoff_delay(attempt: int) -> float:
+    base = min(JINA_RETRY_BASE_SECONDS * (2 ** attempt), JINA_RETRY_MAX_SECONDS)
+    return base + random.uniform(0.0, base * 0.25)
 
 
 def _cache_conn() -> sqlite3.Connection:
@@ -2790,6 +2820,17 @@ def fetch_text_cached(
     allow_blocking: bool = True,
 ) -> Dict[str, Any]:
     norm = normalize_url(url)
+    if not _is_valid_jina_query(norm):
+        LOG.warning("Skipping Jina fetch for invalid URL query: %s", url)
+        return {
+            "url": norm,
+            "fetched_at": time.time(),
+            "ttl_seconds": 120,
+            "http_status": 400,
+            "extracted_text": "",
+            "final_url": norm,
+            "retry_needed": False,
+        }
     if is_blocked_url(norm):
         _log_blocked_url(norm)
         return {
@@ -2836,28 +2877,44 @@ def fetch_text_cached(
     retry_needed = False
     thin_response = False
 
-    try:
-        resp = _http_get(
-            mirror,
-            timeout=12,
-            headers=_browser_headers(_domain(mirror)),
-            rotate_user_agent=True,
-            respect_block=False,
-            block_on_status=allow_blocking,
-            record_timeout=allow_blocking,
-        )
-        text = resp.text if resp and resp.text else ""
-        status = resp.status_code if resp else 0
-        final_url = getattr(resp, "url", norm) if resp else norm
-    except requests.HTTPError as exc:
-        resp = exc.response
-        text = resp.text if resp and resp.text else ""
-        status = resp.status_code if resp else 0
-        final_url = getattr(resp, "url", norm) if resp else norm
-    except Exception:
-        text = ""
-        status = 0
-        final_url = norm
+    attempts = max(1, JINA_RETRY_ATTEMPTS)
+    for attempt in range(attempts):
+        try:
+            resp = _http_get(
+                mirror,
+                timeout=12,
+                headers=_browser_headers(_domain(mirror)),
+                rotate_user_agent=True,
+                respect_block=False,
+                block_on_status=allow_blocking,
+                record_timeout=allow_blocking,
+            )
+            text = resp.text if resp and resp.text else ""
+            status = resp.status_code if resp else 0
+            final_url = getattr(resp, "url", norm) if resp else norm
+        except DomainBlockedError:
+            raise
+        except requests.HTTPError as exc:
+            resp = exc.response
+            text = resp.text if resp and resp.text else ""
+            status = resp.status_code if resp else 0
+            final_url = getattr(resp, "url", norm) if resp else norm
+        except Exception:
+            text = ""
+            status = 0
+            final_url = norm
+        if text.strip() and 200 <= status < 300:
+            break
+        if attempt < attempts - 1:
+            delay = _jina_backoff_delay(attempt)
+            LOG.info(
+                "JINA_RETRY url=%s attempt=%s status=%s delay=%.2fs",
+                norm,
+                attempt + 1,
+                status,
+                delay,
+            )
+            time.sleep(delay)
 
     final_url = _normalize_jina_proxy_url(final_url)
     if _domain(final_url) == "r.jina.ai":
