@@ -112,6 +112,13 @@ HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
 HEADLESS_FACEBOOK_TIMEOUT_MS = int(os.getenv("HEADLESS_FACEBOOK_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS + 12000)))
 HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
 HEADLESS_OVERALL_TIMEOUT_S = int(os.getenv("HEADLESS_OVERALL_TIMEOUT_S", "50"))
+HEADFUL_ALWAYS = os.getenv("HEADFUL_ALWAYS", "false").lower() == "true"
+HEADFUL_DOMAINS = {d.strip().lower() for d in os.getenv("HEADFUL_DOMAINS", "").split(",") if d.strip()}
+HEADFUL_REASONS = {d.strip().lower() for d in os.getenv("HEADFUL_REASONS", "").split(",") if d.strip()}
+PLAYWRIGHT_RETRY_ATTEMPTS = int(os.getenv("PLAYWRIGHT_RETRY_ATTEMPTS", "3"))
+PLAYWRIGHT_SELECTOR_TIMEOUT_MS = int(os.getenv("PLAYWRIGHT_SELECTOR_TIMEOUT_MS", "3500"))
+PLAYWRIGHT_INTERACTION_MIN_MS = int(os.getenv("PLAYWRIGHT_INTERACTION_MIN_MS", "180"))
+PLAYWRIGHT_INTERACTION_MAX_MS = int(os.getenv("PLAYWRIGHT_INTERACTION_MAX_MS", "650"))
 JINA_THIN_TEXT_CHARS = int(os.getenv("JINA_THIN_TEXT_CHARS", "450"))
 PLAYWRIGHT_CONTACT_DOMAINS = {
     "facebook.com",
@@ -660,8 +667,19 @@ PLAYWRIGHT_BROWSER_CACHE = "/tmp/ms-playwright"
 def _log_blocked_url(url: str) -> None:
     LOG.info("URL_BLOCKED url=%s", url)
 
-async def _connect_playwright_browser(p) -> Tuple[Any, str]:
-    browser = await p.chromium.launch(headless=True)
+
+def _should_use_headful(domain: str, reason: str) -> bool:
+    if HEADFUL_ALWAYS:
+        return True
+    if domain and domain.lower() in HEADFUL_DOMAINS:
+        return True
+    if reason and reason.lower() in HEADFUL_REASONS:
+        return True
+    return False
+
+
+async def _connect_playwright_browser(p, *, headless: bool = True) -> Tuple[Any, str]:
+    browser = await p.chromium.launch(headless=headless)
     LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", p.chromium.executable_path)
     return browser, "local"
 
@@ -5673,6 +5691,117 @@ def _is_playwright_closed_error(exc: Exception) -> bool:
     return "target page" in message and "has been closed" in message
 
 
+def _random_ms(min_ms: int, max_ms: int) -> int:
+    if max_ms <= min_ms:
+        return max(min_ms, 0)
+    return random.randint(min_ms, max_ms)
+
+
+async def _sleep_jitter(min_ms: int = PLAYWRIGHT_INTERACTION_MIN_MS, max_ms: int = PLAYWRIGHT_INTERACTION_MAX_MS) -> None:
+    await asyncio.sleep(_random_ms(min_ms, max_ms) / 1000.0)
+
+
+async def _retry_async(func: Callable[[], Any], *, attempts: int = PLAYWRIGHT_RETRY_ATTEMPTS) -> Any:
+    last_exc: Optional[Exception] = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return await func()
+        except Exception as exc:
+            last_exc = exc
+            await asyncio.sleep(0.2 + (0.3 * attempt))
+    if last_exc:
+        raise last_exc
+    return None
+
+
+async def _wait_for_any_selector(page, selectors: Iterable[str], *, timeout_ms: int = PLAYWRIGHT_SELECTOR_TIMEOUT_MS) -> None:
+    for selector in selectors:
+        try:
+            await page.wait_for_selector(selector, timeout=timeout_ms, state="visible")
+            return
+        except Exception:
+            continue
+
+
+async def _humanize_page(page) -> None:
+    viewport = page.viewport_size or {"width": 1280, "height": 720}
+    try:
+        await page.mouse.move(_random_ms(50, viewport["width"]), _random_ms(50, viewport["height"]), steps=8)
+        await _sleep_jitter()
+        await page.mouse.wheel(0, _random_ms(800, 1400))
+        await _sleep_jitter()
+        await page.mouse.move(_random_ms(50, viewport["width"]), _random_ms(50, viewport["height"]), steps=6)
+    except Exception:
+        return
+
+
+def _anti_bot_markers(text: str) -> List[str]:
+    lowered = text.lower()
+    markers = [
+        "captcha",
+        "recaptcha",
+        "hcaptcha",
+        "cloudflare",
+        "checking your browser",
+        "verify you are human",
+        "access denied",
+        "are you a robot",
+        "unusual traffic",
+        "bot detection",
+        "automated requests",
+        "please enable javascript",
+    ]
+    return [marker for marker in markers if marker in lowered]
+
+
+async def _dismiss_common_banners(page) -> None:
+    labels = ("accept", "agree", "continue", "close", "dismiss", "i agree", "got it")
+    for label in labels:
+        try:
+            locator = page.get_by_role("button", name=re.compile(label, re.I))  # type: ignore[attr-defined]
+            await locator.first.click(timeout=800)
+            await _sleep_jitter()
+        except Exception:
+            continue
+
+
+async def _attempt_simple_captcha_bypass(page) -> bool:
+    success = False
+    for frame in page.frames:
+        frame_url = (frame.url or "").lower()
+        if any(token in frame_url for token in ("recaptcha", "hcaptcha", "turnstile", "captcha")):
+            try:
+                await frame.click("input[type='checkbox']", timeout=1200)
+                success = True
+                await _sleep_jitter()
+            except Exception:
+                continue
+    return success
+
+
+async def _handle_antibot_challenge(page, *, content: str = "", visible_text: str = "") -> None:
+    markers = _anti_bot_markers(" ".join([content, visible_text]).strip())
+    if not markers:
+        return
+    LOG.info("PLAYWRIGHT_ANTIBOT markers=%s", ",".join(markers))
+    await _dismiss_common_banners(page)
+    await _sleep_jitter()
+    if await _attempt_simple_captcha_bypass(page):
+        await page.wait_for_timeout(1500)
+    for _ in range(3):
+        try:
+            await page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+        await _sleep_jitter()
+        try:
+            refreshed = await page.inner_text("body", timeout=1200)
+        except Exception:
+            refreshed = ""
+        if not _anti_bot_markers(refreshed):
+            break
+
+
 async def _headless_fetch_async(
     url: str,
     *,
@@ -5720,6 +5849,7 @@ async def _headless_fetch_async(
             for label in labels:
                 try:
                     locator = page.get_by_role("button", name=re.compile(label, re.I))  # type: ignore[attr-defined]
+                    await _sleep_jitter()
                     await locator.first.click(timeout=1500)
                     await page.wait_for_timeout(450)
                     continue
@@ -5727,6 +5857,7 @@ async def _headless_fetch_async(
                     pass
                 try:
                     locator = page.locator(f"text={label}")
+                    await _sleep_jitter()
                     await locator.first.click(timeout=1500)
                     await page.wait_for_timeout(450)
                 except Exception:
@@ -5739,7 +5870,8 @@ async def _headless_fetch_async(
         page = None
         try:
             async with async_playwright() as p:
-                browser, runtime_mode = await _connect_playwright_browser(p)
+                use_headful = _should_use_headful(effective_domain, reason or "")
+                browser, runtime_mode = await _connect_playwright_browser(p, headless=not use_headful)
                 accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
                 context = await browser.new_context(
                     user_agent=random.choice(_USER_AGENT_POOL),
@@ -5798,30 +5930,53 @@ async def _headless_fetch_async(
                     await page.wait_for_load_state("networkidle", timeout=3000)
                 except Exception:
                     pass
+                await _wait_for_any_selector(
+                    page,
+                    ("body", "main", "article", "[role=main]", "a[href]"),
+                    timeout_ms=PLAYWRIGHT_SELECTOR_TIMEOUT_MS,
+                )
                 await page.wait_for_timeout(HEADLESS_WAIT_MS)
+                await _humanize_page(page)
                 await _progressive_scroll(page)
                 try:
-                    last_snapshot["html"] = await page.content() or ""
-                    last_snapshot["visible_text"] = await page.inner_text("body", timeout=2000) or ""
+                    last_snapshot["html"] = await _retry_async(page.content) or ""
+                    last_snapshot["visible_text"] = await _retry_async(
+                        lambda: page.inner_text("body", timeout=2000)
+                    ) or ""
                     last_snapshot["final_url"] = page.url
+                except Exception:
+                    pass
+                try:
+                    await _handle_antibot_challenge(
+                        page,
+                        content=last_snapshot.get("html", ""),
+                        visible_text=last_snapshot.get("visible_text", ""),
+                    )
                 except Exception:
                     pass
                 if "facebook.com" in (domain or _domain(target_url) or ""):
                     await _expand_facebook(page)
                     await page.wait_for_timeout(600)
 
-                content = await page.content() or ""
+                try:
+                    content = await _retry_async(page.content) or ""
+                except Exception:
+                    content = ""
                 visible_text = ""
                 try:
-                    visible_text = await page.inner_text("body", timeout=2000) or ""
+                    visible_text = await _retry_async(
+                        lambda: page.inner_text("body", timeout=2000)
+                    ) or ""
                 except Exception:
                     visible_text = ""
                 mail_links: List[str] = []
                 tel_links: List[str] = []
                 try:
-                    hrefs = await page.eval_on_selector_all(
-                        "a[href]",
-                        "els => els.map(el => el.getAttribute('href') || '')",
+                    hrefs = await _retry_async(
+                        lambda: page.eval_on_selector_all(
+                            "a[href]",
+                            "els => els.map(el => el.getAttribute('href') || '')",
+                        )
                     ) or []
                     mail_links = [h for h in hrefs if h and h.lower().startswith("mailto:")]
                     tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
