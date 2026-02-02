@@ -453,3 +453,24 @@ def test_select_top_5_keeps_jsonld_directory_email(monkeypatch):
 
     assert "https://broker.example/agents" in selected
     assert ("https://broker.example/agents", "agent_mismatch") not in rejected
+
+
+def test_select_top_5_accepts_agent_slug_url(monkeypatch):
+    items = [{"link": "https://broker.example/agents/jane-agent"}]
+
+    def fake_fetch(url, ttl_days=7, respect_block=False, allow_blocking=False):
+        return {"extracted_text": "Meet our agents", "http_status": 200, "final_url": url}
+
+    monkeypatch.setattr(bot_min, "fetch_text_cached", fake_fetch)
+
+    selected, rejected = bot_min.select_top_5_urls(
+        items,
+        fetch_check=True,
+        property_state="",
+        property_city="",
+        agent="Jane Agent",
+        limit=5,
+    )
+
+    assert "https://broker.example/agents/jane-agent" in selected
+    assert ("https://broker.example/agents/jane-agent", "agent_mismatch") not in rejected
