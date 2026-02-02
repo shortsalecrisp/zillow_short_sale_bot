@@ -4402,6 +4402,7 @@ def _agent_matches_context(
         dom = _domain(url) if url else ""
         if _brand_handle_match(agent, context, dom):
             return True
+        return False
     if url:
         agent_tokens = [tok for tok in _normalize_name_tokens(agent) if len(tok) > 1]
         if len(agent_tokens) >= 2 and _agent_slug_match(url, agent_tokens):
