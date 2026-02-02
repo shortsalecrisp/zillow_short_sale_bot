@@ -661,7 +661,22 @@ LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
 _playwright_ready = False
 _playwright_ready_lock = threading.Lock()
-PLAYWRIGHT_BROWSER_CACHE = "/tmp/ms-playwright"
+_playwright_executable_path: Optional[str] = None
+PLAYWRIGHT_BROWSER_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
+PLAYWRIGHT_LAUNCH_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-default-apps",
+    "--disable-extensions",
+    "--disable-sync",
+    "--metrics-recording-only",
+    "--no-first-run",
+    "--safebrowsing-disable-auto-update",
+]
 
 
 def _log_blocked_url(url: str) -> None:
@@ -678,20 +693,39 @@ def _should_use_headful(domain: str, reason: str) -> bool:
     return False
 
 
+def _ensure_playwright_browsers_path(logger: logging.Logger) -> str:
+    if not os.getenv("PLAYWRIGHT_BROWSERS_PATH"):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_BROWSER_CACHE
+    browsers_path = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
+    try:
+        Path(browsers_path).mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.warning("PLAYWRIGHT_BROWSERS_PATH_CREATE_FAILED path=%s err=%s", browsers_path, exc)
+    return browsers_path
+
+
 async def _connect_playwright_browser(p, *, headless: bool = True) -> Tuple[Any, str]:
-    browser = await p.chromium.launch(headless=headless)
-    LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", p.chromium.executable_path)
+    executable_path = _playwright_executable_path or p.chromium.executable_path
+    launch_timeout = max(30000, HEADLESS_TIMEOUT_MS)
+    browser = await p.chromium.launch(
+        headless=headless,
+        executable_path=executable_path,
+        args=PLAYWRIGHT_LAUNCH_ARGS,
+        timeout=launch_timeout,
+    )
+    LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", executable_path)
     return browser, "local"
 
 
 async def _ensure_playwright_ready_async(logger: logging.Logger) -> bool:
+    global _playwright_executable_path
     if async_playwright is None:
         logger.warning("PLAYWRIGHT_MISSING playwright not installed")
         return False
-    if not os.getenv("PLAYWRIGHT_BROWSERS_PATH"):
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_BROWSER_CACHE
+    _ensure_playwright_browsers_path(logger)
     async with async_playwright() as p:
         executable_path = Path(p.chromium.executable_path)
+        _playwright_executable_path = str(executable_path)
     if not executable_path.exists():
         logger.warning(
             "PLAYWRIGHT_MISSING_EXECUTABLE path=%s; installing chromium",
@@ -707,7 +741,13 @@ async def _ensure_playwright_ready_async(logger: logging.Logger) -> bool:
             return False
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            executable_path = _playwright_executable_path or p.chromium.executable_path
+            browser = await p.chromium.launch(
+                headless=True,
+                executable_path=executable_path,
+                args=PLAYWRIGHT_LAUNCH_ARGS,
+                timeout=max(30000, HEADLESS_TIMEOUT_MS),
+            )
             await browser.close()
         logger.info("PLAYWRIGHT_READY local chromium smoke test OK")
         return True
@@ -5812,6 +5852,12 @@ def _is_playwright_closed_error(exc: Exception) -> bool:
     return "target page" in message and "has been closed" in message
 
 
+def _is_playwright_timeout_error(exc: Exception) -> bool:
+    if PlaywrightTimeoutError and isinstance(exc, PlaywrightTimeoutError):
+        return True
+    return exc.__class__.__name__ == "TimeoutError"
+
+
 def _random_ms(min_ms: int, max_ms: int) -> int:
     if max_ms <= min_ms:
         return max(min_ms, 0)
@@ -5828,8 +5874,10 @@ async def _retry_async(func: Callable[[], Any], *, attempts: int = PLAYWRIGHT_RE
         try:
             return await func()
         except Exception as exc:
+            if _is_playwright_closed_error(exc):
+                raise
             last_exc = exc
-            await asyncio.sleep(0.2 + (0.3 * attempt))
+            await asyncio.sleep(0.25 + (0.35 * attempt))
     if last_exc:
         raise last_exc
     return None
@@ -6026,9 +6074,16 @@ async def _headless_fetch_async(
                         await page.goto(target_url, wait_until="domcontentloaded", timeout=nav_timeout)
                         break
                     except Exception as exc:
-                        if PlaywrightTimeoutError and isinstance(exc, PlaywrightTimeoutError):
+                        if _is_playwright_timeout_error(exc):
                             LOG.warning(
                                 "PLAYWRIGHT_TIMEOUT nav url=%s attempt=%s err=%s",
+                                target_url,
+                                attempt + 1,
+                                exc,
+                            )
+                        elif _is_playwright_closed_error(exc):
+                            LOG.warning(
+                                "PLAYWRIGHT_CLOSED nav url=%s attempt=%s err=%s",
                                 target_url,
                                 attempt + 1,
                                 exc,
@@ -6147,9 +6202,9 @@ async def _headless_fetch_async(
                 if result:
                     return result
             except Exception as exc:  # pragma: no cover - network/env specific
-                if _is_playwright_closed_error(exc):
+                if _is_playwright_closed_error(exc) or _is_playwright_timeout_error(exc):
                     LOG.warning("PLAYWRIGHT_RETRY url=%s err=%s attempt=%s", target_url, exc, attempt + 1)
-                    await asyncio.sleep(0.6)
+                    await asyncio.sleep(0.8 + (0.4 * attempt))
                     continue
                 LOG.warning("PLAYWRIGHT_ERROR url=%s err=%s", target_url, exc)
                 return {}
