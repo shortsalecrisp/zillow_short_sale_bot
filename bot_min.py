@@ -4396,12 +4396,25 @@ def _agent_matches_context(
     if not agent.strip():
         return True
     context = " ".join(part for part in (title, snippet, text) if part).strip()
-    if not context:
-        return False
-    if _page_mentions_agent(context, agent):
-        return True
-    dom = _domain(url) if url else ""
-    return _brand_handle_match(agent, context, dom)
+    if context:
+        if _page_mentions_agent(context, agent):
+            return True
+        dom = _domain(url) if url else ""
+        if _brand_handle_match(agent, context, dom):
+            return True
+    if url:
+        agent_tokens = [tok for tok in _normalize_name_tokens(agent) if len(tok) > 1]
+        if len(agent_tokens) >= 2 and _agent_slug_match(url, agent_tokens):
+            return True
+        if agent_tokens:
+            parsed = urlparse(url)
+            url_surface = f"{parsed.netloc.lower()}{parsed.path.lower()}"
+            token_hits = sum(1 for tok in agent_tokens if tok and tok in url_surface)
+            if token_hits >= max(1, len(agent_tokens) - 1):
+                return True
+        if _plausible_agent_url(url, agent):
+            return True
+    return False
 
 
 def _email_has_strong_domain_signal(email: str, *, brokerage: str = "", url: str = "") -> bool:
@@ -6362,6 +6375,8 @@ TOP5_PATH_HINT_TOKENS = {
     "about",
     "contact",
     "directory",
+    "people",
+    "staff",
 }
 TOP5_LISTING_HINTS = {"listing", "listings", "for-sale", "homedetails", "property", "newlisting", "mls", "idx"}
 TOP5_GOOD_PATH_HINTS = (
