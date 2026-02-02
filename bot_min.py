@@ -3303,23 +3303,53 @@ def _duckduckgo_html_search(
     page = 0
     fetched_any = False
     max_pages = max(1, min(5, (max_results + 9) // 10))
+    proxy_pool = list(_PROXY_POOL)
+    attempted_proxy = False
+
+    def _ddg_backoff_delay(attempt: int) -> float:
+        base = min(DDG_RETRY_BACKOFF_BASE * (2 ** attempt), DDG_RETRY_BACKOFF_CAP)
+        jitter = random.uniform(0.0, DDG_RETRY_BACKOFF_JITTER)
+        return base + jitter
 
     while len(hits) < max_results and page < max_pages:
-        try:
-            params = {"q": query}
-            if offset:
-                params["s"] = str(offset)
-            resp = _http_get(
-                "https://duckduckgo.com/html/",
-                params=params,
-                headers=_browser_headers("duckduckgo.com"),
-                rotate_user_agent=True,
-            )
-            body = resp.text if resp and resp.text else ""
-        except DomainBlockedError:
-            raise
-        except Exception as exc:
-            LOG.debug("duckduckgo html search failed for %s: %s", query, exc)
+        params = {"q": query}
+        if offset:
+            params["s"] = str(offset)
+        body = ""
+        last_err: Optional[Exception] = None
+        for attempt in range(DDG_RETRY_ATTEMPTS):
+            proxy = None
+            if attempt > 0 and proxy_pool:
+                proxy = random.choice(proxy_pool)
+                attempted_proxy = True
+            try:
+                resp = _http_get(
+                    "https://duckduckgo.com/html/",
+                    params=params,
+                    headers=_browser_headers("duckduckgo.com"),
+                    rotate_user_agent=True,
+                    proxy=proxy,
+                )
+                body = resp.text if resp and resp.text else ""
+                if body:
+                    break
+            except DomainBlockedError:
+                raise
+            except Exception as exc:
+                last_err = exc
+                delay = _ddg_backoff_delay(attempt)
+                LOG.debug(
+                    "duckduckgo html search failed for %s attempt=%s proxy=%s delay=%.2fs err=%s",
+                    query,
+                    attempt + 1,
+                    bool(proxy),
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+        if not body:
+            if last_err:
+                LOG.debug("duckduckgo html search failed for %s: %s", query, last_err)
             break
 
         if not body:
@@ -3341,6 +3371,8 @@ def _duckduckgo_html_search(
         offset += 30
         page += 1
         _search_sleep()
+        if attempted_proxy:
+            _search_sleep()
 
     if fetched_any:
         _ddg_cache_set(query, hits, ttl_seconds)
@@ -3353,6 +3385,12 @@ DDG_MAX_RESULTS = int(os.getenv("DDG_MAX_RESULTS", "15"))
 _DDG_SERP_TTL_HOURS = float(os.getenv("DDG_SERP_TTL_HOURS", "48"))
 DDG_SERP_TTL_SECONDS = int(max(24.0, min(_DDG_SERP_TTL_HOURS, 72.0)) * 3600)
 CONTACT_SEARCH_TARGET = int(os.getenv("CONTACT_SEARCH_TARGET", "8"))
+DDG_RETRY_ATTEMPTS = int(os.getenv("DDG_RETRY_ATTEMPTS", "2"))
+DDG_RETRY_BACKOFF_BASE = float(os.getenv("DDG_RETRY_BACKOFF_BASE", "1.6"))
+DDG_RETRY_BACKOFF_CAP = float(os.getenv("DDG_RETRY_BACKOFF_CAP", "6.0"))
+DDG_RETRY_BACKOFF_JITTER = float(os.getenv("DDG_RETRY_BACKOFF_JITTER", "0.6"))
+DDG_BLOCK_AFTER = int(os.getenv("DDG_BLOCK_AFTER", "3"))
+_ddg_failure_streak = 0
 
 
 def _ddg_target_limit(limit: int) -> int:
@@ -7521,6 +7559,7 @@ def duckduckgo_search(
     allowed_domains: Optional[Set[str]] = None,
     with_blocked: bool = False,
 ) -> List[Dict[str, Any]] | Tuple[List[Dict[str, Any]], bool]:
+    global _ddg_failure_streak
     blocked = False
     results: List[Dict[str, str]] = []
     effective_limit = _ddg_target_limit(limit)
@@ -7548,11 +7587,18 @@ def duckduckgo_search(
                     seen.add(norm)
                     if len(results) >= effective_limit:
                         break
+        if results:
+            _ddg_failure_streak = 0
+        else:
+            _ddg_failure_streak += 1
     except DomainBlockedError:
-        blocked = True
+        _ddg_failure_streak += 1
     except Exception:
-        blocked = True
+        _ddg_failure_streak += 1
         LOG.exception("duckduckgo_search failed for %s", query)
+    if _ddg_failure_streak >= DDG_BLOCK_AFTER:
+        blocked = True
+        LOG.warning("DuckDuckGo failure streak reached %s; treating as blocked", _ddg_failure_streak)
     hits = [
         {
             "link": item.get("link", ""),
