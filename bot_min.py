@@ -120,6 +120,14 @@ PLAYWRIGHT_SELECTOR_TIMEOUT_MS = int(os.getenv("PLAYWRIGHT_SELECTOR_TIMEOUT_MS",
 PLAYWRIGHT_INTERACTION_MIN_MS = int(os.getenv("PLAYWRIGHT_INTERACTION_MIN_MS", "180"))
 PLAYWRIGHT_INTERACTION_MAX_MS = int(os.getenv("PLAYWRIGHT_INTERACTION_MAX_MS", "650"))
 JINA_THIN_TEXT_CHARS = int(os.getenv("JINA_THIN_TEXT_CHARS", "450"))
+HEADLESS_NAV_TIMEOUT_OVERRIDES = {
+    k.strip().lower(): int(v)
+    for k, v in (
+        part.split("=", 1)
+        for part in os.getenv("HEADLESS_NAV_TIMEOUT_OVERRIDES", "").split(",")
+        if "=" in part
+    )
+}
 PLAYWRIGHT_CONTACT_DOMAINS = {
     "facebook.com",
     "remax.com",
@@ -662,6 +670,9 @@ _playwright_status_logged = False
 _playwright_ready = False
 _playwright_ready_lock = threading.Lock()
 _playwright_executable_path: Optional[str] = None
+_playwright_runtime: Optional[Any] = None
+_playwright_browser: Optional[Any] = None
+_playwright_browser_lock = asyncio.Lock()
 PLAYWRIGHT_BROWSER_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
 PLAYWRIGHT_LAUNCH_ARGS = [
     "--no-sandbox",
@@ -715,6 +726,39 @@ async def _connect_playwright_browser(p, *, headless: bool = True) -> Tuple[Any,
     )
     LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", executable_path)
     return browser, "local"
+
+
+async def _reset_playwright_browser(reason: str = "") -> None:
+    global _playwright_runtime, _playwright_browser
+    browser = _playwright_browser
+    runtime = _playwright_runtime
+    _playwright_browser = None
+    _playwright_runtime = None
+    try:
+        if browser:
+            await browser.close()
+    except Exception:
+        pass
+    try:
+        if runtime:
+            await runtime.stop()
+    except Exception:
+        pass
+    if reason:
+        LOG.info("PLAYWRIGHT_BROWSER_RESET reason=%s", reason)
+
+
+async def _get_playwright_browser(*, headless: bool) -> Tuple[Any, str]:
+    global _playwright_runtime, _playwright_browser
+    async with _playwright_browser_lock:
+        if _playwright_runtime and _playwright_browser:
+            return _playwright_browser, "shared"
+        if async_playwright is None:
+            raise RuntimeError("playwright not installed")
+        _playwright_runtime = await async_playwright().start()
+        browser, runtime_mode = await _connect_playwright_browser(_playwright_runtime, headless=headless)
+        _playwright_browser = browser
+        return browser, runtime_mode
 
 
 async def _ensure_playwright_ready_async(logger: logging.Logger) -> bool:
@@ -5975,6 +6019,42 @@ def _anti_bot_markers(text: str) -> List[str]:
     return [marker for marker in markers if marker in lowered]
 
 
+def _headless_nav_timeout_for(url: str, domain: str, base_timeout: int) -> int:
+    if not domain:
+        domain = _domain(url) or ""
+    domain = domain.lower()
+    for entry, override in HEADLESS_NAV_TIMEOUT_OVERRIDES.items():
+        if domain == entry or domain.endswith(f".{entry}"):
+            return max(base_timeout, override)
+    if domain in HEADLESS_SLOW_DOMAINS:
+        return max(base_timeout, HEADLESS_FIRST_NAV_TIMEOUT_MS)
+    return base_timeout
+
+
+def _http_fallback_snapshot(url: str, *, domain: str = "") -> Dict[str, Any]:
+    target_url = _unwrap_jina_url(url)
+    if not target_url or is_blocked_url(target_url):
+        return {}
+    try:
+        resp = _http_get(
+            target_url,
+            headers=_browser_headers(domain or _domain(target_url)),
+            rotate_user_agent=True,
+        )
+    except Exception:
+        return {}
+    body = resp.text if resp and resp.text else ""
+    if not body.strip():
+        return {}
+    return {
+        "html": body,
+        "visible_text": "",
+        "mailto_links": [],
+        "tel_links": [],
+        "final_url": target_url,
+    }
+
+
 async def _dismiss_common_banners(page) -> None:
     labels = ("accept", "agree", "continue", "close", "dismiss", "i agree", "got it")
     for label in labels:
@@ -6050,6 +6130,7 @@ async def _headless_fetch_async(
     default_timeout = max(10000, HEADLESS_TIMEOUT_MS)
     overall_timeout = max(15, min(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 10)))
     effective_domain = domain or _domain(target_url) or ""
+    nav_timeout = _headless_nav_timeout_for(target_url, effective_domain, nav_timeout)
     if effective_domain in HEADLESS_SLOW_DOMAINS:
         overall_timeout = max(overall_timeout, HEADLESS_OVERALL_TIMEOUT_S + 15)
 
@@ -6090,146 +6171,150 @@ async def _headless_fetch_async(
         context = None
         page = None
         try:
-            async with async_playwright() as p:
-                use_headful = _should_use_headful(effective_domain, reason or "")
-                browser, runtime_mode = await _connect_playwright_browser(p, headless=not use_headful)
-                accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
-                context = await browser.new_context(
-                    user_agent=random.choice(_USER_AGENT_POOL),
-                    locale=accept_language.split(",")[0],
-                    extra_http_headers={
-                        "Accept-Language": accept_language,
-                        **_random_cookie_header(),
-                    },
-                )
-                page = await context.new_page()
-                try:
-                    async def _route_handler(route, request) -> None:
-                        if request.resource_type in {"image", "media", "font", "stylesheet"}:
-                            await route.abort()
-                        else:
-                            await route.continue_()
+            use_headful = _should_use_headful(effective_domain, reason or "")
+            browser, runtime_mode = await _get_playwright_browser(headless=not use_headful)
+            accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
+            context = await browser.new_context(
+                user_agent=random.choice(_USER_AGENT_POOL),
+                locale=accept_language.split(",")[0],
+                extra_http_headers={
+                    "Accept-Language": accept_language,
+                    **_random_cookie_header(),
+                },
+            )
+            page = await context.new_page()
+            try:
+                async def _route_handler(route, request) -> None:
+                    if request.resource_type in {"image", "media", "font", "stylesheet"}:
+                        await route.abort()
+                    else:
+                        await route.continue_()
 
-                    await page.route("**/*", _route_handler)
-                except Exception:
-                    pass
-                page.set_default_timeout(default_timeout)
-                page.set_default_navigation_timeout(default_timeout)
-                LOG.info(
-                    "PLAYWRIGHT_START url=%s reason=%s remote=%s",
-                    target_url,
-                    reason or "fallback",
-                    runtime_mode == "remote",
-                )
-                for attempt in range(2):
-                    try:
-                        await page.goto(target_url, wait_until="domcontentloaded", timeout=nav_timeout)
-                        break
-                    except Exception as exc:
-                        if _is_playwright_timeout_error(exc):
-                            LOG.warning(
-                                "PLAYWRIGHT_TIMEOUT nav url=%s attempt=%s err=%s",
-                                target_url,
-                                attempt + 1,
-                                exc,
-                            )
-                        elif _is_playwright_closed_error(exc):
-                            LOG.warning(
-                                "PLAYWRIGHT_CLOSED nav url=%s attempt=%s err=%s",
-                                target_url,
-                                attempt + 1,
-                                exc,
-                            )
-                        else:
-                            LOG.warning(
-                                "PLAYWRIGHT_ERROR nav url=%s attempt=%s err=%s",
-                                target_url,
-                                attempt + 1,
-                                exc,
-                            )
-                        if attempt == 0:
-                            try:
-                                await page.wait_for_timeout(800)
-                            except Exception:
-                                pass
-                            continue
-                        return {}
+                await page.route("**/*", _route_handler)
+            except Exception:
+                pass
+            page.set_default_timeout(default_timeout)
+            page.set_default_navigation_timeout(default_timeout)
+            LOG.info(
+                "PLAYWRIGHT_START url=%s reason=%s remote=%s",
+                target_url,
+                reason or "fallback",
+                runtime_mode == "remote",
+            )
+            attempt_timeout = nav_timeout
+            for attempt in range(2):
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=3000)
-                except Exception:
-                    pass
-                await _wait_for_any_selector(
-                    page,
-                    ("body", "main", "article", "[role=main]", "a[href]"),
-                    timeout_ms=PLAYWRIGHT_SELECTOR_TIMEOUT_MS,
-                )
-                await page.wait_for_timeout(HEADLESS_WAIT_MS)
-                await _humanize_page(page)
-                await _progressive_scroll(page)
-                try:
-                    last_snapshot["html"] = await _retry_async(page.content) or ""
-                    last_snapshot["visible_text"] = await _retry_async(
-                        lambda: page.inner_text("body", timeout=2000)
-                    ) or ""
-                    last_snapshot["final_url"] = page.url
-                except Exception:
-                    pass
-                try:
-                    await _handle_antibot_challenge(
-                        page,
-                        content=last_snapshot.get("html", ""),
-                        visible_text=last_snapshot.get("visible_text", ""),
-                    )
-                except Exception:
-                    pass
-                if "facebook.com" in (domain or _domain(target_url) or ""):
-                    await _expand_facebook(page)
-                    await page.wait_for_timeout(600)
-
-                try:
-                    content = await _retry_async(page.content) or ""
-                except Exception:
-                    content = ""
-                visible_text = ""
-                try:
-                    visible_text = await _retry_async(
-                        lambda: page.inner_text("body", timeout=2000)
-                    ) or ""
-                except Exception:
-                    visible_text = ""
-                mail_links: List[str] = []
-                tel_links: List[str] = []
-                try:
-                    hrefs = await _retry_async(
-                        lambda: page.eval_on_selector_all(
-                            "a[href]",
-                            "els => els.map(el => el.getAttribute('href') || '')",
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=attempt_timeout)
+                    break
+                except Exception as exc:
+                    if _is_playwright_timeout_error(exc):
+                        LOG.warning(
+                            "PLAYWRIGHT_TIMEOUT nav url=%s attempt=%s err=%s",
+                            target_url,
+                            attempt + 1,
+                            exc,
                         )
-                    ) or []
-                    mail_links = [h for h in hrefs if h and h.lower().startswith("mailto:")]
-                    tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
-                except Exception:
-                    pass
-                if not content.strip():
-                    LOG.info("PLAYWRIGHT_ERROR url=%s err=%s", target_url, "empty-content")
+                    elif _is_playwright_closed_error(exc):
+                        LOG.warning(
+                            "PLAYWRIGHT_CLOSED nav url=%s attempt=%s err=%s",
+                            target_url,
+                            attempt + 1,
+                            exc,
+                        )
+                        await _reset_playwright_browser("nav-closed")
+                        return {}
+                    else:
+                        LOG.warning(
+                            "PLAYWRIGHT_ERROR nav url=%s attempt=%s err=%s",
+                            target_url,
+                            attempt + 1,
+                            exc,
+                        )
+                    if attempt == 0:
+                        attempt_timeout = max(attempt_timeout, HEADLESS_FIRST_NAV_TIMEOUT_MS)
+                        LOG.info("PLAYWRIGHT_SLOW_RETRY url=%s timeout=%s", target_url, attempt_timeout)
+                        try:
+                            await page.wait_for_timeout(800)
+                        except Exception:
+                            pass
+                        continue
                     return {}
-                LOG.info(
-                    "PLAYWRIGHT_OK url=%s bytes=%s",
-                    target_url,
-                    len(content.encode("utf-8")),
+            try:
+                await page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            await _wait_for_any_selector(
+                page,
+                ("body", "main", "article", "[role=main]", "a[href]"),
+                timeout_ms=PLAYWRIGHT_SELECTOR_TIMEOUT_MS,
+            )
+            await page.wait_for_timeout(HEADLESS_WAIT_MS)
+            await _humanize_page(page)
+            await _progressive_scroll(page)
+            try:
+                last_snapshot["html"] = await _retry_async(page.content) or ""
+                last_snapshot["visible_text"] = await _retry_async(
+                    lambda: page.inner_text("body", timeout=2000)
+                ) or ""
+                last_snapshot["final_url"] = page.url
+            except Exception:
+                pass
+            try:
+                await _handle_antibot_challenge(
+                    page,
+                    content=last_snapshot.get("html", ""),
+                    visible_text=last_snapshot.get("visible_text", ""),
                 )
-                LOG.debug(
-                    "Headless fetch ok for %s (remote=%s)",
-                    domain or _domain(target_url),
-                    runtime_mode == "remote",
-                )
-                return {
-                    "html": content,
-                    "visible_text": visible_text,
-                    "mailto_links": mail_links,
-                    "tel_links": tel_links,
-                    "final_url": page.url,
-                }
+            except Exception:
+                pass
+            if "facebook.com" in (domain or _domain(target_url) or ""):
+                await _expand_facebook(page)
+                await page.wait_for_timeout(600)
+
+            try:
+                content = await _retry_async(page.content) or ""
+            except Exception:
+                content = ""
+            visible_text = ""
+            try:
+                visible_text = await _retry_async(
+                    lambda: page.inner_text("body", timeout=2000)
+                ) or ""
+            except Exception:
+                visible_text = ""
+            mail_links: List[str] = []
+            tel_links: List[str] = []
+            try:
+                hrefs = await _retry_async(
+                    lambda: page.eval_on_selector_all(
+                        "a[href]",
+                        "els => els.map(el => el.getAttribute('href') || '')",
+                    )
+                ) or []
+                mail_links = [h for h in hrefs if h and h.lower().startswith("mailto:")]
+                tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
+            except Exception:
+                pass
+            if not content.strip():
+                LOG.info("PLAYWRIGHT_ERROR url=%s err=%s", target_url, "empty-content")
+                return {}
+            LOG.info(
+                "PLAYWRIGHT_OK url=%s bytes=%s",
+                target_url,
+                len(content.encode("utf-8")),
+            )
+            LOG.debug(
+                "Headless fetch ok for %s (remote=%s)",
+                domain or _domain(target_url),
+                runtime_mode == "remote",
+            )
+            return {
+                "html": content,
+                "visible_text": visible_text,
+                "mailto_links": mail_links,
+                "tel_links": tel_links,
+                "final_url": page.url,
+            }
         finally:
             try:
                 if page:
@@ -6243,7 +6328,8 @@ async def _headless_fetch_async(
                 pass
             try:
                 if browser:
-                    await asyncio.shield(browser.close())
+                    if _playwright_browser is not browser:
+                        await asyncio.shield(browser.close())
             except Exception:
                 pass
 
@@ -6255,6 +6341,8 @@ async def _headless_fetch_async(
                     return result
             except Exception as exc:  # pragma: no cover - network/env specific
                 if _is_playwright_closed_error(exc) or _is_playwright_timeout_error(exc):
+                    if _is_playwright_closed_error(exc):
+                        await _reset_playwright_browser("run-closed")
                     LOG.warning("PLAYWRIGHT_RETRY url=%s err=%s attempt=%s", target_url, exc, attempt + 1)
                     await asyncio.sleep(0.8 + (0.4 * attempt))
                     continue
@@ -6315,7 +6403,13 @@ def _headless_fetch(
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
         timeout_s = HEADLESS_OVERALL_TIMEOUT_S + 5
-        return future.result(timeout=timeout_s)
+        result = future.result(timeout=timeout_s)
+        if result.get("timeout") and not result.get("html"):
+            fallback = _http_fallback_snapshot(url, domain=domain)
+            if fallback:
+                LOG.info("PLAYWRIGHT_TIMEOUT_FALLBACK_HTTP url=%s", url)
+                return fallback
+        return result
     except concurrent.futures.TimeoutError:
         future.cancel()
         try:
@@ -6323,6 +6417,10 @@ def _headless_fetch(
         except Exception:
             pass
         LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", url, "thread-timeout")
+        fallback = _http_fallback_snapshot(url, domain=domain)
+        if fallback:
+            LOG.info("PLAYWRIGHT_TIMEOUT_FALLBACK_HTTP url=%s", url)
+            return fallback
         return {"timeout": True, "final_url": url}
     except Exception:
         LOG.exception("PLAYWRIGHT_FAIL url=%s err=%s", url, "thread-runner")
