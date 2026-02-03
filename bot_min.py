@@ -756,7 +756,7 @@ async def _get_playwright_browser(*, headless: bool) -> Tuple[Any, str]:
     global _playwright_runtime, _playwright_browser, _playwright_browser_headless
     async with _playwright_browser_lock:
         if _playwright_runtime and _playwright_browser:
-            if _playwright_browser_headless is None or _playwright_browser_headless == headless:
+            if _playwright_browser_headless == headless:
                 return _playwright_browser, "shared"
             await _reset_playwright_browser("headless-mismatch")
         if async_playwright is None:
@@ -3086,7 +3086,32 @@ def fetch_text_cached(
     retry_needed = False
     thin_response = False
 
-    if mirror:
+    if bypass_jina:
+        try:
+            direct_resp = _http_get(
+                norm,
+                timeout=12,
+                headers=_browser_headers(_domain(norm)),
+                rotate_user_agent=True,
+                respect_block=respect_block,
+                block_on_status=allow_blocking,
+                record_timeout=allow_blocking,
+            )
+            text = direct_resp.text if direct_resp and direct_resp.text else ""
+            status = direct_resp.status_code if direct_resp else 0
+            final_url = getattr(direct_resp, "url", norm) if direct_resp else norm
+            if status in {403, 429, 451} and dom in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
+                snapshot = _headless_fetch(norm, domain=dom, reason="jina-bypass-direct-blocked")
+                rendered = _combine_playwright_snapshot(snapshot)
+                if rendered.strip():
+                    text = rendered
+                    status = 200
+                    final_url = norm
+        except Exception:
+            text = ""
+            status = 0
+            final_url = norm
+    elif mirror:
         attempts = max(1, JINA_RETRY_ATTEMPTS)
         for attempt in range(attempts):
             try:
