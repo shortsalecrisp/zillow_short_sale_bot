@@ -9304,6 +9304,28 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     cached = _contact_cache_get(cache_p, cache_key)
     if cached is not None:
+        if cached.get("number"):
+            _log_final_phone(cached)
+            return cached
+        rapid_snapshot = _rapid_contact_normalized(agent, row_payload)
+        rapid_best_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
+        rapid_phone_reason = rapid_snapshot.get("phone_reason", "") if rapid_snapshot else ""
+        if rapid_best_phone:
+            rapid_result = {
+                "number": rapid_best_phone,
+                "confidence": "low",
+                "score": CONTACT_PHONE_OVERRIDE_MIN,
+                "source": "rapid_fallback",
+                "reason": rapid_phone_reason or "rapid_fallback",
+                "verified_mobile": False,
+            }
+            LOG.info(
+                "RAPID_FALLBACK_SELECTED cached_empty=True phone=%s reason=%s",
+                rapid_best_phone,
+                rapid_phone_reason or "<none>",
+            )
+            _log_final_decision(rapid_best_phone, "rapid_fallback", rapid_phone_reason or "rapid_fallback")
+            return _finalize(rapid_result)
         _log_final_phone(cached)
         return cached
 
@@ -12111,6 +12133,12 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                         spreadsheetId=GSHEET_ID,
                         body={"valueInputOption": "RAW", "data": data_updates},
                     ).execute()
+                    LOG.info(
+                        "Sheet update applied for row %s (phone=%s email=%s)",
+                        row_idx,
+                        enriched_phone or "<blank>",
+                        enriched_email or "<blank>",
+                    )
                 except Exception as exc:
                     LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
             if enriched_phone and phone_exists(enriched_phone):
