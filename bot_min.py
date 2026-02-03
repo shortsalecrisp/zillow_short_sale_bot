@@ -116,6 +116,16 @@ HEADLESS_OVERALL_TIMEOUT_S = int(os.getenv("HEADLESS_OVERALL_TIMEOUT_S", "50"))
 HEADFUL_ALWAYS = os.getenv("HEADFUL_ALWAYS", "false").lower() == "true"
 HEADFUL_DOMAINS = {d.strip().lower() for d in os.getenv("HEADFUL_DOMAINS", "").split(",") if d.strip()}
 HEADFUL_REASONS = {d.strip().lower() for d in os.getenv("HEADFUL_REASONS", "").split(",") if d.strip()}
+PLAYWRIGHT_ENGINE = os.getenv("PLAYWRIGHT_ENGINE", "chromium").strip().lower()
+PLAYWRIGHT_ENGINE_FALLBACKS = [
+    v.strip().lower()
+    for v in os.getenv("PLAYWRIGHT_ENGINE_FALLBACKS", "firefox,webkit").split(",")
+    if v.strip()
+]
+PLAYWRIGHT_REMOTE_WS = os.getenv("PLAYWRIGHT_REMOTE_WS", "").strip()
+PLAYWRIGHT_LAUNCH_TIMEOUT_MS = int(os.getenv("PLAYWRIGHT_LAUNCH_TIMEOUT_MS", "15000"))
+PLAYWRIGHT_SMOKE_TEST_DISABLED = os.getenv("PLAYWRIGHT_SMOKE_TEST_DISABLED", "false").lower() == "true"
+PLAYWRIGHT_PERSISTENT_CONTEXT = os.getenv("PLAYWRIGHT_PERSISTENT_CONTEXT", "true").lower() == "true"
 PLAYWRIGHT_RETRY_ATTEMPTS = int(os.getenv("PLAYWRIGHT_RETRY_ATTEMPTS", "3"))
 PLAYWRIGHT_SELECTOR_TIMEOUT_MS = int(os.getenv("PLAYWRIGHT_SELECTOR_TIMEOUT_MS", "3500"))
 PLAYWRIGHT_INTERACTION_MIN_MS = int(os.getenv("PLAYWRIGHT_INTERACTION_MIN_MS", "180"))
@@ -672,10 +682,13 @@ LOG = logging.getLogger("bot_min")
 _playwright_status_logged = False
 _playwright_ready = False
 _playwright_ready_lock = threading.Lock()
-_playwright_executable_path: Optional[str] = None
+_playwright_executable_paths: Dict[str, str] = {}
 _playwright_runtime: Optional[Any] = None
 _playwright_browser: Optional[Any] = None
 _playwright_browser_headless: Optional[bool] = None
+_playwright_browser_engine: Optional[str] = None
+_playwright_runtime_mode: Optional[str] = None
+_playwright_runtime_endpoint: Optional[str] = None
 _playwright_persistent_context: Optional[Any] = None
 _playwright_persistent_headless: Optional[bool] = None
 _playwright_persistent_user_data_dir: Optional[str] = None
@@ -696,6 +709,34 @@ PLAYWRIGHT_LAUNCH_ARGS = [
     "--no-first-run",
     "--safebrowsing-disable-auto-update",
 ]
+PLAYWRIGHT_ALLOWED_ENGINES = {"chromium", "firefox", "webkit"}
+
+
+def _normalize_playwright_engine(engine: str) -> str:
+    normalized = (engine or "").strip().lower()
+    return normalized if normalized in PLAYWRIGHT_ALLOWED_ENGINES else "chromium"
+
+
+def _playwright_engine_order() -> List[str]:
+    primary = _normalize_playwright_engine(PLAYWRIGHT_ENGINE)
+    fallbacks = [
+        _normalize_playwright_engine(value)
+        for value in PLAYWRIGHT_ENGINE_FALLBACKS
+        if _normalize_playwright_engine(value) != primary
+    ]
+    seen = {primary}
+    ordered = [primary]
+    for engine in fallbacks:
+        if engine not in seen:
+            ordered.append(engine)
+            seen.add(engine)
+    return ordered
+
+
+def _playwright_launch_args(engine: str) -> List[str]:
+    if engine == "chromium":
+        return PLAYWRIGHT_LAUNCH_ARGS
+    return []
 
 
 def _log_blocked_url(url: str) -> None:
@@ -723,21 +764,46 @@ def _ensure_playwright_browsers_path(logger: logging.Logger) -> str:
     return browsers_path
 
 
-async def _connect_playwright_browser(p, *, headless: bool = True) -> Tuple[Any, str]:
-    executable_path = _playwright_executable_path or p.chromium.executable_path
-    launch_timeout = max(30000, HEADLESS_TIMEOUT_MS)
-    browser = await p.chromium.launch(
+def _playwright_engine_runtime(p, engine: str):
+    if engine == "firefox":
+        return p.firefox
+    if engine == "webkit":
+        return p.webkit
+    return p.chromium
+
+
+async def _connect_playwright_browser(p, *, headless: bool = True, engine: str = "chromium") -> Tuple[Any, str]:
+    launch_timeout = max(5000, PLAYWRIGHT_LAUNCH_TIMEOUT_MS)
+    normalized_engine = _normalize_playwright_engine(engine)
+    if PLAYWRIGHT_REMOTE_WS:
+        if normalized_engine != "chromium":
+            LOG.warning(
+                "PLAYWRIGHT_REMOTE_UNSUPPORTED engine=%s ws=%s; falling back to local launch",
+                normalized_engine,
+                PLAYWRIGHT_REMOTE_WS,
+            )
+        else:
+            browser = await p.chromium.connect_over_cdp(
+                PLAYWRIGHT_REMOTE_WS,
+                timeout=launch_timeout,
+            )
+            LOG.info("PLAYWRIGHT_REMOTE_CONNECT ws=%s", PLAYWRIGHT_REMOTE_WS)
+            return browser, "remote"
+    runtime = _playwright_engine_runtime(p, normalized_engine)
+    executable_path = _playwright_executable_paths.get(normalized_engine) or runtime.executable_path
+    browser = await runtime.launch(
         headless=headless,
         executable_path=executable_path,
-        args=PLAYWRIGHT_LAUNCH_ARGS,
+        args=_playwright_launch_args(normalized_engine),
         timeout=launch_timeout,
     )
-    LOG.info("PLAYWRIGHT_LOCAL_LAUNCH executable_path=%s", executable_path)
+    LOG.info("PLAYWRIGHT_LOCAL_LAUNCH engine=%s executable_path=%s", normalized_engine, executable_path)
     return browser, "local"
 
 
 async def _reset_playwright_browser(reason: str = "") -> None:
     global _playwright_runtime, _playwright_browser, _playwright_browser_headless
+    global _playwright_browser_engine, _playwright_runtime_mode, _playwright_runtime_endpoint
     global _playwright_persistent_context, _playwright_persistent_headless, _playwright_persistent_user_data_dir
     browser = _playwright_browser
     runtime = _playwright_runtime
@@ -745,6 +811,9 @@ async def _reset_playwright_browser(reason: str = "") -> None:
     _playwright_browser = None
     _playwright_runtime = None
     _playwright_browser_headless = None
+    _playwright_browser_engine = None
+    _playwright_runtime_mode = None
+    _playwright_runtime_endpoint = None
     _playwright_persistent_context = None
     _playwright_persistent_headless = None
     _playwright_persistent_user_data_dir = None
@@ -769,26 +838,51 @@ async def _reset_playwright_browser(reason: str = "") -> None:
 
 async def _get_playwright_browser(*, headless: bool) -> Tuple[Any, str]:
     global _playwright_runtime, _playwright_browser, _playwright_browser_headless
+    global _playwright_browser_engine, _playwright_runtime_mode, _playwright_runtime_endpoint
     async with _playwright_browser_lock:
+        desired_engine = _normalize_playwright_engine(PLAYWRIGHT_ENGINE)
+        desired_endpoint = PLAYWRIGHT_REMOTE_WS or None
         if _playwright_runtime and _playwright_browser:
-            if _playwright_browser_headless == headless:
-                return _playwright_browser, "shared"
-            await _reset_playwright_browser("headless-mismatch")
+            if (
+                _playwright_browser_headless == headless
+                and _playwright_browser_engine == desired_engine
+                and _playwright_runtime_endpoint == desired_endpoint
+            ):
+                return _playwright_browser, _playwright_runtime_mode or "shared"
+            await _reset_playwright_browser("browser-mismatch")
         if async_playwright is None:
             raise RuntimeError("playwright not installed")
-        _playwright_runtime = await async_playwright().start()
-        browser, runtime_mode = await _connect_playwright_browser(_playwright_runtime, headless=headless)
-        _playwright_browser = browser
-        _playwright_browser_headless = headless
-        return browser, runtime_mode
+        last_error: Optional[Exception] = None
+        for engine in _playwright_engine_order():
+            try:
+                _playwright_runtime = await async_playwright().start()
+                browser, runtime_mode = await _connect_playwright_browser(
+                    _playwright_runtime,
+                    headless=headless,
+                    engine=engine,
+                )
+                _playwright_browser = browser
+                _playwright_browser_headless = headless
+                _playwright_browser_engine = engine
+                _playwright_runtime_mode = runtime_mode
+                _playwright_runtime_endpoint = desired_endpoint
+                if engine != desired_engine:
+                    LOG.warning("PLAYWRIGHT_ENGINE_FALLBACK primary=%s selected=%s", desired_engine, engine)
+                return browser, runtime_mode
+            except Exception as exc:
+                last_error = exc
+                LOG.warning("PLAYWRIGHT_LAUNCH_FAILED engine=%s err=%s", engine, exc)
+                await _reset_playwright_browser(f"launch-failed-{engine}")
+        raise RuntimeError(f"Playwright launch failed: {last_error}")
 
 
 async def _get_playwright_context(*, headless: bool) -> Tuple[Any, str, bool]:
     global _playwright_runtime, _playwright_persistent_context, _playwright_persistent_headless
-    global _playwright_persistent_user_data_dir
-    if not _multi_agent_run:
-        browser, runtime_mode = await _get_playwright_browser(headless=headless)
-        accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
+    global _playwright_persistent_user_data_dir, _playwright_browser_engine, _playwright_runtime_mode
+    global _playwright_runtime_endpoint
+    browser, runtime_mode = await _get_playwright_browser(headless=headless)
+    accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
+    if not _multi_agent_run and (runtime_mode == "remote" or not PLAYWRIGHT_PERSISTENT_CONTEXT):
         context = await browser.new_context(
             user_agent=random.choice(_USER_AGENT_POOL),
             locale=accept_language.split(",")[0],
@@ -809,13 +903,15 @@ async def _get_playwright_context(*, headless: bool) -> Tuple[Any, str, bool]:
         accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
         user_data_dir = _playwright_persistent_user_data_dir or tempfile.mkdtemp(prefix="playwright-profile-")
         _playwright_persistent_user_data_dir = user_data_dir
-        executable_path = _playwright_executable_path or _playwright_runtime.chromium.executable_path
-        launch_timeout = max(30000, HEADLESS_TIMEOUT_MS)
-        context = await _playwright_runtime.chromium.launch_persistent_context(
+        engine = _normalize_playwright_engine(PLAYWRIGHT_ENGINE)
+        runtime = _playwright_engine_runtime(_playwright_runtime, engine)
+        executable_path = _playwright_executable_paths.get(engine) or runtime.executable_path
+        launch_timeout = max(5000, PLAYWRIGHT_LAUNCH_TIMEOUT_MS)
+        context = await runtime.launch_persistent_context(
             user_data_dir,
             headless=headless,
             executable_path=executable_path,
-            args=PLAYWRIGHT_LAUNCH_ARGS,
+            args=_playwright_launch_args(engine),
             timeout=launch_timeout,
             locale=accept_language.split(",")[0],
             user_agent=random.choice(_USER_AGENT_POOL),
@@ -826,43 +922,48 @@ async def _get_playwright_context(*, headless: bool) -> Tuple[Any, str, bool]:
         )
         _playwright_persistent_context = context
         _playwright_persistent_headless = headless
-        LOG.info("PLAYWRIGHT_PERSISTENT_CONTEXT_READY dir=%s", user_data_dir)
+        _playwright_browser_engine = engine
+        _playwright_runtime_mode = "persistent"
+        _playwright_runtime_endpoint = PLAYWRIGHT_REMOTE_WS or None
+        LOG.info("PLAYWRIGHT_PERSISTENT_CONTEXT_READY engine=%s dir=%s", engine, user_data_dir)
         return context, "persistent", False
 
 
 async def _ensure_playwright_ready_async(logger: logging.Logger) -> bool:
-    global _playwright_executable_path
+    global _playwright_executable_paths
     if async_playwright is None:
         logger.warning("PLAYWRIGHT_MISSING playwright not installed")
         return False
     _ensure_playwright_browsers_path(logger)
+    engine = _normalize_playwright_engine(PLAYWRIGHT_ENGINE)
     async with async_playwright() as p:
-        executable_path = Path(p.chromium.executable_path)
-        _playwright_executable_path = str(executable_path)
-    if not executable_path.exists():
+        runtime = _playwright_engine_runtime(p, engine)
+        executable_path = Path(runtime.executable_path)
+        _playwright_executable_paths[engine] = str(executable_path)
+    if PLAYWRIGHT_REMOTE_WS:
+        logger.info("PLAYWRIGHT_REMOTE_CONFIGURED ws=%s", PLAYWRIGHT_REMOTE_WS)
+    if not executable_path.exists() and not PLAYWRIGHT_REMOTE_WS:
         logger.warning(
-            "PLAYWRIGHT_MISSING_EXECUTABLE path=%s; installing chromium",
+            "PLAYWRIGHT_MISSING_EXECUTABLE path=%s; installing %s",
             executable_path,
+            engine,
         )
         try:
             subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
+                [sys.executable, "-m", "playwright", "install", engine],
                 check=True,
             )
         except Exception as exc:
             logger.error("PLAYWRIGHT_INSTALL_FAILED err=%s", exc)
             return False
+    if PLAYWRIGHT_SMOKE_TEST_DISABLED:
+        logger.info("PLAYWRIGHT_SMOKE_TEST_DISABLED=true")
+        return True
     try:
         async with async_playwright() as p:
-            executable_path = _playwright_executable_path or p.chromium.executable_path
-            browser = await p.chromium.launch(
-                headless=True,
-                executable_path=executable_path,
-                args=PLAYWRIGHT_LAUNCH_ARGS,
-                timeout=max(30000, HEADLESS_TIMEOUT_MS),
-            )
+            browser, runtime_mode = await _connect_playwright_browser(p, headless=True, engine=engine)
             await browser.close()
-        logger.info("PLAYWRIGHT_READY local chromium smoke test OK")
+        logger.info("PLAYWRIGHT_READY smoke test OK engine=%s mode=%s", engine, runtime_mode)
         return True
     except Exception as exc:
         logger.error("PLAYWRIGHT_BROWSER_ERROR smoke test failed err=%s", exc)
