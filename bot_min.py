@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import tempfile
 import importlib.util
 import unicodedata
 from pathlib import Path
@@ -675,7 +676,11 @@ _playwright_executable_path: Optional[str] = None
 _playwright_runtime: Optional[Any] = None
 _playwright_browser: Optional[Any] = None
 _playwright_browser_headless: Optional[bool] = None
+_playwright_persistent_context: Optional[Any] = None
+_playwright_persistent_headless: Optional[bool] = None
+_playwright_persistent_user_data_dir: Optional[str] = None
 _playwright_browser_lock = asyncio.Lock()
+_multi_agent_run = False
 PLAYWRIGHT_BROWSER_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
 PLAYWRIGHT_LAUNCH_ARGS = [
     "--no-sandbox",
@@ -733,11 +738,21 @@ async def _connect_playwright_browser(p, *, headless: bool = True) -> Tuple[Any,
 
 async def _reset_playwright_browser(reason: str = "") -> None:
     global _playwright_runtime, _playwright_browser, _playwright_browser_headless
+    global _playwright_persistent_context, _playwright_persistent_headless, _playwright_persistent_user_data_dir
     browser = _playwright_browser
     runtime = _playwright_runtime
+    context = _playwright_persistent_context
     _playwright_browser = None
     _playwright_runtime = None
     _playwright_browser_headless = None
+    _playwright_persistent_context = None
+    _playwright_persistent_headless = None
+    _playwright_persistent_user_data_dir = None
+    try:
+        if context:
+            await context.close()
+    except Exception:
+        pass
     try:
         if browser:
             await browser.close()
@@ -766,6 +781,53 @@ async def _get_playwright_browser(*, headless: bool) -> Tuple[Any, str]:
         _playwright_browser = browser
         _playwright_browser_headless = headless
         return browser, runtime_mode
+
+
+async def _get_playwright_context(*, headless: bool) -> Tuple[Any, str, bool]:
+    global _playwright_runtime, _playwright_persistent_context, _playwright_persistent_headless
+    global _playwright_persistent_user_data_dir
+    if not _multi_agent_run:
+        browser, runtime_mode = await _get_playwright_browser(headless=headless)
+        accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
+        context = await browser.new_context(
+            user_agent=random.choice(_USER_AGENT_POOL),
+            locale=accept_language.split(",")[0],
+            extra_http_headers={
+                "Accept-Language": accept_language,
+                **_random_cookie_header(),
+            },
+        )
+        return context, runtime_mode, True
+
+    async with _playwright_browser_lock:
+        if _playwright_persistent_context and _playwright_persistent_headless == headless:
+            return _playwright_persistent_context, "persistent", False
+        if async_playwright is None:
+            raise RuntimeError("playwright not installed")
+        await _reset_playwright_browser("persistent-context-reinit")
+        _playwright_runtime = await async_playwright().start()
+        accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
+        user_data_dir = _playwright_persistent_user_data_dir or tempfile.mkdtemp(prefix="playwright-profile-")
+        _playwright_persistent_user_data_dir = user_data_dir
+        executable_path = _playwright_executable_path or _playwright_runtime.chromium.executable_path
+        launch_timeout = max(30000, HEADLESS_TIMEOUT_MS)
+        context = await _playwright_runtime.chromium.launch_persistent_context(
+            user_data_dir,
+            headless=headless,
+            executable_path=executable_path,
+            args=PLAYWRIGHT_LAUNCH_ARGS,
+            timeout=launch_timeout,
+            locale=accept_language.split(",")[0],
+            user_agent=random.choice(_USER_AGENT_POOL),
+            extra_http_headers={
+                "Accept-Language": accept_language,
+                **_random_cookie_header(),
+            },
+        )
+        _playwright_persistent_context = context
+        _playwright_persistent_headless = headless
+        LOG.info("PLAYWRIGHT_PERSISTENT_CONTEXT_READY dir=%s", user_data_dir)
+        return context, "persistent", False
 
 
 async def _ensure_playwright_ready_async(logger: logging.Logger) -> bool:
@@ -2471,6 +2533,54 @@ def _should_use_playwright_for_contact(dom: str, body: str = "", *, js_hint: boo
     if not (body or "").strip():
         return True
     return False
+
+
+def _looks_like_js_required(body: str) -> bool:
+    low = (body or "").lower()
+    if not low:
+        return True
+    return any(
+        hint in low
+        for hint in (
+            "enable javascript",
+            "please enable javascript",
+            "javascript required",
+            "requires javascript",
+            "your browser does not support javascript",
+            "noscript",
+            "data-reactroot",
+            "__next_data__",
+            "__next_data",
+            "__nuxt",
+        )
+    )
+
+
+def _has_contact_signals(body: str) -> bool:
+    if not body or not BeautifulSoup:
+        return False
+    try:
+        phones, mails, meta, info = extract_struct(body)
+    except Exception:
+        return False
+    if phones or mails:
+        return True
+    if info.get("tel") or info.get("mailto"):
+        return True
+    for entry in meta:
+        if entry.get("phones") or entry.get("emails"):
+            return True
+    return False
+
+
+def _needs_playwright_contact(dom: str, body: str, *, js_hint: bool = False) -> bool:
+    if not _should_use_playwright_for_contact(dom, body, js_hint=js_hint):
+        return False
+    if not (body or "").strip():
+        return True
+    if _has_contact_signals(body):
+        return False
+    return js_hint or _looks_like_js_required(body)
 
 def _combine_playwright_snapshot(snapshot: Dict[str, Any]) -> str:
     if not snapshot or snapshot.get("timeout"):
@@ -5996,7 +6106,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
         if is_blocked_url(url):
             LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", url)
             return "", False, ""
-        allow_playwright = _should_use_playwright_for_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
+        allow_playwright = _needs_playwright_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
         if not allow_playwright:
             return "", False, ""
         for attempt in range(1, max(1, CONTACT_PLAYWRIGHT_RETRIES) + 1):
@@ -6375,21 +6485,21 @@ async def _headless_fetch_async(
         except Exception:
             return
     async def _run_once() -> Dict[str, Any]:
-        browser = None
         context = None
+        close_context = False
         page = None
         try:
             use_headful = _should_use_headful(effective_domain, reason or "")
-            browser, runtime_mode = await _get_playwright_browser(headless=not use_headful)
+            context, runtime_mode, close_context = await _get_playwright_context(headless=not use_headful)
             accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
-            context = await browser.new_context(
-                user_agent=random.choice(_USER_AGENT_POOL),
-                locale=accept_language.split(",")[0],
-                extra_http_headers={
-                    "Accept-Language": accept_language,
-                    **_random_cookie_header(),
-                },
-            )
+            if not close_context:
+                try:
+                    await context.set_extra_http_headers({
+                        "Accept-Language": accept_language,
+                        **_random_cookie_header(),
+                    })
+                except Exception:
+                    pass
             page = await context.new_page()
             try:
                 async def _route_handler(route, request) -> None:
@@ -6531,13 +6641,12 @@ async def _headless_fetch_async(
                 pass
             try:
                 if context:
-                    await asyncio.shield(context.close())
+                    if close_context:
+                        await asyncio.shield(context.close())
             except Exception:
                 pass
             try:
-                if browser:
-                    if _playwright_browser is not browser:
-                        await asyncio.shield(browser.close())
+                pass
             except Exception:
                 pass
 
@@ -11757,11 +11866,15 @@ def _expand_row(l: List[str], n: int = MIN_COLS) -> List[str]:
     return l + [""] * (n - len(l)) if len(l) < n else l
 
 def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
+    global _multi_agent_run
     if not skip_dedupe:
         rows = dedupe_rows_by_zpid(rows, LOG)
         if not rows:
             LOG.info("No fresh rows after de-duplication; skipping enrichment run")
             return
+    _multi_agent_run = len(rows) > 1
+    if _multi_agent_run:
+        LOG.info("PLAYWRIGHT_MULTI_AGENT_RUN rows=%s", len(rows))
     load_seen_contacts()
     for r in rows:
         zpid = str(r.get("zpid", ""))
