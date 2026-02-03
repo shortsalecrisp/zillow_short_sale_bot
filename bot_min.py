@@ -231,6 +231,8 @@ _rapid_logged: Set[str] = set()
 _rapid_contact_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
 RAPID_MIN_INTERVAL = float(os.getenv("RAPID_MIN_INTERVAL", "0.75"))
 RAPID_COOLDOWN_SECONDS = float(os.getenv("RAPID_COOLDOWN_SECONDS", "18.0"))
+SECONDARY_CONTACT_URL = os.getenv("SECONDARY_CONTACT_URL", "").strip()
+SECONDARY_CONTACT_TOKEN = os.getenv("SECONDARY_CONTACT_TOKEN", "").strip()
 
 def _http_get(
     url: str,
@@ -672,7 +674,6 @@ _playwright_ready_lock = threading.Lock()
 _playwright_executable_path: Optional[str] = None
 _playwright_runtime: Optional[Any] = None
 _playwright_browser: Optional[Any] = None
-_playwright_headless: Optional[bool] = None
 _playwright_browser_lock = asyncio.Lock()
 PLAYWRIGHT_BROWSER_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
 PLAYWRIGHT_LAUNCH_ARGS = [
@@ -730,12 +731,11 @@ async def _connect_playwright_browser(p, *, headless: bool = True) -> Tuple[Any,
 
 
 async def _reset_playwright_browser(reason: str = "") -> None:
-    global _playwright_runtime, _playwright_browser, _playwright_headless
+    global _playwright_runtime, _playwright_browser
     browser = _playwright_browser
     runtime = _playwright_runtime
     _playwright_browser = None
     _playwright_runtime = None
-    _playwright_headless = None
     try:
         if browser:
             await browser.close()
@@ -751,18 +751,15 @@ async def _reset_playwright_browser(reason: str = "") -> None:
 
 
 async def _get_playwright_browser(*, headless: bool) -> Tuple[Any, str]:
-    global _playwright_runtime, _playwright_browser, _playwright_headless
+    global _playwright_runtime, _playwright_browser
     async with _playwright_browser_lock:
         if _playwright_runtime and _playwright_browser:
-            if _playwright_headless == headless:
-                return _playwright_browser, "shared"
-            await _reset_playwright_browser("mode-changed")
+            return _playwright_browser, "shared"
         if async_playwright is None:
             raise RuntimeError("playwright not installed")
         _playwright_runtime = await async_playwright().start()
         browser, runtime_mode = await _connect_playwright_browser(_playwright_runtime, headless=headless)
         _playwright_browser = browser
-        _playwright_headless = headless
         return browser, runtime_mode
 
 
@@ -1886,6 +1883,24 @@ def _rapid_collect_contacts(payload: Any) -> Tuple[List[Dict[str, str]], List[Di
         contacts = payload.get("contact_recipients") or []
         if isinstance(contacts, list):
             blocks.extend([blk for blk in contacts if isinstance(blk, dict)])
+        for key in (
+            "agent",
+            "agents",
+            "broker",
+            "brokers",
+            "office",
+            "offices",
+            "listingAgent",
+            "listingAgents",
+            "listingOffice",
+            "listingOffices",
+            "attribution",
+        ):
+            block_val = payload.get(key)
+            if isinstance(block_val, dict):
+                blocks.append(block_val)
+            elif isinstance(block_val, list):
+                blocks.extend([blk for blk in block_val if isinstance(blk, dict)])
         return blocks
 
     for blk in _iter_contact_blocks():
@@ -1906,6 +1921,10 @@ def _rapid_collect_contacts(payload: Any) -> Tuple[List[Dict[str, str]], List[Di
         for key in ("agentPhone", "agentMobilePhone", "mobilePhone", "agent_phone", "agent_mobile_phone"):
             if blk.get(key):
                 _add_phone_entry(blk[key], context or key, str(blk), 0)
+        for email in _emails_from_block(blk):
+            if email and email not in seen_email:
+                seen_email.add(email)
+                emails.append({"value": email, "context": context or "contact_block", "text": str(blk)})
 
     for path, text in _rapid_walk(payload):
         joined.append(text)
@@ -2020,7 +2039,17 @@ def _rapid_rank_phones(agent: str, phones: List[Dict[str, str]]) -> Dict[str, An
             "selected_score": 0,
             "selected_verified_mobile": False,
             "candidates": [],
+            "single_candidate_low_confidence": False,
         }
+    single_candidate_low_confidence = False
+    if (
+        len(ranked) == 1
+        and not ranked[0]["verified_mobile"]
+        and ranked[0]["is_us_10"]
+    ):
+        ranked[0]["score"] = max(ranked[0]["score"], 55)
+        ranked[0]["score_reason"] = "rapid_score_us_10_digit_unverified"
+        single_candidate_low_confidence = True
     verified = next((item for item in ranked if item["verified_mobile"]), None)
     if verified:
         best = verified
@@ -2033,12 +2062,81 @@ def _rapid_rank_phones(agent: str, phones: List[Dict[str, str]]) -> Dict[str, An
         "selected_score": best["score"],
         "selected_verified_mobile": best["verified_mobile"],
         "candidates": ranked,
+        "single_candidate_low_confidence": single_candidate_low_confidence,
     }
 
 
 def _rapid_select_phone(agent: str, phones: List[Dict[str, str]]) -> Tuple[str, str]:
     ranked = _rapid_rank_phones(agent, phones)
     return ranked.get("selected_phone", ""), ranked.get("selected_reason", "")
+
+
+def _secondary_collect_contacts(payload: Any) -> Tuple[List[str], List[str]]:
+    if payload is None:
+        return [], []
+    phones: List[str] = []
+    emails: List[str] = []
+    seen_phone: Set[str] = set()
+    seen_email: Set[str] = set()
+    for path, text in _rapid_walk(payload):
+        for em in EMAIL_RE.finditer(text):
+            cleaned = clean_email(em.group())
+            if cleaned and cleaned not in seen_email and ok_email(cleaned):
+                seen_email.add(cleaned)
+                emails.append(cleaned)
+        for pm in PHONE_RE.finditer(text):
+            formatted = fmt_phone(pm.group())
+            if not formatted:
+                continue
+            e164 = _phone_to_e164(formatted) or formatted
+            if e164 in seen_phone:
+                continue
+            seen_phone.add(e164)
+            phones.append(formatted)
+        if "phone" in path.lower():
+            digits_only = re.sub(r"\D", "", text)
+            if digits_only and len(digits_only) >= 10:
+                formatted = fmt_phone(digits_only[:10])
+                if formatted:
+                    e164 = _phone_to_e164(formatted) or formatted
+                    if e164 not in seen_phone:
+                        seen_phone.add(e164)
+                        phones.append(formatted)
+    return phones, emails
+
+
+def _secondary_contact_lookup(zpid: str, agent: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not SECONDARY_CONTACT_URL:
+        return {}
+    url = SECONDARY_CONTACT_URL.format(
+        zpid=zpid,
+        agent=agent,
+        address=str(row_payload.get("address", "")).strip(),
+    )
+    headers = _browser_headers(_domain(url))
+    if SECONDARY_CONTACT_TOKEN:
+        headers["Authorization"] = f"Bearer {SECONDARY_CONTACT_TOKEN}"
+    try:
+        resp = _http_get(url, headers=headers, rotate_user_agent=True, timeout=15)
+    except Exception as exc:
+        LOG.info("SECONDARY_ENRICHMENT_FAIL url=%s err=%s", url, exc)
+        return {}
+    if not resp or resp.status_code != 200:
+        LOG.info("SECONDARY_ENRICHMENT_STATUS url=%s status=%s", url, getattr(resp, "status_code", 0))
+        return {}
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = {}
+    phones, emails = _secondary_collect_contacts(payload)
+    if phones or emails:
+        LOG.info(
+            "SECONDARY_ENRICHMENT_USED zpid=%s phones=%s emails=%s",
+            zpid,
+            len(phones),
+            len(emails),
+        )
+    return {"phones": phones, "emails": emails, "raw": payload}
 
 
 def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2064,16 +2162,26 @@ def _rapid_contact_snapshot(agent: str, row_payload: Dict[str, Any]) -> Dict[str
     data = rapid_property(zpid)
     status = _rapid_status(zpid)
     phones, emails, joined_text = _rapid_collect_contacts(data)
+    if not phones and not emails:
+        secondary = _secondary_contact_lookup(zpid, agent, row_payload)
+        for phone in secondary.get("phones", []):
+            phones.append({"value": phone, "context": "secondary_enrichment", "text": "secondary"})
+        for email in secondary.get("emails", []):
+            if ok_email(email):
+                emails.append({"value": email, "context": "secondary_enrichment", "text": "secondary"})
     ranked = _rapid_rank_phones(agent, phones)
     selected_phone = ranked.get("selected_phone", "")
     phone_reason = ranked.get("selected_reason", "")
     phone_score = ranked.get("selected_score", 0)
     phone_verified_mobile = bool(ranked.get("selected_verified_mobile"))
+    low_confidence_single = bool(ranked.get("single_candidate_low_confidence"))
     selected_email, email_reason = _rapid_select_email(agent, emails, joined_text)
     cm_info = get_line_info(selected_phone) if selected_phone else {}
     phone_type = cm_info.get("type") or "unknown"
     rapid_fallback_phone = selected_phone if phones else ""
     rapid_primary_phone = selected_phone if phone_verified_mobile else ""
+    if not rapid_primary_phone and low_confidence_single:
+        LOG.info("RAPID_SINGLE_CANDIDATE_LOW_CONF phone=%s reason=%s", selected_phone, phone_reason)
 
     snapshot = {
         "status": status,
