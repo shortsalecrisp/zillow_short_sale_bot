@@ -7690,7 +7690,10 @@ def duckduckgo_search(
                     seen.add(norm)
                     if len(results) >= effective_limit:
                         break
-        _ddg_failure_streak = 0
+        if results:
+            _ddg_failure_streak = 0
+        else:
+            _ddg_failure_streak += 1
     except DomainBlockedError:
         _ddg_failure_streak += 1
     except Exception:
