@@ -2655,7 +2655,7 @@ def _contact_proxy_candidates(domain: str, preferred: str) -> List[str]:
 def _normalize_jina_proxy_url(url: str) -> str:
     if not url:
         return url
-    normalized = url
+    normalized = url.strip()
     while "r.jina.ai/https://r.jina.ai/" in normalized or "r.jina.ai/http://r.jina.ai/" in normalized:
         normalized = normalized.replace("r.jina.ai/https://r.jina.ai/", "r.jina.ai/")
         normalized = normalized.replace("r.jina.ai/http://r.jina.ai/", "r.jina.ai/")
@@ -2683,6 +2683,7 @@ _CACHE_DB_PATH = os.path.join(os.path.dirname(__file__), "jina_cache.sqlite")
 _CACHE_LOCK = threading.Lock()
 _CACHE_DOMAIN_LAST_FETCH: Dict[str, float] = {}
 _CACHE_DEDUPE_RUN: Set[str] = set()
+_jina_bypass_domains: Set[str] = set()
 _TRACKING_QUERY_KEYS = {
     "utm_source",
     "utm_medium",
@@ -2698,6 +2699,11 @@ _TRACKING_QUERY_KEYS = {
 JINA_RETRY_ATTEMPTS = int(os.getenv("JINA_RETRY_ATTEMPTS", "3"))
 JINA_RETRY_BASE_SECONDS = float(os.getenv("JINA_RETRY_BASE_SECONDS", "0.75"))
 JINA_RETRY_MAX_SECONDS = float(os.getenv("JINA_RETRY_MAX_SECONDS", "6.0"))
+JINA_BYPASS_DOMAINS = {
+    d.strip().lower()
+    for d in os.getenv("JINA_BYPASS_DOMAINS", "").split(",")
+    if d.strip()
+}
 
 
 def normalize_url(url: str) -> str:
@@ -2959,56 +2965,92 @@ def fetch_text_cached(
         # Disabled because the upstream endpoint returns 400 and wastes time.
         return ""
 
-    mirror = _mirror_url(norm) or f"https://r.jina.ai/{norm}"
+    bypass_jina = bool(dom and (dom in _jina_bypass_domains or dom in JINA_BYPASS_DOMAINS))
+    mirror = "" if bypass_jina else (_mirror_url(norm) or f"https://r.jina.ai/{norm}")
     text = ""
     status = 0
     final_url = norm
     retry_needed = False
     thin_response = False
 
-    attempts = max(1, JINA_RETRY_ATTEMPTS)
-    for attempt in range(attempts):
-        try:
-            resp = _http_get(
-                mirror,
-                timeout=12,
-                headers=_browser_headers(_domain(mirror)),
-                rotate_user_agent=True,
-                respect_block=False,
-                block_on_status=allow_blocking,
-                record_timeout=allow_blocking,
-            )
-            text = resp.text if resp and resp.text else ""
-            status = resp.status_code if resp else 0
-            final_url = getattr(resp, "url", norm) if resp else norm
-        except DomainBlockedError:
-            raise
-        except requests.HTTPError as exc:
-            resp = exc.response
-            text = resp.text if resp and resp.text else ""
-            status = resp.status_code if resp else 0
-            final_url = getattr(resp, "url", norm) if resp else norm
-        except Exception:
-            text = ""
-            status = 0
-            final_url = norm
-        if text.strip() and 200 <= status < 300:
-            break
-        if attempt < attempts - 1:
-            delay = _jina_backoff_delay(attempt)
-            LOG.info(
-                "JINA_RETRY url=%s attempt=%s status=%s delay=%.2fs",
-                norm,
-                attempt + 1,
-                status,
-                delay,
-            )
-            time.sleep(delay)
+    if mirror:
+        attempts = max(1, JINA_RETRY_ATTEMPTS)
+        for attempt in range(attempts):
+            try:
+                resp = _http_get(
+                    mirror,
+                    timeout=12,
+                    headers=_browser_headers(_domain(mirror)),
+                    rotate_user_agent=True,
+                    respect_block=False,
+                    block_on_status=allow_blocking,
+                    record_timeout=allow_blocking,
+                )
+                text = resp.text if resp and resp.text else ""
+                status = resp.status_code if resp else 0
+                final_url = getattr(resp, "url", norm) if resp else norm
+            except DomainBlockedError:
+                raise
+            except requests.HTTPError as exc:
+                resp = exc.response
+                text = resp.text if resp and resp.text else ""
+                status = resp.status_code if resp else 0
+                final_url = getattr(resp, "url", norm) if resp else norm
+            except Exception:
+                text = ""
+                status = 0
+                final_url = norm
+            if text.strip() and 200 <= status < 300:
+                break
+            if attempt < attempts - 1:
+                delay = _jina_backoff_delay(attempt)
+                LOG.info(
+                    "JINA_RETRY url=%s attempt=%s status=%s delay=%.2fs",
+                    norm,
+                    attempt + 1,
+                    status,
+                    delay,
+                )
+                time.sleep(delay)
 
     final_url = _normalize_jina_proxy_url(final_url)
     if _domain(final_url) == "r.jina.ai":
         unwrapped = _unwrap_jina_url(final_url)
         final_url = unwrapped or norm
+
+    success = bool(text.strip()) and 200 <= status < 300
+    if status == 400 and dom:
+        _jina_bypass_domains.add(dom)
+        LOG.info("JINA_BYPASS domain=%s reason=bad-request", dom)
+        try:
+            direct_resp = _http_get(
+                norm,
+                timeout=12,
+                headers=_browser_headers(_domain(norm)),
+                rotate_user_agent=True,
+                respect_block=respect_block,
+                block_on_status=allow_blocking,
+                record_timeout=allow_blocking,
+            )
+            if direct_resp and direct_resp.status_code == 200 and (direct_resp.text or "").strip():
+                text = direct_resp.text
+                status = direct_resp.status_code
+                final_url = getattr(direct_resp, "url", norm)
+                success = True
+            else:
+                direct_status = direct_resp.status_code if direct_resp else 0
+                if direct_status in {403, 429, 451}:
+                    dom_for_fallback = _domain(norm)
+                    if dom_for_fallback in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
+                        snapshot = _headless_fetch(norm, domain=dom_for_fallback, reason="jina-400-direct-blocked")
+                        rendered = _combine_playwright_snapshot(snapshot)
+                        if rendered.strip():
+                            text = rendered
+                            status = 200
+                            final_url = norm
+                            success = True
+        except Exception:
+            pass
 
     blocked_statuses = {403, 429, 451}
     if status in blocked_statuses and dom and allow_blocking:
@@ -3019,8 +3061,6 @@ def fetch_text_cached(
             "Jina fetch blocked for %s with %s; marking domain for retry", dom, status
         )
         _mark_block(dom, seconds=block_for)
-    success = bool(text.strip()) and 200 <= status < 300
-
     if success and _is_thin_jina_response(text):
         thin_response = True
         LOG.info("JINA_THIN_RESPONSE url=%s bytes=%s; retrying direct fetch", norm, len(text.encode("utf-8")))
