@@ -674,6 +674,7 @@ _playwright_ready_lock = threading.Lock()
 _playwright_executable_path: Optional[str] = None
 _playwright_runtime: Optional[Any] = None
 _playwright_browser: Optional[Any] = None
+_playwright_browser_headless: Optional[bool] = None
 _playwright_browser_lock = asyncio.Lock()
 PLAYWRIGHT_BROWSER_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
 PLAYWRIGHT_LAUNCH_ARGS = [
@@ -731,11 +732,12 @@ async def _connect_playwright_browser(p, *, headless: bool = True) -> Tuple[Any,
 
 
 async def _reset_playwright_browser(reason: str = "") -> None:
-    global _playwright_runtime, _playwright_browser
+    global _playwright_runtime, _playwright_browser, _playwright_browser_headless
     browser = _playwright_browser
     runtime = _playwright_runtime
     _playwright_browser = None
     _playwright_runtime = None
+    _playwright_browser_headless = None
     try:
         if browser:
             await browser.close()
@@ -751,15 +753,18 @@ async def _reset_playwright_browser(reason: str = "") -> None:
 
 
 async def _get_playwright_browser(*, headless: bool) -> Tuple[Any, str]:
-    global _playwright_runtime, _playwright_browser
+    global _playwright_runtime, _playwright_browser, _playwright_browser_headless
     async with _playwright_browser_lock:
         if _playwright_runtime and _playwright_browser:
-            return _playwright_browser, "shared"
+            if _playwright_browser_headless is None or _playwright_browser_headless == headless:
+                return _playwright_browser, "shared"
+            await _reset_playwright_browser("headless-mismatch")
         if async_playwright is None:
             raise RuntimeError("playwright not installed")
         _playwright_runtime = await async_playwright().start()
         browser, runtime_mode = await _connect_playwright_browser(_playwright_runtime, headless=headless)
         _playwright_browser = browser
+        _playwright_browser_headless = headless
         return browser, runtime_mode
 
 
@@ -3120,6 +3125,31 @@ def fetch_text_cached(
                     delay,
                 )
                 time.sleep(delay)
+    else:
+        try:
+            direct_resp = _http_get(
+                norm,
+                timeout=12,
+                headers=_browser_headers(_domain(norm)),
+                rotate_user_agent=True,
+                respect_block=respect_block,
+                block_on_status=allow_blocking,
+                record_timeout=allow_blocking,
+            )
+            text = direct_resp.text if direct_resp and direct_resp.text else ""
+            status = direct_resp.status_code if direct_resp else 0
+            final_url = getattr(direct_resp, "url", norm) if direct_resp else norm
+            if status in {403, 429, 451} and dom in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
+                snapshot = _headless_fetch(norm, domain=dom, reason="jina-bypass-direct-blocked")
+                rendered = _combine_playwright_snapshot(snapshot)
+                if rendered.strip():
+                    text = rendered
+                    status = 200
+                    final_url = norm
+        except Exception:
+            text = ""
+            status = 0
+            final_url = norm
 
     final_url = _normalize_jina_proxy_url(final_url)
     if _domain(final_url) == "r.jina.ai":
@@ -7843,7 +7873,8 @@ def duckduckgo_search(
         else:
             _ddg_failure_streak += 1
     except DomainBlockedError:
-        _ddg_failure_streak += 1
+        _ddg_failure_streak = max(_ddg_failure_streak + 1, DDG_BLOCK_AFTER)
+        blocked = True
     except Exception:
         _ddg_failure_streak += 1
         LOG.exception("duckduckgo_search failed for %s", query)
