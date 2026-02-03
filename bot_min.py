@@ -672,6 +672,7 @@ _playwright_ready_lock = threading.Lock()
 _playwright_executable_path: Optional[str] = None
 _playwright_runtime: Optional[Any] = None
 _playwright_browser: Optional[Any] = None
+_playwright_headless: Optional[bool] = None
 _playwright_browser_lock = asyncio.Lock()
 PLAYWRIGHT_BROWSER_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
 PLAYWRIGHT_LAUNCH_ARGS = [
@@ -729,11 +730,12 @@ async def _connect_playwright_browser(p, *, headless: bool = True) -> Tuple[Any,
 
 
 async def _reset_playwright_browser(reason: str = "") -> None:
-    global _playwright_runtime, _playwright_browser
+    global _playwright_runtime, _playwright_browser, _playwright_headless
     browser = _playwright_browser
     runtime = _playwright_runtime
     _playwright_browser = None
     _playwright_runtime = None
+    _playwright_headless = None
     try:
         if browser:
             await browser.close()
@@ -749,15 +751,18 @@ async def _reset_playwright_browser(reason: str = "") -> None:
 
 
 async def _get_playwright_browser(*, headless: bool) -> Tuple[Any, str]:
-    global _playwright_runtime, _playwright_browser
+    global _playwright_runtime, _playwright_browser, _playwright_headless
     async with _playwright_browser_lock:
         if _playwright_runtime and _playwright_browser:
-            return _playwright_browser, "shared"
+            if _playwright_headless == headless:
+                return _playwright_browser, "shared"
+            await _reset_playwright_browser("mode-changed")
         if async_playwright is None:
             raise RuntimeError("playwright not installed")
         _playwright_runtime = await async_playwright().start()
         browser, runtime_mode = await _connect_playwright_browser(_playwright_runtime, headless=headless)
         _playwright_browser = browser
+        _playwright_headless = headless
         return browser, runtime_mode
 
 
