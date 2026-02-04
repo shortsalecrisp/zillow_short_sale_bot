@@ -683,7 +683,7 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
         )
         return
     if not headless_available():
-        sink.warning("HEADLESS_MISSING pyppeteer not installed")
+        sink.warning("HEADLESS_MISSING playwright not installed")
         return
     ensure_headless_ready(sink)
 
@@ -693,7 +693,7 @@ def ensure_headless_ready(logger: Optional[logging.Logger] = None) -> bool:
     if not HEADLESS_ENABLED:
         return False
     if not headless_available():
-        sink.warning("HEADLESS_MISSING pyppeteer not installed")
+        sink.warning("HEADLESS_MISSING playwright not installed")
         return False
     try:
         loop = asyncio.get_running_loop()

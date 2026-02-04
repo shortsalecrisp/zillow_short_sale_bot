@@ -66,6 +66,7 @@ async def fetch_headless_snapshot(
     content = ""
     visible_text = ""
     hrefs = []
+    final_url = url
     try:
         args = [
             "--no-sandbox",
@@ -106,6 +107,7 @@ async def fetch_headless_snapshot(
             hrefs = await page.evaluate(
                 "() => Array.from(document.querySelectorAll('a[href]')).map(a => a.getAttribute('href') || '')"
             )
+            final_url = page.url
         hrefs = hrefs or []
         mailto_links = [h for h in hrefs if h and h.lower().startswith("mailto:")]
         tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
@@ -114,7 +116,7 @@ async def fetch_headless_snapshot(
             "visible_text": visible_text or "",
             "mailto_links": mailto_links,
             "tel_links": tel_links,
-            "final_url": page.url if page else url,
+            "final_url": final_url,
         }
     except Exception as exc:
         if logger:
