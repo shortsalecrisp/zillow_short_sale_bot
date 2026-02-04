@@ -48,10 +48,10 @@ HTTP traffic or subject to web-service auto-suspend. When doing so:
 3) If you cannot run a Worker, either disable auto-suspend (paid plan) or keep the web process warm with an uptime
    monitor so the scheduler thread inside `webhook_server.py` hits each top-of-hour slot.
 
-Headless reviews download a Chromium bundle on first run via Pyppeteer. You can control the cache location and download
+Headless reviews download a Chromium bundle on first run via Playwright. You can control the cache location and download
 behavior with:
 
-* `HEADLESS_BROWSER_CACHE` (default: `~/.cache/pyppeteer`)
+* `HEADLESS_BROWSER_CACHE` (default: `~/.cache/playwright`)
 * `HEADLESS_BROWSER_DOWNLOAD` (default: `true`)
 
 ### How to recreate service on Render using Blueprint

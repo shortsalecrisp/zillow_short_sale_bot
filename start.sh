@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("startup")
 
 if not headless_available():
-    logger.warning("STARTUP_HEADLESS_BROWSER_MISSING pyppeteer not installed")
+    logger.warning("STARTUP_HEADLESS_BROWSER_MISSING playwright not installed")
 else:
     asyncio.run(ensure_headless_browser(logger))
     logger.info("STARTUP_HEADLESS_BROWSER_READY")
