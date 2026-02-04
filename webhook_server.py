@@ -26,6 +26,7 @@ from bot_min import (
     WORK_END,
     WORK_START,
     SCHEDULER_TZ,
+    SMS_TEMPLATE,
     append_seen_zpids,
     dedupe_rows_by_zpid,
     fetch_contact_page,
@@ -615,7 +616,11 @@ def _process_incoming_rows(
 
     for job in sms_jobs:
         try:
-            send_sms(job["phone"], job["message"])
+            message = _job_message(job)
+            if not message:
+                logger.warning("Skipping SMS job with empty message: %s", job)
+                continue
+            send_sms(job["phone"], message)
         except Exception:
             logger.exception("send_sms failed for %s", job)
 
@@ -646,6 +651,17 @@ def _get_apify_run_status(run_id: str) -> Optional[str]:
         return None
     status = data.get("data", {}).get("status")
     return status
+
+
+def _job_message(job: Dict[str, Any]) -> str:
+    raw_message = str(job.get("message") or "").strip()
+    if raw_message:
+        return raw_message
+    first = str(job.get("first") or "").strip()
+    address = str(job.get("address") or "").strip()
+    if first or address:
+        return SMS_TEMPLATE.format(first=first, address=address).strip()
+    return ""
 
 
 @app.on_event("startup")
