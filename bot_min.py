@@ -2316,13 +2316,21 @@ def _allowed_contact_domains(domain_hint: str) -> Optional[Set[str]]:
         allowed.add(dom)
     return allowed or None
 
-def _should_use_headless_for_contact(dom: str, body: str = "", *, js_hint: bool = False) -> bool:
+def _should_use_headless_for_contact(
+    dom: str,
+    body: str = "",
+    *,
+    js_hint: bool = False,
+    allow_blocked: bool = False,
+) -> bool:
     domain = _domain(dom)
     if not domain:
         return False
     if domain in _ALWAYS_SKIP_DOMAINS:
         return False
-    if domain in _CONTACT_DENYLIST or _blocked(domain):
+    if domain in _CONTACT_DENYLIST:
+        return False
+    if _blocked(domain) and not allow_blocked:
         return False
     if domain in HEADLESS_CONTACT_DOMAINS:
         return True
@@ -2372,7 +2380,8 @@ def _has_contact_signals(body: str) -> bool:
 
 
 def _needs_headless_contact(dom: str, body: str, *, js_hint: bool = False) -> bool:
-    if not _should_use_headless_for_contact(dom, body, js_hint=js_hint):
+    allow_blocked = js_hint or not (body or "").strip()
+    if not _should_use_headless_for_contact(dom, body, js_hint=js_hint, allow_blocked=allow_blocked):
         return False
     if not (body or "").strip():
         return True
@@ -3004,6 +3013,11 @@ def fetch_text_cached(
         return ""
 
     bypass_jina = bool(dom and (dom in _jina_bypass_domains or dom in JINA_BYPASS_DOMAINS))
+    if not bypass_jina and _blocked("r.jina.ai"):
+        bypass_jina = True
+        if dom:
+            _jina_bypass_domains.add(dom)
+        LOG.info("JINA_BYPASS domain=%s reason=jina-blocked", dom)
     mirror = "" if bypass_jina else (_mirror_url(norm) or f"https://r.jina.ai/{norm}")
     text = ""
     status = 0
@@ -3011,7 +3025,8 @@ def fetch_text_cached(
     retry_needed = False
     thin_response = False
 
-    if bypass_jina:
+    def _direct_fetch(reason: str) -> None:
+        nonlocal text, status, final_url
         try:
             direct_resp = _http_get(
                 norm,
@@ -3026,7 +3041,7 @@ def fetch_text_cached(
             status = direct_resp.status_code if direct_resp else 0
             final_url = getattr(direct_resp, "url", norm) if direct_resp else norm
             if status in {403, 429, 451} and dom in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
-                snapshot = _headless_fetch(norm, domain=dom, reason="jina-bypass-direct-blocked")
+                snapshot = _headless_fetch(norm, domain=dom, reason=reason)
                 rendered = _combine_headless_snapshot(snapshot)
                 if rendered.strip():
                     text = rendered
@@ -3036,7 +3051,11 @@ def fetch_text_cached(
             text = ""
             status = 0
             final_url = norm
+
+    if bypass_jina:
+        _direct_fetch("jina-bypass-direct-blocked")
     elif mirror:
+        mirror_blocked = False
         attempts = max(1, JINA_RETRY_ATTEMPTS)
         for attempt in range(attempts):
             try:
@@ -3053,7 +3072,11 @@ def fetch_text_cached(
                 status = resp.status_code if resp else 0
                 final_url = getattr(resp, "url", norm) if resp else norm
             except DomainBlockedError:
-                raise
+                mirror_blocked = True
+                if dom:
+                    _jina_bypass_domains.add(dom)
+                LOG.info("JINA_BYPASS domain=%s reason=jina-proxy-blocked", dom)
+                break
             except requests.HTTPError as exc:
                 resp = exc.response
                 text = resp.text if resp and resp.text else ""
@@ -3075,31 +3098,10 @@ def fetch_text_cached(
                     delay,
                 )
                 time.sleep(delay)
+        if mirror_blocked:
+            _direct_fetch("jina-proxy-blocked")
     else:
-        try:
-            direct_resp = _http_get(
-                norm,
-                timeout=12,
-                headers=_browser_headers(_domain(norm)),
-                rotate_user_agent=True,
-                respect_block=respect_block,
-                block_on_status=allow_blocking,
-                record_timeout=allow_blocking,
-            )
-            text = direct_resp.text if direct_resp and direct_resp.text else ""
-            status = direct_resp.status_code if direct_resp else 0
-            final_url = getattr(direct_resp, "url", norm) if direct_resp else norm
-            if status in {403, 429, 451} and dom in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
-                snapshot = _headless_fetch(norm, domain=dom, reason="jina-bypass-direct-blocked")
-                rendered = _combine_headless_snapshot(snapshot)
-                if rendered.strip():
-                    text = rendered
-                    status = 200
-                    final_url = norm
-        except Exception:
-            text = ""
-            status = 0
-            final_url = norm
+        _direct_fetch("jina-bypass-direct-blocked")
 
     final_url = _normalize_jina_proxy_url(final_url)
     if _domain(final_url) == "r.jina.ai":
@@ -5748,7 +5750,12 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         if not _has_verifiable_contacts():
             for idx, url in enumerate(urls):
                 dom = _domain(url)
-                if not _should_use_headless_for_contact(dom, "", js_hint=dom in CONTACT_JS_DOMAINS):
+                if not _should_use_headless_for_contact(
+                    dom,
+                    "",
+                    js_hint=dom in CONTACT_JS_DOMAINS,
+                    allow_blocked=True,
+                ):
                     continue
                 proxy_url = _proxy_for_domain(dom)
                 nav_timeout_ms = HEADLESS_FIRST_NAV_TIMEOUT_MS if idx == 0 else None
@@ -6371,6 +6378,9 @@ HEADLESS_THIN_FALLBACK_DOMAINS = {
     "remaxofutah.com",
     "ogden.remaxofutah.com",
     "utahrealestate.com",
+    "coldwellbanker.com",
+    "coldwellbankerhomes.com",
+    "compass.com",
 }
 TOP5_OFF_TOPIC_HINTS = (
     "forum",
