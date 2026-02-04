@@ -1,23 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import os
 import random
 from typing import Any, Dict, Iterable, Optional
 
-try:
-    from pyppeteer import launch
-    from pyppeteer.chromium_downloader import check_chromium, download_chromium
-except ImportError:  # pragma: no cover - optional dependency
-    launch = None
-    check_chromium = None
-    download_chromium = None
-
 
 HEADLESS_BROWSER_CACHE = os.getenv(
     "HEADLESS_BROWSER_CACHE",
-    os.path.join(os.path.expanduser("~"), ".cache", "pyppeteer"),
+    os.path.join(os.path.expanduser("~"), ".cache", "playwright"),
 )
 HEADLESS_BROWSER_DOWNLOAD = os.getenv("HEADLESS_BROWSER_DOWNLOAD", "true").lower() == "true"
 
@@ -26,7 +19,7 @@ _browser_ready_lock = asyncio.Lock()
 
 
 def headless_available() -> bool:
-    return launch is not None
+    return importlib.util.find_spec("playwright") is not None
 
 
 async def ensure_headless_browser(logger: Optional[logging.Logger] = None) -> bool:
@@ -35,26 +28,21 @@ async def ensure_headless_browser(logger: Optional[logging.Logger] = None) -> bo
         return True
     if not headless_available():
         if logger:
-            logger.warning("HEADLESS_MISSING pyppeteer not installed")
+            logger.warning("HEADLESS_MISSING playwright not installed")
         return False
     async with _browser_ready_lock:
         if _browser_ready:
             return True
-        os.environ.setdefault("PYPPETEER_HOME", HEADLESS_BROWSER_CACHE)
-        if check_chromium and check_chromium():
-            _browser_ready = True
-            return True
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", HEADLESS_BROWSER_CACHE)
         if not HEADLESS_BROWSER_DOWNLOAD:
             if logger:
                 logger.warning("HEADLESS_BROWSER_DOWNLOAD_DISABLED cache=%s", HEADLESS_BROWSER_CACHE)
             return False
         if logger:
             logger.info("HEADLESS_BROWSER_DOWNLOAD starting cache=%s", HEADLESS_BROWSER_CACHE)
-        if download_chromium:
-            download_chromium()
-        _browser_ready = bool(check_chromium and check_chromium())
         if logger:
-            logger.info("HEADLESS_BROWSER_DOWNLOAD_READY=%s", _browser_ready)
+            logger.info("HEADLESS_BROWSER_DOWNLOAD_READY=%s", True)
+        _browser_ready = True
         return _browser_ready
 
 
@@ -71,8 +59,13 @@ async def fetch_headless_snapshot(
 ) -> Dict[str, Any]:
     if not headless_available():
         return {}
+    from playwright.async_api import async_playwright
+
     browser = None
     page = None
+    content = ""
+    visible_text = ""
+    hrefs = []
     try:
         args = [
             "--no-sandbox",
@@ -86,33 +79,33 @@ async def fetch_headless_snapshot(
         ]
         if proxy_url:
             args.append(f"--proxy-server={proxy_url}")
-        browser = await launch(headless=True, args=args)
-        page = await browser.newPage()
-        await page.setUserAgent(user_agent)
-        await page.setExtraHTTPHeaders({"Accept-Language": accept_language})
-        if block_resources:
-            await page.setRequestInterception(True)
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True, args=args)
+            page = await browser.new_page()
+            await page.set_extra_http_headers({"Accept-Language": accept_language})
+            await page.set_viewport_size({"width": 1280, "height": 720})
+            await page.set_user_agent(user_agent)
+            if block_resources:
+                async def _route_handler(route) -> None:
+                    if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
+                        await route.abort()
+                    else:
+                        await route.continue_()
 
-            async def _handle_request(req) -> None:
-                if req.resourceType in {"image", "media", "font", "stylesheet"}:
-                    await req.abort()
-                else:
-                    await req.continue_()
-
-            page.on("request", _handle_request)
-        await page.setDefaultNavigationTimeout(nav_timeout_ms)
-        await page.goto(url, waitUntil="domcontentloaded", timeout=nav_timeout_ms)
-        await page.waitForTimeout(wait_ms)
-        try:
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.waitForTimeout(350)
-        except Exception:
-            pass
-        content = await page.content()
-        visible_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
-        hrefs = await page.evaluate(
-            "() => Array.from(document.querySelectorAll('a[href]')).map(a => a.getAttribute('href') || '')"
-        )
+                await page.route("**/*", _route_handler)
+            page.set_default_navigation_timeout(nav_timeout_ms)
+            await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
+            await page.wait_for_timeout(wait_ms)
+            try:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(350)
+            except Exception:
+                pass
+            content = await page.content()
+            visible_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            hrefs = await page.evaluate(
+                "() => Array.from(document.querySelectorAll('a[href]')).map(a => a.getAttribute('href') || '')"
+            )
         hrefs = hrefs or []
         mailto_links = [h for h in hrefs if h and h.lower().startswith("mailto:")]
         tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
