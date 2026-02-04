@@ -8,10 +8,8 @@ import logging
 import os
 import re
 import sqlite3
-import subprocess
 import sys
 import threading
-import tempfile
 import importlib.util
 import unicodedata
 from pathlib import Path
@@ -30,12 +28,12 @@ from requests import exceptions as req_exc
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build as gapi_build
 from sms_providers import get_sender
-try:
-    from playwright.async_api import async_playwright
-    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-except ImportError:  # pragma: no cover - optional dependency
-    async_playwright = None
-    PlaywrightTimeoutError = None  # type: ignore
+from headless_browser import (
+    ensure_headless_browser,
+    fetch_headless_snapshot,
+    headless_available,
+    random_accept_language,
+)
 try:
     import dns.resolver  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -113,23 +111,7 @@ HEADLESS_WAIT_MS = int(os.getenv("HEADLESS_FETCH_WAIT_MS", "1200"))
 HEADLESS_FACEBOOK_TIMEOUT_MS = int(os.getenv("HEADLESS_FACEBOOK_TIMEOUT_MS", str(HEADLESS_TIMEOUT_MS + 12000)))
 HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
 HEADLESS_OVERALL_TIMEOUT_S = int(os.getenv("HEADLESS_OVERALL_TIMEOUT_S", "50"))
-HEADFUL_ALWAYS = os.getenv("HEADFUL_ALWAYS", "false").lower() == "true"
-HEADFUL_DOMAINS = {d.strip().lower() for d in os.getenv("HEADFUL_DOMAINS", "").split(",") if d.strip()}
-HEADFUL_REASONS = {d.strip().lower() for d in os.getenv("HEADFUL_REASONS", "").split(",") if d.strip()}
-PLAYWRIGHT_ENGINE = os.getenv("PLAYWRIGHT_ENGINE", "chromium").strip().lower()
-PLAYWRIGHT_ENGINE_FALLBACKS = [
-    v.strip().lower()
-    for v in os.getenv("PLAYWRIGHT_ENGINE_FALLBACKS", "firefox,webkit").split(",")
-    if v.strip()
-]
-PLAYWRIGHT_REMOTE_WS = os.getenv("PLAYWRIGHT_REMOTE_WS", "").strip()
-PLAYWRIGHT_LAUNCH_TIMEOUT_MS = int(os.getenv("PLAYWRIGHT_LAUNCH_TIMEOUT_MS", "15000"))
-PLAYWRIGHT_SMOKE_TEST_DISABLED = os.getenv("PLAYWRIGHT_SMOKE_TEST_DISABLED", "false").lower() == "true"
-PLAYWRIGHT_PERSISTENT_CONTEXT = os.getenv("PLAYWRIGHT_PERSISTENT_CONTEXT", "true").lower() == "true"
-PLAYWRIGHT_RETRY_ATTEMPTS = int(os.getenv("PLAYWRIGHT_RETRY_ATTEMPTS", "3"))
-PLAYWRIGHT_SELECTOR_TIMEOUT_MS = int(os.getenv("PLAYWRIGHT_SELECTOR_TIMEOUT_MS", "3500"))
-PLAYWRIGHT_INTERACTION_MIN_MS = int(os.getenv("PLAYWRIGHT_INTERACTION_MIN_MS", "180"))
-PLAYWRIGHT_INTERACTION_MAX_MS = int(os.getenv("PLAYWRIGHT_INTERACTION_MAX_MS", "650"))
+HEADLESS_BROWSER_RETRY_ATTEMPTS = int(os.getenv("HEADLESS_BROWSER_RETRY_ATTEMPTS", "2"))
 JINA_THIN_TEXT_CHARS = int(os.getenv("JINA_THIN_TEXT_CHARS", "450"))
 HEADLESS_NAV_TIMEOUT_OVERRIDES = {
     k.strip().lower(): int(v)
@@ -139,7 +121,7 @@ HEADLESS_NAV_TIMEOUT_OVERRIDES = {
         if "=" in part
     )
 }
-PLAYWRIGHT_CONTACT_DOMAINS = {
+HEADLESS_CONTACT_DOMAINS = {
     "facebook.com",
     "remax.com",
     "har.com",
@@ -189,7 +171,7 @@ def _ensure_headless_loop() -> asyncio.AbstractEventLoop:
         def _runner() -> None:
             asyncio.set_event_loop(loop)
             loop.run_forever()
-        thread = threading.Thread(target=_runner, name="playwright-loop", daemon=True)
+        thread = threading.Thread(target=_runner, name="headless-loop", daemon=True)
         thread.start()
         _headless_loop = loop
         _headless_loop_thread = thread
@@ -679,333 +661,48 @@ logging.basicConfig(
     force=True,
 )
 LOG = logging.getLogger("bot_min")
-_playwright_status_logged = False
-_playwright_ready = False
-_playwright_ready_lock = threading.Lock()
-_playwright_executable_paths: Dict[str, str] = {}
-_playwright_runtime: Optional[Any] = None
-_playwright_browser: Optional[Any] = None
-_playwright_browser_headless: Optional[bool] = None
-_playwright_browser_engine: Optional[str] = None
-_playwright_runtime_mode: Optional[str] = None
-_playwright_runtime_endpoint: Optional[str] = None
-_playwright_persistent_context: Optional[Any] = None
-_playwright_persistent_headless: Optional[bool] = None
-_playwright_persistent_user_data_dir: Optional[str] = None
-_playwright_browser_lock = asyncio.Lock()
 _multi_agent_run = False
-PLAYWRIGHT_BROWSER_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
-PLAYWRIGHT_LAUNCH_ARGS = [
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--disable-background-networking",
-    "--disable-background-timer-throttling",
-    "--disable-renderer-backgrounding",
-    "--disable-default-apps",
-    "--disable-extensions",
-    "--disable-sync",
-    "--metrics-recording-only",
-    "--no-first-run",
-    "--safebrowsing-disable-auto-update",
-]
-PLAYWRIGHT_ALLOWED_ENGINES = {"chromium", "firefox", "webkit"}
 
-
-def _normalize_playwright_engine(engine: str) -> str:
-    normalized = (engine or "").strip().lower()
-    return normalized if normalized in PLAYWRIGHT_ALLOWED_ENGINES else "chromium"
-
-
-def _playwright_engine_order() -> List[str]:
-    primary = _normalize_playwright_engine(PLAYWRIGHT_ENGINE)
-    fallbacks = [
-        _normalize_playwright_engine(value)
-        for value in PLAYWRIGHT_ENGINE_FALLBACKS
-        if _normalize_playwright_engine(value) != primary
-    ]
-    seen = {primary}
-    ordered = [primary]
-    for engine in fallbacks:
-        if engine not in seen:
-            ordered.append(engine)
-            seen.add(engine)
-    return ordered
-
-
-def _playwright_launch_args(engine: str) -> List[str]:
-    if engine == "chromium":
-        return PLAYWRIGHT_LAUNCH_ARGS
-    return []
+_headless_status_logged = False
 
 
 def _log_blocked_url(url: str) -> None:
     LOG.info("URL_BLOCKED url=%s", url)
 
 
-def _should_use_headful(domain: str, reason: str) -> bool:
-    if HEADFUL_ALWAYS:
-        return True
-    if domain and domain.lower() in HEADFUL_DOMAINS:
-        return True
-    if reason and reason.lower() in HEADFUL_REASONS:
-        return True
-    return False
-
-
-def _ensure_playwright_browsers_path(logger: logging.Logger) -> str:
-    if not os.getenv("PLAYWRIGHT_BROWSERS_PATH"):
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_BROWSER_CACHE
-    browsers_path = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
-    try:
-        Path(browsers_path).mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        logger.warning("PLAYWRIGHT_BROWSERS_PATH_CREATE_FAILED path=%s err=%s", browsers_path, exc)
-    return browsers_path
-
-
-def _playwright_engine_runtime(p, engine: str):
-    if engine == "firefox":
-        return p.firefox
-    if engine == "webkit":
-        return p.webkit
-    return p.chromium
-
-
-async def _connect_playwright_browser(p, *, headless: bool = True, engine: str = "chromium") -> Tuple[Any, str]:
-    launch_timeout = max(5000, PLAYWRIGHT_LAUNCH_TIMEOUT_MS)
-    normalized_engine = _normalize_playwright_engine(engine)
-    if PLAYWRIGHT_REMOTE_WS:
-        if normalized_engine != "chromium":
-            LOG.warning(
-                "PLAYWRIGHT_REMOTE_UNSUPPORTED engine=%s ws=%s; falling back to local launch",
-                normalized_engine,
-                PLAYWRIGHT_REMOTE_WS,
-            )
-        else:
-            browser = await p.chromium.connect_over_cdp(
-                PLAYWRIGHT_REMOTE_WS,
-                timeout=launch_timeout,
-            )
-            LOG.info("PLAYWRIGHT_REMOTE_CONNECT ws=%s", PLAYWRIGHT_REMOTE_WS)
-            return browser, "remote"
-    runtime = _playwright_engine_runtime(p, normalized_engine)
-    executable_path = _playwright_executable_paths.get(normalized_engine) or runtime.executable_path
-    browser = await runtime.launch(
-        headless=headless,
-        executable_path=executable_path,
-        args=_playwright_launch_args(normalized_engine),
-        timeout=launch_timeout,
-    )
-    LOG.info("PLAYWRIGHT_LOCAL_LAUNCH engine=%s executable_path=%s", normalized_engine, executable_path)
-    return browser, "local"
-
-
-async def _reset_playwright_browser(reason: str = "") -> None:
-    global _playwright_runtime, _playwright_browser, _playwright_browser_headless
-    global _playwright_browser_engine, _playwright_runtime_mode, _playwright_runtime_endpoint
-    global _playwright_persistent_context, _playwright_persistent_headless, _playwright_persistent_user_data_dir
-    browser = _playwright_browser
-    runtime = _playwright_runtime
-    context = _playwright_persistent_context
-    _playwright_browser = None
-    _playwright_runtime = None
-    _playwright_browser_headless = None
-    _playwright_browser_engine = None
-    _playwright_runtime_mode = None
-    _playwright_runtime_endpoint = None
-    _playwright_persistent_context = None
-    _playwright_persistent_headless = None
-    _playwright_persistent_user_data_dir = None
-    try:
-        if context:
-            await context.close()
-    except Exception:
-        pass
-    try:
-        if browser:
-            await browser.close()
-    except Exception:
-        pass
-    try:
-        if runtime:
-            await runtime.stop()
-    except Exception:
-        pass
-    if reason:
-        LOG.info("PLAYWRIGHT_BROWSER_RESET reason=%s", reason)
-
-
-async def _get_playwright_browser(*, headless: bool) -> Tuple[Any, str]:
-    global _playwright_runtime, _playwright_browser, _playwright_browser_headless
-    global _playwright_browser_engine, _playwright_runtime_mode, _playwright_runtime_endpoint
-    async with _playwright_browser_lock:
-        desired_engine = _normalize_playwright_engine(PLAYWRIGHT_ENGINE)
-        desired_endpoint = PLAYWRIGHT_REMOTE_WS or None
-        if _playwright_runtime and _playwright_browser:
-            if (
-                _playwright_browser_headless == headless
-                and _playwright_browser_engine == desired_engine
-                and _playwright_runtime_endpoint == desired_endpoint
-            ):
-                return _playwright_browser, _playwright_runtime_mode or "shared"
-            await _reset_playwright_browser("browser-mismatch")
-        if async_playwright is None:
-            raise RuntimeError("playwright not installed")
-        last_error: Optional[Exception] = None
-        for engine in _playwright_engine_order():
-            try:
-                _playwright_runtime = await async_playwright().start()
-                browser, runtime_mode = await _connect_playwright_browser(
-                    _playwright_runtime,
-                    headless=headless,
-                    engine=engine,
-                )
-                _playwright_browser = browser
-                _playwright_browser_headless = headless
-                _playwright_browser_engine = engine
-                _playwright_runtime_mode = runtime_mode
-                _playwright_runtime_endpoint = desired_endpoint
-                if engine != desired_engine:
-                    LOG.warning("PLAYWRIGHT_ENGINE_FALLBACK primary=%s selected=%s", desired_engine, engine)
-                return browser, runtime_mode
-            except Exception as exc:
-                last_error = exc
-                LOG.warning("PLAYWRIGHT_LAUNCH_FAILED engine=%s err=%s", engine, exc)
-                await _reset_playwright_browser(f"launch-failed-{engine}")
-        raise RuntimeError(f"Playwright launch failed: {last_error}")
-
-
-async def _get_playwright_context(*, headless: bool) -> Tuple[Any, str, bool]:
-    global _playwright_runtime, _playwright_persistent_context, _playwright_persistent_headless
-    global _playwright_persistent_user_data_dir, _playwright_browser_engine, _playwright_runtime_mode
-    global _playwright_runtime_endpoint
-    browser, runtime_mode = await _get_playwright_browser(headless=headless)
-    accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
-    if not _multi_agent_run and (runtime_mode == "remote" or not PLAYWRIGHT_PERSISTENT_CONTEXT):
-        context = await browser.new_context(
-            user_agent=random.choice(_USER_AGENT_POOL),
-            locale=accept_language.split(",")[0],
-            extra_http_headers={
-                "Accept-Language": accept_language,
-                **_random_cookie_header(),
-            },
-        )
-        return context, runtime_mode, True
-
-    async with _playwright_browser_lock:
-        if _playwright_persistent_context and _playwright_persistent_headless == headless:
-            return _playwright_persistent_context, "persistent", False
-        if async_playwright is None:
-            raise RuntimeError("playwright not installed")
-        await _reset_playwright_browser("persistent-context-reinit")
-        _playwright_runtime = await async_playwright().start()
-        accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
-        user_data_dir = _playwright_persistent_user_data_dir or tempfile.mkdtemp(prefix="playwright-profile-")
-        _playwright_persistent_user_data_dir = user_data_dir
-        engine = _normalize_playwright_engine(PLAYWRIGHT_ENGINE)
-        runtime = _playwright_engine_runtime(_playwright_runtime, engine)
-        executable_path = _playwright_executable_paths.get(engine) or runtime.executable_path
-        launch_timeout = max(5000, PLAYWRIGHT_LAUNCH_TIMEOUT_MS)
-        context = await runtime.launch_persistent_context(
-            user_data_dir,
-            headless=headless,
-            executable_path=executable_path,
-            args=_playwright_launch_args(engine),
-            timeout=launch_timeout,
-            locale=accept_language.split(",")[0],
-            user_agent=random.choice(_USER_AGENT_POOL),
-            extra_http_headers={
-                "Accept-Language": accept_language,
-                **_random_cookie_header(),
-            },
-        )
-        _playwright_persistent_context = context
-        _playwright_persistent_headless = headless
-        _playwright_browser_engine = engine
-        _playwright_runtime_mode = "persistent"
-        _playwright_runtime_endpoint = PLAYWRIGHT_REMOTE_WS or None
-        LOG.info("PLAYWRIGHT_PERSISTENT_CONTEXT_READY engine=%s dir=%s", engine, user_data_dir)
-        return context, "persistent", False
-
-
-async def _ensure_playwright_ready_async(logger: logging.Logger) -> bool:
-    global _playwright_executable_paths
-    if async_playwright is None:
-        logger.warning("PLAYWRIGHT_MISSING playwright not installed")
-        return False
-    _ensure_playwright_browsers_path(logger)
-    engine = _normalize_playwright_engine(PLAYWRIGHT_ENGINE)
-    async with async_playwright() as p:
-        runtime = _playwright_engine_runtime(p, engine)
-        executable_path = Path(runtime.executable_path)
-        _playwright_executable_paths[engine] = str(executable_path)
-    if PLAYWRIGHT_REMOTE_WS:
-        logger.info("PLAYWRIGHT_REMOTE_CONFIGURED ws=%s", PLAYWRIGHT_REMOTE_WS)
-    if not executable_path.exists() and not PLAYWRIGHT_REMOTE_WS:
-        logger.warning(
-            "PLAYWRIGHT_MISSING_EXECUTABLE path=%s; installing %s",
-            executable_path,
-            engine,
-        )
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "playwright", "install", engine],
-                check=True,
-            )
-        except Exception as exc:
-            logger.error("PLAYWRIGHT_INSTALL_FAILED err=%s", exc)
-            return False
-    if PLAYWRIGHT_SMOKE_TEST_DISABLED:
-        logger.info("PLAYWRIGHT_SMOKE_TEST_DISABLED=true")
-        return True
-    try:
-        async with async_playwright() as p:
-            browser, runtime_mode = await _connect_playwright_browser(p, headless=True, engine=engine)
-            await browser.close()
-        logger.info("PLAYWRIGHT_READY smoke test OK engine=%s mode=%s", engine, runtime_mode)
-        return True
-    except Exception as exc:
-        logger.error("PLAYWRIGHT_BROWSER_ERROR smoke test failed err=%s", exc)
-        return False
-
-
-def ensure_playwright_ready(logger: Optional[logging.Logger] = None) -> bool:
-    global _playwright_ready
-    sink = logger or LOG
-    if _playwright_ready:
-        return True
-    if not HEADLESS_ENABLED:
-        sink.warning("PLAYWRIGHT_DISABLED HEADLESS_FALLBACK=false – set HEADLESS_FALLBACK=true to enable headless reviews")
-        return False
-    with _playwright_ready_lock:
-        if _playwright_ready:
-            return True
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop and loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(_ensure_playwright_ready_async(sink), _ensure_headless_loop())
-            _playwright_ready = bool(future.result())
-        else:
-            _playwright_ready = bool(asyncio.run(_ensure_playwright_ready_async(sink)))
-        return _playwright_ready
-
-
 def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
-    """Emit a one-time status line explaining whether Playwright will run."""
-    global _playwright_status_logged
-    if _playwright_status_logged:
+    """Emit a one-time status line explaining whether headless browsing will run."""
+    global _headless_status_logged
+    if _headless_status_logged:
         return
-    _playwright_status_logged = True
+    _headless_status_logged = True
     sink = logger or LOG
     if not HEADLESS_ENABLED:
         sink.warning(
-            "PLAYWRIGHT_DISABLED HEADLESS_FALLBACK=false – set HEADLESS_FALLBACK=true to enable headless reviews"
+            "HEADLESS_DISABLED HEADLESS_FALLBACK=false – set HEADLESS_FALLBACK=true to enable headless reviews"
         )
         return
-    ensure_playwright_ready(sink)
+    if not headless_available():
+        sink.warning("HEADLESS_MISSING pyppeteer not installed")
+        return
+    ensure_headless_ready(sink)
+
+
+def ensure_headless_ready(logger: Optional[logging.Logger] = None) -> bool:
+    sink = logger or LOG
+    if not HEADLESS_ENABLED:
+        return False
+    if not headless_available():
+        sink.warning("HEADLESS_MISSING pyppeteer not installed")
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(ensure_headless_browser(sink), _ensure_headless_loop())
+        return bool(future.result())
+    return bool(asyncio.run(ensure_headless_browser(sink)))
 
 # ───────────────────── regexes & misc helpers ─────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
@@ -2619,7 +2316,7 @@ def _allowed_contact_domains(domain_hint: str) -> Optional[Set[str]]:
         allowed.add(dom)
     return allowed or None
 
-def _should_use_playwright_for_contact(dom: str, body: str = "", *, js_hint: bool = False) -> bool:
+def _should_use_headless_for_contact(dom: str, body: str = "", *, js_hint: bool = False) -> bool:
     domain = _domain(dom)
     if not domain:
         return False
@@ -2627,7 +2324,7 @@ def _should_use_playwright_for_contact(dom: str, body: str = "", *, js_hint: boo
         return False
     if domain in _CONTACT_DENYLIST or _blocked(domain):
         return False
-    if domain in PLAYWRIGHT_CONTACT_DOMAINS:
+    if domain in HEADLESS_CONTACT_DOMAINS:
         return True
     if js_hint or domain in CONTACT_JS_DOMAINS:
         return True
@@ -2674,8 +2371,8 @@ def _has_contact_signals(body: str) -> bool:
     return False
 
 
-def _needs_playwright_contact(dom: str, body: str, *, js_hint: bool = False) -> bool:
-    if not _should_use_playwright_for_contact(dom, body, js_hint=js_hint):
+def _needs_headless_contact(dom: str, body: str, *, js_hint: bool = False) -> bool:
+    if not _should_use_headless_for_contact(dom, body, js_hint=js_hint):
         return False
     if not (body or "").strip():
         return True
@@ -2683,21 +2380,38 @@ def _needs_playwright_contact(dom: str, body: str, *, js_hint: bool = False) -> 
         return False
     return js_hint or _looks_like_js_required(body)
 
-def _combine_playwright_snapshot(snapshot: Dict[str, Any]) -> str:
+def _combine_headless_snapshot(snapshot: Dict[str, Any]) -> str:
     if not snapshot or snapshot.get("timeout"):
         return ""
+    hint_lines: List[str] = []
+    for link in snapshot.get("mailto_links", []) or []:
+        if not link:
+            continue
+        hint_lines.append(link)
+        for match in EMAIL_RE.findall(link):
+            hint_lines.append(match)
+    for link in snapshot.get("tel_links", []) or []:
+        if not link:
+            continue
+        hint_lines.append(link)
+        for match in PHONE_RE.findall(link):
+            hint_lines.append(match)
+    visible_text = snapshot.get("visible_text", "")
+    if visible_text:
+        hint_lines.append(visible_text)
     meta = {
-        "playwright_final_url": snapshot.get("final_url", ""),
-        "playwright_visible_text": snapshot.get("visible_text", ""),
-        "playwright_mailto_links": snapshot.get("mailto_links", []),
-        "playwright_tel_links": snapshot.get("tel_links", []),
+        "headless_final_url": snapshot.get("final_url", ""),
+        "headless_visible_text": snapshot.get("visible_text", ""),
+        "headless_mailto_links": snapshot.get("mailto_links", []),
+        "headless_tel_links": snapshot.get("tel_links", []),
     }
     try:
         meta_json = json.dumps(meta, ensure_ascii=False)
     except Exception:
         meta_json = ""
-    payload = f"<!--PLAYWRIGHT_SNAPSHOT {html.escape(meta_json)} -->" if meta_json else ""
-    return f"{snapshot.get('html', '')}\n{payload}"
+    payload = f"<!--HEADLESS_SNAPSHOT {html.escape(meta_json)} -->" if meta_json else ""
+    hint_text = "\n".join(hint_lines)
+    return f"{snapshot.get('html', '')}\n{payload}\n{hint_text}"
 
 def _proxy_for_domain(domain: str) -> str:
     dom = _domain(domain)
@@ -2916,7 +2630,7 @@ CONTACT_HTTP_BACKOFF_CAP = float(os.getenv("CONTACT_HTTP_BACKOFF_CAP", "12.0"))
 CONTACT_HTTP_BACKOFF_JITTER = float(os.getenv("CONTACT_HTTP_BACKOFF_JITTER", "0.6"))
 CONTACT_FAILURE_THRESHOLD = int(os.getenv("CONTACT_FAILURE_THRESHOLD", "3"))
 CONTACT_FAILURE_LOG_INTERVAL = float(os.getenv("CONTACT_FAILURE_LOG_INTERVAL", "300"))
-CONTACT_PLAYWRIGHT_RETRIES = int(os.getenv("CONTACT_PLAYWRIGHT_RETRIES", "2"))
+CONTACT_HEADLESS_RETRIES = int(os.getenv("CONTACT_HEADLESS_RETRIES", "2"))
 
 _CONTACT_DOMAIN_LAST_FETCH: Dict[str, float] = {}
 _CONTACT_FAILURE_COUNTS: Dict[str, int] = {}
@@ -3313,7 +3027,7 @@ def fetch_text_cached(
             final_url = getattr(direct_resp, "url", norm) if direct_resp else norm
             if status in {403, 429, 451} and dom in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
                 snapshot = _headless_fetch(norm, domain=dom, reason="jina-bypass-direct-blocked")
-                rendered = _combine_playwright_snapshot(snapshot)
+                rendered = _combine_headless_snapshot(snapshot)
                 if rendered.strip():
                     text = rendered
                     status = 200
@@ -3377,7 +3091,7 @@ def fetch_text_cached(
             final_url = getattr(direct_resp, "url", norm) if direct_resp else norm
             if status in {403, 429, 451} and dom in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
                 snapshot = _headless_fetch(norm, domain=dom, reason="jina-bypass-direct-blocked")
-                rendered = _combine_playwright_snapshot(snapshot)
+                rendered = _combine_headless_snapshot(snapshot)
                 if rendered.strip():
                     text = rendered
                     status = 200
@@ -3417,7 +3131,7 @@ def fetch_text_cached(
                     dom_for_fallback = _domain(norm)
                     if dom_for_fallback in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
                         snapshot = _headless_fetch(norm, domain=dom_for_fallback, reason="jina-400-direct-blocked")
-                        rendered = _combine_playwright_snapshot(snapshot)
+                        rendered = _combine_headless_snapshot(snapshot)
                         if rendered.strip():
                             text = rendered
                             status = 200
@@ -3462,7 +3176,7 @@ def fetch_text_cached(
                     dom_for_fallback = _domain(norm)
                     if dom_for_fallback in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
                         snapshot = _headless_fetch(norm, domain=dom_for_fallback, reason="thin-direct-blocked")
-                        rendered = _combine_playwright_snapshot(snapshot)
+                        rendered = _combine_headless_snapshot(snapshot)
                         if rendered.strip():
                             text = rendered
                             status = 200
@@ -5703,7 +5417,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                     fetched.get("source", "jina_cache"),
                 )
             if prefer_headless and headless_budget > 0 and not page_contact_found:
-                LOG.info("PLAYWRIGHT_FALLBACK_TRIGGERED url=%s reason=jina_no_contacts", url)
+                LOG.info("HEADLESS_FALLBACK_TRIGGERED url=%s reason=jina_no_contacts", url)
                 page, _, _ = fetch_contact_page(url)
                 if page:
                     headless_budget -= 1
@@ -6034,7 +5748,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         if not _has_verifiable_contacts():
             for idx, url in enumerate(urls):
                 dom = _domain(url)
-                if not _should_use_playwright_for_contact(dom, "", js_hint=dom in CONTACT_JS_DOMAINS):
+                if not _should_use_headless_for_contact(dom, "", js_hint=dom in CONTACT_JS_DOMAINS):
                     continue
                 proxy_url = _proxy_for_domain(dom)
                 nav_timeout_ms = HEADLESS_FIRST_NAV_TIMEOUT_MS if idx == 0 else None
@@ -6047,7 +5761,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 )
                 if snapshot.get("timeout"):
                     _blocked_domain_from_url(snapshot.get("final_url") or url)
-                rendered = _combine_playwright_snapshot(snapshot)
+                rendered = _combine_headless_snapshot(snapshot)
                 if not rendered.strip():
                     continue
                 final_url = snapshot.get("final_url") or url
@@ -6201,30 +5915,30 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
                 LOG.debug("mirror fetch failed %s on %s", exc, mirror)
         return "", False, "jina_cache"
 
-    def _run_playwright_review(reason: str, body: str = "") -> Tuple[str, bool, str]:
-        if not HEADLESS_ENABLED or not async_playwright:
+    def _run_headless_review(reason: str, body: str = "") -> Tuple[str, bool, str]:
+        if not HEADLESS_ENABLED or not headless_available():
             return "", False, ""
         if is_blocked_url(url):
-            LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", url)
+            LOG.info("HEADLESS_SKIPPED_BLOCKED url=%s", url)
             return "", False, ""
-        allow_playwright = _needs_playwright_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
-        if not allow_playwright:
+        allow_headless = _needs_headless_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
+        if not allow_headless:
             return "", False, ""
-        for attempt in range(1, max(1, CONTACT_PLAYWRIGHT_RETRIES) + 1):
+        for attempt in range(1, max(1, CONTACT_HEADLESS_RETRIES) + 1):
             snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)
-            rendered = _combine_playwright_snapshot(snapshot)
+            rendered = _combine_headless_snapshot(snapshot)
             if rendered.strip():
                 LOG.info(
-                    "PLAYWRIGHT REVIEW used for %s (proxy=%s reason=%s)",
+                    "HEADLESS REVIEW used for %s (proxy=%s reason=%s)",
                     dom,
                     bool(proxy_url),
                     reason,
                 )
-                return rendered, True, "playwright"
-            _record_contact_failure(dom, url=url, err="playwright_empty")
-            if attempt < CONTACT_PLAYWRIGHT_RETRIES:
+                return rendered, True, "headless"
+            _record_contact_failure(dom, url=url, err="headless_empty")
+            if attempt < CONTACT_HEADLESS_RETRIES:
                 _contact_backoff(attempt)
-        LOG.info("PLAYWRIGHT REVIEW empty for %s (reason=%s)", dom, reason)
+        LOG.info("HEADLESS REVIEW empty for %s (reason=%s)", dom, reason)
         return "", False, ""
 
     def _finalize(
@@ -6234,7 +5948,7 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
         body: str = "",
         method: str = "direct",
     ) -> Tuple[str, bool, str]:
-        headless_html, headless_used, headless_method = _run_playwright_review(reason, body)
+        headless_html, headless_used, headless_method = _run_headless_review(reason, body)
         if headless_html:
             html = headless_html
             used_fallback = used_fallback or headless_used
@@ -6357,87 +6071,6 @@ def _unwrap_jina_url(url: str) -> str:
     return inner
 
 
-def _is_playwright_closed_error(exc: Exception) -> bool:
-    if exc is None:
-        return False
-    name = exc.__class__.__name__
-    if name in {"TargetClosedError", "BrowserClosedError"}:
-        return True
-    message = str(exc).lower()
-    return "target page" in message and "has been closed" in message
-
-
-def _is_playwright_timeout_error(exc: Exception) -> bool:
-    if PlaywrightTimeoutError and isinstance(exc, PlaywrightTimeoutError):
-        return True
-    return exc.__class__.__name__ == "TimeoutError"
-
-
-def _random_ms(min_ms: int, max_ms: int) -> int:
-    if max_ms <= min_ms:
-        return max(min_ms, 0)
-    return random.randint(min_ms, max_ms)
-
-
-async def _sleep_jitter(min_ms: int = PLAYWRIGHT_INTERACTION_MIN_MS, max_ms: int = PLAYWRIGHT_INTERACTION_MAX_MS) -> None:
-    await asyncio.sleep(_random_ms(min_ms, max_ms) / 1000.0)
-
-
-async def _retry_async(func: Callable[[], Any], *, attempts: int = PLAYWRIGHT_RETRY_ATTEMPTS) -> Any:
-    last_exc: Optional[Exception] = None
-    for attempt in range(max(1, attempts)):
-        try:
-            return await func()
-        except Exception as exc:
-            if _is_playwright_closed_error(exc):
-                raise
-            last_exc = exc
-            await asyncio.sleep(0.25 + (0.35 * attempt))
-    if last_exc:
-        raise last_exc
-    return None
-
-
-async def _wait_for_any_selector(page, selectors: Iterable[str], *, timeout_ms: int = PLAYWRIGHT_SELECTOR_TIMEOUT_MS) -> None:
-    for selector in selectors:
-        try:
-            await page.wait_for_selector(selector, timeout=timeout_ms, state="visible")
-            return
-        except Exception:
-            continue
-
-
-async def _humanize_page(page) -> None:
-    viewport = page.viewport_size or {"width": 1280, "height": 720}
-    try:
-        await page.mouse.move(_random_ms(50, viewport["width"]), _random_ms(50, viewport["height"]), steps=8)
-        await _sleep_jitter()
-        await page.mouse.wheel(0, _random_ms(800, 1400))
-        await _sleep_jitter()
-        await page.mouse.move(_random_ms(50, viewport["width"]), _random_ms(50, viewport["height"]), steps=6)
-    except Exception:
-        return
-
-
-def _anti_bot_markers(text: str) -> List[str]:
-    lowered = text.lower()
-    markers = [
-        "captcha",
-        "recaptcha",
-        "hcaptcha",
-        "cloudflare",
-        "checking your browser",
-        "verify you are human",
-        "access denied",
-        "are you a robot",
-        "unusual traffic",
-        "bot detection",
-        "automated requests",
-        "please enable javascript",
-    ]
-    return [marker for marker in markers if marker in lowered]
-
-
 def _headless_nav_timeout_for(url: str, domain: str, base_timeout: int) -> int:
     if not domain:
         domain = _domain(url) or ""
@@ -6474,54 +6107,6 @@ def _http_fallback_snapshot(url: str, *, domain: str = "") -> Dict[str, Any]:
     }
 
 
-async def _dismiss_common_banners(page) -> None:
-    labels = ("accept", "agree", "continue", "close", "dismiss", "i agree", "got it")
-    for label in labels:
-        try:
-            locator = page.get_by_role("button", name=re.compile(label, re.I))  # type: ignore[attr-defined]
-            await locator.first.click(timeout=800)
-            await _sleep_jitter()
-        except Exception:
-            continue
-
-
-async def _attempt_simple_captcha_bypass(page) -> bool:
-    success = False
-    for frame in page.frames:
-        frame_url = (frame.url or "").lower()
-        if any(token in frame_url for token in ("recaptcha", "hcaptcha", "turnstile", "captcha")):
-            try:
-                await frame.click("input[type='checkbox']", timeout=1200)
-                success = True
-                await _sleep_jitter()
-            except Exception:
-                continue
-    return success
-
-
-async def _handle_antibot_challenge(page, *, content: str = "", visible_text: str = "") -> None:
-    markers = _anti_bot_markers(" ".join([content, visible_text]).strip())
-    if not markers:
-        return
-    LOG.info("PLAYWRIGHT_ANTIBOT markers=%s", ",".join(markers))
-    await _dismiss_common_banners(page)
-    await _sleep_jitter()
-    if await _attempt_simple_captcha_bypass(page):
-        await page.wait_for_timeout(1500)
-    for _ in range(3):
-        try:
-            await page.wait_for_load_state("networkidle", timeout=3000)
-        except Exception:
-            pass
-        await _sleep_jitter()
-        try:
-            refreshed = await page.inner_text("body", timeout=1200)
-        except Exception:
-            refreshed = ""
-        if not _anti_bot_markers(refreshed):
-            break
-
-
 async def _headless_fetch_async(
     url: str,
     *,
@@ -6530,270 +6115,59 @@ async def _headless_fetch_async(
     reason: str = "",
     nav_timeout_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
-    if not HEADLESS_ENABLED or not async_playwright:
+    if not HEADLESS_ENABLED or not headless_available():
         return {}
     target_url = _unwrap_jina_url(url)
     if not target_url:
-        LOG.info("PLAYWRIGHT_SKIPPED_JINA_EMPTY url=%s", url)
+        LOG.info("HEADLESS_SKIPPED_JINA_EMPTY url=%s", url)
         return {}
     if _domain(target_url) == "r.jina.ai":
-        LOG.info("PLAYWRIGHT_SKIPPED_JINA_PROXY url=%s", url)
+        LOG.info("HEADLESS_SKIPPED_JINA_PROXY url=%s", url)
         return {}
     if is_blocked_url(target_url):
-        LOG.info("PLAYWRIGHT_SKIPPED_BLOCKED url=%s", target_url)
+        LOG.info("HEADLESS_SKIPPED_BLOCKED url=%s", target_url)
         return {}
     nav_timeout = HEADLESS_FACEBOOK_TIMEOUT_MS if "facebook.com" in target_url else HEADLESS_NAV_TIMEOUT_MS
     if nav_timeout_ms:
         nav_timeout = max(nav_timeout, nav_timeout_ms)
     nav_timeout = max(10000, nav_timeout)
-    default_timeout = max(10000, HEADLESS_TIMEOUT_MS)
     overall_timeout = max(15, min(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 10)))
     effective_domain = domain or _domain(target_url) or ""
     nav_timeout = _headless_nav_timeout_for(target_url, effective_domain, nav_timeout)
     if effective_domain in HEADLESS_SLOW_DOMAINS:
         overall_timeout = max(overall_timeout, HEADLESS_OVERALL_TIMEOUT_S + 15)
 
-    last_snapshot: Dict[str, Any] = {}
+    accept_language = random_accept_language(_ACCEPT_LANGUAGE_POOL)
+    user_agent = random.choice(_USER_AGENT_POOL)
 
-    async def _progressive_scroll(page) -> None:
-        for _ in range(3):
-            try:
-                await page.mouse.wheel(0, 1800)
-            except Exception:
-                break
-            await page.wait_for_timeout(400)
-
-    async def _expand_facebook(page) -> None:
-        try:
-            await _progressive_scroll(page)
-            labels = ("About", "Contact info", "Contact", "About info", "See more")
-            for label in labels:
-                try:
-                    locator = page.get_by_role("button", name=re.compile(label, re.I))  # type: ignore[attr-defined]
-                    await _sleep_jitter()
-                    await locator.first.click(timeout=1500)
-                    await page.wait_for_timeout(450)
-                    continue
-                except Exception:
-                    pass
-                try:
-                    locator = page.locator(f"text={label}")
-                    await _sleep_jitter()
-                    await locator.first.click(timeout=1500)
-                    await page.wait_for_timeout(450)
-                except Exception:
-                    continue
-        except Exception:
-            return
     async def _run_once() -> Dict[str, Any]:
-        context = None
-        close_context = False
-        page = None
+        return await fetch_headless_snapshot(
+            target_url,
+            proxy_url=proxy_url,
+            nav_timeout_ms=nav_timeout,
+            wait_ms=HEADLESS_WAIT_MS,
+            user_agent=user_agent,
+            accept_language=accept_language,
+            logger=LOG,
+        )
+
+    last_snapshot: Dict[str, Any] = {}
+    for attempt in range(max(1, HEADLESS_BROWSER_RETRY_ATTEMPTS)):
         try:
-            use_headful = _should_use_headful(effective_domain, reason or "")
-            context, runtime_mode, close_context = await _get_playwright_context(headless=not use_headful)
-            accept_language = random.choice(_ACCEPT_LANGUAGE_POOL)
-            if not close_context:
-                try:
-                    await context.set_extra_http_headers({
-                        "Accept-Language": accept_language,
-                        **_random_cookie_header(),
-                    })
-                except Exception:
-                    pass
-            page = await context.new_page()
-            try:
-                async def _route_handler(route, request) -> None:
-                    if request.resource_type in {"image", "media", "font", "stylesheet"}:
-                        await route.abort()
-                    else:
-                        await route.continue_()
-
-                await page.route("**/*", _route_handler)
-            except Exception:
-                pass
-            page.set_default_timeout(default_timeout)
-            page.set_default_navigation_timeout(default_timeout)
-            LOG.info(
-                "PLAYWRIGHT_START url=%s reason=%s remote=%s",
-                target_url,
-                reason or "fallback",
-                runtime_mode == "remote",
-            )
-            attempt_timeout = nav_timeout
-            for attempt in range(2):
-                try:
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=attempt_timeout)
-                    break
-                except Exception as exc:
-                    if _is_playwright_timeout_error(exc):
-                        LOG.warning(
-                            "PLAYWRIGHT_TIMEOUT nav url=%s attempt=%s err=%s",
-                            target_url,
-                            attempt + 1,
-                            exc,
-                        )
-                    elif _is_playwright_closed_error(exc):
-                        LOG.warning(
-                            "PLAYWRIGHT_CLOSED nav url=%s attempt=%s err=%s",
-                            target_url,
-                            attempt + 1,
-                            exc,
-                        )
-                        await _reset_playwright_browser("nav-closed")
-                        return {}
-                    else:
-                        LOG.warning(
-                            "PLAYWRIGHT_ERROR nav url=%s attempt=%s err=%s",
-                            target_url,
-                            attempt + 1,
-                            exc,
-                        )
-                    if attempt == 0:
-                        attempt_timeout = max(attempt_timeout, HEADLESS_FIRST_NAV_TIMEOUT_MS)
-                        LOG.info("PLAYWRIGHT_SLOW_RETRY url=%s timeout=%s", target_url, attempt_timeout)
-                        try:
-                            await page.wait_for_timeout(800)
-                        except Exception:
-                            pass
-                        continue
-                    return {}
-            try:
-                await page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass
-            await _wait_for_any_selector(
-                page,
-                ("body", "main", "article", "[role=main]", "a[href]"),
-                timeout_ms=PLAYWRIGHT_SELECTOR_TIMEOUT_MS,
-            )
-            await page.wait_for_timeout(HEADLESS_WAIT_MS)
-            await _humanize_page(page)
-            await _progressive_scroll(page)
-            try:
-                last_snapshot["html"] = await _retry_async(page.content) or ""
-                last_snapshot["visible_text"] = await _retry_async(
-                    lambda: page.inner_text("body", timeout=2000)
-                ) or ""
-                last_snapshot["final_url"] = page.url
-            except Exception:
-                pass
-            try:
-                await _handle_antibot_challenge(
-                    page,
-                    content=last_snapshot.get("html", ""),
-                    visible_text=last_snapshot.get("visible_text", ""),
-                )
-            except Exception:
-                pass
-            if "facebook.com" in (domain or _domain(target_url) or ""):
-                await _expand_facebook(page)
-                await page.wait_for_timeout(600)
-
-            try:
-                content = await _retry_async(page.content) or ""
-            except Exception:
-                content = ""
-            visible_text = ""
-            try:
-                visible_text = await _retry_async(
-                    lambda: page.inner_text("body", timeout=2000)
-                ) or ""
-            except Exception:
-                visible_text = ""
-            mail_links: List[str] = []
-            tel_links: List[str] = []
-            try:
-                hrefs = await _retry_async(
-                    lambda: page.eval_on_selector_all(
-                        "a[href]",
-                        "els => els.map(el => el.getAttribute('href') || '')",
-                    )
-                ) or []
-                mail_links = [h for h in hrefs if h and h.lower().startswith("mailto:")]
-                tel_links = [h for h in hrefs if h and h.lower().startswith("tel:")]
-            except Exception:
-                pass
-            if not content.strip():
-                LOG.info("PLAYWRIGHT_ERROR url=%s err=%s", target_url, "empty-content")
-                return {}
-            LOG.info(
-                "PLAYWRIGHT_OK url=%s bytes=%s",
-                target_url,
-                len(content.encode("utf-8")),
-            )
-            LOG.debug(
-                "Headless fetch ok for %s (remote=%s)",
-                domain or _domain(target_url),
-                runtime_mode == "remote",
-            )
-            return {
-                "html": content,
-                "visible_text": visible_text,
-                "mailto_links": mail_links,
-                "tel_links": tel_links,
-                "final_url": page.url,
-            }
-        finally:
-            try:
-                if page:
-                    await asyncio.shield(page.close())
-            except Exception:
-                pass
-            try:
-                if context:
-                    if close_context:
-                        await asyncio.shield(context.close())
-            except Exception:
-                pass
-            try:
-                pass
-            except Exception:
-                pass
-
-    async def _run() -> Dict[str, Any]:
-        for attempt in range(2):
-            try:
-                result = await _run_once()
-                if result:
-                    return result
-            except Exception as exc:  # pragma: no cover - network/env specific
-                if _is_playwright_closed_error(exc) or _is_playwright_timeout_error(exc):
-                    if _is_playwright_closed_error(exc):
-                        await _reset_playwright_browser("run-closed")
-                    LOG.warning("PLAYWRIGHT_RETRY url=%s err=%s attempt=%s", target_url, exc, attempt + 1)
-                    await asyncio.sleep(0.8 + (0.4 * attempt))
-                    continue
-                LOG.warning("PLAYWRIGHT_ERROR url=%s err=%s", target_url, exc)
-                return {}
-            if attempt == 0:
-                await asyncio.sleep(0.5)
-        return {}
-
-    run_task = asyncio.create_task(_run())
-    try:
-        return await asyncio.wait_for(run_task, timeout=overall_timeout)
-    except asyncio.TimeoutError:
-        LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", target_url, "overall_timeout")
-        if last_snapshot.get("html"):
-            last_snapshot["timeout"] = True
-            last_snapshot.setdefault("final_url", target_url)
-            return last_snapshot
-        return {"timeout": True, "final_url": target_url}
-    except Exception as exc:
-        LOG.warning("PLAYWRIGHT_ERROR url=%s err=%s", target_url, exc)
-        return {}
-    finally:
-        if not run_task.done():
-            run_task.cancel()
-        try:
-            await asyncio.wait_for(run_task, timeout=3)
-        except asyncio.CancelledError:
-            pass
+            last_snapshot = await asyncio.wait_for(_run_once(), timeout=overall_timeout)
+            if last_snapshot:
+                return last_snapshot
         except asyncio.TimeoutError:
-            LOG.debug("PLAYWRIGHT_CANCEL_TIMEOUT url=%s", target_url)
-        except Exception:
-            pass
+            LOG.warning("HEADLESS_TIMEOUT url=%s err=%s", target_url, "overall_timeout")
+        except Exception as exc:
+            LOG.warning("HEADLESS_ERROR url=%s err=%s attempt=%s", target_url, exc, attempt + 1)
+        if attempt < HEADLESS_BROWSER_RETRY_ATTEMPTS - 1:
+            await asyncio.sleep(0.4 + (0.4 * attempt))
+    if last_snapshot:
+        last_snapshot["timeout"] = True
+        last_snapshot.setdefault("final_url", target_url)
+        return last_snapshot
+    return {}
 
 
 def _headless_fetch(
@@ -6804,10 +6178,10 @@ def _headless_fetch(
     reason: str = "",
     nav_timeout_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
-    if not HEADLESS_ENABLED or not async_playwright:
+    if not HEADLESS_ENABLED or not headless_available():
         return {}
     log_headless_status()
-    if not ensure_playwright_ready(LOG):
+    if not ensure_headless_ready(LOG):
         return {}
 
     loop = _ensure_headless_loop()
@@ -6825,7 +6199,7 @@ def _headless_fetch(
         if result.get("timeout") and not result.get("html"):
             fallback = _http_fallback_snapshot(url, domain=domain)
             if fallback:
-                LOG.info("PLAYWRIGHT_TIMEOUT_FALLBACK_HTTP url=%s", url)
+                LOG.info("HEADLESS_TIMEOUT_FALLBACK_HTTP url=%s", url)
                 return fallback
         return result
     except concurrent.futures.TimeoutError:
@@ -6834,14 +6208,14 @@ def _headless_fetch(
             future.result(timeout=3)
         except Exception:
             pass
-        LOG.warning("PLAYWRIGHT_TIMEOUT url=%s err=%s", url, "thread-timeout")
+        LOG.warning("HEADLESS_TIMEOUT url=%s err=%s", url, "thread-timeout")
         fallback = _http_fallback_snapshot(url, domain=domain)
         if fallback:
-            LOG.info("PLAYWRIGHT_TIMEOUT_FALLBACK_HTTP url=%s", url)
+            LOG.info("HEADLESS_TIMEOUT_FALLBACK_HTTP url=%s", url)
             return fallback
         return {"timeout": True, "final_url": url}
     except Exception:
-        LOG.exception("PLAYWRIGHT_FAIL url=%s err=%s", url, "thread-runner")
+        LOG.exception("HEADLESS_FAIL url=%s err=%s", url, "thread-runner")
         return {}
 
 # ───────────────────── Google CSE helpers ─────────────────────
@@ -7439,12 +6813,12 @@ def _fetch_contact_page_html(url: str) -> str:
     dom = _domain(url)
     if not dom or dom not in HEADLESS_THIN_FALLBACK_DOMAINS:
         return html
-    if not HEADLESS_ENABLED or not async_playwright:
+    if not HEADLESS_ENABLED or not headless_available():
         return html
     if is_blocked_url(url):
         return html
     snapshot = _headless_fetch(url, domain=dom, reason="contact-empty-fallback")
-    rendered = _combine_playwright_snapshot(snapshot)
+    rendered = _combine_headless_snapshot(snapshot)
     return rendered if rendered.strip() else html
 
 
@@ -11997,7 +11371,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             return
     _multi_agent_run = len(rows) > 1
     if _multi_agent_run:
-        LOG.info("PLAYWRIGHT_MULTI_AGENT_RUN rows=%s", len(rows))
+        LOG.info("HEADLESS_MULTI_AGENT_RUN rows=%s", len(rows))
     load_seen_contacts()
     for r in rows:
         zpid = str(r.get("zpid", ""))

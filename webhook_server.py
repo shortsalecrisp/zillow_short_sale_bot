@@ -73,7 +73,7 @@ app            = FastAPI()
 
 
 @app.on_event("startup")
-async def _log_playwright_status() -> None:
+async def _log_headless_status() -> None:
     log_headless_status(logger)
 
 # In-memory de-dupe cache of exported ZPIDs
