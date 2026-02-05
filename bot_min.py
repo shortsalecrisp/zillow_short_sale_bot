@@ -10874,6 +10874,34 @@ def append_row(vals) -> int:
     LOG.info("Row appended to sheet (row %s); next hint %s", row_idx, _next_row_hint)
     return row_idx
 
+def delete_row(row_idx: int) -> None:
+    global _next_row_hint
+    if row_idx <= 0:
+        LOG.warning("Skip delete for invalid row index %s", row_idx)
+        return
+    try:
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=GSHEET_ID,
+            body={
+                "requests": [
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": ws.id,
+                                "dimension": "ROWS",
+                                "startIndex": row_idx - 1,
+                                "endIndex": row_idx,
+                            }
+                        }
+                    }
+                ]
+            },
+        ).execute()
+        _next_row_hint = min(_next_row_hint, row_idx)
+        LOG.info("Row deleted from sheet (row %s); next hint %s", row_idx, _next_row_hint)
+    except Exception as exc:
+        LOG.warning("Row delete failed for row %s: %s", row_idx, exc)
+
 def phone_exists(p):
     normalized = _normalize_phone_for_dedupe(p or "")
     return bool(normalized) and normalized in seen_phones
@@ -11642,6 +11670,15 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
 
         enriched_phone = phone_info.get("number", "") if phone_info else ""
         enriched_email = email_info.get("email", "") if email_info else ""
+        if enriched_phone and phone_exists(enriched_phone):
+            LOG.info(
+                "SKIP already-contacted enriched phone %s for agent %s (%s)",
+                _redact_phone(enriched_phone),
+                name,
+                r.get("zpid"),
+            )
+            delete_row(row_idx)
+            continue
         if not selected_phone and not enriched_phone:
             LOG.info(
                 "No phone available for row %s after enrichment; initial SMS not scheduled",
@@ -11700,14 +11737,7 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                     )
                 except Exception as exc:
                     LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
-            if enriched_phone and phone_exists(enriched_phone):
-                LOG.info(
-                    "SKIP already-contacted enriched phone %s for agent %s (%s)",
-                    _redact_phone(enriched_phone),
-                    name,
-                    r.get("zpid"),
-                )
-            elif enriched_phone:
+            if enriched_phone:
                 seen_phones.add(_normalize_phone_for_dedupe(enriched_phone))
                 schedule_initial_sms(enriched_phone, first, r.get("street", ""), row_idx)
 
