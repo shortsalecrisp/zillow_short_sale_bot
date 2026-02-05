@@ -204,7 +204,7 @@ PY
       - key: SMS_RETRY_ATTEMPTS
         value: "2"
       - key: SMS_TEST_MODE
-        value: "true"
+        value: "false"
       - key: SMS_TEST_NUMBER
         value: ""
       - key: WORK_END_HOUR
