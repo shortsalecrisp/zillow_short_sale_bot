@@ -29,6 +29,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build as gapi_build
 from sms_providers import get_sender
 from headless_browser import (
+    chromium_available,
     ensure_headless_browser,
     fetch_headless_snapshot,
     headless_available,
@@ -726,6 +727,12 @@ def log_headless_status(logger: Optional[logging.Logger] = None) -> None:
     if not headless_available():
         sink.warning("HEADLESS_MISSING playwright not installed")
         return
+    sink.info(
+        "HEADLESS_STATUS enabled=%s playwright=%s chromium=%s",
+        HEADLESS_ENABLED,
+        True,
+        chromium_available(),
+    )
     ensure_headless_ready(sink)
 
 
@@ -6145,6 +6152,23 @@ def _headless_nav_timeout_for(url: str, domain: str, base_timeout: int) -> int:
     return base_timeout
 
 
+def _compute_headless_timeouts(
+    target_url: str,
+    effective_domain: str,
+    nav_timeout_ms: Optional[int] = None,
+) -> Tuple[int, int, str]:
+    nav_timeout = HEADLESS_FACEBOOK_TIMEOUT_MS if "facebook.com" in target_url else HEADLESS_NAV_TIMEOUT_MS
+    if nav_timeout_ms:
+        nav_timeout = max(nav_timeout, nav_timeout_ms)
+    nav_timeout = max(10000, nav_timeout)
+    effective_domain = effective_domain or _domain(target_url) or ""
+    nav_timeout = _headless_nav_timeout_for(target_url, effective_domain, nav_timeout)
+    overall_timeout = max(15, min(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 10)))
+    if effective_domain in HEADLESS_SLOW_DOMAINS:
+        overall_timeout = max(overall_timeout, HEADLESS_OVERALL_TIMEOUT_S + 15)
+    return nav_timeout, overall_timeout, effective_domain
+
+
 def _http_fallback_snapshot(url: str, *, domain: str = "") -> Dict[str, Any]:
     target_url = _unwrap_jina_url(url)
     if not target_url or is_blocked_url(target_url):
@@ -6189,15 +6213,11 @@ async def _headless_fetch_async(
     if is_blocked_url(target_url):
         LOG.info("HEADLESS_SKIPPED_BLOCKED url=%s", target_url)
         return {}
-    nav_timeout = HEADLESS_FACEBOOK_TIMEOUT_MS if "facebook.com" in target_url else HEADLESS_NAV_TIMEOUT_MS
-    if nav_timeout_ms:
-        nav_timeout = max(nav_timeout, nav_timeout_ms)
-    nav_timeout = max(10000, nav_timeout)
-    overall_timeout = max(15, min(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 10)))
-    effective_domain = domain or _domain(target_url) or ""
-    nav_timeout = _headless_nav_timeout_for(target_url, effective_domain, nav_timeout)
-    if effective_domain in HEADLESS_SLOW_DOMAINS:
-        overall_timeout = max(overall_timeout, HEADLESS_OVERALL_TIMEOUT_S + 15)
+    nav_timeout, overall_timeout, effective_domain = _compute_headless_timeouts(
+        target_url,
+        domain or "",
+        nav_timeout_ms=nav_timeout_ms,
+    )
 
     accept_language = random_accept_language(_ACCEPT_LANGUAGE_POOL)
     user_agent = random.choice(_USER_AGENT_POOL)
@@ -6227,7 +6247,12 @@ async def _headless_fetch_async(
             if last_snapshot:
                 return last_snapshot
         except asyncio.TimeoutError:
-            LOG.warning("HEADLESS_TIMEOUT url=%s err=%s", target_url, "overall_timeout")
+            LOG.warning(
+                "HEADLESS_TIMEOUT url=%s err=%s timeout_s=%s",
+                target_url,
+                "overall_timeout",
+                overall_timeout,
+            )
         except Exception as exc:
             LOG.warning("HEADLESS_ERROR url=%s err=%s attempt=%s", target_url, exc, attempt + 1)
         if attempt < HEADLESS_BROWSER_RETRY_ATTEMPTS - 1:
@@ -6253,6 +6278,13 @@ def _headless_fetch(
     if not ensure_headless_ready(LOG):
         return {}
 
+    target_url = _unwrap_jina_url(url)
+    effective_domain = domain or _domain(target_url) or ""
+    nav_timeout, overall_timeout, effective_domain = _compute_headless_timeouts(
+        target_url,
+        effective_domain,
+        nav_timeout_ms=nav_timeout_ms,
+    )
     loop = _ensure_headless_loop()
     coro = _headless_fetch_async(
         url,
@@ -6263,7 +6295,7 @@ def _headless_fetch(
     )
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
-        timeout_s = HEADLESS_OVERALL_TIMEOUT_S + 5
+        timeout_s = overall_timeout + 2
         result = future.result(timeout=timeout_s)
         if result.get("timeout") and not result.get("html"):
             fallback = _http_fallback_snapshot(url, domain=domain)
@@ -6277,7 +6309,12 @@ def _headless_fetch(
             future.result(timeout=3)
         except Exception:
             pass
-        LOG.warning("HEADLESS_TIMEOUT url=%s err=%s", url, "thread-timeout")
+        LOG.warning(
+            "HEADLESS_TIMEOUT url=%s err=%s timeout_s=%s",
+            url,
+            "thread-timeout",
+            timeout_s,
+        )
         fallback = _http_fallback_snapshot(url, domain=domain)
         if fallback:
             LOG.info("HEADLESS_TIMEOUT_FALLBACK_HTTP url=%s", url)
