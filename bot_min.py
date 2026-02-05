@@ -475,7 +475,7 @@ if SMS_ENABLE and not _sms_api_key:
         "SMS_ENABLE=true but no SMS gateway API key found; forcing SMS_ENABLE=false"
     )
     SMS_ENABLE = False
-SMS_TEST_MODE     = os.getenv("SMS_TEST_MODE", "true").lower() == "true"
+SMS_TEST_MODE     = os.getenv("SMS_TEST_MODE", "false").lower() == "true"
 SMS_TEST_NUMBER   = os.getenv("SMS_TEST_NUMBER", "")
 if SMS_TEST_MODE:
     logging.warning(
