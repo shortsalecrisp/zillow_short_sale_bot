@@ -39,6 +39,11 @@ def _has_chromium_executable(cache_dir: str) -> bool:
     return False
 
 
+def chromium_available(cache_dir: Optional[str] = None) -> bool:
+    cache_dir = cache_dir or HEADLESS_BROWSER_CACHE
+    return _has_chromium_executable(cache_dir)
+
+
 def _install_chromium(cache_dir: str, logger: Optional[logging.Logger]) -> bool:
     if not headless_available():
         return False
@@ -75,6 +80,13 @@ async def ensure_headless_browser(logger: Optional[logging.Logger] = None) -> bo
         if _browser_ready:
             return True
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", HEADLESS_BROWSER_CACHE)
+        if logger:
+            logger.info(
+                "HEADLESS_BROWSER_CACHE path=%s chromium_ready=%s download=%s",
+                HEADLESS_BROWSER_CACHE,
+                chromium_available(HEADLESS_BROWSER_CACHE),
+                HEADLESS_BROWSER_DOWNLOAD,
+            )
         if not HEADLESS_BROWSER_DOWNLOAD:
             if logger:
                 logger.warning("HEADLESS_BROWSER_DOWNLOAD_DISABLED cache=%s", HEADLESS_BROWSER_CACHE)
@@ -87,7 +99,11 @@ async def ensure_headless_browser(logger: Optional[logging.Logger] = None) -> bo
                     logger.warning("HEADLESS_BROWSER_DOWNLOAD_FAILED cache=%s", HEADLESS_BROWSER_CACHE)
                 return False
         if logger:
-            logger.info("HEADLESS_BROWSER_DOWNLOAD_READY=%s", True)
+            logger.info(
+                "HEADLESS_BROWSER_DOWNLOAD_READY=%s chromium_ready=%s",
+                True,
+                chromium_available(HEADLESS_BROWSER_CACHE),
+            )
         _browser_ready = True
         return _browser_ready
 
@@ -130,7 +146,7 @@ async def fetch_headless_snapshot(
         if proxy_url:
             args.append(f"--proxy-server={proxy_url}")
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True, args=args)
+            browser = await pw.chromium.launch(headless=True, args=args, timeout=nav_timeout_ms)
             headers = {"Accept-Language": accept_language}
             if extra_headers:
                 headers.update({k: v for k, v in extra_headers.items() if v})
@@ -146,6 +162,8 @@ async def fetch_headless_snapshot(
                     if logger:
                         logger.warning("HEADLESS_COOKIE_ERROR url=%s err=%s", url, exc)
             page = await context.new_page()
+            page.set_default_timeout(nav_timeout_ms)
+            page.set_default_navigation_timeout(nav_timeout_ms)
             if block_resources:
                 async def _route_handler(route) -> None:
                     if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
@@ -154,8 +172,15 @@ async def fetch_headless_snapshot(
                         await route.continue_()
 
                 await page.route("**/*", _route_handler)
-            page.set_default_navigation_timeout(nav_timeout_ms)
-            await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
+            if response and response.status in {403, 429, 451}:
+                if logger:
+                    logger.warning(
+                        "HEADLESS_BLOCKED_RESPONSE url=%s status=%s",
+                        url,
+                        response.status,
+                    )
+                return {}
             await page.wait_for_timeout(wait_ms)
             try:
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
