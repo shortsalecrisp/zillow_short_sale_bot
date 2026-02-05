@@ -3071,6 +3071,7 @@ def fetch_text_cached(
     final_url = norm
     retry_needed = False
     thin_response = False
+    mirror_timeout = False
 
     def _direct_fetch(reason: str) -> None:
         nonlocal text, status, final_url
@@ -3115,6 +3116,8 @@ def fetch_text_cached(
                     block_on_status=allow_blocking,
                     record_timeout=allow_blocking,
                 )
+                if not resp:
+                    mirror_timeout = True
                 text = resp.text if resp and resp.text else ""
                 status = resp.status_code if resp else 0
                 final_url = getattr(resp, "url", norm) if resp else norm
@@ -3130,6 +3133,7 @@ def fetch_text_cached(
                 status = resp.status_code if resp else 0
                 final_url = getattr(resp, "url", norm) if resp else norm
             except Exception:
+                mirror_timeout = True
                 text = ""
                 status = 0
                 final_url = norm
@@ -3147,6 +3151,10 @@ def fetch_text_cached(
                 time.sleep(delay)
         if mirror_blocked:
             _direct_fetch("jina-proxy-blocked")
+        elif status == 0 and mirror_timeout:
+            _mark_block("r.jina.ai", seconds=JINA_BLOCK_SECONDS, reason="timeout")
+            LOG.info("JINA_TIMEOUT_BYPASS url=%s -> direct fetch", norm)
+            _direct_fetch("jina-timeout")
     else:
         _direct_fetch("jina-bypass-direct-blocked")
 
@@ -6435,6 +6443,11 @@ HEADLESS_THIN_FALLBACK_DOMAINS = {
     "coldwellbanker.com",
     "coldwellbankerhomes.com",
     "compass.com",
+    "bbb.org",
+    "har.com",
+    "homeandhousesearch.com",
+    "linkedin.com",
+    "thetexashomes.com",
 }
 TOP5_OFF_TOPIC_HINTS = (
     "forum",
@@ -6982,6 +6995,11 @@ def select_top_5_urls(
         seen_links: Set[str] = set(existing_norms)
         candidates: List[Tuple[str, bool, int]] = []
         overflow: List[Tuple[str, bool, int]] = []
+
+        def _normalize_candidate_url(candidate: str) -> str:
+            normalized = normalize_url(candidate)
+            return normalized or candidate
+
         for idx, item in enumerate(items):
             link = ""
             snippet = ""
@@ -7021,7 +7039,7 @@ def select_top_5_urls(
             location_context = " ".join(part for part in (snippet_text, location_hint) if part)
             if fetch_check:
                 fetched = fetch_text_cached(norm, ttl_days=7, respect_block=False, allow_blocking=False)
-                final_url = fetched.get("final_url") or norm
+                final_url = _normalize_candidate_url(fetched.get("final_url") or norm)
                 if is_blocked_url(final_url):
                     _log_blocked_url(final_url)
                     rejected.append((final_url, "blocked_domain"))
@@ -7128,6 +7146,7 @@ def select_top_5_urls(
                         rejected.append((final_url, "agent_mismatch"))
                         continue
             else:
+                final_url = _normalize_candidate_url(norm)
                 accept_reason = allow_reason
                 if property_state and not _location_matches(final_url, "", location_context, property_state, property_city, brokerage):
                     rejected.append((final_url, "state_mismatch"))
