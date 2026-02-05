@@ -1858,8 +1858,6 @@ def _rapid_collect_contacts(payload: Any) -> Tuple[List[Dict[str, str]], List[Di
     ordered: List[Dict[str, str]] = []
     for _, _, entry in sorted(phone_entries, key=lambda t: (t[0], t[1])):
         ordered.append(entry)
-        if len(ordered) >= 2:
-            break
     return ordered, emails, joined_text
 
 
@@ -8771,6 +8769,33 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             res.get("source", "") or "<blank>",
         )
 
+    def _apply_rapid_candidate_fallback(
+        zpid: str,
+        rapid_best: str,
+        rapid_candidates: List[Dict[str, Any]],
+        rapid_reason: str,
+        rapid_score: int,
+        *,
+        log_label: str,
+    ) -> Tuple[str, str, int]:
+        if rapid_best or not rapid_candidates:
+            return rapid_best, rapid_reason, rapid_score
+        top_candidate = max(rapid_candidates, key=lambda item: item.get("score", 0))
+        fallback_phone = top_candidate.get("phone", "")
+        if not fallback_phone:
+            return rapid_best, rapid_reason, rapid_score
+        fallback_reason = top_candidate.get("score_reason") or "rapid_candidate_fallback"
+        fallback_score = top_candidate.get("score", rapid_score)
+        LOG.info(
+            "RAPID_CANDIDATE_FALLBACK %s zpid=%s phone=%s score=%s reason=%s",
+            log_label,
+            zpid,
+            fallback_phone,
+            fallback_score,
+            fallback_reason,
+        )
+        return fallback_phone, fallback_reason, fallback_score
+
     def _finalize(res: Dict[str, Any]) -> Dict[str, Any]:
         res.setdefault("verified_mobile", False)
         _contact_cache_set(cache_p, cache_key, res)
@@ -8804,6 +8829,16 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         rapid_snapshot = _rapid_contact_normalized(agent, row_payload)
         rapid_best_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
         rapid_phone_reason = rapid_snapshot.get("phone_reason", "") if rapid_snapshot else ""
+        rapid_phone_score = rapid_snapshot.get("phone_score", 0) if rapid_snapshot else 0
+        rapid_candidates = rapid_snapshot.get("rapid_candidates", []) if rapid_snapshot else []
+        rapid_best_phone, rapid_phone_reason, rapid_phone_score = _apply_rapid_candidate_fallback(
+            str(row_payload.get("zpid", "")),
+            rapid_best_phone,
+            rapid_candidates,
+            rapid_phone_reason,
+            rapid_phone_score,
+            log_label="cached_empty",
+        )
         if rapid_best_phone:
             rapid_result = {
                 "number": rapid_best_phone,
@@ -8830,6 +8865,14 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     rapid_phone_reason = rapid_snapshot.get("phone_reason", "") if rapid_snapshot else ""
     rapid_phone_score = rapid_snapshot.get("phone_score", 0) if rapid_snapshot else 0
     rapid_best_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
+    rapid_best_phone, rapid_phone_reason, rapid_phone_score = _apply_rapid_candidate_fallback(
+        zpid,
+        rapid_best_phone,
+        rapid_candidates,
+        rapid_phone_reason,
+        rapid_phone_score,
+        log_label="live_lookup",
+    )
     redacted_rapid = [_redact_phone_value(item.get("phone", "")) for item in rapid_candidates]
     LOG.info(
         "RAPID_PHONE_CANDIDATES count=%s phones=%s selected=%s score_reason=%s score=%s",
@@ -11592,6 +11635,11 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         except Exception as exc:
             LOG.error("ENRICHMENT_FAILED zpid=%s agent=%s err=%s", zpid, name, exc)
 
+        rapid_snapshot = _rapid_contact_normalized(name, r)
+        rapid_snapshot_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
+        rapid_snapshot_phones_found = len(rapid_snapshot.get("phones", []) or []) if rapid_snapshot else 0
+        rapid_candidates = rapid_snapshot.get("rapid_candidates", []) if rapid_snapshot else []
+
         enriched_phone = phone_info.get("number", "") if phone_info else ""
         enriched_email = email_info.get("email", "") if email_info else ""
         if not selected_phone and not enriched_phone:
@@ -11601,7 +11649,15 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             )
         data_updates: List[Dict[str, Any]] = []
         if enriched_phone or enriched_email:
-            update_phone = enriched_phone and enriched_phone != selected_phone
+            if rapid_candidates and not enriched_phone:
+                LOG.warning(
+                    "SKIP_BLANK_PHONE_UPDATE zpid=%s row=%s rapid_candidates=%s rapid_selected=%s",
+                    zpid,
+                    row_idx,
+                    len(rapid_candidates),
+                    rapid_snapshot_phone or "<blank>",
+                )
+            update_phone = bool(enriched_phone) and enriched_phone != selected_phone
             update_email = enriched_email and enriched_email != selected_email
             if update_phone or update_email:
                 if update_phone:
@@ -11630,6 +11686,15 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
                     LOG.info(
                         "Sheet update applied for row %s (phone=%s email=%s)",
                         row_idx,
+                        enriched_phone or "<blank>",
+                        enriched_email or "<blank>",
+                    )
+                    LOG.info(
+                        "SHEET_UPDATE_RAPID_SNAPSHOT zpid=%s row=%s phones_found=%s rapid_selected=%s final_phone=%s final_email=%s",
+                        zpid,
+                        row_idx,
+                        rapid_snapshot_phones_found,
+                        rapid_snapshot_phone or "<blank>",
                         enriched_phone or "<blank>",
                         enriched_email or "<blank>",
                     )
