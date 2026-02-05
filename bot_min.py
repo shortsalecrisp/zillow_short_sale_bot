@@ -91,6 +91,9 @@ _MOBILE_PROXIES = _parse_proxy_pool("MOBILE_PROXIES")
 _PROXY_POOL = _MOBILE_PROXIES + _RESIDENTIAL_PROXIES
 _PROXY_REDACT = os.getenv("PROXY_LOG_REDACT", "***")
 _SCRAPER_COOKIE_POOL = [c.strip() for c in os.getenv("SCRAPER_COOKIE_POOL", "").split("|||") if c.strip()]
+LINKEDIN_COOKIES_JSON = os.getenv("LINKEDIN_COOKIES_JSON", "").strip()
+LINKEDIN_PROXY_URL = os.getenv("LINKEDIN_PROXY_URL", "").strip()
+REMAX_PROXY_URL = os.getenv("REMAX_PROXY_URL", "").strip()
 _ACCEPT_LANGUAGE_POOL = [
     "en-US,en;q=0.9",
     "en-US,en;q=0.8,es;q=0.5",
@@ -126,6 +129,7 @@ HEADLESS_CONTACT_DOMAINS = {
     "remax.com",
     "har.com",
     "century21.com",
+    "linkedin.com",
 }
 CONTACT_JS_DOMAINS = {
     "boomtownroi.com",
@@ -212,6 +216,43 @@ def _contact_cache_set(cache_store: Dict[str, Any], key: str, result: Dict[str, 
     cache_store[key] = {
         "result": result,
         "expires_at": time.time() + CONTACT_CACHE_TTL_SECONDS,
+    }
+
+
+def _parse_playwright_cookies(raw: str) -> List[Dict[str, Any]]:
+    if not raw:
+        return []
+    logger = logging.getLogger("bot_min")
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        logger.warning("LINKEDIN_COOKIES_INVALID json_error")
+        return []
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        logger.warning("LINKEDIN_COOKIES_INVALID json_type=%s", type(payload).__name__)
+        return []
+    cookies: List[Dict[str, Any]] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("name") or not entry.get("value"):
+            continue
+        cookies.append(entry)
+    return cookies
+
+
+_LINKEDIN_COOKIES = _parse_playwright_cookies(LINKEDIN_COOKIES_JSON)
+
+
+def _linkedin_extra_headers() -> Dict[str, str]:
+    return {
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
     }
 
 # RapidAPI request coordination/state
@@ -2424,7 +2465,13 @@ def _combine_headless_snapshot(snapshot: Dict[str, Any]) -> str:
 
 def _proxy_for_domain(domain: str) -> str:
     dom = _domain(domain)
-    if not _PROXY_POOL or not dom:
+    if not dom:
+        return ""
+    if dom.endswith("linkedin.com") and LINKEDIN_PROXY_URL:
+        return LINKEDIN_PROXY_URL
+    if dom.endswith("remax.com") and REMAX_PROXY_URL:
+        return REMAX_PROXY_URL
+    if not _PROXY_POOL:
         return ""
     proxy_targets = set(_PROXY_TARGETS) | set(CONTACT_SITE_PRIORITY) | set(ALT_PHONE_SITES) | SOCIAL_DOMAINS
     if dom in proxy_targets or any(dom.endswith(t) for t in proxy_targets):
@@ -6146,6 +6193,11 @@ async def _headless_fetch_async(
 
     accept_language = random_accept_language(_ACCEPT_LANGUAGE_POOL)
     user_agent = random.choice(_USER_AGENT_POOL)
+    extra_headers: Dict[str, str] = {}
+    cookies: List[Dict[str, Any]] = []
+    if "linkedin.com" in effective_domain:
+        extra_headers = _linkedin_extra_headers()
+        cookies = _LINKEDIN_COOKIES
 
     async def _run_once() -> Dict[str, Any]:
         return await fetch_headless_snapshot(
@@ -6155,6 +6207,8 @@ async def _headless_fetch_async(
             wait_ms=HEADLESS_WAIT_MS,
             user_agent=user_agent,
             accept_language=accept_language,
+            extra_headers=extra_headers,
+            cookies=cookies,
             logger=LOG,
         )
 

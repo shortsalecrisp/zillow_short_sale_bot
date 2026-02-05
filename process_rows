@@ -222,6 +222,10 @@ def _fetch_via_jina(url: str) -> str:
                 timeout=20,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; jina/1.0)"},
             )
+            if resp.status_code in {403, 451}:
+                fallback_html, _, _ = bot_min.fetch_contact_page(target_url)
+                if fallback_html.strip():
+                    return fallback_html
             if resp.status_code == 200:
                 text = resp.text or ""
                 if text.strip().lower() in {"", "none", "null"}:

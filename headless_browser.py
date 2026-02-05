@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import importlib.util
 import logging
 import os
 import random
-from typing import Any, Dict, Iterable, Optional
+import subprocess
+import sys
+from typing import Any, Dict, Iterable, List, Optional
 
 
 HEADLESS_BROWSER_CACHE = os.getenv(
@@ -20,6 +23,44 @@ _browser_ready_lock = asyncio.Lock()
 
 def headless_available() -> bool:
     return importlib.util.find_spec("playwright") is not None
+
+
+def _has_chromium_executable(cache_dir: str) -> bool:
+    if not cache_dir:
+        return False
+    patterns = (
+        "chromium-*/chrome-linux/headless_shell",
+        "chromium-*/chrome-linux/chrome",
+        "chromium_headless_shell-*/chrome-linux/headless_shell",
+    )
+    for pattern in patterns:
+        if glob.glob(os.path.join(cache_dir, pattern)):
+            return True
+    return False
+
+
+def _install_chromium(cache_dir: str, logger: Optional[logging.Logger]) -> bool:
+    if not headless_available():
+        return False
+    env = os.environ.copy()
+    if cache_dir:
+        env.setdefault("PLAYWRIGHT_BROWSERS_PATH", cache_dir)
+    cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+    try:
+        result = subprocess.run(cmd, env=env, check=False, capture_output=True, text=True)
+    except Exception as exc:
+        if logger:
+            logger.warning("HEADLESS_BROWSER_INSTALL_FAILED err=%s", exc)
+        return False
+    if result.returncode != 0:
+        if logger:
+            logger.warning(
+                "HEADLESS_BROWSER_INSTALL_FAILED code=%s stderr=%s",
+                result.returncode,
+                (result.stderr or "").strip(),
+            )
+        return False
+    return _has_chromium_executable(cache_dir)
 
 
 async def ensure_headless_browser(logger: Optional[logging.Logger] = None) -> bool:
@@ -38,8 +79,13 @@ async def ensure_headless_browser(logger: Optional[logging.Logger] = None) -> bo
             if logger:
                 logger.warning("HEADLESS_BROWSER_DOWNLOAD_DISABLED cache=%s", HEADLESS_BROWSER_CACHE)
             return False
-        if logger:
-            logger.info("HEADLESS_BROWSER_DOWNLOAD starting cache=%s", HEADLESS_BROWSER_CACHE)
+        if not _has_chromium_executable(HEADLESS_BROWSER_CACHE):
+            if logger:
+                logger.info("HEADLESS_BROWSER_DOWNLOAD starting cache=%s", HEADLESS_BROWSER_CACHE)
+            if not _install_chromium(HEADLESS_BROWSER_CACHE, logger):
+                if logger:
+                    logger.warning("HEADLESS_BROWSER_DOWNLOAD_FAILED cache=%s", HEADLESS_BROWSER_CACHE)
+                return False
         if logger:
             logger.info("HEADLESS_BROWSER_DOWNLOAD_READY=%s", True)
         _browser_ready = True
@@ -54,6 +100,8 @@ async def fetch_headless_snapshot(
     wait_ms: int,
     user_agent: str,
     accept_language: str,
+    extra_headers: Optional[Dict[str, str]] = None,
+    cookies: Optional[List[Dict[str, Any]]] = None,
     block_resources: bool = True,
     logger: Optional[logging.Logger] = None,
 ) -> Dict[str, Any]:
@@ -63,6 +111,7 @@ async def fetch_headless_snapshot(
 
     browser = None
     page = None
+    context = None
     content = ""
     visible_text = ""
     hrefs = []
@@ -82,10 +131,21 @@ async def fetch_headless_snapshot(
             args.append(f"--proxy-server={proxy_url}")
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True, args=args)
-            page = await browser.new_page()
-            await page.set_extra_http_headers({"Accept-Language": accept_language})
-            await page.set_viewport_size({"width": 1280, "height": 720})
-            await page.set_user_agent(user_agent)
+            headers = {"Accept-Language": accept_language}
+            if extra_headers:
+                headers.update({k: v for k, v in extra_headers.items() if v})
+            context = await browser.new_context(
+                user_agent=user_agent,
+                extra_http_headers=headers,
+                viewport={"width": 1280, "height": 720},
+            )
+            if cookies:
+                try:
+                    await context.add_cookies(cookies)
+                except Exception as exc:
+                    if logger:
+                        logger.warning("HEADLESS_COOKIE_ERROR url=%s err=%s", url, exc)
+            page = await context.new_page()
             if block_resources:
                 async def _route_handler(route) -> None:
                     if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
@@ -126,6 +186,11 @@ async def fetch_headless_snapshot(
         if page:
             try:
                 await page.close()
+            except Exception:
+                pass
+        if context:
+            try:
+                await context.close()
             except Exception:
                 pass
         if browser:
