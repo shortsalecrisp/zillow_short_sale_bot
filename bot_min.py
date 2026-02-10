@@ -11429,6 +11429,29 @@ def _redact_followup_phone(phone: str) -> str:
     return f"...{digits[-4:]}"
 
 
+def _current_sheet_phone_for_row(row_idx: int) -> str:
+    """Return the latest phone in column C for ``row_idx`` from the sheet."""
+
+    try:
+        resp = sheets_service.spreadsheets().values().get(
+            spreadsheetId=GSHEET_ID,
+            range=f"{GSHEET_TAB}!C{row_idx}:C{row_idx}",
+            majorDimension="ROWS",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+        values = resp.get("values", [])
+        if not values or not values[0]:
+            return ""
+        return str(values[0][0] or "").strip()
+    except Exception as exc:
+        LOG.warning(
+            "Unable to refresh phone from sheet for row %s before follow-up: %s",
+            row_idx,
+            exc,
+        )
+        return ""
+
+
 def _follow_up_pass():
     now = datetime.now(tz=SCHEDULER_TZ)
     resp = sheets_service.spreadsheets().values().get(
@@ -11551,8 +11574,18 @@ def _follow_up_pass():
             sheet_row, row[COL_REPLY_FLAG], row[COL_MANUAL_NOTE]
         )
 
+        latest_sheet_phone = _current_sheet_phone_for_row(sheet_row)
+        followup_phone = latest_sheet_phone or row[COL_PHONE]
+        if latest_sheet_phone and _digits_only(latest_sheet_phone) != _digits_only(row[COL_PHONE]):
+            LOG.info(
+                "FU-review row %s using updated sheet phone colC=%s instead of cached row phone=%s",
+                sheet_row,
+                _redact_followup_phone(latest_sheet_phone),
+                phone_redacted,
+            )
+
         send_sms(
-            phone=row[COL_PHONE],
+            phone=followup_phone,
             first=row[COL_FIRST],
             address=row[COL_STREET],
             row_idx=sheet_row,
