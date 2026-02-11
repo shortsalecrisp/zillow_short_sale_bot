@@ -4981,14 +4981,14 @@ def _contact_search_urls(
     engine: str = "google",
     allow_portals: bool = False,
 ) -> Tuple[List[str], bool, str] | Tuple[List[str], bool, str, bool]:
-    """Issue enriched contact queries and return candidate URLs.
+    """Issue deterministic contact queries and return candidate URLs.
 
     Returns (urls, search_empty, cse_status) unless include_exhausted is True, in which
     case (urls, search_empty, cse_status, search_exhausted) is returned.
     """
 
     limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
-    target_count = min(limit, 5)
+    target_count = 5
     city = str(row_payload.get("city") or "").strip()
     top5_log = row_payload.setdefault("_top5_log", {})
     urls: List[str] = []
@@ -5000,7 +5000,7 @@ def _contact_search_urls(
     blocked_domains: Set[str] = set()
     fetch_ok = _cse_last_state not in {"disabled"}
     relaxed_mode = _cse_last_state in {"disabled"}
-    search_limit = min(CONTACT_CSE_FETCH_LIMIT, 15)
+    search_limit = 20
 
     def _select_from_results(
         raw_results: List[Dict[str, Any]],
@@ -5046,16 +5046,6 @@ def _contact_search_urls(
                 json.dumps(_compact_url_log(selected), separators=(",", ":")),
             )
 
-    def _all_pages_blocked(
-        raw: List[Dict[str, Any]],
-        selected: List[str],
-        rejected: List[Tuple[str, str]],
-    ) -> bool:
-        if selected or not raw or not rejected:
-            return False
-        blocked_reasons = {"blocked_status", "thin_response", "fetch_failed"}
-        return all(reason in blocked_reasons for _, reason in rejected)
-
     def _run_ddg(
         query: str,
         *,
@@ -5077,7 +5067,6 @@ def _contact_search_urls(
         name_term = f'"{agent}"'
         primary_query = _compact_tokens(name_term, "realtor", state)
         secondary_query = _compact_tokens(name_term, "realtor", city, state)
-        retry_query = _compact_tokens(name_term, brokerage or domain_hint, "contact")
         if not primary_query:
             search_empty = True
         else:
@@ -5087,164 +5076,74 @@ def _contact_search_urls(
                 return cached if include_exhausted else cached[:3]
 
             selected_urls: List[str] = []
-            if engine in {"duckduckgo", "jina"}:
-                ddg_results, ddg_selected, ddg_rejected, ddg_blocked = _run_ddg(
-                    primary_query,
-                    existing=selected_urls,
-                )
-                rejected_urls.extend(ddg_rejected)
-                for url in ddg_selected:
-                    if url not in selected_urls:
-                        selected_urls.append(url)
-                _log_results("duckduckgo", primary_query, ddg_results, ddg_selected, ddg_rejected)
-                cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
-                if len(selected_urls) < target_count and secondary_query and not ddg_blocked:
-                    ddg_results, ddg_selected, ddg_rejected, ddg_blocked = _run_ddg(
-                        secondary_query,
+            good_urls_after_each_step: List[int] = []
+            searches_executed = 0
+
+            def _record_selected(step_urls: List[str]) -> None:
+                for selected_url in step_urls:
+                    if selected_url in selected_urls:
+                        continue
+                    selected_urls.append(selected_url)
+                    if len(selected_urls) >= target_count:
+                        break
+
+            def _run_step(step_engine: str, query: str) -> None:
+                nonlocal cse_status, searches_executed
+                if step_engine == "google":
+                    raw_results = google_cse_search(
+                        query,
+                        limit=search_limit,
+                        allow_fallback=False,
+                    )
+                    selected, rejected = _select_from_results(
+                        raw_results,
+                        location_hint=query,
                         existing=selected_urls,
                     )
-                    rejected_urls.extend(ddg_rejected)
-                    for url in ddg_selected:
-                        if url not in selected_urls:
-                            selected_urls.append(url)
-                    _log_results("duckduckgo", secondary_query, ddg_results, ddg_selected, ddg_rejected)
-                    cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
-            else:
-                raw_results = google_cse_search(
-                    primary_query,
-                    limit=search_limit,
-                    allow_fallback=False,
-                )
-                selected, rejected = _select_from_results(
-                    raw_results,
-                    location_hint=primary_query,
-                    existing=selected_urls,
-                )
-                rejected_urls.extend(rejected)
-                for url in selected:
-                    if url not in selected_urls:
-                        selected_urls.append(url)
-                _log_results("google", primary_query, raw_results, selected, rejected)
-                google_blocked = _cse_last_state in {"blocked", "throttled", "disabled"}
-                google_all_blocked = _all_pages_blocked(raw_results, selected, rejected)
-                ddg_primary_done = False
-                if google_blocked or google_all_blocked:
-                    ddg_results, ddg_selected, ddg_rejected, ddg_blocked = _run_ddg(
-                        primary_query,
-                        existing=selected_urls,
-                    )
-                    rejected_urls.extend(ddg_rejected)
-                    for url in ddg_selected:
-                        if url not in selected_urls:
-                            selected_urls.append(url)
-                    _log_results("duckduckgo", primary_query, ddg_results, ddg_selected, ddg_rejected)
-                    cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
-                    ddg_primary_done = True
-                else:
+                    rejected_urls.extend(rejected)
+                    _record_selected(selected)
+                    _log_results("google", query, raw_results, selected, rejected)
                     cse_status = _cse_last_state
-                if len(selected_urls) < target_count and not ddg_primary_done:
-                    ddg_results, ddg_selected, ddg_rejected, ddg_blocked = _run_ddg(
-                        primary_query,
-                        existing=selected_urls,
-                    )
-                    rejected_urls.extend(ddg_rejected)
-                    for url in ddg_selected:
-                        if url not in selected_urls:
-                            selected_urls.append(url)
-                    _log_results("duckduckgo", primary_query, ddg_results, ddg_selected, ddg_rejected)
-                    cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
-                if len(selected_urls) < target_count and secondary_query:
-                    ddg_results, ddg_selected, ddg_rejected, ddg_blocked = _run_ddg(
-                        secondary_query,
-                        existing=selected_urls,
-                    )
-                    rejected_urls.extend(ddg_rejected)
-                    for url in ddg_selected:
-                        if url not in selected_urls:
-                            selected_urls.append(url)
-                    _log_results("duckduckgo", secondary_query, ddg_results, ddg_selected, ddg_rejected)
-                    cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
-
-            def _low_quality_urls(url_list: List[str]) -> bool:
-                if not url_list:
-                    return True
-                non_social_count = sum(
-                    1 for u in url_list if not _is_social_root(_domain(u) or "")
-                )
-                return non_social_count < min(2, target_count)
-
-            search_empty = not bool(selected_urls)
-            urls = selected_urls
-            if selected_urls or rejected_urls:
-                top5_log[engine] = {
-                    "urls": selected_urls[:target_count],
-                    "rejected": rejected_urls,
-                }
-                if search_empty or len(selected_urls) >= target_count:
-                    LOG.info(
-                        "TOP5_SELECTED urls=%s rejected=%s",
-                        selected_urls[:target_count],
-                        rejected_urls,
-                    )
-            if (
-                _low_quality_urls(selected_urls)
-                and not row_payload.get("_contact_search_retry")
-                and retry_query
-                and retry_query not in {primary_query, secondary_query}
-                and len(selected_urls) < target_count
-            ):
-                row_payload["_contact_search_retry"] = True
-                retry_selected: List[str] = []
-                retry_rejected: List[Tuple[str, str]] = []
-                if engine in {"duckduckgo", "jina"}:
-                    retry_results, retry_selected, retry_rejected, ddg_blocked = _run_ddg(
-                        retry_query,
-                        existing=selected_urls,
-                    )
-                    rejected_urls.extend(retry_rejected)
-                    for url in retry_selected:
-                        if url not in selected_urls:
-                            selected_urls.append(url)
-                    _log_results("duckduckgo", retry_query, retry_results, retry_selected, retry_rejected)
-                    cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
                 else:
-                    retry_results = google_cse_search(retry_query, limit=search_limit)
-                    retry_selected, retry_rejected = _select_from_results(
-                        retry_results,
-                        location_hint=retry_query,
+                    raw_results, selected, rejected, ddg_blocked = _run_ddg(
+                        query,
                         existing=selected_urls,
                     )
-                    rejected_urls.extend(retry_rejected)
-                    for url in retry_selected:
-                        if url not in selected_urls:
-                            selected_urls.append(url)
-                    _log_results("google", retry_query, retry_results, retry_selected, retry_rejected)
-                    google_blocked = _cse_last_state in {"blocked", "throttled", "disabled"}
-                    if google_blocked:
-                        retry_results, retry_selected, retry_rejected, ddg_blocked = _run_ddg(
-                            retry_query,
-                            existing=selected_urls,
-                        )
-                        rejected_urls.extend(retry_rejected)
-                        for url in retry_selected:
-                            if url not in selected_urls:
-                                selected_urls.append(url)
-                        _log_results("duckduckgo", retry_query, retry_results, retry_selected, retry_rejected)
-                        cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
-                    else:
-                        cse_status = _cse_last_state
-                search_empty = not bool(selected_urls)
-                urls = selected_urls
-                if selected_urls or rejected_urls:
-                    top5_log[engine] = {
-                        "urls": selected_urls[:target_count],
-                        "rejected": rejected_urls,
-                    }
-                    LOG.info(
-                        "TOP5_SELECTED urls=%s rejected=%s",
-                        selected_urls[:target_count],
-                        rejected_urls,
-                    )
+                    rejected_urls.extend(rejected)
+                    _record_selected(selected)
+                    _log_results("duckduckgo", query, raw_results, selected, rejected)
+                    cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
+                searches_executed += 1
+                good_urls_after_each_step.append(len(selected_urls))
+
+            # Deterministic fixed plan:
+            # 1) Google: "{agent}" realtor {state}
+            # 2) DDG: same query only if good URLs < 5
+            # 3) DDG: "{agent}" realtor {city} {state} only if still < 5
+            _run_step("google", primary_query)
+            if len(selected_urls) < target_count:
+                _run_step("duckduckgo", primary_query)
+            if len(selected_urls) < target_count and secondary_query:
+                _run_step("duckduckgo", secondary_query)
+
+            urls = selected_urls[:target_count]
+            search_empty = not bool(urls)
+            top5_log[engine] = {
+                "urls": urls,
+                "rejected": rejected_urls,
+            }
+            LOG.info(
+                "CONTACT_SEARCH_SUMMARY %s",
+                json.dumps(
+                    {
+                        "searches_executed": searches_executed,
+                        "good_urls_after_each_step": good_urls_after_each_step,
+                        "final_top5_urls": urls,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+            LOG.info("TOP5_SELECTED urls=%s rejected=%s", urls, rejected_urls)
         search_exhausted = True
     except Exception:
         LOG.exception("contact search failed for %s %s", agent, state)
@@ -5255,7 +5154,6 @@ def _contact_search_urls(
     if cache_key:
         search_cache[cache_key] = result
     return result if include_exhausted else result[:3]
-
 
 def _normalize_contact_search_result(result: Tuple[Any, ...]) -> Tuple[List[str], bool, str, bool]:
     """Return a 4-tuple from _contact_search_urls results, tolerating monkeypatched shapes."""
