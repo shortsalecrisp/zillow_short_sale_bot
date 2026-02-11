@@ -5456,6 +5456,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                 continue
             is_portal = dom in PORTAL_DOMAINS
             fetched: Dict[str, Any] = {}
+            fetched_source = ""
             cached_prefetch = prefetch_cache.get(url)
             if cached_prefetch is not None:
                 cached_text, cached_final_url = cached_prefetch
@@ -5465,12 +5466,19 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                     "final_url": cached_final_url or url,
                     "source": "jina_prefetch",
                 }
+                fetched_source = "jina_prefetch"
             else:
                 fetched = fetch_text_cached(url)
                 fetched["source"] = "jina_cache"
+                fetched_source = "jina_cache"
             text = fetched.get("extracted_text", "") or ""
             final_url = fetched.get("final_url") or url
+            status = int(fetched.get("http_status", 0) or 0)
+            thin_response = bool(fetched.get("thin_response"))
             page_contact_found = False
+            page_agent_seen = False
+            parse_emails = 0
+            parse_phones = 0
             if text:
                 page_candidates: List[Dict[str, Any]] = []
                 start_index = len(candidates)
@@ -5479,6 +5487,8 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                 )
                 page_candidates = candidates[start_index:]
                 emails_found, phones_found = _count_contacts(page_candidates)
+                parse_emails = emails_found
+                parse_phones = phones_found
                 LOG.info(
                     "JINA_PARSE_RESULT url=%s source=%s emails_found=%s phones_found=%s",
                     final_url,
@@ -5496,18 +5506,77 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                     final_url,
                     fetched.get("source", "jina_cache"),
                 )
-            if prefer_headless and headless_budget > 0 and not page_contact_found:
-                LOG.info("HEADLESS_FALLBACK_TRIGGERED url=%s reason=jina_no_contacts", url)
-                page, _, _ = fetch_contact_page(url)
-                if page:
-                    headless_budget -= 1
+            direct_used = False
+            direct_reason = ""
+            headless_attempted = False
+            if not page_contact_found and (not text.strip() or thin_response):
+                direct_reason = "empty" if not text.strip() else "thin"
+                LOG.info(
+                    "CONTACT_FETCH_CHAIN url=%s chain=jina->direct trigger=%s status=%s source=%s",
+                    url,
+                    direct_reason,
+                    status,
+                    fetched_source,
+                )
+                direct_html, _, direct_method = fetch_contact_page(url)
+                direct_used = True
+                if direct_html:
+                    start_index = len(candidates)
                     page_discovered, page_agent_seen, page_contact_found = _parse_contact_page(
-                        page, url, is_portal
+                        direct_html, final_url, is_portal
                     )
+                    page_candidates = candidates[start_index:]
+                    parse_emails, parse_phones = _count_contacts(page_candidates)
                     if page_contact_found:
                         contact_found = True
                     agent_seen = agent_seen or page_agent_seen
                     discovered.update(page_discovered)
+                    LOG.info(
+                        "CONTACT_DIRECT_PARSE_RESULT url=%s method=%s emails_found=%s phones_found=%s bytes=%s",
+                        final_url,
+                        direct_method or "direct",
+                        parse_emails,
+                        parse_phones,
+                        len(direct_html.encode("utf-8")),
+                    )
+                else:
+                    LOG.info(
+                        "CONTACT_DIRECT_PARSE_RESULT url=%s method=%s emails_found=0 phones_found=0 empty=True",
+                        url,
+                        direct_method or "direct",
+                    )
+            if prefer_headless and headless_budget > 0 and not page_contact_found:
+                headless_attempted = True
+                LOG.info("HEADLESS_FALLBACK_TRIGGERED url=%s reason=jina_no_contacts", url)
+                page, _, _ = fetch_contact_page(url)
+                if page:
+                    headless_budget -= 1
+                    start_index = len(candidates)
+                    page_discovered, page_agent_seen, page_contact_found = _parse_contact_page(
+                        page, url, is_portal
+                    )
+                    page_candidates = candidates[start_index:]
+                    parse_emails, parse_phones = _count_contacts(page_candidates)
+                    if page_contact_found:
+                        contact_found = True
+                    agent_seen = agent_seen or page_agent_seen
+                    discovered.update(page_discovered)
+            LOG.info(
+                "CONTACT_PIPELINE url=%s domain=%s source=%s status=%s bytes=%s thin=%s direct_used=%s direct_trigger=%s headless_attempted=%s emails_found=%s phones_found=%s page_contact_found=%s agent_seen=%s",
+                final_url,
+                dom,
+                fetched_source or "jina_cache",
+                status,
+                len(text.encode("utf-8")) if text else 0,
+                thin_response,
+                direct_used,
+                direct_reason or "",
+                headless_attempted,
+                parse_emails,
+                parse_phones,
+                page_contact_found,
+                page_agent_seen,
+            )
         return discovered, agent_seen
 
     if prefetch_urls:
@@ -5960,7 +6029,15 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
     cache_key = normalize_url(url)
     with _CONTACT_PAGE_CACHE_LOCK:
         if cache_key in _CONTACT_PAGE_CACHE:
-            return _CONTACT_PAGE_CACHE[cache_key]
+            cached_html, cached_used_fallback, cached_method = _CONTACT_PAGE_CACHE[cache_key]
+            LOG.info(
+                "CONTACT_FETCH_CACHE_HIT url=%s method=%s bytes=%s used_fallback=%s",
+                url,
+                cached_method or "unknown",
+                len((cached_html or "").encode("utf-8")),
+                cached_used_fallback,
+            )
+            return cached_html, cached_used_fallback, cached_method
 
     def _cache_result(html: str, used_fallback: bool, method: str) -> Tuple[str, bool, str]:
         with _CONTACT_PAGE_CACHE_LOCK:
@@ -6001,13 +6078,18 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
         return "", False, "jina_cache"
 
     def _run_headless_review(reason: str, body: str = "") -> Tuple[str, bool, str]:
-        if not HEADLESS_ENABLED or not headless_available():
+        if not HEADLESS_ENABLED:
+            LOG.info("HEADLESS_SKIPPED url=%s reason=disabled", url)
+            return "", False, ""
+        if not headless_available():
+            LOG.info("HEADLESS_SKIPPED url=%s reason=playwright_missing", url)
             return "", False, ""
         if is_blocked_url(url):
-            LOG.info("HEADLESS_SKIPPED_BLOCKED url=%s", url)
+            LOG.info("HEADLESS_SKIPPED url=%s reason=blocked", url)
             return "", False, ""
         allow_headless = _needs_headless_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
         if not allow_headless:
+            LOG.info("HEADLESS_SKIPPED url=%s reason=not_needed", url)
             return "", False, ""
         for attempt in range(1, max(1, CONTACT_HEADLESS_RETRIES) + 1):
             snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)

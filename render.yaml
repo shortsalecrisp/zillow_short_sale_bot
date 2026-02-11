@@ -130,7 +130,7 @@ PY
       - key: HEADLESS_FACEBOOK_TIMEOUT_MS
         value: "32000"
       - key: HEADLESS_FALLBACK
-        value: "false"
+        value: "true"
       - key: HEADLESS_FETCH_TIMEOUT_MS
         value: "20000"
       - key: HEADLESS_FETCH_WAIT_MS
