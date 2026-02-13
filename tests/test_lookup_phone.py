@@ -1344,3 +1344,104 @@ def test_select_top5_relaxes_when_empty(monkeypatch):
     assert any("example.com/about" in url for url in filtered)
     assert all("example.gov" not in url for url in filtered)
     assert any(reason == "gov_edu" for _, reason in rejected)
+
+
+def test_search_unverified_low_conf_defaults_to_rapid_fallback(monkeypatch):
+    rapid_number = "479-305-2241"
+    search_number = "415-398-1127"
+
+    monkeypatch.setattr(
+        bot_min,
+        "_rapid_contact_normalized",
+        lambda *args, **kwargs: {
+            "selected_phone": rapid_number,
+            "rapid_candidates": [{"phone": rapid_number, "score": 70, "score_reason": "rapid_score_70_valid_non_mobile"}],
+            "phone_reason": "rapid_score_70_valid_non_mobile",
+            "phone_score": 70,
+            "rapid_primary_phone": "",
+        },
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "_contact_enrichment",
+        lambda *args, **kwargs: {
+            "best_phone": search_number,
+            "best_phone_confidence": 90,
+            "best_phone_source_url": "two_stage_cse",
+            "best_phone_evidence": "agent profile phone",
+        },
+    )
+
+    def fake_line_info(phone):
+        if phone == search_number:
+            return {
+                "valid": True,
+                "mobile": False,
+                "mobile_verified": False,
+                "type": "Unknown",
+            }
+        return {
+            "valid": True,
+            "mobile": False,
+            "mobile_verified": False,
+            "type": "Unknown",
+        }
+
+    monkeypatch.setattr(bot_min, "get_line_info", fake_line_info)
+
+    bot_min.cache_p.clear()
+    bot_min._rapid_contact_cache.clear()
+    bot_min._rapid_logged.clear()
+    bot_min._rapid_cache.clear()
+
+    result = bot_min.lookup_phone(
+        "Taylor Agent",
+        "AZ",
+        {"zpid": "334", "contact_recipients": []},
+    )
+
+    assert result["number"] == rapid_number
+    assert result["source"] == "rapid_fallback"
+
+
+def test_search_high_conf_direct_mobile_can_override_rapid_fallback(monkeypatch):
+    rapid_number = "628-900-4477"
+    search_number = "415-398-1127"
+
+    monkeypatch.setattr(
+        bot_min,
+        "rapid_property",
+        lambda zpid: {"contact_recipients": [{"phones": [{"number": rapid_number}]}]},
+    )
+    monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
+    monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
+    monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
+
+    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: number == search_number)
+    monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: True)
+
+    bot_min.cache_p.clear()
+    bot_min._line_type_cache.clear()
+    bot_min._line_type_verified.clear()
+    bot_min._rapid_contact_cache.clear()
+    bot_min._rapid_logged.clear()
+    bot_min._rapid_cache.clear()
+
+    result = bot_min.lookup_phone(
+        "Taylor Agent",
+        "AZ",
+        {
+            "zpid": "335",
+            "contact_recipients": [
+                {
+                    "display_name": "Taylor Agent",
+                    "label": "Cell",
+                    "phones": [{"number": search_number}],
+                }
+            ],
+        },
+    )
+
+    assert result["number"] == search_number
+    assert result["source"].startswith("payload_contact")
