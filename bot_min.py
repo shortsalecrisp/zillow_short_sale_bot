@@ -531,6 +531,8 @@ CONTACT_PHONE_MIN_SCORE = float(os.getenv("CONTACT_PHONE_MIN_SCORE", "2.25"))
 CONTACT_PHONE_LOW_CONF  = float(os.getenv("CONTACT_PHONE_LOW_CONF", "1.5"))
 CONTACT_PHONE_OVERRIDE_MIN = float(os.getenv("CONTACT_PHONE_OVERRIDE_MIN", "1.0"))
 CONTACT_PHONE_OVERRIDE_DELTA = float(os.getenv("CONTACT_PHONE_OVERRIDE_DELTA", "1.0"))
+CONTACT_CARD_COOCCURRENCE_BOOST = int(os.getenv("CONTACT_CARD_COOCCURRENCE_BOOST", "30"))
+CONTACT_CARD_COOCCURRENCE_MIN_CONF = int(os.getenv("CONTACT_CARD_COOCCURRENCE_MIN_CONF", "85"))
 CLOUDMERSIVE_MOBILE_BOOST = float(os.getenv("CLOUDMERSIVE_MOBILE_BOOST", "0.8"))
 CONTACT_OVERRIDE_JSON = os.getenv("CONTACT_OVERRIDE_JSON", "")
 
@@ -4384,6 +4386,85 @@ def _apply_phone_type_boost(result: Dict[str, Any]) -> Dict[str, Any]:
     result["best_phone_type"] = phone_type
     return result
 
+def _contact_card_cooccurrence_score(
+    result: Dict[str, Any],
+    *,
+    agent: str,
+    brokerage: str = "",
+    domain_hint: str = "",
+) -> Dict[str, Any]:
+    """Score confidence when phone+email co-occur in a likely direct contact card.
+
+    Rubric (0-100):
+      - +30 same source URL for selected phone and email
+      - +15 email name matches agent
+      - +15 source URL looks like plausible agent profile/contact URL
+      - +10 source domain matches brokerage/domain hint
+      - +5  phone evidence mentions direct/mobile/cell/text/contact
+      - -30 source domain is known portal domain
+      - -20 source appears listing boilerplate
+      - -15 selected email looks generic
+
+    A score >= 50 marks the candidate as co-occurrence eligible and can be
+    promoted to high confidence by callers.
+    """
+
+    phone = str(result.get("best_phone") or "")
+    email = str(result.get("best_email") or "")
+    phone_url = str(result.get("best_phone_source_url") or "")
+    email_url = str(result.get("best_email_source_url") or "")
+    source_url = phone_url or email_url
+    evidence = str(result.get("best_phone_evidence") or "")
+
+    score = 0
+    same_source_url = bool(phone and email and phone_url and email_url and phone_url == email_url)
+    if same_source_url:
+        score += 30
+    if email and _email_matches_name(agent, email):
+        score += 15
+
+    plausible_source = False
+    if source_url:
+        plausible_source = _plausible_agent_url(source_url, agent, brokerage, domain_hint)
+    if plausible_source:
+        score += 15
+
+    source_domain = _domain(source_url)
+    brokerage_domain = _domain(domain_hint or brokerage)
+    if source_domain and brokerage_domain and (
+        source_domain == brokerage_domain or source_domain.endswith(f".{brokerage_domain}")
+    ):
+        score += 10
+
+    evidence_low = evidence.lower()
+    if any(tok in evidence_low for tok in ("direct", "mobile", "cell", "text", "contact")):
+        score += 5
+
+    if source_domain in PORTAL_DOMAINS:
+        score -= 30
+
+    path = ""
+    if source_url:
+        try:
+            path = urlparse(source_url).path or ""
+        except Exception:
+            path = ""
+    listing_like = _looks_listing_boilerplate(f"{evidence} {result.get('best_email_evidence','')}", path)
+    if listing_like:
+        score -= 20
+
+    if email and _is_generic_email(email):
+        score -= 15
+
+    score = max(0, min(100, int(score)))
+    return {
+        "score": score,
+        "same_source_url": same_source_url,
+        "plausible_source": plausible_source,
+        "eligible": score >= 50,
+        "source_url": source_url,
+    }
+
 
 def _openai_rerank(candidates: List[Dict[str, Any]], agent: str) -> Optional[Dict[str, Any]]:
     if not openai or not os.getenv("OPENAI_API_KEY"):
@@ -5861,6 +5942,16 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
 
         ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
         ranked = _apply_phone_type_boost(ranked)
+        cooccurrence = _contact_card_cooccurrence_score(
+            ranked,
+            agent=agent,
+            brokerage=brokerage,
+            domain_hint=domain_hint,
+        )
+        ranked["phone_email_cooccurrence_score"] = cooccurrence["score"]
+        ranked["phone_email_cooccurrence"] = bool(cooccurrence["eligible"])
+        ranked["phone_email_same_source"] = bool(cooccurrence["same_source_url"])
+        ranked["phone_email_source_url"] = cooccurrence.get("source_url", "")
 
         email = ranked.get("best_email", "")
         rejected_email_reasons: List[Tuple[str, str, str]] = []
@@ -5904,6 +5995,13 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             _email_ok(final_email, ranked.get("best_email_source_url", ""))
         ranked["_email_candidates"] = email_candidates_info
         ranked["_email_rejected"] = rejected_email_reasons
+        LOG.info(
+            "CONTACT_COOCCURRENCE score=%s eligible=%s same_source=%s source=%s",
+            ranked.get("phone_email_cooccurrence_score", 0),
+            ranked.get("phone_email_cooccurrence", False),
+            ranked.get("phone_email_same_source", False),
+            ranked.get("phone_email_source_url", "") or "<blank>",
+        )
         return ranked
     except Exception:
         LOG.exception("two_stage_contact_search failed during ranking for %s %s", agent, state)
@@ -8761,10 +8859,12 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
 
     def _log_search_phone(res: Dict[str, Any]) -> None:
         LOG.info(
-            "SEARCH_PHONE_RESULT chosen=%s confidence=%s verified_mobile=%s source=%s",
+            "SEARCH_PHONE_RESULT chosen=%s confidence=%s verified_mobile=%s cooccurrence=%s cooccurrence_score=%s source=%s",
             res.get("number", "") or "<blank>",
             res.get("confidence", "") or "<blank>",
             res.get("verified_mobile", False),
+            res.get("phone_email_cooccurrence", False),
+            res.get("phone_email_cooccurrence_score", 0),
             res.get("source", "") or "<blank>",
         )
 
@@ -9073,19 +9173,30 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     enrichment_done = bool(enrichment.get("_two_stage_done") and enrichment.get("_two_stage_candidates", 0) > 0)
     enriched_phone = enrichment.get("best_phone", "")
     enriched_conf = int(enrichment.get("best_phone_confidence", 0) or 0)
+    cooccurrence_score = int(enrichment.get("phone_email_cooccurrence_score", 0) or 0)
+    cooccurrence_eligible = bool(enrichment.get("phone_email_cooccurrence"))
+    cooccurrence_promote = cooccurrence_eligible and cooccurrence_score >= CONTACT_CARD_COOCCURRENCE_MIN_CONF
     if enriched_phone:
         line_info = get_line_info(enriched_phone)
         verified_mobile = bool(line_info.get("mobile_verified"))
         if enriched_conf >= CONTACT_PHONE_LOW_CONF or verified_mobile:
-            confidence = "high" if enriched_conf >= 80 or verified_mobile else "low"
+            boosted_conf = min(100, enriched_conf + CONTACT_CARD_COOCCURRENCE_BOOST) if cooccurrence_eligible else enriched_conf
+            confidence = "high" if boosted_conf >= CONTACT_CARD_COOCCURRENCE_MIN_CONF or verified_mobile else "low"
+            reason = "two_stage_cse_cooccurrence" if cooccurrence_eligible else "two_stage_cse"
+            evidence = enrichment.get("best_phone_evidence", "")
+            if cooccurrence_eligible:
+                evidence = f"{evidence} | same-page email+phone cooccurrence".strip(" |")
             search_result = {
                 "number": enriched_phone,
                 "confidence": confidence,
-                "score": max(CONTACT_PHONE_LOW_CONF, enriched_conf / 25),
+                "score": max(CONTACT_PHONE_LOW_CONF, boosted_conf / 25),
                 "source": enrichment.get("best_phone_source_url", "two_stage_cse"),
-                "reason": "two_stage_cse",
-                "evidence": enrichment.get("best_phone_evidence", ""),
+                "reason": reason,
+                "evidence": evidence,
                 "verified_mobile": verified_mobile,
+                "phone_email_cooccurrence": cooccurrence_eligible,
+                "phone_email_cooccurrence_score": cooccurrence_score,
+                "direct_ok": cooccurrence_promote,
             }
     # If two-stage search produced no phone, continue to other sources (including RapidAPI).
     if search_result is not None:
