@@ -8768,6 +8768,19 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             res.get("source", "") or "<blank>",
         )
 
+    def _is_high_confidence_direct_mobile(res: Dict[str, Any]) -> bool:
+        if (res.get("confidence") or "").lower() != "high":
+            return False
+        if bool(res.get("direct_ok")) or bool(res.get("mobile_hint")):
+            return True
+        text = " ".join(
+            str(res.get(key, ""))
+            for key in ("reason", "evidence", "source")
+        ).lower()
+        if not text:
+            return False
+        return any(token in text for token in ("mobile", "cell", "direct"))
+
     def _apply_rapid_candidate_fallback(
         zpid: str,
         rapid_best: str,
@@ -8903,6 +8916,9 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         if search_res.get("number") and search_res.get("verified_mobile"):
             decision_source = "search_verified_mobile"
             decision_reason = "search_verified_mobile"
+        elif search_res.get("number") and _is_high_confidence_direct_mobile(search_res):
+            decision_source = "search_high_conf_direct_mobile"
+            decision_reason = "search_high_conf_direct_mobile"
         elif rapid_best_phone:
             final_result = {
                 "number": rapid_best_phone,
@@ -9528,7 +9544,10 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "confidence": confidence,
                 "score": adjusted_score,
                 "source": best_source,
+                "reason": "search_candidate",
                 "verified_mobile": verified_mobile,
+                "direct_ok": bool(candidate_info.get("direct_ok")),
+                "mobile_hint": bool(best_is_mobile),
             }
 
     if search_result is None and candidates:
