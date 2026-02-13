@@ -1404,6 +1404,129 @@ def test_search_unverified_low_conf_defaults_to_rapid_fallback(monkeypatch):
     assert result["source"] == "rapid_fallback"
 
 
+def test_search_same_page_email_phone_promoted_over_rapid_fallback(monkeypatch):
+    rapid_number = "777-710-3066"
+    search_number = "469-644-8558"
+
+    monkeypatch.setattr(
+        bot_min,
+        "_rapid_contact_normalized",
+        lambda *args, **kwargs: {
+            "selected_phone": rapid_number,
+            "rapid_candidates": [{"phone": rapid_number, "score": 60, "score_reason": "rapid_score_us_10_digit"}],
+            "phone_reason": "rapid_score_us_10_digit",
+            "phone_score": 60,
+            "rapid_primary_phone": "",
+        },
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "_contact_enrichment",
+        lambda *args, **kwargs: {
+            "_two_stage_done": True,
+            "_two_stage_candidates": 2,
+            "best_phone": search_number,
+            "best_phone_confidence": 72,
+            "best_phone_source_url": "https://searchdallasareahomes.com/contact",
+            "best_phone_evidence": "Contact Alvin Paulson",
+            "best_email": "alvin@paulsonres.com",
+            "best_email_source_url": "https://searchdallasareahomes.com/contact",
+            "phone_email_cooccurrence": True,
+            "phone_email_cooccurrence_score": 85,
+        },
+    )
+
+    def fake_line_info(phone):
+        if phone == search_number:
+            return {
+                "valid": True,
+                "mobile": True,
+                "mobile_verified": False,
+                "type": "FixedLineOrMobile",
+            }
+        return {
+            "valid": True,
+            "mobile": False,
+            "mobile_verified": False,
+            "type": "Unknown",
+        }
+
+    monkeypatch.setattr(bot_min, "get_line_info", fake_line_info)
+
+    bot_min.cache_p.clear()
+    bot_min._rapid_contact_cache.clear()
+    bot_min._rapid_logged.clear()
+    bot_min._rapid_cache.clear()
+
+    result = bot_min.lookup_phone(
+        "Alvin Paulson",
+        "TX",
+        {"zpid": "336", "contact_recipients": []},
+    )
+
+    assert result["number"] == search_number
+    assert result["source"] == "https://searchdallasareahomes.com/contact"
+    assert result["confidence"] == "high"
+
+
+def test_search_listing_like_cooccurrence_not_promoted_over_rapid_fallback(monkeypatch):
+    rapid_number = "777-710-3066"
+    search_number = "469-644-8558"
+
+    monkeypatch.setattr(
+        bot_min,
+        "_rapid_contact_normalized",
+        lambda *args, **kwargs: {
+            "selected_phone": rapid_number,
+            "rapid_candidates": [{"phone": rapid_number, "score": 60, "score_reason": "rapid_score_us_10_digit"}],
+            "phone_reason": "rapid_score_us_10_digit",
+            "phone_score": 60,
+            "rapid_primary_phone": "",
+        },
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "_contact_enrichment",
+        lambda *args, **kwargs: {
+            "_two_stage_done": True,
+            "_two_stage_candidates": 2,
+            "best_phone": search_number,
+            "best_phone_confidence": 72,
+            "best_phone_source_url": "https://portal.example/listing/123",
+            "best_phone_evidence": "listing details contact",
+            "best_email": "alvin@paulsonres.com",
+            "best_email_source_url": "https://portal.example/listing/123",
+            "phone_email_cooccurrence": True,
+            "phone_email_cooccurrence_score": 45,
+        },
+    )
+
+    monkeypatch.setattr(
+        bot_min,
+        "get_line_info",
+        lambda *_args, **_kwargs: {
+            "valid": True,
+            "mobile": True,
+            "mobile_verified": False,
+            "type": "FixedLineOrMobile",
+        },
+    )
+
+    bot_min.cache_p.clear()
+    bot_min._rapid_contact_cache.clear()
+    bot_min._rapid_logged.clear()
+    bot_min._rapid_cache.clear()
+
+    result = bot_min.lookup_phone(
+        "Alvin Paulson",
+        "TX",
+        {"zpid": "337", "contact_recipients": []},
+    )
+
+    assert result["number"] == rapid_number
+    assert result["source"] == "rapid_fallback"
+
+
 def test_search_high_conf_direct_mobile_can_override_rapid_fallback(monkeypatch):
     rapid_number = "628-900-4477"
     search_number = "415-398-1127"
