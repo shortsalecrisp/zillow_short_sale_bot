@@ -5942,16 +5942,19 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
 
         ranked = rerank_contact_candidates(candidates, agent, brokerage_domain=brokerage_domain)
         ranked = _apply_phone_type_boost(ranked)
-        cooccurrence = _contact_card_cooccurrence_score(
-            ranked,
-            agent=agent,
-            brokerage=brokerage,
-            domain_hint=domain_hint,
-        )
-        ranked["phone_email_cooccurrence_score"] = cooccurrence["score"]
-        ranked["phone_email_cooccurrence"] = bool(cooccurrence["eligible"])
-        ranked["phone_email_same_source"] = bool(cooccurrence["same_source_url"])
-        ranked["phone_email_source_url"] = cooccurrence.get("source_url", "")
+        def _refresh_cooccurrence() -> None:
+            cooccurrence = _contact_card_cooccurrence_score(
+                ranked,
+                agent=agent,
+                brokerage=brokerage,
+                domain_hint=domain_hint,
+            )
+            ranked["phone_email_cooccurrence_score"] = cooccurrence["score"]
+            ranked["phone_email_cooccurrence"] = bool(cooccurrence["eligible"])
+            ranked["phone_email_same_source"] = bool(cooccurrence["same_source_url"])
+            ranked["phone_email_source_url"] = cooccurrence.get("source_url", "")
+
+        _refresh_cooccurrence()
 
         email = ranked.get("best_email", "")
         rejected_email_reasons: List[Tuple[str, str, str]] = []
@@ -5981,6 +5984,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             ranked["best_email_confidence"] = 0
             ranked["best_email_source_url"] = ""
             ranked["best_email_evidence"] = ""
+            _refresh_cooccurrence()
 
         ranked["_two_stage_done"] = bool(candidates)
         ranked["_two_stage_candidates"] = len(candidates)
@@ -9181,7 +9185,8 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         verified_mobile = bool(line_info.get("mobile_verified"))
         if enriched_conf >= CONTACT_PHONE_LOW_CONF or verified_mobile:
             boosted_conf = min(100, enriched_conf + CONTACT_CARD_COOCCURRENCE_BOOST) if cooccurrence_eligible else enriched_conf
-            confidence = "high" if boosted_conf >= CONTACT_CARD_COOCCURRENCE_MIN_CONF or verified_mobile else "low"
+            high_conf_threshold = CONTACT_CARD_COOCCURRENCE_MIN_CONF if cooccurrence_eligible else 80
+            confidence = "high" if boosted_conf >= high_conf_threshold or verified_mobile else "low"
             reason = "two_stage_cse_cooccurrence" if cooccurrence_eligible else "two_stage_cse"
             evidence = enrichment.get("best_phone_evidence", "")
             if cooccurrence_eligible:
