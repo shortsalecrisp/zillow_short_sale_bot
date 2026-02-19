@@ -357,6 +357,59 @@ def test_search_verified_mobile_beats_rapid_fallback(monkeypatch):
     assert result["source"] == "two_stage_cse"
 
 
+def test_lookup_phone_keeps_strong_search_number_over_rapid_fallback(monkeypatch):
+    rapid_number = "555-111-0000"
+    search_number = "555-444-6666"
+
+    def fake_rapid_property(zpid):
+        return {
+            "contact_recipients": [
+                {"phones": [{"number": rapid_number}]},
+            ]
+        }
+
+    def fake_line_info(phone):
+        if phone == search_number:
+            return {
+                "valid": True,
+                "mobile": True,
+                "mobile_verified": False,
+                "type": "FixedLineOrMobile",
+            }
+        return {
+            "valid": False,
+            "mobile": False,
+            "mobile_verified": False,
+            "type": "Unknown",
+        }
+
+    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(
+        bot_min,
+        "_contact_enrichment",
+        lambda *args, **kwargs: {
+            "best_phone": search_number,
+            "best_phone_confidence": 2.7,
+            "best_phone_source_url": "agent_card_dom",
+            "best_phone_evidence": "mobile direct",
+        },
+    )
+    monkeypatch.setattr(bot_min, "get_line_info", fake_line_info)
+
+    bot_min.cache_p.clear()
+    bot_min._rapid_contact_cache.clear()
+    bot_min._rapid_logged.clear()
+
+    result = bot_min.lookup_phone(
+        "Morgan Agent",
+        "WA",
+        {"zpid": "333", "contact_recipients": []},
+    )
+
+    assert result["number"] == search_number
+    assert result["source"] == "agent_card_dom"
+
+
 def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
     office_number = "555-000-1111"
     mobile_number = "555-222-3333"
@@ -415,6 +468,17 @@ def test_lookup_phone_prefers_non_office_mobile(monkeypatch):
 
     assert result["number"] == mobile_number
     assert result["source"].startswith("rapid_contact")
+
+
+def test_extract_struct_handles_malformed_markup():
+    malformed = "<![9\x00oŜ\x003\x0fj>"
+    phones, mails, meta, info = bot_min.extract_struct(malformed)
+
+    assert phones == []
+    assert mails == []
+    assert meta == []
+    assert info.get("tel") == []
+    assert info.get("mailto") == []
 
 
 def test_trusted_domain_office_number_demoted(monkeypatch):
