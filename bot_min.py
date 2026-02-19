@@ -491,13 +491,11 @@ logging.info(
     bool(_sms_api_key),
 )
 SMS_TEMPLATE      = (
-    "Hey {first}, this is Yoni Kutler—I saw your short sale listing at "
-    "{address} and wanted to introduce myself. I specialize in helping "
-    "agents get faster bank approvals and ensure these deals close. I "
-    "know you likely handle short sales yourself, but I work behind the "
-    "scenes to take on lender negotiations so you can focus on selling. "
-    "No cost to you or your client—I’m only paid by the buyer at closing. "
-    "Would you be open to a quick call to see if this could help?"
+    "Hey {first}, this is Yoni Kutler — I saw your short sale at {address}. "
+    "I help agents get approvals through faster and keep deals from falling "
+    "apart, and there’s no cost to you or your seller at any point. If you’d "
+    "ever want to offload the lender side, I’m happy to jump on a quick call "
+    "— do you have a few minutes today?"
 )
 SMS_FU_TEMPLATE   = (
     "Hey, just wanted to follow up on my message from earlier. "
