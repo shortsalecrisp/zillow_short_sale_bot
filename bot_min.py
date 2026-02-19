@@ -5079,6 +5079,8 @@ def _contact_search_urls(
     cse_status = _cse_last_state
     search_cache = row_payload.setdefault("_contact_search_cache", {})
     blocked_domains: Set[str] = set()
+    headless_timeout_counts: Dict[str, int] = {}
+    headless_circuit_domains: Set[str] = set()
     fetch_ok = _cse_last_state not in {"disabled"}
     relaxed_mode = _cse_last_state in {"disabled"}
     search_limit = 20
@@ -5743,6 +5745,8 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
     email_candidates_info: List[Dict[str, str]] = []
     blocked_engines: Set[str] = set()
     blocked_domains: Set[str] = set()
+    headless_timeout_counts: Dict[str, int] = {}
+    headless_circuit_domains: Set[str] = set()
     brokerage_domain = _domain(domain_hint or brokerage)
 
     def _empty_result() -> Dict[str, Any]:
@@ -5763,7 +5767,11 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         return bool(quality["phones_found"] or quality["emails_found"])
 
     def _collect_page(page: str, final_url: str) -> None:
-        page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
+        try:
+            page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
+        except Exception as exc:
+            LOG.warning("CONTACT_PARSE_SKIPPED url=%s reason=malformed_markup err=%s", final_url, exc)
+            return
         for cand in page_candidates:
             src = cand.get("source_url", final_url)
             for em in cand.get("emails", []):
@@ -5831,6 +5839,15 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         if dom:
             blocked_domains.add(dom)
 
+    def _record_headless_timeout(url: str) -> None:
+        dom = _domain(url)
+        if not dom:
+            return
+        count = headless_timeout_counts.get(dom, 0) + 1
+        headless_timeout_counts[dom] = count
+        if count >= 2:
+            headless_circuit_domains.add(dom)
+
     try:
         urls, search_empty, cse_status, _ = _normalize_contact_search_result(
             _contact_search_urls(
@@ -5876,6 +5893,9 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         if not _has_verifiable_contacts():
             for idx, url in enumerate(urls):
                 dom = _domain(url)
+                if dom in headless_circuit_domains:
+                    LOG.info("HEADLESS_SKIPPED url=%s reason=domain_circuit_open", url)
+                    continue
                 if not _should_use_headless_for_contact(
                     dom,
                     "",
@@ -5894,6 +5914,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 )
                 if snapshot.get("timeout"):
                     _blocked_domain_from_url(snapshot.get("final_url") or url)
+                    _record_headless_timeout(snapshot.get("final_url") or url)
                 rendered = _combine_headless_snapshot(snapshot)
                 if not rendered.strip():
                     continue
@@ -7916,7 +7937,15 @@ def extract_struct(td: str) -> Tuple[List[str], List[str], List[Dict[str, Any]],
     if not BeautifulSoup:
         return phones, mails, meta, info
 
-    soup = BeautifulSoup(td, "html.parser")
+    payload = td if isinstance(td, str) else str(td or "")
+    if not payload.strip():
+        return phones, mails, meta, info
+
+    try:
+        soup = BeautifulSoup(payload, "html.parser")
+    except Exception as exc:
+        LOG.warning("STRUCT_PARSE_SKIPPED reason=malformed_markup err=%s", exc)
+        return phones, mails, meta, info
     if soup.title and soup.title.string:
         info["title"] = soup.title.string.strip()
 
@@ -8853,12 +8882,25 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             res.get("number", "") or "<blank>",
         )
 
-    def _log_final_decision(phone: str, source: str, reason: str) -> None:
+    def _log_final_decision(
+        phone: str,
+        source: str,
+        reason: str,
+        *,
+        search_score: float = 0.0,
+        rapid_score: float = 0.0,
+        search_reason: str = "",
+        rapid_reason: str = "",
+    ) -> None:
         LOG.info(
-            "FINAL_PHONE_DECISION final_phone=%s source=%s reason=%s",
+            "FINAL_PHONE_DECISION final_phone=%s source=%s reason=%s search_score=%.2f rapid_score=%.2f search_reason=%s rapid_reason=%s",
             phone or "<blank>",
             source or "none",
             reason or "<none>",
+            float(search_score or 0.0),
+            float(rapid_score or 0.0),
+            search_reason or "<none>",
+            rapid_reason or "<none>",
         )
 
     def _log_search_phone(res: Dict[str, Any]) -> None:
@@ -8969,7 +9011,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 rapid_best_phone,
                 rapid_phone_reason or "<none>",
             )
-            _log_final_decision(rapid_best_phone, "rapid_fallback", rapid_phone_reason or "rapid_fallback")
+            _log_final_decision(
+                rapid_best_phone,
+                "rapid_fallback",
+                rapid_phone_reason or "rapid_fallback",
+                rapid_score=rapid_phone_score,
+                rapid_reason=rapid_phone_reason,
+            )
             return _finalize(rapid_result)
         _log_final_phone(cached)
         return cached
@@ -9008,7 +9056,13 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             "reason": rapid_phone_reason or "rapid_verified_mobile",
             "verified_mobile": True,
         }
-        _log_final_decision(rapid_primary_phone, "rapid_verified_mobile", rapid_phone_reason)
+        _log_final_decision(
+            rapid_primary_phone,
+            "rapid_verified_mobile",
+            rapid_phone_reason,
+            rapid_score=max(CONTACT_PHONE_MIN_SCORE, CONTACT_PHONE_LOW_CONF + 0.5),
+            rapid_reason=rapid_phone_reason,
+        )
         return _finalize(rapid_result)
 
     def _apply_final_decision(search_res: Dict[str, Any]) -> Dict[str, Any]:
@@ -9017,13 +9071,24 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
         final_result = search_res
         decision_source = "none"
         decision_reason = ""
-        if search_res.get("number") and search_res.get("verified_mobile"):
+        search_number = search_res.get("number", "")
+        search_score = float(search_res.get("score", 0.0) or 0.0)
+        search_confidence = str(search_res.get("confidence", "") or "").lower()
+        search_direct = bool(search_res.get("direct_ok")) or bool(search_res.get("mobile_hint"))
+
+        keep_search = bool(search_number) and (
+            bool(search_res.get("verified_mobile"))
+            or _is_high_confidence_direct_mobile(search_res)
+            or (search_confidence == "high" and search_score >= CONTACT_PHONE_LOW_CONF and search_direct)
+        )
+
+        if search_number and search_res.get("verified_mobile"):
             decision_source = "search_verified_mobile"
             decision_reason = "search_verified_mobile"
-        elif search_res.get("number") and _is_high_confidence_direct_mobile(search_res):
+        elif search_number and _is_high_confidence_direct_mobile(search_res):
             decision_source = "search_high_conf_direct_mobile"
             decision_reason = "search_high_conf_direct_mobile"
-        elif rapid_best_phone:
+        elif rapid_best_phone and not keep_search and not search_number:
             final_result = {
                 "number": rapid_best_phone,
                 "confidence": "low",
@@ -9034,15 +9099,39 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
             }
             decision_source = "rapid_fallback"
             decision_reason = rapid_phone_reason or "rapid_fallback"
+        elif rapid_best_phone and not keep_search and search_number:
+            rapid_beats_search = rapid_phone_score > (search_score + 0.35)
+            if rapid_beats_search:
+                final_result = {
+                    "number": rapid_best_phone,
+                    "confidence": "low",
+                    "score": max(search_res.get("score", 0.0), CONTACT_PHONE_OVERRIDE_MIN),
+                    "source": "rapid_fallback",
+                    "reason": rapid_phone_reason or "rapid_fallback",
+                    "verified_mobile": False,
+                }
+                decision_source = "rapid_fallback"
+                decision_reason = "rapid_score_advantage"
+            else:
+                decision_source = "search_guarded_against_rapid_fallback"
+                decision_reason = "search_guarded_against_rapid_fallback"
         else:
-            if search_res.get("number"):
+            if search_number:
                 decision_source = "search_unverified"
                 decision_reason = "search_unverified"
             else:
                 decision_source = "none"
                 decision_reason = "no_phone_candidates"
 
-        _log_final_decision(final_result.get("number", ""), decision_source, decision_reason)
+        _log_final_decision(
+            final_result.get("number", ""),
+            decision_source,
+            decision_reason,
+            search_score=search_score,
+            rapid_score=rapid_phone_score,
+            search_reason=str(search_res.get("reason", "") or ""),
+            rapid_reason=rapid_phone_reason,
+        )
         return _finalize(final_result)
 
     candidates: Dict[str, Dict[str, Any]] = {}
