@@ -2286,11 +2286,18 @@ def rapid_phone(zpid: str, agent_name: str) -> Tuple[str, str]:
 def _jitter() -> None:
     time.sleep(random.uniform(0.8, 1.5))
 
-def _mark_block(dom: str, *, seconds: float = BLOCK_SECONDS, reason: str = "blocked") -> None:
+def _mark_block(
+    dom: str,
+    *,
+    seconds: float = BLOCK_SECONDS,
+    reason: str = "blocked",
+    transient: bool = True,
+) -> None:
     if not dom:
         return
     _blocked_until[dom] = time.time() + seconds
-    _blocked_domains.setdefault(dom, reason)
+    if not transient:
+        _blocked_domains.setdefault(dom, reason)
 
 
 def _reset_timeout(dom: str) -> None:
@@ -2569,12 +2576,12 @@ def _should_fetch(url: str, strict: bool = True) -> bool:
         return False
     dom = _domain(url)
     if dom in _ALWAYS_SKIP_DOMAINS:
-        _mark_block(dom, reason="always_skip")
+        _mark_block(dom, reason="always_skip", transient=False)
         return False
     if _blocked(dom):
         return False
     if strict and dom in _CONTACT_DENYLIST:
-        _mark_block(dom, reason="denylist")
+        _mark_block(dom, reason="denylist", transient=False)
         return False
     return not (_is_banned(dom) and strict)
 
@@ -3444,6 +3451,23 @@ def _duckduckgo_html_results(
     results: List[Dict[str, str]] = []
     if not body:
         return results
+    low_body = body.lower()
+    artifact_hosts = {"w3.org", "www.w3.org", "schema.org", "www.schema.org"}
+
+    def _looks_interstitial(content: str) -> bool:
+        low = content.lower()
+        challenge_markers = (
+            "anomaly",
+            "automated",
+            "unusual traffic",
+            "captcha",
+            "verify you are human",
+        )
+        return any(marker in low for marker in challenge_markers)
+
+    if _looks_interstitial(low_body):
+        LOG.warning("DuckDuckGo interstitial/challenge page detected; ignoring page")
+        return results
 
     def _allowed(host: str) -> bool:
         if not allowed_domains:
@@ -3468,6 +3492,10 @@ def _duckduckgo_html_results(
             return
         host = _domain(normalized)
         if host and not _allowed(host):
+            return
+        parsed = urlparse(normalized)
+        netloc = (parsed.netloc or "").lower()
+        if any(netloc == h or netloc.endswith(f".{h}") for h in artifact_hosts):
             return
         seen.add(normalized)
         results.append(
@@ -3550,6 +3578,8 @@ def _duckduckgo_html_search(
         jitter = random.uniform(0.0, DDG_RETRY_BACKOFF_JITTER)
         return base + jitter
 
+    no_growth_pages = 0
+    max_no_growth_pages = 2
     while len(hits) < max_results and page < max_pages:
         params = {"q": query}
         if offset:
@@ -3604,7 +3634,12 @@ def _duckduckgo_html_search(
                 max_results=max_results - len(hits),
             )
         )
-        if len(hits) >= max_results or len(hits) == before:
+        if len(hits) == before:
+            no_growth_pages += 1
+        else:
+            no_growth_pages = 0
+
+        if len(hits) >= max_results or no_growth_pages >= max_no_growth_pages:
             break
 
         offset += 30
@@ -5068,6 +5103,7 @@ def _contact_search_urls(
 
     limit = max(1, min(limit, CONTACT_CSE_FETCH_LIMIT))
     target_count = 5
+    minimum_usable_urls = 3
     city = str(row_payload.get("city") or "").strip()
     top5_log = row_payload.setdefault("_top5_log", {})
     urls: List[str] = []
@@ -5081,7 +5117,7 @@ def _contact_search_urls(
     headless_circuit_domains: Set[str] = set()
     fetch_ok = _cse_last_state not in {"disabled"}
     relaxed_mode = _cse_last_state in {"disabled"}
-    search_limit = 20
+    search_limit = 15
 
     def _select_from_results(
         raw_results: List[Dict[str, Any]],
@@ -5159,6 +5195,7 @@ def _contact_search_urls(
             selected_urls: List[str] = []
             good_urls_after_each_step: List[int] = []
             searches_executed = 0
+            step_metrics: List[Dict[str, Any]] = []
 
             def _record_selected(step_urls: List[str]) -> None:
                 for selected_url in step_urls:
@@ -5170,6 +5207,7 @@ def _contact_search_urls(
 
             def _run_step(step_engine: str, query: str) -> None:
                 nonlocal cse_status, searches_executed
+                raw_results: List[Dict[str, Any]] = []
                 if step_engine == "google":
                     raw_results = google_cse_search(
                         query,
@@ -5196,6 +5234,15 @@ def _contact_search_urls(
                     cse_status = "duckduckgo-blocked" if ddg_blocked else "duckduckgo"
                 searches_executed += 1
                 good_urls_after_each_step.append(len(selected_urls))
+                step_metrics.append(
+                    {
+                        "engine": step_engine,
+                        "query": query,
+                        "raw_candidates": len(raw_results),
+                        "usable_after_step": len(selected_urls),
+                        "step_usable": len(selected),
+                    }
+                )
 
             # Deterministic fixed plan:
             # 1) Google: "{agent}" realtor {state}
@@ -5220,6 +5267,19 @@ def _contact_search_urls(
                         "searches_executed": searches_executed,
                         "good_urls_after_each_step": good_urls_after_each_step,
                         "final_top5_urls": urls,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+            LOG.info(
+                "CONTACT_SEARCH_FLOOR %s",
+                json.dumps(
+                    {
+                        "minimum_usable_urls": minimum_usable_urls,
+                        "met": len(urls) >= minimum_usable_urls,
+                        "usable_found": len(urls),
+                        "exhausted": searches_executed >= 3,
+                        "per_step": step_metrics,
                     },
                     separators=(",", ":"),
                 ),
@@ -5429,7 +5489,7 @@ def enrich_contact(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[
                 continue
             dom = _domain(url)
             if dom in _CONTACT_DENYLIST:
-                _mark_block(dom, reason="denylist")
+                _mark_block(dom, reason="denylist", transient=False)
                 continue
             if _blocked(dom):
                 continue
