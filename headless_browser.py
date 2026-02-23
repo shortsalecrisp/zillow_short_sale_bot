@@ -128,6 +128,7 @@ async def fetch_headless_snapshot(
     browser = None
     page = None
     context = None
+    route_enabled = False
     content = ""
     visible_text = ""
     hrefs = []
@@ -166,12 +167,19 @@ async def fetch_headless_snapshot(
             page.set_default_navigation_timeout(nav_timeout_ms)
             if block_resources:
                 async def _route_handler(route) -> None:
-                    if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
-                        await route.abort()
-                    else:
-                        await route.continue_()
+                    try:
+                        if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
+                            await route.abort()
+                        else:
+                            await route.continue_()
+                    except Exception as exc:
+                        # Route callbacks can still run while the page/context is
+                        # shutting down after timeout cancellation.
+                        if logger:
+                            logger.debug("HEADLESS_ROUTE_IGNORED url=%s err=%s", url, exc)
 
                 await page.route("**/*", _route_handler)
+                route_enabled = True
             response = await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
             if response and response.status in {403, 429, 451}:
                 if logger:
@@ -208,6 +216,11 @@ async def fetch_headless_snapshot(
             logger.warning("HEADLESS_BROWSER_ERROR url=%s err=%s", url, exc)
         return {}
     finally:
+        if page and route_enabled:
+            try:
+                await page.unroute_all(behavior="ignoreErrors")
+            except Exception:
+                pass
         if page:
             try:
                 await page.close()

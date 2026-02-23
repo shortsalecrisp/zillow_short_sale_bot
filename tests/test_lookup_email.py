@@ -474,3 +474,30 @@ def test_select_top_5_accepts_agent_slug_url(monkeypatch):
 
     assert "https://broker.example/agents/jane-agent" in selected
     assert ("https://broker.example/agents/jane-agent", "agent_mismatch") not in rejected
+
+
+def test_parse_lite_reads_headless_snapshot_social_contacts():
+    payload = {
+        "headless_final_url": "https://www.facebook.com/RosaValdiviaRealtor",
+        "headless_visible_text": "Contact us at rosa.valdivia@example.com or (813) 598-1065",
+        "headless_mailto_links": ["mailto:rosa.valdivia@example.com"],
+        "headless_tel_links": ["tel:+1-813-598-1065"],
+    }
+    text = f"<!--HEADLESS_SNAPSHOT {json.dumps(payload)} -->"
+
+    parsed = bot_min.parse_lite("https://facebook.com/RosaValdiviaRealtor", text=text)
+
+    assert "rosa.valdivia@example.com" in parsed["emails"]
+    assert "813-598-1065" in parsed["phones"]
+
+
+def test_is_social_login_wall_detects_facebook_and_linkedin():
+    assert bot_min._is_social_login_wall(
+        "https://www.facebook.com/login/?next=https://www.facebook.com/RosaValdiviaRealtor",
+        "",
+    )
+    assert bot_min._is_social_login_wall(
+        "https://www.linkedin.com/in/rosa-valdivia-56513320",
+        "Sign in to view this profile",
+    )
+    assert not bot_min._is_social_login_wall("https://example.com/profile", "public profile page")
