@@ -116,6 +116,9 @@ HEADLESS_FACEBOOK_TIMEOUT_MS = int(os.getenv("HEADLESS_FACEBOOK_TIMEOUT_MS", str
 HEADLESS_CONTACT_BUDGET = int(os.getenv("HEADLESS_CONTACT_BUDGET", "4"))
 HEADLESS_OVERALL_TIMEOUT_S = int(os.getenv("HEADLESS_OVERALL_TIMEOUT_S", "50"))
 HEADLESS_BROWSER_RETRY_ATTEMPTS = int(os.getenv("HEADLESS_BROWSER_RETRY_ATTEMPTS", "2"))
+HEADLESS_SOCIAL_TIMEOUT_MS = int(os.getenv("HEADLESS_SOCIAL_TIMEOUT_MS", "18000"))
+HEADLESS_SOCIAL_WAIT_MS = int(os.getenv("HEADLESS_SOCIAL_WAIT_MS", "900"))
+HEADLESS_SOCIAL_RETRY_ATTEMPTS = int(os.getenv("HEADLESS_SOCIAL_RETRY_ATTEMPTS", "1"))
 JINA_THIN_TEXT_CHARS = int(os.getenv("JINA_THIN_TEXT_CHARS", "450"))
 HEADLESS_NAV_TIMEOUT_OVERRIDES = {
     k.strip().lower(): int(v)
@@ -140,6 +143,8 @@ CONTACT_JS_DOMAINS = {
     "placester.net",
 }
 
+
+HEADLESS_SOCIAL_DOMAINS = {"facebook.com", "linkedin.com", "instagram.com"}
 _CONNECTION_ERRORS = (
     req_exc.ConnectionError,
     req_exc.ConnectTimeout,
@@ -3315,6 +3320,43 @@ def fetch_text_cached(
     }
 
 
+def _parse_social_snapshot_contacts(url: str, text: str) -> Dict[str, List[str]]:
+    emails: List[str] = []
+    phones: List[str] = []
+    if not text:
+        return {"emails": emails, "phones": phones}
+
+    match = re.search(r"<!--HEADLESS_SNAPSHOT\s+(.*?)\s+-->", text, re.S)
+    if not match:
+        return {"emails": emails, "phones": phones}
+
+    try:
+        payload = html.unescape(match.group(1) or "")
+        meta = json.loads(payload)
+    except Exception:
+        return {"emails": emails, "phones": phones}
+
+    sources: List[str] = []
+    for key in ("headless_visible_text",):
+        val = meta.get(key, "")
+        if isinstance(val, str) and val:
+            sources.append(val)
+    for key in ("headless_mailto_links", "headless_tel_links"):
+        vals = meta.get(key, [])
+        if isinstance(vals, list):
+            sources.extend(str(v) for v in vals if v)
+
+    aggregate = "\n".join(sources)
+    for email, _ in _extract_emails_with_obfuscation(aggregate):
+        if ok_email(email) and not _is_junk_email(email):
+            emails.append(email)
+    for found in PHONE_RE.findall(aggregate):
+        formatted = fmt_phone(found)
+        if formatted and valid_phone(formatted):
+            phones.append(formatted)
+    return {"emails": list(dict.fromkeys(emails)), "phones": list(dict.fromkeys(phones))}
+
+
 def parse_lite(url: str, text: str = "") -> Dict[str, List[str]]:
     if not text:
         fetched = fetch_text_cached(
@@ -3333,6 +3375,9 @@ def parse_lite(url: str, text: str = "") -> Dict[str, List[str]]:
         if formatted and valid_phone(formatted):
             phones.append(formatted)
     phones.extend(vcard_phones)
+    social_contacts = _parse_social_snapshot_contacts(url, text)
+    emails.extend(social_contacts.get("emails", []))
+    phones.extend(social_contacts.get("phones", []))
     return {
         "emails": list(dict.fromkeys(emails)),
         "phones": list(dict.fromkeys(phones)),
@@ -6329,12 +6374,36 @@ def _headless_nav_timeout_for(url: str, domain: str, base_timeout: int) -> int:
     return base_timeout
 
 
+def _is_social_domain(domain: str) -> bool:
+    dom = (domain or "").lower()
+    return any(dom == root or dom.endswith(f".{root}") for root in HEADLESS_SOCIAL_DOMAINS)
+
+
+def _is_social_login_wall(url: str, body: str = "") -> bool:
+    surface = f"{url or ''}\n{body or ''}".lower()
+    if "linkedin.com" in surface and ("/authwall" in surface or "status=999" in surface or "sign in" in surface):
+        return True
+    if "facebook.com" in surface and ("/login" in surface or "checkpoint" in surface or "login/?next=" in surface):
+        return True
+    return False
+
+
+def _headless_policy_for_domain(domain: str) -> Tuple[int, int, int]:
+    dom = (domain or "").lower()
+    if _is_social_domain(dom):
+        return HEADLESS_SOCIAL_TIMEOUT_MS, HEADLESS_SOCIAL_WAIT_MS, max(1, HEADLESS_SOCIAL_RETRY_ATTEMPTS)
+    return HEADLESS_NAV_TIMEOUT_MS, HEADLESS_WAIT_MS, max(1, HEADLESS_BROWSER_RETRY_ATTEMPTS)
+
+
 def _compute_headless_timeouts(
     target_url: str,
     effective_domain: str,
     nav_timeout_ms: Optional[int] = None,
 ) -> Tuple[int, int, str]:
-    nav_timeout = HEADLESS_FACEBOOK_TIMEOUT_MS if "facebook.com" in target_url else HEADLESS_NAV_TIMEOUT_MS
+    policy_nav_timeout, _, _ = _headless_policy_for_domain(effective_domain or _domain(target_url) or "")
+    nav_timeout = policy_nav_timeout
+    if "facebook.com" in target_url and not _is_social_domain(effective_domain or _domain(target_url) or ""):
+        nav_timeout = max(nav_timeout, HEADLESS_FACEBOOK_TIMEOUT_MS)
     if nav_timeout_ms:
         nav_timeout = max(nav_timeout, nav_timeout_ms)
     nav_timeout = max(10000, nav_timeout)
@@ -6396,6 +6465,7 @@ async def _headless_fetch_async(
         nav_timeout_ms=nav_timeout_ms,
     )
 
+    _, wait_ms, retry_attempts = _headless_policy_for_domain(effective_domain)
     accept_language = random_accept_language(_ACCEPT_LANGUAGE_POOL)
     user_agent = random.choice(_USER_AGENT_POOL)
     extra_headers: Dict[str, str] = {}
@@ -6409,7 +6479,7 @@ async def _headless_fetch_async(
             target_url,
             proxy_url=proxy_url,
             nav_timeout_ms=nav_timeout,
-            wait_ms=HEADLESS_WAIT_MS,
+            wait_ms=wait_ms,
             user_agent=user_agent,
             accept_language=accept_language,
             extra_headers=extra_headers,
@@ -6418,10 +6488,16 @@ async def _headless_fetch_async(
         )
 
     last_snapshot: Dict[str, Any] = {}
-    for attempt in range(max(1, HEADLESS_BROWSER_RETRY_ATTEMPTS)):
+    for attempt in range(retry_attempts):
         try:
             last_snapshot = await asyncio.wait_for(_run_once(), timeout=overall_timeout)
             if last_snapshot:
+                if _is_social_login_wall(
+                    last_snapshot.get("final_url", ""),
+                    (last_snapshot.get("visible_text", "") or "")[:2000],
+                ):
+                    LOG.info("HEADLESS_ABORT_REASON=social_login_wall url=%s", target_url)
+                    break
                 return last_snapshot
         except asyncio.TimeoutError:
             LOG.warning(
@@ -6432,7 +6508,7 @@ async def _headless_fetch_async(
             )
         except Exception as exc:
             LOG.warning("HEADLESS_ERROR url=%s err=%s attempt=%s", target_url, exc, attempt + 1)
-        if attempt < HEADLESS_BROWSER_RETRY_ATTEMPTS - 1:
+        if attempt < retry_attempts - 1:
             await asyncio.sleep(0.4 + (0.4 * attempt))
     if last_snapshot:
         last_snapshot["timeout"] = True
