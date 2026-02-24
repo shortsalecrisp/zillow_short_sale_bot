@@ -2815,6 +2815,44 @@ JINA_BYPASS_DOMAINS = {
     for d in os.getenv("JINA_BYPASS_DOMAINS", "").split(",")
     if d.strip()
 }
+JINA_SOCIAL_DIRECT_DOMAINS = {
+    d.strip().lower()
+    for d in os.getenv(
+        "JINA_SOCIAL_DIRECT_DOMAINS",
+        "linkedin.com,facebook.com,instagram.com",
+    ).split(",")
+    if d.strip()
+}
+
+
+def _is_social_fetch_domain(dom: str) -> bool:
+    root = _domain(dom)
+    if not root:
+        return False
+    return any(root == entry or root.endswith(f".{entry}") for entry in JINA_SOCIAL_DIRECT_DOMAINS)
+
+
+def _is_social_blocked_outcome(url: str, status: int, text: str) -> bool:
+    dom = _domain(url)
+    if not _is_social_fetch_domain(dom):
+        return False
+    if status == 999:
+        return True
+    if status in {401, 403, 429, 451}:
+        return True
+    return _is_social_login_wall(url, (text or "")[:2000])
+
+
+def _classify_fetch_outcome(url: str, status: int, text: str, *, thin_response: bool = False) -> str:
+    if _is_social_blocked_outcome(url, status, text):
+        return "login_wall"
+    if 200 <= status < 300 and (text or "").strip() and not thin_response:
+        return "success"
+    if thin_response:
+        return "thin"
+    if status in {401, 403, 429, 451, 999}:
+        return "blocked"
+    return "error"
 
 
 def normalize_url(url: str) -> str:
@@ -2890,10 +2928,14 @@ def _cache_conn() -> sqlite3.Connection:
                 ttl_seconds REAL,
                 http_status INTEGER,
                 extracted_text TEXT,
-                final_url TEXT
+                final_url TEXT,
+                fetch_class TEXT
             )
             """
         )
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(jina_cache)")]
+        if "fetch_class" not in cols:
+            conn.execute("ALTER TABLE jina_cache ADD COLUMN fetch_class TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS ddg_serp_cache (
@@ -2912,7 +2954,7 @@ def cache_get(url: str) -> Optional[Dict[str, Any]]:
     norm = normalize_url(url)
     conn = _cache_conn()
     cur = conn.execute(
-        "SELECT url, fetched_at, ttl_seconds, http_status, extracted_text, final_url FROM jina_cache WHERE url=?",
+        "SELECT url, fetched_at, ttl_seconds, http_status, extracted_text, final_url, fetch_class FROM jina_cache WHERE url=?",
         (norm,),
     )
     row = cur.fetchone()
@@ -2924,6 +2966,12 @@ def cache_get(url: str) -> Optional[Dict[str, Any]]:
         return None
     if (fetched_at + ttl_seconds) < time.time():
         return None
+    fetch_class = row[6] or _classify_fetch_outcome(
+        row[5] or norm,
+        int(row[3] or 0),
+        row[4] or "",
+        thin_response=False,
+    )
     return {
         "url": row[0],
         "fetched_at": fetched_at,
@@ -2931,6 +2979,9 @@ def cache_get(url: str) -> Optional[Dict[str, Any]]:
         "http_status": row[3],
         "extracted_text": row[4] or "",
         "final_url": row[5] or norm,
+        "fetch_class": fetch_class,
+        "social_blocked": fetch_class in {"blocked", "login_wall"}
+        and _is_social_fetch_domain(_domain(row[5] or norm)),
     }
 
 
@@ -2940,12 +2991,21 @@ def cache_set(
     http_status: int,
     final_url: str,
     ttl_seconds: int,
+    fetch_class: str = "",
 ) -> None:
     norm = normalize_url(url)
     conn = _cache_conn()
     conn.execute(
-        "REPLACE INTO jina_cache (url, fetched_at, ttl_seconds, http_status, extracted_text, final_url) VALUES (?, ?, ?, ?, ?, ?)",
-        (norm, time.time(), ttl_seconds, http_status, extracted_text, final_url or norm),
+        "REPLACE INTO jina_cache (url, fetched_at, ttl_seconds, http_status, extracted_text, final_url, fetch_class) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            norm,
+            time.time(),
+            ttl_seconds,
+            http_status,
+            extracted_text,
+            final_url or norm,
+            fetch_class or _classify_fetch_outcome(final_url or norm, int(http_status or 0), extracted_text),
+        ),
     )
     conn.commit()
 
@@ -3076,12 +3136,14 @@ def fetch_text_cached(
         # Disabled because the upstream endpoint returns 400 and wastes time.
         return ""
 
-    bypass_jina = bool(dom and (dom in _jina_bypass_domains or dom in JINA_BYPASS_DOMAINS))
+    bypass_jina = bool(dom and (dom in _jina_bypass_domains or dom in JINA_BYPASS_DOMAINS or _is_social_fetch_domain(dom)))
     if not bypass_jina and _blocked("r.jina.ai"):
         bypass_jina = True
         if dom:
             _jina_bypass_domains.add(dom)
         LOG.info("JINA_BYPASS domain=%s reason=jina-blocked", dom)
+    if bypass_jina and dom and _is_social_fetch_domain(dom):
+        LOG.info("JINA_BYPASS domain=%s reason=domain-policy", dom)
     mirror = "" if bypass_jina else (_mirror_url(norm) or f"https://r.jina.ai/{norm}")
     text = ""
     status = 0
@@ -3089,6 +3151,8 @@ def fetch_text_cached(
     retry_needed = False
     thin_response = False
     mirror_timeout = False
+    social_blocked = False
+    fetch_class = "error"
 
     def _direct_fetch(reason: str) -> None:
         nonlocal text, status, final_url
@@ -3176,6 +3240,7 @@ def fetch_text_cached(
         _direct_fetch("jina-bypass-direct-blocked")
 
     final_url = _normalize_jina_proxy_url(final_url)
+    social_blocked = _is_social_blocked_outcome(final_url or norm, int(status or 0), text)
     if _domain(final_url) == "r.jina.ai":
         unwrapped = _unwrap_jina_url(final_url)
         final_url = unwrapped or norm
@@ -3214,7 +3279,7 @@ def fetch_text_cached(
         except Exception:
             pass
 
-    blocked_statuses = {403, 429, 451}
+    blocked_statuses = {403, 429, 451, 999}
     if status in blocked_statuses and dom and allow_blocking:
         is_jina = dom in {"r.jina.ai", "duckduckgo.com", "www.duckduckgo.com"}
         base_block = JINA_BLOCK_SECONDS if is_jina else BLOCK_SECONDS
@@ -3223,6 +3288,11 @@ def fetch_text_cached(
             "Jina fetch blocked for %s with %s; marking domain for retry", dom, status
         )
         _mark_block(dom, seconds=block_for)
+    if social_blocked:
+        retry_needed = False
+        if dom:
+            _jina_bypass_domains.add(dom)
+
     if success and _is_thin_jina_response(text):
         thin_response = True
         LOG.info("JINA_THIN_RESPONSE url=%s bytes=%s; retrying direct fetch", norm, len(text.encode("utf-8")))
@@ -3293,19 +3363,23 @@ def fetch_text_cached(
         except Exception:
             pass
 
-    if not success:
+    if not success and not social_blocked:
         retry_needed = True
 
-    if not success and dom:
+    if not success and dom and not social_blocked:
         textise = _try_textise(dom, norm)
         if textise:
             text = textise
             status = status or 200
             success = True
 
-    ttl_seconds = int(ttl_days * 86400 if success else 900)
+    fetch_class = _classify_fetch_outcome(final_url or norm, int(status or 0), text, thin_response=thin_response)
+    if fetch_class in {"blocked", "login_wall", "thin", "error"}:
+        ttl_seconds = min(900, int(max(120, ttl_days * 86400)))
+    else:
+        ttl_seconds = int(ttl_days * 86400)
     if success or text or status:
-        cache_set(norm, text, status, final_url, ttl_seconds)
+        cache_set(norm, text, status, final_url, ttl_seconds, fetch_class=fetch_class)
         _CACHE_DEDUPE_RUN.add(norm)
 
     return {
@@ -3317,6 +3391,8 @@ def fetch_text_cached(
         "final_url": final_url,
         "retry_needed": retry_needed,
         "thin_response": thin_response,
+        "fetch_class": fetch_class,
+        "social_blocked": social_blocked,
     }
 
 
@@ -6207,6 +6283,18 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
         return "", False, "jina_cache"
 
     def _run_headless_review(reason: str, body: str = "") -> Tuple[str, bool, str]:
+        chromium_ready = chromium_available()
+        allow_headless = _needs_headless_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
+        LOG.info(
+            "HEADLESS_ELIGIBILITY url=%s domain=%s reason=%s eligible=%s headless_enabled=%s playwright_available=%s chromium_available=%s",
+            url,
+            dom,
+            reason,
+            allow_headless,
+            HEADLESS_ENABLED,
+            headless_available(),
+            chromium_ready,
+        )
         if not HEADLESS_ENABLED:
             LOG.info("HEADLESS_SKIPPED url=%s reason=disabled", url)
             return "", False, ""
@@ -6214,16 +6302,25 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
             LOG.info("HEADLESS_SKIPPED url=%s reason=playwright_missing", url)
             return "", False, ""
         if is_blocked_url(url):
-            LOG.info("HEADLESS_SKIPPED url=%s reason=blocked", url)
+            LOG.info("HEADLESS_SKIPPED url=%s reason=blocked_url", url)
             return "", False, ""
-        allow_headless = _needs_headless_contact(dom, body, js_hint=dom in CONTACT_JS_DOMAINS)
+        if not chromium_ready:
+            LOG.info("HEADLESS_SKIPPED url=%s reason=chromium_not_ready", url)
+            return "", False, ""
         if not allow_headless:
-            LOG.info("HEADLESS_SKIPPED url=%s reason=not_needed", url)
+            LOG.info("HEADLESS_SKIPPED url=%s reason=policy_not_needed", url)
             return "", False, ""
         for attempt in range(1, max(1, CONTACT_HEADLESS_RETRIES) + 1):
+            LOG.info("HEADLESS_ATTEMPT_START url=%s domain=%s reason=%s attempt=%s", url, dom, reason, attempt)
             snapshot = _headless_fetch(url, proxy_url=proxy_url, domain=dom, reason=reason)
             rendered = _combine_headless_snapshot(snapshot)
             if rendered.strip():
+                LOG.info(
+                    "HEADLESS_ATTEMPT_DONE url=%s domain=%s outcome=success attempt=%s",
+                    url,
+                    dom,
+                    attempt,
+                )
                 LOG.info(
                     "HEADLESS REVIEW used for %s (proxy=%s reason=%s)",
                     dom,
@@ -6231,6 +6328,10 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
                     reason,
                 )
                 return rendered, True, "headless"
+            outcome = "timeout" if snapshot.get("timeout") else "empty"
+            if _is_social_login_wall(snapshot.get("final_url", ""), snapshot.get("visible_text", "")):
+                outcome = "login_wall"
+            LOG.info("HEADLESS_ATTEMPT_DONE url=%s domain=%s outcome=%s attempt=%s", url, dom, outcome, attempt)
             _record_contact_failure(dom, url=url, err="headless_empty")
             if attempt < CONTACT_HEADLESS_RETRIES:
                 _contact_backoff(attempt)
@@ -6538,6 +6639,7 @@ def _headless_fetch(
 
     target_url = _unwrap_jina_url(url)
     effective_domain = domain or _domain(target_url) or ""
+    LOG.info("HEADLESS_FETCH_START url=%s domain=%s reason=%s proxy=%s", target_url, effective_domain, reason or "", bool(proxy_url))
     nav_timeout, overall_timeout, effective_domain = _compute_headless_timeouts(
         target_url,
         effective_domain,
@@ -6555,6 +6657,12 @@ def _headless_fetch(
     try:
         timeout_s = overall_timeout + 2
         result = future.result(timeout=timeout_s)
+        outcome = "success" if result and (result.get("html") or result.get("visible_text")) else "empty"
+        if _is_social_login_wall(result.get("final_url", ""), result.get("visible_text", "")):
+            outcome = "login_wall"
+        elif result.get("timeout"):
+            outcome = "timeout"
+        LOG.info("HEADLESS_FETCH_DONE url=%s domain=%s reason=%s outcome=%s", target_url, effective_domain, reason or "", outcome)
         if result.get("timeout") and not result.get("html"):
             fallback = _http_fallback_snapshot(url, domain=domain)
             if fallback:
@@ -6562,6 +6670,7 @@ def _headless_fetch(
                 return fallback
         return result
     except concurrent.futures.TimeoutError:
+        LOG.info("HEADLESS_FETCH_DONE url=%s domain=%s reason=%s outcome=timeout", target_url, effective_domain, reason or "")
         future.cancel()
         try:
             future.result(timeout=3)
@@ -7342,10 +7451,16 @@ def select_top_5_urls(
                 status = int(fetched.get("http_status", 0) or 0)
                 text = fetched.get("extracted_text", "")
                 fetch_root = _domain(final_url) or _domain(norm) or ""
-                if status in {403, 429}:
+                if status in {403, 429, 451, 999}:
                     if blocked_domains is not None and fetch_root:
                         blocked_domains.add(fetch_root)
-                    rejected.append((final_url, "blocked_status"))
+                    reason = "social_login_wall" if fetched.get("social_blocked") else "blocked_status"
+                    rejected.append((final_url, reason))
+                    continue
+                if fetched.get("social_blocked"):
+                    if blocked_domains is not None and fetch_root:
+                        blocked_domains.add(fetch_root)
+                    rejected.append((final_url, "social_login_wall"))
                     continue
                 if fetched.get("thin_response"):
                     if blocked_domains is not None and fetch_root:

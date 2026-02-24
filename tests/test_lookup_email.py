@@ -451,7 +451,7 @@ def test_select_top_5_prioritizes_non_social_and_filters_low_signal(monkeypatch)
         {"link": "https://www.facebook.com/josh.agent"},
     ]
 
-    def fake_fetch(url, ttl_days=7):
+    def fake_fetch(url, ttl_days=7, **kwargs):
         return {"extracted_text": "profile page", "http_status": 200, "final_url": url}
 
     monkeypatch.setattr(bot_min, "fetch_text_cached", fake_fetch)
@@ -558,3 +558,56 @@ def test_is_social_login_wall_detects_facebook_and_linkedin():
         "Sign in to view this profile",
     )
     assert not bot_min._is_social_login_wall("https://example.com/profile", "public profile page")
+
+
+def test_select_top_5_rejects_linkedin_social_login_wall(monkeypatch):
+    items = [{"link": "https://www.linkedin.com/in/example-agent"}]
+
+    def fake_fetch(url, ttl_days=7, respect_block=False, allow_blocking=False):
+        return {
+            "extracted_text": "Sign in to view this profile",
+            "http_status": 999,
+            "final_url": url,
+            "social_blocked": True,
+            "retry_needed": False,
+            "thin_response": False,
+        }
+
+    monkeypatch.setattr(bot_min, "fetch_text_cached", fake_fetch)
+
+    selected, rejected = bot_min.select_top_5_urls(items, fetch_check=True, limit=5)
+
+    assert selected == []
+    assert ("https://linkedin.com/in/example-agent", "social_login_wall") in rejected
+
+
+def test_fetch_text_cached_social_domains_use_domain_policy_bypass(monkeypatch):
+    calls = {"jina": 0, "direct": 0}
+
+    class _Resp:
+        def __init__(self, url, status, text):
+            self.url = url
+            self.status_code = status
+            self.text = text
+
+    def fake_http_get(url, **kwargs):
+        if "r.jina.ai" in url:
+            calls["jina"] += 1
+            return _Resp(url, 200, "jina content")
+        calls["direct"] += 1
+        return _Resp(url, 999, "Sign in to view this profile")
+
+    monkeypatch.setattr(bot_min, "_http_get", fake_http_get)
+    monkeypatch.setattr(bot_min, "_respect_domain_delay", lambda url: None)
+    monkeypatch.setattr(bot_min, "is_blocked_url", lambda url: False)
+    monkeypatch.setattr(bot_min, "_blocked", lambda dom: False)
+    monkeypatch.setattr(bot_min, "cache_get", lambda url: None)
+    monkeypatch.setattr(bot_min, "cache_set", lambda *args, **kwargs: None)
+
+    result = bot_min.fetch_text_cached("https://www.linkedin.com/in/example-agent", ttl_days=1)
+
+    assert calls["jina"] == 0
+    assert calls["direct"] >= 1
+    assert result["social_blocked"] is True
+    assert result["retry_needed"] is False
+    assert result["fetch_class"] == "login_wall"
