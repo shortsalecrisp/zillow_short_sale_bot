@@ -1393,7 +1393,7 @@ def test_select_top5_relaxes_when_empty(monkeypatch):
         "https://example.gov/agent",
     ]
 
-    def fake_fetch_cached(url, ttl_days=7):
+    def fake_fetch_cached(url, ttl_days=7, **kwargs):
         return {
             "final_url": url,
             "http_status": 200,

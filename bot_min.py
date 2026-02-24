@@ -5869,6 +5869,11 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         quality = _candidate_quality(candidates)
         return bool(quality["phones_found"] or quality["emails_found"])
 
+    def _needs_email_deepening() -> bool:
+        """Keep escalating fetch methods until we either find an email or exhaust sources."""
+        quality = _candidate_quality(candidates)
+        return not bool(quality["emails_found"])
+
     def _collect_page(page: str, final_url: str) -> None:
         try:
             page_candidates = _agent_contact_candidates_from_html(page, final_url, agent)
@@ -5979,7 +5984,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 continue
             _collect_page(page, final_url)
 
-        if not _has_verifiable_contacts():
+        if _needs_email_deepening():
             for url in urls:
                 fetched = fetch_text_cached(url, ttl_days=14, respect_block=False, allow_blocking=False)
                 status = int(fetched.get("http_status", 0) or 0)
@@ -5993,7 +5998,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 _collect_page(page, final_url)
                 _collect_parse_lite(page, final_url)
 
-        if not _has_verifiable_contacts():
+        if _needs_email_deepening():
             for idx, url in enumerate(urls):
                 dom = _domain(url)
                 if dom in headless_circuit_domains:
@@ -6024,7 +6029,7 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 final_url = snapshot.get("final_url") or url
                 _collect_page(rendered, final_url)
 
-        if not _has_verifiable_contacts() and blocked_domains:
+        if _needs_email_deepening() and blocked_domains:
             alt_urls: List[str] = []
             alt_urls.extend(_brokerage_contact_urls(agent, brokerage, domain_hint=domain_hint))
             alt_queries = _contact_alternative_queries(

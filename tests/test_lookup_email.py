@@ -377,6 +377,63 @@ def test_enrich_contact_uses_js_rendered_contact_page(monkeypatch):
     assert result["best_phone"] == "555-888-9999"
 
 
+def test_two_stage_reviews_single_url_with_jina_and_headless_when_email_missing(monkeypatch):
+    monkeypatch.setattr(
+        bot_min,
+        "_contact_search_urls",
+        lambda *args, **kwargs: (["https://only.example/agent"], False, "google", True),
+    )
+
+    class _Resp:
+        status_code = 200
+        text = "<html>PHONE_ONLY</html>"
+        url = "https://only.example/agent"
+
+    monkeypatch.setattr(bot_min._session, "get", lambda *args, **kwargs: _Resp())
+
+    fetch_calls = []
+    headless_calls = []
+
+    def fake_fetch_cached(url, ttl_days=14, respect_block=False, allow_blocking=False):
+        fetch_calls.append(url)
+        return {
+            "http_status": 200,
+            "thin_response": False,
+            "extracted_text": "PHONE_ONLY_JINA",
+            "final_url": url,
+        }
+
+    monkeypatch.setattr(bot_min, "fetch_text_cached", fake_fetch_cached)
+    monkeypatch.setattr(bot_min, "_should_use_headless_for_contact", lambda *args, **kwargs: True)
+
+    def fake_headless(url, **kwargs):
+        headless_calls.append(url)
+        return {"final_url": url, "timeout": False}
+
+    monkeypatch.setattr(bot_min, "_headless_fetch", fake_headless)
+    monkeypatch.setattr(bot_min, "_combine_headless_snapshot", lambda snapshot: "EMAIL_ONLY")
+    monkeypatch.setattr(bot_min, "parse_lite", lambda *args, **kwargs: {"emails": [], "phones": []})
+
+    def fake_extract(page, final_url, agent):
+        if "EMAIL_ONLY" in page:
+            return [{"source_url": final_url, "emails": ["alex.agent@example.com"], "phones": []}]
+        if "PHONE_ONLY" in page:
+            return [{"source_url": final_url, "emails": [], "phones": ["555-111-2222"]}]
+        return []
+
+    monkeypatch.setattr(bot_min, "_agent_contact_candidates_from_html", fake_extract)
+
+    result = bot_min._two_stage_contact_search(
+        "Alex Agent",
+        "FL",
+        {"city": "Tampa", "state": "FL"},
+    )
+
+    assert fetch_calls == ["https://only.example/agent"]
+    assert headless_calls == ["https://only.example/agent"]
+    assert result["best_email"] == "alex.agent@example.com"
+
+
 def test_ok_email_rejects_social_handles_and_needs_domain():
     assert not bot_min.ok_email("@j.ziegelbaum")
     assert not bot_min.ok_email("agent@instagram")
