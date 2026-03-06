@@ -532,6 +532,8 @@ JINA_BLOCK_SECONDS = float(os.getenv("JINA_BLOCK_SECONDS", str(BLOCK_SECONDS)))
 
 CONTACT_DOMAIN_MIN_GAP = float(os.getenv("CONTACT_DOMAIN_MIN_GAP", "4.0"))
 CONTACT_DOMAIN_GAP_JITTER = float(os.getenv("CONTACT_DOMAIN_GAP_JITTER", "1.5"))
+CONTACT_DOMAIN_CIRCUIT_THRESHOLD = int(os.getenv("CONTACT_DOMAIN_CIRCUIT_THRESHOLD", "3"))
+CONTACT_DOMAIN_CIRCUIT_SECONDS = float(os.getenv("CONTACT_DOMAIN_CIRCUIT_SECONDS", str(BLOCK_SECONDS)))
 
 CONTACT_EMAIL_MIN_SCORE = float(os.getenv("CONTACT_EMAIL_MIN_SCORE", "0.75"))
 CONTACT_EMAIL_FALLBACK_SCORE = float(os.getenv("CONTACT_EMAIL_FALLBACK_SCORE", "0.45"))
@@ -2756,6 +2758,53 @@ def _record_contact_failure(domain: str, *, url: str, err: str, status: Optional
             url,
         )
         _CONTACT_FAILURE_LAST_LOG[domain] = now
+    if count >= CONTACT_DOMAIN_CIRCUIT_THRESHOLD:
+        _mark_block(
+            domain,
+            seconds=CONTACT_DOMAIN_CIRCUIT_SECONDS,
+            reason="contact_failure_circuit",
+        )
+
+
+def _retry_after_seconds(resp: Optional[requests.Response]) -> Optional[float]:
+    if resp is None:
+        return None
+    retry_after = (resp.headers or {}).get("Retry-After", "")
+    if not retry_after:
+        return None
+    retry_after = retry_after.strip()
+    if retry_after.isdigit():
+        return max(0.0, float(retry_after))
+    return None
+
+
+def _auth_or_interstitial_path(path: str, query: str = "") -> bool:
+    low_path = (path or "").lower()
+    low_query = (query or "").lower()
+    auth_hints = (
+        "/accounts/login",
+        "/login",
+        "/signin",
+        "/sign-in",
+        "/auth",
+        "/checkpoint",
+        "/consent",
+        "/interstitial",
+    )
+    if any(tok in low_path for tok in auth_hints):
+        return True
+    return any(tok in low_query for tok in ("next=", "redirect=", "returnurl=", "continue=")) and any(
+        tok in low_path for tok in ("login", "signin", "auth")
+    )
+
+
+def _canonical_candidate_url(url: str) -> str:
+    norm = normalize_url(url)
+    if not norm:
+        return url
+    parsed = urlparse(norm)
+    path = parsed.path.rstrip("/") or "/"
+    return urlunparse((parsed.scheme, parsed.netloc.lower(), path, "", "", ""))
 
 
 def _contact_proxy_candidates(domain: str, preferred: str) -> List[str]:
@@ -5255,6 +5304,7 @@ def _contact_search_urls(
     search_exhausted = False
     cse_status = _cse_last_state
     search_cache = row_payload.setdefault("_contact_search_cache", {})
+    provider_health: Dict[str, Dict[str, Any]] = row_payload.setdefault("_search_provider_health", {})
     blocked_domains: Set[str] = set()
     headless_timeout_counts: Dict[str, int] = {}
     headless_circuit_domains: Set[str] = set()
@@ -5311,12 +5361,26 @@ def _contact_search_urls(
         *,
         existing: List[str],
     ) -> Tuple[List[Dict[str, Any]], List[str], List[Tuple[str, str]], bool]:
+        ddg_state = provider_health.setdefault("duckduckgo", {"blocked": False, "failures": 0, "success": 0})
+        if ddg_state.get("blocked"):
+            LOG.warning('DuckDuckGo blocked; skipping search for query %s', query)
+            return [], [], [], True
         ddg_results, blocked = duckduckgo_search(
             query,
             limit=search_limit,
             allowed_domains=None,
             with_blocked=True,
         )
+        if blocked:
+            ddg_state["blocked"] = True
+            ddg_state["failures"] = ddg_state.get("failures", 0) + 1
+        elif ddg_results:
+            ddg_state["success"] = ddg_state.get("success", 0) + 1
+        else:
+            ddg_state["failures"] = ddg_state.get("failures", 0) + 1
+            if ddg_state["failures"] >= DDG_BLOCK_AFTER:
+                ddg_state["blocked"] = True
+                blocked = True
         if blocked:
             _mark_block("duckduckgo.com", reason="blocked")
         selected, rejected = _select_from_results(ddg_results, location_hint=query, existing=existing)
@@ -5352,6 +5416,20 @@ def _contact_search_urls(
                 nonlocal cse_status, searches_executed
                 raw_results: List[Dict[str, Any]] = []
                 if step_engine == "google":
+                    google_state = provider_health.setdefault("google", {"blocked": False, "failures": 0, "success": 0})
+                    if google_state.get("blocked"):
+                        LOG.warning("Google CSE unhealthy; skipping search for query %s", query)
+                        cse_status = "blocked"
+                        searches_executed += 1
+                        good_urls_after_each_step.append(len(selected_urls))
+                        step_metrics.append({
+                            "engine": step_engine,
+                            "query": query,
+                            "raw_candidates": 0,
+                            "usable_after_step": len(selected_urls),
+                            "step_usable": 0,
+                        })
+                        return
                     raw_results = google_cse_search(
                         query,
                         limit=search_limit,
@@ -5366,6 +5444,13 @@ def _contact_search_urls(
                     _record_selected(selected)
                     _log_results("google", query, raw_results, selected, rejected)
                     cse_status = _cse_last_state
+                    if cse_status in {"blocked", "throttled", "disabled"}:
+                        google_state["blocked"] = True
+                        google_state["failures"] = google_state.get("failures", 0) + 1
+                    elif raw_results:
+                        google_state["success"] = google_state.get("success", 0) + 1
+                    else:
+                        google_state["failures"] = google_state.get("failures", 0) + 1
                 else:
                     raw_results, selected, rejected, ddg_blocked = _run_ddg(
                         query,
@@ -6035,8 +6120,17 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             if last_status == 200 and body:
                 return body, final_url, last_status
             if last_status in {403, 429, 451}:
+                retry_after_seconds = _retry_after_seconds(resp)
+                if retry_after_seconds:
+                    _mark_block(dom, seconds=retry_after_seconds, reason=f"http_{last_status}")
+                _record_contact_failure(dom, url=final_url, err=f"http_{last_status}", status=last_status)
                 LOG.info("CONTACT direct blocked status=%s url=%s", last_status, final_url)
                 return "", final_url, last_status
+            if last_status in {408, 425, 500, 502, 503, 504}:
+                _record_contact_failure(dom, url=final_url, err=f"http_{last_status}", status=last_status)
+                if attempt < tries:
+                    _contact_backoff(attempt)
+                    continue
             break
         return "", final_url, last_status
 
@@ -6421,6 +6515,9 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
         _CONTACT_DOMAIN_LAST_FETCH[dom] = time.time()
         status = resp.status_code
         body = (resp.text or "").strip() if resp is not None else ""
+        if _auth_or_interstitial_path(urlparse(url).path, urlparse(url).query):
+            _record_contact_failure(dom, url=url, err="login_interstitial", status=status)
+            break
         if status == 200 and body:
             if proxy_url:
                 LOG.info("CONTACT fetched via proxy %s (%s)", _redact_proxy(proxy_url), dom)
@@ -6433,6 +6530,9 @@ def fetch_contact_page(url: str) -> Tuple[str, bool, str]:
             return _finalize(html, used_fallback, "post-mirror-403", html, method=method or "jina_cache")
         if status == 429:
             _record_contact_failure(dom, url=url, err="http_429", status=status)
+            retry_after_seconds = _retry_after_seconds(resp)
+            if retry_after_seconds:
+                _mark_block(dom, seconds=retry_after_seconds, reason="retry_after")
             if attempt < tries:
                 _contact_backoff(attempt)
                 continue
@@ -7184,6 +7284,8 @@ def _top_url_allowed(link: str, *, relaxed: bool = False, allow_portals: bool = 
         return False, "gov_edu"
     if path.endswith(".pdf") or ".pdf" in path:
         return False, "pdf"
+    if _auth_or_interstitial_path(path, parsed.query):
+        return False, "login_interstitial"
     if any(block in path for block in TOP5_HARD_PATH_BLOCKS):
         return False, "hard_block_path"
     if _listing_path_blocked(path):
@@ -7422,7 +7524,7 @@ def select_top_5_urls(
     property_city = property_city.strip()
     target = min(limit, 5)
     existing_norms: Set[str] = {
-        normalize_url(u) for u in (existing or []) if u
+        _canonical_candidate_url(u) for u in (existing or []) if u
     }
     agent_tokens = [re.sub(r"[^a-z0-9]", "", part.lower()) for part in agent.split() if part.strip()]
     brokerage_token = re.sub(r"[^a-z0-9]", "", brokerage.lower()) if brokerage else ""
@@ -7503,7 +7605,7 @@ def select_top_5_urls(
                 _log_blocked_url(link)
                 rejected.append((link, "blocked_domain"))
                 continue
-            norm = normalize_url(link)
+            norm = _canonical_candidate_url(link)
             if norm in seen_links:
                 continue
             root_hint = _domain(norm) or urlparse(norm).netloc.lower()
@@ -7519,7 +7621,6 @@ def select_top_5_urls(
                 rejected.append((norm, reason))
                 continue
             allow_reason = reason
-            seen_links.add(norm)
             final_url = norm
             text = ""
             snippet_text = " ".join(part for part in (title, snippet) if part)
@@ -7565,16 +7666,27 @@ def select_top_5_urls(
                         accept_reason = "allowlist_parse_anyway"
                     else:
                         lite = parse_lite(final_url, text=text)
-                        emails_found = len(lite.get("emails", []))
-                        phones_found = len(lite.get("phones", []))
+                        emails_found = [em for em in lite.get("emails", []) if ok_email(em) and not _is_junk_email(em)]
+                        phones_found = [ph for ph in lite.get("phones", []) if valid_phone(ph)]
+                        has_agent_signal = bool(
+                            agent
+                            and _agent_matches_context(
+                                agent,
+                                text=text,
+                                snippet=location_context,
+                                title=title,
+                                url=final_url,
+                            )
+                        )
+                        has_direct_contact = bool(emails_found) or (len(phones_found) >= 2)
                         LOG.info(
                             "URL_CANDIDATE_SOFT_REJECT url=%s reason=%s parsed_lite=True emails_found=%s phones_found=%s",
                             final_url,
                             reject_reason,
-                            emails_found,
-                            phones_found,
+                            len(emails_found),
+                            len(phones_found),
                         )
-                        if emails_found or phones_found:
+                        if has_agent_signal and has_direct_contact:
                             accept_reason = f"{reject_reason}_parse_lite_contact"
                         else:
                             rejected.append((final_url, reject_reason))
@@ -7694,7 +7806,11 @@ def select_top_5_urls(
                     else:
                         rejected.append((final_url, "agent_mismatch"))
                         continue
-            original_order.setdefault(normalize_url(final_url), original_order.get(norm, idx))
+            canonical_final = _canonical_candidate_url(final_url)
+            if canonical_final in seen_links:
+                continue
+            seen_links.add(canonical_final)
+            original_order.setdefault(canonical_final, original_order.get(norm, idx))
             root = _domain(final_url) or _domain(norm) or ""
             score = _good_candidate_score(final_url, snippet=snippet_text, text=text)
             if relax and score <= 0 and not _is_social_root(root):
