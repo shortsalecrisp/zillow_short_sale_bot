@@ -19,6 +19,12 @@ HEADLESS_BROWSER_DOWNLOAD = os.getenv("HEADLESS_BROWSER_DOWNLOAD", "true").lower
 
 _browser_ready = False
 _browser_ready_lock = asyncio.Lock()
+_playwright = None
+_shared_browser = None
+_shared_browser_lock = asyncio.Lock()
+_headless_page_limit = max(1, int(os.getenv("HEADLESS_BROWSER_MAX_PAGES", "2")))
+_headless_page_semaphore = asyncio.Semaphore(_headless_page_limit)
+_active_contexts = 0
 
 
 def headless_available() -> bool:
@@ -121,6 +127,7 @@ async def fetch_headless_snapshot(
     block_resources: bool = True,
     logger: Optional[logging.Logger] = None,
 ) -> Dict[str, Any]:
+    global _playwright, _shared_browser, _active_contexts
     if not headless_available():
         return {}
     from playwright.async_api import async_playwright
@@ -146,8 +153,17 @@ async def fetch_headless_snapshot(
         ]
         if proxy_url:
             args.append(f"--proxy-server={proxy_url}")
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True, args=args, timeout=nav_timeout_ms)
+        queue_start = asyncio.get_running_loop().time()
+        async with _headless_page_semaphore:
+            wait_s = asyncio.get_running_loop().time() - queue_start
+            if logger:
+                logger.info("HEADLESS_QUEUE_ACQUIRED url=%s wait_s=%.2f max_pages=%s", url, wait_s, _headless_page_limit)
+            async with _shared_browser_lock:
+                if _playwright is None:
+                    _playwright = await async_playwright().start()
+                if _shared_browser is None or not _shared_browser.is_connected():
+                    _shared_browser = await _playwright.chromium.launch(headless=True, args=args, timeout=nav_timeout_ms)
+                browser = _shared_browser
             headers = {"Accept-Language": accept_language}
             if extra_headers:
                 headers.update({k: v for k, v in extra_headers.items() if v})
@@ -156,6 +172,9 @@ async def fetch_headless_snapshot(
                 extra_http_headers=headers,
                 viewport={"width": 1280, "height": 720},
             )
+            _active_contexts += 1
+            if logger:
+                logger.info("HEADLESS_CONTEXT_OPEN url=%s active_contexts=%s", url, _active_contexts)
             if cookies:
                 try:
                     await context.add_cookies(cookies)
@@ -231,7 +250,9 @@ async def fetch_headless_snapshot(
                 await context.close()
             except Exception:
                 pass
-        if browser:
+            finally:
+                _active_contexts = max(0, _active_contexts - 1)
+        if browser and browser is not _shared_browser:
             try:
                 await browser.close()
             except Exception:

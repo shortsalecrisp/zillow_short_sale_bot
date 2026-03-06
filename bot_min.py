@@ -35,6 +35,7 @@ from headless_browser import (
     headless_available,
     random_accept_language,
 )
+from lightweight_extract import extract_lightweight_snapshot
 try:
     import dns.resolver  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -119,6 +120,10 @@ HEADLESS_BROWSER_RETRY_ATTEMPTS = int(os.getenv("HEADLESS_BROWSER_RETRY_ATTEMPTS
 HEADLESS_SOCIAL_TIMEOUT_MS = int(os.getenv("HEADLESS_SOCIAL_TIMEOUT_MS", "18000"))
 HEADLESS_SOCIAL_WAIT_MS = int(os.getenv("HEADLESS_SOCIAL_WAIT_MS", "900"))
 HEADLESS_SOCIAL_RETRY_ATTEMPTS = int(os.getenv("HEADLESS_SOCIAL_RETRY_ATTEMPTS", "1"))
+HEADLESS_PROMOTE_AFTER = int(os.getenv("HEADLESS_PROMOTE_AFTER", "2"))
+HEADLESS_DEMOTE_AFTER_TIMEOUTS = int(os.getenv("HEADLESS_DEMOTE_AFTER_TIMEOUTS", "2"))
+HEADLESS_DOMAIN_COOLDOWN_S = int(os.getenv("HEADLESS_DOMAIN_COOLDOWN_S", "600"))
+HEADLESS_QUEUE_TIMEOUT_S = int(os.getenv("HEADLESS_QUEUE_TIMEOUT_S", "8"))
 JINA_THIN_TEXT_CHARS = int(os.getenv("JINA_THIN_TEXT_CHARS", "450"))
 HEADLESS_NAV_TIMEOUT_OVERRIDES = {
     k.strip().lower(): int(v)
@@ -168,6 +173,7 @@ SEEN_ZPID_CACHE_SECONDS = int(os.getenv("SEEN_ZPID_CACHE_SECONDS", "300"))
 _headless_loop: Optional[asyncio.AbstractEventLoop] = None
 _headless_loop_thread: Optional[threading.Thread] = None
 _headless_loop_lock = threading.Lock()
+_headless_domain_outcomes: Dict[str, Dict[str, Any]] = {}
 
 
 def _ensure_headless_loop() -> asyncio.AbstractEventLoop:
@@ -2438,14 +2444,18 @@ def _has_contact_signals(body: str) -> bool:
 
 
 def _needs_headless_contact(dom: str, body: str, *, js_hint: bool = False) -> bool:
+    state = _headless_domain_state(dom)
+    if state.get("cooldown_until", 0.0) > time.time():
+        return False
     allow_blocked = js_hint or not (body or "").strip()
-    if not _should_use_headless_for_contact(dom, body, js_hint=js_hint, allow_blocked=allow_blocked):
+    promoted = _headless_domain_promoted(dom)
+    if not _should_use_headless_for_contact(dom, body, js_hint=(js_hint or promoted), allow_blocked=allow_blocked):
         return False
     if not (body or "").strip():
         return True
     if _has_contact_signals(body):
         return False
-    return js_hint or _looks_like_js_required(body)
+    return js_hint or promoted or _looks_like_js_required(body)
 
 def _combine_headless_snapshot(snapshot: Dict[str, Any]) -> str:
     if not snapshot or snapshot.get("timeout"):
@@ -3169,13 +3179,19 @@ def fetch_text_cached(
             text = direct_resp.text if direct_resp and direct_resp.text else ""
             status = direct_resp.status_code if direct_resp else 0
             final_url = getattr(direct_resp, "url", norm) if direct_resp else norm
-            if status in {403, 429, 451} and dom in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
+            if status == 200 and text.strip():
+                lite_snapshot = extract_lightweight_snapshot(text, final_url=final_url)
+                if lite_snapshot.get("visible_text"):
+                    text = _combine_headless_snapshot(lite_snapshot)
+            if status in {403, 429, 451} and (dom in HEADLESS_THIN_FALLBACK_DOMAINS or _headless_domain_promoted(dom)) and HEADLESS_ENABLED:
+                _headless_record_domain_outcome(dom, "blocked")
                 snapshot = _headless_fetch(norm, domain=dom, reason=reason)
                 rendered = _combine_headless_snapshot(snapshot)
                 if rendered.strip():
                     text = rendered
                     status = 200
                     final_url = norm
+                    _headless_record_domain_outcome(dom, "success")
         except Exception:
             text = ""
             status = 0
@@ -3268,7 +3284,7 @@ def fetch_text_cached(
                 direct_status = direct_resp.status_code if direct_resp else 0
                 if direct_status in {403, 429, 451}:
                     dom_for_fallback = _domain(norm)
-                    if dom_for_fallback in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
+                    if (dom_for_fallback in HEADLESS_THIN_FALLBACK_DOMAINS or _headless_domain_promoted(dom_for_fallback)) and HEADLESS_ENABLED:
                         snapshot = _headless_fetch(norm, domain=dom_for_fallback, reason="jina-400-direct-blocked")
                         rendered = _combine_headless_snapshot(snapshot)
                         if rendered.strip():
@@ -3295,6 +3311,7 @@ def fetch_text_cached(
 
     if success and _is_thin_jina_response(text):
         thin_response = True
+        _headless_record_domain_outcome(dom, "thin")
         LOG.info("JINA_THIN_RESPONSE url=%s bytes=%s; retrying direct fetch", norm, len(text.encode("utf-8")))
         try:
             direct_status = 0
@@ -3312,13 +3329,17 @@ def fetch_text_cached(
                 text = direct_resp.text
                 status = direct_resp.status_code
                 final_url = getattr(direct_resp, "url", norm)
+                lite_snapshot = extract_lightweight_snapshot(text, final_url=final_url)
+                if lite_snapshot.get("visible_text"):
+                    text = _combine_headless_snapshot(lite_snapshot)
                 success = True
                 retry_needed = False
                 thin_response = False
             else:
                 if direct_status in {403, 429, 451}:
                     dom_for_fallback = _domain(norm)
-                    if dom_for_fallback in HEADLESS_THIN_FALLBACK_DOMAINS and HEADLESS_ENABLED:
+                    if (dom_for_fallback in HEADLESS_THIN_FALLBACK_DOMAINS or _headless_domain_promoted(dom_for_fallback)) and HEADLESS_ENABLED:
+                        _headless_record_domain_outcome(dom_for_fallback, "blocked")
                         snapshot = _headless_fetch(norm, domain=dom_for_fallback, reason="thin-direct-blocked")
                         rendered = _combine_headless_snapshot(snapshot)
                         if rendered.strip():
@@ -3328,6 +3349,7 @@ def fetch_text_cached(
                             success = True
                             retry_needed = False
                             thin_response = False
+                            _headless_record_domain_outcome(dom_for_fallback, "success")
                             LOG.info("JINA_THIN_FALLBACK_HEADLESS url=%s", norm)
                             return {
                                 "url": norm,
@@ -6485,6 +6507,50 @@ def _is_social_domain(domain: str) -> bool:
     return any(dom == root or dom.endswith(f".{root}") for root in HEADLESS_SOCIAL_DOMAINS)
 
 
+def _headless_domain_state(domain: str) -> Dict[str, Any]:
+    dom = _domain(domain)
+    return _headless_domain_outcomes.setdefault(
+        dom,
+        {
+            "thin_count": 0,
+            "blocked_count": 0,
+            "timeout_count": 0,
+            "success_count": 0,
+            "cooldown_until": 0.0,
+        },
+    )
+
+
+def _headless_record_domain_outcome(domain: str, outcome: str) -> None:
+    dom = _domain(domain)
+    if not dom:
+        return
+    state = _headless_domain_state(dom)
+    if outcome == "thin":
+        state["thin_count"] += 1
+    elif outcome == "blocked":
+        state["blocked_count"] += 1
+    elif outcome == "timeout":
+        state["timeout_count"] += 1
+        if state["timeout_count"] >= max(1, HEADLESS_DEMOTE_AFTER_TIMEOUTS):
+            state["cooldown_until"] = time.time() + max(60, HEADLESS_DOMAIN_COOLDOWN_S)
+    elif outcome == "success":
+        state["success_count"] += 1
+        state["timeout_count"] = 0
+        state["cooldown_until"] = 0.0
+
+
+def _headless_domain_promoted(domain: str) -> bool:
+    dom = _domain(domain)
+    if not dom:
+        return False
+    state = _headless_domain_state(dom)
+    if state.get("cooldown_until", 0.0) > time.time():
+        return False
+    score = state.get("thin_count", 0) + state.get("blocked_count", 0)
+    return score >= max(1, HEADLESS_PROMOTE_AFTER)
+
+
 def _is_social_login_wall(url: str, body: str = "") -> bool:
     surface = f"{url or ''}\n{body or ''}".lower()
     if "linkedin.com" in surface and ("/authwall" in surface or "status=999" in surface or "sign in" in surface):
@@ -6515,7 +6581,7 @@ def _compute_headless_timeouts(
     nav_timeout = max(10000, nav_timeout)
     effective_domain = effective_domain or _domain(target_url) or ""
     nav_timeout = _headless_nav_timeout_for(target_url, effective_domain, nav_timeout)
-    overall_timeout = max(15, min(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 10)))
+    overall_timeout = max(12, min(HEADLESS_OVERALL_TIMEOUT_S, int((nav_timeout / 1000) + 8)))
     if effective_domain in HEADLESS_SLOW_DOMAINS:
         overall_timeout = max(overall_timeout, HEADLESS_OVERALL_TIMEOUT_S + 15)
     return nav_timeout, overall_timeout, effective_domain
@@ -6596,22 +6662,35 @@ async def _headless_fetch_async(
     last_snapshot: Dict[str, Any] = {}
     for attempt in range(retry_attempts):
         try:
+            queue_start = time.time()
             last_snapshot = await asyncio.wait_for(_run_once(), timeout=overall_timeout)
+            queue_elapsed = time.time() - queue_start
             if last_snapshot:
+                LOG.info(
+                    "HEADLESS_ATTEMPT_METRICS url=%s attempt=%s elapsed_s=%.2f",
+                    target_url,
+                    attempt + 1,
+                    queue_elapsed,
+                )
                 if _is_social_login_wall(
                     last_snapshot.get("final_url", ""),
                     (last_snapshot.get("visible_text", "") or "")[:2000],
                 ):
                     LOG.info("HEADLESS_ABORT_REASON=social_login_wall url=%s", target_url)
                     break
+                _headless_record_domain_outcome(effective_domain, "success")
                 return last_snapshot
         except asyncio.TimeoutError:
             LOG.warning(
-                "HEADLESS_TIMEOUT url=%s err=%s timeout_s=%s",
+                "HEADLESS_TIMEOUT url=%s err=%s timeout_s=%s timeout_stage=%s",
                 target_url,
                 "overall_timeout",
                 overall_timeout,
+                "run_once",
             )
+            _headless_record_domain_outcome(effective_domain, "timeout")
+            if not last_snapshot.get("html"):
+                break
         except Exception as exc:
             LOG.warning("HEADLESS_ERROR url=%s err=%s attempt=%s", target_url, exc, attempt + 1)
         if attempt < retry_attempts - 1:
@@ -6655,7 +6734,7 @@ def _headless_fetch(
     )
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
-        timeout_s = overall_timeout + 2
+        timeout_s = min(overall_timeout + 2, max(8, HEADLESS_QUEUE_TIMEOUT_S + overall_timeout))
         result = future.result(timeout=timeout_s)
         outcome = "success" if result and (result.get("html") or result.get("visible_text")) else "empty"
         if _is_social_login_wall(result.get("final_url", ""), result.get("visible_text", "")):
@@ -6664,6 +6743,7 @@ def _headless_fetch(
             outcome = "timeout"
         LOG.info("HEADLESS_FETCH_DONE url=%s domain=%s reason=%s outcome=%s", target_url, effective_domain, reason or "", outcome)
         if result.get("timeout") and not result.get("html"):
+            _headless_record_domain_outcome(effective_domain, "timeout")
             fallback = _http_fallback_snapshot(url, domain=domain)
             if fallback:
                 LOG.info("HEADLESS_TIMEOUT_FALLBACK_HTTP url=%s", url)
@@ -6677,11 +6757,14 @@ def _headless_fetch(
         except Exception:
             pass
         LOG.warning(
-            "HEADLESS_TIMEOUT url=%s err=%s timeout_s=%s",
+            "HEADLESS_TIMEOUT url=%s err=%s timeout_s=%s timeout_stage=%s domain_budget_remaining=%s",
             url,
             "thread-timeout",
             timeout_s,
+            "thread-runner",
+            max(0, HEADLESS_OVERALL_TIMEOUT_S - timeout_s),
         )
+        _headless_record_domain_outcome(effective_domain, "timeout")
         fallback = _http_fallback_snapshot(url, domain=domain)
         if fallback:
             LOG.info("HEADLESS_TIMEOUT_FALLBACK_HTTP url=%s", url)
