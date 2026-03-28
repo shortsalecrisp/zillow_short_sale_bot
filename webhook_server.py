@@ -91,6 +91,89 @@ APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
 APIFY_FETCH_BACKOFF_SECONDS = float(os.getenv("APIFY_FETCH_BACKOFF_SECONDS", "2.0"))
 APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "300"))
+APIFY_STATE_SEARCH_ENABLED = os.getenv("APIFY_STATE_SEARCH_ENABLED", "true").lower() == "true"
+APIFY_STATE_SEARCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_LIMIT", "5"))
+APIFY_STATE_SEARCH_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_SEARCH_TIMEOUT_SECONDS", "60"))
+
+
+def _task_enabled(task_id: Optional[str]) -> bool:
+    return APIFY_STATE_SEARCH_ENABLED and bool(task_id)
+
+
+EXTRA_STATE_SEARCHES = [
+    {"source": "mi", "task_id": os.getenv("APIFY_TASK_MI", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_MI", "").strip())},
+    {"source": "ak", "task_id": os.getenv("APIFY_TASK_AK", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_AK", "").strip())},
+    {"source": "hi", "task_id": os.getenv("APIFY_TASK_HI", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_HI", "").strip())},
+]
+
+
+def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[str, Any]]:
+    if not APIFY_TOKEN:
+        logger.warning("state-search: source=%s task_id=%s skipped missing_apify_token", source, task_id)
+        return []
+    limit = max(APIFY_STATE_SEARCH_LIMIT, 0)
+    if limit <= 0:
+        logger.info("state-search: source=%s task_id=%s skipped limit=%s", source, task_id, APIFY_STATE_SEARCH_LIMIT)
+        return []
+
+    url = f"https://api.apify.com/v2/actor-tasks/{task_id}/run-sync-get-dataset-items"
+    params = {
+        "token": APIFY_TOKEN,
+        "limit": limit,
+        "maxItems": limit,
+        "desc": "true",
+        "clean": "true",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=APIFY_STATE_SEARCH_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, list):
+            logger.warning(
+                "state-search: source=%s task_id=%s invalid_payload_type=%s",
+                source,
+                task_id,
+                type(payload).__name__,
+            )
+            return []
+        rows: List[Dict[str, Any]] = []
+        for item in payload[:limit]:
+            if not isinstance(item, dict):
+                continue
+            enriched = dict(item)
+            enriched.setdefault("search_source", source)
+            rows.append(enriched)
+        logger.info(
+            "state-search: source=%s task_id=%s returned=%s",
+            source,
+            task_id,
+            len(rows),
+        )
+        return rows
+    except requests.Timeout:
+        logger.warning("state-search: source=%s task_id=%s timeout", source, task_id)
+    except requests.RequestException as exc:
+        logger.warning("state-search: source=%s task_id=%s request_error=%s", source, task_id, exc)
+    except ValueError:
+        logger.warning("state-search: source=%s task_id=%s invalid_json", source, task_id)
+    return []
+
+
+def _fetch_extra_state_rows() -> List[Dict[str, Any]]:
+    if not APIFY_STATE_SEARCH_ENABLED:
+        return []
+    collected: List[Dict[str, Any]] = []
+    for cfg in EXTRA_STATE_SEARCHES:
+        source = cfg["source"]
+        task_id = cfg["task_id"]
+        enabled = bool(cfg.get("enabled"))
+        if not enabled:
+            if task_id:
+                logger.info("state-search: source=%s task_id=%s disabled", source, task_id)
+            continue
+        rows = _run_state_task_sync_dataset_items(task_id, source)
+        collected.extend(rows)
+    return collected
 
 
 def _should_run_immediately() -> bool:
@@ -1169,6 +1252,22 @@ async def apify_hook(request: Request):
             logger.info("apify-hook: fetched %d rows from dataset %s", len(rows), dataset_id)
         else:
             logger.info("apify-hook: dataset %s empty after retries", dataset_id)
+
+    should_fetch_extra_state_rows = payload_listings is not None
+    if should_fetch_extra_state_rows:
+        extra_state_rows = _fetch_extra_state_rows()
+        if extra_state_rows:
+            base_count = len(rows) if rows else 0
+            rows = (rows or []) + extra_state_rows
+            logger.info(
+                "state-search: appended=%d combined_before_dedupe=%d",
+                len(extra_state_rows),
+                len(rows),
+            )
+            if base_count:
+                logger.info("state-search: original_batch_count=%d", base_count)
+    else:
+        logger.debug("state-search: skipped extra fetch for non-primary webhook event source=%s", row_source)
 
     if rows:
         if row_source == "none":

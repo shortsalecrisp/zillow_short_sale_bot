@@ -28,6 +28,24 @@ By default the webhook server launches the hourly Apify scheduler. Deployments t
 
 * `DISABLE_APIFY_SCHEDULER=true`
 
+## Additional MI/AK/HI Apify state searches
+
+The bot can optionally run three extra Apify actor tasks directly from inside `webhook_server.py` and append their
+results into the same downstream pipeline used by the existing Zillow webhook ingestion (normalize → dedupe → qualify
+→ detail/retry → sheet/contact/SMS).
+
+Set these environment variables:
+
+* `APIFY_TASK_MI`
+* `APIFY_TASK_AK`
+* `APIFY_TASK_HI`
+* `APIFY_STATE_SEARCH_ENABLED=true` (default)
+* `APIFY_STATE_SEARCH_LIMIT=5` (default)
+
+These extra state tasks are intentionally **not** webhook-driven. The bot fetches them via Apify
+`/v2/actor-tasks/{taskId}/run-sync-get-dataset-items` with `limit=5` to cap what the bot receives and `maxItems=5`
+as a pay-per-result billing guardrail.
+
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main
 process so the hourly follow-up scheduler stays active.
