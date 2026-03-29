@@ -1528,6 +1528,11 @@ def _merge_rapid_listing_data(row: Dict[str, Any], rapid_payload: Dict[str, Any]
             row["state"] = address_fields["state"]
         if not row.get("zip") and address_fields.get("zip"):
             row["zip"] = address_fields["zip"]
+    listing_text = _listing_text_from_payload(rapid_payload)
+    if listing_text:
+        row.setdefault("listing_description", listing_text)
+        row.setdefault("listingText", listing_text)
+        row.setdefault("description", listing_text)
 
 
 def _is_weekend(d: datetime) -> bool:
@@ -12276,6 +12281,32 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
     for r in rows:
         zpid = str(r.get("zpid", ""))
         listing_text = _listing_text_from_payload(r)
+        source = str(r.get("search_source", "") or "")
+        is_extra_state_row = source in {"mi", "ak", "hi"}
+        if is_extra_state_row and not listing_text:
+            LOG.info(
+                "EXTRA_STATE_DETAIL_ENRICHMENT_ROUTE zpid=%s source=%s has_text_before=%s",
+                zpid,
+                source,
+                False,
+            )
+            rapid_payload = _rapid_from_payload(r)
+            if rapid_payload:
+                _merge_rapid_listing_data(r, rapid_payload)
+                listing_text = _listing_text_from_payload(r)
+            LOG.info(
+                "EXTRA_STATE_DETAIL_ENRICHMENT_RESULT zpid=%s source=%s has_text_after=%s",
+                zpid,
+                source,
+                bool(listing_text),
+            )
+        if is_extra_state_row:
+            LOG.info(
+                "EXTRA_STATE_CLASSIFY_READY zpid=%s source=%s has_text=%s",
+                zpid,
+                source,
+                bool(listing_text),
+            )
         short_sale_text = _short_sale_text_from_payload(listing_text)
         exclusion_reason = _short_sale_exclusion_reason(short_sale_text)
         if exclusion_reason:

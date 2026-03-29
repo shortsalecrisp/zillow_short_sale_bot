@@ -1193,6 +1193,7 @@ async def apify_hook(request: Request):
             or payload.get("dataset_id")
             or payload.get("datasetID")
             or payload.get("defaultDatasetId")
+            or payload.get("upstreamDatasetId")
         )
         if isinstance(payload.get("items"), list):
             rows = payload.get("items")
@@ -1275,6 +1276,11 @@ async def apify_hook(request: Request):
         row_source = "payload.listings"
 
         extra_state_rows = _fetch_extra_state_rows()
+        logger.info(
+            "state-search: fetch_once invoked enabled=%s fetched=%d",
+            APIFY_STATE_SEARCH_ENABLED,
+            len(extra_state_rows),
+        )
         if extra_state_rows:
             extra_selection = _select_unseen_rows(
                 extra_state_rows,
@@ -1292,6 +1298,12 @@ async def apify_hook(request: Request):
                 extra_selection["selected"],
             )
             logger.info("state-search: final_appended=%d", len(extra_selection["rows"]))
+            routed_for_detail = sum(1 for row in extra_selection["rows"] if not _row_has_listing_text(row))
+            if routed_for_detail:
+                logger.info(
+                    "state-search: detail-enrichment-route rows=%d reason=missing_listing_text",
+                    routed_for_detail,
+                )
 
     if rows is not None:
         normalized_rows: List[Dict[str, Any]] = []
@@ -1391,20 +1403,7 @@ async def apify_hook(request: Request):
         else:
             logger.info("apify-hook: dataset %s empty after retries", dataset_id)
 
-    should_fetch_extra_state_rows = payload_listings is not None
-    if should_fetch_extra_state_rows:
-        extra_state_rows = _fetch_extra_state_rows()
-        if extra_state_rows:
-            base_count = len(rows) if rows else 0
-            rows = (rows or []) + extra_state_rows
-            logger.info(
-                "state-search: appended=%d combined_before_dedupe=%d",
-                len(extra_state_rows),
-                len(rows),
-            )
-            if base_count:
-                logger.info("state-search: original_batch_count=%d", base_count)
-    else:
+    if payload_listings is None:
         logger.debug("state-search: skipped extra fetch for non-primary webhook event source=%s", row_source)
 
     if rows:
