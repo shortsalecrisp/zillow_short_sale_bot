@@ -91,6 +91,78 @@ APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
 APIFY_FETCH_BACKOFF_SECONDS = float(os.getenv("APIFY_FETCH_BACKOFF_SECONDS", "2.0"))
 APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "300"))
+APIFY_STATE_SEARCH_ENABLED = os.getenv("APIFY_STATE_SEARCH_ENABLED", "true").lower() == "true"
+APIFY_STATE_SEARCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_LIMIT", "5"))
+APIFY_STATE_SEARCH_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_SEARCH_TIMEOUT_SECONDS", "60"))
+
+
+def _task_enabled(task_id: Optional[str]) -> bool:
+    return APIFY_STATE_SEARCH_ENABLED and bool(task_id)
+
+
+EXTRA_STATE_SEARCHES = [
+    {"source": "mi", "task_id": os.getenv("APIFY_TASK_MI", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_MI", "").strip())},
+    {"source": "ak", "task_id": os.getenv("APIFY_TASK_AK", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_AK", "").strip())},
+    {"source": "hi", "task_id": os.getenv("APIFY_TASK_HI", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_HI", "").strip())},
+]
+
+
+def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[str, Any]]:
+    if not APIFY_TOKEN:
+        logger.warning("state-search: source=%s task_id=%s skipped missing_apify_token", source, task_id)
+        return []
+    limit = max(APIFY_STATE_SEARCH_LIMIT, 0)
+    if limit <= 0:
+        logger.info("state-search: source=%s task_id=%s skipped limit=%s", source, task_id, APIFY_STATE_SEARCH_LIMIT)
+        return []
+
+    url = f"https://api.apify.com/v2/actor-tasks/{task_id}/run-sync-get-dataset-items"
+    params = {
+        "token": APIFY_TOKEN,
+        "limit": limit,
+        "maxItems": limit,
+        "desc": "true",
+        "clean": "true",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=APIFY_STATE_SEARCH_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, list):
+            logger.warning(
+                "state-search: source=%s task_id=%s invalid_payload_type=%s",
+                source,
+                task_id,
+                type(payload).__name__,
+            )
+            return []
+        raw_rows = [item for item in payload[:limit] if isinstance(item, dict)]
+        prepared = _prepare_extra_state_rows(raw_rows, source)
+        return prepared["rows"]
+    except requests.Timeout:
+        logger.warning("state-search: source=%s task_id=%s timeout", source, task_id)
+    except requests.RequestException as exc:
+        logger.warning("state-search: source=%s task_id=%s request_error=%s", source, task_id, exc)
+    except ValueError:
+        logger.warning("state-search: source=%s task_id=%s invalid_json", source, task_id)
+    return []
+
+
+def _fetch_extra_state_rows() -> List[Dict[str, Any]]:
+    if not APIFY_STATE_SEARCH_ENABLED:
+        return []
+    collected: List[Dict[str, Any]] = []
+    for cfg in EXTRA_STATE_SEARCHES:
+        source = cfg["source"]
+        task_id = cfg["task_id"]
+        enabled = bool(cfg.get("enabled"))
+        if not enabled:
+            if task_id:
+                logger.info("state-search: source=%s task_id=%s disabled", source, task_id)
+            continue
+        rows = _run_state_task_sync_dataset_items(task_id, source)
+        collected.extend(rows)
+    return collected
 
 
 def _should_run_immediately() -> bool:
@@ -479,42 +551,171 @@ def _extract_hard_skip_zpids(payload: Dict[str, Any]) -> set[str]:
     return {str(val).strip() for val in candidates if str(val).strip()}
 
 
-def _select_payload_listings(payload: Dict[str, Any]) -> Dict[str, Any]:
-    received_rows = payload.get("listings")
-    if not isinstance(received_rows, list):
-        return {"rows": [], "received": 0, "hard_skipped": 0, "already_seen": 0, "selected": 0}
-    seen_set = load_seen_zpids()
-    hard_skip = _extract_hard_skip_zpids(payload)
+def _select_unseen_rows(
+    received_rows: List[Dict[str, Any]],
+    seen_set: set[str],
+    hard_skip: set[str],
+    *,
+    max_rows: Optional[int] = None,
+) -> Dict[str, Any]:
     selected_rows: List[Dict[str, Any]] = []
     selected_zpids: List[str] = []
     selected_addresses: List[str] = []
     hard_skipped = 0
     already_seen = 0
+    invalid_rows = 0
+    selected_zpid_set: set[str] = set()
+
     for row in received_rows:
         if not isinstance(row, dict):
+            invalid_rows += 1
             continue
         zpid = str(row.get("zpid", "")).strip()
-        if not zpid:
-            continue
-        if zpid in hard_skip:
+        if zpid and zpid in hard_skip:
             hard_skipped += 1
             continue
-        if zpid in seen_set:
+        if zpid and zpid in seen_set:
             already_seen += 1
             continue
-        if len(selected_rows) < 5:
-            selected_rows.append(row)
+        if zpid and zpid in selected_zpid_set:
+            continue
+        if max_rows is not None and len(selected_rows) >= max_rows:
+            continue
+
+        selected_rows.append(row)
+        if zpid:
+            selected_zpid_set.add(zpid)
             selected_zpids.append(zpid)
-            selected_addresses.append(_format_listing_address(row))
+        selected_addresses.append(_format_listing_address(row))
+
     return {
         "rows": selected_rows,
         "received": len(received_rows),
         "hard_skipped": hard_skipped,
         "already_seen": already_seen,
+        "invalid_rows": invalid_rows,
         "selected": len(selected_rows),
         "selected_zpids": selected_zpids,
         "selected_addresses": [addr for addr in selected_addresses if addr],
     }
+
+
+_ZPID_IN_URL_RE = re.compile(r"/(\d+)_zpid", re.IGNORECASE)
+
+
+def _extra_state_listing_url(row: Dict[str, Any]) -> str:
+    for key in (
+        "detailUrl",
+        "detailURL",
+        "propertyUrl",
+        "propertyURL",
+        "listingUrl",
+        "listingURL",
+        "url",
+        "href",
+    ):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _normalize_extra_state_row(row: Dict[str, Any], source: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not isinstance(row, dict):
+        return None, "invalid_type"
+    if row.get("error"):
+        return None, "error_field"
+
+    candidate = dict(row)
+    candidate["search_source"] = source
+
+    detail_url = _extra_state_listing_url(candidate)
+    if detail_url:
+        candidate["detailUrl"] = detail_url
+        candidate.setdefault("propertyUrl", detail_url)
+
+    zpid_val = candidate.get("zpid")
+    if not zpid_val:
+        for path in (("property", "zpid"), ("listing", "zpid"), ("home", "zpid")):
+            current: Any = candidate
+            for key in path:
+                if not isinstance(current, dict):
+                    current = None
+                    break
+                current = current.get(key)
+            if current:
+                zpid_val = current
+                break
+    if not zpid_val and detail_url:
+        match = _ZPID_IN_URL_RE.search(detail_url)
+        if match:
+            zpid_val = match.group(1)
+    if zpid_val:
+        candidate["zpid"] = str(zpid_val).strip()
+
+    listing_text = extract_description(candidate)
+    if listing_text:
+        candidate.setdefault("listingText", listing_text)
+        candidate.setdefault("description", listing_text)
+        candidate["listing_description"] = listing_text
+
+    normalized = _normalize_apify_row(candidate)
+    has_zpid = bool(str(normalized.get("zpid", "")).strip())
+    has_url = bool(_extra_state_listing_url(normalized))
+    if not has_zpid and not has_url:
+        return None, "missing_zpid_and_url"
+
+    if not _row_has_expected_fields(normalized) and not (has_zpid and has_url):
+        return None, "not_valid_candidate"
+
+    return normalized, None
+
+
+def _select_payload_listings(payload: Dict[str, Any]) -> Dict[str, Any]:
+    received_rows = payload.get("listings")
+    if not isinstance(received_rows, list):
+        return {"rows": [], "received": 0, "hard_skipped": 0, "already_seen": 0, "invalid_rows": 0, "selected": 0}
+    seen_set = load_seen_zpids()
+    hard_skip = _extract_hard_skip_zpids(payload)
+    return _select_unseen_rows(received_rows, seen_set, hard_skip, max_rows=5)
+
+
+def _prepare_extra_state_rows(raw_rows: List[Dict[str, Any]], source: str) -> Dict[str, Any]:
+    fetched = len(raw_rows)
+    kept: List[Dict[str, Any]] = []
+    dropped_error = 0
+    dropped_missing_id_url = 0
+    dropped_invalid = 0
+
+    for row in raw_rows:
+        normalized, drop_reason = _normalize_extra_state_row(row, source)
+        if normalized:
+            kept.append(normalized)
+            continue
+        if drop_reason == "error_field":
+            dropped_error += 1
+        elif drop_reason == "missing_zpid_and_url":
+            dropped_missing_id_url += 1
+        else:
+            dropped_invalid += 1
+
+    logger.info(
+        "state-search: source=%s fetched=%d dropped_error=%d dropped_missing_id_url=%d dropped_invalid=%d normalized_kept=%d",
+        source,
+        fetched,
+        dropped_error,
+        dropped_missing_id_url,
+        dropped_invalid,
+        len(kept),
+    )
+    return {
+        "rows": kept,
+        "fetched": fetched,
+        "dropped_error": dropped_error,
+        "dropped_missing_id_url": dropped_missing_id_url,
+        "dropped_invalid": dropped_invalid,
+    }
+
 
 
 def _process_incoming_rows(
@@ -1059,10 +1260,11 @@ async def apify_hook(request: Request):
     if payload_listings is not None:
         selection = _select_payload_listings(payload)
         logger.info(
-            "apify-hook: selection received=%s hard_skipped=%s already_seen=%s selected=%s",
+            "apify-hook: selection received=%s hard_skipped=%s already_seen=%s invalid=%s selected=%s",
             selection["received"],
             selection["hard_skipped"],
             selection["already_seen"],
+            selection.get("invalid_rows", 0),
             selection["selected"],
         )
         if selection.get("selected_zpids"):
@@ -1071,6 +1273,25 @@ async def apify_hook(request: Request):
             logger.info("apify-hook: selected addresses=%s", selection["selected_addresses"])
         rows = selection["rows"]
         row_source = "payload.listings"
+
+        extra_state_rows = _fetch_extra_state_rows()
+        if extra_state_rows:
+            extra_selection = _select_unseen_rows(
+                extra_state_rows,
+                load_seen_zpids(),
+                _extract_hard_skip_zpids(payload),
+                max_rows=None,
+            )
+            rows = _merge_rows_by_zpid(rows, extra_selection["rows"])
+            logger.info(
+                "state-search: unseen_filter received=%d hard_skipped=%d already_seen=%d invalid=%d kept=%d",
+                extra_selection["received"],
+                extra_selection["hard_skipped"],
+                extra_selection["already_seen"],
+                extra_selection.get("invalid_rows", 0),
+                extra_selection["selected"],
+            )
+            logger.info("state-search: final_appended=%d", len(extra_selection["rows"]))
 
     if rows is not None:
         normalized_rows: List[Dict[str, Any]] = []
