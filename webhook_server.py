@@ -1391,6 +1391,22 @@ async def apify_hook(request: Request):
         else:
             logger.info("apify-hook: dataset %s empty after retries", dataset_id)
 
+    should_fetch_extra_state_rows = payload_listings is not None
+    if should_fetch_extra_state_rows:
+        extra_state_rows = _fetch_extra_state_rows()
+        if extra_state_rows:
+            base_count = len(rows) if rows else 0
+            rows = (rows or []) + extra_state_rows
+            logger.info(
+                "state-search: appended=%d combined_before_dedupe=%d",
+                len(extra_state_rows),
+                len(rows),
+            )
+            if base_count:
+                logger.info("state-search: original_batch_count=%d", base_count)
+    else:
+        logger.debug("state-search: skipped extra fetch for non-primary webhook event source=%s", row_source)
+
     if rows:
         if row_source == "none":
             row_source = "payload"
