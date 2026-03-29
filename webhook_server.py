@@ -86,6 +86,9 @@ _keepalive_stop: Optional[threading.Event] = None
 _deferred_rows_lock = threading.Lock()
 _deferred_rows: List[Dict[str, Any]] = []
 _deferred_zpids: set[str] = set()
+_original_payload_signature_lock = threading.Lock()
+_previous_original_upstream_dataset_id: Optional[str] = None
+_previous_original_ordered_zpids: List[str] = []
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN")
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
@@ -94,6 +97,37 @@ APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "
 APIFY_STATE_SEARCH_ENABLED = os.getenv("APIFY_STATE_SEARCH_ENABLED", "true").lower() == "true"
 APIFY_STATE_SEARCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_LIMIT", "5"))
 APIFY_STATE_SEARCH_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_SEARCH_TIMEOUT_SECONDS", "60"))
+_SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
+
+
+def _redact_sensitive_url(url: str) -> str:
+    if not isinstance(url, str) or not url:
+        return url
+    parsed = urllib.parse.urlsplit(url)
+    if not parsed.query:
+        return url
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    redacted_query = []
+    for key, value in query:
+        if key.lower() in _SENSITIVE_QUERY_PARAMS:
+            redacted_query.append((key, "[REDACTED]"))
+        else:
+            redacted_query.append((key, value))
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(redacted_query), parsed.fragment)
+    )
+
+
+def _format_request_exception(exc: requests.RequestException) -> str:
+    message = str(exc)
+    if message:
+        return _redact_sensitive_url(message)
+    req = getattr(exc, "request", None)
+    if req is not None:
+        req_url = getattr(req, "url", "")
+        if req_url:
+            return _redact_sensitive_url(req_url)
+    return exc.__class__.__name__
 
 
 def _task_enabled(task_id: Optional[str]) -> bool:
@@ -142,7 +176,12 @@ def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[s
     except requests.Timeout:
         logger.warning("state-search: source=%s task_id=%s timeout", source, task_id)
     except requests.RequestException as exc:
-        logger.warning("state-search: source=%s task_id=%s request_error=%s", source, task_id, exc)
+        logger.warning(
+            "state-search: source=%s task_id=%s request_error=%s",
+            source,
+            task_id,
+            _format_request_exception(exc),
+        )
     except ValueError:
         logger.warning("state-search: source=%s task_id=%s invalid_json", source, task_id)
     return []
@@ -1259,6 +1298,46 @@ async def apify_hook(request: Request):
             return {"status": "ignored", "reason": "missing datasetId"}
 
     if payload_listings is not None:
+        upstream_dataset_id = payload.get("upstreamDatasetId") if isinstance(payload, dict) else None
+        if upstream_dataset_id is None:
+            upstream_dataset_id = dataset_id
+        total_scraped = payload.get("totalScraped") if isinstance(payload, dict) else None
+        total_new = payload.get("totalNew") if isinstance(payload, dict) else None
+        ordered_zpids = [
+            str(row.get("zpid", "")).strip()
+            for row in payload_listings
+            if isinstance(row, dict)
+        ]
+        ordered_addresses = [
+            _format_listing_address(row)
+            for row in payload_listings
+            if isinstance(row, dict)
+        ]
+        logger.info(
+            "ORIGINAL_PAYLOAD_META upstreamDatasetId=%s totalScraped=%s totalNew=%s listingCount=%s",
+            upstream_dataset_id,
+            total_scraped,
+            total_new,
+            len(payload_listings),
+        )
+        logger.info("ORIGINAL_PAYLOAD_ZPIDS %s", ordered_zpids)
+        logger.info("ORIGINAL_PAYLOAD_ADDRESSES %s", ordered_addresses)
+        global _previous_original_upstream_dataset_id, _previous_original_ordered_zpids
+        with _original_payload_signature_lock:
+            prev_upstream_dataset_id = _previous_original_upstream_dataset_id
+            prev_zpids = list(_previous_original_ordered_zpids)
+            identical_to_previous = (
+                upstream_dataset_id == prev_upstream_dataset_id and ordered_zpids == prev_zpids
+            )
+            _previous_original_upstream_dataset_id = upstream_dataset_id
+            _previous_original_ordered_zpids = list(ordered_zpids)
+        logger.info(
+            "ORIGINAL_PAYLOAD_REPEAT_CHECK identical=%s previousUpstreamDatasetId=%s previousZpids=%s",
+            identical_to_previous,
+            prev_upstream_dataset_id,
+            prev_zpids,
+        )
+
         selection = _select_payload_listings(payload)
         logger.info(
             "apify-hook: selection received=%s hard_skipped=%s already_seen=%s invalid=%s selected=%s",
