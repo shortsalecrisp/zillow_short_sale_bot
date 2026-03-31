@@ -1,6 +1,5 @@
 import logging
 import os
-import base64
 from typing import Optional
 
 import requests
@@ -9,21 +8,27 @@ LOG = logging.getLogger(__name__)
 
 
 class SMSGatewayForAndroid:
-    """Minimal sender for SMS Gateway for Android."""
+    """Sender backed by Tasker AutoRemote."""
 
-    def __init__(self, api_key: str, base_url: str = "https://api.smstext.app"):
+    def __init__(self, api_key: str, base_url: str = "https://autoremotejoaomgcd.appspot.com"):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
 
-    def send(self, to: str, message: str) -> Optional[str]:
-        auth = "Basic " + base64.b64encode(f"apikey:{self.api_key}".encode()).decode()
-        headers = {"Authorization": auth}
-        payload = [{"mobile": to, "text": message}]
-        r = requests.post(f"{self.base_url}/push", json=payload, headers=headers, timeout=15)
-        r.raise_for_status()
+    def send(self, to: str, message: str, sms_type: str = "initial") -> Optional[str]:
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        payload = {
+            "key": self.api_key,
+            "message": f"smsbot={to}|||{message}|||{sms_type}",
+        }
+        r = requests.post(f"{self.base_url}/sendmessage", data=payload, headers=headers, timeout=15)
+        if r.status_code != 200:
+            raise requests.HTTPError(
+                f"Tasker AutoRemote send failed: status={r.status_code}",
+                response=r,
+            )
         response_preview = (r.text or "").strip().replace("\n", " ")[:200]
         LOG.debug(
-            "SMS gateway accepted message: status=%s response=%s",
+            "Tasker AutoRemote accepted message: status=%s response=%s",
             r.status_code,
             response_preview or "<empty>",
         )
@@ -32,7 +37,7 @@ class SMSGatewayForAndroid:
 
 
 def get_sender(provider: Optional[str] = None):
-    """Return an SMS sender (currently only SMS Gateway for Android)."""
+    """Return an SMS sender (currently Tasker AutoRemote)."""
     # provider parameter is kept for backward compatibility but ignored
-    key = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
+    key = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "EhobscAL")
     return SMSGatewayForAndroid(api_key=key)

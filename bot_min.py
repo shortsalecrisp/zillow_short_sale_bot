@@ -474,7 +474,7 @@ FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False
 SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=False)
 APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
 
-_sms_api_key = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
+_sms_api_key = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "EhobscAL")
 _sms_enable_env = os.getenv("SMS_ENABLE")
 if _sms_enable_env is None:
     # Enable SMS by default when any SMS API key is present
@@ -11743,17 +11743,18 @@ def send_sms(
     digits = _digits_only(phone)
     for attempt in range(1, SMS_RETRY_ATTEMPTS + 1):
         try:
-            msg_id = SMS_SENDER.send(digits, msg_txt) or ""
+            sms_type = "followup" if follow_up else "initial"
+            msg_id = SMS_SENDER.send(digits, msg_txt, sms_type=sms_type) or ""
             if follow_up:
                 mark_followup(row_idx)
                 LOG.info(
-                    "Follow‑up SMS sent to %s (row %s, attempt %s, msg_id=%s)",
+                    "TASKER_SEND_FOLLOWUP to %s (row %s, attempt %s, msg_id=%s)",
                     digits, row_idx, attempt, msg_id
                 )
             else:
                 mark_sent(row_idx, msg_id)
                 LOG.info(
-                    "Initial SMS sent to %s (row %s, attempt %s, msg_id=%s)",
+                    "TASKER_SEND_INITIAL to %s (row %s, attempt %s, msg_id=%s)",
                     digits, row_idx, attempt, msg_id
                 )
             return

@@ -94,7 +94,7 @@ def _resolve_destination(phone: str, *, force_live: bool) -> str:
     return phone
 
 
-def _send_sms(phone: str, message: str, *, dry_run: bool) -> None:
+def _send_sms(phone: str, message: str, *, dry_run: bool, sms_type: str) -> None:
     digits = _digits_only(phone)
     if not digits:
         LOG.warning("Skipping invalid phone=%s", phone)
@@ -102,7 +102,7 @@ def _send_sms(phone: str, message: str, *, dry_run: bool) -> None:
     if dry_run:
         LOG.info("DRY_RUN send to %s", digits)
         return
-    SMS_SENDER.send(digits, message)
+    SMS_SENDER.send(digits, message, sms_type=sms_type)
 
 
 def _format_message(kind: str, first: str, address: str) -> str:
@@ -167,7 +167,8 @@ def main() -> int:
         destination = _resolve_destination(phone, force_live=args.force_live)
         message = _format_message(kind, first, address)
         try:
-            _send_sms(destination, message, dry_run=args.dry_run)
+            sms_type = "followup" if kind == "follow_up" else "initial"
+            _send_sms(destination, message, dry_run=args.dry_run, sms_type=sms_type)
             sent += 1
             LOG.info("Replayed %s SMS for row %s to %s", kind, row_idx, destination)
         except Exception as exc:

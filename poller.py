@@ -57,7 +57,7 @@ def maybe_notify(msg: str) -> None:
     if not SEND_SMS:
         return
     try:
-        SMS_SENDER.send(NOTIFY_PHONE, msg)
+        SMS_SENDER.send(NOTIFY_PHONE, msg, sms_type="initial")
     except Exception as e:
         log.warning("SMS send failed: %s", e)
 
@@ -118,4 +118,3 @@ if __name__ == "__main__":
         SEND_SMS = True
 
     main(loop=not args.once, min_s=args.min, max_s=args.max)
-
