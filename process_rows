@@ -258,7 +258,7 @@ def _init_candidate_cache(conn: sqlite3.Connection) -> None:
 
 def send_sms(to: str, body: str):
     """Send SMS using configured provider."""
-    SMS_SENDER.send(to, body)
+    SMS_SENDER.send(to, body, sms_type="initial")
 
 
 def _normalize_obfuscation(text: str) -> str:

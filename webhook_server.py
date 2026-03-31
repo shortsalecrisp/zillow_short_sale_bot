@@ -41,7 +41,7 @@ from sms_providers import get_sender
 # Configuration & logging
 # ──────────────────────────────────────────────────────────────────────
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
-SMS_API_KEY = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
+SMS_API_KEY = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "EhobscAL")
 SMS_SENDER   = get_sender(SMS_PROVIDER)
 DISABLE_APIFY_SCHEDULER = os.getenv("DISABLE_APIFY_SCHEDULER", "false").lower() == "true"
 RENDER_APIFY_TRIGGER_DISABLED = (
@@ -1025,7 +1025,7 @@ def fmt_phone(raw: str) -> str:
     return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
 
 
-def send_sms(phone: str, message: str) -> None:
+def send_sms(phone: str, message: str, sms_type: str = "initial") -> None:
     """Send an SMS using the configured provider."""
     if not SMS_API_KEY:
         logger.warning("SMS gateway API key missing; skipping SMS send to %s", phone)
@@ -1035,8 +1035,11 @@ def send_sms(phone: str, message: str) -> None:
         logger.warning("Bad phone number '%s' – skipping SMS send", phone)
         return
     try:
-        SMS_SENDER.send(digits, message)
-        logger.info("SMS sent OK to %s", digits)
+        SMS_SENDER.send(digits, message, sms_type=sms_type)
+        if sms_type == "followup":
+            logger.info("TASKER_SEND_FOLLOWUP to %s", digits)
+        else:
+            logger.info("TASKER_SEND_INITIAL to %s", digits)
     except Exception as exc:
         logger.exception("SMS send failed: %s", exc)
 
