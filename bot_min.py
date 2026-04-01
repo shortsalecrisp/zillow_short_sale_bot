@@ -11775,19 +11775,23 @@ def send_sms(
 
             if sheet_updated:
                 LOG.info(
-                    "SHEET_SENT_MARK_APPLIED row=%s phone=%s type=%s attempt=%s",
+                    "SHEET_SENT_MARK_APPLIED row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s sheet_update_occurred=true",
                     row_idx,
                     digits,
                     sms_type,
                     attempt,
+                    result.status_code,
+                    result.response_text or "<empty>",
                 )
             else:
                 LOG.error(
-                    "SHEET_SENT_MARK_SKIPPED row=%s phone=%s type=%s attempt=%s reason=sheet_update_failed",
+                    "SHEET_SENT_MARK_SKIPPED row=%s phone=%s type=%s attempt=%s reason=sheet_update_failed http_status=%s response_body=%s sheet_update_occurred=false",
                     row_idx,
                     digits,
                     sms_type,
                     attempt,
+                    result.status_code,
+                    result.response_text or "<empty>",
                 )
 
             LOG.info(
@@ -11816,11 +11820,13 @@ def send_sms(
             result.exception_message or "",
         )
         LOG.info(
-            "SHEET_SENT_MARK_SKIPPED row=%s phone=%s type=%s attempt=%s reason=autoremote_send_failed",
+            "SHEET_SENT_MARK_SKIPPED row=%s phone=%s type=%s attempt=%s reason=autoremote_send_failed http_status=%s response_body=%s sheet_update_occurred=false",
             row_idx,
             digits,
             sms_type,
             attempt,
+            result.status_code,
+            result.response_text or "<empty>",
         )
         if attempt < max_attempts:
             time.sleep(2)

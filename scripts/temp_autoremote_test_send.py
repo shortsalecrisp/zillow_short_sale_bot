@@ -40,9 +40,9 @@ def main() -> None:
     )
     print("AUTOREMOTE_TEST_RESULT", result)
     if result.success:
-        print("SUCCESS: HTTP 200 received from AutoRemote")
+        print("SUCCESS: AutoRemote send accepted (HTTP 200 + no body error signal)")
     else:
-        print("FAILURE: AutoRemote did not return HTTP 200")
+        print("FAILURE: AutoRemote send not accepted (status/body validation failed)")
 
 
 if __name__ == "__main__":
