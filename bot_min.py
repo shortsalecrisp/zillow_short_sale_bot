@@ -512,7 +512,7 @@ SMS_FU_TEMPLATE   = (
     "Hey, just wanted to follow up on my message from earlier. "
     "Let me know if I can help with anything—happy to connect whenever works for you!"
 )
-SMS_RETRY_ATTEMPTS = int(os.getenv("SMS_RETRY_ATTEMPTS", "2"))
+SMS_RETRY_ATTEMPTS = 3  # initial attempt + up to 2 retries for AutoRemote reliability
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
 CSE_MIN_INTERVAL = float(os.getenv("CSE_MIN_INTERVAL", "4.0"))
@@ -11466,7 +11466,7 @@ def is_active_listing(row_payload: Dict[str, Any]) -> bool:
                 break
     return (not status) or status in GOOD_STATUS
 
-def mark_sent(row_idx: int, msg_id: str):
+def mark_sent(row_idx: int, msg_id: str) -> bool:
     ts = datetime.now(tz=TZ).isoformat()
     data = [
         {"range": f"{GSHEET_TAB}!H{row_idx}", "values": [["x"]]},
@@ -11479,10 +11479,12 @@ def mark_sent(row_idx: int, msg_id: str):
             body={"valueInputOption": "RAW", "data": data},
         ).execute()
         LOG.info("Marked row %s H:x W:init-ts L:msg-id (msg_id=%s)", row_idx, msg_id)
+        return True
     except Exception as e:
         LOG.error("GSheet mark_sent error %s", e)
+        return False
 
-def mark_followup(row_idx: int):
+def mark_followup(row_idx: int) -> bool:
     ts = datetime.now(tz=TZ).isoformat()
     data = [
         {"range": f"{GSHEET_TAB}!I{row_idx}", "values": [["x"]]},
@@ -11494,8 +11496,10 @@ def mark_followup(row_idx: int):
             body={"valueInputOption": "RAW", "data": data},
         ).execute()
         LOG.info("Marked row %s I:x X:follow-up done", row_idx)
+        return True
     except Exception as e:
         LOG.error("GSheet mark_followup error %s", e)
+        return False
 
 def mark_reply(row_idx: int):
     ts = datetime.now(tz=TZ).isoformat()
@@ -11741,27 +11745,87 @@ def send_sms(
         phone = SMS_TEST_NUMBER
     msg_txt = SMS_FU_TEMPLATE if follow_up else SMS_TEMPLATE.format(first=first, address=address)
     digits = _digits_only(phone)
-    for attempt in range(1, SMS_RETRY_ATTEMPTS + 1):
-        try:
-            sms_type = "followup" if follow_up else "initial"
-            msg_id = SMS_SENDER.send(digits, msg_txt, sms_type=sms_type) or ""
+    sms_type = "followup" if follow_up else "initial"
+    tasker_label_prefix = "TASKER_SEND_FOLLOWUP" if follow_up else "TASKER_SEND_INITIAL"
+    max_attempts = SMS_RETRY_ATTEMPTS
+
+    for attempt in range(1, max_attempts + 1):
+        LOG.info(
+            "%s_ATTEMPT row=%s phone=%s type=%s attempt=%s",
+            tasker_label_prefix,
+            row_idx,
+            digits,
+            sms_type,
+            attempt,
+        )
+        result = SMS_SENDER.send_with_diagnostics(
+            digits,
+            msg_txt,
+            sms_type=sms_type,
+            row_idx=row_idx,
+            attempt=attempt,
+        )
+
+        if result.success:
+            msg_id = ""
             if follow_up:
-                mark_followup(row_idx)
+                sheet_updated = mark_followup(row_idx)
+            else:
+                sheet_updated = mark_sent(row_idx, msg_id)
+
+            if sheet_updated:
                 LOG.info(
-                    "TASKER_SEND_FOLLOWUP to %s (row %s, attempt %s, msg_id=%s)",
-                    digits, row_idx, attempt, msg_id
+                    "SHEET_SENT_MARK_APPLIED row=%s phone=%s type=%s attempt=%s",
+                    row_idx,
+                    digits,
+                    sms_type,
+                    attempt,
                 )
             else:
-                mark_sent(row_idx, msg_id)
-                LOG.info(
-                    "TASKER_SEND_INITIAL to %s (row %s, attempt %s, msg_id=%s)",
-                    digits, row_idx, attempt, msg_id
+                LOG.error(
+                    "SHEET_SENT_MARK_SKIPPED row=%s phone=%s type=%s attempt=%s reason=sheet_update_failed",
+                    row_idx,
+                    digits,
+                    sms_type,
+                    attempt,
                 )
+
+            LOG.info(
+                "%s_SUCCESS row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s sheet_update_occurred=%s",
+                tasker_label_prefix,
+                row_idx,
+                digits,
+                sms_type,
+                attempt,
+                result.status_code,
+                result.response_text or "<empty>",
+                sheet_updated,
+            )
             return
-        except Exception as e:
-            LOG.debug("SMS attempt %s failed → retrying", attempt)
-            time.sleep(5)
-    LOG.error("SMS failed after %s attempts to %s", SMS_RETRY_ATTEMPTS, digits)
+
+        LOG.error(
+            "%s_FAILED row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s exception_type=%s exception_message=%s sheet_update_occurred=false",
+            tasker_label_prefix,
+            row_idx,
+            digits,
+            sms_type,
+            attempt,
+            result.status_code,
+            result.response_text or "<empty>",
+            result.exception_type or "",
+            result.exception_message or "",
+        )
+        LOG.info(
+            "SHEET_SENT_MARK_SKIPPED row=%s phone=%s type=%s attempt=%s reason=autoremote_send_failed",
+            row_idx,
+            digits,
+            sms_type,
+            attempt,
+        )
+        if attempt < max_attempts:
+            time.sleep(2)
+
+    LOG.error("SMS failed after %s attempts to %s", max_attempts, digits)
 
 
 def _within_initial_hours(slot: datetime) -> bool:
