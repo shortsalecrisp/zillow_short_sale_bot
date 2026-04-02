@@ -2,7 +2,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import quote_plus, urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -31,7 +31,7 @@ class SMSGatewayForAndroid:
         "error",
         "failed",
     )
-    DEFAULT_ENDPOINT = "https://autoremotejoaomgcd.appspot.com"
+    DEFAULT_ENDPOINT = "https://autoremotejoaomgcd.appspot.com/sendmessage"
 
     def __init__(
         self,
@@ -52,7 +52,8 @@ class SMSGatewayForAndroid:
             parsed = urlsplit(f"https://{candidate}")
             if parsed.netloc:
                 return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
-        return cls.DEFAULT_ENDPOINT
+        default_parsed = urlsplit(cls.DEFAULT_ENDPOINT)
+        return f"{default_parsed.scheme}://{default_parsed.netloc}".rstrip("/")
 
     @staticmethod
     def _mask_secret(value: str) -> str:
@@ -88,6 +89,10 @@ class SMSGatewayForAndroid:
         body = (response_text or "").lower()
         return any(signal in body for signal in self.ERROR_SIGNALS)
 
+    @staticmethod
+    def _body_has_success_signal(response_text: str) -> bool:
+        return "success" in (response_text or "").lower()
+
     def send_with_diagnostics(
         self,
         to: str,
@@ -98,9 +103,17 @@ class SMSGatewayForAndroid:
         attempt: Optional[int] = None,
     ) -> AutoRemoteSendResult:
         message_payload = f"smsbot={to}|||{message}|||{sms_type}"
-        encoded_message = quote_plus(message_payload)
-        request_url = f"{self.endpoint_root}/{self.api_key}?message={encoded_message}"
-        payload_preview = request_url.replace(f"/{self.api_key}?", f"/{self._mask_secret(self.api_key)}?")[:220]
+        request_url = f"{self.endpoint_root}/sendmessage"
+        request_params = {
+            "key": self.api_key,
+            "message": message_payload,
+            "target": to,
+        }
+        encoded_query = urlencode(request_params)
+        payload_preview = f"{request_url}?{encoded_query}".replace(
+            f"key={self.api_key}",
+            f"key={self._mask_secret(self.api_key)}",
+        )
 
         LOG.info(
             "AUTOREMOTE_CONFIG_CHECK row=%s phone=%s type=%s attempt=%s key_present=%s key_masked=%s key_length=%s endpoint=%s",
@@ -131,12 +144,12 @@ class SMSGatewayForAndroid:
             )
 
         LOG.info(
-            "AUTOREMOTE_REQUEST_PREPARED row=%s phone=%s type=%s attempt=%s final_url=%s payload_preview=%s",
+            "AUTOREMOTE_REQUEST_PREPARED row=%s phone=%s type=%s attempt=%s final_url_masked=%s payload_preview=%s",
             row_idx,
             to,
             sms_type,
             attempt,
-            request_url,
+            payload_preview,
             payload_preview,
         )
 
@@ -148,8 +161,8 @@ class SMSGatewayForAndroid:
                 sms_type,
                 attempt,
             )
-            response = requests.get(request_url, timeout=15)
-            response_text = (response.text or "").strip().replace("\n", " ")
+            response = requests.get(request_url, params=request_params, timeout=15)
+            response_text = (response.text or "").strip()
             LOG.info(
                 "AUTOREMOTE_RESPONSE_RECEIVED row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
                 row_idx,
@@ -157,9 +170,14 @@ class SMSGatewayForAndroid:
                 sms_type,
                 attempt,
                 response.status_code,
-                response_text[:600] or "<empty>",
+                response_text or "<empty>",
             )
-            if response.status_code == 200 and not self._body_has_error_signal(response_text):
+            body_has_success_signal = self._body_has_success_signal(response_text)
+            if (
+                response.status_code == 200
+                and body_has_success_signal
+                and not self._body_has_error_signal(response_text)
+            ):
                 LOG.info(
                     "AUTOREMOTE_SEND_CONFIRMED row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
                     row_idx,
@@ -167,7 +185,7 @@ class SMSGatewayForAndroid:
                     sms_type,
                     attempt,
                     response.status_code,
-                    response_text[:600] or "<empty>",
+                    response_text or "<empty>",
                 )
                 return self._build_result(
                     success=True,
@@ -184,7 +202,18 @@ class SMSGatewayForAndroid:
                     sms_type,
                     attempt,
                     response.status_code,
-                    response_text[:600] or "<empty>",
+                    response_text or "<empty>",
+                )
+
+            if response.status_code == 200 and not body_has_success_signal:
+                LOG.error(
+                    "AUTOREMOTE_RESPONSE_MISSING_SUCCESS_SIGNAL row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
+                    row_idx,
+                    to,
+                    sms_type,
+                    attempt,
+                    response.status_code,
+                    response_text or "<empty>",
                 )
 
             LOG.error(
@@ -194,7 +223,7 @@ class SMSGatewayForAndroid:
                 sms_type,
                 attempt,
                 response.status_code,
-                response_text[:600] or "<empty>",
+                response_text or "<empty>",
             )
             return self._build_result(
                 success=False,
@@ -202,7 +231,7 @@ class SMSGatewayForAndroid:
                 response_text=response_text,
                 exception_type="HTTPError",
                 exception_message=(
-                    "AutoRemote HTTP 200 body indicates failure"
+                    "AutoRemote HTTP 200 body did not include success confirmation"
                     if response.status_code == 200
                     else f"Non-200 from AutoRemote: {response.status_code}"
                 ),
@@ -242,5 +271,5 @@ def get_sender(provider: Optional[str] = None):
     """Return an SMS sender (currently Tasker AutoRemote)."""
     # provider parameter is kept for backward compatibility but ignored
     key = os.getenv("AUTOREMOTE_KEY") or os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
-    endpoint = os.getenv("AUTOREMOTE_ENDPOINT", "https://autoremotejoaomgcd.appspot.com")
+    endpoint = os.getenv("AUTOREMOTE_ENDPOINT", SMSGatewayForAndroid.DEFAULT_ENDPOINT)
     return SMSGatewayForAndroid(api_key=key, endpoint=endpoint)
