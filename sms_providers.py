@@ -2,7 +2,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 import requests
 
@@ -31,14 +31,28 @@ class SMSGatewayForAndroid:
         "error",
         "failed",
     )
+    DEFAULT_ENDPOINT = "https://autoremotejoaomgcd.appspot.com"
 
     def __init__(
         self,
         api_key: str,
-        endpoint: str = "https://autoremotejoaomgcd.appspot.com",
+        endpoint: str = DEFAULT_ENDPOINT,
     ):
         self.api_key = api_key or ""
-        self.endpoint = (endpoint or "").strip() or "https://autoremotejoaomgcd.appspot.com"
+        self.endpoint = (endpoint or "").strip() or self.DEFAULT_ENDPOINT
+        self.endpoint_root = self._normalize_endpoint_root(self.endpoint)
+
+    @classmethod
+    def _normalize_endpoint_root(cls, endpoint: str) -> str:
+        candidate = (endpoint or "").strip() or cls.DEFAULT_ENDPOINT
+        parsed = urlsplit(candidate)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+        if "://" not in candidate:
+            parsed = urlsplit(f"https://{candidate}")
+            if parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+        return cls.DEFAULT_ENDPOINT
 
     @staticmethod
     def _mask_secret(value: str) -> str:
@@ -85,8 +99,7 @@ class SMSGatewayForAndroid:
     ) -> AutoRemoteSendResult:
         message_payload = f"smsbot={to}|||{message}|||{sms_type}"
         encoded_message = quote_plus(message_payload)
-        endpoint_base = self.endpoint.rstrip("/")
-        request_url = f"{endpoint_base}/{self.api_key}?message={encoded_message}"
+        request_url = f"{self.endpoint_root}/{self.api_key}?message={encoded_message}"
         payload_preview = request_url.replace(f"/{self.api_key}?", f"/{self._mask_secret(self.api_key)}?")[:220]
 
         LOG.info(
@@ -98,7 +111,7 @@ class SMSGatewayForAndroid:
             bool(self.api_key),
             self._mask_secret(self.api_key),
             len(self.api_key),
-            self.endpoint,
+            self.endpoint_root,
         )
         if not self.api_key:
             LOG.error(
@@ -118,7 +131,7 @@ class SMSGatewayForAndroid:
             )
 
         LOG.info(
-            "AUTOREMOTE_REQUEST_PREPARED row=%s phone=%s type=%s attempt=%s endpoint=%s payload_preview=%s",
+            "AUTOREMOTE_REQUEST_PREPARED row=%s phone=%s type=%s attempt=%s final_url=%s payload_preview=%s",
             row_idx,
             to,
             sms_type,
