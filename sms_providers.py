@@ -2,6 +2,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import quote_plus
 
 import requests
 
@@ -34,10 +35,10 @@ class SMSGatewayForAndroid:
     def __init__(
         self,
         api_key: str,
-        endpoint: str = "https://autoremotejoaomgcd.appspot.com/sendmessage",
+        endpoint: str = "https://autoremotejoaomgcd.appspot.com",
     ):
         self.api_key = api_key or ""
-        self.endpoint = (endpoint or "").strip() or "https://autoremotejoaomgcd.appspot.com/sendmessage"
+        self.endpoint = (endpoint or "").strip() or "https://autoremotejoaomgcd.appspot.com"
 
     @staticmethod
     def _mask_secret(value: str) -> str:
@@ -82,13 +83,11 @@ class SMSGatewayForAndroid:
         row_idx: Optional[int] = None,
         attempt: Optional[int] = None,
     ) -> AutoRemoteSendResult:
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
         message_payload = f"smsbot={to}|||{message}|||{sms_type}"
-        payload = {
-            "key": self.api_key,
-            "message": message_payload,
-        }
-        payload_preview = f"key={self._mask_secret(self.api_key)}&message={message_payload[:140]}"
+        encoded_message = quote_plus(message_payload)
+        endpoint_base = self.endpoint.rstrip("/")
+        request_url = f"{endpoint_base}/{self.api_key}?message={encoded_message}"
+        payload_preview = request_url.replace(f"/{self.api_key}?", f"/{self._mask_secret(self.api_key)}?")[:220]
 
         LOG.info(
             "AUTOREMOTE_CONFIG_CHECK row=%s phone=%s type=%s attempt=%s key_present=%s key_masked=%s key_length=%s endpoint=%s",
@@ -124,7 +123,7 @@ class SMSGatewayForAndroid:
             to,
             sms_type,
             attempt,
-            self.endpoint,
+            request_url,
             payload_preview,
         )
 
@@ -136,7 +135,7 @@ class SMSGatewayForAndroid:
                 sms_type,
                 attempt,
             )
-            response = requests.post(self.endpoint, data=payload, headers=headers, timeout=15)
+            response = requests.get(request_url, timeout=15)
             response_text = (response.text or "").strip().replace("\n", " ")
             LOG.info(
                 "AUTOREMOTE_RESPONSE_RECEIVED row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
@@ -230,5 +229,5 @@ def get_sender(provider: Optional[str] = None):
     """Return an SMS sender (currently Tasker AutoRemote)."""
     # provider parameter is kept for backward compatibility but ignored
     key = os.getenv("AUTOREMOTE_KEY") or os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
-    endpoint = os.getenv("AUTOREMOTE_ENDPOINT", "https://autoremotejoaomgcd.appspot.com/sendmessage")
+    endpoint = os.getenv("AUTOREMOTE_ENDPOINT", "https://autoremotejoaomgcd.appspot.com")
     return SMSGatewayForAndroid(api_key=key, endpoint=endpoint)

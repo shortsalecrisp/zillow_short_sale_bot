@@ -39,10 +39,11 @@ def main() -> None:
         attempt=1,
     )
     print("AUTOREMOTE_TEST_RESULT", result)
+    print("AUTOREMOTE_TEST_REQUEST_PREVIEW", result.payload_preview)
     if result.success:
-        print("SUCCESS: AutoRemote send accepted (HTTP 200 + no body error signal)")
+        print("SUCCESS: AutoRemote personal URL GET accepted (HTTP 200 + no body error signal)")
     else:
-        print("FAILURE: AutoRemote send not accepted (status/body validation failed)")
+        print("FAILURE: AutoRemote personal URL GET not accepted (status/body validation failed)")
 
 
 if __name__ == "__main__":
