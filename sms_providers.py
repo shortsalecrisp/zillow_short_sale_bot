@@ -90,8 +90,8 @@ class SMSGatewayForAndroid:
         return any(signal in body for signal in self.ERROR_SIGNALS)
 
     @staticmethod
-    def _body_has_success_signal(response_text: str) -> bool:
-        return "success" in (response_text or "").lower()
+    def _body_is_ok_success(response_text: str) -> bool:
+        return (response_text or "").strip().lower() == "ok"
 
     def send_with_diagnostics(
         self,
@@ -114,6 +114,7 @@ class SMSGatewayForAndroid:
             f"key={self.api_key}",
             f"key={self._mask_secret(self.api_key)}",
         )
+        target_is_separate_query_param = "target" in request_params
 
         LOG.info(
             "AUTOREMOTE_CONFIG_CHECK row=%s phone=%s type=%s attempt=%s key_present=%s key_masked=%s key_length=%s endpoint=%s",
@@ -152,6 +153,39 @@ class SMSGatewayForAndroid:
             payload_preview,
             payload_preview,
         )
+        LOG.info(
+            "AUTOREMOTE_LOGICAL_PAYLOAD row=%s phone=%s type=%s attempt=%s logical_payload=%s",
+            row_idx,
+            to,
+            sms_type,
+            attempt,
+            message_payload,
+        )
+        LOG.info(
+            "AUTOREMOTE_MESSAGE_PAYLOAD_UNENCODED row=%s phone=%s type=%s attempt=%s message_payload=%s",
+            row_idx,
+            to,
+            sms_type,
+            attempt,
+            message_payload,
+        )
+        LOG.info(
+            "AUTOREMOTE_MESSAGE_PAYLOAD_ENCODED row=%s phone=%s type=%s attempt=%s encoded_message_payload=%s",
+            row_idx,
+            to,
+            sms_type,
+            attempt,
+            urlencode({"message": message_payload}),
+        )
+        LOG.info(
+            "AUTOREMOTE_TARGET_QUERY row=%s phone=%s type=%s attempt=%s target_value=%s target_is_separate_query_param=%s",
+            row_idx,
+            to,
+            sms_type,
+            attempt,
+            to,
+            target_is_separate_query_param,
+        )
 
         try:
             LOG.info(
@@ -172,11 +206,13 @@ class SMSGatewayForAndroid:
                 response.status_code,
                 response_text or "<empty>",
             )
-            body_has_success_signal = self._body_has_success_signal(response_text)
+            body_is_ok_success = self._body_is_ok_success(response_text)
+            body_has_error_signal = self._body_has_error_signal(response_text)
             if (
                 response.status_code == 200
-                and body_has_success_signal
-                and not self._body_has_error_signal(response_text)
+                and response_text
+                and body_is_ok_success
+                and not body_has_error_signal
             ):
                 LOG.info(
                     "AUTOREMOTE_SEND_CONFIRMED row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
@@ -194,7 +230,7 @@ class SMSGatewayForAndroid:
                     payload_preview=payload_preview,
                 )
 
-            if response.status_code == 200 and self._body_has_error_signal(response_text):
+            if response.status_code == 200 and body_has_error_signal:
                 LOG.error(
                     "AUTOREMOTE_RESPONSE_BODY_ERROR row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
                     row_idx,
@@ -205,9 +241,20 @@ class SMSGatewayForAndroid:
                     response_text or "<empty>",
                 )
 
-            if response.status_code == 200 and not body_has_success_signal:
+            if response.status_code == 200 and not response_text:
                 LOG.error(
-                    "AUTOREMOTE_RESPONSE_MISSING_SUCCESS_SIGNAL row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
+                    "AUTOREMOTE_RESPONSE_EMPTY_BODY row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
+                    row_idx,
+                    to,
+                    sms_type,
+                    attempt,
+                    response.status_code,
+                    "<empty>",
+                )
+
+            if response.status_code == 200 and response_text and not body_is_ok_success:
+                LOG.error(
+                    "AUTOREMOTE_RESPONSE_NOT_OK row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
                     row_idx,
                     to,
                     sms_type,
@@ -231,7 +278,7 @@ class SMSGatewayForAndroid:
                 response_text=response_text,
                 exception_type="HTTPError",
                 exception_message=(
-                    "AutoRemote HTTP 200 body did not include success confirmation"
+                    "AutoRemote HTTP 200 body was not exact 'OK'"
                     if response.status_code == 200
                     else f"Non-200 from AutoRemote: {response.status_code}"
                 ),
