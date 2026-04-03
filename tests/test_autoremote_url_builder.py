@@ -18,7 +18,7 @@ def test_send_with_diagnostics_uses_fcm_sendmessage_endpoint(monkeypatch):
         captured["url"] = url
         captured["params"] = params
         assert timeout == 15
-        return SimpleNamespace(status_code=200, text="Success!")
+        return SimpleNamespace(status_code=200, text="OK")
 
     monkeypatch.setattr("sms_providers.requests.get", fake_get)
 
@@ -43,7 +43,7 @@ def test_send_with_diagnostics_uses_fcm_sendmessage_endpoint(monkeypatch):
 
 def test_send_with_diagnostics_requires_success_confirmation(monkeypatch):
     def fake_get(url, params, timeout):
-        return SimpleNamespace(status_code=200, text="ok")
+        return SimpleNamespace(status_code=200, text="unexpected")
 
     monkeypatch.setattr("sms_providers.requests.get", fake_get)
 
@@ -51,6 +51,74 @@ def test_send_with_diagnostics_requires_success_confirmation(monkeypatch):
         api_key="EhobscAL",
         endpoint="https://autoremotejoaomgcd.appspot.com/sendmessage",
     )
+    result = sender.send_with_diagnostics(
+        to="+15551234567",
+        message="Hello there",
+        sms_type="initial",
+    )
+
+    assert result.success is False
+    assert result.exception_type == "HTTPError"
+
+
+def test_send_with_diagnostics_http_200_ok_is_success(monkeypatch):
+    def fake_get(url, params, timeout):
+        return SimpleNamespace(status_code=200, text=" OK ")
+
+    monkeypatch.setattr("sms_providers.requests.get", fake_get)
+
+    sender = SMSGatewayForAndroid(api_key="EhobscAL")
+    result = sender.send_with_diagnostics(
+        to="+15551234567",
+        message="Hello there",
+        sms_type="initial",
+    )
+
+    assert result.success is True
+    assert result.status_code == 200
+
+
+def test_send_with_diagnostics_http_200_token_error_is_failure(monkeypatch):
+    def fake_get(url, params, timeout):
+        return SimpleNamespace(status_code=200, text="Not a valid FCM registration token")
+
+    monkeypatch.setattr("sms_providers.requests.get", fake_get)
+
+    sender = SMSGatewayForAndroid(api_key="EhobscAL")
+    result = sender.send_with_diagnostics(
+        to="+15551234567",
+        message="Hello there",
+        sms_type="initial",
+    )
+
+    assert result.success is False
+    assert result.exception_type == "HTTPError"
+
+
+def test_send_with_diagnostics_http_200_empty_body_is_failure(monkeypatch):
+    def fake_get(url, params, timeout):
+        return SimpleNamespace(status_code=200, text="   ")
+
+    monkeypatch.setattr("sms_providers.requests.get", fake_get)
+
+    sender = SMSGatewayForAndroid(api_key="EhobscAL")
+    result = sender.send_with_diagnostics(
+        to="+15551234567",
+        message="Hello there",
+        sms_type="initial",
+    )
+
+    assert result.success is False
+    assert result.exception_type == "HTTPError"
+
+
+def test_send_with_diagnostics_non_200_is_failure(monkeypatch):
+    def fake_get(url, params, timeout):
+        return SimpleNamespace(status_code=500, text="OK")
+
+    monkeypatch.setattr("sms_providers.requests.get", fake_get)
+
+    sender = SMSGatewayForAndroid(api_key="EhobscAL")
     result = sender.send_with_diagnostics(
         to="+15551234567",
         message="Hello there",
