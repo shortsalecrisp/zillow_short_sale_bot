@@ -697,6 +697,33 @@ def _col_letter_to_index(letter: str, default_index: int) -> int:
     return idx - 1
 
 
+def _parse_configured_col_index(
+    raw_value: str,
+    *,
+    default_index: int,
+    env_key: str,
+    max_index: int,
+) -> tuple[int, Optional[str]]:
+    raw = str(raw_value or "").strip().upper()
+    if not raw:
+        return default_index, None
+    if not raw.isalpha() or len(raw) > 3:
+        return (
+            default_index,
+            f"{env_key} must be an A1-style column label (e.g., W or AD); "
+            f"got {raw!r}. Falling back to {_col_index_to_letter(default_index)}.",
+        )
+    idx = _col_letter_to_index(raw, default_index)
+    if idx < 0 or idx > max_index:
+        return (
+            default_index,
+            f"{env_key} resolved to out-of-bounds column {raw} "
+            f"(max supported {_col_index_to_letter(max_index)}). "
+            f"Falling back to {_col_index_to_letter(default_index)}.",
+        )
+    return idx, None
+
+
 def _col_index_to_letter(index: int) -> str:
     n = int(index) + 1
     if n <= 0:
@@ -722,6 +749,7 @@ COL_REPLY_TS    = 10  # K
 COL_MSG_ID      = 11  # L
 DEFAULT_COL_INIT_TS = 22  # W
 DEFAULT_COL_FU_TS   = 23  # X
+MAX_CONFIGURABLE_TIMESTAMP_COL = 199  # GR (safety bound for env misconfiguration)
 COL_PHONE_CONF  = 24  # Y
 COL_CONTACT_REASON = 25  # Z
 COL_EMAIL_CONF  = 26  # AA
@@ -775,16 +803,40 @@ def _resolve_timestamp_columns(init_idx: int, fu_idx: int) -> tuple[int, int, Li
     return init_idx, fu_idx, warnings
 
 
-_init_col_candidate = _col_letter_to_index(os.getenv("GSHEET_INIT_TS_COL", "W"), DEFAULT_COL_INIT_TS)
-_fu_col_candidate = _col_letter_to_index(os.getenv("GSHEET_FU_TS_COL", "X"), DEFAULT_COL_FU_TS)
+_init_col_candidate, _init_parse_warning = _parse_configured_col_index(
+    os.getenv("GSHEET_INIT_TS_COL", "W"),
+    default_index=DEFAULT_COL_INIT_TS,
+    env_key="GSHEET_INIT_TS_COL",
+    max_index=MAX_CONFIGURABLE_TIMESTAMP_COL,
+)
+_fu_col_candidate, _fu_parse_warning = _parse_configured_col_index(
+    os.getenv("GSHEET_FU_TS_COL", "X"),
+    default_index=DEFAULT_COL_FU_TS,
+    env_key="GSHEET_FU_TS_COL",
+    max_index=MAX_CONFIGURABLE_TIMESTAMP_COL,
+)
 COL_INIT_TS, COL_FU_TS, _TIMESTAMP_COL_CONFIG_WARNINGS = _resolve_timestamp_columns(
     _init_col_candidate,
     _fu_col_candidate,
 )
+if _init_parse_warning:
+    _TIMESTAMP_COL_CONFIG_WARNINGS.append(_init_parse_warning)
+if _fu_parse_warning:
+    _TIMESTAMP_COL_CONFIG_WARNINGS.append(_fu_parse_warning)
 
 BASE_MIN_COLS   = 30
 MIN_COLS        = max(BASE_MIN_COLS, COL_INIT_TS + 1, COL_FU_TS + 1)
 SHEET_READ_END_COL = _col_index_to_letter(MIN_COLS - 1)
+FOLLOWUP_REQUIRED_COLS = (
+    COL_PHONE,
+    COL_STREET,
+    COL_REPLY_FLAG,
+    COL_MANUAL_NOTE,
+    COL_MSG_ID,
+    COL_INIT_TS,
+    COL_FU_TS,
+)
+FOLLOWUP_READ_END_COL = _col_index_to_letter(max(FOLLOWUP_REQUIRED_COLS))
 
 MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
@@ -12193,7 +12245,7 @@ def run_hourly_scheduler(
     )
     LOG.info(
         "Follow-up sheet read window configured: A:%s (min_cols=%s)",
-        SHEET_READ_END_COL,
+        FOLLOWUP_READ_END_COL,
         MIN_COLS,
     )
     next_run = _next_scheduler_run(datetime.now(tz=SCHEDULER_TZ))
@@ -12291,7 +12343,7 @@ def _follow_up_pass():
     now = datetime.now(tz=SCHEDULER_TZ)
     resp = sheets_service.spreadsheets().values().get(
         spreadsheetId=GSHEET_ID,
-        range=f"{GSHEET_TAB}!A:{SHEET_READ_END_COL}",
+        range=f"{GSHEET_TAB}!A:{FOLLOWUP_READ_END_COL}",
         majorDimension="ROWS",
         valueRenderOption="FORMATTED_VALUE",
     ).execute()

@@ -64,7 +64,7 @@ class _FakeValuesAPI:
 
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
         self._ranges.append(range)
-        if range.endswith(f"!A:{bot_min.SHEET_READ_END_COL}"):
+        if range.endswith(f"!A:{bot_min.FOLLOWUP_READ_END_COL}"):
             row = [""] * bot_min.MIN_COLS
             row[bot_min.COL_FIRST] = "Sam"
             row[bot_min.COL_PHONE] = "5550001111"
@@ -117,3 +117,14 @@ def test_resolve_timestamp_columns_rejects_reserved_and_colliding_columns():
     assert init_idx == bot_min.DEFAULT_COL_INIT_TS
     assert fu_idx == bot_min.DEFAULT_COL_FU_TS
     assert warnings
+
+
+def test_parse_configured_col_index_rejects_non_a1_labels():
+    idx, warning = bot_min._parse_configured_col_index(
+        "TIMESTAMP",
+        default_index=bot_min.DEFAULT_COL_INIT_TS,
+        env_key="GSHEET_INIT_TS_COL",
+        max_index=bot_min.MAX_CONFIGURABLE_TIMESTAMP_COL,
+    )
+    assert idx == bot_min.DEFAULT_COL_INIT_TS
+    assert warning
