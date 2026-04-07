@@ -720,14 +720,68 @@ COL_REPLY_FLAG  = 8   # I  ← check before follow‑up
 COL_MANUAL_NOTE = 9   # J  ← check before follow‑up
 COL_REPLY_TS    = 10  # K
 COL_MSG_ID      = 11  # L
-COL_INIT_TS     = _col_letter_to_index(os.getenv("GSHEET_INIT_TS_COL", "W"), 22)
-COL_FU_TS       = _col_letter_to_index(os.getenv("GSHEET_FU_TS_COL", "X"), 23)
+DEFAULT_COL_INIT_TS = 22  # W
+DEFAULT_COL_FU_TS   = 23  # X
 COL_PHONE_CONF  = 24  # Y
 COL_CONTACT_REASON = 25  # Z
 COL_EMAIL_CONF  = 26  # AA
 COL_ZPID        = 27  # AB
 COL_STATUS      = 28  # AC
 COL_NOTES       = 29  # AD
+
+
+def _resolve_timestamp_columns(init_idx: int, fu_idx: int) -> tuple[int, int, List[str]]:
+    warnings: List[str] = []
+    reserved = {
+        COL_FIRST,
+        COL_LAST,
+        COL_PHONE,
+        COL_EMAIL,
+        COL_STREET,
+        COL_CITY,
+        COL_STATE,
+        COL_SENT_FLAG,
+        COL_REPLY_FLAG,
+        COL_MANUAL_NOTE,
+        COL_REPLY_TS,
+        COL_MSG_ID,
+        COL_PHONE_CONF,
+        COL_CONTACT_REASON,
+        COL_EMAIL_CONF,
+        COL_ZPID,
+        COL_STATUS,
+        COL_NOTES,
+    }
+    if init_idx in reserved:
+        warnings.append(
+            f"GSHEET_INIT_TS_COL points to reserved column {_col_index_to_letter(init_idx)}; "
+            f"falling back to {_col_index_to_letter(DEFAULT_COL_INIT_TS)}."
+        )
+        init_idx = DEFAULT_COL_INIT_TS
+    if fu_idx in reserved:
+        warnings.append(
+            f"GSHEET_FU_TS_COL points to reserved column {_col_index_to_letter(fu_idx)}; "
+            f"falling back to {_col_index_to_letter(DEFAULT_COL_FU_TS)}."
+        )
+        fu_idx = DEFAULT_COL_FU_TS
+    if init_idx == fu_idx:
+        warnings.append(
+            f"GSHEET_INIT_TS_COL and GSHEET_FU_TS_COL both resolve to {_col_index_to_letter(init_idx)}; "
+            f"falling back to defaults {_col_index_to_letter(DEFAULT_COL_INIT_TS)}/"
+            f"{_col_index_to_letter(DEFAULT_COL_FU_TS)}."
+        )
+        init_idx = DEFAULT_COL_INIT_TS
+        fu_idx = DEFAULT_COL_FU_TS
+    return init_idx, fu_idx, warnings
+
+
+_init_col_candidate = _col_letter_to_index(os.getenv("GSHEET_INIT_TS_COL", "W"), DEFAULT_COL_INIT_TS)
+_fu_col_candidate = _col_letter_to_index(os.getenv("GSHEET_FU_TS_COL", "X"), DEFAULT_COL_FU_TS)
+COL_INIT_TS, COL_FU_TS, _TIMESTAMP_COL_CONFIG_WARNINGS = _resolve_timestamp_columns(
+    _init_col_candidate,
+    _fu_col_candidate,
+)
+
 BASE_MIN_COLS   = 30
 MIN_COLS        = max(BASE_MIN_COLS, COL_INIT_TS + 1, COL_FU_TS + 1)
 SHEET_READ_END_COL = _col_index_to_letter(MIN_COLS - 1)
@@ -745,6 +799,8 @@ logging.basicConfig(
     force=True,
 )
 LOG = logging.getLogger("bot_min")
+for _col_warning in _TIMESTAMP_COL_CONFIG_WARNINGS:
+    LOG.warning(_col_warning)
 _multi_agent_run = False
 
 _headless_status_logged = False
