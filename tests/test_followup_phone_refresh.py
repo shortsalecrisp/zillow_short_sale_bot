@@ -64,7 +64,7 @@ class _FakeValuesAPI:
 
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
         self._ranges.append(range)
-        if range.endswith("!A:AB"):
+        if range.endswith(f"!A:{bot_min.SHEET_READ_END_COL}"):
             row = [""] * bot_min.MIN_COLS
             row[bot_min.COL_FIRST] = "Sam"
             row[bot_min.COL_PHONE] = "5550001111"
@@ -107,3 +107,13 @@ def test_follow_up_uses_latest_sheet_phone(monkeypatch):
     assert sent["phone"] == "5559998888"
     assert sent["row_idx"] == 2
     assert sent["follow_up"] is True
+
+
+def test_resolve_timestamp_columns_rejects_reserved_and_colliding_columns():
+    init_idx, fu_idx, warnings = bot_min._resolve_timestamp_columns(
+        bot_min.COL_ZPID,
+        bot_min.COL_ZPID,
+    )
+    assert init_idx == bot_min.DEFAULT_COL_INIT_TS
+    assert fu_idx == bot_min.DEFAULT_COL_FU_TS
+    assert warnings
