@@ -681,6 +681,33 @@ STATE_ABBR_TO_NAME = {
 }
 
 # column indices (0‑based)
+#
+# NOTE:
+# - COL_INIT_TS is the timestamp for *initial SMS sent*.
+# - COL_FU_TS is the timestamp for *follow-up SMS sent*.
+#   Both are configurable via env so sheet column moves do not silently break
+#   follow-up eligibility.
+def _col_letter_to_index(letter: str, default_index: int) -> int:
+    raw = str(letter or "").strip().upper()
+    if not raw or not raw.isalpha():
+        return default_index
+    idx = 0
+    for ch in raw:
+        idx = (idx * 26) + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
+
+def _col_index_to_letter(index: int) -> str:
+    n = int(index) + 1
+    if n <= 0:
+        return "A"
+    out = []
+    while n:
+        n, rem = divmod(n - 1, 26)
+        out.append(chr(ord("A") + rem))
+    return "".join(reversed(out))
+
+
 COL_FIRST       = 0   # A
 COL_LAST        = 1   # B
 COL_PHONE       = 2   # C
@@ -693,8 +720,8 @@ COL_REPLY_FLAG  = 8   # I  ← check before follow‑up
 COL_MANUAL_NOTE = 9   # J  ← check before follow‑up
 COL_REPLY_TS    = 10  # K
 COL_MSG_ID      = 11  # L
-COL_INIT_TS     = 22  # W
-COL_FU_TS       = 23  # X
+COL_INIT_TS     = _col_letter_to_index(os.getenv("GSHEET_INIT_TS_COL", "W"), 22)
+COL_FU_TS       = _col_letter_to_index(os.getenv("GSHEET_FU_TS_COL", "X"), 23)
 COL_PHONE_CONF  = 24  # Y
 COL_CONTACT_REASON = 25  # Z
 COL_EMAIL_CONF  = 26  # AA
@@ -11468,9 +11495,10 @@ def is_active_listing(row_payload: Dict[str, Any]) -> bool:
 
 def mark_sent(row_idx: int, msg_id: str) -> bool:
     ts = datetime.now(tz=TZ).isoformat()
+    init_col = _col_index_to_letter(COL_INIT_TS)
     data = [
         {"range": f"{GSHEET_TAB}!H{row_idx}", "values": [["x"]]},
-        {"range": f"{GSHEET_TAB}!W{row_idx}", "values": [[ts]]},
+        {"range": f"{GSHEET_TAB}!{init_col}{row_idx}", "values": [[ts]]},
         {"range": f"{GSHEET_TAB}!L{row_idx}", "values": [[msg_id]]},
     ]
     try:
@@ -11478,7 +11506,12 @@ def mark_sent(row_idx: int, msg_id: str) -> bool:
             spreadsheetId=GSHEET_ID,
             body={"valueInputOption": "RAW", "data": data},
         ).execute()
-        LOG.info("Marked row %s H:x W:init-ts L:msg-id (msg_id=%s)", row_idx, msg_id)
+        LOG.info(
+            "Marked row %s H:x %s:init-ts L:msg-id (msg_id=%s)",
+            row_idx,
+            init_col,
+            msg_id,
+        )
         return True
     except Exception as e:
         LOG.error("GSheet mark_sent error %s", e)
@@ -11486,16 +11519,17 @@ def mark_sent(row_idx: int, msg_id: str) -> bool:
 
 def mark_followup(row_idx: int) -> bool:
     ts = datetime.now(tz=TZ).isoformat()
+    fu_col = _col_index_to_letter(COL_FU_TS)
     data = [
         {"range": f"{GSHEET_TAB}!I{row_idx}", "values": [["x"]]},
-        {"range": f"{GSHEET_TAB}!X{row_idx}", "values": [[ts]]},
+        {"range": f"{GSHEET_TAB}!{fu_col}{row_idx}", "values": [[ts]]},
     ]
     try:
         sheets_service.spreadsheets().values().batchUpdate(
             spreadsheetId=GSHEET_ID,
             body={"valueInputOption": "RAW", "data": data},
         ).execute()
-        LOG.info("Marked row %s I:x X:follow-up done", row_idx)
+        LOG.info("Marked row %s I:x %s:follow-up done", row_idx, fu_col)
         return True
     except Exception as e:
         LOG.error("GSheet mark_followup error %s", e)
@@ -12094,6 +12128,11 @@ def run_hourly_scheduler(
         SCHEDULER_TZ,
         SCHEDULER_INCLUDE_WEEKENDS,
     )
+    LOG.info(
+        "Follow-up timestamp columns configured: init=%s followup=%s",
+        _col_index_to_letter(COL_INIT_TS),
+        _col_index_to_letter(COL_FU_TS),
+    )
     next_run = _next_scheduler_run(datetime.now(tz=SCHEDULER_TZ))
 
     LOG.info(
@@ -12447,15 +12486,19 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         row_vals[COL_STREET]  = r.get("street", "")
         row_vals[COL_CITY]    = r.get("city", "")
         row_vals[COL_STATE]   = state
-        row_vals[COL_INIT_TS] = pulled_at
+        # Initial SMS timestamp is set only after a successful initial send
+        # (mark_sent). Keep this blank on insert so follow-up timing is based on
+        # actual message send time, not listing pull time.
+        row_vals[COL_INIT_TS] = ""
         row_vals[COL_ZPID]    = zpid
         row_idx = append_row(row_vals)
         LOG.info(
-            "SHEET_APPEND_OK zpid=%s agent=%s phone=%s email=%s",
+            "SHEET_APPEND_OK zpid=%s agent=%s phone=%s email=%s pulled_at=%s",
             zpid,
             name,
             selected_phone or "",
             selected_email or "",
+            pulled_at,
         )
         if normalized_agent:
             seen_agents.add(normalized_agent)
