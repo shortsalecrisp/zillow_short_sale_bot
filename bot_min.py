@@ -12352,20 +12352,63 @@ def _follow_up_pass():
         return
 
     last_row_idx = len(all_rows)
-    # look back over recent rows for potential follow‑ups
-    start_row_idx = max(2, last_row_idx - FU_LOOKBACK_ROWS)
-    recent_rows = all_rows[start_row_idx - 1:]
+    init_col = _col_index_to_letter(COL_INIT_TS)
+    init_rows: List[Tuple[int, datetime, List[str]]] = []
+    bad_init_ts_rows = 0
+    missing_init_ts_rows = 0
+
+    for sheet_row, row_values in enumerate(all_rows[1:], start=2):
+        row = list(row_values)
+        row += [""] * (MIN_COLS - len(row))
+        init_raw = row[COL_INIT_TS].strip()
+        if not init_raw:
+            missing_init_ts_rows += 1
+            continue
+        try:
+            ts = datetime.fromisoformat(init_raw)
+        except Exception:
+            bad_init_ts_rows += 1
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=SCHEDULER_TZ)
+        else:
+            ts = ts.astimezone(SCHEDULER_TZ)
+        init_rows.append((sheet_row, ts, row))
+
+    if not init_rows:
+        LOG.info(
+            "Follow-up candidate query: init_ts in %s2:%s%s found 0 rows (missing_init_ts=%s bad_init_ts=%s)",
+            init_col,
+            init_col,
+            last_row_idx,
+            missing_init_ts_rows,
+            bad_init_ts_rows,
+        )
+        return
+
+    init_rows.sort(key=lambda item: item[1], reverse=True)
+    candidate_rows = init_rows[:FU_LOOKBACK_ROWS]
+    candidate_indices = [row_idx for row_idx, _, _ in candidate_rows]
     LOG.info(
-        "Follow-up review scanning rows %s-%s (count=%s, lookback=%s)",
-        start_row_idx,
+        "Follow-up candidate query: init_ts in %s2:%s%s ORDER BY ts DESC LIMIT %s -> rows=%s (total_init_ts=%s missing_init_ts=%s bad_init_ts=%s)",
+        init_col,
+        init_col,
         last_row_idx,
-        len(recent_rows),
         FU_LOOKBACK_ROWS,
+        len(candidate_rows),
+        len(init_rows),
+        missing_init_ts_rows,
+        bad_init_ts_rows,
+    )
+    LOG.info(
+        "Recently marked %s:init-ts row index bounds min=%s max=%s",
+        init_col,
+        min(candidate_indices),
+        max(candidate_indices),
     )
 
     eligible_count = 0
-    for sheet_row, row in enumerate(recent_rows, start=start_row_idx):
-        row += [""] * (MIN_COLS - len(row))  # pad
+    for sheet_row, ts, row in candidate_rows:
         phone_redacted = _redact_followup_phone(row[COL_PHONE])
         address = row[COL_STREET] or ""
 
@@ -12400,30 +12443,6 @@ def _follow_up_pass():
             )
             mark_reply(sheet_row)
             continue
-
-        if not row[COL_INIT_TS].strip():
-            LOG.info(
-                "FU-review row %s status=skip_missing_init_ts phone=%s address=%s",
-                sheet_row,
-                phone_redacted,
-                address,
-            )
-            continue
-        try:
-            ts = datetime.fromisoformat(row[COL_INIT_TS])
-        except Exception:
-            LOG.info(
-                "FU-review row %s status=skip_bad_init_ts init_ts=%s phone=%s address=%s",
-                sheet_row,
-                row[COL_INIT_TS],
-                phone_redacted,
-                address,
-            )
-            continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=SCHEDULER_TZ)
-        else:
-            ts = ts.astimezone(SCHEDULER_TZ)
 
         elapsed_hours = business_hours_elapsed(
             ts,
@@ -12482,10 +12501,11 @@ def _follow_up_pass():
 
     if eligible_count == 0:
         LOG.info(
-            "No eligible follow-ups found in rows %s-%s (lookback=%s).",
-            start_row_idx,
-            last_row_idx,
+            "No eligible follow-ups found for init_ts-query rows (limit=%s, total_init_ts=%s, row_bounds=%s-%s).",
             FU_LOOKBACK_ROWS,
+            len(init_rows),
+            min(candidate_indices),
+            max(candidate_indices),
         )
 
 # ───────────────────── core row processor (UNCHANGED) ─────────────────────
