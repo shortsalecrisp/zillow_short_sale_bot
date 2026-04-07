@@ -728,7 +728,9 @@ COL_EMAIL_CONF  = 26  # AA
 COL_ZPID        = 27  # AB
 COL_STATUS      = 28  # AC
 COL_NOTES       = 29  # AD
-MIN_COLS        = 30
+BASE_MIN_COLS   = 30
+MIN_COLS        = max(BASE_MIN_COLS, COL_INIT_TS + 1, COL_FU_TS + 1)
+SHEET_READ_END_COL = _col_index_to_letter(MIN_COLS - 1)
 
 MAX_ZILLOW_403      = 3
 MAX_RATE_429        = 3
@@ -12133,6 +12135,11 @@ def run_hourly_scheduler(
         _col_index_to_letter(COL_INIT_TS),
         _col_index_to_letter(COL_FU_TS),
     )
+    LOG.info(
+        "Follow-up sheet read window configured: A:%s (min_cols=%s)",
+        SHEET_READ_END_COL,
+        MIN_COLS,
+    )
     next_run = _next_scheduler_run(datetime.now(tz=SCHEDULER_TZ))
 
     LOG.info(
@@ -12228,7 +12235,7 @@ def _follow_up_pass():
     now = datetime.now(tz=SCHEDULER_TZ)
     resp = sheets_service.spreadsheets().values().get(
         spreadsheetId=GSHEET_ID,
-        range=f"{GSHEET_TAB}!A:AB",
+        range=f"{GSHEET_TAB}!A:{SHEET_READ_END_COL}",
         majorDimension="ROWS",
         valueRenderOption="FORMATTED_VALUE",
     ).execute()
