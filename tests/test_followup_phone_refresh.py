@@ -64,7 +64,7 @@ class _FakeValuesAPI:
 
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
         self._ranges.append(range)
-        if range.endswith("!A:AB"):
+        if range.endswith(f"!A:{bot_min.SHEET_READ_END_COL}"):
             row = [""] * bot_min.MIN_COLS
             row[bot_min.COL_FIRST] = "Sam"
             row[bot_min.COL_PHONE] = "5550001111"
