@@ -1121,6 +1121,7 @@ seen_agents: Set[str] = set()
 seen_zpids: Set[str] = set()
 _seen_zpids_loaded_at = 0.0
 _seen_contacts_loaded_at = 0.0
+_seen_contacts_snapshot_ready = False
 _seen_zpids_lock = threading.Lock()
 _seen_contacts_lock = threading.Lock()
 
@@ -1128,10 +1129,10 @@ _seen_contacts_lock = threading.Lock()
 def load_seen_contacts(force: bool = False) -> Tuple[Set[str], Set[str]]:
     """Load agent names and phones present in the Google Sheet with caching."""
 
-    global seen_phones, seen_agents, _seen_contacts_loaded_at
+    global seen_phones, seen_agents, _seen_contacts_loaded_at, _seen_contacts_snapshot_ready
     with _seen_contacts_lock:
         now = time.time()
-        if (seen_phones or seen_agents) and not force and (now - _seen_contacts_loaded_at) < SEEN_ZPID_CACHE_SECONDS:
+        if _seen_contacts_snapshot_ready and not force and (now - _seen_contacts_loaded_at) < SEEN_ZPID_CACHE_SECONDS:
             return set(seen_phones), set(seen_agents)
         try:
             resp = sheets_service.spreadsheets().values().get(
@@ -1159,6 +1160,7 @@ def load_seen_contacts(force: bool = False) -> Tuple[Set[str], Set[str]]:
         seen_phones = phone_set
         seen_agents = agent_set
         _seen_contacts_loaded_at = now
+        _seen_contacts_snapshot_ready = True
         LOG.info(
             "seen_contacts_loaded phones=%s agents=%s rows=%s",
             len(seen_phones),
@@ -1177,23 +1179,34 @@ def load_seen_zpids(force: bool = False) -> Set[str]:
         if seen_zpids and not force and (now - _seen_zpids_loaded_at) < SEEN_ZPID_CACHE_SECONDS:
             return set(seen_zpids)
         try:
-            _get_seen_zpid_worksheet()
-            resp = sheets_service.spreadsheets().values().get(
-                spreadsheetId=GSHEET_ID,
-                range=f"'{SEEN_ZPID_TAB}'!A:A",
-                majorDimension="COLUMNS",
-                valueRenderOption="UNFORMATTED_VALUE",
-            ).execute()
+            seen_ws = _get_seen_zpid_worksheet()
         except Exception as exc:
             LOG.warning("Unable to refresh seen ZPIDs from sheet: %s", exc)
             return set(seen_zpids)
-        col_vals = (resp.get("values") or [[]])[0]
-        refreshed = {
-            str(val).strip()
-            for val in col_vals[1:]
-            if str(val).strip()
-        }
-        refreshed = {z for z in refreshed if re.fullmatch(r"\d+", z)}
+        max_row = max(1, int(getattr(seen_ws, "row_count", 1) or 1))
+        collected: List[str] = []
+        scan_end = max_row
+        chunk_size = 500
+        while scan_end >= 2 and len(collected) < 100:
+            scan_start = max(2, scan_end - chunk_size + 1)
+            resp = sheets_service.spreadsheets().values().get(
+                spreadsheetId=GSHEET_ID,
+                range=f"'{SEEN_ZPID_TAB}'!A{scan_start}:A{scan_end}",
+                majorDimension="ROWS",
+                valueRenderOption="UNFORMATTED_VALUE",
+            ).execute()
+            rows = resp.get("values", [])
+            for offset in range(len(rows) - 1, -1, -1):
+                value = str((rows[offset][0] if rows[offset] else "") or "").strip()
+                if not value:
+                    continue
+                if not re.fullmatch(r"\d+", value):
+                    continue
+                collected.append(value)
+                if len(collected) >= 100:
+                    break
+            scan_end = scan_start - 1
+        refreshed = set(collected)
         seen_zpids = refreshed
         _seen_zpids_loaded_at = now
         LOG.info("seen_zpids_loaded=%s tab=%s", len(refreshed), SEEN_ZPID_TAB)
@@ -12341,25 +12354,47 @@ def _current_sheet_phone_for_row(row_idx: int) -> str:
 
 def _follow_up_pass():
     now = datetime.now(tz=SCHEDULER_TZ)
-    resp = sheets_service.spreadsheets().values().get(
-        spreadsheetId=GSHEET_ID,
-        range=f"{GSHEET_TAB}!A:{FOLLOWUP_READ_END_COL}",
-        majorDimension="ROWS",
-        valueRenderOption="FORMATTED_VALUE",
-    ).execute()
-    all_rows = resp.get("values", [])
-    if len(all_rows) <= 1:
+    max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
+    if max_row <= 1:
+        return
+    # Memory optimization: scan from the bottom in chunks and keep only the last
+    # 50 rows with meaningful follow-up data in required review columns.
+    recent_rows: List[Tuple[int, List[str]]] = []
+    scan_end = max_row
+    chunk_size = 200
+    while scan_end >= 2 and len(recent_rows) < 50:
+        scan_start = max(2, scan_end - chunk_size + 1)
+        resp = sheets_service.spreadsheets().values().get(
+            spreadsheetId=GSHEET_ID,
+            range=f"{GSHEET_TAB}!A{scan_start}:{FOLLOWUP_READ_END_COL}{scan_end}",
+            majorDimension="ROWS",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+        rows = resp.get("values", [])
+        for offset in range(len(rows) - 1, -1, -1):
+            sheet_row = scan_start + offset
+            row = list(rows[offset])
+            row += [""] * (MIN_COLS - len(row))
+            # Candidate rows for review are strictly:
+            # - Column I blank
+            # - Column W non-blank
+            if str(row[COL_REPLY_FLAG]).strip() or not str(row[COL_INIT_TS]).strip():
+                continue
+            recent_rows.append((sheet_row, row))
+            if len(recent_rows) >= 50:
+                break
+        scan_end = scan_start - 1
+    recent_rows.reverse()
+    if not recent_rows:
         return
 
-    last_row_idx = len(all_rows)
+    last_row_idx = recent_rows[-1][0]
     init_col = _col_index_to_letter(COL_INIT_TS)
     init_rows: List[Tuple[int, datetime, List[str]]] = []
     bad_init_ts_rows = 0
     missing_init_ts_rows = 0
 
-    for sheet_row, row_values in enumerate(all_rows[1:], start=2):
-        row = list(row_values)
-        row += [""] * (MIN_COLS - len(row))
+    for sheet_row, row in recent_rows:
         init_raw = row[COL_INIT_TS].strip()
         if not init_raw:
             missing_init_ts_rows += 1
