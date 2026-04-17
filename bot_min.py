@@ -2871,6 +2871,8 @@ CONTACT_HTTP_BACKOFF_JITTER = float(os.getenv("CONTACT_HTTP_BACKOFF_JITTER", "0.
 CONTACT_FAILURE_THRESHOLD = int(os.getenv("CONTACT_FAILURE_THRESHOLD", "3"))
 CONTACT_FAILURE_LOG_INTERVAL = float(os.getenv("CONTACT_FAILURE_LOG_INTERVAL", "300"))
 CONTACT_HEADLESS_RETRIES = int(os.getenv("CONTACT_HEADLESS_RETRIES", "2"))
+CONTACT_ENRICHMENT_BUDGET_SECONDS = float(os.getenv("CONTACT_ENRICHMENT_BUDGET_SECONDS", "75"))
+CONTACT_ENRICHMENT_MAX_EXPENSIVE_FETCHES = int(os.getenv("CONTACT_ENRICHMENT_MAX_EXPENSIVE_FETCHES", "14"))
 
 _CONTACT_DOMAIN_LAST_FETCH: Dict[str, float] = {}
 _CONTACT_FAILURE_COUNTS: Dict[str, int] = {}
@@ -5518,7 +5520,7 @@ def _contact_search_urls(
     ) -> Tuple[List[Dict[str, Any]], List[str], List[Tuple[str, str]], bool]:
         ddg_state = provider_health.setdefault("duckduckgo", {"blocked": False, "failures": 0, "success": 0})
         if ddg_state.get("blocked"):
-            LOG.warning('DuckDuckGo blocked; skipping search for query %s', query)
+            LOG.info("search-engine-skip blocked_in_run engine=duckduckgo query=%s", query)
             return [], [], [], True
         ddg_results, blocked = duckduckgo_search(
             query,
@@ -6189,12 +6191,30 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
     headless_timeout_counts: Dict[str, int] = {}
     headless_circuit_domains: Set[str] = set()
     brokerage_domain = _domain(domain_hint or brokerage)
+    zpid = str(row_payload.get("zpid", ""))
+    budget_start = time.monotonic()
+    budget_exceeded = False
+    expensive_fetches = 0
+    attempt_outcomes: Dict[str, str] = {}
+    prior_timeout_urls: Set[str] = set()
+    thin_or_blocked_counts: Dict[str, int] = {}
+
+    LOG.info(
+        "contact-budget-start agent=%s zpid=%s budget_s=%.1f max_expensive_fetches=%s",
+        agent,
+        zpid,
+        CONTACT_ENRICHMENT_BUDGET_SECONDS,
+        CONTACT_ENRICHMENT_MAX_EXPENSIVE_FETCHES,
+    )
 
     def _empty_result() -> Dict[str, Any]:
         return {
             "_two_stage_done": False,
             "_two_stage_candidates": len(candidates),
             "_blocked_engines": sorted(blocked_engines),
+            "_contact_budget_exceeded": bool(budget_exceeded),
+            "_search_empty": False,
+            "_search_exhausted": False,
             "best_email": "",
             "best_email_confidence": 0,
             "best_email_source_url": "",
@@ -6202,6 +6222,60 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
             "_email_candidates": [],
             "_email_rejected": [],
         }
+
+    def _mark_attempt_outcome(url: str, reason: str) -> None:
+        if not url:
+            return
+        key = _canonical_candidate_url(url)
+        if key and key not in attempt_outcomes:
+            attempt_outcomes[key] = reason
+
+    def _mark_thin_or_blocked(url: str) -> None:
+        if not url:
+            return
+        key = _canonical_candidate_url(url)
+        if not key:
+            return
+        count = thin_or_blocked_counts.get(key, 0) + 1
+        thin_or_blocked_counts[key] = count
+        if count >= 2 and key not in attempt_outcomes:
+            attempt_outcomes[key] = "repeated_thin_or_blocked"
+
+    def _skip_url(url: str) -> bool:
+        if not url:
+            return True
+        key = _canonical_candidate_url(url)
+        if key in prior_timeout_urls:
+            LOG.info("contact-url-skip prior_timeout url=%s", url)
+            return True
+        reason = attempt_outcomes.get(key, "")
+        if reason:
+            LOG.info("contact-url-skip cached_reject url=%s reason=%s", url, reason)
+            return True
+        return False
+
+    def _consume_budget(stage: str, *, url: str = "", headless_stage: bool = False) -> bool:
+        nonlocal budget_exceeded, expensive_fetches
+        if budget_exceeded:
+            if headless_stage and url:
+                LOG.info("headless-skip candidate_budget_exceeded url=%s", url)
+            return False
+        elapsed = time.monotonic() - budget_start
+        if elapsed >= CONTACT_ENRICHMENT_BUDGET_SECONDS or expensive_fetches >= CONTACT_ENRICHMENT_MAX_EXPENSIVE_FETCHES:
+            budget_exceeded = True
+            LOG.warning(
+                "contact-budget-exceeded agent=%s zpid=%s stage=%s elapsed_s=%.2f expensive_fetches=%s",
+                agent,
+                zpid,
+                stage,
+                elapsed,
+                expensive_fetches,
+            )
+            if headless_stage and url:
+                LOG.info("headless-skip candidate_budget_exceeded url=%s", url)
+            return False
+        expensive_fetches += 1
+        return True
 
     def _has_verifiable_contacts() -> bool:
         quality = _candidate_quality(candidates)
@@ -6320,37 +6394,60 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         if cse_status in {"blocked", "throttled"}:
             blocked_engines.add("google")
         if search_empty or not urls:
-            return _empty_result()
+            empty = _empty_result()
+            empty["_search_empty"] = bool(search_empty or not urls)
+            empty["_search_exhausted"] = bool(search_empty or not urls)
+            return empty
 
         for url in urls:
+            if _skip_url(url):
+                continue
+            if not _consume_budget("direct_fetch", url=url):
+                break
             page, final_url, status = _direct_fetch(url)
             if status in {403, 429, 451}:
                 _blocked_domain_from_url(final_url or url)
+                _mark_attempt_outcome(final_url or url, f"hard_reject_{status}")
                 continue
             if not page:
+                _mark_attempt_outcome(final_url or url, "soft_reject_empty")
                 continue
             _collect_page(page, final_url)
 
-        if _needs_email_deepening():
+        if _needs_email_deepening() and not budget_exceeded:
             for url in urls:
+                if _skip_url(url):
+                    continue
+                if not _consume_budget("jina_fetch", url=url):
+                    break
                 fetched = fetch_text_cached(url, ttl_days=14, respect_block=False, allow_blocking=False)
                 status = int(fetched.get("http_status", 0) or 0)
                 if status in {403, 429, 451} or fetched.get("thin_response"):
                     _blocked_domain_from_url(fetched.get("final_url") or url)
+                    _mark_thin_or_blocked(fetched.get("final_url") or url)
                     continue
                 page = fetched.get("extracted_text", "") or ""
                 final_url = fetched.get("final_url") or url
                 if not page.strip():
+                    _mark_attempt_outcome(final_url, "soft_reject_empty")
                     continue
                 _collect_page(page, final_url)
                 _collect_parse_lite(page, final_url)
 
-        if _needs_email_deepening():
+        if _needs_email_deepening() and not budget_exceeded:
             for idx, url in enumerate(urls):
+                if _skip_url(url):
+                    continue
                 dom = _domain(url)
                 if dom in headless_circuit_domains:
                     LOG.info("HEADLESS_SKIPPED url=%s reason=domain_circuit_open", url)
                     continue
+                canonical_url = _canonical_candidate_url(url)
+                if canonical_url in prior_timeout_urls:
+                    LOG.info("headless-skip prior_timeout url=%s", url)
+                    continue
+                if not _consume_budget("headless_fetch", url=url, headless_stage=True):
+                    break
                 if not _should_use_headless_for_contact(
                     dom,
                     "",
@@ -6370,13 +6467,15 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                 if snapshot.get("timeout"):
                     _blocked_domain_from_url(snapshot.get("final_url") or url)
                     _record_headless_timeout(snapshot.get("final_url") or url)
+                    prior_timeout_urls.add(canonical_url)
                 rendered = _combine_headless_snapshot(snapshot)
                 if not rendered.strip():
+                    _mark_attempt_outcome(snapshot.get("final_url") or url, "soft_reject_headless_empty")
                     continue
                 final_url = snapshot.get("final_url") or url
                 _collect_page(rendered, final_url)
 
-        if _needs_email_deepening() and blocked_domains:
+        if _needs_email_deepening() and blocked_domains and not budget_exceeded:
             alt_urls: List[str] = []
             alt_urls.extend(_brokerage_contact_urls(agent, brokerage, domain_hint=domain_hint))
             alt_queries = _contact_alternative_queries(
@@ -6405,13 +6504,19 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
                     continue
             alt_urls = list(dict.fromkeys(alt_urls))[:8]
             for url in alt_urls:
+                if _skip_url(url):
+                    continue
+                if not _consume_budget("alt_fetch", url=url):
+                    break
                 fetched = fetch_text_cached(url, ttl_days=7, respect_block=False, allow_blocking=False)
                 status = int(fetched.get("http_status", 0) or 0)
                 if status in {403, 429, 451} or fetched.get("thin_response"):
+                    _mark_thin_or_blocked(fetched.get("final_url") or url)
                     continue
                 page = fetched.get("extracted_text", "") or ""
                 final_url = fetched.get("final_url") or url
                 if not page.strip():
+                    _mark_attempt_outcome(final_url, "soft_reject_empty")
                     continue
                 _collect_page(page, final_url)
                 _collect_parse_lite(page, final_url)
@@ -6465,6 +6570,9 @@ def _two_stage_contact_search(agent: str, state: str, row_payload: Dict[str, Any
         ranked["_two_stage_done"] = bool(candidates)
         ranked["_two_stage_candidates"] = len(candidates)
         ranked["_blocked_engines"] = sorted(blocked_engines)
+        ranked["_contact_budget_exceeded"] = bool(budget_exceeded)
+        ranked["_search_empty"] = bool(search_empty)
+        ranked["_search_exhausted"] = bool(search_empty and not candidates)
         for cand in email_candidates_info:
             em = cand.get("email", "")
             if not em:
@@ -9903,6 +10011,35 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
     # If two-stage search produced no phone, continue to other sources (including RapidAPI).
     if search_result is not None:
         return _apply_final_decision(search_result)
+    if rapid_best_phone:
+        weak_enrichment = bool(
+            enrichment.get("_contact_budget_exceeded")
+            or enrichment.get("_search_empty")
+            or enrichment.get("_search_exhausted")
+            or enrichment.get("_blocked_engines")
+        )
+        if weak_enrichment:
+            LOG.info(
+                "enrichment-finish using_best_known_phone agent=%s zpid=%s reason=weak_or_exhausted_search",
+                agent,
+                zpid,
+            )
+            rapid_result = {
+                "number": rapid_best_phone,
+                "confidence": "low",
+                "score": max(CONTACT_PHONE_OVERRIDE_MIN, float(rapid_phone_score or 0.0)),
+                "source": "rapid_fallback",
+                "reason": rapid_phone_reason or "rapid_fallback",
+                "verified_mobile": False,
+            }
+            _log_final_decision(
+                rapid_best_phone,
+                "rapid_fallback",
+                rapid_phone_reason or "rapid_fallback",
+                rapid_score=float(rapid_phone_score or 0.0),
+                rapid_reason=rapid_phone_reason,
+            )
+            return _finalize(rapid_result)
 
     location_tokens, location_digits = _collect_location_hints(
         row_payload,
