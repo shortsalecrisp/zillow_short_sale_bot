@@ -1021,6 +1021,20 @@ QUEUE_HEADERS = [
     "error",
     "listing_json",
 ]
+GOOGLE_SHEETS_MAX_CELL_CHARS = 50_000
+QUEUE_CELL_SAFE_LIMIT = GOOGLE_SHEETS_MAX_CELL_CHARS - 100
+QUEUE_REQUIRED_PAYLOAD_KEYS = ("zpid", "source")
+QUEUE_OPTIONAL_PAYLOAD_TRIM_ORDER = (
+    "listing_description",
+    "description",
+    "listingText",
+    "address",
+    "street",
+    "agentName",
+    "url",
+    "propertyUrl",
+    "detailUrl",
+)
 FINAL_QUEUE_STATUSES = {
     "completed_short_sale",
     "completed_non_short_sale",
@@ -1046,7 +1060,108 @@ def _parse_iso_timestamp(value: str) -> Optional[datetime]:
 
 
 def _queue_row_values(record: Dict[str, Any]) -> List[str]:
-    return [str(record.get(col, "") or "") for col in QUEUE_HEADERS]
+    values: List[str] = []
+    for col in QUEUE_HEADERS:
+        raw_value = str(record.get(col, "") or "")
+        if len(raw_value) > QUEUE_CELL_SAFE_LIMIT:
+            trimmed = raw_value[:QUEUE_CELL_SAFE_LIMIT]
+            logger.warning(
+                "queue: truncated column=%s chars=%d->%d",
+                col,
+                len(raw_value),
+                len(trimmed),
+            )
+            values.append(trimmed)
+            continue
+        values.append(raw_value)
+    return values
+
+
+def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str, Any]:
+    zpid = str(row.get("zpid", "")).strip()
+    listing_text = extract_description(row)
+    payload: Dict[str, Any] = {
+        "zpid": zpid,
+        "address": _format_listing_address(row),
+        "street": str(row.get("street") or "").strip(),
+        "city": str(row.get("city") or "").strip(),
+        "state": str(row.get("state") or "").strip(),
+        "zip": str(row.get("zip") or row.get("zipcode") or "").strip(),
+        "source": source,
+        "search_source": str(row.get("search_source") or source or "").strip(),
+        "agentName": str(row.get("agentName") or "").strip(),
+        "url": str(_extra_state_listing_url(row) or "").strip(),
+        "detailUrl": str(row.get("detailUrl") or row.get("detailURL") or "").strip(),
+        "propertyUrl": str(row.get("propertyUrl") or row.get("propertyURL") or "").strip(),
+        "homeStatus": str(
+            row.get("homeStatus")
+            or row.get("status")
+            or row.get("listingStatus")
+            or row.get("home_status")
+            or ""
+        ).strip(),
+        "detailScrapedAt": str(
+            row.get("detailScrapedAt")
+            or row.get("detail_scraped_at")
+            or row.get("detailScrapeAt")
+            or ""
+        ).strip(),
+        "listing_description": listing_text,
+        "description": listing_text,
+        "listingText": listing_text,
+    }
+    return {k: v for k, v in payload.items() if str(v or "").strip()}
+
+
+def _serialize_queue_payload(payload: Dict[str, Any], zpid: str) -> str:
+    compact_payload = dict(payload)
+    serialized = json.dumps(compact_payload, separators=(",", ":"), ensure_ascii=False)
+    if len(serialized) <= QUEUE_CELL_SAFE_LIMIT:
+        return serialized
+
+    for key in QUEUE_OPTIONAL_PAYLOAD_TRIM_ORDER:
+        value = compact_payload.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        new_value = value[:4_000].rstrip()
+        if len(new_value) < len(value):
+            compact_payload[key] = new_value
+            logger.warning(
+                "queue: truncated payload field zpid=%s field=%s chars=%d->%d",
+                zpid,
+                key,
+                len(value),
+                len(new_value),
+            )
+        serialized = json.dumps(compact_payload, separators=(",", ":"), ensure_ascii=False)
+        if len(serialized) <= QUEUE_CELL_SAFE_LIMIT:
+            return serialized
+
+    for key in QUEUE_OPTIONAL_PAYLOAD_TRIM_ORDER:
+        if key in compact_payload:
+            compact_payload.pop(key, None)
+            logger.warning("queue: dropped payload field zpid=%s field=%s to fit sheet cell", zpid, key)
+            serialized = json.dumps(compact_payload, separators=(",", ":"), ensure_ascii=False)
+            if len(serialized) <= QUEUE_CELL_SAFE_LIMIT:
+                return serialized
+
+    minimal_payload: Dict[str, str] = {}
+    for key in QUEUE_REQUIRED_PAYLOAD_KEYS:
+        value = str(compact_payload.get(key, "") or "").strip()
+        if not value:
+            continue
+        if len(value) > 1_000:
+            clipped = value[:1_000]
+            logger.warning(
+                "queue: truncated required payload field zpid=%s field=%s chars=%d->%d",
+                zpid,
+                key,
+                len(value),
+                len(clipped),
+            )
+            value = clipped
+        minimal_payload[key] = value
+    return json.dumps(minimal_payload, separators=(",", ":"), ensure_ascii=False)
 
 
 def get_pending_queue_ws():
@@ -1144,7 +1259,8 @@ def _enqueue_pending_rows(rows: List[Dict[str, Any]], source: str) -> int:
 
             address = _format_listing_address(row)
             source_value = str(row.get("source") or source or "").strip()
-            payload = json.dumps(row, separators=(",", ":"), ensure_ascii=False)
+            payload_dict = _compact_queue_resume_payload(row, source_value)
+            payload = _serialize_queue_payload(payload_dict, zpid)
             append_vals = _queue_row_values(
                 {
                     "zpid": zpid,
