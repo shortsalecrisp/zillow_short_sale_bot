@@ -12140,6 +12140,9 @@ def _within_scheduler_hours(slot: datetime) -> bool:
     return WORK_START <= slot.hour < WORK_END
 
 
+_follow_up_pass_lock = threading.Lock()
+
+
 def _next_work_start(slot: datetime, *, include_weekends: bool) -> datetime:
     slot = slot.astimezone(SCHEDULER_TZ)
     candidate = slot
@@ -12190,10 +12193,15 @@ def _run_hourly_cycle(
 
     if _within_work_hours(run_time):
         LOG.info("Starting follow-up pass at %s", run_time.isoformat())
-        try:
-            _follow_up_pass()
-        except Exception as exc:
-            LOG.exception("Error during follow-up pass: %s", exc)
+        if not _follow_up_pass_lock.acquire(blocking=False):
+            LOG.info("follow-up: skipped overlapping pass")
+        else:
+            try:
+                _follow_up_pass()
+            except Exception as exc:
+                LOG.exception("Error during follow-up pass: %s", exc)
+            finally:
+                _follow_up_pass_lock.release()
     else:
         LOG.info(
             "Current hour %s outside work hours (%s–%s); skipping follow-up",
@@ -12353,6 +12361,7 @@ def _current_sheet_phone_for_row(row_idx: int) -> str:
 
 
 def _follow_up_pass():
+    LOG.info("follow-up: using bounded init_ts scan path")
     now = datetime.now(tz=SCHEDULER_TZ)
     max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
     if max_row <= 1:

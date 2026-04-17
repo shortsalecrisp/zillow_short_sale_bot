@@ -87,6 +87,8 @@ EXPORTED_ZPIDS: set[str] = set()
 
 _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
+_scheduler_start_lock = threading.Lock()
+_scheduler_started = False
 _keepalive_thread: Optional[threading.Thread] = None
 _keepalive_stop: Optional[threading.Event] = None
 _deferred_rows_lock = threading.Lock()
@@ -294,37 +296,44 @@ def _ensure_scheduler_thread(
     *,
     initial_callbacks: bool = True,
 ) -> None:
-    global _scheduler_thread, _scheduler_stop
-    if _scheduler_thread and _scheduler_thread.is_alive():
-        return
+    global _scheduler_thread, _scheduler_stop, _scheduler_started
+    with _scheduler_start_lock:
+        if _scheduler_started:
+            logger.info("scheduler already started")
+            return
+        if _scheduler_thread and _scheduler_thread.is_alive():
+            _scheduler_started = True
+            logger.info("scheduler already started")
+            return
 
-    _scheduler_stop = threading.Event()
+        _scheduler_stop = threading.Event()
 
-    def _runner() -> None:
-        logger.info("Background hourly scheduler thread starting")
-        while not _scheduler_stop.is_set():
-            try:
-                run_hourly_scheduler(
-                    stop_event=_scheduler_stop,
-                    hourly_callbacks=hourly_callbacks,
-                    run_immediately=_should_run_immediately(),
-                    initial_callbacks=initial_callbacks,
-                )
-                break
-            except Exception:
-                logger.exception(
-                    "Background scheduler crashed; restarting in 30 seconds"
-                )
-                if _scheduler_stop.wait(30):
+        def _runner() -> None:
+            logger.info("Background hourly scheduler thread starting")
+            while not _scheduler_stop.is_set():
+                try:
+                    run_hourly_scheduler(
+                        stop_event=_scheduler_stop,
+                        hourly_callbacks=hourly_callbacks,
+                        run_immediately=_should_run_immediately(),
+                        initial_callbacks=initial_callbacks,
+                    )
                     break
-        logger.info("Background hourly scheduler thread stopped")
+                except Exception:
+                    logger.exception(
+                        "Background scheduler crashed; restarting in 30 seconds"
+                    )
+                    if _scheduler_stop.wait(30):
+                        break
+            logger.info("Background hourly scheduler thread stopped")
 
-    _scheduler_thread = threading.Thread(
-        target=_runner,
-        name="hourly-scheduler",
-        daemon=True,
-    )
-    _scheduler_thread.start()
+        _scheduler_thread = threading.Thread(
+            target=_runner,
+            name="hourly-scheduler",
+            daemon=True,
+        )
+        _scheduler_thread.start()
+        _scheduler_started = True
 
 
 def _ensure_keepalive_thread() -> None:
@@ -927,11 +936,15 @@ async def _start_scheduler() -> None:
 
 @app.on_event("shutdown")
 async def _stop_scheduler() -> None:
-    global _scheduler_thread, _scheduler_stop
+    global _scheduler_thread, _scheduler_stop, _scheduler_started
     if _scheduler_stop:
         _scheduler_stop.set()
     if _scheduler_thread and _scheduler_thread.is_alive():
         _scheduler_thread.join(timeout=10)
+    with _scheduler_start_lock:
+        _scheduler_started = False
+        _scheduler_thread = None
+        _scheduler_stop = None
     global _keepalive_thread, _keepalive_stop
     if _keepalive_stop:
         _keepalive_stop.set()
