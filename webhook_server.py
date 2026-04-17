@@ -783,6 +783,7 @@ def _process_incoming_rows(
     skip_seen_dedupe: bool = False,
     skip_seen_append: bool = False,
     allow_deferred_drain: bool = True,
+    skip_enqueue: bool = False,
 ) -> Dict[str, Any]:
     normalized_rows = [_normalize_apify_row(row) if isinstance(row, dict) else row for row in rows]
     normalized_rows = _prefer_detail_rows(normalized_rows)
@@ -832,7 +833,8 @@ def _process_incoming_rows(
             logger.info("apify-hook: no unseen rows to process after filter")
             return {"status": "no new rows"}
 
-    _enqueue_pending_rows(db_filtered, source=source)
+    if not skip_enqueue:
+        _enqueue_pending_rows(db_filtered, source=source)
 
     now = datetime.now(tz=SCHEDULER_TZ)
     if allow_deferred_drain and _within_initial_hours(now):
@@ -848,6 +850,7 @@ def _process_incoming_rows(
                 skip_seen_dedupe=False,
                 skip_seen_append=False,
                 allow_deferred_drain=False,
+                skip_enqueue=False,
             )
     if not _within_initial_hours(now):
         deferred = _defer_rows(db_filtered)
@@ -1092,6 +1095,7 @@ def _update_pending_queue_row(ws, row_num: int, record: Dict[str, Any]) -> None:
 def _enqueue_pending_rows(rows: List[Dict[str, Any]], source: str) -> int:
     now_iso = _utcnow_iso()
     enqueued = 0
+    enqueued_zpids: List[str] = []
     with _queue_lock:
         ws = PENDING_QUEUE_WS
         records = _load_pending_queue_records(ws)
@@ -1144,9 +1148,10 @@ def _enqueue_pending_rows(rows: List[Dict[str, Any]], source: str) -> int:
             )
             _retry_gspread_call("append pending queue row", lambda vals=append_vals: ws.append_row(vals))
             enqueued += 1
+            enqueued_zpids.append(zpid)
             by_zpid[zpid] = {"zpid": zpid, "status": "pending"}
 
-    logger.info("queue: enqueued count=%d", enqueued)
+    logger.info("queue: enqueued count=%d zpids=%s source=%s", enqueued, enqueued_zpids, source)
     return enqueued
 
 
@@ -1625,6 +1630,7 @@ async def apify_hook(request: Request):
             logger.info("apify-hook: selected addresses=%s", selection["selected_addresses"])
         rows = selection["rows"]
         row_source = "payload.listings"
+        _enqueue_pending_rows(rows, source=row_source)
 
         extra_state_rows = _fetch_extra_state_rows()
         logger.info(
@@ -1771,6 +1777,7 @@ async def apify_hook(request: Request):
         source=row_source,
         skip_seen_dedupe=payload_listings is not None,
         skip_seen_append=False,
+        skip_enqueue=payload_listings is not None,
     )
 
 
