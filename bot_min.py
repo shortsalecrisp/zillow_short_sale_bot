@@ -12547,19 +12547,27 @@ def _follow_up_pass():
 def _expand_row(l: List[str], n: int = MIN_COLS) -> List[str]:
     return l + [""] * (n - len(l)) if len(l) < n else l
 
-def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
+def process_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    skip_dedupe: bool = False,
+    return_outcomes: bool = False,
+):
     global _multi_agent_run
+    outcomes: Dict[str, str] = {}
     if not skip_dedupe:
         rows = dedupe_rows_by_zpid(rows, LOG)
         if not rows:
             LOG.info("No fresh rows after de-duplication; skipping enrichment run")
-            return
+            return outcomes if return_outcomes else None
     _multi_agent_run = len(rows) > 1
     if _multi_agent_run:
         LOG.info("HEADLESS_MULTI_AGENT_RUN rows=%s", len(rows))
     load_seen_contacts()
     for r in rows:
         zpid = str(r.get("zpid", ""))
+        outcome = "completed_non_short_sale"
+        outcomes[zpid] = outcome
         listing_text = _listing_text_from_payload(r)
         source = str(r.get("search_source", "") or "")
         is_extra_state_row = source in {"mi", "ak", "hi"}
@@ -12662,6 +12670,8 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
         row_vals[COL_INIT_TS] = ""
         row_vals[COL_ZPID]    = zpid
         row_idx = append_row(row_vals)
+        outcome = "completed_short_sale"
+        outcomes[zpid] = outcome
         LOG.info(
             "SHEET_APPEND_OK zpid=%s agent=%s phone=%s email=%s pulled_at=%s",
             zpid,
@@ -12764,6 +12774,9 @@ def process_rows(rows: List[Dict[str, Any]], *, skip_dedupe: bool = False):
             if enriched_phone:
                 seen_phones.add(_normalize_phone_for_dedupe(enriched_phone))
                 schedule_initial_sms(enriched_phone, first, r.get("street", ""), row_idx)
+        outcomes[zpid] = outcome
+    if return_outcomes:
+        return outcomes
 
 # ───────────────────── main entry point & scheduler ─────────────────────
 if __name__ == "__main__":

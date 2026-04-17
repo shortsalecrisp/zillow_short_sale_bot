@@ -76,6 +76,12 @@ app            = FastAPI()
 async def _log_headless_status() -> None:
     log_headless_status(logger)
 
+
+@app.on_event("startup")
+async def _recover_pending_queue() -> None:
+    processed = _process_pending_queue(startup=True)
+    logger.info("queue: startup processed count=%d", processed)
+
 # In-memory de-dupe cache of exported ZPIDs
 EXPORTED_ZPIDS: set[str] = set()
 
@@ -86,6 +92,8 @@ _keepalive_stop: Optional[threading.Event] = None
 _deferred_rows_lock = threading.Lock()
 _deferred_rows: List[Dict[str, Any]] = []
 _deferred_zpids: set[str] = set()
+_queue_lock = threading.Lock()
+_queue_worker_lock = threading.Lock()
 _original_payload_signature_lock = threading.Lock()
 _previous_original_upstream_dataset_id: Optional[str] = None
 _previous_original_ordered_zpids: List[str] = []
@@ -97,6 +105,8 @@ APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "
 APIFY_STATE_SEARCH_ENABLED = os.getenv("APIFY_STATE_SEARCH_ENABLED", "true").lower() == "true"
 APIFY_STATE_SEARCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_LIMIT", "5"))
 APIFY_STATE_SEARCH_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_SEARCH_TIMEOUT_SECONDS", "60"))
+PENDING_QUEUE_TAB = os.getenv("PENDING_QUEUE_TAB", "PendingQueue")
+PENDING_QUEUE_STALE_MINUTES = int(os.getenv("PENDING_QUEUE_STALE_MINUTES", "30"))
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
 
 
@@ -264,10 +274,19 @@ def _process_deferred_rows(run_time: datetime) -> None:
     logger.info("Processing %d deferred initial rows", len(rows))
     _process_incoming_rows(
         rows,
+        source="deferred_scheduler",
         skip_seen_dedupe=False,
         skip_seen_append=False,
         allow_deferred_drain=False,
     )
+
+
+def _process_pending_rows_callback(run_time: datetime) -> None:
+    if not _within_initial_hours(run_time):
+        return
+    processed = _process_pending_queue()
+    if processed:
+        logger.info("queue: scheduler processed count=%d", processed)
 
 
 def _ensure_scheduler_thread(
@@ -760,6 +779,7 @@ def _prepare_extra_state_rows(raw_rows: List[Dict[str, Any]], source: str) -> Di
 def _process_incoming_rows(
     rows: List[Dict[str, Any]],
     *,
+    source: str = "",
     skip_seen_dedupe: bool = False,
     skip_seen_append: bool = False,
     allow_deferred_drain: bool = True,
@@ -812,6 +832,8 @@ def _process_incoming_rows(
             logger.info("apify-hook: no unseen rows to process after filter")
             return {"status": "no new rows"}
 
+    _enqueue_pending_rows(db_filtered, source=source)
+
     now = datetime.now(tz=SCHEDULER_TZ)
     if allow_deferred_drain and _within_initial_hours(now):
         deferred_rows = _drain_deferred_rows()
@@ -822,6 +844,7 @@ def _process_incoming_rows(
             )
             _process_incoming_rows(
                 deferred_rows,
+                source="deferred_drain",
                 skip_seen_dedupe=False,
                 skip_seen_append=False,
                 allow_deferred_drain=False,
@@ -847,33 +870,8 @@ def _process_incoming_rows(
         )
 
     logger.debug("Sample fields on first fresh row: %s", list(db_filtered[0].keys())[:15])
-
-    try:
-        sms_jobs = process_rows(db_filtered, skip_dedupe=True) or []
-    except Exception:
-        logger.exception("process_rows failed; skipping batch to keep server alive")
-        return {"status": "error", "rows": len(db_filtered)}
-
-    for job in sms_jobs:
-        try:
-            message = _job_message(job)
-            if not message:
-                logger.warning("Skipping SMS job with empty message: %s", job)
-                continue
-            send_sms(job["phone"], message)
-        except Exception:
-            logger.exception("send_sms failed for %s", job)
-
-    detail_seen: List[str] = []
-    for row in db_filtered:
-        if _row_has_detail_marker(row):
-            zpid = row.get("zpid")
-            if zpid:
-                detail_seen.append(zpid)
-
-    EXPORTED_ZPIDS.update(detail_seen)
-
-    return {"status": "processed", "rows": len(db_filtered)}
+    processed = _process_pending_queue()
+    return {"status": "processed", "rows": len(db_filtered), "processed": processed}
 
 
 def _get_apify_run_status(run_id: str) -> Optional[str]:
@@ -918,7 +916,7 @@ async def _start_scheduler() -> None:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
         return
     _ensure_scheduler_thread(
-        hourly_callbacks=[_process_deferred_rows],
+        hourly_callbacks=[_process_deferred_rows, _process_pending_rows_callback],
         initial_callbacks=False,
     )
     _ensure_keepalive_thread()
@@ -994,6 +992,277 @@ def get_replies_ws():
         return ws
 
 REPLIES_WS = get_replies_ws()
+
+QUEUE_HEADERS = [
+    "zpid",
+    "address",
+    "source",
+    "created_at",
+    "status",
+    "claimed_at",
+    "processed_at",
+    "result",
+    "error",
+    "listing_json",
+]
+FINAL_QUEUE_STATUSES = {
+    "completed_short_sale",
+    "completed_non_short_sale",
+    "skipped_seen",
+}
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_timestamp(value: str) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _queue_row_values(record: Dict[str, Any]) -> List[str]:
+    return [str(record.get(col, "") or "") for col in QUEUE_HEADERS]
+
+
+def get_pending_queue_ws():
+    try:
+        workbook = _retry_gspread_call("open workbook", lambda: gclient.open_by_key(GSHEET_ID))
+        ws = _retry_gspread_call(
+            "open pending queue worksheet",
+            lambda: workbook.worksheet(PENDING_QUEUE_TAB),
+        )
+    except gspread.WorksheetNotFound:
+        workbook = _retry_gspread_call("open workbook", lambda: gclient.open_by_key(GSHEET_ID))
+        ws = _retry_gspread_call(
+            "create pending queue worksheet",
+            lambda: workbook.add_worksheet(title=PENDING_QUEUE_TAB, rows="2000", cols=str(len(QUEUE_HEADERS))),
+        )
+        _retry_gspread_call("seed pending queue header", lambda: ws.append_row(QUEUE_HEADERS))
+        return ws
+
+    values = _retry_gspread_call("read pending queue header", lambda: ws.row_values(1))
+    if values[: len(QUEUE_HEADERS)] != QUEUE_HEADERS:
+        end_col = chr(ord("A") + len(QUEUE_HEADERS) - 1)
+        _retry_gspread_call(
+            "repair pending queue header",
+            lambda: ws.update(f"A1:{end_col}1", [QUEUE_HEADERS], value_input_option="RAW"),
+        )
+    return ws
+
+
+PENDING_QUEUE_WS = get_pending_queue_ws()
+
+
+def _load_pending_queue_records(ws) -> List[Dict[str, Any]]:
+    values = _retry_gspread_call("read pending queue rows", ws.get_all_values)
+    if not values:
+        return []
+    header = list(values[0])
+    if len(header) < len(QUEUE_HEADERS):
+        header += QUEUE_HEADERS[len(header):]
+    records: List[Dict[str, Any]] = []
+    for row_num, row_vals in enumerate(values[1:], start=2):
+        row = list(row_vals)
+        if len(row) < len(header):
+            row += [""] * (len(header) - len(row))
+        record = {header[idx]: row[idx] for idx in range(len(header))}
+        record["_row_num"] = row_num
+        records.append(record)
+    return records
+
+
+def _update_pending_queue_row(ws, row_num: int, record: Dict[str, Any]) -> None:
+    end_col = chr(ord("A") + len(QUEUE_HEADERS) - 1)
+    values = _queue_row_values(record)
+    _retry_gspread_call(
+        "update pending queue row",
+        lambda: ws.update(f"A{row_num}:{end_col}{row_num}", [values], value_input_option="RAW"),
+    )
+
+
+def _enqueue_pending_rows(rows: List[Dict[str, Any]], source: str) -> int:
+    now_iso = _utcnow_iso()
+    enqueued = 0
+    with _queue_lock:
+        ws = PENDING_QUEUE_WS
+        records = _load_pending_queue_records(ws)
+        by_zpid: Dict[str, Dict[str, Any]] = {}
+        for rec in records:
+            zpid = str(rec.get("zpid", "")).strip()
+            if zpid:
+                current_status = str(rec.get("status", "")).strip()
+                existing = by_zpid.get(zpid)
+                if not existing:
+                    by_zpid[zpid] = rec
+                    continue
+                existing_status = str(existing.get("status", "")).strip()
+                if existing_status in FINAL_QUEUE_STATUSES:
+                    continue
+                if current_status in FINAL_QUEUE_STATUSES:
+                    by_zpid[zpid] = rec
+                    continue
+                if current_status in {"pending", "in_progress"} and existing_status == "failed":
+                    by_zpid[zpid] = rec
+
+        for row in rows:
+            zpid = str(row.get("zpid", "")).strip()
+            if not zpid:
+                continue
+            existing = by_zpid.get(zpid)
+            if existing:
+                status = str(existing.get("status", "")).strip()
+                if status in FINAL_QUEUE_STATUSES:
+                    logger.info("queue: skipped duplicate completed zpid=%s", zpid)
+                    continue
+                continue
+
+            address = _format_listing_address(row)
+            source_value = str(row.get("source") or source or "").strip()
+            payload = json.dumps(row, separators=(",", ":"), ensure_ascii=False)
+            append_vals = _queue_row_values(
+                {
+                    "zpid": zpid,
+                    "address": address,
+                    "source": source_value,
+                    "created_at": now_iso,
+                    "status": "pending",
+                    "claimed_at": "",
+                    "processed_at": "",
+                    "result": "",
+                    "error": "",
+                    "listing_json": payload,
+                }
+            )
+            _retry_gspread_call("append pending queue row", lambda vals=append_vals: ws.append_row(vals))
+            enqueued += 1
+            by_zpid[zpid] = {"zpid": zpid, "status": "pending"}
+
+    logger.info("queue: enqueued count=%d", enqueued)
+    return enqueued
+
+
+def _requeue_stale_in_progress_items(*, startup: bool = False) -> int:
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(PENDING_QUEUE_STALE_MINUTES, 1))
+    requeued = 0
+    with _queue_lock:
+        ws = PENDING_QUEUE_WS
+        records = _load_pending_queue_records(ws)
+        for rec in records:
+            status = str(rec.get("status", "")).strip()
+            if status != "in_progress":
+                continue
+            claimed_at = _parse_iso_timestamp(str(rec.get("claimed_at", "")))
+            if not claimed_at or claimed_at > stale_cutoff:
+                continue
+            rec["status"] = "pending"
+            rec["claimed_at"] = ""
+            rec["processed_at"] = ""
+            rec["result"] = ""
+            rec["error"] = ""
+            _update_pending_queue_row(ws, int(rec["_row_num"]), rec)
+            requeued += 1
+            logger.info("queue: requeued stale item zpid=%s", str(rec.get("zpid", "")).strip())
+    if startup and requeued == 0:
+        logger.info("queue: startup recovery found no stale in_progress items")
+    return requeued
+
+
+def _claim_next_pending_item() -> Optional[Dict[str, Any]]:
+    with _queue_lock:
+        ws = PENDING_QUEUE_WS
+        records = _load_pending_queue_records(ws)
+        for rec in records:
+            status = str(rec.get("status", "")).strip()
+            if status != "pending":
+                continue
+            zpid = str(rec.get("zpid", "")).strip()
+            if not zpid:
+                continue
+            rec["status"] = "in_progress"
+            rec["claimed_at"] = _utcnow_iso()
+            rec["error"] = ""
+            _update_pending_queue_row(ws, int(rec["_row_num"]), rec)
+            logger.info("queue: claimed zpid=%s", zpid)
+            return rec
+    return None
+
+
+def _complete_queue_item(item: Dict[str, Any], status: str, result: str = "", error: str = "") -> None:
+    row_num = int(item["_row_num"])
+    item["status"] = status
+    item["processed_at"] = _utcnow_iso()
+    item["result"] = result
+    item["error"] = error
+    with _queue_lock:
+        _update_pending_queue_row(PENDING_QUEUE_WS, row_num, item)
+    logger.info("queue: completed zpid=%s result=%s", str(item.get("zpid", "")).strip(), status)
+
+
+def _process_claimed_queue_item(item: Dict[str, Any]) -> None:
+    zpid = str(item.get("zpid", "")).strip()
+    listing_payload = str(item.get("listing_json", "")).strip()
+    try:
+        if listing_payload:
+            row = json.loads(listing_payload)
+            if not isinstance(row, dict):
+                row = {}
+        else:
+            row = {}
+    except ValueError:
+        row = {}
+
+    if not row:
+        row = {
+            "zpid": zpid,
+            "address": item.get("address", ""),
+            "source": item.get("source", ""),
+        }
+    if zpid and "zpid" not in row:
+        row["zpid"] = zpid
+
+    try:
+        outcomes = process_rows([row], skip_dedupe=True, return_outcomes=True) or {}
+        if _row_has_detail_marker(row) and zpid:
+            EXPORTED_ZPIDS.add(zpid)
+        result_status = outcomes.get(zpid)
+        if result_status not in {"completed_short_sale", "completed_non_short_sale"}:
+            logger.warning(
+                "queue: missing outcome zpid=%s; marking failed to avoid misclassification",
+                zpid,
+            )
+            _complete_queue_item(item, "failed", error="missing_outcome")
+            return
+        _complete_queue_item(item, result_status)
+    except Exception as exc:
+        logger.exception("queue: failed zpid=%s", zpid)
+        _complete_queue_item(item, "failed", error=str(exc))
+
+
+def _process_pending_queue(*, startup: bool = False) -> int:
+    processed = 0
+    if not _queue_worker_lock.acquire(blocking=False):
+        return 0
+    try:
+        if startup:
+            _requeue_stale_in_progress_items(startup=True)
+        while True:
+            claimed = _claim_next_pending_item()
+            if not claimed:
+                break
+            _process_claimed_queue_item(claimed)
+            processed += 1
+    finally:
+        _queue_worker_lock.release()
+    return processed
 
 def _digits_only(num: str) -> str:
     """Keep digits, prefix 1 if US local (10 digits)."""
@@ -1499,6 +1768,7 @@ async def apify_hook(request: Request):
 
     return _process_incoming_rows(
         rows,
+        source=row_source,
         skip_seen_dedupe=payload_listings is not None,
         skip_seen_append=False,
     )
