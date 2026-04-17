@@ -12366,47 +12366,38 @@ def _follow_up_pass():
     max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
     if max_row <= 1:
         return
-    # Memory optimization: scan from the bottom in chunks and keep only the last
-    # 50 rows with meaningful follow-up data in required review columns.
-    recent_rows: List[Tuple[int, List[str]]] = []
-    scan_end = max_row
-    chunk_size = 200
-    while scan_end >= 2 and len(recent_rows) < 50:
-        scan_start = max(2, scan_end - chunk_size + 1)
-        resp = sheets_service.spreadsheets().values().get(
-            spreadsheetId=GSHEET_ID,
-            range=f"{GSHEET_TAB}!A{scan_start}:{FOLLOWUP_READ_END_COL}{scan_end}",
-            majorDimension="ROWS",
-            valueRenderOption="FORMATTED_VALUE",
-        ).execute()
-        rows = resp.get("values", [])
-        for offset in range(len(rows) - 1, -1, -1):
-            sheet_row = scan_start + offset
-            row = list(rows[offset])
-            row += [""] * (MIN_COLS - len(row))
-            # Candidate rows for review are strictly:
-            # - Column I blank
-            # - Column W non-blank
-            if str(row[COL_REPLY_FLAG]).strip() or not str(row[COL_INIT_TS]).strip():
-                continue
-            recent_rows.append((sheet_row, row))
-            if len(recent_rows) >= 50:
-                break
-        scan_end = scan_start - 1
-    recent_rows.reverse()
-    if not recent_rows:
-        return
-
-    last_row_idx = recent_rows[-1][0]
     init_col = _col_index_to_letter(COL_INIT_TS)
-    init_rows: List[Tuple[int, datetime, List[str]]] = []
+    reply_col = _col_index_to_letter(COL_REPLY_FLAG)
+    init_resp = sheets_service.spreadsheets().values().batchGet(
+        spreadsheetId=GSHEET_ID,
+        ranges=[
+            f"{GSHEET_TAB}!{init_col}2:{init_col}{max_row}",
+            f"{GSHEET_TAB}!{reply_col}2:{reply_col}{max_row}",
+        ],
+        majorDimension="COLUMNS",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute()
+    value_ranges = init_resp.get("valueRanges", [])
+    init_values = []
+    reply_values = []
+    if value_ranges:
+        init_values = (value_ranges[0].get("values") or [[]])[0]
+    if len(value_ranges) > 1:
+        reply_values = (value_ranges[1].get("values") or [[]])[0]
+
+    init_rows: List[Tuple[int, datetime]] = []
     bad_init_ts_rows = 0
     missing_init_ts_rows = 0
-
-    for sheet_row, row in recent_rows:
-        init_raw = row[COL_INIT_TS].strip()
-        if not init_raw:
-            missing_init_ts_rows += 1
+    for idx in range(max(len(init_values), len(reply_values))):
+        sheet_row = idx + 2
+        init_raw = str(init_values[idx]).strip() if idx < len(init_values) else ""
+        reply_raw = str(reply_values[idx]).strip() if idx < len(reply_values) else ""
+        # Candidate rows for review are strictly:
+        # - Column I blank
+        # - Column W non-blank
+        if reply_raw or not init_raw:
+            if not init_raw:
+                missing_init_ts_rows += 1
             continue
         try:
             ts = datetime.fromisoformat(init_raw)
@@ -12417,27 +12408,41 @@ def _follow_up_pass():
             ts = ts.replace(tzinfo=SCHEDULER_TZ)
         else:
             ts = ts.astimezone(SCHEDULER_TZ)
-        init_rows.append((sheet_row, ts, row))
+        init_rows.append((sheet_row, ts))
 
     if not init_rows:
-        LOG.info(
-            "Follow-up candidate query: init_ts in %s2:%s%s found 0 rows (missing_init_ts=%s bad_init_ts=%s)",
-            init_col,
-            init_col,
-            last_row_idx,
-            missing_init_ts_rows,
-            bad_init_ts_rows,
-        )
         return
 
     init_rows.sort(key=lambda item: item[1], reverse=True)
     candidate_rows = init_rows[:FU_LOOKBACK_ROWS]
-    candidate_indices = [row_idx for row_idx, _, _ in candidate_rows]
+    candidate_indices = [row_idx for row_idx, _ in candidate_rows]
+    row_ranges = [
+        f"{GSHEET_TAB}!A{row_idx}:{FOLLOWUP_READ_END_COL}{row_idx}"
+        for row_idx, _ in candidate_rows
+    ]
+    candidate_row_map: Dict[int, List[str]] = {}
+    if row_ranges:
+        LOG.info("follow-up: using direct bounded row fetch (no full sheet scan)")
+        row_resp = sheets_service.spreadsheets().values().batchGet(
+            spreadsheetId=GSHEET_ID,
+            ranges=row_ranges,
+            majorDimension="ROWS",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+        for row_idx, range_data in zip(
+            candidate_indices,
+            row_resp.get("valueRanges", []),
+        ):
+            values = range_data.get("values", [])
+            row = list(values[0]) if values else []
+            row += [""] * (MIN_COLS - len(row))
+            candidate_row_map[row_idx] = row
+
     LOG.info(
         "Follow-up candidate query: init_ts in %s2:%s%s ORDER BY ts DESC LIMIT %s -> rows=%s (total_init_ts=%s missing_init_ts=%s bad_init_ts=%s)",
         init_col,
         init_col,
-        last_row_idx,
+        max_row,
         FU_LOOKBACK_ROWS,
         len(candidate_rows),
         len(init_rows),
@@ -12452,7 +12457,8 @@ def _follow_up_pass():
     )
 
     eligible_count = 0
-    for sheet_row, ts, row in candidate_rows:
+    for sheet_row, ts in candidate_rows:
+        row = candidate_row_map.get(sheet_row, [""] * MIN_COLS)
         phone_redacted = _redact_followup_phone(row[COL_PHONE])
         address = row[COL_STREET] or ""
 
