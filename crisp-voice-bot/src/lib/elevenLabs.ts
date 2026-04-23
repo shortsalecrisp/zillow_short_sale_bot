@@ -71,11 +71,20 @@ function getStreetAddress(listingAddress: string): string {
     .replace(/\bSW\b\.?/gi, "Southwest");
 }
 
+function buildVoicemailMessage(streetAddress: string, callAttemptNumber: number): string {
+  if (callAttemptNumber > 1) {
+    return "";
+  }
+
+  return `Hi, this is Emmy with Crisp Short Sales calling about the short sale listing at ${streetAddress}. We specialize in helping agents with the short sale process and can handle the paperwork, phone calls, and the whole process with the lender to take that work off your shoulders. Yoni is our short sale specialist, and he can answer any questions you have. Give him a call back at 404-300-9526 when you get a chance. Thanks.`;
+}
+
 export async function placeElevenLabsOutboundCall(params: {
   to: string;
   metadata: CallMetadata;
 }): Promise<ElevenLabsOutboundCallResponse> {
   const { agentId, agentPhoneNumberId } = requireElevenLabsOutboundConfig();
+  const streetAddress = getStreetAddress(params.metadata.listingAddress);
   const dynamicVariables = {
     rowNumber: params.metadata.rowNumber,
     agentName: params.metadata.fullName,
@@ -85,7 +94,8 @@ export async function placeElevenLabsOutboundCall(params: {
     phone: params.metadata.dialedPhone,
     requestedPhone: params.metadata.requestedPhone,
     listingAddress: params.metadata.listingAddress,
-    streetAddress: getStreetAddress(params.metadata.listingAddress),
+    streetAddress,
+    voicemailMessage: buildVoicemailMessage(streetAddress, params.metadata.callAttemptNumber),
     testMode: params.metadata.testMode,
     liveTransferNumber: config.liveTransferNumber,
     toolWebhookBaseUrl: config.baseUrl,

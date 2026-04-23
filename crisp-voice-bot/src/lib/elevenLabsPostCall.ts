@@ -28,6 +28,17 @@ type ElevenLabsTranscriptItem = {
 
 type ElevenLabsConversation = {
   status?: string;
+  metadata?: {
+    termination_reason?: string | null;
+    features_usage?: {
+      voicemail_detection?: {
+        enabled?: boolean;
+        used?: boolean;
+      };
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
   analysis?: {
     transcript_summary?: string;
     call_summary_title?: string;
@@ -132,7 +143,7 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
   }
 
   if (callResult === "voicemail_left") {
-    return "Left voicemail";
+    return "Left Vm";
   }
 
   if (callResult === "no_answer_first_attempt") {
@@ -214,6 +225,10 @@ function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boole
 }
 
 function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
+  if (usedVoicemailDetectionTool(conversation)) {
+    return true;
+  }
+
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   return (
     text.includes("voicemail") ||
@@ -226,7 +241,56 @@ function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
   );
 }
 
+function getVoicemailDetectionMessage(conversation: ElevenLabsConversation): string {
+  for (const item of conversation.transcript ?? []) {
+    for (const toolResult of item.tool_results ?? []) {
+      if (toolResult.tool_name !== "voicemail_detection") {
+        continue;
+      }
+
+      const voicemailMessage =
+        typeof toolResult.result?.voicemail_message === "string"
+          ? toolResult.result.voicemail_message
+          : undefined;
+      if (voicemailMessage?.trim()) {
+        return voicemailMessage.trim();
+      }
+
+      if (typeof toolResult.result_value === "string" && toolResult.result_value.trim()) {
+        try {
+          const parsed = JSON.parse(toolResult.result_value) as { voicemail_message?: unknown };
+          if (typeof parsed.voicemail_message === "string" && parsed.voicemail_message.trim()) {
+            return parsed.voicemail_message.trim();
+          }
+        } catch {
+          // Ignore malformed result_value payloads and fall through to transcript heuristics.
+        }
+      }
+    }
+  }
+
+  return "";
+}
+
+function usedVoicemailDetectionTool(conversation: ElevenLabsConversation): boolean {
+  const voicemailFeatureUsed = conversation.metadata?.features_usage?.voicemail_detection?.used === true;
+  const terminationReason = normalizeText(conversation.metadata?.termination_reason ?? "");
+
+  if (voicemailFeatureUsed || terminationReason.includes("voicemail_detection tool was called")) {
+    return true;
+  }
+
+  return (conversation.transcript ?? []).some((item) =>
+    (item.tool_calls ?? []).some((toolCall) => toolCall.tool_name === "voicemail_detection" || toolCall.name === "voicemail_detection") ||
+    (item.tool_results ?? []).some((toolResult) => toolResult.tool_name === "voicemail_detection"),
+  );
+}
+
 function hasDeliveredVoicemailMessage(conversation: ElevenLabsConversation): boolean {
+  if (getVoicemailDetectionMessage(conversation)) {
+    return true;
+  }
+
   const assistantText = normalizeText(assistantMessages(conversation).join(" "));
 
   if (!assistantText) {

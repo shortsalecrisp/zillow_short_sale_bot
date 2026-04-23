@@ -41,6 +41,7 @@ type AgentResponse = {
         temperature?: number;
         max_tokens?: number;
         tool_ids?: string[];
+        built_in_tools?: Record<string, Record<string, unknown> | null>;
         tools?: Array<Record<string, unknown>>;
         [key: string]: unknown;
       };
@@ -74,6 +75,7 @@ const MAX_TOKENS = 80;
 const TTS_SPEED = 1.05;
 const BACKUP_LLM_PREFERENCE = "disabled";
 const CASCADE_TIMEOUT_SECONDS: number | null = null;
+const VOICEMAIL_MESSAGE_TEMPLATE = "{{voicemailMessage}}";
 
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
@@ -347,6 +349,17 @@ async function main(): Promise<void> {
         llm: config.elevenLabs.primaryLlm,
         temperature: TEMPERATURE,
         max_tokens: MAX_TOKENS,
+        built_in_tools: {
+          ...(currentAgent.conversation_config.agent.prompt.built_in_tools ?? {}),
+          voicemail_detection: {
+            ...((currentAgent.conversation_config.agent.prompt.built_in_tools?.voicemail_detection as Record<string, unknown> | null) ?? {}),
+            params: {
+              ...((((currentAgent.conversation_config.agent.prompt.built_in_tools?.voicemail_detection as Record<string, unknown> | null)?.params as Record<string, unknown> | undefined) ?? {})),
+              system_tool_type: "voicemail_detection",
+              voicemail_message: VOICEMAIL_MESSAGE_TEMPLATE,
+            },
+          },
+        },
         backup_llm_config: {
           ...(currentAgent.conversation_config.agent.prompt.backup_llm_config ?? {}),
           preference: BACKUP_LLM_PREFERENCE,
@@ -398,6 +411,7 @@ async function main(): Promise<void> {
     temperature: TEMPERATURE,
     maxTokens: MAX_TOKENS,
     ttsSpeed: TTS_SPEED,
+    voicemailMessageTemplate: VOICEMAIL_MESSAGE_TEMPLATE,
   });
 }
 
