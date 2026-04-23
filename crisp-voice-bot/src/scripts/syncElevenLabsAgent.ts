@@ -59,6 +59,7 @@ type ToolResponse = {
   };
 };
 
+
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
 const FIRST_MESSAGE = "Hi, is this {{firstName}}?";
 const INITIAL_WAIT_TIME_SECONDS = 2.0;
@@ -81,6 +82,7 @@ function asStringArray(value: unknown): string[] {
 
   return value.filter((item): item is string => typeof item === "string");
 }
+
 
 function buildWarmTransferWorkflow(options: {
   liveTransferToolId: string;

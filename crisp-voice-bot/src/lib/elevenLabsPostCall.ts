@@ -402,6 +402,46 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
     return true;
   }
 
+  if (conversation.status === "failed" && (shouldTreatAsVoicemail(conversation) || shouldTreatAsNoAnswer(conversation))) {
+    const isFirstAttempt = metadata.callAttemptNumber <= 1;
+    const voicemailDetected = shouldTreatAsVoicemail(conversation);
+    const voicemailLeft = voicemailDetected && hasDeliveredVoicemailMessage(conversation);
+    const callResult = isFirstAttempt
+      ? voicemailLeft
+        ? "voicemail_left"
+        : "no_answer_first_attempt"
+      : "no_response_second_attempt";
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult,
+      responseStatus: buildVoiceResponseStatus(callResult),
+      ...(isFirstAttempt ? {} : { leadStatusCode: "N" }),
+      ...(voicemailLeft && isFirstAttempt ? { vmLeft: "yes" } : {}),
+      voiceNotes: summary,
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome: buildVoiceResponseStatus(callResult),
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback converted failed voicemail/no-answer into normal outcome handling", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      voicemailDetected,
+      voicemailLeft,
+      status: conversation.status,
+    });
+    return true;
+  }
+
   if (conversation.status !== "done") {
     if (conversation.status === "failed") {
       await sendTranscriptEmailIfEnabled({
