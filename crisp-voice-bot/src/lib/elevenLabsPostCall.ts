@@ -167,6 +167,10 @@ function extractCallbackTime(conversation: ElevenLabsConversation): string | und
 }
 
 function shouldTreatAsCallback(conversation: ElevenLabsConversation): boolean {
+  if (shouldTreatAsVoicemail(conversation) || hasDeliveredVoicemailMessage(conversation)) {
+    return false;
+  }
+
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   return (
     text.includes("call back") ||
