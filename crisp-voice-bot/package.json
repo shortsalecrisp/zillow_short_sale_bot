@@ -1,0 +1,40 @@
+{
+  "name": "crisp-voice-bot",
+  "version": "0.1.0",
+  "description": "Webhook-driven outbound voice bot between Google Sheets and Telnyx Call Control.",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test:sheets": "tsx src/scripts/testSheetWrite.ts",
+    "sync:elevenlabs-agent": "tsx src/scripts/syncElevenLabsAgent.ts"
+  },
+  "keywords": [
+    "telnyx",
+    "express",
+    "voice",
+    "webhook",
+    "typescript"
+  ],
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@google-cloud/local-auth": "^3.0.1",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "google-auth-library": "^10.6.2",
+    "googleapis": "^171.4.0",
+    "nodemailer": "^8.0.5"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.7",
+    "@types/nodemailer": "^8.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

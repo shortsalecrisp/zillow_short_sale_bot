@@ -1,0 +1,19 @@
+# Project-scoped Codex defaults for crisp-voice-bot.
+# Some Codex clients may ignore project config keys they do not support; keep this file conservative.
+
+model_reasoning_effort = "high"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+writable_roots = ["."]
+network_access = false
+
+# Setup commands for a fresh worktree:
+#   npm install
+#   npm run build
+#
+# Project map:
+#   src/         Node.js + TypeScript Express/Telnyx backend
+#   apps-script/ Local source of truth for the Google Apps Script callback
+#   docs/        Deployment and setup notes
