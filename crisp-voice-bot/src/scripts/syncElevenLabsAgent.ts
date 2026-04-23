@@ -339,17 +339,17 @@ async function main(): Promise<void> {
       ...currentAgent.conversation_config.agent,
       first_message: FIRST_MESSAGE,
       disable_first_message_interruptions: DISABLE_FIRST_MESSAGE_INTERRUPTION,
-      backup_llm_config: {
-        ...currentAgent.conversation_config.agent.backup_llm_config,
-        preference: BACKUP_LLM_PREFERENCE,
-      },
-      cascade_timeout_seconds: CASCADE_TIMEOUT_SECONDS,
       prompt: {
         ...currentAgent.conversation_config.agent.prompt,
         prompt,
         llm: config.elevenLabs.primaryLlm,
         temperature: TEMPERATURE,
         max_tokens: MAX_TOKENS,
+        backup_llm_config: {
+          ...(currentAgent.conversation_config.agent.prompt.backup_llm_config ?? {}),
+          preference: BACKUP_LLM_PREFERENCE,
+        },
+        ...(CASCADE_TIMEOUT_SECONDS === null ? {} : { cascade_timeout_seconds: CASCADE_TIMEOUT_SECONDS }),
       },
     },
   };
