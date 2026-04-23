@@ -55,7 +55,9 @@ function requireElevenLabsOutboundConfig(): { agentId: string; agentPhoneNumberI
 }
 
 function getStreetAddress(listingAddress: string): string {
-  return listingAddress.split(",")[0]?.trim() || listingAddress;
+  const streetAddress = listingAddress.split(",")[0]?.trim() || listingAddress;
+
+  return streetAddress.replace(/\bAPT\b\.?/gi, "Apartment");
 }
 
 export async function placeElevenLabsOutboundCall(params: {
