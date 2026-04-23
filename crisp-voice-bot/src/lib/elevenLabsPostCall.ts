@@ -81,6 +81,12 @@ function transcriptForEmail(conversation: ElevenLabsConversation): string {
     .join("\n");
 }
 
+function assistantMessages(conversation: ElevenLabsConversation): string[] {
+  return (conversation.transcript ?? [])
+    .filter((item) => item.role === "assistant" && typeof item.message === "string" && item.message.trim() !== "")
+    .map((item) => item.message!.trim());
+}
+
 function hasToolCall(conversation: ElevenLabsConversation, toolName: string): boolean {
   return (conversation.transcript ?? []).some((item) =>
     (item.tool_calls ?? []).some((toolCall) => toolCall.tool_name === toolName || toolCall.name === toolName),
@@ -200,6 +206,19 @@ function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
     text.includes("left a message") ||
     text.includes("after the tone") ||
     text.includes("at the beep")
+  );
+}
+
+function hasDeliveredVoicemailMessage(conversation: ElevenLabsConversation): boolean {
+  const assistantText = normalizeText(assistantMessages(conversation).join(" "));
+
+  if (!assistantText) {
+    return false;
+  }
+
+  return (
+    assistantText.includes("this is emmy with crisp short sales") &&
+    assistantText.includes("call back at 404-300-9526")
   );
 }
 
@@ -478,7 +497,8 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
 
   if (shouldTreatAsVoicemail(conversation) || shouldTreatAsNoAnswer(conversation)) {
     const isFirstAttempt = metadata.callAttemptNumber <= 1;
-    const voicemailLeft = shouldTreatAsVoicemail(conversation);
+    const voicemailDetected = shouldTreatAsVoicemail(conversation);
+    const voicemailLeft = voicemailDetected && hasDeliveredVoicemailMessage(conversation);
     const callResult = isFirstAttempt
       ? voicemailLeft
         ? "voicemail_left"
@@ -508,7 +528,9 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
+      voicemailDetected,
       voicemailLeft,
+      hadAssistantVoicemailMessage: hasDeliveredVoicemailMessage(conversation),
       finalOutcome: isFirstAttempt ? "follow_up_call_pending" : "no_response_closed_out",
     });
     return true;
