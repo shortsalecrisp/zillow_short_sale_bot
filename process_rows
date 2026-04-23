@@ -727,9 +727,17 @@ def process_rows(rows: list[dict]):
             ])
 
             # send SMS
+            agent_name = row.get("agentName", "") or ""
+            first = agent_name.split()[0] if agent_name else "there"
+            address = row.get("address", "")
             sms_body = (
-                f"Hi {row.get('agentName','there')}, I saw your short-sale at {row.get('address')}. "
-                "Are you open to discussing?"
+                f"Hey {first}, this is Yoni Kutler with Crisp Short Sales. "
+                f"I saw your short sale at {address}. "
+                "I help agents by handling the bank side of the short sale "
+                "process so files get approved faster and are less likely "
+                "to fall apart. There's no cost to you or your seller. "
+                "Are you handling that part yourself or do you already "
+                "have help?"
             )
             try:
                 send_sms(phone, sms_body)
