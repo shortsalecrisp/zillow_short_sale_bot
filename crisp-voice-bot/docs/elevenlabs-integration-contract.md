@@ -11,7 +11,7 @@ The current system is working with Telnyx, DTMF test prompts, Apps Script sheet 
 - Branch ID: `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`
 - Voice: `Liza`
 - Voice ID: `bb2q8Tox15YHJ7ceE9tu`
-- TTS model: `eleven_v3_conversational`
+- TTS model: `eleven_turbo_v2`
 - Primary LLM: `Qwen3-30B-A3B`
 - Agent timezone: `Eastern Time (US)`
 - API base URL: `https://api.elevenlabs.io`

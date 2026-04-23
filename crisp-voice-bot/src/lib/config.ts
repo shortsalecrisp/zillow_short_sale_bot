@@ -118,7 +118,7 @@ export const config = {
     toolSecret: readOptionalEnv("ELEVENLABS_TOOL_SECRET"),
     voiceName: readEnv("ELEVENLABS_VOICE_NAME", "Liza"),
     voiceId: readOptionalEnv("ELEVENLABS_VOICE_ID"),
-    ttsModel: readEnv("ELEVENLABS_TTS_MODEL", "eleven_v3_conversational"),
+    ttsModel: readEnv("ELEVENLABS_TTS_MODEL", "eleven_turbo_v2"),
     primaryLlm: readEnv("ELEVENLABS_PRIMARY_LLM", "gpt-4o"),
     timezone: readEnv("ELEVENLABS_AGENT_TIMEZONE", "Eastern Time (US)"),
   },
