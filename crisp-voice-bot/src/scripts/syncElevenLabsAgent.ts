@@ -70,6 +70,7 @@ const RETRANSCRIBE_ON_TURN_TIMEOUT = true;
 const DISABLE_FIRST_MESSAGE_INTERRUPTION = false;
 const TEMPERATURE = 0.1;
 const MAX_TOKENS = 80;
+const TTS_SPEED = 1.0;
 const BACKUP_LLM_PREFERENCE = "disabled";
 const CASCADE_TIMEOUT_SECONDS: number | null = null;
 
@@ -332,6 +333,7 @@ async function main(): Promise<void> {
       ...currentAgent.conversation_config.tts,
       ...(config.elevenLabs.voiceId ? { voice_id: config.elevenLabs.voiceId } : {}),
       ...(config.elevenLabs.ttsModel ? { model_id: config.elevenLabs.ttsModel } : {}),
+      speed: TTS_SPEED,
     },
     agent: {
       ...currentAgent.conversation_config.agent,
@@ -393,6 +395,7 @@ async function main(): Promise<void> {
     softTimeoutSeconds: SOFT_TIMEOUT_SECONDS,
     temperature: TEMPERATURE,
     maxTokens: MAX_TOKENS,
+    ttsSpeed: TTS_SPEED,
   });
 }
 
