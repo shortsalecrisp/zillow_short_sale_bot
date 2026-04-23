@@ -70,7 +70,7 @@ const RETRANSCRIBE_ON_TURN_TIMEOUT = true;
 const DISABLE_FIRST_MESSAGE_INTERRUPTION = false;
 const TEMPERATURE = 0.1;
 const MAX_TOKENS = 80;
-const TTS_SPEED = 1.0;
+const TTS_SPEED = 1.05;
 const BACKUP_LLM_PREFERENCE = "disabled";
 const CASCADE_TIMEOUT_SECONDS: number | null = null;
 
