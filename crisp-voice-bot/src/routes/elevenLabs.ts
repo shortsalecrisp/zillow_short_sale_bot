@@ -273,11 +273,6 @@ router.post("/tool/live-transfer-requested", async (req: Request, res: Response,
         intent: "live_transfer",
         transferApproved: true,
         approvalStatus: "accepted",
-        transferNumber: config.liveTransferNumber,
-        clientMessage: "Ok good news, he's available. I'm bringing him into the call now, and then I'll drop off so you guys can talk.",
-        agentMessage: `Live transfer from ${payload.agentName} about ${payload.listingAddress}.`,
-        nextAction:
-          "The live transfer has already been approved. If you have not already called transfer_to_number, call it now immediately. Use clientMessage as the transfer_to_number client_message and use agentMessage as the transfer_to_number agent_message. Do not say clientMessage as a separate conversational reply first. Do not call live_transfer_requested again. Do not restart the explanation.",
       });
       return;
     }
@@ -360,10 +355,6 @@ router.post("/tool/live-transfer-requested", async (req: Request, res: Response,
       intent: "live_transfer",
       transferApproved: true,
       approvalStatus: approval.status,
-      transferNumber: config.liveTransferNumber,
-      clientMessage: "Ok good news, I've got him. Patching him in now.",
-      nextAction:
-        "Yoni accepted the warm handoff. Your next output must be exactly one transfer_to_number tool call. Do not say any plain assistant message first. Call transfer_to_number exactly once using only transferNumber as transfer_number and clientMessage as client_message. Do not include agent_message. Do not include any extra fields. Do not listen for or respond to anything the caller says before the tool call. This accepted-transfer phase is fully automatic. If control returns after transfer_to_number, do not repeat the handoff line and do not call transfer_to_number again. Only fall back to callback_requested if transfer_to_number clearly fails.",
     });
   } catch (error) {
     completeElevenLabsLiveTransferAttempt("call_failed");
