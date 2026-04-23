@@ -103,6 +103,10 @@ function hasSuccessfulTransfer(conversation: ElevenLabsConversation): boolean {
   );
 }
 
+function hasLiveTransferRequest(conversation: ElevenLabsConversation): boolean {
+  return hasToolCall(conversation, "live_transfer_requested");
+}
+
 function buildVoiceResponseStatus(callResult: string, callbackTime?: string): string {
   if (callResult === "warm_transfer_completed") {
     return "Warm transfer accepted";
@@ -264,33 +268,6 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
   const summary = conversation.analysis?.transcript_summary ?? transcriptText(conversation);
   const fullTranscript = transcriptForEmail(conversation);
 
-  if (conversation.status !== "done") {
-    if (conversation.status === "failed") {
-      await sendTranscriptEmailIfEnabled({
-        conversationId,
-        metadata,
-        outcome: "Call failed before completion",
-        summary,
-        transcript: fullTranscript,
-      });
-
-      processedConversationIds.add(conversationId);
-      logger.info("ElevenLabs post-call fallback skipped because conversation failed before a final outcome", {
-        conversationId,
-        rowNumber: metadata.rowNumber,
-        status: conversation.status,
-      });
-      return true;
-    }
-
-    logger.info("ElevenLabs conversation not finished yet; will retry post-call outcome", {
-      conversationId,
-      rowNumber: metadata.rowNumber,
-      status: conversation.status,
-    });
-    return false;
-  }
-
   if (hasToolCall(conversation, "callback_requested")) {
     const callbackTime = isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified");
 
@@ -355,6 +332,78 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
       callAttemptNumber: metadata.callAttemptNumber,
     });
     return true;
+  }
+
+  if (conversation.status === "failed" && hasLiveTransferRequest(conversation)) {
+    const callbackTime = "asap";
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "callback_requested",
+      responseStatus: buildVoiceResponseStatus("callback_requested", callbackTime),
+      leadStatusCode: "Y",
+      callbackRequested: "yes",
+      callbackTime,
+      liveTransferRequested: "yes",
+      voiceNotes: summary,
+    });
+
+    await sendCallbackEmail({
+      agentName: metadata.fullName,
+      phone: metadata.dialedPhone,
+      listingAddress: metadata.listingAddress,
+      rowNumber: metadata.rowNumber,
+      action: "Call this lead back ASAP",
+      callbackTime,
+      conversationDescription: summary,
+      details:
+        "The caller agreed to a live transfer, but the patch-through did not complete cleanly. Call this lead back ASAP.",
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome: buildVoiceResponseStatus("callback_requested", callbackTime),
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback converted failed live transfer into callback follow-up", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      status: conversation.status,
+    });
+    return true;
+  }
+
+  if (conversation.status !== "done") {
+    if (conversation.status === "failed") {
+      await sendTranscriptEmailIfEnabled({
+        conversationId,
+        metadata,
+        outcome: "Call failed before completion",
+        summary,
+        transcript: fullTranscript,
+      });
+
+      processedConversationIds.add(conversationId);
+      logger.info("ElevenLabs post-call fallback skipped because conversation failed before a final outcome", {
+        conversationId,
+        rowNumber: metadata.rowNumber,
+        status: conversation.status,
+      });
+      return true;
+    }
+
+    logger.info("ElevenLabs conversation not finished yet; will retry post-call outcome", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      status: conversation.status,
+    });
+    return false;
   }
 
   if (shouldTreatAsCallback(conversation)) {
