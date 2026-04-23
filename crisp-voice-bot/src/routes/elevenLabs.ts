@@ -465,7 +465,7 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
       ok: true,
       intent: "not_interested",
       nextAction:
-        "Say exactly: Ok, no problem. Bye! Then immediately call end_call. Do not wait for another caller response. Do not say one moment. Do not continue chatting.",
+        "Say exactly: Ok, thanks for letting me know. If anything ever changes in the future and you're looking for some additional help with these deals, please just keep us in mind. Thanks. Then pause briefly. If the caller says anything short like ok, thanks, or will do, say exactly: Ok, bye. Then immediately call end_call. If the caller says nothing, after a brief beat say exactly: Ok, bye. Then immediately call end_call. Do not pitch again. Do not reopen the conversation.",
     });
   } catch (error) {
     next(error);

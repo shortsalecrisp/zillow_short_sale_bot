@@ -197,7 +197,20 @@ function isLiveTransferFallback(conversation: ElevenLabsConversation): boolean {
 
 function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
-  return text.includes("not interested") || text.includes("has it handled") || text.includes("have it handled");
+  return (
+    text.includes("not interested") ||
+    text.includes("has it handled") ||
+    text.includes("have it handled") ||
+    text.includes("already have someone handling") ||
+    text.includes("already handling it") ||
+    text.includes("already working with an attorney") ||
+    text.includes("already working with attorney") ||
+    text.includes("already working with a negotiator") ||
+    text.includes("already working with negotiator") ||
+    text.includes("already have a specialist") ||
+    text.includes("already got someone handling") ||
+    text.includes("already got it handled")
+  );
 }
 
 function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
