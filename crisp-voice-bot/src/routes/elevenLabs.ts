@@ -339,8 +339,8 @@ router.post("/tool/live-transfer-requested", async (req: Request, res: Response,
         approvalStatus: approval.status,
       });
 
-      res.status(200).json({
-        ok: true,
+      res.status(409).json({
+        ok: false,
         intent: "live_transfer",
         transferApproved: false,
         approvalStatus: approval.status,
