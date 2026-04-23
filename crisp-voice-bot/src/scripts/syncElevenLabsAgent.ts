@@ -69,7 +69,7 @@ const SOFT_TIMEOUT_SECONDS = -1;
 const RETRANSCRIBE_ON_TURN_TIMEOUT = true;
 const DISABLE_FIRST_MESSAGE_INTERRUPTION = false;
 const TEMPERATURE = 0.1;
-const MAX_TOKENS = 60;
+const MAX_TOKENS = 80;
 const BACKUP_LLM_PREFERENCE = "disabled";
 const CASCADE_TIMEOUT_SECONDS: number | null = null;
 
