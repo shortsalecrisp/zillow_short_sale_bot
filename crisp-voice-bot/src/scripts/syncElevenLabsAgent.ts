@@ -91,7 +91,7 @@ function buildWarmTransferWorkflow(options: {
   liveTransferNumber: string;
   baseClientEvents: string[];
 }): Record<string, unknown> {
-  const patchNodeClientEvents = options.baseClientEvents.filter((event) => event !== "interruption");
+  const noInterruptionClientEvents = options.baseClientEvents.filter((event) => event !== "interruption");
 
   return {
     edges: {
@@ -168,7 +168,11 @@ function buildWarmTransferWorkflow(options: {
         additional_prompt: "",
         additional_tool_ids: [],
         additional_knowledge_base: [],
-        conversation_config: {},
+        conversation_config: {
+          conversation: {
+            client_events: noInterruptionClientEvents,
+          },
+        },
         edge_order: [
           "main_to_patch_after_accepted_result",
           "main_to_callback_after_unavailable_result",
@@ -201,7 +205,7 @@ function buildWarmTransferWorkflow(options: {
         additional_knowledge_base: [],
         conversation_config: {
           conversation: {
-            client_events: patchNodeClientEvents,
+            client_events: noInterruptionClientEvents,
           },
         },
         edge_order: ["patch_to_phone"],

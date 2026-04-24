@@ -154,6 +154,10 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
     return "No response after second call";
   }
 
+  if (callResult === "call_received_agent_hung_up") {
+    return "Call received but agent hung up on Emmy";
+  }
+
   return callResult;
 }
 
@@ -315,6 +319,42 @@ function shouldTreatAsNoAnswer(conversation: ElevenLabsConversation): boolean {
   );
 }
 
+function userMessages(conversation: ElevenLabsConversation): string[] {
+  return (conversation.transcript ?? [])
+    .filter((item) => item.role === "user" && typeof item.message === "string" && item.message.trim() !== "")
+    .map((item) => item.message!.trim());
+}
+
+function hasMeaningfulUserInteraction(conversation: ElevenLabsConversation): boolean {
+  const messages = userMessages(conversation);
+  if (messages.length >= 2) {
+    return true;
+  }
+
+  return messages.some((message) => normalizeText(message).split(" ").filter(Boolean).length >= 3);
+}
+
+function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): boolean {
+  if (
+    shouldTreatAsVoicemail(conversation) ||
+    shouldTreatAsNoAnswer(conversation) ||
+    shouldTreatAsCallback(conversation) ||
+    shouldTreatAsNotInterested(conversation) ||
+    hasToolCall(conversation, "callback_requested") ||
+    hasToolCall(conversation, "not_interested") ||
+    hasSuccessfulTransfer(conversation)
+  ) {
+    return false;
+  }
+
+  const terminationReason = normalizeText(conversation.metadata?.termination_reason ?? "");
+  if (!terminationReason.includes("client disconnected")) {
+    return false;
+  }
+
+  return hasMeaningfulUserInteraction(conversation);
+}
+
 async function fetchConversation(conversationId: string): Promise<ElevenLabsConversation> {
   const response = await elevenLabsApi.get<ElevenLabsConversation>(`/v1/convai/conversations/${conversationId}`);
   return response.data;
@@ -430,6 +470,34 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsAgentHungUp(conversation)) {
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "call_received_agent_hung_up",
+      responseStatus: buildVoiceResponseStatus("call_received_agent_hung_up"),
+      leadStatusCode: "N",
+      voiceNotes: summary,
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome: buildVoiceResponseStatus("call_received_agent_hung_up"),
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback recorded answered call that ended with agent hangup", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      summary,
     });
     return true;
   }
