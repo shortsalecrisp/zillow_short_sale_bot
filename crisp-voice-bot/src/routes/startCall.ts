@@ -138,6 +138,7 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
       firstName: payload.firstName,
       lastName: payload.lastName,
       fullName: payload.fullName,
+      email: payload.email,
       callAttemptNumber: payload.callAttemptNumber ?? 1,
       listingAddress: payload.listingAddress,
       sheetName: payload.sheetName,

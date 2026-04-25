@@ -14,6 +14,7 @@ function createState(callControlId: string, metadata: CallMetadata, step: CallSt
     firstName: metadata.firstName,
     lastName: metadata.lastName,
     fullName: metadata.fullName,
+    email: metadata.email,
     listingAddress: metadata.listingAddress,
     destinationPhone: metadata.dialedPhone,
     startedAt: now(),
@@ -65,6 +66,7 @@ export function upsertCallStateFromWebhook(
     firstName: metadata?.firstName ?? base.firstName,
     lastName: metadata?.lastName ?? base.lastName,
     fullName: metadata?.fullName ?? base.fullName,
+    email: metadata?.email ?? base.email,
     listingAddress: metadata?.listingAddress ?? base.listingAddress,
     destinationPhone: metadata?.dialedPhone ?? base.destinationPhone,
     answeredAt:

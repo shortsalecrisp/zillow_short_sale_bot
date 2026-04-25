@@ -311,6 +311,7 @@ function queueCallbackEmail(callControlId: string, outcome: PromptOutcome): void
       await sendCallbackEmail({
         agentName: state?.fullName ?? "Unknown",
         phone: state?.destinationPhone ?? "Unknown",
+        email: state?.email,
         listingAddress: state?.listingAddress ?? "Unknown",
         rowNumber,
         action: "Call this lead back at the requested time",

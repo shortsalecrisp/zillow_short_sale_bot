@@ -19,6 +19,7 @@ export interface CallMetadata {
   firstName?: string;
   lastName?: string;
   fullName: string;
+  email?: string;
   callAttemptNumber: number;
   listingAddress: string;
   sheetName?: string;
@@ -45,6 +46,7 @@ export interface CallState {
   firstName?: string;
   lastName?: string;
   fullName: string;
+  email?: string;
   listingAddress: string;
   destinationPhone: string;
   startedAt: string;

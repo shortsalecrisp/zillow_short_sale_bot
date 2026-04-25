@@ -166,6 +166,7 @@ function readLeadPayload(body: unknown): {
   callAttemptNumber: number;
   agentName: string;
   phone: string;
+  email: string;
   listingAddress: string;
   callbackTime: string;
   conversationSummary: string;
@@ -179,6 +180,7 @@ function readLeadPayload(body: unknown): {
     callAttemptNumber: readPositiveInteger(body, "callAttemptNumber", 1),
     agentName: readString(body, "agentName", "Unknown"),
     phone: readString(body, "phone", "Unknown"),
+    email: readString(body, "email"),
     listingAddress: readString(body, "listingAddress", "Unknown"),
     callbackTime: readString(body, "callbackTime", "unspecified"),
     conversationSummary: readString(body, "conversationSummary", "No conversation summary provided."),
@@ -217,6 +219,7 @@ function applyLatestCallContextIfNeeded(payload: ReturnType<typeof readLeadPaylo
     callAttemptNumber: latestContext.callAttemptNumber,
     agentName: latestContext.fullName,
     phone: latestContext.dialedPhone,
+    email: latestContext.email ?? payload.email,
     listingAddress: latestContext.listingAddress,
   };
 }
@@ -400,6 +403,7 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
         sendCallbackEmail({
           agentName: payload.agentName,
           phone: payload.phone,
+          email: payload.email,
           listingAddress: payload.listingAddress,
           rowNumber: payload.rowNumber,
           callbackTime: payload.callbackTime,

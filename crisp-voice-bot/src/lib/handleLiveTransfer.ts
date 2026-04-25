@@ -76,7 +76,6 @@ async function sendFallbackCallback({
         phone,
         listingAddress,
         rowNumber,
-        subject: "🔥 ASAP Callback Needed - Live Transfer Missed",
         action: "Call this lead back ASAP",
         callbackTime: "ASAP",
         conversationDescription:

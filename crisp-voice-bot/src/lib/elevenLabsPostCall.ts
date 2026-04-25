@@ -520,11 +520,13 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
     await sendCallbackEmail({
       agentName: metadata.fullName,
       phone: metadata.dialedPhone,
+      email: metadata.email,
       listingAddress: metadata.listingAddress,
       rowNumber: metadata.rowNumber,
       action: "Call this lead back ASAP",
       callbackTime,
       conversationDescription: summary,
+      conversationTranscript: fullTranscript,
       details:
         "The caller agreed to a live transfer, but the patch-through did not complete cleanly. Call this lead back ASAP.",
     });
@@ -631,11 +633,13 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
     await sendCallbackEmail({
       agentName: metadata.fullName,
       phone: metadata.dialedPhone,
+      email: metadata.email,
       listingAddress: metadata.listingAddress,
       rowNumber: metadata.rowNumber,
       action: "Call this lead back at the requested time",
       callbackTime,
       conversationDescription: summary,
+      conversationTranscript: fullTranscript,
       details: "Post-call fallback detected a callback request from the ElevenLabs transcript.",
     });
 
