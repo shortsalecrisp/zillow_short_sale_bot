@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import types
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +69,23 @@ def test_build_q_phone_prefers_locality_tokens():
     assert queries[0].startswith('"Antonio Flores" "Real Estate Agent" "Mobile" TX')
     assert any("Flores Realty Group" in q for q in queries)
     assert any("Seguin" in q for q in queries)
+
+
+def test_initial_sms_window_allows_final_8pm_scrape_completion(monkeypatch):
+    monkeypatch.setattr(bot_min, "WORK_START", 8)
+    monkeypatch.setattr(bot_min, "WORK_END", 20)
+    monkeypatch.setattr(bot_min, "INITIAL_SMS_END", 21)
+
+    final_scrape_completion = bot_min.SCHEDULER_TZ.localize(
+        datetime(2026, 4, 24, 20, 13)
+    )
+    after_initial_window = bot_min.SCHEDULER_TZ.localize(
+        datetime(2026, 4, 24, 21, 0)
+    )
+
+    assert bot_min._within_initial_hours(final_scrape_completion)
+    assert not bot_min._within_work_hours(final_scrape_completion)
+    assert not bot_min._within_initial_hours(after_initial_window)
 
 
 def test_realtor_office_label_cloudmersive_override(monkeypatch):

@@ -22,8 +22,8 @@ from google.oauth2.service_account import Credentials
 
 from apify_fetcher import fetch_rows  # unchanged helper
 from bot_min import (
+    INITIAL_SMS_END,
     TZ,
-    WORK_END,
     WORK_START,
     SCHEDULER_TZ,
     SMS_TEMPLATE,
@@ -222,14 +222,14 @@ def _should_run_immediately() -> bool:
 
 def _within_initial_hours(slot: datetime) -> bool:
     slot = slot.astimezone(SCHEDULER_TZ)
-    return WORK_START <= slot.hour < WORK_END
+    return WORK_START <= slot.hour < INITIAL_SMS_END
 
 
 def _next_initial_window(slot: datetime) -> datetime:
     slot = slot.astimezone(SCHEDULER_TZ)
     if slot.hour < WORK_START:
         return slot.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
-    if slot.hour >= WORK_END:
+    if slot.hour >= INITIAL_SMS_END:
         next_day = slot + timedelta(days=1)
         return next_day.replace(hour=WORK_START, minute=0, second=0, microsecond=0)
     return slot

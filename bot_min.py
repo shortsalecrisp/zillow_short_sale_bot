@@ -470,6 +470,7 @@ FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (final run starts at 8 pm)
+INITIAL_SMS_END = int(os.getenv("INITIAL_SMS_END_HOUR", str(max(WORK_END, 21))))  # exclusive; lets 8pm scrape send after enrichment
 FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
 SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=False)
 APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
@@ -12132,7 +12133,7 @@ def _within_initial_hours(slot: datetime) -> bool:
     """Return True when ``slot`` falls inside working hours for initial texts."""
 
     slot = slot.astimezone(SCHEDULER_TZ)
-    return WORK_START <= slot.hour < WORK_END
+    return WORK_START <= slot.hour < INITIAL_SMS_END
 
 
 def schedule_initial_sms(
@@ -12159,7 +12160,9 @@ def schedule_initial_sms(
     next_start = _next_work_start(now, include_weekends=True)
     sleep_secs = max(0, (next_start - now).total_seconds())
     LOG.info(
-        "Initial SMS outside work hours; sleeping %.2fs until %s (now=%s)",
+        "Initial SMS outside send window (%s–%s); sleeping %.2fs until %s (now=%s)",
+        WORK_START,
+        INITIAL_SMS_END,
         sleep_secs,
         next_start.isoformat(),
         now.isoformat(),
@@ -12265,7 +12268,7 @@ def _within_initial_hours(slot: datetime) -> bool:
     """Return True when ``slot`` falls inside working hours for initial SMS."""
 
     slot = slot.astimezone(SCHEDULER_TZ)
-    return WORK_START <= slot.hour < WORK_END
+    return WORK_START <= slot.hour < INITIAL_SMS_END
 
 
 def _within_scheduler_hours(slot: datetime) -> bool:
@@ -12310,7 +12313,9 @@ def _sleep_until_initial_window(*, row_idx: Optional[int], phone: str) -> None:
     sleep_secs = max(0, (next_start - now).total_seconds())
     row_label = f"row {row_idx}" if row_idx else "row <unknown>"
     LOG.info(
-        "Initial SMS outside work hours; sleeping %.2fs until %s (now=%s, %s, phone=%s)",
+        "Initial SMS outside send window (%s–%s); sleeping %.2fs until %s (now=%s, %s, phone=%s)",
+        WORK_START,
+        INITIAL_SMS_END,
         sleep_secs,
         next_start.isoformat(),
         now.isoformat(),
