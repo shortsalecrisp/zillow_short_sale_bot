@@ -14,6 +14,9 @@ const elevenLabsClient = axios.create({
   },
 });
 
+const STREET_TYPE_SUFFIX_PATTERN =
+  /\s+(?:ALY|ALLY|AVE|AVENUE|BLVD|BOULEVARD|CIR|CIRCLE|CT|COURT|CV|COVE|DR|DRIVE|HWY|HIGHWAY|LN|LANE|LOOP|PKWY|PARKWAY|PL|PLACE|RD|ROAD|ST|STREET|TER|TERRACE|TRL|TRAIL|WAY)\.?(?:\s+(?:N|S|E|W|NE|NW|SE|SW)\.?)?$/i;
+
 function getElevenLabsError(error: unknown): Record<string, unknown> {
   if (error instanceof AxiosError) {
     return {
@@ -59,6 +62,7 @@ function getStreetAddress(listingAddress: string): string {
   const withoutUnit = streetAddress
     .replace(/\s*(?:,|-)?\s*(?:APT|APARTMENT|STE|SUITE|UNIT)\.?\s*[A-Z0-9-]+(?:\s*[A-Z0-9-]+)?/gi, "")
     .replace(/\s*#\s*[A-Z0-9-]+(?:\s*[A-Z0-9-]+)?/gi, "")
+    .replace(STREET_TYPE_SUFFIX_PATTERN, "")
     .replace(/\s{2,}/g, " ")
     .trim();
 
