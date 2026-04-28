@@ -17,7 +17,7 @@ import { logger } from "../lib/logger";
 import { sendCallbackEmail } from "../lib/sendCallbackEmail";
 import { postSheetUpdate } from "../lib/sheetUpdateClient";
 import { decodeLiveTransferClientState, gatherUsingAi, gatherUsingSpeak, hangupCall, speakText } from "../lib/telnyx";
-import type { CallState, SheetUpdateRequest, TelnyxWebhookEvent, TestOutcome } from "../types";
+import type { CallState, SheetUpdateRequest, TelnyxWebhookEvent, TelnyxWebhookPayload, TestOutcome } from "../types";
 
 const router = Router();
 const TRANSFER_WAIT_MS = 1_500;
@@ -37,6 +37,17 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function getFirstDtmfDigit(payload: TelnyxWebhookPayload): string | undefined {
+  const rawDigit =
+    typeof payload.digit === "string"
+      ? payload.digit
+      : typeof payload.digits === "string"
+        ? payload.digits
+        : undefined;
+
+  return rawDigit?.slice(0, 1);
 }
 
 function buildOpeningScript(state: CallState): string {
@@ -504,8 +515,51 @@ async function handleYoniTransferWebhook(
       return true;
     }
 
+    case "call.dtmf.received": {
+      const digit = getFirstDtmfDigit(payload);
+
+      if (digit === "1") {
+        const didResolve = resolveTransferByYoniCallControlId(callControlId, "yes");
+        logger.info("Yoni accepted transfer via DTMF event", {
+          originalCallControlId,
+          yoniCallControlId: callControlId,
+          digit,
+          didResolve,
+        });
+        return true;
+      }
+
+      if (digit === "2") {
+        const didResolve = resolveTransferByYoniCallControlId(callControlId, "no");
+        logger.info("Yoni declined transfer via DTMF event", {
+          originalCallControlId,
+          yoniCallControlId: callControlId,
+          digit,
+          didResolve,
+        });
+        return true;
+      }
+
+      logger.info("Ignoring unsupported Yoni transfer DTMF digit", {
+        originalCallControlId,
+        yoniCallControlId: callControlId,
+        digit,
+      });
+      return true;
+    }
+
     case "call.gather.ended": {
-      const digit = typeof payload.digits === "string" ? payload.digits.slice(0, 1) : undefined;
+      const digit = getFirstDtmfDigit(payload);
+
+      if (!pendingTransfer) {
+        logger.info("Ignoring Yoni gather end because transfer is no longer pending", {
+          originalCallControlId,
+          yoniCallControlId: callControlId,
+          digit,
+          gatherStatus: payload.status,
+        });
+        return true;
+      }
 
       if (digit === "1") {
         logger.info("Yoni accepted transfer", {
@@ -581,6 +635,7 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
     callSessionId: payload.call_session_id,
     from: payload.from,
     to: payload.to,
+    digit: payload.digit,
     digits: payload.digits,
     gatherStatus: payload.status,
     hangupCause: payload.hangup_cause,

@@ -4,7 +4,7 @@ import { logger } from "./logger";
 import { hangupCall, placeLiveTransferApprovalCall, speakText } from "./telnyx";
 import { waitForLiveTransferReply } from "./waitForLiveTransferReply";
 
-const ELEVENLABS_TRANSFER_APPROVAL_TIMEOUT_MS = 16_000;
+const ELEVENLABS_TRANSFER_APPROVAL_TIMEOUT_MS = 35_000;
 
 export type ElevenLabsLiveTransferApprovalResult =
   | { status: "accepted"; approvalCallControlId?: string }

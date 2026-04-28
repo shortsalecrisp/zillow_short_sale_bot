@@ -102,6 +102,7 @@ export interface TelnyxWebhookPayload {
   to?: string;
   state?: string;
   hangup_cause?: string;
+  digit?: string;
   digits?: string;
   status?: string;
   result?: Record<string, unknown>;
