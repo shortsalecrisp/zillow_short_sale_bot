@@ -30,6 +30,11 @@ type ElevenLabsConversation = {
   status?: string;
   metadata?: {
     termination_reason?: string | null;
+    error?: {
+      code?: number;
+      reason?: string;
+      [key: string]: unknown;
+    } | null;
     features_usage?: {
       voicemail_detection?: {
         enabled?: boolean;
@@ -158,7 +163,37 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
     return "Call received but agent hung up on Emmy";
   }
 
+  if (callResult === "call_failed_invalid_number") {
+    return "Call failed - invalid phone number";
+  }
+
   return callResult;
+}
+
+function getFailedConversationReason(conversation: ElevenLabsConversation): string {
+  const reason = conversation.metadata?.error?.reason;
+  if (typeof reason === "string" && reason.trim()) {
+    return reason.trim();
+  }
+
+  const terminationReason = conversation.metadata?.termination_reason;
+  if (typeof terminationReason === "string" && terminationReason.trim()) {
+    return terminationReason.trim();
+  }
+
+  return "Call failed before completion";
+}
+
+function isInvalidDestinationNumberFailure(conversation: ElevenLabsConversation): boolean {
+  const errorCode = conversation.metadata?.error?.code;
+  const reason = normalizeText(getFailedConversationReason(conversation));
+
+  return (
+    errorCode === 404 &&
+    (reason.includes("invalid destination number") ||
+      reason.includes("invalid number") ||
+      reason.includes("sip status: 404"))
+  );
 }
 
 function extractCallbackTime(conversation: ElevenLabsConversation): string | undefined {
@@ -638,20 +673,43 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
 
   if (conversation.status !== "done") {
     if (conversation.status === "failed") {
+      const failureReason = getFailedConversationReason(conversation);
+      const invalidDestinationNumber = isInvalidDestinationNumberFailure(conversation);
+      const outcome = invalidDestinationNumber ? "call_failed_invalid_number" : "Call failed before completion";
+      const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();
+
+      if (invalidDestinationNumber) {
+        await postSheetUpdate({
+          rowNumber: metadata.rowNumber,
+          callAttemptNumber: metadata.callAttemptNumber,
+          callResult: outcome,
+          responseStatus: buildVoiceResponseStatus(outcome),
+          leadStatusCode: "N",
+          voiceNotes: failureReason,
+        });
+      }
+
       await sendTranscriptEmailIfEnabled({
         conversationId,
         metadata,
-        outcome: "Call failed before completion",
-        summary,
+        outcome: buildVoiceResponseStatus(outcome),
+        summary: outcomeSummary,
         transcript: fullTranscript,
       });
 
       processedConversationIds.add(conversationId);
-      logger.info("ElevenLabs post-call fallback skipped because conversation failed before a final outcome", {
-        conversationId,
-        rowNumber: metadata.rowNumber,
-        status: conversation.status,
-      });
+      logger.info(
+        invalidDestinationNumber
+          ? "ElevenLabs post-call fallback recorded invalid destination number"
+          : "ElevenLabs post-call fallback skipped because conversation failed before a final outcome",
+        {
+          conversationId,
+          rowNumber: metadata.rowNumber,
+          callAttemptNumber: metadata.callAttemptNumber,
+          status: conversation.status,
+          failureReason,
+        },
+      );
       return true;
     }
 
