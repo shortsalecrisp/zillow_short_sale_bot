@@ -186,12 +186,35 @@ function shouldTreatAsCallback(conversation: ElevenLabsConversation): boolean {
     return false;
   }
 
-  const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+  if (endedBecauseCallerStoppedResponding(conversation)) {
+    return false;
+  }
+
+  const summary = normalizeText(conversation.analysis?.transcript_summary ?? "");
+  const userText = normalizeText(userMessages(conversation).join(" "));
+
   return (
-    text.includes("call back") ||
-    text.includes("callback") ||
-    text.includes("call you") ||
-    text.includes("reach out")
+    userText.includes("call me back") ||
+    userText.includes("call us back") ||
+    userText.includes("call you back") ||
+    userText.includes("call back later") ||
+    userText.includes("give me a call") ||
+    userText.includes("have yoni call") ||
+    userText.includes("have him call") ||
+    userText.includes("ask him to call") ||
+    userText.includes("yoni can call") ||
+    userText.includes("reach out to me") ||
+    userText.includes("reach back out") ||
+    userText.includes("call later") ||
+    userText.includes("call tomorrow") ||
+    summary.includes("requested a callback") ||
+    summary.includes("asked for a callback") ||
+    summary.includes("requested a call back") ||
+    summary.includes("asked for a call back") ||
+    summary.includes("asked yoni to call") ||
+    summary.includes("wanted yoni to call") ||
+    summary.includes("arranged for yoni to call") ||
+    summary.includes("scheduled callback")
   );
 }
 
@@ -323,6 +346,30 @@ function userMessages(conversation: ElevenLabsConversation): string[] {
   return (conversation.transcript ?? [])
     .filter((item) => item.role === "user" && typeof item.message === "string" && item.message.trim() !== "")
     .map((item) => item.message!.trim());
+}
+
+function endedBecauseCallerStoppedResponding(conversation: ElevenLabsConversation): boolean {
+  const summary = normalizeText(conversation.analysis?.transcript_summary ?? "");
+  if (
+    summary.includes("no verbal responses") ||
+    summary.includes("lack of engagement") ||
+    summary.includes("lack of response") ||
+    summary.includes("no response from the user")
+  ) {
+    return true;
+  }
+
+  return (conversation.transcript ?? []).some((item) =>
+    (item.tool_calls ?? []).some((toolCall) => {
+      if (toolCall.tool_name !== "end_call" && toolCall.name !== "end_call") {
+        return false;
+      }
+
+      const params = typeof toolCall.params_as_json === "string" ? toolCall.params_as_json : "";
+      const normalizedParams = normalizeText(params);
+      return normalizedParams.includes("no response") || normalizedParams.includes("lost connection");
+    }),
+  );
 }
 
 function hasMeaningfulUserInteraction(conversation: ElevenLabsConversation): boolean {
