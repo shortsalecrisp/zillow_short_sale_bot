@@ -72,7 +72,11 @@ function getStreetAddress(listingAddress: string): string {
     .replace(/\bNE\b\.?/gi, "Northeast")
     .replace(/\bNW\b\.?/gi, "Northwest")
     .replace(/\bSE\b\.?/gi, "Southeast")
-    .replace(/\bSW\b\.?/gi, "Southwest");
+    .replace(/\bSW\b\.?/gi, "Southwest")
+    .replace(/\bN\b\.?/gi, "North")
+    .replace(/\bS\b\.?/gi, "South")
+    .replace(/\bE\b\.?/gi, "East")
+    .replace(/\bW\b\.?/gi, "West");
 }
 
 function buildVoicemailMessage(streetAddress: string, callAttemptNumber: number): string {
