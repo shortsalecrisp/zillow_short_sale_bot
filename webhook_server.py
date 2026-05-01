@@ -74,7 +74,13 @@ app            = FastAPI()
 
 @app.on_event("startup")
 async def _log_headless_status() -> None:
-    log_headless_status(logger)
+    async def _warm_headless_browser() -> None:
+        try:
+            await asyncio.to_thread(log_headless_status, logger)
+        except Exception:
+            logger.exception("HEADLESS_STATUS background warmup failed")
+
+    asyncio.create_task(_warm_headless_browser())
 
 
 @app.on_event("startup")
