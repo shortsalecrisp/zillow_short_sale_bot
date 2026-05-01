@@ -1774,7 +1774,6 @@ async def apify_hook(request: Request):
                 _extract_hard_skip_zpids(payload),
                 max_rows=None,
             )
-            rows = _merge_rows_by_zpid(rows, extra_selection["rows"])
             logger.info(
                 "state-search: unseen_filter received=%d hard_skipped=%d already_seen=%d invalid=%d kept=%d",
                 extra_selection["received"],
@@ -1790,6 +1789,16 @@ async def apify_hook(request: Request):
                     "state-search: detail-enrichment-route rows=%d reason=missing_listing_text",
                     routed_for_detail,
                 )
+            if extra_selection["rows"]:
+                extra_enqueued = _enqueue_pending_rows(extra_selection["rows"], source="state-search")
+                append_seen_zpids(
+                    [
+                        str(row.get("zpid")).strip()
+                        for row in extra_selection["rows"]
+                        if str(row.get("zpid", "")).strip()
+                    ]
+                )
+                logger.info("state-search: enqueued_extra=%d", extra_enqueued)
 
     if rows is not None:
         normalized_rows: List[Dict[str, Any]] = []

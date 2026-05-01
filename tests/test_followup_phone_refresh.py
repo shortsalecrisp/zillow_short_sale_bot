@@ -15,7 +15,7 @@ os.environ.setdefault("GCP_SERVICE_ACCOUNT_JSON", "{}")
 os.environ.setdefault("SMS_GATEWAY_API_KEY", "dummy")
 
 
-dummy_sheet = types.SimpleNamespace(col_values=lambda idx: [])
+dummy_sheet = types.SimpleNamespace(col_values=lambda idx: [], row_count=2)
 dummy_workbook = types.SimpleNamespace(sheet1=dummy_sheet, worksheet=lambda name: dummy_sheet)
 dummy_client = types.SimpleNamespace(open_by_key=lambda key: dummy_workbook)
 
@@ -62,6 +62,26 @@ class _FakeValuesAPI:
     def __init__(self):
         self._ranges = []
 
+    def batchGet(self, spreadsheetId, ranges, majorDimension, valueRenderOption):
+        self._ranges.extend(ranges)
+        if majorDimension == "COLUMNS":
+            return _FakeRequest(
+                {
+                    "valueRanges": [
+                        {"values": [["2024-01-01T10:00:00-05:00"]]},
+                        {"values": [[]]},
+                    ]
+                }
+            )
+        if majorDimension == "ROWS":
+            row = [""] * bot_min.MIN_COLS
+            row[bot_min.COL_FIRST] = "Sam"
+            row[bot_min.COL_PHONE] = "5550001111"
+            row[bot_min.COL_STREET] = "123 Main St"
+            row[bot_min.COL_INIT_TS] = "2024-01-01T10:00:00-05:00"
+            return _FakeRequest({"valueRanges": [{"values": [row]}]})
+        raise AssertionError(f"Unexpected batchGet: {ranges}")
+
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
         self._ranges.append(range)
         if range.endswith(f"!A:{bot_min.FOLLOWUP_READ_END_COL}"):
@@ -92,6 +112,7 @@ def test_follow_up_uses_latest_sheet_phone(monkeypatch):
     sent = {}
 
     monkeypatch.setattr(bot_min, "sheets_service", fake_service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
     monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
     monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
 

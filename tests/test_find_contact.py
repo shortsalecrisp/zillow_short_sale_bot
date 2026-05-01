@@ -1,3 +1,4 @@
+import importlib.machinery
 import os
 import sys
 import types
@@ -15,15 +16,28 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("OPENAI_API_KEY", "test")
 os.environ.setdefault("APIFY_API_TOKEN", "test")
 
-# gspread + oauth2client shims
-_dummy_sheet = types.SimpleNamespace(append_row=lambda row: None)
-_dummy_workbook = types.SimpleNamespace(sheet1=_dummy_sheet)
+# gspread + Google auth shims
+_dummy_sheet = types.SimpleNamespace(
+    append_row=lambda row: None,
+    col_values=lambda idx: [],
+)
+_dummy_workbook = types.SimpleNamespace(
+    sheet1=_dummy_sheet,
+    worksheet=lambda name: _dummy_sheet,
+)
 _dummy_client = types.SimpleNamespace(open_by_key=lambda key: _dummy_workbook)
-sys.modules["gspread"] = types.SimpleNamespace(authorize=lambda creds: _dummy_client)
+sys.modules["gspread"] = types.SimpleNamespace(
+    authorize=lambda creds: _dummy_client,
+    exceptions=types.SimpleNamespace(WorksheetNotFound=Exception, APIError=Exception),
+)
 
 class _DummyCreds:
     @staticmethod
     def from_json_keyfile_name(*args, **kwargs):
+        return object()
+
+    @staticmethod
+    def from_service_account_info(info, scopes=None):
         return object()
 
 service_account_module = types.ModuleType("oauth2client.service_account")
@@ -33,12 +47,23 @@ oauth2client_module.service_account = service_account_module
 sys.modules["oauth2client"] = oauth2client_module
 sys.modules["oauth2client.service_account"] = service_account_module
 
-# SMS + OpenAI shims
-sms_module = types.ModuleType("sms_providers")
-sms_module.get_sender = lambda provider: types.SimpleNamespace(send=lambda to, body: None)
-sys.modules["sms_providers"] = sms_module
+google_service_account_module = types.ModuleType("google.oauth2.service_account")
+google_service_account_module.Credentials = _DummyCreds
+sys.modules.setdefault("google", types.ModuleType("google"))
+oauth2_module = sys.modules.setdefault("google.oauth2", types.ModuleType("google.oauth2"))
+oauth2_module.service_account = google_service_account_module
+sys.modules["google.oauth2.service_account"] = google_service_account_module
 
+discovery_module = types.ModuleType("googleapiclient.discovery")
+discovery_module.build = lambda *args, **kwargs: object()
+googleapiclient_module = types.ModuleType("googleapiclient")
+googleapiclient_module.discovery = discovery_module
+sys.modules["googleapiclient"] = googleapiclient_module
+sys.modules["googleapiclient.discovery"] = discovery_module
+
+# OpenAI shim
 openai_module = types.SimpleNamespace(
+    __spec__=importlib.machinery.ModuleSpec("openai", None),
     chat=types.SimpleNamespace(
         completions=types.SimpleNamespace(
             create=lambda **kwargs: types.SimpleNamespace(
