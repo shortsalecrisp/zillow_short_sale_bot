@@ -222,3 +222,39 @@ def test_original_cap_does_not_consume_state_search_cap(monkeypatch):
     assert {"mi-1", "ak-1", "hi-1"} <= set(enqueued)
     assert {f"main-{idx}" for idx in range(5)} <= seen_zpids
     assert {"mi-1", "ak-1", "hi-1"} <= seen_zpids
+
+
+def test_state_searches_have_separate_combined_cap(monkeypatch):
+    enqueued_by_source = []
+
+    original_rows = [_listing(f"main-{idx}") for idx in range(5)]
+    state_rows = [_listing(f"mi-{idx}", "MI", "mi") for idx in range(7)]
+
+    monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
+    monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: state_rows)
+    monkeypatch.setattr(webhook_server, "_within_initial_hours", lambda now: True)
+    monkeypatch.setattr(webhook_server, "_drain_deferred_rows", lambda: [])
+    monkeypatch.setattr(webhook_server, "_process_pending_queue", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(webhook_server, "append_seen_zpids", lambda zpids: None)
+    monkeypatch.setattr(webhook_server, "APIFY_MAX_ITEMS", 5)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_LIMIT", 5)
+    webhook_server.EXPORTED_ZPIDS.clear()
+
+    def fake_enqueue(rows, source):
+        enqueued_by_source.extend((source, str(row.get("zpid"))) for row in rows)
+        return len(rows)
+
+    monkeypatch.setattr(webhook_server, "_enqueue_pending_rows", fake_enqueue)
+
+    result = asyncio.run(
+        webhook_server.apify_hook(
+            _FakeRequest({"listings": original_rows, "upstreamDatasetId": "dataset-1"})
+        )
+    )
+
+    original_enqueued = [zpid for source, zpid in enqueued_by_source if source == "payload.listings"]
+    state_enqueued = [zpid for source, zpid in enqueued_by_source if source == "state-search"]
+
+    assert result["status"] == "processed"
+    assert original_enqueued == [f"main-{idx}" for idx in range(5)]
+    assert state_enqueued == [f"mi-{idx}" for idx in range(5)]

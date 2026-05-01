@@ -1778,7 +1778,7 @@ async def apify_hook(request: Request):
                 extra_state_rows,
                 load_seen_zpids(),
                 _extract_hard_skip_zpids(payload),
-                max_rows=None,
+                max_rows=max(APIFY_STATE_SEARCH_LIMIT, 0),
             )
             logger.info(
                 "state-search: unseen_filter received=%d hard_skipped=%d already_seen=%d invalid=%d kept=%d",
