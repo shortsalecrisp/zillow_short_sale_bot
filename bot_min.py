@@ -11754,11 +11754,11 @@ def is_active_listing(row_payload: Dict[str, Any]) -> bool:
                 break
     return (not status) or status in GOOD_STATUS
 
-def mark_sent(row_idx: int, msg_id: str, message: str) -> bool:
+def mark_sent(row_idx: int, msg_id: str) -> bool:
     ts = datetime.now(tz=TZ).isoformat()
     init_col = _col_index_to_letter(COL_INIT_TS)
     data = [
-        {"range": f"{GSHEET_TAB}!H{row_idx}", "values": [[message]]},
+        {"range": f"{GSHEET_TAB}!H{row_idx}", "values": [["x"]]},
         {"range": f"{GSHEET_TAB}!{init_col}{row_idx}", "values": [[ts]]},
         {"range": f"{GSHEET_TAB}!L{row_idx}", "values": [[msg_id]]},
     ]
@@ -11768,7 +11768,7 @@ def mark_sent(row_idx: int, msg_id: str, message: str) -> bool:
             body={"valueInputOption": "RAW", "data": data},
         ).execute()
         LOG.info(
-            "Marked row %s H:initial-text %s:init-ts L:msg-id (msg_id=%s)",
+            "Marked row %s H:x %s:init-ts L:msg-id (msg_id=%s)",
             row_idx,
             init_col,
             msg_id,
@@ -12066,7 +12066,7 @@ def send_sms(
             if follow_up:
                 sheet_updated = mark_followup(row_idx)
             else:
-                sheet_updated = mark_sent(row_idx, msg_id, msg_txt)
+                sheet_updated = mark_sent(row_idx, msg_id)
 
             if sheet_updated:
                 LOG.info(
