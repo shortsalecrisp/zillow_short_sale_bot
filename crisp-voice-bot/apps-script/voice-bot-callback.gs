@@ -49,8 +49,10 @@ const VOICE_BOT_BUSINESS_DAY_START_HOUR_ET = 8;
 const VOICE_BOT_BUSINESS_DAY_END_HOUR_ET = 20;
 const VOICE_BOT_QUEUE_RUN_END_HOUR_ET = 24;
 const VOICE_BOT_TIMEZONE = 'America/New_York';
-const VOICE_BOT_AFTERNOON_WINDOW_START_MINUTES = 16 * 60 + 30;
-const VOICE_BOT_AFTERNOON_WINDOW_END_MINUTES = 17 * 60 + 30;
+const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_START_MINUTES = 16 * 60 + 30;
+const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_END_MINUTES = 17 * 60 + 30;
+const VOICE_BOT_WEEKEND_AFTERNOON_WINDOW_START_MINUTES = 16 * 60;
+const VOICE_BOT_WEEKEND_AFTERNOON_WINDOW_END_MINUTES = 17 * 60;
 
 const VOICE_BOT_STATE_TIMEZONES = {
   AL: 'America/Chicago',
@@ -766,7 +768,7 @@ function isWithinVoiceBotQueueRunWindow_(date) {
   const day = Number(Utilities.formatDate(date, VOICE_BOT_TIMEZONE, 'u'));
   const hour = Number(Utilities.formatDate(date, VOICE_BOT_TIMEZONE, 'H'));
 
-  return day >= 1 && day <= 5 && hour >= VOICE_BOT_BUSINESS_DAY_START_HOUR_ET && hour < VOICE_BOT_QUEUE_RUN_END_HOUR_ET;
+  return day >= 1 && day <= 7 && hour >= VOICE_BOT_BUSINESS_DAY_START_HOUR_ET && hour < VOICE_BOT_QUEUE_RUN_END_HOUR_ET;
 }
 
 function getVoiceBotAgentTimeZone_(rowValues) {
@@ -776,16 +778,41 @@ function getVoiceBotAgentTimeZone_(rowValues) {
 
 function getVoiceBotPreferredCallWindowName_(date, timeZone) {
   const day = Number(Utilities.formatDate(date, timeZone, 'u'));
-  if (day < 1 || day > 5) {
+  const callWindow = getVoiceBotCallWindowForDay_(day);
+  if (!callWindow) {
     return '';
   }
 
   const localMinutes = getVoiceBotLocalMinutes_(date, timeZone);
-  if (localMinutes >= VOICE_BOT_AFTERNOON_WINDOW_START_MINUTES && localMinutes < VOICE_BOT_AFTERNOON_WINDOW_END_MINUTES) {
+  if (localMinutes >= callWindow.startMinutes && localMinutes < callWindow.endMinutes) {
     return 'afternoon';
   }
 
   return '';
+}
+
+function getVoiceBotCallWindowForDay_(day) {
+  if (day >= 1 && day <= 5) {
+    return {
+      startMinutes: VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_START_MINUTES,
+      endMinutes: VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_END_MINUTES
+    };
+  }
+
+  if (day === 6 || day === 7) {
+    return {
+      startMinutes: VOICE_BOT_WEEKEND_AFTERNOON_WINDOW_START_MINUTES,
+      endMinutes: VOICE_BOT_WEEKEND_AFTERNOON_WINDOW_END_MINUTES
+    };
+  }
+
+  return null;
+}
+
+function getVoiceBotCallWindowForDateKey_(dateKey, timeZone) {
+  const probeDate = buildVoiceBotDateInTimeZone_(dateKey, 12 * 60, timeZone);
+  const day = Number(Utilities.formatDate(probeDate, timeZone, 'u'));
+  return getVoiceBotCallWindowForDay_(day);
 }
 
 function getVoiceBotLocalMinutes_(date, timeZone) {
@@ -802,37 +829,41 @@ function getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, timeZone) {
   const followupDateKey = getVoiceBotLocalDateKey_(followupSentAt, timeZone);
   const followupDay = Number(Utilities.formatDate(followupSentAt, timeZone, 'u'));
   const followupMinutes = getVoiceBotLocalMinutes_(followupSentAt, timeZone);
+  const followupCallWindow = getVoiceBotCallWindowForDay_(followupDay);
 
   if (
-    followupDay >= 1 &&
-    followupDay <= 5 &&
-    followupMinutes < VOICE_BOT_AFTERNOON_WINDOW_START_MINUTES
+    followupCallWindow &&
+    followupMinutes < followupCallWindow.startMinutes
   ) {
-    return buildVoiceBotDateInTimeZone_(followupDateKey, VOICE_BOT_AFTERNOON_WINDOW_START_MINUTES, timeZone);
+    return buildVoiceBotDateInTimeZone_(followupDateKey, followupCallWindow.startMinutes, timeZone);
   }
 
+  const nextCallDateKey = getNextVoiceBotCallDateKey_(followupDateKey, timeZone);
+  const nextCallWindow = getVoiceBotCallWindowForDateKey_(nextCallDateKey, timeZone);
+
   return buildVoiceBotDateInTimeZone_(
-    getNextVoiceBotBusinessDateKey_(followupDateKey, timeZone),
-    VOICE_BOT_AFTERNOON_WINDOW_START_MINUTES,
+    nextCallDateKey,
+    nextCallWindow.startMinutes,
     timeZone
   );
 }
 
 function getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, timeZone) {
+  const nextCallDateKey = getNextVoiceBotCallDateKey_(getVoiceBotLocalDateKey_(firstAttemptSentAt, timeZone), timeZone);
+  const nextCallWindow = getVoiceBotCallWindowForDateKey_(nextCallDateKey, timeZone);
+
   return buildVoiceBotDateInTimeZone_(
-    getNextVoiceBotBusinessDateKey_(getVoiceBotLocalDateKey_(firstAttemptSentAt, timeZone), timeZone),
-    VOICE_BOT_AFTERNOON_WINDOW_START_MINUTES,
+    nextCallDateKey,
+    nextCallWindow.startMinutes,
     timeZone
   );
 }
 
-function getNextVoiceBotBusinessDateKey_(dateKey, timeZone) {
+function getNextVoiceBotCallDateKey_(dateKey, timeZone) {
   var cursorDateKey = shiftVoiceBotDateKey_(dateKey, 1);
 
   while (true) {
-    const probeDate = buildVoiceBotDateInTimeZone_(cursorDateKey, 12 * 60, timeZone);
-    const day = Number(Utilities.formatDate(probeDate, timeZone, 'u'));
-    if (day >= 1 && day <= 5) {
+    if (getVoiceBotCallWindowForDateKey_(cursorDateKey, timeZone)) {
       return cursorDateKey;
     }
 
