@@ -89,9 +89,14 @@ class SMSGatewayForAndroid:
         body = (response_text or "").lower()
         return any(signal in body for signal in self.ERROR_SIGNALS)
 
-    @staticmethod
-    def _body_is_ok_success(response_text: str) -> bool:
-        return (response_text or "").strip().lower() == "ok"
+    def _response_is_accepted(self, status_code: int, response_text: str) -> bool:
+        """AutoRemote can send the push while returning non-OK body text.
+
+        Treat any HTTP 200 without an explicit error signal as accepted so the
+        sheet marker matches what actually happened on the phone.
+        """
+
+        return status_code == 200 and not self._body_has_error_signal(response_text)
 
     def send_with_diagnostics(
         self,
@@ -206,14 +211,9 @@ class SMSGatewayForAndroid:
                 response.status_code,
                 response_text or "<empty>",
             )
-            body_is_ok_success = self._body_is_ok_success(response_text)
             body_has_error_signal = self._body_has_error_signal(response_text)
-            if (
-                response.status_code == 200
-                and response_text
-                and body_is_ok_success
-                and not body_has_error_signal
-            ):
+            response_is_accepted = self._response_is_accepted(response.status_code, response_text)
+            if response_is_accepted:
                 LOG.info(
                     "AUTOREMOTE_SEND_CONFIRMED row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
                     row_idx,
@@ -241,18 +241,7 @@ class SMSGatewayForAndroid:
                     response_text or "<empty>",
                 )
 
-            if response.status_code == 200 and not response_text:
-                LOG.error(
-                    "AUTOREMOTE_RESPONSE_EMPTY_BODY row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
-                    row_idx,
-                    to,
-                    sms_type,
-                    attempt,
-                    response.status_code,
-                    "<empty>",
-                )
-
-            if response.status_code == 200 and response_text and not body_is_ok_success:
+            if response.status_code == 200 and response_text and not response_is_accepted:
                 LOG.error(
                     "AUTOREMOTE_RESPONSE_NOT_OK row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s",
                     row_idx,
@@ -278,7 +267,7 @@ class SMSGatewayForAndroid:
                 response_text=response_text,
                 exception_type="HTTPError",
                 exception_message=(
-                    "AutoRemote HTTP 200 body was not exact 'OK'"
+                    "AutoRemote HTTP 200 body contained an error signal"
                     if response.status_code == 200
                     else f"Non-200 from AutoRemote: {response.status_code}"
                 ),

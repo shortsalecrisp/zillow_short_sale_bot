@@ -58,6 +58,14 @@ class _FakeRequest:
         return self._payload
 
 
+class _FailingRequest:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def execute(self):
+        raise self._exc
+
+
 class _FakeValuesAPI:
     def __init__(self):
         self._ranges = []
@@ -149,3 +157,41 @@ def test_parse_configured_col_index_rejects_non_a1_labels():
     )
     assert idx == bot_min.DEFAULT_COL_INIT_TS
     assert warning
+
+
+def test_mark_sent_retries_transient_sheet_failure(monkeypatch):
+    class _RetryValuesAPI:
+        def __init__(self):
+            self.calls = []
+
+        def batchUpdate(self, spreadsheetId, body):
+            self.calls.append((spreadsheetId, body))
+            if len(self.calls) == 1:
+                return _FailingRequest(RuntimeError("temporary sheet error"))
+            return _FakeRequest({})
+
+    class _RetrySheetsService:
+        def __init__(self):
+            self.values_api = _RetryValuesAPI()
+
+        def spreadsheets(self):
+            return self
+
+        def values(self):
+            return self.values_api
+
+    fake_service = _RetrySheetsService()
+    sleeps = []
+    monkeypatch.setattr(bot_min, "sheets_service", fake_service)
+    monkeypatch.setattr(bot_min.time, "sleep", lambda secs: sleeps.append(secs))
+
+    assert bot_min.mark_sent(42, "msg-123") is True
+    assert len(fake_service.values_api.calls) == 2
+    assert sleeps == [1]
+
+    body = fake_service.values_api.calls[-1][1]
+    assert body["data"][0]["range"] == "Sheet1!H42"
+    assert body["data"][0]["values"] == [["x"]]
+    assert body["data"][1]["range"] == "Sheet1!W42"
+    assert body["data"][2]["range"] == "Sheet1!L42"
+    assert body["data"][2]["values"] == [["msg-123"]]

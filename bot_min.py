@@ -11762,21 +11762,27 @@ def mark_sent(row_idx: int, msg_id: str) -> bool:
         {"range": f"{GSHEET_TAB}!{init_col}{row_idx}", "values": [[ts]]},
         {"range": f"{GSHEET_TAB}!L{row_idx}", "values": [[msg_id]]},
     ]
-    try:
-        sheets_service.spreadsheets().values().batchUpdate(
-            spreadsheetId=GSHEET_ID,
-            body={"valueInputOption": "RAW", "data": data},
-        ).execute()
-        LOG.info(
-            "Marked row %s H:x %s:init-ts L:msg-id (msg_id=%s)",
-            row_idx,
-            init_col,
-            msg_id,
-        )
-        return True
-    except Exception as e:
-        LOG.error("GSheet mark_sent error %s", e)
-        return False
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            sheets_service.spreadsheets().values().batchUpdate(
+                spreadsheetId=GSHEET_ID,
+                body={"valueInputOption": "RAW", "data": data},
+            ).execute()
+            LOG.info(
+                "Marked row %s H:x %s:init-ts L:msg-id (msg_id=%s, attempt=%s)",
+                row_idx,
+                init_col,
+                msg_id,
+                attempt,
+            )
+            return True
+        except Exception as e:
+            if attempt >= max_attempts:
+                LOG.error("GSheet mark_sent error after %s attempts: %s", attempt, e)
+                return False
+            LOG.warning("GSheet mark_sent retry row=%s attempt=%s error=%s", row_idx, attempt, e)
+            time.sleep(attempt)
 
 def mark_followup(row_idx: int) -> bool:
     ts = datetime.now(tz=TZ).isoformat()

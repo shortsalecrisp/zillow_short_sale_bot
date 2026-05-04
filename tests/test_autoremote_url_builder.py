@@ -41,9 +41,9 @@ def test_send_with_diagnostics_uses_fcm_sendmessage_endpoint(monkeypatch):
     }
 
 
-def test_send_with_diagnostics_requires_success_confirmation(monkeypatch):
+def test_send_with_diagnostics_accepts_http_200_without_error_body(monkeypatch):
     def fake_get(url, params, timeout):
-        return SimpleNamespace(status_code=200, text="unexpected")
+        return SimpleNamespace(status_code=200, text="queued")
 
     monkeypatch.setattr("sms_providers.requests.get", fake_get)
 
@@ -57,8 +57,8 @@ def test_send_with_diagnostics_requires_success_confirmation(monkeypatch):
         sms_type="initial",
     )
 
-    assert result.success is False
-    assert result.exception_type == "HTTPError"
+    assert result.success is True
+    assert result.status_code == 200
 
 
 def test_send_with_diagnostics_http_200_ok_is_success(monkeypatch):
@@ -95,7 +95,7 @@ def test_send_with_diagnostics_http_200_token_error_is_failure(monkeypatch):
     assert result.exception_type == "HTTPError"
 
 
-def test_send_with_diagnostics_http_200_empty_body_is_failure(monkeypatch):
+def test_send_with_diagnostics_http_200_empty_body_is_accepted(monkeypatch):
     def fake_get(url, params, timeout):
         return SimpleNamespace(status_code=200, text="   ")
 
@@ -108,8 +108,8 @@ def test_send_with_diagnostics_http_200_empty_body_is_failure(monkeypatch):
         sms_type="initial",
     )
 
-    assert result.success is False
-    assert result.exception_type == "HTTPError"
+    assert result.success is True
+    assert result.status_code == 200
 
 
 def test_send_with_diagnostics_non_200_is_failure(monkeypatch):
