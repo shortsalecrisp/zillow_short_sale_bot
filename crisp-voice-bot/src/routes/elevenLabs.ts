@@ -114,6 +114,10 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
     return "Not interested";
   }
 
+  if (callResult === "not_short_sale") {
+    return "Not a short sale";
+  }
+
   if (callResult === "warm_transfer_completed") {
     return "Warm transfer accepted";
   }
@@ -128,6 +132,18 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
   }
 
   return callResult;
+}
+
+function normalizeText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function looksLikeNotShortSale(value: string): boolean {
+  const text = normalizeText(value);
+  return (
+    /\b(?:not|isn't|isnt|wasn't|wasnt)\s+(?:actually\s+)?(?:a\s+)?short sale\b/.test(text) ||
+    /\b(?:not|isn't|isnt|wasn't|wasnt)\s+(?:actually\s+)?(?:a\s+)?short-sale\b/.test(text)
+  );
 }
 
 function formatCallbackConfirmationTime(callbackTime: string): string {
@@ -447,15 +463,20 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
         agentName: payload.agentName,
         callAttemptNumber: payload.callAttemptNumber,
       },
-      () =>
-        postSheetUpdate({
+      () => {
+        const callResult = looksLikeNotShortSale(payload.conversationSummary)
+          ? "not_short_sale"
+          : "answered_not_interested";
+
+        return postSheetUpdate({
           rowNumber: payload.rowNumber,
           callAttemptNumber: payload.callAttemptNumber,
-          callResult: "answered_not_interested",
-          responseStatus: buildVoiceResponseStatus("answered_not_interested"),
+          callResult,
+          responseStatus: buildVoiceResponseStatus(callResult),
           leadStatusCode: "R",
           voiceNotes: payload.conversationSummary || "ElevenLabs: lead not interested",
-        }),
+        });
+      },
     );
 
     logger.info("ElevenLabs not interested tool handled", {

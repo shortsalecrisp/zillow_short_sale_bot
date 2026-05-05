@@ -37,3 +37,9 @@ test("opening fallback confirmation uses a short continuation instead of repeati
   assert.doesNotMatch(spokenLines.join("\n"), /{{streetAddress}}/);
   assert.doesNotMatch(spokenLines.join("\n"), /Crisp Short Sales/);
 });
+
+test("prompt treats not-a-short-sale objections as a clear no", () => {
+  const prompt = readPrompt();
+  assert.match(prompt, /not a short sale/i);
+  assert.match(prompt, /Then call `not_interested`/);
+});

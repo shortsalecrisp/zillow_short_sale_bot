@@ -132,7 +132,7 @@ If they say they are already handling it themselves but still sound open, uncert
 
 "Got it. If you're interested, we can take the bank paperwork, calls, and approval side off your plate, and there's no cost to you or the seller. Yoni's our short sale specialist here at Crisp, and he texted earlier. Want me to see if I can get him on now?"
 
-If they clearly say they already have someone handling it, are already working with an attorney, negotiator, or specialist, or clearly say they do not need help:
+If they clearly say they already have someone handling it, are already working with an attorney, negotiator, or specialist, clearly say they do not need help, or say the listing is not a short sale:
 
 - Treat that as a clear no.
 - Do not pivot into the sales pitch.

@@ -129,7 +129,7 @@ function hasLiveTransferRequest(conversation: ElevenLabsConversation): boolean {
   return hasToolCall(conversation, "live_transfer_requested");
 }
 
-function buildVoiceResponseStatus(callResult: string, callbackTime?: string): string {
+export function buildVoiceResponseStatus(callResult: string, callbackTime?: string): string {
   if (callResult === "warm_transfer_completed") {
     return "Warm transfer accepted";
   }
@@ -145,6 +145,10 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
 
   if (callResult === "answered_not_interested") {
     return "Not interested";
+  }
+
+  if (callResult === "not_short_sale") {
+    return "Not a short sale";
   }
 
   if (callResult === "voicemail_left") {
@@ -265,6 +269,15 @@ function isLiveTransferFallback(conversation: ElevenLabsConversation): boolean {
     text.includes("come on the line") ||
     text.includes("was not available") ||
     text.includes("did not answer")
+  );
+}
+
+export function shouldTreatAsNotShortSale(conversation: ElevenLabsConversation): boolean {
+  const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+
+  return (
+    /\b(?:not|isn't|isnt|wasn't|wasnt)\s+(?:actually\s+)?(?:a\s+)?short sale\b/.test(text) ||
+    /\b(?:not|isn't|isnt|wasn't|wasnt)\s+(?:actually\s+)?(?:a\s+)?short-sale\b/.test(text)
   );
 }
 
@@ -416,11 +429,12 @@ function hasMeaningfulUserInteraction(conversation: ElevenLabsConversation): boo
   return messages.some((message) => normalizeText(message).split(" ").filter(Boolean).length >= 3);
 }
 
-function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): boolean {
+export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): boolean {
   if (
     shouldTreatAsVoicemail(conversation) ||
     shouldTreatAsNoAnswer(conversation) ||
     shouldTreatAsCallback(conversation) ||
+    shouldTreatAsNotShortSale(conversation) ||
     shouldTreatAsNotInterested(conversation) ||
     hasToolCall(conversation, "callback_requested") ||
     hasToolCall(conversation, "not_interested") ||
@@ -549,6 +563,33 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
 
     processedConversationIds.add(conversationId);
     logger.info("ElevenLabs post-call fallback recorded successful warm transfer", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsNotShortSale(conversation)) {
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "not_short_sale",
+      responseStatus: buildVoiceResponseStatus("not_short_sale"),
+      leadStatusCode: "R",
+      voiceNotes: summary,
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome: buildVoiceResponseStatus("not_short_sale"),
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback recorded listing is not a short sale", {
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
