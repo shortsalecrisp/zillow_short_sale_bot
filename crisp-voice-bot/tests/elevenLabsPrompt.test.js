@@ -43,3 +43,12 @@ test("prompt treats not-a-short-sale objections as a clear no", () => {
   assert.match(prompt, /not a short sale/i);
   assert.match(prompt, /Then call `not_interested`/);
 });
+
+test("prompt redirects unknown affiliation questions back to the short-sale plan", () => {
+  const prompt = readPrompt();
+
+  assert.match(
+    prompt,
+    /I'm with Crisp Short Sales, working with Yoni Kutler who is our short sale specialist\. What's your plan for handling the short sale with the bank\?/,
+  );
+});

@@ -17,6 +17,40 @@ const elevenLabsClient = axios.create({
 const STREET_TYPE_SUFFIX_PATTERN =
   /\s+(?:ALY|ALLY|AVE|AVENUE|BLVD|BOULEVARD|CIR|CIRCLE|CT|COURT|CV|COVE|DR|DRIVE|HWY|HIGHWAY|LN|LANE|LOOP|PKWY|PARKWAY|PL|PLACE|RD|ROAD|ST|STREET|TER|TERRACE|TRL|TRAIL|WAY)\.?(?:\s+(?:N|S|E|W|NE|NW|SE|SW)\.?)?$/i;
 
+const SMALL_NUMBER_WORDS = [
+  "Zero",
+  "One",
+  "Two",
+  "Three",
+  "Four",
+  "Five",
+  "Six",
+  "Seven",
+  "Eight",
+  "Nine",
+  "Ten",
+  "Eleven",
+  "Twelve",
+  "Thirteen",
+  "Fourteen",
+  "Fifteen",
+  "Sixteen",
+  "Seventeen",
+  "Eighteen",
+  "Nineteen",
+] as const;
+
+const TENS_NUMBER_WORDS: Record<number, string> = {
+  2: "Twenty",
+  3: "Thirty",
+  4: "Forty",
+  5: "Fifty",
+  6: "Sixty",
+  7: "Seventy",
+  8: "Eighty",
+  9: "Ninety",
+};
+
 function getElevenLabsError(error: unknown): Record<string, unknown> {
   if (error instanceof AxiosError) {
     return {
@@ -57,7 +91,47 @@ function requireElevenLabsOutboundConfig(): { agentId: string; agentPhoneNumberI
   };
 }
 
-function getStreetAddress(listingAddress: string): string {
+function twoDigitNumberToWords(raw: string): string {
+  const value = Number(raw);
+
+  if (raw.length === 2 && raw.startsWith("0")) {
+    return `Oh ${SMALL_NUMBER_WORDS[value] ?? raw[1]}`;
+  }
+
+  if (value < 20) {
+    return SMALL_NUMBER_WORDS[value] ?? raw;
+  }
+
+  const tens = Math.floor(value / 10);
+  const ones = value % 10;
+  const tensWord = TENS_NUMBER_WORDS[tens] ?? raw[0];
+
+  return ones === 0 ? tensWord : `${tensWord} ${SMALL_NUMBER_WORDS[ones] ?? raw[1]}`;
+}
+
+function streetNumberToWords(digits: string): string {
+  if (digits.length === 2) {
+    return twoDigitNumberToWords(digits);
+  }
+
+  if (digits.length === 3) {
+    return `${SMALL_NUMBER_WORDS[Number(digits[0])] ?? digits[0]} ${twoDigitNumberToWords(digits.slice(1))}`;
+  }
+
+  const groups: string[] = [];
+
+  for (let index = 0; index < digits.length; index += 2) {
+    groups.push(twoDigitNumberToWords(digits.slice(index, index + 2)));
+  }
+
+  return groups.join(" ");
+}
+
+function formatLeadingStreetNumber(address: string): string {
+  return address.replace(/^\d{2,}\b/, (digits) => streetNumberToWords(digits));
+}
+
+export function getStreetAddress(listingAddress: string): string {
   const streetAddress = listingAddress.split(",")[0]?.trim() || listingAddress;
   const withoutUnit = streetAddress
     .replace(/\s*(?:,|-)?\s*(?:APT|APARTMENT|STE|SUITE|UNIT)\.?\s*[A-Z0-9-]+(?:\s*[A-Z0-9-]+)?/gi, "")
@@ -66,7 +140,7 @@ function getStreetAddress(listingAddress: string): string {
     .replace(/\s{2,}/g, " ")
     .trim();
 
-  return withoutUnit
+  const normalizedAddress = withoutUnit
     .replace(/\bAVE\b\.?/gi, "Avenue")
     .replace(/\bBLVD\b\.?/gi, "Boulevard")
     .replace(/\bNE\b\.?/gi, "Northeast")
@@ -77,6 +151,8 @@ function getStreetAddress(listingAddress: string): string {
     .replace(/\bS\b\.?/gi, "South")
     .replace(/\bE\b\.?/gi, "East")
     .replace(/\bW\b\.?/gi, "West");
+
+  return formatLeadingStreetNumber(normalizedAddress);
 }
 
 function buildVoicemailMessage(streetAddress: string, callAttemptNumber: number): string {
