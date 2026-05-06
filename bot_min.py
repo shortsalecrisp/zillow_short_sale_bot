@@ -12609,6 +12609,7 @@ def _follow_up_pass():
         row = candidate_row_map.get(sheet_row, [""] * MIN_COLS)
         phone_redacted = _redact_followup_phone(row[COL_PHONE])
         address = row[COL_STREET] or ""
+        lead_status = row[COL_REPLY_TS].strip().upper()
 
         # skip if follow‑up already sent …
         if row[COL_FU_TS].strip():
@@ -12627,6 +12628,15 @@ def _follow_up_pass():
                 sheet_row,
                 bool(row[COL_REPLY_FLAG].strip()),
                 bool(row[COL_MANUAL_NOTE].strip()),
+                phone_redacted,
+                address,
+            )
+            continue
+        if lead_status in {"R", "Y", "G"}:
+            LOG.info(
+                "FU-review row %s status=skip_lead_status lead_status=%s phone=%s address=%s",
+                sheet_row,
+                lead_status,
                 phone_redacted,
                 address,
             )
