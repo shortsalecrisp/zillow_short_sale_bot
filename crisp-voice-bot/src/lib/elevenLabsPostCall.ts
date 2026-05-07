@@ -28,8 +28,13 @@ type ElevenLabsTranscriptItem = {
 
 type ElevenLabsConversation = {
   status?: string;
+  has_audio?: boolean;
+  has_user_audio?: boolean;
+  has_response_audio?: boolean;
   metadata?: {
     termination_reason?: string | null;
+    accepted_time_unix_secs?: number | null;
+    call_duration_secs?: number | null;
     error?: {
       code?: number;
       reason?: string;
@@ -390,6 +395,18 @@ function shouldTreatAsNoAnswer(conversation: ElevenLabsConversation): boolean {
   );
 }
 
+export function shouldTreatAsUnconnectedInitiatedConversation(conversation: ElevenLabsConversation): boolean {
+  return (
+    conversation.status === "initiated" &&
+    !conversation.metadata?.accepted_time_unix_secs &&
+    !conversation.metadata?.call_duration_secs &&
+    conversation.has_audio !== true &&
+    conversation.has_user_audio !== true &&
+    conversation.has_response_audio !== true &&
+    (conversation.transcript ?? []).length === 0
+  );
+}
+
 function userMessages(conversation: ElevenLabsConversation): string[] {
   return (conversation.transcript ?? [])
     .filter((item) => item.role === "user" && typeof item.message === "string" && item.message.trim() !== "")
@@ -491,7 +508,11 @@ async function sendTranscriptEmailIfEnabled(params: {
   }
 }
 
-async function processPostCallOutcome(conversationId: string, metadata: CallMetadata): Promise<boolean> {
+async function processPostCallOutcome(
+  conversationId: string,
+  metadata: CallMetadata,
+  options: { finalAttempt?: boolean } = {},
+): Promise<boolean> {
   if (processedConversationIds.has(conversationId)) {
     logger.info("Skipping already processed ElevenLabs post-call outcome", {
       conversationId,
@@ -754,6 +775,40 @@ async function processPostCallOutcome(conversationId: string, metadata: CallMeta
       return true;
     }
 
+    if (options.finalAttempt && shouldTreatAsUnconnectedInitiatedConversation(conversation)) {
+      const isFirstAttempt = metadata.callAttemptNumber <= 1;
+      const callResult = isFirstAttempt ? "no_answer_first_attempt" : "no_response_second_attempt";
+      const noConnectSummary =
+        "ElevenLabs accepted the outbound call request, but the call never connected and produced no audio or transcript.";
+
+      await postSheetUpdate({
+        rowNumber: metadata.rowNumber,
+        callAttemptNumber: metadata.callAttemptNumber,
+        callResult,
+        responseStatus: buildVoiceResponseStatus(callResult),
+        ...(isFirstAttempt ? {} : { leadStatusCode: "N" }),
+        voiceNotes: noConnectSummary,
+      });
+
+      await sendTranscriptEmailIfEnabled({
+        conversationId,
+        metadata,
+        outcome: buildVoiceResponseStatus(callResult),
+        summary: noConnectSummary,
+        transcript: fullTranscript,
+      });
+
+      processedConversationIds.add(conversationId);
+      logger.info("ElevenLabs post-call fallback recorded unconnected initiated conversation", {
+        conversationId,
+        rowNumber: metadata.rowNumber,
+        callAttemptNumber: metadata.callAttemptNumber,
+        callResult,
+        status: conversation.status,
+      });
+      return true;
+    }
+
     logger.info("ElevenLabs conversation not finished yet; will retry post-call outcome", {
       conversationId,
       rowNumber: metadata.rowNumber,
@@ -952,7 +1007,7 @@ export function scheduleElevenLabsPostCallFallback(params: {
   metadata: CallMetadata;
 }): void {
   const run = (attempt: number) => {
-    void processPostCallOutcome(params.conversationId, params.metadata)
+    void processPostCallOutcome(params.conversationId, params.metadata, { finalAttempt: attempt >= MAX_ATTEMPTS })
       .then((done) => {
         if (!done && attempt < MAX_ATTEMPTS) {
           setTimeout(() => run(attempt + 1), RETRY_DELAY_MS);

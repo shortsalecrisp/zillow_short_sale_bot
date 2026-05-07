@@ -43,3 +43,35 @@ test("post-call fallback classifies an agent saying it is not a short sale as no
   assert.equal(shouldTreatAsAgentHungUp(rodrigoConversation), false);
   assert.equal(buildVoiceResponseStatus("not_short_sale"), "Not a short sale");
 });
+
+test("post-call fallback treats stale initiated conversations with no audio as no-connect", async () => {
+  const { shouldTreatAsUnconnectedInitiatedConversation } = await import("../src/lib/elevenLabsPostCall");
+
+  assert.equal(
+    shouldTreatAsUnconnectedInitiatedConversation({
+      status: "initiated",
+      has_audio: false,
+      has_user_audio: false,
+      has_response_audio: false,
+      metadata: {
+        accepted_time_unix_secs: null,
+        call_duration_secs: 0,
+      },
+      transcript: [],
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldTreatAsUnconnectedInitiatedConversation({
+      status: "initiated",
+      has_audio: true,
+      metadata: {
+        accepted_time_unix_secs: 1778106342,
+        call_duration_secs: 53,
+      },
+      transcript: [{ role: "user", message: "Hello?" }],
+    }),
+    false,
+  );
+});
