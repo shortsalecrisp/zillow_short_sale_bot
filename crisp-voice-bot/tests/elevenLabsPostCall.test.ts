@@ -45,22 +45,24 @@ test("post-call fallback classifies an agent saying it is not a short sale as no
 });
 
 test("post-call fallback treats stale initiated conversations with no audio as no-connect", async () => {
-  const { shouldTreatAsUnconnectedInitiatedConversation } = await import("../src/lib/elevenLabsPostCall");
-
-  assert.equal(
-    shouldTreatAsUnconnectedInitiatedConversation({
-      status: "initiated",
-      has_audio: false,
-      has_user_audio: false,
-      has_response_audio: false,
-      metadata: {
-        accepted_time_unix_secs: null,
-        call_duration_secs: 0,
-      },
-      transcript: [],
-    }),
-    true,
+  const { shouldRetryUnconnectedConversation, shouldTreatAsUnconnectedInitiatedConversation } = await import(
+    "../src/lib/elevenLabsPostCall"
   );
+  const unconnectedConversation = {
+    status: "initiated",
+    has_audio: false,
+    has_user_audio: false,
+    has_response_audio: false,
+    metadata: {
+      accepted_time_unix_secs: null,
+      call_duration_secs: 0,
+    },
+    transcript: [],
+  };
+
+  assert.equal(shouldTreatAsUnconnectedInitiatedConversation(unconnectedConversation), true);
+  assert.equal(shouldRetryUnconnectedConversation(unconnectedConversation, { callConnectRetryCount: 0 }), true);
+  assert.equal(shouldRetryUnconnectedConversation(unconnectedConversation, { callConnectRetryCount: 1 }), false);
 
   assert.equal(
     shouldTreatAsUnconnectedInitiatedConversation({

@@ -166,6 +166,7 @@ function buildVoicemailMessage(streetAddress: string, callAttemptNumber: number)
 export async function placeElevenLabsOutboundCall(params: {
   to: string;
   metadata: CallMetadata;
+  schedulePostCallFallback?: boolean;
 }): Promise<ElevenLabsOutboundCallResponse> {
   const { agentId, agentPhoneNumberId } = requireElevenLabsOutboundConfig();
   const streetAddress = getStreetAddress(params.metadata.listingAddress);
@@ -220,10 +221,12 @@ export async function placeElevenLabsOutboundCall(params: {
     rememberElevenLabsCallContext(params.metadata);
 
     if (response.data.conversation_id) {
-      scheduleElevenLabsPostCallFallback({
-        conversationId: response.data.conversation_id,
-        metadata: params.metadata,
-      });
+      if (params.schedulePostCallFallback !== false) {
+        scheduleElevenLabsPostCallFallback({
+          conversationId: response.data.conversation_id,
+          metadata: params.metadata,
+        });
+      }
     }
 
     return response.data;

@@ -9,6 +9,8 @@ import type { CallMetadata } from "../types";
 const FIRST_CHECK_DELAY_MS = 90_000;
 const RETRY_DELAY_MS = 30_000;
 const MAX_ATTEMPTS = 5;
+const CALL_CONNECT_RETRY_DELAY_MS = 30_000;
+const MAX_CALL_CONNECT_RETRIES = 1;
 
 type ElevenLabsTranscriptItem = {
   role?: string;
@@ -407,6 +409,66 @@ export function shouldTreatAsUnconnectedInitiatedConversation(conversation: Elev
   );
 }
 
+export function shouldRetryUnconnectedConversation(
+  conversation: ElevenLabsConversation,
+  metadata: Pick<CallMetadata, "callConnectRetryCount">,
+): boolean {
+  return (
+    shouldTreatAsUnconnectedInitiatedConversation(conversation) &&
+    (metadata.callConnectRetryCount ?? 0) < MAX_CALL_CONNECT_RETRIES
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function retryUnconnectedElevenLabsCall(params: {
+  originalConversationId: string;
+  metadata: CallMetadata;
+}): Promise<void> {
+  const nextMetadata: CallMetadata = {
+    ...params.metadata,
+    callConnectRetryCount: (params.metadata.callConnectRetryCount ?? 0) + 1,
+  };
+
+  logger.info("Retrying unconnected ElevenLabs call after delay", {
+    originalConversationId: params.originalConversationId,
+    rowNumber: params.metadata.rowNumber,
+    callAttemptNumber: params.metadata.callAttemptNumber,
+    callConnectRetryCount: nextMetadata.callConnectRetryCount,
+    retryDelayMs: CALL_CONNECT_RETRY_DELAY_MS,
+  });
+
+  await delay(CALL_CONNECT_RETRY_DELAY_MS);
+
+  const { placeElevenLabsOutboundCall } = await import("./elevenLabs");
+  const retryResponse = await placeElevenLabsOutboundCall({
+    to: nextMetadata.dialedPhone,
+    metadata: nextMetadata,
+    schedulePostCallFallback: false,
+  });
+
+  if (!retryResponse.conversation_id) {
+    throw new Error("ElevenLabs retry call accepted without a conversation_id");
+  }
+
+  logger.info("Unconnected ElevenLabs call retry accepted", {
+    originalConversationId: params.originalConversationId,
+    retryConversationId: retryResponse.conversation_id,
+    rowNumber: params.metadata.rowNumber,
+    callAttemptNumber: params.metadata.callAttemptNumber,
+    sipCallId: retryResponse.sip_call_id,
+  });
+
+  scheduleElevenLabsPostCallFallback({
+    conversationId: retryResponse.conversation_id,
+    metadata: nextMetadata,
+  });
+}
+
 function userMessages(conversation: ElevenLabsConversation): string[] {
   return (conversation.transcript ?? [])
     .filter((item) => item.role === "user" && typeof item.message === "string" && item.message.trim() !== "")
@@ -772,6 +834,16 @@ async function processPostCallOutcome(
           failureReason,
         },
       );
+      return true;
+    }
+
+    if (options.finalAttempt && shouldRetryUnconnectedConversation(conversation, metadata)) {
+      await retryUnconnectedElevenLabsCall({
+        originalConversationId: conversationId,
+        metadata,
+      });
+
+      processedConversationIds.add(conversationId);
       return true;
     }
 

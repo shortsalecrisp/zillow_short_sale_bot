@@ -26,6 +26,7 @@ export interface CallMetadata {
   requestedPhone: string;
   dialedPhone: string;
   testMode: boolean;
+  callConnectRetryCount?: number;
 }
 
 export interface LiveTransferCallMetadata {
