@@ -52,3 +52,12 @@ test("prompt redirects unknown affiliation questions back to the short-sale plan
     /I'm with Crisp Short Sales, working with Yoni Kutler who is our short sale specialist\. What's your plan for handling the short sale with the bank\?/,
   );
 });
+
+test("prompt treats placeholder-only user turns as background noise and skips speaking", () => {
+  const prompt = readPrompt();
+
+  assert.match(prompt, /If the latest caller message is exactly "\.\.\."/);
+  assert.match(prompt, /background noise/i);
+  assert.match(prompt, /call `skip_turn`/);
+  assert.match(prompt, /Do not say[\s\S]{0,120}Are you still there\?/);
+});

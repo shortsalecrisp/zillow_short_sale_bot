@@ -64,7 +64,7 @@ type ToolResponse = {
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
 const FIRST_MESSAGE = '<break time="1.0s" /> Hi, is this {{firstName}}?';
 const INITIAL_WAIT_TIME_SECONDS = 2.0;
-const TURN_TIMEOUT_SECONDS = 1.0;
+const TURN_TIMEOUT_SECONDS = 4.0;
 const TURN_EAGERNESS = "normal";
 const SPECULATIVE_TURN = false;
 const SOFT_TIMEOUT_SECONDS = -1;
@@ -355,6 +355,21 @@ async function main(): Promise<void> {
         max_tokens: MAX_TOKENS,
         built_in_tools: {
           ...(currentAgent.conversation_config.agent.prompt.built_in_tools ?? {}),
+          skip_turn: {
+            ...((currentAgent.conversation_config.agent.prompt.built_in_tools?.skip_turn as Record<string, unknown> | null) ?? {}),
+            type: "system",
+            name: "skip_turn",
+            description:
+              "Use this instead of speaking when the caller turn is only placeholder silence like ..., background noise, road noise, static, breathing, or another non-word sound. Do not use it when the caller spoke actual words.",
+            response_timeout_secs: 20,
+            disable_interruptions: true,
+            force_pre_tool_speech: false,
+            pre_tool_speech: "auto",
+            params: {
+              ...((((currentAgent.conversation_config.agent.prompt.built_in_tools?.skip_turn as Record<string, unknown> | null)?.params as Record<string, unknown> | undefined) ?? {})),
+              system_tool_type: "skip_turn",
+            },
+          },
           voicemail_detection: {
             ...((currentAgent.conversation_config.agent.prompt.built_in_tools?.voicemail_detection as Record<string, unknown> | null) ?? {}),
             params: {
@@ -412,6 +427,7 @@ async function main(): Promise<void> {
     workflowEnabled: true,
     liveTransferToolId: liveTransferTool.id,
     softTimeoutSeconds: SOFT_TIMEOUT_SECONDS,
+    skipTurnEnabled: true,
     temperature: TEMPERATURE,
     maxTokens: MAX_TOKENS,
     ttsSpeed: TTS_SPEED,
