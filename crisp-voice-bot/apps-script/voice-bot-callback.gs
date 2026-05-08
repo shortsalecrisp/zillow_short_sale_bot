@@ -33,8 +33,8 @@
  *
  * SCHEDULER:
  * processVoiceBotCallQueue() is meant to run on a time-based trigger, for
- * example every 15 minutes. It scans Sheet1, finds the next row eligible for
- * a voice call, and POSTs to the Node backend /start-call route.
+ * example every 15 minutes. It scans Sheet1, finds eligible rows for voice
+ * calls, and POSTs them to the Node backend /start-call route.
  */
 
 // =============================================================================
@@ -49,8 +49,9 @@ const VOICE_BOT_BUSINESS_DAY_START_HOUR_ET = 8;
 const VOICE_BOT_BUSINESS_DAY_END_HOUR_ET = 20;
 const VOICE_BOT_QUEUE_RUN_END_HOUR_ET = 24;
 const VOICE_BOT_TIMEZONE = 'America/New_York';
-const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_START_MINUTES = 16 * 60 + 30;
-const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_END_MINUTES = 17 * 60 + 30;
+const VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN = 10;
+const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_START_MINUTES = 16 * 60;
+const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_END_MINUTES = 17 * 60;
 const VOICE_BOT_WEEKEND_AFTERNOON_WINDOW_START_MINUTES = 16 * 60;
 const VOICE_BOT_WEEKEND_AFTERNOON_WINDOW_END_MINUTES = 17 * 60;
 
@@ -302,8 +303,8 @@ function processVoiceBotCallQueue() {
     };
   }
 
-  const candidate = getNextVoiceBotCallCandidate_(sheet, now);
-  if (!candidate) {
+  const candidates = getVoiceBotCallCandidates_(sheet, now, VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN);
+  if (candidates.length === 0) {
     voiceBotLog_({
       event: 'voice_queue_no_candidate',
       nowEt: formatVoiceBotDateEt_(now)
@@ -321,45 +322,49 @@ function processVoiceBotCallQueue() {
   try {
     lock.waitLock(5000);
 
-    const refreshedCandidate = getVoiceBotCallCandidateByRow_(sheet, candidate.rowNumber, now);
-    if (!refreshedCandidate) {
-      voiceBotLog_({
-        event: 'voice_queue_candidate_no_longer_eligible',
-        rowNumber: candidate.rowNumber
+    const queuedCalls = [];
+
+    for (var i = 0; i < candidates.length; i++) {
+      const refreshedCandidate = getVoiceBotCallCandidateByRow_(sheet, candidates[i].rowNumber, now);
+      if (!refreshedCandidate) {
+        voiceBotLog_({
+          event: 'voice_queue_candidate_no_longer_eligible',
+          rowNumber: candidates[i].rowNumber
+        });
+        continue;
+      }
+
+      const payload = buildVoiceBotStartCallPayload_(refreshedCandidate);
+      const startCallResult = postVoiceBotStartCall_(payload);
+
+      markVoiceBotAttemptStarted_(sheet, refreshedCandidate, now);
+
+      queuedCalls.push({
+        rowNumber: refreshedCandidate.rowNumber,
+        callAttemptNumber: refreshedCandidate.callAttemptNumber,
+        dueAtEt: formatVoiceBotDateEt_(refreshedCandidate.dueAt),
+        localWindow: refreshedCandidate.callWindow,
+        agentTimeZone: refreshedCandidate.agentTimeZone
       });
 
-      return {
-        ok: true,
-        queued: false,
-        reason: 'candidate_no_longer_eligible',
-        rowNumber: candidate.rowNumber
-      };
+      voiceBotLog_({
+        event: 'voice_queue_call_started',
+        rowNumber: refreshedCandidate.rowNumber,
+        callAttemptNumber: refreshedCandidate.callAttemptNumber,
+        dueAtEt: formatVoiceBotDateEt_(refreshedCandidate.dueAt),
+        localWindow: refreshedCandidate.callWindow,
+        agentTimeZone: refreshedCandidate.agentTimeZone,
+        startCallUrl: VOICE_BOT_START_CALL_URL,
+        startCallResult: startCallResult
+      });
     }
-
-    const payload = buildVoiceBotStartCallPayload_(refreshedCandidate);
-    const startCallResult = postVoiceBotStartCall_(payload);
-
-    markVoiceBotAttemptStarted_(sheet, refreshedCandidate, now);
-
-    voiceBotLog_({
-      event: 'voice_queue_call_started',
-      rowNumber: refreshedCandidate.rowNumber,
-      callAttemptNumber: refreshedCandidate.callAttemptNumber,
-      dueAtEt: formatVoiceBotDateEt_(refreshedCandidate.dueAt),
-      localWindow: refreshedCandidate.callWindow,
-      agentTimeZone: refreshedCandidate.agentTimeZone,
-      startCallUrl: VOICE_BOT_START_CALL_URL,
-      startCallResult: startCallResult
-    });
 
     return {
       ok: true,
-      queued: true,
-      rowNumber: refreshedCandidate.rowNumber,
-      callAttemptNumber: refreshedCandidate.callAttemptNumber,
-      dueAtEt: formatVoiceBotDateEt_(refreshedCandidate.dueAt),
-      localWindow: refreshedCandidate.callWindow,
-      agentTimeZone: refreshedCandidate.agentTimeZone
+      queued: queuedCalls.length > 0,
+      queuedCount: queuedCalls.length,
+      maxCallsPerRun: VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
+      calls: queuedCalls
     };
   } finally {
     try {
@@ -399,22 +404,44 @@ function resetVoiceBotCallQueueTriggers() {
 }
 
 function getNextVoiceBotCallCandidate_(sheet, now) {
+  const candidates = getVoiceBotCallCandidates_(sheet, now, 1);
+  return candidates.length > 0 ? candidates[0] : null;
+}
+
+function getVoiceBotCallCandidates_(sheet, now, maxCandidates) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) {
-    return null;
+    return [];
   }
 
   const values = sheet.getRange(2, 1, lastRow - 1, VOICE_BOT_COL_VOICE_NOTES).getValues();
+  const rows = [];
 
   for (var i = 0; i < values.length; i++) {
-    const rowNumber = i + 2;
-    const candidate = getVoiceBotCallCandidateFromRowValues_(rowNumber, values[i], now);
+    rows.push({
+      rowNumber: i + 2,
+      values: values[i]
+    });
+  }
+
+  return getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates);
+}
+
+function getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates) {
+  const candidates = [];
+  const limit = Math.max(1, Number(maxCandidates) || 1);
+
+  for (var i = 0; i < rows.length; i++) {
+    const candidate = getVoiceBotCallCandidateFromRowValues_(rows[i].rowNumber, rows[i].values, now);
     if (candidate) {
-      return candidate;
+      candidates.push(candidate);
+      if (candidates.length >= limit) {
+        break;
+      }
     }
   }
 
-  return null;
+  return candidates;
 }
 
 function getVoiceBotCallCandidateByRow_(sheet, rowNumber, now) {
@@ -833,9 +860,13 @@ function getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, timeZone) {
 
   if (
     followupCallWindow &&
-    followupMinutes < followupCallWindow.startMinutes
+    followupMinutes < followupCallWindow.endMinutes
   ) {
-    return buildVoiceBotDateInTimeZone_(followupDateKey, followupCallWindow.startMinutes, timeZone);
+    if (followupMinutes < followupCallWindow.startMinutes) {
+      return buildVoiceBotDateInTimeZone_(followupDateKey, followupCallWindow.startMinutes, timeZone);
+    }
+
+    return new Date(followupSentAt.getTime());
   }
 
   const nextCallDateKey = getNextVoiceBotCallDateKey_(followupDateKey, timeZone);

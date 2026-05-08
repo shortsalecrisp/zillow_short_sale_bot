@@ -96,18 +96,22 @@ function runSchedulerExpression(expression) {
   return vm.runInContext(expression, loadSchedulerContext());
 }
 
-test("weekday calls are only eligible during the 4:30-5:30pm local window", () => {
+function runSchedulerScript(script) {
+  return vm.runInContext(script, loadSchedulerContext());
+}
+
+test("weekday calls are only eligible during the 4:00-5:00pm local window", () => {
   const morning = runSchedulerExpression(
     'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T14:00:00Z"), "America/New_York")',
   );
   const beforeWindow = runSchedulerExpression(
-    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T20:15:00Z"), "America/New_York")',
+    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T19:59:00Z"), "America/New_York")',
   );
   const afternoon = runSchedulerExpression(
-    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T20:45:00Z"), "America/New_York")',
+    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T20:15:00Z"), "America/New_York")',
   );
   const afterWindow = runSchedulerExpression(
-    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T21:30:00Z"), "America/New_York")',
+    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T21:00:00Z"), "America/New_York")',
   );
 
   assert.equal(morning, "");
@@ -168,12 +172,12 @@ test("first Emmy call uses the first afternoon window after follow-up text", () 
     'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-10T21:30:00Z"), "America/New_York").toISOString()',
   );
 
-  assert.equal(beforeWindow, "2026-05-04T20:30:00.000Z");
-  assert.equal(duringWindow, "2026-05-05T20:30:00.000Z");
+  assert.equal(beforeWindow, "2026-05-04T20:00:00.000Z");
+  assert.equal(duringWindow, "2026-05-04T20:30:00.000Z");
   assert.equal(afterFridayWindow, "2026-05-09T20:00:00.000Z");
   assert.equal(beforeSaturdayWindow, "2026-05-09T20:00:00.000Z");
-  assert.equal(duringSaturdayWindow, "2026-05-10T20:00:00.000Z");
-  assert.equal(afterSundayWindow, "2026-05-11T20:30:00.000Z");
+  assert.equal(duringSaturdayWindow, "2026-05-09T20:30:00.000Z");
+  assert.equal(afterSundayWindow, "2026-05-11T20:00:00.000Z");
 });
 
 test("second Emmy call uses the next calendar day afternoon window", () => {
@@ -190,8 +194,36 @@ test("second Emmy call uses the next calendar day afternoon window", () => {
     'getNextVoiceBotFollowupAttemptWindowStart_(new Date("2026-05-10T20:15:00Z"), "America/New_York").toISOString()',
   );
 
-  assert.equal(nextDay, "2026-05-05T20:30:00.000Z");
+  assert.equal(nextDay, "2026-05-05T20:00:00.000Z");
   assert.equal(saturdayAfterFriday, "2026-05-09T20:00:00.000Z");
   assert.equal(sundayAfterSaturday, "2026-05-10T20:00:00.000Z");
-  assert.equal(mondayAfterSunday, "2026-05-11T20:30:00.000Z");
+  assert.equal(mondayAfterSunday, "2026-05-11T20:00:00.000Z");
+});
+
+test("queue scan can return multiple eligible rows in the same local call window", () => {
+  const rowNumbers = Array.from(runSchedulerScript(`
+    function row(first, last, state, followupSentAt) {
+      const values = Array(42).fill("");
+      values[0] = first;
+      values[1] = last;
+      values[2] = "603-325-5909";
+      values[4] = "20 Pearl Street";
+      values[5] = "Hillsboro";
+      values[6] = state;
+      values[7] = "x";
+      values[8] = "x";
+      values[23] = followupSentAt;
+      return values;
+    }
+
+    getVoiceBotCallCandidatesFromRows_([
+      { rowNumber: 3366, values: row("Colleen", "Whitney", "NH", "2026-05-06T17:14:41.692330-04:00") },
+      { rowNumber: 3367, values: row("Robert", "DeFalco", "NJ", "2026-05-06T19:49:46.290207-04:00") },
+      { rowNumber: 3369, values: row("Silvia", "Andion", "FL", "2026-05-07T16:03:22.841775-04:00") },
+    ], new Date("2026-05-07T20:15:00Z"), 10).map(function(candidate) {
+      return candidate.rowNumber;
+    });
+  `));
+
+  assert.deepEqual(rowNumbers, [3366, 3367, 3369]);
 });
