@@ -61,3 +61,31 @@ test("prompt treats placeholder-only user turns as background noise and skips sp
   assert.match(prompt, /call `skip_turn`/);
   assert.match(prompt, /Do not say[\s\S]{0,120}Are you still there\?/);
 });
+
+test("prompt waits through office robots and gatekeeper transfer attempts", () => {
+  const prompt = readPrompt();
+
+  assert.match(prompt, /automated attendant/i);
+  assert.match(prompt, /phone tree/i);
+  assert.match(prompt, /Please stay on the line/i);
+  assert.match(prompt, /Sure, I'll wait\./);
+  assert.match(prompt, /Do not call `end_call`[\s\S]{0,160}transferred/i);
+});
+
+test("prompt treats not-worried responses as a soft no instead of pitching", () => {
+  const prompt = readPrompt();
+
+  assert.match(prompt, /not worried/i);
+  assert.match(prompt, /soft no/i);
+  assert.match(prompt, /Crisp Short Sales specializes in helping agents/i);
+  assert.match(prompt, /Then call `not_interested`/);
+});
+
+test("prompt treats partial this-is identity replies as confirmed", () => {
+  const prompt = readPrompt();
+
+  assert.match(prompt, /partial identity/i);
+  assert.match(prompt, /"this is"/i);
+  assert.match(prompt, /first recognized human response/i);
+  assert.match(prompt, /Do not wait for the caller to repeat/i);
+});

@@ -64,7 +64,7 @@ type ToolResponse = {
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
 const FIRST_MESSAGE = '<break time="1.0s" /> Hi, is this {{firstName}}?';
 const INITIAL_WAIT_TIME_SECONDS = 2.0;
-const TURN_TIMEOUT_SECONDS = 4.0;
+const TURN_TIMEOUT_SECONDS = 2.0;
 const TURN_EAGERNESS = "normal";
 const SPECULATIVE_TURN = false;
 const SOFT_TIMEOUT_SECONDS = -1;
