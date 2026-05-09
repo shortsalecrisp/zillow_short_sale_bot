@@ -43,13 +43,15 @@
 
 const VOICE_BOT_SHARED_TOKEN = 'REPLACE_ME';
 const VOICE_BOT_SHEET_NAME = 'Sheet1';
-const VOICE_BOT_START_CALL_URL = 'REPLACE_ME';
+const VOICE_BOT_START_CALL_URL = 'https://crisp-voice-bot.onrender.com/start-call';
 
 const VOICE_BOT_BUSINESS_DAY_START_HOUR_ET = 8;
 const VOICE_BOT_BUSINESS_DAY_END_HOUR_ET = 20;
 const VOICE_BOT_QUEUE_RUN_END_HOUR_ET = 24;
 const VOICE_BOT_TIMEZONE = 'America/New_York';
 const VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN = 10;
+const VOICE_BOT_MAX_ACTIVE_CALLS = 2;
+const VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES = 60;
 const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_START_MINUTES = 16 * 60;
 const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_END_MINUTES = 17 * 60;
 const VOICE_BOT_WEEKEND_AFTERNOON_WINDOW_START_MINUTES = 16 * 60;
@@ -144,6 +146,12 @@ const VOICE_BOT_COL_VOICE_NOTES = 42; // AP = voice_notes
 function doPost(e) {
   try {
     const payload = parseJsonPost_(e);
+
+    if (isVoiceBotQueueRefillPayload_(payload)) {
+      validateVoiceBotQueueRefillPayload_(payload);
+      return jsonOutput_(processVoiceBotCallQueue());
+    }
+
     const result = handleVoiceBotCallback_(payload);
     return jsonOutput_(result);
   } catch (err) {
@@ -303,24 +311,54 @@ function processVoiceBotCallQueue() {
     };
   }
 
-  const candidates = getVoiceBotCallCandidates_(sheet, now, VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN);
-  if (candidates.length === 0) {
-    voiceBotLog_({
-      event: 'voice_queue_no_candidate',
-      nowEt: formatVoiceBotDateEt_(now)
-    });
-
-    return {
-      ok: true,
-      queued: false,
-      reason: 'no_candidate'
-    };
-  }
-
   const lock = LockService.getDocumentLock();
 
   try {
     lock.waitLock(5000);
+
+    const rows = getVoiceBotRows_(sheet);
+    const activeCallCount = countActiveVoiceBotCallsFromRows_(rows, now);
+    const availableSlots = Math.max(0, VOICE_BOT_MAX_ACTIVE_CALLS - activeCallCount);
+
+    if (availableSlots <= 0) {
+      voiceBotLog_({
+        event: 'voice_queue_skipped_active_call_limit',
+        nowEt: formatVoiceBotDateEt_(now),
+        activeCallCount: activeCallCount,
+        maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS
+      });
+
+      return {
+        ok: true,
+        queued: false,
+        reason: 'active_call_limit',
+        activeCallCount: activeCallCount,
+        maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS
+      };
+    }
+
+    const candidates = getVoiceBotStartableCallCandidatesFromRows_(
+      rows,
+      now,
+      VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
+      VOICE_BOT_MAX_ACTIVE_CALLS
+    );
+    if (candidates.length === 0) {
+      voiceBotLog_({
+        event: 'voice_queue_no_candidate',
+        nowEt: formatVoiceBotDateEt_(now),
+        activeCallCount: activeCallCount,
+        availableSlots: availableSlots
+      });
+
+      return {
+        ok: true,
+        queued: false,
+        reason: 'no_candidate',
+        activeCallCount: activeCallCount,
+        availableSlots: availableSlots
+      };
+    }
 
     const queuedCalls = [];
 
@@ -364,6 +402,8 @@ function processVoiceBotCallQueue() {
       queued: queuedCalls.length > 0,
       queuedCount: queuedCalls.length,
       maxCallsPerRun: VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
+      maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS,
+      activeCallCountBeforeRun: activeCallCount,
       calls: queuedCalls
     };
   } finally {
@@ -409,6 +449,11 @@ function getNextVoiceBotCallCandidate_(sheet, now) {
 }
 
 function getVoiceBotCallCandidates_(sheet, now, maxCandidates) {
+  const rows = getVoiceBotRows_(sheet);
+  return getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates);
+}
+
+function getVoiceBotRows_(sheet) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) {
     return [];
@@ -424,7 +469,65 @@ function getVoiceBotCallCandidates_(sheet, now, maxCandidates) {
     });
   }
 
-  return getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates);
+  return rows;
+}
+
+function getVoiceBotStartableCallCandidatesFromRows_(rows, now, maxCandidates, maxActiveCalls) {
+  const activeCallCount = countActiveVoiceBotCallsFromRows_(rows, now);
+  const activeLimit = Math.max(1, Number(maxActiveCalls) || 1);
+  const availableSlots = Math.max(0, activeLimit - activeCallCount);
+
+  if (availableSlots <= 0) {
+    return [];
+  }
+
+  const candidateLimit = Math.min(Math.max(1, Number(maxCandidates) || 1), availableSlots);
+  return getVoiceBotCallCandidatesFromRows_(rows, now, candidateLimit);
+}
+
+function countActiveVoiceBotCallsFromRows_(rows, now) {
+  var activeCount = 0;
+
+  for (var i = 0; i < rows.length; i++) {
+    if (isVoiceBotRowActivelyCalling_(rows[i].values, now)) {
+      activeCount++;
+    }
+  }
+
+  return activeCount;
+}
+
+function isVoiceBotRowActivelyCalling_(rowValues, now) {
+  const leadStatusCode = normalizeString_(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]);
+  if (leadStatusCode) {
+    return false;
+  }
+
+  return (
+    isVoiceBotAttemptActivelyCalling_(
+      rowValues[VOICE_BOT_COL_CALL_1_SENT - 1],
+      rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1],
+      now
+    ) ||
+    isVoiceBotAttemptActivelyCalling_(
+      rowValues[VOICE_BOT_COL_CALL_2_SENT - 1],
+      rowValues[VOICE_BOT_COL_CALL_2_RESULT - 1],
+      now
+    )
+  );
+}
+
+function isVoiceBotAttemptActivelyCalling_(sentAtValue, resultValue, now) {
+  const sentAt = parseVoiceBotDate_(sentAtValue);
+  const normalizedResult = normalizeString_(resultValue).toLowerCase();
+  const resultStillInProgress = !normalizedResult || normalizedResult === 'live_transfer_requested';
+
+  if (!sentAt || !resultStillInProgress) {
+    return false;
+  }
+
+  const ageMinutes = (now.getTime() - sentAt.getTime()) / 60000;
+  return ageMinutes >= 0 && ageMinutes <= VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES;
 }
 
 function getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates) {
@@ -623,6 +726,25 @@ function validateVoiceBotPayload_(payload) {
     });
 
     throw voiceCallbackError_('invalid_row_number', 'rowNumber must be a sheet row number greater than 1');
+  }
+}
+
+function isVoiceBotQueueRefillPayload_(payload) {
+  return Boolean(payload) && typeof payload === 'object' && normalizeString_(payload.action) === 'process_voice_queue';
+}
+
+function validateVoiceBotQueueRefillPayload_(payload) {
+  if (VOICE_BOT_SHARED_TOKEN === 'REPLACE_ME') {
+    throw voiceCallbackError_('token_not_configured', 'VOICE_BOT_SHARED_TOKEN must be set before deployment');
+  }
+
+  if (!payload.token || payload.token !== VOICE_BOT_SHARED_TOKEN) {
+    voiceBotLog_({
+      event: 'voice_queue_refill_rejected',
+      reason: 'bad_token'
+    });
+
+    throw voiceCallbackError_('unauthorized', 'Missing or invalid voice bot token');
   }
 }
 

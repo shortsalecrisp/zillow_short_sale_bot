@@ -3,7 +3,8 @@ import { config } from "./config";
 import { logger } from "./logger";
 import { sendCallbackEmail } from "./sendCallbackEmail";
 import { sendCallTranscriptEmail } from "./sendCallTranscriptEmail";
-import { postSheetUpdate } from "./sheetUpdateClient";
+import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContext";
+import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import type { CallMetadata } from "../types";
 
 const FIRST_CHECK_DELAY_MS = 90_000;
@@ -1074,6 +1075,29 @@ async function processPostCallOutcome(
   return true;
 }
 
+export async function handleElevenLabsPostCallWebhook(conversationId: string): Promise<boolean> {
+  const metadata = getElevenLabsCallContextByConversationId(conversationId);
+
+  if (!metadata) {
+    logger.warn("Skipping ElevenLabs post-call webhook because call context was not found", {
+      conversationId,
+    });
+    return false;
+  }
+
+  const done = await processPostCallOutcome(conversationId, metadata);
+
+  if (done) {
+    await requestVoiceQueueRefill({
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+    });
+  }
+
+  return done;
+}
+
 export function scheduleElevenLabsPostCallFallback(params: {
   conversationId: string;
   metadata: CallMetadata;
@@ -1081,7 +1105,16 @@ export function scheduleElevenLabsPostCallFallback(params: {
   const run = (attempt: number) => {
     void processPostCallOutcome(params.conversationId, params.metadata, { finalAttempt: attempt >= MAX_ATTEMPTS })
       .then((done) => {
-        if (!done && attempt < MAX_ATTEMPTS) {
+        if (done) {
+          void requestVoiceQueueRefill({
+            conversationId: params.conversationId,
+            rowNumber: params.metadata.rowNumber,
+            callAttemptNumber: params.metadata.callAttemptNumber,
+          });
+          return;
+        }
+
+        if (attempt < MAX_ATTEMPTS) {
           setTimeout(() => run(attempt + 1), RETRY_DELAY_MS);
         }
       })

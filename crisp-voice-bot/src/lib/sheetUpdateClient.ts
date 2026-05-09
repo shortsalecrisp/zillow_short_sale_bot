@@ -3,6 +3,63 @@ import { config } from "./config";
 import { logger } from "./logger";
 import type { SheetUpdateRequest } from "../types";
 
+export function buildVoiceQueueRefillPayload(): Record<string, string> {
+  return {
+    ...(config.googleAppsScript.token ? { token: config.googleAppsScript.token } : {}),
+    action: "process_voice_queue",
+  };
+}
+
+export async function requestVoiceQueueRefill(context: {
+  conversationId?: string;
+  rowNumber?: number;
+  callAttemptNumber?: number;
+} = {}): Promise<void> {
+  if (!config.googleAppsScript.webhookUrl) {
+    logger.info("Skipping voice queue refill because Apps Script webhook is not configured", context);
+    return;
+  }
+
+  const payload = buildVoiceQueueRefillPayload();
+  const logPayload = {
+    ...payload,
+    ...(payload.token ? { token: "[redacted]" } : {}),
+  };
+
+  logger.info("Requesting voice queue refill", {
+    ...context,
+    url: config.googleAppsScript.webhookUrl,
+    payload: logPayload,
+  });
+
+  try {
+    await axios.post(config.googleAppsScript.webhookUrl, payload, {
+      timeout: 10_000,
+      headers: {
+        "Content-Type": "application/json",
+        ...(config.googleAppsScript.token ? { "X-Crisp-Token": config.googleAppsScript.token } : {}),
+      },
+    });
+
+    logger.info("Voice queue refill accepted", context);
+  } catch (error) {
+    if (error instanceof AxiosError) {
+      logger.error("Voice queue refill failed", {
+        ...context,
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+      });
+      return;
+    }
+
+    logger.error("Voice queue refill failed", {
+      ...context,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export async function postSheetUpdate(payload: SheetUpdateRequest): Promise<void> {
   const useAppsScript = Boolean(config.googleAppsScript.webhookUrl);
   const url = config.googleAppsScript.webhookUrl ?? `${config.baseUrl}/sheet-update`;

@@ -218,15 +218,17 @@ export async function placeElevenLabsOutboundCall(params: {
       message: response.data.message,
     });
 
-    rememberElevenLabsCallContext(params.metadata);
-
     if (response.data.conversation_id) {
+      rememberElevenLabsCallContext(params.metadata, response.data.conversation_id);
+
       if (params.schedulePostCallFallback !== false) {
         scheduleElevenLabsPostCallFallback({
           conversationId: response.data.conversation_id,
           metadata: params.metadata,
         });
       }
+    } else {
+      rememberElevenLabsCallContext(params.metadata);
     }
 
     return response.data;

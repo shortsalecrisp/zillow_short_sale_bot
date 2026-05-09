@@ -227,3 +227,103 @@ test("queue scan can return multiple eligible rows in the same local call window
 
   assert.deepEqual(rowNumbers, [3366, 3367, 3369]);
 });
+
+test("queue only starts enough calls to fill the two active call slots", () => {
+  const rowNumbers = Array.from(runSchedulerScript(`
+    function row(first, last, state, followupSentAt, options) {
+      const values = Array(42).fill("");
+      values[0] = first;
+      values[1] = last;
+      values[2] = "603-325-5909";
+      values[4] = "20 Pearl Street";
+      values[5] = "Hillsboro";
+      values[6] = state;
+      values[7] = "x";
+      values[8] = "x";
+      values[23] = followupSentAt;
+      if (options && options.call1SentAt) {
+        values[32] = options.call1SentAt;
+      }
+      if (options && options.call1Result) {
+        values[33] = options.call1Result;
+      }
+      return values;
+    }
+
+    getVoiceBotStartableCallCandidatesFromRows_([
+      { rowNumber: 3400, values: row("Active", "Call", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T20:05:00Z" }) },
+      { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
+      { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
+    ], new Date("2026-05-09T20:15:00Z"), 10, 2).map(function(candidate) {
+      return candidate.rowNumber;
+    });
+  `));
+
+  assert.deepEqual(rowNumbers, [3401]);
+});
+
+test("stale unfinished call rows do not block new calls forever", () => {
+  const rowNumbers = Array.from(runSchedulerScript(`
+    function row(first, last, state, followupSentAt, options) {
+      const values = Array(42).fill("");
+      values[0] = first;
+      values[1] = last;
+      values[2] = "603-325-5909";
+      values[4] = "20 Pearl Street";
+      values[5] = "Hillsboro";
+      values[6] = state;
+      values[7] = "x";
+      values[8] = "x";
+      values[23] = followupSentAt;
+      if (options && options.call1SentAt) {
+        values[32] = options.call1SentAt;
+      }
+      return values;
+    }
+
+    getVoiceBotStartableCallCandidatesFromRows_([
+      { rowNumber: 3400, values: row("Stale", "Call", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T18:00:00Z" }) },
+      { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
+      { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
+      { rowNumber: 3403, values: row("Third", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
+    ], new Date("2026-05-09T20:15:00Z"), 10, 2).map(function(candidate) {
+      return candidate.rowNumber;
+    });
+  `));
+
+  assert.deepEqual(rowNumbers, [3401, 3402]);
+});
+
+test("live-transfer-requested rows still count against active call slots", () => {
+  const rowNumbers = Array.from(runSchedulerScript(`
+    function row(first, last, state, followupSentAt, options) {
+      const values = Array(42).fill("");
+      values[0] = first;
+      values[1] = last;
+      values[2] = "603-325-5909";
+      values[4] = "20 Pearl Street";
+      values[5] = "Hillsboro";
+      values[6] = state;
+      values[7] = "x";
+      values[8] = "x";
+      values[23] = followupSentAt;
+      if (options && options.call1SentAt) {
+        values[32] = options.call1SentAt;
+      }
+      if (options && options.call1Result) {
+        values[33] = options.call1Result;
+      }
+      return values;
+    }
+
+    getVoiceBotStartableCallCandidatesFromRows_([
+      { rowNumber: 3400, values: row("Transfer", "Pending", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T20:05:00Z", call1Result: "live_transfer_requested" }) },
+      { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
+      { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
+    ], new Date("2026-05-09T20:15:00Z"), 10, 2).map(function(candidate) {
+      return candidate.rowNumber;
+    });
+  `));
+
+  assert.deepEqual(rowNumbers, [3401]);
+});

@@ -2,10 +2,12 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { config } from "../lib/config";
 import {
   beginElevenLabsLiveTransferAttempt,
+  buildElevenLabsCallContextKey,
   completeElevenLabsLiveTransferAttempt,
   getLatestElevenLabsCallContext,
 } from "../lib/elevenLabsCallContext";
 import { requestElevenLabsLiveTransferApproval } from "../lib/elevenLabsLiveTransferApproval";
+import { handleElevenLabsPostCallWebhook } from "../lib/elevenLabsPostCall";
 import { logger } from "../lib/logger";
 import { sendCallbackEmail } from "../lib/sendCallbackEmail";
 import { postSheetUpdate } from "../lib/sheetUpdateClient";
@@ -240,7 +242,7 @@ function applyLatestCallContextIfNeeded(payload: ReturnType<typeof readLeadPaylo
   };
 }
 
-function queueElevenLabsBackgroundTask(taskName: string, metadata: Record<string, unknown>, task: () => Promise<void>): void {
+function queueElevenLabsBackgroundTask(taskName: string, metadata: Record<string, unknown>, task: () => Promise<unknown>): void {
   void task()
     .then(() => {
       logger.info(`${taskName} completed`, metadata);
@@ -254,10 +256,16 @@ function queueElevenLabsBackgroundTask(taskName: string, metadata: Record<string
 }
 
 router.post("/tool/live-transfer-requested", async (req: Request, res: Response, next: NextFunction) => {
+  let liveTransferContextKey: string | undefined;
+
   try {
     verifyToolSecret(req);
     const payload = applyLatestCallContextIfNeeded(readLeadPayload(req.body));
-    const liveTransferState = beginElevenLabsLiveTransferAttempt();
+    liveTransferContextKey = buildElevenLabsCallContextKey({
+      rowNumber: payload.rowNumber,
+      callAttemptNumber: payload.callAttemptNumber,
+    });
+    const liveTransferState = beginElevenLabsLiveTransferAttempt(liveTransferContextKey);
 
     if (liveTransferState === "pending") {
       logger.info("Ignoring duplicate ElevenLabs live transfer request", {
@@ -346,7 +354,7 @@ router.post("/tool/live-transfer-requested", async (req: Request, res: Response,
       liveTransferNumber: config.liveTransferNumber,
     });
 
-    completeElevenLabsLiveTransferAttempt(approval.status);
+    completeElevenLabsLiveTransferAttempt(approval.status, liveTransferContextKey);
 
     if (approval.status !== "accepted") {
       logger.info("ElevenLabs live transfer approval did not complete; returning fallback instructions", {
@@ -376,7 +384,7 @@ router.post("/tool/live-transfer-requested", async (req: Request, res: Response,
       approvalStatus: approval.status,
     });
   } catch (error) {
-    completeElevenLabsLiveTransferAttempt("call_failed");
+    completeElevenLabsLiveTransferAttempt("call_failed", liveTransferContextKey);
     next(error);
   }
 });
@@ -498,13 +506,23 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
 });
 
 router.post("/post-call", async (req: Request, res: Response) => {
+  const conversationId =
+    isRecord(req.body) && isRecord(req.body.data) && typeof req.body.data.conversation_id === "string"
+      ? req.body.data.conversation_id
+      : undefined;
+
   logger.info("Received ElevenLabs post-call webhook", {
     type: isRecord(req.body) ? req.body.type : undefined,
-    conversationId:
-      isRecord(req.body) && isRecord(req.body.data) && typeof req.body.data.conversation_id === "string"
-        ? req.body.data.conversation_id
-        : undefined,
+    conversationId,
   });
+
+  if (conversationId) {
+    queueElevenLabsBackgroundTask(
+      "ElevenLabs post-call webhook outcome",
+      { conversationId },
+      () => handleElevenLabsPostCallWebhook(conversationId),
+    );
+  }
 
   res.status(200).json({ ok: true });
 });
