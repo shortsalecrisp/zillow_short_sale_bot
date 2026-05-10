@@ -107,3 +107,19 @@ test("prompt treats partial this-is identity replies as confirmed", () => {
   assert.match(prompt, /first recognized human response/i);
   assert.match(prompt, /Do not wait for the caller to repeat/i);
 });
+
+test("prompt answers quick-second how-can-I-help turns immediately", () => {
+  const prompt = readPrompt();
+  const quickHelpBranch = extractSection(
+    prompt,
+    'If the caller answers "Got a quick second?" with a yes plus "how can I help you?"',
+    "If they ask who is calling",
+  );
+
+  assert.match(quickHelpBranch, /Treat that as permission to continue/);
+  assert.match(quickHelpBranch, /Do not pause to acknowledge it/);
+  assert.match(
+    quickHelpBranch,
+    /I was calling to see what your plan is for handling the short sale with the bank\./,
+  );
+});

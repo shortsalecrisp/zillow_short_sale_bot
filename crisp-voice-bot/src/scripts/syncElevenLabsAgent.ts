@@ -65,7 +65,7 @@ const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.
 const FIRST_MESSAGE = '<break time="1.0s" /> Hi, is this {{firstName}}?';
 const INITIAL_WAIT_TIME_SECONDS = 2.0;
 const TURN_TIMEOUT_SECONDS = 2.0;
-const TURN_EAGERNESS = "normal";
+const TURN_EAGERNESS = "eager";
 const SPECULATIVE_TURN = false;
 const SOFT_TIMEOUT_SECONDS = -1;
 const RETRANSCRIBE_ON_TURN_TIMEOUT = true;
