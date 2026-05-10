@@ -155,6 +155,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Not interested";
   }
 
+  if (callResult === "already_working_with_negotiator") {
+    return "Already working with negotiator";
+  }
+
   if (callResult === "not_short_sale") {
     return "Not a short sale";
   }
@@ -289,9 +293,26 @@ export function shouldTreatAsNotShortSale(conversation: ElevenLabsConversation):
   );
 }
 
+export function shouldTreatAsAlreadyHasShortSaleHelp(conversation: ElevenLabsConversation): boolean {
+  const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+
+  return (
+    /\b(?:already\s+)?(?:have|has|got)\s+(?:a\s+|an\s+|the\s+|my\s+|our\s+)?(?:short sale\s+)?(?:negotiator|attorney|lawyer|specialist)\b/.test(
+      text,
+    ) ||
+    /\b(?:already\s+)?(?:working|work)\s+with\s+(?:a\s+|an\s+|the\s+|my\s+|our\s+)?(?:short sale\s+)?(?:negotiator|attorney|lawyer|specialist)\b/.test(
+      text,
+    ) ||
+    /\b(?:negotiator|attorney|lawyer|specialist)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text) ||
+    /\b(?:already\s+)?(?:have|has|got)\s+(?:someone|somebody)\s+handling\b/.test(text) ||
+    /\b(?:someone|somebody)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text)
+  );
+}
+
 function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   return (
+    shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
     text.includes("not interested") ||
     text.includes("has it handled") ||
     text.includes("have it handled") ||
@@ -674,6 +695,33 @@ async function processPostCallOutcome(
 
     processedConversationIds.add(conversationId);
     logger.info("ElevenLabs post-call fallback recorded listing is not a short sale", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsAlreadyHasShortSaleHelp(conversation)) {
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "already_working_with_negotiator",
+      responseStatus: buildVoiceResponseStatus("already_working_with_negotiator"),
+      leadStatusCode: "R",
+      voiceNotes: summary,
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome: buildVoiceResponseStatus("already_working_with_negotiator"),
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback recorded existing short sale help", {
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,

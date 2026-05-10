@@ -34,6 +34,26 @@ const rodrigoConversation = {
   ],
 } as const;
 
+const taniaConversation = {
+  status: "done",
+  metadata: {
+    termination_reason: "end_call tool was called.",
+  },
+  analysis: {
+    transcript_summary:
+      "An agent from Crisp Short Sales contacted Tania. Tania informed the agent that she already has a short sale negotiator, leading the agent to conclude the call.",
+  },
+  transcript: [
+    { role: "assistant", message: "What's your plan for handling the short sale with the bank?" },
+    { role: "user", message: "I have a short sale negotiator." },
+    {
+      role: "assistant",
+      message:
+        "Ok, well thanks for letting me know. If anything changes in the future and you're looking for some additional help, please just keep me in mind. Thanks!",
+    },
+  ],
+} as const;
+
 test("post-call fallback classifies an agent saying it is not a short sale as not_short_sale", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsNotShortSale } = await import(
     "../src/lib/elevenLabsPostCall"
@@ -42,6 +62,16 @@ test("post-call fallback classifies an agent saying it is not a short sale as no
   assert.equal(shouldTreatAsNotShortSale(rodrigoConversation), true);
   assert.equal(shouldTreatAsAgentHungUp(rodrigoConversation), false);
   assert.equal(buildVoiceResponseStatus("not_short_sale"), "Not a short sale");
+});
+
+test("post-call fallback marks existing short sale help as already working with negotiator", async () => {
+  const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsAlreadyHasShortSaleHelp } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+
+  assert.equal(shouldTreatAsAlreadyHasShortSaleHelp(taniaConversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(taniaConversation), false);
+  assert.equal(buildVoiceResponseStatus("already_working_with_negotiator"), "Already working with negotiator");
 });
 
 test("post-call fallback treats stale initiated conversations with no audio as no-connect", async () => {

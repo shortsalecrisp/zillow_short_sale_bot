@@ -116,6 +116,10 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
     return "Not interested";
   }
 
+  if (callResult === "already_working_with_negotiator") {
+    return "Already working with negotiator";
+  }
+
   if (callResult === "not_short_sale") {
     return "Not a short sale";
   }
@@ -145,6 +149,21 @@ function looksLikeNotShortSale(value: string): boolean {
   return (
     /\b(?:not|isn't|isnt|wasn't|wasnt)\s+(?:actually\s+)?(?:a\s+)?short sale\b/.test(text) ||
     /\b(?:not|isn't|isnt|wasn't|wasnt)\s+(?:actually\s+)?(?:a\s+)?short-sale\b/.test(text)
+  );
+}
+
+function looksLikeAlreadyHasShortSaleHelp(value: string): boolean {
+  const text = normalizeText(value);
+  return (
+    /\b(?:already\s+)?(?:have|has|got)\s+(?:a\s+|an\s+|the\s+|my\s+|our\s+)?(?:short sale\s+)?(?:negotiator|attorney|lawyer|specialist)\b/.test(
+      text,
+    ) ||
+    /\b(?:already\s+)?(?:working|work)\s+with\s+(?:a\s+|an\s+|the\s+|my\s+|our\s+)?(?:short sale\s+)?(?:negotiator|attorney|lawyer|specialist)\b/.test(
+      text,
+    ) ||
+    /\b(?:negotiator|attorney|lawyer|specialist)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text) ||
+    /\b(?:already\s+)?(?:have|has|got)\s+(?:someone|somebody)\s+handling\b/.test(text) ||
+    /\b(?:someone|somebody)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text)
   );
 }
 
@@ -474,6 +493,8 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
       () => {
         const callResult = looksLikeNotShortSale(payload.conversationSummary)
           ? "not_short_sale"
+          : looksLikeAlreadyHasShortSaleHelp(payload.conversationSummary)
+            ? "already_working_with_negotiator"
           : "answered_not_interested";
 
         return postSheetUpdate({
