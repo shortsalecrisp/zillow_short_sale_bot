@@ -148,7 +148,11 @@ function looksLikeNotShortSale(value: string): boolean {
   const text = normalizeText(value);
   return (
     /\b(?:not|isn't|isnt|wasn't|wasnt)\s+(?:actually\s+)?(?:a\s+)?short sale\b/.test(text) ||
-    /\b(?:not|isn't|isnt|wasn't|wasnt)\s+(?:actually\s+)?(?:a\s+)?short-sale\b/.test(text)
+    /\b(?:not|isn't|isnt|wasn't|wasnt)\s+(?:actually\s+)?(?:a\s+)?short-sale\b/.test(text) ||
+    /\b(?:do not|don't|dont|does not|doesn't|doesnt)\s+have\s+(?:a\s+)?short sale\b/.test(text) ||
+    /\bno\s+short sale\b/.test(text) ||
+    /\bnot\s+involved\s+in\s+(?:a\s+)?short sale\b/.test(text) ||
+    /\b(?:bought|purchased)\s+(?:it|the property|this property|that property)?\s*(?:from|through)\s+the bank\b/.test(text)
   );
 }
 

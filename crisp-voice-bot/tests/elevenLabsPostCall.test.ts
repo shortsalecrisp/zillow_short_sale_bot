@@ -54,6 +54,21 @@ const taniaConversation = {
   ],
 } as const;
 
+const danielConversation = {
+  status: "done",
+  metadata: {
+    termination_reason: "Client disconnected: 1000",
+  },
+  analysis: {
+    transcript_summary:
+      "Dan clarified that he had already purchased the property from the bank and was not involved in a short sale.",
+  },
+  transcript: [
+    { role: "assistant", message: "What's your plan for handling the short sale with the bank?" },
+    { role: "user", message: "Uh, I don't have a short sale. I bought it from the bank." },
+  ],
+} as const;
+
 test("post-call fallback classifies an agent saying it is not a short sale as not_short_sale", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsNotShortSale } = await import(
     "../src/lib/elevenLabsPostCall"
@@ -62,6 +77,13 @@ test("post-call fallback classifies an agent saying it is not a short sale as no
   assert.equal(shouldTreatAsNotShortSale(rodrigoConversation), true);
   assert.equal(shouldTreatAsAgentHungUp(rodrigoConversation), false);
   assert.equal(buildVoiceResponseStatus("not_short_sale"), "Not a short sale");
+});
+
+test("post-call fallback classifies no short sale ownership explanations as not_short_sale", async () => {
+  const { shouldTreatAsAgentHungUp, shouldTreatAsNotShortSale } = await import("../src/lib/elevenLabsPostCall");
+
+  assert.equal(shouldTreatAsNotShortSale(danielConversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(danielConversation), false);
 });
 
 test("post-call fallback marks existing short sale help as already working with negotiator", async () => {
