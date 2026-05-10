@@ -123,3 +123,21 @@ test("prompt answers quick-second how-can-I-help turns immediately", () => {
     /I was calling to see what your plan is for handling the short sale with the bank\./,
   );
 });
+
+test("prompt clearly explains purpose before callback when caller is busy or cannot hear", () => {
+  const prompt = readPrompt();
+  const busyNoiseBranch = extractSection(
+    prompt,
+    "If the caller says they are busy, out to dinner, driving, cannot hear you well",
+    "If a receptionist, office assistant",
+  );
+
+  assert.match(busyNoiseBranch, /Do not ask for a callback before explaining why you called/);
+  assert.match(busyNoiseBranch, /Do not only say that Yoni can explain it better/);
+  assert.match(
+    busyNoiseBranch,
+    /No worries, I'll be quick\. I'm Emmy with Crisp Short Sales, calling for Yoni Kutler about your short sale listing at {{streetAddress}}\./,
+  );
+  assert.match(busyNoiseBranch, /paperwork, lender calls, and approval process/);
+  assert.match(busyNoiseBranch, /call `callback_requested`/);
+});
