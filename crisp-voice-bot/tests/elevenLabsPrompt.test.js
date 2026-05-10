@@ -77,8 +77,26 @@ test("prompt treats not-worried responses as a soft no instead of pitching", () 
 
   assert.match(prompt, /not worried/i);
   assert.match(prompt, /soft no/i);
-  assert.match(prompt, /Crisp Short Sales specializes in helping agents/i);
+  assert.match(
+    prompt,
+    /Ok, well thanks for letting me know\. If anything changes in the future and you're looking for some additional help, please just keep me in mind\. Thanks!/,
+  );
   assert.match(prompt, /Then call `not_interested`/);
+});
+
+test("prompt closes immediately when the caller already has short sale help", () => {
+  const prompt = readPrompt();
+  const coveredBranch = extractSection(
+    prompt,
+    "If they say they already have a short sale negotiator",
+    "If they say they are not worried about it",
+  );
+
+  assert.match(coveredBranch, /attorney, specialist, someone handling it/);
+  assert.match(coveredBranch, /Do not pitch/);
+  assert.match(coveredBranch, /please just keep me in mind\. Thanks!/);
+  assert.match(coveredBranch, /Then immediately call `not_interested`/);
+  assert.match(coveredBranch, /After the tool returns, call `end_call`/);
 });
 
 test("prompt treats partial this-is identity replies as confirmed", () => {
