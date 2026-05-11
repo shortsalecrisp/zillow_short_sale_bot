@@ -108,6 +108,23 @@ test("prompt treats partial this-is identity replies as confirmed", () => {
   assert.match(prompt, /Do not wait for the caller to repeat/i);
 });
 
+test("prompt skips the address when identity confirmation already asks how to help", () => {
+  const prompt = readPrompt();
+  const identityHelpBranch = extractSection(
+    prompt,
+    'If the caller confirms identity and asks "how may I help you?"',
+    "- If the caller answers your name question with something like",
+  );
+
+  assert.match(identityHelpBranch, /already invited the reason for the call/);
+  assert.match(identityHelpBranch, /Do not say {{streetAddress}}/);
+  assert.match(identityHelpBranch, /Do not ask "Got a quick second\?"/);
+  assert.match(
+    identityHelpBranch,
+    /Hi {{firstName}}, Emmy with Crisp Short Sales\. I'm calling about your short sale listing\. What's your plan for handling it with the bank\?/,
+  );
+});
+
 test("prompt answers quick-second how-can-I-help turns immediately", () => {
   const prompt = readPrompt();
   const quickHelpBranch = extractSection(
