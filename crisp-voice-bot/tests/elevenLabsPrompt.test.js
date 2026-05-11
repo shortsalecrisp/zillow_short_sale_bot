@@ -99,6 +99,21 @@ test("prompt closes immediately when the caller already has short sale help", ()
   assert.match(coveredBranch, /After the tool returns, call `end_call`/);
 });
 
+test("prompt treats direct or self-handling answers as a soft value-pitch opportunity", () => {
+  const prompt = readPrompt();
+  const selfHandlingBranch = extractSection(
+    prompt,
+    "If they answer the plan question with \"direct\"",
+    "If they say they already have a short sale negotiator",
+  );
+
+  assert.match(selfHandlingBranch, /handling it themselves/i);
+  assert.match(selfHandlingBranch, /Do not treat this as a hard no/);
+  assert.match(selfHandlingBranch, /whole short sale process with the bank/);
+  assert.match(selfHandlingBranch, /no cost to you or the seller/);
+  assert.match(selfHandlingBranch, /Do you have any interest in talking with Yoni/);
+});
+
 test("prompt treats partial this-is identity replies as confirmed", () => {
   const prompt = readPrompt();
 
