@@ -38,6 +38,30 @@ test("opening fallback confirmation uses a short continuation instead of repeati
   assert.doesNotMatch(spokenLines.join("\n"), /Crisp Short Sales/);
 });
 
+test("prompt keeps the standard opener short and saves the address for which-property questions", () => {
+  const prompt = readPrompt();
+  const openerBranch = extractSection(
+    prompt,
+    "- If the caller confirms identity after the first name-only opener, your very next line must be:",
+    "- Do not ask \"Hi, is this {{firstName}}?\" twice after a clear identity confirmation.",
+  );
+  const genericFallbackBranch = extractSection(
+    prompt,
+    "- Instead say once:",
+    "- If they give any clear yes-type answer after that, do not repeat",
+  );
+
+  assert.match(
+    openerBranch,
+    /Hi {{firstName}}, Emmy with Crisp Short Sales\. I'm calling about your short sale listing\. Got a quick second\?/,
+  );
+  assert.doesNotMatch(openerBranch, /{{streetAddress}}/);
+  assert.match(genericFallbackBranch, /Hi, this is Emmy with Crisp Short Sales\. Is this {{firstName}}\?/);
+  assert.doesNotMatch(genericFallbackBranch, /{{streetAddress}}/);
+  assert.match(prompt, /If they ask which listing, which property, or what address/);
+}
+);
+
 test("prompt treats not-a-short-sale objections as a clear no", () => {
   const prompt = readPrompt();
   assert.match(prompt, /not a short sale/i);
