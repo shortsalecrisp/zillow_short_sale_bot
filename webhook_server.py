@@ -1509,17 +1509,7 @@ def _mark_initial_sms_sent(
     return ts
 
 
-@app.post("/internal/send-initial-sms")
-async def internal_send_initial_sms(request: Request):
-    """Send an initial SMS from the production bot using Render-side credentials."""
-    _auth_internal_request(request)
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid_json")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="invalid_payload")
-
+def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         row_idx = int(payload.get("row"))
     except (TypeError, ValueError):
@@ -1612,6 +1602,20 @@ async def internal_send_initial_sms(request: Request):
         "gateway_response": final_result.response_text,
         "codex_verified": mark_codex_verified,
     }
+
+
+@app.post("/internal/send-initial-sms")
+async def internal_send_initial_sms(request: Request):
+    """Send an initial SMS from the production bot using Render-side credentials."""
+    _auth_internal_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    return await asyncio.to_thread(_send_initial_sms_from_payload, payload)
 
 
 _RELATIVE_TIME_RE = re.compile(

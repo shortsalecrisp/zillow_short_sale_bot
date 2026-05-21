@@ -114,11 +114,9 @@ class SMSGatewayForAndroid:
             "message": message_payload,
             "target": to,
         }
-        encoded_query = urlencode(request_params)
-        payload_preview = f"{request_url}?{encoded_query}".replace(
-            f"key={self.api_key}",
-            f"key={self._mask_secret(self.api_key)}",
-        )
+        preview_params = dict(request_params)
+        preview_params["key"] = self._mask_secret(self.api_key)
+        payload_preview = f"{request_url}?{urlencode(preview_params)}"
         target_is_separate_query_param = "target" in request_params
 
         LOG.info(

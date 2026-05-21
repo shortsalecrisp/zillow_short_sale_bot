@@ -41,6 +41,27 @@ def test_send_with_diagnostics_uses_fcm_sendmessage_endpoint(monkeypatch):
     }
 
 
+def test_send_with_diagnostics_masks_encoded_key_in_preview(monkeypatch):
+    secret = "abc:def/ghi+123"
+
+    def fake_get(url, params, timeout):
+        return SimpleNamespace(status_code=200, text="OK")
+
+    monkeypatch.setattr("sms_providers.requests.get", fake_get)
+
+    sender = SMSGatewayForAndroid(api_key=secret)
+    result = sender.send_with_diagnostics(
+        to="+15551234567",
+        message="Hello there",
+        sms_type="initial",
+    )
+
+    assert result.success is True
+    assert secret not in result.payload_preview
+    assert "abc%3Adef%2Fghi%2B123" not in result.payload_preview
+    assert "abc...23" in result.payload_preview
+
+
 def test_send_with_diagnostics_accepts_http_200_without_error_body(monkeypatch):
     def fake_get(url, params, timeout):
         return SimpleNamespace(status_code=200, text="queued")
