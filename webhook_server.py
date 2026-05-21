@@ -59,6 +59,9 @@ SCOPES      = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Shared-secret token for inbound-SMS webhook (optional)
 WEBHOOK_TOKEN = os.getenv("SMSM_WEBHOOK_TOKEN")  # e.g. "65-g84-jfy7t"
+CODEX_AUTOMATION_TOKEN = os.getenv("CODEX_AUTOMATION_TOKEN", "").strip()
+LEADS_SHEET_TAB = os.getenv("GSHEET_TAB", "Sheet1")
+INITIAL_SMS_RETRY_ATTEMPTS = max(1, int(os.getenv("SMS_RETRY_ATTEMPTS", "3")))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1451,6 +1454,164 @@ def send_sms(phone: str, message: str, sms_type: str = "initial") -> None:
             logger.info("TASKER_SEND_INITIAL to %s", digits)
     except Exception as exc:
         logger.exception("SMS send failed: %s", exc)
+
+
+def _row_value(row: List[str], index: int) -> str:
+    if index < len(row):
+        return str(row[index] or "").strip()
+    return ""
+
+
+def _get_leads_ws():
+    workbook = _retry_gspread_call("open workbook", lambda: gclient.open_by_key(GSHEET_ID))
+    return _retry_gspread_call(
+        "open leads worksheet",
+        lambda: workbook.worksheet(LEADS_SHEET_TAB),
+    )
+
+
+def _auth_internal_request(request: Request) -> None:
+    if not CODEX_AUTOMATION_TOKEN:
+        raise HTTPException(status_code=503, detail="automation_token_not_configured")
+    auth = request.headers.get("authorization", "")
+    header_token = request.headers.get("x-codex-automation-token", "")
+    expected_auth = f"Bearer {CODEX_AUTOMATION_TOKEN}"
+    if auth == expected_auth or header_token == CODEX_AUTOMATION_TOKEN:
+        return
+    raise HTTPException(status_code=403, detail="bad token")
+
+
+def _format_initial_message(payload: Dict[str, Any], row: List[str]) -> str:
+    first = str(payload.get("first") or _row_value(row, 0)).strip()
+    address = str(payload.get("address") or _row_value(row, 4)).strip()
+    return SMS_TEMPLATE.format(first=first, address=address).strip()
+
+
+def _mark_initial_sms_sent(
+    ws,
+    *,
+    row_idx: int,
+    msg_id: str,
+    mark_codex_verified: bool,
+) -> str:
+    ts = datetime.now(tz=TZ).isoformat()
+    updates = [
+        {"range": f"H{row_idx}", "values": [["x"]]},
+        {"range": f"W{row_idx}", "values": [[ts]]},
+        {"range": f"L{row_idx}", "values": [[msg_id]]},
+    ]
+    if mark_codex_verified:
+        updates.append({"range": f"AQ{row_idx}", "values": [["x"]]})
+    _retry_gspread_call(
+        "mark internal initial SMS",
+        lambda: ws.batch_update(updates, value_input_option="RAW"),
+    )
+    return ts
+
+
+@app.post("/internal/send-initial-sms")
+async def internal_send_initial_sms(request: Request):
+    """Send an initial SMS from the production bot using Render-side credentials."""
+    _auth_internal_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    try:
+        row_idx = int(payload.get("row"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid_row")
+    if row_idx < 2:
+        raise HTTPException(status_code=400, detail="invalid_row")
+
+    phone = fmt_phone(str(payload.get("phone") or ""))
+    if not phone:
+        raise HTTPException(status_code=400, detail="invalid_phone")
+    digits = _digits_only(phone)
+
+    ws = _get_leads_ws()
+    row = _retry_gspread_call("read leads row", lambda: ws.row_values(row_idx))
+    if not row:
+        raise HTTPException(status_code=404, detail="row_not_found")
+
+    if _row_value(row, 42).lower() == "x":
+        return {"status": "already_verified", "row": row_idx}
+
+    current_phone = fmt_phone(_row_value(row, 2))
+    if not current_phone:
+        raise HTTPException(status_code=409, detail="row_phone_missing")
+    if _digits_only(current_phone) != digits:
+        raise HTTPException(status_code=409, detail="row_phone_mismatch")
+
+    force_resend = bool(payload.get("force_resend") or payload.get("force"))
+    if _row_value(row, 7).lower() == "x" and not force_resend:
+        raise HTTPException(status_code=409, detail="initial_sms_already_marked")
+
+    message = _format_initial_message(payload, row)
+    if not message:
+        raise HTTPException(status_code=400, detail="empty_message")
+
+    final_result = None
+    for attempt in range(1, INITIAL_SMS_RETRY_ATTEMPTS + 1):
+        final_result = SMS_SENDER.send_with_diagnostics(
+            digits,
+            message,
+            sms_type="initial",
+            row_idx=row_idx,
+            attempt=attempt,
+        )
+        if final_result.success:
+            break
+        if attempt < INITIAL_SMS_RETRY_ATTEMPTS:
+            time.sleep(2)
+
+    if not final_result or not final_result.success:
+        logger.error(
+            "INTERNAL_INITIAL_SMS_FAILED row=%s phone=%s http_status=%s response_body=%s exception_type=%s exception_message=%s",
+            row_idx,
+            digits,
+            getattr(final_result, "status_code", None),
+            getattr(final_result, "response_text", "") or "<empty>",
+            getattr(final_result, "exception_type", ""),
+            getattr(final_result, "exception_message", ""),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "status": "gateway_failed",
+                "gateway_status": getattr(final_result, "status_code", None),
+                "gateway_response": getattr(final_result, "response_text", ""),
+            },
+        )
+
+    msg_id = str(payload.get("message_id") or "")
+    mark_codex_verified = payload.get("mark_codex_verified", True) is not False
+    sent_at = _mark_initial_sms_sent(
+        ws,
+        row_idx=row_idx,
+        msg_id=msg_id,
+        mark_codex_verified=mark_codex_verified,
+    )
+    logger.info(
+        "INTERNAL_INITIAL_SMS_SENT row=%s phone=%s http_status=%s response_body=%s codex_verified=%s",
+        row_idx,
+        digits,
+        final_result.status_code,
+        final_result.response_text or "<empty>",
+        mark_codex_verified,
+    )
+    return {
+        "status": "sent",
+        "row": row_idx,
+        "phone": digits,
+        "sent_at": sent_at,
+        "gateway_status": final_result.status_code,
+        "gateway_response": final_result.response_text,
+        "codex_verified": mark_codex_verified,
+    }
 
 
 _RELATIVE_TIME_RE = re.compile(
