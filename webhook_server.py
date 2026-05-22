@@ -1527,7 +1527,10 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="row_not_found")
 
-    if _row_value(row, 42).lower() == "x":
+    force_resend = bool(payload.get("force_resend") or payload.get("force"))
+    initial_marked = _row_value(row, 7).lower() == "x"
+    initial_ts = _row_value(row, 22).strip()
+    if _row_value(row, 42).lower() == "x" and initial_marked and initial_ts and not force_resend:
         return {"status": "already_verified", "row": row_idx}
 
     current_phone = fmt_phone(_row_value(row, 2))
@@ -1536,8 +1539,7 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if _digits_only(current_phone) != digits:
         raise HTTPException(status_code=409, detail="row_phone_mismatch")
 
-    force_resend = bool(payload.get("force_resend") or payload.get("force"))
-    if _row_value(row, 7).lower() == "x" and not force_resend:
+    if initial_marked and not force_resend:
         raise HTTPException(status_code=409, detail="initial_sms_already_marked")
 
     message = _format_initial_message(payload, row)

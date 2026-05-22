@@ -97,12 +97,21 @@ def _col_to_index(letters):
     return value
 
 
-def _row(*, phone="555-111-2222", sent="", verified="", first="Alex", address="123 Main"):
+def _row(
+    *,
+    phone="555-111-2222",
+    sent="",
+    init_ts="",
+    verified="",
+    first="Alex",
+    address="123 Main",
+):
     values = [""] * 43
     values[0] = first
     values[2] = phone
     values[4] = address
     values[7] = sent
+    values[22] = init_ts
     values[42] = verified
     return values
 
@@ -112,9 +121,10 @@ def _import_webhook_server(monkeypatch, *, sender_result):
     sheet1 = FakeWorksheet(
         {
             12: _row(phone="555-111-2222", sent="", verified=""),
-            13: _row(phone="555-111-2222", sent="", verified="x"),
+            13: _row(phone="555-111-2222", sent="x", init_ts="2026-05-22T08:00:00-04:00", verified="x"),
             14: _row(phone="555-111-2222", sent="x", verified=""),
             15: _row(phone="", sent="", verified=""),
+            16: _row(phone="555-111-2222", sent="", init_ts="", verified="x"),
         }
     )
     workbook = FakeWorkbook(
@@ -353,3 +363,24 @@ def test_internal_initial_sms_returns_already_verified_without_sending(monkeypat
     assert response.status_code == 200
     assert response.json()["status"] == "already_verified"
     assert sender.calls == []
+
+
+def test_internal_initial_sms_sends_when_verified_but_not_marked_sent(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/internal/send-initial-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={"row": 16, "phone": "555-111-2222"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "sent"
+    assert sender.calls[0]["row_idx"] == 16
+    assert sheet.rows[16][7] == "x"
+    assert sheet.rows[16][22]
+    assert sheet.rows[16][42] == "x"
