@@ -71,21 +71,21 @@ def test_build_q_phone_prefers_locality_tokens():
     assert any("Seguin" in q for q in queries)
 
 
-def test_initial_sms_window_allows_final_8pm_scrape_completion(monkeypatch):
+def test_initial_sms_window_blocks_new_outreach_after_8pm(monkeypatch):
     monkeypatch.setattr(bot_min, "WORK_START", 8)
     monkeypatch.setattr(bot_min, "WORK_END", 20)
-    monkeypatch.setattr(bot_min, "INITIAL_SMS_END", 21)
+    monkeypatch.setattr(bot_min, "INITIAL_SMS_END", 20)
 
-    final_scrape_completion = bot_min.SCHEDULER_TZ.localize(
-        datetime(2026, 4, 24, 20, 13)
+    before_cutoff = bot_min.SCHEDULER_TZ.localize(
+        datetime(2026, 4, 24, 19, 59)
     )
-    after_initial_window = bot_min.SCHEDULER_TZ.localize(
-        datetime(2026, 4, 24, 21, 0)
+    after_cutoff = bot_min.SCHEDULER_TZ.localize(
+        datetime(2026, 4, 24, 20, 0)
     )
 
-    assert bot_min._within_initial_hours(final_scrape_completion)
-    assert not bot_min._within_work_hours(final_scrape_completion)
-    assert not bot_min._within_initial_hours(after_initial_window)
+    assert bot_min._within_initial_hours(before_cutoff)
+    assert not bot_min._within_initial_hours(after_cutoff)
+    assert not bot_min._within_work_hours(after_cutoff)
 
 
 def test_realtor_office_label_cloudmersive_override(monkeypatch):
@@ -777,28 +777,38 @@ def test_profile_hint_urls_are_used(monkeypatch):
     assert result["number"] == mobile_number
 
 
-def test_lookup_phone_mismatched_rapid_does_not_override(monkeypatch):
-    office_number = "555-010-1010"
+def test_lookup_phone_mismatched_rapid_uses_best_likely_candidate(monkeypatch):
+    office_number = "972-704-9202"
 
-    def fake_rapid_property(zpid):
+    def fake_rapid_snapshot(agent, row_payload):
         return {
-            "contact_recipients": [
+            "selected_phone": "",
+            "rapid_candidates": [
                 {
-                    "display_name": "Main Office",
-                    "label": "Office",
-                    "phones": [
-                        {"number": office_number},
-                    ],
+                    "phone": bot_min.fmt_phone(office_number),
+                    "score": 1.1,
+                    "score_reason": "rapid_score_direct_candidate",
                 }
-            ]
+            ],
         }
 
-    monkeypatch.setattr(bot_min, "rapid_property", fake_rapid_property)
+    monkeypatch.setattr(bot_min, "_rapid_contact_normalized", fake_rapid_snapshot)
+    monkeypatch.setattr(bot_min, "_contact_enrichment", lambda *args, **kwargs: {})
     monkeypatch.setattr(bot_min, "build_q_phone", lambda name, state, **kwargs: [])
     monkeypatch.setattr(bot_min, "pmap", lambda fn, iterable: [])
     monkeypatch.setattr(bot_min, "google_items", lambda *args, **kwargs: [])
-    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", ""))
-    monkeypatch.setattr(bot_min, "is_mobile_number", lambda number: True)
+    monkeypatch.setattr(bot_min, "fetch_contact_page", lambda url: ("", False, ""))
+    monkeypatch.setattr(
+        bot_min,
+        "get_line_info",
+        lambda number: {
+            "valid": True,
+            "mobile": True,
+            "mobile_verified": False,
+            "country": "US",
+            "type": "unknown",
+        },
+    )
     monkeypatch.setattr(bot_min, "_looks_direct", lambda *args, **kwargs: False)
 
     bot_min.cache_p.clear()
@@ -809,8 +819,9 @@ def test_lookup_phone_mismatched_rapid_does_not_override(monkeypatch):
         {"zpid": "30768362", "contact_recipients": []},
     )
 
-    assert result["number"] == ""
-    assert result["reason"] == "withheld_low_conf_mix"
+    assert result["number"] == bot_min.fmt_phone(office_number)
+    assert result["confidence"] == "low"
+    assert result["reason"] == "rapid_score_direct_candidate"
 
 
 def test_lookup_phone_continues_search_after_nonproductive_page(monkeypatch):

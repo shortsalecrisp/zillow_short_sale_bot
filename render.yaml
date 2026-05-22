@@ -208,6 +208,6 @@ PY
       - key: SMS_TEST_NUMBER
         value: ""
       - key: WORK_END_HOUR
-        value: "21"
+        value: "20"
       - key: WORK_START_HOUR
         value: "8"

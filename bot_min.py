@@ -469,8 +469,8 @@ SCHEDULER_TZ   = pytz.timezone("America/New_York")
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
-WORK_END       = int(os.getenv("WORK_END_HOUR", "21"))    # exclusive (final run starts at 8 pm)
-INITIAL_SMS_END = int(os.getenv("INITIAL_SMS_END_HOUR", str(max(WORK_END, 21))))  # exclusive; lets 8pm scrape send after enrichment
+WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive; no new outreach after 8 PM ET
+INITIAL_SMS_END = int(os.getenv("INITIAL_SMS_END_HOUR", str(WORK_END)))  # exclusive; inbound replies are handled separately by Apps Script/Tasker
 FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
 SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=False)
 APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
@@ -10499,6 +10499,50 @@ def lookup_phone(agent: str, state: str, row_payload: Dict[str, Any]) -> Dict[st
                 "verified_mobile": verified_mobile,
                 "direct_ok": bool(candidate_info.get("direct_ok")),
                 "mobile_hint": bool(best_is_mobile),
+            }
+
+    if search_result is None and candidates:
+        likely_candidates: List[Tuple[str, Dict[str, Any], float]] = []
+        for number, info in candidates.items():
+            line_info = get_line_info(number)
+            if not line_info.get("valid") or line_info.get("country") != "US":
+                continue
+            score = float(info.get("final_score", info.get("score", 0.0)) or 0.0)
+            if line_info.get("mobile"):
+                score += 1.0
+            if info.get("direct_ok") is True:
+                score += 0.5
+            elif info.get("direct_ok") is False:
+                score -= 0.75
+            if info.get("office_demoted") and not line_info.get("mobile"):
+                score -= 1.0
+            if score >= CONTACT_PHONE_OVERRIDE_MIN or line_info.get("mobile") or info.get("direct_ok") is True:
+                likely_candidates.append((number, info, score))
+
+        if likely_candidates:
+            fallback_number, fallback_info, fallback_score = max(
+                likely_candidates,
+                key=lambda item: item[2],
+            )
+            fallback_source = fallback_info.get("best_source") or next(
+                iter(fallback_info.get("sources", [])),
+                "",
+            )
+            LOG.info(
+                "PHONE WIN (best-likely fallback): %s %.2f %s",
+                fallback_number,
+                fallback_score,
+                fallback_source or "unknown",
+            )
+            search_result = {
+                "number": fallback_number,
+                "confidence": "low",
+                "score": max(fallback_score, CONTACT_PHONE_OVERRIDE_MIN),
+                "source": fallback_source,
+                "reason": "best_likely_candidate_fallback",
+                "verified_mobile": bool(get_line_info(fallback_number).get("mobile_verified")),
+                "direct_ok": bool(fallback_info.get("direct_ok")),
+                "mobile_hint": bool(get_line_info(fallback_number).get("mobile")),
             }
 
     if search_result is None and candidates:
