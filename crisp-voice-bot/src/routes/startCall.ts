@@ -3,6 +3,7 @@ import { saveInitialCallState } from "../lib/callState";
 import { config } from "../lib/config";
 import { placeElevenLabsOutboundCall } from "../lib/elevenLabs";
 import { logger } from "../lib/logger";
+import { getOutboundCallPause } from "../lib/outboundCallPause";
 import { placeOutboundCall } from "../lib/telnyx";
 import type { CallMetadata, StartCallRequest } from "../types";
 
@@ -127,6 +128,24 @@ function validateStartCallRequest(body: unknown): ValidatedStartCallRequest {
 router.post("/", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const payload = validateStartCallRequest(req.body);
+    const outboundPause = getOutboundCallPause();
+
+    if (outboundPause) {
+      logger.warn("Outbound voice call start paused", {
+        rowNumber: payload.rowNumber,
+        pausedUntil: outboundPause.pausedUntil.toISOString(),
+        reason: outboundPause.reason,
+      });
+
+      res.status(503).json({
+        ok: false,
+        error: "outbound_calling_paused",
+        reason: outboundPause.reason,
+        pausedUntil: outboundPause.pausedUntil.toISOString(),
+      });
+      return;
+    }
+
     const dialedPhone = config.testMode ? config.testDestinationNumber : payload.phone;
 
     if (!E164_PHONE.test(dialedPhone)) {
