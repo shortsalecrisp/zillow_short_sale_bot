@@ -1658,14 +1658,32 @@ def _merge_rapid_listing_data(row: Dict[str, Any], rapid_payload: Dict[str, Any]
         return
     if not row.get("agentName"):
         for path in (
+            ("attributionInfo", "agentName"),
+            ("contactFormRenderData", "agentName"),
             ("listed_by", "name"),
+            ("listedBy", "name"),
             ("listingAgent", "name"),
-            ("agent", "name"),
             ("listing_agent", "name"),
+            ("agent", "name"),
+            ("postingContact", "name"),
         ):
             agent_name = _nested_value(rapid_payload, list(path))
             if isinstance(agent_name, str) and agent_name.strip():
                 row["agentName"] = agent_name.strip()
+                break
+    if not row.get("agentName"):
+        for key in ("listed_by", "listedBy", "listingAgents", "agents"):
+            value = rapid_payload.get(key)
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                agent_name = item.get("name") or item.get("agentName")
+                if isinstance(agent_name, str) and agent_name.strip():
+                    row["agentName"] = agent_name.strip()
+                    break
+            if row.get("agentName"):
                 break
     address_fields = _extract_address_fields(rapid_payload)
     if address_fields:
@@ -12842,18 +12860,31 @@ def process_rows(
         )
         street = (r.get("street") or r.get("address") or "").strip()
         if street == "(Undisclosed Address)":
+            outcome = "skipped_undisclosed_address"
+            outcomes[zpid] = outcome
             LOG.debug("SKIP undisclosed address zpid %s", r.get("zpid"))
             continue
         if zpid and not is_active_listing(r):
+            outcome = "skipped_stale_listing"
+            outcomes[zpid] = outcome
             LOG.info("Skip stale/off-market zpid %s", zpid)
             continue
         name = (r.get("agentName") or "").strip()
-        if not name or TEAM_RE.search(name):
+        if not name:
+            outcome = "failed_missing_agent"
+            outcomes[zpid] = outcome
             LOG.debug("SKIP missing agent name for %s (%s)", r.get("street"), r.get("zpid"))
+            continue
+        if TEAM_RE.search(name):
+            outcome = "skipped_agent_team"
+            outcomes[zpid] = outcome
+            LOG.debug("SKIP team/office agent name for %s (%s): %s", r.get("street"), r.get("zpid"), name)
             continue
         state = r.get("state", "")
         normalized_agent = _normalize_agent_name(name)
         if normalized_agent and normalized_agent in seen_agents:
+            outcome = "skipped_already_contacted_agent"
+            outcomes[zpid] = outcome
             LOG.info("SKIP already-contacted agent %s (%s)", name, r.get("zpid"))
             continue
         selected_phone = ""

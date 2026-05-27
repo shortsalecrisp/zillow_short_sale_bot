@@ -163,6 +163,7 @@ def test_payload_webhook_enqueues_extra_state_rows(monkeypatch):
     monkeypatch.setattr(webhook_server, "_process_pending_queue", lambda *args, **kwargs: 0)
     monkeypatch.setattr(webhook_server, "append_seen_zpids", lambda zpids: None)
     monkeypatch.setattr(webhook_server, "APIFY_MAX_ITEMS", 0)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_BACKGROUND", False)
     webhook_server.EXPORTED_ZPIDS.clear()
 
     def fake_enqueue(rows, source):
@@ -201,6 +202,7 @@ def test_original_cap_does_not_consume_state_search_cap(monkeypatch):
         lambda zpids: seen_batches.append([str(zpid) for zpid in zpids]),
     )
     monkeypatch.setattr(webhook_server, "APIFY_MAX_ITEMS", 5)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_BACKGROUND", False)
     webhook_server.EXPORTED_ZPIDS.clear()
 
     def fake_enqueue(rows, source):
@@ -221,7 +223,7 @@ def test_original_cap_does_not_consume_state_search_cap(monkeypatch):
     assert {f"main-{idx}" for idx in range(5)} <= set(enqueued)
     assert {"mi-1", "ak-1", "hi-1"} <= set(enqueued)
     assert {f"main-{idx}" for idx in range(5)} <= seen_zpids
-    assert {"mi-1", "ak-1", "hi-1"} <= seen_zpids
+    assert {"mi-1", "ak-1", "hi-1"}.isdisjoint(seen_zpids)
 
 
 def test_state_searches_have_separate_combined_cap(monkeypatch):
@@ -238,6 +240,7 @@ def test_state_searches_have_separate_combined_cap(monkeypatch):
     monkeypatch.setattr(webhook_server, "append_seen_zpids", lambda zpids: None)
     monkeypatch.setattr(webhook_server, "APIFY_MAX_ITEMS", 5)
     monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_LIMIT", 5)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_BACKGROUND", False)
     webhook_server.EXPORTED_ZPIDS.clear()
 
     def fake_enqueue(rows, source):
@@ -258,3 +261,86 @@ def test_state_searches_have_separate_combined_cap(monkeypatch):
     assert result["status"] == "processed"
     assert original_enqueued == [f"main-{idx}" for idx in range(5)]
     assert state_enqueued == [f"mi-{idx}" for idx in range(5)]
+
+
+def test_state_search_cap_is_applied_after_queue_skip(monkeypatch):
+    enqueued_by_source = []
+
+    original_rows = [_listing("main-1")]
+    state_rows = [_listing(f"mi-{idx}", "MI", "mi") for idx in range(7)]
+
+    monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
+    monkeypatch.setattr(webhook_server, "_pending_queue_state_skip_zpids", lambda: {f"mi-{idx}" for idx in range(5)})
+    monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: state_rows)
+    monkeypatch.setattr(webhook_server, "_within_initial_hours", lambda now: True)
+    monkeypatch.setattr(webhook_server, "_drain_deferred_rows", lambda: [])
+    monkeypatch.setattr(webhook_server, "_process_pending_queue", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(webhook_server, "append_seen_zpids", lambda zpids: None)
+    monkeypatch.setattr(webhook_server, "APIFY_MAX_ITEMS", 5)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_LIMIT", 5)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_BACKGROUND", False)
+    webhook_server.EXPORTED_ZPIDS.clear()
+
+    def fake_enqueue(rows, source):
+        enqueued_by_source.extend((source, str(row.get("zpid"))) for row in rows)
+        return len(rows)
+
+    monkeypatch.setattr(webhook_server, "_enqueue_pending_rows", fake_enqueue)
+
+    result = asyncio.run(
+        webhook_server.apify_hook(
+            _FakeRequest({"listings": original_rows, "upstreamDatasetId": "dataset-1"})
+        )
+    )
+
+    state_enqueued = [zpid for source, zpid in enqueued_by_source if source == "state-search"]
+
+    assert result["status"] == "processed"
+    assert state_enqueued == ["mi-5", "mi-6"]
+
+
+def test_state_search_uses_detail_wrapper(monkeypatch):
+    captured = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {
+                    "zpid": "hi-1",
+                    "detailUrl": "https://www.zillow.com/homedetails/hi-1_zpid/",
+                    "address": "1 Ocean Ave, Pahoa, HI 96778",
+                    "street": "1 Ocean Ave",
+                    "city": "Pahoa",
+                    "state": "HI",
+                    "agentName": "State Agent",
+                    "description": "Short sale subject to lender approval.",
+                }
+            ]
+
+    def fake_post(url, params, json, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr(webhook_server, "APIFY_TOKEN", "token")
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_DETAIL_WRAPPER_TASK_ID", "wrapper-task")
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_DETAIL_TASK_ID", "detail-task")
+    monkeypatch.setattr(webhook_server.requests, "post", fake_post)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_LIMIT", 5)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_FETCH_LIMIT", 7)
+
+    rows = webhook_server._run_state_task_sync_dataset_items("state-task", "hi")
+
+    assert rows[0]["zpid"] == "hi-1"
+    assert rows[0]["agentName"] == "State Agent"
+    assert rows[0]["search_source"] == "hi"
+    assert captured["json"]["taskId"] == "state-task"
+    assert captured["json"]["detailTaskId"] == "detail-task"
+    assert captured["json"]["POST_TO_WEBHOOK"] is False
+    assert captured["json"]["DEDUPE_BY_ZPID"] is False
+    assert captured["json"]["NEWEST_LIMIT"] == 7
