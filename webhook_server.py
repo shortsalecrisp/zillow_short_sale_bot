@@ -88,8 +88,14 @@ async def _log_headless_status() -> None:
 
 @app.on_event("startup")
 async def _recover_pending_queue() -> None:
-    processed = _process_pending_queue(startup=True)
-    logger.info("queue: startup processed count=%d", processed)
+    async def _recover_in_background() -> None:
+        try:
+            processed = await asyncio.to_thread(_process_pending_queue, startup=True)
+            logger.info("queue: startup processed count=%d", processed)
+        except Exception:
+            logger.exception("queue: startup recovery failed")
+
+    asyncio.create_task(_recover_in_background())
 
 # In-memory de-dupe cache of exported ZPIDs
 EXPORTED_ZPIDS: set[str] = set()

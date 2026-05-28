@@ -181,6 +181,28 @@ def test_payload_webhook_enqueues_extra_state_rows(monkeypatch):
     assert "mi-1" in enqueued
 
 
+def test_startup_queue_recovery_is_backgrounded(monkeypatch):
+    calls = []
+    scheduled = []
+
+    def fake_process_pending_queue(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 0
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        return types.SimpleNamespace()
+
+    monkeypatch.setattr(webhook_server, "_process_pending_queue", fake_process_pending_queue)
+    monkeypatch.setattr(webhook_server.asyncio, "create_task", fake_create_task)
+
+    asyncio.run(webhook_server._recover_pending_queue())
+
+    assert calls == []
+    assert len(scheduled) == 1
+    scheduled[0].close()
+
+
 def test_original_cap_does_not_consume_state_search_cap(monkeypatch):
     enqueued = []
     seen_batches = []
