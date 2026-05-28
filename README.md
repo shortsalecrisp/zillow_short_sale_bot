@@ -43,14 +43,13 @@ Set these environment variables:
 * `APIFY_STATE_SEARCH_LIMIT=5` (default)
 * `APIFY_STATE_SEARCH_FETCH_LIMIT=25` (default)
 * `APIFY_STATE_SEARCH_BACKGROUND=true` (default)
-* `APIFY_STATE_DETAIL_WRAPPER_TASK_ID=uBxydPmdgFIu14HYz` (default)
 * `APIFY_STATE_DETAIL_TASK_ID=VI5izq8RGAL14zM75` (default)
 
 These extra state tasks are intentionally **not** webhook-driven. The bot fetches them via Apify
-`/v2/actor-tasks/{APIFY_STATE_DETAIL_WRAPPER_TASK_ID}/run-sync-get-dataset-items` so each state search goes through
-the same Zillow detail scraper/merge path as the primary search. `APIFY_STATE_SEARCH_FETCH_LIMIT` controls how many
-raw state rows are checked before queue de-dupe, while `APIFY_STATE_SEARCH_LIMIT` caps the combined MI/AK/HI rows
-enqueued per primary webhook run.
+`/v2/actor-tasks/{APIFY_TASK_*}/run-sync-get-dataset-items`, applies queue de-dupe locally, and then calls
+`/v2/actor-tasks/{APIFY_STATE_DETAIL_TASK_ID}/run-sync-get-dataset-items` only for the selected unseen zpids.
+`APIFY_STATE_SEARCH_FETCH_LIMIT` controls how many raw state rows are checked before queue de-dupe, while
+`APIFY_STATE_SEARCH_LIMIT` caps the combined MI/AK/HI rows detailed and enqueued per primary webhook run.
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main

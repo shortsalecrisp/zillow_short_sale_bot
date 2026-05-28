@@ -158,6 +158,7 @@ def test_payload_webhook_enqueues_extra_state_rows(monkeypatch):
 
     monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
     monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: [_listing("mi-1", "MI", "mi")])
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows: rows, raising=False)
     monkeypatch.setattr(webhook_server, "_within_initial_hours", lambda now: True)
     monkeypatch.setattr(webhook_server, "_drain_deferred_rows", lambda: [])
     monkeypatch.setattr(webhook_server, "_process_pending_queue", lambda *args, **kwargs: 0)
@@ -193,6 +194,7 @@ def test_original_cap_does_not_consume_state_search_cap(monkeypatch):
 
     monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
     monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: state_rows)
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows: rows, raising=False)
     monkeypatch.setattr(webhook_server, "_within_initial_hours", lambda now: True)
     monkeypatch.setattr(webhook_server, "_drain_deferred_rows", lambda: [])
     monkeypatch.setattr(webhook_server, "_process_pending_queue", lambda *args, **kwargs: 0)
@@ -234,6 +236,7 @@ def test_state_searches_have_separate_combined_cap(monkeypatch):
 
     monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
     monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: state_rows)
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows: rows, raising=False)
     monkeypatch.setattr(webhook_server, "_within_initial_hours", lambda now: True)
     monkeypatch.setattr(webhook_server, "_drain_deferred_rows", lambda: [])
     monkeypatch.setattr(webhook_server, "_process_pending_queue", lambda *args, **kwargs: 0)
@@ -272,6 +275,7 @@ def test_state_search_cap_is_applied_after_queue_skip(monkeypatch):
     monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
     monkeypatch.setattr(webhook_server, "_pending_queue_state_skip_zpids", lambda: {f"mi-{idx}" for idx in range(5)})
     monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: state_rows)
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows: rows, raising=False)
     monkeypatch.setattr(webhook_server, "_within_initial_hours", lambda now: True)
     monkeypatch.setattr(webhook_server, "_drain_deferred_rows", lambda: [])
     monkeypatch.setattr(webhook_server, "_process_pending_queue", lambda *args, **kwargs: 0)
@@ -299,7 +303,7 @@ def test_state_search_cap_is_applied_after_queue_skip(monkeypatch):
     assert state_enqueued == ["mi-5", "mi-6"]
 
 
-def test_state_search_uses_detail_wrapper(monkeypatch):
+def test_state_search_runs_search_task_without_detail_wrapper(monkeypatch):
     captured = {}
 
     class _Response:
@@ -320,16 +324,17 @@ def test_state_search_uses_detail_wrapper(monkeypatch):
                 }
             ]
 
-    def fake_post(url, params, json, timeout):
+    def fake_get(url, params, timeout):
         captured["url"] = url
         captured["params"] = params
-        captured["json"] = json
         captured["timeout"] = timeout
         return _Response()
 
+    def fake_post(*args, **kwargs):
+        raise AssertionError("state search should not call the detail wrapper before filtering")
+
     monkeypatch.setattr(webhook_server, "APIFY_TOKEN", "token")
-    monkeypatch.setattr(webhook_server, "APIFY_STATE_DETAIL_WRAPPER_TASK_ID", "wrapper-task")
-    monkeypatch.setattr(webhook_server, "APIFY_STATE_DETAIL_TASK_ID", "detail-task")
+    monkeypatch.setattr(webhook_server.requests, "get", fake_get)
     monkeypatch.setattr(webhook_server.requests, "post", fake_post)
     monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_LIMIT", 5)
     monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_FETCH_LIMIT", 7)
@@ -339,8 +344,49 @@ def test_state_search_uses_detail_wrapper(monkeypatch):
     assert rows[0]["zpid"] == "hi-1"
     assert rows[0]["agentName"] == "State Agent"
     assert rows[0]["search_source"] == "hi"
-    assert captured["json"]["taskId"] == "state-task"
-    assert captured["json"]["detailTaskId"] == "detail-task"
-    assert captured["json"]["POST_TO_WEBHOOK"] is False
-    assert captured["json"]["DEDUPE_BY_ZPID"] is False
-    assert captured["json"]["NEWEST_LIMIT"] == 7
+    assert captured["url"].endswith("/actor-tasks/state-task/run-sync-get-dataset-items")
+    assert captured["params"]["limit"] == 7
+    assert captured["params"]["maxItems"] == 7
+
+
+def test_state_search_details_only_selected_unseen_rows(monkeypatch):
+    detail_calls = []
+    enqueued = []
+
+    state_rows = [
+        {
+            "zpid": f"mi-{idx}",
+            "address": f"{idx} Main St, Detroit, MI",
+            "agentName": "State Agent",
+            "search_source": "mi",
+        }
+        for idx in range(7)
+    ]
+
+    def fake_detail(rows):
+        detail_calls.extend(str(row.get("zpid")) for row in rows)
+        return [
+            {
+                **row,
+                "description": "Detailed short sale subject to lender approval.",
+            }
+            for row in rows
+        ]
+
+    monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: state_rows)
+    monkeypatch.setattr(webhook_server, "_pending_queue_state_skip_zpids", lambda: {"mi-0", "mi-1"})
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", fake_detail, raising=False)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_LIMIT", 3)
+
+    def fake_enqueue(rows, source):
+        enqueued.extend(str(row.get("zpid")) for row in rows)
+        assert all(row.get("description", "").startswith("Detailed short sale") for row in rows)
+        return len(rows)
+
+    monkeypatch.setattr(webhook_server, "_enqueue_pending_rows", fake_enqueue)
+
+    count = webhook_server._enqueue_extra_state_rows({})
+
+    assert count == 3
+    assert detail_calls == ["mi-2", "mi-3", "mi-4"]
+    assert enqueued == ["mi-2", "mi-3", "mi-4"]

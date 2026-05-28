@@ -119,7 +119,6 @@ APIFY_STATE_SEARCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_LIMIT", "5"))
 APIFY_STATE_SEARCH_FETCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_FETCH_LIMIT", "25"))
 APIFY_STATE_SEARCH_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_SEARCH_TIMEOUT_SECONDS", "60"))
 APIFY_STATE_SEARCH_BACKGROUND = os.getenv("APIFY_STATE_SEARCH_BACKGROUND", "true").lower() == "true"
-APIFY_STATE_DETAIL_WRAPPER_TASK_ID = os.getenv("APIFY_STATE_DETAIL_WRAPPER_TASK_ID", "uBxydPmdgFIu14HYz").strip()
 APIFY_STATE_DETAIL_TASK_ID = os.getenv("APIFY_STATE_DETAIL_TASK_ID", "VI5izq8RGAL14zM75").strip()
 APIFY_STATE_DETAIL_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_DETAIL_TIMEOUT_SECONDS", "240"))
 PENDING_QUEUE_TAB = os.getenv("PENDING_QUEUE_TAB", "PendingQueue")
@@ -181,66 +180,120 @@ EXTRA_STATE_SEARCHES = [
 ]
 
 
-def _run_state_detail_wrapper_task(task_id: str, source: str, limit: int) -> Optional[List[Dict[str, Any]]]:
-    if not APIFY_STATE_DETAIL_WRAPPER_TASK_ID or not APIFY_STATE_DETAIL_TASK_ID:
-        return None
+def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not rows:
+        return []
+    if not APIFY_TOKEN:
+        logger.warning("state-search: detail task skipped missing_apify_token")
+        return rows
+    if not APIFY_STATE_DETAIL_TASK_ID:
+        logger.warning("state-search: detail task skipped missing_task_id")
+        return rows
 
-    url = f"https://api.apify.com/v2/actor-tasks/{APIFY_STATE_DETAIL_WRAPPER_TASK_ID}/run-sync-get-dataset-items"
+    selected_zpids: List[str] = []
+    source_by_zpid: Dict[str, str] = {}
+    seen_zpids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        zpid = str(row.get("zpid", "")).strip()
+        if not zpid or zpid in seen_zpids:
+            continue
+        selected_zpids.append(zpid)
+        source_by_zpid[zpid] = str(row.get("search_source") or "state-search")
+        seen_zpids.add(zpid)
+
+    if not selected_zpids:
+        return rows
+
+    url = f"https://api.apify.com/v2/actor-tasks/{APIFY_STATE_DETAIL_TASK_ID}/run-sync-get-dataset-items"
     params = {
         "token": APIFY_TOKEN,
-        "limit": limit,
+        "limit": len(selected_zpids),
         "clean": "true",
         "format": "json",
     }
     payload = {
-        "taskId": task_id,
-        "detailTaskId": APIFY_STATE_DETAIL_TASK_ID,
-        "USE_DETAIL_SCRAPER": True,
-        "POST_TO_WEBHOOK": False,
-        "PUSH_TO_DATASET": True,
-        "DEDUPE_BY_ZPID": False,
-        "RESULTS_LIMIT": limit,
-        "NEWEST_LIMIT": limit,
-        "MAX_ITEMS": limit,
+        "zpids": selected_zpids,
+        "propertyStatus": "FOR_SALE",
+        "extractBuildingUnits": "disabled",
+        "maxConcurrency": min(max(len(selected_zpids), 1), 10),
     }
     try:
         resp = requests.post(
             url,
             params=params,
             json=payload,
-            timeout=max(APIFY_STATE_DETAIL_TIMEOUT_SECONDS, APIFY_STATE_SEARCH_TIMEOUT_SECONDS),
+            timeout=APIFY_STATE_DETAIL_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
         items = resp.json()
         if not isinstance(items, list):
             logger.warning(
-                "state-search: source=%s wrapper_task_id=%s invalid_payload_type=%s",
-                source,
-                APIFY_STATE_DETAIL_WRAPPER_TASK_ID,
+                "state-search: detail_task_id=%s invalid_payload_type=%s",
+                APIFY_STATE_DETAIL_TASK_ID,
                 type(items).__name__,
             )
-            return []
-        raw_rows = [item for item in items[:limit] if isinstance(item, dict)]
-        prepared = _prepare_extra_state_rows(raw_rows, source)
+            return rows
+
+        detail_by_zpid: Dict[str, Dict[str, Any]] = {}
+        dropped = 0
+        for item in items:
+            if not isinstance(item, dict):
+                dropped += 1
+                continue
+            item_zpid = str(item.get("zpid", "")).strip()
+            source = source_by_zpid.get(item_zpid, str(item.get("search_source") or "state-search"))
+            normalized, drop_reason = _normalize_extra_state_row(item, source)
+            if normalized is None:
+                dropped += 1
+                logger.info("state-search: detail dropped reason=%s", drop_reason)
+                continue
+            zpid = str(normalized.get("zpid", "")).strip()
+            if not zpid or zpid not in source_by_zpid:
+                dropped += 1
+                continue
+            normalized["search_source"] = source_by_zpid[zpid]
+            detail_by_zpid[zpid] = normalized
+
+        enriched: List[Dict[str, Any]] = []
+        matched = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                enriched.append(row)
+                continue
+            zpid = str(row.get("zpid", "")).strip()
+            detail = detail_by_zpid.get(zpid)
+            if not detail:
+                enriched.append(row)
+                continue
+            merged = dict(row)
+            merged.update(detail)
+            if row.get("search_source"):
+                merged["search_source"] = row.get("search_source")
+            enriched.append(merged)
+            matched += 1
+
         logger.info(
-            "state-search: source=%s detail_wrapper=%s prepared=%d",
-            source,
-            APIFY_STATE_DETAIL_WRAPPER_TASK_ID,
-            len(prepared["rows"]),
+            "state-search: detail_task_id=%s requested=%d returned=%d matched=%d dropped=%d",
+            APIFY_STATE_DETAIL_TASK_ID,
+            len(selected_zpids),
+            len(items),
+            matched,
+            dropped,
         )
-        return prepared["rows"]
+        return enriched
     except requests.Timeout:
-        logger.warning("state-search: source=%s wrapper_task_id=%s timeout", source, APIFY_STATE_DETAIL_WRAPPER_TASK_ID)
+        logger.warning("state-search: detail_task_id=%s timeout", APIFY_STATE_DETAIL_TASK_ID)
     except requests.RequestException as exc:
         logger.warning(
-            "state-search: source=%s wrapper_task_id=%s request_error=%s",
-            source,
-            APIFY_STATE_DETAIL_WRAPPER_TASK_ID,
+            "state-search: detail_task_id=%s request_error=%s",
+            APIFY_STATE_DETAIL_TASK_ID,
             _format_request_exception(exc),
         )
     except ValueError:
-        logger.warning("state-search: source=%s wrapper_task_id=%s invalid_json", source, APIFY_STATE_DETAIL_WRAPPER_TASK_ID)
-    return None
+        logger.warning("state-search: detail_task_id=%s invalid_json", APIFY_STATE_DETAIL_TASK_ID)
+    return rows
 
 
 def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[str, Any]]:
@@ -252,10 +305,6 @@ def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[s
         logger.info("state-search: source=%s task_id=%s skipped limit=%s", source, task_id, APIFY_STATE_SEARCH_LIMIT)
         return []
     limit = max(_state_search_fetch_limit(source), selection_limit)
-
-    wrapper_rows = _run_state_detail_wrapper_task(task_id, source, limit)
-    if wrapper_rows is not None:
-        return wrapper_rows
 
     url = f"https://api.apify.com/v2/actor-tasks/{task_id}/run-sync-get-dataset-items"
     params = {
@@ -279,6 +328,12 @@ def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[s
             return []
         raw_rows = [item for item in payload[:limit] if isinstance(item, dict)]
         prepared = _prepare_extra_state_rows(raw_rows, source)
+        logger.info(
+            "state-search: source=%s task_id=%s search_only_prepared=%d",
+            source,
+            task_id,
+            len(prepared["rows"]),
+        )
         return prepared["rows"]
     except requests.Timeout:
         logger.warning("state-search: source=%s task_id=%s timeout", source, task_id)
@@ -335,16 +390,11 @@ def _enqueue_extra_state_rows(payload: Dict[str, Any]) -> int:
         extra_selection.get("invalid_rows", 0),
         extra_selection["selected"],
     )
-    logger.info("state-search: final_appended=%d", len(extra_selection["rows"]))
-    routed_for_detail = sum(1 for row in extra_selection["rows"] if not _row_has_listing_text(row))
-    if routed_for_detail:
-        logger.info(
-            "state-search: detail-enrichment-route rows=%d reason=missing_listing_text",
-            routed_for_detail,
-        )
     if not extra_selection["rows"]:
         return 0
-    extra_enqueued = _enqueue_pending_rows(extra_selection["rows"], source="state-search")
+    logger.info("state-search: selected_for_detail=%d", len(extra_selection["rows"]))
+    detail_rows = _run_state_detail_task_for_rows(extra_selection["rows"])
+    extra_enqueued = _enqueue_pending_rows(detail_rows, source="state-search")
     logger.info("state-search: enqueued_extra=%d", extra_enqueued)
     return extra_enqueued
 
