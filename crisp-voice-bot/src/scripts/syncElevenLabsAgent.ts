@@ -50,6 +50,16 @@ type AgentResponse = {
     [key: string]: unknown;
   };
   workflow?: Record<string, unknown>;
+  platform_settings?: {
+    overrides?: {
+      conversation_config_override?: {
+        tts?: Record<string, unknown>;
+        [key: string]: unknown;
+      };
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
 };
 
 type ToolResponse = {
@@ -62,9 +72,9 @@ type ToolResponse = {
 
 
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
-const FIRST_MESSAGE = '<break time="1.0s" /> Hi, is this {{firstName}}?';
+const FIRST_MESSAGE = '<break time="1.0s" /> Hey, is this {{firstName}}?';
 const INITIAL_WAIT_TIME_SECONDS = 2.0;
-const TURN_TIMEOUT_SECONDS = 2.0;
+const TURN_TIMEOUT_SECONDS = 1.2;
 const TURN_EAGERNESS = "eager";
 const SPECULATIVE_TURN = false;
 const SOFT_TIMEOUT_SECONDS = -1;
@@ -72,7 +82,7 @@ const RETRANSCRIBE_ON_TURN_TIMEOUT = true;
 const DISABLE_FIRST_MESSAGE_INTERRUPTION = false;
 const TEMPERATURE = 0.1;
 const MAX_TOKENS = 80;
-const TTS_SPEED = 1.05;
+const TTS_SPEED = 1.0;
 const BACKUP_LLM_PREFERENCE = "disabled";
 const CASCADE_TIMEOUT_SECONDS: number | null = null;
 const VOICEMAIL_MESSAGE_TEMPLATE = "{{voicemailMessage}}";
@@ -321,6 +331,31 @@ async function main(): Promise<void> {
     throw new Error("Unable to find live_transfer_requested tool for ElevenLabs workflow sync");
   }
 
+  const currentOverrides = currentAgent.platform_settings?.overrides ?? {};
+  const currentConversationConfigOverrides = currentOverrides.conversation_config_override ?? {};
+  const currentTtsOverrides = currentConversationConfigOverrides.tts ?? {};
+  const updatedPlatformSettings = {
+    ...(currentAgent.platform_settings ?? {}),
+    overrides: {
+      ...currentOverrides,
+      conversation_config_override: {
+        ...currentConversationConfigOverrides,
+        tts: {
+          ...currentTtsOverrides,
+          voice_id: true,
+        },
+      },
+    },
+  };
+
+  const updatedTtsConfig = {
+    ...currentAgent.conversation_config.tts,
+    ...(config.elevenLabs.voiceId ? { voice_id: config.elevenLabs.voiceId } : {}),
+    ...(config.elevenLabs.ttsModel ? { model_id: config.elevenLabs.ttsModel } : {}),
+    speed: TTS_SPEED,
+    optimize_streaming_latency: 0,
+  };
+
   const updatedConversationConfig = {
     ...currentAgent.conversation_config,
     turn: {
@@ -337,12 +372,7 @@ async function main(): Promise<void> {
         use_llm_generated_message: false,
       },
     },
-    tts: {
-      ...currentAgent.conversation_config.tts,
-      ...(config.elevenLabs.voiceId ? { voice_id: config.elevenLabs.voiceId } : {}),
-      ...(config.elevenLabs.ttsModel ? { model_id: config.elevenLabs.ttsModel } : {}),
-      speed: TTS_SPEED,
-    },
+    tts: updatedTtsConfig,
     agent: {
       ...currentAgent.conversation_config.agent,
       first_message: FIRST_MESSAGE,
@@ -400,6 +430,7 @@ async function main(): Promise<void> {
     `/v1/convai/agents/${agentId}`,
     {
       conversation_config: updatedConversationConfig,
+      platform_settings: updatedPlatformSettings,
       workflow,
     },
     {

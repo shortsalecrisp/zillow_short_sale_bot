@@ -129,3 +129,16 @@ test("post-call fallback treats stale initiated conversations with no audio as n
     false,
   );
 });
+
+test("post-call transcript labels assistant turns with the selected assistant name", async () => {
+  const { buildVoiceResponseStatus, transcriptForEmail } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    transcript: [
+      { role: "assistant", message: "Hey, is this Chris?" },
+      { role: "user", message: "This is Chris." },
+    ],
+  };
+
+  assert.equal(transcriptForEmail(conversation, "Finch"), "Finch: Hey, is this Chris?\nAgent: This is Chris.");
+  assert.equal(buildVoiceResponseStatus("call_received_agent_hung_up", undefined, "Finch"), "Call received but agent hung up on Finch");
+});

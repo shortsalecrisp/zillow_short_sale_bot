@@ -12,6 +12,9 @@ type SendCallTranscriptEmailInput = {
   summary: string;
   transcript: string;
   testMode: boolean;
+  assistantName?: string;
+  voiceName?: string;
+  voiceVariant?: string;
 };
 
 export async function sendCallTranscriptEmail({
@@ -26,6 +29,9 @@ export async function sendCallTranscriptEmail({
   summary,
   transcript,
   testMode,
+  assistantName,
+  voiceName,
+  voiceVariant,
 }: SendCallTranscriptEmailInput): Promise<void> {
   const emailConfig = requireEmailConfig();
   const transporter = createEmailTransporter(emailConfig);
@@ -34,11 +40,15 @@ export async function sendCallTranscriptEmail({
   const transcriptBody = transcript.trim() || "No transcript was available for this call.";
   const safeSummary = summary.trim() || "No summary was available for this call.";
   const subject = `Call Transcript - ${agentName} - ${outcome}`;
+  const voiceLabel = [voiceName, assistantName ? `as ${assistantName}` : undefined, voiceVariant ? `variant ${voiceVariant}` : undefined]
+    .filter(Boolean)
+    .join(" ");
 
   const textLines = [
     `Agent: ${agentName}`,
     `Agent Phone: ${formattedRequestedPhone}`,
     ...(testMode && dialedPhone !== requestedPhone ? [`Dialed Number (Test Mode): ${formattedDialedPhone}`] : []),
+    ...(voiceLabel ? [`Voice: ${voiceLabel}`] : []),
     `Property: ${listingAddress}`,
     `Outcome: ${outcome}`,
     `Call Attempt: ${callAttemptNumber}`,
@@ -52,9 +62,10 @@ export async function sendCallTranscriptEmail({
     transcriptBody,
   ];
 
-  const html = `<p><strong>Agent:</strong> ${escapeHtml(agentName)}</p>
+const html = `<p><strong>Agent:</strong> ${escapeHtml(agentName)}</p>
 <p><strong>Agent Phone:</strong> ${escapeHtml(formattedRequestedPhone)}</p>
 ${testMode && dialedPhone !== requestedPhone ? `<p><strong>Dialed Number (Test Mode):</strong> ${escapeHtml(formattedDialedPhone)}</p>` : ""}
+${voiceLabel ? `<p><strong>Voice:</strong> ${escapeHtml(voiceLabel)}</p>` : ""}
 <p><strong>Property:</strong> ${escapeHtml(listingAddress)}</p>
 <p><strong>Outcome:</strong> ${escapeHtml(outcome)}</p>
 <p><strong>Call Attempt:</strong> ${callAttemptNumber}</p>

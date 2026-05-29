@@ -94,12 +94,12 @@ function transcriptText(conversation: ElevenLabsConversation): string {
     .join(" | ");
 }
 
-function transcriptForEmail(conversation: ElevenLabsConversation): string {
+export function transcriptForEmail(conversation: ElevenLabsConversation, assistantName = "Emmy"): string {
   return (conversation.transcript ?? [])
     .filter((item) => typeof item.message === "string" && item.message.trim() !== "")
     .map((item) => {
       const role = (item.role ?? "unknown").toLowerCase();
-      const speaker = role === "user" ? "Agent" : role === "assistant" ? "Emmy" : role;
+      const speaker = role === "user" ? "Agent" : role === "assistant" ? assistantName : role;
       return `${speaker}: ${item.message?.trim() ?? ""}`;
     })
     .join("\n");
@@ -137,7 +137,7 @@ function hasLiveTransferRequest(conversation: ElevenLabsConversation): boolean {
   return hasToolCall(conversation, "live_transfer_requested");
 }
 
-export function buildVoiceResponseStatus(callResult: string, callbackTime?: string): string {
+export function buildVoiceResponseStatus(callResult: string, callbackTime?: string, assistantName = "Emmy"): string {
   if (callResult === "warm_transfer_completed") {
     return "Warm transfer accepted";
   }
@@ -176,7 +176,7 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
   }
 
   if (callResult === "call_received_agent_hung_up") {
-    return "Call received but agent hung up on Emmy";
+    return `Call received but agent hung up on ${assistantName}`;
   }
 
   if (callResult === "call_failed_invalid_number") {
@@ -585,6 +585,9 @@ async function sendTranscriptEmailIfEnabled(params: {
       summary: params.summary,
       transcript: params.transcript,
       testMode: params.metadata.testMode,
+      assistantName: params.metadata.assistantName,
+      voiceName: params.metadata.voiceName,
+      voiceVariant: params.metadata.voiceVariant,
     });
   } catch (error) {
     logger.error("Call transcript email failed", {
@@ -611,7 +614,7 @@ async function processPostCallOutcome(
 
   const conversation = await fetchConversation(conversationId);
   const summary = conversation.analysis?.transcript_summary ?? transcriptText(conversation);
-  const fullTranscript = transcriptForEmail(conversation);
+  const fullTranscript = transcriptForEmail(conversation, metadata.assistantName ?? "Emmy");
 
   if (hasToolCall(conversation, "callback_requested")) {
     const callbackTime = isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified");
@@ -738,7 +741,7 @@ async function processPostCallOutcome(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "call_received_agent_hung_up",
-      responseStatus: buildVoiceResponseStatus("call_received_agent_hung_up"),
+      responseStatus: buildVoiceResponseStatus("call_received_agent_hung_up", undefined, metadata.assistantName),
       leadStatusCode: "N",
       voiceNotes: summary,
     });
@@ -746,7 +749,7 @@ async function processPostCallOutcome(
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("call_received_agent_hung_up"),
+      outcome: buildVoiceResponseStatus("call_received_agent_hung_up", undefined, metadata.assistantName),
       summary,
       transcript: fullTranscript,
     });

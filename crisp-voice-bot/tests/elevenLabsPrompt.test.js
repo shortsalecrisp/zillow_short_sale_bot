@@ -20,7 +20,7 @@ function extractSection(text, startMarker, endMarker) {
   return text.slice(start, end);
 }
 
-test("opening fallback confirmation uses a short continuation instead of repeating the address", () => {
+test("opening generic pickup fallback moves forward instead of repeating quick-second", () => {
   const prompt = readPrompt();
   const fallbackConfirmation = extractSection(
     prompt,
@@ -33,9 +33,12 @@ test("opening fallback confirmation uses a short continuation instead of repeati
     .map((line) => line.trim())
     .filter((line) => line.startsWith('"'));
 
-  assert.deepEqual(spokenLines, ['"Perfect, thanks. Got a quick second?"']);
+  assert.deepEqual(spokenLines, [
+    '"Thanks. Quick reason for my call, I was reaching out about your short sale listing. How are you planning to handle the bank side?"',
+  ]);
   assert.doesNotMatch(spokenLines.join("\n"), /{{streetAddress}}/);
   assert.doesNotMatch(spokenLines.join("\n"), /Crisp Short Sales/);
+  assert.doesNotMatch(spokenLines.join("\n"), /Got a quick second/);
 });
 
 test("prompt keeps the standard opener short and saves the address for which-property questions", () => {
@@ -43,7 +46,7 @@ test("prompt keeps the standard opener short and saves the address for which-pro
   const openerBranch = extractSection(
     prompt,
     "- If the caller confirms identity after the first name-only opener, your very next line must be:",
-    "- Do not ask \"Hi, is this {{firstName}}?\" twice after a clear identity confirmation.",
+    "- Do not ask \"Hey, is this {{firstName}}?\" twice after a clear identity confirmation.",
   );
   const genericFallbackBranch = extractSection(
     prompt,
@@ -53,10 +56,14 @@ test("prompt keeps the standard opener short and saves the address for which-pro
 
   assert.match(
     openerBranch,
-    /Hi {{firstName}}, Emmy with Crisp Short Sales\. I'm calling about your short sale listing\. Got a quick second\?/,
+    /Hey {{firstName}}, this is {{assistantName}} with Crisp Short Sales\. Quick reason for my call, I was reaching out about your short sale listing\. How are you planning to handle the bank side\?/,
   );
   assert.doesNotMatch(openerBranch, /{{streetAddress}}/);
-  assert.match(genericFallbackBranch, /Hi, this is Emmy with Crisp Short Sales\. Is this {{firstName}}\?/);
+  assert.match(
+    genericFallbackBranch,
+    /Hey, this is {{assistantName}} with Crisp Short Sales\. I'm trying to reach {{firstName}} about a short sale listing\. Did I catch you for a second\?/,
+  );
+  assert.doesNotMatch(genericFallbackBranch, /Is this {{firstName}}\?/);
   assert.doesNotMatch(genericFallbackBranch, /{{streetAddress}}/);
   assert.match(prompt, /If they ask which listing, which property, or what address/);
 }
@@ -84,6 +91,19 @@ test("prompt treats placeholder-only user turns as background noise and skips sp
   assert.match(prompt, /background noise/i);
   assert.match(prompt, /call `skip_turn`/);
   assert.match(prompt, /Do not say[\s\S]{0,120}Are you still there\?/);
+});
+
+test("prompt keeps third-party callback timing questions direct and name-specific", () => {
+  const prompt = readPrompt();
+  const callbackFlow = extractSection(
+    prompt,
+    "Callback flow:",
+    "If they say no, all set, thanks, bye, ok, or similar, say:",
+  );
+
+  assert.match(callbackFlow, /What time should Yoni call \[name\]\?/);
+  assert.match(callbackFlow, /Do not say:[\s\S]*Great, what time should Yoni call her\?/);
+  assert.match(prompt, /use plain human phrasing and the real name when you know it/i);
 });
 
 test("prompt waits through office robots and gatekeeper transfer attempts", () => {
@@ -160,7 +180,7 @@ test("prompt skips the address when identity confirmation already asks how to he
   assert.match(identityHelpBranch, /Do not ask "Got a quick second\?"/);
   assert.match(
     identityHelpBranch,
-    /Hi {{firstName}}, Emmy with Crisp Short Sales\. I'm calling about your short sale listing\. What's your plan for handling it with the bank\?/,
+    /Hey {{firstName}}, this is {{assistantName}} with Crisp Short Sales\. Quick reason for my call, I was reaching out about your short sale listing\. How are you planning to handle the bank side\?/,
   );
 });
 
@@ -192,8 +212,18 @@ test("prompt clearly explains purpose before callback when caller is busy or can
   assert.match(busyNoiseBranch, /Do not only say that Yoni can explain it better/);
   assert.match(
     busyNoiseBranch,
-    /No worries, I'll be quick\. I'm Emmy with Crisp Short Sales, calling for Yoni Kutler about your short sale listing at {{streetAddress}}\./,
+    /No worries, I'll be quick\. I'm {{assistantName}} with Crisp Short Sales, calling for Yoni Kutler about your short sale listing at {{streetAddress}}\./,
   );
   assert.match(busyNoiseBranch, /paperwork, lender calls, and approval process/);
   assert.match(busyNoiseBranch, /call `callback_requested`/);
+});
+
+test("prompt uses the per-call assistant name instead of hard-coding Emmy in spoken lines", () => {
+  const prompt = readPrompt();
+
+  assert.match(prompt, /You are {{assistantName}}, a warm/);
+  assert.match(prompt, /this is {{assistantName}} with Crisp Short Sales/);
+  assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
+  assert.doesNotMatch(prompt, /I'm Emmy with Crisp Short Sales/i);
+  assert.doesNotMatch(prompt, /let .* know Emmy from Crisp Short Sales/i);
 });

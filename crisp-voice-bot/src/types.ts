@@ -27,6 +27,10 @@ export interface CallMetadata {
   dialedPhone: string;
   testMode: boolean;
   callConnectRetryCount?: number;
+  assistantName?: string;
+  voiceVariant?: string;
+  voiceName?: string;
+  voiceId?: string;
 }
 
 export interface LiveTransferCallMetadata {

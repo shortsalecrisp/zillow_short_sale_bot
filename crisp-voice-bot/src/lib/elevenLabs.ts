@@ -2,6 +2,7 @@ import axios, { AxiosError } from "axios";
 import { config } from "./config";
 import { rememberElevenLabsCallContext } from "./elevenLabsCallContext";
 import { scheduleElevenLabsPostCallFallback } from "./elevenLabsPostCall";
+import { selectElevenLabsVoiceVariant, type ElevenLabsVoiceVariant } from "./elevenLabsVoiceVariant";
 import { logger } from "./logger";
 import type { CallMetadata, ElevenLabsOutboundCallResponse } from "../types";
 
@@ -155,20 +156,34 @@ export function getStreetAddress(listingAddress: string): string {
   return formatLeadingStreetNumber(normalizedAddress);
 }
 
-function buildVoicemailMessage(streetAddress: string, callAttemptNumber: number): string {
+function resolveElevenLabsVoiceVariant(metadata: CallMetadata): ElevenLabsVoiceVariant {
+  if (metadata.voiceVariant && metadata.assistantName && metadata.voiceName && metadata.voiceId) {
+    return {
+      key: metadata.voiceVariant as ElevenLabsVoiceVariant["key"],
+      assistantName: metadata.assistantName as ElevenLabsVoiceVariant["assistantName"],
+      voiceName: metadata.voiceName as ElevenLabsVoiceVariant["voiceName"],
+      voiceId: metadata.voiceId,
+    };
+  }
+
+  return selectElevenLabsVoiceVariant({ rowNumber: metadata.rowNumber });
+}
+
+function buildVoicemailMessage(streetAddress: string, callAttemptNumber: number, assistantName: string): string {
   if (callAttemptNumber > 1) {
     return "";
   }
 
-  return `Hi, this is Emmy with Crisp Short Sales calling about the short sale listing at ${streetAddress}. We specialize in helping agents with the short sale process and can handle the paperwork, phone calls, and the whole process with the lender to take that work off your shoulders. Yoni is our short sale specialist, and he can answer any questions you have. Give him a call back at 404-300-9526 when you get a chance. Thanks.`;
+  return `Hi, this is ${assistantName} with Crisp Short Sales calling about the short sale listing at ${streetAddress}. We specialize in helping agents with the short sale process and can handle the paperwork, phone calls, and the whole process with the lender to take that work off your shoulders. Yoni is our short sale specialist, and he can answer any questions you have. Give him a call back at 404-300-9526 when you get a chance. Thanks.`;
 }
 
-export async function placeElevenLabsOutboundCall(params: {
+export function buildElevenLabsOutboundCallBody(params: {
+  agentId: string;
+  agentPhoneNumberId: string;
   to: string;
   metadata: CallMetadata;
-  schedulePostCallFallback?: boolean;
-}): Promise<ElevenLabsOutboundCallResponse> {
-  const { agentId, agentPhoneNumberId } = requireElevenLabsOutboundConfig();
+}) {
+  const voiceVariant = resolveElevenLabsVoiceVariant(params.metadata);
   const streetAddress = getStreetAddress(params.metadata.listingAddress);
   const dynamicVariables = {
     rowNumber: params.metadata.rowNumber,
@@ -180,26 +195,59 @@ export async function placeElevenLabsOutboundCall(params: {
     requestedPhone: params.metadata.requestedPhone,
     listingAddress: params.metadata.listingAddress,
     streetAddress,
-    voicemailMessage: buildVoicemailMessage(streetAddress, params.metadata.callAttemptNumber),
+    assistantName: voiceVariant.assistantName,
+    voiceVariant: voiceVariant.key,
+    voiceName: voiceVariant.voiceName,
+    voicemailMessage: buildVoicemailMessage(streetAddress, params.metadata.callAttemptNumber, voiceVariant.assistantName),
     testMode: params.metadata.testMode,
     liveTransferNumber: config.liveTransferNumber,
     toolWebhookBaseUrl: config.baseUrl,
   };
 
-  const body = {
-    agent_id: agentId,
-    agent_phone_number_id: agentPhoneNumberId,
+  return {
+    agent_id: params.agentId,
+    agent_phone_number_id: params.agentPhoneNumberId,
     to_number: params.to,
     conversation_initiation_client_data: {
       dynamic_variables: dynamicVariables,
+      conversation_config_override: {
+        tts: {
+          voice_id: voiceVariant.voiceId,
+        },
+      },
     },
   };
+}
+
+export async function placeElevenLabsOutboundCall(params: {
+  to: string;
+  metadata: CallMetadata;
+  schedulePostCallFallback?: boolean;
+}): Promise<ElevenLabsOutboundCallResponse> {
+  const { agentId, agentPhoneNumberId } = requireElevenLabsOutboundConfig();
+  const voiceVariant = resolveElevenLabsVoiceVariant(params.metadata);
+  const metadata: CallMetadata = {
+    ...params.metadata,
+    assistantName: voiceVariant.assistantName,
+    voiceVariant: voiceVariant.key,
+    voiceName: voiceVariant.voiceName,
+    voiceId: voiceVariant.voiceId,
+  };
+  const body = buildElevenLabsOutboundCallBody({
+    agentId,
+    agentPhoneNumberId,
+    to: params.to,
+    metadata,
+  });
 
   logger.info("Placing ElevenLabs outbound call via SIP trunk", {
     to: params.to,
-    rowNumber: params.metadata.rowNumber,
-    callAttemptNumber: params.metadata.callAttemptNumber,
-    fullName: params.metadata.fullName,
+    rowNumber: metadata.rowNumber,
+    callAttemptNumber: metadata.callAttemptNumber,
+    fullName: metadata.fullName,
+    assistantName: voiceVariant.assistantName,
+    voiceVariant: voiceVariant.key,
+    voiceName: voiceVariant.voiceName,
     agentId,
     agentPhoneNumberId,
   });
@@ -216,19 +264,21 @@ export async function placeElevenLabsOutboundCall(params: {
       conversationId: response.data.conversation_id,
       sipCallId: response.data.sip_call_id,
       message: response.data.message,
+      assistantName: voiceVariant.assistantName,
+      voiceVariant: voiceVariant.key,
     });
 
     if (response.data.conversation_id) {
-      rememberElevenLabsCallContext(params.metadata, response.data.conversation_id);
+      rememberElevenLabsCallContext(metadata, response.data.conversation_id);
 
       if (params.schedulePostCallFallback !== false) {
         scheduleElevenLabsPostCallFallback({
           conversationId: response.data.conversation_id,
-          metadata: params.metadata,
+          metadata,
         });
       }
     } else {
-      rememberElevenLabsCallContext(params.metadata);
+      rememberElevenLabsCallContext(metadata);
     }
 
     return response.data;
