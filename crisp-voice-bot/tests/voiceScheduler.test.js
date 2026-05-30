@@ -152,6 +152,95 @@ test("queue runner is open on weekends so weekend-local calls can be placed", ()
   assert.equal(sundayAfternoonEt, true);
 });
 
+test("queue runner is paused through Memorial Day", () => {
+  const memorialDayAfternoon = runSchedulerExpression(
+    'isVoiceBotQueuePaused_(new Date("2026-05-25T21:00:00Z"))',
+  );
+  const nextDayEt = runSchedulerExpression(
+    'isVoiceBotQueuePaused_(new Date("2026-05-26T04:00:00Z"))',
+  );
+
+  assert.equal(memorialDayAfternoon, true);
+  assert.equal(nextDayEt, false);
+});
+
+test("voice performance logs append to the one AP cell instead of replacing earlier attempts", () => {
+  const stored = runSchedulerScript(`
+    let value = "--- CODEX_VOICE_CALL_METRICS_V1 ---\\n{\\"call\\":{\\"callAttemptNumber\\":1}}";
+    const writes = [];
+    const sheet = {
+      getRange(rowNumber, columnNumber) {
+        return {
+          getValue() {
+            return value;
+          },
+          setValue(nextValue) {
+            value = nextValue;
+          }
+        };
+      }
+    };
+
+    appendVoiceBotFieldIfPresent_(sheet, 3264, VOICE_BOT_COL_VOICE_NOTES, {
+      voiceNotes: "--- CODEX_VOICE_CALL_METRICS_V1 ---\\n{\\"call\\":{\\"callAttemptNumber\\":2}}"
+    }, "voiceNotes", writes);
+
+    value;
+  `);
+
+  assert.match(stored, /"callAttemptNumber":1/);
+  assert.match(stored, /"callAttemptNumber":2/);
+  assert.match(stored, /\n\n---\n\n--- CODEX_VOICE_CALL_METRICS_V1 ---/);
+});
+
+test("start-call payload does not echo the AP codex analysis cell as runtime notes", () => {
+  const notes = runSchedulerExpression(`buildVoiceBotStartCallPayload_({
+    rowNumber: 3264,
+    callAttemptNumber: 2,
+    firstName: "Jane",
+    lastName: "Agent",
+    fullName: "Jane Agent",
+    phone: "+12175550123",
+    email: "jane@example.com",
+    listingAddress: "123 Main St, Tampa, FL",
+    createdAt: "2026-05-01T10:00:00-04:00",
+    existingResponseStatus: "Left Vm",
+    voiceNotes: "--- CODEX_VOICE_CALL_METRICS_V1 ---",
+    dueAt: new Date("2026-05-02T20:00:00Z"),
+    callWindow: "afternoon",
+    agentTimeZone: "America/New_York"
+  }).notes`);
+
+  assert.equal(notes, undefined);
+});
+
+test("voice performance log-only updates do not change scheduling cells", () => {
+  const result = JSON.parse(runSchedulerScript(`
+    const cleared = [];
+    const fields = [];
+    const sheet = {
+      getRange(rowNumber, columnNumber) {
+        return {
+          getValue() {
+            return "existing";
+          },
+          clearContent() {
+            cleared.push(columnNumber);
+          },
+          setValue() {
+            throw new Error("log-only update should not write scheduling fields");
+          }
+        };
+      }
+    };
+
+    updateVoiceBotSchedulingCells_(sheet, 3264, { voiceNotes: "metrics only" }, 2, fields);
+    JSON.stringify({ cleared, fields });
+  `));
+
+  assert.deepEqual(result, { cleared: [], fields: [] });
+});
+
 test("first Emmy call uses the first afternoon window after follow-up text", () => {
   const beforeWindow = runSchedulerExpression(
     'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T19:00:00Z"), "America/New_York").toISOString()',

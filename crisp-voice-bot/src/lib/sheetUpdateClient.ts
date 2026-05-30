@@ -10,6 +10,17 @@ export function buildVoiceQueueRefillPayload(): Record<string, string> {
   };
 }
 
+function redactLargeSheetFields(payload: Record<string, unknown>): Record<string, unknown> {
+  if (typeof payload.voiceNotes !== "string") {
+    return payload;
+  }
+
+  return {
+    ...payload,
+    voiceNotes: `[redacted ${payload.voiceNotes.length} chars]`,
+  };
+}
+
 export async function requestVoiceQueueRefill(context: {
   conversationId?: string;
   rowNumber?: number;
@@ -75,6 +86,7 @@ export async function postSheetUpdate(payload: SheetUpdateRequest): Promise<void
         token: "[redacted]",
       }
     : body;
+  const safeLogBody = redactLargeSheetFields(logBody);
 
   logger.info("Posting sheet update", {
     mode: useAppsScript ? "google_apps_script" : "local_stub",
@@ -84,7 +96,7 @@ export async function postSheetUpdate(payload: SheetUpdateRequest): Promise<void
     callResult: payload.callResult,
     responseStatus: payload.responseStatus,
     leadStatusCode: payload.leadStatusCode,
-    copyPayload: JSON.stringify(logBody),
+    copyPayload: JSON.stringify(safeLogBody),
   });
 
   try {

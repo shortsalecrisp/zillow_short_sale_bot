@@ -52,6 +52,8 @@ const VOICE_BOT_TIMEZONE = 'America/New_York';
 const VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN = 10;
 const VOICE_BOT_MAX_ACTIVE_CALLS = 2;
 const VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES = 60;
+const VOICE_BOT_PAUSED_UNTIL_ET = '2026-05-26T00:00:00-04:00';
+const VOICE_BOT_PAUSE_REASON = 'Memorial Day pause';
 const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_START_MINUTES = 16 * 60;
 const VOICE_BOT_WEEKDAY_AFTERNOON_WINDOW_END_MINUTES = 17 * 60;
 const VOICE_BOT_WEEKEND_AFTERNOON_WINDOW_START_MINUTES = 16 * 60;
@@ -137,7 +139,9 @@ const VOICE_BOT_COL_CALLBACK_REQUESTED = 38; // AL = callback_requested
 const VOICE_BOT_COL_CALLBACK_TIME = 39; // AM = callback_time
 const VOICE_BOT_COL_CALL_2_SENT = 40; // AN = voice_call_2_sent
 const VOICE_BOT_COL_CALL_2_RESULT = 41; // AO = voice_call_2_result
-const VOICE_BOT_COL_VOICE_NOTES = 42; // AP = voice_notes
+const VOICE_BOT_COL_VOICE_NOTES = 42; // AP = voice_notes / Codex voice performance log
+const VOICE_BOT_VOICE_NOTES_SEPARATOR = '\n\n---\n\n';
+const VOICE_BOT_MAX_VOICE_NOTES_CHARS = 49000;
 
 // =============================================================================
 // Web App Entrypoint
@@ -238,7 +242,7 @@ function applyVoiceBotRowUpdates_(sheet, rowNumber, payload) {
   writeVoiceBotFieldIfPresent_(sheet, rowNumber, callResultColumn, payload, 'callResult', fieldsWritten);
   writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_RESPONSE_STATUS, payload, 'responseStatus', fieldsWritten);
   writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_LEAD_STATUS_CODE, payload, 'leadStatusCode', fieldsWritten);
-  writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_VOICE_NOTES, payload, 'voiceNotes', fieldsWritten);
+  appendVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_VOICE_NOTES, payload, 'voiceNotes', fieldsWritten);
   writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_VM_LEFT, payload, 'vmLeft', fieldsWritten);
   writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_LIVE_TRANSFER_REQUESTED, payload, 'liveTransferRequested', fieldsWritten);
   writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_LIVE_TRANSFER_COMPLETED, payload, 'liveTransferCompleted', fieldsWritten);
@@ -263,6 +267,11 @@ function applyVoiceBotRowUpdates_(sheet, rowNumber, payload) {
 function updateVoiceBotSchedulingCells_(sheet, rowNumber, payload, callAttemptNumber, fieldsWritten) {
   const callResult = normalizeString_(payload.callResult);
   const leadStatusCode = normalizeString_(payload.leadStatusCode);
+
+  if (!callResult && !leadStatusCode) {
+    return;
+  }
+
   const retryableFirstAttempt = callAttemptNumber === 1 && isRetryableVoiceBotResult_(callResult);
 
   if (retryableFirstAttempt) {
@@ -294,8 +303,28 @@ function updateVoiceBotSchedulingCells_(sheet, rowNumber, payload, callAttemptNu
 function processVoiceBotCallQueue() {
   validateVoiceBotQueueConfig_();
 
-  const sheet = getVoiceBotSheet_();
   const now = new Date();
+
+  if (isVoiceBotQueuePaused_(now)) {
+    const pauseEndsAt = getVoiceBotQueuePauseEndsAt_();
+
+    voiceBotLog_({
+      event: 'voice_queue_paused',
+      nowEt: formatVoiceBotDateEt_(now),
+      pausedUntilEt: formatVoiceBotDateEt_(pauseEndsAt),
+      reason: VOICE_BOT_PAUSE_REASON
+    });
+
+    return {
+      ok: true,
+      queued: false,
+      reason: 'paused',
+      pausedUntilEt: formatVoiceBotDateEt_(pauseEndsAt),
+      pauseReason: VOICE_BOT_PAUSE_REASON
+    };
+  }
+
+  const sheet = getVoiceBotSheet_();
 
   if (!isWithinVoiceBotQueueRunWindow_(now)) {
     voiceBotLog_({
@@ -654,7 +683,6 @@ function buildVoiceBotStartCallPayload_(candidate) {
     scheduledWindow: candidate.callWindow || undefined,
     agentTimeZone: candidate.agentTimeZone || undefined,
     responseStatus: candidate.existingResponseStatus || undefined,
-    notes: candidate.voiceNotes || undefined,
     sheetName: VOICE_BOT_SHEET_NAME
   };
 }
@@ -823,6 +851,37 @@ function writeVoiceBotFieldIfPresent_(sheet, rowNumber, columnNumber, payload, p
   fieldsWritten.push(columnToLetter_(columnNumber) + ':' + payloadKey);
 }
 
+function appendVoiceBotFieldIfPresent_(sheet, rowNumber, columnNumber, payload, payloadKey, fieldsWritten) {
+  if (!Object.prototype.hasOwnProperty.call(payload, payloadKey)) {
+    return;
+  }
+
+  const value = payload[payloadKey];
+  if (value === undefined || value === null) {
+    return;
+  }
+
+  const cell = sheet.getRange(rowNumber, columnNumber);
+  const previous = cell.getValue();
+  const previousText = previous === undefined || previous === null ? '' : String(previous);
+  const nextText = previousText
+    ? previousText + VOICE_BOT_VOICE_NOTES_SEPARATOR + String(value)
+    : String(value);
+
+  cell.setValue(trimVoiceBotVoiceNotes_(nextText));
+  fieldsWritten.push(columnToLetter_(columnNumber) + ':' + payloadKey + '_appended');
+}
+
+function trimVoiceBotVoiceNotes_(value) {
+  const text = String(value);
+  if (text.length <= VOICE_BOT_MAX_VOICE_NOTES_CHARS) {
+    return text;
+  }
+
+  const prefix = '[Older voice performance log data trimmed to fit Google Sheets cell limit]\n';
+  return prefix + text.slice(text.length - (VOICE_BOT_MAX_VOICE_NOTES_CHARS - prefix.length));
+}
+
 function clearVoiceBotCellIfNeeded_(sheet, rowNumber, columnNumber, fieldsWritten, label) {
   const cell = sheet.getRange(rowNumber, columnNumber);
   if (cell.getValue() !== '') {
@@ -918,6 +977,15 @@ function isWithinVoiceBotQueueRunWindow_(date) {
   const hour = Number(Utilities.formatDate(date, VOICE_BOT_TIMEZONE, 'H'));
 
   return day >= 1 && day <= 7 && hour >= VOICE_BOT_BUSINESS_DAY_START_HOUR_ET && hour < VOICE_BOT_QUEUE_RUN_END_HOUR_ET;
+}
+
+function getVoiceBotQueuePauseEndsAt_() {
+  return VOICE_BOT_PAUSED_UNTIL_ET ? new Date(VOICE_BOT_PAUSED_UNTIL_ET) : null;
+}
+
+function isVoiceBotQueuePaused_(date) {
+  const pauseEndsAt = getVoiceBotQueuePauseEndsAt_();
+  return pauseEndsAt && date < pauseEndsAt;
 }
 
 function getVoiceBotAgentTimeZone_(rowValues) {

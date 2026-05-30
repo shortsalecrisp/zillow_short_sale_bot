@@ -4,6 +4,7 @@ import { logger } from "./logger";
 import { sendCallbackEmail } from "./sendCallbackEmail";
 import { sendCallTranscriptEmail } from "./sendCallTranscriptEmail";
 import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContext";
+import { buildVoicePerformanceLog } from "./elevenLabsPerformanceLog";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import type { CallMetadata } from "../types";
 
@@ -16,6 +17,10 @@ const MAX_CALL_CONNECT_RETRIES = 1;
 type ElevenLabsTranscriptItem = {
   role?: string;
   message?: string;
+  time_in_call_secs?: number | null;
+  start_time_in_call_secs?: number | null;
+  start_time_secs?: number | null;
+  start_time?: number | null;
   tool_calls?: Array<{ tool_name?: string; name?: string; [key: string]: unknown }>;
   tool_results?: Array<{
     tool_name?: string;
@@ -615,14 +620,30 @@ async function processPostCallOutcome(
   const conversation = await fetchConversation(conversationId);
   const summary = conversation.analysis?.transcript_summary ?? transcriptText(conversation);
   const fullTranscript = transcriptForEmail(conversation, metadata.assistantName ?? "Emmy");
+  const buildPerformanceNotes = (outcome: string, performanceSummary = summary): string =>
+    buildVoicePerformanceLog({
+      conversationId,
+      metadata,
+      conversation,
+      outcome,
+      summary: performanceSummary,
+      transcript: fullTranscript,
+    });
 
   if (hasToolCall(conversation, "callback_requested")) {
     const callbackTime = isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified");
+    const outcome = buildVoiceResponseStatus("callback_requested", callbackTime);
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("callback_requested", callbackTime),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -637,10 +658,18 @@ async function processPostCallOutcome(
   }
 
   if (hasToolCall(conversation, "not_interested")) {
+    const outcome = buildVoiceResponseStatus("answered_not_interested");
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
+
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("answered_not_interested"),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -654,21 +683,23 @@ async function processPostCallOutcome(
   }
 
   if (hasSuccessfulTransfer(conversation)) {
+    const outcome = buildVoiceResponseStatus("warm_transfer_completed");
+
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "warm_transfer_completed",
-      responseStatus: buildVoiceResponseStatus("warm_transfer_completed"),
+      responseStatus: outcome,
       leadStatusCode: "G",
       liveTransferRequested: "yes",
       liveTransferCompleted: "yes",
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("warm_transfer_completed"),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -683,19 +714,21 @@ async function processPostCallOutcome(
   }
 
   if (shouldTreatAsNotShortSale(conversation)) {
+    const outcome = buildVoiceResponseStatus("not_short_sale");
+
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "not_short_sale",
-      responseStatus: buildVoiceResponseStatus("not_short_sale"),
+      responseStatus: outcome,
       leadStatusCode: "R",
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("not_short_sale"),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -710,19 +743,21 @@ async function processPostCallOutcome(
   }
 
   if (shouldTreatAsAlreadyHasShortSaleHelp(conversation)) {
+    const outcome = buildVoiceResponseStatus("already_working_with_negotiator");
+
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "already_working_with_negotiator",
-      responseStatus: buildVoiceResponseStatus("already_working_with_negotiator"),
+      responseStatus: outcome,
       leadStatusCode: "R",
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("already_working_with_negotiator"),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -737,19 +772,21 @@ async function processPostCallOutcome(
   }
 
   if (shouldTreatAsAgentHungUp(conversation)) {
+    const outcome = buildVoiceResponseStatus("call_received_agent_hung_up", undefined, metadata.assistantName);
+
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "call_received_agent_hung_up",
-      responseStatus: buildVoiceResponseStatus("call_received_agent_hung_up", undefined, metadata.assistantName),
+      responseStatus: outcome,
       leadStatusCode: "N",
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("call_received_agent_hung_up", undefined, metadata.assistantName),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -766,17 +803,18 @@ async function processPostCallOutcome(
 
   if (conversation.status === "failed" && hasLiveTransferRequest(conversation)) {
     const callbackTime = "asap";
+    const outcome = buildVoiceResponseStatus("callback_requested", callbackTime);
 
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "callback_requested",
-      responseStatus: buildVoiceResponseStatus("callback_requested", callbackTime),
+      responseStatus: outcome,
       leadStatusCode: "Y",
       callbackRequested: "yes",
       callbackTime,
       liveTransferRequested: "yes",
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendCallbackEmail({
@@ -796,7 +834,7 @@ async function processPostCallOutcome(
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("callback_requested", callbackTime),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -820,21 +858,22 @@ async function processPostCallOutcome(
         ? "voicemail_left"
         : "no_answer_first_attempt"
       : "no_response_second_attempt";
+    const outcome = buildVoiceResponseStatus(callResult);
 
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult,
-      responseStatus: buildVoiceResponseStatus(callResult),
+      responseStatus: outcome,
       ...(isFirstAttempt ? {} : { leadStatusCode: "N" }),
       ...(voicemailLeft && isFirstAttempt ? { vmLeft: "yes" } : {}),
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus(callResult),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -856,6 +895,7 @@ async function processPostCallOutcome(
       const failureReason = getFailedConversationReason(conversation);
       const invalidDestinationNumber = isInvalidDestinationNumberFailure(conversation);
       const outcome = invalidDestinationNumber ? "call_failed_invalid_number" : "Call failed before completion";
+      const responseStatus = buildVoiceResponseStatus(outcome);
       const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();
 
       if (invalidDestinationNumber) {
@@ -863,16 +903,22 @@ async function processPostCallOutcome(
           rowNumber: metadata.rowNumber,
           callAttemptNumber: metadata.callAttemptNumber,
           callResult: outcome,
-          responseStatus: buildVoiceResponseStatus(outcome),
+          responseStatus,
           leadStatusCode: "N",
-          voiceNotes: failureReason,
+          voiceNotes: buildPerformanceNotes(responseStatus, outcomeSummary),
+        });
+      } else {
+        await postSheetUpdate({
+          rowNumber: metadata.rowNumber,
+          callAttemptNumber: metadata.callAttemptNumber,
+          voiceNotes: buildPerformanceNotes(responseStatus, outcomeSummary),
         });
       }
 
       await sendTranscriptEmailIfEnabled({
         conversationId,
         metadata,
-        outcome: buildVoiceResponseStatus(outcome),
+        outcome: responseStatus,
         summary: outcomeSummary,
         transcript: fullTranscript,
       });
@@ -906,6 +952,7 @@ async function processPostCallOutcome(
     if (options.finalAttempt && shouldTreatAsUnconnectedInitiatedConversation(conversation)) {
       const isFirstAttempt = metadata.callAttemptNumber <= 1;
       const callResult = isFirstAttempt ? "no_answer_first_attempt" : "no_response_second_attempt";
+      const outcome = buildVoiceResponseStatus(callResult);
       const noConnectSummary =
         "ElevenLabs accepted the outbound call request, but the call never connected and produced no audio or transcript.";
 
@@ -913,15 +960,15 @@ async function processPostCallOutcome(
         rowNumber: metadata.rowNumber,
         callAttemptNumber: metadata.callAttemptNumber,
         callResult,
-        responseStatus: buildVoiceResponseStatus(callResult),
+        responseStatus: outcome,
         ...(isFirstAttempt ? {} : { leadStatusCode: "N" }),
-        voiceNotes: noConnectSummary,
+        voiceNotes: buildPerformanceNotes(outcome, noConnectSummary),
       });
 
       await sendTranscriptEmailIfEnabled({
         conversationId,
         metadata,
-        outcome: buildVoiceResponseStatus(callResult),
+        outcome,
         summary: noConnectSummary,
         transcript: fullTranscript,
       });
@@ -947,16 +994,17 @@ async function processPostCallOutcome(
 
   if (shouldTreatAsCallback(conversation)) {
     const callbackTime = isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified");
+    const outcome = buildVoiceResponseStatus("callback_requested", callbackTime);
 
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "callback_requested",
-      responseStatus: buildVoiceResponseStatus("callback_requested", callbackTime),
+      responseStatus: outcome,
       leadStatusCode: "Y",
       callbackRequested: "yes",
       callbackTime,
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendCallbackEmail({
@@ -975,7 +1023,7 @@ async function processPostCallOutcome(
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("callback_requested", callbackTime),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -991,19 +1039,21 @@ async function processPostCallOutcome(
   }
 
   if (shouldTreatAsNotInterested(conversation)) {
+    const outcome = buildVoiceResponseStatus("answered_not_interested");
+
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "answered_not_interested",
-      responseStatus: buildVoiceResponseStatus("answered_not_interested"),
+      responseStatus: outcome,
       leadStatusCode: "R",
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("answered_not_interested"),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -1026,21 +1076,22 @@ async function processPostCallOutcome(
         ? "voicemail_left"
         : "no_answer_first_attempt"
       : "no_response_second_attempt";
+    const outcome = buildVoiceResponseStatus(callResult);
 
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult,
-      responseStatus: buildVoiceResponseStatus(callResult),
+      responseStatus: outcome,
       ...(isFirstAttempt ? {} : { leadStatusCode: "N" }),
       ...(voicemailLeft && isFirstAttempt ? { vmLeft: "yes" } : {}),
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus(callResult),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -1059,18 +1110,20 @@ async function processPostCallOutcome(
   }
 
   if (metadata.callAttemptNumber <= 1) {
+    const outcome = buildVoiceResponseStatus("no_answer_first_attempt");
+
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "no_answer_first_attempt",
-      responseStatus: buildVoiceResponseStatus("no_answer_first_attempt"),
-      voiceNotes: summary,
+      responseStatus: outcome,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("no_answer_first_attempt"),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
@@ -1086,19 +1139,21 @@ async function processPostCallOutcome(
   }
 
   if (metadata.callAttemptNumber > 1) {
+    const outcome = buildVoiceResponseStatus("no_response_second_attempt");
+
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "no_response_second_attempt",
-      responseStatus: buildVoiceResponseStatus("no_response_second_attempt"),
+      responseStatus: outcome,
       leadStatusCode: "N",
-      voiceNotes: summary,
+      voiceNotes: buildPerformanceNotes(outcome),
     });
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
-      outcome: buildVoiceResponseStatus("no_response_second_attempt"),
+      outcome,
       summary,
       transcript: fullTranscript,
     });
