@@ -4,6 +4,12 @@ export const VOICE_PERFORMANCE_LOG_MARKER = "CODEX_VOICE_CALL_METRICS_V1";
 
 const MAX_SUMMARY_CHARS = 3_000;
 const MAX_TRANSCRIPT_CHARS = 16_000;
+const VOICE_AB_TEST_COHORT = "eryn_vs_finch";
+const VOICE_AB_TEST_STARTED_AT = "2026-05-29T23:33:59Z";
+const VOICE_AB_TEST_STARTED_LOCAL = "May 29, 2026 7:33 PM ET";
+const VOICE_AB_TEST_INCLUDED_VARIANTS = ["eryn", "finch"] as const;
+const CODEX_ANALYSIS_INSTRUCTIONS =
+  "When asked how the voice A/B test or voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer. For the A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant of eryn or finch. Do not include previous single-voice Emmy calls in A/B results. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes.";
 
 type TranscriptToolCall = {
   tool_name?: string;
@@ -177,8 +183,17 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
 
   const payload = {
     schema: "voice_call_metrics_v1",
-    codexInstructions:
-      "When asked how the voice A/B test or voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes.",
+    codexInstructions: CODEX_ANALYSIS_INSTRUCTIONS,
+    abTestScope: {
+      cohort: VOICE_AB_TEST_COHORT,
+      startedAt: VOICE_AB_TEST_STARTED_AT,
+      startedLocalTime: VOICE_AB_TEST_STARTED_LOCAL,
+      includeOnlyVoiceVariants: [...VOICE_AB_TEST_INCLUDED_VARIANTS],
+      excludeMissingVoiceVariant: true,
+      excludePriorSingleVoiceEmmyCalls: true,
+      analysisRule:
+        "Only include calls where call.voiceVariant is eryn or finch and the call happened after the Eryn/Finch voice split started. Exclude all previous single-voice Emmy calls.",
+    },
     call: {
       conversationId: input.conversationId,
       rowNumber: input.metadata.rowNumber,
