@@ -444,6 +444,33 @@ def test_state_detail_task_uses_listing_urls(monkeypatch):
     assert "zpids" not in captured["json"]
 
 
+def test_state_detail_task_failure_does_not_return_search_only_rows(monkeypatch):
+    class _Response:
+        def raise_for_status(self):
+            raise webhook_server.requests.RequestException("bad request")
+
+        def json(self):
+            return []
+
+    monkeypatch.setattr(webhook_server, "APIFY_TOKEN", "token")
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_DETAIL_TASK_ID", "detail-task")
+    monkeypatch.setattr(webhook_server.requests, "post", lambda *args, **kwargs: _Response())
+
+    rows = webhook_server._run_state_detail_task_for_rows(
+        [
+            {
+                "zpid": "mi-1",
+                "detailUrl": "https://www.zillow.com/homedetails/mi-1_zpid/",
+                "address": "1 Main St, Detroit, MI 48201",
+                "agentName": "State Agent",
+                "search_source": "mi",
+            }
+        ]
+    )
+
+    assert rows == []
+
+
 def test_state_search_details_only_selected_unseen_rows(monkeypatch):
     detail_calls = []
     enqueued = []

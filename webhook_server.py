@@ -191,10 +191,10 @@ def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str
         return []
     if not APIFY_TOKEN:
         logger.warning("state-search: detail task skipped missing_apify_token")
-        return rows
+        return []
     if not APIFY_STATE_DETAIL_TASK_ID:
         logger.warning("state-search: detail task skipped missing_task_id")
-        return rows
+        return []
 
     selected_zpids: List[str] = []
     start_urls: List[Dict[str, str]] = []
@@ -245,7 +245,7 @@ def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str
                 APIFY_STATE_DETAIL_TASK_ID,
                 type(items).__name__,
             )
-            return rows
+            return []
 
         detail_by_zpid: Dict[str, Dict[str, Any]] = {}
         dropped = 0
@@ -304,7 +304,7 @@ def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str
         )
     except ValueError:
         logger.warning("state-search: detail_task_id=%s invalid_json", APIFY_STATE_DETAIL_TASK_ID)
-    return rows
+    return []
 
 
 def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[str, Any]]:
