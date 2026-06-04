@@ -197,6 +197,7 @@ def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str
         return rows
 
     selected_zpids: List[str] = []
+    start_urls: List[Dict[str, str]] = []
     source_by_zpid: Dict[str, str] = {}
     seen_zpids: set[str] = set()
     for row in rows:
@@ -205,25 +206,29 @@ def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str
         zpid = str(row.get("zpid", "")).strip()
         if not zpid or zpid in seen_zpids:
             continue
+        detail_url = _extra_state_listing_url(row)
+        if not detail_url:
+            continue
         selected_zpids.append(zpid)
+        start_urls.append({"url": detail_url})
         source_by_zpid[zpid] = str(row.get("search_source") or "state-search")
         seen_zpids.add(zpid)
 
-    if not selected_zpids:
+    if not start_urls:
         return rows
 
     url = f"https://api.apify.com/v2/actor-tasks/{APIFY_STATE_DETAIL_TASK_ID}/run-sync-get-dataset-items"
     params = {
         "token": APIFY_TOKEN,
-        "limit": len(selected_zpids),
+        "limit": len(start_urls),
         "clean": "true",
         "format": "json",
     }
     payload = {
-        "zpids": selected_zpids,
+        "startUrls": start_urls,
         "propertyStatus": "FOR_SALE",
         "extractBuildingUnits": "disabled",
-        "maxConcurrency": min(max(len(selected_zpids), 1), 10),
+        "maxConcurrency": min(max(len(start_urls), 1), 10),
     }
     try:
         resp = requests.post(
@@ -822,6 +827,31 @@ def _format_listing_address(row: Dict[str, Any]) -> str:
     return ""
 
 
+def _street_only_address(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    return text.split(",", 1)[0].strip()
+
+
+def _format_sms_listing_address(row: Dict[str, Any]) -> str:
+    street = _street_only_address(row.get("street"))
+    if street:
+        return street
+
+    address = row.get("address")
+    if isinstance(address, dict):
+        for key in ("streetAddress", "streetAddress1", "street", "addressLine1"):
+            street = _street_only_address(address.get(key))
+            if street:
+                return street
+        return ""
+
+    return _street_only_address(address)
+
+
 def _extract_hard_skip_zpids(payload: Dict[str, Any]) -> set[str]:
     candidates: List[Any] = []
     for key in ("hard_skip", "hardSkip", "hard_skip_zpids", "hardSkipZpids"):
@@ -1123,7 +1153,7 @@ def _job_message(job: Dict[str, Any]) -> str:
     if raw_message:
         return raw_message
     first = str(job.get("first") or "").strip()
-    address = str(job.get("address") or "").strip()
+    address = _street_only_address(job.get("street")) or _street_only_address(job.get("address"))
     if first or address:
         return SMS_TEMPLATE.format(first=first, address=address).strip()
     return ""
@@ -1301,6 +1331,8 @@ def _queue_row_values(record: Dict[str, Any]) -> List[str]:
 def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str, Any]:
     zpid = str(row.get("zpid", "")).strip()
     listing_text = extract_description(row)
+    sms_address = _format_sms_listing_address(row)
+    full_address = _format_listing_address(row)
     attribution = row.get("attributionInfo") if isinstance(row.get("attributionInfo"), dict) else {}
     broker_name = (
         row.get("brokerName")
@@ -1312,8 +1344,8 @@ def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str,
     )
     payload: Dict[str, Any] = {
         "zpid": zpid,
-        "address": _format_listing_address(row),
-        "street": str(row.get("street") or "").strip(),
+        "address": sms_address or full_address,
+        "street": sms_address,
         "city": str(row.get("city") or "").strip(),
         "state": str(row.get("state") or "").strip(),
         "zip": str(row.get("zip") or row.get("zipcode") or "").strip(),
@@ -1342,6 +1374,8 @@ def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str,
         "description": listing_text,
         "listingText": listing_text,
     }
+    if full_address and full_address != payload.get("address"):
+        payload["full_address"] = full_address
     return {k: v for k, v in payload.items() if str(v or "").strip()}
 
 
@@ -1501,7 +1535,7 @@ def _enqueue_pending_rows(rows: List[Dict[str, Any]], source: str) -> int:
                     logger.info("queue: skipped duplicate completed zpid=%s", zpid)
                     continue
                 if status == "failed" and existing.get("_row_num"):
-                    address = _format_listing_address(row)
+                    address = _format_sms_listing_address(row) or _format_listing_address(row)
                     source_value = str(row.get("source") or source or "").strip()
                     existing.update(
                         {
@@ -1526,7 +1560,7 @@ def _enqueue_pending_rows(rows: List[Dict[str, Any]], source: str) -> int:
                     continue
                 continue
 
-            address = _format_listing_address(row)
+            address = _format_sms_listing_address(row) or _format_listing_address(row)
             source_value = str(row.get("source") or source or "").strip()
             payload_dict = _compact_queue_resume_payload(row, source_value)
             payload = _serialize_queue_payload(payload_dict, zpid)
@@ -1747,7 +1781,11 @@ def _auth_internal_request(request: Request) -> None:
 
 def _format_initial_message(payload: Dict[str, Any], row: List[str]) -> str:
     first = str(payload.get("first") or _row_value(row, 0)).strip()
-    address = str(payload.get("address") or _row_value(row, 4)).strip()
+    address = (
+        _street_only_address(payload.get("street"))
+        or _street_only_address(payload.get("address"))
+        or _street_only_address(_row_value(row, 4))
+    )
     return SMS_TEMPLATE.format(first=first, address=address).strip()
 
 

@@ -1624,10 +1624,20 @@ def _short_sale_exclusion_reason(text: str) -> Optional[str]:
     return None
 
 
+def _street_only_address(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    return text.split(",", 1)[0].strip()
+
+
 def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     address = payload.get("address") or payload.get("property", {}).get("address") or {}
     if isinstance(address, str):
-        return {"street": address.strip()} if address.strip() else {}
+        street = _street_only_address(address)
+        return {"street": street} if street else {}
     if not isinstance(address, dict):
         address = {}
     street_candidates = [
@@ -1643,7 +1653,7 @@ def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     postal = address.get("zipcode") or address.get("zip") or address.get("postalCode") or payload.get("zipcode") or payload.get("zip")
     result: Dict[str, str] = {}
     if street:
-        result["street"] = street.strip()
+        result["street"] = _street_only_address(street)
     if isinstance(city, str) and city.strip():
         result["city"] = city.strip()
     if isinstance(state, str) and state.strip():
@@ -12858,12 +12868,14 @@ def process_rows(
             zpid,
             "description",
         )
-        street = (r.get("street") or r.get("address") or "").strip()
+        street = _street_only_address(r.get("street")) or _street_only_address(r.get("address"))
         if street == "(Undisclosed Address)":
             outcome = "skipped_undisclosed_address"
             outcomes[zpid] = outcome
             LOG.debug("SKIP undisclosed address zpid %s", r.get("zpid"))
             continue
+        if street:
+            r["street"] = street
         if zpid and not is_active_listing(r):
             outcome = "skipped_stale_listing"
             outcomes[zpid] = outcome

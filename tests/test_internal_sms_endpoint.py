@@ -244,6 +244,21 @@ def test_internal_initial_sms_sends_and_marks_sheet_after_gateway_ok(monkeypatch
     assert sheet.rows[12][42] == "x"
 
 
+def test_internal_initial_sms_uses_street_only_payload_address(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    message = module._format_initial_message(
+        {"first": "Alex", "address": "123 Main St, Honolulu, HI 96813"},
+        _row(first="Alex", address="Fallback Address"),
+    )
+
+    assert "at 123 Main St." in message
+    assert "Honolulu" not in message
+
+
 def test_internal_initial_sms_does_not_mark_sheet_when_gateway_fails(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,

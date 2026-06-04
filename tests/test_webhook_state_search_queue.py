@@ -371,6 +371,79 @@ def test_state_search_runs_search_task_without_detail_wrapper(monkeypatch):
     assert captured["params"]["maxItems"] == 7
 
 
+def test_state_search_queue_payload_uses_street_only_sms_address():
+    row = {
+        "zpid": "hi-1",
+        "detailUrl": "https://www.zillow.com/homedetails/hi-1_zpid/",
+        "address": "1 Ocean Ave, Pahoa, HI 96778",
+        "street": "1 Ocean Ave, Pahoa, HI 96778",
+        "city": "Pahoa",
+        "state": "HI",
+        "zip": "96778",
+        "agentName": "State Agent",
+        "description": "Short sale subject to lender approval.",
+        "search_source": "hi",
+    }
+
+    payload = webhook_server._compact_queue_resume_payload(row, "state-search")
+
+    assert payload["address"] == "1 Ocean Ave"
+    assert payload["street"] == "1 Ocean Ave"
+    assert payload["full_address"] == "1 Ocean Ave, Pahoa, HI 96778"
+
+
+def test_state_detail_task_uses_listing_urls(monkeypatch):
+    captured = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {
+                    "zpid": "mi-1",
+                    "detailUrl": "https://www.zillow.com/homedetails/mi-1_zpid/",
+                    "address": "1 Main St, Detroit, MI 48201",
+                    "street": "1 Main St",
+                    "city": "Detroit",
+                    "state": "MI",
+                    "agentName": "State Agent",
+                    "description": "Short sale subject to lender approval.",
+                }
+            ]
+
+    def fake_post(url, params, json, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr(webhook_server, "APIFY_TOKEN", "token")
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_DETAIL_TASK_ID", "detail-task")
+    monkeypatch.setattr(webhook_server.requests, "post", fake_post)
+
+    rows = webhook_server._run_state_detail_task_for_rows(
+        [
+            {
+                "zpid": "mi-1",
+                "detailUrl": "https://www.zillow.com/homedetails/mi-1_zpid/",
+                "address": "1 Main St, Detroit, MI 48201",
+                "agentName": "State Agent",
+                "search_source": "mi",
+            }
+        ]
+    )
+
+    assert rows[0]["description"] == "Short sale subject to lender approval."
+    assert captured["url"].endswith("/actor-tasks/detail-task/run-sync-get-dataset-items")
+    assert captured["json"]["startUrls"] == [
+        {"url": "https://www.zillow.com/homedetails/mi-1_zpid/"}
+    ]
+    assert "zpids" not in captured["json"]
+
+
 def test_state_search_details_only_selected_unseen_rows(monkeypatch):
     detail_calls = []
     enqueued = []
