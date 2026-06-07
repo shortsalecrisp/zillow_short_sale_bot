@@ -131,6 +131,7 @@ APIFY_STATE_DETAIL_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_DETAIL_TIMEOUT
 PENDING_QUEUE_TAB = os.getenv("PENDING_QUEUE_TAB", "PendingQueue")
 PENDING_QUEUE_STALE_MINUTES = int(os.getenv("PENDING_QUEUE_STALE_MINUTES", "30"))
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
+_STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1, "mi": 2}
 
 
 def _redact_sensitive_url(url: str) -> str:
@@ -186,6 +187,23 @@ EXTRA_STATE_SEARCHES = [
     {"source": "ak", "task_id": os.getenv("APIFY_TASK_AK", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_AK", "").strip())},
     {"source": "hi", "task_id": os.getenv("APIFY_TASK_HI", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_HI", "").strip())},
 ]
+
+
+def _prioritize_extra_state_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    indexed_rows = list(enumerate(rows))
+    return [
+        row
+        for _, row in sorted(
+            indexed_rows,
+            key=lambda item: (
+                _STATE_SEARCH_SOURCE_PRIORITY.get(
+                    str(item[1].get("search_source") or item[1].get("source") or "").lower(),
+                    99,
+                ),
+                item[0],
+            ),
+        )
+    ]
 
 
 def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -389,6 +407,7 @@ def _enqueue_extra_state_rows(payload: Dict[str, Any]) -> int:
     if not extra_state_rows:
         return 0
 
+    extra_state_rows = _prioritize_extra_state_rows(extra_state_rows)
     extra_selection = _select_unseen_rows(
         extra_state_rows,
         _pending_queue_state_skip_zpids(),

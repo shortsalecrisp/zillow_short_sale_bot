@@ -297,6 +297,32 @@ def test_state_searches_have_separate_combined_cap(monkeypatch):
     assert state_enqueued == [f"mi-{idx}" for idx in range(5)]
 
 
+def test_state_search_prioritizes_low_volume_states_before_mi(monkeypatch):
+    enqueued_by_source = []
+    state_rows = (
+        [_listing(f"mi-{idx}", "MI", "mi") for idx in range(5)]
+        + [_listing(f"ak-{idx}", "AK", "ak") for idx in range(2)]
+        + [_listing("hi-1", "HI", "hi")]
+    )
+
+    monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: state_rows)
+    monkeypatch.setattr(webhook_server, "_pending_queue_state_skip_zpids", lambda: set())
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows: rows, raising=False)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_LIMIT", 5)
+
+    def fake_enqueue(rows, source):
+        enqueued_by_source.extend((source, str(row.get("zpid"))) for row in rows)
+        return len(rows)
+
+    monkeypatch.setattr(webhook_server, "_enqueue_pending_rows", fake_enqueue)
+
+    count = webhook_server._enqueue_extra_state_rows({})
+
+    state_enqueued = [zpid for source, zpid in enqueued_by_source if source == "state-search"]
+    assert count == 5
+    assert state_enqueued == ["ak-0", "ak-1", "hi-1", "mi-0", "mi-1"]
+
+
 def test_state_search_cap_is_applied_after_queue_skip(monkeypatch):
     enqueued_by_source = []
 

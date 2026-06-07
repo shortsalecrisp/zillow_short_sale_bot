@@ -52,7 +52,9 @@ These extra state tasks are intentionally **not** webhook-driven. The bot fetche
 `APIFY_STATE_SEARCH_FETCH_LIMIT` controls how many raw state rows are checked before queue de-dupe, while
 `APIFY_STATE_SEARCH_LIMIT` caps the combined MI/AK/HI rows detailed and enqueued per primary webhook run. MI uses a
 deeper default raw fetch window because Zillow can pin dozens of stale/non-qualifying Michigan listings above newer
-candidates.
+candidates; AK and HI are prioritized ahead of MI before the shared state-search cap is applied. Keep AK's saved Zillow
+search URL free of the `doz` days-on-Zillow filter so valid low-volume active listings older than seven days are not
+hidden behind Apify's `No results found.` error row.
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main
