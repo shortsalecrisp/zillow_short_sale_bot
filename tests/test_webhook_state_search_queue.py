@@ -203,6 +203,15 @@ def test_startup_queue_recovery_is_backgrounded(monkeypatch):
     scheduled[0].close()
 
 
+def test_mi_uses_deeper_default_fetch_limit(monkeypatch):
+    monkeypatch.delenv("APIFY_STATE_SEARCH_FETCH_LIMIT", raising=False)
+    monkeypatch.delenv("APIFY_STATE_SEARCH_FETCH_LIMIT_MI", raising=False)
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_FETCH_LIMIT", 25)
+
+    assert webhook_server._state_search_fetch_limit("mi") == 100
+    assert webhook_server._state_search_fetch_limit("hi") == 25
+
+
 def test_original_cap_does_not_consume_state_search_cap(monkeypatch):
     enqueued = []
     seen_batches = []

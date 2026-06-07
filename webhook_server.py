@@ -123,6 +123,7 @@ APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "
 APIFY_STATE_SEARCH_ENABLED = os.getenv("APIFY_STATE_SEARCH_ENABLED", "true").lower() == "true"
 APIFY_STATE_SEARCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_LIMIT", "5"))
 APIFY_STATE_SEARCH_FETCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_FETCH_LIMIT", "25"))
+APIFY_STATE_SEARCH_FETCH_LIMIT_DEFAULTS = {"MI": 100}
 APIFY_STATE_SEARCH_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_SEARCH_TIMEOUT_SECONDS", "60"))
 APIFY_STATE_SEARCH_BACKGROUND = os.getenv("APIFY_STATE_SEARCH_BACKGROUND", "true").lower() == "true"
 APIFY_STATE_DETAIL_TASK_ID = os.getenv("APIFY_STATE_DETAIL_TASK_ID", "VI5izq8RGAL14zM75").strip()
@@ -176,7 +177,8 @@ def _state_search_fetch_limit(source: str) -> int:
             return max(int(raw_value), 0)
         except ValueError:
             logger.warning("state-search: invalid fetch limit source=%s value=%s", source, raw_value)
-    return max(APIFY_STATE_SEARCH_FETCH_LIMIT, 0)
+    default_limit = APIFY_STATE_SEARCH_FETCH_LIMIT_DEFAULTS.get(source_key, APIFY_STATE_SEARCH_FETCH_LIMIT)
+    return max(default_limit, 0)
 
 
 EXTRA_STATE_SEARCHES = [
