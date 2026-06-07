@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -547,3 +548,106 @@ def test_state_search_details_only_selected_unseen_rows(monkeypatch):
     assert count == 3
     assert detail_calls == ["mi-2", "mi-3", "mi-4"]
     assert enqueued == ["mi-2", "mi-3", "mi-4"]
+
+
+def test_coverage_backstop_has_separate_main_and_state_caps(monkeypatch):
+    detail_calls = []
+    enqueued_by_source = []
+
+    main_rows = [_listing(f"main-{idx}", "FL", "main") for idx in range(4)]
+    state_rows = [
+        _listing("ak-1", "AK", "ak"),
+        _listing("mi-0", "MI", "mi"),
+        _listing("mi-1", "MI", "mi"),
+        _listing("mi-2", "MI", "mi"),
+    ]
+
+    monkeypatch.setattr(webhook_server, "_fetch_apify_backstop_main_rows", lambda: main_rows)
+    monkeypatch.setattr(webhook_server, "_fetch_apify_backstop_state_rows", lambda: state_rows)
+    monkeypatch.setattr(webhook_server, "_coverage_backstop_skip_zpids", lambda: {"main-0", "mi-0"})
+    monkeypatch.setattr(webhook_server, "APIFY_BACKSTOP_MAIN_LIMIT", 2)
+    monkeypatch.setattr(webhook_server, "APIFY_BACKSTOP_STATE_LIMIT", 2)
+
+    def fake_detail(rows):
+        detail_calls.append([str(row.get("zpid")) for row in rows])
+        return [
+            {
+                **row,
+                "description": "Detailed short sale subject to lender approval.",
+            }
+            for row in rows
+        ]
+
+    def fake_enqueue(rows, source):
+        enqueued_by_source.append((source, [str(row.get("zpid")) for row in rows]))
+        return len(rows)
+
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", fake_detail)
+    monkeypatch.setattr(webhook_server, "_enqueue_pending_rows", fake_enqueue)
+
+    count = webhook_server._enqueue_apify_coverage_backstop()
+
+    assert count == 4
+    assert detail_calls == [["main-1", "main-2"], ["ak-1", "mi-1"]]
+    assert enqueued_by_source == [
+        ("coverage-backstop-main", ["main-1", "main-2"]),
+        ("coverage-backstop-state", ["ak-1", "mi-1"]),
+    ]
+
+
+def test_coverage_backstop_search_fetch_does_not_call_detail_before_filter(monkeypatch):
+    captured = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {
+                    "zpid": "main-1",
+                    "detailUrl": "https://www.zillow.com/homedetails/main-1_zpid/",
+                    "address": "1 Main St, Tampa, FL 33602",
+                    "street": "1 Main St",
+                    "city": "Tampa",
+                    "state": "FL",
+                    "agentName": "Main Agent",
+                    "description": "Short sale subject to lender approval.",
+                }
+            ]
+
+    def fake_get(url, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        captured["timeout"] = timeout
+        return _Response()
+
+    def fake_post(*args, **kwargs):
+        raise AssertionError("coverage backstop search fetch should not detail before filtering")
+
+    monkeypatch.setattr(webhook_server, "APIFY_TOKEN", "token")
+    monkeypatch.setattr(webhook_server.requests, "get", fake_get)
+    monkeypatch.setattr(webhook_server.requests, "post", fake_post)
+
+    rows = webhook_server._run_apify_search_task_sync_dataset_items(
+        "main-task",
+        "main",
+        fetch_limit=37,
+        log_prefix="coverage-backstop",
+    )
+
+    assert rows[0]["zpid"] == "main-1"
+    assert rows[0]["search_source"] == "main"
+    assert captured["url"].endswith("/actor-tasks/main-task/run-sync-get-dataset-items")
+    assert captured["params"]["limit"] == 37
+    assert captured["params"]["maxItems"] == 37
+
+
+def test_coverage_backstop_day_lock_prevents_duplicate_runs(monkeypatch, tmp_path):
+    monkeypatch.setattr(webhook_server, "APIFY_BACKSTOP_LOCK_PATH", str(tmp_path / "coverage-backstop"))
+
+    run_time = datetime(2026, 6, 7, 18, tzinfo=timezone.utc)
+
+    assert webhook_server._acquire_apify_backstop_day(run_time) is True
+    assert webhook_server._acquire_apify_backstop_day(run_time) is False
+    assert webhook_server._acquire_apify_backstop_day(run_time + timedelta(days=1)) is True

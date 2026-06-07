@@ -112,10 +112,18 @@ _deferred_zpids: set[str] = set()
 _queue_lock = threading.Lock()
 _queue_worker_lock = threading.Lock()
 _state_search_worker_lock = threading.Lock()
+_apify_backstop_worker_lock = threading.Lock()
+_apify_backstop_day_lock = threading.Lock()
 _original_payload_signature_lock = threading.Lock()
 _previous_original_upstream_dataset_id: Optional[str] = None
 _previous_original_ordered_zpids: List[str] = []
 APIFY_TOKEN = os.getenv("APIFY_API_TOKEN") or os.getenv("APIFY_TOKEN")
+APIFY_MAIN_TASK_ID = (
+    os.getenv("APIFY_TASK_MAIN")
+    or os.getenv("APIFY_MAIN_TASK_ID")
+    or os.getenv("APIFY_SEARCH_TASK_ID")
+    or "GPBSVcMBIK6CyJzBm"
+).strip()
 APIFY_MAX_ITEMS = int(os.getenv("APIFY_MAX_ITEMS", "5"))
 APIFY_FETCH_ATTEMPTS = int(os.getenv("APIFY_FETCH_ATTEMPTS", "6"))
 APIFY_FETCH_BACKOFF_SECONDS = float(os.getenv("APIFY_FETCH_BACKOFF_SECONDS", "2.0"))
@@ -130,6 +138,14 @@ APIFY_STATE_DETAIL_TASK_ID = os.getenv("APIFY_STATE_DETAIL_TASK_ID", "VI5izq8RGA
 APIFY_STATE_DETAIL_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_DETAIL_TIMEOUT_SECONDS", "240"))
 PENDING_QUEUE_TAB = os.getenv("PENDING_QUEUE_TAB", "PendingQueue")
 PENDING_QUEUE_STALE_MINUTES = int(os.getenv("PENDING_QUEUE_STALE_MINUTES", "30"))
+APIFY_BACKSTOP_ENABLED = os.getenv("APIFY_BACKSTOP_ENABLED", "true").lower() == "true"
+APIFY_BACKSTOP_HOUR = int(os.getenv("APIFY_BACKSTOP_HOUR", "18"))
+APIFY_BACKSTOP_MAIN_FETCH_LIMIT = int(os.getenv("APIFY_BACKSTOP_MAIN_FETCH_LIMIT", "100"))
+APIFY_BACKSTOP_MAIN_LIMIT = int(os.getenv("APIFY_BACKSTOP_MAIN_LIMIT", "10"))
+APIFY_BACKSTOP_STATE_FETCH_LIMIT = int(os.getenv("APIFY_BACKSTOP_STATE_FETCH_LIMIT", "50"))
+APIFY_BACKSTOP_STATE_FETCH_LIMIT_DEFAULTS = {"MI": 150, "AK": 50, "HI": 50}
+APIFY_BACKSTOP_STATE_LIMIT = int(os.getenv("APIFY_BACKSTOP_STATE_LIMIT", "10"))
+APIFY_BACKSTOP_LOCK_PATH = os.getenv("APIFY_BACKSTOP_LOCK_PATH", "/tmp/apify_coverage_backstop.txt")
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
 _STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1, "mi": 2}
 
@@ -179,6 +195,23 @@ def _state_search_fetch_limit(source: str) -> int:
         except ValueError:
             logger.warning("state-search: invalid fetch limit source=%s value=%s", source, raw_value)
     default_limit = APIFY_STATE_SEARCH_FETCH_LIMIT_DEFAULTS.get(source_key, APIFY_STATE_SEARCH_FETCH_LIMIT)
+    return max(default_limit, 0)
+
+
+def _backstop_state_fetch_limit(source: str) -> int:
+    source_key = re.sub(r"[^A-Z0-9_]", "", str(source or "").upper())
+    raw_value = os.getenv(f"APIFY_BACKSTOP_STATE_FETCH_LIMIT_{source_key}") if source_key else None
+    if not raw_value:
+        raw_value = os.getenv("APIFY_BACKSTOP_STATE_FETCH_LIMIT")
+    if raw_value:
+        try:
+            return max(int(raw_value), 0)
+        except ValueError:
+            logger.warning("coverage-backstop: invalid fetch limit source=%s value=%s", source, raw_value)
+    default_limit = APIFY_BACKSTOP_STATE_FETCH_LIMIT_DEFAULTS.get(
+        source_key,
+        APIFY_BACKSTOP_STATE_FETCH_LIMIT,
+    )
     return max(default_limit, 0)
 
 
@@ -327,15 +360,20 @@ def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str
     return []
 
 
-def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[str, Any]]:
+def _run_apify_search_task_sync_dataset_items(
+    task_id: str,
+    source: str,
+    *,
+    fetch_limit: int,
+    log_prefix: str,
+) -> List[Dict[str, Any]]:
     if not APIFY_TOKEN:
-        logger.warning("state-search: source=%s task_id=%s skipped missing_apify_token", source, task_id)
+        logger.warning("%s: source=%s task_id=%s skipped missing_apify_token", log_prefix, source, task_id)
         return []
-    selection_limit = max(APIFY_STATE_SEARCH_LIMIT, 0)
-    if selection_limit <= 0:
-        logger.info("state-search: source=%s task_id=%s skipped limit=%s", source, task_id, APIFY_STATE_SEARCH_LIMIT)
+    limit = max(fetch_limit, 0)
+    if limit <= 0:
+        logger.info("%s: source=%s task_id=%s skipped limit=%s", log_prefix, source, task_id, fetch_limit)
         return []
-    limit = max(_state_search_fetch_limit(source), selection_limit)
 
     url = f"https://api.apify.com/v2/actor-tasks/{task_id}/run-sync-get-dataset-items"
     params = {
@@ -351,33 +389,50 @@ def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[s
         payload = resp.json()
         if not isinstance(payload, list):
             logger.warning(
-                "state-search: source=%s task_id=%s invalid_payload_type=%s",
+                "%s: source=%s task_id=%s invalid_payload_type=%s",
+                log_prefix,
                 source,
                 task_id,
                 type(payload).__name__,
             )
             return []
         raw_rows = [item for item in payload[:limit] if isinstance(item, dict)]
-        prepared = _prepare_extra_state_rows(raw_rows, source)
+        prepared = _prepare_extra_state_rows(raw_rows, source, log_prefix=log_prefix)
         logger.info(
-            "state-search: source=%s task_id=%s search_only_prepared=%d",
+            "%s: source=%s task_id=%s search_only_prepared=%d",
+            log_prefix,
             source,
             task_id,
             len(prepared["rows"]),
         )
         return prepared["rows"]
     except requests.Timeout:
-        logger.warning("state-search: source=%s task_id=%s timeout", source, task_id)
+        logger.warning("%s: source=%s task_id=%s timeout", log_prefix, source, task_id)
     except requests.RequestException as exc:
         logger.warning(
-            "state-search: source=%s task_id=%s request_error=%s",
+            "%s: source=%s task_id=%s request_error=%s",
+            log_prefix,
             source,
             task_id,
             _format_request_exception(exc),
         )
     except ValueError:
-        logger.warning("state-search: source=%s task_id=%s invalid_json", source, task_id)
+        logger.warning("%s: source=%s task_id=%s invalid_json", log_prefix, source, task_id)
     return []
+
+
+def _run_state_task_sync_dataset_items(task_id: str, source: str) -> List[Dict[str, Any]]:
+    selection_limit = max(APIFY_STATE_SEARCH_LIMIT, 0)
+    if selection_limit <= 0:
+        logger.info("state-search: source=%s task_id=%s skipped limit=%s", source, task_id, APIFY_STATE_SEARCH_LIMIT)
+        return []
+    limit = max(_state_search_fetch_limit(source), selection_limit)
+    return _run_apify_search_task_sync_dataset_items(
+        task_id,
+        source,
+        fetch_limit=limit,
+        log_prefix="state-search",
+    )
 
 
 def _fetch_extra_state_rows() -> List[Dict[str, Any]]:
@@ -429,6 +484,181 @@ def _enqueue_extra_state_rows(payload: Dict[str, Any]) -> int:
     extra_enqueued = _enqueue_pending_rows(detail_rows, source="state-search")
     logger.info("state-search: enqueued_extra=%d", extra_enqueued)
     return extra_enqueued
+
+
+def _fetch_apify_backstop_main_rows() -> List[Dict[str, Any]]:
+    if not APIFY_MAIN_TASK_ID:
+        logger.info("coverage-backstop: main skipped missing_task_id")
+        return []
+    if APIFY_BACKSTOP_MAIN_FETCH_LIMIT <= 0:
+        logger.info("coverage-backstop: main skipped fetch_limit=%s", APIFY_BACKSTOP_MAIN_FETCH_LIMIT)
+        return []
+    return _run_apify_search_task_sync_dataset_items(
+        APIFY_MAIN_TASK_ID,
+        "main",
+        fetch_limit=max(APIFY_BACKSTOP_MAIN_FETCH_LIMIT, APIFY_BACKSTOP_MAIN_LIMIT),
+        log_prefix="coverage-backstop",
+    )
+
+
+def _fetch_apify_backstop_state_rows() -> List[Dict[str, Any]]:
+    if not APIFY_STATE_SEARCH_ENABLED:
+        return []
+    collected: List[Dict[str, Any]] = []
+    for cfg in EXTRA_STATE_SEARCHES:
+        source = cfg["source"]
+        task_id = cfg["task_id"]
+        enabled = bool(cfg.get("enabled"))
+        if not enabled:
+            if task_id:
+                logger.info("coverage-backstop: source=%s task_id=%s disabled", source, task_id)
+            continue
+        fetch_limit = _backstop_state_fetch_limit(source)
+        if fetch_limit <= 0:
+            logger.info("coverage-backstop: source=%s task_id=%s skipped fetch_limit=%s", source, task_id, fetch_limit)
+            continue
+        rows = _run_apify_search_task_sync_dataset_items(
+            task_id,
+            source,
+            fetch_limit=max(fetch_limit, APIFY_BACKSTOP_STATE_LIMIT),
+            log_prefix="coverage-backstop",
+        )
+        collected.extend(rows)
+    return _prioritize_extra_state_rows(collected)
+
+
+def _coverage_backstop_skip_zpids() -> set[str]:
+    skip: set[str] = set()
+    try:
+        skip.update(load_seen_zpids())
+    except Exception:
+        logger.warning("coverage-backstop: failed to load seen zpids", exc_info=True)
+    skip.update(_pending_queue_state_skip_zpids())
+    return skip
+
+
+def _enqueue_apify_backstop_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    source: str,
+    max_rows: int,
+) -> int:
+    if max_rows <= 0:
+        logger.info("coverage-backstop: source=%s skipped limit=%s", source, max_rows)
+        return 0
+    selection = _select_unseen_rows(
+        rows,
+        _coverage_backstop_skip_zpids(),
+        set(),
+        max_rows=max(max_rows, 0),
+    )
+    logger.info(
+        "coverage-backstop: source=%s unseen_filter received=%d hard_skipped=%d already_seen=%d invalid=%d kept=%d",
+        source,
+        selection["received"],
+        selection["hard_skipped"],
+        selection["already_seen"],
+        selection.get("invalid_rows", 0),
+        selection["selected"],
+    )
+    if not selection["rows"]:
+        return 0
+    logger.info("coverage-backstop: source=%s selected_for_detail=%d", source, len(selection["rows"]))
+    detail_rows = _run_state_detail_task_for_rows(selection["rows"])
+    enqueued = _enqueue_pending_rows(detail_rows, source=source)
+    logger.info("coverage-backstop: source=%s enqueued=%d", source, enqueued)
+    return enqueued
+
+
+def _enqueue_apify_coverage_backstop() -> int:
+    if not APIFY_BACKSTOP_ENABLED:
+        logger.info("coverage-backstop: skipped disabled")
+        return 0
+    main_rows = _fetch_apify_backstop_main_rows()
+    main_enqueued = _enqueue_apify_backstop_rows(
+        main_rows,
+        source="coverage-backstop-main",
+        max_rows=max(APIFY_BACKSTOP_MAIN_LIMIT, 0),
+    )
+    state_rows = _fetch_apify_backstop_state_rows()
+    state_enqueued = _enqueue_apify_backstop_rows(
+        state_rows,
+        source="coverage-backstop-state",
+        max_rows=max(APIFY_BACKSTOP_STATE_LIMIT, 0),
+    )
+    total = main_enqueued + state_enqueued
+    logger.info(
+        "coverage-backstop: enqueued_total=%d main=%d state=%d",
+        total,
+        main_enqueued,
+        state_enqueued,
+    )
+    return total
+
+
+def _apify_backstop_due(run_time: datetime) -> bool:
+    if not APIFY_BACKSTOP_ENABLED:
+        return False
+    if not APIFY_TOKEN:
+        return False
+    local_dt = run_time.astimezone(SCHEDULER_TZ)
+    return local_dt.hour == APIFY_BACKSTOP_HOUR
+
+
+def _apify_backstop_day_key(run_time: datetime) -> str:
+    return run_time.astimezone(SCHEDULER_TZ).strftime("%Y-%m-%d")
+
+
+def _acquire_apify_backstop_day(run_time: datetime) -> bool:
+    day_key = _apify_backstop_day_key(run_time)
+    lock_file = f"{APIFY_BACKSTOP_LOCK_PATH}.{day_key}"
+    with _apify_backstop_day_lock:
+        try:
+            parent = os.path.dirname(lock_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            logger.info("coverage-backstop: skipped already_ran day=%s", day_key)
+            return False
+        except Exception:
+            logger.warning("coverage-backstop: failed to acquire day lock day=%s", day_key, exc_info=True)
+            return False
+        try:
+            os.close(fd)
+        except Exception:
+            logger.debug("coverage-backstop: failed to close day lock fd", exc_info=True)
+    return True
+
+
+def _start_apify_coverage_backstop(run_time: Optional[datetime] = None) -> None:
+    run_time = run_time or datetime.now(tz=SCHEDULER_TZ)
+    if not _apify_backstop_due(run_time):
+        return
+    if not _apify_backstop_worker_lock.acquire(blocking=False):
+        logger.info("coverage-backstop: worker already running; skipped duplicate trigger")
+        return
+    if not _acquire_apify_backstop_day(run_time):
+        _apify_backstop_worker_lock.release()
+        return
+
+    def _runner() -> None:
+        try:
+            enqueued = _enqueue_apify_coverage_backstop()
+            if enqueued and _within_initial_hours(datetime.now(tz=SCHEDULER_TZ)):
+                processed = _process_pending_queue()
+                logger.info("coverage-backstop: processed count=%d", processed)
+        except Exception:
+            logger.exception("coverage-backstop: worker failed")
+        finally:
+            _apify_backstop_worker_lock.release()
+
+    threading.Thread(target=_runner, name="apify-coverage-backstop", daemon=True).start()
+    logger.info("coverage-backstop: background worker started")
+
+
+def _process_apify_coverage_backstop_callback(run_time: datetime) -> None:
+    _start_apify_coverage_backstop(run_time)
 
 
 def _start_extra_state_rows(payload: Dict[str, Any]) -> None:
@@ -1013,7 +1243,12 @@ def _select_payload_listings(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _select_unseen_rows(received_rows, seen_set, hard_skip, max_rows=5)
 
 
-def _prepare_extra_state_rows(raw_rows: List[Dict[str, Any]], source: str) -> Dict[str, Any]:
+def _prepare_extra_state_rows(
+    raw_rows: List[Dict[str, Any]],
+    source: str,
+    *,
+    log_prefix: str = "state-search",
+) -> Dict[str, Any]:
     fetched = len(raw_rows)
     kept: List[Dict[str, Any]] = []
     dropped_error = 0
@@ -1033,7 +1268,8 @@ def _prepare_extra_state_rows(raw_rows: List[Dict[str, Any]], source: str) -> Di
             dropped_invalid += 1
 
     logger.info(
-        "state-search: source=%s fetched=%d dropped_error=%d dropped_missing_id_url=%d dropped_invalid=%d normalized_kept=%d",
+        "%s: source=%s fetched=%d dropped_error=%d dropped_missing_id_url=%d dropped_invalid=%d normalized_kept=%d",
+        log_prefix,
         source,
         fetched,
         dropped_error,
@@ -1194,7 +1430,11 @@ async def _start_scheduler() -> None:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
         return
     _ensure_scheduler_thread(
-        hourly_callbacks=[_process_deferred_rows, _process_pending_rows_callback],
+        hourly_callbacks=[
+            _process_deferred_rows,
+            _process_pending_rows_callback,
+            _process_apify_coverage_backstop_callback,
+        ],
         initial_callbacks=False,
     )
     _ensure_keepalive_thread()
@@ -2257,6 +2497,7 @@ async def apify_hook(request: Request):
         row_source = "payload.listings"
         _enqueue_pending_rows(rows, source=row_source)
         _start_extra_state_rows(payload)
+        _start_apify_coverage_backstop(datetime.now(tz=SCHEDULER_TZ))
 
     if rows is not None:
         normalized_rows: List[Dict[str, Any]] = []

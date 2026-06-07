@@ -39,6 +39,24 @@ PY
         value: "300"
       - key: APIFY_DECISION_LOCK_PATH
         value: /tmp/apify_hourly_decision.txt
+      - key: APIFY_TASK_MAIN
+        value: GPBSVcMBIK6CyJzBm
+      - key: APIFY_BACKSTOP_ENABLED
+        value: "true"
+      - key: APIFY_BACKSTOP_HOUR
+        value: "18"
+      - key: APIFY_BACKSTOP_MAIN_FETCH_LIMIT
+        value: "100"
+      - key: APIFY_BACKSTOP_MAIN_LIMIT
+        value: "10"
+      - key: APIFY_BACKSTOP_STATE_FETCH_LIMIT
+        value: "50"
+      - key: APIFY_BACKSTOP_STATE_FETCH_LIMIT_MI
+        value: "150"
+      - key: APIFY_BACKSTOP_STATE_LIMIT
+        value: "10"
+      - key: APIFY_BACKSTOP_LOCK_PATH
+        value: /tmp/apify_coverage_backstop.txt
       - key: ALLOW_ROLE_EMAIL_FALLBACK
         value: "false"
       - key: BLOCK_SECONDS

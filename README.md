@@ -39,6 +39,7 @@ Set these environment variables:
 * `APIFY_TASK_MI`
 * `APIFY_TASK_AK`
 * `APIFY_TASK_HI`
+* `APIFY_TASK_MAIN` (optional override; defaults to the current original-search task)
 * `APIFY_STATE_SEARCH_ENABLED=true` (default)
 * `APIFY_STATE_SEARCH_LIMIT=5` (default)
 * `APIFY_STATE_SEARCH_FETCH_LIMIT=25` (default for AK/HI)
@@ -55,6 +56,18 @@ deeper default raw fetch window because Zillow can pin dozens of stale/non-quali
 candidates; AK and HI are prioritized ahead of MI before the shared state-search cap is applied. Keep AK's saved Zillow
 search URL free of the `doz` days-on-Zillow filter so valid low-volume active listings older than seven days are not
 hidden behind Apify's `No results found.` error row.
+
+The optional daily coverage backstop runs once per local day at `APIFY_BACKSTOP_HOUR` (default `18`). It fetches wider
+search-only windows from the original task and MI/AK/HI tasks, de-dupes against already-seen and queued zpids, and only
+then calls the detail task for selected unseen rows. Defaults:
+
+* `APIFY_BACKSTOP_ENABLED=true`
+* `APIFY_BACKSTOP_MAIN_FETCH_LIMIT=100`
+* `APIFY_BACKSTOP_MAIN_LIMIT=10`
+* `APIFY_BACKSTOP_STATE_FETCH_LIMIT=50`
+* `APIFY_BACKSTOP_STATE_FETCH_LIMIT_MI=150`
+* `APIFY_BACKSTOP_STATE_LIMIT=10`
+* `APIFY_BACKSTOP_LOCK_PATH=/tmp/apify_coverage_backstop.txt`
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main
