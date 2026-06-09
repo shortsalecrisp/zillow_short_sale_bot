@@ -9,7 +9,7 @@ const VOICE_AB_TEST_STARTED_AT = "2026-05-29T23:33:59Z";
 const VOICE_AB_TEST_STARTED_LOCAL = "May 29, 2026 7:33 PM ET";
 const VOICE_AB_TEST_INCLUDED_VARIANTS = ["eryn", "finch"] as const;
 const CODEX_ANALYSIS_INSTRUCTIONS =
-  "When asked how the voice A/B test or voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer. For the A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant of eryn or finch. Do not include previous single-voice Emmy calls in A/B results. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes.";
+  "When asked how the voice A/B test or voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer. For the historical A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant of eryn or finch. Do not include previous single-voice Emmy calls in A/B results. Treat the current production baseline as Eryn voice with Maya assistant name. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes.";
 
 type TranscriptToolCall = {
   tool_name?: string;
@@ -72,6 +72,11 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function isAssistantRole(role?: string): boolean {
+  const normalizedRole = role?.toLowerCase();
+  return normalizedRole === "assistant" || normalizedRole === "agent";
+}
+
 function words(value: string): string[] {
   return value.trim().split(/\s+/).filter(Boolean);
 }
@@ -122,7 +127,7 @@ function getAgentToAssistantLatencies(transcript: PerformanceTranscriptItem[]): 
       continue;
     }
 
-    if (role === "assistant" && latestAgentTime !== null) {
+    if (isAssistantRole(role) && latestAgentTime !== null) {
       const latency = roundOne(timeSecs - latestAgentTime);
       if (latency >= 0 && latency <= 60) {
         latencies.push(latency);
@@ -161,7 +166,7 @@ function hasSuccessfulTransferResult(transcript: PerformanceTranscriptItem[]): b
 export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): string {
   const transcript = input.conversation.transcript ?? [];
   const assistantMessages = transcript
-    .filter((item) => item.role === "assistant" && typeof item.message === "string" && item.message.trim() !== "")
+    .filter((item) => isAssistantRole(item.role) && typeof item.message === "string" && item.message.trim() !== "")
     .map((item) => item.message!.trim());
   const agentMessages = transcript
     .filter((item) => item.role === "user" && typeof item.message === "string" && item.message.trim() !== "")
@@ -203,7 +208,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       requestedPhone: input.metadata.requestedPhone,
       dialedPhone: input.metadata.dialedPhone,
       testMode: input.metadata.testMode,
-      assistantName: input.metadata.assistantName ?? "Emmy",
+      assistantName: input.metadata.assistantName ?? "Maya",
       voiceName: input.metadata.voiceName ?? null,
       voiceVariant: input.metadata.voiceVariant ?? null,
       voiceId: input.metadata.voiceId ?? null,
