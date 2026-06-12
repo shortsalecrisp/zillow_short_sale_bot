@@ -1343,6 +1343,30 @@ def test_process_rows_surfaces_override(monkeypatch):
     assert captured["row"][bot_min.COL_EMAIL_CONF] == "high"
 
 
+def test_listing_text_uses_positive_special_listing_conditions():
+    listing_text = bot_min._listing_text_from_payload(
+        {
+            "description": "Clean house with updated kitchen.",
+            "resoFacts": {"specialListingConditions": "Short Sale,Standard"},
+        }
+    )
+
+    assert "Short Sale,Standard" in listing_text
+    assert bot_min.is_short_sale(bot_min._short_sale_text_from_payload(listing_text))
+
+
+def test_listing_text_rejects_short_sale_no_special_listing_conditions():
+    listing_text = bot_min._listing_text_from_payload(
+        {
+            "description": "Clean house with updated kitchen.",
+            "resoFacts": {"specialListingConditions": "Short Sale No,Standard"},
+        }
+    )
+
+    assert "Short Sale No,Standard" in listing_text
+    assert not bot_min.is_short_sale(bot_min._short_sale_text_from_payload(listing_text))
+
+
 def test_portal_mobile_number_extracted(monkeypatch):
     portal_html = Path("tests/fixtures/portal_exprealty.html").read_text()
 

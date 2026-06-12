@@ -41,6 +41,8 @@ PY
         value: /tmp/apify_hourly_decision.txt
       - key: APIFY_TASK_MAIN
         value: GPBSVcMBIK6CyJzBm
+      - key: APIFY_STATE_SEARCH_FETCH_LIMIT_MI
+        value: "50"
       - key: APIFY_BACKSTOP_ENABLED
         value: "true"
       - key: APIFY_BACKSTOP_HOUR

@@ -906,7 +906,8 @@ def ensure_headless_ready(logger: Optional[logging.Logger] = None) -> bool:
 # ───────────────────── regexes & misc helpers ─────────────────────
 SHORT_RE = re.compile(r"\bshort\s+sale\b", re.I)
 BAD_RE   = re.compile(
-    r"\b(?:approved short sale|short sale approved|not a\s+short\s+sale)\b",
+    r"\b(?:approved short sale|short sale approved|short\s+sale\s*(?:-|:)?\s*no|"
+    r"not a\s+short\s+sale|no\s+short\s+sale)\b",
     re.I,
 )
 APPROVED_RE = re.compile(r"\bapproved\b", re.I)
@@ -1562,11 +1563,16 @@ _LISTING_TEXT_PATHS = (
     ("hdpData", "homeInfo", "listingDescription"),
     ("hdpData", "homeInfo", "whatsSpecial"),
     ("hdpData", "homeInfo", "whatsSpecialText"),
+    ("resoFacts", "specialListingConditions"),
+    ("resoFacts", "specialConditions"),
     ("property", "description"),
     ("property", "remarks"),
+    ("property", "specialListingConditions"),
+    ("property", "resoFacts", "specialListingConditions"),
     ("listing", "description"),
     ("listing", "remarks"),
     ("listing", "listingRemarks"),
+    ("listing", "specialListingConditions"),
     ("property", "listingRemarks"),
 )
 
