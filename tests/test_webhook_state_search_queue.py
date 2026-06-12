@@ -428,6 +428,26 @@ def test_state_search_queue_payload_uses_street_only_sms_address():
     assert payload["full_address"] == "1 Ocean Ave, Pahoa, HI 96778"
 
 
+def test_state_search_queue_payload_preserves_special_listing_conditions():
+    row = {
+        "zpid": "mi-1",
+        "detailUrl": "https://www.zillow.com/homedetails/mi-1_zpid/",
+        "address": "1 Main St, Detroit, MI 48201",
+        "street": "1 Main St",
+        "city": "Detroit",
+        "state": "MI",
+        "agentName": "State Agent",
+        "description": "Clean house with updated kitchen.",
+        "search_source": "mi",
+        "resoFacts": {"specialListingConditions": "Short Sale,Standard"},
+    }
+
+    payload = webhook_server._compact_queue_resume_payload(row, "state-search")
+
+    assert payload["specialListingConditions"] == "Short Sale,Standard"
+    assert "Short Sale,Standard" in payload["listingText"]
+
+
 def test_state_detail_task_uses_listing_urls(monkeypatch):
     captured = {}
 

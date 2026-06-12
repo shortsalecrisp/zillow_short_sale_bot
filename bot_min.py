@@ -1553,6 +1553,8 @@ _LISTING_TEXT_FIELDS = (
     "agentRemarks",
     "listingRemarks",
     "shortSaleDescription",
+    "specialListingConditions",
+    "specialConditions",
     "whatsSpecial",
     "whatsSpecialText",
 )

@@ -1589,9 +1589,46 @@ def _queue_row_values(record: Dict[str, Any]) -> List[str]:
     return values
 
 
+def _extract_special_listing_conditions(row: Dict[str, Any]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    paths = (
+        ("specialListingConditions",),
+        ("specialConditions",),
+        ("resoFacts", "specialListingConditions"),
+        ("resoFacts", "specialConditions"),
+        ("property", "specialListingConditions"),
+        ("property", "resoFacts", "specialListingConditions"),
+        ("listing", "specialListingConditions"),
+    )
+    parts: List[str] = []
+    for path in paths:
+        current: Any = row
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        if isinstance(current, str) and current.strip():
+            parts.append(current.strip())
+        elif isinstance(current, list):
+            parts.extend(str(item).strip() for item in current if str(item).strip())
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for part in parts:
+        normalized = re.sub(r"\s+", " ", part).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return "; ".join(deduped)
+
+
 def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str, Any]:
     zpid = str(row.get("zpid", "")).strip()
     listing_text = extract_description(row)
+    special_conditions = _extract_special_listing_conditions(row)
+    if special_conditions and special_conditions not in listing_text:
+        listing_text = " ".join(part for part in (listing_text, special_conditions) if part)
     sms_address = _format_sms_listing_address(row)
     full_address = _format_listing_address(row)
     attribution = row.get("attributionInfo") if isinstance(row.get("attributionInfo"), dict) else {}
@@ -1631,6 +1668,7 @@ def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str,
             or row.get("detailScrapeAt")
             or ""
         ).strip(),
+        "specialListingConditions": special_conditions,
         "listing_description": listing_text,
         "description": listing_text,
         "listingText": listing_text,
