@@ -1,6 +1,7 @@
 import axios, { AxiosError } from "axios";
 import { config } from "./config";
 import { rememberElevenLabsCallContext } from "./elevenLabsCallContext";
+import { buildElevenLabsOpenerVariant } from "./elevenLabsOpenerVariant";
 import { scheduleElevenLabsPostCallFallback } from "./elevenLabsPostCall";
 import { selectElevenLabsVoiceVariant, type ElevenLabsVoiceVariant } from "./elevenLabsVoiceVariant";
 import { logger } from "./logger";
@@ -177,6 +178,22 @@ function buildVoicemailMessage(streetAddress: string, callAttemptNumber: number,
   return `Hi, this is ${assistantName} with Crisp Short Sales calling about the short sale listing at ${streetAddress}. We specialize in helping agents with the short sale process and can handle the paperwork, phone calls, and the whole process with the lender to take that work off your shoulders. Yoni is our short sale specialist, and he can answer any questions you have. Give him a call back at 404-300-9526 when you get a chance. Thanks.`;
 }
 
+function resolveElevenLabsOpener(metadata: CallMetadata, assistantName: string) {
+  if (metadata.openerVariant && metadata.openerScript) {
+    return {
+      key: metadata.openerVariant,
+      label: metadata.openerVariantLabel ?? metadata.openerVariant,
+      script: metadata.openerScript,
+    };
+  }
+
+  return buildElevenLabsOpenerVariant({
+    rowNumber: metadata.rowNumber,
+    firstName: metadata.firstName,
+    assistantName,
+  });
+}
+
 export function buildElevenLabsOutboundCallBody(params: {
   agentId: string;
   agentPhoneNumberId: string;
@@ -185,6 +202,7 @@ export function buildElevenLabsOutboundCallBody(params: {
 }) {
   const voiceVariant = resolveElevenLabsVoiceVariant(params.metadata);
   const streetAddress = getStreetAddress(params.metadata.listingAddress);
+  const openerVariant = resolveElevenLabsOpener(params.metadata, voiceVariant.assistantName);
   const dynamicVariables = {
     rowNumber: params.metadata.rowNumber,
     agentName: params.metadata.fullName,
@@ -198,6 +216,9 @@ export function buildElevenLabsOutboundCallBody(params: {
     assistantName: voiceVariant.assistantName,
     voiceVariant: voiceVariant.key,
     voiceName: voiceVariant.voiceName,
+    openerVariant: openerVariant.key,
+    openerVariantLabel: openerVariant.label,
+    openerScript: openerVariant.script,
     voicemailMessage: buildVoicemailMessage(streetAddress, params.metadata.callAttemptNumber, voiceVariant.assistantName),
     testMode: params.metadata.testMode,
     liveTransferNumber: config.liveTransferNumber,
@@ -233,6 +254,10 @@ export async function placeElevenLabsOutboundCall(params: {
     voiceName: voiceVariant.voiceName,
     voiceId: voiceVariant.voiceId,
   };
+  const openerVariant = resolveElevenLabsOpener(metadata, voiceVariant.assistantName);
+  metadata.openerVariant = openerVariant.key;
+  metadata.openerVariantLabel = openerVariant.label;
+  metadata.openerScript = openerVariant.script;
   const body = buildElevenLabsOutboundCallBody({
     agentId,
     agentPhoneNumberId,
@@ -248,6 +273,8 @@ export async function placeElevenLabsOutboundCall(params: {
     assistantName: voiceVariant.assistantName,
     voiceVariant: voiceVariant.key,
     voiceName: voiceVariant.voiceName,
+    openerVariant: openerVariant.key,
+    openerVariantLabel: openerVariant.label,
     agentId,
     agentPhoneNumberId,
   });

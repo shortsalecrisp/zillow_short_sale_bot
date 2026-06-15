@@ -5,6 +5,7 @@ import { sendCallbackEmail } from "./sendCallbackEmail";
 import { sendCallTranscriptEmail } from "./sendCallTranscriptEmail";
 import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContext";
 import { buildVoicePerformanceLog } from "./elevenLabsPerformanceLog";
+import { hasClearLiveTransferConsent } from "./elevenLabsTransferConsent";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import type { CallMetadata } from "../types";
 
@@ -123,6 +124,10 @@ function hasToolCall(conversation: ElevenLabsConversation, toolName: string): bo
 }
 
 function hasSuccessfulTransfer(conversation: ElevenLabsConversation): boolean {
+  if (!hasClearLiveTransferConsent(conversation.transcript ?? [], conversation.analysis?.transcript_summary ?? "")) {
+    return false;
+  }
+
   return (conversation.transcript ?? []).some((item) =>
     (item.tool_results ?? []).some((toolResult) => {
       if (toolResult.tool_name !== "transfer_to_number") {

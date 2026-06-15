@@ -34,14 +34,14 @@ test("opening generic pickup fallback moves forward instead of repeating quick-s
     .filter((line) => line.startsWith('"'));
 
   assert.deepEqual(spokenLines, [
-    '"Thanks. Quick reason for my call, I was reaching out about your short sale listing. How are you planning to handle the bank side?"',
+    '"Thanks. Are you handling the bank side yourself?"',
   ]);
   assert.doesNotMatch(spokenLines.join("\n"), /{{streetAddress}}/);
   assert.doesNotMatch(spokenLines.join("\n"), /Crisp Short Sales/);
   assert.doesNotMatch(spokenLines.join("\n"), /Got a quick second/);
 });
 
-test("prompt keeps the standard opener short and saves the address for which-property questions", () => {
+test("prompt uses dynamic opener scripts and keeps the address out of the first opener", () => {
   const prompt = readPrompt();
   const openerBranch = extractSection(
     prompt,
@@ -54,16 +54,20 @@ test("prompt keeps the standard opener short and saves the address for which-pro
     "- If they give any clear yes-type answer after that, do not repeat",
   );
 
+  assert.match(prompt, /"{{openerScript}}"/);
+  assert.match(prompt, /The backend chooses `{{openerScript}}` for the opener test/);
+  assert.match(prompt, /passes `{{openerVariant}}` for analysis/);
+  assert.match(prompt, /Do not add a long pause before the opener/);
+  assert.match(prompt, /Do not say `{{streetAddress}}` in the first line/);
   assert.match(
     openerBranch,
-    /Hey {{firstName}}, this is {{assistantName}} with Crisp Short Sales\. Quick reason for my call, I was reaching out about your short sale listing\. How are you planning to handle the bank side\?/,
+    /Hey {{firstName}}, this is {{assistantName}} with Crisp Short Sales about your short sale listing\. Are you handling the bank side yourself\?/,
   );
-  assert.doesNotMatch(openerBranch, /{{streetAddress}}/);
+  assert.doesNotMatch(openerBranch, /short sale listing at {{streetAddress}}/);
   assert.match(
     genericFallbackBranch,
-    /Hey, this is {{assistantName}} with Crisp Short Sales\. I'm trying to reach {{firstName}} about a short sale listing\. Did I catch you for a second\?/,
+    /Hey, this is {{assistantName}} with Crisp Short Sales about a short sale listing\. Is this {{firstName}}\?/,
   );
-  assert.doesNotMatch(genericFallbackBranch, /Is this {{firstName}}\?/);
   assert.doesNotMatch(genericFallbackBranch, /{{streetAddress}}/);
   assert.match(prompt, /If they ask which listing, which property, or what address/);
 }
@@ -158,6 +162,23 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   assert.match(selfHandlingBranch, /Do you have any interest in talking with Yoni/);
 });
 
+test("prompt does not treat overlapped okay or busy later/callback language as live-transfer consent", () => {
+  const prompt = readPrompt();
+  const transferRule = extractSection(
+    prompt,
+    "Transfer rule:",
+    "If they want Yoni now, or say",
+  );
+
+  assert.match(transferRule, /clearly and unambiguously agrees/);
+  assert.match(transferRule, /Do not treat a vague or overlapped "okay okay"/);
+  assert.match(transferRule, /"I, so\.\.\. okay"/);
+  assert.match(transferRule, /in a meeting/);
+  assert.match(transferRule, /afternoon\/tomorrow\/later/);
+  assert.match(transferRule, /Sorry, I may have talked over you/);
+  assert.match(transferRule, /No problem\. What time should he call you\?/);
+});
+
 test("prompt treats partial this-is identity replies as confirmed", () => {
   const prompt = readPrompt();
 
@@ -180,8 +201,9 @@ test("prompt skips the address when identity confirmation already asks how to he
   assert.match(identityHelpBranch, /Do not ask "Got a quick second\?"/);
   assert.match(
     identityHelpBranch,
-    /Hey {{firstName}}, this is {{assistantName}} with Crisp Short Sales\. Quick reason for my call, I was reaching out about your short sale listing\. How are you planning to handle the bank side\?/,
+    /Hey {{firstName}}, this is {{assistantName}} with Crisp Short Sales about your short sale listing\. Are you handling the bank side yourself\?/,
   );
+  assert.doesNotMatch(identityHelpBranch, /short sale listing at {{streetAddress}}/);
 });
 
 test("prompt answers quick-second how-can-I-help turns immediately", () => {

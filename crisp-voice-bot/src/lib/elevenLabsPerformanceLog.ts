@@ -1,4 +1,9 @@
 import type { CallMetadata } from "../types";
+import {
+  hasCallbackOrLaterSignal,
+  hasClearLiveTransferConsent,
+  isMisfiredLiveTransferRequest,
+} from "./elevenLabsTransferConsent";
 
 export const VOICE_PERFORMANCE_LOG_MARKER = "CODEX_VOICE_CALL_METRICS_V1";
 
@@ -9,7 +14,7 @@ const VOICE_AB_TEST_STARTED_AT = "2026-05-29T23:33:59Z";
 const VOICE_AB_TEST_STARTED_LOCAL = "May 29, 2026 7:33 PM ET";
 const VOICE_AB_TEST_INCLUDED_VARIANTS = ["eryn", "finch"] as const;
 const CODEX_ANALYSIS_INSTRUCTIONS =
-  "When asked how the voice A/B test or voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer. For the historical A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant of eryn or finch. Do not include previous single-voice Emmy calls in A/B results. Treat the current production baseline as Eryn voice with Maya assistant name. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes.";
+  "When asked how the voice A/B test or voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer. For the historical A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant of eryn or finch. Do not include previous single-voice Emmy calls in A/B results. Treat the current production baseline as Eryn voice with Maya assistant name. Also compare call.openerVariant for the opener test: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome.";
 
 type TranscriptToolCall = {
   tool_name?: string;
@@ -163,6 +168,31 @@ function hasSuccessfulTransferResult(transcript: PerformanceTranscriptItem[]): b
   );
 }
 
+function firstAssistantMessageIndexMatching(
+  transcript: PerformanceTranscriptItem[],
+  pattern: RegExp,
+): number {
+  return transcript.findIndex(
+    (item) => isAssistantRole(item.role) && typeof item.message === "string" && pattern.test(item.message),
+  );
+}
+
+function hasUserMessageAfter(transcript: PerformanceTranscriptItem[], index: number): boolean {
+  if (index < 0) {
+    return false;
+  }
+
+  return transcript.slice(index + 1).some((item) => item.role === "user" && typeof item.message === "string" && item.message.trim() !== "");
+}
+
+function getMessageTimeAtIndex(transcript: PerformanceTranscriptItem[], index: number): number | null {
+  if (index < 0) {
+    return null;
+  }
+
+  return getItemTimeSecs(transcript[index]);
+}
+
 export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): string {
   const transcript = input.conversation.transcript ?? [];
   const assistantMessages = transcript
@@ -176,6 +206,19 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const combinedText = normalizeText(`${input.outcome} ${input.summary} ${input.transcript}`);
   const toolCallNames = getToolCallNames(transcript);
   const agentToAssistantLatencies = getAgentToAssistantLatencies(transcript);
+  const liveTransferToolFired = toolCallNames.includes("live_transfer_requested");
+  const clearLiveTransferConsent = hasClearLiveTransferConsent(transcript, input.summary);
+  const misfiredLiveTransferRequest = isMisfiredLiveTransferRequest(transcript, input.summary);
+  const callbackOrLaterSignal = hasCallbackOrLaterSignal(transcript, input.summary);
+  const reasonMessageIndex = firstAssistantMessageIndexMatching(transcript, /\bshort sale\b/i);
+  const openingQuestionIndex = firstAssistantMessageIndexMatching(
+    transcript,
+    /\b(?:handling the bank side|handling that one|already have someone)\b/i,
+  );
+  const reasonDelivered = reasonMessageIndex !== -1;
+  const openingQuestionDelivered = openingQuestionIndex !== -1;
+  const agentRespondedAfterReason = hasUserMessageAfter(transcript, reasonMessageIndex);
+  const agentRespondedAfterOpeningQuestion = hasUserMessageAfter(transcript, openingQuestionIndex);
   const durationSecs =
     typeof input.conversation.metadata?.call_duration_secs === "number"
       ? input.conversation.metadata.call_duration_secs
@@ -212,6 +255,9 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       voiceName: input.metadata.voiceName ?? null,
       voiceVariant: input.metadata.voiceVariant ?? null,
       voiceId: input.metadata.voiceId ?? null,
+      openerVariant: input.metadata.openerVariant ?? null,
+      openerVariantLabel: input.metadata.openerVariantLabel ?? null,
+      openerScript: input.metadata.openerScript ?? null,
       outcome: input.outcome,
       status: input.conversation.status ?? null,
       terminationReason,
@@ -229,6 +275,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       maxAgentToAssistantDelaySecs: agentToAssistantLatencies.length
         ? Math.max(...agentToAssistantLatencies)
         : null,
+      reasonMentionedAtSecs: getMessageTimeAtIndex(transcript, reasonMessageIndex),
+      openingQuestionAtSecs: getMessageTimeAtIndex(transcript, openingQuestionIndex),
       identityAskCount,
       areYouThereCount: (assistantText.match(/\bare you (?:still )?(?:there|on the line)\b/g) ?? []).length,
       clarificationCount: (assistantText.match(/\b(?:what was that|say that again|repeat that|sorry,? i caught)\b/g) ?? [])
@@ -240,12 +288,31 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       liveAnswered: agentMessages.length > 0,
       earlyHangupUnder20Secs:
         durationSecs !== null && durationSecs < 20 && normalizeText(terminationReason ?? "").includes("client disconnected"),
+      reasonDelivered,
+      openingQuestionDelivered,
+      agentRespondedAfterReason,
+      agentRespondedAfterOpeningQuestion,
+      hangupBeforeReason:
+        agentMessages.length > 0 &&
+        durationSecs !== null &&
+        normalizeText(terminationReason ?? "").includes("client disconnected") &&
+        !reasonDelivered,
+      hangupBeforeOpeningQuestion:
+        agentMessages.length > 0 &&
+        durationSecs !== null &&
+        normalizeText(terminationReason ?? "").includes("client disconnected") &&
+        !openingQuestionDelivered,
       repeatedIdentityAsk: identityAskCount > 1,
       aiSuspicion,
       audioConfusion: /\b(?:can'?t hear|can you hear|going in and out|breaking up|static|hello\?)\b/i.test(agentText),
       callbackRequested: toolCallNames.includes("callback_requested") || /requested callback/i.test(input.outcome),
-      liveTransferRequested: toolCallNames.includes("live_transfer_requested") || combinedText.includes("live transfer"),
-      transferCompleted: hasSuccessfulTransferResult(transcript) || /warm transfer accepted/i.test(input.outcome),
+      liveTransferToolFired,
+      liveTransferRequested: clearLiveTransferConsent,
+      clearLiveTransferConsent,
+      misfiredLiveTransferRequest,
+      callbackOrLaterSignal,
+      transferCompleted:
+        clearLiveTransferConsent && (hasSuccessfulTransferResult(transcript) || /warm transfer accepted/i.test(input.outcome)),
       voicemailDetected: combinedText.includes("voicemail") || combinedText.includes("voice mail"),
       noAnswer: combinedText.includes("no answer") || combinedText.includes("no response after second call"),
       notInterested: /not interested/i.test(input.outcome),

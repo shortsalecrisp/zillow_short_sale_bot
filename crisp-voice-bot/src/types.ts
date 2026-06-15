@@ -31,6 +31,9 @@ export interface CallMetadata {
   voiceVariant?: string;
   voiceName?: string;
   voiceId?: string;
+  openerVariant?: string;
+  openerVariantLabel?: string;
+  openerScript?: string;
 }
 
 export interface LiveTransferCallMetadata {

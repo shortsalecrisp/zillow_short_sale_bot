@@ -15,10 +15,10 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
 
   const log = buildVoicePerformanceLog({
     conversationId: "conv_test",
-    outcome: "Call received but agent hung up on Finch",
-    summary: "The agent asked if Finch was a chatbot and hung up early.",
+    outcome: "Call received but agent hung up on Maya",
+    summary: "The agent asked if Maya was a chatbot and hung up early.",
     transcript:
-      "Finch: Hey, is this Chris?\nAgent: This is Chris.\nFinch: Quick reason for my call...\nAgent: Are you a chatbot?",
+      "Maya: Hi Chris, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?\nAgent: Are you a chatbot?",
     metadata: {
       rowNumber: 3481,
       fullName: "Chris Agent",
@@ -27,10 +27,14 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
       requestedPhone: "+18135550123",
       dialedPhone: "+18135550123",
       testMode: false,
-      voiceVariant: "finch",
-      voiceName: "Finch",
-      assistantName: "Finch",
-      voiceId: "voice_finch",
+      voiceVariant: "eryn",
+      voiceName: "Eryn",
+      assistantName: "Maya",
+      voiceId: "voice_eryn",
+      openerVariant: "direct_reason",
+      openerVariantLabel: "Direct short sale reason",
+      openerScript:
+        "Hi Chris, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",
     },
     conversation: {
       status: "done",
@@ -39,9 +43,12 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
         call_duration_secs: 18,
       },
       transcript: [
-        { role: "assistant", message: "Hey, is this Chris?", time_in_call_secs: 1 },
-        { role: "user", message: "This is Chris.", time_in_call_secs: 3 },
-        { role: "assistant", message: "Quick reason for my call...", time_in_call_secs: 4.4 },
+        {
+          role: "agent",
+          message:
+            "Hi Chris, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",
+          time_in_call_secs: 0.7,
+        },
         { role: "user", message: "Are you a chatbot?", time_in_call_secs: 12 },
       ],
     },
@@ -55,15 +62,90 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   assert.deepEqual(parsed.abTestScope.includeOnlyVoiceVariants, ["eryn", "finch"]);
   assert.equal(parsed.abTestScope.excludePriorSingleVoiceEmmyCalls, true);
   assert.match(parsed.abTestScope.analysisRule, /Exclude all previous single-voice Emmy calls/i);
-  assert.equal(parsed.call.voiceVariant, "finch");
-  assert.equal(parsed.call.assistantName, "Finch");
+  assert.equal(parsed.call.voiceVariant, "eryn");
+  assert.equal(parsed.call.assistantName, "Maya");
+  assert.equal(parsed.call.openerVariant, "direct_reason");
+  assert.equal(parsed.call.openerVariantLabel, "Direct short sale reason");
+  assert.match(parsed.call.openerScript, /short sale listing/);
   assert.equal(parsed.metrics.durationSecs, 18);
-  assert.equal(parsed.metrics.agentTurns, 2);
-  assert.equal(parsed.metrics.assistantTurns, 2);
-  assert.equal(parsed.metrics.firstAgentToAssistantDelaySecs, 1.4);
+  assert.equal(parsed.metrics.agentTurns, 1);
+  assert.equal(parsed.metrics.assistantTurns, 1);
+  assert.equal(parsed.metrics.reasonMentionedAtSecs, 0.7);
+  assert.equal(parsed.metrics.openingQuestionAtSecs, 0.7);
   assert.equal(parsed.flags.aiSuspicion, true);
+  assert.equal(parsed.flags.reasonDelivered, true);
+  assert.equal(parsed.flags.openingQuestionDelivered, true);
+  assert.equal(parsed.flags.agentRespondedAfterReason, true);
+  assert.equal(parsed.flags.agentRespondedAfterOpeningQuestion, true);
+  assert.equal(parsed.flags.hangupBeforeReason, false);
+  assert.equal(parsed.flags.hangupBeforeOpeningQuestion, false);
   assert.match(parsed.codexInstructions, /Compare voiceVariant/i);
+  assert.match(parsed.codexInstructions, /openerVariant/i);
+  assert.match(parsed.codexInstructions, /hangupBeforeReason/i);
+  assert.match(parsed.codexInstructions, /current production baseline as Eryn voice with Maya assistant name/i);
   assert.match(parsed.codexInstructions, /without call\.voiceVariant of eryn or finch/i);
   assert.match(parsed.codexInstructions, /previous single-voice Emmy calls/i);
   assert.match(parsed.transcript, /Are you a chatbot/);
+});
+
+test("voice performance log does not count confused live-transfer tool fire as clear consent", async () => {
+  const { buildVoicePerformanceLog } = await import("../src/lib/elevenLabsPerformanceLog");
+
+  const log = buildVoicePerformanceLog({
+    conversationId: "conv_3701ktskd6ehedgrg0n56rptbx38",
+    outcome: "Requested callback later",
+    summary: "The caller was in a meeting and said she would call back later or tomorrow.",
+    transcript:
+      "Maya: Should I see if Yoni can hop on for sixty seconds and explain it?\nAgent: I, so... Okay. Okay.\nMaya: Ok, hold on, let me see if he's available one second.\nAgent: Right now, I am on the meeting. On the afternoon or tomorrow, I call you back.",
+    metadata: {
+      rowNumber: 3651,
+      fullName: "Norma Lagonell",
+      callAttemptNumber: 1,
+      listingAddress: "7733 Stone Creek Trl, Kissimmee, FL",
+      requestedPhone: "+19545441676",
+      dialedPhone: "+19545441676",
+      testMode: false,
+      voiceVariant: "eryn",
+      voiceName: "Eryn",
+      assistantName: "Maya",
+      voiceId: "dMyQqiVXTU80dDl2eNK8",
+    },
+    conversation: {
+      status: "done",
+      metadata: {
+        termination_reason: "Client disconnected: 1000",
+        call_duration_secs: 72,
+      },
+      transcript: [
+        {
+          role: "agent",
+          message:
+            "Got it. We can take the lender paperwork and bank calls off your plate at no cost to you or the seller. Should I see if Yoni, our short sale specialist, can hop on for sixty seconds and explain it?",
+          time_in_call_secs: 25,
+        },
+        { role: "user", message: "I, so... Okay. Okay.", time_in_call_secs: 26 },
+        {
+          role: "agent",
+          message: "Ok, hold on, let me see if he's available one second.",
+          time_in_call_secs: 38,
+        },
+        { role: "agent", tool_calls: [{ tool_name: "live_transfer_requested" }], time_in_call_secs: 38 },
+        {
+          role: "user",
+          message:
+            "Right now, I am on the meeting. On the afternoon or tomorrow, I call you back. Okay.",
+          time_in_call_secs: 37,
+        },
+      ],
+    },
+  });
+
+  const parsed = JSON.parse(log.replace(`--- CODEX_VOICE_CALL_METRICS_V1 ---\n`, ""));
+  assert.equal(parsed.flags.liveTransferToolFired, true);
+  assert.equal(parsed.flags.liveTransferRequested, false);
+  assert.equal(parsed.flags.clearLiveTransferConsent, false);
+  assert.equal(parsed.flags.misfiredLiveTransferRequest, true);
+  assert.equal(parsed.flags.callbackOrLaterSignal, true);
+  assert.equal(parsed.flags.transferCompleted, false);
+  assert.match(parsed.codexInstructions, /clearLiveTransferConsent/);
 });

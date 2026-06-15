@@ -72,8 +72,8 @@ type ToolResponse = {
 
 
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
-const FIRST_MESSAGE = '<break time="1.0s" /> Hey, is this {{firstName}}?';
-const INITIAL_WAIT_TIME_SECONDS = 2.0;
+const FIRST_MESSAGE = "{{openerScript}}";
+const INITIAL_WAIT_TIME_SECONDS = 0.4;
 const TURN_TIMEOUT_SECONDS = 1.2;
 const TURN_EAGERNESS = "eager";
 const SPECULATIVE_TURN = false;
@@ -136,7 +136,7 @@ function buildWarmTransferWorkflow(options: {
         forward_condition: {
           type: "llm",
           condition:
-            "Route to transfer_check only when the caller clearly wants to talk to Yoni right now, asks if he is available right now, or agrees to trying him now, and there is not already a fresh live_transfer_requested tool result waiting to be handled for this same handoff moment.",
+            "Route to transfer_check only when the caller clearly and unambiguously wants to talk to Yoni right now, asks if he is available right now, or agrees to trying him now after being offered a live Yoni handoff. Do not route on vague or overlapped replies like okay okay, yes yes, I so okay, broken English fragments, background speech, or any reply that also says the caller is busy, in a meeting, wants later/tomorrow, will call back, or did not understand. If unclear, stay in the main conversation and clarify callback versus trying Yoni now. Do not route when there is already a fresh live_transfer_requested tool result waiting to be handled for this same handoff moment.",
         },
       },
       transfer_check_to_patch: {

@@ -10,21 +10,43 @@ process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 process.env.ELEVENLABS_ERYN_VOICE_ID = "eryn-voice-id";
 process.env.ELEVENLABS_FINCH_VOICE_ID = "finch-voice-id";
 
-test("ElevenLabs calls alternate deterministically between Eryn and Finch by row", async () => {
+test("ElevenLabs calls use Eryn voice with Maya assistant name for every row", async () => {
   const { selectElevenLabsVoiceVariant } = await import("../src/lib/elevenLabsVoiceVariant");
 
   assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3480 }), {
     key: "eryn",
-    assistantName: "Emmy",
+    assistantName: "Maya",
     voiceName: "Eryn",
     voiceId: "eryn-voice-id",
   });
   assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3481 }), {
-    key: "finch",
-    assistantName: "Finch",
-    voiceName: "Finch",
-    voiceId: "finch-voice-id",
+    key: "eryn",
+    assistantName: "Maya",
+    voiceName: "Eryn",
+    voiceId: "eryn-voice-id",
   });
+});
+
+test("ElevenLabs opener test assigns weighted opener variants by row", async () => {
+  const { buildElevenLabsOpenerVariant } = await import("../src/lib/elevenLabsOpenerVariant");
+
+  assert.deepEqual(buildElevenLabsOpenerVariant({ rowNumber: 3700, firstName: "Karimah", assistantName: "Maya" }), {
+    key: "identity_check_short",
+    label: "Short identity check control",
+    script: "Hey, is this Karimah?",
+  });
+  assert.equal(
+    buildElevenLabsOpenerVariant({ rowNumber: 3701, firstName: "Norma", assistantName: "Maya" }).key,
+    "direct_reason",
+  );
+  assert.equal(
+    buildElevenLabsOpenerVariant({ rowNumber: 3704, firstName: "Miriam", assistantName: "Maya" }).key,
+    "yoni_name",
+  );
+  assert.equal(
+    buildElevenLabsOpenerVariant({ rowNumber: 3707, firstName: "Marta", assistantName: "Maya" }).key,
+    "benefit_hook",
+  );
 });
 
 test("ElevenLabs outbound payload overrides the voice and assistant name per call", async () => {
@@ -48,15 +70,21 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
     },
   });
 
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.assistantName, "Finch");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "finch");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Finch");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.assistantName, "Maya");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "eryn");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Eryn");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariant, "direct_reason");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Direct short sale reason");
+  assert.equal(
+    body.conversation_initiation_client_data.dynamic_variables.openerScript,
+    "Hi Tina, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",
+  );
   assert.equal(
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,
-    "finch-voice-id",
+    "eryn-voice-id",
   );
   assert.match(
     body.conversation_initiation_client_data.dynamic_variables.voicemailMessage,
-    /^Hi, this is Finch with Crisp Short Sales/,
+    /^Hi, this is Maya with Crisp Short Sales/,
   );
 });
