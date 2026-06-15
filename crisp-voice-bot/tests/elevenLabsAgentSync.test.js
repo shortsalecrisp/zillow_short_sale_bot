@@ -21,7 +21,7 @@ test("agent sync enables skip_turn for placeholder-only noise turns", () => {
   const script = readSyncScript();
 
   assert.match(script, /const FIRST_MESSAGE = "{{openerScript}}";/);
-  assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = 0\.4;/);
+  assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = -1;/);
   assert.match(script, /const TURN_TIMEOUT_SECONDS = 1\.2;/);
   assert.match(script, /const TURN_EAGERNESS = "eager";/);
   assert.match(script, /skip_turn:\s*{/);
