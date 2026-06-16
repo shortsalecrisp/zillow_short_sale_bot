@@ -28,22 +28,20 @@ By default the webhook server launches the hourly Apify scheduler. Deployments t
 
 * `DISABLE_APIFY_SCHEDULER=true`
 
-## Additional MI/AK/HI Apify state searches
+## Additional AK/HI Apify state searches
 
-The bot can optionally run three extra Apify actor tasks directly from inside `webhook_server.py` and append their
+The bot can optionally run two extra Apify actor tasks directly from inside `webhook_server.py` and append their
 results into the same downstream pipeline used by the existing Zillow webhook ingestion (normalize → dedupe → qualify
 → detail/retry → sheet/contact/SMS).
 
 Set these environment variables:
 
-* `APIFY_TASK_MI`
 * `APIFY_TASK_AK`
 * `APIFY_TASK_HI`
 * `APIFY_TASK_MAIN` (optional override; defaults to the current original-search task)
 * `APIFY_STATE_SEARCH_ENABLED=true` (default)
 * `APIFY_STATE_SEARCH_LIMIT=5` (default)
 * `APIFY_STATE_SEARCH_FETCH_LIMIT=25` (default for AK/HI)
-* `APIFY_STATE_SEARCH_FETCH_LIMIT_MI=50` (implicit default; set explicitly to override)
 * `APIFY_STATE_SEARCH_BACKGROUND=true` (default)
 * `APIFY_STATE_DETAIL_TASK_ID=VI5izq8RGAL14zM75` (default)
 
@@ -51,21 +49,20 @@ These extra state tasks are intentionally **not** webhook-driven. The bot fetche
 `/v2/actor-tasks/{APIFY_TASK_*}/run-sync-get-dataset-items`, applies queue de-dupe locally, and then calls
 `/v2/actor-tasks/{APIFY_STATE_DETAIL_TASK_ID}/run-sync-get-dataset-items` only for the selected unseen zpids.
 `APIFY_STATE_SEARCH_FETCH_LIMIT` controls how many raw state rows are checked before queue de-dupe, while
-`APIFY_STATE_SEARCH_LIMIT` caps the combined MI/AK/HI rows detailed and enqueued per primary webhook run. MI keeps a
-moderate hourly raw fetch window because Zillow can pin dozens of stale/non-qualifying Michigan listings above newer
-candidates, while the daily backstop still goes deeper. AK and HI are prioritized ahead of MI before the shared state-search cap is applied. Keep AK's saved Zillow
+`APIFY_STATE_SEARCH_LIMIT` caps the combined AK/HI rows detailed and enqueued per primary webhook run. Michigan is
+intentionally not part of the extra state scrape because Zillow's Michigan short-sale search is too noisy and expensive.
+Keep AK's saved Zillow
 search URL free of the `doz` days-on-Zillow filter so valid low-volume active listings older than seven days are not
 hidden behind Apify's `No results found.` error row.
 
 The optional daily coverage backstop runs once per local day at `APIFY_BACKSTOP_HOUR` (default `18`). It fetches wider
-search-only windows from the original task and MI/AK/HI tasks, de-dupes against already-seen and queued zpids, and only
+search-only windows from the original task and AK/HI tasks, de-dupes against already-seen and queued zpids, and only
 then calls the detail task for selected unseen rows. Defaults:
 
 * `APIFY_BACKSTOP_ENABLED=true`
 * `APIFY_BACKSTOP_MAIN_FETCH_LIMIT=100`
 * `APIFY_BACKSTOP_MAIN_LIMIT=10`
 * `APIFY_BACKSTOP_STATE_FETCH_LIMIT=50`
-* `APIFY_BACKSTOP_STATE_FETCH_LIMIT_MI=150`
 * `APIFY_BACKSTOP_STATE_LIMIT=10`
 * `APIFY_BACKSTOP_LOCK_PATH=/tmp/apify_coverage_backstop.txt`
 

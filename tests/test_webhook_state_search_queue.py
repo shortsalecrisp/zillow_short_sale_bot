@@ -204,12 +204,17 @@ def test_startup_queue_recovery_is_backgrounded(monkeypatch):
     scheduled[0].close()
 
 
-def test_mi_uses_deeper_default_fetch_limit(monkeypatch):
+def test_extra_state_searches_exclude_mi(monkeypatch):
+    sources = {cfg["source"] for cfg in webhook_server.EXTRA_STATE_SEARCHES}
+
+    assert sources == {"ak", "hi"}
+
+
+def test_state_search_uses_shared_default_fetch_limit(monkeypatch):
     monkeypatch.delenv("APIFY_STATE_SEARCH_FETCH_LIMIT", raising=False)
     monkeypatch.delenv("APIFY_STATE_SEARCH_FETCH_LIMIT_MI", raising=False)
     monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_FETCH_LIMIT", 25)
 
-    assert webhook_server._state_search_fetch_limit("mi") == 50
     assert webhook_server._state_search_fetch_limit("hi") == 25
 
 

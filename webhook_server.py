@@ -131,7 +131,7 @@ APIFY_FETCH_MAX_WAIT_SECONDS = float(os.getenv("APIFY_FETCH_MAX_WAIT_SECONDS", "
 APIFY_STATE_SEARCH_ENABLED = os.getenv("APIFY_STATE_SEARCH_ENABLED", "true").lower() == "true"
 APIFY_STATE_SEARCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_LIMIT", "5"))
 APIFY_STATE_SEARCH_FETCH_LIMIT = int(os.getenv("APIFY_STATE_SEARCH_FETCH_LIMIT", "25"))
-APIFY_STATE_SEARCH_FETCH_LIMIT_DEFAULTS = {"MI": 50}
+APIFY_STATE_SEARCH_FETCH_LIMIT_DEFAULTS = {}
 APIFY_STATE_SEARCH_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_SEARCH_TIMEOUT_SECONDS", "60"))
 APIFY_STATE_SEARCH_BACKGROUND = os.getenv("APIFY_STATE_SEARCH_BACKGROUND", "true").lower() == "true"
 APIFY_STATE_DETAIL_TASK_ID = os.getenv("APIFY_STATE_DETAIL_TASK_ID", "VI5izq8RGAL14zM75").strip()
@@ -143,11 +143,11 @@ APIFY_BACKSTOP_HOUR = int(os.getenv("APIFY_BACKSTOP_HOUR", "18"))
 APIFY_BACKSTOP_MAIN_FETCH_LIMIT = int(os.getenv("APIFY_BACKSTOP_MAIN_FETCH_LIMIT", "100"))
 APIFY_BACKSTOP_MAIN_LIMIT = int(os.getenv("APIFY_BACKSTOP_MAIN_LIMIT", "10"))
 APIFY_BACKSTOP_STATE_FETCH_LIMIT = int(os.getenv("APIFY_BACKSTOP_STATE_FETCH_LIMIT", "50"))
-APIFY_BACKSTOP_STATE_FETCH_LIMIT_DEFAULTS = {"MI": 150, "AK": 50, "HI": 50}
+APIFY_BACKSTOP_STATE_FETCH_LIMIT_DEFAULTS = {"AK": 50, "HI": 50}
 APIFY_BACKSTOP_STATE_LIMIT = int(os.getenv("APIFY_BACKSTOP_STATE_LIMIT", "10"))
 APIFY_BACKSTOP_LOCK_PATH = os.getenv("APIFY_BACKSTOP_LOCK_PATH", "/tmp/apify_coverage_backstop.txt")
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
-_STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1, "mi": 2}
+_STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1}
 
 
 def _redact_sensitive_url(url: str) -> str:
@@ -216,7 +216,6 @@ def _backstop_state_fetch_limit(source: str) -> int:
 
 
 EXTRA_STATE_SEARCHES = [
-    {"source": "mi", "task_id": os.getenv("APIFY_TASK_MI", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_MI", "").strip())},
     {"source": "ak", "task_id": os.getenv("APIFY_TASK_AK", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_AK", "").strip())},
     {"source": "hi", "task_id": os.getenv("APIFY_TASK_HI", "").strip(), "enabled": _task_enabled(os.getenv("APIFY_TASK_HI", "").strip())},
 ]
