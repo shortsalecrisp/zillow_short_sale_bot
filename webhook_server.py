@@ -2206,6 +2206,78 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    phone = fmt_phone(str(payload.get("phone") or ""))
+    if not phone:
+        raise HTTPException(status_code=400, detail="invalid_phone")
+    digits = _digits_only(phone)
+
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="empty_message")
+    if len(message) > 1600:
+        raise HTTPException(status_code=400, detail="message_too_long")
+
+    row_idx = None
+    if payload.get("row") not in (None, ""):
+        try:
+            row_idx = int(payload.get("row"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="invalid_row")
+        if row_idx < 2:
+            raise HTTPException(status_code=400, detail="invalid_row")
+
+    final_result = None
+    for attempt in range(1, INITIAL_SMS_RETRY_ATTEMPTS + 1):
+        final_result = SMS_SENDER.send_with_diagnostics(
+            digits,
+            message,
+            sms_type="followup",
+            row_idx=row_idx,
+            attempt=attempt,
+        )
+        if final_result.success:
+            break
+        if attempt < INITIAL_SMS_RETRY_ATTEMPTS:
+            time.sleep(2)
+
+    if not final_result or not final_result.success:
+        logger.error(
+            "INTERNAL_FOLLOWUP_SMS_FAILED row=%s phone=%s http_status=%s response_body=%s exception_type=%s exception_message=%s",
+            row_idx,
+            digits,
+            getattr(final_result, "status_code", None),
+            getattr(final_result, "response_text", "") or "<empty>",
+            getattr(final_result, "exception_type", ""),
+            getattr(final_result, "exception_message", ""),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "status": "gateway_failed",
+                "gateway_status": getattr(final_result, "status_code", None),
+                "gateway_response": getattr(final_result, "response_text", ""),
+            },
+        )
+
+    sent_at = datetime.now(tz=TZ).isoformat()
+    logger.info(
+        "INTERNAL_FOLLOWUP_SMS_SENT row=%s phone=%s http_status=%s response_body=%s",
+        row_idx,
+        digits,
+        final_result.status_code,
+        final_result.response_text or "<empty>",
+    )
+    return {
+        "status": "sent",
+        "row": row_idx,
+        "phone": digits,
+        "sent_at": sent_at,
+        "gateway_status": final_result.status_code,
+        "gateway_response": final_result.response_text,
+    }
+
+
 @app.post("/internal/send-initial-sms")
 async def internal_send_initial_sms(request: Request):
     """Send an initial SMS from the production bot using Render-side credentials."""
@@ -2218,6 +2290,20 @@ async def internal_send_initial_sms(request: Request):
         raise HTTPException(status_code=400, detail="invalid_payload")
 
     return await asyncio.to_thread(_send_initial_sms_from_payload, payload)
+
+
+@app.post("/internal/send-followup-sms")
+async def internal_send_followup_sms(request: Request):
+    """Send a custom follow-up SMS from the production bot using Render-side credentials."""
+    _auth_internal_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    return await asyncio.to_thread(_send_followup_sms_from_payload, payload)
 
 
 _RELATIVE_TIME_RE = re.compile(

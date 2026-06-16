@@ -399,3 +399,69 @@ def test_internal_initial_sms_sends_when_verified_but_not_marked_sent(monkeypatc
     assert sheet.rows[16][7] == "x"
     assert sheet.rows[16][22]
     assert sheet.rows[16][42] == "x"
+
+
+def test_internal_followup_sms_requires_token(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/internal/send-followup-sms",
+        json={"phone": "555-111-2222", "message": "Custom follow-up"},
+    )
+
+    assert response.status_code == 403
+    assert sender.calls == []
+
+
+def test_internal_followup_sms_sends_custom_message_without_marking_sheet(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True, status_code=200, response_text="OK"),
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/internal/send-followup-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={"row": 12, "phone": "555-111-2222", "message": "Custom follow-up"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "sent"
+    assert body["row"] == 12
+    assert body["gateway_status"] == 200
+    assert sender.calls == [
+        {
+            "to": "15551112222",
+            "message": "Custom follow-up",
+            "sms_type": "followup",
+            "row_idx": 12,
+            "attempt": 1,
+        }
+    ]
+    assert sheet.rows[12][7] == ""
+    assert sheet.rows[12][22] == ""
+    assert sheet.rows[12][42] == ""
+
+
+def test_internal_followup_sms_rejects_empty_message(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/internal/send-followup-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={"phone": "555-111-2222", "message": "   "},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "empty_message"
+    assert sender.calls == []
