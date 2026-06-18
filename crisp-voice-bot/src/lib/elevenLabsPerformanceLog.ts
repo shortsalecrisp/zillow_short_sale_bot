@@ -258,6 +258,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       openerVariant: input.metadata.openerVariant ?? null,
       openerVariantLabel: input.metadata.openerVariantLabel ?? null,
       openerScript: input.metadata.openerScript ?? null,
+      scheduledWindow: input.metadata.scheduledWindow ?? null,
+      agentTimeZone: input.metadata.agentTimeZone ?? null,
       outcome: input.outcome,
       status: input.conversation.status ?? null,
       terminationReason,

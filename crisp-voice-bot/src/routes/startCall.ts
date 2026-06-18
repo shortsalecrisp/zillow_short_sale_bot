@@ -119,6 +119,8 @@ function validateStartCallRequest(body: unknown): ValidatedStartCallRequest {
     listingAddress,
     createdAt: readString(body, "createdAt"),
     scheduledForEt: readString(body, "scheduledForEt"),
+    scheduledWindow: readString(body, "scheduledWindow"),
+    agentTimeZone: readString(body, "agentTimeZone"),
     responseStatus: readString(body, "responseStatus"),
     notes: readString(body, "notes"),
     sheetName: readString(body, "sheetName"),
@@ -161,6 +163,8 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
       callAttemptNumber: payload.callAttemptNumber ?? 1,
       listingAddress: payload.listingAddress,
       sheetName: payload.sheetName,
+      scheduledWindow: payload.scheduledWindow,
+      agentTimeZone: payload.agentTimeZone,
       requestedPhone: payload.phone,
       dialedPhone,
       testMode: config.testMode,
@@ -172,6 +176,8 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
       actualDialedPhone: dialedPhone,
       listingAddress: payload.listingAddress,
       callAttemptNumber: payload.callAttemptNumber ?? 1,
+      scheduledWindow: payload.scheduledWindow,
+      agentTimeZone: payload.agentTimeZone,
       testMode: config.testMode,
     });
 

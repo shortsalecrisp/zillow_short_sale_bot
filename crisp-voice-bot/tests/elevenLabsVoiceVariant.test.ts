@@ -64,6 +64,8 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
       email: "tina@example.com",
       callAttemptNumber: 1,
       listingAddress: "123 Main St, Atlanta, GA",
+      scheduledWindow: "late_morning",
+      agentTimeZone: "America/New_York",
       requestedPhone: "+14045550123",
       dialedPhone: "+14043009526",
       testMode: false,
@@ -75,6 +77,8 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Eryn");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariant, "direct_reason");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Direct short sale reason");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.scheduledWindow, "late_morning");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.agentTimeZone, "America/New_York");
   assert.equal(
     body.conversation_initiation_client_data.dynamic_variables.openerScript,
     "Hi Tina, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",

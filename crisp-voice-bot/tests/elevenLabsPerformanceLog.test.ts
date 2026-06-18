@@ -35,6 +35,8 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
       openerVariantLabel: "Direct short sale reason",
       openerScript:
         "Hi Chris, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",
+      scheduledWindow: "late_morning",
+      agentTimeZone: "America/New_York",
     },
     conversation: {
       status: "done",
@@ -67,6 +69,8 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   assert.equal(parsed.call.openerVariant, "direct_reason");
   assert.equal(parsed.call.openerVariantLabel, "Direct short sale reason");
   assert.match(parsed.call.openerScript, /short sale listing/);
+  assert.equal(parsed.call.scheduledWindow, "late_morning");
+  assert.equal(parsed.call.agentTimeZone, "America/New_York");
   assert.equal(parsed.metrics.durationSecs, 18);
   assert.equal(parsed.metrics.agentTurns, 1);
   assert.equal(parsed.metrics.assistantTurns, 1);

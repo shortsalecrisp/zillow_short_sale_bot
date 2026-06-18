@@ -9,6 +9,8 @@ export interface StartCallRequest {
   listingAddress: string;
   createdAt?: string;
   scheduledForEt?: string;
+  scheduledWindow?: string;
+  agentTimeZone?: string;
   responseStatus?: string;
   notes?: string;
   sheetName?: string;
@@ -23,6 +25,8 @@ export interface CallMetadata {
   callAttemptNumber: number;
   listingAddress: string;
   sheetName?: string;
+  scheduledWindow?: string;
+  agentTimeZone?: string;
   requestedPhone: string;
   dialedPhone: string;
   testMode: boolean;
