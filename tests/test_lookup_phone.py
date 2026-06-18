@@ -1367,6 +1367,102 @@ def test_listing_text_rejects_short_sale_no_special_listing_conditions():
     assert not bot_min.is_short_sale(bot_min._short_sale_text_from_payload(listing_text))
 
 
+def test_process_rows_skips_duplicate_enriched_phone_before_append(monkeypatch):
+    bot_min.seen_agents.clear()
+    bot_min.seen_phones.clear()
+    monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
+    monkeypatch.setattr(bot_min, "phone_exists", lambda phone: True)
+    monkeypatch.setattr(bot_min, "_find_existing_phone_row", lambda *args, **kwargs: 12)
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_phone",
+        lambda *args, **kwargs: {"number": "555-444-3333", "confidence": "high", "reason": ""},
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_email",
+        lambda *args, **kwargs: {"email": "jane@example.com", "confidence": "high", "reason": ""},
+    )
+    monkeypatch.setattr(bot_min, "_rapid_contact_normalized", lambda *args, **kwargs: {})
+    monkeypatch.setattr(bot_min, "record_seen_zpid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        bot_min,
+        "append_row",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("duplicate should not append")),
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "schedule_initial_sms",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("duplicate should not text")),
+    )
+
+    bot_min.process_rows(
+        [
+            {
+                "description": "short sale listing",
+                "agentName": "Jane Agent",
+                "state": "CA",
+                "street": "123 Elm St",
+                "city": "Los Angeles",
+                "zpid": "abc",
+            }
+        ],
+        skip_dedupe=True,
+    )
+
+
+def test_process_rows_deletes_raced_duplicate_before_text(monkeypatch):
+    bot_min.seen_agents.clear()
+    bot_min.seen_phones.clear()
+    monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
+    monkeypatch.setattr(bot_min, "phone_exists", lambda phone: False)
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_phone",
+        lambda *args, **kwargs: {"number": "555-444-3333", "confidence": "high", "reason": ""},
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_email",
+        lambda *args, **kwargs: {"email": "jane@example.com", "confidence": "high", "reason": ""},
+    )
+    monkeypatch.setattr(bot_min, "_rapid_contact_normalized", lambda *args, **kwargs: {})
+
+    def fake_find_existing_phone_row(phone, *, exclude_row_idx=None):
+        return 41 if exclude_row_idx == 42 else None
+
+    deleted = []
+    monkeypatch.setattr(bot_min, "_find_existing_phone_row", fake_find_existing_phone_row)
+    monkeypatch.setattr(bot_min, "append_row", lambda row_vals: 42)
+    monkeypatch.setattr(bot_min, "delete_row", lambda row_idx: deleted.append(row_idx))
+    monkeypatch.setattr(bot_min, "record_seen_zpid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        bot_min,
+        "schedule_initial_sms",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("raced duplicate should not text")),
+    )
+
+    bot_min.process_rows(
+        [
+            {
+                "description": "short sale listing",
+                "agentName": "Jane Agent",
+                "state": "CA",
+                "street": "123 Elm St",
+                "city": "Los Angeles",
+                "zpid": "abc",
+            }
+        ],
+        skip_dedupe=True,
+    )
+
+    assert deleted == [42]
+
+
 def test_portal_mobile_number_extracted(monkeypatch):
     portal_html = Path("tests/fixtures/portal_exprealty.html").read_text()
 

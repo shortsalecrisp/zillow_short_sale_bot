@@ -11972,6 +11972,30 @@ def phone_exists(p):
     normalized = _normalize_phone_for_dedupe(p or "")
     return bool(normalized) and normalized in seen_phones
 
+
+def _find_existing_phone_row(phone: str, *, exclude_row_idx: Optional[int] = None) -> Optional[int]:
+    normalized = _normalize_phone_for_dedupe(phone or "")
+    if not normalized:
+        return None
+    try:
+        resp = sheets_service.spreadsheets().values().get(
+            spreadsheetId=GSHEET_ID,
+            range=f"{GSHEET_TAB}!C:C",
+            majorDimension="ROWS",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+    except Exception as exc:
+        LOG.warning("Unable to refresh sheet phones before dedupe check: %s", exc)
+        return None
+    for row_idx, row_vals in enumerate(resp.get("values", []), start=1):
+        if exclude_row_idx is not None and row_idx == exclude_row_idx:
+            continue
+        current = row_vals[0] if row_vals else ""
+        if _normalize_phone_for_dedupe(str(current)) == normalized:
+            return row_idx
+    return None
+
+
 def _digits_only(num: str) -> str:
     """Keep digits, prefix 1 if US local (10 digits)."""
     digits = re.sub(r"\D", "", num or "")
@@ -12907,16 +12931,50 @@ def process_rows(
             outcomes[zpid] = outcome
             LOG.info("SKIP already-contacted agent %s (%s)", name, r.get("zpid"))
             continue
-        selected_phone = ""
-        selected_email = ""
-        if selected_phone and phone_exists(selected_phone):
+        phone_info = {"number": "", "confidence": "", "reason": ""}
+        email_info = {"email": "", "confidence": "", "reason": ""}
+        try:
+            phone_info = lookup_phone(name, state, r)
+        except Exception as exc:
+            LOG.error("ENRICHMENT_FAILED zpid=%s agent=%s err=%s", zpid, name, exc)
+        try:
+            email_info = lookup_email(name, state, r)
+        except Exception as exc:
+            LOG.error("ENRICHMENT_FAILED zpid=%s agent=%s err=%s", zpid, name, exc)
+
+        rapid_snapshot = _rapid_contact_normalized(name, r)
+        rapid_snapshot_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
+        rapid_snapshot_phones_found = len(rapid_snapshot.get("phones", []) or []) if rapid_snapshot else 0
+        rapid_candidates = rapid_snapshot.get("rapid_candidates", []) if rapid_snapshot else []
+
+        selected_phone = phone_info.get("number", "") if phone_info else ""
+        selected_email = email_info.get("email", "") if email_info else ""
+        if selected_phone:
+            load_seen_contacts(force=True)
+        if selected_phone and (phone_exists(selected_phone) or _find_existing_phone_row(selected_phone)):
             LOG.info(
                 "SKIP already-contacted phone %s for agent %s (%s)",
                 _redact_phone(selected_phone),
                 name,
                 r.get("zpid"),
             )
+            if zpid:
+                record_seen_zpid(zpid)
+            outcomes[zpid] = "completed_short_sale"
             continue
+        if rapid_candidates and not selected_phone:
+            LOG.warning(
+                "SKIP_BLANK_PHONE_UPDATE zpid=%s rapid_candidates=%s rapid_selected=%s",
+                zpid,
+                len(rapid_candidates),
+                rapid_snapshot_phone or "<blank>",
+            )
+        if not selected_phone:
+            LOG.info(
+                "No phone available for agent %s zpid=%s after enrichment; initial SMS not scheduled",
+                name,
+                zpid,
+            )
 
         first, *last = name.split()
         now_iso = datetime.now(tz=TZ).isoformat()
@@ -12926,9 +12984,18 @@ def process_rows(
         row_vals[COL_LAST]    = " ".join(last)
         row_vals[COL_PHONE]   = selected_phone
         row_vals[COL_EMAIL]   = selected_email
-        row_vals[COL_PHONE_CONF] = "low" if selected_phone else ""
-        row_vals[COL_EMAIL_CONF] = ""
-        row_vals[COL_CONTACT_REASON] = ""
+        row_vals[COL_PHONE_CONF] = phone_info.get("confidence", "") if selected_phone else ""
+        row_vals[COL_EMAIL_CONF] = email_info.get("confidence", "") if selected_email else ""
+        phone_reason = phone_info.get("reason", "")
+        email_reason = email_info.get("reason", "")
+        reason = ""
+        if "withheld_low_conf_mix" in {phone_reason, email_reason}:
+            reason = "withheld_low_conf_mix"
+        elif phone_reason == "no_personal_mobile":
+            reason = "no_personal_mobile"
+        elif email_reason == "no_personal_email":
+            reason = "no_personal_email"
+        row_vals[COL_CONTACT_REASON] = reason
         row_vals[COL_STREET]  = r.get("street", "")
         row_vals[COL_CITY]    = r.get("city", "")
         row_vals[COL_STATE]   = state
@@ -12948,100 +13015,36 @@ def process_rows(
             selected_email or "",
             pulled_at,
         )
+        if selected_phone:
+            existing_row = _find_existing_phone_row(selected_phone, exclude_row_idx=row_idx)
+            if existing_row and existing_row < row_idx:
+                LOG.info(
+                    "DELETE duplicate row %s for already-contacted phone %s; existing row %s agent=%s (%s)",
+                    row_idx,
+                    _redact_phone(selected_phone),
+                    existing_row,
+                    name,
+                    r.get("zpid"),
+                )
+                delete_row(row_idx)
+                if zpid:
+                    record_seen_zpid(zpid)
+                outcomes[zpid] = "completed_short_sale"
+                continue
         if normalized_agent:
             seen_agents.add(normalized_agent)
-        if selected_phone and not phone_exists(selected_phone):
+        if selected_phone:
             seen_phones.add(_normalize_phone_for_dedupe(selected_phone))
             schedule_initial_sms(selected_phone, first, r.get("street", ""), row_idx)
-
-        phone_info = {"number": "", "confidence": "", "reason": ""}
-        email_info = {"email": "", "confidence": "", "reason": ""}
-        try:
-            phone_info = lookup_phone(name, state, r)
-        except Exception as exc:
-            LOG.error("ENRICHMENT_FAILED zpid=%s agent=%s err=%s", zpid, name, exc)
-        try:
-            email_info = lookup_email(name, state, r)
-        except Exception as exc:
-            LOG.error("ENRICHMENT_FAILED zpid=%s agent=%s err=%s", zpid, name, exc)
-
-        rapid_snapshot = _rapid_contact_normalized(name, r)
-        rapid_snapshot_phone = rapid_snapshot.get("selected_phone", "") if rapid_snapshot else ""
-        rapid_snapshot_phones_found = len(rapid_snapshot.get("phones", []) or []) if rapid_snapshot else 0
-        rapid_candidates = rapid_snapshot.get("rapid_candidates", []) if rapid_snapshot else []
-
-        enriched_phone = phone_info.get("number", "") if phone_info else ""
-        enriched_email = email_info.get("email", "") if email_info else ""
-        if enriched_phone and phone_exists(enriched_phone):
             LOG.info(
-                "SKIP already-contacted enriched phone %s for agent %s (%s)",
-                _redact_phone(enriched_phone),
-                name,
-                r.get("zpid"),
-            )
-            delete_row(row_idx)
-            continue
-        if not selected_phone and not enriched_phone:
-            LOG.info(
-                "No phone available for row %s after enrichment; initial SMS not scheduled",
+                "SHEET_APPEND_RAPID_SNAPSHOT zpid=%s row=%s phones_found=%s rapid_selected=%s final_phone=%s final_email=%s",
+                zpid,
                 row_idx,
+                rapid_snapshot_phones_found,
+                rapid_snapshot_phone or "<blank>",
+                selected_phone or "<blank>",
+                selected_email or "<blank>",
             )
-        data_updates: List[Dict[str, Any]] = []
-        if enriched_phone or enriched_email:
-            if rapid_candidates and not enriched_phone:
-                LOG.warning(
-                    "SKIP_BLANK_PHONE_UPDATE zpid=%s row=%s rapid_candidates=%s rapid_selected=%s",
-                    zpid,
-                    row_idx,
-                    len(rapid_candidates),
-                    rapid_snapshot_phone or "<blank>",
-                )
-            update_phone = bool(enriched_phone) and enriched_phone != selected_phone
-            update_email = enriched_email and enriched_email != selected_email
-            if update_phone or update_email:
-                if update_phone:
-                    data_updates.append({"range": f"{GSHEET_TAB}!C{row_idx}", "values": [[enriched_phone]]})
-                    data_updates.append({"range": f"{GSHEET_TAB}!Y{row_idx}", "values": [[phone_info.get("confidence", "")]]})
-                if update_email:
-                    data_updates.append({"range": f"{GSHEET_TAB}!D{row_idx}", "values": [[enriched_email]]})
-                    data_updates.append({"range": f"{GSHEET_TAB}!AA{row_idx}", "values": [[email_info.get("confidence", "")]]})
-                reason = ""
-                phone_reason = phone_info.get("reason", "")
-                email_reason = email_info.get("reason", "")
-                if "withheld_low_conf_mix" in {phone_reason, email_reason}:
-                    reason = "withheld_low_conf_mix"
-                elif phone_reason == "no_personal_mobile":
-                    reason = "no_personal_mobile"
-                elif email_reason == "no_personal_email":
-                    reason = "no_personal_email"
-                if reason:
-                    data_updates.append({"range": f"{GSHEET_TAB}!Z{row_idx}", "values": [[reason]]})
-            if data_updates:
-                try:
-                    sheets_service.spreadsheets().values().batchUpdate(
-                        spreadsheetId=GSHEET_ID,
-                        body={"valueInputOption": "RAW", "data": data_updates},
-                    ).execute()
-                    LOG.info(
-                        "Sheet update applied for row %s (phone=%s email=%s)",
-                        row_idx,
-                        enriched_phone or "<blank>",
-                        enriched_email or "<blank>",
-                    )
-                    LOG.info(
-                        "SHEET_UPDATE_RAPID_SNAPSHOT zpid=%s row=%s phones_found=%s rapid_selected=%s final_phone=%s final_email=%s",
-                        zpid,
-                        row_idx,
-                        rapid_snapshot_phones_found,
-                        rapid_snapshot_phone or "<blank>",
-                        enriched_phone or "<blank>",
-                        enriched_email or "<blank>",
-                    )
-                except Exception as exc:
-                    LOG.warning("Sheet update failed for row %s: %s", row_idx, exc)
-            if enriched_phone:
-                seen_phones.add(_normalize_phone_for_dedupe(enriched_phone))
-                schedule_initial_sms(enriched_phone, first, r.get("street", ""), row_idx)
         outcomes[zpid] = outcome
     if return_outcomes:
         return outcomes
