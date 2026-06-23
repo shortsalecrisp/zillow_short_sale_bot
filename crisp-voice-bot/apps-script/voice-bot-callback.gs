@@ -422,28 +422,45 @@ function processVoiceBotCallQueue() {
       }
 
       const payload = buildVoiceBotStartCallPayload_(refreshedCandidate);
-      const startCallResult = postVoiceBotStartCall_(payload);
 
-      markVoiceBotAttemptStarted_(sheet, refreshedCandidate, now);
+      try {
+        const startCallResult = postVoiceBotStartCall_(payload);
 
-      queuedCalls.push({
-        rowNumber: refreshedCandidate.rowNumber,
-        callAttemptNumber: refreshedCandidate.callAttemptNumber,
-        dueAtEt: formatVoiceBotDateEt_(refreshedCandidate.dueAt),
-        localWindow: refreshedCandidate.callWindow,
-        agentTimeZone: refreshedCandidate.agentTimeZone
-      });
+        markVoiceBotAttemptStarted_(sheet, refreshedCandidate, now);
 
-      voiceBotLog_({
-        event: 'voice_queue_call_started',
-        rowNumber: refreshedCandidate.rowNumber,
-        callAttemptNumber: refreshedCandidate.callAttemptNumber,
-        dueAtEt: formatVoiceBotDateEt_(refreshedCandidate.dueAt),
-        localWindow: refreshedCandidate.callWindow,
-        agentTimeZone: refreshedCandidate.agentTimeZone,
-        startCallUrl: VOICE_BOT_START_CALL_URL,
-        startCallResult: startCallResult
-      });
+        queuedCalls.push({
+          rowNumber: refreshedCandidate.rowNumber,
+          callAttemptNumber: refreshedCandidate.callAttemptNumber,
+          dueAtEt: formatVoiceBotDateEt_(refreshedCandidate.dueAt),
+          localWindow: refreshedCandidate.callWindow,
+          agentTimeZone: refreshedCandidate.agentTimeZone
+        });
+
+        voiceBotLog_({
+          event: 'voice_queue_call_started',
+          rowNumber: refreshedCandidate.rowNumber,
+          callAttemptNumber: refreshedCandidate.callAttemptNumber,
+          dueAtEt: formatVoiceBotDateEt_(refreshedCandidate.dueAt),
+          localWindow: refreshedCandidate.callWindow,
+          agentTimeZone: refreshedCandidate.agentTimeZone,
+          startCallUrl: VOICE_BOT_START_CALL_URL,
+          startCallResult: startCallResult
+        });
+      } catch (err) {
+        const fieldsWritten = markVoiceBotAttemptStartFailed_(sheet, refreshedCandidate, now, err);
+
+        voiceBotLog_({
+          event: 'voice_queue_call_start_failed',
+          rowNumber: refreshedCandidate.rowNumber,
+          callAttemptNumber: refreshedCandidate.callAttemptNumber,
+          dueAtEt: formatVoiceBotDateEt_(refreshedCandidate.dueAt),
+          localWindow: refreshedCandidate.callWindow,
+          agentTimeZone: refreshedCandidate.agentTimeZone,
+          startCallUrl: VOICE_BOT_START_CALL_URL,
+          errorMessage: getVoiceBotErrorMessage_(err),
+          fieldsWritten: fieldsWritten
+        });
+      }
     }
 
     return {
@@ -742,6 +759,42 @@ function markVoiceBotAttemptStarted_(sheet, candidate, now) {
   sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR).setValue(candidate.dueAt);
 }
 
+function markVoiceBotAttemptStartFailed_(sheet, candidate, now, err) {
+  const sentColumn = candidate.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
+  const resultColumn = candidate.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
+  const fieldsWritten = [];
+  const errorMessage = getVoiceBotErrorMessage_(err);
+  const voiceNotes =
+    'Voice call start failed before connecting at ' +
+    formatVoiceBotDateEt_(now) +
+    ': ' +
+    truncateVoiceBotStartFailureMessage_(errorMessage);
+
+  sheet.getRange(candidate.rowNumber, sentColumn).setValue(now);
+  fieldsWritten.push(columnToLetter_(sentColumn) + ':voice_call_' + candidate.callAttemptNumber + '_sent');
+
+  sheet.getRange(candidate.rowNumber, resultColumn).setValue('call_start_failed');
+  fieldsWritten.push(columnToLetter_(resultColumn) + ':voice_call_' + candidate.callAttemptNumber + '_result');
+
+  sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_RESPONSE_STATUS).setValue('Call start failed before connecting');
+  fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_RESPONSE_STATUS) + ':response_status');
+
+  clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE, fieldsWritten, 'call_eligible');
+  clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET, fieldsWritten, 'call_time_bucket');
+  clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR, fieldsWritten, 'call_scheduled_for');
+
+  appendVoiceBotFieldIfPresent_(
+    sheet,
+    candidate.rowNumber,
+    VOICE_BOT_COL_VOICE_NOTES,
+    { voiceNotes: voiceNotes },
+    'voiceNotes',
+    fieldsWritten
+  );
+
+  return fieldsWritten;
+}
+
 // =============================================================================
 // Validation
 // =============================================================================
@@ -843,6 +896,25 @@ function parseJsonSafely_(text) {
   } catch (err) {
     return null;
   }
+}
+
+function getVoiceBotErrorMessage_(err) {
+  if (err && err.message) {
+    return String(err.message);
+  }
+
+  return String(err);
+}
+
+function truncateVoiceBotStartFailureMessage_(message) {
+  const text = normalizeString_(message);
+  const maxLength = 500;
+
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return text.slice(0, maxLength - 3) + '...';
 }
 
 function jsonOutput_(obj) {

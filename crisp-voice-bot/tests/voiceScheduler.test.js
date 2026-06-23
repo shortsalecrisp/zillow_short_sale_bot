@@ -405,6 +405,74 @@ test("stale unfinished call rows do not block new calls forever", () => {
   assert.deepEqual(rowNumbers, [3401, 3402]);
 });
 
+test("start-call failures are marked so one provider timeout cannot monopolize the queue", () => {
+  const result = JSON.parse(runSchedulerScript(`
+    const cells = {};
+    cells[VOICE_BOT_COL_CALL_ELIGIBLE] = "queued";
+    cells[VOICE_BOT_COL_CALL_TIME_BUCKET] = "voice_call_1_due";
+    cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR] = "2026-06-22T20:00:00Z";
+
+    const sheet = {
+      getRange(rowNumber, columnNumber) {
+        return {
+          getValue() {
+            return cells[columnNumber] || "";
+          },
+          setValue(value) {
+            cells[columnNumber] = value instanceof Date ? value.toISOString() : value;
+          },
+          clearContent() {
+            cells[columnNumber] = "";
+          }
+        };
+      }
+    };
+    const candidate = {
+      rowNumber: 3721,
+      callAttemptNumber: 1,
+      dueAt: new Date("2026-06-22T20:00:00Z"),
+      callWindow: "late_afternoon_control",
+      agentTimeZone: "America/New_York"
+    };
+
+    const fieldsWritten = markVoiceBotAttemptStartFailed_(
+      sheet,
+      candidate,
+      new Date("2026-06-22T20:56:15Z"),
+      new Error("timeout of 45000ms exceeded")
+    );
+
+    JSON.stringify({
+      fieldsWritten,
+      call1Sent: cells[VOICE_BOT_COL_CALL_1_SENT],
+      call1Result: cells[VOICE_BOT_COL_CALL_1_RESULT],
+      responseStatus: cells[VOICE_BOT_COL_RESPONSE_STATUS],
+      callEligible: cells[VOICE_BOT_COL_CALL_ELIGIBLE],
+      callTimeBucket: cells[VOICE_BOT_COL_CALL_TIME_BUCKET],
+      callScheduledFor: cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR],
+      voiceNotes: cells[VOICE_BOT_COL_VOICE_NOTES]
+    });
+  `));
+
+  assert.equal(result.call1Sent, "2026-06-22T20:56:15.000Z");
+  assert.equal(result.call1Result, "call_start_failed");
+  assert.equal(result.responseStatus, "Call start failed before connecting");
+  assert.equal(result.callEligible, "");
+  assert.equal(result.callTimeBucket, "");
+  assert.equal(result.callScheduledFor, "");
+  assert.match(result.voiceNotes, /Voice call start failed before connecting/);
+  assert.match(result.voiceNotes, /timeout of 45000ms exceeded/);
+  assert.deepEqual(result.fieldsWritten, [
+    "AG:voice_call_1_sent",
+    "AH:voice_call_1_result",
+    "J:response_status",
+    "AD:call_eligible",
+    "AE:call_time_bucket",
+    "AF:call_scheduled_for",
+    "AP:voiceNotes_appended",
+  ]);
+});
+
 test("live-transfer-requested rows still count against active call slots", () => {
   const rowNumbers = Array.from(runSchedulerScript(`
     function row(first, last, state, followupSentAt, options) {
