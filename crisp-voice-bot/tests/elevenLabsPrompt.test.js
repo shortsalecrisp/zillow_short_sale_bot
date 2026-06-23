@@ -205,6 +205,40 @@ test("prompt treats partial this-is identity replies as confirmed", () => {
   assert.match(prompt, /Do not wait for the caller to repeat/i);
 });
 
+test("prompt treats corrected realtor identity as the active agent", () => {
+  const prompt = readPrompt();
+  const correctedIdentityBranch = extractSection(
+    prompt,
+    "If the caller corrects the name",
+    "If they confirm they are `{{firstName}}` after the first name-only opener",
+  );
+
+  assert.match(correctedIdentityBranch, /I'?m the realtor/i);
+  assert.match(correctedIdentityBranch, /treat the current speaker as the agent/i);
+  assert.match(correctedIdentityBranch, /Do not ask to speak with {{firstName}}/);
+  assert.match(correctedIdentityBranch, /do not ask whether {{firstName}} is handling the bank side/i);
+  assert.match(
+    correctedIdentityBranch,
+    /Got it\. We help agents with short sale bank paperwork, lender calls, and approval\. Are you handling the bank side yourself\?/,
+  );
+});
+
+test("prompt clarifies noisy background speech before treating it as consent", () => {
+  const prompt = readPrompt();
+  const noisySpeechBranch = extractSection(
+    prompt,
+    "If the caller's speech sounds like background conversation",
+    "If they sound skeptical",
+  );
+
+  assert.match(noisySpeechBranch, /hair|unrelated personal conversation/i);
+  assert.match(noisySpeechBranch, /Do not treat a single yes, sure, or okay inside that noisy turn as consent/i);
+  assert.match(
+    noisySpeechBranch,
+    /Sorry, I may be catching background conversation\. Just to confirm, do you want Yoni to call you about the short sale\?/,
+  );
+});
+
 test("prompt skips the address when identity confirmation already asks how to help", () => {
   const prompt = readPrompt();
   const identityHelpBranch = extractSection(

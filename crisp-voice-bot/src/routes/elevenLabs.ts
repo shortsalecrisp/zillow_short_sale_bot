@@ -8,6 +8,11 @@ import {
 } from "../lib/elevenLabsCallContext";
 import { requestElevenLabsLiveTransferApproval } from "../lib/elevenLabsLiveTransferApproval";
 import { handleElevenLabsPostCallWebhook } from "../lib/elevenLabsPostCall";
+import {
+  assertValidElevenLabsConversationId,
+  fetchElevenLabsConversationAudio,
+  verifyElevenLabsPlaybackSignature,
+} from "../lib/elevenLabsPlayback";
 import { logger } from "../lib/logger";
 import { sendCallbackEmail } from "../lib/sendCallbackEmail";
 import { postSheetUpdate } from "../lib/sheetUpdateClient";
@@ -139,6 +144,43 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
 
   return callResult;
 }
+
+router.get("/playback/:conversationId", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const conversationId = req.params.conversationId;
+    const signature = typeof req.query.sig === "string" ? req.query.sig : undefined;
+
+    assertValidElevenLabsConversationId(conversationId);
+
+    if (!verifyElevenLabsPlaybackSignature(conversationId, signature)) {
+      throw new ElevenLabsValidationError("Invalid playback link", 401);
+    }
+
+    const audio = await fetchElevenLabsConversationAudio(conversationId);
+    res.setHeader("Content-Type", audio.contentType);
+    res.setHeader("Content-Disposition", `inline; filename="${conversationId}.mp3"`);
+    res.setHeader("Cache-Control", "private, max-age=3600");
+
+    audio.stream.on("error", (error: Error) => {
+      logger.error("ElevenLabs playback stream failed", {
+        conversationId,
+        message: error.message,
+        stack: error.stack,
+      });
+
+      if (!res.headersSent) {
+        next(error);
+        return;
+      }
+
+      res.destroy(error);
+    });
+
+    audio.stream.pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
 
 function normalizeText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();

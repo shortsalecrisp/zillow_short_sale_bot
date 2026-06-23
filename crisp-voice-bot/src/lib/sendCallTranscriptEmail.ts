@@ -1,4 +1,5 @@
 import { createEmailTransporter, escapeHtml, formatPhoneNumber, requireEmailConfig } from "./emailAlerts";
+import { buildElevenLabsPlaybackUrl } from "./elevenLabsPlayback";
 
 type SendCallTranscriptEmailInput = {
   agentName: string;
@@ -17,7 +18,7 @@ type SendCallTranscriptEmailInput = {
   voiceVariant?: string;
 };
 
-export async function sendCallTranscriptEmail({
+export function buildCallTranscriptEmailMessage({
   agentName,
   requestedPhone,
   dialedPhone,
@@ -32,14 +33,17 @@ export async function sendCallTranscriptEmail({
   assistantName,
   voiceName,
   voiceVariant,
-}: SendCallTranscriptEmailInput): Promise<void> {
-  const emailConfig = requireEmailConfig();
-  const transporter = createEmailTransporter(emailConfig);
+}: SendCallTranscriptEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
   const formattedRequestedPhone = formatPhoneNumber(requestedPhone);
   const formattedDialedPhone = formatPhoneNumber(dialedPhone);
   const transcriptBody = transcript.trim() || "No transcript was available for this call.";
   const safeSummary = summary.trim() || "No summary was available for this call.";
   const subject = `Call Transcript - ${agentName} - ${outcome}`;
+  const playbackUrl = buildElevenLabsPlaybackUrl(conversationId);
   const voiceLabel = [voiceName, assistantName ? `as ${assistantName}` : undefined, voiceVariant ? `variant ${voiceVariant}` : undefined]
     .filter(Boolean)
     .join(" ");
@@ -54,6 +58,7 @@ export async function sendCallTranscriptEmail({
     `Call Attempt: ${callAttemptNumber}`,
     `Row: ${rowNumber}`,
     `Conversation ID: ${conversationId}`,
+    `Playback: ${playbackUrl}`,
     "",
     "Summary:",
     safeSummary,
@@ -71,17 +76,30 @@ ${voiceLabel ? `<p><strong>Voice:</strong> ${escapeHtml(voiceLabel)}</p>` : ""}
 <p><strong>Call Attempt:</strong> ${callAttemptNumber}</p>
 <p><strong>Row:</strong> ${rowNumber}</p>
 <p><strong>Conversation ID:</strong> ${escapeHtml(conversationId)}</p>
+<p><strong>Playback:</strong> <a href="${escapeHtml(playbackUrl)}" target="_blank" rel="noopener noreferrer">Play call recording</a></p>
 <p><strong>Summary:</strong><br>${escapeHtml(safeSummary).replace(/\n/g, "<br>")}</p>
 <p><strong>Full Transcript:</strong></p>
 <pre style="white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; line-height: 1.45;">${escapeHtml(
     transcriptBody,
   )}</pre>`;
 
+  return {
+    subject,
+    text: textLines.join("\n"),
+    html,
+  };
+}
+
+export async function sendCallTranscriptEmail(input: SendCallTranscriptEmailInput): Promise<void> {
+  const emailConfig = requireEmailConfig();
+  const transporter = createEmailTransporter(emailConfig);
+  const { subject, text, html } = buildCallTranscriptEmailMessage(input);
+
   await transporter.sendMail({
     to: emailConfig.to,
     from: emailConfig.from,
     subject,
-    text: textLines.join("\n"),
+    text,
     html,
   });
 }
