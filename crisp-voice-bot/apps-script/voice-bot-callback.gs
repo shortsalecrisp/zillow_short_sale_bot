@@ -56,26 +56,16 @@ const VOICE_BOT_PAUSED_UNTIL_ET = '2026-05-26T00:00:00-04:00';
 const VOICE_BOT_PAUSE_REASON = 'Memorial Day pause';
 const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
   {
-    name: 'late_morning',
-    startMinutes: 10 * 60 + 30,
-    endMinutes: 11 * 60 + 45
-  },
-  {
-    name: 'early_afternoon',
-    startMinutes: 13 * 60 + 30,
-    endMinutes: 15 * 60
-  },
-  {
     name: 'late_afternoon_control',
     startMinutes: 16 * 60,
-    endMinutes: 18 * 60
+    endMinutes: 17 * 60
   }
 ];
 const VOICE_BOT_WEEKEND_CALL_WINDOWS = [
   {
     name: 'late_afternoon_control',
     startMinutes: 16 * 60,
-    endMinutes: 18 * 60
+    endMinutes: 17 * 60
   }
 ];
 
