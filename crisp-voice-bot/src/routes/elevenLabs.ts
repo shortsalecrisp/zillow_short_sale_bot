@@ -145,6 +145,35 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
   return callResult;
 }
 
+function normalizedText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function isHandoffReadyCallback(conversationSummary: string): boolean {
+  const summary = normalizedText(conversationSummary);
+
+  return (
+    summary.includes("handoff-ready") ||
+    summary.includes("handoff ready") ||
+    summary.includes("interested callback") ||
+    summary.includes("expressed interest") ||
+    summary.includes("showed interest") ||
+    summary.includes("is interested") ||
+    summary.includes("sounds interested") ||
+    summary.includes("wants to talk to yoni") ||
+    summary.includes("asked to talk to yoni") ||
+    summary.includes("wants yoni to call") ||
+    summary.includes("asked for yoni to call") ||
+    summary.includes("needs help") ||
+    summary.includes("could use help")
+  );
+}
+
+function buildCallbackResponseStatus(callbackTime: string, handoffReady: boolean): string {
+  const baseStatus = buildVoiceResponseStatus("callback_requested", callbackTime);
+  return handoffReady ? `${baseStatus} - handoff ready` : baseStatus;
+}
+
 router.get("/playback/:conversationId", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const conversationId = req.params.conversationId;
@@ -459,6 +488,7 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
     verifyToolSecret(req);
     const payload = applyLatestCallContextIfNeeded(readLeadPayload(req.body));
     const callbackRequested = isRecord(req.body) ? readBoolean(req.body, "callbackRequested") : undefined;
+    const handoffReady = isHandoffReadyCallback(payload.conversationSummary);
 
     queueElevenLabsBackgroundTask(
       "ElevenLabs callback sheet update",
@@ -473,8 +503,8 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
           rowNumber: payload.rowNumber,
           callAttemptNumber: payload.callAttemptNumber,
           callResult: "callback_requested",
-          responseStatus: buildVoiceResponseStatus("callback_requested", payload.callbackTime),
-          leadStatusCode: "Y",
+          responseStatus: buildCallbackResponseStatus(payload.callbackTime, handoffReady),
+          leadStatusCode: handoffReady ? "G" : "Y",
           callbackRequested: callbackRequested === false ? "" : "yes",
           callbackTime: payload.callbackTime,
           voiceNotes: payload.conversationSummary,
@@ -506,6 +536,7 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
       phone: payload.phone,
       listingAddress: payload.listingAddress,
       callbackTime: payload.callbackTime,
+      handoffReady,
     });
 
     res.status(200).json({

@@ -196,6 +196,11 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
   return callResult;
 }
 
+function buildCallbackResponseStatus(callbackTime: string, handoffReady: boolean): string {
+  const baseStatus = buildVoiceResponseStatus("callback_requested", callbackTime);
+  return handoffReady ? `${baseStatus} - handoff ready` : baseStatus;
+}
+
 function getFailedConversationReason(conversation: ElevenLabsConversation): string {
   const reason = conversation.metadata?.error?.reason;
   if (typeof reason === "string" && reason.trim()) {
@@ -276,6 +281,35 @@ function shouldTreatAsCallback(conversation: ElevenLabsConversation): boolean {
     summary.includes("wanted yoni to call") ||
     summary.includes("arranged for yoni to call") ||
     summary.includes("scheduled callback")
+  );
+}
+
+function shouldTreatAsHandoffReadyCallback(conversation: ElevenLabsConversation): boolean {
+  if (!shouldTreatAsCallback(conversation)) {
+    return false;
+  }
+
+  const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+
+  return (
+    text.includes("handoff-ready") ||
+    text.includes("handoff ready") ||
+    text.includes("interested callback") ||
+    text.includes("expressed interest") ||
+    text.includes("showed interest") ||
+    text.includes("is interested") ||
+    text.includes("was interested") ||
+    text.includes("sounds interested") ||
+    text.includes("wants to talk to yoni") ||
+    text.includes("asked to talk to yoni") ||
+    text.includes("wants yoni to call") ||
+    text.includes("asked for yoni to call") ||
+    text.includes("wanted yoni to call") ||
+    text.includes("needs help") ||
+    text.includes("could use help") ||
+    text.includes("asked useful questions") ||
+    text.includes("asked about compensation") ||
+    text.includes("asked about commission")
   );
 }
 
@@ -416,7 +450,8 @@ function hasDeliveredVoicemailMessage(conversation: ElevenLabsConversation): boo
   }
 
   return (
-    assistantText.includes("this is emmy with crisp short sales") &&
+    (assistantText.includes("this is emmy with crisp short sales") ||
+      assistantText.includes("this is maya with crisp short sales")) &&
     assistantText.includes("call back at 404-300-9526")
   );
 }
@@ -637,7 +672,8 @@ async function processPostCallOutcome(
 
   if (hasToolCall(conversation, "callback_requested")) {
     const callbackTime = isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified");
-    const outcome = buildVoiceResponseStatus("callback_requested", callbackTime);
+    const handoffReady = shouldTreatAsHandoffReadyCallback(conversation);
+    const outcome = buildCallbackResponseStatus(callbackTime, handoffReady);
 
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
@@ -999,14 +1035,15 @@ async function processPostCallOutcome(
 
   if (shouldTreatAsCallback(conversation)) {
     const callbackTime = isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified");
-    const outcome = buildVoiceResponseStatus("callback_requested", callbackTime);
+    const handoffReady = shouldTreatAsHandoffReadyCallback(conversation);
+    const outcome = buildCallbackResponseStatus(callbackTime, handoffReady);
 
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "callback_requested",
       responseStatus: outcome,
-      leadStatusCode: "Y",
+      leadStatusCode: handoffReady ? "G" : "Y",
       callbackRequested: "yes",
       callbackTime,
       voiceNotes: buildPerformanceNotes(outcome),
@@ -1039,6 +1076,7 @@ async function processPostCallOutcome(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callbackTime,
+      handoffReady,
     });
     return true;
   }
