@@ -120,6 +120,23 @@ test("prompt waits through office robots and gatekeeper transfer attempts", () =
   assert.match(prompt, /Do not call `end_call`[\s\S]{0,160}transferred/i);
 });
 
+test("prompt pitches admins who answer instead of only taking a message", () => {
+  const prompt = readPrompt();
+  const receptionistBranch = extractSection(
+    prompt,
+    "If a receptionist, office assistant",
+    "If it is the wrong person",
+  );
+
+  assert.match(receptionistBranch, /admin or assistant says {{firstName}} is not available/i);
+  assert.match(receptionistBranch, /treat them as a valid person to pitch/i);
+  assert.match(receptionistBranch, /Do not only ask them to relay a message/i);
+  assert.match(
+    receptionistBranch,
+    /No problem\. We help agents with short sale bank paperwork, lender calls, and approval\. I was calling to see if {{firstName}} wanted help with that\. Do you know if {{firstName}} is handling the bank side personally\?/,
+  );
+});
+
 test("prompt treats not-worried responses as a soft no instead of pitching", () => {
   const prompt = readPrompt();
 
