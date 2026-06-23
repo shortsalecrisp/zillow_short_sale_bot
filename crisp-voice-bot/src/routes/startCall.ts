@@ -1,5 +1,6 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { saveInitialCallState } from "../lib/callState";
+import { getStartCallWindowBlockReason } from "../lib/callWindowGuard";
 import { config } from "../lib/config";
 import { placeElevenLabsOutboundCall } from "../lib/elevenLabs";
 import { logger } from "../lib/logger";
@@ -144,6 +145,26 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
         error: "outbound_calling_paused",
         reason: outboundPause.reason,
         pausedUntil: outboundPause.pausedUntil.toISOString(),
+      });
+      return;
+    }
+
+    const callWindowBlockReason = getStartCallWindowBlockReason(payload);
+    if (callWindowBlockReason) {
+      logger.warn("Outbound voice call blocked outside approved local window", {
+        rowNumber: payload.rowNumber,
+        scheduledWindow: payload.scheduledWindow,
+        agentTimeZone: payload.agentTimeZone,
+        reason: callWindowBlockReason,
+      });
+
+      res.status(409).json({
+        ok: false,
+        error: "outside_approved_local_call_window",
+        reason: callWindowBlockReason,
+        rowNumber: payload.rowNumber,
+        scheduledWindow: payload.scheduledWindow,
+        agentTimeZone: payload.agentTimeZone,
       });
       return;
     }
