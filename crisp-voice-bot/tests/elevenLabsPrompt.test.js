@@ -79,12 +79,12 @@ test("prompt treats not-a-short-sale objections as a clear no", () => {
   assert.match(prompt, /Then call `not_interested`/);
 });
 
-test("prompt redirects unknown affiliation questions back to the short-sale plan", () => {
+test("prompt redirects unknown affiliation questions back to the bank-side help offer", () => {
   const prompt = readPrompt();
 
   assert.match(
     prompt,
-    /I'm with Crisp Short Sales, working with Yoni Kutler who is our short sale specialist\. What's your plan for handling the short sale with the bank\?/,
+    /I'm with Crisp Short Sales, working with Yoni Kutler, our short sale specialist\. We help agents with short sale bank paperwork and lender calls\. Are you handling the bank side yourself\?/,
   );
 });
 
@@ -218,8 +218,26 @@ test("prompt answers quick-second how-can-I-help turns immediately", () => {
   assert.match(quickHelpBranch, /Do not pause to acknowledge it/);
   assert.match(
     quickHelpBranch,
-    /I was calling to see what your plan is for handling the short sale with the bank\./,
+    /I was calling to see if you're handling the bank side of the short sale yourself, or if you already have someone helping with that\./,
   );
+});
+
+test("prompt repairs confusion with the offer before mentioning Yoni or prior text", () => {
+  const prompt = readPrompt();
+  const confusionBranch = extractSection(
+    prompt,
+    "If they say they are not really sure what you are calling about",
+    "Business facts you can use briefly:",
+  );
+
+  assert.match(confusionBranch, /Do not lead with Yoni/);
+  assert.match(confusionBranch, /Do not mention the earlier text yet/);
+  assert.match(
+    confusionBranch,
+    /Sorry if I wasn't clear\. We help agents with short sale bank paperwork, lender calls, and approval\. I was just calling to see if you wanted help with that\./,
+  );
+  assert.doesNotMatch(confusionBranch, /reached out earlier by text/);
+  assert.doesNotMatch(confusionBranch, /what your plan/i);
 });
 
 test("prompt clearly explains purpose before callback when caller is busy or cannot hear", () => {

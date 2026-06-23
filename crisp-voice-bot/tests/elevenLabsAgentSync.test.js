@@ -22,8 +22,9 @@ test("agent sync enables skip_turn for placeholder-only noise turns", () => {
 
   assert.match(script, /const FIRST_MESSAGE = "{{openerScript}}";/);
   assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = -1;/);
-  assert.match(script, /const TURN_TIMEOUT_SECONDS = 1\.2;/);
-  assert.match(script, /const TURN_EAGERNESS = "eager";/);
+  assert.match(script, /const TURN_TIMEOUT_SECONDS = 1\.8;/);
+  assert.match(script, /const TURN_EAGERNESS = "normal";/);
+  assert.match(script, /const DISABLE_FIRST_MESSAGE_INTERRUPTION = true;/);
   assert.match(script, /skip_turn:\s*{/);
   assert.match(script, /name:\s*"skip_turn"/);
   assert.match(script, /system_tool_type:\s*"skip_turn"/);
@@ -35,8 +36,9 @@ test("agent sync uses natural low-latency TTS settings", () => {
 
   assert.match(config, /ttsModel:\s*readEnv\("ELEVENLABS_TTS_MODEL", "eleven_flash_v2"\)/);
   assert.match(config, /voiceAbTestEnabled:\s*readBoolean\("ELEVENLABS_VOICE_AB_TEST_ENABLED", false\)/);
-  assert.match(script, /const TTS_SPEED = 1\.0;/);
+  assert.match(script, /const TTS_SPEED = 0\.95;/);
   assert.match(script, /optimize_streaming_latency: 0,/);
+  assert.doesNotMatch(script, /const TTS_SPEED = 1\.0;/);
   assert.doesNotMatch(script, /const TTS_SPEED = 1\.05;/);
 });
 
