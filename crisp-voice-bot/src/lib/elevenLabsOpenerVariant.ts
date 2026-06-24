@@ -48,7 +48,9 @@ export function buildElevenLabsOpenerVariant(input: BuildOpenerVariantInput): El
       return {
         key,
         label: "Short identity check control",
-        script: input.firstName?.trim() ? `Hey, is this ${input.firstName.trim()}?` : "Hey, is this the listing agent?",
+        script: input.firstName?.trim()
+          ? `Hey, this is ${input.assistantName} with Crisp Short Sales. Is this ${input.firstName.trim()}?`
+          : `Hey, this is ${input.assistantName} with Crisp Short Sales. Is this the listing agent?`,
       };
     case "yoni_name":
       return {

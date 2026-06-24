@@ -33,7 +33,7 @@ test("ElevenLabs opener test assigns weighted opener variants by row", async () 
   assert.deepEqual(buildElevenLabsOpenerVariant({ rowNumber: 3700, firstName: "Karimah", assistantName: "Maya" }), {
     key: "identity_check_short",
     label: "Short identity check control",
-    script: "Hey, is this Karimah?",
+    script: "Hey, this is Maya with Crisp Short Sales. Is this Karimah?",
   });
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3701, firstName: "Norma", assistantName: "Maya" }).key,
