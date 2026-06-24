@@ -94,8 +94,40 @@ test("prompt introduces Maya once and forbids repeated self-introductions after 
 
 test("prompt treats not-a-short-sale objections as a clear no", () => {
   const prompt = readPrompt();
-  assert.match(prompt, /not a short sale/i);
-  assert.match(prompt, /Then call `not_interested`/);
+  const notShortSaleBranch = extractSection(
+    prompt,
+    "If they say the listing is not a short sale",
+    "If they say they are not worried about it",
+  );
+
+  assert.match(notShortSaleBranch, /clean closeout/i);
+  assert.match(notShortSaleBranch, /Do not pitch/);
+  assert.match(
+    notShortSaleBranch,
+    /Ahh, ok, thanks for letting me know\. Good luck with your listing!/,
+  );
+  assert.match(notShortSaleBranch, /Then call `not_interested`/);
+  assert.match(notShortSaleBranch, /conversationSummary[\s\S]{0,120}not a short sale/);
+  assert.match(notShortSaleBranch, /`not_short_sale`/);
+});
+
+test("prompt turns human-only objections into direct Yoni callback rescue", () => {
+  const prompt = readPrompt();
+  const humanRescueBranch = extractSection(
+    prompt,
+    "If they object to automation",
+    "If they ask whether you are with another person",
+  );
+
+  assert.match(
+    humanRescueBranch,
+    /Totally understand\. Yoni is the person who handles these\. Do you want him to call you directly\?/,
+  );
+  assert.match(humanRescueBranch, /call `callback_requested` with `callbackTime` set to `asap`/);
+  assert.match(humanRescueBranch, /handoff-ready interested callback/);
+  assert.match(humanRescueBranch, /direct human callback/);
+  assert.match(humanRescueBranch, /Ok, I'll have Yoni call you directly\. Thanks\./);
+  assert.match(humanRescueBranch, /immediately call `end_call`/);
 });
 
 test("prompt redirects unknown affiliation questions back to the bank-side help offer", () => {
