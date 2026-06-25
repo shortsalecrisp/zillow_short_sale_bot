@@ -7,7 +7,7 @@ import {
   getLatestElevenLabsCallContext,
 } from "../lib/elevenLabsCallContext";
 import { requestElevenLabsLiveTransferApproval } from "../lib/elevenLabsLiveTransferApproval";
-import { handleElevenLabsPostCallWebhook } from "../lib/elevenLabsPostCall";
+import { processPostCallOutcomeFromConversationId } from "../lib/elevenLabsPostCall";
 import {
   assertValidElevenLabsConversationId,
   fetchElevenLabsConversationAudio,
@@ -618,7 +618,9 @@ router.post("/post-call", async (req: Request, res: Response) => {
     queueElevenLabsBackgroundTask(
       "ElevenLabs post-call webhook outcome",
       { conversationId },
-      () => handleElevenLabsPostCallWebhook(conversationId),
+      async () => {
+        await processPostCallOutcomeFromConversationId(conversationId);
+      },
     );
   }
 

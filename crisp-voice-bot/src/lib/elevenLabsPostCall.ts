@@ -40,6 +40,14 @@ type ElevenLabsConversation = {
   has_audio?: boolean;
   has_user_audio?: boolean;
   has_response_audio?: boolean;
+  phone_call?: {
+    external_number?: string | null;
+    [key: string]: unknown;
+  };
+  conversation_initiation_client_data?: {
+    dynamic_variables?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
   metadata?: {
     termination_reason?: string | null;
     accepted_time_unix_secs?: number | null;
@@ -606,6 +614,86 @@ async function fetchConversation(conversationId: string): Promise<ElevenLabsConv
   return response.data;
 }
 
+function readDynamicString(dynamicVariables: Record<string, unknown>, key: string): string | undefined {
+  const value = dynamicVariables[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readDynamicNumber(dynamicVariables: Record<string, unknown>, key: string): number | undefined {
+  const value = dynamicVariables[key];
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+function readDynamicBoolean(dynamicVariables: Record<string, unknown>, key: string): boolean {
+  const value = dynamicVariables[key];
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return ["true", "1", "yes"].includes(value.trim().toLowerCase());
+  }
+
+  return false;
+}
+
+function metadataFromConversation(conversation: ElevenLabsConversation): CallMetadata | undefined {
+  const dynamicVariables = conversation.conversation_initiation_client_data?.dynamic_variables;
+
+  if (!dynamicVariables) {
+    return undefined;
+  }
+
+  const rowNumber = readDynamicNumber(dynamicVariables, "rowNumber");
+  const callAttemptNumber = readDynamicNumber(dynamicVariables, "callAttemptNumber");
+  const listingAddress = readDynamicString(dynamicVariables, "listingAddress");
+  const requestedPhone = readDynamicString(dynamicVariables, "requestedPhone") ?? readDynamicString(dynamicVariables, "phone");
+  const dialedPhone =
+    readDynamicString(dynamicVariables, "phone") ?? conversation.phone_call?.external_number ?? requestedPhone;
+
+  if (!rowNumber || !callAttemptNumber || !listingAddress || !requestedPhone || !dialedPhone) {
+    return undefined;
+  }
+
+  const firstName = readDynamicString(dynamicVariables, "firstName");
+  const lastName = readDynamicString(dynamicVariables, "lastName");
+  const fullName =
+    readDynamicString(dynamicVariables, "agentName") || [firstName, lastName].filter(Boolean).join(" ").trim() || "Unknown agent";
+
+  return {
+    rowNumber,
+    firstName,
+    lastName,
+    fullName,
+    email: readDynamicString(dynamicVariables, "email"),
+    callAttemptNumber,
+    listingAddress,
+    scheduledWindow: readDynamicString(dynamicVariables, "scheduledWindow"),
+    agentTimeZone: readDynamicString(dynamicVariables, "agentTimeZone"),
+    requestedPhone,
+    dialedPhone,
+    testMode: readDynamicBoolean(dynamicVariables, "testMode"),
+    assistantName: readDynamicString(dynamicVariables, "assistantName"),
+    voiceVariant: readDynamicString(dynamicVariables, "voiceVariant"),
+    voiceName: readDynamicString(dynamicVariables, "voiceName"),
+    voiceId: readDynamicString(dynamicVariables, "voiceId"),
+    openerVariant: readDynamicString(dynamicVariables, "openerVariant"),
+    openerVariantLabel: readDynamicString(dynamicVariables, "openerVariantLabel"),
+    openerScript: readDynamicString(dynamicVariables, "openerScript"),
+  };
+}
+
 async function sendTranscriptEmailIfEnabled(params: {
   conversationId: string;
   metadata: CallMetadata;
@@ -649,6 +737,16 @@ async function processPostCallOutcome(
   metadata: CallMetadata,
   options: { finalAttempt?: boolean } = {},
 ): Promise<boolean> {
+  const conversation = await fetchConversation(conversationId);
+  return processPostCallOutcomeForConversation(conversationId, metadata, conversation, options);
+}
+
+async function processPostCallOutcomeForConversation(
+  conversationId: string,
+  metadata: CallMetadata,
+  conversation: ElevenLabsConversation,
+  options: { finalAttempt?: boolean } = {},
+): Promise<boolean> {
   if (processedConversationIds.has(conversationId)) {
     logger.info("Skipping already processed ElevenLabs post-call outcome", {
       conversationId,
@@ -657,7 +755,6 @@ async function processPostCallOutcome(
     return true;
   }
 
-  const conversation = await fetchConversation(conversationId);
   const summary = conversation.analysis?.transcript_summary ?? transcriptText(conversation);
   const fullTranscript = transcriptForEmail(conversation, metadata.assistantName ?? "Emmy");
   const buildPerformanceNotes = (outcome: string, performanceSummary = summary): string =>
@@ -1239,6 +1336,32 @@ export async function handleElevenLabsPostCallWebhook(conversationId: string): P
   }
 
   const done = await processPostCallOutcome(conversationId, metadata);
+
+  if (done) {
+    await requestVoiceQueueRefill({
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+    });
+  }
+
+  return done;
+}
+
+export async function processPostCallOutcomeFromConversationId(conversationId: string): Promise<boolean> {
+  const conversation = await fetchConversation(conversationId);
+  const metadata = metadataFromConversation(conversation);
+
+  if (!metadata) {
+    logger.warn("Skipping ElevenLabs post-call webhook because conversation metadata could not be reconstructed", {
+      conversationId,
+      hasDynamicVariables: Boolean(conversation.conversation_initiation_client_data?.dynamic_variables),
+      externalNumber: conversation.phone_call?.external_number,
+    });
+    return false;
+  }
+
+  const done = await processPostCallOutcomeForConversation(conversationId, metadata, conversation);
 
   if (done) {
     await requestVoiceQueueRefill({
