@@ -1,8 +1,23 @@
 import type { StartCallRequest } from "../types";
 
-const REQUIRED_SCHEDULED_WINDOW = "late_afternoon_control";
-const CALL_WINDOW_START_MINUTES = 16 * 60;
-const CALL_WINDOW_END_MINUTES = 17 * 60;
+const CALL_WINDOWS: Record<string, { startMinutes: number; endMinutes: number }> = {
+  morning_probe: {
+    startMinutes: 9 * 60,
+    endMinutes: 10 * 60,
+  },
+  early_afternoon: {
+    startMinutes: 12 * 60 + 30,
+    endMinutes: 13 * 60 + 30,
+  },
+  mid_afternoon: {
+    startMinutes: 14 * 60 + 30,
+    endMinutes: 15 * 60 + 30,
+  },
+  late_afternoon_control: {
+    startMinutes: 16 * 60,
+    endMinutes: 17 * 60,
+  },
+};
 
 function getLocalCallMinutes(date: Date, timeZone: string): number {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -26,8 +41,9 @@ export function getStartCallWindowBlockReason(
   payload: Pick<StartCallRequest, "agentTimeZone" | "scheduledWindow">,
   now = new Date(),
 ): string | null {
-  if (payload.scheduledWindow !== REQUIRED_SCHEDULED_WINDOW) {
-    return `scheduledWindow must be ${REQUIRED_SCHEDULED_WINDOW}`;
+  const callWindow = payload.scheduledWindow ? CALL_WINDOWS[payload.scheduledWindow] : undefined;
+  if (!callWindow) {
+    return `scheduledWindow must be one of ${Object.keys(CALL_WINDOWS).join(", ")}`;
   }
 
   if (!payload.agentTimeZone) {
@@ -45,8 +61,8 @@ export function getStartCallWindowBlockReason(
     throw error;
   }
 
-  if (localMinutes < CALL_WINDOW_START_MINUTES || localMinutes >= CALL_WINDOW_END_MINUTES) {
-    return "current listing-local time is outside the 4:00-5:00pm call window";
+  if (localMinutes < callWindow.startMinutes || localMinutes >= callWindow.endMinutes) {
+    return `current listing-local time is outside the ${payload.scheduledWindow} call window`;
   }
 
   return null;

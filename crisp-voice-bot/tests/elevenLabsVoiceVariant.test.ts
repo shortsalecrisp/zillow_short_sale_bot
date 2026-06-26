@@ -9,8 +9,11 @@ process.env.TELNYX_OUTBOUND_VOICE_PROFILE_ID = "test";
 process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 process.env.ELEVENLABS_ERYN_VOICE_ID = "eryn-voice-id";
 process.env.ELEVENLABS_FINCH_VOICE_ID = "finch-voice-id";
+process.env.ELEVENLABS_RACHEL_VOICE_ID = "rachel-voice-id";
+process.env.ELEVENLABS_BELLA_VOICE_ID = "bella-voice-id";
+process.env.ELEVENLABS_VOICE_AB_TEST_ENABLED = "true";
 
-test("ElevenLabs calls use Eryn voice with Maya assistant name for every row", async () => {
+test("ElevenLabs calls rotate deterministically across four voices by row", async () => {
   const { selectElevenLabsVoiceVariant } = await import("../src/lib/elevenLabsVoiceVariant");
 
   assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3480 }), {
@@ -20,10 +23,22 @@ test("ElevenLabs calls use Eryn voice with Maya assistant name for every row", a
     voiceId: "eryn-voice-id",
   });
   assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3481 }), {
-    key: "eryn",
+    key: "finch",
     assistantName: "Maya",
-    voiceName: "Eryn",
-    voiceId: "eryn-voice-id",
+    voiceName: "Finch",
+    voiceId: "finch-voice-id",
+  });
+  assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3482 }), {
+    key: "rachel",
+    assistantName: "Maya",
+    voiceName: "Rachel",
+    voiceId: "rachel-voice-id",
+  });
+  assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3483 }), {
+    key: "bella",
+    assistantName: "Maya",
+    voiceName: "Bella",
+    voiceId: "bella-voice-id",
   });
 });
 
@@ -57,7 +72,7 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
     agentPhoneNumberId: "phone_123",
     to: "+14043009526",
     metadata: {
-      rowNumber: 3481,
+      rowNumber: 3483,
       firstName: "Tina",
       lastName: "Agent",
       fullName: "Tina Agent",
@@ -73,8 +88,8 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   });
 
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.assistantName, "Maya");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "eryn");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Eryn");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "bella");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Bella");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariant, "direct_reason");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Direct short sale reason");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.scheduledWindow, "late_morning");
@@ -85,7 +100,7 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   );
   assert.equal(
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,
-    "eryn-voice-id",
+    "bella-voice-id",
   );
   assert.match(
     body.conversation_initiation_client_data.dynamic_variables.voicemailMessage,

@@ -56,6 +56,21 @@ const VOICE_BOT_PAUSED_UNTIL_ET = '2026-05-26T00:00:00-04:00';
 const VOICE_BOT_PAUSE_REASON = 'Memorial Day pause';
 const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
   {
+    name: 'morning_probe',
+    startMinutes: 9 * 60,
+    endMinutes: 10 * 60
+  },
+  {
+    name: 'early_afternoon',
+    startMinutes: 12 * 60 + 30,
+    endMinutes: 13 * 60 + 30
+  },
+  {
+    name: 'mid_afternoon',
+    startMinutes: 14 * 60 + 30,
+    endMinutes: 15 * 60 + 30
+  },
+  {
     name: 'late_afternoon_control',
     startMinutes: 16 * 60,
     endMinutes: 17 * 60
@@ -1108,6 +1123,16 @@ function getVoiceBotCallWindowForDateKey_(dateKey, timeZone) {
   return callWindows.length ? callWindows[0] : null;
 }
 
+function getVoiceBotCallWindowIndexByName_(callWindows, windowName) {
+  for (var i = 0; i < callWindows.length; i++) {
+    if (callWindows[i].name === windowName) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
 function getVoiceBotLocalMinutes_(date, timeZone) {
   const hour = Number(Utilities.formatDate(date, timeZone, 'H'));
   const minute = Number(Utilities.formatDate(date, timeZone, 'm'));
@@ -1147,7 +1172,15 @@ function getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, timeZone) {
 
 function getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, timeZone) {
   const nextCallDateKey = getNextVoiceBotCallDateKey_(getVoiceBotLocalDateKey_(firstAttemptSentAt, timeZone), timeZone);
-  const nextCallWindow = getVoiceBotCallWindowForDateKey_(nextCallDateKey, timeZone);
+  const firstAttemptWindowName = getVoiceBotPreferredCallWindowName_(firstAttemptSentAt, timeZone);
+  const nextCallProbeDate = buildVoiceBotDateInTimeZone_(nextCallDateKey, 12 * 60, timeZone);
+  const nextCallDay = Number(Utilities.formatDate(nextCallProbeDate, timeZone, 'u'));
+  const nextCallWindows = getVoiceBotCallWindowsForDay_(nextCallDay);
+  const firstAttemptWindowIndexInNextDay = getVoiceBotCallWindowIndexByName_(nextCallWindows, firstAttemptWindowName);
+  const nextCallWindowIndex = firstAttemptWindowIndexInNextDay >= 0
+    ? (firstAttemptWindowIndexInNextDay + 1) % nextCallWindows.length
+    : 0;
+  const nextCallWindow = nextCallWindows[nextCallWindowIndex] || getVoiceBotCallWindowForDateKey_(nextCallDateKey, timeZone);
 
   return buildVoiceBotDateInTimeZone_(
     nextCallDateKey,

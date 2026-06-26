@@ -9,12 +9,12 @@ export const VOICE_PERFORMANCE_LOG_MARKER = "CODEX_VOICE_CALL_METRICS_V1";
 
 const MAX_SUMMARY_CHARS = 3_000;
 const MAX_TRANSCRIPT_CHARS = 16_000;
-const VOICE_AB_TEST_COHORT = "eryn_vs_finch";
+const VOICE_AB_TEST_COHORT = "time_bucket_and_voice_rotation";
 const VOICE_AB_TEST_STARTED_AT = "2026-05-29T23:33:59Z";
 const VOICE_AB_TEST_STARTED_LOCAL = "May 29, 2026 7:33 PM ET";
-const VOICE_AB_TEST_INCLUDED_VARIANTS = ["eryn", "finch"] as const;
+const VOICE_AB_TEST_INCLUDED_VARIANTS = ["eryn", "finch", "rachel", "bella"] as const;
 const CODEX_ANALYSIS_INSTRUCTIONS =
-  "When asked how the voice A/B test or voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer. For the historical A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant of eryn or finch. Do not include previous single-voice Emmy calls in A/B results. Treat the current production baseline as Eryn voice with Maya assistant name. Also compare call.openerVariant for the opener test: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome.";
+  "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer, and compare scheduledWindow by agent local time bucket for answer-rate lift. For the historical Eryn/Finch A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls. Current production rotates Eryn, Finch, Rachel, and Bella behind the public Maya caller name when voice testing is enabled. Also compare call.openerVariant for the opener test: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome.";
 
 type TranscriptToolCall = {
   tool_name?: string;
@@ -240,7 +240,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       excludeMissingVoiceVariant: true,
       excludePriorSingleVoiceEmmyCalls: true,
       analysisRule:
-        "Only include calls where call.voiceVariant is eryn or finch and the call happened after the Eryn/Finch voice split started. Exclude all previous single-voice Emmy calls.",
+        "Only include calls where call.voiceVariant is present and the call happened after the voice split started. Exclude all previous single-voice Emmy calls. Compare current voice variants and scheduledWindow buckets separately.",
     },
     call: {
       conversationId: input.conversationId,

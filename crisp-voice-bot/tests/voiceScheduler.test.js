@@ -100,15 +100,18 @@ function runSchedulerScript(script) {
   return vm.runInContext(script, loadSchedulerContext());
 }
 
-test("weekday calls are only eligible during the 4:00-5:00pm local window", () => {
+test("weekday calls are eligible during morning, afternoon, and 4-5pm local test windows", () => {
   const morning = runSchedulerExpression(
-    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T14:00:00Z"), "America/New_York")',
+    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T13:30:00Z"), "America/New_York")',
   );
   const earlyAfternoon = runSchedulerExpression(
-    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T17:45:00Z"), "America/New_York")',
+    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T17:00:00Z"), "America/New_York")',
+  );
+  const midAfternoon = runSchedulerExpression(
+    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T18:45:00Z"), "America/New_York")',
   );
   const beforeWindow = runSchedulerExpression(
-    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T19:59:00Z"), "America/New_York")',
+    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T19:45:00Z"), "America/New_York")',
   );
   const lateAfternoonControl = runSchedulerExpression(
     'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T20:15:00Z"), "America/New_York")',
@@ -117,8 +120,9 @@ test("weekday calls are only eligible during the 4:00-5:00pm local window", () =
     'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T21:00:00Z"), "America/New_York")',
   );
 
-  assert.equal(morning, "");
-  assert.equal(earlyAfternoon, "");
+  assert.equal(morning, "morning_probe");
+  assert.equal(earlyAfternoon, "early_afternoon");
+  assert.equal(midAfternoon, "mid_afternoon");
   assert.equal(beforeWindow, "");
   assert.equal(lateAfternoonControl, "late_afternoon_control");
   assert.equal(afterWindow, "");
@@ -247,18 +251,18 @@ test("voice performance log-only updates do not change scheduling cells", () => 
   assert.deepEqual(result, { cleared: [], fields: [] });
 });
 
-test("first voice call uses the next local 4-5pm window after follow-up text", () => {
+test("first voice call uses the next local time-test window after follow-up text", () => {
   const beforeLateMorning = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T13:00:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T12:30:00Z"), "America/New_York").toISOString()',
   );
   const duringLateMorning = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T15:00:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T13:30:00Z"), "America/New_York").toISOString()',
   );
   const betweenMorningAndAfternoon = runSchedulerExpression(
     'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T16:00:00Z"), "America/New_York").toISOString()',
   );
   const betweenAfternoonWindows = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T19:15:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T19:45:00Z"), "America/New_York").toISOString()',
   );
   const duringLateAfternoon = runSchedulerExpression(
     'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T20:30:00Z"), "America/New_York").toISOString()',
@@ -276,20 +280,26 @@ test("first voice call uses the next local 4-5pm window after follow-up text", (
     'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-10T22:30:00Z"), "America/New_York").toISOString()',
   );
 
-  assert.equal(beforeLateMorning, "2026-05-04T20:00:00.000Z");
-  assert.equal(duringLateMorning, "2026-05-04T20:00:00.000Z");
-  assert.equal(betweenMorningAndAfternoon, "2026-05-04T20:00:00.000Z");
+  assert.equal(beforeLateMorning, "2026-05-04T13:00:00.000Z");
+  assert.equal(duringLateMorning, "2026-05-04T13:30:00.000Z");
+  assert.equal(betweenMorningAndAfternoon, "2026-05-04T16:30:00.000Z");
   assert.equal(betweenAfternoonWindows, "2026-05-04T20:00:00.000Z");
   assert.equal(duringLateAfternoon, "2026-05-04T20:30:00.000Z");
   assert.equal(afterFridayWindow, "2026-05-09T20:00:00.000Z");
   assert.equal(beforeSaturdayWindow, "2026-05-09T20:00:00.000Z");
   assert.equal(duringSaturdayWindow, "2026-05-09T20:30:00.000Z");
-  assert.equal(afterSundayWindow, "2026-05-11T20:00:00.000Z");
+  assert.equal(afterSundayWindow, "2026-05-11T13:00:00.000Z");
 });
 
-test("second voice call uses the local 4-5pm call window on the next calendar day", () => {
-  const nextDay = runSchedulerExpression(
+test("second voice call rotates into the next local time-test bucket on the next calendar day", () => {
+  const nextDayAfterLateAfternoon = runSchedulerExpression(
     'getNextVoiceBotFollowupAttemptWindowStart_(new Date("2026-05-04T20:45:00Z"), "America/New_York").toISOString()',
+  );
+  const nextDayAfterMorning = runSchedulerExpression(
+    'getNextVoiceBotFollowupAttemptWindowStart_(new Date("2026-05-04T13:15:00Z"), "America/New_York").toISOString()',
+  );
+  const nextDayAfterEarlyAfternoon = runSchedulerExpression(
+    'getNextVoiceBotFollowupAttemptWindowStart_(new Date("2026-05-04T17:15:00Z"), "America/New_York").toISOString()',
   );
   const saturdayAfterFriday = runSchedulerExpression(
     'getNextVoiceBotFollowupAttemptWindowStart_(new Date("2026-05-08T20:45:00Z"), "America/New_York").toISOString()',
@@ -301,10 +311,12 @@ test("second voice call uses the local 4-5pm call window on the next calendar da
     'getNextVoiceBotFollowupAttemptWindowStart_(new Date("2026-05-10T20:15:00Z"), "America/New_York").toISOString()',
   );
 
-  assert.equal(nextDay, "2026-05-05T20:00:00.000Z");
+  assert.equal(nextDayAfterLateAfternoon, "2026-05-05T13:00:00.000Z");
+  assert.equal(nextDayAfterMorning, "2026-05-05T16:30:00.000Z");
+  assert.equal(nextDayAfterEarlyAfternoon, "2026-05-05T18:30:00.000Z");
   assert.equal(saturdayAfterFriday, "2026-05-09T20:00:00.000Z");
   assert.equal(sundayAfterSaturday, "2026-05-10T20:00:00.000Z");
-  assert.equal(mondayAfterSunday, "2026-05-11T20:00:00.000Z");
+  assert.equal(mondayAfterSunday, "2026-05-11T13:00:00.000Z");
 });
 
 test("queue scan can return multiple eligible rows in the same local call window", () => {

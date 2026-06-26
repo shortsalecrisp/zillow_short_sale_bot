@@ -121,6 +121,8 @@ export const config = {
     voiceAbTestEnabled: readBoolean("ELEVENLABS_VOICE_AB_TEST_ENABLED", false),
     erynVoiceId: readEnv("ELEVENLABS_ERYN_VOICE_ID", "dMyQqiVXTU80dDl2eNK8"),
     finchVoiceId: readEnv("ELEVENLABS_FINCH_VOICE_ID", "hFskf6X0TFndppvQxiEF"),
+    rachelVoiceId: readEnv("ELEVENLABS_RACHEL_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+    bellaVoiceId: readEnv("ELEVENLABS_BELLA_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),
     ttsModel: readEnv("ELEVENLABS_TTS_MODEL", "eleven_flash_v2"),
     primaryLlm: readEnv("ELEVENLABS_PRIMARY_LLM", "gpt-4o"),
     timezone: readEnv("ELEVENLABS_AGENT_TIMEZONE", "Eastern Time (US)"),

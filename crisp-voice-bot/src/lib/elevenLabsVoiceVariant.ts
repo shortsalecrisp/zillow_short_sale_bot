@@ -1,19 +1,51 @@
 import { config } from "./config";
 
-export type ElevenLabsVoiceVariantKey = "eryn" | "finch";
+export type ElevenLabsVoiceVariantKey = "eryn" | "finch" | "rachel" | "bella";
 
 export type ElevenLabsVoiceVariant = {
   key: ElevenLabsVoiceVariantKey;
-  assistantName: "Maya" | "Emmy" | "Finch";
-  voiceName: "Eryn" | "Finch";
+  assistantName: "Maya";
+  voiceName: "Eryn" | "Finch" | "Rachel" | "Bella";
   voiceId: string;
 };
 
-export function selectElevenLabsVoiceVariant(_input: { rowNumber: number }): ElevenLabsVoiceVariant {
-  return {
-    key: "eryn",
-    assistantName: "Maya",
-    voiceName: "Eryn",
-    voiceId: config.elevenLabs.voiceId ?? config.elevenLabs.erynVoiceId,
-  };
+const ASSISTANT_NAME = "Maya";
+
+function buildVoiceVariants(): ElevenLabsVoiceVariant[] {
+  return [
+    {
+      key: "eryn",
+      assistantName: ASSISTANT_NAME,
+      voiceName: "Eryn",
+      voiceId: config.elevenLabs.voiceId ?? config.elevenLabs.erynVoiceId,
+    },
+    {
+      key: "finch",
+      assistantName: ASSISTANT_NAME,
+      voiceName: "Finch",
+      voiceId: config.elevenLabs.finchVoiceId,
+    },
+    {
+      key: "rachel",
+      assistantName: ASSISTANT_NAME,
+      voiceName: "Rachel",
+      voiceId: config.elevenLabs.rachelVoiceId,
+    },
+    {
+      key: "bella",
+      assistantName: ASSISTANT_NAME,
+      voiceName: "Bella",
+      voiceId: config.elevenLabs.bellaVoiceId,
+    },
+  ];
+}
+
+export function selectElevenLabsVoiceVariant(input: { rowNumber: number }): ElevenLabsVoiceVariant {
+  const variants = buildVoiceVariants();
+
+  if (!config.elevenLabs.voiceAbTestEnabled) {
+    return variants[0];
+  }
+
+  return variants[Math.abs(input.rowNumber) % variants.length];
 }

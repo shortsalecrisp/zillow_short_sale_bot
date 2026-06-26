@@ -3,19 +3,22 @@ import test from "node:test";
 
 import { getStartCallWindowBlockReason } from "../src/lib/callWindowGuard";
 
-test("blocks old early-afternoon queue requests before dialing", () => {
+test("blocks unknown queue windows before dialing", () => {
   const reason = getStartCallWindowBlockReason(
     {
-      scheduledWindow: "early_afternoon",
+      scheduledWindow: "dinner",
       agentTimeZone: "America/Chicago",
     },
     new Date("2026-06-23T19:30:00Z"),
   );
 
-  assert.equal(reason, "scheduledWindow must be late_afternoon_control");
+  assert.equal(
+    reason,
+    "scheduledWindow must be one of morning_probe, early_afternoon, mid_afternoon, late_afternoon_control",
+  );
 });
 
-test("blocks late-afternoon requests before the listing local 4pm window", () => {
+test("blocks approved windows outside their listing-local time", () => {
   const reason = getStartCallWindowBlockReason(
     {
       scheduledWindow: "late_afternoon_control",
@@ -24,7 +27,7 @@ test("blocks late-afternoon requests before the listing local 4pm window", () =>
     new Date("2026-06-23T19:30:00Z"),
   );
 
-  assert.equal(reason, "current listing-local time is outside the 4:00-5:00pm call window");
+  assert.equal(reason, "current listing-local time is outside the late_afternoon_control call window");
 });
 
 test("allows late-afternoon requests during the listing local 4pm window", () => {
@@ -37,4 +40,37 @@ test("allows late-afternoon requests during the listing local 4pm window", () =>
   );
 
   assert.equal(reason, null);
+});
+
+test("allows morning and afternoon experiment buckets during their listing-local windows", () => {
+  assert.equal(
+    getStartCallWindowBlockReason(
+      {
+        scheduledWindow: "morning_probe",
+        agentTimeZone: "America/Chicago",
+      },
+      new Date("2026-06-23T14:30:00Z"),
+    ),
+    null,
+  );
+  assert.equal(
+    getStartCallWindowBlockReason(
+      {
+        scheduledWindow: "early_afternoon",
+        agentTimeZone: "America/Chicago",
+      },
+      new Date("2026-06-23T18:00:00Z"),
+    ),
+    null,
+  );
+  assert.equal(
+    getStartCallWindowBlockReason(
+      {
+        scheduledWindow: "mid_afternoon",
+        agentTimeZone: "America/Chicago",
+      },
+      new Date("2026-06-23T20:00:00Z"),
+    ),
+    null,
+  );
 });
