@@ -176,6 +176,11 @@ function doPost(e) {
   try {
     const payload = parseJsonPost_(e);
 
+    if (isVoiceBotQueueDryRunPayload_(payload)) {
+      validateVoiceBotQueueRefillPayload_(payload);
+      return jsonOutput_(processVoiceBotCallQueueDryRun());
+    }
+
     if (isVoiceBotQueueRefillPayload_(payload)) {
       validateVoiceBotQueueRefillPayload_(payload);
       return jsonOutput_(processVoiceBotCallQueue());
@@ -484,6 +489,51 @@ function processVoiceBotCallQueue() {
       // Nothing to do. Lock release can fail if waitLock never acquired it.
     }
   }
+}
+
+function processVoiceBotCallQueueDryRun() {
+  validateVoiceBotQueueConfig_();
+
+  const now = new Date();
+  const sheet = getVoiceBotSheet_();
+  const rows = getVoiceBotRows_(sheet);
+  const activeCallCount = countActiveVoiceBotCallsFromRows_(rows, now);
+  const availableSlots = Math.max(0, VOICE_BOT_MAX_ACTIVE_CALLS - activeCallCount);
+  const candidates = getVoiceBotStartableCallCandidatesFromRows_(
+    rows,
+    now,
+    VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
+    VOICE_BOT_MAX_ACTIVE_CALLS
+  );
+
+  const candidateSummaries = [];
+  for (var i = 0; i < candidates.length; i++) {
+    candidateSummaries.push({
+      rowNumber: candidates[i].rowNumber,
+      callAttemptNumber: candidates[i].callAttemptNumber,
+      dueAtEt: formatVoiceBotDateEt_(candidates[i].dueAt),
+      localWindow: candidates[i].callWindow,
+      agentTimeZone: candidates[i].agentTimeZone
+    });
+  }
+
+  return {
+    ok: true,
+    dryRun: true,
+    wouldStartCalls: false,
+    wouldWriteSheet: false,
+    nowEt: formatVoiceBotDateEt_(now),
+    paused: Boolean(isVoiceBotQueuePaused_(now)),
+    outsideQueueRunWindow: !isWithinVoiceBotQueueRunWindow_(now),
+    activeCallCount: activeCallCount,
+    availableSlots: availableSlots,
+    maxCallsPerRun: VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
+    maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS,
+    candidateCount: candidateSummaries.length,
+    windowDistribution: summarizeVoiceBotCandidateDistribution_(candidateSummaries, 'localWindow'),
+    timezoneDistribution: summarizeVoiceBotCandidateDistribution_(candidateSummaries, 'agentTimeZone'),
+    candidates: candidateSummaries
+  };
 }
 
 function installVoiceBotCallQueueTrigger() {
@@ -837,6 +887,10 @@ function validateVoiceBotPayload_(payload) {
 
 function isVoiceBotQueueRefillPayload_(payload) {
   return Boolean(payload) && typeof payload === 'object' && normalizeString_(payload.action) === 'process_voice_queue';
+}
+
+function isVoiceBotQueueDryRunPayload_(payload) {
+  return Boolean(payload) && typeof payload === 'object' && normalizeString_(payload.action) === 'dry_run_voice_queue';
 }
 
 function validateVoiceBotQueueRefillPayload_(payload) {
@@ -1315,6 +1369,15 @@ function getVoiceBotSheet_() {
 
 function valueOrNull_(value) {
   return value === undefined || value === null || value === '' ? null : value;
+}
+
+function summarizeVoiceBotCandidateDistribution_(candidates, key) {
+  const distribution = {};
+  for (var i = 0; i < candidates.length; i++) {
+    const value = candidates[i][key] || 'unknown';
+    distribution[value] = (distribution[value] || 0) + 1;
+  }
+  return distribution;
 }
 
 function voiceBotLog_(obj) {

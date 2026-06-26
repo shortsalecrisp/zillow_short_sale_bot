@@ -1,5 +1,7 @@
 import express, { type ErrorRequestHandler, type NextFunction, type Request, type Response } from "express";
+import { getConfiguredCallWindows } from "./lib/callWindowGuard";
 import { config } from "./lib/config";
+import { getElevenLabsVoiceExperimentStatus } from "./lib/elevenLabsVoiceVariant";
 import { logger } from "./lib/logger";
 import elevenLabsRouter from "./routes/elevenLabs";
 import smsReplyRouter from "./routes/smsReply";
@@ -16,6 +18,23 @@ app.get("/health", (_req: Request, res: Response) => {
     ok: true,
     service: "crisp-voice-bot",
     testMode: config.testMode,
+    commit: process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? null,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get("/experiment-status", (_req: Request, res: Response) => {
+  res.status(200).json({
+    ok: true,
+    service: "crisp-voice-bot",
+    testMode: config.testMode,
+    commit: process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? null,
+    voiceExperiment: getElevenLabsVoiceExperimentStatus(),
+    callWindowGuard: {
+      requiresScheduledWindow: true,
+      requiresAgentTimeZone: true,
+      windows: getConfiguredCallWindows(),
+    },
     timestamp: new Date().toISOString(),
   });
 });

@@ -40,6 +40,22 @@ function buildVoiceVariants(): ElevenLabsVoiceVariant[] {
   ];
 }
 
+export function getElevenLabsVoiceExperimentStatus() {
+  const variants = buildVoiceVariants();
+
+  return {
+    enabled: config.elevenLabs.voiceAbTestEnabled,
+    selectionRule: config.elevenLabs.voiceAbTestEnabled ? "abs(rowNumber) % voiceCount" : "fixed_primary_voice",
+    publicAssistantName: ASSISTANT_NAME,
+    variants: variants.map((variant) => ({
+      key: variant.key,
+      voiceName: variant.voiceName,
+      assistantName: variant.assistantName,
+      voiceIdConfigured: Boolean(variant.voiceId),
+    })),
+  };
+}
+
 export function selectElevenLabsVoiceVariant(input: { rowNumber: number }): ElevenLabsVoiceVariant {
   const variants = buildVoiceVariants();
 

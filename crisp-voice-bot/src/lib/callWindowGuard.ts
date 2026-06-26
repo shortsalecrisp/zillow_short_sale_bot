@@ -1,6 +1,6 @@
 import type { StartCallRequest } from "../types";
 
-const CALL_WINDOWS: Record<string, { startMinutes: number; endMinutes: number }> = {
+export const CALL_WINDOWS: Record<string, { startMinutes: number; endMinutes: number }> = {
   morning_probe: {
     startMinutes: 9 * 60,
     endMinutes: 10 * 60,
@@ -18,6 +18,14 @@ const CALL_WINDOWS: Record<string, { startMinutes: number; endMinutes: number }>
     endMinutes: 17 * 60,
   },
 };
+
+export function getConfiguredCallWindows() {
+  return Object.entries(CALL_WINDOWS).map(([name, window]) => ({
+    name,
+    startMinutes: window.startMinutes,
+    endMinutes: window.endMinutes,
+  }));
+}
 
 function getLocalCallMinutes(date: Date, timeZone: string): number {
   const parts = new Intl.DateTimeFormat("en-US", {
