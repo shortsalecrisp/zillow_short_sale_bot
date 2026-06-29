@@ -472,7 +472,7 @@ WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive for outreach; scheduler callbacks also wake at this hour
 INITIAL_SMS_END = int(os.getenv("INITIAL_SMS_END_HOUR", str(WORK_END)))  # exclusive; inbound replies are handled separately by Apps Script/Tasker
 FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
-SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=False)
+SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=True)
 APIFY_DECISION_LOCK_PATH = Path(os.getenv("APIFY_DECISION_LOCK_PATH", "/tmp/apify_hourly_decision.txt"))
 
 _sms_api_key = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "EhobscAL")
