@@ -125,12 +125,14 @@ PY
         value: "6"
       - key: FREE_SOURCE_PILOT_ENABLED
         value: "true"
+      - key: FREE_SOURCE_PILOT_FORCE_ALL_STATES
+        value: "true"
       - key: FREE_SOURCE_PILOT_RESULTS_PER_QUERY
         value: "10"
       - key: FREE_SOURCE_PILOT_SLEEP_SECONDS
         value: "1.0"
       - key: FREE_SOURCE_PILOT_STATES
-        value: FL,CA,TX,WA,PA,HI,GA,MI
+        value: AL,AK,AZ,AR,CA,CO,CT,DE,FL,GA,HI,ID,IL,IN,IA,KS,KY,LA,ME,MD,MA,MI,MN,MS,MO,MT,NE,NV,NH,NJ,NM,NY,NC,ND,OH,OK,OR,PA,RI,SC,SD,TN,TX,UT,VT,VA,WA,WV,WI,WY
       - key: FREE_SOURCE_PILOT_TAB
         value: Lead Source Pilot
       - key: FU_LOOKBACK_ROWS

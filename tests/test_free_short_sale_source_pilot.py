@@ -109,6 +109,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertIn("MI", pilot.DEFAULT_STATES)
         self.assertEqual(pilot.STATE_QUERY_TERMS["MI"], "Michigan")
 
+    def test_default_states_cover_all_50_states(self):
+        self.assertEqual(len(pilot.DEFAULT_STATES), 50)
+        self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
+        self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
+
 
 if __name__ == "__main__":
     unittest.main()

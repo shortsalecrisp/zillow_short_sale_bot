@@ -153,13 +153,67 @@ APIFY_BACKSTOP_STATE_LIMIT = int(os.getenv("APIFY_BACKSTOP_STATE_LIMIT", "10"))
 APIFY_BACKSTOP_LOCK_PATH = os.getenv("APIFY_BACKSTOP_LOCK_PATH", "/tmp/apify_coverage_backstop.txt")
 FREE_SOURCE_PILOT_ENABLED = os.getenv("FREE_SOURCE_PILOT_ENABLED", "true").lower() == "true"
 FREE_SOURCE_PILOT_TAB = os.getenv("FREE_SOURCE_PILOT_TAB", "Lead Source Pilot")
-FREE_SOURCE_PILOT_STATES = [
-    state.strip().upper()
-    for state in os.getenv("FREE_SOURCE_PILOT_STATES", "FL,CA,TX,WA,PA,HI,GA,MI").split(",")
-    if state.strip()
+ALL_US_STATES = [
+    "AL",
+    "AK",
+    "AZ",
+    "AR",
+    "CA",
+    "CO",
+    "CT",
+    "DE",
+    "FL",
+    "GA",
+    "HI",
+    "ID",
+    "IL",
+    "IN",
+    "IA",
+    "KS",
+    "KY",
+    "LA",
+    "ME",
+    "MD",
+    "MA",
+    "MI",
+    "MN",
+    "MS",
+    "MO",
+    "MT",
+    "NE",
+    "NV",
+    "NH",
+    "NJ",
+    "NM",
+    "NY",
+    "NC",
+    "ND",
+    "OH",
+    "OK",
+    "OR",
+    "PA",
+    "RI",
+    "SC",
+    "SD",
+    "TN",
+    "TX",
+    "UT",
+    "VT",
+    "VA",
+    "WA",
+    "WV",
+    "WI",
+    "WY",
 ]
-if "MI" not in FREE_SOURCE_PILOT_STATES:
-    FREE_SOURCE_PILOT_STATES.append("MI")
+FREE_SOURCE_PILOT_FORCE_ALL_STATES = os.getenv("FREE_SOURCE_PILOT_FORCE_ALL_STATES", "true").lower() == "true"
+if FREE_SOURCE_PILOT_FORCE_ALL_STATES:
+    FREE_SOURCE_PILOT_STATES = ALL_US_STATES.copy()
+else:
+    FREE_SOURCE_PILOT_STATES = [
+        state.strip().upper()
+        for state in os.getenv("FREE_SOURCE_PILOT_STATES", ",".join(ALL_US_STATES)).split(",")
+        if state.strip()
+    ]
 FREE_SOURCE_PILOT_RESULTS_PER_QUERY = int(os.getenv("FREE_SOURCE_PILOT_RESULTS_PER_QUERY", "10"))
 FREE_SOURCE_PILOT_SLEEP_SECONDS = float(os.getenv("FREE_SOURCE_PILOT_SLEEP_SECONDS", "1.0"))
 FREE_SOURCE_PILOT_STARTUP_CATCHUP = os.getenv("FREE_SOURCE_PILOT_STARTUP_CATCHUP", "true").lower() == "true"
