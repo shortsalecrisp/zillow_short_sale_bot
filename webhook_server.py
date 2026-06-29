@@ -156,6 +156,8 @@ FREE_SOURCE_PILOT_STATES = [
     for state in os.getenv("FREE_SOURCE_PILOT_STATES", "FL,CA,TX,WA,PA,HI,GA,MI").split(",")
     if state.strip()
 ]
+if "MI" not in FREE_SOURCE_PILOT_STATES:
+    FREE_SOURCE_PILOT_STATES.append("MI")
 FREE_SOURCE_PILOT_RESULTS_PER_QUERY = int(os.getenv("FREE_SOURCE_PILOT_RESULTS_PER_QUERY", "10"))
 FREE_SOURCE_PILOT_SLEEP_SECONDS = float(os.getenv("FREE_SOURCE_PILOT_SLEEP_SECONDS", "1.0"))
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}

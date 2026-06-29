@@ -59,6 +59,8 @@ def _free_source_pilot_callback(run_time: datetime) -> None:
                 for state in os.getenv("FREE_SOURCE_PILOT_STATES", "FL,CA,TX,WA,PA,HI,GA,MI").split(",")
                 if state.strip()
             ]
+            if "MI" not in states:
+                states.append("MI")
             if not states:
                 logger.info("free-source-pilot: skipped no states configured")
                 return
