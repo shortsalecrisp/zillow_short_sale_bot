@@ -27,6 +27,7 @@ from bot_min import (
     INITIAL_SMS_END,
     TZ,
     WORK_START,
+    WORK_END,
     SCHEDULER_TZ,
     SMS_TEMPLATE,
     append_seen_zpids,
