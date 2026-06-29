@@ -153,7 +153,7 @@ FREE_SOURCE_PILOT_ENABLED = os.getenv("FREE_SOURCE_PILOT_ENABLED", "true").lower
 FREE_SOURCE_PILOT_TAB = os.getenv("FREE_SOURCE_PILOT_TAB", "Lead Source Pilot")
 FREE_SOURCE_PILOT_STATES = [
     state.strip().upper()
-    for state in os.getenv("FREE_SOURCE_PILOT_STATES", "FL,CA,TX,WA,PA,HI,GA").split(",")
+    for state in os.getenv("FREE_SOURCE_PILOT_STATES", "FL,CA,TX,WA,PA,HI,GA,MI").split(",")
     if state.strip()
 ]
 FREE_SOURCE_PILOT_RESULTS_PER_QUERY = int(os.getenv("FREE_SOURCE_PILOT_RESULTS_PER_QUERY", "10"))

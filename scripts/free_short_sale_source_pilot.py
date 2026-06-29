@@ -61,7 +61,10 @@ PILOT_HEADERS = [
     "raw_title",
 ]
 
-DEFAULT_STATES = ["FL", "CA", "TX", "WA", "PA", "HI", "GA"]
+DEFAULT_STATES = ["FL", "CA", "TX", "WA", "PA", "HI", "GA", "MI"]
+STATE_QUERY_TERMS = {
+    "MI": "Michigan",
+}
 
 SOURCE_QUERIES = [
     (
@@ -89,6 +92,27 @@ USER_AGENT = (
 
 SHORT_SALE_LISTING_RE = re.compile(
     r"\b(?:short\s+sale|short-sale)\b",
+    re.IGNORECASE,
+)
+
+LISTING_EVIDENCE_LABEL_RE = re.compile(
+    r"\b(?:"
+    r"special\s+listing\s+conditions?|specialListingConditions|"
+    r"what'?s\s+special|description|remarks|public\s+remarks|"
+    r"about\s+this\s+home|property\s+description|listing\s+description|"
+    r"property\s+overview|overview"
+    r")\b",
+    re.IGNORECASE,
+)
+
+SHORT_SALE_SALE_CONTEXT_RE = re.compile(
+    r"\bshort\s*-?\s*sale\b.{0,180}\b(?:"
+    r"subject\s+to|lender|bank|approval|third[-\s]?party|"
+    r"property|home|house|seller|offer"
+    r")\b|"
+    r"\b(?:subject\s+to|lender|bank|approval|third[-\s]?party|"
+    r"property|home|house|seller|offer"
+    r")\b.{0,180}\bshort\s*-?\s*sale\b",
     re.IGNORECASE,
 )
 
@@ -232,12 +256,21 @@ def qualification_for_text(text: str) -> Qualification:
             "",
             "; ".join(disqualified),
         )
+    verified_match = verified_short_sale_match(compact)
+    if not verified_match:
+        return Qualification(
+            "rejected",
+            "short_sale_not_in_listing_evidence",
+            "",
+            excerpt_around(compact, short_sale_match.start(), short_sale_match.end()),
+            "; ".join(disqualified),
+        )
     if disqualified:
         return Qualification(
             "rejected",
             "disqualifying_short_sale_text",
             extract_short_sale_evidence_type(compact),
-            excerpt_around(compact, short_sale_match.start(), short_sale_match.end()),
+            excerpt_around(compact, verified_match.start(), verified_match.end()),
             "; ".join(disqualified),
         )
     if inactive_match and not active_match:
@@ -245,7 +278,7 @@ def qualification_for_text(text: str) -> Qualification:
             "rejected",
             "not_active_for_sale",
             extract_short_sale_evidence_type(compact),
-            excerpt_around(compact, short_sale_match.start(), short_sale_match.end()),
+            excerpt_around(compact, verified_match.start(), verified_match.end()),
             inactive_match.group(0),
         )
 
@@ -253,9 +286,29 @@ def qualification_for_text(text: str) -> Qualification:
         "qualified",
         "",
         extract_short_sale_evidence_type(compact),
-        excerpt_around(compact, short_sale_match.start(), short_sale_match.end()),
+        excerpt_around(compact, verified_match.start(), verified_match.end()),
         "",
     )
+
+
+def verified_short_sale_match(text: str) -> re.Match[str] | None:
+    short_sale_match = SHORT_SALE_LISTING_RE.search(text)
+    if not short_sale_match:
+        return None
+
+    for label_match in LISTING_EVIDENCE_LABEL_RE.finditer(text):
+        section = text[label_match.start() : min(len(text), label_match.end() + 1400)]
+        section_match = SHORT_SALE_LISTING_RE.search(section)
+        if section_match:
+            start = label_match.start() + section_match.start()
+            end = label_match.start() + section_match.end()
+            return SHORT_SALE_LISTING_RE.search(text, start, end)
+
+    contextual_match = SHORT_SALE_SALE_CONTEXT_RE.search(text)
+    if contextual_match:
+        return contextual_match
+
+    return None
 
 
 def extract_short_sale_evidence_type(text: str) -> str:
@@ -723,8 +776,9 @@ def run(args: argparse.Namespace) -> None:
     stats = {"searched": 0, "fetched": 0, "qualified": 0, "duplicates": 0, "rejected": 0}
 
     for state in args.states:
+        state_query_term = STATE_QUERY_TERMS.get(state.upper(), state)
         for source, template in SOURCE_QUERIES:
-            query = template.format(state=state)
+            query = template.format(state=state_query_term)
             stats["searched"] += 1
             try:
                 results = ddg_search(query, source, args.results_per_query)

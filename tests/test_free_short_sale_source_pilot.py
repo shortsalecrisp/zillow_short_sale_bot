@@ -26,6 +26,17 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "missing_listing_text_short_sale")
 
+    def test_qualification_rejects_generic_short_sale_search_page_noise(self):
+        text = (
+            "For Sale. Browse Michigan short sale homes and foreclosure listings. "
+            "Remarks: Updated ranch near parks and shopping."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "short_sale_not_in_listing_evidence")
+
     def test_qualification_rejects_already_approved_short_sale(self):
         text = "For Sale. What's special: This is an approved short sale."
 
@@ -93,6 +104,10 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 "CA",
             ],
         )
+
+    def test_default_states_include_michigan_for_pilot(self):
+        self.assertIn("MI", pilot.DEFAULT_STATES)
+        self.assertEqual(pilot.STATE_QUERY_TERMS["MI"], "Michigan")
 
 
 if __name__ == "__main__":

@@ -56,7 +56,7 @@ def _free_source_pilot_callback(run_time: datetime) -> None:
         try:
             states = [
                 state.strip().upper()
-                for state in os.getenv("FREE_SOURCE_PILOT_STATES", "FL,CA,TX,WA,PA,HI,GA").split(",")
+                for state in os.getenv("FREE_SOURCE_PILOT_STATES", "FL,CA,TX,WA,PA,HI,GA,MI").split(",")
                 if state.strip()
             ]
             if not states:
