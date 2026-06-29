@@ -12522,6 +12522,11 @@ def run_hourly_scheduler(
         FOLLOWUP_READ_END_COL,
         MIN_COLS,
     )
+    LOG.info(
+        "Follow-up lookback configured: limit=%s min_limit=%s",
+        FU_LOOKBACK_ROWS,
+        FOLLOWUP_MIN_LOOKBACK_ROWS,
+    )
     next_run = _next_scheduler_run(datetime.now(tz=SCHEDULER_TZ))
 
     LOG.info(
