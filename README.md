@@ -66,6 +66,25 @@ then calls the detail task for selected unseen rows. Defaults:
 * `APIFY_BACKSTOP_STATE_LIMIT=10`
 * `APIFY_BACKSTOP_LOCK_PATH=/tmp/apify_coverage_backstop.txt`
 
+## Free-source lead pilot
+
+The free-source pilot checks public search results for non-Zillow short sale listings and writes review candidates to
+the `Lead Source Pilot` tab. It runs from the same hourly scheduler as the Zillow scraper: every top-of-hour slot from
+8:00 AM through the final 8:00 PM ET run, seven days per week when `SCHEDULER_INCLUDE_WEEKENDS=true`.
+
+The pilot does not write to `Sheet1`, send SMS, or call paid APIs. Candidate rows are deduped against `Sheet1` by
+listing address and by phone number; if the phone already exists in the main sheet, the listing is skipped because the
+campaign contacts each agent only once. Rows include `synthetic_zpid` and `pending_queue_listing_json` so reviewed
+net-new candidates can later be promoted into the same PendingQueue-style shape used by the Zillow scraper.
+
+Configuration:
+
+* `FREE_SOURCE_PILOT_ENABLED=true`
+* `FREE_SOURCE_PILOT_TAB=Lead Source Pilot`
+* `FREE_SOURCE_PILOT_STATES=FL,CA,TX,WA,PA,HI,GA`
+* `FREE_SOURCE_PILOT_RESULTS_PER_QUERY=10`
+* `FREE_SOURCE_PILOT_SLEEP_SECONDS=1.0`
+
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main
 process so the hourly follow-up scheduler stays active.

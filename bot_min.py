@@ -469,7 +469,7 @@ SCHEDULER_TZ   = pytz.timezone("America/New_York")
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FU_LOOKBACK_ROWS = int(os.getenv("FU_LOOKBACK_ROWS", "50"))
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
-WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive; no new outreach after 8 PM ET
+WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive for outreach; scheduler callbacks also wake at this hour
 INITIAL_SMS_END = int(os.getenv("INITIAL_SMS_END_HOUR", str(WORK_END)))  # exclusive; inbound replies are handled separately by Apps Script/Tasker
 FOLLOWUP_INCLUDE_WEEKENDS = _env_flag("FOLLOWUP_INCLUDE_WEEKENDS", default=False)
 SCHEDULER_INCLUDE_WEEKENDS = _env_flag("SCHEDULER_INCLUDE_WEEKENDS", default=False)
@@ -12387,7 +12387,7 @@ def _within_scheduler_hours(slot: datetime) -> bool:
     slot = slot.astimezone(SCHEDULER_TZ)
     if not SCHEDULER_INCLUDE_WEEKENDS and _is_weekend(slot):
         return False
-    return WORK_START <= slot.hour < WORK_END
+    return WORK_START <= slot.hour <= WORK_END
 
 
 _follow_up_pass_lock = threading.Lock()
@@ -12505,7 +12505,7 @@ def run_hourly_scheduler(
         FOLLOWUP_INCLUDE_WEEKENDS,
     )
     LOG.info(
-        "Scheduler hours configured: %02d:00-%02d:00 %s (include_weekends=%s)",
+        "Scheduler hours configured: %02d:00-%02d:00 inclusive %s (include_weekends=%s)",
         WORK_START,
         WORK_END,
         SCHEDULER_TZ,

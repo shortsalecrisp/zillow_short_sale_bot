@@ -8,6 +8,8 @@ import hashlib
 import logging
 import os
 import re
+import subprocess
+import sys
 import time
 import urllib.parse
 import threading
@@ -113,6 +115,7 @@ _queue_lock = threading.Lock()
 _queue_worker_lock = threading.Lock()
 _state_search_worker_lock = threading.Lock()
 _apify_backstop_worker_lock = threading.Lock()
+_free_source_pilot_worker_lock = threading.Lock()
 _apify_backstop_day_lock = threading.Lock()
 _original_payload_signature_lock = threading.Lock()
 _previous_original_upstream_dataset_id: Optional[str] = None
@@ -146,6 +149,15 @@ APIFY_BACKSTOP_STATE_FETCH_LIMIT = int(os.getenv("APIFY_BACKSTOP_STATE_FETCH_LIM
 APIFY_BACKSTOP_STATE_FETCH_LIMIT_DEFAULTS = {"AK": 50, "HI": 50}
 APIFY_BACKSTOP_STATE_LIMIT = int(os.getenv("APIFY_BACKSTOP_STATE_LIMIT", "10"))
 APIFY_BACKSTOP_LOCK_PATH = os.getenv("APIFY_BACKSTOP_LOCK_PATH", "/tmp/apify_coverage_backstop.txt")
+FREE_SOURCE_PILOT_ENABLED = os.getenv("FREE_SOURCE_PILOT_ENABLED", "true").lower() == "true"
+FREE_SOURCE_PILOT_TAB = os.getenv("FREE_SOURCE_PILOT_TAB", "Lead Source Pilot")
+FREE_SOURCE_PILOT_STATES = [
+    state.strip().upper()
+    for state in os.getenv("FREE_SOURCE_PILOT_STATES", "FL,CA,TX,WA,PA,HI,GA").split(",")
+    if state.strip()
+]
+FREE_SOURCE_PILOT_RESULTS_PER_QUERY = int(os.getenv("FREE_SOURCE_PILOT_RESULTS_PER_QUERY", "10"))
+FREE_SOURCE_PILOT_SLEEP_SECONDS = float(os.getenv("FREE_SOURCE_PILOT_SLEEP_SECONDS", "1.0"))
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
 _STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1}
 
@@ -658,6 +670,85 @@ def _start_apify_coverage_backstop(run_time: Optional[datetime] = None) -> None:
 
 def _process_apify_coverage_backstop_callback(run_time: datetime) -> None:
     _start_apify_coverage_backstop(run_time)
+
+
+def _free_source_pilot_due(run_time: datetime) -> bool:
+    if not FREE_SOURCE_PILOT_ENABLED:
+        return False
+    local_dt = run_time.astimezone(SCHEDULER_TZ)
+    return WORK_START <= local_dt.hour <= WORK_END
+
+
+def _run_free_source_pilot(run_time: datetime) -> None:
+    if not _free_source_pilot_due(run_time):
+        logger.info("free-source-pilot: skipped outside scheduled window run_time=%s", run_time.isoformat())
+        return
+    if not FREE_SOURCE_PILOT_STATES:
+        logger.info("free-source-pilot: skipped no states configured")
+        return
+    if not _free_source_pilot_worker_lock.acquire(blocking=False):
+        logger.info("free-source-pilot: skipped overlapping run")
+        return
+
+    script_path = os.path.join(os.path.dirname(__file__), "scripts", "free_short_sale_source_pilot.py")
+    cmd = [
+        sys.executable,
+        script_path,
+        "--spreadsheet-id",
+        GSHEET_ID,
+        "--main-tab",
+        LEADS_SHEET_TAB,
+        "--pilot-tab",
+        FREE_SOURCE_PILOT_TAB,
+        "--states",
+        *FREE_SOURCE_PILOT_STATES,
+        "--results-per-query",
+        str(FREE_SOURCE_PILOT_RESULTS_PER_QUERY),
+        "--sleep-seconds",
+        str(FREE_SOURCE_PILOT_SLEEP_SECONDS),
+    ]
+    try:
+        logger.info(
+            "free-source-pilot: starting run_time=%s states=%s results_per_query=%s tab=%s",
+            run_time.isoformat(),
+            ",".join(FREE_SOURCE_PILOT_STATES),
+            FREE_SOURCE_PILOT_RESULTS_PER_QUERY,
+            FREE_SOURCE_PILOT_TAB,
+        )
+        completed = subprocess.run(
+            cmd,
+            cwd=os.path.dirname(__file__),
+            capture_output=True,
+            text=True,
+            timeout=50 * 60,
+            check=False,
+        )
+        if completed.returncode:
+            logger.error(
+                "free-source-pilot: failed returncode=%s stdout=%s stderr=%s",
+                completed.returncode,
+                completed.stdout[-4000:],
+                completed.stderr[-4000:],
+            )
+            return
+        logger.info("free-source-pilot: completed stdout=%s", completed.stdout[-4000:])
+        if completed.stderr.strip():
+            logger.warning("free-source-pilot: stderr=%s", completed.stderr[-4000:])
+    except subprocess.TimeoutExpired as exc:
+        logger.error("free-source-pilot: timed out after %.0fs", exc.timeout)
+    except Exception:
+        logger.exception("free-source-pilot: crashed")
+    finally:
+        _free_source_pilot_worker_lock.release()
+
+
+def _process_free_source_pilot_callback(run_time: datetime) -> None:
+    threading.Thread(
+        target=_run_free_source_pilot,
+        args=(run_time,),
+        name="free-source-pilot",
+        daemon=True,
+    ).start()
 
 
 def _start_extra_state_rows(payload: Dict[str, Any]) -> None:
@@ -1433,6 +1524,7 @@ async def _start_scheduler() -> None:
             _process_deferred_rows,
             _process_pending_rows_callback,
             _process_apify_coverage_backstop_callback,
+            _process_free_source_pilot_callback,
         ],
         initial_callbacks=False,
     )
