@@ -136,7 +136,7 @@ PY
       - key: FREE_SOURCE_PILOT_TAB
         value: Lead Source Pilot
       - key: FU_LOOKBACK_ROWS
-        value: "50"
+        value: "500"
       - key: GCP_SERVICE_ACCOUNT_JSON
         value: REPLACE_ME
       - key: GOOGLE_API_KEY
