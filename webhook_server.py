@@ -116,6 +116,7 @@ _queue_worker_lock = threading.Lock()
 _state_search_worker_lock = threading.Lock()
 _apify_backstop_worker_lock = threading.Lock()
 _free_source_pilot_worker_lock = threading.Lock()
+_free_source_pilot_startup_catchup_lock = threading.Lock()
 _apify_backstop_day_lock = threading.Lock()
 _original_payload_signature_lock = threading.Lock()
 _previous_original_upstream_dataset_id: Optional[str] = None
@@ -160,6 +161,11 @@ if "MI" not in FREE_SOURCE_PILOT_STATES:
     FREE_SOURCE_PILOT_STATES.append("MI")
 FREE_SOURCE_PILOT_RESULTS_PER_QUERY = int(os.getenv("FREE_SOURCE_PILOT_RESULTS_PER_QUERY", "10"))
 FREE_SOURCE_PILOT_SLEEP_SECONDS = float(os.getenv("FREE_SOURCE_PILOT_SLEEP_SECONDS", "1.0"))
+FREE_SOURCE_PILOT_STARTUP_CATCHUP = os.getenv("FREE_SOURCE_PILOT_STARTUP_CATCHUP", "true").lower() == "true"
+FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH = os.getenv(
+    "FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH",
+    "/tmp/free_source_pilot_startup_catchup.txt",
+)
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
 _STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1}
 
@@ -679,6 +685,48 @@ def _free_source_pilot_due(run_time: datetime) -> bool:
         return False
     local_dt = run_time.astimezone(SCHEDULER_TZ)
     return WORK_START <= local_dt.hour <= WORK_END
+
+
+def _free_source_pilot_hour_key(run_time: datetime) -> str:
+    return run_time.astimezone(SCHEDULER_TZ).strftime("%Y-%m-%dT%H%z")
+
+
+def _claim_free_source_pilot_startup_catchup(run_time: datetime) -> bool:
+    key = _free_source_pilot_hour_key(run_time)
+    with _free_source_pilot_startup_catchup_lock:
+        try:
+            with open(FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH, "r", encoding="utf-8") as fh:
+                previous_key = fh.read().strip()
+        except FileNotFoundError:
+            previous_key = ""
+        except OSError:
+            logger.exception("free-source-pilot: startup catch-up marker read failed")
+            previous_key = ""
+
+        if previous_key == key:
+            logger.info("free-source-pilot: startup catch-up already claimed hour=%s", key)
+            return False
+
+        try:
+            with open(FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH, "w", encoding="utf-8") as fh:
+                fh.write(key)
+        except OSError:
+            logger.exception("free-source-pilot: startup catch-up marker write failed")
+        return True
+
+
+def _start_free_source_pilot_startup_catchup() -> None:
+    if not FREE_SOURCE_PILOT_STARTUP_CATCHUP:
+        logger.info("free-source-pilot: startup catch-up disabled")
+        return
+    run_time = datetime.now(tz=SCHEDULER_TZ).replace(minute=0, second=0, microsecond=0)
+    if not _free_source_pilot_due(run_time):
+        logger.info("free-source-pilot: startup catch-up skipped outside scheduled window")
+        return
+    if not _claim_free_source_pilot_startup_catchup(run_time):
+        return
+    logger.info("free-source-pilot: startup catch-up triggering run_time=%s", run_time.isoformat())
+    _process_free_source_pilot_callback(run_time)
 
 
 def _run_free_source_pilot(run_time: datetime) -> None:
@@ -1521,15 +1569,21 @@ async def _start_scheduler() -> None:
     if DISABLE_APIFY_SCHEDULER:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
         return
+    hourly_callbacks = [
+        _process_free_source_pilot_callback,
+        _process_deferred_rows,
+        _process_pending_rows_callback,
+        _process_apify_coverage_backstop_callback,
+    ]
+    logger.info(
+        "scheduler: registered hourly callbacks=%s",
+        ",".join(getattr(callback, "__name__", str(callback)) for callback in hourly_callbacks),
+    )
     _ensure_scheduler_thread(
-        hourly_callbacks=[
-            _process_deferred_rows,
-            _process_pending_rows_callback,
-            _process_apify_coverage_backstop_callback,
-            _process_free_source_pilot_callback,
-        ],
+        hourly_callbacks=hourly_callbacks,
         initial_callbacks=False,
     )
+    _start_free_source_pilot_startup_catchup()
     _ensure_keepalive_thread()
 
 
