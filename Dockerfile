@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . ./
 
-CMD ["bash", "-c", "python bot_min.py & uvicorn webhook_server:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["bash", "-c", "uvicorn webhook_server:app --host 0.0.0.0 --port ${PORT:-10000}"]

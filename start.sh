@@ -25,5 +25,5 @@ else:
     logger.info("STARTUP_HEADLESS_BROWSER_READY")
 PY
 
-echo "STARTUP_SERVICES starting bot and webhook server"
-python bot_min.py & uvicorn webhook_server:app --host 0.0.0.0 --port "${PORT:-10000}"
+echo "STARTUP_SERVICES starting webhook server"
+uvicorn webhook_server:app --host 0.0.0.0 --port "${PORT:-10000}"
