@@ -123,6 +123,8 @@ PY
         value: "false"
       - key: FOLLOW_UP_HOURS
         value: "6"
+      - key: FOLLOWUP_RUN_ON_STARTUP
+        value: "true"
       - key: FREE_SOURCE_PILOT_ENABLED
         value: "true"
       - key: FREE_SOURCE_PILOT_FORCE_ALL_STATES

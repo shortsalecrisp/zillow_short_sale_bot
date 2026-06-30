@@ -883,6 +883,12 @@ def _start_extra_state_rows(payload: Dict[str, Any]) -> None:
 
 
 def _should_run_immediately() -> bool:
+    # Render web services can wake shortly after an hourly boundary and then
+    # idle/sleep before the next one. Run the follow-up pass on startup by
+    # default so due follow-ups are not missed during cold-start cycles.
+    run_on_startup = os.getenv("FOLLOWUP_RUN_ON_STARTUP", "true").strip().lower()
+    if run_on_startup not in {"0", "false", "no", "off"}:
+        return True
     return os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true"
 
 
