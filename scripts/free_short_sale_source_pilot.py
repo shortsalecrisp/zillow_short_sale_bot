@@ -134,6 +134,10 @@ SOURCE_QUERIES = [
     ),
 ]
 
+SEARCH_ENGINE = os.getenv("FREE_SOURCE_PILOT_SEARCH_ENGINE", "auto").lower()
+CSE_API_KEY = os.getenv("CS_API_KEY") or os.getenv("GOOGLE_API_KEY")
+CSE_CX = os.getenv("CS_CX") or os.getenv("GOOGLE_CX")
+
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -228,6 +232,11 @@ class ExistingIndex:
     address_keys: dict[str, int]
     phone_keys: dict[str, int]
     agent_keys: dict[str, list[int]]
+
+
+def log_event(event: str, **fields: Any) -> None:
+    payload = {"event": event, **fields}
+    print(json.dumps(payload, sort_keys=True, default=str), flush=True)
 
 
 def normalize_space(value: str) -> str:
@@ -463,6 +472,73 @@ def ddg_search(query: str, source: str, limit: int) -> list[SearchResult]:
         if href.startswith("http"):
             results.append(SearchResult(source, query, href, title, snippet))
     return results
+
+
+def cse_search(query: str, source: str, limit: int) -> list[SearchResult]:
+    if not CSE_API_KEY or not CSE_CX:
+        return []
+    results: list[SearchResult] = []
+    start = 1
+    while len(results) < limit and start <= 91:
+        num = min(10, limit - len(results))
+        params = urllib.parse.urlencode(
+            {
+                "q": query,
+                "key": CSE_API_KEY,
+                "cx": CSE_CX,
+                "num": num,
+                "start": start,
+            }
+        )
+        req = urllib.request.Request(
+            "https://www.googleapis.com/customsearch/v1?" + params,
+            headers={"User-Agent": USER_AGENT},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        items = data.get("items", [])
+        for item in items:
+            href = item.get("link") or ""
+            if not href.startswith("http") or is_ad_or_tracking_url(href):
+                continue
+            results.append(
+                SearchResult(
+                    source,
+                    query,
+                    href,
+                    normalize_space(item.get("title") or ""),
+                    normalize_space(item.get("snippet") or ""),
+                )
+            )
+            if len(results) >= limit:
+                break
+        if len(items) < num:
+            break
+        start += len(items)
+    return results
+
+
+def search_web(query: str, source: str, limit: int) -> tuple[str, list[SearchResult]]:
+    engines: list[str]
+    if SEARCH_ENGINE in {"cse", "google", "google_cse"}:
+        engines = ["cse"]
+    elif SEARCH_ENGINE in {"ddg", "duckduckgo"}:
+        engines = ["ddg"]
+    else:
+        engines = ["cse", "ddg"] if CSE_API_KEY and CSE_CX else ["ddg"]
+
+    last_error = ""
+    for engine in engines:
+        try:
+            if engine == "cse":
+                results = cse_search(query, source, limit)
+            else:
+                results = ddg_search(query, source, limit)
+            return engine, results
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            log_event("search_engine_failed", engine=engine, source=source, query=query, error=last_error)
+    raise RuntimeError(last_error or "all search engines failed")
 
 
 def is_ad_or_tracking_url(url: str) -> bool:
@@ -821,56 +897,135 @@ def run(args: argparse.Namespace) -> None:
     already_seen_urls = {row[11] for row in pilot_rows[1:] if len(row) > 11 and row[11]}
     pilot_seen_phones = {normalize_phone(row[2]) for row in pilot_rows[1:] if len(row) > 2 and normalize_phone(row[2])}
 
-    output_rows: list[list[str]] = []
-    stats = {"searched": 0, "fetched": 0, "qualified": 0, "duplicates": 0, "rejected": 0}
+    stats = {
+        "searched": 0,
+        "results": 0,
+        "fetched": 0,
+        "qualified": 0,
+        "duplicates": 0,
+        "rejected": 0,
+        "fetch_failed": 0,
+        "rows_written": 0,
+    }
+    log_event(
+        "pilot_run_start",
+        states=args.states,
+        source_count=len(SOURCE_QUERIES),
+        results_per_query=args.results_per_query,
+        search_engine=SEARCH_ENGINE,
+        cse_configured=bool(CSE_API_KEY and CSE_CX),
+        dry_run=args.dry_run,
+    )
 
     for state in args.states:
         state_query_term = STATE_QUERY_TERMS.get(state.upper(), state)
         for source, template in SOURCE_QUERIES:
             query = template.format(state=state_query_term)
             stats["searched"] += 1
+            log_event("pilot_query_start", state=state, source=source, query=query)
             try:
-                results = ddg_search(query, source, args.results_per_query)
+                engine, results = search_web(query, source, args.results_per_query)
             except Exception as exc:  # noqa: BLE001
-                print(f"search_failed source={source} state={state} error={exc}")
+                log_event("pilot_query_failed", state=state, source=source, query=query, error=str(exc))
                 continue
+            stats["results"] += len(results)
+            log_event(
+                "pilot_query_results",
+                state=state,
+                source=source,
+                engine=engine,
+                query=query,
+                result_count=len(results),
+            )
             time.sleep(args.sleep_seconds)
+            query_rows: list[list[str]] = []
+            query_stats = {"fetched": 0, "qualified": 0, "duplicates": 0, "rejected": 0, "fetch_failed": 0}
             for result in results:
                 if result.url in already_seen_urls:
+                    stats["duplicates"] += 1
+                    query_stats["duplicates"] += 1
+                    log_event("pilot_duplicate_url", state=state, source=source, url=result.url)
                     continue
                 try:
                     markup = fetch_url(result.url)
                     stats["fetched"] += 1
+                    query_stats["fetched"] += 1
                 except Exception as exc:  # noqa: BLE001
-                    print(f"fetch_failed url={result.url} error={exc}")
+                    stats["fetch_failed"] += 1
+                    query_stats["fetch_failed"] += 1
+                    log_event("pilot_fetch_failed", state=state, source=source, url=result.url, error=str(exc))
                     continue
                 candidate = infer_fields(result, markup)
                 qualification = qualification_for_text(candidate.text)
                 if qualification.status != "qualified":
                     stats["rejected"] += 1
+                    query_stats["rejected"] += 1
+                    log_event(
+                        "pilot_candidate_rejected",
+                        state=state,
+                        source=source,
+                        url=result.url,
+                        reason=qualification.failure_reason,
+                        evidence=qualification.evidence[:220],
+                    )
                     if args.include_rejected:
-                        output_rows.append(candidate_to_row(candidate, qualification, "", "", ""))
+                        query_rows.append(candidate_to_row(candidate, qualification, "", "", ""))
                     continue
                 dup_status, dup_key, matched = duplicate_status(candidate, existing)
                 if dup_status in {"duplicate_listing", "duplicate_agent_phone"}:
                     stats["duplicates"] += 1
+                    query_stats["duplicates"] += 1
+                    log_event(
+                        "pilot_candidate_duplicate",
+                        state=state,
+                        source=source,
+                        url=result.url,
+                        duplicate_status=dup_status,
+                        duplicate_key=dup_key,
+                        matched=matched,
+                    )
                     continue
                 phone_key = normalize_phone(candidate.fields.get("phone", ""))
                 if phone_key and phone_key in pilot_seen_phones:
                     stats["duplicates"] += 1
+                    query_stats["duplicates"] += 1
+                    log_event("pilot_candidate_duplicate", state=state, source=source, url=result.url, duplicate_status="pilot_phone")
                     continue
                 agent_rows = matched if dup_status == "possible_existing_agent" else ""
                 stats["qualified"] += 1
-                output_rows.append(candidate_to_row(candidate, qualification, dup_key, "", agent_rows))
+                query_stats["qualified"] += 1
+                query_rows.append(candidate_to_row(candidate, qualification, dup_key, "", agent_rows))
+                log_event(
+                    "pilot_candidate_qualified",
+                    state=state,
+                    source=source,
+                    url=result.url,
+                    address=candidate.fields.get("listing_address", ""),
+                    agent=candidate.fields.get("agent_name", ""),
+                    has_phone=bool(phone_key),
+                )
                 already_seen_urls.add(result.url)
                 if phone_key:
                     pilot_seen_phones.add(phone_key)
                 time.sleep(args.sleep_seconds)
 
-    if not args.dry_run:
-        append_values(token, args.spreadsheet_id, f"{args.pilot_tab}!A:{column_letter(len(PILOT_HEADERS))}", output_rows)
+            if query_rows and not args.dry_run:
+                append_values(
+                    token,
+                    args.spreadsheet_id,
+                    f"{args.pilot_tab}!A:{column_letter(len(PILOT_HEADERS))}",
+                    query_rows,
+                )
+            stats["rows_written"] += 0 if args.dry_run else len(query_rows)
+            log_event(
+                "pilot_query_done",
+                state=state,
+                source=source,
+                rows_written=0 if args.dry_run else len(query_rows),
+                **query_stats,
+            )
 
-    print(json.dumps({"stats": stats, "rows_to_write": len(output_rows), "dry_run": args.dry_run}, indent=2))
+    log_event("pilot_run_done", stats=stats, dry_run=args.dry_run)
 
 
 def parse_args() -> argparse.Namespace:

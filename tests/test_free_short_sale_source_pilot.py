@@ -1,3 +1,5 @@
+import contextlib
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -113,6 +115,77 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(pilot.DEFAULT_STATES), 50)
         self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
         self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
+
+    def test_search_web_prefers_google_cse_when_configured(self):
+        old_engine = pilot.SEARCH_ENGINE
+        old_key = pilot.CSE_API_KEY
+        old_cx = pilot.CSE_CX
+        old_cse_search = pilot.cse_search
+        old_ddg_search = pilot.ddg_search
+        calls = []
+
+        def fake_cse_search(query, source, limit):
+            calls.append(("cse", query, source, limit))
+            return [pilot.SearchResult(source, query, "https://example.com/1", "Title", "Snippet")]
+
+        def fake_ddg_search(query, source, limit):
+            calls.append(("ddg", query, source, limit))
+            return []
+
+        try:
+            pilot.SEARCH_ENGINE = "auto"
+            pilot.CSE_API_KEY = "key"
+            pilot.CSE_CX = "cx"
+            pilot.cse_search = fake_cse_search
+            pilot.ddg_search = fake_ddg_search
+
+            engine, results = pilot.search_web("query", "source", 3)
+
+            self.assertEqual(engine, "cse")
+            self.assertEqual(len(results), 1)
+            self.assertEqual(calls, [("cse", "query", "source", 3)])
+        finally:
+            pilot.SEARCH_ENGINE = old_engine
+            pilot.CSE_API_KEY = old_key
+            pilot.CSE_CX = old_cx
+            pilot.cse_search = old_cse_search
+            pilot.ddg_search = old_ddg_search
+
+    def test_search_web_falls_back_to_duckduckgo_after_cse_error(self):
+        old_engine = pilot.SEARCH_ENGINE
+        old_key = pilot.CSE_API_KEY
+        old_cx = pilot.CSE_CX
+        old_cse_search = pilot.cse_search
+        old_ddg_search = pilot.ddg_search
+        calls = []
+
+        def fake_cse_search(query, source, limit):
+            calls.append(("cse", query, source, limit))
+            raise RuntimeError("cse down")
+
+        def fake_ddg_search(query, source, limit):
+            calls.append(("ddg", query, source, limit))
+            return [pilot.SearchResult(source, query, "https://example.com/2", "Title", "Snippet")]
+
+        try:
+            pilot.SEARCH_ENGINE = "auto"
+            pilot.CSE_API_KEY = "key"
+            pilot.CSE_CX = "cx"
+            pilot.cse_search = fake_cse_search
+            pilot.ddg_search = fake_ddg_search
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                engine, results = pilot.search_web("query", "source", 3)
+
+            self.assertEqual(engine, "ddg")
+            self.assertEqual(len(results), 1)
+            self.assertEqual(calls, [("cse", "query", "source", 3), ("ddg", "query", "source", 3)])
+        finally:
+            pilot.SEARCH_ENGINE = old_engine
+            pilot.CSE_API_KEY = old_key
+            pilot.CSE_CX = old_cx
+            pilot.cse_search = old_cse_search
+            pilot.ddg_search = old_ddg_search
 
 
 if __name__ == "__main__":

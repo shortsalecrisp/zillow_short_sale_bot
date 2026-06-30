@@ -28,6 +28,59 @@ logger = logging.getLogger("scheduler_worker")
 _stop_event = threading.Event()
 _free_source_pilot_lock = threading.Lock()
 
+ALL_50_STATES = [
+    "AL",
+    "AK",
+    "AZ",
+    "AR",
+    "CA",
+    "CO",
+    "CT",
+    "DE",
+    "FL",
+    "GA",
+    "HI",
+    "ID",
+    "IL",
+    "IN",
+    "IA",
+    "KS",
+    "KY",
+    "LA",
+    "ME",
+    "MD",
+    "MA",
+    "MI",
+    "MN",
+    "MS",
+    "MO",
+    "MT",
+    "NE",
+    "NV",
+    "NH",
+    "NJ",
+    "NM",
+    "NY",
+    "NC",
+    "ND",
+    "OH",
+    "OK",
+    "OR",
+    "PA",
+    "RI",
+    "SC",
+    "SD",
+    "TN",
+    "TX",
+    "UT",
+    "VT",
+    "VA",
+    "WA",
+    "WV",
+    "WI",
+    "WY",
+]
+
 
 def _should_run_immediately() -> bool:
     return os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true"
@@ -42,6 +95,33 @@ def _free_source_pilot_enabled() -> bool:
     return os.getenv("FREE_SOURCE_PILOT_ENABLED", "true").lower() == "true"
 
 
+def _free_source_pilot_states() -> list[str]:
+    configured = [
+        state.strip().upper()
+        for state in os.getenv("FREE_SOURCE_PILOT_STATES", "").split(",")
+        if state.strip()
+    ]
+    force_all_states = os.getenv("FREE_SOURCE_PILOT_FORCE_ALL_STATES", "false").lower() == "true"
+    if force_all_states or not configured:
+        return list(ALL_50_STATES)
+    return configured
+
+
+def _log_subprocess_lines(pipe, level: int, prefix: str) -> None:
+    if pipe is None:
+        return
+    try:
+        for line in iter(pipe.readline, ""):
+            cleaned = line.rstrip()
+            if cleaned:
+                logger.log(level, "%s%s", prefix, cleaned)
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
+
+
 def _free_source_pilot_callback(run_time: datetime) -> None:
     if not _free_source_pilot_enabled():
         return
@@ -54,13 +134,7 @@ def _free_source_pilot_callback(run_time: datetime) -> None:
 
     def _runner() -> None:
         try:
-            states = [
-                state.strip().upper()
-                for state in os.getenv("FREE_SOURCE_PILOT_STATES", "FL,CA,TX,WA,PA,HI,GA,MI").split(",")
-                if state.strip()
-            ]
-            if "MI" not in states:
-                states.append("MI")
+            states = _free_source_pilot_states()
             if not states:
                 logger.info("free-source-pilot: skipped no states configured")
                 return
@@ -81,23 +155,40 @@ def _free_source_pilot_callback(run_time: datetime) -> None:
                 "--sleep-seconds",
                 os.getenv("FREE_SOURCE_PILOT_SLEEP_SECONDS", "1.0"),
             ]
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
                 cwd=os.path.dirname(__file__),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=50 * 60,
-                check=False,
+                bufsize=1,
             )
-            if completed.returncode:
-                logger.error(
-                    "free-source-pilot: failed returncode=%s stdout=%s stderr=%s",
-                    completed.returncode,
-                    completed.stdout[-4000:],
-                    completed.stderr[-4000:],
-                )
+            stdout_thread = threading.Thread(
+                target=_log_subprocess_lines,
+                args=(process.stdout, logging.INFO, "free-source-pilot: stdout "),
+                name="free-source-pilot-stdout",
+                daemon=True,
+            )
+            stderr_thread = threading.Thread(
+                target=_log_subprocess_lines,
+                args=(process.stderr, logging.WARNING, "free-source-pilot: stderr "),
+                name="free-source-pilot-stderr",
+                daemon=True,
+            )
+            stdout_thread.start()
+            stderr_thread.start()
+            try:
+                returncode = process.wait(timeout=50 * 60)
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                logger.error("free-source-pilot: timed out after %.0fs", exc.timeout)
+                return
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
+            if returncode:
+                logger.error("free-source-pilot: failed returncode=%s", returncode)
             else:
-                logger.info("free-source-pilot: completed stdout=%s", completed.stdout[-4000:])
+                logger.info("free-source-pilot: completed returncode=%s", returncode)
         finally:
             _free_source_pilot_lock.release()
 

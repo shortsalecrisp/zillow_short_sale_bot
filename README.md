@@ -72,18 +72,27 @@ The free-source pilot checks public search results for non-Zillow short sale lis
 the `Lead Source Pilot` tab. It runs from the same hourly scheduler as the Zillow scraper: every top-of-hour slot from
 8:00 AM through the final 8:00 PM ET run, seven days per week when `SCHEDULER_INCLUDE_WEEKENDS=true`.
 
-The pilot does not write to `Sheet1`, send SMS, or call paid APIs. Candidate rows are deduped against `Sheet1` by
-listing address and by phone number; if the phone already exists in the main sheet, the listing is skipped because the
-campaign contacts each agent only once. Rows include `synthetic_zpid` and `pending_queue_listing_json` so reviewed
-net-new candidates can later be promoted into the same PendingQueue-style shape used by the Zillow scraper.
+The pilot searches the configured source queries with Google Custom Search when `GOOGLE_API_KEY`/`CS_API_KEY` and
+`GOOGLE_CX`/`CS_CX` are present, then falls back to DuckDuckGo HTML search when allowed. It fetches each result page,
+keeps only active listing pages with listing-text short sale evidence, and appends qualified rows after each source
+query so partial hourly runs still leave observable output. Render logs should include `pilot_query_start`,
+`pilot_query_results`, `pilot_candidate_qualified` or rejection/duplicate events, `pilot_query_done`, and a final
+`pilot_run_done` stats record.
+
+The pilot does not write to `Sheet1` or send SMS. Candidate rows are deduped against `Sheet1` by listing address and by
+phone number; if the phone already exists in the main sheet, the listing is skipped because the campaign contacts each
+agent only once. Rows include `synthetic_zpid` and `pending_queue_listing_json` so reviewed net-new candidates can later
+be promoted into the same PendingQueue-style shape used by the Zillow scraper.
 
 Configuration:
 
 * `FREE_SOURCE_PILOT_ENABLED=true`
 * `FREE_SOURCE_PILOT_TAB=Lead Source Pilot`
-* `FREE_SOURCE_PILOT_STATES=FL,CA,TX,WA,PA,HI,GA`
+* `FREE_SOURCE_PILOT_FORCE_ALL_STATES=true`
+* `FREE_SOURCE_PILOT_STATES=AL,AK,AZ,AR,CA,CO,CT,DE,FL,GA,HI,ID,IL,IN,IA,KS,KY,LA,ME,MD,MA,MI,MN,MS,MO,MT,NE,NV,NH,NJ,NM,NY,NC,ND,OH,OK,OR,PA,RI,SC,SD,TN,TX,UT,VT,VA,WA,WV,WI,WY`
 * `FREE_SOURCE_PILOT_RESULTS_PER_QUERY=10`
 * `FREE_SOURCE_PILOT_SLEEP_SECONDS=1.0`
+* `FREE_SOURCE_PILOT_SEARCH_ENGINE=auto`
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main

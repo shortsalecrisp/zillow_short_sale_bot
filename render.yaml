@@ -131,6 +131,8 @@ PY
         value: "true"
       - key: FREE_SOURCE_PILOT_RESULTS_PER_QUERY
         value: "10"
+      - key: FREE_SOURCE_PILOT_SEARCH_ENGINE
+        value: auto
       - key: FREE_SOURCE_PILOT_SLEEP_SECONDS
         value: "1.0"
       - key: FREE_SOURCE_PILOT_STATES

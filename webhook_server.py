@@ -820,31 +820,60 @@ def _run_free_source_pilot(run_time: datetime) -> None:
             FREE_SOURCE_PILOT_RESULTS_PER_QUERY,
             FREE_SOURCE_PILOT_TAB,
         )
-        completed = subprocess.run(
+        process = subprocess.Popen(
             cmd,
             cwd=os.path.dirname(__file__),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=50 * 60,
-            check=False,
+            bufsize=1,
         )
-        if completed.returncode:
-            logger.error(
-                "free-source-pilot: failed returncode=%s stdout=%s stderr=%s",
-                completed.returncode,
-                completed.stdout[-4000:],
-                completed.stderr[-4000:],
-            )
+        stdout_thread = threading.Thread(
+            target=_log_subprocess_lines,
+            args=(process.stdout, logging.INFO, "free-source-pilot: stdout "),
+            name="free-source-pilot-stdout",
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_log_subprocess_lines,
+            args=(process.stderr, logging.WARNING, "free-source-pilot: stderr "),
+            name="free-source-pilot-stderr",
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        returncode = process.wait(timeout=50 * 60)
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+        if returncode:
+            logger.error("free-source-pilot: failed returncode=%s", returncode)
             return
-        logger.info("free-source-pilot: completed stdout=%s", completed.stdout[-4000:])
-        if completed.stderr.strip():
-            logger.warning("free-source-pilot: stderr=%s", completed.stderr[-4000:])
+        logger.info("free-source-pilot: completed returncode=%s", returncode)
     except subprocess.TimeoutExpired as exc:
+        try:
+            process.kill()
+        except Exception:
+            pass
         logger.error("free-source-pilot: timed out after %.0fs", exc.timeout)
     except Exception:
         logger.exception("free-source-pilot: crashed")
     finally:
         _free_source_pilot_worker_lock.release()
+
+
+def _log_subprocess_lines(pipe: Any, level: int, prefix: str) -> None:
+    if pipe is None:
+        return
+    try:
+        for line in iter(pipe.readline, ""):
+            cleaned = line.rstrip()
+            if cleaned:
+                logger.log(level, "%s%s", prefix, cleaned)
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
 
 
 def _process_free_source_pilot_callback(run_time: datetime) -> None:
