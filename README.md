@@ -74,10 +74,11 @@ the `Lead Source Pilot` tab. It runs from the same hourly scheduler as the Zillo
 
 The pilot searches the configured source queries with Google Custom Search when `GOOGLE_API_KEY`/`CS_API_KEY` and
 `GOOGLE_CX`/`CS_CX` are present, then falls back to DuckDuckGo HTML search when allowed. It fetches each result page,
-keeps only active listing pages with listing-text short sale evidence, and appends qualified rows after each source
-query so partial hourly runs still leave observable output. Render logs should include `pilot_query_start`,
-`pilot_query_results`, `pilot_candidate_qualified` or rejection/duplicate events, `pilot_query_done`, and a final
-`pilot_run_done` stats record.
+uses a bounded Playwright fallback for allowed portal detail pages that return HTTP 403/429/451, keeps only active
+listing pages with listing-text short sale evidence, and appends qualified rows after each source query so partial
+hourly runs still leave observable output. Render logs should include `pilot_query_start`, `pilot_query_results`,
+`pilot_headless_fetch_*` when browser fallback is used, `pilot_candidate_qualified` or rejection/duplicate events,
+`pilot_query_done`, and a final `pilot_run_done` stats record.
 
 The pilot does not write to `Sheet1` or send SMS. Candidate rows are deduped against `Sheet1` by listing address and by
 phone number; if the phone already exists in the main sheet, the listing is skipped because the campaign contacts each
@@ -90,6 +91,9 @@ Configuration:
 * `FREE_SOURCE_PILOT_TAB=Lead Source Pilot`
 * `FREE_SOURCE_PILOT_FORCE_ALL_STATES=true`
 * `FREE_SOURCE_PILOT_STATES=AL,AK,AZ,AR,CA,CO,CT,DE,FL,GA,HI,ID,IL,IN,IA,KS,KY,LA,ME,MD,MA,MI,MN,MS,MO,MT,NE,NV,NH,NJ,NM,NY,NC,ND,OH,OK,OR,PA,RI,SC,SD,TN,TX,UT,VT,VA,WA,WV,WI,WY`
+* `FREE_SOURCE_PILOT_HEADLESS_FALLBACK=true`
+* `FREE_SOURCE_PILOT_HEADLESS_BUDGET=12`
+* `FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET=4`
 * `FREE_SOURCE_PILOT_RESULTS_PER_QUERY=10`
 * `FREE_SOURCE_PILOT_SLEEP_SECONDS=1.0`
 * `FREE_SOURCE_PILOT_SEARCH_ENGINE=auto`

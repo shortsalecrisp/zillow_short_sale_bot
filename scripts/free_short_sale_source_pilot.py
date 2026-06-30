@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -137,6 +138,18 @@ SOURCE_QUERIES = [
 SEARCH_ENGINE = os.getenv("FREE_SOURCE_PILOT_SEARCH_ENGINE", "auto").lower()
 CSE_API_KEY = os.getenv("CS_API_KEY") or os.getenv("GOOGLE_API_KEY")
 CSE_CX = os.getenv("CS_CX") or os.getenv("GOOGLE_CX")
+HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
+HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
+HEADLESS_DOMAIN_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET", "4")))
+HEADLESS_NAV_TIMEOUT_MS = max(1000, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_NAV_TIMEOUT_MS", "12000")))
+HEADLESS_WAIT_MS = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_WAIT_MS", "900")))
+HEADLESS_DOMAINS = {
+    domain.strip().lower()
+    for domain in os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAINS", "realtor.com,redfin.com,homes.com").split(",")
+    if domain.strip()
+}
+_headless_used_total = 0
+_headless_used_by_domain: dict[str, int] = {}
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -433,12 +446,139 @@ def duplicate_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str
     return "", akey, ""
 
 
-def fetch_url(url: str, timeout: int = 20) -> str:
+def registered_domain(url: str) -> str:
+    host = urllib.parse.urlparse(url).netloc.lower()
+    parts = [part for part in host.split(".") if part]
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return host
+
+
+def headless_budget_available(url: str) -> tuple[bool, str]:
+    if not HEADLESS_FALLBACK:
+        return False, "disabled"
+    domain = registered_domain(url)
+    if domain not in HEADLESS_DOMAINS:
+        return False, "domain_not_allowed"
+    if _headless_used_total >= HEADLESS_BUDGET:
+        return False, "run_budget_exhausted"
+    if _headless_used_by_domain.get(domain, 0) >= HEADLESS_DOMAIN_BUDGET:
+        return False, "domain_budget_exhausted"
+    return True, domain
+
+
+def fetch_url_headless(url: str) -> str:
+    global _headless_used_total
+    domain = registered_domain(url)
+    _headless_used_total += 1
+    _headless_used_by_domain[domain] = _headless_used_by_domain.get(domain, 0) + 1
+    log_event(
+        "pilot_headless_fetch_start",
+        url=url,
+        domain=domain,
+        used_total=_headless_used_total,
+        used_domain=_headless_used_by_domain[domain],
+    )
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        log_event("pilot_headless_fetch_failed", url=url, domain=domain, error=f"playwright_missing:{exc}")
+        return ""
+
+    browser = None
+    context = None
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-setuid-sandbox",
+                    "--disable-extensions",
+                ],
+                timeout=HEADLESS_NAV_TIMEOUT_MS,
+            )
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                viewport={"width": 1280, "height": 720},
+            )
+            page = context.new_page()
+            page.set_default_timeout(HEADLESS_NAV_TIMEOUT_MS)
+            page.set_default_navigation_timeout(HEADLESS_NAV_TIMEOUT_MS)
+
+            def route_handler(route) -> None:
+                try:
+                    if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
+                        route.abort()
+                    else:
+                        route.continue_()
+                except Exception:
+                    pass
+
+            page.route("**/*", route_handler)
+            response = page.goto(url, wait_until="domcontentloaded", timeout=HEADLESS_NAV_TIMEOUT_MS)
+            status = response.status if response else 0
+            if status in {403, 429, 451}:
+                log_event("pilot_headless_fetch_blocked", url=url, domain=domain, status=status)
+                return ""
+            if HEADLESS_WAIT_MS:
+                page.wait_for_timeout(HEADLESS_WAIT_MS)
+            content = page.content()
+            try:
+                visible_text = page.locator("body").inner_text(timeout=3000)
+            except Exception:
+                visible_text = ""
+            combined = "\n".join(part for part in [content, visible_text] if part)
+            log_event(
+                "pilot_headless_fetch_done",
+                url=url,
+                domain=domain,
+                status=status,
+                bytes=len(combined.encode("utf-8")),
+            )
+            return combined
+    except Exception as exc:  # noqa: BLE001
+        log_event("pilot_headless_fetch_failed", url=url, domain=domain, error=str(exc)[:500])
+        return ""
+    finally:
+        try:
+            if context:
+                context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+
+
+def fetch_url(url: str, timeout: int = 20, allow_headless: bool = True) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read(2_000_000)
-        encoding = resp.headers.get_content_charset() or "utf-8"
-    return raw.decode(encoding, errors="ignore")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(2_000_000)
+            encoding = resp.headers.get_content_charset() or "utf-8"
+        return raw.decode(encoding, errors="ignore")
+    except urllib.error.HTTPError as exc:
+        if allow_headless and exc.code in {403, 429, 451}:
+            allowed, reason_or_domain = headless_budget_available(url)
+            if allowed:
+                rendered = fetch_url_headless(url)
+                if rendered.strip():
+                    return rendered
+            else:
+                log_event(
+                    "pilot_headless_fetch_skipped",
+                    url=url,
+                    domain=registered_domain(url),
+                    reason=reason_or_domain,
+                    status=exc.code,
+                )
+        raise
 
 
 def strip_html(markup: str) -> str:
@@ -450,7 +590,7 @@ def strip_html(markup: str) -> str:
 
 def ddg_search(query: str, source: str, limit: int) -> list[SearchResult]:
     url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query, "kl": "us-en"})
-    body = fetch_url(url)
+    body = fetch_url(url, allow_headless=False)
     results: list[SearchResult] = []
     blocks = re.split(r'(?=<a[^>]+class="result__a")', body)
     for block in blocks:
