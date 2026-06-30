@@ -541,6 +541,41 @@ def search_web(query: str, source: str, limit: int) -> tuple[str, list[SearchRes
     raise RuntimeError(last_error or "all search engines failed")
 
 
+def source_result_allowed(result: SearchResult) -> tuple[bool, str]:
+    parsed = urllib.parse.urlparse(result.url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if result.source == "realtor.com":
+        if host.endswith("realtor.com") and "/realestateandhomes-detail/" in path:
+            return True, ""
+        return False, "not_realtor_detail"
+    if result.source == "redfin.com":
+        if host.endswith("redfin.com") and "/home/" in path:
+            return True, ""
+        return False, "not_redfin_detail"
+    if result.source == "homes.com":
+        if host.endswith("homes.com") and "/property/" in path:
+            return True, ""
+        return False, "not_homes_detail"
+    return True, ""
+
+
+def looks_like_listing_address(address: str) -> bool:
+    compact = normalize_space(address)
+    if not compact or not re.search(r"\d", compact):
+        return False
+    return not re.search(
+        r"\b(?:blog|buying|foreclosure|short\s+sale|homes?\s+for\s+sale|page|search|vintage|fixer[-\s]?upper)\b",
+        compact,
+        re.IGNORECASE,
+    )
+
+
+def candidate_matches_requested_state(candidate: Candidate, requested_state: str) -> bool:
+    state = normalize_space(candidate.fields.get("state", "")).upper()
+    return bool(state) and state == requested_state.upper()
+
+
 def is_ad_or_tracking_url(url: str) -> bool:
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc.lower()
@@ -946,6 +981,12 @@ def run(args: argparse.Namespace) -> None:
                     query_stats["duplicates"] += 1
                     log_event("pilot_duplicate_url", state=state, source=source, url=result.url)
                     continue
+                allowed, reason = source_result_allowed(result)
+                if not allowed:
+                    stats["rejected"] += 1
+                    query_stats["rejected"] += 1
+                    log_event("pilot_result_skipped", state=state, source=source, url=result.url, reason=reason)
+                    continue
                 try:
                     markup = fetch_url(result.url)
                     stats["fetched"] += 1
@@ -956,6 +997,30 @@ def run(args: argparse.Namespace) -> None:
                     log_event("pilot_fetch_failed", state=state, source=source, url=result.url, error=str(exc))
                     continue
                 candidate = infer_fields(result, markup)
+                if not looks_like_listing_address(candidate.fields.get("listing_address", "")):
+                    stats["rejected"] += 1
+                    query_stats["rejected"] += 1
+                    log_event(
+                        "pilot_candidate_rejected",
+                        state=state,
+                        source=source,
+                        url=result.url,
+                        reason="missing_listing_detail_address",
+                        evidence=candidate.fields.get("listing_address", "")[:220],
+                    )
+                    continue
+                if not candidate_matches_requested_state(candidate, state):
+                    stats["rejected"] += 1
+                    query_stats["rejected"] += 1
+                    log_event(
+                        "pilot_candidate_rejected",
+                        state=state,
+                        source=source,
+                        url=result.url,
+                        reason="listing_state_mismatch",
+                        evidence=candidate.fields.get("state", "")[:40],
+                    )
+                    continue
                 qualification = qualification_for_text(candidate.text)
                 if qualification.status != "qualified":
                     stats["rejected"] += 1

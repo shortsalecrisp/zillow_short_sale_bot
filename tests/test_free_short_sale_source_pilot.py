@@ -116,6 +116,50 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
         self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
 
+    def test_source_result_allowed_rejects_redfin_collection_and_blog_pages(self):
+        collection = pilot.SearchResult(
+            "redfin.com",
+            "query",
+            "https://www.redfin.com/state/Alabama/fixer-upper/page-4",
+            "Alabama Fixer Uppers",
+            "",
+        )
+        blog = pilot.SearchResult(
+            "redfin.com",
+            "query",
+            "https://www.redfin.com/blog/short-sale-vs-foreclosure/",
+            "Buying A Short Sale vs Foreclosure",
+            "",
+        )
+        detail = pilot.SearchResult(
+            "redfin.com",
+            "query",
+            "https://www.redfin.com/AL/Mobile/123-Main-St-36602/home/123456",
+            "123 Main St",
+            "",
+        )
+
+        self.assertEqual(pilot.source_result_allowed(collection), (False, "not_redfin_detail"))
+        self.assertEqual(pilot.source_result_allowed(blog), (False, "not_redfin_detail"))
+        self.assertEqual(pilot.source_result_allowed(detail), (True, ""))
+
+    def test_listing_address_and_state_guards_reject_search_page_noise(self):
+        self.assertFalse(pilot.looks_like_listing_address("Buying A Short Sale vs Foreclosure"))
+        self.assertFalse(pilot.looks_like_listing_address("Alabama fixer-upper homes page 4"))
+        self.assertTrue(pilot.looks_like_listing_address("123 Main St"))
+
+        candidate = pilot.Candidate(
+            source="redfin.com",
+            query="query",
+            url="https://www.redfin.com/MD/Halethorpe/2828-Alabama-Ave-21227/home/9378085",
+            title="2828 Alabama Ave",
+            text="For Sale. Remarks: Short sale subject to lender approval.",
+            fields={"listing_address": "2828 Alabama Ave", "state": "MD"},
+        )
+
+        self.assertFalse(pilot.candidate_matches_requested_state(candidate, "AL"))
+        self.assertTrue(pilot.candidate_matches_requested_state(candidate, "MD"))
+
     def test_search_web_prefers_google_cse_when_configured(self):
         old_engine = pilot.SEARCH_ENGINE
         old_key = pilot.CSE_API_KEY
