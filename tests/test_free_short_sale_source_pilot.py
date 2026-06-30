@@ -47,6 +47,17 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
 
+    def test_qualification_rejects_explicit_short_sale_no(self):
+        text = (
+            "For Sale. Property description: Status Active. "
+            "Is Short Sale: No. Special Listing Conditions: None."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+
     def test_duplicate_status_skips_existing_agent_phone_even_new_address(self):
         main_rows = [
             ["agent_name", "last_name", "phone", "email", "listing_address", "city", "state"],
@@ -146,6 +157,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
     def test_listing_address_and_state_guards_reject_search_page_noise(self):
         self.assertFalse(pilot.looks_like_listing_address("Buying A Short Sale vs Foreclosure"))
         self.assertFalse(pilot.looks_like_listing_address("Alabama fixer-upper homes page 4"))
+        self.assertFalse(pilot.looks_like_listing_address("Viewing Listing MLS# 7033072"))
+        self.assertFalse(pilot.looks_like_listing_address("3301 64th Street in Fort Smith, AR for $189,000"))
         self.assertTrue(pilot.looks_like_listing_address("123 Main St"))
 
         candidate = pilot.Candidate(

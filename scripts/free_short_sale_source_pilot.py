@@ -131,7 +131,7 @@ SOURCE_QUERIES = [
     ),
     (
         "idx_broker_pages",
-        '"{state}" "Special Listing Conditions" "Short Sale" "For Sale" -zillow -trulia -realtor.com -redfin.com',
+        '"{state}" ("Special Listing Conditions: Short Sale" OR "Is Short Sale: Yes" OR "Potential Short Sale") "For Sale" -zillow -trulia -realtor.com -redfin.com',
     ),
 ]
 
@@ -190,6 +190,9 @@ ACTIVE_RE = re.compile(
 INACTIVE_RE = re.compile(r"\b(?:sold|off market|contingent|pending)\b", re.IGNORECASE)
 
 DISQUALIFY_PATTERNS = [
+    re.compile(r"\bis\s+short\s+sale\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
+    re.compile(r"\bshort\s+sale\s*[:=]\s*(?:no|false)\b", re.IGNORECASE),
+    re.compile(r"\bisShortSale[\"']?\s*[:=]\s*[\"']?false[\"']?\b", re.IGNORECASE),
     re.compile(r"\bapproved\s+short\s+sale\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s+approved\b", re.IGNORECASE),
     re.compile(r"\balready\s+approved\b", re.IGNORECASE),
@@ -705,7 +708,7 @@ def looks_like_listing_address(address: str) -> bool:
     if not compact or not re.search(r"\d", compact):
         return False
     return not re.search(
-        r"\b(?:blog|buying|foreclosure|short\s+sale|homes?\s+for\s+sale|page|search|vintage|fixer[-\s]?upper)\b",
+        r"\b(?:blog|buying|foreclosure|short\s+sale|homes?\s+for\s+sale|page|search|vintage|fixer[-\s]?upper|viewing\s+listing|mls\s*#|for\s+\$)\b",
         compact,
         re.IGNORECASE,
     )
