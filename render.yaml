@@ -5,17 +5,7 @@ services:
     plan: pro
     buildCommand: |
       pip install -r requirements.txt &&
-      python -m playwright install chromium &&
-      python - <<'PY'
-      import asyncio
-      import logging
-
-      from headless_browser import ensure_headless_browser
-
-      logging.basicConfig(level=logging.INFO)
-      logger = logging.getLogger("render-build")
-      asyncio.run(ensure_headless_browser(logger))
-      PY
+      PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.playwright-browsers python -m playwright install chromium
     startCommand: bash ./start.sh
     envVars:
       - key: NODE_VERSION
@@ -166,8 +156,14 @@ services:
         value: "200"
       - key: GSHEET_TAB
         value: Sheet1
+      - key: HEADLESS_BROWSER_CACHE
+        value: /opt/render/project/src/.playwright-browsers
+      - key: HEADLESS_BROWSER_DOWNLOAD
+        value: "false"
       - key: HEADLESS_BROWSER_MAX_PAGES
         value: "1"
+      - key: HEADLESS_BROWSER_STARTUP_CHECK
+        value: "false"
       - key: HEADLESS_CONTACT_BUDGET
         value: "4"
       - key: HEADLESS_FACEBOOK_TIMEOUT_MS

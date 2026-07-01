@@ -93,6 +93,15 @@ async def ensure_headless_browser(logger: Optional[logging.Logger] = None) -> bo
                 chromium_available(HEADLESS_BROWSER_CACHE),
                 HEADLESS_BROWSER_DOWNLOAD,
             )
+        if _has_chromium_executable(HEADLESS_BROWSER_CACHE):
+            if logger:
+                logger.info(
+                    "HEADLESS_BROWSER_READY cache=%s chromium_ready=%s",
+                    HEADLESS_BROWSER_CACHE,
+                    True,
+                )
+            _browser_ready = True
+            return _browser_ready
         if not HEADLESS_BROWSER_DOWNLOAD:
             if logger:
                 logger.warning("HEADLESS_BROWSER_DOWNLOAD_DISABLED cache=%s", HEADLESS_BROWSER_CACHE)
