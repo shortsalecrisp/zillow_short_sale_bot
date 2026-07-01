@@ -953,20 +953,12 @@ def jsonld_type_names(value: Any) -> set[str]:
 
 def required_review_field_failure(candidate: Candidate, qualification: Qualification) -> str:
     agent_name = clean_agent_name(candidate.fields.get("agent_name", ""))
-    if not agent_name:
-        return "missing_listing_agent_name"
-    candidate.fields["agent_name"] = agent_name
-    first_name, last_name = split_agent_name(agent_name)
-    if not first_name or not last_name:
-        return "missing_agent_first_last_name"
+    if agent_name:
+        candidate.fields["agent_name"] = agent_name
     if not looks_like_listing_address(candidate.fields.get("listing_address", "")):
         return "missing_listing_detail_address"
     if qualification.status != "qualified" or not normalize_space(qualification.evidence):
         return "missing_short_sale_confirmation"
-    if not normalize_phone(candidate.fields.get("phone", "")):
-        return "missing_agent_phone"
-    if not is_valid_email(candidate.fields.get("email", "")):
-        return "missing_agent_email"
     return ""
 
 
@@ -1141,7 +1133,7 @@ def candidate_to_row(
     promotion_notes = (
         "Net-new listing candidate; review then promote to PendingQueue using pending_queue_listing_json."
         if not matched and not agent_rows and has_contact
-        else "Missing required agent phone or email; review before promotion."
+        else "Qualified net-new short sale listing; agent contact is missing or partial and can be reviewed later."
         if not has_contact
         else "Possible existing main-sheet match; review before promotion."
     )
@@ -1348,8 +1340,6 @@ def run(args: argparse.Namespace) -> None:
         for row in pilot_rows[1:]
         if len(row) > 6 and address_key(row[4], row[5], row[6])
     }
-    pilot_seen_phones = {normalize_phone(row[2]) for row in pilot_rows[1:] if len(row) > 2 and normalize_phone(row[2])}
-
     stats = {
         "searched": 0,
         "results": 0,
@@ -1503,7 +1493,7 @@ def run(args: argparse.Namespace) -> None:
                     )
                     continue
                 dup_status, dup_key, matched = duplicate_status(candidate, existing)
-                if dup_status in {"duplicate_listing", "duplicate_agent_phone"}:
+                if dup_status == "duplicate_listing":
                     stats["duplicates"] += 1
                     query_stats["duplicates"] += 1
                     log_event(
@@ -1517,15 +1507,11 @@ def run(args: argparse.Namespace) -> None:
                     )
                     continue
                 phone_key = normalize_phone(candidate.fields.get("phone", ""))
-                if phone_key and phone_key in pilot_seen_phones:
-                    stats["duplicates"] += 1
-                    query_stats["duplicates"] += 1
-                    log_event("pilot_candidate_duplicate", state=state, source=source, url=result.url, duplicate_status="pilot_phone")
-                    continue
+                matched_main_row = matched if dup_status == "duplicate_agent_phone" else ""
                 agent_rows = matched if dup_status == "possible_existing_agent" else ""
                 stats["qualified"] += 1
                 query_stats["qualified"] += 1
-                query_rows.append(candidate_to_row(candidate, qualification, dup_key, "", agent_rows))
+                query_rows.append(candidate_to_row(candidate, qualification, dup_key, matched_main_row, agent_rows))
                 log_event(
                     "pilot_candidate_qualified",
                     state=state,
@@ -1535,12 +1521,12 @@ def run(args: argparse.Namespace) -> None:
                     agent=candidate.fields.get("agent_name", ""),
                     has_phone=bool(phone_key),
                     has_email=is_valid_email(candidate.fields.get("email", "")),
+                    duplicate_status=dup_status,
+                    matched=matched,
                 )
                 already_seen_urls.add(result.url)
                 if listing_dup_key:
                     pilot_seen_addresses.add(listing_dup_key)
-                if phone_key:
-                    pilot_seen_phones.add(phone_key)
                 time.sleep(args.sleep_seconds)
 
             if query_rows and not args.dry_run:

@@ -81,9 +81,10 @@ hourly runs still leave observable output. Render logs should include `pilot_que
 `pilot_query_done`, and a final `pilot_run_done` stats record.
 
 The pilot does not write to `Sheet1` or send SMS. Candidate rows are first qualified as active short sale listings, then
-deduped against `Sheet1` by listing address before bounded contact research runs. New rows require a split agent first
-name and last name plus agent phone and email; phone-number dedupe still skips agents already present in the main sheet
-because the campaign contacts each agent only once. Rows include `synthetic_zpid` and `pending_queue_listing_json` so
+deduped against `Sheet1` by listing address before bounded contact research runs. New rows can be added without agent
+contact fields; contact research is best-effort enrichment and incomplete contact rows stay in pilot review. If contact
+research finds an already-known phone or possible existing agent, the row is still written for listing review and the
+match is recorded in the duplicate/review columns. Rows include `synthetic_zpid` and `pending_queue_listing_json` so
 reviewed net-new candidates can later be promoted into the same PendingQueue-style shape used by the Zillow scraper.
 
 Configuration:

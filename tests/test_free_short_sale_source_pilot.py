@@ -58,7 +58,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
 
-    def test_duplicate_status_skips_existing_agent_phone_even_new_address(self):
+    def test_duplicate_status_flags_existing_agent_phone_even_new_address(self):
         main_rows = [
             ["agent_name", "last_name", "phone", "email", "listing_address", "city", "state"],
             ["Jane", "Agent", "404-555-1212", "jane@example.com", "1 Old St", "Atlanta", "GA"],
@@ -75,7 +75,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 "city": "Atlanta",
                 "state": "GA",
                 "phone": "(404) 555-1212",
-                "agent_name": "Jane Agent",
+                "agent_name": "Jane Smith",
             },
         )
 
@@ -84,6 +84,31 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(status, "duplicate_agent_phone")
         self.assertEqual(key, "4045551212")
         self.assertEqual(matched_row, "2")
+
+    def test_duplicate_agent_phone_can_still_be_written_for_listing_review(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="2 New St",
+            text="For Sale. Special Listing Conditions: Short Sale.",
+            fields={
+                "listing_address": "2 New St",
+                "city": "Atlanta",
+                "state": "GA",
+                "phone": "404-555-1212",
+                "email": "jane@example.com",
+                "agent_name": "Jane Smith",
+            },
+        )
+        qualification = pilot.qualification_for_text(candidate.text)
+
+        row = pilot.candidate_to_row(candidate, qualification, "4045551212", "2", "")
+
+        self.assertEqual(row[:7], ["Jane", "Smith", "404-555-1212", "jane@example.com", "2 New St", "Atlanta", "GA"])
+        self.assertEqual(row[16], "review")
+        self.assertEqual(row[22], "4045551212")
+        self.assertEqual(row[23], "2")
 
     def test_pilot_row_starts_like_main_sheet(self):
         candidate = pilot.Candidate(
@@ -250,7 +275,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(candidate.fields["agent_name"], "Marsha Rogers")
         self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "")
 
-    def test_required_review_fields_require_agent_address_and_short_sale_evidence(self):
+    def test_required_review_fields_require_address_and_short_sale_evidence_not_agent_contact(self):
         candidate = pilot.Candidate(
             source="idx_broker_pages",
             query="query",
@@ -261,19 +286,34 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         )
         qualification = pilot.qualification_for_text(candidate.text)
 
-        self.assertEqual(
-            pilot.required_review_field_failure(candidate, qualification),
-            "missing_listing_agent_name",
-        )
+        self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "")
 
         candidate.fields["agent_name"] = "Jane Smith"
-        self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "missing_agent_phone")
+        self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "")
 
         candidate.fields["phone"] = "404-555-1212"
-        self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "missing_agent_email")
+        self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "")
 
         candidate.fields["email"] = "jane@example.com"
         self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "")
+
+    def test_qualified_short_sale_row_can_be_added_without_agent_contact(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street",
+            text="For Sale. Special Listing Conditions: Short Sale.",
+            fields={"listing_address": "123 Main Street", "city": "Atlanta", "state": "GA"},
+        )
+        qualification = pilot.qualification_for_text(candidate.text)
+
+        row = pilot.candidate_to_row(candidate, qualification, "", "", "")
+
+        self.assertEqual(row[:7], ["", "", "", "", "123 Main Street", "Atlanta", "GA"])
+        self.assertEqual(row[12], "qualified")
+        self.assertEqual(row[16], "review")
+        self.assertIn("agent contact is missing or partial", row[15])
 
     def test_agent_name_cleaner_rejects_brokerage_names(self):
         self.assertEqual(pilot.clean_agent_name("West USA Realty"), "")
