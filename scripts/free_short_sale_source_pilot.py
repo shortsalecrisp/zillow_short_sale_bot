@@ -1476,7 +1476,6 @@ def run(args: argparse.Namespace) -> None:
                         duplicate_key=listing_dup_key,
                     )
                     continue
-                research_candidate_contact(candidate)
                 required_failure = required_review_field_failure(candidate, qualification)
                 if required_failure:
                     stats["rejected"] += 1
