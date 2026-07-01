@@ -225,9 +225,17 @@ def test_extra_state_searches_exclude_mi(monkeypatch):
     assert sources == {"ak", "hi"}
 
 
-def test_free_source_pilot_defaults_exclude_mi():
-    assert "MI" not in webhook_server.FREE_SOURCE_PILOT_STATES
-    assert len(webhook_server.FREE_SOURCE_PILOT_STATES) == 49
+def test_free_source_pilot_defaults_include_all_states():
+    assert "MI" in webhook_server.FREE_SOURCE_PILOT_STATES
+    assert len(webhook_server.FREE_SOURCE_PILOT_STATES) == 50
+
+
+def test_free_source_pilot_next_run_ignores_business_hours():
+    now = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 21, 12, 29))
+
+    next_run = webhook_server._next_free_source_pilot_run(now)
+
+    assert next_run == webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 22, 0, 0))
 
 
 def test_state_search_uses_shared_default_fetch_limit(monkeypatch):

@@ -109,6 +109,9 @@ _scheduler_start_lock = threading.Lock()
 _scheduler_started = False
 _keepalive_thread: Optional[threading.Thread] = None
 _keepalive_stop: Optional[threading.Event] = None
+_free_source_pilot_scheduler_thread: Optional[threading.Thread] = None
+_free_source_pilot_scheduler_stop: Optional[threading.Event] = None
+_free_source_pilot_scheduler_start_lock = threading.Lock()
 _deferred_rows_lock = threading.Lock()
 _deferred_rows: List[Dict[str, Any]] = []
 _deferred_zpids: set[str] = set()
@@ -743,10 +746,15 @@ def _process_apify_coverage_backstop_callback(run_time: datetime) -> None:
 
 
 def _free_source_pilot_due(run_time: datetime) -> bool:
-    if not FREE_SOURCE_PILOT_ENABLED:
-        return False
-    local_dt = run_time.astimezone(SCHEDULER_TZ)
-    return WORK_START <= local_dt.hour <= WORK_END
+    return FREE_SOURCE_PILOT_ENABLED
+
+
+def _next_free_source_pilot_run(now: datetime) -> datetime:
+    now = now.astimezone(SCHEDULER_TZ)
+    base = now.replace(minute=0, second=0, microsecond=0)
+    if now < base + timedelta(seconds=1):
+        return base
+    return base + timedelta(hours=1)
 
 
 def _free_source_pilot_hour_key(run_time: datetime) -> str:
@@ -890,6 +898,47 @@ def _process_free_source_pilot_callback(run_time: datetime) -> None:
         name="free-source-pilot",
         daemon=True,
     ).start()
+
+
+def _ensure_free_source_pilot_scheduler_thread() -> None:
+    global _free_source_pilot_scheduler_thread, _free_source_pilot_scheduler_stop
+    if not FREE_SOURCE_PILOT_ENABLED:
+        logger.info("free-source-pilot: hourly scheduler disabled")
+        return
+    with _free_source_pilot_scheduler_start_lock:
+        if _free_source_pilot_scheduler_thread and _free_source_pilot_scheduler_thread.is_alive():
+            logger.info("free-source-pilot: hourly scheduler already started")
+            return
+        stop_event = threading.Event()
+        _free_source_pilot_scheduler_stop = stop_event
+
+        def _loop() -> None:
+            logger.info(
+                "free-source-pilot: hourly scheduler thread starting states_count=%s all_states=%s",
+                len(FREE_SOURCE_PILOT_STATES),
+                len(FREE_SOURCE_PILOT_STATES) == len(ALL_US_STATES),
+            )
+            while not stop_event.is_set():
+                now = datetime.now(tz=SCHEDULER_TZ)
+                next_run = _next_free_source_pilot_run(now)
+                sleep_secs = max(0, (next_run - now).total_seconds())
+                logger.info(
+                    "free-source-pilot: hourly scheduler sleeping %.2fs until %s",
+                    sleep_secs,
+                    next_run.isoformat(),
+                )
+                if stop_event.wait(timeout=sleep_secs):
+                    break
+                logger.info("free-source-pilot: hourly scheduler wake run_time=%s", next_run.isoformat())
+                _process_free_source_pilot_callback(next_run)
+            logger.info("free-source-pilot: hourly scheduler thread stopped")
+
+        _free_source_pilot_scheduler_thread = threading.Thread(
+            target=_loop,
+            name="free-source-pilot-scheduler",
+            daemon=True,
+        )
+        _free_source_pilot_scheduler_thread.start()
 
 
 def _start_extra_state_rows(payload: Dict[str, Any]) -> None:
@@ -1666,7 +1715,6 @@ async def _start_scheduler() -> None:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
         return
     hourly_callbacks = [
-        _process_free_source_pilot_callback,
         _process_deferred_rows,
         _process_pending_rows_callback,
         _process_apify_coverage_backstop_callback,
@@ -1679,6 +1727,7 @@ async def _start_scheduler() -> None:
         hourly_callbacks=hourly_callbacks,
         initial_callbacks=False,
     )
+    _ensure_free_source_pilot_scheduler_thread()
     _start_free_source_pilot_startup_catchup()
     _ensure_keepalive_thread()
 
@@ -1694,6 +1743,14 @@ async def _stop_scheduler() -> None:
         _scheduler_started = False
         _scheduler_thread = None
         _scheduler_stop = None
+    global _free_source_pilot_scheduler_thread, _free_source_pilot_scheduler_stop
+    if _free_source_pilot_scheduler_stop:
+        _free_source_pilot_scheduler_stop.set()
+    if _free_source_pilot_scheduler_thread and _free_source_pilot_scheduler_thread.is_alive():
+        _free_source_pilot_scheduler_thread.join(timeout=5)
+    with _free_source_pilot_scheduler_start_lock:
+        _free_source_pilot_scheduler_thread = None
+        _free_source_pilot_scheduler_stop = None
     global _keepalive_thread, _keepalive_stop
     if _keepalive_stop:
         _keepalive_stop.set()
