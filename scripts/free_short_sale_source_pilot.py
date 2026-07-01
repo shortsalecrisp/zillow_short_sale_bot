@@ -114,7 +114,8 @@ STATE_QUERY_TERMS = {
     "WI": "Wisconsin",
     "WY": "Wyoming",
 }
-DEFAULT_EXCLUDED_STATES = {
+FORCE_ALL_STATES = os.getenv("FREE_SOURCE_PILOT_FORCE_ALL_STATES", "false").lower() == "true"
+DEFAULT_EXCLUDED_STATES = set() if FORCE_ALL_STATES else {
     state.strip().upper()
     for state in os.getenv("FREE_SOURCE_PILOT_EXCLUDED_STATES", "").split(",")
     if state.strip()
