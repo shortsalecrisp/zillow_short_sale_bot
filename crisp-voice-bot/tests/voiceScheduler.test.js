@@ -251,6 +251,59 @@ test("voice performance log-only updates do not change scheduling cells", () => 
   assert.deepEqual(result, { cleared: [], fields: [] });
 });
 
+test("agent-not-available first attempts are retryable in the next local call window", () => {
+  const result = JSON.parse(runSchedulerScript(`
+    const cells = Array(VOICE_BOT_COL_VOICE_NOTES + 1).fill("");
+    cells[VOICE_BOT_COL_STATE] = "CA";
+    cells[VOICE_BOT_COL_CALL_1_SENT] = "2026-07-01T23:15:00.000Z";
+
+    const sheet = {
+      getRange(rowNumber, columnNumber, rowCount, columnCount) {
+        if (rowCount && columnCount) {
+          return {
+            getValues() {
+              const row = Array(VOICE_BOT_COL_VOICE_NOTES).fill("");
+              row[VOICE_BOT_COL_STATE - 1] = cells[VOICE_BOT_COL_STATE];
+              return [row];
+            }
+          };
+        }
+
+        return {
+          getValue() {
+            return cells[columnNumber] || "";
+          },
+          setValue(value) {
+            cells[columnNumber] = value instanceof Date ? value.toISOString() : value;
+          },
+          clearContent() {
+            cells[columnNumber] = "";
+          }
+        };
+      }
+    };
+    const fields = [];
+
+    updateVoiceBotSchedulingCells_(sheet, 3891, { callResult: "agent_not_available" }, 1, fields);
+
+    JSON.stringify({
+      callEligible: cells[VOICE_BOT_COL_CALL_ELIGIBLE],
+      callTimeBucket: cells[VOICE_BOT_COL_CALL_TIME_BUCKET],
+      callScheduledFor: cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR],
+      fields
+    });
+  `));
+
+  assert.equal(result.callEligible, "yes");
+  assert.equal(result.callTimeBucket, "voice_call_2_due");
+  assert.equal(result.callScheduledFor, "2026-07-02T16:00:00.000Z");
+  assert.deepEqual(result.fields, [
+    "AF:call_scheduled_for",
+    "AD:call_eligible",
+    "AE:call_time_bucket",
+  ]);
+});
+
 test("first voice call uses the next local time-test window after follow-up text", () => {
   const beforeLateMorning = runSchedulerExpression(
     'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T12:30:00Z"), "America/New_York").toISOString()',

@@ -69,6 +69,33 @@ const danielConversation = {
   ],
 } as const;
 
+const parvanehGatekeeperHoldConversation = {
+  status: "done",
+  metadata: {
+    termination_reason: "Client disconnected: 1000",
+    call_duration_secs: 42,
+  },
+  analysis: {
+    transcript_summary:
+      "Maya contacted a receptionist regarding Parvaneh's short sale listing. The receptionist asked for Maya's name and reason for calling, then asked Maya to stay on the line while they checked availability.",
+  },
+  transcript: [
+    {
+      role: "assistant",
+      message:
+        "Hi Parvaneh, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",
+    },
+    { role: "user", message: "Hi, if you record your name and reason for calling I'll see if this person is available." },
+    {
+      role: "assistant",
+      message: "Hi, this is Maya with Crisp Short Sales, calling about Parvaneh's short sale listing at Thirteen Thirty Five Opechee.",
+    },
+    { role: "user", message: "Thanks. Please stay on the line." },
+    { role: "assistant", message: "Sure, I'll wait." },
+    { role: "user", message: "..." },
+  ],
+} as const;
+
 test("post-call fallback classifies an agent saying it is not a short sale as not_short_sale", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsNotShortSale } = await import(
     "../src/lib/elevenLabsPostCall"
@@ -94,6 +121,16 @@ test("post-call fallback marks existing short sale help as already working with 
   assert.equal(shouldTreatAsAlreadyHasShortSaleHelp(taniaConversation), true);
   assert.equal(shouldTreatAsAgentHungUp(taniaConversation), false);
   assert.equal(buildVoiceResponseStatus("already_working_with_negotiator"), "Already working with negotiator");
+});
+
+test("post-call fallback classifies gatekeeper hold as agent unavailable instead of agent hangup", async () => {
+  const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+
+  assert.equal(shouldTreatAsAgentUnavailable(parvanehGatekeeperHoldConversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(parvanehGatekeeperHoldConversation), false);
+  assert.equal(buildVoiceResponseStatus("agent_not_available"), "Agent was not available");
 });
 
 test("post-call fallback treats stale initiated conversations with no audio as no-connect", async () => {

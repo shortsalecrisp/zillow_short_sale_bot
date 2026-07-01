@@ -1113,7 +1113,7 @@ function parseVoiceBotDate_(value) {
 function isRetryableVoiceBotResult_(callResult) {
   const normalized = normalizeString_(callResult).toLowerCase();
 
-  return normalized === 'voicemail_left' || normalized === 'no_answer_first_attempt';
+  return normalized === 'voicemail_left' || normalized === 'no_answer_first_attempt' || normalized === 'agent_not_available';
 }
 
 function isWithinBusinessHours_(date) {

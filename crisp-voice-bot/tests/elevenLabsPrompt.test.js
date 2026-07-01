@@ -218,10 +218,11 @@ test("prompt treats not-worried responses as a soft no instead of pitching", () 
     prompt,
     /Ok, well thanks for letting me know\. If anything changes in the future and you're looking for some additional help, please just keep me in mind\. Thanks!/,
   );
-  assert.match(prompt, /Then call `not_interested`/);
+  assert.match(prompt, /Then pause briefly and listen/);
+  assert.match(prompt, /answer it instead of calling `not_interested`/);
 });
 
-test("prompt closes immediately when the caller already has short sale help", () => {
+test("prompt soft-closes when the caller already has short sale help but still answers questions", () => {
   const prompt = readPrompt();
   const coveredBranch = extractSection(
     prompt,
@@ -232,23 +233,41 @@ test("prompt closes immediately when the caller already has short sale help", ()
   assert.match(coveredBranch, /attorney, specialist, someone handling it/);
   assert.match(coveredBranch, /Do not pitch/);
   assert.match(coveredBranch, /please just keep me in mind\. Thanks!/);
-  assert.match(coveredBranch, /Then immediately call `not_interested`/);
-  assert.match(coveredBranch, /After the tool returns, call `end_call`/);
+  assert.match(coveredBranch, /If they ask any question after this/i);
+  assert.match(coveredBranch, /answer it instead of calling `not_interested`/i);
+  assert.match(coveredBranch, /If they do not ask a question/i);
 });
 
 test("prompt treats direct or self-handling answers as a soft value-pitch opportunity", () => {
   const prompt = readPrompt();
   const selfHandlingBranch = extractSection(
     prompt,
-    "If they answer the plan question with \"direct\"",
+    "If they answer the plan question with \"yes\"",
     "If they say they already have a short sale negotiator",
   );
 
   assert.match(selfHandlingBranch, /handling it themselves/i);
+  assert.match(selfHandlingBranch, /plain yes/i);
   assert.match(selfHandlingBranch, /Do not treat this as a hard no/);
   assert.match(selfHandlingBranch, /whole short sale process with the bank/);
   assert.match(selfHandlingBranch, /no cost to you or the seller/);
   assert.match(selfHandlingBranch, /Do you have any interest in talking with Yoni/);
+});
+
+test("prompt answers service questions after a soft-no closeout instead of ending", () => {
+  const prompt = readPrompt();
+  const softNoBranch = extractSection(
+    prompt,
+    "If they say they are not worried about it",
+    "If they ask whether you handle the full short sale process",
+  );
+
+  assert.match(softNoBranch, /If they ask any question after this/i);
+  assert.match(softNoBranch, /how much do you charge/i);
+  assert.match(softNoBranch, /answer it instead of calling `not_interested`/i);
+  assert.match(softNoBranch, /no cost to the agent or seller/i);
+  assert.match(softNoBranch, /buyer pays a flat fee only if the deal closes/i);
+  assert.match(softNoBranch, /treat that as re-engagement/i);
 });
 
 test("prompt does not treat overlapped okay or busy later/callback language as live-transfer consent", () => {

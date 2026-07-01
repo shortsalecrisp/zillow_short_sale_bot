@@ -193,6 +193,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "No response after second call";
   }
 
+  if (callResult === "agent_not_available") {
+    return "Agent was not available";
+  }
+
   if (callResult === "call_received_agent_hung_up") {
     return `Call received but agent hung up on ${assistantName}`;
   }
@@ -587,11 +591,59 @@ function hasMeaningfulUserInteraction(conversation: ElevenLabsConversation): boo
   return messages.some((message) => normalizeText(message).split(" ").filter(Boolean).length >= 3);
 }
 
+function meaningfulUserMessages(conversation: ElevenLabsConversation): string[] {
+  return userMessages(conversation).filter((message) => {
+    const normalized = normalizeText(message);
+    return normalized !== "" && normalized !== "...";
+  });
+}
+
+export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversation): boolean {
+  if (
+    shouldTreatAsVoicemail(conversation) ||
+    shouldTreatAsNoAnswer(conversation) ||
+    shouldTreatAsCallback(conversation) ||
+    shouldTreatAsNotShortSale(conversation) ||
+    shouldTreatAsNotInterested(conversation) ||
+    hasToolCall(conversation, "callback_requested") ||
+    hasToolCall(conversation, "not_interested") ||
+    hasSuccessfulTransfer(conversation)
+  ) {
+    return false;
+  }
+
+  const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+  const assistantText = normalizeText(assistantMessages(conversation).join(" "));
+  const messages = meaningfulUserMessages(conversation).map(normalizeText);
+  const lastUserMessage = messages.at(-1) ?? "";
+  const hasAvailabilityScreen =
+    text.includes("see if this person is available") ||
+    text.includes("see if they are available") ||
+    text.includes("see if he is available") ||
+    text.includes("see if she is available") ||
+    text.includes("check if") ||
+    text.includes("check whether") ||
+    text.includes("record your name and reason") ||
+    text.includes("name and reason for calling");
+  const wasPlacedOnHold =
+    lastUserMessage.includes("please stay on the line") ||
+    lastUserMessage.includes("stay on the line") ||
+    lastUserMessage.includes("hold on") ||
+    lastUserMessage.includes("one moment") ||
+    lastUserMessage.includes("transfer you") ||
+    text.includes("placed the agent on hold") ||
+    text.includes("placed maya on hold") ||
+    text.includes("asked maya to stay on the line");
+
+  return hasAvailabilityScreen && wasPlacedOnHold && assistantText.includes("i'll wait");
+}
+
 export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): boolean {
   if (
     shouldTreatAsVoicemail(conversation) ||
     shouldTreatAsNoAnswer(conversation) ||
     shouldTreatAsCallback(conversation) ||
+    shouldTreatAsAgentUnavailable(conversation) ||
     shouldTreatAsNotShortSale(conversation) ||
     shouldTreatAsNotInterested(conversation) ||
     hasToolCall(conversation, "callback_requested") ||
@@ -905,6 +957,36 @@ async function processPostCallOutcomeForConversation(
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsAgentUnavailable(conversation)) {
+    const outcome = buildVoiceResponseStatus("agent_not_available");
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "agent_not_available",
+      responseStatus: outcome,
+      ...(metadata.callAttemptNumber > 1 ? { leadStatusCode: "N" } : {}),
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback recorded gatekeeper hold or unavailable agent", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      summary,
     });
     return true;
   }
