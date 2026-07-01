@@ -118,14 +118,14 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             ],
         )
 
-    def test_default_states_exclude_michigan_but_keep_lookup_term(self):
-        self.assertNotIn("MI", pilot.DEFAULT_STATES)
+    def test_default_states_include_michigan_for_pilot(self):
+        self.assertIn("MI", pilot.DEFAULT_STATES)
         self.assertEqual(pilot.STATE_QUERY_TERMS["MI"], "Michigan")
 
-    def test_default_states_cover_49_active_states(self):
-        self.assertEqual(len(pilot.DEFAULT_STATES), 49)
-        self.assertEqual(len(set(pilot.DEFAULT_STATES)), 49)
-        self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS) - {"MI"})
+    def test_default_states_cover_all_50_states(self):
+        self.assertEqual(len(pilot.DEFAULT_STATES), 50)
+        self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
+        self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
 
     def test_source_result_allowed_rejects_redfin_collection_and_blog_pages(self):
         collection = pilot.SearchResult(

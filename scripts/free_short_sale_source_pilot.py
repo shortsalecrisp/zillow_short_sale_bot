@@ -116,7 +116,7 @@ STATE_QUERY_TERMS = {
 }
 DEFAULT_EXCLUDED_STATES = {
     state.strip().upper()
-    for state in os.getenv("FREE_SOURCE_PILOT_EXCLUDED_STATES", "MI").split(",")
+    for state in os.getenv("FREE_SOURCE_PILOT_EXCLUDED_STATES", "").split(",")
     if state.strip()
 }
 DEFAULT_STATES = [

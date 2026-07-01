@@ -207,7 +207,7 @@ ALL_US_STATES = [
 ]
 FREE_SOURCE_PILOT_EXCLUDED_STATES = {
     state.strip().upper()
-    for state in os.getenv("FREE_SOURCE_PILOT_EXCLUDED_STATES", "MI").split(",")
+    for state in os.getenv("FREE_SOURCE_PILOT_EXCLUDED_STATES", "").split(",")
     if state.strip()
 }
 FREE_SOURCE_PILOT_FORCE_ALL_STATES = os.getenv("FREE_SOURCE_PILOT_FORCE_ALL_STATES", "true").lower() == "true"

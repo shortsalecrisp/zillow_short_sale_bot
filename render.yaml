@@ -119,7 +119,7 @@ services:
       - key: FREE_SOURCE_PILOT_FORCE_ALL_STATES
         value: "true"
       - key: FREE_SOURCE_PILOT_EXCLUDED_STATES
-        value: MI
+        value: ""
       - key: FREE_SOURCE_PILOT_HEADLESS_BUDGET
         value: "4"
       - key: FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET
