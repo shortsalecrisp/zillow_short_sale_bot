@@ -204,10 +204,30 @@ def test_startup_queue_recovery_is_backgrounded(monkeypatch):
     scheduled[0].close()
 
 
+def test_scheduler_startup_work_defaults_off(monkeypatch):
+    monkeypatch.delenv("FOLLOWUP_RUN_ON_STARTUP", raising=False)
+    monkeypatch.delenv("SCHEDULER_RUN_IMMEDIATELY", raising=False)
+
+    assert webhook_server.FREE_SOURCE_PILOT_STARTUP_CATCHUP is False
+    assert webhook_server._should_run_immediately() is False
+
+
+def test_scheduler_startup_work_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("FOLLOWUP_RUN_ON_STARTUP", "true")
+    monkeypatch.delenv("SCHEDULER_RUN_IMMEDIATELY", raising=False)
+
+    assert webhook_server._should_run_immediately() is True
+
+
 def test_extra_state_searches_exclude_mi(monkeypatch):
     sources = {cfg["source"] for cfg in webhook_server.EXTRA_STATE_SEARCHES}
 
     assert sources == {"ak", "hi"}
+
+
+def test_free_source_pilot_defaults_exclude_mi():
+    assert "MI" not in webhook_server.FREE_SOURCE_PILOT_STATES
+    assert len(webhook_server.FREE_SOURCE_PILOT_STATES) == 49
 
 
 def test_state_search_uses_shared_default_fetch_limit(monkeypatch):

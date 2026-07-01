@@ -205,18 +205,25 @@ ALL_US_STATES = [
     "WI",
     "WY",
 ]
+FREE_SOURCE_PILOT_EXCLUDED_STATES = {
+    state.strip().upper()
+    for state in os.getenv("FREE_SOURCE_PILOT_EXCLUDED_STATES", "MI").split(",")
+    if state.strip()
+}
 FREE_SOURCE_PILOT_FORCE_ALL_STATES = os.getenv("FREE_SOURCE_PILOT_FORCE_ALL_STATES", "true").lower() == "true"
 if FREE_SOURCE_PILOT_FORCE_ALL_STATES:
-    FREE_SOURCE_PILOT_STATES = ALL_US_STATES.copy()
+    FREE_SOURCE_PILOT_STATES = [
+        state for state in ALL_US_STATES if state not in FREE_SOURCE_PILOT_EXCLUDED_STATES
+    ]
 else:
     FREE_SOURCE_PILOT_STATES = [
         state.strip().upper()
         for state in os.getenv("FREE_SOURCE_PILOT_STATES", ",".join(ALL_US_STATES)).split(",")
-        if state.strip()
+        if state.strip() and state.strip().upper() not in FREE_SOURCE_PILOT_EXCLUDED_STATES
     ]
 FREE_SOURCE_PILOT_RESULTS_PER_QUERY = int(os.getenv("FREE_SOURCE_PILOT_RESULTS_PER_QUERY", "10"))
 FREE_SOURCE_PILOT_SLEEP_SECONDS = float(os.getenv("FREE_SOURCE_PILOT_SLEEP_SECONDS", "1.0"))
-FREE_SOURCE_PILOT_STARTUP_CATCHUP = os.getenv("FREE_SOURCE_PILOT_STARTUP_CATCHUP", "true").lower() == "true"
+FREE_SOURCE_PILOT_STARTUP_CATCHUP = os.getenv("FREE_SOURCE_PILOT_STARTUP_CATCHUP", "false").lower() == "true"
 FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH = os.getenv(
     "FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH",
     "/tmp/free_source_pilot_startup_catchup.txt",
@@ -912,10 +919,9 @@ def _start_extra_state_rows(payload: Dict[str, Any]) -> None:
 
 
 def _should_run_immediately() -> bool:
-    # Render web services can wake shortly after an hourly boundary and then
-    # idle/sleep before the next one. Run the follow-up pass on startup by
-    # default so due follow-ups are not missed during cold-start cycles.
-    run_on_startup = os.getenv("FOLLOWUP_RUN_ON_STARTUP", "true").strip().lower()
+    # Keep Render restarts lightweight. The hourly scheduler handles follow-ups;
+    # startup catch-up can be enabled explicitly for worker-only deployments.
+    run_on_startup = os.getenv("FOLLOWUP_RUN_ON_STARTUP", "false").strip().lower()
     if run_on_startup not in {"0", "false", "no", "off"}:
         return True
     return os.getenv("SCHEDULER_RUN_IMMEDIATELY", "false").lower() == "true"

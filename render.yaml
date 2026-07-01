@@ -2,22 +2,21 @@ services:
   - type: web
     name: zillow-short-sale-bot
     env: python
+    plan: pro
     buildCommand: |
       pip install -r requirements.txt &&
       python -m playwright install chromium &&
       python - <<'PY'
-import asyncio
-import logging
+      import asyncio
+      import logging
 
-from headless_browser import ensure_headless_browser
+      from headless_browser import ensure_headless_browser
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("render-build")
-asyncio.run(ensure_headless_browser(logger))
-PY
+      logging.basicConfig(level=logging.INFO)
+      logger = logging.getLogger("render-build")
+      asyncio.run(ensure_headless_browser(logger))
+      PY
     startCommand: bash ./start.sh
-    cacheDirectories:
-      - /opt/render/.cache/playwright
     envVars:
       - key: NODE_VERSION
         value: 20.11.1
@@ -124,15 +123,17 @@ PY
       - key: FOLLOW_UP_HOURS
         value: "6"
       - key: FOLLOWUP_RUN_ON_STARTUP
-        value: "true"
+        value: "false"
       - key: FREE_SOURCE_PILOT_ENABLED
         value: "true"
       - key: FREE_SOURCE_PILOT_FORCE_ALL_STATES
         value: "true"
+      - key: FREE_SOURCE_PILOT_EXCLUDED_STATES
+        value: MI
       - key: FREE_SOURCE_PILOT_HEADLESS_BUDGET
-        value: "12"
-      - key: FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET
         value: "4"
+      - key: FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET
+        value: "2"
       - key: FREE_SOURCE_PILOT_HEADLESS_FALLBACK
         value: "true"
       - key: FREE_SOURCE_PILOT_RESULTS_PER_QUERY
@@ -141,8 +142,10 @@ PY
         value: auto
       - key: FREE_SOURCE_PILOT_SLEEP_SECONDS
         value: "1.0"
+      - key: FREE_SOURCE_PILOT_STARTUP_CATCHUP
+        value: "false"
       - key: FREE_SOURCE_PILOT_STATES
-        value: AL,AK,AZ,AR,CA,CO,CT,DE,FL,GA,HI,ID,IL,IN,IA,KS,KY,LA,ME,MD,MA,MI,MN,MS,MO,MT,NE,NV,NH,NJ,NM,NY,NC,ND,OH,OK,OR,PA,RI,SC,SD,TN,TX,UT,VT,VA,WA,WV,WI,WY
+        value: AL,AK,AZ,AR,CA,CO,CT,DE,FL,GA,HI,ID,IL,IN,IA,KS,KY,LA,ME,MD,MA,MN,MS,MO,MT,NE,NV,NH,NJ,NM,NY,NC,ND,OH,OK,OR,PA,RI,SC,SD,TN,TX,UT,VT,VA,WA,WV,WI,WY
       - key: FREE_SOURCE_PILOT_TAB
         value: Lead Source Pilot
       - key: FU_LOOKBACK_ROWS
@@ -163,6 +166,8 @@ PY
         value: "200"
       - key: GSHEET_TAB
         value: Sheet1
+      - key: HEADLESS_BROWSER_MAX_PAGES
+        value: "1"
       - key: HEADLESS_CONTACT_BUDGET
         value: "4"
       - key: HEADLESS_FACEBOOK_TIMEOUT_MS

@@ -146,6 +146,7 @@ def _import_webhook_server(monkeypatch, *, sender_result):
     fake_bot_min.INITIAL_SMS_END = 21
     fake_bot_min.TZ = ZoneInfo("America/New_York")
     fake_bot_min.WORK_START = 8
+    fake_bot_min.WORK_END = 20
     fake_bot_min.SCHEDULER_TZ = ZoneInfo("America/New_York")
     fake_bot_min.SMS_TEMPLATE = (
         "Hey {first}, this is Yoni Kutler with Crisp Short Sales. "
