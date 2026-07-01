@@ -98,7 +98,7 @@ function getErrorDetails(error: unknown): Record<string, unknown> {
 }
 
 function normalizeText(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
+  return value.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
 }
 
 function transcriptText(conversation: ElevenLabsConversation): string {
@@ -634,8 +634,14 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
     text.includes("placed the agent on hold") ||
     text.includes("placed maya on hold") ||
     text.includes("asked maya to stay on the line");
+  const assistantWaited =
+    assistantText.includes("i'll wait") ||
+    assistantText.includes("i will wait") ||
+    assistantText.includes("sure, i'll wait") ||
+    assistantText.includes("sure, i will wait") ||
+    assistantText.includes("okay, i'll wait");
 
-  return hasAvailabilityScreen && wasPlacedOnHold && assistantText.includes("i'll wait");
+  return hasAvailabilityScreen && wasPlacedOnHold && (assistantWaited || text.includes("placed the agent on hold"));
 }
 
 export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): boolean {
