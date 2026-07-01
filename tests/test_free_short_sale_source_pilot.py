@@ -118,6 +118,9 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             ],
         )
 
+    def test_pilot_headers_start_with_first_and_last_name(self):
+        self.assertEqual(pilot.PILOT_HEADERS[:2], ["first_name", "last_name"])
+
     def test_default_states_include_michigan_for_pilot(self):
         self.assertIn("MI", pilot.DEFAULT_STATES)
         self.assertEqual(pilot.STATE_QUERY_TERMS["MI"], "Michigan")
@@ -233,7 +236,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
           <div>Status: Active For Sale</div>
           <div>Listed by: Marsha Rogers Realty, Inc.</div>
           <div>Remarks: Potential Short Sale</div>
-          <a href="mailto:agent@example.com">Email</a>
+          <div>agent@example.com</div>
           <span>(479) 484-5588</span>
         </body>
         """
@@ -264,11 +267,90 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         )
 
         candidate.fields["agent_name"] = "Jane Smith"
+        self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "missing_agent_phone")
+
+        candidate.fields["phone"] = "404-555-1212"
+        self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "missing_agent_email")
+
+        candidate.fields["email"] = "jane@example.com"
         self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "")
 
     def test_agent_name_cleaner_rejects_brokerage_names(self):
         self.assertEqual(pilot.clean_agent_name("West USA Realty"), "")
+        self.assertEqual(pilot.clean_agent_name("Brokered by Ben Zeller"), "Ben Zeller")
+        self.assertEqual(pilot.clean_agent_name("Ben Zeller Brokered by"), "Ben Zeller")
+        self.assertEqual(pilot.clean_agent_name("Shown By Listed By"), "")
         self.assertEqual(pilot.clean_agent_name("Listing Agent: Jane Smith Phone 404-555-1212"), "Jane Smith")
+
+    def test_duplicate_listing_status_checks_address_before_contact_research(self):
+        main_rows = [
+            ["agent_name", "last_name", "phone", "email", "listing_address", "city", "state"],
+            ["Linda", "Turney", "", "", "15790 Easthaven Ct, Unit 510", "Bowie", "MD"],
+        ]
+        existing = pilot.build_existing_index(main_rows)
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="",
+            text="For Sale. Remarks: Potential Short Sale.",
+            fields={
+                "listing_address": "15790 Easthaven Ct, Unit 510",
+                "city": "Bowie",
+                "state": "MD",
+            },
+        )
+
+        self.assertEqual(
+            pilot.duplicate_listing_status(candidate, existing),
+            ("duplicate_listing", "15790 easthaven ct 510|bowie|md", "2"),
+        )
+
+    def test_research_contact_runs_after_qualification_and_fills_missing_fields(self):
+        old_search_web = pilot.search_web
+        old_fetch_url = pilot.fetch_url
+        calls = []
+
+        def fake_search_web(query, source, limit):
+            calls.append((query, source, limit))
+            return "cse", [
+                pilot.SearchResult(
+                    source,
+                    query,
+                    "https://agent.example.com/jane-smith",
+                    "Listing Agent: Jane Smith",
+                    "Call 404-555-1212 or email jane@example.com",
+                )
+            ]
+
+        def fake_fetch_url(url, allow_headless=True):
+            return ""
+
+        try:
+            pilot.search_web = fake_search_web
+            pilot.fetch_url = fake_fetch_url
+            candidate = pilot.Candidate(
+                source="idx_broker_pages",
+                query="query",
+                url="https://example.com/listing",
+                title="123 Main Street, Atlanta, GA 30303",
+                text="For Sale. Remarks: Potential Short Sale.",
+                fields={
+                    "listing_address": "123 Main Street",
+                    "city": "Atlanta",
+                    "state": "GA",
+                },
+            )
+
+            pilot.research_candidate_contact(candidate)
+
+            self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+            self.assertEqual(candidate.fields["phone"], "404-555-1212")
+            self.assertEqual(candidate.fields["email"], "jane@example.com")
+            self.assertTrue(calls)
+        finally:
+            pilot.search_web = old_search_web
+            pilot.fetch_url = old_fetch_url
 
     def test_phone_regex_rejects_long_photo_timestamps(self):
         self.assertIsNone(pilot.PHONE_RE.search("20260512213414244719000000-o.jpg"))

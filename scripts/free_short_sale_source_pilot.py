@@ -30,7 +30,7 @@ MAIN_TAB = "Sheet1"
 PILOT_TAB = "Lead Source Pilot"
 
 PILOT_HEADERS = [
-    "agent_name",
+    "first_name",
     "last_name",
     "phone",
     "email",
@@ -146,6 +146,7 @@ SOURCE_QUERIES = [
 SEARCH_ENGINE = os.getenv("FREE_SOURCE_PILOT_SEARCH_ENGINE", "auto").lower()
 CSE_API_KEY = os.getenv("CS_API_KEY") or os.getenv("GOOGLE_API_KEY")
 CSE_CX = os.getenv("CS_CX") or os.getenv("GOOGLE_CX")
+CONTACT_RESEARCH_RESULTS = int(os.getenv("FREE_SOURCE_PILOT_CONTACT_RESEARCH_RESULTS", "3"))
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
 HEADLESS_DOMAIN_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET", "4")))
@@ -234,10 +235,15 @@ BUSINESS_NAME_RE = re.compile(
 GENERIC_NAME_TOKENS = {
     "agent",
     "agents",
+    "brokered",
     "broker",
     "brokers",
     "listing",
+    "listed",
+    "shown",
+    "by",
     "office",
+    "call",
     "phone",
     "mobile",
     "cell",
@@ -248,8 +254,8 @@ GENERIC_NAME_TOKENS = {
     "usa",
 }
 AGENT_LABEL_CONTEXT_RE = re.compile(
-    r"\b(?:listing\s+agent(?:s|\(s\))?|listed\s+by|listing\s+courtesy\s+of|"
-    r"courtesy\s+of|presented\s+by|agent\s*[:\-])\s*[:\-]?\s*(.{2,180})",
+    r"\b(?:listing\s+agent(?:s|\(s\))?|brokered\s+by|shown\s+by|listed\s+by|"
+    r"listing\s+courtesy\s+of|courtesy\s+of|presented\s+by|agent\s*[:\-])\s*[:\-]?\s*(.{2,180})",
     re.IGNORECASE,
 )
 STREET_SUFFIX_RE = (
@@ -491,6 +497,97 @@ def duplicate_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str
         return "possible_existing_agent", gkey, ",".join(map(str, existing.agent_keys[gkey]))
 
     return "", akey, ""
+
+
+def duplicate_listing_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str, str, str]:
+    fields = candidate.fields
+    akey = address_key(
+        fields.get("listing_address", ""),
+        fields.get("city", ""),
+        fields.get("state", ""),
+    )
+    if akey and akey in existing.address_keys:
+        return "duplicate_listing", akey, str(existing.address_keys[akey])
+    return "", akey, ""
+
+
+def is_valid_email(value: str) -> bool:
+    compact = normalize_space(value)
+    match = EMAIL_RE.fullmatch(compact)
+    return bool(match)
+
+
+def has_complete_agent_contact(candidate: Candidate) -> bool:
+    fields = candidate.fields
+    agent_name = clean_agent_name(fields.get("agent_name", ""))
+    first_name, last_name = split_agent_name(agent_name)
+    return bool(
+        first_name
+        and last_name
+        and normalize_phone(fields.get("phone", ""))
+        and is_valid_email(fields.get("email", ""))
+    )
+
+
+def merge_contact_hints(candidate: Candidate, text: str) -> None:
+    fields = candidate.fields
+    agent_name = extract_agent_name(text)
+    if agent_name and not clean_agent_name(fields.get("agent_name", "")):
+        fields["agent_name"] = agent_name
+    elif agent_name and len(agent_name.split()) >= 2:
+        fields["agent_name"] = clean_agent_name(fields.get("agent_name", "")) or agent_name
+    if not normalize_phone(fields.get("phone", "")):
+        phone_match = PHONE_RE.search(text)
+        if phone_match:
+            fields["phone"] = phone_match.group(0)
+    if not is_valid_email(fields.get("email", "")):
+        email_match = EMAIL_RE.search(text)
+        if email_match:
+            fields["email"] = email_match.group(0)
+
+
+def research_candidate_contact(candidate: Candidate) -> None:
+    fields = candidate.fields
+    fields["agent_name"] = clean_agent_name(fields.get("agent_name", ""))
+    if has_complete_agent_contact(candidate):
+        return
+
+    address = fields.get("listing_address", "")
+    city = fields.get("city", "")
+    state = fields.get("state", "")
+    agent_name = clean_agent_name(fields.get("agent_name", ""))
+    queries: list[str] = []
+    if address and city and state:
+        queries.append(f'"{address}" "{city}" "{state}" "listing agent"')
+        queries.append(f'"{address}" "{city}" "{state}" realtor phone email')
+    if agent_name:
+        queries.append(f'"{agent_name}" realtor "{state}" phone email')
+
+    seen_urls: set[str] = set()
+    fetched_pages = 0
+    for query in queries:
+        try:
+            _, results = search_web(query, "contact_research", CONTACT_RESEARCH_RESULTS)
+        except Exception as exc:  # noqa: BLE001
+            log_event("pilot_contact_research_failed", url=candidate.url, query=query, error=str(exc)[:220])
+            continue
+        for result in results:
+            if result.url in seen_urls or is_ad_or_tracking_url(result.url):
+                continue
+            seen_urls.add(result.url)
+            merge_contact_hints(candidate, " ".join([result.title, result.snippet]))
+            if has_complete_agent_contact(candidate):
+                return
+            if fetched_pages >= 2:
+                continue
+            try:
+                fetched = fetch_url(result.url, allow_headless=False)
+                fetched_pages += 1
+            except Exception:
+                continue
+            merge_contact_hints(candidate, strip_html(fetched))
+            if has_complete_agent_contact(candidate):
+                return
 
 
 def registered_domain(url: str) -> str:
@@ -809,14 +906,16 @@ def clean_agent_name(value: str) -> str:
     if not compact:
         return ""
     compact = re.sub(
-        r"(?i)^(?:by|agent|agents|listing\s+agent(?:s|\(s\))?|listed\s+by|"
-        r"listing\s+courtesy\s+of|courtesy\s+of|presented\s+by)\s*[:\-]?\s*",
+        r"(?i)^(?:by|agent|agents|listing\s+agent(?:s|\(s\))?|brokered\s+by|"
+        r"shown\s+by|listed\s+by|listing\s+courtesy\s+of|courtesy\s+of|"
+        r"presented\s+by)\s*[:\-]?\s*",
         "",
         compact,
     )
     compact = re.split(
-        r"(?i)\b(?:phone|cell|mobile|email|license|lic\.?|dre|brokerage|broker|"
-        r"listing\s+office|office|mls|fax|website|provided\s+by|realty|realtor|"
+        r"(?i)\b(?:call|phone|cell|mobile|email|license|lic\.?|dre|brokerage|broker|"
+        r"brokered\s+by|shown\s+by|listed\s+by|listing\s+office|office|mls|fax|"
+        r"website|provided\s+by|realty|realtor|"
         r"real\s+estate|properties|brokerage|llc|inc|corp|company|group|team|"
         r"associates|homes?|mortgage|bank|trust|services|partners|title|insurance)\b|"
         r"[|•;,]|\.\s+(?=[{\"A-Z])",
@@ -857,10 +956,17 @@ def required_review_field_failure(candidate: Candidate, qualification: Qualifica
     if not agent_name:
         return "missing_listing_agent_name"
     candidate.fields["agent_name"] = agent_name
+    first_name, last_name = split_agent_name(agent_name)
+    if not first_name or not last_name:
+        return "missing_agent_first_last_name"
     if not looks_like_listing_address(candidate.fields.get("listing_address", "")):
         return "missing_listing_detail_address"
     if qualification.status != "qualified" or not normalize_space(qualification.evidence):
         return "missing_short_sale_confirmation"
+    if not normalize_phone(candidate.fields.get("phone", "")):
+        return "missing_agent_phone"
+    if not is_valid_email(candidate.fields.get("email", "")):
+        return "missing_agent_email"
     return ""
 
 
@@ -1028,13 +1134,15 @@ def candidate_to_row(
     queue_source = payload.get("source", "")
     queue_address = payload.get("address", "")
     has_phone = bool(normalize_phone(fields.get("phone", "")))
-    import_ready = "yes" if qualification.status == "qualified" and not matched and not agent_rows and has_phone else "review"
+    has_email = is_valid_email(fields.get("email", ""))
+    has_contact = has_phone and has_email
+    import_ready = "yes" if qualification.status == "qualified" and not matched and not agent_rows and has_contact else "review"
     promotion_status = "pilot_review"
     promotion_notes = (
         "Net-new listing candidate; review then promote to PendingQueue using pending_queue_listing_json."
-        if not matched and not agent_rows and has_phone
-        else "No phone found; cannot prove this is a new agent for one-touch outreach."
-        if not has_phone
+        if not matched and not agent_rows and has_contact
+        else "Missing required agent phone or email; review before promotion."
+        if not has_contact
         else "Possible existing main-sheet match; review before promotion."
     )
     return [
@@ -1235,6 +1343,11 @@ def run(args: argparse.Namespace) -> None:
     existing = build_existing_index(main_rows)
     pilot_rows = get_values(token, args.spreadsheet_id, f"{args.pilot_tab}!A:{column_letter(len(PILOT_HEADERS))}")
     already_seen_urls = {row[11] for row in pilot_rows[1:] if len(row) > 11 and row[11]}
+    pilot_seen_addresses = {
+        address_key(row[4], row[5], row[6])
+        for row in pilot_rows[1:]
+        if len(row) > 6 and address_key(row[4], row[5], row[6])
+    }
     pilot_seen_phones = {normalize_phone(row[2]) for row in pilot_rows[1:] if len(row) > 2 and normalize_phone(row[2])}
 
     stats = {
@@ -1347,6 +1460,33 @@ def run(args: argparse.Namespace) -> None:
                             reason="missing_short_sale_confirmation",
                         )
                     continue
+                listing_dup_status, listing_dup_key, listing_matched = duplicate_listing_status(candidate, existing)
+                if listing_dup_status:
+                    stats["duplicates"] += 1
+                    query_stats["duplicates"] += 1
+                    log_event(
+                        "pilot_candidate_duplicate",
+                        state=state,
+                        source=source,
+                        url=result.url,
+                        duplicate_status=listing_dup_status,
+                        duplicate_key=listing_dup_key,
+                        matched=listing_matched,
+                    )
+                    continue
+                if listing_dup_key and listing_dup_key in pilot_seen_addresses:
+                    stats["duplicates"] += 1
+                    query_stats["duplicates"] += 1
+                    log_event(
+                        "pilot_candidate_duplicate",
+                        state=state,
+                        source=source,
+                        url=result.url,
+                        duplicate_status="pilot_listing",
+                        duplicate_key=listing_dup_key,
+                    )
+                    continue
+                research_candidate_contact(candidate)
                 required_failure = required_review_field_failure(candidate, qualification)
                 if required_failure:
                     stats["rejected"] += 1
@@ -1394,8 +1534,11 @@ def run(args: argparse.Namespace) -> None:
                     address=candidate.fields.get("listing_address", ""),
                     agent=candidate.fields.get("agent_name", ""),
                     has_phone=bool(phone_key),
+                    has_email=is_valid_email(candidate.fields.get("email", "")),
                 )
                 already_seen_urls.add(result.url)
+                if listing_dup_key:
+                    pilot_seen_addresses.add(listing_dup_key)
                 if phone_key:
                     pilot_seen_phones.add(phone_key)
                 time.sleep(args.sleep_seconds)
