@@ -148,6 +148,27 @@ test("prompt treats placeholder-only user turns as background noise and skips sp
   assert.match(prompt, /Do not say[\s\S]{0,120}Are you still there\?/);
 });
 
+test("prompt confirms identity before repeating the pitch when caller is confused", () => {
+  const prompt = readPrompt();
+  const confusedRepair = extractSection(
+    prompt,
+    "- If the caller sounds confused right after the opener",
+    "- If the first response is clipped",
+  );
+
+  assert.match(confusedRepair, /what\?/i);
+  assert.match(
+    confusedRepair,
+    /Sorry, I may have caught you fast\. Is this {{firstName}}\?/,
+  );
+  assert.match(
+    confusedRepair,
+    /Thanks\. I was calling about your short sale listing\. Are you handling the bank side yourself\?/,
+  );
+  assert.match(confusedRepair, /Do not repeat Crisp Short Sales/);
+  assert.match(confusedRepair, /{{streetAddress}}/);
+});
+
 test("prompt keeps third-party callback timing questions direct and name-specific", () => {
   const prompt = readPrompt();
   const callbackFlow = extractSection(
