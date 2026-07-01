@@ -173,6 +173,36 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertFalse(pilot.candidate_matches_requested_state(candidate, "AL"))
         self.assertTrue(pilot.candidate_matches_requested_state(candidate, "MD"))
 
+    def test_infer_fields_uses_jsonld_product_name_when_title_is_not_address(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="Viewing Listing MLS# 7033072 - Broker",
+            snippet="Special Listing Conditions: Short Sale.",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@context":"https://schema.org","@type":"Product",
+           "name":"1794 N Parkside Lane Casa Grande, AZ 85122",
+           "description":"Short sale subject to lender approval.",
+           "image":"https://cdn.example.com/az/20260512213414244719000000-o.jpg"}
+        </script>
+        <body>Contact Phone 928-282-4166</body>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["listing_address"], "1794 N Parkside Lane")
+        self.assertEqual(candidate.fields["city"], "Casa Grande")
+        self.assertEqual(candidate.fields["state"], "AZ")
+        self.assertEqual(candidate.fields["zip"], "85122")
+        self.assertEqual(candidate.fields["phone"], "928-282-4166")
+
+    def test_phone_regex_rejects_long_photo_timestamps(self):
+        self.assertIsNone(pilot.PHONE_RE.search("20260512213414244719000000-o.jpg"))
+        self.assertEqual(pilot.PHONE_RE.search("(404) 555-1212").group(0), "(404) 555-1212")
+
     def test_search_web_prefers_google_cse_when_configured(self):
         old_engine = pilot.SEARCH_ENGINE
         old_key = pilot.CSE_API_KEY

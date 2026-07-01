@@ -218,7 +218,12 @@ DISQUALIFY_PATTERNS = [
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 PHONE_RE = re.compile(
-    r"(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}"
+    r"(?<!\d)(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)"
+)
+STREET_SUFFIX_RE = (
+    r"(?:avenue|ave|street|st|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|"
+    r"circle|cir|way|place|pl|loop|trail|trl|parkway|pkwy|terrace|ter|highway|hwy|"
+    r"route|rte|pass|path|point|pt|run|row)"
 )
 
 
@@ -598,6 +603,37 @@ def strip_html(markup: str) -> str:
     return normalize_space(html.unescape(markup))
 
 
+def parse_address_parts(value: str) -> dict[str, str]:
+    compact = normalize_space(value)
+    if not compact:
+        return {}
+    compact = re.split(r"\s+\$\d[\d,]*(?:\.\d+)?|\s+\((?:for sale|active|pending)\)", compact, maxsplit=1, flags=re.I)[0]
+    patterns = [
+        rf"^(?P<listing_address>\d{{1,6}}\s+.+?\b{STREET_SUFFIX_RE}\b)\s+"
+        r"(?P<city>[A-Z][A-Za-z .'-]{2,40}),\s*(?P<state>[A-Z]{2}),?\s*(?P<zip>\d{5}(?:-\d{4})?)?$",
+        r"^(?P<listing_address>\d{1,6}\s+.+?),\s*"
+        r"(?P<city>[A-Z][A-Za-z .'-]{2,40}),\s*(?P<state>[A-Z]{2}),?\s*(?P<zip>\d{5}(?:-\d{4})?)?$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, compact, re.I)
+        if match:
+            return {key: normalize_space(value or "") for key, value in match.groupdict(default="").items()}
+    return {}
+
+
+def apply_address_parts(fields: dict[str, str], parts: dict[str, str], replace_bad_address: bool = False) -> None:
+    if not parts:
+        return
+    current_address = fields.get("listing_address", "")
+    if replace_bad_address and not looks_like_listing_address(current_address):
+        fields["listing_address"] = parts.get("listing_address", "")
+    else:
+        fields.setdefault("listing_address", parts.get("listing_address", ""))
+    for key in ["city", "state", "zip"]:
+        if parts.get(key):
+            fields.setdefault(key, parts[key])
+
+
 def ddg_search(query: str, source: str, limit: int) -> list[SearchResult]:
     url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query, "kl": "us-en"})
     body = fetch_url(url, allow_headless=False)
@@ -766,6 +802,8 @@ def extract_jsonld_text(markup: str) -> tuple[str, dict[str, str]]:
             name = obj.get("name")
             if isinstance(name, str) and not fields.get("raw_name"):
                 fields["raw_name"] = name
+            if isinstance(name, str):
+                apply_address_parts(fields, parse_address_parts(name), replace_bad_address=True)
             description = obj.get("description")
             if isinstance(description, str):
                 pieces.append(description)
@@ -791,6 +829,10 @@ def infer_fields(result: SearchResult, markup: str) -> Candidate:
     title_parts = [part.strip() for part in re.split(r"\s*[|–-]\s*", result.title) if part.strip()]
     if title_parts and not fields.get("listing_address"):
         fields["listing_address"] = title_parts[0]
+    if not looks_like_listing_address(fields.get("listing_address", "")):
+        apply_address_parts(fields, parse_address_parts(result.title), replace_bad_address=True)
+    if not looks_like_listing_address(fields.get("listing_address", "")) and fields.get("raw_name"):
+        apply_address_parts(fields, parse_address_parts(fields["raw_name"]), replace_bad_address=True)
 
     fields.setdefault("source_url", result.url)
     fields.setdefault("agent_name", extract_labeled_value(combined, ["Listing Agent", "Listed by", "Agent"]))
