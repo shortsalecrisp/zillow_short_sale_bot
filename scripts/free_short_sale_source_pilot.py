@@ -639,9 +639,14 @@ def parse_address_parts(value: str) -> dict[str, str]:
     compact = normalize_space(value)
     if not compact:
         return {}
-    compact = re.split(r"\s+\$\d[\d,]*(?:\.\d+)?|\s+\((?:for sale|active|pending)\)", compact, maxsplit=1, flags=re.I)[0]
+    compact = re.split(
+        r"\s+(?:for\s+)?\$\d[\d,]*(?:\.\d+)?|\s+\((?:for sale|active|pending)\)",
+        compact,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
     patterns = [
-        rf"^(?P<listing_address>\d{{1,6}}\s+.+?\b{STREET_SUFFIX_RE}\b)\s+"
+        rf"^(?P<listing_address>\d{{1,6}}\s+.+?\b{STREET_SUFFIX_RE}\b)(?:\s+in\s+|,?\s+)"
         r"(?P<city>[A-Z][A-Za-z .'-]{2,40}),\s*(?P<state>[A-Z]{2}),?\s*(?P<zip>\d{5}(?:-\d{4})?)?$",
         r"^(?P<listing_address>\d{1,6}\s+.+?),\s*"
         r"(?P<city>[A-Z][A-Za-z .'-]{2,40}),\s*(?P<state>[A-Z]{2}),?\s*(?P<zip>\d{5}(?:-\d{4})?)?$",

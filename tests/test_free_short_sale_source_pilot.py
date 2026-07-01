@@ -220,6 +220,33 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
 
+    def test_infer_fields_cleans_idx_title_with_in_city_and_price(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="3301 64th Street in Fort Smith, AR for $189,000",
+            snippet="",
+        )
+        markup = """
+        <body>
+          <div>Status: Active For Sale</div>
+          <div>Listed by: Marsha Rogers Realty, Inc.</div>
+          <div>Remarks: Potential Short Sale</div>
+          <a href="mailto:agent@example.com">Email</a>
+          <span>(479) 484-5588</span>
+        </body>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+        qualification = pilot.qualification_for_text(candidate.text)
+
+        self.assertEqual(candidate.fields["listing_address"], "3301 64th Street")
+        self.assertEqual(candidate.fields["city"], "Fort Smith")
+        self.assertEqual(candidate.fields["state"], "AR")
+        self.assertEqual(candidate.fields["agent_name"], "Marsha Rogers")
+        self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "")
+
     def test_required_review_fields_require_agent_address_and_short_sale_evidence(self):
         candidate = pilot.Candidate(
             source="idx_broker_pages",
