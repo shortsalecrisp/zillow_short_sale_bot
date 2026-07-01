@@ -179,7 +179,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             query="query",
             url="https://example.com/listing",
             title="Viewing Listing MLS# 7033072 - Broker",
-            snippet="Special Listing Conditions: Short Sale.",
+            snippet="Special Listing Conditions: Short Sale. Listing Agent: Maria Cahuenas.",
         )
         markup = """
         <script type="application/ld+json">
@@ -197,7 +197,51 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(candidate.fields["city"], "Casa Grande")
         self.assertEqual(candidate.fields["state"], "AZ")
         self.assertEqual(candidate.fields["zip"], "85122")
+        self.assertEqual(candidate.fields["agent_name"], "Maria Cahuenas")
         self.assertEqual(candidate.fields["phone"], "928-282-4166")
+
+    def test_infer_fields_extracts_jsonld_real_estate_agent_name(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="Special Listing Conditions: Short Sale.",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@context":"https://schema.org","@type":"RealEstateAgent",
+           "name":"Jane Smith"}
+        </script>
+        <body>For Sale. Special Listing Conditions: Short Sale.</body>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+
+    def test_required_review_fields_require_agent_address_and_short_sale_evidence(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street",
+            text="For Sale. Special Listing Conditions: Short Sale.",
+            fields={"listing_address": "123 Main Street", "city": "Atlanta", "state": "GA"},
+        )
+        qualification = pilot.qualification_for_text(candidate.text)
+
+        self.assertEqual(
+            pilot.required_review_field_failure(candidate, qualification),
+            "missing_listing_agent_name",
+        )
+
+        candidate.fields["agent_name"] = "Jane Smith"
+        self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "")
+
+    def test_agent_name_cleaner_rejects_brokerage_names(self):
+        self.assertEqual(pilot.clean_agent_name("West USA Realty"), "")
+        self.assertEqual(pilot.clean_agent_name("Listing Agent: Jane Smith Phone 404-555-1212"), "Jane Smith")
 
     def test_phone_regex_rejects_long_photo_timestamps(self):
         self.assertIsNone(pilot.PHONE_RE.search("20260512213414244719000000-o.jpg"))

@@ -221,6 +221,37 @@ EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)"
 )
+PERSON_TOKEN_RE = re.compile(r"[A-Z][A-Za-z.'-]{1,30}")
+BUSINESS_NAME_RE = re.compile(
+    r"\b(?:"
+    r"realty|realtor|real\s+estate|properties|property|brokerage|llc|inc|corp|"
+    r"company|group|team|associates|homes?|mortgage|bank|trust|services|"
+    r"partners|title|insurance|re/max|remax|coldwell|century|sotheby|compass|"
+    r"redfin|zillow|berkshire"
+    r")\b",
+    re.IGNORECASE,
+)
+GENERIC_NAME_TOKENS = {
+    "agent",
+    "agents",
+    "broker",
+    "brokers",
+    "listing",
+    "office",
+    "phone",
+    "mobile",
+    "cell",
+    "email",
+    "mls",
+    "dre",
+    "license",
+    "usa",
+}
+AGENT_LABEL_CONTEXT_RE = re.compile(
+    r"\b(?:listing\s+agent(?:s|\(s\))?|listed\s+by|listing\s+courtesy\s+of|"
+    r"courtesy\s+of|presented\s+by|agent\s*[:\-])\s*[:\-]?\s*(.{2,180})",
+    re.IGNORECASE,
+)
 STREET_SUFFIX_RE = (
     r"(?:avenue|ave|street|st|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|"
     r"circle|cir|way|place|pl|loop|trail|trl|parkway|pkwy|terrace|ter|highway|hwy|"
@@ -758,6 +789,76 @@ def looks_like_listing_address(address: str) -> bool:
     )
 
 
+def looks_like_person_name(value: str) -> bool:
+    compact = normalize_space(value).strip(" .:-")
+    if not compact or BUSINESS_NAME_RE.search(compact) or re.search(r"\d", compact):
+        return False
+    tokens = [token.strip(" .'") for token in compact.split()]
+    if len(tokens) < 2 or len(tokens) > 4:
+        return False
+    return not any(token.lower().strip(".") in GENERIC_NAME_TOKENS for token in tokens)
+
+
+def clean_agent_name(value: str) -> str:
+    compact = normalize_space(html.unescape(value or ""))
+    if not compact:
+        return ""
+    compact = re.sub(
+        r"(?i)^(?:by|agent|agents|listing\s+agent(?:s|\(s\))?|listed\s+by|"
+        r"listing\s+courtesy\s+of|courtesy\s+of|presented\s+by)\s*[:\-]?\s*",
+        "",
+        compact,
+    )
+    compact = re.split(
+        r"(?i)\b(?:phone|cell|mobile|email|license|lic\.?|dre|brokerage|broker|"
+        r"listing\s+office|office|mls|fax|website|provided\s+by|realty|realtor|"
+        r"real\s+estate|properties|brokerage|llc|inc|corp|company|group|team|"
+        r"associates|homes?|mortgage|bank|trust|services|partners|title|insurance)\b|"
+        r"[|•;,]|\.\s+(?=[{\"A-Z])",
+        compact,
+        maxsplit=1,
+    )[0]
+    compact = normalize_space(re.split(r"(?i)\s+(?:and|&|with)\s+", compact, maxsplit=1)[0]).strip(" .:-")
+    if looks_like_person_name(compact):
+        return compact
+
+    tokens = PERSON_TOKEN_RE.findall(compact)
+    for start in range(len(tokens)):
+        for length in range(min(4, len(tokens) - start), 1, -1):
+            candidate = " ".join(tokens[start : start + length]).strip(" .:-")
+            if looks_like_person_name(candidate):
+                return candidate
+    return ""
+
+
+def extract_agent_name(text: str) -> str:
+    for match in AGENT_LABEL_CONTEXT_RE.finditer(text):
+        name = clean_agent_name(match.group(1))
+        if name:
+            return name
+    return ""
+
+
+def jsonld_type_names(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value.lower()}
+    if isinstance(value, list):
+        return {str(item).lower() for item in value}
+    return set()
+
+
+def required_review_field_failure(candidate: Candidate, qualification: Qualification) -> str:
+    agent_name = clean_agent_name(candidate.fields.get("agent_name", ""))
+    if not agent_name:
+        return "missing_listing_agent_name"
+    candidate.fields["agent_name"] = agent_name
+    if not looks_like_listing_address(candidate.fields.get("listing_address", "")):
+        return "missing_listing_detail_address"
+    if qualification.status != "qualified" or not normalize_space(qualification.evidence):
+        return "missing_short_sale_confirmation"
+    return ""
+
+
 def candidate_matches_requested_state(candidate: Candidate, requested_state: str) -> bool:
     state = normalize_space(candidate.fields.get("state", "")).upper()
     return bool(state) and state == requested_state.upper()
@@ -803,6 +904,11 @@ def extract_jsonld_text(markup: str) -> tuple[str, dict[str, str]]:
             name = obj.get("name")
             if isinstance(name, str) and not fields.get("raw_name"):
                 fields["raw_name"] = name
+            type_names = jsonld_type_names(obj.get("@type"))
+            if type_names.intersection({"person", "realestateagent", "real estate agent"}):
+                agent_name = clean_agent_name(str(name or ""))
+                if agent_name:
+                    fields.setdefault("agent_name", agent_name)
             if isinstance(name, str):
                 apply_address_parts(fields, parse_address_parts(name), replace_bad_address=True)
             description = obj.get("description")
@@ -836,7 +942,7 @@ def infer_fields(result: SearchResult, markup: str) -> Candidate:
         apply_address_parts(fields, parse_address_parts(fields["raw_name"]), replace_bad_address=True)
 
     fields.setdefault("source_url", result.url)
-    fields.setdefault("agent_name", extract_labeled_value(combined, ["Listing Agent", "Listed by", "Agent"]))
+    fields.setdefault("agent_name", extract_agent_name(combined))
     fields.setdefault("broker_name", extract_labeled_value(combined, ["Broker", "Brokerage", "Listing Office"]))
 
     phone_match = PHONE_RE.search(combined)
@@ -903,6 +1009,7 @@ def candidate_to_row(
     agent_rows: str,
 ) -> list[str]:
     fields = candidate.fields
+    fields["agent_name"] = clean_agent_name(fields.get("agent_name", ""))
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     first_name, last_name = split_agent_name(fields.get("agent_name", ""))
     synthetic_zpid = stable_synthetic_zpid(
@@ -1227,7 +1334,28 @@ def run(args: argparse.Namespace) -> None:
                         evidence=qualification.evidence[:220],
                     )
                     if args.include_rejected:
-                        query_rows.append(candidate_to_row(candidate, qualification, "", "", ""))
+                        log_event(
+                            "pilot_rejected_row_not_written",
+                            state=state,
+                            source=source,
+                            url=result.url,
+                            reason="missing_short_sale_confirmation",
+                        )
+                    continue
+                required_failure = required_review_field_failure(candidate, qualification)
+                if required_failure:
+                    stats["rejected"] += 1
+                    query_stats["rejected"] += 1
+                    log_event(
+                        "pilot_candidate_rejected",
+                        state=state,
+                        source=source,
+                        url=result.url,
+                        reason=required_failure,
+                        evidence=candidate.fields.get("agent_name", "")[:220]
+                        or candidate.fields.get("listing_address", "")[:220]
+                        or qualification.evidence[:220],
+                    )
                     continue
                 dup_status, dup_key, matched = duplicate_status(candidate, existing)
                 if dup_status in {"duplicate_listing", "duplicate_agent_phone"}:
