@@ -191,12 +191,37 @@ SHORT_SALE_SALE_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
-ACTIVE_RE = re.compile(
-    r"\b(?:for sale|active|homeStatus[\"']?\s*[:=]\s*[\"']?FOR_SALE|listingStatus[\"']?\s*[:=]\s*[\"']?ACTIVE)\b",
+CURRENT_ACTIVE_STATUS_RE = re.compile(
+    r"\b(?:"
+    r"(?:source\s+listing\s+status|listing\s+status|status)\s*[:#-]?\s*active\b(?!\s+(?:under\s+contract|contingent))|"
+    r"STATUS\s+Active\b(?!\s+(?:under\s+contract|contingent))|"
+    r"Share\s+Active\b|"
+    r"currently\s+listed\s+for\s+sale\b|"
+    r"homeStatus[\"']?\s*[:=]\s*[\"']?FOR_SALE[\"']?|"
+    r"listingStatus[\"']?\s*[:=]\s*[\"']?ACTIVE[\"']?"
+    r")\b",
     re.IGNORECASE,
 )
 
-INACTIVE_RE = re.compile(r"\b(?:sold|off market|contingent|pending)\b", re.IGNORECASE)
+NON_CURRENT_STATUS_RE = re.compile(
+    r"\b(?:"
+    r"Off\s+Market|"
+    r"Last\s+Sold\s+Price|"
+    r"Listing\s+removed|"
+    r"Share\s+Closed|"
+    r"Sold\s*-\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d{1,2}/\d{1,2}/\d{2,4})|"
+    r"Sold\s+Listed\s+by|"
+    r"Sold\s+For\b|"
+    r"Sold\b.{0,80}\bLast\s+updated\b|"
+    r"(?:Source\s+Listing\s+Status|Listing\s+Status|Status)\s*[:#-]?\s*"
+    r"(?:Under\s+Agreement|Temporarily\s+Withdrawn|Active\s+Under\s+Contract|Under\s+Contract|"
+    r"Coming\s+Soon|Pending|Contingent|Closed|Sold)\b|"
+    r"Short\s+Sale\b.{0,260}\bPending\b|"
+    r"\bComing\s+Soon\b.{0,160}\b(?:Beds?|Baths?|MLS|Property\s+Tax)\b|"
+    r"\bActive\s+Under\s+Contract\b"
+    r")",
+    re.IGNORECASE,
+)
 
 DISQUALIFY_PATTERNS = [
     re.compile(r"\bis\s+short\s+sale\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
@@ -376,6 +401,17 @@ def split_agent_name(full_name: str) -> tuple[str, str]:
     return " ".join(parts[:-1]), parts[-1]
 
 
+def current_listing_status(text: str) -> tuple[str, str]:
+    compact = normalize_space(html.unescape(text or ""))
+    non_current_match = NON_CURRENT_STATUS_RE.search(compact)
+    if non_current_match:
+        return "not_current", non_current_match.group(0)
+    active_match = CURRENT_ACTIVE_STATUS_RE.search(compact)
+    if active_match:
+        return "active", active_match.group(0)
+    return "unknown", ""
+
+
 def qualification_for_text(text: str) -> Qualification:
     text = html.unescape(text or "")
     compact = normalize_space(text)
@@ -386,8 +422,7 @@ def qualification_for_text(text: str) -> Qualification:
             disqualified.append(match.group(0))
 
     short_sale_match = SHORT_SALE_LISTING_RE.search(compact)
-    active_match = ACTIVE_RE.search(compact)
-    inactive_match = INACTIVE_RE.search(compact)
+    listing_status, listing_status_evidence = current_listing_status(compact)
 
     if not short_sale_match:
         return Qualification(
@@ -414,13 +449,13 @@ def qualification_for_text(text: str) -> Qualification:
             excerpt_around(compact, verified_match.start(), verified_match.end()),
             "; ".join(disqualified),
         )
-    if inactive_match and not active_match:
+    if listing_status != "active":
         return Qualification(
             "rejected",
-            "not_active_for_sale",
+            "not_active_for_sale" if listing_status == "not_current" else "missing_active_listing_status",
             extract_short_sale_evidence_type(compact),
             excerpt_around(compact, verified_match.start(), verified_match.end()),
-            inactive_match.group(0),
+            listing_status_evidence,
         )
 
     return Qualification(
