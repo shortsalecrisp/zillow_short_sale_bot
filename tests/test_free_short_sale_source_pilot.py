@@ -363,6 +363,28 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(row[16], "review")
         self.assertIn("agent contact is missing or partial", row[15])
 
+    def test_phone_and_email_without_agent_name_still_needs_review(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street",
+            text="For Sale. Special Listing Conditions: Short Sale.",
+            fields={
+                "phone": "404-555-1212",
+                "email": "support@example.com",
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+            },
+        )
+        qualification = pilot.qualification_for_text(candidate.text)
+
+        row = pilot.candidate_to_row(candidate, qualification, "", "", "")
+
+        self.assertEqual(row[16], "review")
+        self.assertIn("agent contact is missing or partial", row[15])
+
     def test_agent_name_cleaner_rejects_brokerage_names(self):
         self.assertEqual(pilot.clean_agent_name("West USA Realty"), "")
         self.assertEqual(pilot.clean_agent_name("Brokered by Ben Zeller"), "Ben Zeller")

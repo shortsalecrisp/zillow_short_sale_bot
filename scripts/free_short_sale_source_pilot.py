@@ -1190,7 +1190,7 @@ def candidate_to_row(
     queue_address = payload.get("address", "")
     has_phone = bool(normalize_phone(fields.get("phone", "")))
     has_email = is_valid_email(fields.get("email", ""))
-    has_contact = has_phone and has_email
+    has_contact = bool(first_name and last_name and has_phone and has_email)
     import_ready = "yes" if qualification.status == "qualified" and not matched and not agent_rows and has_contact else "review"
     promotion_status = "pilot_review"
     promotion_notes = (
