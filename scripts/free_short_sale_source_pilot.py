@@ -124,7 +124,11 @@ DEFAULT_STATES = [
     state for state in STATE_QUERY_TERMS if state not in DEFAULT_EXCLUDED_STATES
 ]
 
-SOURCE_QUERIES = [
+ALL_SOURCE_QUERIES = [
+    (
+        "idx_broker_pages",
+        '"{state}" ("Special Listing Conditions: Short Sale" OR "Is Short Sale: Yes" OR "Potential Short Sale") "For Sale" -zillow -trulia -realtor.com -redfin.com',
+    ),
     (
         "realtor.com",
         'site:realtor.com/realestateandhomes-detail "{state}" "Short Sale"',
@@ -137,15 +141,32 @@ SOURCE_QUERIES = [
         "homes.com",
         'site:homes.com/property "{state}" "Short Sale"',
     ),
-    (
-        "idx_broker_pages",
-        '"{state}" ("Special Listing Conditions: Short Sale" OR "Is Short Sale: Yes" OR "Potential Short Sale") "For Sale" -zillow -trulia -realtor.com -redfin.com',
-    ),
 ]
+ALL_SOURCE_QUERY_MAP = dict(ALL_SOURCE_QUERIES)
+DEFAULT_SOURCE_BUCKETS = ("idx_broker_pages", "realtor.com")
+
+
+def configured_source_queries() -> list[tuple[str, str]]:
+    raw = os.getenv("FREE_SOURCE_PILOT_SOURCE_BUCKETS", ",".join(DEFAULT_SOURCE_BUCKETS))
+    buckets = []
+    seen = set()
+    for bucket in raw.split(","):
+        source = bucket.strip()
+        if not source or source in seen or source not in ALL_SOURCE_QUERY_MAP:
+            continue
+        buckets.append(source)
+        seen.add(source)
+    if not buckets:
+        buckets = list(DEFAULT_SOURCE_BUCKETS)
+    return [(source, ALL_SOURCE_QUERY_MAP[source]) for source in buckets]
+
+
+SOURCE_QUERIES = configured_source_queries()
 
 SEARCH_ENGINE = os.getenv("FREE_SOURCE_PILOT_SEARCH_ENGINE", "auto").lower()
 CSE_API_KEY = os.getenv("CS_API_KEY") or os.getenv("GOOGLE_API_KEY")
 CSE_CX = os.getenv("CS_CX") or os.getenv("GOOGLE_CX")
+CSE_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DATE_RESTRICT", "d1").strip()
 CONTACT_RESEARCH_RESULTS = int(os.getenv("FREE_SOURCE_PILOT_CONTACT_RESEARCH_RESULTS", "3"))
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
@@ -905,15 +926,16 @@ def cse_search(query: str, source: str, limit: int) -> list[SearchResult]:
     start = 1
     while len(results) < limit and start <= 91:
         num = min(10, limit - len(results))
-        params = urllib.parse.urlencode(
-            {
-                "q": query,
-                "key": CSE_API_KEY,
-                "cx": CSE_CX,
-                "num": num,
-                "start": start,
-            }
-        )
+        request_params = {
+            "q": query,
+            "key": CSE_API_KEY,
+            "cx": CSE_CX,
+            "num": num,
+            "start": start,
+        }
+        if CSE_DATE_RESTRICT:
+            request_params["dateRestrict"] = CSE_DATE_RESTRICT
+        params = urllib.parse.urlencode(request_params)
         req = urllib.request.Request(
             "https://www.googleapis.com/customsearch/v1?" + params,
             headers={"User-Agent": USER_AGENT},
@@ -1507,8 +1529,10 @@ def run(args: argparse.Namespace) -> None:
         "pilot_run_start",
         states=args.states,
         source_count=len(SOURCE_QUERIES),
+        source_buckets=[source for source, _ in SOURCE_QUERIES],
         results_per_query=args.results_per_query,
         search_engine=SEARCH_ENGINE,
+        cse_date_restrict=CSE_DATE_RESTRICT,
         cse_configured=bool(CSE_API_KEY and CSE_CX),
         dry_run=args.dry_run,
     )

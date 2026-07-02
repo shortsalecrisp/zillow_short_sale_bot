@@ -128,14 +128,22 @@ services:
         value: "true"
       - key: FREE_SOURCE_PILOT_RESULTS_PER_QUERY
         value: "10"
+      - key: FREE_SOURCE_PILOT_RUN_HOUR
+        value: "9"
+      - key: FREE_SOURCE_PILOT_RUN_MINUTE
+        value: "0"
       - key: FREE_SOURCE_PILOT_SEARCH_ENGINE
-        value: auto
+        value: cse
       - key: FREE_SOURCE_PILOT_SLEEP_SECONDS
         value: "1.0"
+      - key: FREE_SOURCE_PILOT_SOURCE_BUCKETS
+        value: idx_broker_pages,realtor.com
+      - key: FREE_SOURCE_PILOT_DATE_RESTRICT
+        value: d1
       - key: FREE_SOURCE_PILOT_STARTUP_CATCHUP
         value: "false"
       - key: FREE_SOURCE_PILOT_STATES
-        value: AL,AK,AZ,AR,CA,CO,CT,DE,FL,GA,HI,ID,IL,IN,IA,KS,KY,LA,ME,MD,MA,MN,MS,MO,MT,NE,NV,NH,NJ,NM,NY,NC,ND,OH,OK,OR,PA,RI,SC,SD,TN,TX,UT,VT,VA,WA,WV,WI,WY
+        value: AL,AK,AZ,AR,CA,CO,CT,DE,FL,GA,HI,ID,IL,IN,IA,KS,KY,LA,ME,MD,MA,MI,MN,MS,MO,MT,NE,NV,NH,NJ,NM,NY,NC,ND,OH,OK,OR,PA,RI,SC,SD,TN,TX,UT,VT,VA,WA,WV,WI,WY
       - key: FREE_SOURCE_PILOT_TAB
         value: Lead Source Pilot
       - key: FU_LOOKBACK_ROWS

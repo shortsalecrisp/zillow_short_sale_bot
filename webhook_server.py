@@ -224,6 +224,8 @@ else:
     ]
 FREE_SOURCE_PILOT_RESULTS_PER_QUERY = int(os.getenv("FREE_SOURCE_PILOT_RESULTS_PER_QUERY", "10"))
 FREE_SOURCE_PILOT_SLEEP_SECONDS = float(os.getenv("FREE_SOURCE_PILOT_SLEEP_SECONDS", "1.0"))
+FREE_SOURCE_PILOT_RUN_HOUR = int(os.getenv("FREE_SOURCE_PILOT_RUN_HOUR", "9"))
+FREE_SOURCE_PILOT_RUN_MINUTE = int(os.getenv("FREE_SOURCE_PILOT_RUN_MINUTE", "0"))
 FREE_SOURCE_PILOT_STARTUP_CATCHUP = os.getenv("FREE_SOURCE_PILOT_STARTUP_CATCHUP", "false").lower() == "true"
 FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH = os.getenv(
     "FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH",
@@ -744,15 +746,23 @@ def _process_apify_coverage_backstop_callback(run_time: datetime) -> None:
 
 
 def _free_source_pilot_due(run_time: datetime) -> bool:
-    return FREE_SOURCE_PILOT_ENABLED
+    if not FREE_SOURCE_PILOT_ENABLED:
+        return False
+    local_dt = run_time.astimezone(SCHEDULER_TZ)
+    return local_dt.hour == FREE_SOURCE_PILOT_RUN_HOUR and local_dt.minute == FREE_SOURCE_PILOT_RUN_MINUTE
 
 
 def _next_free_source_pilot_run(now: datetime) -> datetime:
     now = now.astimezone(SCHEDULER_TZ)
-    base = now.replace(minute=0, second=0, microsecond=0)
-    if now < base + timedelta(seconds=1):
-        return base
-    return base + timedelta(hours=1)
+    candidate = now.replace(
+        hour=FREE_SOURCE_PILOT_RUN_HOUR,
+        minute=FREE_SOURCE_PILOT_RUN_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if now <= candidate:
+        return candidate
+    return candidate + timedelta(days=1)
 
 
 def _free_source_pilot_hour_key(run_time: datetime) -> str:
@@ -901,35 +911,37 @@ def _process_free_source_pilot_callback(run_time: datetime) -> None:
 def _ensure_free_source_pilot_scheduler_thread() -> None:
     global _free_source_pilot_scheduler_thread, _free_source_pilot_scheduler_stop
     if not FREE_SOURCE_PILOT_ENABLED:
-        logger.info("free-source-pilot: hourly scheduler disabled")
+        logger.info("free-source-pilot: daily scheduler disabled")
         return
     with _free_source_pilot_scheduler_start_lock:
         if _free_source_pilot_scheduler_thread and _free_source_pilot_scheduler_thread.is_alive():
-            logger.info("free-source-pilot: hourly scheduler already started")
+            logger.info("free-source-pilot: daily scheduler already started")
             return
         stop_event = threading.Event()
         _free_source_pilot_scheduler_stop = stop_event
 
         def _loop() -> None:
             logger.info(
-                "free-source-pilot: hourly scheduler thread starting states_count=%s all_states=%s",
+                "free-source-pilot: daily scheduler thread starting states_count=%s all_states=%s run_time=%02d:%02d",
                 len(FREE_SOURCE_PILOT_STATES),
                 len(FREE_SOURCE_PILOT_STATES) == len(ALL_US_STATES),
+                FREE_SOURCE_PILOT_RUN_HOUR,
+                FREE_SOURCE_PILOT_RUN_MINUTE,
             )
             while not stop_event.is_set():
                 now = datetime.now(tz=SCHEDULER_TZ)
                 next_run = _next_free_source_pilot_run(now)
                 sleep_secs = max(0, (next_run - now).total_seconds())
                 logger.info(
-                    "free-source-pilot: hourly scheduler sleeping %.2fs until %s",
+                    "free-source-pilot: daily scheduler sleeping %.2fs until %s",
                     sleep_secs,
                     next_run.isoformat(),
                 )
                 if stop_event.wait(timeout=sleep_secs):
                     break
-                logger.info("free-source-pilot: hourly scheduler wake run_time=%s", next_run.isoformat())
+                logger.info("free-source-pilot: daily scheduler wake run_time=%s", next_run.isoformat())
                 _process_free_source_pilot_callback(next_run)
-            logger.info("free-source-pilot: hourly scheduler thread stopped")
+            logger.info("free-source-pilot: daily scheduler thread stopped")
 
         _free_source_pilot_scheduler_thread = threading.Thread(
             target=_loop,

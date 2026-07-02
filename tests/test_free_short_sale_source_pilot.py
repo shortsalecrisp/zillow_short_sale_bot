@@ -1,7 +1,10 @@
 import contextlib
 import io
+import json
+import os
 import sys
 import unittest
+import urllib.parse
 from pathlib import Path
 
 
@@ -257,6 +260,29 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(pilot.DEFAULT_STATES), 50)
         self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
         self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
+
+    def test_default_source_buckets_are_idx_and_realtor(self):
+        old_buckets = os.environ.pop("FREE_SOURCE_PILOT_SOURCE_BUCKETS", None)
+        try:
+            sources = [source for source, _ in pilot.configured_source_queries()]
+        finally:
+            if old_buckets is not None:
+                os.environ["FREE_SOURCE_PILOT_SOURCE_BUCKETS"] = old_buckets
+
+        self.assertEqual(sources, ["idx_broker_pages", "realtor.com"])
+
+    def test_configured_source_buckets_ignore_unknowns_and_duplicates(self):
+        old_buckets = os.environ.get("FREE_SOURCE_PILOT_SOURCE_BUCKETS")
+        os.environ["FREE_SOURCE_PILOT_SOURCE_BUCKETS"] = "realtor.com,unknown,realtor.com,homes.com"
+        try:
+            sources = [source for source, _ in pilot.configured_source_queries()]
+        finally:
+            if old_buckets is None:
+                os.environ.pop("FREE_SOURCE_PILOT_SOURCE_BUCKETS", None)
+            else:
+                os.environ["FREE_SOURCE_PILOT_SOURCE_BUCKETS"] = old_buckets
+
+        self.assertEqual(sources, ["realtor.com", "homes.com"])
 
     def test_source_result_allowed_rejects_redfin_collection_and_blog_pages(self):
         collection = pilot.SearchResult(
@@ -671,6 +697,44 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.CSE_CX = old_cx
             pilot.cse_search = old_cse_search
             pilot.ddg_search = old_ddg_search
+
+    def test_cse_search_uses_configured_date_restrict(self):
+        old_key = pilot.CSE_API_KEY
+        old_cx = pilot.CSE_CX
+        old_date_restrict = pilot.CSE_DATE_RESTRICT
+        old_urlopen = pilot.urllib.request.urlopen
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"items": []}).encode("utf-8")
+
+        def fake_urlopen(req, timeout=30):
+            captured["url"] = req.full_url
+            return FakeResponse()
+
+        try:
+            pilot.CSE_API_KEY = "key"
+            pilot.CSE_CX = "cx"
+            pilot.CSE_DATE_RESTRICT = "d1"
+            pilot.urllib.request.urlopen = fake_urlopen
+
+            pilot.cse_search("query", "source", 10)
+
+            parsed = urllib.parse.urlparse(captured["url"])
+            params = urllib.parse.parse_qs(parsed.query)
+            self.assertEqual(params["dateRestrict"], ["d1"])
+        finally:
+            pilot.CSE_API_KEY = old_key
+            pilot.CSE_CX = old_cx
+            pilot.CSE_DATE_RESTRICT = old_date_restrict
+            pilot.urllib.request.urlopen = old_urlopen
 
 
 if __name__ == "__main__":

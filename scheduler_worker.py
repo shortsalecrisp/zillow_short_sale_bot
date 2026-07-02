@@ -16,7 +16,7 @@ from datetime import datetime
 from types import FrameType
 from typing import Optional
 
-from bot_min import SCHEDULER_TZ, WORK_END, WORK_START, run_hourly_scheduler
+from bot_min import SCHEDULER_TZ, run_hourly_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,6 +95,14 @@ def _free_source_pilot_enabled() -> bool:
     return os.getenv("FREE_SOURCE_PILOT_ENABLED", "true").lower() == "true"
 
 
+def _free_source_pilot_run_hour() -> int:
+    return int(os.getenv("FREE_SOURCE_PILOT_RUN_HOUR", "9"))
+
+
+def _free_source_pilot_run_minute() -> int:
+    return int(os.getenv("FREE_SOURCE_PILOT_RUN_MINUTE", "0"))
+
+
 def _free_source_pilot_states() -> list[str]:
     configured = [
         state.strip().upper()
@@ -126,7 +134,7 @@ def _free_source_pilot_callback(run_time: datetime) -> None:
     if not _free_source_pilot_enabled():
         return
     local_dt = run_time.astimezone(SCHEDULER_TZ)
-    if local_dt.hour < WORK_START or local_dt.hour > WORK_END:
+    if local_dt.hour != _free_source_pilot_run_hour() or local_dt.minute != _free_source_pilot_run_minute():
         return
     if not _free_source_pilot_lock.acquire(blocking=False):
         logger.info("free-source-pilot: skipped overlapping worker run")

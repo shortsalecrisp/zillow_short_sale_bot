@@ -230,12 +230,28 @@ def test_free_source_pilot_defaults_include_all_states():
     assert len(webhook_server.FREE_SOURCE_PILOT_STATES) == 50
 
 
-def test_free_source_pilot_next_run_ignores_business_hours():
+def test_free_source_pilot_next_run_uses_daily_9am_slot():
     now = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 21, 12, 29))
 
     next_run = webhook_server._next_free_source_pilot_run(now)
 
-    assert next_run == webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 22, 0, 0))
+    assert next_run == webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 2, 9, 0, 0))
+
+
+def test_free_source_pilot_next_run_returns_today_before_9am():
+    now = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 8, 12, 29))
+
+    next_run = webhook_server._next_free_source_pilot_run(now)
+
+    assert next_run == webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 9, 0, 0))
+
+
+def test_free_source_pilot_due_only_at_configured_daily_slot():
+    due = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 9, 0, 0))
+    not_due = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 10, 0, 0))
+
+    assert webhook_server._free_source_pilot_due(due)
+    assert not webhook_server._free_source_pilot_due(not_due)
 
 
 def test_state_search_uses_shared_default_fetch_limit(monkeypatch):

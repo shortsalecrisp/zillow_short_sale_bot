@@ -69,14 +69,16 @@ then calls the detail task for selected unseen rows. Defaults:
 ## Free-source lead pilot
 
 The free-source pilot checks public search results for non-Zillow short sale listings and writes review candidates to
-the `Lead Source Pilot` tab. It runs from the same hourly scheduler as the Zillow scraper: every top-of-hour slot from
-8:00 AM through the final 8:00 PM ET run, seven days per week when `SCHEDULER_INCLUDE_WEEKENDS=true`.
+the `Lead Source Pilot` tab. It runs once per day by default at 9:00 AM ET, scanning the configured source buckets
+across all 50 states.
 
 The pilot searches the configured source queries with Google Custom Search when `GOOGLE_API_KEY`/`CS_API_KEY` and
-`GOOGLE_CX`/`CS_CX` are present, then falls back to DuckDuckGo HTML search when allowed. It fetches each result page,
-uses a bounded Playwright fallback for allowed portal detail pages that return HTTP 403/429/451, keeps only active
-listing pages with listing-text short sale evidence, and appends qualified rows after each source query so partial
-hourly runs still leave observable output. Render logs should include `pilot_query_start`, `pilot_query_results`,
+`GOOGLE_CX`/`CS_CX` are present. Production is configured to use Google CSE only, with `dateRestrict=d1`, so the
+daily run spends about 100 search calls on the two selected buckets: `idx_broker_pages` and `realtor.com`. It fetches
+each result page, uses a bounded Playwright fallback for allowed portal detail pages that return HTTP 403/429/451,
+keeps only active listing pages with listing-text short sale evidence, and appends qualified rows after each source
+query so partial daily runs still leave observable output. Render logs should include `pilot_query_start`,
+`pilot_query_results`,
 `pilot_headless_fetch_*` when browser fallback is used, `pilot_candidate_qualified` or rejection/duplicate events,
 `pilot_query_done`, and a final `pilot_run_done` stats record.
 
@@ -98,8 +100,12 @@ Configuration:
 * `FREE_SOURCE_PILOT_HEADLESS_BUDGET=12`
 * `FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET=4`
 * `FREE_SOURCE_PILOT_RESULTS_PER_QUERY=10`
+* `FREE_SOURCE_PILOT_RUN_HOUR=9`
+* `FREE_SOURCE_PILOT_RUN_MINUTE=0`
 * `FREE_SOURCE_PILOT_SLEEP_SECONDS=1.0`
-* `FREE_SOURCE_PILOT_SEARCH_ENGINE=auto`
+* `FREE_SOURCE_PILOT_SEARCH_ENGINE=cse`
+* `FREE_SOURCE_PILOT_SOURCE_BUCKETS=idx_broker_pages,realtor.com`
+* `FREE_SOURCE_PILOT_DATE_RESTRICT=d1`
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main
