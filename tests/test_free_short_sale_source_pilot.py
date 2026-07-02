@@ -64,18 +64,17 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         result = pilot.qualification_for_text(text)
 
         self.assertEqual(result.status, "rejected")
-        self.assertEqual(result.failure_reason, "missing_active_listing_status")
+        self.assertEqual(result.failure_reason, "missing_current_listing_status")
 
-    def test_qualification_rejects_pending_short_sale_listing(self):
+    def test_qualification_accepts_pending_short_sale_listing(self):
         text = (
-            "Listed by Jane Agent. Short Sale. Pending $229,900. "
+            "Listed by Jane Agent. Status: Pending. "
             "Property description: Potential short sale subject to lender approval."
         )
 
         result = pilot.qualification_for_text(text)
 
-        self.assertEqual(result.status, "rejected")
-        self.assertEqual(result.failure_reason, "not_active_for_sale")
+        self.assertEqual(result.status, "qualified")
 
     def test_qualification_rejects_off_market_short_sale_listing(self):
         text = (
@@ -86,18 +85,17 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         result = pilot.qualification_for_text(text)
 
         self.assertEqual(result.status, "rejected")
-        self.assertEqual(result.failure_reason, "not_active_for_sale")
+        self.assertEqual(result.failure_reason, "not_current_listing")
 
-    def test_qualification_rejects_coming_soon_short_sale_listing(self):
+    def test_qualification_accepts_coming_soon_short_sale_listing(self):
         text = (
-            "450 Stardust Court. Townhouse | Coming Soon 3 Beds 3 Total Baths. "
+            "450 Stardust Court. Status: Coming Soon. "
             "Remarks: Potential short sale subject to lender approval."
         )
 
         result = pilot.qualification_for_text(text)
 
-        self.assertEqual(result.status, "rejected")
-        self.assertEqual(result.failure_reason, "not_active_for_sale")
+        self.assertEqual(result.status, "qualified")
 
     def test_qualification_rejects_closed_short_sale_listing(self):
         text = (
@@ -108,7 +106,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         result = pilot.qualification_for_text(text)
 
         self.assertEqual(result.status, "rejected")
-        self.assertEqual(result.failure_reason, "not_active_for_sale")
+        self.assertEqual(result.failure_reason, "not_current_listing")
 
     def test_qualification_does_not_treat_assessment_pending_as_listing_pending(self):
         text = (
@@ -119,6 +117,49 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         result = pilot.qualification_for_text(text)
 
         self.assertEqual(result.status, "qualified")
+
+    def test_qualification_accepts_active_under_contract_short_sale_listing(self):
+        text = (
+            "Status Active Under Contract. "
+            "Remarks: Potential short sale subject to lender approval."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "qualified")
+
+    def test_qualification_rejects_approved_price_short_sale(self):
+        text = (
+            "Status: Pending. "
+            "Property description: SHORT SALE APPROVED PRICE. Buyer to verify all information."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+
+    def test_qualification_rejects_potential_short_sale_no(self):
+        text = (
+            "Status Active Under Contract. Contract Information - Potential Short Sale No. "
+            "Financial Status - Potential Short Sale No."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+
+    def test_qualification_rejects_special_listing_conditions_short_sale_no(self):
+        text = (
+            "Status: Closed. "
+            "Special Listing Conditions Short Sale No, Standard."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
 
     def test_duplicate_status_flags_existing_agent_phone_even_new_address(self):
         main_rows = [
@@ -338,6 +379,33 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
 
+    def test_infer_fields_uses_embedded_realtor_flags_and_description(self):
+        result = pilot.SearchResult(
+            source="realtor.com",
+            query="query",
+            url="https://www.realtor.com/realestateandhomes-detail/17-Pine-St_Bellingham_MA_02019_M38220-61048",
+            title="17 Pine St, Bellingham, MA 02019",
+            snippet="",
+        )
+        markup = r"""
+        <script>
+        {"flags":{"is_pending":true,"is_short_sale":true},
+         "description":"Cute ranch. SHORT SALE APPROVED PRICE.",
+         "opcity_lead_attributes":{"phones":[{"number":"(508)594-3513"}]}}
+        </script>
+        <body>
+          <img src="https://ap.rdcpix.com/photo-m1567719840s.jpg" />
+          Listed by Amber Cadorette
+        </body>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+        qualification = pilot.qualification_for_text(candidate.text)
+
+        self.assertEqual(candidate.fields["phone"], "(508)594-3513")
+        self.assertEqual(qualification.status, "rejected")
+        self.assertEqual(qualification.failure_reason, "disqualifying_short_sale_text")
+
     def test_clean_listing_address_strips_null_and_city_state_zip(self):
         self.assertEqual(
             pilot.clean_listing_address("679 null Bridger Drive null", "Colorado Springs", "CO", "80909"),
@@ -453,6 +521,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(pilot.clean_agent_name("Ben Zeller Brokered by"), "Ben Zeller")
         self.assertEqual(pilot.clean_agent_name("Shown By Listed By"), "")
         self.assertEqual(pilot.clean_agent_name("Listing Agent: Jane Smith Phone 404-555-1212"), "Jane Smith")
+        self.assertEqual(pilot.clean_agent_name("Southern Missouri Regional"), "")
 
     def test_duplicate_listing_status_checks_address_before_contact_research(self):
         main_rows = [
@@ -527,6 +596,10 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
     def test_phone_regex_rejects_long_photo_timestamps(self):
         self.assertIsNone(pilot.PHONE_RE.search("20260512213414244719000000-o.jpg"))
         self.assertEqual(pilot.PHONE_RE.search("(404) 555-1212").group(0), "(404) 555-1212")
+        self.assertEqual(
+            pilot.first_contact_phone_match("photo-m1567719840s.jpg Phone: (508)594-3513").group(0),
+            "(508)594-3513",
+        )
 
     def test_search_web_prefers_google_cse_when_configured(self):
         old_engine = pilot.SEARCH_ENGINE

@@ -191,14 +191,16 @@ SHORT_SALE_SALE_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
-CURRENT_ACTIVE_STATUS_RE = re.compile(
+CURRENT_MARKET_STATUS_RE = re.compile(
     r"\b(?:"
-    r"(?:source\s+listing\s+status|listing\s+status|status)\s*[:#-]?\s*active\b(?!\s+(?:under\s+contract|contingent))|"
-    r"STATUS\s+Active\b(?!\s+(?:under\s+contract|contingent))|"
+    r"(?:source\s+listing\s+status|listing\s+status|mls\s+status|status)\s*[:#-]?\s*"
+    r"(?:active(?:\s+under\s+contract)?|pending|under\s+agreement|under\s+contract|contingent|coming\s+soon)\b|"
+    r"STATUS\s+(?:Active(?:\s+Under\s+Contract)?|Pending|Under\s+Agreement|Under\s+Contract|Contingent|Coming\s+Soon)\b|"
     r"Share\s+Active\b|"
     r"currently\s+listed\s+for\s+sale\b|"
     r"homeStatus[\"']?\s*[:=]\s*[\"']?FOR_SALE[\"']?|"
-    r"listingStatus[\"']?\s*[:=]\s*[\"']?ACTIVE[\"']?"
+    r"listingStatus[\"']?\s*[:=]\s*[\"']?(?:ACTIVE|PENDING|CONTINGENT|COMING_SOON)[\"']?|"
+    r"MLS#\s*\d+.{0,120}\bActive\b"
     r")\b",
     re.IGNORECASE,
 )
@@ -209,16 +211,14 @@ NON_CURRENT_STATUS_RE = re.compile(
     r"Last\s+Sold\s+Price|"
     r"Listing\s+removed|"
     r"Share\s+Closed|"
+    r"LISTING\s+CLOSED\b|"
     r"Sold\s*-\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d{1,2}/\d{1,2}/\d{2,4})|"
     r"Sold\s+Listed\s+by|"
     r"Sold\s+For\b|"
+    r"Sold\s+Date\b|"
     r"Sold\b.{0,80}\bLast\s+updated\b|"
-    r"(?:Source\s+Listing\s+Status|Listing\s+Status|Status)\s*[:#-]?\s*"
-    r"(?:Under\s+Agreement|Temporarily\s+Withdrawn|Active\s+Under\s+Contract|Under\s+Contract|"
-    r"Coming\s+Soon|Pending|Contingent|Closed|Sold)\b|"
-    r"Short\s+Sale\b.{0,260}\bPending\b|"
-    r"\bComing\s+Soon\b.{0,160}\b(?:Beds?|Baths?|MLS|Property\s+Tax)\b|"
-    r"\bActive\s+Under\s+Contract\b"
+    r"(?:Source\s+Listing\s+Status|Listing\s+Status|Mls\s+Status|Status)\s*[:#-]?\s*"
+    r"(?:Temporarily\s+Withdrawn|Withdrawn|Expired|Canceled|Cancelled|Closed|Sold)\b"
     r")",
     re.IGNORECASE,
 )
@@ -226,14 +226,23 @@ NON_CURRENT_STATUS_RE = re.compile(
 DISQUALIFY_PATTERNS = [
     re.compile(r"\bis\s+short\s+sale\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s*[:=]\s*(?:no|false)\b", re.IGNORECASE),
+    re.compile(r"\b(?:potential\s+)?short\s+sale\s+(?:no|false)\b", re.IGNORECASE),
+    re.compile(r"\b(?:financial\s+status|contract\s+information|special\s+listing\s+conditions?)\s*[-:]?\s*(?:potential\s+)?short\s+sale\s+(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\bisShortSale[\"']?\s*[:=]\s*[\"']?false[\"']?\b", re.IGNORECASE),
     re.compile(r"\bapproved\s+short\s+sale\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s+approved\b", re.IGNORECASE),
+    re.compile(r"\bshort\s+sale\b.{0,80}\bapproved\s+price\b", re.IGNORECASE),
+    re.compile(r"\bapproved\s+price\b.{0,80}\bshort\s+sale\b", re.IGNORECASE),
     re.compile(r"\balready\s+approved\b", re.IGNORECASE),
     re.compile(r"\blender\s+approved\b", re.IGNORECASE),
     re.compile(
         r"\b(?:already|currently)\s+(?:working|work)\s+with\s+(?:a\s+|an\s+|the\s+)?"
         r"(?:short\s+sale\s+)?(?:specialist|attorney|negotiator|processor)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:short\s+sale\s+)?(?:specialist|attorney|negotiator|processor)\b.{0,80}"
+        r"\b(?:assisting|handling|assigned|involved|processing|negotiating)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -252,7 +261,7 @@ BUSINESS_NAME_RE = re.compile(
     r"\b(?:"
     r"realty|realtor|real\s+estate|properties|property|brokerage|llc|inc|corp|"
     r"company|group|team|associates|homes?|mortgage|bank|trust|services|"
-    r"partners|title|insurance|re/max|remax|coldwell|century|sotheby|compass|"
+    r"partners|title|insurance|regional|mls|re/max|remax|coldwell|century|sotheby|compass|"
     r"redfin|zillow|berkshire"
     r")\b",
     re.IGNORECASE,
@@ -274,6 +283,10 @@ GENERIC_NAME_TOKENS = {
     "cell",
     "email",
     "mls",
+    "central",
+    "northern",
+    "regional",
+    "southern",
     "dre",
     "license",
     "usa",
@@ -406,9 +419,9 @@ def current_listing_status(text: str) -> tuple[str, str]:
     non_current_match = NON_CURRENT_STATUS_RE.search(compact)
     if non_current_match:
         return "not_current", non_current_match.group(0)
-    active_match = CURRENT_ACTIVE_STATUS_RE.search(compact)
-    if active_match:
-        return "active", active_match.group(0)
+    current_match = CURRENT_MARKET_STATUS_RE.search(compact)
+    if current_match:
+        return "current", current_match.group(0)
     return "unknown", ""
 
 
@@ -432,6 +445,14 @@ def qualification_for_text(text: str) -> Qualification:
             "",
             "; ".join(disqualified),
         )
+    if disqualified:
+        return Qualification(
+            "rejected",
+            "disqualifying_short_sale_text",
+            extract_short_sale_evidence_type(compact),
+            excerpt_around(compact, short_sale_match.start(), short_sale_match.end()),
+            "; ".join(disqualified),
+        )
     verified_match = verified_short_sale_match(compact)
     if not verified_match:
         return Qualification(
@@ -441,18 +462,10 @@ def qualification_for_text(text: str) -> Qualification:
             excerpt_around(compact, short_sale_match.start(), short_sale_match.end()),
             "; ".join(disqualified),
         )
-    if disqualified:
+    if listing_status != "current":
         return Qualification(
             "rejected",
-            "disqualifying_short_sale_text",
-            extract_short_sale_evidence_type(compact),
-            excerpt_around(compact, verified_match.start(), verified_match.end()),
-            "; ".join(disqualified),
-        )
-    if listing_status != "active":
-        return Qualification(
-            "rejected",
-            "not_active_for_sale" if listing_status == "not_current" else "missing_active_listing_status",
+            "not_current_listing" if listing_status == "not_current" else "missing_current_listing_status",
             extract_short_sale_evidence_type(compact),
             excerpt_around(compact, verified_match.start(), verified_match.end()),
             listing_status_evidence,
@@ -1040,6 +1053,15 @@ def extract_agent_name(text: str) -> str:
     return ""
 
 
+def first_contact_phone_match(text: str) -> re.Match[str] | None:
+    for match in PHONE_RE.finditer(text):
+        context = text[max(0, match.start() - 20) : min(len(text), match.end() + 20)].lower()
+        if re.search(r"[a-z/_-]?\d{10}[a-z0-9_-]*\.(?:jpg|jpeg|png|webp)\b", context):
+            continue
+        return match
+    return None
+
+
 def jsonld_type_names(value: Any) -> set[str]:
     if isinstance(value, str):
         return {value.lower()}
@@ -1117,6 +1139,38 @@ def extract_jsonld_text(markup: str) -> tuple[str, dict[str, str]]:
     return "\n".join(pieces), fields
 
 
+def decode_json_string(value: str) -> str:
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return html.unescape(value.replace(r"\/", "/"))
+
+
+def extract_embedded_listing_text(markup: str) -> str:
+    pieces: list[str] = []
+    if re.search(r'"is_short_sale"\s*:\s*true', markup, re.I):
+        pieces.append("Special Listing Conditions: Short Sale.")
+    status_flags = [
+        (r'"is_pending"\s*:\s*true', "Status: Pending."),
+        (r'"is_contingent"\s*:\s*true', "Status: Contingent."),
+        (r'"is_coming_soon"\s*:\s*true', "Status: Coming Soon."),
+    ]
+    for pattern, text in status_flags:
+        if re.search(pattern, markup, re.I):
+            pieces.append(text)
+    for match in re.finditer(r'"description"\s*:\s*"((?:\\.|[^"\\]){20,5000})"', markup, re.I):
+        decoded = normalize_space(decode_json_string(match.group(1)))
+        if decoded:
+            pieces.append(f"Property description: {decoded}")
+    for match in re.finditer(r'"text"\s*:\s*"((?:\\.|[^"\\]){20,5000})"', markup, re.I):
+        decoded = normalize_space(decode_json_string(match.group(1)))
+        if decoded:
+            pieces.append(f"Property description: {decoded}")
+    for match in re.finditer(r'"number"\s*:\s*"((?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4})"', markup, re.I):
+        pieces.append(f"Phone: {decode_json_string(match.group(1))}")
+    return " ".join(pieces)
+
+
 def iter_json_objects(data: Any) -> Iterable[Any]:
     if isinstance(data, dict):
         yield data
@@ -1129,8 +1183,9 @@ def iter_json_objects(data: Any) -> Iterable[Any]:
 
 def infer_fields(result: SearchResult, markup: str) -> Candidate:
     json_text, json_fields = extract_jsonld_text(markup)
+    embedded_listing_text = extract_embedded_listing_text(markup)
     page_text = strip_html(markup)
-    combined = normalize_space(" ".join([result.title, result.snippet, json_text, page_text]))
+    combined = normalize_space(" ".join([result.title, result.snippet, json_text, embedded_listing_text, page_text]))
 
     fields = dict(json_fields)
     title_parts = [part.strip() for part in re.split(r"\s*[|–-]\s*", result.title) if part.strip()]
@@ -1145,7 +1200,7 @@ def infer_fields(result: SearchResult, markup: str) -> Candidate:
     fields.setdefault("agent_name", extract_agent_name(combined))
     fields.setdefault("broker_name", extract_labeled_value(combined, ["Broker", "Brokerage", "Listing Office"]))
 
-    phone_match = PHONE_RE.search(combined)
+    phone_match = first_contact_phone_match(combined)
     email_match = EMAIL_RE.search(combined)
     fields.setdefault("phone", phone_match.group(0) if phone_match else "")
     fields.setdefault("email", email_match.group(0) if email_match else "")
