@@ -3,6 +3,7 @@ import os
 import sys
 import types
 from pathlib import Path
+from datetime import datetime, timedelta
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -69,6 +70,7 @@ class _FailingRequest:
 class _FakeValuesAPI:
     def __init__(self):
         self._ranges = []
+        self._batch_updates = []
 
     def batchGet(self, spreadsheetId, ranges, majorDimension, valueRenderOption):
         self._ranges.extend(ranges)
@@ -92,16 +94,40 @@ class _FakeValuesAPI:
 
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
         self._ranges.append(range)
-        if range.endswith(f"!A:{bot_min.FOLLOWUP_READ_END_COL}"):
+        if range.endswith("!C2:C2"):
+            return _FakeRequest({"values": [["5559998888"]]})
+        raise AssertionError(f"Unexpected range: {range}")
+
+    def batchGet(self, spreadsheetId, ranges, majorDimension, valueRenderOption):
+        self._ranges.extend(ranges)
+        init_col = bot_min._col_index_to_letter(bot_min.COL_INIT_TS)
+        fu_flag_col = bot_min._col_index_to_letter(bot_min.COL_REPLY_FLAG)
+        row_range = f"{bot_min.GSHEET_TAB}!A2:{bot_min.FOLLOWUP_READ_END_COL}2"
+
+        if ranges == [
+            f"{bot_min.GSHEET_TAB}!{init_col}2:{init_col}2",
+            f"{bot_min.GSHEET_TAB}!{fu_flag_col}2:{fu_flag_col}2",
+        ]:
+            return _FakeRequest({
+                "valueRanges": [
+                    {"values": [["2024-01-01T10:00:00-05:00"]]},
+                    {"values": [[""]]},
+                ]
+            })
+
+        if ranges == [row_range]:
             row = [""] * bot_min.MIN_COLS
             row[bot_min.COL_FIRST] = "Sam"
             row[bot_min.COL_PHONE] = "5550001111"
             row[bot_min.COL_STREET] = "123 Main St"
             row[bot_min.COL_INIT_TS] = "2024-01-01T10:00:00-05:00"
-            return _FakeRequest({"values": [["header"], row]})
-        if range.endswith("!C2:C2"):
-            return _FakeRequest({"values": [["5559998888"]]})
-        raise AssertionError(f"Unexpected range: {range}")
+            return _FakeRequest({"valueRanges": [{"values": [row]}]})
+
+        raise AssertionError(f"Unexpected ranges: {ranges}")
+
+    def batchUpdate(self, spreadsheetId, body):
+        self._batch_updates.append(body)
+        return _FakeRequest({"updated": True})
 
 
 class _FakeSheetsService:
@@ -136,6 +162,76 @@ def test_follow_up_uses_latest_sheet_phone(monkeypatch):
     assert sent["phone"] == "5559998888"
     assert sent["row_idx"] == 2
     assert sent["follow_up"] is True
+
+
+class _MailshakeValuesAPI:
+    def __init__(self, rows):
+        self.rows = rows
+        self.batch_updates = []
+
+    def batchGet(self, spreadsheetId, ranges, majorDimension, valueRenderOption):
+        value_ranges = []
+        for col_range in ranges:
+            col = col_range.split("!")[1].split("2:")[0]
+            values = []
+            for row in self.rows:
+                values.append(row.get(col, ""))
+            value_ranges.append({"values": [values]})
+        return _FakeRequest({"valueRanges": value_ranges})
+
+    def batchUpdate(self, spreadsheetId, body):
+        self.batch_updates.append(body)
+        return _FakeRequest({"updated": True})
+
+
+class _MailshakeSheetsService:
+    def __init__(self, rows):
+        self.values_api = _MailshakeValuesAPI(rows)
+
+    def spreadsheets(self):
+        return self
+
+    def values(self):
+        return self.values_api
+
+
+def test_mailshake_release_marks_due_followup_after_two_hour_grace(monkeypatch):
+    now = bot_min.SCHEDULER_TZ.localize(datetime(2026, 7, 2, 16, 0, 0))
+    due_ts = (now - timedelta(hours=2, minutes=5)).isoformat()
+    recent_ts = (now - timedelta(hours=1, minutes=59)).isoformat()
+    service = _MailshakeSheetsService([
+        {"I": "x", "C": "5550001111", "J": "", "K": "", "X": due_ts},
+        {"I": "x", "C": "5550002222", "J": "", "K": "", "X": recent_ts},
+        {"I": "x", "C": "5550003333", "J": "", "K": "Y", "X": due_ts},
+        {"I": "x", "C": "5550004444", "J": "manual", "K": "", "X": due_ts},
+    ])
+
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=5))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+
+    assert bot_min.release_due_followups_to_mailshake(now) == 1
+
+    updates = service.values_api.batch_updates[0]["data"]
+    assert updates == [{"range": f"{bot_min.GSHEET_TAB}!K2", "values": [["N"]]}]
+
+
+def test_mailshake_release_skips_rows_with_sms_reply(monkeypatch):
+    now = bot_min.SCHEDULER_TZ.localize(datetime(2026, 7, 2, 16, 0, 0))
+    due_ts = (now - timedelta(hours=3)).isoformat()
+    service = _MailshakeSheetsService([
+        {"I": "x", "C": "5550001111", "J": "", "K": "", "X": due_ts},
+    ])
+    replied = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: True)
+    monkeypatch.setattr(bot_min, "mark_reply", lambda row_idx: replied.append(row_idx))
+
+    assert bot_min.release_due_followups_to_mailshake(now) == 0
+    assert replied == [2]
+    assert service.values_api.batch_updates == []
 
 
 def test_resolve_timestamp_columns_rejects_reserved_and_colliding_columns():

@@ -469,6 +469,9 @@ SCHEDULER_TZ   = pytz.timezone("America/New_York")
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
 FOLLOWUP_MIN_LOOKBACK_ROWS = int(os.getenv("FOLLOWUP_MIN_LOOKBACK_ROWS", "500"))
 FU_LOOKBACK_ROWS = max(int(os.getenv("FU_LOOKBACK_ROWS", "50")), FOLLOWUP_MIN_LOOKBACK_ROWS)
+MAILSHAKE_AFTER_FOLLOWUP_HOURS = float(os.getenv("MAILSHAKE_AFTER_FOLLOWUP_HOURS", "2"))
+MAILSHAKE_AFTER_FOLLOWUP_CODE = (os.getenv("MAILSHAKE_AFTER_FOLLOWUP_CODE", "N").strip().upper() or "N")
+GSHEET_REPLIES_TAB = os.getenv("GSHEET_REPLIES_TAB", "Replies")
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
 WORK_END       = int(os.getenv("WORK_END_HOUR", "20"))    # exclusive for outreach; scheduler callbacks also wake at this hour
 INITIAL_SMS_END = int(os.getenv("INITIAL_SMS_END_HOUR", str(WORK_END)))  # exclusive; inbound replies are handled separately by Apps Script/Tasker
@@ -11898,6 +11901,30 @@ def mark_reply(row_idx: int):
     except Exception as e:
         LOG.error("GSheet mark_reply error %s", e)
 
+
+def mark_mailshake_ready(row_indices: List[int], code: Optional[str] = None) -> int:
+    if not row_indices:
+        return 0
+    mailshake_code = (str(code or MAILSHAKE_AFTER_FOLLOWUP_CODE).strip().upper() or "N")
+    data = [
+        {"range": f"{GSHEET_TAB}!K{row_idx}", "values": [[mailshake_code]]}
+        for row_idx in row_indices
+    ]
+    try:
+        sheets_service.spreadsheets().values().batchUpdate(
+            spreadsheetId=GSHEET_ID,
+            body={"valueInputOption": "RAW", "data": data},
+        ).execute()
+        LOG.info(
+            "Mailshake release marked %s row(s) K:%s after follow-up grace",
+            len(row_indices),
+            mailshake_code,
+        )
+        return len(row_indices)
+    except Exception as e:
+        LOG.error("GSheet mark_mailshake_ready error rows=%s: %s", row_indices, e)
+        return 0
+
 def _row_is_empty(row_vals: List[Any]) -> bool:
     return not any(str(v).strip() for v in row_vals)
 
@@ -12292,13 +12319,74 @@ def schedule_initial_sms(
     thread.start()
 
 def check_reply(phone: str, since_iso: str) -> bool:
-    """Return True if a reply from *phone* has been received since *since_iso*.
+    """Return True if a reply from *phone* has been received since *since_iso*."""
 
-    SMS Gateway for Android does not expose an API for retrieving inbound
-    messages in this script, so replies are not processed here and this always
-    returns ``False``."""
+    phone_digits = _digits_only(phone or "")
+    if not phone_digits:
+        return False
 
+    since = _parse_sheet_datetime(since_iso)
+    for reply_phone, reply_ts in _get_reply_records():
+        if reply_phone != phone_digits:
+            continue
+        if reply_ts is None or since is None or reply_ts >= since:
+            return True
     return False
+
+
+_reply_records_cache: Dict[str, Any] = {"expires_at": 0.0, "records": []}
+_reply_records_lock = threading.Lock()
+REPLY_RECORDS_CACHE_SECONDS = int(os.getenv("REPLY_RECORDS_CACHE_SECONDS", "120"))
+
+
+def _parse_sheet_datetime(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        try:
+            return SCHEDULER_TZ.localize(dt)
+        except Exception:
+            return dt.replace(tzinfo=SCHEDULER_TZ)
+    return dt.astimezone(SCHEDULER_TZ)
+
+
+def _get_reply_records(force_refresh: bool = False) -> List[Tuple[str, Optional[datetime]]]:
+    now_monotonic = time.monotonic()
+    with _reply_records_lock:
+        if (
+            not force_refresh
+            and _reply_records_cache["expires_at"] > now_monotonic
+        ):
+            return list(_reply_records_cache["records"])
+
+        try:
+            resp = sheets_service.spreadsheets().values().get(
+                spreadsheetId=GSHEET_ID,
+                range=f"{GSHEET_REPLIES_TAB}!A:C",
+                majorDimension="ROWS",
+                valueRenderOption="FORMATTED_VALUE",
+            ).execute()
+        except Exception as exc:
+            LOG.warning("Unable to read SMS replies sheet %s: %s", GSHEET_REPLIES_TAB, exc)
+            return []
+
+        records: List[Tuple[str, Optional[datetime]]] = []
+        for raw_row in resp.get("values", []):
+            row = list(raw_row) + ["", "", ""]
+            phone_digits = _digits_only(row[0])
+            if not phone_digits or phone_digits.lower() == "phone":
+                continue
+            records.append((phone_digits, _parse_sheet_datetime(row[1])))
+
+        _reply_records_cache["records"] = records
+        _reply_records_cache["expires_at"] = now_monotonic + max(1, REPLY_RECORDS_CACHE_SECONDS)
+        return list(records)
 
 # ───────────────────── scheduler helpers ─────────────────────
 _APIFY_DECISION_LOCK = threading.Lock()
@@ -12450,9 +12538,16 @@ def _run_hourly_cycle(
             LOG.info("follow-up: skipped overlapping pass")
         else:
             try:
-                _follow_up_pass()
+                try:
+                    _follow_up_pass()
+                except Exception as exc:
+                    LOG.exception("Error during follow-up pass: %s", exc)
+                try:
+                    release_due_followups_to_mailshake(run_time)
+                except Exception as exc:
+                    LOG.exception("Error during Mailshake release pass: %s", exc)
             except Exception as exc:
-                LOG.exception("Error during follow-up pass: %s", exc)
+                LOG.exception("Error during hourly messaging pass: %s", exc)
             finally:
                 _follow_up_pass_lock.release()
     else:
@@ -12516,6 +12611,12 @@ def run_hourly_scheduler(
         "Follow-up timestamp columns configured: init=%s followup=%s",
         _col_index_to_letter(COL_INIT_TS),
         _col_index_to_letter(COL_FU_TS),
+    )
+    LOG.info(
+        "Mailshake release configured: follow-up grace=%.2f hours code=%s replies_tab=%s",
+        MAILSHAKE_AFTER_FOLLOWUP_HOURS,
+        MAILSHAKE_AFTER_FOLLOWUP_CODE,
+        GSHEET_REPLIES_TAB,
     )
     LOG.info(
         "Follow-up sheet read window configured: A:%s (min_cols=%s)",
@@ -12616,6 +12717,107 @@ def _current_sheet_phone_for_row(row_idx: int) -> str:
             exc,
         )
         return ""
+
+
+def _column_values(value_ranges: List[Dict[str, Any]], index: int) -> List[str]:
+    if index >= len(value_ranges):
+        return []
+    values = value_ranges[index].get("values") or [[]]
+    if not values:
+        return []
+    return [str(v or "").strip() for v in values[0]]
+
+
+def release_due_followups_to_mailshake(now: Optional[datetime] = None) -> int:
+    """Mark K=N after the follow-up has had the configured reply grace period."""
+
+    run_time = now or datetime.now(tz=SCHEDULER_TZ)
+    if run_time.tzinfo is None:
+        run_time = run_time.replace(tzinfo=SCHEDULER_TZ)
+    else:
+        run_time = run_time.astimezone(SCHEDULER_TZ)
+
+    max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
+    if max_row <= 1:
+        return 0
+
+    followup_flag_col = _col_index_to_letter(COL_REPLY_FLAG)
+    phone_col = _col_index_to_letter(COL_PHONE)
+    manual_col = _col_index_to_letter(COL_MANUAL_NOTE)
+    mailshake_col = _col_index_to_letter(COL_REPLY_TS)
+    followup_ts_col = _col_index_to_letter(COL_FU_TS)
+
+    resp = sheets_service.spreadsheets().values().batchGet(
+        spreadsheetId=GSHEET_ID,
+        ranges=[
+            f"{GSHEET_TAB}!{followup_flag_col}2:{followup_flag_col}{max_row}",
+            f"{GSHEET_TAB}!{phone_col}2:{phone_col}{max_row}",
+            f"{GSHEET_TAB}!{manual_col}2:{manual_col}{max_row}",
+            f"{GSHEET_TAB}!{mailshake_col}2:{mailshake_col}{max_row}",
+            f"{GSHEET_TAB}!{followup_ts_col}2:{followup_ts_col}{max_row}",
+        ],
+        majorDimension="COLUMNS",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute()
+    value_ranges = resp.get("valueRanges", [])
+    followup_flags = _column_values(value_ranges, 0)
+    phone_values = _column_values(value_ranges, 1)
+    manual_values = _column_values(value_ranges, 2)
+    mailshake_values = _column_values(value_ranges, 3)
+    followup_ts_values = _column_values(value_ranges, 4)
+
+    due_rows: List[int] = []
+    replied_rows: List[int] = []
+    bad_ts_rows = 0
+    candidate_count = max(
+        len(followup_flags),
+        len(phone_values),
+        len(manual_values),
+        len(mailshake_values),
+        len(followup_ts_values),
+    )
+
+    for idx in range(candidate_count):
+        sheet_row = idx + 2
+        followup_flag = followup_flags[idx] if idx < len(followup_flags) else ""
+        phone = phone_values[idx] if idx < len(phone_values) else ""
+        manual_status = manual_values[idx] if idx < len(manual_values) else ""
+        mailshake_status = mailshake_values[idx] if idx < len(mailshake_values) else ""
+        followup_ts_raw = followup_ts_values[idx] if idx < len(followup_ts_values) else ""
+
+        if followup_flag.strip().lower() != "x" or not followup_ts_raw:
+            continue
+        if manual_status or mailshake_status:
+            continue
+
+        followup_ts = _parse_sheet_datetime(followup_ts_raw)
+        if not followup_ts:
+            bad_ts_rows += 1
+            continue
+
+        elapsed_hours = (run_time - followup_ts).total_seconds() / 3600
+        if elapsed_hours < MAILSHAKE_AFTER_FOLLOWUP_HOURS:
+            continue
+
+        if phone and check_reply(phone, followup_ts_raw):
+            mark_reply(sheet_row)
+            replied_rows.append(sheet_row)
+            continue
+
+        due_rows.append(sheet_row)
+
+    updated = mark_mailshake_ready(due_rows)
+    LOG.info(
+        "Mailshake release scan complete candidates=%s due=%s marked=%s replied=%s bad_ts=%s grace_hours=%.2f code=%s",
+        candidate_count,
+        len(due_rows),
+        updated,
+        len(replied_rows),
+        bad_ts_rows,
+        MAILSHAKE_AFTER_FOLLOWUP_HOURS,
+        MAILSHAKE_AFTER_FOLLOWUP_CODE,
+    )
+    return updated
 
 
 def _follow_up_pass():
