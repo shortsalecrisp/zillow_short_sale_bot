@@ -12220,7 +12220,7 @@ def check_reply(phone: str, since_iso: str) -> bool:
     return False
 
 
-_reply_records_cache: Dict[str, Any] = {"expires_at": 0.0, "records": []}
+_reply_records_cache: Dict[str, Any] = {"expires_at": 0.0, "records": [], "last_error": None}
 _reply_records_lock = threading.Lock()
 REPLY_RECORDS_CACHE_SECONDS = int(os.getenv("REPLY_RECORDS_CACHE_SECONDS", "120"))
 
@@ -12260,6 +12260,8 @@ def _get_reply_records(force_refresh: bool = False) -> List[Tuple[str, Optional[
             ).execute()
         except Exception as exc:
             LOG.warning("Unable to read SMS replies sheet %s: %s", GSHEET_REPLIES_TAB, exc)
+            _reply_records_cache["last_error"] = str(exc)
+            _reply_records_cache["expires_at"] = now_monotonic + 30
             return []
 
         records: List[Tuple[str, Optional[datetime]]] = []
@@ -12271,6 +12273,7 @@ def _get_reply_records(force_refresh: bool = False) -> List[Tuple[str, Optional[
             records.append((phone_digits, _parse_sheet_datetime(row[1])))
 
         _reply_records_cache["records"] = records
+        _reply_records_cache["last_error"] = None
         _reply_records_cache["expires_at"] = now_monotonic + max(1, REPLY_RECORDS_CACHE_SECONDS)
         return list(records)
 
@@ -12618,6 +12621,15 @@ def release_due_followups_to_mailshake(now: Optional[datetime] = None) -> int:
 
     max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
     if max_row <= 1:
+        return 0
+
+    _get_reply_records()
+    reply_scan_error = _reply_records_cache.get("last_error")
+    if reply_scan_error:
+        LOG.warning(
+            "Mailshake release skipped because SMS replies sheet could not be read: %s",
+            reply_scan_error,
+        )
         return 0
 
     followup_flag_col = _col_index_to_letter(COL_REPLY_FLAG)

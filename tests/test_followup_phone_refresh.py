@@ -180,6 +180,8 @@ def test_mailshake_release_marks_due_followup_after_two_hour_grace(monkeypatch):
 
     monkeypatch.setattr(bot_min, "sheets_service", service)
     monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=5))
+    monkeypatch.setattr(bot_min, "_get_reply_records", lambda *args, **kwargs: [])
+    bot_min._reply_records_cache["last_error"] = None
     monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
 
     assert bot_min.release_due_followups_to_mailshake(now) == 1
@@ -198,12 +200,35 @@ def test_mailshake_release_skips_rows_with_sms_reply(monkeypatch):
 
     monkeypatch.setattr(bot_min, "sheets_service", service)
     monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "_get_reply_records", lambda *args, **kwargs: [])
+    bot_min._reply_records_cache["last_error"] = None
     monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: True)
     monkeypatch.setattr(bot_min, "mark_reply", lambda row_idx: replied.append(row_idx))
 
     assert bot_min.release_due_followups_to_mailshake(now) == 0
     assert replied == [2]
     assert service.values_api.batch_updates == []
+
+
+def test_mailshake_release_skips_when_replies_sheet_cannot_be_read(monkeypatch):
+    now = bot_min.SCHEDULER_TZ.localize(datetime(2026, 7, 2, 16, 0, 0))
+    due_ts = (now - timedelta(hours=3)).isoformat()
+    service = _MailshakeSheetsService([
+        {"I": "x", "C": "5550001111", "J": "", "K": "", "X": due_ts},
+    ])
+
+    def _reply_scan_failed(*args, **kwargs):
+        bot_min._reply_records_cache["last_error"] = "boom"
+        return []
+
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "_get_reply_records", _reply_scan_failed)
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+
+    assert bot_min.release_due_followups_to_mailshake(now) == 0
+    assert service.values_api.batch_updates == []
+    bot_min._reply_records_cache["last_error"] = None
 
 
 def test_resolve_timestamp_columns_rejects_reserved_and_colliding_columns():
