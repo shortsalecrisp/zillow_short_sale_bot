@@ -182,11 +182,39 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(pilot.source_result_allowed(blog), (False, "not_redfin_detail"))
         self.assertEqual(pilot.source_result_allowed(detail), (True, ""))
 
+    def test_source_result_allowed_rejects_idx_search_pages_but_allows_listing_detail_branding(self):
+        search = pilot.SearchResult(
+            "idx_broker_pages",
+            "query",
+            "https://www.allkchomesforsale.com/search",
+            "1872+ Listings - All KC Homes For Sale",
+            "",
+        )
+        collection = pilot.SearchResult(
+            "idx_broker_pages",
+            "query",
+            "https://www.sunsetrealtyservices.com/golden-missouri-homes-for-sale",
+            "Golden Missouri Homes For Sale",
+            "",
+        )
+        detail = pilot.SearchResult(
+            "idx_broker_pages",
+            "query",
+            "https://www.marylanddreamhomerealty.com/newlisting/3201837/1412-W-LOMBARD-ST-W-Baltimore-MD-21223",
+            "1412 W LOMBARD ST W, Baltimore MD 21223 - Maryland Real Estate",
+            "",
+        )
+
+        self.assertEqual(pilot.source_result_allowed(search), (False, "not_idx_listing_detail"))
+        self.assertEqual(pilot.source_result_allowed(collection), (False, "not_idx_listing_detail"))
+        self.assertEqual(pilot.source_result_allowed(detail), (True, ""))
+
     def test_listing_address_and_state_guards_reject_search_page_noise(self):
         self.assertFalse(pilot.looks_like_listing_address("Buying A Short Sale vs Foreclosure"))
         self.assertFalse(pilot.looks_like_listing_address("Alabama fixer-upper homes page 4"))
         self.assertFalse(pilot.looks_like_listing_address("Viewing Listing MLS# 7033072"))
         self.assertFalse(pilot.looks_like_listing_address("3301 64th Street in Fort Smith, AR for $189,000"))
+        self.assertFalse(pilot.looks_like_listing_address("1872+ Listings"))
         self.assertTrue(pilot.looks_like_listing_address("123 Main St"))
 
         candidate = pilot.Candidate(
@@ -247,6 +275,26 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         candidate = pilot.infer_fields(result, markup)
 
         self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+
+    def test_clean_listing_address_strips_null_and_city_state_zip(self):
+        self.assertEqual(
+            pilot.clean_listing_address("679 null Bridger Drive null", "Colorado Springs", "CO", "80909"),
+            "679 Bridger Drive",
+        )
+        self.assertEqual(
+            pilot.clean_listing_address("450 Stardust Court, Dacono, CO, 80514", "Dacono", "CO", "80514"),
+            "450 Stardust Court",
+        )
+        self.assertEqual(
+            pilot.clean_listing_address("1256 Van Allen Mews NW, Atlanta, GA 30318", "Atlanta", "GA", "30318"),
+            "1256 Van Allen Mews NW",
+        )
+
+    def test_address_key_canonicalizes_street_suffix_and_trailing_direction(self):
+        self.assertEqual(
+            pilot.address_key("1412 W LOMBARD ST W", "Baltimore", "MD"),
+            pilot.address_key("1412 W Lombard Street", "Baltimore", "MD"),
+        )
 
     def test_infer_fields_cleans_idx_title_with_in_city_and_price(self):
         result = pilot.SearchResult(
@@ -343,7 +391,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(
             pilot.duplicate_listing_status(candidate, existing),
-            ("duplicate_listing", "15790 easthaven ct 510|bowie|md", "2"),
+            ("duplicate_listing", "15790 easthaven court 510|bowie|md", "2"),
         )
 
     def test_research_contact_runs_after_qualification_and_fills_missing_fields(self):

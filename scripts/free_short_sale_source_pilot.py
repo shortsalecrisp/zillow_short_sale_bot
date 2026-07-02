@@ -259,7 +259,7 @@ AGENT_LABEL_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 STREET_SUFFIX_RE = (
-    r"(?:avenue|ave|street|st|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|"
+    r"(?:avenue|ave|street|st|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|mews|"
     r"circle|cir|way|place|pl|loop|trail|trl|parkway|pkwy|terrace|ter|highway|hwy|"
     r"route|rte|pass|path|point|pt|run|row)"
 )
@@ -312,6 +312,23 @@ def normalize_space(value: str) -> str:
 def normalize_key(value: str) -> str:
     value = html.unescape(value or "").lower()
     value = re.sub(r"\b(?:unit|apt|apartment|suite|ste|#)\b", " ", value)
+    value = re.sub(r"\b(?:avenue|ave)\b", " avenue ", value)
+    value = re.sub(r"\b(?:street|st)\b", " street ", value)
+    value = re.sub(r"\b(?:road|rd)\b", " road ", value)
+    value = re.sub(r"\b(?:drive|dr)\b", " drive ", value)
+    value = re.sub(r"\b(?:lane|ln)\b", " lane ", value)
+    value = re.sub(r"\b(?:boulevard|blvd)\b", " boulevard ", value)
+    value = re.sub(r"\b(?:court|ct)\b", " court ", value)
+    value = re.sub(r"\b(?:circle|cir)\b", " circle ", value)
+    value = re.sub(r"\b(?:parkway|pkwy)\b", " parkway ", value)
+    value = re.sub(r"\b(?:terrace|ter)\b", " terrace ", value)
+    value = re.sub(r"\b(?:highway|hwy)\b", " highway ", value)
+    value = re.sub(r"\b(?:route|rte)\b", " route ", value)
+    value = re.sub(
+        r"\b([nsew])\s+(.+?\b(?:street|road|avenue|drive|lane|court|circle|boulevard|parkway|terrace|highway|route)\b)\s+\1\b",
+        r"\1 \2",
+        value,
+    )
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return normalize_space(value)
 
@@ -324,7 +341,7 @@ def normalize_phone(value: str) -> str:
 
 
 def address_key(address: str, city: str, state: str) -> str:
-    parts = [normalize_key(address), normalize_key(city), normalize_key(state)]
+    parts = [normalize_key(clean_listing_address(address, city, state)), normalize_key(city), normalize_key(state)]
     return "|".join(part for part in parts if part)
 
 
@@ -736,6 +753,8 @@ def parse_address_parts(value: str) -> dict[str, str]:
     compact = normalize_space(value)
     if not compact:
         return {}
+    compact = re.sub(r"\bnull\b", " ", compact, flags=re.I)
+    compact = normalize_space(compact).strip(" ,")
     compact = re.split(
         r"\s+(?:for\s+)?\$\d[\d,]*(?:\.\d+)?|\s+\((?:for sale|active|pending)\)",
         compact,
@@ -755,6 +774,32 @@ def parse_address_parts(value: str) -> dict[str, str]:
     return {}
 
 
+def clean_listing_address(address: str, city: str = "", state: str = "", zip_code: str = "") -> str:
+    compact = normalize_space(html.unescape(address or ""))
+    if not compact:
+        return ""
+    compact = re.sub(r"\bnull\b", " ", compact, flags=re.I)
+    compact = normalize_space(compact).strip(" ,")
+    parsed = parse_address_parts(compact)
+    if parsed.get("listing_address"):
+        compact = parsed["listing_address"]
+
+    city = normalize_space(city)
+    state = normalize_space(state).upper()
+    zip_code = normalize_space(zip_code)
+    if city and state:
+        compact = re.sub(
+            rf",?\s+{re.escape(city)}\s*,?\s+{re.escape(state)}(?:\s+{re.escape(zip_code)})?$",
+            "",
+            compact,
+            flags=re.I,
+        )
+    elif state:
+        compact = re.sub(rf",?\s+{re.escape(state)}(?:\s+{re.escape(zip_code)})?$", "", compact, flags=re.I)
+    compact = re.sub(r"\s*,\s*$", "", normalize_space(compact))
+    return compact.strip(" ,")
+
+
 def apply_address_parts(fields: dict[str, str], parts: dict[str, str], replace_bad_address: bool = False) -> None:
     if not parts:
         return
@@ -766,6 +811,17 @@ def apply_address_parts(fields: dict[str, str], parts: dict[str, str], replace_b
     for key in ["city", "state", "zip"]:
         if parts.get(key):
             fields.setdefault(key, parts[key])
+
+
+def normalize_candidate_address_fields(fields: dict[str, str]) -> None:
+    cleaned = clean_listing_address(
+        fields.get("listing_address", ""),
+        fields.get("city", ""),
+        fields.get("state", ""),
+        fields.get("zip", ""),
+    )
+    if cleaned:
+        fields["listing_address"] = cleaned
 
 
 def ddg_search(query: str, source: str, limit: int) -> list[SearchResult]:
@@ -865,6 +921,7 @@ def source_result_allowed(result: SearchResult) -> tuple[bool, str]:
     parsed = urllib.parse.urlparse(result.url)
     host = parsed.netloc.lower()
     path = parsed.path.lower()
+    title = normalize_space(result.title)
     if result.source == "realtor.com":
         if host.endswith("realtor.com") and "/realestateandhomes-detail/" in path:
             return True, ""
@@ -877,6 +934,11 @@ def source_result_allowed(result: SearchResult) -> tuple[bool, str]:
         if host.endswith("homes.com") and "/property/" in path:
             return True, ""
         return False, "not_homes_detail"
+    if result.source == "idx_broker_pages":
+        if re.search(r"/(?:search|blog|buying|selling|guides?|resources?|category|tag)(?:/|$)", path):
+            return False, "not_idx_listing_detail"
+        if re.search(r"\b(?:\d+\+\s+listings|homes?\s+for\s+sale|search\s+homes|buying\s+a|tips)\b", title, re.I):
+            return False, "not_idx_listing_detail"
     return True, ""
 
 
@@ -885,7 +947,7 @@ def looks_like_listing_address(address: str) -> bool:
     if not compact or not re.search(r"\d", compact):
         return False
     return not re.search(
-        r"\b(?:blog|buying|foreclosure|short\s+sale|homes?\s+for\s+sale|page|search|vintage|fixer[-\s]?upper|viewing\s+listing|mls\s*#|for\s+\$)\b",
+        r"\b(?:blog|buying|foreclosure|short\s+sale|homes?\s+for\s+sale|listings?|page|search|vintage|fixer[-\s]?upper|viewing\s+listing|mls\s*#|for\s+\$)\b",
         compact,
         re.IGNORECASE,
     )
@@ -1060,6 +1122,7 @@ def infer_fields(result: SearchResult, markup: str) -> Candidate:
             fields.setdefault("state", city_state.group(2))
             fields.setdefault("zip", city_state.group(3) or "")
 
+    normalize_candidate_address_fields(fields)
     return Candidate(result.source, result.query, result.url, result.title, combined, fields)
 
 
