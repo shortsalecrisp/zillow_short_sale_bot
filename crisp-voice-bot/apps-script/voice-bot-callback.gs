@@ -52,8 +52,8 @@ const VOICE_BOT_TIMEZONE = 'America/New_York';
 const VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN = 10;
 const VOICE_BOT_MAX_ACTIVE_CALLS = 2;
 const VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES = 60;
-const VOICE_BOT_PAUSED_UNTIL_ET = '2026-05-26T00:00:00-04:00';
-const VOICE_BOT_PAUSE_REASON = 'Memorial Day pause';
+const VOICE_BOT_PAUSED_UNTIL_ET = '2026-07-31T23:59:59-04:00';
+const VOICE_BOT_PAUSE_REASON = 'Paused while ElevenLabs quota is exhausted';
 const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
   {
     name: 'morning_probe',
@@ -268,6 +268,29 @@ function applyVoiceBotRowUpdates_(sheet, rowNumber, payload) {
   const callAttemptNumber = normalizeCallAttemptNumber_(payload.callAttemptNumber);
   const callSentColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
   const callResultColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
+
+  if (isVoiceBotProviderQuotaExceededPayload_(payload)) {
+    clearVoiceBotCellIfNeeded_(
+      sheet,
+      rowNumber,
+      callSentColumn,
+      fieldsWritten,
+      'voice_call_' + callAttemptNumber + '_sent_provider_quota_cleared'
+    );
+    clearVoiceBotCellIfNeeded_(
+      sheet,
+      rowNumber,
+      callResultColumn,
+      fieldsWritten,
+      'voice_call_' + callAttemptNumber + '_result_provider_quota_cleared'
+    );
+    clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE, fieldsWritten, 'call_eligible');
+    clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET, fieldsWritten, 'call_time_bucket');
+    clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR, fieldsWritten, 'call_scheduled_for');
+    writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_RESPONSE_STATUS, payload, 'responseStatus', fieldsWritten);
+    appendVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_VOICE_NOTES, payload, 'voiceNotes', fieldsWritten);
+    return fieldsWritten;
+  }
 
   writeVoiceBotFieldIfPresent_(sheet, rowNumber, callResultColumn, payload, 'callResult', fieldsWritten);
   writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_RESPONSE_STATUS, payload, 'responseStatus', fieldsWritten);
@@ -1052,6 +1075,14 @@ function normalizeString_(value) {
   }
 
   return String(value).trim();
+}
+
+function isVoiceBotProviderQuotaExceededPayload_(payload) {
+  return (
+    payload &&
+    (payload.providerQuotaExceeded === true ||
+      normalizeString_(payload.callResult).toLowerCase() === 'provider_quota_exceeded')
+  );
 }
 
 function normalizeMarker_(value) {

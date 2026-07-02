@@ -74,6 +74,7 @@ type ElevenLabsConversation = {
 };
 
 const processedConversationIds = new Set<string>();
+const conversationsWithoutQueueRefill = new Set<string>();
 
 const elevenLabsApi = axios.create({
   baseURL: config.elevenLabs.baseUrl,
@@ -82,6 +83,10 @@ const elevenLabsApi = axios.create({
     ...(config.elevenLabs.apiKey ? { "xi-api-key": config.elevenLabs.apiKey } : {}),
   },
 });
+
+function shouldRequestQueueRefillAfterPostCall(conversationId: string): boolean {
+  return !conversationsWithoutQueueRefill.has(conversationId);
+}
 
 function getErrorDetails(error: unknown): Record<string, unknown> {
   if (error instanceof AxiosError) {
@@ -205,6 +210,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Call failed - invalid phone number";
   }
 
+  if (callResult === "provider_quota_exceeded") {
+    return "ElevenLabs quota exceeded - call not counted";
+  }
+
   return callResult;
 }
 
@@ -236,6 +245,20 @@ function isInvalidDestinationNumberFailure(conversation: ElevenLabsConversation)
     (reason.includes("invalid destination number") ||
       reason.includes("invalid number") ||
       reason.includes("sip status: 404"))
+  );
+}
+
+export function shouldTreatAsProviderQuotaExceeded(conversation: ElevenLabsConversation): boolean {
+  const errorCode = conversation.metadata?.error?.code;
+  const reason = normalizeText(getFailedConversationReason(conversation));
+
+  return (
+    conversation.status === "failed" &&
+    (errorCode === 1002 ||
+      reason.includes("quota limit") ||
+      reason.includes("exceeds your quota") ||
+      reason.includes("quota exceeded") ||
+      (reason.includes("quota") && reason.includes("exceed")))
   );
 }
 
@@ -824,6 +847,31 @@ async function processPostCallOutcomeForConversation(
       summary: performanceSummary,
       transcript: fullTranscript,
     });
+
+  if (shouldTreatAsProviderQuotaExceeded(conversation)) {
+    const failureReason = getFailedConversationReason(conversation);
+    const outcome = buildVoiceResponseStatus("provider_quota_exceeded");
+    const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "provider_quota_exceeded",
+      responseStatus: outcome,
+      providerQuotaExceeded: true,
+      voiceNotes: buildPerformanceNotes(outcome, outcomeSummary),
+    });
+
+    processedConversationIds.add(conversationId);
+    conversationsWithoutQueueRefill.add(conversationId);
+    logger.error("ElevenLabs provider quota exceeded; call attempt will not be counted", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      failureReason,
+    });
+    return true;
+  }
 
   if (hasToolCall(conversation, "callback_requested")) {
     const callbackTime = isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified");
@@ -1425,7 +1473,7 @@ export async function handleElevenLabsPostCallWebhook(conversationId: string): P
 
   const done = await processPostCallOutcome(conversationId, metadata);
 
-  if (done) {
+  if (done && shouldRequestQueueRefillAfterPostCall(conversationId)) {
     await requestVoiceQueueRefill({
       conversationId,
       rowNumber: metadata.rowNumber,
@@ -1451,7 +1499,7 @@ export async function processPostCallOutcomeFromConversationId(conversationId: s
 
   const done = await processPostCallOutcomeForConversation(conversationId, metadata, conversation);
 
-  if (done) {
+  if (done && shouldRequestQueueRefillAfterPostCall(conversationId)) {
     await requestVoiceQueueRefill({
       conversationId,
       rowNumber: metadata.rowNumber,
@@ -1470,6 +1518,10 @@ export function scheduleElevenLabsPostCallFallback(params: {
     void processPostCallOutcome(params.conversationId, params.metadata, { finalAttempt: attempt >= MAX_ATTEMPTS })
       .then((done) => {
         if (done) {
+          if (!shouldRequestQueueRefillAfterPostCall(params.conversationId)) {
+            return;
+          }
+
           void requestVoiceQueueRefill({
             conversationId: params.conversationId,
             rowNumber: params.metadata.rowNumber,

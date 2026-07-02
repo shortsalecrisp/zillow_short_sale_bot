@@ -160,16 +160,16 @@ test("queue runner is open on weekends so weekend-local calls can be placed", ()
   assert.equal(sundayAfternoonEt, true);
 });
 
-test("queue runner is paused through Memorial Day", () => {
-  const memorialDayAfternoon = runSchedulerExpression(
-    'isVoiceBotQueuePaused_(new Date("2026-05-25T21:00:00Z"))',
+test("queue runner is paused while ElevenLabs quota is exhausted", () => {
+  const quotaPauseAfternoon = runSchedulerExpression(
+    'isVoiceBotQueuePaused_(new Date("2026-07-02T21:00:00Z"))',
   );
-  const nextDayEt = runSchedulerExpression(
-    'isVoiceBotQueuePaused_(new Date("2026-05-26T04:00:00Z"))',
+  const afterPause = runSchedulerExpression(
+    'isVoiceBotQueuePaused_(new Date("2026-08-01T03:59:59Z"))',
   );
 
-  assert.equal(memorialDayAfternoon, true);
-  assert.equal(nextDayEt, false);
+  assert.equal(quotaPauseAfternoon, true);
+  assert.equal(afterPause, false);
 });
 
 test("voice performance logs append to the one AP cell instead of replacing earlier attempts", () => {
@@ -249,6 +249,70 @@ test("voice performance log-only updates do not change scheduling cells", () => 
   `));
 
   assert.deepEqual(result, { cleared: [], fields: [] });
+});
+
+test("provider quota callbacks clear the attempted call markers without changing lead status", () => {
+  const result = JSON.parse(runSchedulerScript(`
+    const cells = Array(VOICE_BOT_COL_VOICE_NOTES + 1).fill("");
+    cells[VOICE_BOT_COL_CALL_1_SENT] = "2026-07-02T19:25:00.000Z";
+    cells[VOICE_BOT_COL_CALL_1_RESULT] = "queued";
+    cells[VOICE_BOT_COL_CALL_ELIGIBLE] = "queued";
+    cells[VOICE_BOT_COL_CALL_TIME_BUCKET] = "voice_call_1_due";
+    cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR] = "2026-07-02T20:00:00.000Z";
+
+    const sheet = {
+      getRange(rowNumber, columnNumber) {
+        return {
+          getValue() {
+            return cells[columnNumber] || "";
+          },
+          setValue(value) {
+            cells[columnNumber] = value instanceof Date ? value.toISOString() : value;
+          },
+          clearContent() {
+            cells[columnNumber] = "";
+          }
+        };
+      }
+    };
+
+    const fieldsWritten = applyVoiceBotRowUpdates_(sheet, 3898, {
+      callAttemptNumber: 1,
+      callResult: "provider_quota_exceeded",
+      responseStatus: "ElevenLabs quota exceeded - call not counted",
+      voiceNotes: "quota exhausted"
+    });
+
+    JSON.stringify({
+      fieldsWritten,
+      call1Sent: cells[VOICE_BOT_COL_CALL_1_SENT],
+      call1Result: cells[VOICE_BOT_COL_CALL_1_RESULT],
+      callEligible: cells[VOICE_BOT_COL_CALL_ELIGIBLE],
+      callTimeBucket: cells[VOICE_BOT_COL_CALL_TIME_BUCKET],
+      callScheduledFor: cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR],
+      responseStatus: cells[VOICE_BOT_COL_RESPONSE_STATUS],
+      leadStatusCode: cells[VOICE_BOT_COL_LEAD_STATUS_CODE],
+      voiceNotes: cells[VOICE_BOT_COL_VOICE_NOTES]
+    });
+  `));
+
+  assert.equal(result.call1Sent, "");
+  assert.equal(result.call1Result, "");
+  assert.equal(result.callEligible, "");
+  assert.equal(result.callTimeBucket, "");
+  assert.equal(result.callScheduledFor, "");
+  assert.equal(result.responseStatus, "ElevenLabs quota exceeded - call not counted");
+  assert.equal(result.leadStatusCode, "");
+  assert.equal(result.voiceNotes, "quota exhausted");
+  assert.deepEqual(result.fieldsWritten, [
+    "AG:voice_call_1_sent_provider_quota_cleared",
+    "AH:voice_call_1_result_provider_quota_cleared",
+    "AD:call_eligible",
+    "AE:call_time_bucket",
+    "AF:call_scheduled_for",
+    "J:responseStatus",
+    "AP:voiceNotes_appended",
+  ]);
 });
 
 test("agent-not-available first attempts are retryable in the next local call window", () => {

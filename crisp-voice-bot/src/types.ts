@@ -157,5 +157,6 @@ export interface SheetUpdateRequest {
   callbackRequested?: string;
   callbackTime?: string;
   voiceNotes?: string;
+  providerQuotaExceeded?: boolean;
   [key: string]: unknown;
 }

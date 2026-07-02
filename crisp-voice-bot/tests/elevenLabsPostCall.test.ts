@@ -123,6 +123,33 @@ const parvanehLiveSummaryGatekeeperHoldConversation = {
   ],
 } as const;
 
+const providerQuotaFailureConversation = {
+  status: "failed",
+  metadata: {
+    termination_reason: "error",
+    error: {
+      code: 1002,
+      reason: "This request exceeds your quota limit.",
+    },
+  },
+  analysis: {
+    transcript_summary: "The conversation begins with Maya introducing herself before the provider failed.",
+  },
+  transcript: [{ role: "assistant", message: "Hi Celeste, this is Maya with Crisp Short Sales..." }],
+} as const;
+
+test("post-call fallback detects ElevenLabs quota failures as provider quota and not a prospect outcome", async () => {
+  const { buildVoiceResponseStatus, shouldTreatAsProviderQuotaExceeded } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+
+  assert.equal(shouldTreatAsProviderQuotaExceeded(providerQuotaFailureConversation), true);
+  assert.equal(
+    buildVoiceResponseStatus("provider_quota_exceeded"),
+    "ElevenLabs quota exceeded - call not counted",
+  );
+});
+
 test("post-call fallback classifies an agent saying it is not a short sale as not_short_sale", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsNotShortSale } = await import(
     "../src/lib/elevenLabsPostCall"
