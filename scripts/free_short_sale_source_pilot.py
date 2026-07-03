@@ -261,6 +261,17 @@ DISQUALIFY_PATTERNS = [
     re.compile(r"\bapproved\s+price\b.{0,80}\bshort\s+sale\b", re.IGNORECASE),
     re.compile(r"\balready\s+approved\b", re.IGNORECASE),
     re.compile(r"\blender\s+approved\b", re.IGNORECASE),
+    re.compile(r"\b(?:short\s+sale\s+)?(?:negotiator|negotiation)\s+fee\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:buyer|purchaser)\s+to\s+pay\b.{0,80}"
+        r"\b(?:short\s+sale\s+)?(?:negotiator|negotiation)\s+fee\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bprofessional\s+third[-\s]?party\s+negotiation\b.{0,80}"
+        r"\b(?:already|underway|under\s+way|in\s+process)\b",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"\b(?:already|currently)\s+(?:working|work)\s+with\s+(?:a\s+|an\s+|the\s+)?"
         r"(?:short\s+sale\s+)?(?:specialist|attorney|negotiator|processor)\b",

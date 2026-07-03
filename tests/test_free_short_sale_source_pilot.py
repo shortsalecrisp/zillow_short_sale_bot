@@ -73,6 +73,39 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
 
+    def test_qualification_rejects_short_sale_negotiation_fee(self):
+        text = (
+            "Status: Active. About This Home: Short Sale. "
+            "Buyer to pay the short sale negotiation fee at closing."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+        self.assertIn("negotiation fee", result.disqualifying_terms.lower())
+
+    def test_qualification_rejects_professional_third_party_negotiation_underway(self):
+        text = (
+            "Status: Active. About This Home: Short Sale offered with professional "
+            "third-party negotiation already underway."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+
+    def test_qualification_allows_third_party_approval_without_negotiator_fee(self):
+        text = (
+            "Status: Active. About This Home: Short Sale - Subject to Third-Party Approval. "
+            "Short sale with third-party approval required."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "qualified")
+
     def test_qualification_rejects_explicit_short_sale_no(self):
         text = (
             "For Sale. Property description: Status Active. "
