@@ -167,6 +167,7 @@ SEARCH_ENGINE = os.getenv("FREE_SOURCE_PILOT_SEARCH_ENGINE", "auto").lower()
 CSE_API_KEY = os.getenv("CS_API_KEY") or os.getenv("GOOGLE_API_KEY")
 CSE_CX = os.getenv("CS_CX") or os.getenv("GOOGLE_CX")
 CSE_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DATE_RESTRICT", "d1").strip()
+ALLOW_DDG_FALLBACK = os.getenv("FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK", "false").lower() == "true"
 CONTACT_RESEARCH_RESULTS = int(os.getenv("FREE_SOURCE_PILOT_CONTACT_RESEARCH_RESULTS", "3"))
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
@@ -245,10 +246,10 @@ NON_CURRENT_STATUS_RE = re.compile(
 )
 
 DISQUALIFY_PATTERNS = [
-    re.compile(r"\bis\s+short\s+sale\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
-    re.compile(r"\bshort\s+sale\s*[:=]\s*(?:no|false)\b", re.IGNORECASE),
-    re.compile(r"\b(?:potential\s+)?short\s+sale\s+(?:no|false)\b", re.IGNORECASE),
-    re.compile(r"\b(?:financial\s+status|contract\s+information|special\s+listing\s+conditions?)\s*[-:]?\s*(?:potential\s+)?short\s+sale\s+(?:no|false)\b", re.IGNORECASE),
+    re.compile(r"\bis\s+short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
+    re.compile(r"\bshort\s+sale\s*\??\s*[:=]\s*(?:no|false)\b", re.IGNORECASE),
+    re.compile(r"\b(?:potential\s+)?short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
+    re.compile(r"\b(?:financial\s+status|contract\s+information|special\s+listing\s+conditions?)\s*[-:]?\s*(?:potential\s+)?short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\bisShortSale[\"']?\s*[:=]\s*[\"']?false[\"']?\b", re.IGNORECASE),
     re.compile(r"\bapproved\s+short\s+sale\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s+approved\b", re.IGNORECASE),
@@ -848,6 +849,7 @@ def clean_listing_address(address: str, city: str = "", state: str = "", zip_cod
     if not compact:
         return ""
     compact = re.sub(r"\bnull\b", " ", compact, flags=re.I)
+    compact = re.sub(r"\s*\(MLS#.*?\)\s*$", "", compact, flags=re.I)
     compact = normalize_space(compact).strip(" ,")
     parsed = parse_address_parts(compact)
     if parsed.get("listing_address"):
@@ -857,16 +859,18 @@ def clean_listing_address(address: str, city: str = "", state: str = "", zip_cod
     state = normalize_space(state).upper()
     zip_code = normalize_space(zip_code)
     if city and state:
+        zip_part = rf"(?:\s+{re.escape(zip_code)})?" if zip_code else ""
         compact = re.sub(
-            rf",?\s+{re.escape(city)}\s*,?\s+{re.escape(state)}(?:\s+{re.escape(zip_code)})?$",
+            rf",?\s+{re.escape(city)}\s*,?\s+{re.escape(state)}\.?{zip_part}$",
             "",
             compact,
             flags=re.I,
         )
     elif state:
-        compact = re.sub(rf",?\s+{re.escape(state)}(?:\s+{re.escape(zip_code)})?$", "", compact, flags=re.I)
+        zip_part = rf"(?:\s+{re.escape(zip_code)})?" if zip_code else ""
+        compact = re.sub(rf",?\s+{re.escape(state)}\.?{zip_part}$", "", compact, flags=re.I)
     compact = re.sub(r"\s*,\s*$", "", normalize_space(compact))
-    return compact.strip(" ,")
+    return compact.strip(" ,.")
 
 
 def apply_address_parts(fields: dict[str, str], parts: dict[str, str], replace_bad_address: bool = False) -> None:
@@ -971,7 +975,12 @@ def search_web(query: str, source: str, limit: int) -> tuple[str, list[SearchRes
     elif SEARCH_ENGINE in {"ddg", "duckduckgo"}:
         engines = ["ddg"]
     else:
-        engines = ["cse", "ddg"] if CSE_API_KEY and CSE_CX else ["ddg"]
+        engines = ["cse"] if CSE_API_KEY and CSE_CX else []
+        if ALLOW_DDG_FALLBACK:
+            if CSE_API_KEY and CSE_CX:
+                engines.append("ddg")
+            else:
+                engines = ["ddg"]
 
     last_error = ""
     for engine in engines:
@@ -1014,7 +1023,7 @@ def source_result_allowed(result: SearchResult) -> tuple[bool, str]:
 
 def looks_like_listing_address(address: str) -> bool:
     compact = normalize_space(address)
-    if not compact or not re.search(r"\d", compact):
+    if not compact or not re.match(r"^\d{1,6}\b", compact):
         return False
     return not re.search(
         r"\b(?:blog|buying|foreclosure|short\s+sale|homes?\s+for\s+sale|listings?|page|search|vintage|fixer[-\s]?upper|viewing\s+listing|mls\s*#|for\s+\$)\b",
@@ -1092,6 +1101,17 @@ def jsonld_type_names(value: Any) -> set[str]:
     return set()
 
 
+LISTING_JSONLD_TYPES = {
+    "product",
+    "house",
+    "singlefamilyresidence",
+    "residence",
+    "apartment",
+    "realestatelisting",
+    "offer",
+}
+
+
 def required_review_field_failure(candidate: Candidate, qualification: Qualification) -> str:
     agent_name = clean_agent_name(candidate.fields.get("agent_name", ""))
     if agent_name:
@@ -1137,18 +1157,19 @@ def extract_jsonld_text(markup: str) -> tuple[str, dict[str, str]]:
         for obj in iter_json_objects(data):
             if not isinstance(obj, dict):
                 continue
+            type_names = jsonld_type_names(obj.get("@type"))
             address = obj.get("address")
-            if isinstance(address, dict):
-                fields.setdefault("listing_address", str(address.get("streetAddress") or ""))
-                fields.setdefault("city", str(address.get("addressLocality") or ""))
-                fields.setdefault("state", str(address.get("addressRegion") or ""))
-                fields.setdefault("zip", str(address.get("postalCode") or ""))
-            elif isinstance(address, str):
-                fields.setdefault("listing_address", address)
+            if type_names.intersection(LISTING_JSONLD_TYPES):
+                if isinstance(address, dict):
+                    fields.setdefault("listing_address", str(address.get("streetAddress") or ""))
+                    fields.setdefault("city", str(address.get("addressLocality") or ""))
+                    fields.setdefault("state", str(address.get("addressRegion") or ""))
+                    fields.setdefault("zip", str(address.get("postalCode") or ""))
+                elif isinstance(address, str):
+                    fields.setdefault("listing_address", address)
             name = obj.get("name")
             if isinstance(name, str) and not fields.get("raw_name"):
                 fields["raw_name"] = name
-            type_names = jsonld_type_names(obj.get("@type"))
             if type_names.intersection({"person", "realestateagent", "real estate agent"}):
                 agent_name = clean_agent_name(str(name or ""))
                 if agent_name:
@@ -1533,6 +1554,7 @@ def run(args: argparse.Namespace) -> None:
         results_per_query=args.results_per_query,
         search_engine=SEARCH_ENGINE,
         cse_date_restrict=CSE_DATE_RESTRICT,
+        ddg_fallback_allowed=ALLOW_DDG_FALLBACK,
         cse_configured=bool(CSE_API_KEY and CSE_CX),
         dry_run=args.dry_run,
     )

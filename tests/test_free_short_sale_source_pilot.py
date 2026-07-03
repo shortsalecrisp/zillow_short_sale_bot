@@ -153,6 +153,18 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
 
+    def test_qualification_rejects_potential_short_sale_question_no(self):
+        text = (
+            "Listing Status: Active. Tax Amount: 2148. In Foreclosure?: No "
+            "Potential Short Sale?: No Lender Owned?: No Directions & Remarks "
+            "Public Remarks: Nice home with water views."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+
     def test_qualification_rejects_special_listing_conditions_short_sale_no(self):
         text = (
             "Status: Closed. "
@@ -405,6 +417,31 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
 
+    def test_infer_fields_ignores_jsonld_real_estate_agent_address_for_listing(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="8441 Sierra Vista, Phelan, CA.| MLS# IV26144448",
+            snippet="Special Listing Conditions: Short Sale.",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@context":"https://schema.org","@type":"RealEstateAgent",
+           "name":"Glenn Zimmerman",
+           "address":{"@type":"PostalAddress","streetAddress":"9748 Rose Drive",
+                      "addressLocality":"Oak Hills","addressRegion":"CA","postalCode":"92344"}}
+        </script>
+        <body>Status: Active. Special Listing Conditions: Short Sale.</body>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["listing_address"], "8441 Sierra Vista")
+        self.assertEqual(candidate.fields["city"], "Phelan")
+        self.assertEqual(candidate.fields["state"], "CA")
+        self.assertEqual(candidate.fields["agent_name"], "Glenn Zimmerman")
+
     def test_infer_fields_uses_embedded_realtor_flags_and_description(self):
         result = pilot.SearchResult(
             source="realtor.com",
@@ -445,6 +482,19 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.clean_listing_address("1256 Van Allen Mews NW, Atlanta, GA 30318", "Atlanta", "GA", "30318"),
             "1256 Van Allen Mews NW",
         )
+        self.assertEqual(
+            pilot.clean_listing_address(
+                "1475 Woodland Loop NW, Baudette, MN 56623 (MLS# 7103500)",
+                "Baudette",
+                "MN",
+                "56623",
+            ),
+            "1475 Woodland Loop NW",
+        )
+
+    def test_listing_address_requires_street_number_not_city_zip_only(self):
+        self.assertTrue(pilot.looks_like_listing_address("1475 Woodland Loop NW"))
+        self.assertFalse(pilot.looks_like_listing_address("Baudette, MN 56623 (MLS# 7103449)"))
 
     def test_address_key_canonicalizes_street_suffix_and_trailing_direction(self):
         self.assertEqual(
@@ -666,6 +716,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         old_engine = pilot.SEARCH_ENGINE
         old_key = pilot.CSE_API_KEY
         old_cx = pilot.CSE_CX
+        old_allow_ddg = pilot.ALLOW_DDG_FALLBACK
         old_cse_search = pilot.cse_search
         old_ddg_search = pilot.ddg_search
         calls = []
@@ -682,6 +733,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.SEARCH_ENGINE = "auto"
             pilot.CSE_API_KEY = "key"
             pilot.CSE_CX = "cx"
+            pilot.ALLOW_DDG_FALLBACK = True
             pilot.cse_search = fake_cse_search
             pilot.ddg_search = fake_ddg_search
 
@@ -695,6 +747,45 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.SEARCH_ENGINE = old_engine
             pilot.CSE_API_KEY = old_key
             pilot.CSE_CX = old_cx
+            pilot.ALLOW_DDG_FALLBACK = old_allow_ddg
+            pilot.cse_search = old_cse_search
+            pilot.ddg_search = old_ddg_search
+
+    def test_search_web_does_not_fallback_to_duckduckgo_by_default(self):
+        old_engine = pilot.SEARCH_ENGINE
+        old_key = pilot.CSE_API_KEY
+        old_cx = pilot.CSE_CX
+        old_allow_ddg = pilot.ALLOW_DDG_FALLBACK
+        old_cse_search = pilot.cse_search
+        old_ddg_search = pilot.ddg_search
+        calls = []
+
+        def fake_cse_search(query, source, limit):
+            calls.append(("cse", query, source, limit))
+            raise RuntimeError("cse down")
+
+        def fake_ddg_search(query, source, limit):
+            calls.append(("ddg", query, source, limit))
+            return []
+
+        try:
+            pilot.SEARCH_ENGINE = "auto"
+            pilot.CSE_API_KEY = "key"
+            pilot.CSE_CX = "cx"
+            pilot.ALLOW_DDG_FALLBACK = False
+            pilot.cse_search = fake_cse_search
+            pilot.ddg_search = fake_ddg_search
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    pilot.search_web("query", "source", 3)
+
+            self.assertEqual(calls, [("cse", "query", "source", 3)])
+        finally:
+            pilot.SEARCH_ENGINE = old_engine
+            pilot.CSE_API_KEY = old_key
+            pilot.CSE_CX = old_cx
+            pilot.ALLOW_DDG_FALLBACK = old_allow_ddg
             pilot.cse_search = old_cse_search
             pilot.ddg_search = old_ddg_search
 

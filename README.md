@@ -73,11 +73,12 @@ the `Lead Source Pilot` tab. It runs once per day by default at 9:00 AM ET, scan
 across all 50 states.
 
 The pilot searches the configured source queries with Google Custom Search when `GOOGLE_API_KEY`/`CS_API_KEY` and
-`GOOGLE_CX`/`CS_CX` are present. Production is configured to use Google CSE only, with `dateRestrict=d1`, so the
-daily run spends about 100 search calls on the two selected buckets: `idx_broker_pages` and `realtor.com`. It fetches
-each result page, uses a bounded Playwright fallback for allowed portal detail pages that return HTTP 403/429/451,
-keeps only active listing pages with listing-text short sale evidence, and appends qualified rows after each source
-query so partial daily runs still leave observable output. Render logs should include `pilot_query_start`,
+`GOOGLE_CX`/`CS_CX` are present. Production is configured to use Google CSE only, with `dateRestrict=d1` and no
+DuckDuckGo fallback, so the daily run spends about 100 search calls on the two selected buckets: `idx_broker_pages` and
+`realtor.com`. It fetches each result page, uses a bounded Playwright fallback for allowed portal detail pages that
+return HTTP 403/429/451, keeps only active listing pages with listing-text short sale evidence, and appends qualified
+rows after each source query so partial daily runs still leave observable output. Render logs should include
+`pilot_query_start`,
 `pilot_query_results`,
 `pilot_headless_fetch_*` when browser fallback is used, `pilot_candidate_qualified` or rejection/duplicate events,
 `pilot_query_done`, and a final `pilot_run_done` stats record.
@@ -106,6 +107,7 @@ Configuration:
 * `FREE_SOURCE_PILOT_SEARCH_ENGINE=cse`
 * `FREE_SOURCE_PILOT_SOURCE_BUCKETS=idx_broker_pages,realtor.com`
 * `FREE_SOURCE_PILOT_DATE_RESTRICT=d1`
+* `FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK=false`
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main
