@@ -42,6 +42,29 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "short_sale_not_in_listing_evidence")
 
+    def test_qualification_rejects_short_sale_only_in_listing_fields(self):
+        text = (
+            "Status: Active. Description: Nestled in a desirable neighborhood with a spacious layout. "
+            "Disclosures and Reports Special Conditions: In Foreclosure, Short Sale. "
+            "Potential Short Sale: Yes."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "short_sale_not_in_listing_evidence")
+
+    def test_qualification_accepts_short_sale_in_public_remarks(self):
+        text = (
+            "Listing Status: Active. Public Remarks: Spacious home being sold as a short sale "
+            "subject to lender approval. Disclosures and Reports Special Conditions: Short Sale."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "qualified")
+        self.assertEqual(result.short_sale_evidence_type, "listing_description_or_remarks")
+
     def test_qualification_rejects_already_approved_short_sale(self):
         text = "Status: Active. What's special: This is an approved short sale."
 
@@ -187,7 +210,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             query="q",
             url="https://example.com/new",
             title="2 New St",
-            text="Status: Active. Special Listing Conditions: Short Sale.",
+            text="Status: Active. Remarks: Potential short sale subject to lender approval.",
             fields={
                 "listing_address": "2 New St",
                 "city": "Atlanta",
@@ -209,7 +232,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             query="query",
             url="https://example.com/listing",
             title="2 New St",
-            text="Status: Active. Special Listing Conditions: Short Sale.",
+            text="Status: Active. Remarks: Potential short sale subject to lender approval.",
             fields={
                 "listing_address": "2 New St",
                 "city": "Atlanta",
@@ -535,7 +558,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             query="query",
             url="https://example.com/listing",
             title="123 Main Street",
-            text="Status: Active. Special Listing Conditions: Short Sale.",
+            text="Status: Active. Remarks: Potential short sale subject to lender approval.",
             fields={"listing_address": "123 Main Street", "city": "Atlanta", "state": "GA"},
         )
         qualification = pilot.qualification_for_text(candidate.text)
@@ -557,7 +580,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             query="query",
             url="https://example.com/listing",
             title="123 Main Street",
-            text="Status: Active. Special Listing Conditions: Short Sale.",
+            text="Status: Active. Remarks: Potential short sale subject to lender approval.",
             fields={"listing_address": "123 Main Street", "city": "Atlanta", "state": "GA"},
         )
         qualification = pilot.qualification_for_text(candidate.text)
@@ -575,7 +598,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             query="query",
             url="https://example.com/listing",
             title="123 Main Street",
-            text="Status: Active. Special Listing Conditions: Short Sale.",
+            text="Status: Active. Remarks: Potential short sale subject to lender approval.",
             fields={
                 "phone": "404-555-1212",
                 "email": "support@example.com",

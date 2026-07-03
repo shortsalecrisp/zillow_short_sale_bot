@@ -192,9 +192,8 @@ SHORT_SALE_LISTING_RE = re.compile(
     re.IGNORECASE,
 )
 
-LISTING_EVIDENCE_LABEL_RE = re.compile(
+DESCRIPTION_EVIDENCE_LABEL_RE = re.compile(
     r"\b(?:"
-    r"special\s+listing\s+conditions?|specialListingConditions|"
     r"what'?s\s+special|description|remarks|public\s+remarks|"
     r"about\s+this\s+home|property\s+description|listing\s+description|"
     r"property\s+overview|overview"
@@ -202,14 +201,19 @@ LISTING_EVIDENCE_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 
-SHORT_SALE_SALE_CONTEXT_RE = re.compile(
-    r"\bshort\s*-?\s*sale\b.{0,180}\b(?:"
-    r"subject\s+to|lender|bank|approval|third[-\s]?party|"
-    r"property|home|house|seller|offer"
-    r")\b|"
-    r"\b(?:subject\s+to|lender|bank|approval|third[-\s]?party|"
-    r"property|home|house|seller|offer"
-    r")\b.{0,180}\bshort\s*-?\s*sale\b",
+DESCRIPTION_EVIDENCE_SKIP_PREFIX_RE = re.compile(
+    r"(?:legal|meta|seo|image|special\s+conditions?|special\s+listing\s+conditions?|potential\s+short\s+sale)\s*$",
+    re.IGNORECASE,
+)
+
+DESCRIPTION_SECTION_STOP_RE = re.compile(
+    r"\b(?:"
+    r"location|school\s+information|community|heating(?:\s*&\s*cooling)?|utilities|"
+    r"financial\s+considerations|disclosures(?:\s+and\s+reports)?|interior|exterior|"
+    r"features|parking|lot\s+features|listing\s+agent|home\s+details|property\s+details|"
+    r"listing\s+details|quickly\s+find|map|facts\s*&\s*features|tax\s+info|"
+    r"condo/co-op/association|mls\s+data"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -507,26 +511,28 @@ def verified_short_sale_match(text: str) -> re.Match[str] | None:
     if not short_sale_match:
         return None
 
-    for label_match in LISTING_EVIDENCE_LABEL_RE.finditer(text):
-        section = text[label_match.start() : min(len(text), label_match.end() + 1400)]
+    for label_match in DESCRIPTION_EVIDENCE_LABEL_RE.finditer(text):
+        prefix = text[max(0, label_match.start() - 40) : label_match.start()]
+        if DESCRIPTION_EVIDENCE_SKIP_PREFIX_RE.search(prefix):
+            continue
+        section = text[label_match.start() : min(len(text), label_match.end() + 900)]
+        stop_match = DESCRIPTION_SECTION_STOP_RE.search(section, max(20, label_match.end() - label_match.start()))
+        if stop_match:
+            section = section[: stop_match.start()]
         section_match = SHORT_SALE_LISTING_RE.search(section)
         if section_match:
             start = label_match.start() + section_match.start()
             end = label_match.start() + section_match.end()
             return SHORT_SALE_LISTING_RE.search(text, start, end)
 
-    contextual_match = SHORT_SALE_SALE_CONTEXT_RE.search(text)
-    if contextual_match:
-        return contextual_match
-
     return None
 
 
 def extract_short_sale_evidence_type(text: str) -> str:
-    if re.search(r"(?:special\s+listing\s+conditions?|specialListingConditions)", text, re.I):
-        return "special_listing_conditions_or_field"
     if re.search(r"\b(?:description|remarks|what'?s special|about this home|public remarks)\b", text, re.I):
         return "listing_description_or_remarks"
+    if re.search(r"(?:special\s+listing\s+conditions?|specialListingConditions)", text, re.I):
+        return "special_listing_conditions_or_field"
     return "listing_text"
 
 

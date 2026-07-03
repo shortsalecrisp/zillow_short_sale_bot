@@ -76,8 +76,10 @@ The pilot searches the configured source queries with Google Custom Search when 
 `GOOGLE_CX`/`CS_CX` are present. Production is configured to use Google CSE only, with `dateRestrict=d1` and no
 DuckDuckGo fallback, so the daily run spends about 100 search calls on the two selected buckets: `idx_broker_pages` and
 `realtor.com`. It fetches each result page, uses a bounded Playwright fallback for allowed portal detail pages that
-return HTTP 403/429/451, keeps only active listing pages with listing-text short sale evidence, and appends qualified
-rows after each source query so partial daily runs still leave observable output. Render logs should include
+return HTTP 403/429/451, keeps only active listing pages where the agent-written description/remarks/overview text
+mentions short sale, and appends qualified rows after each source query so partial daily runs still leave observable output.
+Structured fields such as `Special Conditions: Short Sale` or `Potential Short Sale: Yes` are not enough by themselves.
+Render logs should include
 `pilot_query_start`,
 `pilot_query_results`,
 `pilot_headless_fetch_*` when browser fallback is used, `pilot_candidate_qualified` or rejection/duplicate events,
