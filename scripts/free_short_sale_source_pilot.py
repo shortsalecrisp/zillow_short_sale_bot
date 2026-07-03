@@ -23,6 +23,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 
 SPREADSHEET_ID = "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70"
@@ -144,10 +145,25 @@ ALL_SOURCE_QUERIES = [
 ]
 ALL_SOURCE_QUERY_MAP = dict(ALL_SOURCE_QUERIES)
 DEFAULT_SOURCE_BUCKETS = ("idx_broker_pages", "realtor.com", "redfin.com", "homes.com")
+CSE_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DATE_RESTRICT", "d1").strip()
+SOURCE_PLAN = os.getenv("FREE_SOURCE_PILOT_SOURCE_PLAN", "homes_daily_rotating_weekly").strip().lower()
+DEFAULT_DAILY_SOURCE_BUCKETS = ("homes.com",)
+DEFAULT_ROTATING_SOURCE_BUCKETS = ("redfin.com", "idx_broker_pages", "realtor.com")
+DEFAULT_ROTATION_ANCHOR_DATE = "2026-07-04"
+ROTATION_TZ = os.getenv("FREE_SOURCE_PILOT_ROTATION_TZ", "America/New_York")
+DAILY_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT", "d1").strip()
+ROTATING_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_ROTATING_DATE_RESTRICT", "w1").strip()
 
 
-def configured_source_queries() -> list[tuple[str, str]]:
-    raw = os.getenv("FREE_SOURCE_PILOT_SOURCE_BUCKETS", ",".join(DEFAULT_SOURCE_BUCKETS))
+@dataclass(frozen=True)
+class SourceQuery:
+    source: str
+    template: str
+    date_restrict: str
+
+
+def configured_bucket_names(env_name: str, fallback: tuple[str, ...]) -> list[str]:
+    raw = os.getenv(env_name, ",".join(fallback))
     buckets = []
     seen = set()
     for bucket in raw.split(","):
@@ -157,8 +173,48 @@ def configured_source_queries() -> list[tuple[str, str]]:
         buckets.append(source)
         seen.add(source)
     if not buckets:
-        buckets = list(DEFAULT_SOURCE_BUCKETS)
-    return [(source, ALL_SOURCE_QUERY_MAP[source]) for source in buckets]
+        buckets = [source for source in fallback if source in ALL_SOURCE_QUERY_MAP]
+    return buckets
+
+
+def parse_run_date(value: str | None) -> dt.date:
+    if value:
+        return dt.date.fromisoformat(value)
+    try:
+        return dt.datetime.now(ZoneInfo(ROTATION_TZ)).date()
+    except Exception:
+        return dt.datetime.now().date()
+
+
+def rotating_source_for_date(run_date: dt.date, sources: list[str]) -> str:
+    if not sources:
+        return ""
+    anchor = parse_run_date(os.getenv("FREE_SOURCE_PILOT_ROTATION_ANCHOR_DATE", DEFAULT_ROTATION_ANCHOR_DATE))
+    return sources[(run_date - anchor).days % len(sources)]
+
+
+def configured_source_queries(run_date: dt.date | None = None) -> list[SourceQuery]:
+    if SOURCE_PLAN in {"homes_daily_rotating_weekly", "daily_homes_rotating_weekly"}:
+        resolved_run_date = run_date or parse_run_date(os.getenv("FREE_SOURCE_PILOT_RUN_DATE"))
+        daily_sources = configured_bucket_names("FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS", DEFAULT_DAILY_SOURCE_BUCKETS)
+        rotating_sources = configured_bucket_names("FREE_SOURCE_PILOT_ROTATING_SOURCE_BUCKETS", DEFAULT_ROTATING_SOURCE_BUCKETS)
+        selected: list[SourceQuery] = []
+        seen = set()
+        for source in daily_sources:
+            selected.append(SourceQuery(source, ALL_SOURCE_QUERY_MAP[source], DAILY_DATE_RESTRICT))
+            seen.add(source)
+        first_rotating = rotating_source_for_date(resolved_run_date, rotating_sources)
+        if first_rotating:
+            start_index = rotating_sources.index(first_rotating)
+            for offset in range(len(rotating_sources)):
+                source = rotating_sources[(start_index + offset) % len(rotating_sources)]
+                if source not in seen:
+                    selected.append(SourceQuery(source, ALL_SOURCE_QUERY_MAP[source], ROTATING_DATE_RESTRICT))
+                    break
+        return selected
+
+    buckets = configured_bucket_names("FREE_SOURCE_PILOT_SOURCE_BUCKETS", DEFAULT_SOURCE_BUCKETS)
+    return [SourceQuery(source, ALL_SOURCE_QUERY_MAP[source], CSE_DATE_RESTRICT) for source in buckets]
 
 
 SOURCE_QUERIES = configured_source_queries()
@@ -166,7 +222,6 @@ SOURCE_QUERIES = configured_source_queries()
 SEARCH_ENGINE = os.getenv("FREE_SOURCE_PILOT_SEARCH_ENGINE", "auto").lower()
 CSE_API_KEY = os.getenv("CS_API_KEY") or os.getenv("GOOGLE_API_KEY")
 CSE_CX = os.getenv("CS_CX") or os.getenv("GOOGLE_CX")
-CSE_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DATE_RESTRICT", "d1").strip()
 ALLOW_DDG_FALLBACK = os.getenv("FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK", "false").lower() == "true"
 CONTACT_RESEARCH_RESULTS = int(os.getenv("FREE_SOURCE_PILOT_CONTACT_RESEARCH_RESULTS", "3"))
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
@@ -940,10 +995,11 @@ def ddg_search(query: str, source: str, limit: int) -> list[SearchResult]:
     return results
 
 
-def cse_search(query: str, source: str, limit: int) -> list[SearchResult]:
+def cse_search(query: str, source: str, limit: int, date_restrict: str | None = None) -> list[SearchResult]:
     if not CSE_API_KEY or not CSE_CX:
         return []
     results: list[SearchResult] = []
+    effective_date_restrict = CSE_DATE_RESTRICT if date_restrict is None else date_restrict
     start = 1
     while len(results) < limit and start <= 91:
         num = min(10, limit - len(results))
@@ -954,8 +1010,8 @@ def cse_search(query: str, source: str, limit: int) -> list[SearchResult]:
             "num": num,
             "start": start,
         }
-        if CSE_DATE_RESTRICT:
-            request_params["dateRestrict"] = CSE_DATE_RESTRICT
+        if effective_date_restrict:
+            request_params["dateRestrict"] = effective_date_restrict
         params = urllib.parse.urlencode(request_params)
         req = urllib.request.Request(
             "https://www.googleapis.com/customsearch/v1?" + params,
@@ -985,7 +1041,7 @@ def cse_search(query: str, source: str, limit: int) -> list[SearchResult]:
     return results
 
 
-def search_web(query: str, source: str, limit: int) -> tuple[str, list[SearchResult]]:
+def search_web(query: str, source: str, limit: int, date_restrict: str | None = None) -> tuple[str, list[SearchResult]]:
     engines: list[str]
     if SEARCH_ENGINE in {"cse", "google", "google_cse"}:
         engines = ["cse"]
@@ -1003,7 +1059,7 @@ def search_web(query: str, source: str, limit: int) -> tuple[str, list[SearchRes
     for engine in engines:
         try:
             if engine == "cse":
-                results = cse_search(query, source, limit)
+                results = cse_search(query, source, limit, date_restrict=date_restrict)
             else:
                 results = ddg_search(query, source, limit)
             return engine, results
@@ -1543,6 +1599,8 @@ def run(args: argparse.Namespace) -> None:
     service_account = load_service_account_info(args.service_account)
     token = sheets_client(service_account)
     ensure_tab(token, args.spreadsheet_id, args.pilot_tab)
+    run_date = parse_run_date(args.run_date)
+    source_queries = configured_source_queries(run_date)
 
     main_rows = get_values(token, args.spreadsheet_id, f"{args.main_tab}!A:AQ")
     existing = build_existing_index(main_rows)
@@ -1565,12 +1623,14 @@ def run(args: argparse.Namespace) -> None:
     }
     log_event(
         "pilot_run_start",
+        run_date=run_date.isoformat(),
+        source_plan=SOURCE_PLAN,
         states=args.states,
-        source_count=len(SOURCE_QUERIES),
-        source_buckets=[source for source, _ in SOURCE_QUERIES],
+        source_count=len(source_queries),
+        source_buckets=[query.source for query in source_queries],
+        source_date_restricts={query.source: query.date_restrict for query in source_queries},
         results_per_query=args.results_per_query,
         search_engine=SEARCH_ENGINE,
-        cse_date_restrict=CSE_DATE_RESTRICT,
         ddg_fallback_allowed=ALLOW_DDG_FALLBACK,
         cse_configured=bool(CSE_API_KEY and CSE_CX),
         dry_run=args.dry_run,
@@ -1578,14 +1638,33 @@ def run(args: argparse.Namespace) -> None:
 
     for state in args.states:
         state_query_term = STATE_QUERY_TERMS.get(state.upper(), state)
-        for source, template in SOURCE_QUERIES:
-            query = template.format(state=state_query_term)
+        for source_query in source_queries:
+            source = source_query.source
+            query = source_query.template.format(state=state_query_term)
             stats["searched"] += 1
-            log_event("pilot_query_start", state=state, source=source, query=query)
+            log_event(
+                "pilot_query_start",
+                state=state,
+                source=source,
+                query=query,
+                date_restrict=source_query.date_restrict,
+            )
             try:
-                engine, results = search_web(query, source, args.results_per_query)
+                engine, results = search_web(
+                    query,
+                    source,
+                    args.results_per_query,
+                    date_restrict=source_query.date_restrict,
+                )
             except Exception as exc:  # noqa: BLE001
-                log_event("pilot_query_failed", state=state, source=source, query=query, error=str(exc))
+                log_event(
+                    "pilot_query_failed",
+                    state=state,
+                    source=source,
+                    query=query,
+                    date_restrict=source_query.date_restrict,
+                    error=str(exc),
+                )
                 continue
             stats["results"] += len(results)
             log_event(
@@ -1594,6 +1673,7 @@ def run(args: argparse.Namespace) -> None:
                 source=source,
                 engine=engine,
                 query=query,
+                date_restrict=source_query.date_restrict,
                 result_count=len(results),
             )
             time.sleep(args.sleep_seconds)
@@ -1756,6 +1836,7 @@ def run(args: argparse.Namespace) -> None:
                 "pilot_query_done",
                 state=state,
                 source=source,
+                date_restrict=source_query.date_restrict,
                 rows_written=0 if args.dry_run else len(query_rows),
                 **query_stats,
             )
@@ -1772,6 +1853,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--states", nargs="+", default=DEFAULT_STATES)
     parser.add_argument("--results-per-query", type=int, default=10)
     parser.add_argument("--sleep-seconds", type=float, default=1.0)
+    parser.add_argument("--run-date", default=os.getenv("FREE_SOURCE_PILOT_RUN_DATE"))
     parser.add_argument("--include-rejected", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()

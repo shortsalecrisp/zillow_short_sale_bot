@@ -162,6 +162,8 @@ def _free_source_pilot_callback(run_time: datetime) -> None:
                 os.getenv("FREE_SOURCE_PILOT_RESULTS_PER_QUERY", "10"),
                 "--sleep-seconds",
                 os.getenv("FREE_SOURCE_PILOT_SLEEP_SECONDS", "1.0"),
+                "--run-date",
+                local_dt.date().isoformat(),
             ]
             process = subprocess.Popen(
                 cmd,

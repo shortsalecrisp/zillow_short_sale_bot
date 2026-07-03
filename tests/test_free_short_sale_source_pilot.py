@@ -329,22 +329,32 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
         self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
 
-    def test_default_source_buckets_cover_all_four_approved_sources(self):
-        old_buckets = os.environ.pop("FREE_SOURCE_PILOT_SOURCE_BUCKETS", None)
-        try:
-            sources = [source for source, _ in pilot.configured_source_queries()]
-        finally:
-            if old_buckets is not None:
-                os.environ["FREE_SOURCE_PILOT_SOURCE_BUCKETS"] = old_buckets
+    def test_default_source_plan_runs_homes_daily_and_rotates_weekly_bucket(self):
+        queries = pilot.configured_source_queries(pilot.dt.date(2026, 7, 4))
 
-        self.assertEqual(sources, ["idx_broker_pages", "realtor.com", "redfin.com", "homes.com"])
+        self.assertEqual([query.source for query in queries], ["homes.com", "redfin.com"])
+        self.assertEqual([query.date_restrict for query in queries], ["d1", "w1"])
+
+    def test_default_source_plan_rotates_non_homes_buckets_daily(self):
+        day_1 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 4))
+        day_2 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 5))
+        day_3 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 6))
+        day_4 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 7))
+
+        self.assertEqual([query.source for query in day_1], ["homes.com", "redfin.com"])
+        self.assertEqual([query.source for query in day_2], ["homes.com", "idx_broker_pages"])
+        self.assertEqual([query.source for query in day_3], ["homes.com", "realtor.com"])
+        self.assertEqual([query.source for query in day_4], ["homes.com", "redfin.com"])
 
     def test_configured_source_buckets_ignore_unknowns_and_duplicates(self):
+        old_plan = pilot.SOURCE_PLAN
         old_buckets = os.environ.get("FREE_SOURCE_PILOT_SOURCE_BUCKETS")
         os.environ["FREE_SOURCE_PILOT_SOURCE_BUCKETS"] = "realtor.com,unknown,realtor.com,homes.com"
         try:
-            sources = [source for source, _ in pilot.configured_source_queries()]
+            pilot.SOURCE_PLAN = "static"
+            sources = [query.source for query in pilot.configured_source_queries()]
         finally:
+            pilot.SOURCE_PLAN = old_plan
             if old_buckets is None:
                 os.environ.pop("FREE_SOURCE_PILOT_SOURCE_BUCKETS", None)
             else:
@@ -741,8 +751,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         old_ddg_search = pilot.ddg_search
         calls = []
 
-        def fake_cse_search(query, source, limit):
-            calls.append(("cse", query, source, limit))
+        def fake_cse_search(query, source, limit, date_restrict=None):
+            calls.append(("cse", query, source, limit, date_restrict))
             return [pilot.SearchResult(source, query, "https://example.com/1", "Title", "Snippet")]
 
         def fake_ddg_search(query, source, limit):
@@ -756,11 +766,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.cse_search = fake_cse_search
             pilot.ddg_search = fake_ddg_search
 
-            engine, results = pilot.search_web("query", "source", 3)
+            engine, results = pilot.search_web("query", "source", 3, date_restrict="w1")
 
             self.assertEqual(engine, "cse")
             self.assertEqual(len(results), 1)
-            self.assertEqual(calls, [("cse", "query", "source", 3)])
+            self.assertEqual(calls, [("cse", "query", "source", 3, "w1")])
         finally:
             pilot.SEARCH_ENGINE = old_engine
             pilot.CSE_API_KEY = old_key
@@ -777,8 +787,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         old_ddg_search = pilot.ddg_search
         calls = []
 
-        def fake_cse_search(query, source, limit):
-            calls.append(("cse", query, source, limit))
+        def fake_cse_search(query, source, limit, date_restrict=None):
+            calls.append(("cse", query, source, limit, date_restrict))
             raise RuntimeError("cse down")
 
         def fake_ddg_search(query, source, limit):
@@ -798,7 +808,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
             self.assertEqual(engine, "ddg")
             self.assertEqual(len(results), 1)
-            self.assertEqual(calls, [("cse", "query", "source", 3), ("ddg", "query", "source", 3)])
+            self.assertEqual(calls, [("cse", "query", "source", 3, None), ("ddg", "query", "source", 3)])
         finally:
             pilot.SEARCH_ENGINE = old_engine
             pilot.CSE_API_KEY = old_key
@@ -816,8 +826,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         old_ddg_search = pilot.ddg_search
         calls = []
 
-        def fake_cse_search(query, source, limit):
-            calls.append(("cse", query, source, limit))
+        def fake_cse_search(query, source, limit, date_restrict=None):
+            calls.append(("cse", query, source, limit, date_restrict))
             raise RuntimeError("cse down")
 
         def fake_ddg_search(query, source, limit):
@@ -836,7 +846,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     pilot.search_web("query", "source", 3)
 
-            self.assertEqual(calls, [("cse", "query", "source", 3)])
+            self.assertEqual(calls, [("cse", "query", "source", 3, None)])
         finally:
             pilot.SEARCH_ENGINE = old_engine
             pilot.CSE_API_KEY = old_key

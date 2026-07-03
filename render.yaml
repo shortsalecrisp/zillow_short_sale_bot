@@ -136,6 +136,18 @@ services:
         value: cse
       - key: FREE_SOURCE_PILOT_SLEEP_SECONDS
         value: "1.0"
+      - key: FREE_SOURCE_PILOT_SOURCE_PLAN
+        value: homes_daily_rotating_weekly
+      - key: FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS
+        value: homes.com
+      - key: FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT
+        value: d1
+      - key: FREE_SOURCE_PILOT_ROTATING_SOURCE_BUCKETS
+        value: redfin.com,idx_broker_pages,realtor.com
+      - key: FREE_SOURCE_PILOT_ROTATING_DATE_RESTRICT
+        value: w1
+      - key: FREE_SOURCE_PILOT_ROTATION_ANCHOR_DATE
+        value: "2026-07-04"
       - key: FREE_SOURCE_PILOT_SOURCE_BUCKETS
         value: idx_broker_pages,realtor.com,redfin.com,homes.com
       - key: FREE_SOURCE_PILOT_DATE_RESTRICT

@@ -834,6 +834,8 @@ def _run_free_source_pilot(run_time: datetime) -> None:
         str(FREE_SOURCE_PILOT_RESULTS_PER_QUERY),
         "--sleep-seconds",
         str(FREE_SOURCE_PILOT_SLEEP_SECONDS),
+        "--run-date",
+        run_time.astimezone(SCHEDULER_TZ).date().isoformat(),
     ]
     try:
         logger.info(
