@@ -74,8 +74,9 @@ across all 50 states.
 
 The pilot searches the configured source queries with Google Custom Search when `GOOGLE_API_KEY`/`CS_API_KEY` and
 `GOOGLE_CX`/`CS_CX` are present. Production is configured to use Google CSE only, with `dateRestrict=d1` and no
-DuckDuckGo fallback, so the daily run spends about 100 search calls on the two selected buckets: `idx_broker_pages` and
-`realtor.com`. It fetches each result page, uses a bounded Playwright fallback for allowed portal detail pages that
+DuckDuckGo fallback, so the daily run spends about 200 search calls on the four selected buckets:
+`idx_broker_pages`, `realtor.com`, `redfin.com`, and `homes.com`. It fetches each result page, uses a bounded
+Playwright fallback for allowed portal detail pages that
 return HTTP 403/429/451, keeps only active listing pages where the agent-written description/remarks/overview text
 mentions short sale, and appends qualified rows after each source query so partial daily runs still leave observable output.
 Structured fields such as `Special Conditions: Short Sale` or `Potential Short Sale: Yes` are not enough by themselves.
@@ -107,7 +108,7 @@ Configuration:
 * `FREE_SOURCE_PILOT_RUN_MINUTE=0`
 * `FREE_SOURCE_PILOT_SLEEP_SECONDS=1.0`
 * `FREE_SOURCE_PILOT_SEARCH_ENGINE=cse`
-* `FREE_SOURCE_PILOT_SOURCE_BUCKETS=idx_broker_pages,realtor.com`
+* `FREE_SOURCE_PILOT_SOURCE_BUCKETS=idx_broker_pages,realtor.com,redfin.com,homes.com`
 * `FREE_SOURCE_PILOT_DATE_RESTRICT=d1`
 * `FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK=false`
 

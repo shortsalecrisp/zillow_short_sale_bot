@@ -137,7 +137,7 @@ services:
       - key: FREE_SOURCE_PILOT_SLEEP_SECONDS
         value: "1.0"
       - key: FREE_SOURCE_PILOT_SOURCE_BUCKETS
-        value: idx_broker_pages,realtor.com
+        value: idx_broker_pages,realtor.com,redfin.com,homes.com
       - key: FREE_SOURCE_PILOT_DATE_RESTRICT
         value: d1
       - key: FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK

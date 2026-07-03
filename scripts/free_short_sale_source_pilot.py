@@ -143,7 +143,7 @@ ALL_SOURCE_QUERIES = [
     ),
 ]
 ALL_SOURCE_QUERY_MAP = dict(ALL_SOURCE_QUERIES)
-DEFAULT_SOURCE_BUCKETS = ("idx_broker_pages", "realtor.com")
+DEFAULT_SOURCE_BUCKETS = ("idx_broker_pages", "realtor.com", "redfin.com", "homes.com")
 
 
 def configured_source_queries() -> list[tuple[str, str]]:

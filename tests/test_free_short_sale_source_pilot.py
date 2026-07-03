@@ -296,7 +296,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
         self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
 
-    def test_default_source_buckets_are_idx_and_realtor(self):
+    def test_default_source_buckets_cover_all_four_approved_sources(self):
         old_buckets = os.environ.pop("FREE_SOURCE_PILOT_SOURCE_BUCKETS", None)
         try:
             sources = [source for source, _ in pilot.configured_source_queries()]
@@ -304,7 +304,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             if old_buckets is not None:
                 os.environ["FREE_SOURCE_PILOT_SOURCE_BUCKETS"] = old_buckets
 
-        self.assertEqual(sources, ["idx_broker_pages", "realtor.com"])
+        self.assertEqual(sources, ["idx_broker_pages", "realtor.com", "redfin.com", "homes.com"])
 
     def test_configured_source_buckets_ignore_unknowns_and_duplicates(self):
         old_buckets = os.environ.get("FREE_SOURCE_PILOT_SOURCE_BUCKETS")
