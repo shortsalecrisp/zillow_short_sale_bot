@@ -146,12 +146,12 @@ ALL_SOURCE_QUERIES = [
 ALL_SOURCE_QUERY_MAP = dict(ALL_SOURCE_QUERIES)
 DEFAULT_SOURCE_BUCKETS = ("idx_broker_pages", "realtor.com", "redfin.com", "homes.com")
 CSE_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DATE_RESTRICT", "d1").strip()
-SOURCE_PLAN = os.getenv("FREE_SOURCE_PILOT_SOURCE_PLAN", "homes_daily_rotating_weekly").strip().lower()
-DEFAULT_DAILY_SOURCE_BUCKETS = ("homes.com",)
-DEFAULT_ROTATING_SOURCE_BUCKETS = ("redfin.com", "idx_broker_pages", "realtor.com")
-DEFAULT_ROTATION_ANCHOR_DATE = "2026-07-04"
+SOURCE_PLAN = os.getenv("FREE_SOURCE_PILOT_SOURCE_PLAN", "idx_daily_rotating_weekly").strip().lower()
+DEFAULT_DAILY_SOURCE_BUCKETS = ("idx_broker_pages",)
+DEFAULT_ROTATING_SOURCE_BUCKETS = ("homes.com", "realtor.com", "redfin.com")
+DEFAULT_ROTATION_ANCHOR_DATE = "2026-07-06"
 ROTATION_TZ = os.getenv("FREE_SOURCE_PILOT_ROTATION_TZ", "America/New_York")
-DAILY_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT", "d1").strip()
+DAILY_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT", "w1").strip()
 ROTATING_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_ROTATING_DATE_RESTRICT", "w1").strip()
 
 
@@ -194,7 +194,12 @@ def rotating_source_for_date(run_date: dt.date, sources: list[str]) -> str:
 
 
 def configured_source_queries(run_date: dt.date | None = None) -> list[SourceQuery]:
-    if SOURCE_PLAN in {"homes_daily_rotating_weekly", "daily_homes_rotating_weekly"}:
+    if SOURCE_PLAN in {
+        "idx_daily_rotating_weekly",
+        "daily_idx_rotating_weekly",
+        "homes_daily_rotating_weekly",
+        "daily_homes_rotating_weekly",
+    }:
         resolved_run_date = run_date or parse_run_date(os.getenv("FREE_SOURCE_PILOT_RUN_DATE"))
         daily_sources = configured_bucket_names("FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS", DEFAULT_DAILY_SOURCE_BUCKETS)
         rotating_sources = configured_bucket_names("FREE_SOURCE_PILOT_ROTATING_SOURCE_BUCKETS", DEFAULT_ROTATING_SOURCE_BUCKETS)

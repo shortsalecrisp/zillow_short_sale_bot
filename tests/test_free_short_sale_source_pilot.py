@@ -329,22 +329,22 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
         self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
 
-    def test_default_source_plan_runs_homes_daily_and_rotates_weekly_bucket(self):
-        queries = pilot.configured_source_queries(pilot.dt.date(2026, 7, 4))
+    def test_default_source_plan_runs_idx_daily_and_rotates_weekly_bucket(self):
+        queries = pilot.configured_source_queries(pilot.dt.date(2026, 7, 6))
 
-        self.assertEqual([query.source for query in queries], ["homes.com", "redfin.com"])
-        self.assertEqual([query.date_restrict for query in queries], ["d1", "w1"])
+        self.assertEqual([query.source for query in queries], ["idx_broker_pages", "homes.com"])
+        self.assertEqual([query.date_restrict for query in queries], ["w1", "w1"])
 
-    def test_default_source_plan_rotates_non_homes_buckets_daily(self):
-        day_1 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 4))
-        day_2 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 5))
-        day_3 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 6))
-        day_4 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 7))
+    def test_default_source_plan_rotates_non_idx_buckets_daily(self):
+        day_1 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 6))
+        day_2 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 7))
+        day_3 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 8))
+        day_4 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 9))
 
-        self.assertEqual([query.source for query in day_1], ["homes.com", "redfin.com"])
-        self.assertEqual([query.source for query in day_2], ["homes.com", "idx_broker_pages"])
-        self.assertEqual([query.source for query in day_3], ["homes.com", "realtor.com"])
-        self.assertEqual([query.source for query in day_4], ["homes.com", "redfin.com"])
+        self.assertEqual([query.source for query in day_1], ["idx_broker_pages", "homes.com"])
+        self.assertEqual([query.source for query in day_2], ["idx_broker_pages", "realtor.com"])
+        self.assertEqual([query.source for query in day_3], ["idx_broker_pages", "redfin.com"])
+        self.assertEqual([query.source for query in day_4], ["idx_broker_pages", "homes.com"])
 
     def test_configured_source_buckets_ignore_unknowns_and_duplicates(self):
         old_plan = pilot.SOURCE_PLAN

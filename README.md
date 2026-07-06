@@ -74,10 +74,10 @@ across all 50 states.
 
 The pilot searches the configured source queries with Google Custom Search when `GOOGLE_API_KEY`/`CS_API_KEY` and
 `GOOGLE_CX`/`CS_CX` are present. Production is configured to use Google CSE only with no DuckDuckGo fallback. To stay
-inside the free daily CSE quota, the daily seven-day-a-week schedule spends 100 source/state searches: `homes.com` runs
-across all 50 states with `dateRestrict=d1`, and one rotating bucket runs across all 50 states with
-`dateRestrict=w1`. The rotating sequence starts with `redfin.com` on 2026-07-04, then `idx_broker_pages`, then
-`realtor.com`, and repeats. It fetches each result page, uses a bounded Playwright fallback for allowed portal detail pages that
+inside the free daily CSE quota, the daily seven-day-a-week schedule spends 100 source/state searches:
+`idx_broker_pages` runs across all 50 states with `dateRestrict=w1`, and one rotating bucket runs across all 50 states
+with `dateRestrict=w1`. The rotating sequence starts with `homes.com` on 2026-07-06, then `realtor.com`, then
+`redfin.com`, and repeats. It fetches each result page, uses a bounded Playwright fallback for allowed portal detail pages that
 return HTTP 403/429/451, keeps only active listing pages where the agent-written description/remarks/overview text
 mentions short sale, and appends qualified rows after each source query so partial daily runs still leave observable output.
 Structured fields such as `Special Conditions: Short Sale` or `Potential Short Sale: Yes` are not enough by themselves.
@@ -109,12 +109,12 @@ Configuration:
 * `FREE_SOURCE_PILOT_RUN_MINUTE=0`
 * `FREE_SOURCE_PILOT_SLEEP_SECONDS=1.0`
 * `FREE_SOURCE_PILOT_SEARCH_ENGINE=cse`
-* `FREE_SOURCE_PILOT_SOURCE_PLAN=homes_daily_rotating_weekly`
-* `FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS=homes.com`
-* `FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT=d1`
-* `FREE_SOURCE_PILOT_ROTATING_SOURCE_BUCKETS=redfin.com,idx_broker_pages,realtor.com`
+* `FREE_SOURCE_PILOT_SOURCE_PLAN=idx_daily_rotating_weekly`
+* `FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS=idx_broker_pages`
+* `FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT=w1`
+* `FREE_SOURCE_PILOT_ROTATING_SOURCE_BUCKETS=homes.com,realtor.com,redfin.com`
 * `FREE_SOURCE_PILOT_ROTATING_DATE_RESTRICT=w1`
-* `FREE_SOURCE_PILOT_ROTATION_ANCHOR_DATE=2026-07-04`
+* `FREE_SOURCE_PILOT_ROTATION_ANCHOR_DATE=2026-07-06`
 * `FREE_SOURCE_PILOT_SOURCE_BUCKETS=idx_broker_pages,realtor.com,redfin.com,homes.com`
 * `FREE_SOURCE_PILOT_DATE_RESTRICT=d1`
 * `FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK=false`
