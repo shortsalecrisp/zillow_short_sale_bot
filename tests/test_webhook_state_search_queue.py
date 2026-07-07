@@ -70,39 +70,42 @@ fake_openai = types.SimpleNamespace(__spec__=importlib.machinery.ModuleSpec("ope
 sys.modules["openai"] = fake_openai
 
 
-class _DummyFastAPI:
-    def on_event(self, *args, **kwargs):
-        return lambda func: func
+try:
+    import fastapi as _fastapi  # noqa: F401
+except Exception:
+    class _DummyFastAPI:
+        def on_event(self, *args, **kwargs):
+            return lambda func: func
 
-    def post(self, *args, **kwargs):
-        return lambda func: func
+        def post(self, *args, **kwargs):
+            return lambda func: func
 
-    def get(self, *args, **kwargs):
-        return lambda func: func
+        def get(self, *args, **kwargs):
+            return lambda func: func
 
-    def head(self, *args, **kwargs):
-        return lambda func: func
+        def head(self, *args, **kwargs):
+            return lambda func: func
 
+    fastapi_module = types.ModuleType("fastapi")
+    fastapi_module.FastAPI = lambda *args, **kwargs: _DummyFastAPI()
+    fastapi_module.HTTPException = Exception
+    fastapi_module.Request = object
+    fastapi_module.Response = lambda *args, **kwargs: types.SimpleNamespace(
+        status_code=kwargs.get("status_code")
+    )
+    sys.modules["fastapi"] = fastapi_module
 
-fastapi_module = types.ModuleType("fastapi")
-fastapi_module.FastAPI = lambda *args, **kwargs: _DummyFastAPI()
-fastapi_module.HTTPException = Exception
-fastapi_module.Request = object
-fastapi_module.Response = lambda *args, **kwargs: types.SimpleNamespace(
-    status_code=kwargs.get("status_code")
-)
-sys.modules["fastapi"] = fastapi_module
+try:
+    from starlette.requests import ClientDisconnect as _ClientDisconnect  # noqa: F401
+except Exception:
+    starlette_requests_module = types.ModuleType("starlette.requests")
 
-starlette_requests_module = types.ModuleType("starlette.requests")
+    class _ClientDisconnect(Exception):
+        pass
 
-
-class _ClientDisconnect(Exception):
-    pass
-
-
-starlette_requests_module.ClientDisconnect = _ClientDisconnect
-sys.modules.setdefault("starlette", types.ModuleType("starlette"))
-sys.modules["starlette.requests"] = starlette_requests_module
+    starlette_requests_module.ClientDisconnect = _ClientDisconnect
+    sys.modules.setdefault("starlette", types.ModuleType("starlette"))
+    sys.modules["starlette.requests"] = starlette_requests_module
 
 
 class _DummyCreds:

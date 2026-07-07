@@ -1,0 +1,23 @@
+{
+  "zillow_url": "https://www.zillow.com/homes/for_sale/",
+  "sheet_id": "YOUR_GOOGLE_SHEET_ID",
+  "sheet_tab": "Sheet1",
+  "poll_interval_min": 60,
+  "poll_random_min": 5,
+  "openai_model": "gpt-4o-mini",
+  "user_agents": [],
+  "must_include": [],
+  "disallowed_phrases": [],
+  "allowed_types": [],
+  "disallowed_states": [],
+  "sms_enabled": false,
+  "sms_provider": "android_gateway",
+  "sms_gateway_api_key": "",
+  "email_enabled": false,
+  "email_from": "",
+  "email_to": "",
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 587,
+  "smtp_user": "",
+  "smtp_pass": ""
+}

@@ -4,7 +4,7 @@ This repository contains scripts for scraping Zillow short sale listings and con
 
 ## SMS
 
-SMS sending uses [SMS Gateway for Android](https://api.smstext.app).  Provide the API key via the `sms_gateway_api_key` field in `config.json` or the `SMS_GATEWAY_API_KEY` environment variable.  The provider can be set with `sms_provider`, but currently only `android_gateway` is supported.
+SMS sending uses the Tasker AutoRemote-compatible Android gateway. Provide the API key with the `AUTOREMOTE_KEY` or `SMS_GATEWAY_API_KEY` environment variable. Do not commit real SMS or email credentials to `config.json`; local config belongs in an ignored `config.json`, and Render credentials belong in the service environment. The provider can be set with `SMS_PROVIDER`, but currently only `android_gateway` is supported.
 
 Test mode is disabled by default. To enable it explicitly, set `SMS_TEST_MODE=true` (and optionally `SMS_TEST_NUMBER` to route test messages to a specific device/number).
 

@@ -15,9 +15,9 @@ services:
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: /opt/render/.cache/playwright
       - key: APIFY_API_TOKEN
-        value: REPLACE_ME
+        sync: false
       - key: APIFY_TOKEN
-        value: REPLACE_ME
+        sync: false
       - key: APIFY_MAX_ITEMS
         value: "5"
       - key: APIFY_FETCH_ATTEMPTS
@@ -51,7 +51,7 @@ services:
       - key: BOT_TIMEZONE
         value: US/Eastern
       - key: CLOUDMERSIVE_KEY
-        value: REPLACE_ME
+        sync: false
       - key: CLOUDMERSIVE_MOBILE_BOOST
         value: "0.8"
       - key: CONTACT_CACHE_TTL_SECONDS
@@ -79,9 +79,9 @@ services:
       - key: CONTACT_PHONE_OVERRIDE_MIN
         value: "1.0"
       - key: CS_API_KEY
-        value: REPLACE_ME
+        sync: false
       - key: CS_CX
-        value: REPLACE_ME
+        sync: false
       - key: CS_API_KEYS
         value: ""
       - key: CS_CXS
@@ -163,13 +163,13 @@ services:
       - key: FU_LOOKBACK_ROWS
         value: "500"
       - key: GCP_SERVICE_ACCOUNT_JSON
-        value: REPLACE_ME
+        sync: false
       - key: GOOGLE_API_KEY
-        value: REPLACE_ME
+        sync: false
       - key: GOOGLE_CX
-        value: REPLACE_ME
+        sync: false
       - key: GSHEET_ID
-        value: REPLACE_ME
+        sync: false
       - key: GSHEET_NEXT_ROW_HINT
         value: "2566"
       - key: GSHEET_RANGE
@@ -213,7 +213,7 @@ services:
       - key: NOTIFY_PHONE
         value: ""
       - key: OPENAI_API_KEY
-        value: REPLACE_ME
+        sync: false
       - key: OPENAI_RERANK_MODEL
         value: gpt-4o-mini
       - key: PROXY_LOG_REDACT
@@ -223,7 +223,7 @@ services:
       - key: RAPID_HOST
         value: us-housing-market-data1.p.rapidapi.com
       - key: RAPID_KEY
-        value: REPLACE_ME
+        sync: false
       - key: RAPID_MIN_INTERVAL
         value: "0.75"
       - key: REALTOR_BACKOFF_BASE
@@ -253,13 +253,13 @@ services:
       - key: SEND_SMS
         value: ""
       - key: SMSM_WEBHOOK_TOKEN
-        value: REPLACE_ME
+        sync: false
       - key: SMS_API_KEY
-        value: REPLACE_ME
+        sync: false
       - key: SMS_ENABLE
         value: "false"
       - key: SMS_GATEWAY_API_KEY
-        value: REPLACE_ME
+        sync: false
       - key: SMS_PROVIDER
         value: android_gateway
       - key: SMS_RETRY_ATTEMPTS

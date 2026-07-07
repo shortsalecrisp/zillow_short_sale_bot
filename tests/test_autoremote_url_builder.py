@@ -1,14 +1,36 @@
 from types import SimpleNamespace
 
-from sms_providers import SMSGatewayForAndroid
+from sms_providers import SMSGatewayForAndroid, get_sender
+
+DUMMY_AUTOREMOTE_KEY = "test-autoremote-key"
 
 
 def test_normalize_endpoint_root_strips_sendmessage_path():
     sender = SMSGatewayForAndroid(
-        api_key="EhobscAL",
-        endpoint="https://autoremotejoaomgcd.appspot.com/sendmessage/EhobscAL",
+        api_key=DUMMY_AUTOREMOTE_KEY,
+        endpoint=f"https://autoremotejoaomgcd.appspot.com/sendmessage/{DUMMY_AUTOREMOTE_KEY}",
     )
     assert sender.endpoint_root == "https://autoremotejoaomgcd.appspot.com"
+
+
+def test_get_sender_has_no_committed_key_fallback(monkeypatch):
+    monkeypatch.delenv("AUTOREMOTE_KEY", raising=False)
+    monkeypatch.delenv("SMS_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("SMS_API_KEY", raising=False)
+
+    sender = get_sender("android_gateway")
+
+    assert sender.api_key == ""
+
+
+def test_get_sender_prefers_autoremote_key(monkeypatch):
+    monkeypatch.setenv("AUTOREMOTE_KEY", "private-autoremote-key")
+    monkeypatch.setenv("SMS_GATEWAY_API_KEY", "gateway-key")
+    monkeypatch.setenv("SMS_API_KEY", "legacy-key")
+
+    sender = get_sender("android_gateway")
+
+    assert sender.api_key == "private-autoremote-key"
 
 
 def test_send_with_diagnostics_uses_fcm_sendmessage_endpoint(monkeypatch):
@@ -23,7 +45,7 @@ def test_send_with_diagnostics_uses_fcm_sendmessage_endpoint(monkeypatch):
     monkeypatch.setattr("sms_providers.requests.get", fake_get)
 
     sender = SMSGatewayForAndroid(
-        api_key="EhobscAL",
+        api_key=DUMMY_AUTOREMOTE_KEY,
         endpoint="https://autoremotejoaomgcd.appspot.com/sendmessage",
     )
     result = sender.send_with_diagnostics(
@@ -35,7 +57,7 @@ def test_send_with_diagnostics_uses_fcm_sendmessage_endpoint(monkeypatch):
     assert result.success is True
     assert captured["url"] == "https://autoremotejoaomgcd.appspot.com/sendmessage"
     assert captured["params"] == {
-        "key": "EhobscAL",
+        "key": DUMMY_AUTOREMOTE_KEY,
         "message": "smsbot=+15551234567|||Hello there|||initial",
         "target": "+15551234567",
     }
@@ -69,7 +91,7 @@ def test_send_with_diagnostics_accepts_http_200_without_error_body(monkeypatch):
     monkeypatch.setattr("sms_providers.requests.get", fake_get)
 
     sender = SMSGatewayForAndroid(
-        api_key="EhobscAL",
+        api_key=DUMMY_AUTOREMOTE_KEY,
         endpoint="https://autoremotejoaomgcd.appspot.com/sendmessage",
     )
     result = sender.send_with_diagnostics(
@@ -88,7 +110,7 @@ def test_send_with_diagnostics_http_200_ok_is_success(monkeypatch):
 
     monkeypatch.setattr("sms_providers.requests.get", fake_get)
 
-    sender = SMSGatewayForAndroid(api_key="EhobscAL")
+    sender = SMSGatewayForAndroid(api_key=DUMMY_AUTOREMOTE_KEY)
     result = sender.send_with_diagnostics(
         to="+15551234567",
         message="Hello there",
@@ -105,7 +127,7 @@ def test_send_with_diagnostics_http_200_token_error_is_failure(monkeypatch):
 
     monkeypatch.setattr("sms_providers.requests.get", fake_get)
 
-    sender = SMSGatewayForAndroid(api_key="EhobscAL")
+    sender = SMSGatewayForAndroid(api_key=DUMMY_AUTOREMOTE_KEY)
     result = sender.send_with_diagnostics(
         to="+15551234567",
         message="Hello there",
@@ -122,7 +144,7 @@ def test_send_with_diagnostics_http_200_empty_body_is_accepted(monkeypatch):
 
     monkeypatch.setattr("sms_providers.requests.get", fake_get)
 
-    sender = SMSGatewayForAndroid(api_key="EhobscAL")
+    sender = SMSGatewayForAndroid(api_key=DUMMY_AUTOREMOTE_KEY)
     result = sender.send_with_diagnostics(
         to="+15551234567",
         message="Hello there",
@@ -139,7 +161,7 @@ def test_send_with_diagnostics_non_200_is_failure(monkeypatch):
 
     monkeypatch.setattr("sms_providers.requests.get", fake_get)
 
-    sender = SMSGatewayForAndroid(api_key="EhobscAL")
+    sender = SMSGatewayForAndroid(api_key=DUMMY_AUTOREMOTE_KEY)
     result = sender.send_with_diagnostics(
         to="+15551234567",
         message="Hello there",

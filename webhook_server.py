@@ -44,7 +44,7 @@ from sms_providers import get_sender
 # Configuration & logging
 # ──────────────────────────────────────────────────────────────────────
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "android_gateway")
-SMS_API_KEY = os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "EhobscAL")
+SMS_API_KEY = os.getenv("AUTOREMOTE_KEY") or os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
 SMS_SENDER   = get_sender(SMS_PROVIDER)
 DISABLE_APIFY_SCHEDULER = os.getenv("DISABLE_APIFY_SCHEDULER", "false").lower() == "true"
 RENDER_APIFY_TRIGGER_DISABLED = (

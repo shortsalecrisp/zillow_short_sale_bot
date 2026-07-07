@@ -1,5 +1,7 @@
 service_account.json
 .env
+config.json
+*.local.json
 
 seen.db
 
