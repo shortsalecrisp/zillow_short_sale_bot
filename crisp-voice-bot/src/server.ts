@@ -2,10 +2,12 @@ import express, { type ErrorRequestHandler, type NextFunction, type Request, typ
 import { getConfiguredCallWindows } from "./lib/callWindowGuard";
 import { config } from "./lib/config";
 import { getElevenLabsVoiceExperimentStatus } from "./lib/elevenLabsVoiceVariant";
+import { startGmailImportSchedulers } from "./lib/gmailImporters";
 import { logger } from "./lib/logger";
 import { startMailshakeSyncScheduler } from "./lib/mailshakeSync";
 import { startVoiceQueueScheduler } from "./lib/voiceQueue";
 import elevenLabsRouter from "./routes/elevenLabs";
+import gmailImportRouter from "./routes/gmailImport";
 import mailshakeSyncRouter from "./routes/mailshakeSync";
 import smsReplyRouter from "./routes/smsReply";
 import startCallRouter from "./routes/startCall";
@@ -50,6 +52,7 @@ app.use("/sms-reply", smsReplyRouter);
 app.use("/elevenlabs", elevenLabsRouter);
 app.use("/voice-queue", voiceQueueRouter);
 app.use("/mailshake-sync", mailshakeSyncRouter);
+app.use("/gmail-import", gmailImportRouter);
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({
@@ -96,6 +99,7 @@ app.listen(config.port, () => {
   });
   startVoiceQueueScheduler();
   startMailshakeSyncScheduler();
+  startGmailImportSchedulers();
 });
 
 // TODO: Add live transfer support once call qualification logic is ready.

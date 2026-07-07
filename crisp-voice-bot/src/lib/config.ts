@@ -73,6 +73,8 @@ function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+const gmailImportSchedulerEnabled = readBoolean("GMAIL_IMPORT_SCHEDULER_ENABLED", false);
+
 function readLiveTransferForceResult(): "none" | "accept" | "fail" {
   const value = readEnv("LIVE_TRANSFER_FORCE_RESULT", "none").toLowerCase();
 
@@ -124,6 +126,24 @@ export const config = {
     intervalMinutes: readNumber("MAILSHAKE_SYNC_INTERVAL_MINUTES", 60),
     startAtRow: readNumber("MAILSHAKE_SYNC_START_AT_ROW", 3000),
     windowSize: readNumber("MAILSHAKE_SYNC_WINDOW_SIZE", 50),
+  },
+  gmailImporters: {
+    oauthCredentialsJson: readOptionalEnv("GMAIL_OAUTH_CREDENTIALS_JSON") ?? readOptionalEnv("GMAIL_AUTHORIZED_USER_JSON"),
+    sourceAccount: readEnv("GMAIL_IMPORT_SOURCE_ACCOUNT", "ygkutler@gmail.com"),
+    stateSheetName: readEnv("GMAIL_IMPORT_STATE_SHEET_NAME", "BotState"),
+    calendlySchedulerEnabled: readBoolean("CALENDLY_GMAIL_IMPORT_ENABLED", gmailImportSchedulerEnabled),
+    calendlyIntervalMinutes: readNumber("CALENDLY_GMAIL_IMPORT_INTERVAL_MINUTES", 15),
+    calendlyLookbackDays: readNumber("CALENDLY_GMAIL_LOOKBACK_DAYS", 30),
+    calendlyMaxMessages: readNumber("CALENDLY_GMAIL_MAX_MESSAGES", 25),
+    calendlyExtraQueries: readOptionalEnv("CALENDLY_GMAIL_EXTRA_QUERIES"),
+    calendlyWebhookUrl: readOptionalEnv("CALENDLY_GMAIL_WEBHOOK_URL"),
+    calendlyWebhookSecret: readOptionalEnv("CALENDLY_WEBHOOK_SECRET") ?? readOptionalEnv("CRON_SECRET"),
+    googleMarketingSchedulerEnabled: readBoolean("GOOGLE_MARKETING_ALERT_IMPORT_ENABLED", gmailImportSchedulerEnabled),
+    googleMarketingIntervalMinutes: readNumber("GOOGLE_MARKETING_ALERT_IMPORT_INTERVAL_MINUTES", 60),
+    googleMarketingLookbackDays: readNumber("GOOGLE_MARKETING_ALERT_LOOKBACK_DAYS", 45),
+    googleMarketingMaxMessages: readNumber("GOOGLE_MARKETING_ALERT_MAX_MESSAGES", 30),
+    googleMarketingBaseUrl: stripTrailingSlash(readEnv("MARKETING_PLATFORM_BASE_URL", "https://crisp-marketing-platform.vercel.app")),
+    googleMarketingWebhookSecret: readOptionalEnv("GOOGLE_MARKETING_ALERT_WEBHOOK_SECRET") ?? readOptionalEnv("CRON_SECRET"),
   },
   emailAlerts: {
     to: readOptionalEnv("ALERT_EMAIL_TO"),
