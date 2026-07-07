@@ -1,6 +1,8 @@
 import axios, { AxiosError } from "axios";
 import { config } from "./config";
 import { logger } from "./logger";
+import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
+import { processVoiceQueue } from "./voiceQueue";
 import type { SheetUpdateRequest } from "../types";
 
 export function buildVoiceQueueRefillPayload(): Record<string, string> {
@@ -27,7 +29,8 @@ export async function requestVoiceQueueRefill(context: {
   callAttemptNumber?: number;
 } = {}): Promise<void> {
   if (!config.googleAppsScript.webhookUrl) {
-    logger.info("Skipping voice queue refill because Apps Script webhook is not configured", context);
+    logger.info("Requesting direct voice queue refill", context);
+    await processVoiceQueue();
     return;
   }
 
@@ -73,6 +76,49 @@ export async function requestVoiceQueueRefill(context: {
 
 export async function postSheetUpdate(payload: SheetUpdateRequest): Promise<void> {
   const useAppsScript = Boolean(config.googleAppsScript.webhookUrl);
+
+  if (!useAppsScript) {
+    if (!Number.isInteger(payload.rowNumber) || Number(payload.rowNumber) < 2) {
+      logger.error("Direct sheet update skipped because rowNumber is invalid", {
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+        callResult: payload.callResult,
+      });
+      return;
+    }
+
+    const safeLogBody = redactLargeSheetFields(payload);
+
+    logger.info("Posting direct sheet update", {
+      mode: "direct_google_sheets",
+      rowNumber: payload.rowNumber,
+      callAttemptNumber: payload.callAttemptNumber,
+      callResult: payload.callResult,
+      responseStatus: payload.responseStatus,
+      leadStatusCode: payload.leadStatusCode,
+      copyPayload: JSON.stringify(safeLogBody),
+    });
+
+    try {
+      const fieldsWritten = await updateVoiceLeadRow(Number(payload.rowNumber), payload);
+      logger.info("Direct sheet update accepted", {
+        mode: "direct_google_sheets",
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+        callResult: payload.callResult,
+        fieldsWritten,
+      });
+    } catch (error) {
+      logger.error("Direct sheet update failed", {
+        mode: "direct_google_sheets",
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
   const url = config.googleAppsScript.webhookUrl ?? `${config.baseUrl}/sheet-update`;
   const body = config.googleAppsScript.token
     ? {

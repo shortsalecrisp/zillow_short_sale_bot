@@ -2,7 +2,7 @@ import { authenticate } from "@google-cloud/local-auth";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { google } from "googleapis";
-import type { OAuth2Client } from "google-auth-library";
+import type { AuthClient, OAuth2Client } from "google-auth-library";
 import { logger } from "./logger";
 
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
@@ -27,6 +27,12 @@ type SavedToken = {
   refresh_token: string;
 };
 
+type ServiceAccountCredentials = {
+  client_email?: string;
+  private_key?: string;
+  type?: string;
+};
+
 async function fileExists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
@@ -34,6 +40,46 @@ async function fileExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function parseServiceAccountEnvValue(raw: string): ServiceAccountCredentials {
+  const trimmed = raw.trim();
+  const decoded = trimmed.startsWith("{") ? trimmed : Buffer.from(trimmed, "base64").toString("utf8");
+  const credentials = JSON.parse(decoded) as ServiceAccountCredentials;
+
+  if (credentials.private_key) {
+    credentials.private_key = credentials.private_key.replace(/\\n/g, "\n");
+  }
+
+  return credentials;
+}
+
+function loadServiceAccountCredentialsFromEnv(): ServiceAccountCredentials | undefined {
+  const names = ["GOOGLE_SERVICE_ACCOUNT_JSON", "GCP_SERVICE_ACCOUNT_JSON", "GOOGLE_CREDENTIALS_JSON"];
+
+  for (const name of names) {
+    const raw = process.env[name]?.trim();
+    if (!raw) {
+      continue;
+    }
+
+    try {
+      const credentials = parseServiceAccountEnvValue(raw);
+      logger.info("Using Google Sheets auth mode: service_account_env", {
+        envVar: name,
+        clientEmail: credentials.client_email,
+      });
+      return credentials;
+    } catch (error) {
+      throw new Error(
+        `${name} must contain a service account JSON object or base64-encoded JSON. ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  return undefined;
 }
 
 async function loadSavedCredentials(): Promise<OAuth2Client | undefined> {
@@ -69,7 +115,23 @@ async function saveCredentials(client: OAuth2Client): Promise<void> {
   await fs.writeFile(TOKEN_PATH, JSON.stringify(token, null, 2));
 }
 
-export async function getGoogleAuthClient(): Promise<OAuth2Client> {
+export async function getGoogleAuthClient(): Promise<AuthClient> {
+  const serviceAccountCredentials = loadServiceAccountCredentialsFromEnv();
+
+  if (serviceAccountCredentials) {
+    const client = google.auth.fromJSON(serviceAccountCredentials) as AuthClient & {
+      scopes?: string | string[];
+      createScoped?: (scopes: string[]) => AuthClient;
+    };
+
+    if (typeof client.createScoped === "function") {
+      return client.createScoped(SCOPES);
+    }
+
+    client.scopes = SCOPES;
+    return client;
+  }
+
   const savedClient = await loadSavedCredentials();
 
   if (savedClient) {

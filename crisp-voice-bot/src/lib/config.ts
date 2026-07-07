@@ -54,6 +54,21 @@ function readOptionalNumber(name: string): number | undefined {
   return value;
 }
 
+function readNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`${name} must be a number. Received: ${raw}`);
+  }
+
+  return value;
+}
+
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
@@ -98,6 +113,17 @@ export const config = {
       readOptionalEnv("GOOGLE_SHEET_ID") ?? "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70",
     ),
     tabName: readEnv("GOOGLE_SHEETS_TAB_NAME", "ShortSaleLeads"),
+  },
+  voiceQueue: {
+    schedulerEnabled: readBoolean("VOICE_QUEUE_SCHEDULER_ENABLED", false),
+    intervalMinutes: readNumber("VOICE_QUEUE_INTERVAL_MINUTES", 15),
+  },
+  mailshakeSync: {
+    apiKey: readOptionalEnv("MAILSHAKE_API_KEY"),
+    schedulerEnabled: readBoolean("MAILSHAKE_SYNC_SCHEDULER_ENABLED", false),
+    intervalMinutes: readNumber("MAILSHAKE_SYNC_INTERVAL_MINUTES", 60),
+    startAtRow: readNumber("MAILSHAKE_SYNC_START_AT_ROW", 3000),
+    windowSize: readNumber("MAILSHAKE_SYNC_WINDOW_SIZE", 50),
   },
   emailAlerts: {
     to: readOptionalEnv("ALERT_EMAIL_TO"),

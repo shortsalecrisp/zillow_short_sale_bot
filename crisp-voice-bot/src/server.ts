@@ -3,11 +3,15 @@ import { getConfiguredCallWindows } from "./lib/callWindowGuard";
 import { config } from "./lib/config";
 import { getElevenLabsVoiceExperimentStatus } from "./lib/elevenLabsVoiceVariant";
 import { logger } from "./lib/logger";
+import { startMailshakeSyncScheduler } from "./lib/mailshakeSync";
+import { startVoiceQueueScheduler } from "./lib/voiceQueue";
 import elevenLabsRouter from "./routes/elevenLabs";
+import mailshakeSyncRouter from "./routes/mailshakeSync";
 import smsReplyRouter from "./routes/smsReply";
 import startCallRouter from "./routes/startCall";
 import sheetUpdateRouter from "./routes/sheetUpdate";
 import telnyxWebhookRouter from "./routes/telnyxWebhook";
+import voiceQueueRouter from "./routes/voiceQueue";
 
 const app = express();
 
@@ -44,6 +48,8 @@ app.use("/telnyx/webhook", telnyxWebhookRouter);
 app.use("/sheet-update", sheetUpdateRouter);
 app.use("/sms-reply", smsReplyRouter);
 app.use("/elevenlabs", elevenLabsRouter);
+app.use("/voice-queue", voiceQueueRouter);
+app.use("/mailshake-sync", mailshakeSyncRouter);
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({
@@ -88,6 +94,8 @@ app.listen(config.port, () => {
     baseUrl: config.baseUrl,
     testMode: config.testMode,
   });
+  startVoiceQueueScheduler();
+  startMailshakeSyncScheduler();
 });
 
 // TODO: Add live transfer support once call qualification logic is ready.
