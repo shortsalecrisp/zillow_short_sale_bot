@@ -67,14 +67,34 @@ class FakeWorksheet:
                 existing.append("")
             existing[col - 1] = value
 
-    def update(self, *_args, **_kwargs):
+    def update(self, range_name, values=None, **_kwargs):
+        if not values:
+            return None
+        letters = "".join(ch for ch in str(range_name).split(":")[0] if ch.isalpha())
+        digits = "".join(ch for ch in str(range_name).split(":")[0] if ch.isdigit())
+        row = int(digits or "1")
+        start_col = _col_to_index(letters or "A")
+        existing = self.rows.setdefault(row, [])
+        written = values[0]
+        while len(existing) < start_col - 1:
+            existing.append("")
+        for offset, value in enumerate(written):
+            col = start_col + offset
+            while len(existing) < col:
+                existing.append("")
+            existing[col - 1] = value
         return None
 
-    def append_row(self, row):
+    def append_row(self, row, **_kwargs):
         self.appended_rows.append(row)
+        next_row = max(self.rows.keys(), default=0) + 1
+        self.rows[next_row] = list(row)
 
     def get_all_values(self):
-        return [["zpid", "address", "source", "created_at", "status"]]
+        if not self.rows:
+            return [["zpid", "address", "source", "created_at", "status"]]
+        max_row = max(self.rows.keys())
+        return [list(self.rows.get(idx, [])) for idx in range(1, max_row + 1)]
 
 
 class FakeWorkbook:
@@ -116,10 +136,67 @@ def _row(
     return values
 
 
+CHATBOT_HEADERS = [
+    "agent_name",
+    "last_name",
+    "phone",
+    "email",
+    "listing_address",
+    "city",
+    "state",
+    "initial_text_sent",
+    "followup_text_sent",
+    "response_status",
+    "mailshake_status",
+    "last_outbound_text",
+    "conversation_summary",
+    "ai_state",
+    "last_contact_time",
+    "call_booking_status",
+    "handoff_flag",
+    "history_json",
+    "auto_reply_count",
+    "human_override",
+    "last_message_id",
+] + [f"extra_{idx}" for idx in range(21, 43)]
+
+
+def _chatbot_row(
+    *,
+    first="Andi",
+    last="Gamble",
+    phone="954-235-7723",
+    email="Andrea.gamble@lptrealty.com",
+    address="2266 Red Gate Rd",
+    status="N",
+):
+    values = [""] * len(CHATBOT_HEADERS)
+    values[0] = first
+    values[1] = last
+    values[2] = phone
+    values[3] = email
+    values[4] = address
+    values[5] = "Orlando"
+    values[6] = "FL"
+    values[10] = status
+    values[17] = "[]"
+    values[18] = "0"
+    values[19] = "FALSE"
+    return values
+
+
 def _import_webhook_server(monkeypatch, *, sender_result):
     fake_sender = FakeSender(sender_result)
     sheet1 = FakeWorksheet(
         {
+            1: CHATBOT_HEADERS,
+            2: _chatbot_row(),
+            3: _chatbot_row(
+                first="Alex",
+                last="Agent",
+                phone="555-222-3333",
+                address="123 Main St",
+            ),
             12: _row(phone="555-111-2222", sent="", verified=""),
             13: _row(phone="555-111-2222", sent="x", init_ts="2026-05-22T08:00:00-04:00", verified="x"),
             14: _row(phone="555-111-2222", sent="x", verified=""),
@@ -131,6 +208,8 @@ def _import_webhook_server(monkeypatch, *, sender_result):
         {
             "Sheet1": sheet1,
             "Replies": FakeWorksheet(),
+            "sms_debug_log": FakeWorksheet(),
+            "sms_send_guard": FakeWorksheet(),
             "PendingQueue": FakeWorksheet(),
         }
     )
@@ -466,3 +545,84 @@ def test_internal_followup_sms_rejects_empty_message(monkeypatch):
     assert response.status_code == 400
     assert response.json()["detail"] == "empty_message"
     assert sender.calls == []
+
+
+def test_sms_chatbot_records_hot_handoff_without_apps_script_mail(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": (
+                "Hi Yoni. I will call you about this today. "
+                "I'm dealing with Shellpoint mtg but am beyond busy and can use the help."
+            ),
+            "received_at": "7-8-26 08.07",
+            "message_id": "+19542357723-1783512429065",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["should_reply"] is False
+    assert body["handoff_needed"] is True
+    assert body["lead_status"] == "Y"
+    assert sheet.rows[2][9].startswith("Hi Yoni.")
+    assert sheet.rows[2][10] == "Y"
+    assert sheet.rows[2][13] == "handoff"
+    assert sheet.rows[2][16] == "TRUE"
+    assert sheet.rows[2][19] == "TRUE"
+    assert "Shellpoint" in sheet.rows[2][17]
+
+
+def test_sms_chatbot_reply_and_reply_sent_writeback(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "555-222-3333",
+            "message": "How can you help?",
+            "received_at": "2026-07-08 09:10",
+            "message_id": "msg-help-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["should_reply"] is True
+    assert body["should_reply_text"] == "true"
+    assert body["reply_to_phone"] == "5552223333"
+    assert "short sale process" in body["reply_text"]
+
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "reply_sent",
+            "phone": "555-222-3333",
+            "reply_text": body["reply_text"],
+            "sent_at": "2026-07-08T09:11:00-04:00",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert sheet.rows[3][11] == body["reply_text"]
+    assert sheet.rows[3][18] == "1"
+    assert "assistant" in sheet.rows[3][17]

@@ -13,7 +13,7 @@ import sys
 import time
 import urllib.parse
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -64,6 +64,16 @@ SCOPES      = ["https://www.googleapis.com/auth/spreadsheets"]
 WEBHOOK_TOKEN = os.getenv("SMSM_WEBHOOK_TOKEN")  # e.g. "65-g84-jfy7t"
 CODEX_AUTOMATION_TOKEN = os.getenv("CODEX_AUTOMATION_TOKEN", "").strip()
 LEADS_SHEET_TAB = os.getenv("GSHEET_TAB", "Sheet1")
+SMS_CHATBOT_ALLOWED_TOKEN = (
+    os.getenv("SMS_CHATBOT_ALLOWED_TOKEN")
+    or os.getenv("GOOGLE_APPS_SCRIPT_TOKEN")
+    or CODEX_AUTOMATION_TOKEN
+).strip()
+SMS_CHATBOT_DEBUG_TAB = os.getenv("SMS_CHATBOT_DEBUG_TAB", "sms_debug_log")
+SMS_CHATBOT_SEND_GUARD_TAB = os.getenv("SMS_CHATBOT_SEND_GUARD_TAB", "sms_send_guard")
+SMS_CHATBOT_REPLY_DELAY_SECONDS = int(os.getenv("SMS_CHATBOT_REPLY_DELAY_SECONDS", "30"))
+SMS_CHATBOT_OPENAI_MODEL = os.getenv("SMS_CHATBOT_OPENAI_MODEL", "gpt-5-mini")
+SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS = float(os.getenv("SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS", "25"))
 INITIAL_SMS_RETRY_ATTEMPTS = max(1, int(os.getenv("SMS_RETRY_ATTEMPTS", "3")))
 
 logging.basicConfig(
@@ -2589,6 +2599,788 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "gateway_status": final_result.status_code,
         "gateway_response": final_result.response_text,
     }
+
+
+SMS_DEBUG_HEADERS = [
+    "logged_at",
+    "stage",
+    "request_id",
+    "phone",
+    "message",
+    "should_reply",
+    "reply_text",
+    "reason",
+    "lead_status",
+    "details_json",
+]
+SMS_SEND_GUARD_HEADERS = [
+    "created_at",
+    "status",
+    "phone",
+    "raw_phone",
+    "reply_text",
+    "message_id",
+    "request_id",
+    "inbound_message",
+    "sent_at",
+    "reported_phone",
+    "result",
+    "note",
+]
+
+
+def _sms_normalize_whitespace(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _sms_normalize_phone(phone: Any) -> str:
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits
+
+
+def _sms_column_letter(index: int) -> str:
+    letters = ""
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def _sms_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+    except Exception:
+        return json.dumps({"repr": repr(value)}, ensure_ascii=True)
+
+
+def _sms_truncate(value: Any, limit: int) -> str:
+    text = str(value or "")
+    return text[:limit]
+
+
+def _sms_mask_sensitive(value: Any) -> Any:
+    if isinstance(value, dict):
+        masked: Dict[str, Any] = {}
+        for key, item in value.items():
+            if re.search(r"token|key|secret|password|authorization", str(key), re.I):
+                masked[key] = "[redacted]"
+            else:
+                masked[key] = _sms_mask_sensitive(item)
+        return masked
+    if isinstance(value, list):
+        return [_sms_mask_sensitive(item) for item in value]
+    return value
+
+
+def _sms_get_workbook():
+    return _retry_gspread_call("open workbook", lambda: gclient.open_by_key(GSHEET_ID))
+
+
+def _sms_get_or_create_ws(title: str, headers: List[str], rows: str = "1000", cols: str = "12"):
+    workbook = _sms_get_workbook()
+    try:
+        ws = _retry_gspread_call(
+            f"open {title} worksheet",
+            lambda: workbook.worksheet(title),
+        )
+    except gspread.WorksheetNotFound:
+        ws = _retry_gspread_call(
+            f"create {title} worksheet",
+            lambda: workbook.add_worksheet(title=title, rows=rows, cols=cols),
+        )
+
+    existing = _retry_gspread_call(
+        f"read {title} headers",
+        lambda: ws.get_all_values(),
+    )
+    if not existing:
+        _retry_gspread_call(
+            f"write {title} headers",
+            lambda: ws.update(
+                f"A1:{_sms_column_letter(len(headers))}1",
+                [headers],
+                value_input_option="RAW",
+            ),
+        )
+    return ws
+
+
+def _sms_append_debug(stage: str, details: Optional[Dict[str, Any]] = None) -> None:
+    try:
+        data = details or {}
+        ws = _sms_get_or_create_ws(
+            SMS_CHATBOT_DEBUG_TAB,
+            SMS_DEBUG_HEADERS,
+            rows="5000",
+            cols=str(len(SMS_DEBUG_HEADERS)),
+        )
+        row = [
+            datetime.now(timezone.utc).isoformat(),
+            stage or "",
+            str(data.get("request_id") or ""),
+            str(data.get("phone") or ""),
+            _sms_truncate(data.get("message") or "", 500),
+            str(data.get("should_reply") or ""),
+            _sms_truncate(data.get("reply_text") or "", 500),
+            _sms_truncate(data.get("reason") or "", 300),
+            str(data.get("lead_status") or ""),
+            _sms_truncate(_sms_json(_sms_mask_sensitive(data)), 3000),
+        ]
+        _retry_gspread_call(f"append {SMS_CHATBOT_DEBUG_TAB}", lambda: ws.append_row(row))
+    except Exception:
+        logger.exception("sms-chatbot: failed to append debug row stage=%s", stage)
+
+
+def _sms_read_leads_sheet() -> Tuple[Any, List[str], List[List[str]]]:
+    ws = _get_leads_ws()
+    rows = _retry_gspread_call("read leads rows", lambda: ws.get_all_values())
+    if not rows or not rows[0]:
+        raise HTTPException(status_code=500, detail="leads_sheet_missing_headers")
+    return ws, [str(header or "").strip() for header in rows[0]], rows
+
+
+def _sms_header_index(headers: List[str]) -> Dict[str, int]:
+    return {name: idx for idx, name in enumerate(headers) if name}
+
+
+def _sms_row_to_obj(headers: List[str], row: List[str]) -> Dict[str, str]:
+    return {
+        header: str(row[idx] or "") if idx < len(row) else ""
+        for idx, header in enumerate(headers)
+        if header
+    }
+
+
+def _sms_update_row_fields(ws, row_idx: int, headers: List[str], updates: Dict[str, Any]) -> None:
+    index = _sms_header_index(headers)
+    batch = []
+    for header, value in updates.items():
+        col_idx = index.get(header)
+        if col_idx is None:
+            continue
+        batch.append(
+            {
+                "range": f"{_sms_column_letter(col_idx + 1)}{row_idx}",
+                "values": [[str(value) if value is not None else ""]],
+            }
+        )
+    if batch:
+        _retry_gspread_call(
+            "update sms chatbot row",
+            lambda: ws.batch_update(batch, value_input_option="RAW"),
+        )
+
+
+def _sms_find_or_create_row_by_phone(ws, headers: List[str], rows: List[List[str]], phone_raw: str) -> Tuple[int, Dict[str, str]]:
+    normalized = _sms_normalize_phone(phone_raw)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="invalid_phone")
+
+    phone_col = _sms_header_index(headers).get("phone")
+    if phone_col is None:
+        raise HTTPException(status_code=500, detail="phone_header_missing")
+
+    for row_idx, row in enumerate(rows[1:], start=2):
+        if _sms_normalize_phone(row[phone_col] if phone_col < len(row) else "") == normalized:
+            return row_idx, _sms_row_to_obj(headers, row)
+
+    row_idx = len(rows) + 1
+    blank = [""] * len(headers)
+    _retry_gspread_call("append sms chatbot row", lambda: ws.append_row(blank, value_input_option="RAW"))
+    updates = {
+        "phone": phone_raw,
+        "mailshake_status": "N",
+        "auto_reply_count": "0",
+        "human_override": "FALSE",
+        "history_json": "[]",
+    }
+    _sms_update_row_fields(ws, row_idx, headers, updates)
+    obj = {header: "" for header in headers if header}
+    obj.update(updates)
+    return row_idx, obj
+
+
+def _sms_history_array(value: Any) -> List[Dict[str, Any]]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _sms_append_history(ws, row_idx: int, headers: List[str], row_obj: Dict[str, str], entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    history = _sms_history_array(row_obj.get("history_json"))
+    history.append(entry)
+    _sms_update_row_fields(ws, row_idx, headers, {"history_json": _sms_json(history)})
+    row_obj["history_json"] = _sms_json(history)
+    return history
+
+
+def _sms_count(row_obj: Dict[str, str]) -> int:
+    try:
+        return int(float(str(row_obj.get("auto_reply_count") or "0").strip()))
+    except ValueError:
+        return 0
+
+
+def _sms_decision(
+    *,
+    reply_text: str = "",
+    lead_status: str = "Y",
+    conversation_done: bool = False,
+    handoff_needed: bool = False,
+    needs_review: bool = False,
+    block_reply: bool = False,
+    reason: str = "",
+) -> Dict[str, Any]:
+    return {
+        "reply_text": reply_text,
+        "lead_status": lead_status if lead_status in {"R", "Y", "G", "N", "O"} else "Y",
+        "conversation_done": conversation_done,
+        "handoff_needed": handoff_needed or lead_status == "G" or needs_review,
+        "needs_review": needs_review,
+        "block_reply": block_reply,
+        "reason": reason,
+    }
+
+
+def _sms_extract_openai_text(payload: Dict[str, Any]) -> str:
+    if isinstance(payload.get("output_text"), str):
+        return payload["output_text"]
+    for item in payload.get("output", []) or []:
+        for content in item.get("content", []) or []:
+            text = content.get("text")
+            if isinstance(text, str):
+                return text
+    raise ValueError("Could not extract OpenAI output text")
+
+
+def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str, Any]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return _sms_decision(
+            handoff_needed=True,
+            block_reply=True,
+            reason="OpenAI API key missing; manual follow-up needed",
+        )
+
+    history = _sms_history_array(row_obj.get("history_json"))[-8:]
+    system_prompt = (
+        "You write short SMS replies as Yoni from Crisp Short Sales. "
+        "If the agent asks for a call now, asks whether this is AI/a bot, gives a callback window, "
+        "asks for stats, or needs personal handling, set handoff_needed true, block_reply true, and leave reply_text empty. "
+        "Never claim to have buyers. Never offer documents unless they explicitly ask for info by email. "
+        "Keep any reply under 500 characters and casual."
+    )
+    user_payload = {
+        "agent_context": {
+            "agent_name": row_obj.get("agent_name", ""),
+            "last_name": row_obj.get("last_name", ""),
+            "phone": row_obj.get("phone", ""),
+            "email": row_obj.get("email", ""),
+            "listing_address": row_obj.get("listing_address", ""),
+            "city": row_obj.get("city", ""),
+            "state": row_obj.get("state", ""),
+            "response_status": row_obj.get("response_status", ""),
+            "mailshake_status": row_obj.get("mailshake_status", "N"),
+        },
+        "conversation_history": history,
+        "latest_inbound_message": inbound_text,
+    }
+    request_body = {
+        "model": SMS_CHATBOT_OPENAI_MODEL,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+            {"role": "user", "content": [{"type": "input_text", "text": _sms_json(user_payload)}]},
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "sms_agent_response",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "reply_text": {"type": "string"},
+                        "lead_status": {"type": "string", "enum": ["R", "Y", "G", "N", "O"]},
+                        "conversation_done": {"type": "boolean"},
+                        "handoff_needed": {"type": "boolean"},
+                        "needs_review": {"type": "boolean"},
+                        "block_reply": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": [
+                        "reply_text",
+                        "lead_status",
+                        "conversation_done",
+                        "handoff_needed",
+                        "needs_review",
+                        "block_reply",
+                        "reason",
+                    ],
+                },
+            }
+        },
+    }
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=request_body,
+            timeout=SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS,
+        )
+        if response.status_code < 200 or response.status_code >= 300:
+            raise RuntimeError(f"OpenAI API error {response.status_code}: {response.text[:500]}")
+        parsed = response.json()
+        decision = json.loads(_sms_extract_openai_text(parsed))
+        return _sms_decision(
+            reply_text=str(decision.get("reply_text") or ""),
+            lead_status=str(decision.get("lead_status") or "Y"),
+            conversation_done=bool(decision.get("conversation_done")),
+            handoff_needed=bool(decision.get("handoff_needed")),
+            needs_review=bool(decision.get("needs_review")),
+            block_reply=bool(decision.get("block_reply")),
+            reason=str(decision.get("reason") or ""),
+        )
+    except Exception as exc:
+        logger.exception("sms-chatbot: OpenAI decision failed")
+        return _sms_decision(
+            handoff_needed=True,
+            block_reply=True,
+            reason=f"OpenAI decision failed; manual follow-up needed: {exc}",
+        )
+
+
+def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
+    t = _sms_normalize_whitespace(inbound_text).lower()
+
+    if re.search(r"\berror\s+invalid\s+number\b", t) and "valid 10 digit" in t:
+        return _sms_decision(reason="Carrier invalid-number notice ignored", block_reply=True)
+
+    if re.fullmatch(r"(stop|unsubscribe|quit|end|wrong number)[.!?]*", t) or re.search(
+        r"\b(remove me|take me off|do not text|don't text|dont text|opt out)\b", t
+    ):
+        return _sms_decision(
+            lead_status="R",
+            conversation_done=True,
+            block_reply=True,
+            reason="Opt-out / stop request",
+        )
+
+    if re.search(r"\breply\s+stop\s+to\s+(end|unsubscribe|cancel|opt out)\b", t):
+        return _sms_decision(
+            reply_text="STOP",
+            lead_status="R",
+            conversation_done=True,
+            reason="Automated STOP instruction / non-agent responder",
+        )
+
+    if str(row_obj.get("human_override") or "").upper() == "TRUE":
+        return _sms_decision(block_reply=True, reason="Human override enabled - inbound recorded only")
+
+    if re.search(r"\b(ai|bot|automated|real person|actually your phone)\b", t):
+        return _sms_decision(
+            handoff_needed=True,
+            block_reply=True,
+            reason="Agent asked whether this is AI/a bot; manual follow-up needed",
+        )
+
+    if re.search(r"\b(i('| wi)?ll|i will|gonna|going to)\s+(call|phone|ring)\b", t) or re.search(
+        r"\b(call me|give me a call|can we talk|let'?s talk|hop on a call|quick call)\b", t
+    ):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            reason="Agent requested or promised a phone call; manual follow-up needed",
+        )
+
+    if re.search(r"\b(can use|need|would like|interested in|could use)\b.*\b(help|short sale|shellpoint|lender)\b", t):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            reason="Agent said they need help; manual follow-up needed",
+        )
+
+    if re.search(r"\b(website|brochure|flyer|flier|one[- ]?pager|reviews?)\b", t):
+        return _sms_decision(
+            reply_text=(
+                "https://www.crispshortsales.com\n"
+                "You can also look me up on Google and I have all kinds of reviews from past agents and homeowners that I have worked with."
+            ),
+            lead_status="Y",
+            reason="Agent asked for website, brochure, flyer, or reviews",
+        )
+
+    if re.search(r"\b(how do you help|how can you help|what do you do|how does this work|what kind of help)\b", t):
+        return _sms_decision(
+            reply_text=(
+                "I handle the short sale process with the lender: paperwork, calls, negotiations, approvals, and getting the file to closing. "
+                "No cost to you or the seller - we get paid by the buyer at closing. Want to talk through your situation?"
+            ),
+            lead_status="Y",
+            reason="Agent asked how Crisp helps",
+        )
+
+    if re.search(r"\b(fee|cost|paid|compensat|commission|charge)\b", t):
+        return _sms_decision(
+            reply_text=(
+                "There is no cost to you or the seller. We get paid by the buyer at closing, and charge a flat fee for our service. "
+                "As long as it is disclosed up front in the listing, buyers can account for it in their offer."
+            ),
+            lead_status="Y",
+            reason="Agent asked about fee or compensation",
+        )
+
+    if re.search(r"\b(not a short sale|no short sale|already have help|have help|we handle|handling (it|this)|not interested|no thank)\b", t):
+        return _sms_decision(
+            reply_text=(
+                "Ok, no problem. If anything ever changes in the future and you're looking for some additional help with these files, "
+                "please just keep me in mind. Thanks!"
+            ),
+            lead_status="R",
+            conversation_done=True,
+            reason="Agent declined, is already represented, or says this is not a short sale",
+        )
+
+    if re.search(r"\b(local|where are you located|where r u located|based)\b", t):
+        state = row_obj.get("state", "").strip()
+        location = f" in {state}" if state else ""
+        return _sms_decision(
+            reply_text=(
+                f"I'm based in Chicago, but I help agents with short sales all over the country{location}. "
+                "Most of the work is with the lender by phone/email, so location usually is not an issue."
+            ),
+            lead_status="Y",
+            reason="Agent asked whether Yoni is local",
+        )
+
+    if re.search(r"\b(buyer|buyers|offer|submit an offer|have an offer)\b", t):
+        return _sms_decision(
+            reply_text=(
+                "I don't represent a buyer. I help the listing side process the short sale with the homeowner's lender so the file can get approved and closed."
+            ),
+            lead_status="Y",
+            reason="Agent asked about buyers or offers",
+        )
+
+    return None
+
+
+def _sms_build_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str, Any]:
+    fast = _sms_fast_decision(row_obj, inbound_text)
+    if fast is not None:
+        return fast
+    return _sms_openai_decision(row_obj, inbound_text)
+
+
+def _sms_should_reply(decision: Dict[str, Any], auto_reply_count: int) -> bool:
+    if auto_reply_count >= 3:
+        return False
+    if decision.get("handoff_needed") or decision.get("needs_review") or decision.get("block_reply"):
+        return False
+    return bool(_sms_normalize_whitespace(decision.get("reply_text") or ""))
+
+
+def _sms_normalize_tasker_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(payload)
+    out["reply_text"] = str(out.get("reply_text") or "")
+    out["reason"] = str(out.get("reason") or "")
+    out["delay_seconds"] = str(out.get("delay_seconds") or SMS_CHATBOT_REPLY_DELAY_SECONDS)
+    out["should_reply_text"] = "true" if out.get("should_reply") is True else "false"
+    out["handoff_needed_text"] = "true" if out.get("handoff_needed") is True else "false"
+    return out
+
+
+def _sms_register_pending_reply(
+    phone_raw: str,
+    reply_text: str,
+    request_id: str,
+    message_id: str,
+    inbound_message: str,
+) -> None:
+    phone = _sms_normalize_phone(phone_raw)
+    if not phone or not reply_text:
+        return
+    ws = _sms_get_or_create_ws(
+        SMS_CHATBOT_SEND_GUARD_TAB,
+        SMS_SEND_GUARD_HEADERS,
+        rows="1000",
+        cols=str(len(SMS_SEND_GUARD_HEADERS)),
+    )
+    row = [
+        datetime.now(timezone.utc).isoformat(),
+        "pending",
+        phone,
+        phone_raw,
+        reply_text,
+        message_id,
+        request_id,
+        _sms_normalize_whitespace(inbound_message),
+        "",
+        "",
+        "",
+        "",
+    ]
+    _retry_gspread_call(f"append {SMS_CHATBOT_SEND_GUARD_TAB}", lambda: ws.append_row(row))
+
+
+def _sms_find_pending_guard(phone_raw: str, reply_text: str) -> Tuple[Optional[int], str]:
+    phone = _sms_normalize_phone(phone_raw)
+    normalized_reply = _sms_normalize_whitespace(reply_text).lower()
+    ws = _sms_get_or_create_ws(
+        SMS_CHATBOT_SEND_GUARD_TAB,
+        SMS_SEND_GUARD_HEADERS,
+        rows="1000",
+        cols=str(len(SMS_SEND_GUARD_HEADERS)),
+    )
+    rows = _retry_gspread_call("read sms send guard", lambda: ws.get_all_values())
+    for row_idx in range(len(rows), 1, -1):
+        row = rows[row_idx - 1]
+        status = row[1] if len(row) > 1 else ""
+        row_phone = row[2] if len(row) > 2 else ""
+        row_reply = row[4] if len(row) > 4 else ""
+        if status == "pending" and row_phone == phone and _sms_normalize_whitespace(row_reply).lower() == normalized_reply:
+            return row_idx, row[6] if len(row) > 6 else ""
+    return None, ""
+
+
+def _sms_mark_guard_sent(row_idx: Optional[int], phone_raw: str, sent_at: str, result: str, note: str) -> None:
+    if not row_idx:
+        return
+    ws = _sms_get_or_create_ws(
+        SMS_CHATBOT_SEND_GUARD_TAB,
+        SMS_SEND_GUARD_HEADERS,
+        rows="1000",
+        cols=str(len(SMS_SEND_GUARD_HEADERS)),
+    )
+    updates = [
+        {"range": f"B{row_idx}", "values": [["sent"]]},
+        {"range": f"I{row_idx}", "values": [[sent_at]]},
+        {"range": f"J{row_idx}", "values": [[_sms_normalize_phone(phone_raw)]]},
+        {"range": f"K{row_idx}", "values": [[result]]},
+        {"range": f"L{row_idx}", "values": [[note]]},
+    ]
+    _retry_gspread_call("mark sms send guard", lambda: ws.batch_update(updates, value_input_option="RAW"))
+
+
+def _sms_handle_reply_sent(body: Dict[str, Any], request_id: str) -> Dict[str, Any]:
+    phone_raw = str(body.get("phone") or "").strip()
+    reply_text = _sms_normalize_whitespace(body.get("reply_text") or body.get("message") or "")
+    sent_at = str(body.get("sent_at") or datetime.now(timezone.utc).isoformat())
+    if not _sms_normalize_phone(phone_raw) or not reply_text:
+        return {"ok": False, "error": "Missing phone or reply text", "should_reply": False}
+
+    guard_row, guard_request_id = _sms_find_pending_guard(phone_raw, reply_text)
+    ws, headers, rows = _sms_read_leads_sheet()
+    row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
+    _sms_append_history(ws, row_idx, headers, row_obj, {"role": "assistant", "text": reply_text, "ts": sent_at})
+    _sms_update_row_fields(
+        ws,
+        row_idx,
+        headers,
+        {
+            "last_outbound_text": reply_text,
+            "last_contact_time": sent_at,
+            "auto_reply_count": str(_sms_count(row_obj) + 1),
+        },
+    )
+    guard_mode = "matched" if guard_row else "no_pending_fallback"
+    _sms_mark_guard_sent(guard_row, phone_raw, sent_at, "ok", "Matched pending bot reply" if guard_row else "No pending guard found")
+    result = {"ok": True, "guard": guard_mode, "guard_request_id": guard_request_id, "should_reply": False}
+    _sms_append_debug(
+        "reply_sent_result",
+        {"request_id": request_id, "phone": phone_raw, "reply_text": reply_text, "result": result},
+    )
+    return result
+
+
+def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any]:
+    phone_raw = str(body.get("phone") or body.get("p") or "").strip()
+    inbound_text = _sms_normalize_whitespace(body.get("message") or "")
+    message_id = str(body.get("message_id") or "")
+    received_at = str(body.get("received_at") or datetime.now(timezone.utc).isoformat())
+    if not phone_raw or not inbound_text:
+        return {"ok": False, "error": "Missing phone or message", "should_reply": False}
+
+    ws, headers, rows = _sms_read_leads_sheet()
+    row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
+
+    if message_id and str(row_obj.get("last_message_id") or "").strip() == message_id:
+        return _sms_normalize_tasker_payload(
+            {"ok": True, "duplicate": True, "should_reply": False, "reason": "Duplicate message_id ignored"}
+        )
+
+    if _sms_normalize_whitespace(row_obj.get("last_inbound_text") or "").lower() == inbound_text.lower():
+        result = _sms_normalize_tasker_payload(
+            {
+                "ok": True,
+                "duplicate": True,
+                "should_reply": False,
+                "reason": "Recent duplicate inbound text ignored",
+            }
+        )
+        _sms_append_debug(
+            "incoming_sms_duplicate_suppressed",
+            {"request_id": request_id, "phone": phone_raw, "message": inbound_text, "reason": result["reason"]},
+        )
+        return result
+
+    _sms_update_row_fields(
+        ws,
+        row_idx,
+        headers,
+        {
+            "last_inbound_text": inbound_text,
+            "last_contact_time": received_at,
+            "last_message_id": message_id,
+        },
+    )
+    row_obj.update({"last_inbound_text": inbound_text, "last_contact_time": received_at, "last_message_id": message_id})
+    _sms_append_history(ws, row_idx, headers, row_obj, {"role": "agent", "text": inbound_text, "ts": received_at})
+
+    decision = _sms_build_decision(row_obj, inbound_text)
+    auto_count = _sms_count(row_obj)
+    should_reply = _sms_should_reply(decision, auto_count)
+    reply_text = _sms_normalize_whitespace(decision.get("reply_text") or "") if should_reply else ""
+    lead_status = str(decision.get("lead_status") or "Y")
+    conversation_done = bool(decision.get("conversation_done"))
+    handoff_needed = bool(decision.get("handoff_needed"))
+    needs_review = bool(decision.get("needs_review"))
+    reason = str(decision.get("reason") or "")
+
+    updates = {
+        "response_status": inbound_text,
+        "mailshake_status": lead_status,
+        "conversation_summary": reason,
+        "ai_state": "done" if conversation_done else ("handoff" if handoff_needed or needs_review else "active"),
+        "call_booking_status": "closed_no_interest" if conversation_done and lead_status == "R" else "interested_no_call",
+        "handoff_flag": "TRUE" if handoff_needed or needs_review else "FALSE",
+        "human_override": "TRUE" if handoff_needed or needs_review or conversation_done else "FALSE",
+    }
+    _sms_update_row_fields(ws, row_idx, headers, updates)
+
+    result = _sms_normalize_tasker_payload(
+        {
+            "ok": True,
+            "should_reply": should_reply,
+            "reply_text": reply_text,
+            "reply_to_phone": _sms_normalize_phone(phone_raw) if should_reply else "",
+            "lead_status": lead_status,
+            "conversation_done": conversation_done,
+            "handoff_needed": handoff_needed,
+            "needs_review": needs_review,
+            "reason": reason,
+            "row": row_idx,
+        }
+    )
+    if should_reply:
+        _sms_register_pending_reply(phone_raw, reply_text, request_id, message_id, inbound_text)
+
+    _sms_append_debug(
+        "incoming_sms_result",
+        {
+            "request_id": request_id,
+            "phone": phone_raw,
+            "message": inbound_text,
+            "should_reply": result["should_reply_text"],
+            "reply_text": reply_text,
+            "reason": reason,
+            "lead_status": lead_status,
+        },
+    )
+    return result
+
+
+def _sms_validate_token(body: Dict[str, Any], request: Optional[Request] = None) -> None:
+    supplied = str(body.get("token") or "").strip()
+    header_token = request.headers.get("x-crisp-token", "").strip() if request else ""
+    if not SMS_CHATBOT_ALLOWED_TOKEN or supplied == SMS_CHATBOT_ALLOWED_TOKEN or header_token == SMS_CHATBOT_ALLOWED_TOKEN:
+        return
+    raise HTTPException(status_code=403, detail="bad token")
+
+
+async def _sms_parse_request_body(request: Request) -> Dict[str, Any]:
+    content_type = request.headers.get("content-type", "").lower()
+    raw = await request.body()
+    if "application/json" in content_type:
+        try:
+            parsed = json.loads(raw.decode("utf-8") if raw else "{}")
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="invalid_json")
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=400, detail="invalid_payload")
+        return parsed
+    parsed_qs = urllib.parse.parse_qs(raw.decode("utf-8", errors="replace"), keep_blank_values=True)
+    return {key: values[-1] if values else "" for key, values in parsed_qs.items()}
+
+
+def _sms_handle_action(body: Dict[str, Any], request_id: str, request: Optional[Request] = None) -> Dict[str, Any]:
+    _sms_validate_token(body, request)
+    action = str(body.get("action") or "incoming_sms").lower()
+    if action in {"incoming_sms", "inbound_watchdog", "reconcile_inbound"}:
+        return _sms_handle_incoming(body, request_id)
+    if action == "reply_sent":
+        return _sms_handle_reply_sent(body, request_id)
+    return {"ok": False, "error": "Unknown action", "should_reply": False}
+
+
+@app.post("/sms-chatbot")
+async def sms_chatbot(request: Request):
+    """Service-account-backed inbound SMS chatbot endpoint for Tasker/Android."""
+    request_id = hashlib.sha1(f"{time.time()}:{id(request)}".encode()).hexdigest()[:16]
+    body = await _sms_parse_request_body(request)
+    _sms_append_debug(
+        "backend_doPost_start",
+        {
+            "request_id": request_id,
+            "phone": body.get("phone") or body.get("p") or "",
+            "message": body.get("message") or "",
+            "body": _sms_mask_sensitive(body),
+        },
+    )
+    try:
+        return _sms_handle_action(body, request_id, request)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("sms-chatbot: request failed")
+        _sms_append_debug(
+            "backend_doPost_error",
+            {"request_id": request_id, "error": str(exc), "body": _sms_mask_sensitive(body)},
+        )
+        return {"ok": False, "error": str(exc), "should_reply": False}
+
+
+@app.get("/sms-chatbot")
+async def sms_chatbot_get(request: Request):
+    """GET-compatible fallback for Tasker configurations that cannot POST."""
+    request_id = hashlib.sha1(f"{time.time()}:{id(request)}".encode()).hexdigest()[:16]
+    body = dict(request.query_params)
+    _sms_append_debug(
+        "backend_doGet_start",
+        {
+            "request_id": request_id,
+            "phone": body.get("phone") or body.get("p") or "",
+            "message": body.get("message") or "",
+            "body": _sms_mask_sensitive(body),
+        },
+    )
+    try:
+        return _sms_handle_action(body, request_id, request)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("sms-chatbot: GET request failed")
+        _sms_append_debug(
+            "backend_doGet_error",
+            {"request_id": request_id, "error": str(exc), "body": _sms_mask_sensitive(body)},
+        )
+        return {"ok": False, "error": str(exc), "should_reply": False}
 
 
 @app.post("/internal/send-initial-sms")
