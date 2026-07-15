@@ -128,7 +128,16 @@ DEFAULT_STATES = [
 ALL_SOURCE_QUERIES = [
     (
         "idx_broker_pages",
-        '"{state}" ("Special Listing Conditions: Short Sale" OR "Is Short Sale: Yes" OR "Potential Short Sale") "For Sale" -zillow -trulia -realtor.com -redfin.com',
+        '"{state}" ("Special Listing Conditions: Short Sale" OR "Is Short Sale: Yes") '
+        '("For Sale" OR "Pending" OR "Active") '
+        '-site:zillow.com -site:trulia.com -site:realtor.com -site:redfin.com -site:homes.com',
+    ),
+    (
+        "idx_broker_remarks",
+        '"{state}" "short sale" '
+        '("Public Remarks" OR "Property Description" OR "What\'s Special" OR "About This Home") '
+        '("Active" OR "Pending" OR "Under Contract") '
+        '-site:zillow.com -site:trulia.com -site:realtor.com -site:redfin.com -site:homes.com',
     ),
     (
         "realtor.com",
@@ -144,10 +153,13 @@ ALL_SOURCE_QUERIES = [
     ),
 ]
 ALL_SOURCE_QUERY_MAP = dict(ALL_SOURCE_QUERIES)
-DEFAULT_SOURCE_BUCKETS = ("idx_broker_pages", "realtor.com", "redfin.com", "homes.com")
+DEFAULT_SOURCE_BUCKETS = ("idx_broker_pages", "idx_broker_remarks")
 CSE_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DATE_RESTRICT", "d1").strip()
-SOURCE_PLAN = os.getenv("FREE_SOURCE_PILOT_SOURCE_PLAN", "idx_daily_rotating_weekly").strip().lower()
-DEFAULT_DAILY_SOURCE_BUCKETS = ("idx_broker_pages",)
+SOURCE_PLAN = os.getenv("FREE_SOURCE_PILOT_SOURCE_PLAN", "idx_dual_shadow").strip().lower()
+SHADOW_MODE = os.getenv("FREE_SOURCE_PILOT_SHADOW_MODE", "true").lower() == "true"
+SHADOW_REVIEW_TARGET = max(1, int(os.getenv("FREE_SOURCE_PILOT_SHADOW_REVIEW_TARGET", "10")))
+SHADOW_REVIEW_DAYS = max(1, int(os.getenv("FREE_SOURCE_PILOT_SHADOW_REVIEW_DAYS", "7")))
+DEFAULT_DAILY_SOURCE_BUCKETS = ("idx_broker_pages", "idx_broker_remarks")
 DEFAULT_ROTATING_SOURCE_BUCKETS = ("homes.com", "realtor.com", "redfin.com")
 DEFAULT_ROTATION_ANCHOR_DATE = "2026-07-06"
 ROTATION_TZ = os.getenv("FREE_SOURCE_PILOT_ROTATION_TZ", "America/New_York")
@@ -194,6 +206,16 @@ def rotating_source_for_date(run_date: dt.date, sources: list[str]) -> str:
 
 
 def configured_source_queries(run_date: dt.date | None = None) -> list[SourceQuery]:
+    if SOURCE_PLAN in {"idx_dual_shadow", "idx_dual_daily"}:
+        daily_sources = configured_bucket_names(
+            "FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS",
+            DEFAULT_DAILY_SOURCE_BUCKETS,
+        )
+        return [
+            SourceQuery(source, ALL_SOURCE_QUERY_MAP[source], DAILY_DATE_RESTRICT)
+            for source in daily_sources
+        ]
+
     if SOURCE_PLAN in {
         "idx_daily_rotating_weekly",
         "daily_idx_rotating_weekly",
@@ -201,7 +223,7 @@ def configured_source_queries(run_date: dt.date | None = None) -> list[SourceQue
         "daily_homes_rotating_weekly",
     }:
         resolved_run_date = run_date or parse_run_date(os.getenv("FREE_SOURCE_PILOT_RUN_DATE"))
-        daily_sources = configured_bucket_names("FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS", DEFAULT_DAILY_SOURCE_BUCKETS)
+        daily_sources = configured_bucket_names("FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS", ("idx_broker_pages",))
         rotating_sources = configured_bucket_names("FREE_SOURCE_PILOT_ROTATING_SOURCE_BUCKETS", DEFAULT_ROTATING_SOURCE_BUCKETS)
         selected: list[SourceQuery] = []
         seen = set()
@@ -236,7 +258,7 @@ HEADLESS_NAV_TIMEOUT_MS = max(1000, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_NA
 HEADLESS_WAIT_MS = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_WAIT_MS", "900")))
 HEADLESS_DOMAINS = {
     domain.strip().lower()
-    for domain in os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAINS", "realtor.com,redfin.com,homes.com").split(",")
+    for domain in os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAINS", "*").split(",")
     if domain.strip()
 }
 _headless_used_total = 0
@@ -257,6 +279,14 @@ DESCRIPTION_EVIDENCE_LABEL_RE = re.compile(
     r"what'?s\s+special|description|remarks|public\s+remarks|"
     r"about\s+this\s+home|property\s+description|listing\s+description|"
     r"property\s+overview|overview"
+    r")\b",
+    re.IGNORECASE,
+)
+
+STRICT_DESCRIPTION_EVIDENCE_LABEL_RE = re.compile(
+    r"\b(?:"
+    r"what'?s\s+special|description|remarks|public\s+remarks|"
+    r"about\s+this\s+home|property\s+description|listing\s+description"
     r")\b",
     re.IGNORECASE,
 )
@@ -388,9 +418,8 @@ GENERIC_NAME_TOKENS = {
     "license",
     "usa",
 }
-AGENT_LABEL_CONTEXT_RE = re.compile(
-    r"\b(?:listing\s+agent(?:s|\(s\))?|brokered\s+by|shown\s+by|listed\s+by|"
-    r"listing\s+courtesy\s+of|courtesy\s+of|presented\s+by|agent\s*[:\-])\s*[:\-]?\s*(.{2,180})",
+TRUSTED_AGENT_LABEL_CONTEXT_RE = re.compile(
+    r"\b(?:listing\s+agent(?:s|\(s\))?|list\s+agent|listed\s+by)\s*[:\-]?\s*(.{2,180})",
     re.IGNORECASE,
 )
 STREET_SUFFIX_RE = (
@@ -431,6 +460,7 @@ class Qualification:
 @dataclass
 class ExistingIndex:
     address_keys: dict[str, int]
+    street_state_keys: dict[str, int]
     phone_keys: dict[str, int]
     agent_keys: dict[str, list[int]]
 
@@ -480,14 +510,18 @@ def address_key(address: str, city: str, state: str) -> str:
     return "|".join(part for part in parts if part)
 
 
+def street_state_key(address: str, state: str) -> str:
+    street = normalize_key(clean_listing_address(address, state=state))
+    state_key = normalize_key(state)
+    if not street or not state_key:
+        return ""
+    return f"{street}|{state_key}"
+
+
 def stable_synthetic_zpid(source: str, url: str, address: str, city: str, state: str) -> str:
-    raw = "|".join(
-        [
-            normalize_key(source),
-            normalize_key(url),
-            address_key(address, city, state),
-        ]
-    )
+    raw = street_state_key(address, state)
+    if not raw:
+        raw = "|".join([normalize_key(source), normalize_key(url), address_key(address, city, state)])
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
     return f"free-{digest}"
 
@@ -508,7 +542,7 @@ def split_agent_name(full_name: str) -> tuple[str, str]:
         return "", ""
     if len(parts) == 1:
         return parts[0], ""
-    return " ".join(parts[:-1]), parts[-1]
+    return parts[0], " ".join(parts[1:])
 
 
 def current_listing_status(text: str) -> tuple[str, str]:
@@ -615,11 +649,12 @@ def excerpt_around(text: str, start: int, end: int, width: int = 240) -> str:
 
 def build_existing_index(rows: list[list[str]]) -> ExistingIndex:
     address_keys: dict[str, int] = {}
+    street_state_keys: dict[str, int] = {}
     phone_keys: dict[str, int] = {}
     agent_keys: dict[str, list[int]] = {}
     for idx, row in enumerate(rows[1:], start=2):
         padded = row + [""] * 8
-        agent = padded[0]
+        agent = normalize_space(f"{padded[0]} {padded[1]}")
         phone = padded[2]
         email = padded[3]
         address = padded[4]
@@ -628,24 +663,23 @@ def build_existing_index(rows: list[list[str]]) -> ExistingIndex:
         akey = address_key(address, city, state)
         if akey:
             address_keys.setdefault(akey, idx)
+        skey = street_state_key(address, state)
+        if skey:
+            street_state_keys.setdefault(skey, idx)
         phone_key = normalize_phone(phone)
         if phone_key:
             phone_keys.setdefault(phone_key, idx)
         gkey = agent_key(agent, state, phone, email)
         if gkey:
             agent_keys.setdefault(gkey, []).append(idx)
-    return ExistingIndex(address_keys, phone_keys, agent_keys)
+    return ExistingIndex(address_keys, street_state_keys, phone_keys, agent_keys)
 
 
 def duplicate_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str, str, str]:
     fields = candidate.fields
-    akey = address_key(
-        fields.get("listing_address", ""),
-        fields.get("city", ""),
-        fields.get("state", ""),
-    )
-    if akey and akey in existing.address_keys:
-        return "duplicate_listing", akey, str(existing.address_keys[akey])
+    listing_status, listing_key, listing_row = duplicate_listing_status(candidate, existing)
+    if listing_status:
+        return listing_status, listing_key, listing_row
 
     phone_key = normalize_phone(fields.get("phone", ""))
     if phone_key and phone_key in existing.phone_keys:
@@ -660,7 +694,7 @@ def duplicate_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str
     if gkey and gkey in existing.agent_keys:
         return "possible_existing_agent", gkey, ",".join(map(str, existing.agent_keys[gkey]))
 
-    return "", akey, ""
+    return "", listing_key, ""
 
 
 def duplicate_listing_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str, str, str]:
@@ -672,13 +706,23 @@ def duplicate_listing_status(candidate: Candidate, existing: ExistingIndex) -> t
     )
     if akey and akey in existing.address_keys:
         return "duplicate_listing", akey, str(existing.address_keys[akey])
-    return "", akey, ""
+    skey = street_state_key(fields.get("listing_address", ""), fields.get("state", ""))
+    if skey and skey in existing.street_state_keys:
+        return "duplicate_listing", skey, str(existing.street_state_keys[skey])
+    return "", skey or akey, ""
 
 
 def is_valid_email(value: str) -> bool:
     compact = normalize_space(value)
     match = EMAIL_RE.fullmatch(compact)
     return bool(match)
+
+
+def format_phone(value: str) -> str:
+    digits = normalize_phone(value)
+    if len(digits) != 10:
+        return ""
+    return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
 
 
 def has_complete_agent_contact(candidate: Candidate) -> bool:
@@ -695,19 +739,12 @@ def has_complete_agent_contact(candidate: Candidate) -> bool:
 
 def merge_contact_hints(candidate: Candidate, text: str) -> None:
     fields = candidate.fields
-    agent_name = extract_agent_name(text)
-    if agent_name and not clean_agent_name(fields.get("agent_name", "")):
-        fields["agent_name"] = agent_name
-    elif agent_name and len(agent_name.split()) >= 2:
-        fields["agent_name"] = clean_agent_name(fields.get("agent_name", "")) or agent_name
-    if not normalize_phone(fields.get("phone", "")):
-        phone_match = PHONE_RE.search(text)
-        if phone_match:
-            fields["phone"] = phone_match.group(0)
-    if not is_valid_email(fields.get("email", "")):
-        email_match = EMAIL_RE.search(text)
-        if email_match:
-            fields["email"] = email_match.group(0)
+    details = extract_listing_agent_fields(text)
+    agent_name = details.get("agent_name", "")
+    current_name = clean_agent_name(fields.get("agent_name", ""))
+    if agent_name and (not current_name or normalize_key(current_name) == normalize_key(agent_name)):
+        fields.update(details)
+    sanitize_candidate_identity(candidate)
 
 
 def research_candidate_contact(candidate: Candidate) -> None:
@@ -766,7 +803,7 @@ def headless_budget_available(url: str) -> tuple[bool, str]:
     if not HEADLESS_FALLBACK:
         return False, "disabled"
     domain = registered_domain(url)
-    if domain not in HEADLESS_DOMAINS:
+    if "*" not in HEADLESS_DOMAINS and domain not in HEADLESS_DOMAINS:
         return False, "domain_not_allowed"
     if _headless_used_total >= HEADLESS_BUDGET:
         return False, "run_budget_exhausted"
@@ -946,6 +983,7 @@ def clean_listing_address(address: str, city: str = "", state: str = "", zip_cod
     elif state:
         zip_part = rf"(?:\s+{re.escape(zip_code)})?" if zip_code else ""
         compact = re.sub(rf",?\s+{re.escape(state)}\.?{zip_part}$", "", compact, flags=re.I)
+    compact = re.sub(r"\b([A-Za-z][A-Za-z.'-]*)\s+\1\b", r"\1", compact, flags=re.I)
     compact = re.sub(r"\s*,\s*$", "", normalize_space(compact))
     return compact.strip(" ,.")
 
@@ -1091,7 +1129,7 @@ def source_result_allowed(result: SearchResult) -> tuple[bool, str]:
         if host.endswith("homes.com") and "/property/" in path:
             return True, ""
         return False, "not_homes_detail"
-    if result.source == "idx_broker_pages":
+    if result.source in {"idx_broker_pages", "idx_broker_remarks"}:
         if re.search(r"/(?:search|blog|buying|selling|guides?|resources?|category|tag)(?:/|$)", path):
             return False, "not_idx_listing_detail"
         if re.search(r"\b(?:\d+\+\s+listings|homes?\s+for\s+sale|search\s+homes|buying\s+a|tips)\b", title, re.I):
@@ -1134,10 +1172,11 @@ def clean_agent_name(value: str) -> str:
     compact = re.split(
         r"(?i)\b(?:call|phone|cell|mobile|email|license|lic\.?|dre|brokerage|broker|"
         r"brokered\s+by|shown\s+by|listed\s+by|listing\s+office|office|mls|fax|"
-        r"website|provided\s+by|realty|realtor|"
+        r"website|provided\s+by|status|remarks|public\s+remarks|description|"
+        r"property\s+description|special\s+listing\s+conditions?|realty|realtor|"
         r"real\s+estate|properties|brokerage|llc|inc|corp|company|group|team|"
         r"associates|homes?|mortgage|bank|trust|services|partners|title|insurance)\b|"
-        r"[|•;,]|\.\s+(?=[{\"A-Z])",
+        r"[|•;,{]",
         compact,
         maxsplit=1,
     )[0]
@@ -1155,11 +1194,35 @@ def clean_agent_name(value: str) -> str:
 
 
 def extract_agent_name(text: str) -> str:
-    for match in AGENT_LABEL_CONTEXT_RE.finditer(text):
-        name = clean_agent_name(match.group(1))
-        if name:
-            return name
-    return ""
+    return extract_listing_agent_fields(text).get("agent_name", "")
+
+
+def extract_listing_agent_fields(text: str) -> dict[str, str]:
+    for match in TRUSTED_AGENT_LABEL_CONTEXT_RE.finditer(text):
+        context = match.group(1)
+        agent_segment = re.split(
+            r"(?i)\b(?:status|remarks|public\s+remarks|description|property\s+description|"
+            r"special\s+listing\s+conditions?|brokerage|listing\s+office|office|contact\s+phone)\b",
+            context,
+            maxsplit=1,
+        )[0]
+        name = clean_agent_name(agent_segment)
+        if not name:
+            continue
+        details = {
+            "agent_name": name,
+            "agent_name_source": "listing_agent_label",
+        }
+        phone_match = first_contact_phone_match(agent_segment)
+        if phone_match:
+            details["phone"] = format_phone(phone_match.group(0))
+            details["phone_source"] = "listing_agent_label"
+        email_match = EMAIL_RE.search(agent_segment)
+        if email_match:
+            details["email"] = email_match.group(0).lower()
+            details["email_source"] = "listing_agent_label"
+        return details
+    return {}
 
 
 def first_contact_phone_match(text: str) -> re.Match[str] | None:
@@ -1169,6 +1232,69 @@ def first_contact_phone_match(text: str) -> re.Match[str] | None:
             continue
         return match
     return None
+
+
+TRUSTED_AGENT_SOURCES = {"jsonld_real_estate_agent", "listing_agent_label"}
+
+
+def agent_name_promotion_safety(candidate: Candidate) -> tuple[bool, str]:
+    fields = candidate.fields
+    name = clean_agent_name(fields.get("agent_name", ""))
+    if not name:
+        return False, "missing_listing_agent"
+    if fields.get("agent_name_source", "") not in TRUSTED_AGENT_SOURCES:
+        return False, "unattributed_listing_agent"
+
+    raw_tokens = [token.strip(" .'()-") for token in name.split() if token.strip(" .'()-")]
+    if any(len(token) >= 2 and token.isupper() for token in raw_tokens):
+        return False, "agent_name_contains_acronym"
+
+    name_tokens = set(normalize_key(name).split())
+    state = normalize_space(fields.get("state", "")).upper()
+    state_tokens = set(normalize_key(STATE_QUERY_TERMS.get(state, state)).split())
+    if state.lower() in name_tokens or state_tokens and state_tokens.issubset(name_tokens):
+        return False, "agent_name_contains_state"
+
+    city_tokens = set(normalize_key(fields.get("city", "")).split())
+    if city_tokens and city_tokens.issubset(name_tokens):
+        return False, "agent_name_matches_city"
+
+    address_tokens = set(normalize_key(fields.get("listing_address", "")).split())
+    if len(name_tokens) >= 2 and name_tokens.issubset(address_tokens):
+        return False, "agent_name_matches_address"
+
+    broker_tokens = set(normalize_key(fields.get("broker_name", "")).split())
+    if broker_tokens and (name_tokens.issubset(broker_tokens) or broker_tokens.issubset(name_tokens)):
+        return False, "agent_name_matches_brokerage"
+    return True, ""
+
+
+def sanitize_candidate_identity(candidate: Candidate) -> tuple[bool, str]:
+    fields = candidate.fields
+    fields["agent_name"] = clean_agent_name(fields.get("agent_name", ""))
+    safe, reason = agent_name_promotion_safety(candidate)
+    if not safe:
+        if fields.get("agent_name"):
+            fields["rejected_agent_name"] = fields["agent_name"]
+        fields["agent_name_rejection_reason"] = reason
+        for key in ("agent_name", "agent_name_source", "phone", "phone_source", "email", "email_source"):
+            fields[key] = ""
+        return False, reason
+
+    if fields.get("phone_source", "") not in TRUSTED_AGENT_SOURCES:
+        fields["phone"] = ""
+        fields["phone_source"] = ""
+    else:
+        fields["phone"] = format_phone(fields.get("phone", ""))
+    if fields.get("email_source", "") not in TRUSTED_AGENT_SOURCES:
+        fields["email"] = ""
+        fields["email_source"] = ""
+    elif is_valid_email(fields.get("email", "")):
+        fields["email"] = fields["email"].strip().lower()
+    else:
+        fields["email"] = ""
+        fields["email_source"] = ""
+    return True, ""
 
 
 def jsonld_type_names(value: Any) -> set[str]:
@@ -1199,6 +1325,63 @@ def required_review_field_failure(candidate: Candidate, qualification: Qualifica
     if qualification.status != "qualified" or not normalize_space(qualification.evidence):
         return "missing_short_sale_confirmation"
     return ""
+
+
+def strict_listing_description_evidence(candidate: Candidate) -> str:
+    description = normalize_space(candidate.fields.get("listing_description", ""))
+    description_match = SHORT_SALE_LISTING_RE.search(description)
+    if description_match:
+        return excerpt_around(description, description_match.start(), description_match.end())
+
+    text = candidate.text
+    for label_match in STRICT_DESCRIPTION_EVIDENCE_LABEL_RE.finditer(text):
+        prefix = text[max(0, label_match.start() - 40) : label_match.start()]
+        if DESCRIPTION_EVIDENCE_SKIP_PREFIX_RE.search(prefix):
+            continue
+        section = text[label_match.start() : min(len(text), label_match.end() + 900)]
+        stop_match = DESCRIPTION_SECTION_STOP_RE.search(
+            section,
+            max(20, label_match.end() - label_match.start()),
+        )
+        if stop_match:
+            section = section[: stop_match.start()]
+        section_match = SHORT_SALE_LISTING_RE.search(section)
+        if section_match:
+            return excerpt_around(section, section_match.start(), section_match.end())
+    return ""
+
+
+def shadow_promotion_readiness(candidate: Candidate, qualification: Qualification) -> tuple[str, bool, str]:
+    safe_agent, agent_reason = sanitize_candidate_identity(candidate)
+    fields = candidate.fields
+    if qualification.status != "qualified":
+        return "not_qualified", False, "Listing did not pass the short sale qualification rules."
+    if not (
+        looks_like_listing_address(fields.get("listing_address", ""))
+        and normalize_space(fields.get("city", ""))
+        and normalize_space(fields.get("state", ""))
+    ):
+        return "needs_address", False, "Street, city, and state must be confirmed before promotion."
+    if not strict_listing_description_evidence(candidate):
+        return (
+            "needs_description_confirmation",
+            False,
+            "Short sale language was not confirmed in the listing agent's description or remarks.",
+        )
+    if not safe_agent:
+        return "needs_agent", False, f"Listing agent needs review: {agent_reason}."
+
+    contact_note = (
+        "Agent phone and email are attributable to the listing."
+        if has_complete_agent_contact(candidate)
+        else "Agent contact is blank or partial; the lead verifier must confirm it later."
+    )
+    mode_note = (
+        "Automatic PendingQueue promotion is disabled during the shadow rollout."
+        if SHADOW_MODE
+        else "Automatic PendingQueue promotion remains disabled."
+    )
+    return "shadow_ready", True, f"{contact_note} {mode_note}"
 
 
 def candidate_matches_requested_state(candidate: Candidate, requested_state: str) -> bool:
@@ -1248,15 +1431,26 @@ def extract_jsonld_text(markup: str) -> tuple[str, dict[str, str]]:
             name = obj.get("name")
             if isinstance(name, str) and not fields.get("raw_name"):
                 fields["raw_name"] = name
-            if type_names.intersection({"person", "realestateagent", "real estate agent"}):
+            if type_names.intersection({"realestateagent", "real estate agent"}):
                 agent_name = clean_agent_name(str(name or ""))
                 if agent_name:
                     fields.setdefault("agent_name", agent_name)
+                    fields.setdefault("agent_name_source", "jsonld_real_estate_agent")
+                    phone = obj.get("telephone") or obj.get("phone")
+                    if isinstance(phone, str) and format_phone(phone):
+                        fields.setdefault("phone", format_phone(phone))
+                        fields.setdefault("phone_source", "jsonld_real_estate_agent")
+                    email_value = obj.get("email")
+                    if isinstance(email_value, str) and is_valid_email(email_value):
+                        fields.setdefault("email", email_value.strip().lower())
+                        fields.setdefault("email_source", "jsonld_real_estate_agent")
             if isinstance(name, str):
                 apply_address_parts(fields, parse_address_parts(name), replace_bad_address=True)
             description = obj.get("description")
             if isinstance(description, str):
                 pieces.append(description)
+                if type_names.intersection(LISTING_JSONLD_TYPES):
+                    fields.setdefault("listing_description", normalize_space(description))
     return "\n".join(pieces), fields
 
 
@@ -1267,8 +1461,9 @@ def decode_json_string(value: str) -> str:
         return html.unescape(value.replace(r"\/", "/"))
 
 
-def extract_embedded_listing_text(markup: str) -> str:
+def extract_embedded_listing_text(markup: str) -> tuple[str, str]:
     pieces: list[str] = []
+    descriptions: list[str] = []
     if re.search(r'"is_short_sale"\s*:\s*true', markup, re.I):
         pieces.append("Special Listing Conditions: Short Sale.")
     status_flags = [
@@ -1282,14 +1477,20 @@ def extract_embedded_listing_text(markup: str) -> str:
     for match in re.finditer(r'"description"\s*:\s*"((?:\\.|[^"\\]){20,5000})"', markup, re.I):
         decoded = normalize_space(decode_json_string(match.group(1)))
         if decoded:
+            descriptions.append(decoded)
             pieces.append(f"Property description: {decoded}")
     for match in re.finditer(r'"text"\s*:\s*"((?:\\.|[^"\\]){20,5000})"', markup, re.I):
         decoded = normalize_space(decode_json_string(match.group(1)))
         if decoded:
+            descriptions.append(decoded)
             pieces.append(f"Property description: {decoded}")
     for match in re.finditer(r'"number"\s*:\s*"((?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4})"', markup, re.I):
         pieces.append(f"Phone: {decode_json_string(match.group(1))}")
-    return " ".join(pieces)
+    preferred_description = next(
+        (description for description in descriptions if SHORT_SALE_LISTING_RE.search(description)),
+        descriptions[0] if descriptions else "",
+    )
+    return " ".join(pieces), preferred_description
 
 
 def iter_json_objects(data: Any) -> Iterable[Any]:
@@ -1304,11 +1505,13 @@ def iter_json_objects(data: Any) -> Iterable[Any]:
 
 def infer_fields(result: SearchResult, markup: str) -> Candidate:
     json_text, json_fields = extract_jsonld_text(markup)
-    embedded_listing_text = extract_embedded_listing_text(markup)
+    embedded_listing_text, embedded_description = extract_embedded_listing_text(markup)
     page_text = strip_html(markup)
     combined = normalize_space(" ".join([result.title, result.snippet, json_text, embedded_listing_text, page_text]))
 
     fields = dict(json_fields)
+    if embedded_description:
+        fields.setdefault("listing_description", embedded_description)
     title_parts = [part.strip() for part in re.split(r"\s*[|–-]\s*", result.title) if part.strip()]
     if title_parts and not fields.get("listing_address"):
         fields["listing_address"] = title_parts[0]
@@ -1318,13 +1521,9 @@ def infer_fields(result: SearchResult, markup: str) -> Candidate:
         apply_address_parts(fields, parse_address_parts(fields["raw_name"]), replace_bad_address=True)
 
     fields.setdefault("source_url", result.url)
-    fields.setdefault("agent_name", extract_agent_name(combined))
+    for key, value in extract_listing_agent_fields(combined).items():
+        fields.setdefault(key, value)
     fields.setdefault("broker_name", extract_labeled_value(combined, ["Broker", "Brokerage", "Listing Office"]))
-
-    phone_match = first_contact_phone_match(combined)
-    email_match = EMAIL_RE.search(combined)
-    fields.setdefault("phone", phone_match.group(0) if phone_match else "")
-    fields.setdefault("email", email_match.group(0) if email_match else "")
 
     if not fields.get("city") or not fields.get("state"):
         city_state = re.search(r"\b([A-Z][A-Za-z .'-]{2,40}),\s*([A-Z]{2})\s*(\d{5})?\b", result.title + " " + result.snippet)
@@ -1334,7 +1533,9 @@ def infer_fields(result: SearchResult, markup: str) -> Candidate:
             fields.setdefault("zip", city_state.group(3) or "")
 
     normalize_candidate_address_fields(fields)
-    return Candidate(result.source, result.query, result.url, result.title, combined, fields)
+    candidate = Candidate(result.source, result.query, result.url, result.title, combined, fields)
+    sanitize_candidate_identity(candidate)
+    return candidate
 
 
 def extract_labeled_value(text: str, labels: list[str]) -> str:
@@ -1349,6 +1550,7 @@ def canonical_queue_payload(candidate: Candidate, qualification: Qualification, 
     fields = candidate.fields
     address = fields.get("listing_address", "")
     source = f"free-source-pilot:{candidate.source}"
+    listing_description = fields.get("listing_description", "") or strict_listing_description_evidence(candidate)
     payload = {
         "zpid": synthetic_zpid,
         "address": address,
@@ -1368,12 +1570,14 @@ def canonical_queue_payload(candidate: Candidate, qualification: Qualification, 
         "propertyUrl": candidate.url,
         "homeStatus": "FOR_SALE",
         "specialListingConditions": "Short Sale",
-        "listing_description": candidate.text[:8_000],
-        "description": candidate.text[:8_000],
-        "listingText": candidate.text[:8_000],
+        "listing_description": listing_description[:8_000],
+        "description": listing_description[:8_000],
+        "listingText": listing_description[:8_000],
         "sourceQuery": candidate.query,
         "sourceTitle": candidate.title,
         "qualificationEvidence": qualification.evidence,
+        "sourcePilotShadow": "true",
+        "requiresVerifierReview": "true",
     }
     return {key: str(value) for key, value in payload.items() if str(value or "").strip()}
 
@@ -1386,7 +1590,7 @@ def candidate_to_row(
     agent_rows: str,
 ) -> list[str]:
     fields = candidate.fields
-    fields["agent_name"] = clean_agent_name(fields.get("agent_name", ""))
+    promotion_status, is_shadow_ready, promotion_notes = shadow_promotion_readiness(candidate, qualification)
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     first_name, last_name = split_agent_name(fields.get("agent_name", ""))
     synthetic_zpid = stable_synthetic_zpid(
@@ -1399,18 +1603,9 @@ def candidate_to_row(
     payload = canonical_queue_payload(candidate, qualification, synthetic_zpid)
     queue_source = payload.get("source", "")
     queue_address = payload.get("address", "")
-    has_phone = bool(normalize_phone(fields.get("phone", "")))
-    has_email = is_valid_email(fields.get("email", ""))
-    has_contact = bool(first_name and last_name and has_phone and has_email)
-    import_ready = "yes" if qualification.status == "qualified" and not matched and not agent_rows and has_contact else "review"
-    promotion_status = "pilot_review"
-    promotion_notes = (
-        "Net-new listing candidate; review then promote to PendingQueue using pending_queue_listing_json."
-        if not matched and not agent_rows and has_contact
-        else "Qualified net-new short sale listing; agent contact is missing or partial and can be reviewed later."
-        if not has_contact
-        else "Possible existing main-sheet match; review before promotion."
-    )
+    import_ready = "yes" if is_shadow_ready else "review"
+    if matched or agent_rows:
+        promotion_notes += " Existing agent/contact rows are recorded for reviewer context."
     return [
         first_name,
         last_name,
@@ -1612,15 +1807,16 @@ def run(args: argparse.Namespace) -> None:
     pilot_rows = get_values(token, args.spreadsheet_id, f"{args.pilot_tab}!A:{column_letter(len(PILOT_HEADERS))}")
     already_seen_urls = {row[11] for row in pilot_rows[1:] if len(row) > 11 and row[11]}
     pilot_seen_addresses = {
-        address_key(row[4], row[5], row[6])
+        street_state_key(row[4], row[6])
         for row in pilot_rows[1:]
-        if len(row) > 6 and address_key(row[4], row[5], row[6])
+        if len(row) > 6 and street_state_key(row[4], row[6])
     }
     stats = {
         "searched": 0,
         "results": 0,
         "fetched": 0,
         "qualified": 0,
+        "shadow_ready": 0,
         "duplicates": 0,
         "rejected": 0,
         "fetch_failed": 0,
@@ -1638,6 +1834,10 @@ def run(args: argparse.Namespace) -> None:
         search_engine=SEARCH_ENGINE,
         ddg_fallback_allowed=ALLOW_DDG_FALLBACK,
         cse_configured=bool(CSE_API_KEY and CSE_CX),
+        shadow_mode=SHADOW_MODE,
+        shadow_review_target=SHADOW_REVIEW_TARGET,
+        shadow_review_days=SHADOW_REVIEW_DAYS,
+        automatic_promotion=False,
         dry_run=args.dry_run,
     )
 
@@ -1683,7 +1883,14 @@ def run(args: argparse.Namespace) -> None:
             )
             time.sleep(args.sleep_seconds)
             query_rows: list[list[str]] = []
-            query_stats = {"fetched": 0, "qualified": 0, "duplicates": 0, "rejected": 0, "fetch_failed": 0}
+            query_stats = {
+                "fetched": 0,
+                "qualified": 0,
+                "shadow_ready": 0,
+                "duplicates": 0,
+                "rejected": 0,
+                "fetch_failed": 0,
+            }
             for result in results:
                 if result.url in already_seen_urls:
                     stats["duplicates"] += 1
@@ -1811,7 +2018,20 @@ def run(args: argparse.Namespace) -> None:
                 agent_rows = matched if dup_status == "possible_existing_agent" else ""
                 stats["qualified"] += 1
                 query_stats["qualified"] += 1
-                query_rows.append(candidate_to_row(candidate, qualification, dup_key, matched_main_row, agent_rows))
+                row = candidate_to_row(candidate, qualification, dup_key, matched_main_row, agent_rows)
+                query_rows.append(row)
+                if row[14] == "shadow_ready":
+                    stats["shadow_ready"] += 1
+                    query_stats["shadow_ready"] += 1
+                    log_event(
+                        "pilot_shadow_ready",
+                        state=state,
+                        source=source,
+                        url=result.url,
+                        address=candidate.fields.get("listing_address", ""),
+                        agent=candidate.fields.get("agent_name", ""),
+                        automatic_promotion=False,
+                    )
                 log_event(
                     "pilot_candidate_qualified",
                     state=state,
@@ -1823,6 +2043,7 @@ def run(args: argparse.Namespace) -> None:
                     has_email=is_valid_email(candidate.fields.get("email", "")),
                     duplicate_status=dup_status,
                     matched=matched,
+                    promotion_status=row[14],
                 )
                 already_seen_urls.add(result.url)
                 if listing_dup_key:

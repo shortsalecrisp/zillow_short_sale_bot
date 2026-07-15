@@ -1343,6 +1343,51 @@ def test_process_rows_surfaces_override(monkeypatch):
     assert captured["row"][bot_min.COL_EMAIL_CONF] == "high"
 
 
+def test_process_rows_holds_pilot_origin_sms_for_verifier(monkeypatch):
+    bot_min.seen_agents.clear()
+    bot_min.seen_phones.clear()
+    monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
+    monkeypatch.setattr(bot_min, "phone_exists", lambda *_: False)
+    monkeypatch.setattr(bot_min, "_find_existing_phone_row", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_phone",
+        lambda *args, **kwargs: {"number": "555-444-3333", "confidence": "high", "reason": ""},
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_email",
+        lambda *args, **kwargs: {"email": "jane@example.com", "confidence": "high", "reason": ""},
+    )
+    monkeypatch.setattr(bot_min, "_rapid_contact_normalized", lambda *args, **kwargs: {})
+    appended = []
+    monkeypatch.setattr(bot_min, "append_row", lambda row_vals: appended.append(row_vals) or 42)
+    scheduled = []
+    monkeypatch.setattr(bot_min, "schedule_initial_sms", lambda *args: scheduled.append(args))
+
+    bot_min.process_rows(
+        [
+            {
+                "description": "short sale listing",
+                "agentName": "Jane Agent",
+                "state": "CA",
+                "street": "123 Elm St",
+                "city": "Los Angeles",
+                "zpid": "free-abc",
+                "search_source": "free-source-pilot:idx_broker_remarks",
+            }
+        ],
+        skip_dedupe=True,
+    )
+
+    assert len(appended) == 1
+    assert scheduled == []
+    bot_min.seen_agents.clear()
+    bot_min.seen_phones.clear()
+
+
 def test_listing_text_uses_positive_special_listing_conditions():
     listing_text = bot_min._listing_text_from_payload(
         {

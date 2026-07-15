@@ -271,8 +271,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 "city": "Atlanta",
                 "state": "GA",
                 "phone": "404-555-1212",
+                "phone_source": "listing_agent_label",
                 "email": "jane@example.com",
+                "email_source": "listing_agent_label",
                 "agent_name": "Jane Smith",
+                "agent_name_source": "listing_agent_label",
             },
         )
         qualification = pilot.qualification_for_text(candidate.text)
@@ -280,7 +283,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         row = pilot.candidate_to_row(candidate, qualification, "4045551212", "2", "")
 
         self.assertEqual(row[:7], ["Jane", "Smith", "404-555-1212", "jane@example.com", "2 New St", "Atlanta", "GA"])
-        self.assertEqual(row[16], "review")
+        self.assertEqual(row[14], "shadow_ready")
+        self.assertEqual(row[16], "yes")
         self.assertEqual(row[22], "4045551212")
         self.assertEqual(row[23], "2")
 
@@ -293,8 +297,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             text="Status: Active. What's special: Short sale subject to lender approval.",
             fields={
                 "agent_name": "Maria Cahuenas",
+                "agent_name_source": "listing_agent_label",
                 "phone": "714-300-5277",
+                "phone_source": "listing_agent_label",
                 "email": "maria@example.com",
+                "email_source": "listing_agent_label",
                 "listing_address": "10 Main St",
                 "city": "Oak Hills",
                 "state": "CA",
@@ -329,22 +336,31 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
         self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
 
-    def test_default_source_plan_runs_idx_daily_and_rotates_weekly_bucket(self):
+    def test_default_source_plan_runs_two_idx_broker_buckets(self):
         queries = pilot.configured_source_queries(pilot.dt.date(2026, 7, 6))
 
-        self.assertEqual([query.source for query in queries], ["idx_broker_pages", "homes.com"])
+        self.assertEqual([query.source for query in queries], ["idx_broker_pages", "idx_broker_remarks"])
         self.assertEqual([query.date_restrict for query in queries], ["w1", "w1"])
+        self.assertEqual(len(queries) * len(pilot.DEFAULT_STATES), 100)
 
-    def test_default_source_plan_rotates_non_idx_buckets_daily(self):
+    def test_default_source_plan_is_stable_across_days(self):
         day_1 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 6))
         day_2 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 7))
-        day_3 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 8))
-        day_4 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 9))
+
+        self.assertEqual([query.source for query in day_1], ["idx_broker_pages", "idx_broker_remarks"])
+        self.assertEqual([query.source for query in day_2], ["idx_broker_pages", "idx_broker_remarks"])
+
+    def test_legacy_source_plan_still_rotates_portal_bucket(self):
+        old_plan = pilot.SOURCE_PLAN
+        try:
+            pilot.SOURCE_PLAN = "idx_daily_rotating_weekly"
+            day_1 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 6))
+            day_2 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 7))
+        finally:
+            pilot.SOURCE_PLAN = old_plan
 
         self.assertEqual([query.source for query in day_1], ["idx_broker_pages", "homes.com"])
         self.assertEqual([query.source for query in day_2], ["idx_broker_pages", "realtor.com"])
-        self.assertEqual([query.source for query in day_3], ["idx_broker_pages", "redfin.com"])
-        self.assertEqual([query.source for query in day_4], ["idx_broker_pages", "homes.com"])
 
     def test_configured_source_buckets_ignore_unknowns_and_duplicates(self):
         old_plan = pilot.SOURCE_PLAN
@@ -461,7 +477,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(candidate.fields["state"], "AZ")
         self.assertEqual(candidate.fields["zip"], "85122")
         self.assertEqual(candidate.fields["agent_name"], "Maria Cahuenas")
-        self.assertEqual(candidate.fields["phone"], "928-282-4166")
+        self.assertEqual(candidate.fields["phone"], "")
 
     def test_infer_fields_extracts_jsonld_real_estate_agent_name(self):
         result = pilot.SearchResult(
@@ -531,7 +547,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         candidate = pilot.infer_fields(result, markup)
         qualification = pilot.qualification_for_text(candidate.text)
 
-        self.assertEqual(candidate.fields["phone"], "(508)594-3513")
+        self.assertEqual(candidate.fields["phone"], "")
         self.assertEqual(qualification.status, "rejected")
         self.assertEqual(qualification.failure_reason, "disqualifying_short_sale_text")
 
@@ -633,7 +649,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(row[:7], ["", "", "", "", "123 Main Street", "Atlanta", "GA"])
         self.assertEqual(row[12], "qualified")
         self.assertEqual(row[16], "review")
-        self.assertIn("agent contact is missing or partial", row[15])
+        self.assertIn("missing_listing_agent", row[15])
 
     def test_phone_and_email_without_agent_name_still_needs_review(self):
         candidate = pilot.Candidate(
@@ -655,7 +671,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         row = pilot.candidate_to_row(candidate, qualification, "", "", "")
 
         self.assertEqual(row[16], "review")
-        self.assertIn("agent contact is missing or partial", row[15])
+        self.assertIn("missing_listing_agent", row[15])
 
     def test_agent_name_cleaner_rejects_brokerage_names(self):
         self.assertEqual(pilot.clean_agent_name("West USA Realty"), "")
@@ -734,6 +750,191 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         finally:
             pilot.search_web = old_search_web
             pilot.fetch_url = old_fetch_url
+
+    def test_split_agent_name_matches_main_sheet_first_last_layout(self):
+        self.assertEqual(pilot.split_agent_name("Michael E. LaMorte"), ("Michael", "E. LaMorte"))
+
+    def test_bad_listing_agent_patterns_are_removed(self):
+        cases = [
+            ("Green Valley AZ", "Green Valley", "AZ", "1 Main St", "listing_agent_label"),
+            ("MB Colorado", "Denver", "CO", "2 Main St", "listing_agent_label"),
+            ("BHGRE Paracle Myrtle Beach", "Myrtle Beach", "SC", "3 Main St", "listing_agent_label"),
+            ("Stratton Vantage", "Denver", "CO", "4 Main St", ""),
+            ("Hunters Trail", "Atlanta", "GA", "187 Hunters Trail", "listing_agent_label"),
+        ]
+        for name, city, state, address, source in cases:
+            with self.subTest(name=name):
+                candidate = pilot.Candidate(
+                    source="idx_broker_pages",
+                    query="query",
+                    url="https://example.com/listing",
+                    title=address,
+                    text="Status: Active. Remarks: Potential short sale.",
+                    fields={
+                        "agent_name": name,
+                        "agent_name_source": source,
+                        "listing_address": address,
+                        "city": city,
+                        "state": state,
+                    },
+                )
+
+                safe, _ = pilot.sanitize_candidate_identity(candidate)
+
+                self.assertFalse(safe)
+                self.assertEqual(candidate.fields["agent_name"], "")
+
+    def test_jsonld_real_estate_agent_contact_is_attributable(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <script type="application/ld+json">
+          [{"@type":"Product","name":"123 Main Street, Atlanta, GA 30303",
+            "description":"Potential short sale subject to lender approval."},
+           {"@type":"RealEstateAgent","name":"Jane Q. Smith",
+            "telephone":"(404) 555-1212","email":"Jane@Example.com"}]
+        </script>
+        <body>Status: Active.</body>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["agent_name"], "Jane Q. Smith")
+        self.assertEqual(candidate.fields["phone"], "404-555-1212")
+        self.assertEqual(candidate.fields["email"], "jane@example.com")
+        self.assertEqual(candidate.fields["agent_name_source"], "jsonld_real_estate_agent")
+
+    def test_page_wide_office_contact_is_not_assigned_to_agent(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="Listed by Jane Smith",
+        )
+        markup = """
+        <body>Status: Active. Remarks: Potential short sale.
+        Office phone 404-555-9999. support@example.com</body>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+        self.assertEqual(candidate.fields.get("phone", ""), "")
+        self.assertEqual(candidate.fields.get("email", ""), "")
+
+    def test_shadow_ready_allows_verifier_to_fill_blank_contact(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street",
+            text="Status: Pending. Public Remarks: Potential short sale subject to lender approval.",
+            fields={
+                "agent_name": "Jane Q. Smith",
+                "agent_name_source": "listing_agent_label",
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+            },
+        )
+        qualification = pilot.qualification_for_text(candidate.text)
+
+        row = pilot.candidate_to_row(candidate, qualification, "", "", "")
+
+        self.assertEqual(row[:4], ["Jane", "Q. Smith", "", ""])
+        self.assertEqual(row[14], "shadow_ready")
+        self.assertEqual(row[16], "yes")
+        self.assertIn("lead verifier", row[15])
+        self.assertIn("Automatic PendingQueue promotion is disabled", row[15])
+
+    def test_overview_only_short_sale_needs_description_confirmation(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street",
+            text="Status: Active. Overview: Potential short sale subject to lender approval.",
+            fields={
+                "agent_name": "Jane Smith",
+                "agent_name_source": "listing_agent_label",
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+            },
+        )
+        qualification = pilot.qualification_for_text(candidate.text)
+
+        row = pilot.candidate_to_row(candidate, qualification, "", "", "")
+
+        self.assertEqual(qualification.status, "qualified")
+        self.assertEqual(row[14], "needs_description_confirmation")
+        self.assertEqual(row[16], "review")
+
+    def test_dedupe_matches_street_and_state_when_city_differs(self):
+        main_rows = [
+            ["first", "last", "phone", "email", "listing_address", "city", "state"],
+            ["Michael", "LaMorte", "", "", "610 Farm To Market Road", "Brewster", "NY"],
+        ]
+        existing = pilot.build_existing_index(main_rows)
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="610 Farm To Market Road",
+            text="Status: Active. Remarks: Potential short sale.",
+            fields={"listing_address": "610 Farm To Market Road", "city": "Patterson", "state": "NY"},
+        )
+
+        self.assertEqual(
+            pilot.duplicate_listing_status(candidate, existing),
+            ("duplicate_listing", "610 farm to market road|ny", "2"),
+        )
+
+    def test_synthetic_zpid_is_stable_across_sources_and_city_aliases(self):
+        first = pilot.stable_synthetic_zpid(
+            "idx_broker_pages",
+            "https://one.example/listing",
+            "610 Farm To Market Road",
+            "Brewster",
+            "NY",
+        )
+        second = pilot.stable_synthetic_zpid(
+            "idx_broker_remarks",
+            "https://two.example/property",
+            "610 Farm To Market Road",
+            "Patterson",
+            "NY",
+        )
+
+        self.assertEqual(first, second)
+
+    def test_clean_listing_address_removes_repeated_adjacent_word(self):
+        self.assertEqual(pilot.clean_listing_address("923 W Main Main Street"), "923 W Main Street")
+
+    def test_idx_remarks_bucket_uses_idx_detail_filter(self):
+        search = pilot.SearchResult(
+            "idx_broker_remarks",
+            "query",
+            "https://example.com/search",
+            "Search homes",
+            "",
+        )
+        detail = pilot.SearchResult(
+            "idx_broker_remarks",
+            "query",
+            "https://example.com/listing/123-main-street",
+            "123 Main Street",
+            "",
+        )
+
+        self.assertEqual(pilot.source_result_allowed(search), (False, "not_idx_listing_detail"))
+        self.assertEqual(pilot.source_result_allowed(detail), (True, ""))
 
     def test_phone_regex_rejects_long_photo_timestamps(self):
         self.assertIsNone(pilot.PHONE_RE.search("20260512213414244719000000-o.jpg"))

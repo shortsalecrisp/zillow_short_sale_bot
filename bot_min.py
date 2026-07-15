@@ -13044,6 +13044,12 @@ def _follow_up_pass():
 def _expand_row(l: List[str], n: int = MIN_COLS) -> List[str]:
     return l + [""] * (n - len(l)) if len(l) < n else l
 
+
+def _pilot_origin_requires_verifier_hold(row: Dict[str, Any]) -> bool:
+    source = str(row.get("search_source") or row.get("source") or "").strip().lower()
+    return source.startswith("free-source-pilot:")
+
+
 def process_rows(
     rows: List[Dict[str, Any]],
     *,
@@ -13255,7 +13261,15 @@ def process_rows(
             seen_agents.add(normalized_agent)
         if selected_phone:
             seen_phones.add(_normalize_phone_for_dedupe(selected_phone))
-            schedule_initial_sms(selected_phone, first, r.get("street", ""), row_idx)
+            if _pilot_origin_requires_verifier_hold(r):
+                LOG.info(
+                    "PILOT_VERIFIER_HOLD zpid=%s row=%s source=%s initial_sms_scheduled=false",
+                    zpid,
+                    row_idx,
+                    r.get("search_source") or r.get("source") or "",
+                )
+            else:
+                schedule_initial_sms(selected_phone, first, r.get("street", ""), row_idx)
             LOG.info(
                 "SHEET_APPEND_RAPID_SNAPSHOT zpid=%s row=%s phones_found=%s rapid_selected=%s final_phone=%s final_email=%s",
                 zpid,

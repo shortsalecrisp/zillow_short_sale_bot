@@ -74,26 +74,28 @@ across all 50 states.
 
 The pilot searches the configured source queries with Google Custom Search when `GOOGLE_API_KEY`/`CS_API_KEY` and
 `GOOGLE_CX`/`CS_CX` are present. Production is configured to use Google CSE only with no DuckDuckGo fallback. To stay
-inside the free daily CSE quota, the daily seven-day-a-week schedule spends 100 source/state searches:
-`idx_broker_pages` runs across all 50 states with `dateRestrict=w1`, and one rotating bucket runs across all 50 states
-with `dateRestrict=w1`. The rotating sequence starts with `homes.com` on 2026-07-06, then `realtor.com`, then
-`redfin.com`, and repeats. It fetches each result page, uses a bounded Playwright fallback for allowed portal detail pages that
-return HTTP 403/429/451, keeps only active listing pages where the agent-written description/remarks/overview text
-mentions short sale, and appends qualified rows after each source query so partial daily runs still leave observable output.
+inside the free daily CSE quota, the daily seven-day-a-week schedule spends 100 source/state searches. Two broker/IDX
+buckets each run across all 50 states with `dateRestrict=w1`: `idx_broker_pages` targets structured short sale fields,
+while `idx_broker_remarks` targets agent-written remarks terminology. Portal-specific buckets remain available only for
+legacy/manual plans. The pilot fetches each result page, uses a browser fallback capped at 12 pages per run and four per
+domain when a broker site blocks the normal fetch, keeps only current listings, and appends qualified rows after each
+source query so partial daily runs still leave observable output.
 Structured fields such as `Special Conditions: Short Sale` or `Potential Short Sale: Yes` are not enough by themselves.
 Render logs should include
 `pilot_query_start`,
 `pilot_query_results`,
-`pilot_headless_fetch_*` when browser fallback is used, `pilot_candidate_qualified` or rejection/duplicate events,
+`pilot_headless_fetch_*` when browser fallback is used, `pilot_candidate_qualified`, `pilot_shadow_ready`, or rejection/duplicate events,
 `pilot_query_done`, and a final `pilot_run_done` stats record.
 
-The pilot does not write to `Sheet1` or send SMS. Candidate rows are first qualified as active short sale listings, then
-deduped against `Sheet1` by listing address before writing to the pilot tab. New rows can be added without agent contact
-fields; listing-page parsing fills contact fields when visible, and incomplete rows stay in pilot review for later
-verifier/contact enrichment. If visible contact fields match an already-known phone or possible existing agent, the row
-is still written for listing review and the match is recorded in the duplicate/review columns. Rows include
+The shadow rollout does not write to `PendingQueue` or `Sheet1`, and it does not send SMS. Candidate rows are first
+qualified as current short sale listings, then deduped against `Sheet1` by normalized street and state before writing to
+the pilot tab. A row is only marked `shadow_ready` when street/city/state are clean, short sale appears in the listing
+agent's description or remarks, and the listing agent identity comes from an attributable listing field. Page-wide office
+phones and generic emails are not assigned to the agent. Phone and email may remain blank for the lead verifier. Rows include
 `synthetic_zpid` and `pending_queue_listing_json` so reviewed net-new candidates can later be promoted into the same
-PendingQueue-style shape used by the Zillow scraper.
+PendingQueue-style shape used by the Zillow scraper. The main row processor also suppresses initial SMS for any future
+payload whose source starts with `free-source-pilot:` until the verifier path owns that send.
+Review the first 10 `shadow_ready` rows or seven days of runs, whichever comes first, before enabling any promoter.
 
 Configuration:
 
@@ -104,19 +106,23 @@ Configuration:
 * `FREE_SOURCE_PILOT_HEADLESS_FALLBACK=true`
 * `FREE_SOURCE_PILOT_HEADLESS_BUDGET=12`
 * `FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET=4`
+* `FREE_SOURCE_PILOT_HEADLESS_DOMAINS=*`
 * `FREE_SOURCE_PILOT_RESULTS_PER_QUERY=10`
 * `FREE_SOURCE_PILOT_RUN_HOUR=9`
 * `FREE_SOURCE_PILOT_RUN_MINUTE=0`
 * `FREE_SOURCE_PILOT_SLEEP_SECONDS=1.0`
 * `FREE_SOURCE_PILOT_SEARCH_ENGINE=cse`
-* `FREE_SOURCE_PILOT_SOURCE_PLAN=idx_daily_rotating_weekly`
-* `FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS=idx_broker_pages`
+* `FREE_SOURCE_PILOT_SOURCE_PLAN=idx_dual_shadow`
+* `FREE_SOURCE_PILOT_SHADOW_MODE=true`
+* `FREE_SOURCE_PILOT_SHADOW_REVIEW_TARGET=10`
+* `FREE_SOURCE_PILOT_SHADOW_REVIEW_DAYS=7`
+* `FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS=idx_broker_pages,idx_broker_remarks`
 * `FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT=w1`
 * `FREE_SOURCE_PILOT_ROTATING_SOURCE_BUCKETS=homes.com,realtor.com,redfin.com`
 * `FREE_SOURCE_PILOT_ROTATING_DATE_RESTRICT=w1`
 * `FREE_SOURCE_PILOT_ROTATION_ANCHOR_DATE=2026-07-06`
-* `FREE_SOURCE_PILOT_SOURCE_BUCKETS=idx_broker_pages,realtor.com,redfin.com,homes.com`
-* `FREE_SOURCE_PILOT_DATE_RESTRICT=d1`
+* `FREE_SOURCE_PILOT_SOURCE_BUCKETS=idx_broker_pages,idx_broker_remarks`
+* `FREE_SOURCE_PILOT_DATE_RESTRICT=w1`
 * `FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK=false`
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
