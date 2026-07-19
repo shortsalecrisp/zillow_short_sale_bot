@@ -1101,7 +1101,7 @@ function applyFastRules_(text, rowObj) {
   if (isSelfHandlingOpportunitySignal_(t)) {
     return {
       matched: true,
-      reply_text: "I can take the lender side off your plate - the paperwork, calls, follow-up, and negotiations - so you can focus on the listing and your client. There is no cost to you or the seller. Would a quick call about this file be helpful?",
+      reply_text: "I understand, and I help a lot of agents in the same situation. I can take the lender side off your plate - the paperwork, calls, follow-up, and negotiations - so you can focus on the listing and your client. There is no cost to you or the seller. Would you be open to a quick call about this file?",
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
@@ -2174,9 +2174,11 @@ function coerceSmsTextLeadStatus_(candidateStatus) {
 
 function isSelfHandlingValueReplyText_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  return t.indexOf("i can take the lender side off your plate") !== -1 &&
+  return (t.indexOf("i can take the lender side off your plate") !== -1 ||
+      t.indexOf("i can take lender side off your plate") !== -1) &&
     t.indexOf("there is no cost to you or the seller") !== -1 &&
-    t.indexOf("would a quick call about this file be helpful") !== -1;
+    (t.indexOf("would a quick call about this file be helpful") !== -1 ||
+      t.indexOf("would you be open to a quick call about this file") !== -1);
 }
 
 function buildSelfHandlingRepeatCloseDecision_() {
@@ -3163,6 +3165,9 @@ function testApprovedLeadIntelligenceRules_() {
   const selfDecision = applyFastRules_("I have been handling that part myself", {});
   if (!selfDecision.matched || selfDecision.lead_status !== "Y" || selfDecision.conversation_done || selfDecision.handoff_needed) {
     throw new Error("Self-handling opportunity regression: " + JSON.stringify(selfDecision));
+  }
+  if (selfDecision.reply_text.indexOf("I understand") !== 0 || selfDecision.reply_text.indexOf("I help a lot of agents in the same situation") === -1 || selfDecision.reply_text.indexOf("Would you be open to a quick call about this file?") === -1) {
+    throw new Error("Self-handling acknowledgement reply regression: " + JSON.stringify(selfDecision));
   }
 
   const politeSelfHandlingText = "Thank you for reaching out, I'm handling it myself";
