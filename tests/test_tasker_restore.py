@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 RESTORE = (
     Path(__file__).resolve().parents[1]
     / "tasker"
-    / "TASKER_RESTORE_V8_CORRELATED_REPLIES_FULL.template.xml"
+    / "TASKER_RESTORE_V9_URL_SAFE_CORRELATION_FULL.template.xml"
 )
 
 
@@ -68,10 +68,50 @@ def test_reply_send_and_receipt_use_only_captured_identity():
         ]
         assert len(receipt_bodies) == 1
         receipt = receipt_bodies[0]
-        assert "request_id=%reply_request_id" in receipt
-        assert "message_id=%reply_message_id" in receipt
-        assert "phone=%reply_phone" in receipt
-        assert "reply_text=%reply_text" in receipt
+        assert "request_id=%receipt_request_id" in receipt
+        assert "message_id=%receipt_message_id" in receipt
+        assert "phone=%receipt_phone" in receipt
+        assert "reply_text=%receipt_reply_text" in receipt
+        assert "sent_at=%receipt_sent_at" in receipt
+
+
+def test_every_dynamic_transport_field_is_url_encoded():
+    expected_destinations = {
+        "%transport_token",
+        "%transport_phone",
+        "%transport_message",
+        "%transport_received_at",
+        "%transport_message_id",
+        "%receipt_token",
+        "%receipt_request_id",
+        "%receipt_message_id",
+        "%receipt_phone",
+        "%receipt_reply_text",
+        "%receipt_sent_at",
+    }
+
+    for task_id in ("3", "9"):
+        task = _tasks()[task_id]
+        conversions = {
+            action.findtext("Str[@sr='arg2']"): action.find("Int[@sr='arg1']").get("val")
+            for action in task.findall("Action")
+            if action.findtext("code") == "596"
+        }
+        assert expected_destinations <= conversions.keys()
+        assert all(conversions[name] == "18" for name in expected_destinations)
+
+        inbound_bodies = [
+            action.findtext("Str[@sr='arg5']", default="")
+            for action in task.findall("Action")
+            if action.findtext("code") == "339"
+            and "action=incoming_sms" in action.findtext("Str[@sr='arg5']", default="")
+        ]
+        assert len(inbound_bodies) == 3
+        assert all("message=%transport_message" in body for body in inbound_bodies)
+        assert all("phone=%transport_phone" in body for body in inbound_bodies)
+        assert all("received_at=%transport_received_at" in body for body in inbound_bodies)
+        assert all("message_id=%transport_message_id" in body for body in inbound_bodies)
+        assert all("%SMSRB" not in body and "%evtprm3" not in body for body in inbound_bodies)
 
 
 def test_template_contains_no_private_token():

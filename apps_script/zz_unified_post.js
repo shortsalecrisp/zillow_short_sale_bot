@@ -84,6 +84,7 @@ function handleUnifiedSmsPost_(e) {
     if (typeof appendSmsDebugLog_ === "function") {
       appendSmsDebugLog_("doPost_start", {
         request_id: requestId,
+        transport_format: detectIncomingTransport_(e),
         raw_body: maskSensitiveDebugText_(getRawPostBody_(e)),
         parameters: e && e.parameter ? maskSensitiveDebugText_(safeJsonStringify_(e.parameter)) : ""
       });
@@ -352,6 +353,16 @@ function shouldSuppressUnifiedDuplicateInbound_(body) {
 
 function getRawPostBody_(e) {
   return e && e.postData && typeof e.postData.contents === "string" ? e.postData.contents : "";
+}
+
+function detectIncomingTransport_(e) {
+  var contentType = String(e && e.postData && e.postData.type || "").toLowerCase();
+  var raw = getRawPostBody_(e);
+  if (contentType.indexOf("application/json") !== -1 || /^\s*[\[{]/.test(raw)) return "json";
+  if (contentType.indexOf("application/x-www-form-urlencoded") !== -1 || raw.indexOf("=") !== -1) {
+    return "form_urlencoded";
+  }
+  return contentType || (raw ? "unknown_body" : "no_body");
 }
 
 function safeJsonStringify_(value) {

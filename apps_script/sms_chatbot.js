@@ -90,6 +90,9 @@ function parseIncomingRequest_(e) {
     try {
       return JSON.parse(raw);
     } catch (_) {}
+
+    const canonicalTaskerForm = parseCanonicalTaskerFormBody_(raw);
+    if (canonicalTaskerForm) return canonicalTaskerForm;
   }
 
   if (e && e.parameter && Object.keys(e.parameter).length > 0) {
@@ -112,6 +115,83 @@ function parseFormEncodedBody_(raw) {
     if (key) obj[key] = value;
   });
   return obj;
+}
+
+function parseCanonicalTaskerFormBody_(raw) {
+  const actionMatch = String(raw || "").match(/(?:^|&)action=([^&]*)/);
+  const action = actionMatch ? decodeFormComponent_(actionMatch[1]) : "";
+  const fieldsByAction = {
+    incoming_sms: ["token", "action", "phone", "message", "received_at", "message_id"],
+    reply_sent: ["token", "action", "request_id", "message_id", "phone", "reply_text", "sent_at"]
+  };
+  const fields = fieldsByAction[action];
+  if (!fields) return null;
+
+  const result = {};
+  let cursor = 0;
+  for (let index = 0; index < fields.length; index += 1) {
+    const marker = (index === 0 ? "" : "&") + fields[index] + "=";
+    if (String(raw).slice(cursor, cursor + marker.length) !== marker) return null;
+    const valueStart = cursor + marker.length;
+    const nextMarker = index + 1 < fields.length ? "&" + fields[index + 1] + "=" : "";
+    const valueEnd = nextMarker ? String(raw).indexOf(nextMarker, valueStart) : String(raw).length;
+    if (valueEnd < 0) return null;
+    result[fields[index]] = decodeFormComponent_(String(raw).slice(valueStart, valueEnd));
+    cursor = valueEnd;
+  }
+  return result;
+}
+
+function decodeFormComponent_(value) {
+  const normalized = String(value || "").replace(/\+/g, " ");
+  try {
+    return decodeURIComponent(normalized);
+  } catch (_) {
+    return normalized;
+  }
+}
+
+function testSmsTransportParsing_() {
+  const fullInbound = "I am the owner & broker. There is no issue getting bank release.";
+  const legacyRaw = "token=test&action=incoming_sms&phone=+15732803889&message=" + fullInbound
+    + "&received_at=7-18-26 10.19&message_id=+15732803889-1784384356624";
+  const recoveredLegacy = parseIncomingRequest_({
+    postData: { contents: legacyRaw },
+    parameter: { token: "test", action: "incoming_sms", phone: " 15732803889", message: "I am the owner " }
+  });
+  if (recoveredLegacy.message !== fullInbound) {
+    throw new Error("Legacy ampersand recovery regression: " + JSON.stringify(recoveredLegacy));
+  }
+
+  const encodedRaw = "token=test&action=incoming_sms&phone=%2B15732803889&message="
+    + encodeURIComponent(fullInbound)
+    + "&received_at=7-18-26%2010.19&message_id=%2B15732803889-1784384356624";
+  const recoveredEncoded = parseIncomingRequest_({ postData: { contents: encodedRaw }, parameter: {} });
+  if (recoveredEncoded.message !== fullInbound || recoveredEncoded.phone !== "+15732803889") {
+    throw new Error("URL-encoded inbound regression: " + JSON.stringify(recoveredEncoded));
+  }
+
+  const receiptText = "Free to you & the seller; buyer pays only if/when it closes.";
+  const receiptRaw = "token=test&action=reply_sent&request_id=req-1&message_id=msg-1"
+    + "&phone=%2B18328984452&reply_text=" + encodeURIComponent(receiptText) + "&sent_at=1784412169582";
+  const recoveredReceipt = parseIncomingRequest_({ postData: { contents: receiptRaw }, parameter: {} });
+  if (recoveredReceipt.reply_text !== receiptText || recoveredReceipt.request_id !== "req-1") {
+    throw new Error("URL-encoded receipt regression: " + JSON.stringify(recoveredReceipt));
+  }
+
+  const jsonInbound = parseIncomingRequest_({ postData: { contents: JSON.stringify({
+    token: "test",
+    action: "incoming_sms",
+    phone: "+15732803889",
+    message: fullInbound,
+    received_at: "7-18-26 10.19",
+    message_id: "json-1"
+  }) } });
+  if (jsonInbound.message !== fullInbound || jsonInbound.message_id !== "json-1") {
+    throw new Error("JSON transport regression: " + JSON.stringify(jsonInbound));
+  }
+
+  return { ok: true };
 }
 
 function validateToken_(token) {
@@ -3079,6 +3159,7 @@ function inspectTestNumber() {
 }
 
 function testApprovedLeadIntelligenceRules_() {
+  const transportParsing = testSmsTransportParsing_();
   const selfDecision = applyFastRules_("I have been handling that part myself", {});
   if (!selfDecision.matched || selfDecision.lead_status !== "Y" || selfDecision.conversation_done || selfDecision.handoff_needed) {
     throw new Error("Self-handling opportunity regression: " + JSON.stringify(selfDecision));
@@ -3189,6 +3270,7 @@ function testApprovedLeadIntelligenceRules_() {
     spanishCapability: buildSpanishCapabilityReply_(),
     spanishFee: feeDecision,
     notShortSale: notShortDecision,
+    transportParsing: transportParsing,
     ok: true
   };
   Logger.log(JSON.stringify(result));

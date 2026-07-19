@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a Tasker restore with stable action ordering and concurrent runs."""
+"""Build a URL-safe Tasker restore with stable correlated reply handling."""
 
 from __future__ import annotations
 
@@ -11,6 +11,137 @@ from pathlib import Path
 
 CORRELATED_TASK_IDS = {"3", "9"}
 TOKEN_PLACEHOLDER = "__SMS_BOT_TOKEN__"
+URL_ENCODE_CONVERSION = 18
+
+
+def _text(action: ET.Element, selector: str) -> str:
+    return action.findtext(selector, default="")
+
+
+def _variable_set(name: str, value: str) -> ET.Element:
+    action = ET.Element("Action", {"ve": "7"})
+    ET.SubElement(action, "code").text = "547"
+    ET.SubElement(action, "Str", {"sr": "arg0", "ve": "3"}).text = name
+    ET.SubElement(action, "Str", {"sr": "arg1", "ve": "3"}).text = value
+    for index, value in enumerate((0, 0, 0, 3, 1), start=2):
+        ET.SubElement(action, "Int", {"sr": f"arg{index}", "val": str(value)})
+    return action
+
+
+def _url_encode(source: str, destination: str) -> ET.Element:
+    action = ET.Element("Action", {"ve": "7"})
+    ET.SubElement(action, "code").text = "596"
+    ET.SubElement(action, "Str", {"sr": "arg0", "ve": "3"}).text = source
+    ET.SubElement(
+        action,
+        "Int",
+        {"sr": "arg1", "val": str(URL_ENCODE_CONVERSION)},
+    )
+    ET.SubElement(action, "Str", {"sr": "arg2", "ve": "3"}).text = destination
+    ET.SubElement(action, "Int", {"sr": "arg3", "val": "0"})
+    return action
+
+
+def _insert_actions(task: ET.Element, index: int, actions: list[ET.Element]) -> None:
+    children = list(task)
+    anchor = children.index(task.findall("Action")[index])
+    for offset, action in enumerate(actions):
+        task.insert(anchor + offset, action)
+
+
+def _http_body(action: ET.Element) -> str:
+    if _text(action, "code") != "339":
+        return ""
+    return _text(action, "Str[@sr='arg5']")
+
+
+def _set_http_body(action: ET.Element, body: str) -> None:
+    body_node = action.find("Str[@sr='arg5']")
+    if body_node is None:
+        raise ValueError("HTTP Request action has no body field")
+    body_node.text = body
+
+
+def harden_tasker_transport(task: ET.Element, phone_var: str, message_var: str) -> None:
+    inbound_body = (
+        "token=%transport_token&action=incoming_sms&phone=%transport_phone"
+        "&message=%transport_message&received_at=%transport_received_at"
+        "&message_id=%transport_message_id"
+    )
+    receipt_body = (
+        "token=%receipt_token&action=reply_sent&request_id=%receipt_request_id"
+        "&message_id=%receipt_message_id&phone=%receipt_phone"
+        "&reply_text=%receipt_reply_text&sent_at=%receipt_sent_at"
+    )
+
+    actions = task.findall("Action")
+    inbound_indexes = [
+        index
+        for index, action in enumerate(actions)
+        if "action=incoming_sms" in _http_body(action)
+    ]
+    if not inbound_indexes:
+        raise ValueError(f"Task {task.findtext('id')} has no inbound HTTP Request")
+
+    inbound_encoding = [
+        _variable_set("%transport_received_at_raw", "%DATE %TIME"),
+        _url_encode("%token", "%transport_token"),
+        _url_encode(phone_var, "%transport_phone"),
+        _url_encode(message_var, "%transport_message"),
+        _url_encode("%transport_received_at_raw", "%transport_received_at"),
+        _url_encode("%message_id", "%transport_message_id"),
+    ]
+    _insert_actions(task, inbound_indexes[0], inbound_encoding)
+
+    for action in task.findall("Action"):
+        if "action=incoming_sms" in _http_body(action):
+            _set_http_body(action, inbound_body)
+
+    actions = task.findall("Action")
+    send_index = next(
+        (
+            index
+            for index, action in enumerate(actions)
+            if _text(action, "code") == "41"
+            and _text(action, "Str[@sr='arg0']") == "%reply_phone"
+        ),
+        None,
+    )
+    if send_index is None:
+        raise ValueError(f"Task {task.findtext('id')} has no correlated SMS send")
+
+    receipt_encoding = [
+        _url_encode("%token", "%receipt_token"),
+        _url_encode("%reply_request_id", "%receipt_request_id"),
+        _url_encode("%reply_message_id", "%receipt_message_id"),
+        _url_encode("%reply_phone", "%receipt_phone"),
+        _url_encode("%reply_text", "%receipt_reply_text"),
+    ]
+    _insert_actions(task, send_index, receipt_encoding)
+
+    actions = task.findall("Action")
+    receipt_index = next(
+        (
+            index
+            for index, action in enumerate(actions)
+            if "action=reply_sent" in _http_body(action)
+        ),
+        None,
+    )
+    if receipt_index is None:
+        raise ValueError(f"Task {task.findtext('id')} has no delivery receipt HTTP Request")
+
+    _insert_actions(
+        task,
+        receipt_index,
+        [
+            _variable_set("%receipt_sent_at_raw", "%TIMEMS"),
+            _url_encode("%receipt_sent_at_raw", "%receipt_sent_at"),
+        ],
+    )
+    for action in task.findall("Action"):
+        if "action=reply_sent" in _http_body(action):
+            _set_http_body(action, receipt_body)
 
 
 def harden_restore(source: Path, destination: Path) -> None:
@@ -27,6 +158,13 @@ def harden_restore(source: Path, destination: Path) -> None:
                 insert_at = list(task).index(priority) + 1 if priority is not None else 0
                 task.insert(insert_at, retry_type)
             retry_type.text = "2"
+
+            phone_var, message_var = (
+                ("%SMSRF", "%SMSRB")
+                if task_id == "3"
+                else ("%evtprm2", "%evtprm3")
+            )
+            harden_tasker_transport(task, phone_var, message_var)
 
         for index, action in enumerate(task.findall("Action")):
             action.set("sr", f"act{index}")
