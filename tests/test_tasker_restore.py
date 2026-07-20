@@ -5,24 +5,43 @@ import xml.etree.ElementTree as ET
 RESTORE = (
     Path(__file__).resolve().parents[1]
     / "tasker"
-    / "TASKER_RESTORE_V9_URL_SAFE_CORRELATION_FULL.template.xml"
+    / "TASKER_RESTORE_V10_DURABLE_SMS_OUTBOX_FULL.template.xml"
 )
 
 
+def _root():
+    return ET.parse(RESTORE).getroot()
+
+
 def _tasks():
-    root = ET.parse(RESTORE).getroot()
-    return {task.findtext("id"): task for task in root.findall("Task")}
+    return {task.findtext("id"): task for task in _root().findall("Task")}
+
+
+def _profiles():
+    return {profile.findtext("id"): profile for profile in _root().findall("Profile")}
+
+
+def _http_bodies(task):
+    return [
+        action.findtext("Str[@sr='arg5']", default="")
+        for action in task.findall("Action")
+        if action.findtext("code") == "339"
+    ]
 
 
 def test_restore_is_complete_and_references_existing_tasks():
-    root = ET.parse(RESTORE).getroot()
+    root = _root()
     tasks = _tasks()
-    assert {"3", "9", "21"}.issubset(tasks)
+    assert {"3", "9", "21", "30", "31", "32"}.issubset(tasks)
     assert {profile.findtext("mid0") for profile in root.findall("Profile")} <= set(tasks)
     assert {profile.findtext("nme") for profile in root.findall("Profile")} == {
         "Received Text Any",
         "Google Messages Notification Backup",
         "AutoRemote SMS Outbound",
+        "SMS Outbox Every 2 Minutes",
+        "SMS Outbox After Boot",
+        "SMS Outbox Send Success",
+        "SMS Outbox Send Failure",
     }
 
 
@@ -32,88 +51,97 @@ def test_every_task_has_strict_sequential_action_ids():
         assert action_ids == [f"act{index}" for index in range(len(action_ids))]
 
 
-def test_inbound_tasks_allow_concurrent_runs_and_capture_reply_identity():
-    tasks = _tasks()
-    for task_id in ("3", "9"):
-        task = tasks[task_id]
+def test_inbound_tasks_snapshot_event_identity_before_waiting():
+    expected = {
+        "3": ("%SMSRF", "%SMSRB"),
+        "9": ("%evtprm2", "%evtprm3"),
+    }
+    for task_id, (phone_source, message_source) in expected.items():
+        task = _tasks()[task_id]
+        actions = task.findall("Action")
+        assert actions[0].findtext("Str[@sr='arg0']") == "%inbound_phone"
+        assert actions[0].findtext("Str[@sr='arg1']") == phone_source
+        assert actions[1].findtext("Str[@sr='arg0']") == "%inbound_message"
+        assert actions[1].findtext("Str[@sr='arg1']") == message_source
         assert task.findtext("rty") == "2"
-        values = {
-            action.findtext("Str[@sr='arg0']"): action.findtext("Str[@sr='arg1']")
-            for action in task.findall("Action")
-            if action.findtext("code") == "547"
-        }
-        assert values["%reply_phone"] in {"%SMSRF", "%evtprm2"}
-        assert values["%reply_text"] == "%http_data.reply_text"
-        assert values["%reply_request_id"] == "%http_data.request_id"
-        assert values["%reply_message_id"] == "%http_data.message_id"
+        assert task.findtext("stayawake") == "true"
 
 
-def test_reply_send_and_receipt_use_only_captured_identity():
+def test_inbound_tasks_only_enqueue_and_never_send_bot_reply_directly():
     for task_id in ("3", "9"):
         task = _tasks()[task_id]
-        send_actions = [
+        bodies = _http_bodies(task)
+        assert len([body for body in bodies if "action=enqueue_incoming_sms" in body]) == 3
+        assert not any("action=incoming_sms" in body for body in bodies)
+        assert not any("action=reply_sent" in body for body in bodies)
+        bot_send_actions = [
             action
             for action in task.findall("Action")
             if action.findtext("code") == "41"
-            and action.findtext("Str[@sr='arg0']") == "%reply_phone"
+            and action.findtext("Str[@sr='arg0']") != "9542053205"
         ]
-        assert len(send_actions) == 1
-        assert send_actions[0].findtext("Str[@sr='arg1']") == "%reply_text"
+        assert bot_send_actions == []
 
-        receipt_bodies = [
-            action.findtext("Str[@sr='arg5']", default="")
-            for action in task.findall("Action")
-            if action.findtext("code") == "339"
-            and "action=reply_sent" in action.findtext("Str[@sr='arg5']", default="")
-        ]
-        assert len(receipt_bodies) == 1
-        receipt = receipt_bodies[0]
-        assert "request_id=%receipt_request_id" in receipt
-        assert "message_id=%receipt_message_id" in receipt
-        assert "phone=%receipt_phone" in receipt
-        assert "reply_text=%receipt_reply_text" in receipt
-        assert "sent_at=%receipt_sent_at" in receipt
+
+def test_global_last_sms_variables_are_only_used_for_immediate_snapshot():
+    task = _tasks()["3"]
+    serialized = [ET.tostring(action, encoding="unicode") for action in task.findall("Action")]
+    assert "%SMSRF" in serialized[0]
+    assert "%SMSRB" in serialized[1]
+    assert all("%SMSRF" not in value and "%SMSRB" not in value for value in serialized[4:])
+
+
+def test_dispatcher_is_single_flight_and_uses_server_destination():
+    task = _tasks()["30"]
+    assert task.findtext("rty") == "0"
+    assert task.findtext("stayawake") == "true"
+    bodies = _http_bodies(task)
+    assert len([body for body in bodies if "action=claim_pending_send" in body]) == 3
+    assert len([body for body in bodies if "action=send_started" in body]) == 3
+    sends = [action for action in task.findall("Action") if action.findtext("code") == "41"]
+    assert len(sends) == 1
+    assert sends[0].findtext("Str[@sr='arg0']") == "%SMSOUT_PHONE"
+    assert sends[0].findtext("Str[@sr='arg1']") == "%SMSOUT_REPLY"
+    assert sends[0].find("Int[@sr='arg4']").get("val") == "1"
+
+
+def test_success_and_failure_profiles_have_exact_receipt_tasks():
+    profiles = _profiles()
+    assert profiles["32"].findtext("Event/code") == "2005"
+    assert profiles["33"].findtext("Event/code") == "2010"
+    assert profiles["32"].findtext("Event/Str[@sr='arg0']") == "%SMSOUT_PHONE"
+    assert profiles["33"].findtext("Event/Str[@sr='arg0']") == "%SMSOUT_PHONE"
+    success_bodies = _http_bodies(_tasks()["31"])
+    failure_bodies = _http_bodies(_tasks()["32"])
+    assert len([body for body in success_bodies if "action=reply_sent" in body]) == 3
+    assert len([body for body in failure_bodies if "action=sms_send_failed" in body]) == 3
+    for body in success_bodies + failure_bodies:
+        assert "request_id=%receipt_request_id" in body
+        assert "message_id=%receipt_message_id" in body
+        assert "phone=%receipt_phone" in body
+        assert "reply_text=%receipt_reply_text" in body
+        assert "lease_token=%receipt_lease_token" in body
 
 
 def test_every_dynamic_transport_field_is_url_encoded():
-    expected_destinations = {
+    required = {
         "%transport_token",
         "%transport_phone",
         "%transport_message",
         "%transport_received_at",
         "%transport_message_id",
-        "%receipt_token",
-        "%receipt_request_id",
-        "%receipt_message_id",
-        "%receipt_phone",
-        "%receipt_reply_text",
-        "%receipt_sent_at",
     }
-
     for task_id in ("3", "9"):
-        task = _tasks()[task_id]
         conversions = {
             action.findtext("Str[@sr='arg2']"): action.find("Int[@sr='arg1']").get("val")
-            for action in task.findall("Action")
+            for action in _tasks()[task_id].findall("Action")
             if action.findtext("code") == "596"
         }
-        assert expected_destinations <= conversions.keys()
-        assert all(conversions[name] == "18" for name in expected_destinations)
-
-        inbound_bodies = [
-            action.findtext("Str[@sr='arg5']", default="")
-            for action in task.findall("Action")
-            if action.findtext("code") == "339"
-            and "action=incoming_sms" in action.findtext("Str[@sr='arg5']", default="")
-        ]
-        assert len(inbound_bodies) == 3
-        assert all("message=%transport_message" in body for body in inbound_bodies)
-        assert all("phone=%transport_phone" in body for body in inbound_bodies)
-        assert all("received_at=%transport_received_at" in body for body in inbound_bodies)
-        assert all("message_id=%transport_message_id" in body for body in inbound_bodies)
-        assert all("%SMSRB" not in body and "%evtprm3" not in body for body in inbound_bodies)
+        assert required <= conversions.keys()
+        assert all(conversions[name] == "18" for name in required)
 
 
-def test_template_contains_no_private_token():
+def test_template_contains_placeholder_but_no_private_token():
     text = RESTORE.read_text(encoding="utf-8")
     assert "__SMS_BOT_TOKEN__" in text
+    assert "h7Q2zLp9Xk3mC8aF" not in text

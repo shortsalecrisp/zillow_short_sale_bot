@@ -12,6 +12,11 @@ function doPost(e) {
 function isUnifiedSmsAction_(action) {
   var smsActions = {
     incoming_sms: true,
+    enqueue_incoming_sms: true,
+    claim_pending_send: true,
+    send_started: true,
+    install_outbox_triggers: true,
+    outbox_status: true,
     reply_sent: true,
     manual_reply_sent: true,
     sms_send_failed: true,
@@ -95,7 +100,7 @@ function handleUnifiedSmsPost_(e) {
     var body = parseIncomingRequest_(e);
     validateToken_(body.token);
 
-    var action = body.action || "incoming_sms";
+    var action = String(body.action || "incoming_sms").toLowerCase();
     if (action === "codex_probe") {
       var probe = { ok: true, action: action, has_append: typeof appendSmsDebugLog_ === "function", has_sheet_helper: typeof getSmsSpreadsheet_ === "function" };
       try {
@@ -115,6 +120,36 @@ function handleUnifiedSmsPost_(e) {
       return jsonOutput_(probe);
     }
 
+
+    if (action === "enqueue_incoming_sms") {
+      var queueIgnored = getUnifiedIgnoredInboundReason_(body);
+      if (queueIgnored) {
+        return jsonOutput_({
+          ok: true,
+          queued: false,
+          should_reply: false,
+          should_reply_text: "false",
+          reason: queueIgnored
+        });
+      }
+      return jsonOutput_(enqueueIncomingSmsV10_(body, requestId));
+    }
+
+    if (action === "claim_pending_send") {
+      return jsonOutput_(claimPendingSmsSendV10_(body));
+    }
+
+    if (action === "send_started") {
+      return jsonOutput_(markPendingSmsSendStartedV10_(body));
+    }
+
+    if (action === "install_outbox_triggers") {
+      return jsonOutput_(installSmsOutboxTriggers_());
+    }
+
+    if (action === "outbox_status") {
+      return jsonOutput_(getSmsOutboxStatus_());
+    }
 
     if (action === "incoming_sms") {
       var ignoredInbound = getUnifiedIgnoredInboundReason_(body);
@@ -202,6 +237,13 @@ function handleUnifiedSmsPost_(e) {
           reason: receiptCorrelation.reason || "No exact pending-send match"
         });
       }
+      if (receiptCorrelation.already_sent) {
+        return jsonOutput_({
+          ok: true,
+          duplicate: true,
+          reason: "Send receipt was already confirmed"
+        });
+      }
       var replySentResult = handleReplySent_(body);
       if (typeof markPendingSmsSendComplete_ === "function") {
         markPendingSmsSendComplete_(body);
@@ -220,13 +262,15 @@ function handleUnifiedSmsPost_(e) {
     }
 
     if (action === "sms_send_failed") {
-      if (typeof markPendingSmsSendFailed_ === "function") {
-        markPendingSmsSendFailed_(body);
+      var failedResult = body.lease_token
+        ? requeuePendingSmsSendAfterFailureV10_(body)
+        : markPendingSmsSendFailed_(body);
+      if (!failedResult.ok || failedResult.status === "failed") {
+        try {
+          sendSystemAlertEmail_("SMS BOT SEND FAILED", safeJsonStringify_(failedResult));
+        } catch (_) {}
       }
-      try {
-        sendSystemAlertEmail_("SMS BOT SEND FAILED", safeJsonStringify_(body));
-      } catch (_) {}
-      return jsonOutput_({ ok: true, action: action, alerted: true });
+      return jsonOutput_({ ok: true, action: action, result: failedResult });
     }
 
     if (action === "manual_reply_sent" && typeof handleManualReplySent_ === "function") {
@@ -412,7 +456,9 @@ function appendSmsDebugLog_(stage, data) {
 function registerPendingSmsSend_(body, normalized, requestId) {
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_pending_sends") || ss.insertSheet("sms_pending_sends");
-  var headers = ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
+  var headers = typeof getPendingSmsHeaders_ === "function"
+    ? getPendingSmsHeaders_()
+    : ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
   ensurePendingSmsHeaders_(sheet, headers);
 
   var phone = String(body && body.phone || "").trim();
@@ -428,8 +474,15 @@ function registerPendingSmsSend_(body, normalized, requestId) {
     }
   }
 
-  sheet.appendRow([new Date(), "pending", requestId, messageId, phone, replyText,
-    String(body && body.message || ""), ""]);
+  var output = new Array(headers.length).fill("");
+  output[0] = new Date();
+  output[1] = "pending";
+  output[2] = requestId;
+  output[3] = messageId;
+  output[4] = phone;
+  output[5] = replyText;
+  output[6] = String(body && body.message || "");
+  sheet.appendRow(output);
 }
 
 function markPendingSmsSendComplete_(body) {
@@ -445,7 +498,7 @@ function markPendingSmsSendManuallyResolved_(body) {
   var sheet = ss.getSheetByName("sms_pending_sends");
   if (!sheet || sheet.getLastRow() < 2) return { ok: false, reason: "No pending-send ledger is available" };
 
-  var headers = ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
+  var headers = typeof getPendingSmsHeaders_ === "function" ? getPendingSmsHeaders_() : ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
   ensurePendingSmsHeaders_(sheet, headers);
   var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues();
   var phone = normalizePhone_(body && body.phone || "");
@@ -473,18 +526,24 @@ function findPendingSmsRow_(rows, body) {
   var messageId = String(body && body.message_id || "").trim();
   var phone = normalizePhone_(body && body.phone || "");
   var replyText = normalizePendingSmsReply_(body && body.reply_text || "");
+  var leaseToken = String(body && body.lease_token || "").trim();
+
+  function isReceiptableStatus_(row) {
+    return ["pending", "alerted", "claimed", "send_started", "sent"].indexOf(String(row[1] || "")) !== -1;
+  }
 
   function identifiersMatch_(row) {
     if (requestId && String(row[2] || "") !== requestId) return false;
     if (messageId && String(row[3] || "") !== messageId) return false;
     if (phone && normalizePhone_(row[4]) !== phone) return false;
     if (replyText && normalizePendingSmsReply_(row[5]) !== replyText) return false;
+    if (leaseToken && String(row[10] || "") !== leaseToken) return false;
     return true;
   }
 
   if (requestId || messageId) {
     for (var i = rows.length - 1; i >= 0; i--) {
-      if (String(rows[i][1] || "") !== "pending") continue;
+      if (!isReceiptableStatus_(rows[i])) continue;
       var hasRequestedId = (requestId && String(rows[i][2] || "") === requestId) ||
         (messageId && String(rows[i][3] || "") === messageId);
       if (hasRequestedId) return identifiersMatch_(rows[i]) ? i : -2;
@@ -496,7 +555,7 @@ function findPendingSmsRow_(rows, body) {
   // restore. It is exact on both destination and reply, never phone alone.
   if (phone && replyText) {
     for (var j = rows.length - 1; j >= 0; j--) {
-      if (String(rows[j][1] || "") !== "pending") continue;
+      if (!isReceiptableStatus_(rows[j])) continue;
       if (normalizePhone_(rows[j][4]) === phone &&
           normalizePendingSmsReply_(rows[j][5]) === replyText) {
         return j;
@@ -514,7 +573,7 @@ function validatePendingSmsSendReceipt_(body) {
     return { ok: false, reason: "No pending-send ledger is available" };
   }
 
-  var headers = ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
+  var headers = typeof getPendingSmsHeaders_ === "function" ? getPendingSmsHeaders_() : ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
   ensurePendingSmsHeaders_(sheet, headers);
   var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues();
   var matchIndex = findPendingSmsRow_(rows, body);
@@ -524,7 +583,11 @@ function validatePendingSmsSendReceipt_(body) {
   if (matchIndex < 0) {
     return { ok: false, reason: "Receipt did not match an exact pending phone/reply or correlated request/message ID" };
   }
-  return { ok: true, pending_row: matchIndex + 2 };
+  return {
+    ok: true,
+    pending_row: matchIndex + 2,
+    already_sent: String(rows[matchIndex][1] || "") === "sent"
+  };
 }
 
 function updatePendingSmsSendStatus_(body, status, note) {
@@ -532,7 +595,7 @@ function updatePendingSmsSendStatus_(body, status, note) {
   var sheet = ss.getSheetByName("sms_pending_sends");
   if (!sheet || sheet.getLastRow() < 2) return { ok: false, reason: "No pending-send ledger is available" };
 
-  var headers = ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
+  var headers = typeof getPendingSmsHeaders_ === "function" ? getPendingSmsHeaders_() : ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
   ensurePendingSmsHeaders_(sheet, headers);
   var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues();
   var matchIndex = findPendingSmsRow_(rows, body);
@@ -541,6 +604,7 @@ function updatePendingSmsSendStatus_(body, status, note) {
     var matchRow = matchIndex + 2;
     sheet.getRange(matchRow, 2).setValue(status);
     sheet.getRange(matchRow, 8).setValue(note || new Date());
+    if (status === "sent" && headers.length >= 15) sheet.getRange(matchRow, 15).setValue(new Date());
     return { ok: true, pending_row: matchRow, status: status };
   }
   return { ok: false, reason: matchIndex === -2 ? "Pending-send identifiers conflict with phone or reply text" : "No exact pending-send match" };
@@ -564,7 +628,7 @@ function smsPendingSendWatchdog_() {
   var sheet = ss.getSheetByName("sms_pending_sends");
   if (!sheet || sheet.getLastRow() < 2) return;
 
-  var headers = ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
+  var headers = typeof getPendingSmsHeaders_ === "function" ? getPendingSmsHeaders_() : ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
   ensurePendingSmsHeaders_(sheet, headers);
   var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues();
   var now = Date.now();

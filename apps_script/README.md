@@ -3,7 +3,8 @@
 These files mirror the Apps Script source deployed for the production SMS bot and the Tasker restore package used by the Android sender.
 
 - `sms_chatbot.js` contains intent classification and response behavior.
-- `zz_unified_post.js` contains webhook ingestion and pending-send receipt correlation.
-- The Tasker V9 template captures phone, inbound text, bot reply, delay, handoff state, request ID, and message ID into task-local variables before waiting or sending. Every dynamic inbound and receipt field is URL-encoded before it enters the form body. It also preserves concurrent task execution and uses strictly sequential Tasker action IDs so restored capture actions are not skipped or reordered. Replace `__SMS_BOT_TOKEN__` with the production token before importing. The operator-delivered V9 file already contains the configured token and must not be committed.
+- `zz_unified_post.js` contains webhook routing and exact send-receipt correlation.
+- `sms_outbox.js` contains the durable inbound queue, leased reply outbox, stale-reply suppression, retry handling, and watchdogs.
+- The Tasker V10 template snapshots each inbound sender/body immediately, enqueues it without waiting for the AI response, and uses one sequential outbox dispatcher. SMS Success and SMS Failure profiles post an exact request/message/phone/reply/lease receipt. Replace `__SMS_BOT_TOKEN__` with the production token before importing. The operator-delivered V10 file already contains the configured token and must not be committed.
 
-The transport and cross-send fix is fully active only after both the Apps Script deployment and Tasker V9 restore are live.
+V9 remains compatible during the rollout. The durable queue/outbox path becomes active after both the Apps Script deployment and complete Tasker V10 restore are live.
