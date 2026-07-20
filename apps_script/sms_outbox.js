@@ -371,7 +371,13 @@ function getPendingSmsStaleReason_(outboxRow) {
     if (normalizePhone_(rowObj[HEADERS.phone]) !== phone) continue;
     if (String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
     if (messageId && String(rowObj[HEADERS.last_message_id] || "") !== messageId) return "A newer inbound message exists";
-    if (inboundText && normalizeWhitespace_(String(rowObj[HEADERS.last_inbound_text] || "")) !== inboundText) return "Latest inbound text changed";
+    // Older ShortSaleLeads layouts do not have last_inbound_text. In that
+    // layout, last_message_id remains the authoritative stale-reply guard.
+    var hasInboundColumn = Object.prototype.hasOwnProperty.call(rowObj, HEADERS.last_inbound_text);
+    var currentInboundText = hasInboundColumn
+      ? normalizeWhitespace_(String(rowObj[HEADERS.last_inbound_text] || ""))
+      : "";
+    if (inboundText && currentInboundText && currentInboundText !== inboundText) return "Latest inbound text changed";
     return "";
   }
   return "CRM row no longer matches destination";

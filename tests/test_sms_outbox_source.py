@@ -42,6 +42,8 @@ def test_claim_revalidates_latest_crm_message_before_send():
     assert "A newer inbound message exists" in OUTBOX
     assert "Human takeover is active" in OUTBOX
     assert "Latest inbound text changed" in OUTBOX
+    assert "Older ShortSaleLeads layouts do not have last_inbound_text" in OUTBOX
+    assert "inboundText && currentInboundText" in OUTBOX
 
 
 def test_watchdog_recovers_claims_but_does_not_blindly_resend_uncertain_sms():
