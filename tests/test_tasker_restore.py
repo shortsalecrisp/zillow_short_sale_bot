@@ -83,6 +83,22 @@ def test_inbound_tasks_only_enqueue_and_never_send_bot_reply_directly():
         assert bot_send_actions == []
 
 
+def test_inbound_http_retries_use_non_2xx_status_and_forward_only_after_queue_ack():
+    for task_id in ("3", "9"):
+        task = _tasks()[task_id]
+        serialized = ET.tostring(task, encoding="unicode")
+        assert "<rhs>^$</rhs>" not in serialized
+        assert "%http_data.queued" in serialized
+        retry_conditions = [
+            condition
+            for condition in task.findall(".//Condition")
+            if condition.findtext("lhs") == "%http_response_code"
+        ]
+        assert len(retry_conditions) == 2
+        assert all(condition.findtext("op") == "3" for condition in retry_conditions)
+        assert all(condition.findtext("rhs") == "2*" for condition in retry_conditions)
+
+
 def test_global_last_sms_variables_are_only_used_for_immediate_snapshot():
     task = _tasks()["3"]
     serialized = [ET.tostring(action, encoding="unicode") for action in task.findall("Action")]

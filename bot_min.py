@@ -518,6 +518,14 @@ SMS_FU_TEMPLATE   = (
     "Let me know if I can help with anything—happy to connect whenever works for you!"
 )
 SMS_RETRY_ATTEMPTS = 3  # initial attempt + up to 2 retries for AutoRemote reliability
+# A due follow-up pass can contain dozens of rows. AutoRemote accepts those
+# pushes faster than Tasker can execute them, which can fill Tasker's run queue
+# and crowd out an inbound SMS event. Pace only the bulk follow-up lane; bot
+# replies use the separate Apps Script outbox and remain immediate.
+FOLLOWUP_SMS_PACING_SECONDS = max(
+    0.0,
+    float(os.getenv("FOLLOWUP_SMS_PACING_SECONDS", "6")),
+)
 CLOUDMERSIVE_KEY = os.getenv("CLOUDMERSIVE_KEY", "").strip()
 
 CSE_MIN_INTERVAL = float(os.getenv("CSE_MIN_INTERVAL", "4.0"))
@@ -12699,6 +12707,18 @@ def _redact_followup_phone(phone: str) -> str:
     return f"...{digits[-4:]}"
 
 
+def _pace_followup_sms_batch(already_sent: int) -> None:
+    """Leave room in Tasker's queue between bulk follow-up pushes."""
+
+    if already_sent <= 0 or FOLLOWUP_SMS_PACING_SECONDS <= 0:
+        return
+    LOG.info(
+        "FU-review pacing next Tasker send by %.1fs to protect the device queue",
+        FOLLOWUP_SMS_PACING_SECONDS,
+    )
+    time.sleep(FOLLOWUP_SMS_PACING_SECONDS)
+
+
 def _current_sheet_phone_for_row(row_idx: int) -> str:
     """Return the latest phone in column C for ``row_idx`` from the sheet."""
 
@@ -13021,6 +13041,8 @@ def _follow_up_pass():
                 _redact_followup_phone(latest_sheet_phone),
                 phone_redacted,
             )
+
+        _pace_followup_sms_batch(eligible_count)
 
         send_sms(
             phone=followup_phone,

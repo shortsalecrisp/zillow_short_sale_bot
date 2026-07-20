@@ -164,6 +164,18 @@ def test_follow_up_uses_latest_sheet_phone(monkeypatch):
     assert sent["follow_up"] is True
 
 
+def test_follow_up_batch_pacing_skips_first_send_and_spaces_later_sends(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(bot_min, "FOLLOWUP_SMS_PACING_SECONDS", 6.0)
+    monkeypatch.setattr(bot_min.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    bot_min._pace_followup_sms_batch(0)
+    bot_min._pace_followup_sms_batch(1)
+    bot_min._pace_followup_sms_batch(2)
+
+    assert sleeps == [6.0, 6.0]
+
+
 class _MailshakeValuesAPI:
     def __init__(self, rows):
         self.rows = rows

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the complete V10 Tasker restore with durable queue/outbox transport."""
+"""Build the complete V10/V11 Tasker restore with durable SMS transport."""
 
 from __future__ import annotations
 
@@ -118,11 +118,11 @@ def send_sms(phone: str, message: str, *, wait_for_result: bool = False) -> ET.E
 def retry_http(body: str, *, timeout: int = 30) -> list[ET.Element]:
     return [
         http_post(body, timeout),
-        if_action("%http_data", "^$"),
+        if_action("%http_response_code", "2*", op=3),
         wait(3),
         http_post(body, timeout),
         end_if(),
-        if_action("%http_data", "^$"),
+        if_action("%http_response_code", "2*", op=3),
         wait(6),
         http_post(body, timeout),
         end_if(),
@@ -140,41 +140,49 @@ def dedupe_actions(phone: str, message: str) -> list[ET.Element]:
     ]
 
 
-def enqueue_actions() -> list[ET.Element]:
+def enqueue_actions(*, transport_version: int = 10, forward_to_operator: bool = True) -> list[ET.Element]:
     body = (
         "token=%transport_token&action=enqueue_incoming_sms&phone=%transport_phone"
         "&message=%transport_message&received_at=%transport_received_at"
-        "&message_id=%transport_message_id&transport_version=10"
+        f"&message_id=%transport_message_id&transport_version={transport_version}"
     )
-    return [
+    actions = [
         variable_set("%api_url", API_URL),
         variable_set("%token", TOKEN_PLACEHOLDER),
-        send_sms(
-            PERSONAL_PHONE,
-            "New agent SMS\n\nFrom: %inbound_phone\n\n%inbound_message\n\nTake over:\n"
-            "%api_url?action=takeover&token=%token&phone=%inbound_phone",
-        ),
+    ]
+    actions.extend([
         url_encode("%token", "%transport_token"),
         url_encode("%inbound_phone", "%transport_phone"),
         url_encode("%inbound_message", "%transport_message"),
         url_encode("%inbound_received_at_raw", "%transport_received_at"),
         url_encode("%inbound_message_id", "%transport_message_id"),
         *retry_http(body),
-    ]
+    ])
+    if forward_to_operator:
+        actions.extend([
+            if_action("%http_data.queued", "true"),
+            send_sms(
+                PERSONAL_PHONE,
+                "New agent SMS\n\nFrom: %inbound_phone\n\n%inbound_message\n\nTake over:\n"
+                "%api_url?action=takeover&token=%token&phone=%inbound_phone",
+            ),
+            end_if(),
+        ])
+    return actions
 
 
-def primary_inbound_actions() -> list[ET.Element]:
+def primary_inbound_actions(*, transport_version: int = 10) -> list[ET.Element]:
     return [
         variable_set("%inbound_phone", "%SMSRF"),
         variable_set("%inbound_message", "%SMSRB"),
         variable_set("%inbound_received_at_raw", "%DATE %TIME"),
         variable_set("%inbound_message_id", "%SMSRF-%TIMEMS"),
         *dedupe_actions("%inbound_phone", "%inbound_message"),
-        *enqueue_actions(),
+        *enqueue_actions(transport_version=transport_version),
     ]
 
 
-def notification_inbound_actions() -> list[ET.Element]:
+def notification_inbound_actions(*, transport_version: int = 10) -> list[ET.Element]:
     return [
         variable_set("%inbound_phone", "%evtprm2"),
         variable_set("%inbound_message", "%evtprm3"),
@@ -188,7 +196,35 @@ def notification_inbound_actions() -> list[ET.Element]:
         stop_if("%inbound_phone", "*Messages is doing work in the background*"),
         stop_if("%inbound_message", "*Messages is doing work in the background*"),
         *dedupe_actions("%inbound_phone", "%inbound_message"),
-        *enqueue_actions(),
+        *enqueue_actions(transport_version=transport_version),
+    ]
+
+
+def reconcile_last_sms_actions(*, transport_version: int = 11) -> list[ET.Element]:
+    """Re-enqueue Tasker's last SMS when the real-time event task was dropped.
+
+    Tasker updates the monitored %SMSR* variables independently of whether a
+    profile task later survives queue pressure. The server's 10-minute
+    phone/body dedupe makes this poller safe when the real-time path succeeded.
+    """
+
+    return [
+        variable_set("%inbound_phone", "%SMSRF"),
+        variable_set("%inbound_message", "%SMSRB"),
+        variable_set("%inbound_received_at_raw", "%SMSRD %SMSRT"),
+        variable_set("%inbound_message_id", "reconcile-%SMSRF-%SMSRD-%SMSRT"),
+        stop_if("%SMSBOT_RECONCILE_KEY", "%inbound_message_id"),
+        stop_if("%inbound_phone", "Device pairing"),
+        stop_if("%inbound_message", "Your messages are available*"),
+        stop_if("%inbound_phone", "*Messages is doing work in the background*"),
+        stop_if("%inbound_message", "*Messages is doing work in the background*"),
+        *enqueue_actions(
+            transport_version=transport_version,
+            forward_to_operator=True,
+        ),
+        if_action("%http_data.ok", "true"),
+        variable_set("%SMSBOT_RECONCILE_KEY", "%inbound_message_id"),
+        end_if(),
     ]
 
 
@@ -326,18 +362,42 @@ def time_profile(profile_id: int, task_id: int, name: str, repeat_minutes: int) 
     return profile
 
 
-def build_restore(source: Path, destination: Path) -> None:
+def build_restore(
+    source: Path,
+    destination: Path,
+    *,
+    transport_version: int = 10,
+    include_reconciler: bool = False,
+) -> None:
     tree = ET.parse(source)
     root = tree.getroot()
     tasks = {task.findtext("id"): task for task in root.findall("Task")}
-    replace_task(tasks["3"], primary_inbound_actions(), collision=2, stay_awake=True)
-    replace_task(tasks["9"], notification_inbound_actions(), collision=2, stay_awake=True)
+    replace_task(
+        tasks["3"],
+        primary_inbound_actions(transport_version=transport_version),
+        collision=2,
+        stay_awake=True,
+    )
+    replace_task(
+        tasks["9"],
+        notification_inbound_actions(transport_version=transport_version),
+        collision=2,
+        stay_awake=True,
+    )
+    # AutoRemote may deliver a large 2 PM follow-up batch. Do not let Tasker's
+    # default "abort new task" collision mode silently discard those events.
+    replace_task(
+        tasks["21"],
+        list(tasks["21"].findall("Action")),
+        collision=2,
+        stay_awake=True,
+    )
 
     for profile in list(root.findall("Profile")):
-        if profile.findtext("id") in {"30", "31", "32", "33", "34"}:
+        if profile.findtext("id") in {"30", "31", "32", "33", "34", "35"}:
             root.remove(profile)
     for task in list(root.findall("Task")):
-        if task.findtext("id") in {"30", "31", "32"}:
+        if task.findtext("id") in {"30", "31", "32", "33"}:
             root.remove(task)
 
     first_task_index = min(i for i, child in enumerate(list(root)) if child.tag == "Task")
@@ -347,12 +407,23 @@ def build_restore(source: Path, destination: Path) -> None:
         event_profile(32, 31, "SMS Outbox Send Success", 2005, "%SMSOUT_PHONE"),
         event_profile(33, 32, "SMS Outbox Send Failure", 2010, "%SMSOUT_PHONE"),
     ]
+    if include_reconciler:
+        profiles.append(time_profile(34, 33, "SMS Last Message Reconciler", 1))
     for offset, profile in enumerate(profiles):
         root.insert(first_task_index + offset, profile)
 
     root.append(new_task(30, "SMS Outbox Dispatcher", dispatcher_actions(), collision=0))
     root.append(new_task(31, "SMS Outbox Send Success", receipt_actions(True), collision=0))
     root.append(new_task(32, "SMS Outbox Send Failure", receipt_actions(False), collision=0))
+    if include_reconciler:
+        root.append(
+            new_task(
+                33,
+                "SMS Last Message Reconciler",
+                reconcile_last_sms_actions(transport_version=transport_version),
+                collision=0,
+            )
+        )
 
     for task in root.findall("Task"):
         for index, action in enumerate(task.findall("Action")):

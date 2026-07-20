@@ -110,6 +110,8 @@ services:
         value: "false"
       - key: FOLLOWUP_INCLUDE_WEEKENDS
         value: "false"
+      - key: FOLLOWUP_SMS_PACING_SECONDS
+        value: "6"
       - key: FOLLOW_UP_HOURS
         value: "6"
       - key: FOLLOWUP_RUN_ON_STARTUP
