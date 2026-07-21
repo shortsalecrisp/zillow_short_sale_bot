@@ -437,10 +437,13 @@ def time_profile(profile_id: int, task_id: int, name: str, repeat_minutes: int) 
     ET.SubElement(profile, "nme").text = name
     context = ET.SubElement(profile, "Time", {"sr": "con0"})
     ET.SubElement(context, "fh").text = "-1"
-    ET.SubElement(context, "fm").text = "0"
+    ET.SubElement(context, "fm").text = "-1"
     ET.SubElement(context, "th").text = "-1"
-    ET.SubElement(context, "tm").text = "0"
-    ET.SubElement(context, "rep").text = str(repeat_minutes)
+    ET.SubElement(context, "tm").text = "-1"
+    # Tasker stores the repeat unit in rep (2 = minutes) and the interval
+    # itself in repval. Writing the interval into rep creates an invalid timer.
+    ET.SubElement(context, "rep").text = "2"
+    ET.SubElement(context, "repval").text = str(repeat_minutes)
     return profile
 
 
