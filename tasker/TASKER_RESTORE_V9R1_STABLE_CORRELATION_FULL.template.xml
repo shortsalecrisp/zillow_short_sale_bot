@@ -1,0 +1,1243 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<TaskerData sr="" dvi="1" tv="6.6.20">
+  <Profile sr="prof1" ve="2">
+    <cdate>1782311800000</cdate>
+    <edate>1782311800000</edate>
+    <flags>8</flags>
+    <id>1</id>
+    <mid0>3</mid0>
+    <nme>Received Text Any</nme>
+    <Event sr="con0" ve="2">
+      <code>7</code>
+      <pri>0</pri>
+      <Int sr="arg0" val="2" />
+      <Str sr="arg1" ve="3" />
+      <Str sr="arg2" ve="3" />
+    </Event>
+  </Profile>
+  <Profile sr="prof2" ve="2">
+    <cdate>1782311800000</cdate>
+    <edate>1782311800000</edate>
+    <flags>8</flags>
+    <id>2</id>
+    <mid0>9</mid0>
+    <nme>Google Messages Notification Backup</nme>
+    <Event sr="con0" ve="2">
+      <code>461</code>
+      <pri>0</pri>
+      <App sr="arg0">
+        <appClass>com.google.android.apps.messaging.ui.ConversationListActivity</appClass>
+        <appPkg>com.google.android.apps.messaging</appPkg>
+        <label>Messages</label>
+      </App>
+      <Str sr="arg1" ve="3" />
+      <Str sr="arg2" ve="3" />
+      <Str sr="arg3" ve="3" />
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3" />
+      <Str sr="arg6" ve="3" />
+      <Int sr="arg7" val="0" />
+    </Event>
+  </Profile>
+  <Profile sr="prof20" ve="2">
+    <cdate>1782930343151</cdate>
+    <edate>1782930343151</edate>
+    <flags>8</flags>
+    <id>20</id>
+    <mid0>21</mid0>
+    <nme>AutoRemote SMS Outbound</nme>
+    <Event sr="con0" ve="2">
+      <code>14783</code>
+      <pri>0</pri>
+      <Bundle sr="arg0">
+        <Vals sr="val">
+          <com.twofortyfouram.locale.intent.extra.BLURB>smsbot</com.twofortyfouram.locale.intent.extra.BLURB>
+          <com.twofortyfouram.locale.intent.extra.BLURB-type>java.lang.String</com.twofortyfouram.locale.intent.extra.BLURB-type>
+          <commparamsvar>&lt;null&gt;</commparamsvar>
+          <commparamsvar-type>java.lang.String</commparamsvar-type>
+          <message>smsbot</message>
+          <message-type>java.lang.String</message-type>
+          <messagecaseinsensitive>false</messagecaseinsensitive>
+          <messagecaseinsensitive-type>java.lang.Boolean</messagecaseinsensitive-type>
+          <messageexact>false</messageexact>
+          <messageexact-type>java.lang.Boolean</messageexact-type>
+          <messageregex>false</messageregex>
+          <messageregex-type>java.lang.Boolean</messageregex-type>
+          <messagevar>&lt;null&gt;</messagevar>
+          <messagevar-type>java.lang.String</messagevar-type>
+          <net.dinglisch.android.tasker.EXTRA_NSR_DEPRECATED>true</net.dinglisch.android.tasker.EXTRA_NSR_DEPRECATED>
+          <net.dinglisch.android.tasker.EXTRA_NSR_DEPRECATED-type>java.lang.Boolean</net.dinglisch.android.tasker.EXTRA_NSR_DEPRECATED-type>
+          <net.dinglisch.android.tasker.RELEVANT_VARIABLES>&lt;StringArray sr=""&gt;&lt;_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES0&gt;%armessage
+The whole received AutoRemote message.
+The whole received AutoRemote message.&lt;/_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES0&gt;&lt;_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES1&gt;%arpar()
+Single words to the left of =:=
+Single words to the left of =:=&lt;/_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES1&gt;&lt;_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES2&gt;%arcomm
+Whole of the text to the right of =:=
+Whole of the text to the right of =:=&lt;/_array_net.dinglisch.android.tasker.RELEVANT_VARIABLES2&gt;&lt;/StringArray&gt;</net.dinglisch.android.tasker.RELEVANT_VARIABLES>
+          <net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>[Ljava.lang.String;</net.dinglisch.android.tasker.RELEVANT_VARIABLES-type>
+          <net.dinglisch.android.tasker.extras.VARIABLE_REPLACE_KEYS>plugininstanceid plugintypeid messagevar tempvar commparamsvar message </net.dinglisch.android.tasker.extras.VARIABLE_REPLACE_KEYS>
+          <net.dinglisch.android.tasker.extras.VARIABLE_REPLACE_KEYS-type>java.lang.String</net.dinglisch.android.tasker.extras.VARIABLE_REPLACE_KEYS-type>
+          <net.dinglisch.android.tasker.subbundled>true</net.dinglisch.android.tasker.subbundled>
+          <net.dinglisch.android.tasker.subbundled-type>java.lang.Boolean</net.dinglisch.android.tasker.subbundled-type>
+          <plugininstanceid>c50905f4-d381-4176-937d-575cfab591b2</plugininstanceid>
+          <plugininstanceid-type>java.lang.String</plugininstanceid-type>
+          <plugintypeid>com.joaomgcd.autoremote.IntentRemoteEvent</plugintypeid>
+          <plugintypeid-type>java.lang.String</plugintypeid-type>
+          <tempvar>&lt;null&gt;</tempvar>
+          <tempvar-type>java.lang.String</tempvar-type>
+        </Vals>
+      </Bundle>
+      <Str sr="arg1" ve="3">com.joaomgcd.autoremote</Str>
+      <Str sr="arg2" ve="3">com.joaomgcd.autoremote.activity.ActivityConfigConditionTaskerEvent</Str>
+    </Event>
+  </Profile>
+  <Project sr="proj0" ve="2">
+    <cdate>1782311800000</cdate>
+    <mdate>1782311800000</mdate>
+    <name>SMS Bot</name>
+    <pids>1,2,20</pids>
+    <tids>3,9,21</tids>
+  </Project>
+  <Task sr="task3">
+    <cdate>1774830726137</cdate>
+    <edate>1782310589987</edate>
+    <id>3</id>
+    <nme>AI_SMS_Reply</nme>
+    <pri>6</pri>
+    <rty>2</rty>
+    <Action ve="7" sr="act0">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%inbound_phone</Str>
+      <Str sr="arg1" ve="3">%SMSRF</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action ve="7" sr="act1">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%inbound_message</Str>
+      <Str sr="arg1" ve="3">%SMSRB</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act2" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%SMSBOT_LAST_KEY</lhs>
+          <op>2</op>
+          <rhs>%inbound_phone | %inbound_message</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act3" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%dedupe_age</Str>
+      <Str sr="arg1" ve="3">%TIMEMS-%SMSBOT_LAST_MS</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="1" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act4" ve="7">
+      <code>137</code>
+      <Int sr="arg0" val="0" />
+      <Str sr="arg1" ve="3" />
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%dedupe_age</lhs>
+          <op>6</op>
+          <rhs>120000</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act5" ve="7">
+      <code>38</code>
+    </Action>
+    <Action sr="act6" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%SMSBOT_LAST_KEY</Str>
+      <Str sr="arg1" ve="3">%inbound_phone | %inbound_message</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act7" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%SMSBOT_LAST_MS</Str>
+      <Str sr="arg1" ve="3">%TIMEMS</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act8" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%api_url</Str>
+      <Str sr="arg1" ve="3">https://script.google.com/macros/s/AKfycbxkazqXh3kku3L9dVG2DkTqSt4BEIEg0z4kalAHPTeeNShrtlG8ZK5nKew9iM7rRBWK/exec</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act9" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%token</Str>
+      <Str sr="arg1" ve="3">__SMS_BOT_TOKEN__</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act10" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%message_id</Str>
+      <Str sr="arg1" ve="3">%inbound_phone-%TIMEMS</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act11" ve="7">
+      <code>41</code>
+      <Str sr="arg0" ve="3">9542053205</Str>
+      <Str sr="arg1" ve="3">New agent SMS
+
+From: %inbound_phone
+
+%inbound_message
+
+Take over:
+%api_url?action=takeover&amp;token=%token&amp;phone=%inbound_phone</Str>
+      <Int sr="arg2" val="0" />
+      <Str sr="arg3" ve="3" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action ve="7" sr="act12">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%transport_received_at_raw</Str>
+      <Str sr="arg1" ve="3">%DATE %TIME</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action ve="7" sr="act13">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%token</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_token</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act14">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%inbound_phone</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_phone</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act15">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%inbound_message</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_message</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act16">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%transport_received_at_raw</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_received_at</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act17">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%message_id</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_message_id</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action sr="act18" ve="7">
+      <code>339</code>
+      <Bundle sr="arg0" />
+      <Int sr="arg1" val="1" />
+      <Int sr="arg10" val="1" />
+      <Int sr="arg11" val="0" />
+      <Int sr="arg12" val="1" />
+      <Str sr="arg2" ve="3">%api_url</Str>
+      <Str sr="arg3" ve="3">Content-Type:application/x-www-form-urlencoded</Str>
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3">token=%transport_token&amp;action=incoming_sms&amp;phone=%transport_phone&amp;message=%transport_message&amp;received_at=%transport_received_at&amp;message_id=%transport_message_id</Str>
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Int sr="arg8" val="60" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act19" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%http_data</lhs>
+          <op>2</op>
+          <rhs>^$</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act20" ve="7">
+      <code>30</code>
+      <Int sr="arg0" val="0" />
+      <Int sr="arg1" val="3" />
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action sr="act21" ve="7">
+      <code>339</code>
+      <Bundle sr="arg0" />
+      <Int sr="arg1" val="1" />
+      <Int sr="arg10" val="1" />
+      <Int sr="arg11" val="0" />
+      <Int sr="arg12" val="1" />
+      <Str sr="arg2" ve="3">%api_url</Str>
+      <Str sr="arg3" ve="3">Content-Type:application/x-www-form-urlencoded</Str>
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3">token=%transport_token&amp;action=incoming_sms&amp;phone=%transport_phone&amp;message=%transport_message&amp;received_at=%transport_received_at&amp;message_id=%transport_message_id</Str>
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Int sr="arg8" val="60" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act22" ve="7">
+      <code>38</code>
+    </Action>
+    <Action sr="act23" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%http_data</lhs>
+          <op>2</op>
+          <rhs>^$</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act24" ve="7">
+      <code>30</code>
+      <Int sr="arg0" val="0" />
+      <Int sr="arg1" val="6" />
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action sr="act25" ve="7">
+      <code>339</code>
+      <Bundle sr="arg0" />
+      <Int sr="arg1" val="1" />
+      <Int sr="arg10" val="1" />
+      <Int sr="arg11" val="0" />
+      <Int sr="arg12" val="1" />
+      <Str sr="arg2" ve="3">%api_url</Str>
+      <Str sr="arg3" ve="3">Content-Type:application/x-www-form-urlencoded</Str>
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3">token=%transport_token&amp;action=incoming_sms&amp;phone=%transport_phone&amp;message=%transport_message&amp;received_at=%transport_received_at&amp;message_id=%transport_message_id</Str>
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Int sr="arg8" val="60" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act26" ve="7">
+      <code>38</code>
+    </Action>
+    <Action sr="act27" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%http_data.should_reply_text</lhs>
+          <op>2</op>
+          <rhs>true</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act28" ve="7">
+      <code>548</code>
+      <Str sr="arg0" ve="3">SEND</Str>
+      <Int sr="arg1" val="0" />
+      <Str sr="arg10" ve="3" />
+      <Int sr="arg11" val="1" />
+      <Int sr="arg12" val="0" />
+      <Str sr="arg13" ve="3" />
+      <Int sr="arg14" val="0" />
+      <Str sr="arg15" ve="3" />
+      <Int sr="arg2" val="0" />
+      <Str sr="arg3" ve="3" />
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3" />
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Str sr="arg8" ve="3" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act29" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_phone</Str>
+      <Str sr="arg1" ve="3">%inbound_phone</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act30" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_inbound</Str>
+      <Str sr="arg1" ve="3">%inbound_message</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act31" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_text</Str>
+      <Str sr="arg1" ve="3">%http_data.reply_text</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act32" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_request_id</Str>
+      <Str sr="arg1" ve="3">%http_data.request_id</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act33" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_message_id</Str>
+      <Str sr="arg1" ve="3">%http_data.message_id</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act34" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_delay_seconds</Str>
+      <Str sr="arg1" ve="3">%http_data.delay_seconds</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act35" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_handoff_needed</Str>
+      <Str sr="arg1" ve="3">%http_data.handoff_needed_text</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act36" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_reason</Str>
+      <Str sr="arg1" ve="3">%http_data.reason</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act37" ve="7">
+      <code>30</code>
+      <Int sr="arg0" val="0" />
+      <Int sr="arg1">
+        <var>%reply_delay_seconds</var>
+      </Int>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action ve="7" sr="act38">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%token</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_token</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act39">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%reply_request_id</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_request_id</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act40">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%reply_message_id</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_message_id</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act41">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%reply_phone</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_phone</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act42">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%reply_text</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_reply_text</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action sr="act43" ve="7">
+      <code>41</code>
+      <Str sr="arg0" ve="3">%reply_phone</Str>
+      <Str sr="arg1" ve="3">%reply_text</Str>
+      <Int sr="arg2" val="0" />
+      <Str sr="arg3" ve="3" />
+      <Int sr="arg4" val="1" />
+    </Action>
+    <Action ve="7" sr="act44">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%receipt_sent_at_raw</Str>
+      <Str sr="arg1" ve="3">%TIMEMS</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action ve="7" sr="act45">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%receipt_sent_at_raw</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_sent_at</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action sr="act46" ve="7">
+      <code>339</code>
+      <Bundle sr="arg0" />
+      <Int sr="arg1" val="1" />
+      <Int sr="arg10" val="1" />
+      <Int sr="arg11" val="0" />
+      <Int sr="arg12" val="1" />
+      <Str sr="arg2" ve="3">%api_url</Str>
+      <Str sr="arg3" ve="3">Content-Type:application/x-www-form-urlencoded</Str>
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3">token=%receipt_token&amp;action=reply_sent&amp;request_id=%receipt_request_id&amp;message_id=%receipt_message_id&amp;phone=%receipt_phone&amp;reply_text=%receipt_reply_text&amp;sent_at=%receipt_sent_at</Str>
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Int sr="arg8" val="30" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act47" ve="7">
+      <code>38</code>
+    </Action>
+    <Action sr="act48" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%reply_handoff_needed ~ true</lhs>
+          <op>2</op>
+          <rhs>true</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act49" ve="7">
+      <code>41</code>
+      <Str sr="arg0" ve="3">9542053205</Str>
+      <Str sr="arg1" ve="3">From %reply_phone:
+%reply_inbound</Str>
+      <Int sr="arg2" val="0" />
+      <Str sr="arg3" ve="3" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action sr="act50" ve="7">
+      <code>523</code>
+      <Str sr="arg0" ve="3">AI SMS Handoff Needed</Str>
+      <Str sr="arg1" ve="3">%reply_phone - %reply_reason</Str>
+      <Str sr="arg10" ve="3" />
+      <Str sr="arg11" ve="3" />
+      <Str sr="arg12" ve="3" />
+      <Int sr="arg13" val="0" />
+      <Str sr="arg14" ve="3" />
+      <Str sr="arg15" ve="3" />
+      <Img sr="arg2" ve="2" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="0" />
+      <Int sr="arg7" val="4" />
+      <Int sr="arg8" val="0" />
+      <Str sr="arg9" ve="3" />
+    </Action>
+    <Action sr="act51" ve="7">
+      <code>38</code>
+    </Action>
+  </Task>
+  <Task sr="task9">
+    <cdate>1782310164555</cdate>
+    <edate>1782930343151</edate>
+    <id>9</id>
+    <nme>AI_SMS_Notification_Backup</nme>
+    <pri>6</pri>
+    <rty>2</rty>
+    <Action ve="7" sr="act0">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%inbound_phone</Str>
+      <Str sr="arg1" ve="3">%evtprm2</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action ve="7" sr="act1">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%inbound_message</Str>
+      <Str sr="arg1" ve="3">%evtprm3</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act2" ve="7">
+      <code>30</code>
+      <Int sr="arg0" val="0" />
+      <Int sr="arg1" val="3" />
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action sr="act3" ve="7">
+      <code>137</code>
+      <Int sr="arg0" val="0" />
+      <Str sr="arg1" ve="3" />
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%inbound_phone</lhs>
+          <op>2</op>
+          <rhs>Device pairing</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act4" ve="7">
+      <code>137</code>
+      <Int sr="arg0" val="0" />
+      <Str sr="arg1" ve="3" />
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%inbound_message</lhs>
+          <op>2</op>
+          <rhs>Your messages are available*</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act5" ve="7">
+      <code>137</code>
+      <Int sr="arg0" val="0" />
+      <Str sr="arg1" ve="3" />
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%inbound_phone</lhs>
+          <op>2</op>
+          <rhs>*Device pairing*</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act6" ve="7">
+      <code>137</code>
+      <Int sr="arg0" val="0" />
+      <Str sr="arg1" ve="3" />
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%inbound_message</lhs>
+          <op>2</op>
+          <rhs>*Your messages are available on the device you've paired*</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act7" ve="7">
+      <code>137</code>
+      <Int sr="arg0" val="0" />
+      <Str sr="arg1" ve="3" />
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%inbound_phone</lhs>
+          <op>2</op>
+          <rhs>*Messages is doing work in the background*</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act8" ve="7">
+      <code>137</code>
+      <Int sr="arg0" val="0" />
+      <Str sr="arg1" ve="3" />
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%inbound_message</lhs>
+          <op>2</op>
+          <rhs>*Messages is doing work in the background*</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act9" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%SMSBOT_LAST_KEY</lhs>
+          <op>2</op>
+          <rhs>%inbound_phone | %inbound_message</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act10" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%dedupe_age</Str>
+      <Str sr="arg1" ve="3">%TIMEMS-%SMSBOT_LAST_MS</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="1" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act11" ve="7">
+      <code>137</code>
+      <Int sr="arg0" val="0" />
+      <Str sr="arg1" ve="3" />
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%dedupe_age</lhs>
+          <op>6</op>
+          <rhs>120000</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act12" ve="7">
+      <code>38</code>
+    </Action>
+    <Action sr="act13" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%SMSBOT_LAST_KEY</Str>
+      <Str sr="arg1" ve="3">%inbound_phone | %inbound_message</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act14" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%SMSBOT_LAST_MS</Str>
+      <Str sr="arg1" ve="3">%TIMEMS</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act15" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%api_url</Str>
+      <Str sr="arg1" ve="3">https://script.google.com/macros/s/AKfycbxkazqXh3kku3L9dVG2DkTqSt4BEIEg0z4kalAHPTeeNShrtlG8ZK5nKew9iM7rRBWK/exec</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act16" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%token</Str>
+      <Str sr="arg1" ve="3">__SMS_BOT_TOKEN__</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act17" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%message_id</Str>
+      <Str sr="arg1" ve="3">%inbound_phone-%TIMEMS</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act18" ve="7">
+      <code>41</code>
+      <Str sr="arg0" ve="3">9542053205</Str>
+      <Str sr="arg1" ve="3">New agent SMS
+
+From: %inbound_phone
+
+%inbound_message
+
+Take over:
+%api_url?action=takeover&amp;token=%token&amp;phone=%inbound_phone</Str>
+      <Int sr="arg2" val="0" />
+      <Str sr="arg3" ve="3" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action ve="7" sr="act19">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%transport_received_at_raw</Str>
+      <Str sr="arg1" ve="3">%DATE %TIME</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action ve="7" sr="act20">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%token</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_token</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act21">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%inbound_phone</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_phone</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act22">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%inbound_message</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_message</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act23">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%transport_received_at_raw</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_received_at</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act24">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%message_id</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%transport_message_id</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action sr="act25" ve="7">
+      <code>339</code>
+      <Bundle sr="arg0" />
+      <Int sr="arg1" val="1" />
+      <Int sr="arg10" val="1" />
+      <Int sr="arg11" val="0" />
+      <Int sr="arg12" val="1" />
+      <Str sr="arg2" ve="3">%api_url</Str>
+      <Str sr="arg3" ve="3">Content-Type:application/x-www-form-urlencoded</Str>
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3">token=%transport_token&amp;action=incoming_sms&amp;phone=%transport_phone&amp;message=%transport_message&amp;received_at=%transport_received_at&amp;message_id=%transport_message_id</Str>
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Int sr="arg8" val="60" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act26" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%http_data</lhs>
+          <op>2</op>
+          <rhs>^$</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act27" ve="7">
+      <code>30</code>
+      <Int sr="arg0" val="0" />
+      <Int sr="arg1" val="3" />
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action sr="act28" ve="7">
+      <code>339</code>
+      <Bundle sr="arg0" />
+      <Int sr="arg1" val="1" />
+      <Int sr="arg10" val="1" />
+      <Int sr="arg11" val="0" />
+      <Int sr="arg12" val="1" />
+      <Str sr="arg2" ve="3">%api_url</Str>
+      <Str sr="arg3" ve="3">Content-Type:application/x-www-form-urlencoded</Str>
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3">token=%transport_token&amp;action=incoming_sms&amp;phone=%transport_phone&amp;message=%transport_message&amp;received_at=%transport_received_at&amp;message_id=%transport_message_id</Str>
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Int sr="arg8" val="60" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act29" ve="7">
+      <code>38</code>
+    </Action>
+    <Action sr="act30" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%http_data</lhs>
+          <op>2</op>
+          <rhs>^$</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act31" ve="7">
+      <code>30</code>
+      <Int sr="arg0" val="0" />
+      <Int sr="arg1" val="6" />
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action sr="act32" ve="7">
+      <code>339</code>
+      <Bundle sr="arg0" />
+      <Int sr="arg1" val="1" />
+      <Int sr="arg10" val="1" />
+      <Int sr="arg11" val="0" />
+      <Int sr="arg12" val="1" />
+      <Str sr="arg2" ve="3">%api_url</Str>
+      <Str sr="arg3" ve="3">Content-Type:application/x-www-form-urlencoded</Str>
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3">token=%transport_token&amp;action=incoming_sms&amp;phone=%transport_phone&amp;message=%transport_message&amp;received_at=%transport_received_at&amp;message_id=%transport_message_id</Str>
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Int sr="arg8" val="60" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act33" ve="7">
+      <code>38</code>
+    </Action>
+    <Action sr="act34" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%http_data.should_reply_text</lhs>
+          <op>2</op>
+          <rhs>true</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act35" ve="7">
+      <code>548</code>
+      <Str sr="arg0" ve="3">SEND</Str>
+      <Int sr="arg1" val="0" />
+      <Str sr="arg10" ve="3" />
+      <Int sr="arg11" val="1" />
+      <Int sr="arg12" val="0" />
+      <Str sr="arg13" ve="3" />
+      <Int sr="arg14" val="0" />
+      <Str sr="arg15" ve="3" />
+      <Int sr="arg2" val="0" />
+      <Str sr="arg3" ve="3" />
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3" />
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Str sr="arg8" ve="3" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act36" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_phone</Str>
+      <Str sr="arg1" ve="3">%inbound_phone</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act37" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_inbound</Str>
+      <Str sr="arg1" ve="3">%inbound_message</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act38" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_text</Str>
+      <Str sr="arg1" ve="3">%http_data.reply_text</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act39" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_request_id</Str>
+      <Str sr="arg1" ve="3">%http_data.request_id</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act40" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_message_id</Str>
+      <Str sr="arg1" ve="3">%http_data.message_id</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act41" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_delay_seconds</Str>
+      <Str sr="arg1" ve="3">%http_data.delay_seconds</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act42" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_handoff_needed</Str>
+      <Str sr="arg1" ve="3">%http_data.handoff_needed_text</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act43" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%reply_reason</Str>
+      <Str sr="arg1" ve="3">%http_data.reason</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act44" ve="7">
+      <code>30</code>
+      <Int sr="arg0" val="0" />
+      <Int sr="arg1">
+        <var>%reply_delay_seconds</var>
+      </Int>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action ve="7" sr="act45">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%token</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_token</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act46">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%reply_request_id</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_request_id</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act47">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%reply_message_id</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_message_id</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act48">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%reply_phone</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_phone</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action ve="7" sr="act49">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%reply_text</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_reply_text</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action sr="act50" ve="7">
+      <code>41</code>
+      <Str sr="arg0" ve="3">%reply_phone</Str>
+      <Str sr="arg1" ve="3">%reply_text</Str>
+      <Int sr="arg2" val="0" />
+      <Str sr="arg3" ve="3" />
+      <Int sr="arg4" val="1" />
+    </Action>
+    <Action ve="7" sr="act51">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%receipt_sent_at_raw</Str>
+      <Str sr="arg1" ve="3">%TIMEMS</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action ve="7" sr="act52">
+      <code>596</code>
+      <Str sr="arg0" ve="3">%receipt_sent_at_raw</Str>
+      <Int sr="arg1" val="18" />
+      <Str sr="arg2" ve="3">%receipt_sent_at</Str>
+      <Int sr="arg3" val="0" />
+    </Action>
+    <Action sr="act53" ve="7">
+      <code>339</code>
+      <Bundle sr="arg0" />
+      <Int sr="arg1" val="1" />
+      <Int sr="arg10" val="1" />
+      <Int sr="arg11" val="0" />
+      <Int sr="arg12" val="1" />
+      <Str sr="arg2" ve="3">%api_url</Str>
+      <Str sr="arg3" ve="3">Content-Type:application/x-www-form-urlencoded</Str>
+      <Str sr="arg4" ve="3" />
+      <Str sr="arg5" ve="3">token=%receipt_token&amp;action=reply_sent&amp;request_id=%receipt_request_id&amp;message_id=%receipt_message_id&amp;phone=%receipt_phone&amp;reply_text=%receipt_reply_text&amp;sent_at=%receipt_sent_at</Str>
+      <Str sr="arg6" ve="3" />
+      <Str sr="arg7" ve="3" />
+      <Int sr="arg8" val="30" />
+      <Int sr="arg9" val="1" />
+    </Action>
+    <Action sr="act54" ve="7">
+      <code>38</code>
+    </Action>
+    <Action sr="act55" ve="7">
+      <code>37</code>
+      <coll>false</coll>
+      <ConditionList sr="if">
+        <Condition sr="c0" ve="3">
+          <lhs>%reply_handoff_needed ~ true</lhs>
+          <op>2</op>
+          <rhs>true</rhs>
+        </Condition>
+      </ConditionList>
+    </Action>
+    <Action sr="act56" ve="7">
+      <code>41</code>
+      <Str sr="arg0" ve="3">9542053205</Str>
+      <Str sr="arg1" ve="3">From %reply_phone:
+%reply_inbound</Str>
+      <Int sr="arg2" val="0" />
+      <Str sr="arg3" ve="3" />
+      <Int sr="arg4" val="0" />
+    </Action>
+    <Action sr="act57" ve="7">
+      <code>523</code>
+      <Str sr="arg0" ve="3">AI SMS Handoff Needed</Str>
+      <Str sr="arg1" ve="3">%reply_phone - %reply_reason</Str>
+      <Str sr="arg10" ve="3" />
+      <Str sr="arg11" ve="3" />
+      <Str sr="arg12" ve="3" />
+      <Int sr="arg13" val="0" />
+      <Str sr="arg14" ve="3" />
+      <Str sr="arg15" ve="3" />
+      <Img sr="arg2" ve="2" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="0" />
+      <Int sr="arg7" val="4" />
+      <Int sr="arg8" val="0" />
+      <Str sr="arg9" ve="3" />
+    </Action>
+    <Action sr="act58" ve="7">
+      <code>38</code>
+    </Action>
+  </Task>
+  <Task sr="task21">
+    <cdate>1782930343151</cdate>
+    <edate>1782930343151</edate>
+    <id>21</id>
+    <nme>Send AutoRemote SMS</nme>
+    <pri>6</pri>
+    <rty>2</rty>
+    <Action sr="act0" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%sms_payload</Str>
+      <Str sr="arg1" ve="3">%armessage</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act1" ve="7">
+      <code>590</code>
+      <Str sr="arg0" ve="3">%sms_payload</Str>
+      <Str sr="arg1" ve="3">=</Str>
+      <Int sr="arg2" val="0" />
+    </Action>
+    <Action sr="act2" ve="7">
+      <code>547</code>
+      <Str sr="arg0" ve="3">%sms_parts</Str>
+      <Str sr="arg1" ve="3">%sms_payload2</Str>
+      <Int sr="arg2" val="0" />
+      <Int sr="arg3" val="0" />
+      <Int sr="arg4" val="0" />
+      <Int sr="arg5" val="3" />
+      <Int sr="arg6" val="1" />
+    </Action>
+    <Action sr="act3" ve="7">
+      <code>590</code>
+      <Str sr="arg0" ve="3">%sms_parts</Str>
+      <Str sr="arg1" ve="3">|||</Str>
+      <Int sr="arg2" val="0" />
+    </Action>
+    <Action sr="act4" ve="7">
+      <code>41</code>
+      <Str sr="arg0" ve="3">%sms_parts1</Str>
+      <Str sr="arg1" ve="3">%sms_parts2</Str>
+      <Int sr="arg2" val="0" />
+      <Str sr="arg3" ve="3" />
+      <Int sr="arg4" val="0" />
+    </Action>
+  </Task>
+</TaskerData>
