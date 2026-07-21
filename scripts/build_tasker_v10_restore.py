@@ -384,10 +384,12 @@ def replace_task(task: ET.Element, actions: list[ET.Element], *, collision: int,
     if rty is None:
         rty = ET.SubElement(task, "rty")
     rty.text = str(collision)
+    # Tasker 6.6 accepts the collision-mode rty element, but not a standalone
+    # stayawake element. If present before Action nodes, Tasker imports the task
+    # name and silently drops every action that follows it.
     stay = task.find("stayawake")
-    if stay is None:
-        stay = ET.SubElement(task, "stayawake")
-    stay.text = "true" if stay_awake else "false"
+    if stay is not None:
+        task.remove(stay)
     for index, action in enumerate(actions):
         action.set("sr", f"act{index}")
         task.append(action)
@@ -402,7 +404,6 @@ def new_task(task_id: int, name: str, actions: list[ET.Element], *, collision: i
     ET.SubElement(task, "nme").text = name
     ET.SubElement(task, "pri").text = "8"
     ET.SubElement(task, "rty").text = str(collision)
-    ET.SubElement(task, "stayawake").text = "true"
     for index, action in enumerate(actions):
         action.set("sr", f"act{index}")
         task.append(action)
