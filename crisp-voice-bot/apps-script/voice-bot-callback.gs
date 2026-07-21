@@ -52,8 +52,8 @@ const VOICE_BOT_TIMEZONE = 'America/New_York';
 const VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN = 10;
 const VOICE_BOT_MAX_ACTIVE_CALLS = 2;
 const VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES = 60;
-const VOICE_BOT_PAUSED_UNTIL_ET = '2026-07-31T23:59:59-04:00';
-const VOICE_BOT_PAUSE_REASON = 'Paused while ElevenLabs quota is exhausted';
+const VOICE_BOT_PAUSED_UNTIL_ET = '2026-07-22T09:00:00-04:00';
+const VOICE_BOT_PAUSE_REASON = 'Paused until ElevenLabs billing cycle refreshes on July 22';
 const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
   {
     name: 'morning_probe',

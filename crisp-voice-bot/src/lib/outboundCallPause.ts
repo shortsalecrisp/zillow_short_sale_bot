@@ -1,5 +1,5 @@
-const DEFAULT_PAUSED_UNTIL_ISO = "2026-08-01T03:59:59.000Z";
-const DEFAULT_PAUSE_REASON = "Paused while ElevenLabs quota is exhausted";
+const DEFAULT_PAUSED_UNTIL_ISO = "2026-07-22T13:00:00.000Z";
+const DEFAULT_PAUSE_REASON = "Paused until ElevenLabs billing cycle refreshes on July 22";
 
 export type OutboundCallPause = {
   pausedUntil: Date;

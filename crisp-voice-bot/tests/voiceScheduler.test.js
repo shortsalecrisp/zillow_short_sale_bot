@@ -160,12 +160,12 @@ test("queue runner is open on weekends so weekend-local calls can be placed", ()
   assert.equal(sundayAfternoonEt, true);
 });
 
-test("queue runner is paused while ElevenLabs quota is exhausted", () => {
+test("queue runner is paused until the ElevenLabs billing cycle refresh", () => {
   const quotaPauseAfternoon = runSchedulerExpression(
-    'isVoiceBotQueuePaused_(new Date("2026-07-02T21:00:00Z"))',
+    'isVoiceBotQueuePaused_(new Date("2026-07-21T21:00:00Z"))',
   );
   const afterPause = runSchedulerExpression(
-    'isVoiceBotQueuePaused_(new Date("2026-08-01T03:59:59Z"))',
+    'isVoiceBotQueuePaused_(new Date("2026-07-22T13:00:00Z"))',
   );
 
   assert.equal(quotaPauseAfternoon, true);
