@@ -228,6 +228,23 @@ def reconcile_last_sms_actions(*, transport_version: int = 11) -> list[ET.Elemen
     ]
 
 
+def heartbeat_actions(*, transport_version: int) -> list[ET.Element]:
+    """Report that the imported Tasker transport is enabled and executing."""
+
+    body = (
+        "token=%transport_token&action=tasker_heartbeat"
+        f"&transport_version={transport_version}&device_time=%transport_device_time"
+    )
+    return [
+        variable_set("%api_url", API_URL),
+        variable_set("%token", TOKEN_PLACEHOLDER),
+        variable_set("%transport_device_time_raw", "%TIMEMS"),
+        url_encode("%token", "%transport_token"),
+        url_encode("%transport_device_time_raw", "%transport_device_time"),
+        *retry_http(body),
+    ]
+
+
 def dispatcher_actions() -> list[ET.Element]:
     claim_body = "token=%transport_token&action=claim_pending_send&worker_id=pixel-v10"
     started_body = (
@@ -435,6 +452,8 @@ def build_restore(
     include_reconciler: bool = False,
     permission_safe_receipts: bool = False,
     assign_project_membership: bool = False,
+    include_heartbeat: bool = False,
+    reconciler_minutes: int = 1,
 ) -> None:
     tree = ET.parse(source)
     root = tree.getroot()
@@ -461,10 +480,10 @@ def build_restore(
     )
 
     for profile in list(root.findall("Profile")):
-        if profile.findtext("id") in {"30", "31", "32", "33", "34", "35"}:
+        if profile.findtext("id") in {"30", "31", "32", "33", "34", "35", "36"}:
             root.remove(profile)
     for task in list(root.findall("Task")):
-        if task.findtext("id") in {"30", "31", "32", "33"}:
+        if task.findtext("id") in {"30", "31", "32", "33", "34"}:
             root.remove(task)
 
     first_task_index = min(i for i, child in enumerate(list(root)) if child.tag == "Task")
@@ -480,7 +499,9 @@ def build_restore(
             ]
         )
     if include_reconciler:
-        profiles.append(time_profile(34, 33, "SMS Last Message Reconciler", 1))
+        profiles.append(time_profile(34, 33, "SMS Last Message Reconciler", reconciler_minutes))
+    if include_heartbeat:
+        profiles.append(time_profile(35, 34, "Tasker Transport Heartbeat", 5))
     for offset, profile in enumerate(profiles):
         root.insert(first_task_index + offset, profile)
 
@@ -496,6 +517,15 @@ def build_restore(
                 "SMS Last Message Reconciler",
                 reconcile_last_sms_actions(transport_version=transport_version),
                 collision=0,
+            )
+        )
+    if include_heartbeat:
+        root.append(
+            new_task(
+                34,
+                "Tasker Transport Heartbeat",
+                heartbeat_actions(transport_version=transport_version),
+                collision=1,
             )
         )
 

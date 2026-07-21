@@ -20,6 +20,7 @@ function isUnifiedSmsAction_(action) {
     reply_sent: true,
     manual_reply_sent: true,
     sms_send_failed: true,
+    tasker_heartbeat: true,
     mark_override: true,
     takeover: true
   };
@@ -101,6 +102,23 @@ function handleUnifiedSmsPost_(e) {
     validateToken_(body.token);
 
     var action = String(body.action || "incoming_sms").toLowerCase();
+    if (action === "tasker_heartbeat") {
+      var transportVersion = String(body.transport_version || "");
+      try {
+        appendSmsDebugLog_("tasker_heartbeat", {
+          request_id: requestId,
+          message: transportVersion,
+          reason: "Tasker transport heartbeat"
+        });
+      } catch (_) {}
+      return jsonOutput_({
+        ok: true,
+        action: action,
+        transport_version: transportVersion,
+        server_time: new Date().toISOString()
+      });
+    }
+
     if (action === "codex_probe") {
       var probe = { ok: true, action: action, has_append: typeof appendSmsDebugLog_ === "function", has_sheet_helper: typeof getSmsSpreadsheet_ === "function" };
       try {
