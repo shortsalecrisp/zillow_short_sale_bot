@@ -410,6 +410,27 @@ def new_task(task_id: int, name: str, actions: list[ET.Element], *, collision: i
     return task
 
 
+def canonicalize_root_order(root: ET.Element) -> None:
+    """Match the section order produced by Tasker's own full-data export.
+
+    Tasker writes every Profile first, followed by Project metadata and then
+    every Task. Inserting a new Profile immediately before the first Task puts
+    it after Project, which Tasker's restore UI may partially import: names and
+    project membership appear, while task actions are discarded.
+    """
+
+    children = list(root)
+    profiles = [child for child in children if child.tag == "Profile"]
+    projects = [child for child in children if child.tag == "Project"]
+    tasks = [child for child in children if child.tag == "Task"]
+    remainder = [
+        child
+        for child in children
+        if child.tag not in {"Profile", "Project", "Task"}
+    ]
+    root[:] = profiles + projects + tasks + remainder
+
+
 def event_profile(profile_id: int, task_id: int, name: str, event_code: int, recipient: str = "") -> ET.Element:
     now = str(int(time.time() * 1000))
     profile = ET.Element("Profile", {"sr": f"prof{profile_id}", "ve": "2"})
@@ -545,6 +566,7 @@ def build_restore(
     for task in root.findall("Task"):
         for index, action in enumerate(task.findall("Action")):
             action.set("sr", f"act{index}")
+    canonicalize_root_order(root)
     ET.indent(tree, space="  ")
     destination.parent.mkdir(parents=True, exist_ok=True)
     tree.write(destination, encoding="UTF-8", xml_declaration=True)
