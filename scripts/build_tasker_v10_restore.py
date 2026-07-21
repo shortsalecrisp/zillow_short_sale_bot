@@ -266,6 +266,71 @@ def dispatcher_actions() -> list[ET.Element]:
     ]
 
 
+def dispatcher_actions_inline_receipt() -> list[ET.Element]:
+    """Dispatch one queued reply without SMS Success/Failure event profiles.
+
+    Some Android/Tasker installs disable an imported project until the separate
+    SMS Success and SMS Failure event permissions are granted. Keep the send
+    single-flight, but acknowledge it from the same task after Android accepts
+    the Send SMS action. If Send SMS itself errors, Tasker stops before the
+    receipt and the server lease can safely retry it later.
+    """
+
+    claim_body = "token=%transport_token&action=claim_pending_send&worker_id=pixel-v12"
+    started_body = (
+        "token=%transport_token&action=send_started&request_id=%transport_request_id"
+        "&message_id=%transport_message_id&phone=%transport_phone"
+        "&reply_text=%transport_reply_text&lease_token=%transport_lease_token"
+    )
+    receipt_body = (
+        "token=%receipt_token&action=reply_sent&request_id=%receipt_request_id"
+        "&message_id=%receipt_message_id&phone=%receipt_phone"
+        "&reply_text=%receipt_reply_text&lease_token=%receipt_lease_token"
+        "&sent_at=%receipt_sent_at"
+    )
+    return [
+        if_action("%SMSOUT_BUSY", "1"),
+        variable_set("%busy_age", "%TIMEMS-%SMSOUT_STARTED", do_maths=True),
+        stop_if("%busy_age", "600000", op=6),
+        variable_set("%SMSOUT_BUSY", "0"),
+        end_if(),
+        variable_set("%api_url", API_URL),
+        variable_set("%token", TOKEN_PLACEHOLDER),
+        url_encode("%token", "%transport_token"),
+        *retry_http(claim_body),
+        if_action("%http_data.should_send_text", "true"),
+        variable_set("%SMSOUT_REQUEST", "%http_data.request_id"),
+        variable_set("%SMSOUT_MESSAGE", "%http_data.message_id"),
+        variable_set("%SMSOUT_PHONE", "%http_data.phone"),
+        variable_set("%SMSOUT_REPLY", "%http_data.reply_text"),
+        variable_set("%SMSOUT_LEASE", "%http_data.lease_token"),
+        variable_set("%SMSOUT_STARTED", "%TIMEMS"),
+        variable_set("%SMSOUT_BUSY", "1"),
+        url_encode("%SMSOUT_REQUEST", "%transport_request_id"),
+        url_encode("%SMSOUT_MESSAGE", "%transport_message_id"),
+        url_encode("%SMSOUT_PHONE", "%transport_phone"),
+        url_encode("%SMSOUT_REPLY", "%transport_reply_text"),
+        url_encode("%SMSOUT_LEASE", "%transport_lease_token"),
+        *retry_http(started_body),
+        if_action("%http_data.ok", "true"),
+        send_sms("%SMSOUT_PHONE", "%SMSOUT_REPLY", wait_for_result=False),
+        variable_set("%receipt_sent_at_raw", "%TIMEMS"),
+        url_encode("%token", "%receipt_token"),
+        url_encode("%SMSOUT_REQUEST", "%receipt_request_id"),
+        url_encode("%SMSOUT_MESSAGE", "%receipt_message_id"),
+        url_encode("%SMSOUT_PHONE", "%receipt_phone"),
+        url_encode("%SMSOUT_REPLY", "%receipt_reply_text"),
+        url_encode("%SMSOUT_LEASE", "%receipt_lease_token"),
+        url_encode("%receipt_sent_at_raw", "%receipt_sent_at"),
+        *retry_http(receipt_body),
+        if_action("%http_data.ok", "true"),
+        variable_set("%SMSOUT_BUSY", "0"),
+        end_if(),
+        end_if(),
+        end_if(),
+    ]
+
+
 def receipt_actions(success: bool) -> list[ET.Element]:
     action_name = "reply_sent" if success else "sms_send_failed"
     body = (
@@ -368,6 +433,8 @@ def build_restore(
     *,
     transport_version: int = 10,
     include_reconciler: bool = False,
+    permission_safe_receipts: bool = False,
+    assign_project_membership: bool = False,
 ) -> None:
     tree = ET.parse(source)
     root = tree.getroot()
@@ -404,17 +471,24 @@ def build_restore(
     profiles = [
         time_profile(30, 30, "SMS Outbox Every 2 Minutes", 2),
         event_profile(31, 30, "SMS Outbox After Boot", 411),
-        event_profile(32, 31, "SMS Outbox Send Success", 2005, "%SMSOUT_PHONE"),
-        event_profile(33, 32, "SMS Outbox Send Failure", 2010, "%SMSOUT_PHONE"),
     ]
+    if not permission_safe_receipts:
+        profiles.extend(
+            [
+                event_profile(32, 31, "SMS Outbox Send Success", 2005, "%SMSOUT_PHONE"),
+                event_profile(33, 32, "SMS Outbox Send Failure", 2010, "%SMSOUT_PHONE"),
+            ]
+        )
     if include_reconciler:
         profiles.append(time_profile(34, 33, "SMS Last Message Reconciler", 1))
     for offset, profile in enumerate(profiles):
         root.insert(first_task_index + offset, profile)
 
-    root.append(new_task(30, "SMS Outbox Dispatcher", dispatcher_actions(), collision=0))
-    root.append(new_task(31, "SMS Outbox Send Success", receipt_actions(True), collision=0))
-    root.append(new_task(32, "SMS Outbox Send Failure", receipt_actions(False), collision=0))
+    dispatcher = dispatcher_actions_inline_receipt() if permission_safe_receipts else dispatcher_actions()
+    root.append(new_task(30, "SMS Outbox Dispatcher", dispatcher, collision=0))
+    if not permission_safe_receipts:
+        root.append(new_task(31, "SMS Outbox Send Success", receipt_actions(True), collision=0))
+        root.append(new_task(32, "SMS Outbox Send Failure", receipt_actions(False), collision=0))
     if include_reconciler:
         root.append(
             new_task(
@@ -424,6 +498,15 @@ def build_restore(
                 collision=0,
             )
         )
+
+    if assign_project_membership:
+        project = root.find("Project")
+        if project is None:
+            raise ValueError("Tasker restore has no Project element")
+        profile_ids = [profile.findtext("id") for profile in root.findall("Profile")]
+        task_ids = [task.findtext("id") for task in root.findall("Task")]
+        project.find("pids").text = ",".join(profile_ids)
+        project.find("tids").text = ",".join(task_ids)
 
     for task in root.findall("Task"):
         for index, action in enumerate(task.findall("Action")):
