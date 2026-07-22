@@ -48,10 +48,10 @@ class SMSGatewayForAndroid:
         try:
             self._min_send_interval_seconds = max(
                 0.0,
-                float(os.getenv("AUTOREMOTE_MIN_SEND_INTERVAL_SECONDS", "8")),
+                float(os.getenv("AUTOREMOTE_MIN_SEND_INTERVAL_SECONDS", "30")),
             )
         except (TypeError, ValueError):
-            self._min_send_interval_seconds = 8.0
+            self._min_send_interval_seconds = 30.0
 
     @classmethod
     def _normalize_endpoint_root(cls, endpoint: str) -> str:

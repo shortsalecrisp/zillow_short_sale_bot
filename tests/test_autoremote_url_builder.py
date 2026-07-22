@@ -99,7 +99,7 @@ def test_send_commands_are_spaced_for_tasker(monkeypatch):
     sender.send_with_diagnostics("15551234567", "First", sms_type="initial")
     sender.send_with_diagnostics("15557654321", "Second", sms_type="initial")
 
-    assert sleeps == [5.0]
+    assert sleeps == [27.0]
 
 
 def test_send_with_diagnostics_masks_encoded_key_in_preview(monkeypatch):
