@@ -107,7 +107,11 @@ class SMSGatewayForAndroid:
         row_idx: Optional[int] = None,
         attempt: Optional[int] = None,
     ) -> AutoRemoteSendResult:
-        message_payload = f"smsbot={to}|||{message}|||{sms_type}"
+        # AutoRemote only populates Tasker's %arcomm variable for commands that
+        # use its =:= separator. The Android transport reads %arcomm, so a
+        # plain "smsbot=..." message triggers the profile but leaves the send
+        # payload empty.
+        message_payload = f"smsbot=:={to}|||{message}|||{sms_type}"
         request_url = f"{self.endpoint_root}/sendmessage"
         request_params = {
             "key": self.api_key,

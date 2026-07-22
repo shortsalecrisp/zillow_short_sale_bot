@@ -58,9 +58,30 @@ def test_send_with_diagnostics_uses_fcm_sendmessage_endpoint(monkeypatch):
     assert captured["url"] == "https://autoremotejoaomgcd.appspot.com/sendmessage"
     assert captured["params"] == {
         "key": DUMMY_AUTOREMOTE_KEY,
-        "message": "smsbot=+15551234567|||Hello there|||initial",
+        "message": "smsbot=:=+15551234567|||Hello there|||initial",
         "target": "+15551234567",
     }
+
+
+def test_send_command_uses_autoremote_arcomm_separator(monkeypatch):
+    captured = {}
+
+    def fake_get(url, params, timeout):
+        captured["message"] = params["message"]
+        return SimpleNamespace(status_code=200, text="OK")
+
+    monkeypatch.setattr("sms_providers.requests.get", fake_get)
+
+    sender = SMSGatewayForAndroid(api_key=DUMMY_AUTOREMOTE_KEY)
+    sender.send_with_diagnostics(
+        to="15551234567",
+        message="Follow-up text",
+        sms_type="followup",
+    )
+
+    assert captured["message"] == (
+        "smsbot=:=15551234567|||Follow-up text|||followup"
+    )
 
 
 def test_send_with_diagnostics_masks_encoded_key_in_preview(monkeypatch):
