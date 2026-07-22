@@ -84,6 +84,24 @@ def test_send_command_uses_autoremote_arcomm_separator(monkeypatch):
     )
 
 
+def test_send_commands_are_spaced_for_tasker(monkeypatch):
+    starts = iter([100.0, 103.0])
+    sleeps = []
+
+    monkeypatch.setattr("sms_providers.time.monotonic", lambda: next(starts))
+    monkeypatch.setattr("sms_providers.time.sleep", sleeps.append)
+    monkeypatch.setattr(
+        "sms_providers.requests.get",
+        lambda url, params, timeout: SimpleNamespace(status_code=200, text="OK"),
+    )
+
+    sender = SMSGatewayForAndroid(api_key=DUMMY_AUTOREMOTE_KEY)
+    sender.send_with_diagnostics("15551234567", "First", sms_type="initial")
+    sender.send_with_diagnostics("15557654321", "Second", sms_type="initial")
+
+    assert sleeps == [5.0]
+
+
 def test_send_with_diagnostics_masks_encoded_key_in_preview(monkeypatch):
     secret = "abc:def/ghi+123"
 

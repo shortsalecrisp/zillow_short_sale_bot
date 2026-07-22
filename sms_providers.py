@@ -1,5 +1,7 @@
 import logging
 import os
+import threading
+import time
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlencode, urlsplit
@@ -41,6 +43,15 @@ class SMSGatewayForAndroid:
         self.api_key = api_key or ""
         self.endpoint = (endpoint or "").strip() or self.DEFAULT_ENDPOINT
         self.endpoint_root = self._normalize_endpoint_root(self.endpoint)
+        self._send_slot_lock = threading.Lock()
+        self._last_send_started_at = 0.0
+        try:
+            self._min_send_interval_seconds = max(
+                0.0,
+                float(os.getenv("AUTOREMOTE_MIN_SEND_INTERVAL_SECONDS", "8")),
+            )
+        except (TypeError, ValueError):
+            self._min_send_interval_seconds = 8.0
 
     @classmethod
     def _normalize_endpoint_root(cls, endpoint: str) -> str:
@@ -97,6 +108,18 @@ class SMSGatewayForAndroid:
         """
 
         return status_code == 200 and not self._body_has_error_signal(response_text)
+
+    def _reserve_send_slot(self) -> float:
+        """Space AutoRemote commands so Tasker can finish each SMS action."""
+
+        with self._send_slot_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_send_started_at
+            wait_seconds = max(0.0, self._min_send_interval_seconds - elapsed)
+            if wait_seconds:
+                time.sleep(wait_seconds)
+            self._last_send_started_at = now + wait_seconds
+            return wait_seconds
 
     def send_with_diagnostics(
         self,
@@ -195,6 +218,16 @@ class SMSGatewayForAndroid:
         )
 
         try:
+            wait_seconds = self._reserve_send_slot()
+            if wait_seconds:
+                LOG.info(
+                    "AUTOREMOTE_SEND_THROTTLED row=%s phone=%s type=%s attempt=%s wait_seconds=%.3f",
+                    row_idx,
+                    to,
+                    sms_type,
+                    attempt,
+                    wait_seconds,
+                )
             LOG.info(
                 "AUTOREMOTE_REQUEST_SENT row=%s phone=%s type=%s attempt=%s",
                 row_idx,
