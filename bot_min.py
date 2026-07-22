@@ -1569,6 +1569,12 @@ _LISTING_TEXT_FIELDS = (
     "specialConditions",
     "whatsSpecial",
     "whatsSpecialText",
+    "propertyDescription",
+    "property_description",
+    "descriptionText",
+    "publicRemarksText",
+    "remarksText",
+    "listingText",
 )
 
 _LISTING_TEXT_PATHS = (
@@ -1585,9 +1591,15 @@ _LISTING_TEXT_PATHS = (
     ("property", "resoFacts", "specialListingConditions"),
     ("listing", "description"),
     ("listing", "remarks"),
+    ("listing", "publicRemarks"),
     ("listing", "listingRemarks"),
     ("listing", "specialListingConditions"),
+    ("listing", "descriptionText"),
+    ("home", "description"),
+    ("home", "remarks"),
     ("property", "listingRemarks"),
+    ("property", "publicRemarks"),
+    ("property", "descriptionText"),
 )
 
 
@@ -1654,24 +1666,49 @@ def _street_only_address(value: Any) -> str:
 
 
 def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
-    address = payload.get("address") or payload.get("property", {}).get("address") or {}
+    property_payload = payload.get("property") if isinstance(payload.get("property"), dict) else {}
+    listing_payload = payload.get("listing") if isinstance(payload.get("listing"), dict) else {}
+    home_payload = payload.get("home") if isinstance(payload.get("home"), dict) else {}
+    address = (
+        payload.get("address")
+        or property_payload.get("address")
+        or listing_payload.get("address")
+        or home_payload.get("address")
+        or {}
+    )
+    result: Dict[str, str] = {}
     if isinstance(address, str):
         street = _street_only_address(address)
-        return {"street": street} if street else {}
-    if not isinstance(address, dict):
+        if street:
+            result["street"] = street
         address = {}
-    street_candidates = [
-        address.get("street"),
-        address.get("streetAddress"),
-        address.get("streetAddress1"),
-        address.get("line1"),
-        payload.get("streetAddress"),
-    ]
-    street = next((val for val in street_candidates if isinstance(val, str) and val.strip()), "")
-    city = address.get("city") if isinstance(address.get("city"), str) else payload.get("city", "")
-    state = address.get("state") if isinstance(address.get("state"), str) else payload.get("state", "")
-    postal = address.get("zipcode") or address.get("zip") or address.get("postalCode") or payload.get("zipcode") or payload.get("zip")
-    result: Dict[str, str] = {}
+    elif not isinstance(address, dict):
+        address = {}
+    if not result.get("street"):
+        street_candidates = [
+            payload.get("street"),
+            address.get("street"),
+            address.get("streetAddress"),
+            address.get("streetAddress1"),
+            address.get("line1"),
+            address.get("addressLine1"),
+            payload.get("streetAddress"),
+            payload.get("addressStreet"),
+            payload.get("addressLine1"),
+        ]
+        street = next((val for val in street_candidates if isinstance(val, str) and val.strip()), "")
+    city = address.get("city") if isinstance(address.get("city"), str) else payload.get("city") or payload.get("addressCity") or ""
+    state = address.get("state") if isinstance(address.get("state"), str) else payload.get("state") or payload.get("addressState") or ""
+    postal = (
+        address.get("zipcode")
+        or address.get("zip")
+        or address.get("postalCode")
+        or payload.get("zipcode")
+        or payload.get("zip")
+        or payload.get("addressZipcode")
+        or payload.get("addressZip")
+        or payload.get("postalCode")
+    )
     if street:
         result["street"] = _street_only_address(street)
     if isinstance(city, str) and city.strip():
@@ -1683,38 +1720,162 @@ def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     return result
 
 
+def _extract_agent_name_from_payload(payload: Dict[str, Any]) -> str:
+    for key in ("agentName", "agent_name", "listingAgentName", "listing_agent_name", "primaryAgentName"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for path in (
+        ("attributionInfo", "agentName"),
+        ("attributionInfo", "listingAgentName"),
+        ("contactFormRenderData", "agentName"),
+        ("listed_by", "name"),
+        ("listedBy", "name"),
+        ("listingAgent", "name"),
+        ("listing_agent", "name"),
+        ("agent", "name"),
+        ("postingContact", "name"),
+        ("property", "agentName"),
+        ("listing", "agentName"),
+        ("listing", "listingAgent", "name"),
+    ):
+        agent_name = _nested_value(payload, list(path))
+        if isinstance(agent_name, str) and agent_name.strip():
+            return agent_name.strip()
+    for key in ("listed_by", "listedBy", "listingAgents", "agents", "listing_agents"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        candidates = value if isinstance(value, list) else [value]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            agent_name = item.get("name") or item.get("agentName") or item.get("fullName") or item.get("displayName")
+            if isinstance(agent_name, str) and agent_name.strip():
+                return agent_name.strip()
+    return ""
+
+
+def _first_payload_text(payload: Dict[str, Any], keys: Iterable[str]) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _normalize_listing_payload_aliases(row: Dict[str, Any]) -> None:
+    if not isinstance(row, dict):
+        return
+    zpid = row.get("zpid") or row.get("propertyId") or row.get("property_id")
+    if not zpid:
+        for path in (
+            ("property", "zpid"),
+            ("property", "propertyId"),
+            ("listing", "zpid"),
+            ("listing", "propertyId"),
+            ("home", "zpid"),
+            ("hdpData", "homeInfo", "zpid"),
+        ):
+            zpid = _nested_value(row, list(path))
+            if zpid:
+                break
+    if zpid:
+        row["zpid"] = str(zpid).strip()
+
+    if not row.get("agentName"):
+        agent_name = _extract_agent_name_from_payload(row)
+        if agent_name:
+            row["agentName"] = agent_name
+
+    address_fields = _extract_address_fields(row)
+    if address_fields:
+        if not row.get("street") and address_fields.get("street"):
+            row["street"] = address_fields["street"]
+        if not row.get("address") and address_fields.get("street"):
+            row["address"] = address_fields["street"]
+        if not row.get("city") and address_fields.get("city"):
+            row["city"] = address_fields["city"]
+        if not row.get("state") and address_fields.get("state"):
+            row["state"] = address_fields["state"]
+        if not row.get("zip") and address_fields.get("zip"):
+            row["zip"] = address_fields["zip"]
+
+    listing_text = _listing_text_from_payload(row)
+    if listing_text:
+        row.setdefault("listing_description", listing_text)
+        row.setdefault("listingText", listing_text)
+        row.setdefault("description", listing_text)
+
+    status = _first_payload_text(
+        row,
+        ("homeStatus", "status", "listingStatus", "home_status", "propertyStatus", "listing_status"),
+    )
+    if not status:
+        for path in (
+            ("hdpData", "homeInfo", "homeStatus"),
+            ("hdpData", "homeInfo", "listingStatus"),
+            ("property", "homeStatus"),
+            ("property", "status"),
+            ("property", "listingStatus"),
+            ("listing", "status"),
+            ("listing", "listingStatus"),
+            ("home", "homeStatus"),
+            ("home", "status"),
+        ):
+            value = _nested_value(row, list(path))
+            if isinstance(value, str) and value.strip():
+                status = value.strip()
+                break
+    if status:
+        row.setdefault("homeStatus", status)
+        row.setdefault("listingStatus", status)
+
+    detail_url = _first_payload_text(
+        row,
+        (
+            "detailUrl",
+            "detailURL",
+            "propertyUrl",
+            "propertyURL",
+            "listingUrl",
+            "listingURL",
+            "zillowUrl",
+            "zillowURL",
+            "hdpUrl",
+            "hdpURL",
+            "url",
+            "href",
+        ),
+    )
+    if not detail_url:
+        for path in (
+            ("property", "detailUrl"),
+            ("property", "propertyUrl"),
+            ("property", "url"),
+            ("listing", "detailUrl"),
+            ("listing", "listingUrl"),
+            ("listing", "url"),
+            ("home", "detailUrl"),
+            ("home", "url"),
+            ("hdpData", "homeInfo", "detailUrl"),
+        ):
+            value = _nested_value(row, list(path))
+            if isinstance(value, str) and value.strip():
+                detail_url = value.strip()
+                break
+    if detail_url:
+        row.setdefault("detailUrl", detail_url)
+        row.setdefault("propertyUrl", detail_url)
+
+
 def _merge_rapid_listing_data(row: Dict[str, Any], rapid_payload: Dict[str, Any]) -> None:
     if not row or not rapid_payload:
         return
     if not row.get("agentName"):
-        for path in (
-            ("attributionInfo", "agentName"),
-            ("contactFormRenderData", "agentName"),
-            ("listed_by", "name"),
-            ("listedBy", "name"),
-            ("listingAgent", "name"),
-            ("listing_agent", "name"),
-            ("agent", "name"),
-            ("postingContact", "name"),
-        ):
-            agent_name = _nested_value(rapid_payload, list(path))
-            if isinstance(agent_name, str) and agent_name.strip():
-                row["agentName"] = agent_name.strip()
-                break
-    if not row.get("agentName"):
-        for key in ("listed_by", "listedBy", "listingAgents", "agents"):
-            value = rapid_payload.get(key)
-            if not isinstance(value, list):
-                continue
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                agent_name = item.get("name") or item.get("agentName")
-                if isinstance(agent_name, str) and agent_name.strip():
-                    row["agentName"] = agent_name.strip()
-                    break
-            if row.get("agentName"):
-                break
+        agent_name = _extract_agent_name_from_payload(rapid_payload)
+        if agent_name:
+            row["agentName"] = agent_name
     address_fields = _extract_address_fields(rapid_payload)
     if address_fields:
         if not row.get("street") and address_fields.get("street"):
@@ -11829,7 +11990,7 @@ def is_active_listing(row_payload: Dict[str, Any]) -> bool:
     if not row_payload:
         return True
     status = ""
-    for key in ("homeStatus", "status", "listingStatus", "home_status"):
+    for key in ("homeStatus", "status", "listingStatus", "home_status", "propertyStatus", "listing_status"):
         value = row_payload.get(key)
         if isinstance(value, str) and value.strip():
             status = value.strip().upper()
@@ -11837,8 +11998,14 @@ def is_active_listing(row_payload: Dict[str, Any]) -> bool:
     if not status:
         for path in (
             ("hdpData", "homeInfo", "homeStatus"),
+            ("hdpData", "homeInfo", "listingStatus"),
             ("property", "homeStatus"),
+            ("property", "status"),
+            ("property", "listingStatus"),
             ("listing", "status"),
+            ("listing", "listingStatus"),
+            ("home", "homeStatus"),
+            ("home", "status"),
         ):
             value = _nested_value(row_payload, list(path))
             if isinstance(value, str) and value.strip():
@@ -13090,6 +13257,8 @@ def process_rows(
         LOG.info("HEADLESS_MULTI_AGENT_RUN rows=%s", len(rows))
     load_seen_contacts()
     for r in rows:
+        if isinstance(r, dict):
+            _normalize_listing_payload_aliases(r)
         zpid = str(r.get("zpid", ""))
         outcome = "completed_non_short_sale"
         outcomes[zpid] = outcome

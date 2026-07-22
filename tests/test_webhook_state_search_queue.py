@@ -459,6 +459,65 @@ def test_state_search_runs_search_task_without_detail_wrapper(monkeypatch):
     assert captured["params"]["maxItems"] == 7
 
 
+def test_state_search_normalizes_curated_search_fields():
+    normalized, drop_reason = webhook_server._normalize_extra_state_row(
+        {
+            "propertyId": "ak-100",
+            "addressStreet": "100 Glacier Rd",
+            "addressCity": "Anchorage",
+            "addressState": "AK",
+            "addressZipcode": "99501",
+            "propertyUrl": "https://www.zillow.com/homedetails/ak-100_zpid/",
+            "listingStatus": "FOR_SALE",
+            "brokerName": "North Broker",
+        },
+        "ak",
+    )
+
+    assert drop_reason is None
+    assert normalized["zpid"] == "ak-100"
+    assert normalized["street"] == "100 Glacier Rd"
+    assert normalized["city"] == "Anchorage"
+    assert normalized["state"] == "AK"
+    assert normalized["zip"] == "99501"
+    assert normalized["detailUrl"] == "https://www.zillow.com/homedetails/ak-100_zpid/"
+    assert normalized["homeStatus"] == "FOR_SALE"
+    assert normalized["search_source"] == "ak"
+
+
+def test_apify_normalizer_accepts_curated_detail_fields():
+    normalized = webhook_server._normalize_apify_row(
+        {
+            "propertyId": "hi-200",
+            "propertyUrl": "https://www.zillow.com/homedetails/hi-200_zpid/",
+            "property": {
+                "address": {
+                    "streetAddress": "200 Lava Ln",
+                    "city": "Pahoa",
+                    "state": "HI",
+                    "zipcode": "96778",
+                },
+                "publicRemarks": "Short sale subject to lender approval. Buyer to verify all details.",
+                "status": "FOR_SALE",
+            },
+            "listedBy": [{"name": "Curated Agent"}],
+            "brokerageName": "Island Broker",
+        }
+    )
+
+    payload = webhook_server._compact_queue_resume_payload(normalized, "state-search")
+
+    assert normalized["zpid"] == "hi-200"
+    assert normalized["agentName"] == "Curated Agent"
+    assert normalized["street"] == "200 Lava Ln"
+    assert normalized["city"] == "Pahoa"
+    assert normalized["state"] == "HI"
+    assert normalized["homeStatus"] == "FOR_SALE"
+    assert "Short sale subject to lender approval" in normalized["listing_description"]
+    assert payload["listingText"].startswith("Short sale subject to lender approval")
+    assert payload["agentName"] == "Curated Agent"
+
+
 def test_state_search_queue_payload_uses_street_only_sms_address():
     row = {
         "zpid": "hi-1",

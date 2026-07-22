@@ -1154,53 +1154,269 @@ def _ensure_keepalive_thread() -> None:
     _keepalive_thread.start()
 
 
+APIFY_TEXT_KEYS = (
+    "description",
+    "listing_description",
+    "listingDescription",
+    "homeDescription",
+    "marketingDescription",
+    "openai_summary",
+    "remarks",
+    "publicRemarks",
+    "brokerRemarks",
+    "agentRemarks",
+    "listingRemarks",
+    "shortSaleDescription",
+    "whatsSpecial",
+    "whatsSpecialText",
+    "specialListingConditions",
+    "specialConditions",
+    "listingText",
+)
+
+APIFY_TEXT_PATHS = (
+    ("hdpData", "homeInfo", "description"),
+    ("hdpData", "homeInfo", "listingDescription"),
+    ("hdpData", "homeInfo", "homeDescription"),
+    ("hdpData", "homeInfo", "whatsSpecialText"),
+    ("hdpData", "homeInfo", "whatsSpecial"),
+    ("property", "description"),
+    ("property", "listingDescription"),
+    ("property", "homeDescription"),
+    ("property", "remarks"),
+    ("property", "publicRemarks"),
+    ("property", "listingRemarks"),
+    ("property", "specialListingConditions"),
+    ("property", "resoFacts", "specialListingConditions"),
+    ("listing", "description"),
+    ("listing", "remarks"),
+    ("listing", "publicRemarks"),
+    ("listing", "listingRemarks"),
+    ("listing", "specialListingConditions"),
+    ("home", "description"),
+    ("home", "remarks"),
+)
+
+APIFY_AGENT_KEYS = (
+    "agentName",
+    "agent_name",
+    "listingAgentName",
+    "listing_agent_name",
+    "primaryAgentName",
+)
+
+APIFY_AGENT_PATHS = (
+    ("attributionInfo", "agentName"),
+    ("attributionInfo", "listingAgentName"),
+    ("contactFormRenderData", "agentName"),
+    ("listingAgent", "name"),
+    ("listing_agent", "name"),
+    ("agent", "name"),
+    ("postingContact", "name"),
+    ("listedBy", "name"),
+    ("listed_by", "name"),
+    ("property", "agentName"),
+    ("listing", "agentName"),
+    ("listing", "listingAgent", "name"),
+)
+
+APIFY_AGENT_LIST_KEYS = (
+    "listedBy",
+    "listed_by",
+    "listingAgents",
+    "agents",
+    "listing_agents",
+)
+
+APIFY_STREET_KEYS = (
+    "street",
+    "streetAddress",
+    "streetAddress1",
+    "addressStreet",
+    "addressLine1",
+    "line1",
+)
+APIFY_CITY_KEYS = ("city", "addressCity", "locality")
+APIFY_STATE_KEYS = ("state", "addressState", "region")
+APIFY_ZIP_KEYS = ("zip", "zipcode", "postalCode", "addressZip", "addressZipcode")
+
+APIFY_ADDRESS_PATHS = (
+    ("address",),
+    ("property", "address"),
+    ("listing", "address"),
+    ("home", "address"),
+    ("hdpData", "homeInfo", "address"),
+)
+
+APIFY_URL_KEYS = (
+    "detailUrl",
+    "detailURL",
+    "propertyUrl",
+    "propertyURL",
+    "listingUrl",
+    "listingURL",
+    "zillowUrl",
+    "zillowURL",
+    "hdpUrl",
+    "hdpURL",
+    "url",
+    "href",
+)
+
+APIFY_URL_PATHS = (
+    ("property", "detailUrl"),
+    ("property", "propertyUrl"),
+    ("property", "url"),
+    ("listing", "detailUrl"),
+    ("listing", "listingUrl"),
+    ("listing", "url"),
+    ("home", "detailUrl"),
+    ("home", "url"),
+    ("hdpData", "homeInfo", "detailUrl"),
+)
+
+APIFY_STATUS_KEYS = (
+    "homeStatus",
+    "status",
+    "listingStatus",
+    "home_status",
+    "propertyStatus",
+    "listing_status",
+)
+
+APIFY_STATUS_PATHS = (
+    ("hdpData", "homeInfo", "homeStatus"),
+    ("hdpData", "homeInfo", "listingStatus"),
+    ("property", "homeStatus"),
+    ("property", "status"),
+    ("property", "listingStatus"),
+    ("listing", "status"),
+    ("listing", "listingStatus"),
+    ("home", "homeStatus"),
+    ("home", "status"),
+)
+
+
+def _path_value(row: Dict[str, Any], path: Tuple[str, ...]) -> Any:
+    current: Any = row
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _text_fragment(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return re.sub(r"\s+", " ", value).strip()
+    if isinstance(value, (int, float)):
+        return str(value).strip()
+    if isinstance(value, (list, tuple, set)):
+        parts = [_text_fragment(item) for item in value]
+        return " ".join(part for part in parts if part).strip()
+    if isinstance(value, dict):
+        for key in ("text", "description", "remarks", "summary", "value", "name"):
+            text = _text_fragment(value.get(key))
+            if text:
+                return text
+    return ""
+
+
+def _first_text(row: Dict[str, Any], keys: Tuple[str, ...], paths: Tuple[Tuple[str, ...], ...] = ()) -> str:
+    for key in keys:
+        text = _text_fragment(row.get(key))
+        if text:
+            return text
+    for path in paths:
+        text = _text_fragment(_path_value(row, path))
+        if text:
+            return text
+    return ""
+
+
 def extract_description(row: Dict[str, Any]) -> str:
-    # Prefer top-level fields if present
-    for key in (
-        "description",
-        "listing_description",
-        "listingDescription",
-        "homeDescription",
-        "marketingDescription",
-        "openai_summary",
-        "remarks",
-        "publicRemarks",
-        "brokerRemarks",
-        "agentRemarks",
-        "listingRemarks",
-        "shortSaleDescription",
-        "whatsSpecial",
-        "whatsSpecialText",
-        "listingText",
-    ):
+    if not isinstance(row, dict):
+        return ""
+    return _first_text(row, APIFY_TEXT_KEYS, APIFY_TEXT_PATHS)
+
+
+def _extract_agent_name(row: Dict[str, Any]) -> str:
+    agent_name = _first_text(row, APIFY_AGENT_KEYS, APIFY_AGENT_PATHS)
+    if agent_name:
+        return agent_name
+
+    for key in APIFY_AGENT_LIST_KEYS:
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-
-    # Fallback to nested hdpData.homeInfo if present
-    home_info = (row.get("hdpData") or {}).get("homeInfo") or {}
-    for key in (
-        "description",
-        "listingDescription",
-        "homeDescription",
-        "whatsSpecialText",
-        "whatsSpecial",
-    ):
-        value = home_info.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    for path in (("property", "description"), ("property", "remarks"), ("listing", "description"), ("listing", "remarks")):
-        current: Any = row
-        for key in path:
-            if not isinstance(current, dict):
-                current = None
-                break
-            current = current.get(key)
-        if isinstance(current, str) and current.strip():
-            return current.strip()
-
+        candidates = value if isinstance(value, list) else [value]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            text = _first_text(
+                candidate,
+                ("name", "agentName", "fullName", "displayName"),
+                (("agent", "name"), ("listingAgent", "name")),
+            )
+            if text:
+                return text
     return ""
+
+
+def _address_field(address: Dict[str, Any], keys: Tuple[str, ...]) -> str:
+    for key in keys:
+        text = _text_fragment(address.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _extract_address_fields(row: Dict[str, Any]) -> Dict[str, str]:
+    address_sources: List[Any] = [_path_value(row, path) for path in APIFY_ADDRESS_PATHS]
+    address_dicts = [address for address in address_sources if isinstance(address, dict)]
+    address_strings = [_text_fragment(address) for address in address_sources if isinstance(address, str)]
+
+    street = _first_text(row, APIFY_STREET_KEYS)
+    city = _first_text(row, APIFY_CITY_KEYS)
+    state = _first_text(row, APIFY_STATE_KEYS)
+    zip_code = _first_text(row, APIFY_ZIP_KEYS)
+
+    for address in address_dicts:
+        street = street or _address_field(address, APIFY_STREET_KEYS)
+        city = city or _address_field(address, APIFY_CITY_KEYS)
+        state = state or _address_field(address, APIFY_STATE_KEYS)
+        zip_code = zip_code or _address_field(address, APIFY_ZIP_KEYS)
+
+    full_address = ""
+    for address in address_strings:
+        if address:
+            full_address = address
+            street = street or address.split(",", 1)[0].strip()
+            break
+
+    result: Dict[str, str] = {}
+    if full_address:
+        result["address"] = full_address
+    if street:
+        result["street"] = street
+        result.setdefault("address", street)
+    if city:
+        result["city"] = city
+    if state:
+        result["state"] = state
+    if zip_code:
+        result["zip"] = zip_code
+    return result
+
+
+def _extract_listing_url(row: Dict[str, Any]) -> str:
+    return _first_text(row, APIFY_URL_KEYS, APIFY_URL_PATHS)
+
+
+def _extract_listing_status(row: Dict[str, Any]) -> str:
+    return _first_text(row, APIFY_STATUS_KEYS, APIFY_STATUS_PATHS)
 
 
 def _normalize_apify_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1208,53 +1424,39 @@ def _normalize_apify_row(row: Dict[str, Any]) -> Dict[str, Any]:
         return row
     normalized = dict(row)
 
-    agent_name = row.get("agentName")
-    if not agent_name:
+    zpid_value = row.get("zpid") or row.get("propertyId") or row.get("property_id")
+    if not zpid_value:
         for path in (
-            ("attributionInfo", "agentName"),
-            ("listingAgent", "name"),
-            ("agent", "name"),
-            ("agentName",),
+            ("property", "zpid"),
+            ("property", "propertyId"),
+            ("listing", "zpid"),
+            ("listing", "propertyId"),
+            ("home", "zpid"),
+            ("hdpData", "homeInfo", "zpid"),
         ):
-            current: Any = row
-            for key in path:
-                if not isinstance(current, dict):
-                    current = None
-                    break
-                current = current.get(key)
-            if isinstance(current, str) and current.strip():
-                agent_name = current.strip()
+            zpid_value = _path_value(row, path)
+            if zpid_value:
                 break
+    if zpid_value:
+        normalized["zpid"] = str(zpid_value).strip()
+
+    agent_name = _extract_agent_name(row)
     if agent_name:
         normalized["agentName"] = agent_name
 
-    address = row.get("address") or row.get("street")
-    if isinstance(address, dict):
-        street_parts = [
-            address.get("street"),
-            address.get("streetAddress"),
-            address.get("streetAddress1"),
-        ]
-        street = next((p for p in street_parts if isinstance(p, str) and p.strip()), "")
-        city = address.get("city") if isinstance(address.get("city"), str) else ""
-        state = address.get("state") if isinstance(address.get("state"), str) else ""
-        zip_code = address.get("zipcode") or address.get("zip")
-        if street:
-            normalized.setdefault("street", street)
-            normalized.setdefault("address", street)
-        if city:
-            normalized.setdefault("city", city)
-        if state:
-            normalized.setdefault("state", state)
-        if isinstance(zip_code, str):
-            normalized.setdefault("zip", zip_code)
-    elif isinstance(address, str) and address.strip():
-        normalized.setdefault("address", address.strip())
-        normalized.setdefault("street", address.strip())
+    for key, value in _extract_address_fields(row).items():
+        if value:
+            normalized.setdefault(key, value)
 
-    detail_url = row.get("detailUrl") or row.get("detailURL") or row.get("url")
-    if isinstance(detail_url, str) and detail_url.strip():
-        normalized["detailUrl"] = detail_url.strip()
+    detail_url = _extract_listing_url(row)
+    if detail_url:
+        normalized["detailUrl"] = detail_url
+        normalized.setdefault("propertyUrl", detail_url)
+
+    status = _extract_listing_status(row)
+    if status:
+        normalized.setdefault("homeStatus", status)
+        normalized.setdefault("listingStatus", status)
 
     listing_text = extract_description(row)
     if listing_text:
@@ -1331,6 +1533,36 @@ def _row_has_expected_fields(row: Dict[str, Any]) -> bool:
     if _row_has_listing_text(row):
         return True
     return False
+
+
+def _log_apify_schema_health(rows: List[Dict[str, Any]], context: str) -> None:
+    if not rows:
+        return
+    total = len(rows)
+    missing_text = sum(1 for row in rows if isinstance(row, dict) and not _row_has_listing_text(row))
+    missing_agent = sum(1 for row in rows if isinstance(row, dict) and not _extract_agent_name(row))
+    missing_address = sum(
+        1
+        for row in rows
+        if isinstance(row, dict) and not (_format_listing_address(row) or row.get("address") or row.get("street"))
+    )
+    missing_status = sum(1 for row in rows if isinstance(row, dict) and not _extract_listing_status(row))
+    sample_keys: List[str] = []
+    for row in rows:
+        if isinstance(row, dict):
+            sample_keys = sorted(str(key) for key in row.keys())[:30]
+            break
+    level = logger.warning if (missing_text or missing_agent or missing_address) else logger.info
+    level(
+        "APIFY_SCHEMA_HEALTH context=%s total=%d missing_text=%d missing_agent=%d missing_address=%d missing_status=%d sample_keys=%s",
+        context,
+        total,
+        missing_text,
+        missing_agent,
+        missing_address,
+        missing_status,
+        sample_keys,
+    )
 
 
 def _apify_run_source(run_id: Optional[str]) -> str:
@@ -1474,20 +1706,7 @@ _ZPID_IN_URL_RE = re.compile(r"/(\d+)_zpid", re.IGNORECASE)
 
 
 def _extra_state_listing_url(row: Dict[str, Any]) -> str:
-    for key in (
-        "detailUrl",
-        "detailURL",
-        "propertyUrl",
-        "propertyURL",
-        "listingUrl",
-        "listingURL",
-        "url",
-        "href",
-    ):
-        value = row.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+    return _extract_listing_url(row)
 
 
 def _normalize_extra_state_row(row: Dict[str, Any], source: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -1605,6 +1824,10 @@ def _process_incoming_rows(
 ) -> Dict[str, Any]:
     normalized_rows = [_normalize_apify_row(row) if isinstance(row, dict) else row for row in rows]
     normalized_rows = _prefer_detail_rows(normalized_rows)
+    _log_apify_schema_health(
+        [row for row in normalized_rows if isinstance(row, dict)],
+        source or "incoming",
+    )
     if skip_seen_dedupe:
         fresh_rows = normalized_rows
     else:

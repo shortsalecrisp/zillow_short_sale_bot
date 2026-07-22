@@ -1412,6 +1412,36 @@ def test_listing_text_rejects_short_sale_no_special_listing_conditions():
     assert not bot_min.is_short_sale(bot_min._short_sale_text_from_payload(listing_text))
 
 
+def test_listing_payload_aliases_accept_curated_apify_fields():
+    row = {
+        "propertyId": "curated-300",
+        "propertyUrl": "https://www.zillow.com/homedetails/curated-300_zpid/",
+        "property": {
+            "address": {
+                "streetAddress": "300 Lake Dr",
+                "city": "Traverse City",
+                "state": "MI",
+                "zipcode": "49684",
+            },
+            "publicRemarks": "Short sale subject to lender approval.",
+            "status": "FOR_SALE",
+        },
+        "listedBy": [{"name": "Curated Agent"}],
+    }
+
+    bot_min._normalize_listing_payload_aliases(row)
+
+    assert row["zpid"] == "curated-300"
+    assert row["agentName"] == "Curated Agent"
+    assert row["street"] == "300 Lake Dr"
+    assert row["city"] == "Traverse City"
+    assert row["state"] == "MI"
+    assert row["zip"] == "49684"
+    assert row["homeStatus"] == "FOR_SALE"
+    assert bot_min.is_active_listing(row)
+    assert bot_min.is_short_sale(bot_min._short_sale_text_from_payload(row["listingText"]))
+
+
 def test_process_rows_skips_duplicate_enriched_phone_before_append(monkeypatch):
     bot_min.seen_agents.clear()
     bot_min.seen_phones.clear()
