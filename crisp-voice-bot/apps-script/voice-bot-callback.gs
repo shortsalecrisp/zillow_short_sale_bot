@@ -52,6 +52,7 @@ const VOICE_BOT_TIMEZONE = 'America/New_York';
 const VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN = 10;
 const VOICE_BOT_MAX_ACTIVE_CALLS = 2;
 const VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES = 60;
+const VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES = 240;
 const VOICE_BOT_PAUSED_UNTIL_ET = '2026-07-22T09:00:00-04:00';
 const VOICE_BOT_PAUSE_REASON = 'Paused until ElevenLabs billing cycle refreshes on July 22';
 const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
@@ -270,6 +271,7 @@ function applyVoiceBotRowUpdates_(sheet, rowNumber, payload) {
   const callResultColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
 
   if (isVoiceBotProviderQuotaExceededPayload_(payload)) {
+    const retryAt = new Date(new Date().getTime() + VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES * 60 * 1000);
     clearVoiceBotCellIfNeeded_(
       sheet,
       rowNumber,
@@ -284,9 +286,12 @@ function applyVoiceBotRowUpdates_(sheet, rowNumber, payload) {
       fieldsWritten,
       'voice_call_' + callAttemptNumber + '_result_provider_quota_cleared'
     );
-    clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE, fieldsWritten, 'call_eligible');
-    clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET, fieldsWritten, 'call_time_bucket');
-    clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR, fieldsWritten, 'call_scheduled_for');
+    sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE).setValue('provider_quota_pause');
+    fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_CALL_ELIGIBLE) + ':call_eligible');
+    sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET).setValue('provider_quota_retry');
+    fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_CALL_TIME_BUCKET) + ':call_time_bucket');
+    sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR).setValue(retryAt);
+    fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_CALL_SCHEDULED_FOR) + ':call_scheduled_for');
     writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_RESPONSE_STATUS, payload, 'responseStatus', fieldsWritten);
     appendVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_VOICE_NOTES, payload, 'voiceNotes', fieldsWritten);
     return fieldsWritten;
@@ -710,10 +715,15 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
   const firstAttemptSentAt = parseVoiceBotDate_(rowValues[VOICE_BOT_COL_CALL_1_SENT - 1]);
   const secondAttemptSentAt = parseVoiceBotDate_(rowValues[VOICE_BOT_COL_CALL_2_SENT - 1]);
   const firstAttemptResult = normalizeString_(rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1]);
+  const scheduledFor = parseVoiceBotDate_(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
   const agentTimeZone = getVoiceBotAgentTimeZone_(rowValues);
   const currentWindow = getVoiceBotPreferredCallWindowName_(now, agentTimeZone);
 
   if (!currentWindow) {
+    return null;
+  }
+
+  if (scheduledFor && now < scheduledFor) {
     return null;
   }
 

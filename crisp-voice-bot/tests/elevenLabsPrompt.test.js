@@ -187,6 +187,8 @@ test("prompt waits through office robots and gatekeeper transfer attempts", () =
 
   assert.match(prompt, /automated attendant/i);
   assert.match(prompt, /phone tree/i);
+  assert.match(prompt, /record your name and reason for calling/i);
+  assert.match(prompt, /what's the best time for Yoni to call back/i);
   assert.match(prompt, /Please stay on the line/i);
   assert.match(prompt, /Sure, I'll wait\./);
   assert.match(prompt, /Do not call `end_call`[\s\S]{0,160}transferred/i);
@@ -247,11 +249,26 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   );
 
   assert.match(selfHandlingBranch, /handling it themselves/i);
+  assert.match(selfHandlingBranch, /figuring it out as I go/i);
   assert.match(selfHandlingBranch, /plain yes/i);
+  assert.match(selfHandlingBranch, /acknowledge that first/i);
   assert.match(selfHandlingBranch, /Do not treat this as a hard no/);
   assert.match(selfHandlingBranch, /whole short sale process with the bank/);
   assert.match(selfHandlingBranch, /no cost to you or the seller/);
   assert.match(selfHandlingBranch, /Do you have any interest in talking with Yoni/);
+});
+
+test("prompt keeps self-handling uncertainty out of the hard-no examples", () => {
+  const prompt = readPrompt();
+  const notInterestedExamples = extractSection(
+    prompt,
+    "Treat all of these as not interested:",
+    "Say:",
+  );
+
+  assert.doesNotMatch(notInterestedExamples, /- "I'm handling it myself"/);
+  assert.match(notInterestedExamples, /Do not include "I'm handling it myself"/);
+  assert.match(notInterestedExamples, /"I'm figuring it out as I go"/);
 });
 
 test("prompt answers service questions after a soft-no closeout instead of ending", () => {

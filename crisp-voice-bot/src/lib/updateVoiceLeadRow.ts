@@ -25,6 +25,7 @@ import {
   VOICE_BOT_COL_RESPONSE_STATUS,
   VOICE_BOT_COL_VM_LEFT,
   VOICE_BOT_COL_VOICE_NOTES,
+  VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES,
 } from "./voiceSheet";
 
 export type VoiceLeadRowUpdates = {
@@ -147,11 +148,12 @@ function buildWrites(rowValues: unknown[], updates: VoiceLeadRowUpdates, now: Da
   const providerQuotaExceeded = updates.providerQuotaExceeded || updates.callResult === "provider_quota_exceeded";
 
   if (providerQuotaExceeded) {
+    const retryAt = new Date(now.getTime() + VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES * 60_000);
     clearWrite(writes, callSentColumn, `voice_call_${callAttemptNumber}_sent_provider_quota_cleared`);
     clearWrite(writes, callResultColumn, `voice_call_${callAttemptNumber}_result_provider_quota_cleared`);
-    clearWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible");
-    clearWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket");
-    clearWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "call_scheduled_for");
+    addWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible", "provider_quota_pause");
+    addWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket", "provider_quota_retry");
+    addWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "call_scheduled_for", retryAt.toISOString());
   } else {
     addWrite(writes, callResultColumn, "callResult", updates.callResult);
     if (!rowValues[callSentColumn - 1]) {

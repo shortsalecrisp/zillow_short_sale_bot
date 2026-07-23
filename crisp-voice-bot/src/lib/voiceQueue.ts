@@ -230,10 +230,15 @@ export function getVoiceBotCallCandidateFromRowValues(
   const firstAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_1_SENT - 1]);
   const secondAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_2_SENT - 1]);
   const firstAttemptResult = normalizeString(rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1]);
+  const scheduledFor = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
   const agentTimeZone = getVoiceBotAgentTimeZone(rowValues);
   const currentWindow = getVoiceBotPreferredCallWindowName(now, agentTimeZone);
 
   if (!currentWindow) {
+    return undefined;
+  }
+
+  if (scheduledFor && now < scheduledFor) {
     return undefined;
   }
 

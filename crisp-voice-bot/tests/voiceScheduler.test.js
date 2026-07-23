@@ -251,7 +251,7 @@ test("voice performance log-only updates do not change scheduling cells", () => 
   assert.deepEqual(result, { cleared: [], fields: [] });
 });
 
-test("provider quota callbacks clear the attempted call markers without changing lead status", () => {
+test("provider quota callbacks clear attempted markers and schedule a cooldown", () => {
   const result = JSON.parse(runSchedulerScript(`
     const cells = Array(VOICE_BOT_COL_VOICE_NOTES + 1).fill("");
     cells[VOICE_BOT_COL_CALL_1_SENT] = "2026-07-02T19:25:00.000Z";
@@ -289,7 +289,9 @@ test("provider quota callbacks clear the attempted call markers without changing
       call1Result: cells[VOICE_BOT_COL_CALL_1_RESULT],
       callEligible: cells[VOICE_BOT_COL_CALL_ELIGIBLE],
       callTimeBucket: cells[VOICE_BOT_COL_CALL_TIME_BUCKET],
-      callScheduledFor: cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR],
+      callScheduledFor: cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR] instanceof Date
+        ? cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR].toISOString()
+        : cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR],
       responseStatus: cells[VOICE_BOT_COL_RESPONSE_STATUS],
       leadStatusCode: cells[VOICE_BOT_COL_LEAD_STATUS_CODE],
       voiceNotes: cells[VOICE_BOT_COL_VOICE_NOTES]
@@ -298,9 +300,9 @@ test("provider quota callbacks clear the attempted call markers without changing
 
   assert.equal(result.call1Sent, "");
   assert.equal(result.call1Result, "");
-  assert.equal(result.callEligible, "");
-  assert.equal(result.callTimeBucket, "");
-  assert.equal(result.callScheduledFor, "");
+  assert.equal(result.callEligible, "provider_quota_pause");
+  assert.equal(result.callTimeBucket, "provider_quota_retry");
+  assert.match(result.callScheduledFor, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(result.responseStatus, "ElevenLabs quota exceeded - call not counted");
   assert.equal(result.leadStatusCode, "");
   assert.equal(result.voiceNotes, "quota exhausted");
