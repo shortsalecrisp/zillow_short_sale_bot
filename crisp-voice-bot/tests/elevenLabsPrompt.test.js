@@ -253,9 +253,9 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   assert.match(selfHandlingBranch, /plain yes/i);
   assert.match(selfHandlingBranch, /acknowledge that first/i);
   assert.match(selfHandlingBranch, /Do not treat this as a hard no/);
-  assert.match(selfHandlingBranch, /whole short sale process with the bank/);
+  assert.match(selfHandlingBranch, /lender paperwork and follow-up/);
   assert.match(selfHandlingBranch, /no cost to you or the seller/);
-  assert.match(selfHandlingBranch, /Do you have any interest in talking with Yoni/);
+  assert.match(selfHandlingBranch, /Worth a quick call with Yoni/);
 });
 
 test("prompt keeps self-handling uncertainty out of the hard-no examples", () => {
