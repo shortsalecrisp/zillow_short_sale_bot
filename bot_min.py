@@ -467,6 +467,10 @@ GOOD_STATUS    = {"FOR_SALE", "ACTIVE", "COMING_SOON", "PENDING", "NEW_CONSTRUCT
 TZ             = pytz.timezone(os.getenv("BOT_TIMEZONE", "US/Eastern"))
 SCHEDULER_TZ   = pytz.timezone("America/New_York")
 FU_HOURS       = float(os.getenv("FOLLOW_UP_HOURS", "6"))
+FOLLOWUP_DUE_GRACE_MINUTES = max(
+    0.0,
+    float(os.getenv("FOLLOWUP_DUE_GRACE_MINUTES", "2")),
+)
 FOLLOWUP_MIN_LOOKBACK_ROWS = int(os.getenv("FOLLOWUP_MIN_LOOKBACK_ROWS", "500"))
 FU_LOOKBACK_ROWS = max(int(os.getenv("FU_LOOKBACK_ROWS", "50")), FOLLOWUP_MIN_LOOKBACK_ROWS)
 MAILSHAKE_AFTER_FOLLOWUP_HOURS = float(os.getenv("MAILSHAKE_AFTER_FOLLOWUP_HOURS", "2"))
@@ -13210,18 +13214,22 @@ def _follow_up_pass():
             now,
             include_weekends=FOLLOWUP_INCLUDE_WEEKENDS,
         )
-        remaining_hours = max(0.0, FU_HOURS - elapsed_hours)
+        effective_elapsed_hours = (
+            elapsed_hours + FOLLOWUP_DUE_GRACE_MINUTES / 60.0
+        )
+        remaining_hours = max(0.0, FU_HOURS - effective_elapsed_hours)
         LOG.info(
-            "FU-review row %s init_ts=%s elapsed_hours=%.2f remaining_hours=%.2f qualify=%s phone=%s address=%s",
+            "FU-review row %s init_ts=%s elapsed_hours=%.2f grace_minutes=%.2f remaining_hours=%.2f qualify=%s phone=%s address=%s",
             sheet_row,
             ts.isoformat(),
             elapsed_hours,
+            FOLLOWUP_DUE_GRACE_MINUTES,
             remaining_hours,
-            elapsed_hours >= FU_HOURS,
+            effective_elapsed_hours >= FU_HOURS,
             phone_redacted,
             address,
         )
-        if elapsed_hours < FU_HOURS:
+        if effective_elapsed_hours < FU_HOURS:
             LOG.debug(
                 "FU‑skip row %s – %.2f hours elapsed", sheet_row, elapsed_hours
             )

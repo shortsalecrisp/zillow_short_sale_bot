@@ -258,6 +258,31 @@ def test_follow_up_keeps_current_marker_as_duplicate_guard(monkeypatch):
     assert sent == []
 
 
+def test_follow_up_two_minute_grace_prevents_hour_boundary_slip(monkeypatch):
+    row = _followup_test_row()
+    sent = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+    monkeypatch.setattr(bot_min, "FOLLOWUP_DUE_GRACE_MINUTES", 2.0)
+    monkeypatch.setattr(
+        bot_min,
+        "business_hours_elapsed",
+        lambda *args, **kwargs: bot_min.FU_HOURS - (1.0 / 60.0),
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "send_sms",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    bot_min._follow_up_pass()
+
+    assert len(sent) == 1
+    assert sent[0]["row_idx"] == 2
+
+
 def test_follow_up_still_blocks_genuine_manual_response(monkeypatch):
     row = _followup_test_row()
     row[bot_min.COL_MANUAL_NOTE] = "I already have help, thanks"
