@@ -13051,10 +13051,10 @@ def _follow_up_pass():
         sheet_row = idx + 2
         init_raw = str(init_values[idx]).strip() if idx < len(init_values) else ""
         reply_raw = str(reply_values[idx]).strip() if idx < len(reply_values) else ""
-        # Candidate rows for review are strictly:
-        # - Column I blank
-        # - Column W non-blank
-        if reply_raw or not init_raw:
+        # Review every row with a confirmed initial timestamp. Column I is
+        # evaluated with Column X after the full row is loaded so a marker
+        # older than the current initial send cannot suppress its follow-up.
+        if not init_raw:
             if not init_raw:
                 missing_init_ts_rows += 1
             continue
@@ -13122,28 +13122,70 @@ def _follow_up_pass():
         address = row[COL_STREET] or ""
         lead_status = row[COL_REPLY_TS].strip().upper()
 
-        # skip if follow‑up already sent …
-        if row[COL_FU_TS].strip():
+        # A failed transport can leave a follow-up marker that predates a later
+        # confirmed initial send. Treat only that provably stale marker as
+        # unsent; all current or unparsable markers remain duplicate guards.
+        followup_ts_raw = row[COL_FU_TS].strip()
+        stale_followup_marker = False
+        if followup_ts_raw:
+            try:
+                followup_ts = datetime.fromisoformat(followup_ts_raw)
+                if followup_ts.tzinfo is None:
+                    followup_ts = followup_ts.replace(tzinfo=SCHEDULER_TZ)
+                else:
+                    followup_ts = followup_ts.astimezone(SCHEDULER_TZ)
+                stale_followup_marker = followup_ts < ts
+            except Exception:
+                stale_followup_marker = False
+
+        if followup_ts_raw and not stale_followup_marker:
             LOG.info(
                 "FU-review row %s status=already_sent followup_ts=%s phone=%s address=%s",
                 sheet_row,
-                row[COL_FU_TS],
+                followup_ts_raw,
                 phone_redacted,
                 address,
             )
             continue
-        # … or if reply/manual note exists
-        if row[COL_REPLY_FLAG].strip() or row[COL_MANUAL_NOTE].strip():
+        if stale_followup_marker:
+            LOG.warning(
+                "FU-review row %s status=stale_followup_marker followup_ts=%s init_ts=%s phone=%s address=%s",
+                sheet_row,
+                followup_ts_raw,
+                ts.isoformat(),
+                phone_redacted,
+                address,
+            )
+
+        manual_note = row[COL_MANUAL_NOTE].strip()
+        normalized_manual_note = re.sub(r"\s+", " ", manual_note).strip().lower()
+        non_response_call_note = (
+            normalized_manual_note in {
+                "left vm",
+                "left voicemail",
+                "no answer on first call",
+                "no response after second call",
+                "call start failed before connecting",
+                "call received but agent hung up on maya",
+            }
+            or normalized_manual_note.startswith("no answer on ")
+        )
+
+        # Column I can also contain the stale marker paired with an old X
+        # timestamp. Genuine replies/manual notes still suppress follow-up.
+        reply_flag_blocks = row[COL_REPLY_FLAG].strip() and not stale_followup_marker
+        manual_note_blocks = manual_note and not non_response_call_note
+        if reply_flag_blocks or manual_note_blocks:
             LOG.info(
                 "FU-review row %s status=skip_reply_or_manual reply=%s manual=%s phone=%s address=%s",
                 sheet_row,
-                bool(row[COL_REPLY_FLAG].strip()),
-                bool(row[COL_MANUAL_NOTE].strip()),
+                bool(reply_flag_blocks),
+                bool(manual_note_blocks),
                 phone_redacted,
                 address,
             )
             continue
-        if lead_status in {"R", "Y", "G"}:
+        if lead_status in {"R", "Y", "G", "O"}:
             LOG.info(
                 "FU-review row %s status=skip_lead_status lead_status=%s phone=%s address=%s",
                 sheet_row,

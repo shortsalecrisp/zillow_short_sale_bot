@@ -164,6 +164,120 @@ def test_follow_up_uses_latest_sheet_phone(monkeypatch):
     assert sent["follow_up"] is True
 
 
+class _ConfiguredFollowupValuesAPI:
+    def __init__(self, row):
+        self.row = row
+
+    def batchGet(self, spreadsheetId, ranges, majorDimension, valueRenderOption):
+        init_col = bot_min._col_index_to_letter(bot_min.COL_INIT_TS)
+        fu_flag_col = bot_min._col_index_to_letter(bot_min.COL_REPLY_FLAG)
+        row_range = f"{bot_min.GSHEET_TAB}!A2:{bot_min.FOLLOWUP_READ_END_COL}2"
+
+        if ranges == [
+            f"{bot_min.GSHEET_TAB}!{init_col}2:{init_col}2",
+            f"{bot_min.GSHEET_TAB}!{fu_flag_col}2:{fu_flag_col}2",
+        ]:
+            return _FakeRequest({
+                "valueRanges": [
+                    {"values": [[self.row[bot_min.COL_INIT_TS]]]},
+                    {"values": [[self.row[bot_min.COL_REPLY_FLAG]]]},
+                ]
+            })
+        if ranges == [row_range]:
+            return _FakeRequest({"valueRanges": [{"values": [self.row]}]})
+        raise AssertionError(f"Unexpected ranges: {ranges}")
+
+    def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
+        if range.endswith("!C2:C2"):
+            return _FakeRequest({"values": [[self.row[bot_min.COL_PHONE]]]})
+        raise AssertionError(f"Unexpected range: {range}")
+
+
+class _ConfiguredFollowupSheetsService:
+    def __init__(self, row):
+        self.values_api = _ConfiguredFollowupValuesAPI(row)
+
+    def spreadsheets(self):
+        return self
+
+    def values(self):
+        return self.values_api
+
+
+def _followup_test_row():
+    row = [""] * bot_min.MIN_COLS
+    row[bot_min.COL_FIRST] = "Sam"
+    row[bot_min.COL_PHONE] = "5550001111"
+    row[bot_min.COL_STREET] = "123 Main St"
+    row[bot_min.COL_INIT_TS] = "2026-07-24T11:00:00-04:00"
+    return row
+
+
+def test_follow_up_allows_stale_marker_and_nonresponse_call_note(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_REPLY_FLAG] = "x"
+    row[bot_min.COL_FU_TS] = "2026-07-23T17:00:00-04:00"
+    row[bot_min.COL_MANUAL_NOTE] = "No answer on first call"
+    sent = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
+    monkeypatch.setattr(
+        bot_min,
+        "send_sms",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    bot_min._follow_up_pass()
+
+    assert len(sent) == 1
+    assert sent[0]["row_idx"] == 2
+    assert sent[0]["follow_up"] is True
+
+
+def test_follow_up_keeps_current_marker_as_duplicate_guard(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_REPLY_FLAG] = "x"
+    row[bot_min.COL_FU_TS] = "2026-07-24T18:00:00-04:00"
+    sent = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
+    monkeypatch.setattr(
+        bot_min,
+        "send_sms",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    bot_min._follow_up_pass()
+
+    assert sent == []
+
+
+def test_follow_up_still_blocks_genuine_manual_response(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_MANUAL_NOTE] = "I already have help, thanks"
+    sent = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
+    monkeypatch.setattr(
+        bot_min,
+        "send_sms",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    bot_min._follow_up_pass()
+
+    assert sent == []
+
+
 def test_follow_up_batch_pacing_skips_first_send_and_spaces_later_sends(monkeypatch):
     sleeps = []
     monkeypatch.setattr(bot_min, "FOLLOWUP_SMS_PACING_SECONDS", 6.0)
