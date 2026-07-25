@@ -5,6 +5,7 @@ import { config } from "../lib/config";
 import { placeElevenLabsOutboundCall } from "../lib/elevenLabs";
 import { logger } from "../lib/logger";
 import { getOutboundCallPause } from "../lib/outboundCallPause";
+import { getProviderCircuitStatus } from "../lib/providerCircuitBreaker";
 import { placeOutboundCall } from "../lib/telnyx";
 import type { CallMetadata, StartCallRequest } from "../types";
 
@@ -83,6 +84,13 @@ function readPositiveInteger(
   throw new ValidationError(`${String(key)} must be a positive integer when provided`);
 }
 
+function readBoolean(body: Record<string, unknown>, key: keyof StartCallRequest): boolean {
+  const value = body[key];
+  if (value === undefined || value === null || value === "") return false;
+  if (typeof value === "boolean") return value;
+  throw new ValidationError(`${String(key)} must be a boolean when provided`);
+}
+
 function validateStartCallRequest(body: unknown): ValidatedStartCallRequest {
   if (!isRecord(body)) {
     throw new ValidationError("Request body must be a JSON object");
@@ -125,6 +133,7 @@ function validateStartCallRequest(body: unknown): ValidatedStartCallRequest {
     responseStatus: readString(body, "responseStatus"),
     notes: readString(body, "notes"),
     sheetName: readString(body, "sheetName"),
+    providerProofCall: readBoolean(body, "providerProofCall"),
   };
 }
 
@@ -132,6 +141,16 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const payload = validateStartCallRequest(req.body);
     const outboundPause = getOutboundCallPause();
+    const providerCircuit = getProviderCircuitStatus();
+    const proofCallToken = req.header("X-Crisp-Token")?.trim();
+
+    if (
+      payload.providerProofCall &&
+      (!config.googleAppsScript.token || proofCallToken !== config.googleAppsScript.token)
+    ) {
+      res.status(401).json({ ok: false, error: "unauthorized_provider_proof_call" });
+      return;
+    }
 
     if (outboundPause) {
       logger.warn("Outbound voice call start paused", {
@@ -145,6 +164,21 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
         error: "outbound_calling_paused",
         reason: outboundPause.reason,
         pausedUntil: outboundPause.pausedUntil.toISOString(),
+      });
+      return;
+    }
+
+    if (providerCircuit.open && !payload.providerProofCall) {
+      logger.warn("Outbound voice call blocked by provider circuit", {
+        rowNumber: payload.rowNumber,
+        signature: providerCircuit.signature,
+        openedAt: providerCircuit.openedAt,
+      });
+      res.status(503).json({
+        ok: false,
+        error: "provider_circuit_open",
+        reason: "Telnyx SIP 403 Account is disabled D17 circuit is open",
+        openedAt: providerCircuit.openedAt,
       });
       return;
     }
@@ -189,6 +223,7 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
       requestedPhone: payload.phone,
       dialedPhone,
       testMode: config.testMode,
+      providerProofCall: payload.providerProofCall,
     };
 
     logger.info("Starting outbound call attempt", {

@@ -43,6 +43,7 @@ export type VoiceLeadRowUpdates = {
   vmLeft?: string;
   voiceNotes?: string;
   providerQuotaExceeded?: boolean;
+  providerD17Failure?: boolean;
 };
 
 type SheetCellWrite = {
@@ -140,20 +141,31 @@ function addSchedulingWrites(
   }
 }
 
-function buildWrites(rowValues: unknown[], updates: VoiceLeadRowUpdates, now: Date): SheetCellWrite[] {
+export function buildVoiceLeadRowWrites(
+  rowValues: unknown[],
+  updates: VoiceLeadRowUpdates,
+  now: Date,
+): SheetCellWrite[] {
   const writes: SheetCellWrite[] = [];
   const callAttemptNumber = normalizeCallAttemptNumber(updates.callAttemptNumber);
   const callSentColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
   const callResultColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
   const providerQuotaExceeded = updates.providerQuotaExceeded || updates.callResult === "provider_quota_exceeded";
+  const providerD17Failure = updates.providerD17Failure || updates.callResult === "provider_d17_failure";
 
-  if (providerQuotaExceeded) {
+  if (providerQuotaExceeded || providerD17Failure) {
     const retryAt = new Date(now.getTime() + VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES * 60_000);
-    clearWrite(writes, callSentColumn, `voice_call_${callAttemptNumber}_sent_provider_quota_cleared`);
-    clearWrite(writes, callResultColumn, `voice_call_${callAttemptNumber}_result_provider_quota_cleared`);
-    addWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible", "provider_quota_pause");
-    addWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket", "provider_quota_retry");
-    addWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "call_scheduled_for", retryAt.toISOString());
+    const reason = providerD17Failure ? "provider_d17" : "provider_quota";
+    clearWrite(writes, callSentColumn, `voice_call_${callAttemptNumber}_sent_${reason}_cleared`);
+    clearWrite(writes, callResultColumn, `voice_call_${callAttemptNumber}_result_${reason}_cleared`);
+    addWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible", `${reason}_pause`);
+    addWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket", `${reason}_retry`);
+    addWrite(
+      writes,
+      VOICE_BOT_COL_CALL_SCHEDULED_FOR,
+      "call_scheduled_for",
+      providerD17Failure ? "" : retryAt.toISOString(),
+    );
   } else {
     addWrite(writes, callResultColumn, "callResult", updates.callResult);
     if (!rowValues[callSentColumn - 1]) {
@@ -175,7 +187,7 @@ function buildWrites(rowValues: unknown[], updates: VoiceLeadRowUpdates, now: Da
   );
   addWrite(writes, VOICE_BOT_COL_CALLBACK_TIME, "callbackTime", updates.callbackTime);
 
-  if (!providerQuotaExceeded) {
+  if (!providerQuotaExceeded && !providerD17Failure) {
     addWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "callScheduledFor", updates.callScheduledFor);
     addSchedulingWrites(writes, rowValues, updates, callAttemptNumber, now);
   }
@@ -195,7 +207,7 @@ export async function updateVoiceLeadRow(rowNumber: number, updates: VoiceLeadRo
   const now = new Date();
   const sheets = await getGoogleSheetsClient();
   const rowValues = await readVoiceLeadRow(sheets, rowNumber);
-  const writes = buildWrites(rowValues, updates, now);
+  const writes = buildVoiceLeadRowWrites(rowValues, updates, now);
   const written = fieldsWritten(writes);
 
   if (writes.length === 0) {

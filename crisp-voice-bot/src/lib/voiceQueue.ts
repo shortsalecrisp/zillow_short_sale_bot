@@ -4,6 +4,8 @@ import { config } from "./config";
 import { getGoogleSheetsClient } from "./googleSheets";
 import { logger } from "./logger";
 import { getOutboundCallPause } from "./outboundCallPause";
+import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
+import { getProviderCircuitStatus } from "./providerCircuitBreaker";
 import {
   appendVoiceNotesValue,
   buildVoiceBotListingAddress,
@@ -401,21 +403,25 @@ async function postStartCall(candidate: VoiceQueueCandidate): Promise<unknown> {
 async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date } = {}): Promise<VoiceQueueResult> {
   const now = options.now ?? new Date();
   const outboundPause = getOutboundCallPause(now);
+  const providerCircuit = getProviderCircuitStatus();
 
-  if (outboundPause) {
+  if (outboundPause || providerCircuit.open) {
+    if (providerCircuit.open) {
+      await ensureProviderCircuitAlert();
+    }
     logger.info("Voice queue paused", {
       nowEt: formatVoiceBotDateEt(now),
-      pausedUntil: outboundPause.pausedUntil.toISOString(),
-      reason: outboundPause.reason,
+      pausedUntil: outboundPause?.pausedUntil.toISOString(),
+      reason: outboundPause?.reason ?? "Telnyx SIP 403 Account is disabled D17 circuit is open",
     });
 
     return {
       ok: true,
       queued: false,
-      reason: "paused",
+      reason: providerCircuit.open ? "provider_circuit_open" : "paused",
       nowEt: formatVoiceBotDateEt(now),
-      pausedUntil: outboundPause.pausedUntil.toISOString(),
-      pauseReason: outboundPause.reason,
+      pausedUntil: outboundPause?.pausedUntil.toISOString(),
+      pauseReason: outboundPause?.reason ?? "Telnyx SIP 403 Account is disabled D17 circuit is open",
     };
   }
 

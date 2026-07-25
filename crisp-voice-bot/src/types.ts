@@ -14,6 +14,7 @@ export interface StartCallRequest {
   responseStatus?: string;
   notes?: string;
   sheetName?: string;
+  providerProofCall?: boolean;
 }
 
 export interface CallMetadata {
@@ -38,6 +39,7 @@ export interface CallMetadata {
   openerVariant?: string;
   openerVariantLabel?: string;
   openerScript?: string;
+  providerProofCall?: boolean;
 }
 
 export interface LiveTransferCallMetadata {
@@ -158,5 +160,6 @@ export interface SheetUpdateRequest {
   callbackTime?: string;
   voiceNotes?: string;
   providerQuotaExceeded?: boolean;
+  providerD17Failure?: boolean;
   [key: string]: unknown;
 }

@@ -138,6 +138,18 @@ const providerQuotaFailureConversation = {
   transcript: [{ role: "assistant", message: "Hi Celeste, this is Maya with Crisp Short Sales..." }],
 } as const;
 
+const telnyxD17FailureConversation = {
+  status: "failed",
+  metadata: {
+    termination_reason: "error",
+    error: {
+      code: 403,
+      reason: "SIP status: 403. Account is disabled. D17",
+    },
+  },
+  transcript: [],
+} as const;
+
 test("post-call fallback detects ElevenLabs quota failures as provider quota and not a prospect outcome", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsProviderQuotaExceeded } = await import(
     "../src/lib/elevenLabsPostCall"
@@ -147,6 +159,19 @@ test("post-call fallback detects ElevenLabs quota failures as provider quota and
   assert.equal(
     buildVoiceResponseStatus("provider_quota_exceeded"),
     "ElevenLabs quota exceeded - call not counted",
+  );
+});
+
+test("post-call fallback detects Telnyx D17 as a provider failure and not a prospect outcome", async () => {
+  const { buildVoiceResponseStatus, shouldTreatAsProviderQuotaExceeded, shouldTreatAsTelnyxD17Failure } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+
+  assert.equal(shouldTreatAsTelnyxD17Failure(telnyxD17FailureConversation), true);
+  assert.equal(shouldTreatAsProviderQuotaExceeded(telnyxD17FailureConversation), false);
+  assert.equal(
+    buildVoiceResponseStatus("provider_d17_failure"),
+    "Telnyx account disabled (D17) - call not counted",
   );
 });
 

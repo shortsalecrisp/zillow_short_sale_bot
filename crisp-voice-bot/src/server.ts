@@ -2,6 +2,7 @@ import express, { type ErrorRequestHandler, type NextFunction, type Request, typ
 import { getConfiguredCallWindows } from "./lib/callWindowGuard";
 import { config } from "./lib/config";
 import { getElevenLabsVoiceExperimentStatus } from "./lib/elevenLabsVoiceVariant";
+import { getProviderCircuitStatus } from "./lib/providerCircuitBreaker";
 import { startGmailImportSchedulers } from "./lib/gmailImporters";
 import { logger } from "./lib/logger";
 import { startMailshakeSyncScheduler } from "./lib/mailshakeSync";
@@ -30,6 +31,7 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 app.get("/experiment-status", (_req: Request, res: Response) => {
+  const providerCircuit = getProviderCircuitStatus();
   res.status(200).json({
     ok: true,
     service: "crisp-voice-bot",
@@ -40,6 +42,17 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
       requiresScheduledWindow: true,
       requiresAgentTimeZone: true,
       windows: getConfiguredCallWindows(),
+    },
+    providerCircuit: {
+      open: providerCircuit.open,
+      signature: providerCircuit.signature,
+      consecutiveFailures: providerCircuit.consecutiveFailures,
+      threshold: providerCircuit.threshold,
+      windowMinutes: providerCircuit.windowMinutes,
+      openedAt: providerCircuit.openedAt,
+      alertSentAt: providerCircuit.alertSentAt,
+      resetAt: providerCircuit.resetAt,
+      resetReason: providerCircuit.resetReason,
     },
     timestamp: new Date().toISOString(),
   });

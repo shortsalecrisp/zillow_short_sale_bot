@@ -1,6 +1,8 @@
 import axios, { AxiosError } from "axios";
 import { config } from "./config";
 import { logger } from "./logger";
+import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
+import { recordTelnyxD17Failure, resetProviderCircuit } from "./providerCircuitBreaker";
 import { sendCallbackEmail } from "./sendCallbackEmail";
 import { sendCallTranscriptEmail } from "./sendCallTranscriptEmail";
 import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContext";
@@ -214,6 +216,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "ElevenLabs quota exceeded - call not counted";
   }
 
+  if (callResult === "provider_d17_failure") {
+    return "Telnyx account disabled (D17) - call not counted";
+  }
+
   return callResult;
 }
 
@@ -259,6 +265,16 @@ export function shouldTreatAsProviderQuotaExceeded(conversation: ElevenLabsConve
       reason.includes("exceeds your quota") ||
       reason.includes("quota exceeded") ||
       (reason.includes("quota") && reason.includes("exceed")))
+  );
+}
+
+export function shouldTreatAsTelnyxD17Failure(conversation: ElevenLabsConversation): boolean {
+  const reason = normalizeText(getFailedConversationReason(conversation));
+  return (
+    conversation.status === "failed" &&
+    reason.includes("sip status: 403") &&
+    reason.includes("account is disabled") &&
+    reason.includes("d17")
   );
 }
 
@@ -847,6 +863,50 @@ async function processPostCallOutcomeForConversation(
       summary: performanceSummary,
       transcript: fullTranscript,
     });
+
+  if (metadata.providerProofCall && conversation.status === "done") {
+    resetProviderCircuit(`Successful provider proof call ${conversationId}`);
+    logger.info("Provider circuit reset after successful proof call", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+    });
+  }
+
+  if (shouldTreatAsTelnyxD17Failure(conversation)) {
+    const failureReason = getFailedConversationReason(conversation);
+    const outcome = buildVoiceResponseStatus("provider_d17_failure");
+    const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();
+    const circuit = recordTelnyxD17Failure({
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      reason: failureReason,
+    });
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "provider_d17_failure",
+      responseStatus: outcome,
+      providerD17Failure: true,
+      voiceNotes: buildPerformanceNotes(outcome, outcomeSummary),
+    });
+
+    processedConversationIds.add(conversationId);
+    conversationsWithoutQueueRefill.add(conversationId);
+    if (circuit.status.open) {
+      await ensureProviderCircuitAlert();
+    }
+    logger.error("Telnyx D17 provider failure; call attempt preserved for retry", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      failureReason,
+      consecutiveFailures: circuit.status.consecutiveFailures,
+      circuitOpen: circuit.status.open,
+    });
+    return true;
+  }
 
   if (shouldTreatAsProviderQuotaExceeded(conversation)) {
     const failureReason = getFailedConversationReason(conversation);
