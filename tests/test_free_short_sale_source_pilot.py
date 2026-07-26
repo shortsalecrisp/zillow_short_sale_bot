@@ -3,9 +3,11 @@ import io
 import json
 import os
 import sys
+import types
 import unittest
 import urllib.parse
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +17,12 @@ import free_short_sale_source_pilot as pilot  # noqa: E402
 
 
 class FreeShortSaleSourcePilotTest(unittest.TestCase):
+    def pilot_row(self, **values):
+        row = [""] * len(pilot.PILOT_HEADERS)
+        for header, value in values.items():
+            row[pilot.PILOT_HEADERS.index(header)] = value
+        return row
+
     def test_qualification_accepts_listing_description_short_sale_without_label(self):
         text = "Status: Active. What's special: This home is being sold as a short sale subject to lender approval."
 
@@ -672,6 +680,195 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(row[16], "review")
         self.assertIn("missing_listing_agent", row[15])
+
+    def test_promotion_skips_shadow_ready_row_without_agent_identity(self):
+        payload = {
+            "zpid": "free-abc",
+            "street": "123 Main Street",
+            "city": "Atlanta",
+            "state": "GA",
+            "source": "free-source-pilot:idx_broker_pages",
+            "search_source": "free-source-pilot:idx_broker_pages",
+            "listing_description": "Potential short sale subject to lender approval.",
+        }
+        pilot_row = self.pilot_row(
+            listing_address="123 Main Street",
+            city="Atlanta",
+            state="GA",
+            synthetic_zpid="free-abc",
+            source="idx_broker_pages",
+            source_url="https://example.com/listing",
+            status="qualified",
+            promotion_status="shadow_ready",
+            import_ready="yes",
+            short_sale_evidence_type="listing_description_or_remarks",
+            qualification_evidence="Potential short sale subject to lender approval.",
+            pending_queue_source="free-source-pilot:idx_broker_pages",
+            pending_queue_listing_json=json.dumps(payload),
+        )
+        captured_updates = []
+
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[
+                [["first_name", "last_name", "phone", "email", "listing_address", "city", "state"]],
+                [pilot.PILOT_HEADERS, pilot_row],
+            ],
+        ), mock.patch.object(
+            pilot,
+            "batch_update_values",
+            side_effect=lambda _token, _spreadsheet_id, updates: captured_updates.extend(updates),
+        ), mock.patch.object(
+            pilot,
+            "import_bot_processor",
+            side_effect=AssertionError("processor should not be imported for missing agent"),
+        ):
+            stats = pilot.promote_ready_pilot_rows(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                cap=5,
+                dry_run=False,
+            )
+
+        self.assertEqual(stats["promoted"], 0)
+        self.assertEqual(stats["skipped"], 1)
+        status_updates = {update["range"]: update["values"][0][0] for update in captured_updates}
+        self.assertEqual(status_updates["Lead Source Pilot!O2"], "needs_agent")
+        self.assertEqual(status_updates["Lead Source Pilot!Q2"], "review")
+
+    def test_promotion_routes_confirmed_agent_payload_through_sheet1_processor(self):
+        payload = {
+            "zpid": "free-def",
+            "street": "456 Oak Street",
+            "city": "Denver",
+            "state": "CO",
+            "source": "free-source-pilot:idx_broker_remarks",
+            "search_source": "free-source-pilot:idx_broker_remarks",
+            "agentName": "Jane Smith",
+            "listing_description": "Public remarks: potential short sale subject to lender approval.",
+            "requiresVerifierReview": "true",
+        }
+        pilot_row = self.pilot_row(
+            first_name="Jane",
+            last_name="Smith",
+            listing_address="456 Oak Street",
+            city="Denver",
+            state="CO",
+            synthetic_zpid="free-def",
+            source="idx_broker_remarks",
+            source_url="https://example.com/listing",
+            status="qualified",
+            promotion_status="shadow_ready",
+            import_ready="yes",
+            short_sale_evidence_type="listing_description_or_remarks",
+            qualification_evidence="Public remarks: potential short sale subject to lender approval.",
+            pending_queue_source="free-source-pilot:idx_broker_remarks",
+            pending_queue_listing_json=json.dumps(payload),
+        )
+        captured = {}
+        captured_updates = []
+
+        def fake_process_rows(rows, **kwargs):
+            captured["rows"] = rows
+            captured["kwargs"] = kwargs
+            return {"free-def": "completed_short_sale"}
+
+        fake_processor = types.SimpleNamespace(process_rows=fake_process_rows)
+
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[
+                [["first_name", "last_name", "phone", "email", "listing_address", "city", "state"]],
+                [pilot.PILOT_HEADERS, pilot_row],
+            ],
+        ), mock.patch.object(
+            pilot,
+            "batch_update_values",
+            side_effect=lambda _token, _spreadsheet_id, updates: captured_updates.extend(updates),
+        ), mock.patch.object(
+            pilot,
+            "import_bot_processor",
+            return_value=fake_processor,
+        ):
+            stats = pilot.promote_ready_pilot_rows(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                cap=5,
+                dry_run=False,
+            )
+
+        self.assertEqual(stats["promoted"], 1)
+        self.assertEqual(captured["kwargs"], {"skip_dedupe": True, "return_outcomes": True})
+        routed_payload = captured["rows"][0]
+        self.assertEqual(routed_payload["agentName"], "Jane Smith")
+        self.assertEqual(routed_payload["search_source"], "free-source-pilot:idx_broker_remarks")
+        self.assertEqual(routed_payload["requiresVerifierReview"], "true")
+        self.assertNotIn("phone", routed_payload)
+        status_updates = {update["range"]: update["values"][0][0] for update in captured_updates}
+        self.assertEqual(status_updates["Lead Source Pilot!O2"], "promoted")
+        self.assertEqual(status_updates["Lead Source Pilot!Q2"], "promoted")
+
+    def test_promotion_dry_run_does_not_write_or_import_processor(self):
+        payload = {
+            "zpid": "free-dry",
+            "street": "789 Pine Street",
+            "city": "Phoenix",
+            "state": "AZ",
+            "source": "free-source-pilot:idx_broker_pages",
+            "search_source": "free-source-pilot:idx_broker_pages",
+            "agentName": "Dana Smith",
+            "listing_description": "Remarks: potential short sale subject to lender approval.",
+        }
+        pilot_row = self.pilot_row(
+            first_name="Dana",
+            last_name="Smith",
+            listing_address="789 Pine Street",
+            city="Phoenix",
+            state="AZ",
+            synthetic_zpid="free-dry",
+            source="idx_broker_pages",
+            source_url="https://example.com/listing",
+            status="qualified",
+            promotion_status="shadow_ready",
+            import_ready="yes",
+            qualification_evidence="Remarks: potential short sale subject to lender approval.",
+            pending_queue_source="free-source-pilot:idx_broker_pages",
+            pending_queue_listing_json=json.dumps(payload),
+        )
+
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[
+                [["first_name", "last_name", "phone", "email", "listing_address", "city", "state"]],
+                [pilot.PILOT_HEADERS, pilot_row],
+            ],
+        ), mock.patch.object(
+            pilot,
+            "batch_update_values",
+            side_effect=AssertionError("dry run should not write status updates"),
+        ), mock.patch.object(
+            pilot,
+            "import_bot_processor",
+            side_effect=AssertionError("dry run should not import the Sheet1 processor"),
+        ):
+            stats = pilot.promote_ready_pilot_rows(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                cap=5,
+                dry_run=True,
+            )
+
+        self.assertEqual(stats["promoted"], 1)
+        self.assertEqual(stats["eligible"], 1)
 
     def test_agent_name_cleaner_rejects_brokerage_names(self):
         self.assertEqual(pilot.clean_agent_name("West USA Realty"), "")

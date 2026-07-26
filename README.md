@@ -87,15 +87,18 @@ Render logs should include
 `pilot_headless_fetch_*` when browser fallback is used, `pilot_candidate_qualified`, `pilot_shadow_ready`, or rejection/duplicate events,
 `pilot_query_done`, and a final `pilot_run_done` stats record.
 
-The shadow rollout does not write to `PendingQueue` or `Sheet1`, and it does not send SMS. Candidate rows are first
-qualified as current short sale listings, then deduped against `Sheet1` by normalized street and state before writing to
-the pilot tab. A row is only marked `shadow_ready` when street/city/state are clean, short sale appears in the listing
-agent's description or remarks, and the listing agent identity comes from an attributable listing field. Page-wide office
-phones and generic emails are not assigned to the agent. Phone and email may remain blank for the lead verifier. Rows include
-`synthetic_zpid` and `pending_queue_listing_json` so reviewed net-new candidates can later be promoted into the same
-PendingQueue-style shape used by the Zillow scraper. The main row processor also suppresses initial SMS for any future
-payload whose source starts with `free-source-pilot:` until the verifier path owns that send.
-Review the first 10 `shadow_ready` rows or seven days of runs, whichever comes first, before enabling any promoter.
+Candidate rows are first qualified as current short sale listings, then deduped against `Sheet1` by normalized street
+and state before writing to the pilot tab. A row is only marked `shadow_ready` when street/city/state are clean, short
+sale appears in the listing agent's description or remarks, and the listing agent identity comes from an attributable
+listing field. Page-wide office phones and generic emails are not assigned to the agent. Phone and email may remain blank
+for the lead verifier.
+
+When promotion is enabled, the pilot run rereads `Sheet1`, promotes at most the configured daily cap of `shadow_ready`
+rows, and sends each row's `pending_queue_listing_json` through `bot_min.process_rows` instead of copying directly to
+`Sheet1`. Promotion requires a confirmed listing agent, a `free-source-pilot:*` source guard, clean address fields, and a
+final duplicate check against `Sheet1`. Missing-agent rows stay in the pilot tab as `needs_agent`. The main row processor
+suppresses initial SMS for any payload whose source starts with `free-source-pilot:` until the verifier path owns that
+send.
 
 Configuration:
 
@@ -124,6 +127,9 @@ Configuration:
 * `FREE_SOURCE_PILOT_SOURCE_BUCKETS=idx_broker_pages,idx_broker_remarks`
 * `FREE_SOURCE_PILOT_DATE_RESTRICT=w1`
 * `FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK=false`
+* `FREE_SOURCE_PILOT_PROMOTION_ENABLED=true`
+* `FREE_SOURCE_PILOT_PROMOTION_DAILY_CAP=10`
+* `FREE_SOURCE_PILOT_PROMOTION_DRY_RUN=false`
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main

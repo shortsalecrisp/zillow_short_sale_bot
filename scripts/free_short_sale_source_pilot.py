@@ -17,6 +17,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -251,6 +252,9 @@ CSE_API_KEY = os.getenv("CS_API_KEY") or os.getenv("GOOGLE_API_KEY")
 CSE_CX = os.getenv("CS_CX") or os.getenv("GOOGLE_CX")
 ALLOW_DDG_FALLBACK = os.getenv("FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK", "false").lower() == "true"
 CONTACT_RESEARCH_RESULTS = int(os.getenv("FREE_SOURCE_PILOT_CONTACT_RESEARCH_RESULTS", "3"))
+PROMOTION_ENABLED = os.getenv("FREE_SOURCE_PILOT_PROMOTION_ENABLED", "false").lower() == "true"
+PROMOTION_DAILY_CAP = max(0, int(os.getenv("FREE_SOURCE_PILOT_PROMOTION_DAILY_CAP", "10")))
+PROMOTION_DRY_RUN = os.getenv("FREE_SOURCE_PILOT_PROMOTION_DRY_RUN", "false").lower() == "true"
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
 HEADLESS_DOMAIN_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET", "4")))
@@ -1795,6 +1799,340 @@ def append_values(token: str, spreadsheet_id: str, range_name: str, values: list
     )
 
 
+def batch_update_values(token: str, spreadsheet_id: str, updates: list[dict[str, Any]]) -> None:
+    if not updates:
+        return
+    sheets_request(
+        token,
+        "POST",
+        f"{spreadsheet_id}/values:batchUpdate",
+        {"valueInputOption": "RAW", "data": updates},
+    )
+
+
+def row_value(row: list[str], header: str) -> str:
+    try:
+        idx = PILOT_HEADERS.index(header)
+    except ValueError:
+        return ""
+    return row[idx] if len(row) > idx else ""
+
+
+def pilot_row_map(row: list[str]) -> dict[str, str]:
+    return {header: row_value(row, header) for header in PILOT_HEADERS}
+
+
+def promotion_status_updates(
+    pilot_tab: str,
+    sheet_row: int,
+    *,
+    status: str,
+    notes: str,
+    import_ready: str | None = None,
+    matched_main_row: str | None = None,
+) -> list[dict[str, Any]]:
+    values = {
+        "promotion_status": status,
+        "promotion_notes": notes[:500],
+    }
+    if import_ready is not None:
+        values["import_ready"] = import_ready
+    if matched_main_row is not None:
+        values["matched_main_row"] = matched_main_row
+
+    updates = []
+    for header, value in values.items():
+        idx = PILOT_HEADERS.index(header) + 1
+        col = column_letter(idx)
+        updates.append({"range": f"{pilot_tab}!{col}{sheet_row}", "values": [[value]]})
+    return updates
+
+
+def parse_pilot_payload(row_data: dict[str, str]) -> tuple[dict[str, str], str]:
+    raw = row_data.get("pending_queue_listing_json", "").strip()
+    if not raw:
+        return {}, "missing_pending_queue_listing_json"
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, "invalid_pending_queue_listing_json"
+    if not isinstance(payload, dict):
+        return {}, "invalid_pending_queue_listing_json"
+    return {str(key): str(value) for key, value in payload.items() if str(value or "").strip()}, ""
+
+
+def agent_name_from_pilot(row_data: dict[str, str], payload: dict[str, str]) -> str:
+    payload_agent = clean_agent_name(payload.get("agentName", ""))
+    if payload_agent:
+        return payload_agent
+    sheet_agent = clean_agent_name(
+        normalize_space(f"{row_data.get('first_name', '')} {row_data.get('last_name', '')}")
+    )
+    return sheet_agent
+
+
+def candidate_from_pilot_row(row_data: dict[str, str], payload: dict[str, str]) -> Candidate:
+    agent_name = agent_name_from_pilot(row_data, payload)
+    fields = {
+        "agent_name": agent_name,
+        "listing_address": payload.get("street")
+        or payload.get("address")
+        or row_data.get("listing_address", ""),
+        "city": payload.get("city") or row_data.get("city", ""),
+        "state": (payload.get("state") or row_data.get("state", "")).upper(),
+        "zip": payload.get("zip") or row_data.get("zip", ""),
+        "phone": payload.get("phone") or row_data.get("phone", ""),
+        "email": payload.get("email") or row_data.get("email", ""),
+        "broker_name": payload.get("brokerName")
+        or payload.get("brokerageName")
+        or row_data.get("broker_name", ""),
+    }
+    text = " ".join(
+        part
+        for part in (
+            payload.get("listing_description", ""),
+            payload.get("description", ""),
+            payload.get("listingText", ""),
+            row_data.get("description_excerpt", ""),
+            row_data.get("qualification_evidence", ""),
+        )
+        if part
+    )
+    return Candidate(
+        source=row_data.get("source", ""),
+        query=row_data.get("source_query", ""),
+        url=row_data.get("source_url", ""),
+        title=row_data.get("raw_title", ""),
+        text=normalize_space(text),
+        fields=fields,
+    )
+
+
+def pilot_row_preflight_failure(
+    row_data: dict[str, str],
+    payload: dict[str, str],
+    existing: ExistingIndex,
+) -> tuple[str, str, str]:
+    if row_data.get("status", "").strip().lower() != "qualified":
+        return "not_qualified", "Pilot row is not qualified.", ""
+    if row_data.get("promotion_status", "").strip().lower() != "shadow_ready":
+        return "not_ready", "Pilot row is not marked shadow_ready.", ""
+    if row_data.get("import_ready", "").strip().lower() != "yes":
+        return "not_import_ready", "Pilot row import_ready is not yes.", ""
+
+    source = (payload.get("search_source") or payload.get("source") or row_data.get("pending_queue_source", "")).strip()
+    if not source.startswith("free-source-pilot:"):
+        return "invalid_source", "Pending payload is missing the free-source-pilot source guard.", ""
+
+    agent_name = agent_name_from_pilot(row_data, payload)
+    if not agent_name:
+        return "needs_agent", "Missing confirmed listing agent.", ""
+
+    candidate = candidate_from_pilot_row(row_data, payload)
+    if not (
+        looks_like_listing_address(candidate.fields.get("listing_address", ""))
+        and normalize_space(candidate.fields.get("city", ""))
+        and normalize_space(candidate.fields.get("state", ""))
+    ):
+        return "needs_address", "Street, city, and state must be confirmed before promotion.", ""
+
+    description_evidence = row_data.get("qualification_evidence", "") or candidate.text
+    if not SHORT_SALE_LISTING_RE.search(description_evidence):
+        return "needs_description_confirmation", "Short sale language was not confirmed before promotion.", ""
+
+    duplicate, duplicate_key, matched = duplicate_status(candidate, existing)
+    if duplicate == "duplicate_listing":
+        return "skipped_duplicate_listing", f"Already present in Sheet1 row {matched}.", matched
+    if duplicate == "duplicate_agent_phone":
+        return "skipped_duplicate_phone", f"Phone already present in Sheet1 row {matched}.", matched
+    if duplicate == "possible_existing_agent":
+        return "skipped_existing_agent", f"Possible existing agent already present in Sheet1 row(s) {matched}.", matched
+
+    return "", duplicate_key, ""
+
+
+def normalize_payload_for_sheet1(row_data: dict[str, str], payload: dict[str, str]) -> dict[str, str]:
+    candidate = candidate_from_pilot_row(row_data, payload)
+    normalized = dict(payload)
+    normalized["agentName"] = candidate.fields.get("agent_name", "")
+    normalized["street"] = candidate.fields.get("listing_address", "")
+    normalized.setdefault("address", candidate.fields.get("listing_address", ""))
+    normalized["city"] = candidate.fields.get("city", "")
+    normalized["state"] = candidate.fields.get("state", "")
+    if candidate.fields.get("zip"):
+        normalized["zip"] = candidate.fields["zip"]
+    if candidate.fields.get("broker_name"):
+        normalized.setdefault("brokerName", candidate.fields["broker_name"])
+        normalized.setdefault("brokerageName", candidate.fields["broker_name"])
+    source = normalized.get("search_source") or normalized.get("source") or row_data.get("pending_queue_source", "")
+    if not source.startswith("free-source-pilot:"):
+        source = f"free-source-pilot:{row_data.get('source', 'unknown') or 'unknown'}"
+    normalized["source"] = source
+    normalized["search_source"] = source
+    normalized.setdefault("zpid", row_data.get("synthetic_zpid", ""))
+    listing_text = candidate.text or row_data.get("qualification_evidence", "")
+    if listing_text:
+        normalized.setdefault("listing_description", listing_text[:8_000])
+        normalized.setdefault("description", listing_text[:8_000])
+        normalized.setdefault("listingText", listing_text[:8_000])
+    normalized["sourcePilotShadow"] = "true"
+    normalized["requiresVerifierReview"] = "true"
+    return {key: str(value) for key, value in normalized.items() if str(value or "").strip()}
+
+
+def import_bot_processor() -> Any:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import importlib
+
+    return importlib.import_module("bot_min")
+
+
+def promote_ready_pilot_rows(
+    token: str,
+    spreadsheet_id: str,
+    main_tab: str,
+    pilot_tab: str,
+    *,
+    cap: int,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    stats = {
+        "considered": 0,
+        "eligible": 0,
+        "promoted": 0,
+        "skipped": 0,
+        "errors": 0,
+    }
+    if cap <= 0:
+        log_event("pilot_promotion_skipped", reason="cap_zero", cap=cap)
+        return stats
+
+    main_rows = get_values(token, spreadsheet_id, f"{main_tab}!A:AQ")
+    existing = build_existing_index(main_rows)
+    pilot_rows = get_values(token, spreadsheet_id, f"{pilot_tab}!A:{column_letter(len(PILOT_HEADERS))}")
+    if not pilot_rows:
+        log_event("pilot_promotion_skipped", reason="pilot_tab_empty")
+        return stats
+
+    processor = None
+    updates: list[dict[str, Any]] = []
+
+    for sheet_row, row in enumerate(pilot_rows[1:], start=2):
+        row_data = pilot_row_map(row)
+        if row_data.get("promotion_status", "").strip().lower() != "shadow_ready":
+            continue
+        stats["considered"] += 1
+        payload, payload_failure = parse_pilot_payload(row_data)
+        if payload_failure:
+            stats["skipped"] += 1
+            updates.extend(
+                promotion_status_updates(
+                    pilot_tab,
+                    sheet_row,
+                    status="needs_review",
+                    notes=payload_failure,
+                    import_ready="review",
+                )
+            )
+            log_event("pilot_promotion_skipped", row=sheet_row, reason=payload_failure)
+            continue
+
+        failure_status, failure_note, matched = pilot_row_preflight_failure(row_data, payload, existing)
+        if failure_status:
+            stats["skipped"] += 1
+            updates.extend(
+                promotion_status_updates(
+                    pilot_tab,
+                    sheet_row,
+                    status=failure_status,
+                    notes=failure_note,
+                    import_ready="review",
+                    matched_main_row=matched or None,
+                )
+            )
+            log_event(
+                "pilot_promotion_skipped",
+                row=sheet_row,
+                reason=failure_status,
+                matched_main_row=matched,
+                zpid=row_data.get("synthetic_zpid", ""),
+            )
+            continue
+
+        stats["eligible"] += 1
+        normalized_payload = normalize_payload_for_sheet1(row_data, payload)
+        zpid = normalized_payload.get("zpid", "")
+        if dry_run:
+            stats["promoted"] += 1
+            updates.extend(
+                promotion_status_updates(
+                    pilot_tab,
+                    sheet_row,
+                    status="dry_run_ready",
+                    notes="Dry run: row would be promoted through bot_min.process_rows.",
+                )
+            )
+            log_event("pilot_promotion_dry_run_ready", row=sheet_row, zpid=zpid)
+        else:
+            try:
+                if processor is None:
+                    processor = import_bot_processor()
+                outcomes = processor.process_rows(
+                    [normalized_payload],
+                    skip_dedupe=True,
+                    return_outcomes=True,
+                ) or {}
+                outcome = outcomes.get(zpid, "")
+            except Exception as exc:  # noqa: BLE001
+                stats["errors"] += 1
+                updates.extend(
+                    promotion_status_updates(
+                        pilot_tab,
+                        sheet_row,
+                        status="promotion_error",
+                        notes=str(exc),
+                        import_ready="review",
+                    )
+                )
+                log_event("pilot_promotion_error", row=sheet_row, zpid=zpid, error=str(exc))
+                continue
+
+            if outcome == "completed_short_sale":
+                stats["promoted"] += 1
+                updates.extend(
+                    promotion_status_updates(
+                        pilot_tab,
+                        sheet_row,
+                        status="promoted",
+                        notes="Promoted to Sheet1 through bot_min.process_rows; pilot-origin SMS remains verifier-held.",
+                        import_ready="promoted",
+                    )
+                )
+                log_event("pilot_promoted", row=sheet_row, zpid=zpid, outcome=outcome)
+            else:
+                stats["skipped"] += 1
+                updates.extend(
+                    promotion_status_updates(
+                        pilot_tab,
+                        sheet_row,
+                        status=outcome or "promotion_skipped",
+                        notes=f"bot_min.process_rows returned {outcome or 'no outcome'}.",
+                        import_ready="review",
+                    )
+                )
+                log_event("pilot_promotion_processor_skipped", row=sheet_row, zpid=zpid, outcome=outcome)
+
+        if stats["promoted"] >= cap:
+            break
+
+    if updates and not dry_run:
+        batch_update_values(token, spreadsheet_id, updates)
+    log_event("pilot_promotion_done", stats=stats, cap=cap, dry_run=dry_run)
+    return stats
+
+
 def run(args: argparse.Namespace) -> None:
     service_account = load_service_account_info(args.service_account)
     token = sheets_client(service_account)
@@ -1837,7 +2175,9 @@ def run(args: argparse.Namespace) -> None:
         shadow_mode=SHADOW_MODE,
         shadow_review_target=SHADOW_REVIEW_TARGET,
         shadow_review_days=SHADOW_REVIEW_DAYS,
-        automatic_promotion=False,
+        automatic_promotion=args.promote_ready,
+        promotion_daily_cap=args.promotion_daily_cap,
+        promotion_dry_run=args.promotion_dry_run,
         dry_run=args.dry_run,
     )
 
@@ -2030,7 +2370,7 @@ def run(args: argparse.Namespace) -> None:
                         url=result.url,
                         address=candidate.fields.get("listing_address", ""),
                         agent=candidate.fields.get("agent_name", ""),
-                        automatic_promotion=False,
+                        automatic_promotion=args.promote_ready,
                     )
                 log_event(
                     "pilot_candidate_qualified",
@@ -2068,6 +2408,15 @@ def run(args: argparse.Namespace) -> None:
             )
 
     log_event("pilot_run_done", stats=stats, dry_run=args.dry_run)
+    if args.promote_ready:
+        promote_ready_pilot_rows(
+            token,
+            args.spreadsheet_id,
+            args.main_tab,
+            args.pilot_tab,
+            cap=args.promotion_daily_cap,
+            dry_run=args.dry_run or args.promotion_dry_run,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -2082,6 +2431,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-date", default=os.getenv("FREE_SOURCE_PILOT_RUN_DATE"))
     parser.add_argument("--include-rejected", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--promote-ready", action="store_true", default=PROMOTION_ENABLED)
+    parser.add_argument("--promotion-daily-cap", type=int, default=PROMOTION_DAILY_CAP)
+    parser.add_argument("--promotion-dry-run", action="store_true", default=PROMOTION_DRY_RUN)
     return parser.parse_args()
 
 
