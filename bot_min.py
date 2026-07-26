@@ -1669,6 +1669,12 @@ def _street_only_address(value: Any) -> str:
     return text.split(",", 1)[0].strip()
 
 
+def _is_undisclosed_address(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return bool(re.search(r"\bundisclosed\b", value, re.IGNORECASE))
+
+
 def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     property_payload = payload.get("property") if isinstance(payload.get("property"), dict) else {}
     listing_payload = payload.get("listing") if isinstance(payload.get("listing"), dict) else {}
@@ -13368,7 +13374,7 @@ def process_rows(
             "description",
         )
         street = _street_only_address(r.get("street")) or _street_only_address(r.get("address"))
-        if street == "(Undisclosed Address)":
+        if not street or _is_undisclosed_address(street):
             outcome = "skipped_undisclosed_address"
             outcomes[zpid] = outcome
             LOG.debug("SKIP undisclosed address zpid %s", r.get("zpid"))

@@ -96,11 +96,11 @@ def _free_source_pilot_enabled() -> bool:
 
 
 def _free_source_pilot_run_hour() -> int:
-    return int(os.getenv("FREE_SOURCE_PILOT_RUN_HOUR", "9"))
+    return int(os.getenv("FREE_SOURCE_PILOT_RUN_HOUR", "7"))
 
 
 def _free_source_pilot_run_minute() -> int:
-    return int(os.getenv("FREE_SOURCE_PILOT_RUN_MINUTE", "0"))
+    return int(os.getenv("FREE_SOURCE_PILOT_RUN_MINUTE", "15"))
 
 
 def _free_source_pilot_states() -> list[str]:

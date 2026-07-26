@@ -739,6 +739,99 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(status_updates["Lead Source Pilot!O2"], "needs_agent")
         self.assertEqual(status_updates["Lead Source Pilot!Q2"], "review")
 
+    def test_promotion_skips_feed_or_brokerage_agent_identity(self):
+        bad_names = [
+            ("Corey Smallman Provided Stellar", "123 Main Street", "agent_name_contains_feed_or_brokerage_term"),
+            ("Keller Williams Keystone", "456 Oak Street", "agent_name_contains_feed_or_brokerage_term"),
+            ("Isaacs Ave William Hagan", "612 Isaacs Avenue", "agent_name_contains_address_token"),
+            ("Q Chau eXp", "789 Pine Street", "agent_name_contains_feed_or_brokerage_term"),
+            ("St Julia Hupp Red", "340 S 3rd Street #2", "agent_name_contains_feed_or_brokerage_term"),
+        ]
+        existing = pilot.build_existing_index(
+            [["first_name", "last_name", "phone", "email", "listing_address", "city", "state"]]
+        )
+        for agent_name, address, reason in bad_names:
+            with self.subTest(agent_name=agent_name):
+                payload = {
+                    "zpid": f"free-{pilot.normalize_key(agent_name).replace(' ', '-')}",
+                    "street": address,
+                    "city": "Denver",
+                    "state": "CO",
+                    "source": "free-source-pilot:idx_broker_pages",
+                    "search_source": "free-source-pilot:idx_broker_pages",
+                    "agentName": agent_name,
+                    "listing_description": "Public remarks: potential short sale subject to lender approval.",
+                }
+                pilot_row = self.pilot_row(
+                    first_name=agent_name.split()[0],
+                    last_name=" ".join(agent_name.split()[1:]),
+                    listing_address=address,
+                    city="Denver",
+                    state="CO",
+                    synthetic_zpid=payload["zpid"],
+                    source="idx_broker_pages",
+                    source_url="https://example.com/listing",
+                    status="qualified",
+                    promotion_status="shadow_ready",
+                    import_ready="yes",
+                    short_sale_evidence_type="listing_description_or_remarks",
+                    qualification_evidence="Public remarks: potential short sale subject to lender approval.",
+                    pending_queue_source="free-source-pilot:idx_broker_pages",
+                    pending_queue_listing_json=json.dumps(payload),
+                )
+
+                status, note, matched = pilot.pilot_row_preflight_failure(
+                    pilot.pilot_row_map(pilot_row),
+                    payload,
+                    existing,
+                )
+
+                self.assertEqual(status, "needs_agent")
+                self.assertIn(reason, note)
+                self.assertEqual(matched, "")
+
+    def test_promotion_skips_undisclosed_address(self):
+        payload = {
+            "zpid": "free-undisclosed",
+            "street": "Undisclosed Address",
+            "city": "Miami",
+            "state": "FL",
+            "source": "free-source-pilot:idx_broker_pages",
+            "search_source": "free-source-pilot:idx_broker_pages",
+            "agentName": "Jane Smith",
+            "listing_description": "Public remarks: potential short sale subject to lender approval.",
+        }
+        pilot_row = self.pilot_row(
+            first_name="Jane",
+            last_name="Smith",
+            listing_address="Undisclosed Address",
+            city="Miami",
+            state="FL",
+            synthetic_zpid="free-undisclosed",
+            source="idx_broker_pages",
+            source_url="https://example.com/listing",
+            status="qualified",
+            promotion_status="shadow_ready",
+            import_ready="yes",
+            short_sale_evidence_type="listing_description_or_remarks",
+            qualification_evidence="Public remarks: potential short sale subject to lender approval.",
+            pending_queue_source="free-source-pilot:idx_broker_pages",
+            pending_queue_listing_json=json.dumps(payload),
+        )
+        existing = pilot.build_existing_index(
+            [["first_name", "last_name", "phone", "email", "listing_address", "city", "state"]]
+        )
+
+        status, note, matched = pilot.pilot_row_preflight_failure(
+            pilot.pilot_row_map(pilot_row),
+            payload,
+            existing,
+        )
+
+        self.assertEqual(status, "needs_address")
+        self.assertIn("Street, city, and state", note)
+        self.assertEqual(matched, "")
+
     def test_promotion_routes_confirmed_agent_payload_through_sheet1_processor(self):
         payload = {
             "zpid": "free-def",

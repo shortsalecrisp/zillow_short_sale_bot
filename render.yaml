@@ -133,9 +133,9 @@ services:
       - key: FREE_SOURCE_PILOT_RESULTS_PER_QUERY
         value: "10"
       - key: FREE_SOURCE_PILOT_RUN_HOUR
-        value: "9"
+        value: "7"
       - key: FREE_SOURCE_PILOT_RUN_MINUTE
-        value: "0"
+        value: "15"
       - key: FREE_SOURCE_PILOT_SEARCH_ENGINE
         value: cse
       - key: FREE_SOURCE_PILOT_SLEEP_SECONDS

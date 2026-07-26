@@ -422,6 +422,52 @@ GENERIC_NAME_TOKENS = {
     "license",
     "usa",
 }
+PROMOTION_AGENT_BLOCKLIST = {
+    "brokerage",
+    "brokerages",
+    "company",
+    "corp",
+    "coldwell",
+    "enrg",
+    "exp",
+    "firm",
+    "group",
+    "homes",
+    "inc",
+    "keller",
+    "llc",
+    "mls",
+    "network",
+    "office",
+    "provided",
+    "properties",
+    "real",
+    "realty",
+    "realtor",
+    "realtors",
+    "red",
+    "stellar",
+    "team",
+    "williams",
+}
+PROMOTION_AGENT_STREET_TOKENS = {
+    "avenue",
+    "boulevard",
+    "circle",
+    "court",
+    "drive",
+    "highway",
+    "lane",
+    "loop",
+    "parkway",
+    "place",
+    "road",
+    "route",
+    "street",
+    "terrace",
+    "trail",
+    "way",
+}
 TRUSTED_AGENT_LABEL_CONTEXT_RE = re.compile(
     r"\b(?:listing\s+agent(?:s|\(s\))?|list\s+agent|listed\s+by)\s*[:\-]?\s*(.{2,180})",
     re.IGNORECASE,
@@ -1143,13 +1189,17 @@ def source_result_allowed(result: SearchResult) -> tuple[bool, str]:
 
 def looks_like_listing_address(address: str) -> bool:
     compact = normalize_space(address)
-    if not compact or not re.match(r"^\d{1,6}\b", compact):
+    if is_undisclosed_address(compact) or not compact or not re.match(r"^\d{1,6}\b", compact):
         return False
     return not re.search(
         r"\b(?:blog|buying|foreclosure|short\s+sale|homes?\s+for\s+sale|listings?|page|search|vintage|fixer[-\s]?upper|viewing\s+listing|mls\s*#|for\s+\$)\b",
         compact,
         re.IGNORECASE,
     )
+
+
+def is_undisclosed_address(address: str) -> bool:
+    return bool(re.search(r"\bundisclosed\b", normalize_space(address), re.IGNORECASE))
 
 
 def looks_like_person_name(value: str) -> bool:
@@ -1241,19 +1291,27 @@ def first_contact_phone_match(text: str) -> re.Match[str] | None:
 TRUSTED_AGENT_SOURCES = {"jsonld_real_estate_agent", "listing_agent_label"}
 
 
-def agent_name_promotion_safety(candidate: Candidate) -> tuple[bool, str]:
+def agent_name_promotion_safety(candidate: Candidate, *, require_source: bool = True) -> tuple[bool, str]:
     fields = candidate.fields
     name = clean_agent_name(fields.get("agent_name", ""))
     if not name:
         return False, "missing_listing_agent"
-    if fields.get("agent_name_source", "") not in TRUSTED_AGENT_SOURCES:
+    if require_source and fields.get("agent_name_source", "") not in TRUSTED_AGENT_SOURCES:
         return False, "unattributed_listing_agent"
 
     raw_tokens = [token.strip(" .'()-") for token in name.split() if token.strip(" .'()-")]
     if any(len(token) >= 2 and token.isupper() for token in raw_tokens):
         return False, "agent_name_contains_acronym"
 
-    name_tokens = set(normalize_key(name).split())
+    normalized_name = normalize_key(name)
+    name_tokens = set(normalized_name.split())
+    if any(token in PROMOTION_AGENT_BLOCKLIST for token in name_tokens):
+        return False, "agent_name_contains_feed_or_brokerage_term"
+
+    ordered_tokens = normalized_name.split()
+    if ordered_tokens and ordered_tokens[0] in PROMOTION_AGENT_STREET_TOKENS:
+        return False, "agent_name_starts_with_address_token"
+
     state = normalize_space(fields.get("state", "")).upper()
     state_tokens = set(normalize_key(STATE_QUERY_TERMS.get(state, state)).split())
     if state.lower() in name_tokens or state_tokens and state_tokens.issubset(name_tokens):
@@ -1266,6 +1324,9 @@ def agent_name_promotion_safety(candidate: Candidate) -> tuple[bool, str]:
     address_tokens = set(normalize_key(fields.get("listing_address", "")).split())
     if len(name_tokens) >= 2 and name_tokens.issubset(address_tokens):
         return False, "agent_name_matches_address"
+    overlapping_address_tokens = name_tokens.intersection(address_tokens).intersection(PROMOTION_AGENT_STREET_TOKENS)
+    if overlapping_address_tokens:
+        return False, "agent_name_contains_address_token"
 
     broker_tokens = set(normalize_key(fields.get("broker_name", "")).split())
     if broker_tokens and (name_tokens.issubset(broker_tokens) or broker_tokens.issubset(name_tokens)):
@@ -1935,6 +1996,10 @@ def pilot_row_preflight_failure(
         and normalize_space(candidate.fields.get("state", ""))
     ):
         return "needs_address", "Street, city, and state must be confirmed before promotion.", ""
+    candidate.fields["agent_name"] = agent_name
+    agent_safe, agent_reason = agent_name_promotion_safety(candidate, require_source=False)
+    if not agent_safe:
+        return "needs_agent", f"Listing agent needs review: {agent_reason}.", ""
 
     description_evidence = row_data.get("qualification_evidence", "") or candidate.text
     if not SHORT_SALE_LISTING_RE.search(description_evidence):

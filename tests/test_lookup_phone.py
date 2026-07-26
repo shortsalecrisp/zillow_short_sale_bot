@@ -1388,6 +1388,36 @@ def test_process_rows_holds_pilot_origin_sms_for_verifier(monkeypatch):
     bot_min.seen_phones.clear()
 
 
+def test_process_rows_skips_undisclosed_address_variants(monkeypatch):
+    bot_min.seen_agents.clear()
+    bot_min.seen_phones.clear()
+    monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
+    monkeypatch.setattr(bot_min, "lookup_phone", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no lookup")))
+    monkeypatch.setattr(bot_min, "lookup_email", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no lookup")))
+    monkeypatch.setattr(bot_min, "append_row", lambda *_: (_ for _ in ()).throw(AssertionError("no append")))
+
+    outcomes = bot_min.process_rows(
+        [
+            {
+                "description": "short sale listing",
+                "agentName": "Jane Agent",
+                "state": "FL",
+                "street": "Undisclosed Address",
+                "city": "Miami",
+                "zpid": "undisclosed-1",
+            }
+        ],
+        skip_dedupe=True,
+        return_outcomes=True,
+    )
+
+    assert outcomes == {"undisclosed-1": "skipped_undisclosed_address"}
+    bot_min.seen_agents.clear()
+    bot_min.seen_phones.clear()
+
+
 def test_listing_text_uses_positive_special_listing_conditions():
     listing_text = bot_min._listing_text_from_payload(
         {
