@@ -197,11 +197,11 @@ def _import_webhook_server(monkeypatch, *, sender_result):
                 phone="555-222-3333",
                 address="123 Main St",
             ),
-            12: _row(phone="555-111-2222", sent="", verified=""),
-            13: _row(phone="555-111-2222", sent="x", init_ts="2026-05-22T08:00:00-04:00", verified="x"),
-            14: _row(phone="555-111-2222", sent="x", verified=""),
+            12: _row(phone="555-111-2212", sent="", verified=""),
+            13: _row(phone="555-111-2213", sent="x", init_ts="2026-05-22T08:00:00-04:00", verified="x"),
+            14: _row(phone="555-111-2214", sent="x", verified=""),
             15: _row(phone="", sent="", verified=""),
-            16: _row(phone="555-111-2222", sent="", init_ts="", verified="x"),
+            16: _row(phone="555-111-2216", sent="", init_ts="", verified="x"),
         }
     )
     workbook = FakeWorkbook(
@@ -277,7 +277,7 @@ def test_internal_initial_sms_requires_token(monkeypatch):
 
     response = client.post(
         "/internal/send-initial-sms",
-        json={"row": 12, "phone": "555-111-2222"},
+        json={"row": 12, "phone": "555-111-2212"},
     )
 
     assert response.status_code == 403
@@ -296,7 +296,7 @@ def test_internal_initial_sms_sends_and_marks_sheet_after_gateway_ok(monkeypatch
         headers={"authorization": "Bearer secret-token"},
         json={
             "row": 12,
-            "phone": "555-111-2222",
+            "phone": "555-111-2212",
             "first": "Alex",
             "address": "123 Main",
             "mark_codex_verified": True,
@@ -309,7 +309,7 @@ def test_internal_initial_sms_sends_and_marks_sheet_after_gateway_ok(monkeypatch
     assert body["gateway_status"] == 200
     assert sender.calls == [
         {
-            "to": "15551112222",
+            "to": "15551112212",
             "message": (
                 "Hey Alex, this is Yoni Kutler with Crisp Short Sales. "
                 "I saw your short sale at 123 Main."
@@ -353,7 +353,7 @@ def test_internal_initial_sms_does_not_mark_sheet_when_gateway_fails(monkeypatch
     response = client.post(
         "/internal/send-initial-sms",
         headers={"authorization": "Bearer secret-token"},
-        json={"row": 12, "phone": "555-111-2222"},
+        json={"row": 12, "phone": "555-111-2212"},
     )
 
     assert response.status_code == 502
@@ -373,7 +373,7 @@ def test_internal_initial_sms_rejects_already_sent_without_force(monkeypatch):
     response = client.post(
         "/internal/send-initial-sms",
         headers={"authorization": "Bearer secret-token"},
-        json={"row": 14, "phone": "555-111-2222"},
+        json={"row": 14, "phone": "555-111-2214"},
     )
 
     assert response.status_code == 409
@@ -429,7 +429,7 @@ def test_internal_initial_sms_force_resend_allows_already_sent_row(monkeypatch):
         headers={"authorization": "Bearer secret-token"},
         json={
             "row": 14,
-            "phone": "555-111-2222",
+            "phone": "555-111-2214",
             "force_resend": True,
             "mark_codex_verified": True,
         },
@@ -452,7 +452,7 @@ def test_internal_initial_sms_returns_already_verified_without_sending(monkeypat
     response = client.post(
         "/internal/send-initial-sms",
         headers={"authorization": "Bearer secret-token"},
-        json={"row": 13, "phone": "555-111-2222"},
+        json={"row": 13, "phone": "555-111-2213"},
     )
 
     assert response.status_code == 200
@@ -470,7 +470,7 @@ def test_internal_initial_sms_sends_when_verified_but_not_marked_sent(monkeypatc
     response = client.post(
         "/internal/send-initial-sms",
         headers={"authorization": "Bearer secret-token"},
-        json={"row": 16, "phone": "555-111-2222"},
+        json={"row": 16, "phone": "555-111-2216"},
     )
 
     assert response.status_code == 200
@@ -479,6 +479,97 @@ def test_internal_initial_sms_sends_when_verified_but_not_marked_sent(monkeypatc
     assert sheet.rows[16][7] == "x"
     assert sheet.rows[16][22]
     assert sheet.rows[16][42] == "x"
+
+
+def test_internal_initial_sms_suppresses_duplicate_phone_elsewhere(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    prior = _row(
+        phone="555-222-1717",
+        sent="x",
+        init_ts="2026-07-02T18:01:56-04:00",
+        verified="x",
+        first="Julia",
+        address="116 Highland Ave",
+    )
+    prior[9] = "I do my own short sales."
+    prior[10] = "R"
+    sheet.rows[5] = prior
+    sheet.rows[17] = _row(
+        phone="555-222-1717",
+        sent="",
+        verified="",
+        first="Julia",
+        address="340 S 3rd Street #2",
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/internal/send-initial-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={
+            "row": 17,
+            "phone": "555-222-1717",
+            "first": "Julia",
+            "address": "340 S 3rd Street #2",
+            "force_resend": True,
+            "mark_codex_verified": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "already_contacted_phone"
+    assert body["existing_row"] == 5
+    assert sender.calls == []
+    assert sheet.rows[17][7] == ""
+    assert sheet.rows[17][22] == ""
+    assert sheet.rows[17][24] == "duplicate_phone_suppressed"
+    assert "Sheet1 row 5" in sheet.rows[17][25]
+    assert "status=R" in sheet.rows[17][25]
+    assert sheet.rows[17][42] == "x"
+
+
+def test_internal_initial_sms_ignores_later_duplicate_suppression_marker(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True, status_code=200, response_text="OK"),
+    )
+    later_duplicate = _row(
+        phone="555-111-2212",
+        sent="",
+        init_ts="",
+        verified="x",
+        first="Alex",
+        address="456 Later Duplicate",
+    )
+    later_duplicate[24] = "duplicate_phone_suppressed"
+    later_duplicate[25] = (
+        "2026-07-26T11:00:00-04:00: duplicate phone suppressed; "
+        "same phone exists on Sheet1 row 12"
+    )
+    sheet.rows[17] = later_duplicate
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/internal/send-initial-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={
+            "row": 12,
+            "phone": "555-111-2212",
+            "first": "Alex",
+            "address": "123 Main",
+            "mark_codex_verified": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "sent"
+    assert sender.calls[0]["row_idx"] == 12
+    assert sheet.rows[12][7] == "x"
+    assert sheet.rows[12][42] == "x"
 
 
 def test_internal_followup_sms_requires_token(monkeypatch):

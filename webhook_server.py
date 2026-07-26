@@ -2655,6 +2655,99 @@ def _mark_initial_sms_sent(
     return ts
 
 
+def _row_is_duplicate_phone_suppression(row: List[str]) -> bool:
+    return _row_value(row, 24).lower() == "duplicate_phone_suppressed" or (
+        "duplicate phone suppressed" in _row_value(row, 25).lower()
+    )
+
+
+def _row_has_prior_contact_context(row: List[str]) -> bool:
+    if any(
+        _row_value(row, idx)
+        for idx in (
+            7,   # H: initial_text_sent
+            9,   # J: response_status
+            10,  # K: mailshake_status
+            11,  # L: last outbound/message id
+            12,  # M: conversation_summary
+            13,  # N: ai_state
+            22,  # W: initial send timestamp
+        )
+    ):
+        return True
+    return _row_value(row, 42).lower() == "x" and not _row_is_duplicate_phone_suppression(row)
+
+
+def _find_duplicate_phone_row(
+    ws,
+    *,
+    phone_digits: str,
+    row_idx: int,
+) -> Optional[Dict[str, Any]]:
+    rows = _retry_gspread_call(
+        "read leads for duplicate phone guard",
+        lambda: ws.get_all_values(),
+    )
+    for existing_idx, existing_row in enumerate(rows, start=1):
+        if existing_idx < 2 or existing_idx == row_idx:
+            continue
+        existing_phone = fmt_phone(_row_value(existing_row, 2))
+        if not existing_phone or _digits_only(existing_phone) != phone_digits:
+            continue
+        has_contact_context = _row_has_prior_contact_context(existing_row)
+        if existing_idx < row_idx and (
+            has_contact_context or not _row_is_duplicate_phone_suppression(existing_row)
+        ):
+            return {
+                "row": existing_idx,
+                "values": existing_row,
+                "has_contact_context": has_contact_context,
+            }
+        if existing_idx > row_idx and has_contact_context:
+            return {
+                "row": existing_idx,
+                "values": existing_row,
+                "has_contact_context": has_contact_context,
+            }
+    return None
+
+
+def _mark_initial_sms_duplicate_suppressed(
+    ws,
+    *,
+    row_idx: int,
+    duplicate: Dict[str, Any],
+    mark_codex_verified: bool,
+) -> str:
+    ts = datetime.now(tz=TZ).isoformat()
+    duplicate_row = int(duplicate.get("row") or 0)
+    duplicate_values = duplicate.get("values") or []
+    duplicate_agent = _row_value(duplicate_values, 0)
+    duplicate_status = _row_value(duplicate_values, 10)
+    duplicate_response = _row_value(duplicate_values, 9)
+    note_parts = [
+        f"{ts}: duplicate phone suppressed; same phone exists on Sheet1 row {duplicate_row}",
+    ]
+    if duplicate_agent:
+        note_parts.append(f"agent={duplicate_agent}")
+    if duplicate_status:
+        note_parts.append(f"status={duplicate_status}")
+    if duplicate_response:
+        note_parts.append(f"response={duplicate_response}")
+    note = "; ".join(note_parts)[:500]
+    updates = [
+        {"range": f"Y{row_idx}", "values": [["duplicate_phone_suppressed"]]},
+        {"range": f"Z{row_idx}", "values": [[note]]},
+    ]
+    if mark_codex_verified:
+        updates.append({"range": f"AQ{row_idx}", "values": [["x"]]})
+    _retry_gspread_call(
+        "mark duplicate initial SMS suppression",
+        lambda: ws.batch_update(updates, value_input_option="RAW"),
+    )
+    return ts
+
+
 def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         row_idx = int(payload.get("row"))
@@ -2674,6 +2767,7 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="row_not_found")
 
     force_resend = bool(payload.get("force_resend") or payload.get("force"))
+    mark_codex_verified = payload.get("mark_codex_verified", True) is not False
     initial_marked = _row_value(row, 7).lower() == "x"
     initial_ts = _row_value(row, 22).strip()
     if _row_value(row, 42).lower() == "x" and initial_marked and initial_ts and not force_resend:
@@ -2684,6 +2778,31 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail="row_phone_missing")
     if _digits_only(current_phone) != digits:
         raise HTTPException(status_code=409, detail="row_phone_mismatch")
+
+    duplicate = _find_duplicate_phone_row(ws, phone_digits=digits, row_idx=row_idx)
+    if duplicate:
+        suppressed_at = _mark_initial_sms_duplicate_suppressed(
+            ws,
+            row_idx=row_idx,
+            duplicate=duplicate,
+            mark_codex_verified=mark_codex_verified,
+        )
+        logger.info(
+            "INTERNAL_INITIAL_SMS_DUPLICATE_PHONE_SUPPRESSED row=%s phone=%s existing_row=%s existing_status=%s codex_verified=%s",
+            row_idx,
+            digits,
+            duplicate["row"],
+            _row_value(duplicate.get("values") or [], 10) or "<blank>",
+            mark_codex_verified,
+        )
+        return {
+            "status": "already_contacted_phone",
+            "row": row_idx,
+            "phone": digits,
+            "existing_row": duplicate["row"],
+            "suppressed_at": suppressed_at,
+            "codex_verified": mark_codex_verified,
+        }
 
     if initial_marked and not force_resend:
         raise HTTPException(status_code=409, detail="initial_sms_already_marked")
@@ -2726,7 +2845,6 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     msg_id = str(payload.get("message_id") or "")
-    mark_codex_verified = payload.get("mark_codex_verified", True) is not False
     sent_at = _mark_initial_sms_sent(
         ws,
         row_idx=row_idx,
