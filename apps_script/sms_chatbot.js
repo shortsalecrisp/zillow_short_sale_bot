@@ -325,7 +325,15 @@ function handleIncomingSms_(body) {
   const currentRowObj = refreshedRowInfo ? refreshedRowInfo.obj : rowObj;
   const currentCount = Number(currentRowObj[HEADERS.auto_reply_count] || 0);
   const capReached = currentCount >= 4;
+  const hasFeeQuestion = isPaymentOrFeeQuestionSignal_(inboundText);
   const hasExperienceQuestion = isExperienceTrackRecordQuestionSignal_(inboundText);
+  const hasServiceQuestion = isServiceQuestionSignal_(inboundText);
+  const hasUnsupportedStatsQuestion = isStatsOrNumericClaimQuestion_(inboundText);
+  const hasQuestionThatOutranksCloseout =
+    hasFeeQuestion ||
+    hasExperienceQuestion ||
+    hasServiceQuestion ||
+    hasUnsupportedStatsQuestion;
 
   if (isOptOutSignal_(inboundText)) {
     updateRowFields_(sheet, row, {
@@ -516,7 +524,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isNotShortSaleSignal_(inboundText)) {
+  if (!hasQuestionThatOutranksCloseout && isNotShortSaleSignal_(inboundText)) {
     const replyText = "Ahh, ok... thanks for letting me know. Good luck with your listing!";
 
     updateRowFields_(sheet, row, {
@@ -540,7 +548,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isSelfHandlingFutureHelpSignal_(inboundText)) {
+  if (!hasQuestionThatOutranksCloseout && isSelfHandlingFutureHelpSignal_(inboundText)) {
     const replyText = buildFutureKeepInMindServiceReply_();
 
     updateRowFields_(sheet, row, {
@@ -614,7 +622,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasExperienceQuestion && isAlreadyHandledSignal_(inboundText)) {
+  if (!hasQuestionThatOutranksCloseout && isAlreadyHandledSignal_(inboundText)) {
     const replyText = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -638,7 +646,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasExperienceQuestion && isClearNoSignal_(inboundText)) {
+  if (!hasQuestionThatOutranksCloseout && isClearNoSignal_(inboundText)) {
     const closeoutReply = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -1166,8 +1174,24 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
 function applyFastRules_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const lastOutbound = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || ""));
+  const hasFeeQuestion = isPaymentOrFeeQuestionSignal_(t);
+  const hasExperienceQuestion = isExperienceTrackRecordQuestionSignal_(t);
+  const hasServiceQuestion = isServiceQuestionSignal_(t);
 
-  if (isExperienceTrackRecordQuestionSignal_(t)) {
+  if (hasExperienceQuestion && (hasFeeQuestion || hasServiceQuestion)) {
+    return {
+      matched: true,
+      reply_text: buildCombinedExperienceFeeServiceReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Answered combined experience, service, and fee questions"
+    };
+  }
+
+  if (hasExperienceQuestion) {
     return {
       matched: true,
       reply_text: buildExperienceTrackRecordReply_(),
@@ -1406,35 +1430,20 @@ function applyFastRules_(text, rowObj) {
     }
   }
 
-  const helpQuestionPatterns = [
-    /\bhow do you help\b/,
-    /\bhow can you help\b/,
-    /\bwhat do you do\b/,
-    /\bwhat exactly do you do\b/,
-    /\bwhat do you handle\b/,
-    /\bhow does this work\b/,
-    /\bhow does that work\b/,
-    /\bwhat does that look like\b/,
-    /\bwhat are you offering\b/,
-    /\bwhat kind of help\b/
-  ];
-
-  for (const pattern of helpQuestionPatterns) {
-    if (pattern.test(t)) {
-      return {
-        matched: true,
-        reply_text: buildHowWeHelpReply_(),
-        lead_status: "Y",
-        conversation_done: false,
-        handoff_needed: false,
-        needs_review: false,
-        block_reply: false,
-        reason: "Asked how Crisp helps or what Yoni does"
-      };
-    }
+  if (hasServiceQuestion) {
+    return {
+      matched: true,
+      reply_text: buildHowWeHelpReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Asked how Crisp helps or what Yoni does"
+    };
   }
 
-  if (isPaymentOrFeeQuestionSignal_(t)) {
+  if (hasFeeQuestion) {
     return buildFeeQuestionDecision_(rowObj, lastOutbound);
   }
 
@@ -1978,8 +1987,34 @@ function isExperienceTrackRecordQuestionSignal_(text) {
   return patterns.some(function(pattern) { return pattern.test(t); });
 }
 
+function isServiceQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+
+  const patterns = [
+    /\bhow do you help\b/,
+    /\bhow can you help\b/,
+    /\bwhat do you do\b/,
+    /\bwhat exactly do you do\b/,
+    /\bwhat do you handle\b/,
+    /\bwhat services? do you (?:offer|provide)\b/,
+    /\bwhat does (?:crisp|your company) do\b/,
+    /\bhow does this work\b/,
+    /\bhow does that work\b/,
+    /\bwhat does that look like\b/,
+    /\bwhat are you offering\b/,
+    /\bwhat kind of help\b/
+  ];
+
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
 function buildExperienceTrackRecordReply_() {
   return "I've been doing this for over 15 years, and this is really all I do - help agents and homeowners with the short sale process. I'm confident I can help you and your clients with these deals and get them to closing as quickly as possible. Do you have some time today for a quick call so I can answer any questions you have?";
+}
+
+function buildCombinedExperienceFeeServiceReply_() {
+  return "I've been handling short sales for over 15 years, and this is all I do. I handle the lender paperwork, calls, follow-up, and approval process. There's no cost to you or the seller; I charge the buyer a flat fee at closing, only if the deal closes. Do you have time today for a quick call so I can answer any other questions?";
 }
 
 function isCurrentTextingNumberQuestionSignal_(text) {
@@ -3498,11 +3533,26 @@ function testApprovedLeadIntelligenceRules_() {
   if (!isExperienceTrackRecordQuestionSignal_(experienceQuestion) ||
       isStatsOrNumericClaimQuestion_(experienceQuestion) ||
       !experienceDecision.matched ||
-      experienceDecision.reply_text !== buildExperienceTrackRecordReply_() ||
+      experienceDecision.reply_text !== buildCombinedExperienceFeeServiceReply_() ||
       experienceDecision.lead_status !== "Y" ||
       experienceDecision.conversation_done ||
       experienceDecision.handoff_needed) {
     throw new Error("Experience and track-record reply regression: " + JSON.stringify(experienceDecision));
+  }
+  if (experienceDecision.reply_text.indexOf("over 15 years") === -1 ||
+      experienceDecision.reply_text.indexOf("lender paperwork") === -1 ||
+      experienceDecision.reply_text.indexOf("flat fee at closing") === -1) {
+    throw new Error("Combined experience, service, and fee reply must answer every direct question");
+  }
+  const mixedServiceQuestion = "No thanks, I handle these myself. What exactly do you do?";
+  const mixedServiceDecision = applyFastRules_(mixedServiceQuestion, {});
+  if (!isServiceQuestionSignal_(mixedServiceQuestion) ||
+      !mixedServiceDecision.matched ||
+      mixedServiceDecision.lead_status !== "Y" ||
+      mixedServiceDecision.conversation_done ||
+      mixedServiceDecision.handoff_needed ||
+      mixedServiceDecision.reply_text !== buildHowWeHelpReply_()) {
+    throw new Error("Service question must outrank rejection wording: " + JSON.stringify(mixedServiceDecision));
   }
   if (isExperienceTrackRecordQuestionSignal_("What is your success rate and average closing timeline?") ||
       !isStatsOrNumericClaimQuestion_("What is your success rate and average closing timeline?")) {
