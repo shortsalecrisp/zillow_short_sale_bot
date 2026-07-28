@@ -54,6 +54,7 @@ test("agent sync blocks ambiguous okay-style replies from the transfer-check edg
   const script = readSyncScript();
 
   assert.match(script, /clearly and unambiguously wants to talk to Yoni right now/);
+  assert.match(script, /plain yes\/sure\/ok after the value-pitch line/);
   assert.match(script, /vague or overlapped replies like okay okay/);
   assert.match(script, /caller is busy, in a meeting, wants later\/tomorrow, will call back/);
   assert.match(script, /clarify callback versus trying Yoni now/);

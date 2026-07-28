@@ -32,6 +32,26 @@ test("transfer consent rejects overlapped okay plus meeting/callback-later signa
   assert.equal(isMisfiredLiveTransferRequest(transcript, summary), true);
 });
 
+test("transfer consent rejects plain yes after ambiguous quick-call offer", async () => {
+  const { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } = await import(
+    "../src/lib/elevenLabsTransferConsent"
+  );
+
+  const transcript = [
+    {
+      role: "agent",
+      message:
+        "Got it. We can take the lender paperwork and follow-up off your plate at no cost to you or the seller. Worth a quick call with Yoni?",
+    },
+    { role: "user", message: "Yeah, sure." },
+    { role: "agent", message: "Ok, hold on, let me see if he's available one second." },
+    { role: "agent", tool_calls: [{ tool_name: "live_transfer_requested" }] },
+  ];
+
+  assert.equal(hasClearLiveTransferConsent(transcript), false);
+  assert.equal(isMisfiredLiveTransferRequest(transcript), true);
+});
+
 test("transfer consent accepts a clear yes after a Yoni-now offer", async () => {
   const { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } = await import(
     "../src/lib/elevenLabsTransferConsent"

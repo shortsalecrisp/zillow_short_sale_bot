@@ -36,11 +36,14 @@ function latestMessageBefore(
   return "";
 }
 
-function assistantOfferedLiveTransfer(message: string): boolean {
+function assistantOfferedImmediateLiveTransfer(message: string): boolean {
   const text = normalizeText(message);
   return (
     /\b(?:yoni|him)\b/.test(text) &&
-    /\b(?:available|hop on|get (?:him|yoni) on|on the phone|talk|explain|connect|try|see if)\b/.test(text)
+    (/\b(?:right now|now|on the phone|hop on|hop on with us|bring (?:him|yoni) in|connect|transfer|patch)\b/.test(
+      text,
+    ) ||
+      /\b(?:available|free)\s+(?:right\s+)?now\b/.test(text))
   );
 }
 
@@ -119,7 +122,7 @@ export function hasClearLiveTransferConsent(
   }
 
   const latestAssistantMessage = latestMessageBefore(transcript, transferIndex, (item) => isAssistantRole(item.role));
-  return assistantOfferedLiveTransfer(latestAssistantMessage) && isSimplePositiveReply(latestUserMessage);
+  return assistantOfferedImmediateLiveTransfer(latestAssistantMessage) && isSimplePositiveReply(latestUserMessage);
 }
 
 export function isMisfiredLiveTransferRequest(

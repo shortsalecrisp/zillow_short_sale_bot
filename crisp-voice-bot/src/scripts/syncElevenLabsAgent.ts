@@ -136,7 +136,7 @@ function buildWarmTransferWorkflow(options: {
         forward_condition: {
           type: "llm",
           condition:
-            "Route to transfer_check only when the caller clearly and unambiguously wants to talk to Yoni right now, asks if he is available right now, or agrees to trying him now after being offered a live Yoni handoff. Do not route on vague or overlapped replies like okay okay, yes yes, I so okay, broken English fragments, background speech, or any reply that also says the caller is busy, in a meeting, wants later/tomorrow, will call back, or did not understand. If unclear, stay in the main conversation and clarify callback versus trying Yoni now. Do not route when there is already a fresh live_transfer_requested tool result waiting to be handled for this same handoff moment.",
+            "Route to transfer_check only when the caller clearly and unambiguously wants to talk to Yoni right now, asks if he is available right now, or agrees to trying him now after being offered a live Yoni handoff. Do not route on a plain yes/sure/ok after the value-pitch line 'Worth a quick call with Yoni?'; that means interest only and must first be clarified as trying Yoni now versus scheduling a callback. Do not route on vague or overlapped replies like okay okay, yes yes, I so okay, broken English fragments, background speech, or any reply that also says the caller is busy, in a meeting, wants later/tomorrow, will call back, or did not understand. If unclear, stay in the main conversation and clarify callback versus trying Yoni now. Do not route when there is already a fresh live_transfer_requested tool result waiting to be handled for this same handoff moment.",
         },
       },
       transfer_check_to_patch: {

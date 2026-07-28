@@ -123,6 +123,49 @@ const parvanehLiveSummaryGatekeeperHoldConversation = {
   ],
 } as const;
 
+const lorettaMisfiredTransferConversation = {
+  status: "done",
+  metadata: {
+    termination_reason: "Client disconnected: 1000",
+    call_duration_secs: 69,
+  },
+  analysis: {
+    transcript_summary:
+      "The agent agreed to a call with Yoni Kutler, a short sale specialist, but the call ended during the attempted transfer.",
+  },
+  transcript: [
+    {
+      role: "agent",
+      message:
+        "Hi Loretta, Maya calling for Yoni Kutler about your short sale listing. Are you handling the bank side yourself?",
+    },
+    { role: "user", message: "Um, no, I'm not. Um, who is this?" },
+    {
+      role: "agent",
+      message:
+        "I'm with Crisp Short Sales, working with Yoni Kutler, our short sale specialist. We help agents with short sale bank paperwork and lender calls. Are you handling the bank side yourself?",
+    },
+    { role: "user", message: "No, we're not." },
+    {
+      role: "agent",
+      message:
+        "Got it. We can take the lender paperwork and follow-up off your plate at no cost to you or the seller. Worth a quick call with Yoni?",
+    },
+    { role: "user", message: "Yeah, sure." },
+    { role: "agent", message: "Ok, hold on, let me see if he's available one second." },
+    { role: "agent", tool_calls: [{ tool_name: "live_transfer_requested" }] },
+    {
+      role: "agent",
+      tool_results: [
+        {
+          tool_name: "live_transfer_requested",
+          result_value: "Tool execution was abandoned because the call ended before the tool could complete",
+        },
+      ],
+    },
+  ],
+} as const;
+
 const providerQuotaFailureConversation = {
   status: "failed",
   metadata: {
@@ -217,6 +260,18 @@ test("post-call fallback classifies live gatekeeper hold summaries as agent unav
 
   assert.equal(shouldTreatAsAgentUnavailable(parvanehLiveSummaryGatekeeperHoldConversation), true);
   assert.equal(shouldTreatAsAgentHungUp(parvanehLiveSummaryGatekeeperHoldConversation), false);
+});
+
+test("post-call fallback keeps ambiguous quick-call transfer misfires as interested callbacks", async () => {
+  const {
+    shouldTreatAsAgentHungUp,
+    shouldTreatAsCallback,
+    shouldTreatAsMisfiredTransferInterestedCallback,
+  } = await import("../src/lib/elevenLabsPostCall");
+
+  assert.equal(shouldTreatAsCallback(lorettaMisfiredTransferConversation), false);
+  assert.equal(shouldTreatAsMisfiredTransferInterestedCallback(lorettaMisfiredTransferConversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(lorettaMisfiredTransferConversation), false);
 });
 
 test("post-call fallback treats screening recordings and canned ASAP fragments as unavailable", async () => {

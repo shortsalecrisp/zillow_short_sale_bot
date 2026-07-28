@@ -7,7 +7,7 @@ import { sendCallbackEmail } from "./sendCallbackEmail";
 import { sendCallTranscriptEmail } from "./sendCallTranscriptEmail";
 import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContext";
 import { buildVoicePerformanceLog } from "./elevenLabsPerformanceLog";
-import { hasClearLiveTransferConsent } from "./elevenLabsTransferConsent";
+import { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } from "./elevenLabsTransferConsent";
 import { looksLikeDoNotCall } from "./elevenLabsDoNotCall";
 import { isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
@@ -162,6 +162,41 @@ function hasSuccessfulTransfer(conversation: ElevenLabsConversation): boolean {
 
 function hasLiveTransferRequest(conversation: ElevenLabsConversation): boolean {
   return hasToolCall(conversation, "live_transfer_requested");
+}
+
+function getToolCallIndex(conversation: ElevenLabsConversation, toolName: string): number {
+  return (conversation.transcript ?? []).findIndex((item) =>
+    (item.tool_calls ?? []).some((toolCall) => toolCall.tool_name === toolName || toolCall.name === toolName),
+  );
+}
+
+function latestMessageBeforeTool(
+  conversation: ElevenLabsConversation,
+  toolName: string,
+  role: "agent" | "assistant" | "user",
+): string {
+  const toolIndex = getToolCallIndex(conversation, toolName);
+  if (toolIndex === -1) {
+    return "";
+  }
+
+  for (let index = toolIndex - 1; index >= 0; index -= 1) {
+    const item = conversation.transcript?.[index];
+    if (item?.role === role && typeof item.message === "string" && item.message.trim() !== "") {
+      return item.message.trim();
+    }
+
+    if (
+      role === "assistant" &&
+      item?.role === "agent" &&
+      typeof item.message === "string" &&
+      item.message.trim() !== ""
+    ) {
+      return item.message.trim();
+    }
+  }
+
+  return "";
 }
 
 export function buildVoiceResponseStatus(callResult: string, callbackTime?: string, assistantName = "Emmy"): string {
@@ -387,6 +422,73 @@ function isLiveTransferFallback(conversation: ElevenLabsConversation): boolean {
     text.includes("was not available") ||
     text.includes("did not answer")
   );
+}
+
+function isSimplePositiveResponse(value: string): boolean {
+  const text = normalizeText(value)
+    .replace(/[.!?]/g, "")
+    .replace(/,+/g, " ")
+    .trim();
+
+  return (
+    /^(?:yes|yeah|yep|sure|ok|okay|sounds good|that works|that's fine|fine|alright|all right)$/.test(text) ||
+    /^(?:yes|yeah|yep|sure|ok|okay),?\s+(?:sure|that works|that's fine|sounds good|go ahead)$/.test(text)
+  );
+}
+
+function assistantOfferedAmbiguousYoniCall(value: string): boolean {
+  const text = normalizeText(value);
+  if (!/\b(?:yoni|him)\b/.test(text)) {
+    return false;
+  }
+
+  const isClearlyImmediate =
+    /\b(?:right now|on the phone now|hop on|hop on with us|bring (?:him|yoni) in|connect|transfer|patch)\b/.test(
+      text,
+    ) || /\b(?:available|free)\s+(?:right\s+)?now\b/.test(text);
+
+  if (isClearlyImmediate) {
+    return false;
+  }
+
+  return (
+    text.includes("worth a quick call") ||
+    text.includes("quick call with yoni") ||
+    text.includes("call with yoni") ||
+    text.includes("talk with yoni") ||
+    text.includes("talk to yoni")
+  );
+}
+
+export function shouldTreatAsMisfiredTransferInterestedCallback(conversation: ElevenLabsConversation): boolean {
+  if (
+    !isMisfiredLiveTransferRequest(conversation.transcript ?? [], conversation.analysis?.transcript_summary ?? "") ||
+    shouldTreatAsRecordingArtifact(conversation) ||
+    shouldTreatAsDoNotCall(conversation) ||
+    shouldTreatAsVoicemail(conversation) ||
+    shouldTreatAsNoAnswer(conversation) ||
+    shouldTreatAsNotShortSale(conversation) ||
+    shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
+    shouldTreatAsNotInterested(conversation)
+  ) {
+    return false;
+  }
+
+  const summary = normalizeText(conversation.analysis?.transcript_summary ?? "");
+  if (
+    summary.includes("agreed to a call with yoni") ||
+    summary.includes("agreed to talk to yoni") ||
+    summary.includes("willing to talk to yoni") ||
+    summary.includes("wanted to talk to yoni") ||
+    summary.includes("interested in talking to yoni")
+  ) {
+    return true;
+  }
+
+  const latestUserMessage = latestMessageBeforeTool(conversation, "live_transfer_requested", "user");
+  const latestAssistantMessage = latestMessageBeforeTool(conversation, "live_transfer_requested", "assistant");
+
+  return isSimplePositiveResponse(latestUserMessage) && assistantOfferedAmbiguousYoniCall(latestAssistantMessage);
 }
 
 export function shouldTreatAsNotShortSale(conversation: ElevenLabsConversation): boolean {
@@ -730,6 +832,7 @@ export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): 
     shouldTreatAsNoAnswer(conversation) ||
     shouldTreatAsCallback(conversation) ||
     shouldTreatAsAgentUnavailable(conversation) ||
+    shouldTreatAsMisfiredTransferInterestedCallback(conversation) ||
     shouldTreatAsNotShortSale(conversation) ||
     shouldTreatAsNotInterested(conversation) ||
     hasToolCall(conversation, "callback_requested") ||
@@ -1213,6 +1316,58 @@ async function processPostCallOutcomeForConversation(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       summary,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsMisfiredTransferInterestedCallback(conversation)) {
+    const callbackTime = extractCallbackTime(conversation) ?? "unspecified";
+    const outcome = buildCallbackResponseStatus(callbackTime, true);
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "callback_requested",
+      responseStatus: outcome,
+      leadStatusCode: "Y",
+      callbackRequested: "yes",
+      callbackTime,
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(
+        outcome,
+        "Misfired live transfer: caller showed interest after an ambiguous Yoni quick-call offer, but did not clearly request an immediate transfer.",
+      ),
+    });
+
+    await sendCallbackEmail({
+      agentName: metadata.fullName,
+      phone: metadata.dialedPhone,
+      email: metadata.email,
+      listingAddress: metadata.listingAddress,
+      rowNumber: metadata.rowNumber,
+      action: "Call this interested lead back",
+      callbackTime,
+      conversationDescription: summary,
+      conversationTranscript: fullTranscript,
+      details:
+        "The caller showed interest, but Maya started a live transfer without clear consent that the caller wanted Yoni immediately. Treat this as an interested callback, not a hangup or a completed transfer request.",
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback converted misfired live transfer into interested callback", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callbackTime,
     });
     return true;
   }

@@ -295,6 +295,10 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   assert.match(selfHandlingBranch, /lender paperwork and follow-up/);
   assert.match(selfHandlingBranch, /no cost to you or the seller/);
   assert.match(selfHandlingBranch, /Worth a quick call with Yoni/);
+  assert.match(selfHandlingBranch, /do not start a transfer yet/i);
+  assert.match(selfHandlingBranch, /get him on the phone now, or should he call you back/i);
+  assert.match(selfHandlingBranch, /interest only/i);
+  assert.match(selfHandlingBranch, /What time should he call you\?/);
 });
 
 test("prompt keeps self-handling uncertainty out of the hard-no examples", () => {
@@ -335,6 +339,8 @@ test("prompt does not treat overlapped okay or busy later/callback language as l
   );
 
   assert.match(transferRule, /clearly and unambiguously agrees/);
+  assert.match(transferRule, /Worth a quick call with Yoni/);
+  assert.match(transferRule, /not a clear live-transfer yes/i);
   assert.match(transferRule, /Do not treat a vague or overlapped "okay okay"/);
   assert.match(transferRule, /"I, so\.\.\. okay"/);
   assert.match(transferRule, /in a meeting/);
