@@ -539,6 +539,14 @@ function normalizePendingSmsReply_(value) {
     .toLowerCase();
 }
 
+function pendingSmsReplyMatchesFormDecoded_(pendingValue, receiptValue) {
+  var pendingReply = normalizePendingSmsReply_(pendingValue);
+  var receiptReply = normalizePendingSmsReply_(receiptValue);
+  if (pendingReply === receiptReply) return true;
+  if (String(pendingValue || "").indexOf("+") === -1) return false;
+  return normalizePendingSmsReply_(String(pendingValue || "").replace(/\+/g, " ")) === receiptReply;
+}
+
 function findPendingSmsRow_(rows, body) {
   var requestId = String(body && (body.request_id || body.sms_request_id) || "").trim();
   var messageId = String(body && body.message_id || "").trim();
@@ -564,7 +572,22 @@ function findPendingSmsRow_(rows, body) {
       if (!isReceiptableStatus_(rows[i])) continue;
       var hasRequestedId = (requestId && String(rows[i][2] || "") === requestId) ||
         (messageId && String(rows[i][3] || "") === messageId);
-      if (hasRequestedId) return identifiersMatch_(rows[i]) ? i : -2;
+      if (!hasRequestedId) continue;
+      if (identifiersMatch_(rows[i])) return i;
+
+      // Form decoding can turn a literal plus in Tasker reply text into spaces.
+      // Accept only that transform when all immutable identifiers match this row.
+      if (requestId &&
+          messageId &&
+          phone &&
+          replyText &&
+          String(rows[i][2] || "") === requestId &&
+          String(rows[i][3] || "") === messageId &&
+          normalizePhone_(rows[i][4]) === phone &&
+          pendingSmsReplyMatchesFormDecoded_(rows[i][5], replyText)) {
+        return i;
+      }
+      return -2;
     }
     return -1;
   }
