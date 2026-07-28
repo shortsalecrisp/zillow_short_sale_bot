@@ -111,7 +111,7 @@ test("prompt treats not-a-short-sale objections as a clear no", () => {
   assert.match(notShortSaleBranch, /`not_short_sale`/);
 });
 
-test("prompt turns human-only objections into direct Yoni callback rescue", () => {
+test("prompt turns human-only objections into immediate Yoni transfer rescue", () => {
   const prompt = readPrompt();
   const humanRescueBranch = extractSection(
     prompt,
@@ -121,13 +121,28 @@ test("prompt turns human-only objections into direct Yoni callback rescue", () =
 
   assert.match(
     humanRescueBranch,
-    /Totally understand\. Yoni is the person who handles these\. Do you want him to call you directly\?/,
+    /Totally fair\. I am an AI calling assistant for Crisp Short Sales\./,
   );
-  assert.match(humanRescueBranch, /call `callback_requested` with `callbackTime` set to `asap`/);
-  assert.match(humanRescueBranch, /handoff-ready interested callback/);
-  assert.match(humanRescueBranch, /direct human callback/);
-  assert.match(humanRescueBranch, /Ok, I'll have Yoni call you directly\. Thanks\./);
-  assert.match(humanRescueBranch, /immediately call `end_call`/);
+  assert.match(humanRescueBranch, /Yoni is our live short sale specialist\./);
+  assert.match(humanRescueBranch, /I can get him on the phone right now\./);
+  assert.match(humanRescueBranch, /Would you like me to bring him in to the call\?/);
+  assert.match(humanRescueBranch, /move directly into the live transfer flow/);
+  assert.doesNotMatch(humanRescueBranch, /callback_requested/);
+});
+
+test("prompt answers AI questions truthfully and offers immediate Yoni transfer", () => {
+  const prompt = readPrompt();
+  const aiBranch = extractSection(
+    prompt,
+    "If they ask whether you are AI:",
+    "If they object to automation",
+  );
+
+  assert.match(aiBranch, /Yes, I am an AI calling assistant for Crisp Short Sales\./);
+  assert.match(aiBranch, /Yoni is our live short sale specialist\./);
+  assert.match(aiBranch, /He can answer any questions you have/);
+  assert.match(aiBranch, /I can get him on the phone right now/);
+  assert.match(aiBranch, /Would you like me to bring him in to the call\?/);
 });
 
 test("prompt redirects unknown affiliation questions back to the bank-side help offer", () => {
@@ -274,6 +289,7 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   assert.match(selfHandlingBranch, /handling it themselves/i);
   assert.match(selfHandlingBranch, /figuring it out as I go/i);
   assert.match(selfHandlingBranch, /plain yes/i);
+  assert.match(selfHandlingBranch, /Do not repeat the bank-side question/);
   assert.match(selfHandlingBranch, /acknowledge that first/i);
   assert.match(selfHandlingBranch, /Do not treat this as a hard no/);
   assert.match(selfHandlingBranch, /lender paperwork and follow-up/);
