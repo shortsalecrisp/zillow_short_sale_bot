@@ -162,6 +162,14 @@ services:
         value: idx_broker_pages,idx_broker_remarks
       - key: FREE_SOURCE_PILOT_DATE_RESTRICT
         value: w1
+      - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_ENABLED
+        value: "true"
+      - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_START_DATE
+        value: "2026-07-29"
+      - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_DAYS
+        value: "7"
+      - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_MAX_URLS
+        value: "50"
       - key: FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK
         value: "false"
       - key: FREE_SOURCE_PILOT_PROMOTION_ENABLED

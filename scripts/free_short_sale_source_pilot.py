@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -166,6 +167,22 @@ DEFAULT_ROTATION_ANCHOR_DATE = "2026-07-06"
 ROTATION_TZ = os.getenv("FREE_SOURCE_PILOT_ROTATION_TZ", "America/New_York")
 DAILY_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT", "w1").strip()
 ROTATING_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_ROTATING_DATE_RESTRICT", "w1").strip()
+DIRECT_MONITOR_ENABLED = os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_ENABLED", "true").lower() == "true"
+DIRECT_MONITOR_START_DATE = os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_START_DATE", "2026-07-29").strip()
+DIRECT_MONITOR_DAYS = max(1, int(os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_DAYS", "7")))
+DIRECT_MONITOR_MAX_URLS = min(
+    50,
+    max(1, int(os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_MAX_URLS", "50"))),
+)
+DIRECT_MONITOR_FEEDS = {
+    "momentum": (
+        "https://movewithmomentum.com/sitemap-idx-stellar-1.xml",
+        "https://movewithmomentum.com/sitemap-idx-floridakeys.xml",
+    ),
+    "coldwell": (
+        "https://www.coldwellbanker.com/xml-sitemap/states/sitemapindex-listings-new-day.xml",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -345,6 +362,7 @@ NON_CURRENT_STATUS_RE = re.compile(
 
 DISQUALIFY_PATTERNS = [
     re.compile(r"\bis\s+short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
+    re.compile(r"\bshort\s+sale\s+status\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s*\??\s*[:=]\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\b(?:potential\s+)?short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\b(?:financial\s+status|contract\s+information|special\s+listing\s+conditions?)\s*[-:]?\s*(?:potential\s+)?short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
@@ -471,6 +489,21 @@ PROMOTION_AGENT_STREET_TOKENS = {
 TRUSTED_AGENT_LABEL_CONTEXT_RE = re.compile(
     r"\b(?:listing\s+agent(?:s|\(s\))?|list\s+agent|listed\s+by)\s*[:\-]?\s*(.{2,180})",
     re.IGNORECASE,
+)
+SHADOW_AGENT_LABEL_PATTERNS = (
+    (
+        "listing_agent",
+        re.compile(r"\b(?:listing\s+agent(?:s|\(s\))?|list\s+agent)\s*[:\-]?\s*(.{2,180})", re.I),
+    ),
+    ("listed_by", re.compile(r"\blisted\s+by\s*[:\-]?\s*(.{2,180})", re.I)),
+    (
+        "listing_courtesy",
+        re.compile(r"\b(?:listing\s+courtesy\s+of|courtesy\s+of)\s*[:\-]?\s*(.{2,180})", re.I),
+    ),
+    (
+        "listing_provided_by",
+        re.compile(r"\blisting\s+provided\s+by\s*[:\-]?\s*(.{2,180})", re.I),
+    ),
 )
 STREET_SUFFIX_RE = (
     r"(?:avenue|ave|street|st|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|mews|"
@@ -1191,6 +1224,15 @@ def looks_like_listing_address(address: str) -> bool:
     compact = normalize_space(address)
     if is_undisclosed_address(compact) or not compact or not re.match(r"^\d{1,6}\b", compact):
         return False
+    street_text = re.sub(r"^\d{1,6}\s*", "", compact).strip(" ,")
+    if not re.search(r"[A-Za-z]", street_text):
+        return False
+    if "," in compact and not re.search(
+        r",\s*(?:#|unit|apt|apartment|suite|ste)\s*[-A-Za-z0-9]+\s*$",
+        compact,
+        re.I,
+    ):
+        return False
     return not re.search(
         r"\b(?:blog|buying|foreclosure|short\s+sale|homes?\s+for\s+sale|listings?|page|search|vintage|fixer[-\s]?upper|viewing\s+listing|mls\s*#|for\s+\$)\b",
         compact,
@@ -1276,6 +1318,48 @@ def extract_listing_agent_fields(text: str) -> dict[str, str]:
             details["email"] = email_match.group(0).lower()
             details["email_source"] = "listing_agent_label"
         return details
+    return {}
+
+
+def shadow_listing_agent_candidate(candidate: Candidate) -> dict[str, str]:
+    """Extract a high-confidence agent candidate without changing live fields."""
+    for label, pattern in SHADOW_AGENT_LABEL_PATTERNS:
+        for match in pattern.finditer(candidate.text):
+            segment = re.split(
+                r"(?i)\b(?:status|remarks|public\s+remarks|description|property\s+description|"
+                r"special\s+listing\s+conditions?|listing\s+office|office|contact\s+phone)\b|"
+                r"[|•;\n\r]",
+                match.group(1),
+                maxsplit=1,
+            )[0]
+            name = clean_agent_name(segment)
+            if not name:
+                continue
+            probe = Candidate(
+                source=candidate.source,
+                query=candidate.query,
+                url=candidate.url,
+                title=candidate.title,
+                text=candidate.text,
+                fields={
+                    "agent_name": name,
+                    "agent_name_source": "listing_agent_label",
+                    "listing_address": candidate.fields.get("listing_address", ""),
+                    "city": candidate.fields.get("city", ""),
+                    "state": candidate.fields.get("state", ""),
+                    "broker_name": candidate.fields.get("broker_name", ""),
+                },
+            )
+            safe, reason = agent_name_promotion_safety(probe)
+            if safe:
+                return {"agent_name": name, "label": label}
+            log_event(
+                "pilot_agent_shadow_rejected",
+                url=candidate.url,
+                label=label,
+                agent=name,
+                reason=reason,
+            )
     return {}
 
 
@@ -1601,6 +1685,231 @@ def infer_fields(result: SearchResult, markup: str) -> Candidate:
     candidate = Candidate(result.source, result.query, result.url, result.title, combined, fields)
     sanitize_candidate_identity(candidate)
     return candidate
+
+
+def direct_monitor_active(run_date: dt.date) -> bool:
+    if not DIRECT_MONITOR_ENABLED:
+        return False
+    try:
+        start = dt.date.fromisoformat(DIRECT_MONITOR_START_DATE)
+    except ValueError:
+        return False
+    return start <= run_date < start + dt.timedelta(days=DIRECT_MONITOR_DAYS)
+
+
+def fetch_public_feed(url: str, timeout: int = 20, max_bytes: int = 6_000_000) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read(max_bytes)
+        encoding = resp.headers.get_content_charset() or "utf-8"
+    return raw.decode(encoding, errors="ignore")
+
+
+def sitemap_entries(markup: str) -> list[tuple[str, str]]:
+    root = ET.fromstring(markup)
+    entries: list[tuple[str, str]] = []
+    for item in list(root):
+        loc = ""
+        lastmod = ""
+        for child in list(item):
+            tag = child.tag.rsplit("}", 1)[-1].lower()
+            if tag == "loc":
+                loc = normalize_space(child.text or "")
+            elif tag == "lastmod":
+                lastmod = normalize_space(child.text or "")
+        if loc.startswith("http"):
+            entries.append((loc, lastmod))
+    return entries
+
+
+def is_direct_listing_url(family: str, url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path.rstrip("/").lower()
+    if family == "momentum":
+        return bool(re.search(r"^/listings/idx(?:-[a-z0-9]+)?/\d", path))
+    if family == "coldwell":
+        return "/lid-" in path
+    return False
+
+
+def collect_direct_monitor_urls(
+    family: str,
+    feeds: tuple[str, ...],
+    *,
+    run_date: dt.date,
+    limit: int,
+) -> list[str]:
+    if limit <= 0:
+        return []
+    per_feed = max(1, (limit + len(feeds) - 1) // len(feeds))
+    try:
+        start = dt.date.fromisoformat(DIRECT_MONITOR_START_DATE)
+        day_offset = max(0, (run_date - start).days)
+    except ValueError:
+        day_offset = 0
+    selected: list[str] = []
+    seen: set[str] = set()
+    for feed in feeds:
+        documents = [feed]
+        listing_entries: list[tuple[str, str]] = []
+        while documents and len(listing_entries) < (day_offset + 1) * per_feed:
+            document = documents.pop(0)
+            markup = fetch_public_feed(document)
+            entries = sitemap_entries(markup)
+            child_sitemaps = [url for url, _ in entries if url.lower().endswith(".xml")]
+            if child_sitemaps:
+                documents.extend(child_sitemaps[:8])
+                continue
+            listing_entries.extend(
+                (url, lastmod)
+                for url, lastmod in entries
+                if is_direct_listing_url(family, url)
+            )
+        listing_entries.sort(key=lambda item: (item[1], item[0]), reverse=True)
+        offset = 0 if "new-day" in feed else day_offset * per_feed
+        for url, _ in listing_entries[offset : offset + per_feed]:
+            if url not in seen:
+                selected.append(url)
+                seen.add(url)
+            if len(selected) >= limit:
+                return selected
+    return selected[:limit]
+
+
+def log_agent_shadow(candidate: Candidate, *, monitor_family: str = "") -> bool:
+    shadow = shadow_listing_agent_candidate(candidate)
+    if not shadow:
+        return False
+    log_event(
+        "pilot_agent_shadow_candidate",
+        url=candidate.url,
+        source=candidate.source,
+        monitor_family=monitor_family,
+        current_agent=candidate.fields.get("agent_name", ""),
+        shadow_agent=shadow["agent_name"],
+        label=shadow["label"],
+        would_change=normalize_key(shadow["agent_name"])
+        != normalize_key(candidate.fields.get("agent_name", "")),
+        promotion_changed=False,
+    )
+    return True
+
+
+def run_direct_monitor(
+    run_date: dt.date,
+    already_seen_urls: set[str],
+    existing: ExistingIndex,
+    pilot_seen_addresses: set[str],
+    *,
+    sleep_seconds: float = 0.0,
+) -> dict[str, int]:
+    stats = {
+        "selected": 0,
+        "fetched": 0,
+        "fetch_failed": 0,
+        "qualified": 0,
+        "net_new_qualified": 0,
+        "duplicates": 0,
+        "rejected": 0,
+        "agent_shadow_candidates": 0,
+        "rows_written": 0,
+    }
+    if not direct_monitor_active(run_date):
+        log_event(
+            "pilot_direct_monitor_skipped",
+            run_date=run_date.isoformat(),
+            enabled=DIRECT_MONITOR_ENABLED,
+            start_date=DIRECT_MONITOR_START_DATE,
+            days=DIRECT_MONITOR_DAYS,
+        )
+        return stats
+
+    families = list(DIRECT_MONITOR_FEEDS)
+    base = DIRECT_MONITOR_MAX_URLS // len(families)
+    remainder = DIRECT_MONITOR_MAX_URLS % len(families)
+    log_event(
+        "pilot_direct_monitor_start",
+        run_date=run_date.isoformat(),
+        families=families,
+        max_urls=DIRECT_MONITOR_MAX_URLS,
+        shadow_only=True,
+    )
+    for index, family in enumerate(families):
+        family_limit = base + (1 if index < remainder else 0)
+        try:
+            urls = collect_direct_monitor_urls(
+                family,
+                DIRECT_MONITOR_FEEDS[family],
+                run_date=run_date,
+                limit=family_limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log_event("pilot_direct_monitor_feed_failed", family=family, error=str(exc)[:500])
+            continue
+        for url in urls:
+            if stats["selected"] >= DIRECT_MONITOR_MAX_URLS:
+                break
+            stats["selected"] += 1
+            try:
+                markup = fetch_url(url, timeout=12, allow_headless=False)
+                stats["fetched"] += 1
+            except Exception as exc:  # noqa: BLE001
+                stats["fetch_failed"] += 1
+                log_event("pilot_direct_monitor_fetch_failed", family=family, url=url, error=str(exc)[:500])
+                continue
+            result = SearchResult(
+                source=f"direct_monitor:{family}",
+                query=DIRECT_MONITOR_FEEDS[family][0],
+                url=url,
+                title="",
+                snippet="",
+            )
+            candidate = infer_fields(result, markup)
+            if log_agent_shadow(candidate, monitor_family=family):
+                stats["agent_shadow_candidates"] += 1
+            qualification = qualification_for_text(candidate.text)
+            rejection = required_review_field_failure(candidate, qualification)
+            if rejection:
+                stats["rejected"] += 1
+                log_event(
+                    "pilot_direct_monitor_candidate",
+                    family=family,
+                    url=url,
+                    status="rejected",
+                    reason=rejection if qualification.status == "qualified" else qualification.failure_reason,
+                    rows_written=0,
+                )
+                continue
+            listing_status, listing_key, matched = duplicate_listing_status(candidate, existing)
+            pilot_duplicate = listing_key and listing_key in pilot_seen_addresses
+            url_duplicate = url in already_seen_urls
+            if listing_status or pilot_duplicate or url_duplicate:
+                stats["duplicates"] += 1
+                log_event(
+                    "pilot_direct_monitor_candidate",
+                    family=family,
+                    url=url,
+                    status="duplicate",
+                    reason=listing_status or ("pilot_listing" if pilot_duplicate else "pilot_url"),
+                    matched=matched,
+                    rows_written=0,
+                )
+                continue
+            stats["qualified"] += 1
+            stats["net_new_qualified"] += 1
+            log_event(
+                "pilot_direct_monitor_candidate",
+                family=family,
+                url=url,
+                status="net_new_qualified_shadow",
+                address=candidate.fields.get("listing_address", ""),
+                agent=candidate.fields.get("agent_name", ""),
+                rows_written=0,
+            )
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+    log_event("pilot_direct_monitor_done", stats=stats, shadow_only=True)
+    return stats
 
 
 def extract_labeled_value(text: str, labels: list[str]) -> str:
@@ -2318,6 +2627,7 @@ def run(args: argparse.Namespace) -> None:
                     log_event("pilot_fetch_failed", state=state, source=source, url=result.url, error=str(exc))
                     continue
                 candidate = infer_fields(result, markup)
+                log_agent_shadow(candidate)
                 if not looks_like_listing_address(candidate.fields.get("listing_address", "")):
                     stats["rejected"] += 1
                     query_stats["rejected"] += 1
@@ -2482,6 +2792,13 @@ def run(args: argparse.Namespace) -> None:
             cap=args.promotion_daily_cap,
             dry_run=args.dry_run or args.promotion_dry_run,
         )
+    run_direct_monitor(
+        run_date,
+        already_seen_urls,
+        existing,
+        pilot_seen_addresses,
+        sleep_seconds=min(args.sleep_seconds, 0.25),
+    )
 
 
 def parse_args() -> argparse.Namespace:

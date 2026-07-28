@@ -1,4 +1,5 @@
 import contextlib
+import datetime as dt
 import io
 import json
 import os
@@ -118,6 +119,17 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         text = (
             "For Sale. Property description: Status Active. "
             "Is Short Sale: No. Special Listing Conditions: None."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+
+    def test_qualification_rejects_explicit_short_sale_status_no(self):
+        text = (
+            "Listing Status: Active. Public Remarks: Spacious home. "
+            "Short Sale Status: No."
         )
 
         result = pilot.qualification_for_text(text)
@@ -585,6 +597,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
     def test_listing_address_requires_street_number_not_city_zip_only(self):
         self.assertTrue(pilot.looks_like_listing_address("1475 Woodland Loop NW"))
         self.assertFalse(pilot.looks_like_listing_address("Baudette, MN 56623 (MLS# 7103449)"))
+        self.assertFalse(pilot.looks_like_listing_address("91"))
+        self.assertFalse(pilot.looks_like_listing_address("3933"))
+        self.assertFalse(pilot.looks_like_listing_address("1273"))
+        self.assertFalse(pilot.looks_like_listing_address("840 N Twin Lakes DR 432, St George"))
+        self.assertTrue(pilot.looks_like_listing_address("15790 Easthaven Ct, Unit 510"))
 
     def test_address_key_canonicalizes_street_suffix_and_trailing_direction(self):
         self.assertEqual(
@@ -970,6 +987,88 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(pilot.clean_agent_name("Shown By Listed By"), "")
         self.assertEqual(pilot.clean_agent_name("Listing Agent: Jane Smith Phone 404-555-1212"), "Jane Smith")
         self.assertEqual(pilot.clean_agent_name("Southern Missouri Regional"), "")
+
+    def test_agent_shadow_parser_matches_approved_row_fixtures_without_mutation(self):
+        fixtures = [
+            (
+                "Row 31. Courtesy of RE/MAX of Cherry Creek. The David Hakimi Team.",
+                "",
+                "",
+            ),
+            (
+                "Row 59. Courtesy of House2Home, LLC. The David Hakimi Team.",
+                "",
+                "",
+            ),
+            (
+                "Row 60. Listing Courtesy of PROFESSIONAL REAL ESTATE TEAM 407-483-4964.",
+                "",
+                "",
+            ),
+            (
+                "Row 61. Listing courtesy of ASANO REAL ESTATE LLC. "
+                "Listing agent: Leslie Campasano · 352-552-7232.",
+                "Leslie Campasano",
+                "listing_agent",
+            ),
+            (
+                "Row 62. Listing courtesy of WEMERT GROUP REALTY LLC. 407-214-3967.",
+                "",
+                "",
+            ),
+            (
+                "Row 63. Listing courtesy of Alex Johns of Century 21 Coastal Advantage: 910-353-7755.",
+                "Alex Johns",
+                "listing_courtesy",
+            ),
+            (
+                "Coldwell Banker listing. Listing Agent: Diana Perez | Listing Office: Coldwell Banker.",
+                "Diana Perez",
+                "listing_agent",
+            ),
+        ]
+        for text, expected_name, expected_label in fixtures:
+            with self.subTest(text=text):
+                candidate = pilot.Candidate(
+                    source="idx_broker_remarks",
+                    query="query",
+                    url="https://example.com/listing",
+                    title="123 Main Street",
+                    text=text,
+                    fields={"listing_address": "123 Main Street", "city": "Denver", "state": "CO"},
+                )
+
+                shadow = pilot.shadow_listing_agent_candidate(candidate)
+
+                self.assertEqual(shadow.get("agent_name", ""), expected_name)
+                self.assertEqual(shadow.get("label", ""), expected_label)
+                self.assertNotIn("agent_name", candidate.fields)
+
+    def test_direct_monitor_sitemap_selection_is_bounded_and_rotates(self):
+        feed = "https://example.com/listings.xml"
+        entries = "".join(
+            f"<url><loc>https://movewithmomentum.com/listings/idx/{number}-main-st</loc>"
+            f"<lastmod>2026-07-{number:02d}</lastmod></url>"
+            for number in range(1, 11)
+        )
+        markup = f'<?xml version="1.0"?><urlset>{entries}</urlset>'
+        with mock.patch.object(pilot, "fetch_public_feed", return_value=markup):
+            day_one = pilot.collect_direct_monitor_urls(
+                "momentum",
+                (feed,),
+                run_date=dt.date(2026, 7, 29),
+                limit=3,
+            )
+            day_two = pilot.collect_direct_monitor_urls(
+                "momentum",
+                (feed,),
+                run_date=dt.date(2026, 7, 30),
+                limit=3,
+            )
+
+        self.assertEqual(len(day_one), 3)
+        self.assertEqual(len(day_two), 3)
+        self.assertTrue(set(day_one).isdisjoint(day_two))
 
     def test_duplicate_listing_status_checks_address_before_contact_research(self):
         main_rows = [
