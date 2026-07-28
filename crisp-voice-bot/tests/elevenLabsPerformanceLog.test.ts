@@ -153,3 +153,44 @@ test("voice performance log does not count confused live-transfer tool fire as c
   assert.equal(parsed.flags.transferCompleted, false);
   assert.match(parsed.codexInstructions, /clearLiveTransferConsent/);
 });
+
+test("voice performance log keeps transfer consent separate from later callback fallback", async () => {
+  const { buildVoicePerformanceLog } = await import("../src/lib/elevenLabsPerformanceLog");
+
+  const transcript = [
+    { role: "agent", message: "Want me to try to get Yoni on the phone now?", time_in_call_secs: 20 },
+    { role: "user", message: "Yes, go ahead.", time_in_call_secs: 21 },
+    { role: "agent", tool_calls: [{ tool_name: "live_transfer_requested" }], time_in_call_secs: 22 },
+    { role: "agent", message: "He was not available. Should I have him call you back ASAP?", time_in_call_secs: 35 },
+    { role: "user", message: "Yes, please.", time_in_call_secs: 36 },
+    { role: "agent", tool_calls: [{ tool_name: "callback_requested" }], time_in_call_secs: 37 },
+  ];
+  const log = buildVoicePerformanceLog({
+    conversationId: "conv_transfer_then_callback",
+    outcome: "Requested callback ASAP",
+    summary: "The caller agreed to a live transfer; it did not complete, so an ASAP callback was arranged.",
+    transcript: "Agent explicitly consented to a live transfer and then accepted a callback fallback.",
+    metadata: {
+      rowNumber: 4001,
+      fullName: "Aira Agent",
+      callAttemptNumber: 1,
+      listingAddress: "1 Main St",
+      requestedPhone: "+14045550123",
+      dialedPhone: "+14045550123",
+      testMode: false,
+    },
+    conversation: {
+      status: "done",
+      metadata: { call_duration_secs: 42 },
+      transcript,
+    },
+  });
+
+  const parsed = JSON.parse(log.replace(`--- CODEX_VOICE_CALL_METRICS_V1 ---\n`, ""));
+  assert.equal(parsed.flags.liveTransferToolFired, true);
+  assert.equal(parsed.flags.liveTransferRequested, true);
+  assert.equal(parsed.flags.clearLiveTransferConsent, true);
+  assert.equal(parsed.flags.callbackRequested, true);
+  assert.equal(parsed.flags.transferCompleted, false);
+  assert.equal(parsed.flags.misfiredLiveTransferRequest, false);
+});

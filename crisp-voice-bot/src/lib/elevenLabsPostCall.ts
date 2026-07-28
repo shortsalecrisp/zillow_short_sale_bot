@@ -8,6 +8,8 @@ import { sendCallTranscriptEmail } from "./sendCallTranscriptEmail";
 import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContext";
 import { buildVoicePerformanceLog } from "./elevenLabsPerformanceLog";
 import { hasClearLiveTransferConsent } from "./elevenLabsTransferConsent";
+import { looksLikeDoNotCall } from "./elevenLabsDoNotCall";
+import { isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import type { CallMetadata } from "../types";
 
@@ -163,6 +165,10 @@ function hasLiveTransferRequest(conversation: ElevenLabsConversation): boolean {
 }
 
 export function buildVoiceResponseStatus(callResult: string, callbackTime?: string, assistantName = "Emmy"): string {
+  if (callResult === "do_not_call") {
+    return "Do not call";
+  }
+
   if (callResult === "warm_transfer_completed") {
     return "Warm transfer accepted";
   }
@@ -298,7 +304,11 @@ function extractCallbackTime(conversation: ElevenLabsConversation): string | und
   return undefined;
 }
 
-function shouldTreatAsCallback(conversation: ElevenLabsConversation): boolean {
+export function shouldTreatAsCallback(conversation: ElevenLabsConversation): boolean {
+  if (shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsDoNotCall(conversation)) {
+    return false;
+  }
+
   if (shouldTreatAsVoicemail(conversation) || hasDeliveredVoicemailMessage(conversation)) {
     return false;
   }
@@ -408,7 +418,32 @@ export function shouldTreatAsAlreadyHasShortSaleHelp(conversation: ElevenLabsCon
   );
 }
 
+export function shouldTreatAsRecordingArtifact(conversation: ElevenLabsConversation): boolean {
+  if (shouldTreatAsVoicemail(conversation) || hasDeliveredVoicemailMessage(conversation)) {
+    return false;
+  }
+
+  return isRecordingOrScreeningArtifact(
+    conversation.transcript ?? [],
+    conversation.analysis?.transcript_summary ?? "",
+  );
+}
+
+export function shouldTreatAsDoNotCall(conversation: ElevenLabsConversation): boolean {
+  if (shouldTreatAsRecordingArtifact(conversation)) {
+    return false;
+  }
+
+  return looksLikeDoNotCall(
+    `${conversation.analysis?.transcript_summary ?? ""} ${userMessages(conversation).join(" ")}`,
+  );
+}
+
 function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
+  if (shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsDoNotCall(conversation)) {
+    return false;
+  }
+
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   return (
     shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
@@ -638,6 +673,10 @@ function meaningfulUserMessages(conversation: ElevenLabsConversation): string[] 
 }
 
 export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversation): boolean {
+  if (shouldTreatAsRecordingArtifact(conversation)) {
+    return true;
+  }
+
   if (
     shouldTreatAsVoicemail(conversation) ||
     shouldTreatAsNoAnswer(conversation) ||
@@ -685,6 +724,8 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
 
 export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): boolean {
   if (
+    shouldTreatAsRecordingArtifact(conversation) ||
+    shouldTreatAsDoNotCall(conversation) ||
     shouldTreatAsVoicemail(conversation) ||
     shouldTreatAsNoAnswer(conversation) ||
     shouldTreatAsCallback(conversation) ||
@@ -929,6 +970,77 @@ async function processPostCallOutcomeForConversation(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       failureReason,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsRecordingArtifact(conversation)) {
+    const isFirstAttempt = metadata.callAttemptNumber <= 1;
+    const callResult = isFirstAttempt ? "no_answer_first_attempt" : "no_response_second_attempt";
+    const outcome = buildVoiceResponseStatus(callResult);
+    const recordingSummary =
+      "Automated recording, call-screening system, phone tree, or canned playback answered; no live agent intent was confirmed.";
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult,
+      responseStatus: outcome,
+      ...(isFirstAttempt ? {} : { leadStatusCode: "N" }),
+      callbackRequested: "",
+      callbackTime: "",
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(outcome, `${recordingSummary} ${summary}`.trim()),
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary: recordingSummary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback classified automated recording without human intent", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsDoNotCall(conversation)) {
+    const outcome = buildVoiceResponseStatus("do_not_call");
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "do_not_call",
+      responseStatus: outcome,
+      leadStatusCode: "R",
+      callbackRequested: "",
+      callbackTime: "",
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback recorded explicit do-not-call request", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
     });
     return true;
   }

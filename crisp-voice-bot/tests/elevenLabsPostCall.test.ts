@@ -219,6 +219,53 @@ test("post-call fallback classifies live gatekeeper hold summaries as agent unav
   assert.equal(shouldTreatAsAgentHungUp(parvanehLiveSummaryGatekeeperHoldConversation), false);
 });
 
+test("post-call fallback treats screening recordings and canned ASAP fragments as unavailable", async () => {
+  const {
+    shouldTreatAsAgentHungUp,
+    shouldTreatAsAgentUnavailable,
+    shouldTreatAsCallback,
+    shouldTreatAsRecordingArtifact,
+  } = await import("../src/lib/elevenLabsPostCall") as typeof import("../src/lib/elevenLabsPostCall") & {
+    shouldTreatAsCallback: (conversation: unknown) => boolean;
+  };
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    analysis: { transcript_summary: "An automated call-screening service asked Maya to record her name and reason." },
+    transcript: [
+      { role: "user", message: "Please record your name and reason for calling." },
+      { role: "assistant", message: "Maya with Crisp Short Sales, calling about a short sale listing." },
+      { role: "user", message: "As soon as possible. Thank you." },
+      { role: "assistant", tool_calls: [{ tool_name: "callback_requested" }] },
+    ],
+  };
+
+  assert.equal(shouldTreatAsRecordingArtifact(conversation), true);
+  assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+  assert.equal(shouldTreatAsCallback(conversation), false);
+});
+
+test("post-call fallback distinguishes a live do-not-call request from generic not interested", async () => {
+  const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsDoNotCall } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "end_call tool was called." },
+    analysis: { transcript_summary: "The live caller explicitly requested no further calls." },
+    transcript: [
+      { role: "assistant", message: "Are you handling the bank side yourself?" },
+      { role: "user", message: "Take me off your list and do not call again." },
+      { role: "assistant", tool_calls: [{ tool_name: "not_interested" }] },
+    ],
+  };
+
+  assert.equal(shouldTreatAsDoNotCall(conversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+  assert.equal(buildVoiceResponseStatus("do_not_call"), "Do not call");
+});
+
 test("post-call fallback treats stale initiated conversations with no audio as no-connect", async () => {
   const { shouldRetryUnconnectedConversation, shouldTreatAsUnconnectedInitiatedConversation } = await import(
     "../src/lib/elevenLabsPostCall"

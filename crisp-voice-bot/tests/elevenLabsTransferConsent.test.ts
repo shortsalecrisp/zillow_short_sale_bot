@@ -49,3 +49,21 @@ test("transfer consent accepts a clear yes after a Yoni-now offer", async () => 
   assert.equal(hasClearLiveTransferConsent(transcript), true);
   assert.equal(isMisfiredLiveTransferRequest(transcript), false);
 });
+
+test("transfer consent stays true when callback fallback happens only after the transfer attempt", async () => {
+  const { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } = await import(
+    "../src/lib/elevenLabsTransferConsent"
+  );
+
+  const transcript = [
+    { role: "agent", message: "Want me to try to get Yoni on the phone now?" },
+    { role: "user", message: "Yes, go ahead." },
+    { role: "agent", tool_calls: [{ tool_name: "live_transfer_requested" }] },
+    { role: "agent", message: "Sorry, he was not available. Should I have him call you back ASAP?" },
+    { role: "user", message: "Yes, have him call me back." },
+    { role: "agent", tool_calls: [{ tool_name: "callback_requested" }] },
+  ];
+
+  assert.equal(hasClearLiveTransferConsent(transcript, "Transfer failed, so an ASAP callback was arranged."), true);
+  assert.equal(isMisfiredLiveTransferRequest(transcript, "Transfer failed, so an ASAP callback was arranged."), false);
+});

@@ -101,7 +101,7 @@ export function hasClearLiveTransferConsent(
   summary = "",
 ): boolean {
   const transferIndex = getLiveTransferToolIndex(transcript);
-  if (transferIndex === -1 || hasCallbackOrLaterSignal(transcript, summary)) {
+  if (transferIndex === -1 || hasCallbackOrLaterSignal(transcript.slice(0, transferIndex))) {
     return false;
   }
 

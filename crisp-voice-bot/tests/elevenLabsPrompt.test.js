@@ -194,6 +194,29 @@ test("prompt waits through office robots and gatekeeper transfer attempts", () =
   assert.match(prompt, /Do not call `end_call`[\s\S]{0,160}transferred/i);
 });
 
+test("prompt blocks recording fragments from creating human outcomes", () => {
+  const prompt = readPrompt();
+
+  assert.match(prompt, /Recording\/automated-system gate, highest priority/i);
+  assert.match(prompt, /Canned fragments such as "as soon as possible"/i);
+  assert.match(prompt, /Never call `callback_requested`, `not_interested`, or `live_transfer_requested`/);
+  assert.match(prompt, /automated system asks for a callback number[\s\S]{0,100}404-300-9526/i);
+});
+
+test("prompt gives explicit do-not-call requests a non-sales closeout", () => {
+  const prompt = readPrompt();
+  const branch = extractSection(
+    prompt,
+    'If a live person says "do not call"',
+    "If they say they are not worried about it",
+  );
+
+  assert.match(branch, /priority over every pitch/i);
+  assert.match(branch, /DO NOT CALL: caller explicitly requested no further calls/);
+  assert.match(branch, /Understood\. We won't call again\. Goodbye\./);
+  assert.match(branch, /Do not pitch, mention future help, ask another question, offer Yoni/);
+});
+
 test("prompt pitches admins who answer instead of only taking a message", () => {
   const prompt = readPrompt();
   const receptionistBranch = extractSection(

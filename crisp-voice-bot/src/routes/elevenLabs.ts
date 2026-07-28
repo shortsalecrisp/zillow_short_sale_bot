@@ -7,6 +7,7 @@ import {
   getLatestElevenLabsCallContext,
 } from "../lib/elevenLabsCallContext";
 import { requestElevenLabsLiveTransferApproval } from "../lib/elevenLabsLiveTransferApproval";
+import { looksLikeDoNotCall } from "../lib/elevenLabsDoNotCall";
 import { processPostCallOutcomeFromConversationId } from "../lib/elevenLabsPostCall";
 import {
   assertValidElevenLabsConversationId,
@@ -117,6 +118,10 @@ function readPositiveInteger(body: Record<string, unknown>, key: string, fallbac
 }
 
 function buildVoiceResponseStatus(callResult: string, callbackTime?: string): string {
+  if (callResult === "do_not_call") {
+    return "Do not call";
+  }
+
   if (callResult === "answered_not_interested") {
     return "Not interested";
   }
@@ -568,7 +573,9 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
         callAttemptNumber: payload.callAttemptNumber,
       },
       () => {
-        const callResult = looksLikeNotShortSale(payload.conversationSummary)
+        const callResult = looksLikeDoNotCall(payload.conversationSummary)
+          ? "do_not_call"
+          : looksLikeNotShortSale(payload.conversationSummary)
           ? "not_short_sale"
           : looksLikeAlreadyHasShortSaleHelp(payload.conversationSummary)
             ? "already_working_with_negotiator"
@@ -580,6 +587,14 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
           callResult,
           responseStatus: buildVoiceResponseStatus(callResult),
           leadStatusCode: "R",
+          ...(callResult === "do_not_call"
+            ? {
+                callbackRequested: "",
+                callbackTime: "",
+                liveTransferRequested: "",
+                liveTransferCompleted: "",
+              }
+            : {}),
           voiceNotes: payload.conversationSummary || "ElevenLabs: lead not interested",
         });
       },
@@ -594,9 +609,10 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
 
     res.status(200).json({
       ok: true,
-      intent: "not_interested",
-      nextAction:
-        "Say exactly: Ok, well thanks for letting me know. If anything changes in the future and you're looking for some additional help, please just keep me in mind. Thanks! Then immediately call end_call. Do not wait for another caller response. Do not pitch again. Do not reopen the conversation.",
+      intent: looksLikeDoNotCall(payload.conversationSummary) ? "do_not_call" : "not_interested",
+      nextAction: looksLikeDoNotCall(payload.conversationSummary)
+        ? "Say exactly: Understood. We won't call again. Goodbye. Then immediately call end_call. Do not pitch, ask another question, or wait for another caller response."
+        : "Say exactly: Ok, well thanks for letting me know. If anything changes in the future and you're looking for some additional help, please just keep me in mind. Thanks! Then immediately call end_call. Do not wait for another caller response. Do not pitch again. Do not reopen the conversation.",
     });
   } catch (error) {
     next(error);
