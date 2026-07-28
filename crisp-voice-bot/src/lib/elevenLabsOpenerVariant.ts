@@ -56,7 +56,7 @@ export function buildElevenLabsOpenerVariant(input: BuildOpenerVariantInput): El
       return {
         key,
         label: "Yoni name upfront",
-        script: `${greeting} ${input.assistantName} calling for Yoni Kutler about your short sale listing. Are you handling the bank side yourself?`,
+        script: `${greeting} this is ${input.assistantName} with Crisp Short Sales calling for Yoni Kutler about your short sale listing. Are you handling the bank side yourself?`,
       };
     case "benefit_hook":
       return {

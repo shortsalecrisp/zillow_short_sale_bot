@@ -331,7 +331,7 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   assert.match(selfHandlingBranch, /no cost to you or the seller/);
   assert.match(selfHandlingBranch, /Worth a quick call with Yoni/);
   assert.match(selfHandlingBranch, /do not start a transfer yet/i);
-  assert.match(selfHandlingBranch, /get him on the phone now, or should he call you back/i);
+  assert.match(selfHandlingBranch, /Do you want me to try to bring Yoni onto this call now, or should he call you at a specific time\?/);
   assert.match(selfHandlingBranch, /interest only/i);
   assert.match(selfHandlingBranch, /What time should he call you\?/);
 });
@@ -381,6 +381,7 @@ test("prompt does not treat overlapped okay or busy later/callback language as l
   assert.match(transferRule, /in a meeting/);
   assert.match(transferRule, /afternoon\/tomorrow\/later/);
   assert.match(transferRule, /Sorry, I may have talked over you/);
+  assert.match(transferRule, /Do you want me to try to bring Yoni onto this call now, or should he call you at a specific time\?/);
   assert.match(transferRule, /No problem\. What time should he call you\?/);
 });
 

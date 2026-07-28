@@ -59,6 +59,10 @@ test("ElevenLabs opener test assigns weighted opener variants by row", async () 
     "yoni_name",
   );
   assert.equal(
+    buildElevenLabsOpenerVariant({ rowNumber: 3704, firstName: "Miriam", assistantName: "Maya" }).script,
+    "Hi Miriam, this is Maya with Crisp Short Sales calling for Yoni Kutler about your short sale listing. Are you handling the bank side yourself?",
+  );
+  assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3707, firstName: "Marta", assistantName: "Maya" }).key,
     "benefit_hook",
   );
