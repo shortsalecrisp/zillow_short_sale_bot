@@ -73,7 +73,7 @@ type ToolResponse = {
 
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
 const FIRST_MESSAGE = "Hello?";
-const INITIAL_WAIT_TIME_SECONDS = 0.8;
+const INITIAL_WAIT_TIME_SECONDS = 1;
 const TURN_TIMEOUT_SECONDS = 1.5;
 const TURN_EAGERNESS = "normal";
 const SPECULATIVE_TURN = false;

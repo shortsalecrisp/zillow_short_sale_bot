@@ -21,7 +21,7 @@ test("agent sync uses a short interruptible pickup probe before the opener", () 
   const script = readSyncScript();
 
   assert.match(script, /const FIRST_MESSAGE = "Hello\?";/);
-  assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = 0\.8;/);
+  assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = 1;/);
   assert.match(script, /const TURN_TIMEOUT_SECONDS = 1\.5;/);
   assert.match(script, /const TURN_EAGERNESS = "normal";/);
   assert.match(script, /const DISABLE_FIRST_MESSAGE_INTERRUPTION = false;/);
