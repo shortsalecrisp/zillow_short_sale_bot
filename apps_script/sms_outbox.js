@@ -11,6 +11,12 @@ var SMS_PENDING_SEND_HEADERS_ = [
   "inbound_queue_id", "crm_row", "worker_id"
 ];
 
+var SMS_NOTIFICATION_REPLAY_WINDOW_MS_ = 14 * 24 * 60 * 60 * 1000;
+var SMS_NOTIFICATION_HEARTBEAT_GAP_MS_ = 10 * 60 * 1000;
+var SMS_NOTIFICATION_QUARANTINE_MS_ = 5 * 60 * 1000;
+var SMS_TASKER_LAST_HEARTBEAT_KEY_ = "SMS_TASKER_LAST_HEARTBEAT_AT";
+var SMS_NOTIFICATION_QUARANTINE_KEY_ = "SMS_NOTIFICATION_QUARANTINE_UNTIL";
+
 function getPendingSmsHeaders_() {
   return SMS_PENDING_SEND_HEADERS_.slice();
 }
@@ -28,6 +34,29 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
   ensureSmsSheetHeaders_(sheet, SMS_INBOUND_QUEUE_HEADERS_);
   var dedupeKey = buildSmsInboundDedupeKey_(phone, message);
   var now = new Date();
+  var replayReason = getSmsInboundReplaySuppressionReason_(body, sheet, dedupeKey, now);
+  if (replayReason) {
+    try {
+      appendSmsDebugLog_("incoming_sms_replay_suppressed", {
+        request_id: webhookRequestId || "",
+        phone: phone,
+        message: message,
+        reason: replayReason,
+        message_id: String(body && body.message_id || ""),
+        transport_source: getSmsInboundTransportSource_(body)
+      });
+    } catch (_) {}
+    return {
+      ok: true,
+      queued: false,
+      duplicate: true,
+      should_reply: false,
+      should_reply_text: "false",
+      handoff_needed: false,
+      handoff_needed_text: "false",
+      reason: replayReason
+    };
+  }
   var lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
@@ -80,17 +109,100 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
 }
 
 function buildSmsInboundDedupeKey_(phone, message) {
+  var canonicalMessage = typeof canonicalizeSmsInboundDedupeMessage_ === "function"
+    ? canonicalizeSmsInboundDedupeMessage_(message)
+    : normalizeWhitespace_(String(message || "")).toLowerCase();
   var digest = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
-    normalizePhone_(phone) + "|" + normalizeWhitespace_(String(message || "")).toLowerCase()
+    normalizePhone_(phone) + "|" + canonicalMessage
   );
   return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, "");
 }
 
-function processSmsInboundQueue_() {
+function getSmsInboundTransportSource_(body) {
+  var explicitSource = String(body && body.transport_source || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_");
+  if (explicitSource) return explicitSource;
+
+  // Keep the currently installed transport safe until V12R7 is imported.
+  var messageId = String(body && body.message_id || "").trim();
+  if (/^reconcile-/i.test(messageId)) return "reconciler_legacy";
+  if (/^\(/.test(messageId)) return "notification_backup_legacy";
+  return "received_text_legacy";
+}
+
+function isSmsBackupTransportSource_(source) {
+  return source === "notification_backup" ||
+    source === "notification_backup_legacy" ||
+    source === "reconciler" ||
+    source === "reconciler_legacy";
+}
+
+function getSmsInboundReplaySuppressionReason_(body, sheet, dedupeKey, now) {
+  var source = getSmsInboundTransportSource_(body);
+  if (!isSmsBackupTransportSource_(source)) return "";
+
+  var nowMs = now.getTime();
+  var props = PropertiesService.getScriptProperties();
+  var lastHeartbeatMs = Number(props.getProperty(SMS_TASKER_LAST_HEARTBEAT_KEY_) || 0);
+  var quarantineUntilMs = Number(props.getProperty(SMS_NOTIFICATION_QUARANTINE_KEY_) || 0);
+
+  if (!lastHeartbeatMs || nowMs - lastHeartbeatMs > SMS_NOTIFICATION_HEARTBEAT_GAP_MS_) {
+    quarantineUntilMs = nowMs + SMS_NOTIFICATION_QUARANTINE_MS_;
+    props.setProperty(SMS_NOTIFICATION_QUARANTINE_KEY_, String(quarantineUntilMs));
+  }
+  if (quarantineUntilMs > nowMs) {
+    return "Backup notification quarantined after a Tasker heartbeat gap";
+  }
+
+  var lastRow = sheet.getLastRow();
+  var firstDataRow = Math.max(2, lastRow - 1999);
+  var rows = lastRow >= firstDataRow
+    ? sheet.getRange(
+      firstDataRow,
+      1,
+      lastRow - firstDataRow + 1,
+      SMS_INBOUND_QUEUE_HEADERS_.length
+    ).getValues()
+    : [];
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (String(rows[i][3] || "") !== dedupeKey) continue;
+    var createdAt = new Date(rows[i][0]).getTime();
+    if (createdAt && nowMs - createdAt <= SMS_NOTIFICATION_REPLAY_WINDOW_MS_) {
+      return "Previously recorded backup notification replay suppressed";
+    }
+  }
+  return "";
+}
+
+function recordTaskerHeartbeatV10_() {
+  var props = PropertiesService.getScriptProperties();
+  var nowMs = Date.now();
+  var lastHeartbeatMs = Number(props.getProperty(SMS_TASKER_LAST_HEARTBEAT_KEY_) || 0);
+  var gapMs = lastHeartbeatMs ? nowMs - lastHeartbeatMs : 0;
+  var quarantineUntilMs = Number(props.getProperty(SMS_NOTIFICATION_QUARANTINE_KEY_) || 0);
+
+  if (!lastHeartbeatMs || gapMs > SMS_NOTIFICATION_HEARTBEAT_GAP_MS_) {
+    quarantineUntilMs = nowMs + SMS_NOTIFICATION_QUARANTINE_MS_;
+    props.setProperty(SMS_NOTIFICATION_QUARANTINE_KEY_, String(quarantineUntilMs));
+  }
+  props.setProperty(SMS_TASKER_LAST_HEARTBEAT_KEY_, String(nowMs));
+  return {
+    gap_ms: gapMs,
+    quarantine_until: quarantineUntilMs ? new Date(quarantineUntilMs).toISOString() : ""
+  };
+}
+
+function processSmsInboundQueue_(maxItems, immediateDispatch) {
+  var itemLimit = typeof maxItems === "number"
+    ? Math.max(1, Math.min(4, Math.floor(maxItems)))
+    : 4;
+  var fastDispatch = immediateDispatch === true;
   var started = Date.now();
   var processed = 0;
-  while (processed < 4 && Date.now() - started < 4.5 * 60 * 1000) {
+  while (processed < itemLimit && Date.now() - started < 4.5 * 60 * 1000) {
     var claim = claimQueuedSmsInbound_();
     if (!claim) break;
     try {
@@ -107,6 +219,9 @@ function processSmsInboundQueue_() {
       normalized.message_id = claim.message_id;
       normalized.reply_to_phone = claim.phone;
       if (normalized.should_reply === true) {
+        // The Tasker outbox worker is already waiting for this result, so the
+        // AI-processing time itself supplies the natural response delay.
+        if (fastDispatch) normalized.delay_seconds = 0;
         registerPendingSmsSendV10_({
           phone: claim.phone,
           message: claim.message,
@@ -234,7 +349,8 @@ function claimPendingSmsSendV10_(body) {
   if (!sheet || sheet.getLastRow() < 2) return noPendingSmsClaim_();
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
   var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  var hasLock = lock.tryLock(1500);
+  if (!hasLock) return busyPendingSmsClaim_();
   try {
     var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
     var now = Date.now();
@@ -313,15 +429,52 @@ function noPendingSmsClaim_() {
   return { ok: true, should_send: false, should_send_text: "false", reason: "No due SMS reply" };
 }
 
+function busyPendingSmsClaim_() {
+  return {
+    ok: true,
+    should_send: false,
+    should_send_text: "false",
+    queue_busy: true,
+    retryable: true,
+    retry_after_seconds: 2,
+    reason: "SMS reply queue is briefly busy; retry on the next poll"
+  };
+}
+
 function markPendingSmsSendStartedV10_(body) {
-  var match = findLeasedPendingSmsRow_(body, ["claimed", "send_started"]);
+  // The lease, request, message, and phone already identify one exact send.
+  // Do not let form-encoding or smart-punctuation changes in reply_text block
+  // the Android send action; the final reply_sent receipt still validates text.
+  var correlationBody = Object.assign({}, body || {});
+  delete correlationBody.reply_text;
+  var match = findLeasedPendingSmsRow_(correlationBody, ["claimed", "send_started"]);
+  var correlationMode = "lease";
+  if (!match.ok) {
+    match = findPendingSmsRowByStableCorrelationV10_(
+      correlationBody,
+      ["claimed", "send_started"],
+      false
+    );
+    correlationMode = "stable_callback_fallback";
+  }
   if (!match.ok) return match;
   if (String(match.values[1] || "") === "send_started") {
-    return { ok: true, duplicate: true, status: "send_started", pending_row: match.row };
+    return {
+      ok: true,
+      duplicate: true,
+      status: "send_started",
+      pending_row: match.row,
+      correlation_mode: correlationMode
+    };
   }
   match.sheet.getRange(match.row, 2).setValue("send_started");
   match.sheet.getRange(match.row, 14).setValue(new Date());
-  return { ok: true, status: "send_started", pending_row: match.row };
+  return {
+    ok: true,
+    status: "send_started",
+    pending_row: match.row,
+    correlation_mode: correlationMode
+  };
 }
 
 function requeuePendingSmsSendAfterFailureV10_(body) {
@@ -358,6 +511,52 @@ function findLeasedPendingSmsRow_(body, allowedStatuses) {
     return { ok: true, sheet: sheet, row: i + 2, values: rows[i] };
   }
   return { ok: false, reason: "No exact leased send matched the callback" };
+}
+
+// Tasker can occasionally corrupt a form-encoded lease value while preserving
+// the immutable send identifiers. This fallback is intentionally strict: all
+// three stable identifiers must be present and match the same receiptable row.
+// Final send receipts additionally require the exact normalized reply text.
+function findPendingSmsRowByStableCorrelationV10_(body, allowedStatuses, requireReplyText) {
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_pending_sends");
+  if (!sheet || sheet.getLastRow() < 2) {
+    return { ok: false, reason: "No pending-send ledger is available" };
+  }
+  ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
+  var rows = sheet.getRange(
+    2,
+    1,
+    sheet.getLastRow() - 1,
+    SMS_PENDING_SEND_HEADERS_.length
+  ).getValues();
+  var requestId = String(body && (body.request_id || body.sms_request_id) || "").trim();
+  var messageId = String(body && body.message_id || "").trim();
+  var phone = normalizePhone_(body && body.phone || "");
+  var replyText = normalizePendingSmsReply_(body && body.reply_text || "");
+
+  if (!requestId || !messageId || !phone) {
+    return { ok: false, reason: "Stable callback correlation requires request, message, and phone" };
+  }
+  if (requireReplyText && !replyText) {
+    return { ok: false, reason: "Stable receipt correlation also requires reply text" };
+  }
+
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (allowedStatuses.indexOf(String(rows[i][1] || "")) === -1) continue;
+    if (String(rows[i][2] || "") !== requestId) continue;
+    if (String(rows[i][3] || "") !== messageId) continue;
+    if (normalizePhone_(rows[i][4]) !== phone) continue;
+    if (requireReplyText && normalizePendingSmsReply_(rows[i][5]) !== replyText) continue;
+    return {
+      ok: true,
+      sheet: sheet,
+      row: i + 2,
+      values: rows[i],
+      correlation_mode: "stable_callback_fallback"
+    };
+  }
+  return { ok: false, reason: "No pending send matched all stable callback identifiers" };
 }
 
 function getPendingSmsStaleReason_(outboxRow) {

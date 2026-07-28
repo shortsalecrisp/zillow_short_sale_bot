@@ -21,6 +21,8 @@ function isUnifiedSmsAction_(action) {
     manual_reply_sent: true,
     sms_send_failed: true,
     tasker_heartbeat: true,
+    tasker_debug: true,
+    codex_probe: true,
     mark_override: true,
     takeover: true
   };
@@ -104,17 +106,55 @@ function handleUnifiedSmsPost_(e) {
     var action = String(body.action || "incoming_sms").toLowerCase();
     if (action === "tasker_heartbeat") {
       var transportVersion = String(body.transport_version || "");
+      var heartbeatState = typeof recordTaskerHeartbeatV10_ === "function"
+        ? recordTaskerHeartbeatV10_()
+        : {};
       try {
         appendSmsDebugLog_("tasker_heartbeat", {
           request_id: requestId,
           message: transportVersion,
-          reason: "Tasker transport heartbeat"
+          reason: "Tasker transport heartbeat",
+          details: Object.assign(buildTaskerDebugDetails_(body), heartbeatState)
         });
       } catch (_) {}
       return jsonOutput_({
         ok: true,
         action: action,
         transport_version: transportVersion,
+        notification_quarantine_until: heartbeatState.quarantine_until || "",
+        server_time: new Date().toISOString()
+      });
+    }
+
+    if (action === "tasker_debug") {
+      var debugStage = sanitizeTaskerDebugValue_(body.stage || "unknown", 80)
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "_");
+      var debugDetails = buildTaskerDebugDetails_(body);
+      try {
+        appendSmsDebugLog_("tasker_" + debugStage, {
+          request_id: requestId,
+          phone: sanitizeTaskerDebugValue_(body.phone, 80),
+          message: sanitizeTaskerDebugValue_(body.message, 500),
+          should_reply: sanitizeTaskerDebugValue_(body.should_reply, 20),
+          reply_text: sanitizeTaskerDebugValue_(body.reply_text, 500),
+          reason: sanitizeTaskerDebugValue_(body.reason, 300),
+          details: debugDetails
+        });
+      } catch (debugErr) {
+        return jsonOutput_({
+          ok: false,
+          action: action,
+          stage: debugStage,
+          request_id: requestId,
+          error: String(debugErr)
+        });
+      }
+      return jsonOutput_({
+        ok: true,
+        action: action,
+        stage: debugStage,
+        request_id: requestId,
         server_time: new Date().toISOString()
       });
     }
@@ -154,7 +194,25 @@ function handleUnifiedSmsPost_(e) {
     }
 
     if (action === "claim_pending_send") {
-      return jsonOutput_(claimPendingSmsSendV10_(body));
+      var pendingClaim = claimPendingSmsSendV10_(body);
+      if (pendingClaim.should_send !== true &&
+          pendingClaim.queue_busy !== true &&
+          typeof processSmsInboundQueue_ === "function") {
+        try {
+          var fastProcessResult = processSmsInboundQueue_(1, true);
+          if (fastProcessResult && fastProcessResult.processed > 0) {
+            pendingClaim = claimPendingSmsSendV10_(body);
+          }
+        } catch (fastProcessErr) {
+          try {
+            appendSmsDebugLog_("outbox_fast_path_error", {
+              request_id: requestId,
+              reason: String(fastProcessErr)
+            });
+          } catch (_) {}
+        }
+      }
+      return jsonOutput_(pendingClaim);
     }
 
     if (action === "send_started") {
@@ -375,6 +433,13 @@ function getUnifiedIgnoredInboundReason_(body) {
   }
 
   if (
+    typeof isStandaloneQuestionMark_ === "function" &&
+    isStandaloneQuestionMark_(message)
+  ) {
+    return "Standalone question-mark follow-up ignored";
+  }
+
+  if (
     phoneLower === "device pairing" ||
     phoneLower === "messages is doing work in the background" ||
     messageLower === "messages is doing work in the background" ||
@@ -440,6 +505,30 @@ function maskSensitiveDebugText_(value) {
     .replace(/(token=)[^&\s]+/gi, "$1[redacted]")
     .replace(/(\"token\"\s*:\s*\")[^\"]+(\")/gi, "$1[redacted]$2")
     .replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer [redacted]");
+}
+
+function sanitizeTaskerDebugValue_(value, maxLength) {
+  var text = maskSensitiveDebugText_(String(value || ""));
+  var limit = Number(maxLength || 500);
+  return text.length > limit ? text.slice(0, limit) + "..." : text;
+}
+
+function buildTaskerDebugDetails_(body) {
+  body = body || {};
+  return {
+    transport_version: sanitizeTaskerDebugValue_(body.transport_version, 40),
+    task_name: sanitizeTaskerDebugValue_(body.task_name, 100),
+    source: sanitizeTaskerDebugValue_(body.source, 100),
+    message_id: sanitizeTaskerDebugValue_(body.message_id, 160),
+    reply_request_id: sanitizeTaskerDebugValue_(body.reply_request_id, 160),
+    reply_phone: sanitizeTaskerDebugValue_(body.reply_phone, 80),
+    http_code: sanitizeTaskerDebugValue_(body.http_code, 20),
+    task_error: sanitizeTaskerDebugValue_(body.task_error, 40),
+    task_error_message: sanitizeTaskerDebugValue_(body.task_error_message, 300),
+    device_time: sanitizeTaskerDebugValue_(body.device_time, 80),
+    enabled_profiles: sanitizeTaskerDebugValue_(body.enabled_profiles, 500),
+    running_tasks: sanitizeTaskerDebugValue_(body.running_tasks, 500)
+  };
 }
 
 function appendSmsDebugLog_(stage, data) {
@@ -564,7 +653,23 @@ function findPendingSmsRow_(rows, body) {
       if (!isReceiptableStatus_(rows[i])) continue;
       var hasRequestedId = (requestId && String(rows[i][2] || "") === requestId) ||
         (messageId && String(rows[i][3] || "") === messageId);
-      if (hasRequestedId) return identifiersMatch_(rows[i]) ? i : -2;
+      if (!hasRequestedId) continue;
+      if (identifiersMatch_(rows[i])) return i;
+
+      // Tasker may damage only the form-encoded lease value. A final receipt
+      // may ignore that field only when every immutable identifier and the
+      // normalized reply text are present and match this exact row.
+      if (requestId &&
+          messageId &&
+          phone &&
+          replyText &&
+          String(rows[i][2] || "") === requestId &&
+          String(rows[i][3] || "") === messageId &&
+          normalizePhone_(rows[i][4]) === phone &&
+          normalizePendingSmsReply_(rows[i][5]) === replyText) {
+        return i;
+      }
+      return -2;
     }
     return -1;
   }
