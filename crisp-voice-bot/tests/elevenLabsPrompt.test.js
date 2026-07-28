@@ -43,6 +43,11 @@ test("opening generic pickup fallback moves forward instead of repeating quick-s
 
 test("prompt uses dynamic opener scripts and keeps the address out of the first opener", () => {
   const prompt = readPrompt();
+  const openingSection = extractSection(
+    prompt,
+    "Opening:",
+    "If the caller corrects the name",
+  );
   const openerBranch = extractSection(
     prompt,
     "- If the caller confirms identity after the opener, your very next line must be:",
@@ -54,11 +59,16 @@ test("prompt uses dynamic opener scripts and keeps the address out of the first 
     "- If they give any clear yes-type answer after that, do not repeat",
   );
 
+  assert.match(openingSection, /The backend first says a short pickup probe/);
+  assert.match(openingSection, /"Hello\?"/);
+  assert.match(openingSection, /That pickup probe is only to avoid dumping the full opener before the line is ready/);
+  assert.match(openingSection, /After the first real live-human response, deliver the selected opener/);
   assert.match(prompt, /"{{openerScript}}"/);
   assert.match(prompt, /The backend chooses `{{openerScript}}` for the opener test/);
   assert.match(prompt, /passes `{{openerVariant}}` for analysis/);
-  assert.match(prompt, /Do not add a long pause before the opener/);
+  assert.match(prompt, /Do not add another long pause after the pickup probe/);
   assert.match(prompt, /Do not say `{{streetAddress}}` in the first line/);
+  assert.match(openingSection, /do not deliver `{{openerScript}}`/);
   assert.match(
     openerBranch,
     /Thanks\. I was calling about your short sale listing\. Are you handling the bank side yourself\?/,
@@ -74,6 +84,31 @@ test("prompt uses dynamic opener scripts and keeps the address out of the first 
   assert.match(prompt, /If they ask which listing, which property, or what address/);
 }
 );
+
+test("prompt repairs pickup-probe confusion before repeating the pitch", () => {
+  const prompt = readPrompt();
+  const openingSection = extractSection(
+    prompt,
+    "Opening:",
+    "If the caller corrects the name",
+  );
+
+  assert.match(openingSection, /Hello\? Hello\? What\?/);
+  assert.match(openingSection, /do not repeat the full opener over them/);
+  assert.match(openingSection, /Sorry, I may have caught you fast\. Is this {{firstName}}\\?/);
+});
+
+test("prompt waits for voicemail greeting handoff before leaving voicemail", () => {
+  const prompt = readPrompt();
+  const marker = "Voicemail and no-answer:";
+  const start = prompt.indexOf(marker);
+  assert.notEqual(start, -1, `Missing prompt marker: ${marker}`);
+  const voicemailSection = prompt.slice(start);
+
+  assert.match(voicemailSection, /do not say `{{openerScript}}` first/);
+  assert.match(voicemailSection, /do not call `voicemail_detection` while the mailbox greeting is still mid-sentence/);
+  assert.match(voicemailSection, /clear pause or the greeting has already asked for a message/);
+});
 
 test("prompt introduces Maya once and forbids repeated self-introductions after the opener", () => {
   const prompt = readPrompt();

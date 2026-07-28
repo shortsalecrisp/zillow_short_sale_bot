@@ -72,14 +72,14 @@ type ToolResponse = {
 
 
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
-const FIRST_MESSAGE = "{{openerScript}}";
-const INITIAL_WAIT_TIME_SECONDS = -1;
+const FIRST_MESSAGE = "Hello?";
+const INITIAL_WAIT_TIME_SECONDS = 0.8;
 const TURN_TIMEOUT_SECONDS = 1.5;
 const TURN_EAGERNESS = "normal";
 const SPECULATIVE_TURN = false;
 const SOFT_TIMEOUT_SECONDS = -1;
 const RETRANSCRIBE_ON_TURN_TIMEOUT = true;
-const DISABLE_FIRST_MESSAGE_INTERRUPTION = true;
+const DISABLE_FIRST_MESSAGE_INTERRUPTION = false;
 const TEMPERATURE = 0.1;
 const MAX_TOKENS = 80;
 const TTS_SPEED = 0.95;
@@ -402,6 +402,8 @@ async function main(): Promise<void> {
           },
           voicemail_detection: {
             ...((currentAgent.conversation_config.agent.prompt.built_in_tools?.voicemail_detection as Record<string, unknown> | null) ?? {}),
+            description:
+              "Use this when the first audio or later caller turn is clearly a voicemail greeting, mailbox, answering machine, recorded request to leave a message, or no-live-person voicemail scenario. Wait until the greeting reaches a leave-a-message request, beep, or first natural pause before using it so the voicemail message is not played over the mailbox greeting.",
             params: {
               ...((((currentAgent.conversation_config.agent.prompt.built_in_tools?.voicemail_detection as Record<string, unknown> | null)?.params as Record<string, unknown> | undefined) ?? {})),
               system_tool_type: "voicemail_detection",

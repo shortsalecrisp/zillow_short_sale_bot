@@ -17,17 +17,30 @@ function readConfig() {
   );
 }
 
+test("agent sync uses a short interruptible pickup probe before the opener", () => {
+  const script = readSyncScript();
+
+  assert.match(script, /const FIRST_MESSAGE = "Hello\?";/);
+  assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = 0\.8;/);
+  assert.match(script, /const TURN_TIMEOUT_SECONDS = 1\.5;/);
+  assert.match(script, /const TURN_EAGERNESS = "normal";/);
+  assert.match(script, /const DISABLE_FIRST_MESSAGE_INTERRUPTION = false;/);
+});
+
 test("agent sync enables skip_turn for placeholder-only noise turns", () => {
   const script = readSyncScript();
 
-  assert.match(script, /const FIRST_MESSAGE = "{{openerScript}}";/);
-  assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = -1;/);
-  assert.match(script, /const TURN_TIMEOUT_SECONDS = 1\.5;/);
-  assert.match(script, /const TURN_EAGERNESS = "normal";/);
-  assert.match(script, /const DISABLE_FIRST_MESSAGE_INTERRUPTION = true;/);
   assert.match(script, /skip_turn:\s*{/);
   assert.match(script, /name:\s*"skip_turn"/);
   assert.match(script, /system_tool_type:\s*"skip_turn"/);
+});
+
+test("agent sync tells voicemail detection to wait for the greeting handoff point", () => {
+  const script = readSyncScript();
+
+  assert.match(script, /voicemail_detection:\s*{/);
+  assert.match(script, /Wait until the greeting reaches a leave-a-message request, beep, or first natural pause/);
+  assert.match(script, /voicemail_message:\s*VOICEMAIL_MESSAGE_TEMPLATE/);
 });
 
 test("agent sync uses natural low-latency TTS settings", () => {
