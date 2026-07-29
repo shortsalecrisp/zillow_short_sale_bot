@@ -57,6 +57,54 @@ bot_min.search_round_robin = lambda *args, **kwargs: []
 bot_min._contact_enrichment = lambda *args, **kwargs: {}
 
 
+def test_append_row_uses_atomic_sheets_append(monkeypatch):
+    captured = {}
+
+    class FakeRequest:
+        def execute(self):
+            return {"updates": {"updatedRange": "Sheet1!A9515:AQ9515"}}
+
+    class FakeValues:
+        def append(self, **kwargs):
+            captured.update(kwargs)
+            return FakeRequest()
+
+    class FakeSpreadsheets:
+        def values(self):
+            return FakeValues()
+
+    class FakeSheetsService:
+        def spreadsheets(self):
+            return FakeSpreadsheets()
+
+    recorded_zpids = []
+    row_values = [""] * bot_min.MIN_COLS
+    row_values[bot_min.COL_ZPID] = "free-atomic-append"
+    monkeypatch.setattr(bot_min, "sheets_service", FakeSheetsService())
+    monkeypatch.setattr(
+        bot_min,
+        "_find_next_open_row",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("atomic append must not preselect an open row")
+        ),
+    )
+    monkeypatch.setattr(bot_min, "record_seen_zpid", recorded_zpids.append)
+    monkeypatch.setattr(bot_min, "_next_row_hint", 4733)
+
+    row_idx = bot_min.append_row(row_values)
+
+    assert row_idx == 9515
+    assert captured == {
+        "spreadsheetId": bot_min.GSHEET_ID,
+        "range": f"{bot_min.GSHEET_TAB}!A:AQ",
+        "valueInputOption": "RAW",
+        "insertDataOption": "INSERT_ROWS",
+        "body": {"values": [row_values]},
+    }
+    assert bot_min._next_row_hint == 9516
+    assert recorded_zpids == ["free-atomic-append"]
+
+
 def test_build_q_phone_prefers_locality_tokens():
     queries = bot_min.build_q_phone(
         "Antonio Flores",

@@ -12138,14 +12138,21 @@ _next_row_hint = GSHEET_NEXT_ROW_HINT
 
 def append_row(vals) -> int:
     global _next_row_hint
-    row_idx = _find_next_open_row(_next_row_hint)
-    resp = sheets_service.spreadsheets().values().update(
+    resp = sheets_service.spreadsheets().values().append(
         spreadsheetId=GSHEET_ID,
-        range=f"{GSHEET_TAB}!A{row_idx}",
+        range=f"{GSHEET_TAB}!A:AQ",
         valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
         body={"values": [vals]},
     ).execute()
-    updated_range = resp.get("updatedRange") or resp.get("range") or f"{GSHEET_TAB}!A{row_idx}"
+    updates = resp.get("updates") or {}
+    updated_range = (
+        updates.get("updatedRange")
+        or resp.get("updatedRange")
+        or resp.get("range")
+    )
+    if not updated_range:
+        raise RuntimeError("Google Sheets append response missing updatedRange")
     row_idx = int(updated_range.split("!")[1].split(":")[0][1:])
     _next_row_hint = row_idx + 1
     if len(vals) > COL_ZPID and vals[COL_ZPID]:
