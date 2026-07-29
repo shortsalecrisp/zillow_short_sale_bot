@@ -5,10 +5,6 @@ export const CALL_WINDOWS: Record<string, { startMinutes: number; endMinutes: nu
     startMinutes: 9 * 60,
     endMinutes: 10 * 60,
   },
-  early_afternoon: {
-    startMinutes: 12 * 60 + 30,
-    endMinutes: 13 * 60 + 30,
-  },
   mid_afternoon: {
     startMinutes: 14 * 60 + 30,
     endMinutes: 15 * 60 + 30,

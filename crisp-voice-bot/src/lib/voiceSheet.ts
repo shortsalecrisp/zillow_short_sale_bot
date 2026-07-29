@@ -49,7 +49,6 @@ export type VoiceCallWindow = {
 
 const WEEKDAY_CALL_WINDOWS: VoiceCallWindow[] = [
   { name: "morning_probe", startMinutes: 9 * 60, endMinutes: 10 * 60 },
-  { name: "early_afternoon", startMinutes: 12 * 60 + 30, endMinutes: 13 * 60 + 30 },
   { name: "mid_afternoon", startMinutes: 14 * 60 + 30, endMinutes: 15 * 60 + 30 },
   { name: "late_afternoon_control", startMinutes: 16 * 60, endMinutes: 17 * 60 },
 ];

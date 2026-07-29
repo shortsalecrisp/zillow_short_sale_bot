@@ -14,7 +14,7 @@ test("blocks unknown queue windows before dialing", () => {
 
   assert.equal(
     reason,
-    "scheduledWindow must be one of morning_probe, early_afternoon, mid_afternoon, late_afternoon_control",
+    "scheduledWindow must be one of morning_probe, mid_afternoon, late_afternoon_control",
   );
 });
 
@@ -42,7 +42,7 @@ test("allows late-afternoon requests during the listing local 4pm window", () =>
   assert.equal(reason, null);
 });
 
-test("allows morning and afternoon experiment buckets during their listing-local windows", () => {
+test("allows the approved weekday experiment buckets during their listing-local windows", () => {
   assert.equal(
     getStartCallWindowBlockReason(
       {
@@ -61,7 +61,7 @@ test("allows morning and afternoon experiment buckets during their listing-local
       },
       new Date("2026-06-23T18:00:00Z"),
     ),
-    null,
+    "scheduledWindow must be one of morning_probe, mid_afternoon, late_afternoon_control",
   );
   assert.equal(
     getStartCallWindowBlockReason(
