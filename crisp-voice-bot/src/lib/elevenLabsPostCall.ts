@@ -424,6 +424,40 @@ function isLiveTransferFallback(conversation: ElevenLabsConversation): boolean {
   );
 }
 
+export function shouldTreatAsAcceptedTransferCallback(conversation: ElevenLabsConversation): boolean {
+  if (
+    !hasLiveTransferRequest(conversation) ||
+    !hasClearLiveTransferConsent(conversation.transcript ?? [], conversation.analysis?.transcript_summary ?? "") ||
+    hasSuccessfulTransfer(conversation) ||
+    shouldTreatAsRecordingArtifact(conversation) ||
+    shouldTreatAsDoNotCall(conversation) ||
+    shouldTreatAsVoicemail(conversation) ||
+    shouldTreatAsNoAnswer(conversation) ||
+    shouldTreatAsNotShortSale(conversation) ||
+    shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
+    shouldTreatAsNotInterested(conversation)
+  ) {
+    return false;
+  }
+
+  const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+  return (
+    conversation.status === "failed" ||
+    text.includes("transfer attempt failed") ||
+    text.includes("transfer was attempted") ||
+    text.includes("transfer failed") ||
+    text.includes("transfer did not complete") ||
+    text.includes("transfer didn't complete") ||
+    text.includes("patch-through did not complete") ||
+    text.includes("trouble patching him in") ||
+    text.includes("trouble patching yoni in") ||
+    text.includes("ask him to call you back") ||
+    text.includes("ask yoni to call you back") ||
+    text.includes("have him call you back") ||
+    text.includes("have yoni call you back")
+  );
+}
+
 function isSimplePositiveResponse(value: string): boolean {
   const text = normalizeText(value)
     .replace(/[.!?]/g, "")
@@ -832,6 +866,7 @@ export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): 
     shouldTreatAsNoAnswer(conversation) ||
     shouldTreatAsCallback(conversation) ||
     shouldTreatAsAgentUnavailable(conversation) ||
+    shouldTreatAsAcceptedTransferCallback(conversation) ||
     shouldTreatAsMisfiredTransferInterestedCallback(conversation) ||
     shouldTreatAsNotShortSale(conversation) ||
     shouldTreatAsNotInterested(conversation) ||
@@ -1316,6 +1351,58 @@ async function processPostCallOutcomeForConversation(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       summary,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsAcceptedTransferCallback(conversation)) {
+    const callbackTime = "asap";
+    const outcome = buildCallbackResponseStatus(callbackTime, true);
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "callback_requested",
+      responseStatus: outcome,
+      leadStatusCode: "G",
+      callbackRequested: "yes",
+      callbackTime,
+      liveTransferRequested: "yes",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(
+        outcome,
+        "The caller accepted an immediate transfer, but the transfer did not complete and Maya promised a callback.",
+      ),
+    });
+
+    await sendCallbackEmail({
+      agentName: metadata.fullName,
+      phone: metadata.dialedPhone,
+      email: metadata.email,
+      listingAddress: metadata.listingAddress,
+      rowNumber: metadata.rowNumber,
+      action: "Call this interested lead back ASAP",
+      callbackTime,
+      conversationDescription: summary,
+      conversationTranscript: fullTranscript,
+      details:
+        "The caller accepted an immediate live transfer. The transfer did not complete cleanly, so Maya promised that Yoni would call back ASAP.",
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback converted accepted failed transfer into callback", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callbackTime,
     });
     return true;
   }

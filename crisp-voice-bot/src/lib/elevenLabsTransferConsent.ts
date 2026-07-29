@@ -36,6 +36,21 @@ function latestMessageBefore(
   return "";
 }
 
+function latestMessageIndexBefore(
+  transcript: TransferConsentTranscriptItem[],
+  beforeIndex: number,
+  predicate: (item: TransferConsentTranscriptItem) => boolean,
+): number {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    const item = transcript[index];
+    if (predicate(item) && typeof item.message === "string" && item.message.trim() !== "") {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
 function assistantOfferedImmediateLiveTransfer(message: string): boolean {
   const text = normalizeText(message);
   return (
@@ -108,11 +123,12 @@ export function hasClearLiveTransferConsent(
     return false;
   }
 
-  const latestUserMessage = latestMessageBefore(
+  const latestUserIndex = latestMessageIndexBefore(
     transcript,
     transferIndex,
     (item) => item.role === "user",
   );
+  const latestUserMessage = latestUserIndex === -1 ? "" : transcript[latestUserIndex]?.message?.trim() ?? "";
   if (!latestUserMessage || hasAmbiguousOrConflictingSignal(latestUserMessage)) {
     return false;
   }
@@ -121,7 +137,13 @@ export function hasClearLiveTransferConsent(
     return true;
   }
 
-  const latestAssistantMessage = latestMessageBefore(transcript, transferIndex, (item) => isAssistantRole(item.role));
+  // Pair consent with the offer before the caller's reply, not a later
+  // procedural "hold on" message emitted before the transfer tool.
+  const latestAssistantMessage = latestMessageBefore(
+    transcript,
+    latestUserIndex,
+    (item) => isAssistantRole(item.role),
+  );
   return assistantOfferedImmediateLiveTransfer(latestAssistantMessage) && isSimplePositiveReply(latestUserMessage);
 }
 

@@ -166,6 +166,31 @@ const lorettaMisfiredTransferConversation = {
   ],
 } as const;
 
+const pattyAcceptedTransferFallbackConversation = {
+  status: "done",
+  metadata: {
+    termination_reason: "Client disconnected: 1000",
+    call_duration_secs: 84,
+  },
+  analysis: {
+    transcript_summary:
+      "The agent agreed to be connected with Yoni. The transfer attempt failed, so Maya offered to have Yoni call the agent back.",
+  },
+  transcript: [
+    { role: "assistant", message: "Yoni can explain the details better than I can. Want me to see if he's available now?" },
+    { role: "user", message: "Okay." },
+    { role: "assistant", message: "Would you like me to bring him in to the call?" },
+    { role: "user", message: "Yes." },
+    { role: "assistant", message: "Ok, hold on, let me see if he's available one second." },
+    { role: "assistant", tool_calls: [{ tool_name: "live_transfer_requested" }] },
+    {
+      role: "assistant",
+      message:
+        "Sorry, I am having trouble patching him in, but I will text him and ask him to call you back ASAP. Is that ok?",
+    },
+  ],
+} as const;
+
 const providerQuotaFailureConversation = {
   status: "failed",
   metadata: {
@@ -272,6 +297,18 @@ test("post-call fallback keeps ambiguous quick-call transfer misfires as interes
   assert.equal(shouldTreatAsCallback(lorettaMisfiredTransferConversation), false);
   assert.equal(shouldTreatAsMisfiredTransferInterestedCallback(lorettaMisfiredTransferConversation), true);
   assert.equal(shouldTreatAsAgentHungUp(lorettaMisfiredTransferConversation), false);
+});
+
+test("post-call fallback records an accepted transfer fallback as an ASAP callback instead of a hangup", async () => {
+  const {
+    shouldTreatAsAcceptedTransferCallback,
+    shouldTreatAsAgentHungUp,
+    shouldTreatAsMisfiredTransferInterestedCallback,
+  } = await import("../src/lib/elevenLabsPostCall");
+
+  assert.equal(shouldTreatAsAcceptedTransferCallback(pattyAcceptedTransferFallbackConversation), true);
+  assert.equal(shouldTreatAsMisfiredTransferInterestedCallback(pattyAcceptedTransferFallbackConversation), false);
+  assert.equal(shouldTreatAsAgentHungUp(pattyAcceptedTransferFallbackConversation), false);
 });
 
 test("post-call fallback treats screening recordings and canned ASAP fragments as unavailable", async () => {

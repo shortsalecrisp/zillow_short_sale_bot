@@ -70,6 +70,22 @@ test("transfer consent accepts a clear yes after a Yoni-now offer", async () => 
   assert.equal(isMisfiredLiveTransferRequest(transcript), false);
 });
 
+test("transfer consent ignores a procedural hold-on message after the caller accepts", async () => {
+  const { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } = await import(
+    "../src/lib/elevenLabsTransferConsent"
+  );
+
+  const transcript = [
+    { role: "agent", message: "Would you like me to bring Yoni in to the call?" },
+    { role: "user", message: "Yes." },
+    { role: "agent", message: "Ok, hold on, let me see if he's available one second." },
+    { role: "agent", tool_calls: [{ tool_name: "live_transfer_requested" }] },
+  ];
+
+  assert.equal(hasClearLiveTransferConsent(transcript), true);
+  assert.equal(isMisfiredLiveTransferRequest(transcript), false);
+});
+
 test("transfer consent stays true when callback fallback happens only after the transfer attempt", async () => {
   const { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } = await import(
     "../src/lib/elevenLabsTransferConsent"
