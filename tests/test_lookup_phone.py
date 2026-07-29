@@ -1354,12 +1354,12 @@ def test_process_rows_holds_pilot_origin_sms_for_verifier(monkeypatch):
     monkeypatch.setattr(
         bot_min,
         "lookup_phone",
-        lambda *args, **kwargs: {"number": "555-444-3333", "confidence": "high", "reason": ""},
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pilot intake must not enrich")),
     )
     monkeypatch.setattr(
         bot_min,
         "lookup_email",
-        lambda *args, **kwargs: {"email": "jane@example.com", "confidence": "high", "reason": ""},
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pilot intake must not enrich")),
     )
     monkeypatch.setattr(bot_min, "_rapid_contact_normalized", lambda *args, **kwargs: {})
     appended = []
@@ -1377,15 +1377,65 @@ def test_process_rows_holds_pilot_origin_sms_for_verifier(monkeypatch):
                 "city": "Los Angeles",
                 "zpid": "free-abc",
                 "search_source": "free-source-pilot:idx_broker_remarks",
+                "requiresVerifierReview": "true",
             }
         ],
         skip_dedupe=True,
     )
 
     assert len(appended) == 1
+    assert appended[0][bot_min.COL_FIRST] == "Jane"
+    assert appended[0][bot_min.COL_PHONE] == ""
+    assert appended[0][bot_min.COL_EMAIL] == ""
     assert scheduled == []
     bot_min.seen_agents.clear()
     bot_min.seen_phones.clear()
+
+
+def test_process_rows_accepts_address_only_pilot_for_verifier(monkeypatch):
+    monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_phone",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("address-only intake must not enrich")),
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_email",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("address-only intake must not enrich")),
+    )
+    appended = []
+    monkeypatch.setattr(bot_min, "append_row", lambda row_vals: appended.append(row_vals) or 43)
+    monkeypatch.setattr(
+        bot_min,
+        "schedule_initial_sms",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("address-only intake must not text")),
+    )
+
+    outcomes = bot_min.process_rows(
+        [
+            {
+                "description": "short sale listing",
+                "state": "FL",
+                "street": "6060 Condor Drive",
+                "city": "Lakeland",
+                "zpid": "free-address-only",
+                "search_source": "free-source-pilot:idx_broker_remarks",
+                "requiresVerifierReview": "true",
+            }
+        ],
+        skip_dedupe=True,
+        return_outcomes=True,
+    )
+
+    assert outcomes == {"free-address-only": "completed_short_sale"}
+    assert len(appended) == 1
+    assert appended[0][bot_min.COL_FIRST] == ""
+    assert appended[0][bot_min.COL_STREET] == "6060 Condor Drive"
+    assert appended[0][bot_min.COL_PHONE] == ""
+    assert appended[0][bot_min.COL_EMAIL] == ""
 
 
 def test_process_rows_skips_undisclosed_address_variants(monkeypatch):

@@ -673,8 +673,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(row[:7], ["", "", "", "", "123 Main Street", "Atlanta", "GA"])
         self.assertEqual(row[12], "qualified")
-        self.assertEqual(row[16], "review")
-        self.assertIn("missing_listing_agent", row[15])
+        self.assertEqual(row[16], "yes")
+        self.assertIn("left blank", row[15])
 
     def test_phone_and_email_without_agent_name_still_needs_review(self):
         candidate = pilot.Candidate(
@@ -695,10 +695,10 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         row = pilot.candidate_to_row(candidate, qualification, "", "", "")
 
-        self.assertEqual(row[16], "review")
-        self.assertIn("missing_listing_agent", row[15])
+        self.assertEqual(row[16], "yes")
+        self.assertIn("left blank", row[15])
 
-    def test_promotion_skips_shadow_ready_row_without_agent_identity(self):
+    def test_promotion_accepts_shadow_ready_row_without_agent_identity(self):
         payload = {
             "zpid": "free-abc",
             "street": "123 Main Street",
@@ -739,7 +739,9 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         ), mock.patch.object(
             pilot,
             "import_bot_processor",
-            side_effect=AssertionError("processor should not be imported for missing agent"),
+            return_value=types.SimpleNamespace(
+                process_rows=lambda rows, **kwargs: {"free-abc": "completed_short_sale"}
+            ),
         ):
             stats = pilot.promote_ready_pilot_rows(
                 "token",
@@ -750,11 +752,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 dry_run=False,
             )
 
-        self.assertEqual(stats["promoted"], 0)
-        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["promoted"], 1)
+        self.assertEqual(stats["skipped"], 0)
         status_updates = {update["range"]: update["values"][0][0] for update in captured_updates}
-        self.assertEqual(status_updates["Lead Source Pilot!O2"], "needs_agent")
-        self.assertEqual(status_updates["Lead Source Pilot!Q2"], "review")
+        self.assertEqual(status_updates["Lead Source Pilot!O2"], "promoted")
+        self.assertEqual(status_updates["Lead Source Pilot!Q2"], "promoted")
 
     def test_promotion_skips_feed_or_brokerage_agent_identity(self):
         bad_names = [
@@ -803,8 +805,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                     existing,
                 )
 
-                self.assertEqual(status, "needs_agent")
-                self.assertIn(reason, note)
+                self.assertEqual(status, "")
+                self.assertEqual(note, pilot.street_state_key(address, "CO"))
                 self.assertEqual(matched, "")
 
     def test_promotion_skips_undisclosed_address(self):
@@ -1044,6 +1046,18 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 self.assertEqual(shadow.get("label", ""), expected_label)
                 self.assertNotIn("agent_name", candidate.fields)
 
+    def test_agent_shadow_parser_rejects_brokerage_only_courtesy(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street",
+            text="Listing courtesy of Golden Key Realty LLC.",
+            fields={"listing_address": "123 Main Street", "city": "Denver", "state": "CO"},
+        )
+
+        self.assertEqual(pilot.shadow_listing_agent_candidate(candidate), {})
+
     def test_direct_monitor_sitemap_selection_is_bounded_and_rotates(self):
         feed = "https://example.com/listings.xml"
         entries = "".join(
@@ -1069,6 +1083,34 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(day_one), 3)
         self.assertEqual(len(day_two), 3)
         self.assertTrue(set(day_one).isdisjoint(day_two))
+        day_one_numbers = sorted(int(url.rsplit("/", 1)[-1].split("-", 1)[0]) for url in day_one)
+        self.assertGreater(day_one_numbers[-1] - day_one_numbers[0], 4)
+
+    def test_existing_agent_name_dedupes_even_when_contact_differs(self):
+        existing = pilot.build_existing_index(
+            [
+                ["first", "last", "phone", "email", "listing_address", "city", "state"],
+                ["Jane", "Smith", "404-555-1212", "jane@example.com", "1 Old St", "Atlanta", "GA"],
+            ]
+        )
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/new",
+            title="2 New St",
+            text="Status: Active. Remarks: Potential short sale.",
+            fields={
+                "agent_name": "Jane Smith",
+                "listing_address": "2 New St",
+                "city": "Denver",
+                "state": "CO",
+            },
+        )
+
+        self.assertEqual(
+            pilot.duplicate_status(candidate, existing),
+            ("possible_existing_agent", "jane smith", "2"),
+        )
 
     def test_duplicate_listing_status_checks_address_before_contact_research(self):
         main_rows = [

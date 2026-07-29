@@ -546,6 +546,7 @@ class ExistingIndex:
     street_state_keys: dict[str, int]
     phone_keys: dict[str, int]
     agent_keys: dict[str, list[int]]
+    agent_name_keys: dict[str, list[int]]
 
 
 def log_event(event: str, **fields: Any) -> None:
@@ -617,6 +618,10 @@ def agent_key(agent: str, state: str, phone: str = "", email: str = "") -> str:
         for part in [normalize_key(agent), normalize_key(state), phone_key or email_key]
         if part
     )
+
+
+def agent_name_key(agent: str) -> str:
+    return normalize_key(clean_agent_name(agent))
 
 
 def split_agent_name(full_name: str) -> tuple[str, str]:
@@ -735,6 +740,7 @@ def build_existing_index(rows: list[list[str]]) -> ExistingIndex:
     street_state_keys: dict[str, int] = {}
     phone_keys: dict[str, int] = {}
     agent_keys: dict[str, list[int]] = {}
+    agent_name_keys: dict[str, list[int]] = {}
     for idx, row in enumerate(rows[1:], start=2):
         padded = row + [""] * 8
         agent = normalize_space(f"{padded[0]} {padded[1]}")
@@ -755,7 +761,10 @@ def build_existing_index(rows: list[list[str]]) -> ExistingIndex:
         gkey = agent_key(agent, state, phone, email)
         if gkey:
             agent_keys.setdefault(gkey, []).append(idx)
-    return ExistingIndex(address_keys, street_state_keys, phone_keys, agent_keys)
+        name_key = agent_name_key(agent)
+        if name_key:
+            agent_name_keys.setdefault(name_key, []).append(idx)
+    return ExistingIndex(address_keys, street_state_keys, phone_keys, agent_keys, agent_name_keys)
 
 
 def duplicate_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str, str, str]:
@@ -776,6 +785,14 @@ def duplicate_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str
     )
     if gkey and gkey in existing.agent_keys:
         return "possible_existing_agent", gkey, ",".join(map(str, existing.agent_keys[gkey]))
+
+    name_key = agent_name_key(fields.get("agent_name", ""))
+    if name_key and name_key in existing.agent_name_keys:
+        return (
+            "possible_existing_agent",
+            name_key,
+            ",".join(map(str, existing.agent_name_keys[name_key])),
+        )
 
     return "", listing_key, ""
 
@@ -1332,6 +1349,23 @@ def shadow_listing_agent_candidate(candidate: Candidate) -> dict[str, str]:
                 match.group(1),
                 maxsplit=1,
             )[0]
+            if label in {"listing_courtesy", "listing_provided_by"}:
+                person_of_brokerage = re.match(
+                    r"^\s*(?P<person>[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})"
+                    r"\s+of\s+(?P<brokerage>.+)$",
+                    segment,
+                )
+                if person_of_brokerage and BUSINESS_NAME_RE.search(person_of_brokerage.group("brokerage")):
+                    segment = person_of_brokerage.group("person")
+                elif BUSINESS_NAME_RE.search(segment):
+                    log_event(
+                        "pilot_agent_shadow_rejected",
+                        url=candidate.url,
+                        label=label,
+                        agent="",
+                        reason="courtesy_names_brokerage_not_person",
+                    )
+                    continue
             name = clean_agent_name(segment)
             if not name:
                 continue
@@ -1517,14 +1551,13 @@ def shadow_promotion_readiness(candidate: Candidate, qualification: Qualificatio
             False,
             "Short sale language was not confirmed in the listing agent's description or remarks.",
         )
-    if not safe_agent:
-        return "needs_agent", False, f"Listing agent needs review: {agent_reason}."
-
     contact_note = (
         "Agent phone and email are attributable to the listing."
         if has_complete_agent_contact(candidate)
-        else "Agent contact is blank or partial; the lead verifier must confirm it later."
+        else "Agent identity or contact is blank or partial; the lead verifier must confirm it after Sheet1 intake."
     )
+    if not safe_agent:
+        contact_note = f"Agent identity was left blank ({agent_reason}); the lead verifier must confirm it after Sheet1 intake."
     mode_note = (
         "Automatic PendingQueue promotion is disabled during the shadow rollout."
         if SHADOW_MODE
@@ -1766,8 +1799,17 @@ def collect_direct_monitor_urls(
                 if is_direct_listing_url(family, url)
             )
         listing_entries.sort(key=lambda item: (item[1], item[0]), reverse=True)
-        offset = 0 if "new-day" in feed else day_offset * per_feed
-        for url, _ in listing_entries[offset : offset + per_feed]:
+        if family == "momentum" and listing_entries:
+            count = min(per_feed, len(listing_entries))
+            sample_indexes = [
+                ((slot * len(listing_entries)) // count + day_offset) % len(listing_entries)
+                for slot in range(count)
+            ]
+            sampled_entries = [listing_entries[index] for index in sample_indexes]
+        else:
+            offset = 0 if "new-day" in feed else day_offset * per_feed
+            sampled_entries = listing_entries[offset : offset + per_feed]
+        for url, _ in sampled_entries:
             if url not in seen:
                 selected.append(url)
                 seen.add(url)
@@ -2256,6 +2298,8 @@ def candidate_from_pilot_row(row_data: dict[str, str], payload: dict[str, str]) 
         "broker_name": payload.get("brokerName")
         or payload.get("brokerageName")
         or row_data.get("broker_name", ""),
+        "listing_description": payload.get("listing_description", "")
+        or payload.get("description", ""),
     }
     text = " ".join(
         part
@@ -2294,10 +2338,6 @@ def pilot_row_preflight_failure(
     if not source.startswith("free-source-pilot:"):
         return "invalid_source", "Pending payload is missing the free-source-pilot source guard.", ""
 
-    agent_name = agent_name_from_pilot(row_data, payload)
-    if not agent_name:
-        return "needs_agent", "Missing confirmed listing agent.", ""
-
     candidate = candidate_from_pilot_row(row_data, payload)
     if not (
         looks_like_listing_address(candidate.fields.get("listing_address", ""))
@@ -2305,14 +2345,23 @@ def pilot_row_preflight_failure(
         and normalize_space(candidate.fields.get("state", ""))
     ):
         return "needs_address", "Street, city, and state must be confirmed before promotion.", ""
-    candidate.fields["agent_name"] = agent_name
-    agent_safe, agent_reason = agent_name_promotion_safety(candidate, require_source=False)
-    if not agent_safe:
-        return "needs_agent", f"Listing agent needs review: {agent_reason}.", ""
+    agent_name = agent_name_from_pilot(row_data, payload)
+    if agent_name:
+        candidate.fields["agent_name"] = agent_name
+        agent_safe, _ = agent_name_promotion_safety(candidate, require_source=False)
+        if not agent_safe:
+            candidate.fields["agent_name"] = ""
+            row_data["first_name"] = ""
+            row_data["last_name"] = ""
+            for key in ("agentName", "phone", "email"):
+                payload.pop(key, None)
 
-    description_evidence = row_data.get("qualification_evidence", "") or candidate.text
-    if not SHORT_SALE_LISTING_RE.search(description_evidence):
-        return "needs_description_confirmation", "Short sale language was not confirmed before promotion.", ""
+    if not strict_listing_description_evidence(candidate):
+        return (
+            "needs_description_confirmation",
+            "Short sale language was not confirmed in listing-agent remarks before promotion.",
+            "",
+        )
 
     duplicate, duplicate_key, matched = duplicate_status(candidate, existing)
     if duplicate == "duplicate_listing":
@@ -2392,6 +2441,8 @@ def promote_ready_pilot_rows(
 
     processor = None
     updates: list[dict[str, Any]] = []
+    promoted_listing_keys: set[str] = set()
+    promoted_agent_names: set[str] = set()
 
     for sheet_row, row in enumerate(pilot_rows[1:], start=2):
         row_data = pilot_row_map(row)
@@ -2414,6 +2465,18 @@ def promote_ready_pilot_rows(
             continue
 
         failure_status, failure_note, matched = pilot_row_preflight_failure(row_data, payload, existing)
+        candidate = candidate_from_pilot_row(row_data, payload)
+        listing_key = street_state_key(
+            candidate.fields.get("listing_address", ""),
+            candidate.fields.get("state", ""),
+        )
+        name_key = agent_name_key(candidate.fields.get("agent_name", ""))
+        if not failure_status and listing_key and listing_key in promoted_listing_keys:
+            failure_status = "skipped_duplicate_listing"
+            failure_note = "Duplicate normalized address within this promotion batch."
+        if not failure_status and name_key and name_key in promoted_agent_names:
+            failure_status = "skipped_existing_agent"
+            failure_note = "Duplicate normalized agent name within this promotion batch."
         if failure_status:
             stats["skipped"] += 1
             updates.extend(
@@ -2440,6 +2503,10 @@ def promote_ready_pilot_rows(
         zpid = normalized_payload.get("zpid", "")
         if dry_run:
             stats["promoted"] += 1
+            if listing_key:
+                promoted_listing_keys.add(listing_key)
+            if name_key:
+                promoted_agent_names.add(name_key)
             updates.extend(
                 promotion_status_updates(
                     pilot_tab,
@@ -2475,6 +2542,10 @@ def promote_ready_pilot_rows(
 
             if outcome == "completed_short_sale":
                 stats["promoted"] += 1
+                if listing_key:
+                    promoted_listing_keys.add(listing_key)
+                if name_key:
+                    promoted_agent_names.add(name_key)
                 updates.extend(
                     promotion_status_updates(
                         pilot_tab,
