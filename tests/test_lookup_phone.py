@@ -57,15 +57,21 @@ bot_min.search_round_robin = lambda *args, **kwargs: []
 bot_min._contact_enrichment = lambda *args, **kwargs: {}
 
 
-def test_append_row_uses_atomic_sheets_append(monkeypatch):
+def test_find_next_open_row_checks_identity_columns(monkeypatch):
     captured = {}
 
     class FakeRequest:
         def execute(self):
-            return {"updates": {"updatedRange": "Sheet1!A9515:AQ9515"}}
+            return {
+                "values": [
+                    ["Existing", "Agent"],
+                    ["", "", "404-316-9725"],
+                    [],
+                ]
+            }
 
     class FakeValues:
-        def append(self, **kwargs):
+        def get(self, **kwargs):
             captured.update(kwargs)
             return FakeRequest()
 
@@ -77,32 +83,72 @@ def test_append_row_uses_atomic_sheets_append(monkeypatch):
         def spreadsheets(self):
             return FakeSpreadsheets()
 
+    monkeypatch.setattr(bot_min, "sheets_service", FakeSheetsService())
+
+    assert bot_min._find_next_open_row(4733) == 4735
+    assert captured == {
+        "spreadsheetId": bot_min.GSHEET_ID,
+        "range": f"{bot_min.GSHEET_TAB}!A4733:G4932",
+        "majorDimension": "ROWS",
+    }
+
+
+def test_append_row_writes_next_real_lead_row_not_artifact_tail(monkeypatch):
+    captured = {}
+
+    class FakeRequest:
+        def execute(self):
+            return {}
+
+    class FakeValues:
+        def get(self, **kwargs):
+            captured["get"] = kwargs
+            return FakeRequest()
+
+        def update(self, **kwargs):
+            captured["update"] = kwargs
+            return FakeRequest()
+
+        def append(self, **_kwargs):
+            raise AssertionError("native append would land after the artifact tail")
+
+    class FakeSpreadsheets:
+        def values(self):
+            return FakeValues()
+
+    class FakeSheetsService:
+        def spreadsheets(self):
+            return FakeSpreadsheets()
+
     recorded_zpids = []
     row_values = [""] * bot_min.MIN_COLS
-    row_values[bot_min.COL_ZPID] = "free-atomic-append"
+    row_values[bot_min.COL_ZPID] = "free-active-row-write"
     monkeypatch.setattr(bot_min, "sheets_service", FakeSheetsService())
-    monkeypatch.setattr(
-        bot_min,
-        "_find_next_open_row",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("atomic append must not preselect an open row")
-        ),
-    )
+
+    def fake_find_next_open_row(start_row):
+        assert start_row == 4733
+        return 4737
+
+    monkeypatch.setattr(bot_min, "_find_next_open_row", fake_find_next_open_row)
     monkeypatch.setattr(bot_min, "record_seen_zpid", recorded_zpids.append)
     monkeypatch.setattr(bot_min, "_next_row_hint", 4733)
 
     row_idx = bot_min.append_row(row_values)
 
-    assert row_idx == 9515
-    assert captured == {
+    assert row_idx == 4737
+    assert captured["get"] == {
         "spreadsheetId": bot_min.GSHEET_ID,
-        "range": f"{bot_min.GSHEET_TAB}!A:AQ",
+        "range": f"{bot_min.GSHEET_TAB}!A4737:G4737",
+        "majorDimension": "ROWS",
+    }
+    assert captured["update"] == {
+        "spreadsheetId": bot_min.GSHEET_ID,
+        "range": f"{bot_min.GSHEET_TAB}!A4737:AQ4737",
         "valueInputOption": "RAW",
-        "insertDataOption": "INSERT_ROWS",
         "body": {"values": [row_values]},
     }
-    assert bot_min._next_row_hint == 9516
-    assert recorded_zpids == ["free-atomic-append"]
+    assert bot_min._next_row_hint == 4738
+    assert recorded_zpids == ["free-active-row-write"]
 
 
 def test_build_q_phone_prefers_locality_tokens():

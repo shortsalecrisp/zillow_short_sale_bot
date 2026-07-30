@@ -445,7 +445,7 @@ GSHEET_ID      = os.environ["GSHEET_ID"]
 GSHEET_TAB     = os.getenv("GSHEET_TAB", "Sheet1")
 SEEN_ZPID_TAB  = "Seen Zpids"
 GSHEET_RANGE   = os.getenv("GSHEET_RANGE", f"{GSHEET_TAB}!A1")
-GSHEET_NEXT_ROW_HINT = int(os.getenv("GSHEET_NEXT_ROW_HINT", "2566"))
+GSHEET_NEXT_ROW_HINT = int(os.getenv("GSHEET_NEXT_ROW_HINT", "4749"))
 GSHEET_ROW_SCAN_WINDOW = int(os.getenv("GSHEET_ROW_SCAN_WINDOW", "200"))
 SC_JSON        = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -12121,7 +12121,7 @@ def _find_next_open_row(start_row: Optional[int] = None) -> int:
         end_row = row + window - 1
         resp = sheets_service.spreadsheets().values().get(
             spreadsheetId=GSHEET_ID,
-            range=f"{GSHEET_TAB}!A{row}:A{end_row}",
+            range=f"{GSHEET_TAB}!A{row}:G{end_row}",
             majorDimension="ROWS",
         ).execute()
         values = resp.get("values", [])
@@ -12134,31 +12134,33 @@ def _find_next_open_row(start_row: Optional[int] = None) -> int:
 
 
 _next_row_hint = GSHEET_NEXT_ROW_HINT
+_append_row_lock = threading.Lock()
 
 
 def append_row(vals) -> int:
     global _next_row_hint
-    resp = sheets_service.spreadsheets().values().append(
-        spreadsheetId=GSHEET_ID,
-        range=f"{GSHEET_TAB}!A:AQ",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [vals]},
-    ).execute()
-    updates = resp.get("updates") or {}
-    updated_range = (
-        updates.get("updatedRange")
-        or resp.get("updatedRange")
-        or resp.get("range")
-    )
-    if not updated_range:
-        raise RuntimeError("Google Sheets append response missing updatedRange")
-    row_idx = int(updated_range.split("!")[1].split(":")[0][1:])
-    _next_row_hint = row_idx + 1
-    if len(vals) > COL_ZPID and vals[COL_ZPID]:
-        record_seen_zpid(str(vals[COL_ZPID]))
-    LOG.info("Row appended to sheet (row %s); next hint %s", row_idx, _next_row_hint)
-    return row_idx
+    with _append_row_lock:
+        row_idx = _find_next_open_row(_next_row_hint)
+        check = sheets_service.spreadsheets().values().get(
+            spreadsheetId=GSHEET_ID,
+            range=f"{GSHEET_TAB}!A{row_idx}:G{row_idx}",
+            majorDimension="ROWS",
+        ).execute()
+        check_rows = check.get("values", [])
+        if check_rows and not _row_is_empty(check_rows[0]):
+            raise RuntimeError(f"Refusing to overwrite non-empty Sheet1 row {row_idx}")
+
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=GSHEET_ID,
+            range=f"{GSHEET_TAB}!A{row_idx}:AQ{row_idx}",
+            valueInputOption="RAW",
+            body={"values": [vals]},
+        ).execute()
+        _next_row_hint = row_idx + 1
+        if len(vals) > COL_ZPID and vals[COL_ZPID]:
+            record_seen_zpid(str(vals[COL_ZPID]))
+        LOG.info("Row written to sheet (row %s); next hint %s", row_idx, _next_row_hint)
+        return row_idx
 
 def delete_row(row_idx: int) -> None:
     global _next_row_hint
