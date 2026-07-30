@@ -93,24 +93,44 @@ def test_find_next_open_row_checks_identity_columns(monkeypatch):
     }
 
 
-def test_append_row_writes_next_real_lead_row_not_artifact_tail(monkeypatch):
+@pytest.mark.parametrize(
+    ("updated_range", "expected_row"),
+    [
+        ("Sheet1!A4737:AQ4737", 4737),
+        ("'Sheet1'!AQ9526", 9526),
+        ("Sheet1!$A$4754:$AQ$4754", 4754),
+    ],
+)
+def test_row_index_from_append_range_handles_full_and_single_cell_receipts(
+    updated_range,
+    expected_row,
+):
+    assert bot_min._row_index_from_append_range(updated_range) == expected_row
+
+
+def test_row_index_from_append_range_rejects_multirow_receipt():
+    with pytest.raises(RuntimeError, match="Expected one appended row"):
+        bot_min._row_index_from_append_range("Sheet1!A4754:AQ4755")
+
+
+def test_append_row_atomically_appends_inside_active_lead_block(monkeypatch):
     captured = {}
 
     class FakeRequest:
+        def __init__(self, response=None):
+            self.response = response or {}
+
         def execute(self):
-            return {}
+            return self.response
 
     class FakeValues:
         def get(self, **kwargs):
             captured["get"] = kwargs
             return FakeRequest()
 
-        def update(self, **kwargs):
-            captured["update"] = kwargs
-            return FakeRequest()
-
-        def append(self, **_kwargs):
-            raise AssertionError("native append would land after the artifact tail")
+        def append(self, **kwargs):
+            captured["append"] = kwargs
+            return FakeRequest({"updates": {"updatedRange": "Sheet1!AQ4737"}})
 
     class FakeSpreadsheets:
         def values(self):
@@ -136,15 +156,11 @@ def test_append_row_writes_next_real_lead_row_not_artifact_tail(monkeypatch):
     row_idx = bot_min.append_row(row_values)
 
     assert row_idx == 4737
-    assert captured["get"] == {
+    assert captured["append"] == {
         "spreadsheetId": bot_min.GSHEET_ID,
-        "range": f"{bot_min.GSHEET_TAB}!A4737:G4737",
-        "majorDimension": "ROWS",
-    }
-    assert captured["update"] == {
-        "spreadsheetId": bot_min.GSHEET_ID,
-        "range": f"{bot_min.GSHEET_TAB}!A4737:AQ4737",
+        "range": f"{bot_min.GSHEET_TAB}!A1:AQ4737",
         "valueInputOption": "RAW",
+        "insertDataOption": "INSERT_ROWS",
         "body": {"values": [row_values]},
     }
     assert bot_min._next_row_hint == 4738

@@ -12143,29 +12143,52 @@ _next_row_hint = GSHEET_NEXT_ROW_HINT
 _append_row_lock = threading.Lock()
 
 
+def _row_index_from_append_range(updated_range: str) -> int:
+    coordinate = str(updated_range or "").rsplit("!", 1)[-1].replace("$", "")
+    match = re.fullmatch(
+        r"[A-Z]+(?P<start>\d+)(?::[A-Z]+(?P<end>\d+))?",
+        coordinate,
+        re.IGNORECASE,
+    )
+    if not match:
+        raise RuntimeError(f"Unable to parse Google Sheets append range: {updated_range!r}")
+    start_row = int(match.group("start"))
+    end_row = int(match.group("end") or start_row)
+    if start_row != end_row:
+        raise RuntimeError(f"Expected one appended row, received range: {updated_range!r}")
+    return start_row
+
+
 def append_row(vals) -> int:
     global _next_row_hint
     with _append_row_lock:
-        row_idx = _find_next_open_row(_next_row_hint)
-        check = sheets_service.spreadsheets().values().get(
+        active_open_row = _find_next_open_row(_next_row_hint)
+        resp = sheets_service.spreadsheets().values().append(
             spreadsheetId=GSHEET_ID,
-            range=f"{GSHEET_TAB}!A{row_idx}:G{row_idx}",
-            majorDimension="ROWS",
-        ).execute()
-        check_rows = check.get("values", [])
-        if check_rows and not _row_is_empty(check_rows[0]):
-            raise RuntimeError(f"Refusing to overwrite non-empty Sheet1 row {row_idx}")
-
-        sheets_service.spreadsheets().values().update(
-            spreadsheetId=GSHEET_ID,
-            range=f"{GSHEET_TAB}!A{row_idx}:AQ{row_idx}",
+            # Bound table discovery to the active lead block so legacy artifact
+            # cells far below it cannot pull the append away from the verifier.
+            range=f"{GSHEET_TAB}!A1:AQ{active_open_row}",
             valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
             body={"values": [vals]},
         ).execute()
+        updates = resp.get("updates") or {}
+        updated_range = (
+            updates.get("updatedRange")
+            or resp.get("updatedRange")
+            or resp.get("range")
+        )
+        if not updated_range:
+            raise RuntimeError("Google Sheets append response missing updatedRange")
+        row_idx = _row_index_from_append_range(updated_range)
         _next_row_hint = row_idx + 1
         if len(vals) > COL_ZPID and vals[COL_ZPID]:
             record_seen_zpid(str(vals[COL_ZPID]))
-        LOG.info("Row written to sheet (row %s); next hint %s", row_idx, _next_row_hint)
+        LOG.info(
+            "Row atomically appended to active lead block (row %s); next hint %s",
+            row_idx,
+            _next_row_hint,
+        )
         return row_idx
 
 def delete_row(row_idx: int) -> None:

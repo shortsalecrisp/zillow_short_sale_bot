@@ -272,6 +272,10 @@ CONTACT_RESEARCH_RESULTS = int(os.getenv("FREE_SOURCE_PILOT_CONTACT_RESEARCH_RES
 PROMOTION_ENABLED = os.getenv("FREE_SOURCE_PILOT_PROMOTION_ENABLED", "false").lower() == "true"
 PROMOTION_DAILY_CAP = max(0, int(os.getenv("FREE_SOURCE_PILOT_PROMOTION_DAILY_CAP", "10")))
 PROMOTION_DRY_RUN = os.getenv("FREE_SOURCE_PILOT_PROMOTION_DRY_RUN", "false").lower() == "true"
+AGENT_SHADOW_CONSENSUS_CAP = max(
+    0,
+    int(os.getenv("FREE_SOURCE_PILOT_AGENT_SHADOW_CONSENSUS_CAP", "10")),
+)
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
 HEADLESS_DOMAIN_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET", "4")))
@@ -323,6 +327,8 @@ DESCRIPTION_SECTION_STOP_RE = re.compile(
     r"financial\s+considerations|disclosures(?:\s+and\s+reports)?|interior|exterior|"
     r"features|parking|lot\s+features|listing\s+agent|home\s+details|property\s+details|"
     r"listing\s+details|quickly\s+find|map|facts\s*&\s*features|tax\s+info|"
+    r"special\s+(?:listing\s+)?conditions?|short\s+sale\s+status|is\s+short\s+sale|"
+    r"financial\s+status|contract\s+information|"
     r"condo/co-op/association|mls\s+data"
     r")\b",
     re.IGNORECASE,
@@ -360,13 +366,16 @@ NON_CURRENT_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 
-DISQUALIFY_PATTERNS = [
+STRUCTURED_SHORT_SALE_NEGATIVE_PATTERNS = [
     re.compile(r"\bis\s+short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s+status\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s*\??\s*[:=]\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\b(?:potential\s+)?short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\b(?:financial\s+status|contract\s+information|special\s+listing\s+conditions?)\s*[-:]?\s*(?:potential\s+)?short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\bisShortSale[\"']?\s*[:=]\s*[\"']?false[\"']?\b", re.IGNORECASE),
+]
+
+DISQUALIFY_PATTERNS = [
     re.compile(r"\bapproved\s+short\s+sale\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s+approved\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\b.{0,80}\bapproved\s+price\b", re.IGNORECASE),
@@ -647,8 +656,18 @@ def current_listing_status(text: str) -> tuple[str, str]:
 def qualification_for_text(text: str) -> Qualification:
     text = html.unescape(text or "")
     compact = normalize_space(text)
+    verified_match = verified_short_sale_match(compact)
     disqualified = []
-    for pattern in DISQUALIFY_PATTERNS:
+    # An explicit statement in the listing agent's remarks is authoritative.
+    # Structured fields are often left at their default value, so a conflicting
+    # "No"/false field cannot overrule those remarks. Business disqualifiers
+    # such as approved price or an assigned negotiator still apply.
+    disqualify_patterns = list(DISQUALIFY_PATTERNS)
+    if not verified_match:
+        disqualify_patterns = (
+            list(STRUCTURED_SHORT_SALE_NEGATIVE_PATTERNS) + disqualify_patterns
+        )
+    for pattern in disqualify_patterns:
         match = pattern.search(compact)
         if match:
             disqualified.append(match.group(0))
@@ -672,7 +691,6 @@ def qualification_for_text(text: str) -> Qualification:
             excerpt_around(compact, short_sale_match.start(), short_sale_match.end()),
             "; ".join(disqualified),
         )
-    verified_match = verified_short_sale_match(compact)
     if not verified_match:
         return Qualification(
             "rejected",
@@ -1834,6 +1852,82 @@ def log_agent_shadow(candidate: Candidate, *, monitor_family: str = "") -> bool:
         != normalize_key(candidate.fields.get("agent_name", "")),
         promotion_changed=False,
     )
+    record_two_source_agent_shadow(candidate, shadow=shadow)
+    return True
+
+
+_agent_shadow_observations: dict[str, dict[str, dict[str, Any]]] = {}
+_agent_shadow_consensus_logged: set[str] = set()
+
+
+def reset_agent_shadow_consensus_state() -> None:
+    _agent_shadow_observations.clear()
+    _agent_shadow_consensus_logged.clear()
+
+
+def record_two_source_agent_shadow(
+    candidate: Candidate,
+    *,
+    shadow: dict[str, str] | None = None,
+) -> bool:
+    """Log a zero-write agent fallback only after two independent domains agree."""
+    if AGENT_SHADOW_CONSENSUS_CAP <= 0:
+        return False
+    listing_key = street_state_key(
+        candidate.fields.get("listing_address", ""),
+        candidate.fields.get("state", ""),
+    )
+    domain = urllib.parse.urlparse(candidate.url).netloc.lower()
+    domain = re.sub(r"^www\.", "", domain)
+    if not listing_key or not domain:
+        return False
+
+    current_name = clean_agent_name(candidate.fields.get("agent_name", ""))
+    if current_name:
+        probe = Candidate(
+            source=candidate.source,
+            query=candidate.query,
+            url=candidate.url,
+            title=candidate.title,
+            text=candidate.text,
+            fields=dict(candidate.fields, agent_name=current_name),
+        )
+        safe, _ = agent_name_promotion_safety(probe)
+        if not safe:
+            current_name = ""
+    proposed_name = current_name or (shadow or {}).get("agent_name", "")
+    proposed_name = clean_agent_name(proposed_name)
+    name_key = normalize_key(proposed_name)
+    if not name_key:
+        return False
+
+    listing_observations = _agent_shadow_observations.setdefault(listing_key, {})
+    observation = listing_observations.setdefault(
+        name_key,
+        {"agent_name": proposed_name, "domains": set()},
+    )
+    observation["domains"].add(domain)
+    consensus_key = f"{listing_key}|{name_key}"
+    if (
+        len(observation["domains"]) < 2
+        or consensus_key in _agent_shadow_consensus_logged
+        or len(_agent_shadow_consensus_logged) >= AGENT_SHADOW_CONSENSUS_CAP
+    ):
+        return False
+
+    _agent_shadow_consensus_logged.add(consensus_key)
+    log_event(
+        "pilot_agent_shadow_two_source_consensus",
+        listing_key=listing_key,
+        address=candidate.fields.get("listing_address", ""),
+        state=candidate.fields.get("state", ""),
+        shadow_agent=observation["agent_name"],
+        domains=sorted(observation["domains"]),
+        source_count=len(observation["domains"]),
+        would_change=not bool(current_name),
+        promotion_changed=False,
+        writes=0,
+    )
     return True
 
 
@@ -2579,6 +2673,7 @@ def promote_ready_pilot_rows(
 
 
 def run(args: argparse.Namespace) -> None:
+    reset_agent_shadow_consensus_state()
     service_account = load_service_account_info(args.service_account)
     token = sheets_client(service_account)
     ensure_tab(token, args.spreadsheet_id, args.pilot_tab)

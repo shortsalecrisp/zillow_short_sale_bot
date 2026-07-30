@@ -74,6 +74,28 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "qualified")
         self.assertEqual(result.short_sale_evidence_type, "listing_description_or_remarks")
 
+    def test_agent_remarks_short_sale_overrides_conflicting_structured_label(self):
+        text = (
+            "Listing Status: Active. Public Remarks: Short Sale!! Welcome to this home. "
+            "Special Listing Conditions: Standard. Is Short Sale: No."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "qualified")
+        self.assertEqual(result.short_sale_evidence_type, "listing_description_or_remarks")
+
+    def test_structured_short_sale_no_still_rejects_without_agent_remarks(self):
+        text = (
+            "Listing Status: Active. Public Remarks: Updated home near shopping. "
+            "Short Sale Status: No."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+
     def test_qualification_rejects_already_approved_short_sale(self):
         text = "Status: Active. What's special: This is an approved short sale."
 
@@ -1057,6 +1079,57 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         )
 
         self.assertEqual(pilot.shadow_listing_agent_candidate(candidate), {})
+
+    def test_agent_shadow_requires_two_independent_domains_and_never_mutates(self):
+        pilot.reset_agent_shadow_consensus_state()
+        events = []
+        first = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker-one.example/listing/123",
+            title="123 Main Street",
+            text="Listing Agent: Jane Smith.",
+            fields={
+                "listing_address": "123 Main Street",
+                "city": "Denver",
+                "state": "CO",
+            },
+        )
+        second = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://broker-two.example/property/123",
+            title="123 Main Street",
+            text="Listed By: Jane Smith.",
+            fields={
+                "listing_address": "123 Main Street",
+                "city": "Denver",
+                "state": "CO",
+            },
+        )
+
+        with mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            self.assertTrue(pilot.log_agent_shadow(first))
+            self.assertFalse(
+                any(event == "pilot_agent_shadow_two_source_consensus" for event, _ in events)
+            )
+            self.assertTrue(pilot.log_agent_shadow(second))
+
+        consensus = [
+            details
+            for event, details in events
+            if event == "pilot_agent_shadow_two_source_consensus"
+        ]
+        self.assertEqual(len(consensus), 1)
+        self.assertEqual(consensus[0]["shadow_agent"], "Jane Smith")
+        self.assertEqual(consensus[0]["source_count"], 2)
+        self.assertEqual(consensus[0]["writes"], 0)
+        self.assertNotIn("agent_name", first.fields)
+        self.assertNotIn("agent_name", second.fields)
 
     def test_direct_monitor_sitemap_selection_is_bounded_and_rotates(self):
         feed = "https://example.com/listings.xml"
