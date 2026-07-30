@@ -868,6 +868,12 @@ logging.basicConfig(
     force=True,
 )
 LOG = logging.getLogger("bot_min")
+LOG.info(
+    "Sheet append configured: tab=%s next_row_hint=%s scan_window=%s",
+    GSHEET_TAB,
+    GSHEET_NEXT_ROW_HINT,
+    GSHEET_ROW_SCAN_WINDOW,
+)
 for _col_warning in _TIMESTAMP_COL_CONFIG_WARNINGS:
     LOG.warning(_col_warning)
 _multi_agent_run = False
