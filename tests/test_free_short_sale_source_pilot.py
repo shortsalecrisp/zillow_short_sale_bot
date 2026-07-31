@@ -1598,6 +1598,113 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.CSE_DATE_RESTRICT = old_date_restrict
             pilot.urllib.request.urlopen = old_urlopen
 
+    def test_brokerage_suffix_shadow_is_two_part_and_never_mutates_input(self):
+        self.assertEqual(
+            pilot.brokerage_suffix_shadow_name("Tyler Davis Black Label"),
+            {
+                "original_agent": "Tyler Davis Black Label",
+                "proposed_agent": "Tyler Davis",
+                "brokerage_suffix": "Black Label",
+            },
+        )
+        self.assertEqual(pilot.brokerage_suffix_shadow_name("Black Label"), {})
+        self.assertEqual(pilot.brokerage_suffix_shadow_name("Mary Jane Smith Realty"), {})
+        self.assertEqual(pilot.brokerage_suffix_shadow_name("Tyler Davis"), {})
+
+    def test_reconcile_pilot_link_requires_same_stable_id_and_address(self):
+        pilot_row = {
+            "synthetic_zpid": "free-abc",
+            "listing_address": "10011 Achilles Street",
+            "state": "MI",
+            "matched_main_row": "4754",
+        }
+        main_rows = pilot.sheet_row_maps(
+            [
+                ["First Name", "Last Name", "Listing Address", "State", "ZPID"],
+                ["Other", "Lead", "20 Oak Street", "MI", "free-abc"],
+                ["Right", "Address", "10011 Achilles St", "MI", "different-id"],
+            ]
+        )
+
+        result = pilot.reconcile_pilot_link(67, pilot_row, main_rows)
+
+        self.assertEqual(result["outcome"], "identity_address_mismatch")
+        self.assertTrue(result["follow_on_hold"])
+        self.assertEqual(result["id_match_rows"], [2])
+        self.assertEqual(result["address_match_rows"], [3])
+        self.assertFalse(result["pointer_matches"])
+
+    def test_reconcile_pilot_link_uses_live_headers_and_ignores_stale_pointer(self):
+        pilot_row = {
+            "synthetic_zpid": "free-abc",
+            "listing_address": "10011 Achilles Street",
+            "state": "MI",
+            "matched_main_row": "4754",
+        }
+        main_rows = pilot.sheet_row_maps(
+            [
+                ["First Name", "Last Name", "Street", "State", "ZPID"],
+                ["Right", "Agent", "10011 Achilles St", "MI", "free-abc"],
+            ]
+        )
+
+        result = pilot.reconcile_pilot_link(67, pilot_row, main_rows)
+
+        self.assertEqual(result["outcome"], "linked")
+        self.assertEqual(result["matched_main_row"], 2)
+        self.assertFalse(result["pointer_matches"])
+        self.assertFalse(result["follow_on_hold"])
+
+    def test_review_audit_benchmarks_suffix_against_verifier_without_writes(self):
+        promoted_row = self.pilot_row(
+            first_name="Tyler",
+            last_name="Davis Black Label",
+            listing_address="3464 St Bart Lane",
+            city="Saint Ann",
+            state="MO",
+            first_seen_at="2026-08-01T07:20:00-04:00",
+            synthetic_zpid="free-tyler",
+            promotion_status="promoted",
+        )
+        events = []
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[
+                [
+                    ["First Name", "Last Name", "Listing Address", "State", "ZPID"],
+                    ["Tyler", "Davis", "3464 St Bart Ln", "MO", "free-tyler"],
+                ],
+                [pilot.PILOT_HEADERS, promoted_row],
+            ],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 1),
+                phase="post_verifier",
+            )
+
+        self.assertEqual(stats["linked"], 1)
+        self.assertEqual(stats["held"], 0)
+        self.assertEqual(stats["suffix_candidates"], 1)
+        self.assertEqual(stats["suffix_exact_matches"], 1)
+        suffix_events = [details for event, details in events if event == "pilot_brokerage_suffix_shadow"]
+        self.assertEqual(suffix_events[0]["proposed_agent"], "Tyler Davis")
+        self.assertTrue(suffix_events[0]["exact_name_agreement"])
+        self.assertEqual(suffix_events[0]["writes"], 0)
+
+    def test_review_experiment_windows_are_bounded(self):
+        self.assertTrue(pilot.experiment_active(dt.date(2026, 8, 1), "2026-08-01", 3))
+        self.assertTrue(pilot.experiment_active(dt.date(2026, 8, 3), "2026-08-01", 3))
+        self.assertFalse(pilot.experiment_active(dt.date(2026, 8, 4), "2026-08-01", 3))
+
 
 if __name__ == "__main__":
     unittest.main()

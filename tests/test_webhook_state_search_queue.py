@@ -133,6 +133,14 @@ sys.modules["google.oauth2.service_account"] = service_account_module
 import webhook_server
 
 
+def test_free_source_pilot_post_verifier_audit_due_at_configured_hour():
+    before = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)  # 08:00 New York
+    due = datetime(2026, 8, 1, 13, 0, tzinfo=timezone.utc)  # 09:00 New York
+
+    assert webhook_server._free_source_pilot_post_verifier_audit_due(before) is False
+    assert webhook_server._free_source_pilot_post_verifier_audit_due(due) is True
+
+
 class _FakeRequest:
     headers = {"content-type": "application/json", "content-length": "1"}
     query_params = {}

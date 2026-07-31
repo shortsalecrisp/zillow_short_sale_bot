@@ -276,6 +276,16 @@ AGENT_SHADOW_CONSENSUS_CAP = max(
     0,
     int(os.getenv("FREE_SOURCE_PILOT_AGENT_SHADOW_CONSENSUS_CAP", "10")),
 )
+LINK_AUDIT_START_DATE = os.getenv("FREE_SOURCE_PILOT_LINK_AUDIT_START_DATE", "2026-08-01").strip()
+LINK_AUDIT_DAYS = max(1, int(os.getenv("FREE_SOURCE_PILOT_LINK_AUDIT_DAYS", "3")))
+BROKERAGE_SUFFIX_SHADOW_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_BROKERAGE_SUFFIX_SHADOW_START_DATE",
+    "2026-08-01",
+).strip()
+BROKERAGE_SUFFIX_SHADOW_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_BROKERAGE_SUFFIX_SHADOW_DAYS", "7")),
+)
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
 HEADLESS_DOMAIN_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET", "4")))
@@ -2328,6 +2338,340 @@ def pilot_row_map(row: list[str]) -> dict[str, str]:
     return {header: row_value(row, header) for header in PILOT_HEADERS}
 
 
+def normalized_header(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", normalize_space(value).lower()).strip("_")
+
+
+def sheet_row_maps(rows: list[list[str]]) -> list[tuple[int, dict[str, str]]]:
+    """Map a Sheet response by its live header row instead of fixed columns."""
+    if not rows:
+        return []
+    headers = [normalized_header(value) for value in rows[0]]
+    mapped: list[tuple[int, dict[str, str]]] = []
+    for sheet_row, row in enumerate(rows[1:], start=2):
+        mapped.append(
+            (
+                sheet_row,
+                {
+                    header: str(row[index] if index < len(row) else "")
+                    for index, header in enumerate(headers)
+                    if header
+                },
+            )
+        )
+    return mapped
+
+
+def first_mapped_value(row: dict[str, str], *headers: str) -> str:
+    for header in headers:
+        value = normalize_space(row.get(normalized_header(header), ""))
+        if value:
+            return value
+    return ""
+
+
+def experiment_active(run_date: dt.date, start_date: str, days: int) -> bool:
+    try:
+        start = dt.date.fromisoformat(start_date)
+    except ValueError:
+        return False
+    return start <= run_date < start + dt.timedelta(days=days)
+
+
+def first_seen_date(value: str) -> dt.date | None:
+    raw = normalize_space(value)
+    if not raw:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo(ROTATION_TZ))
+    return parsed.astimezone(ZoneInfo(ROTATION_TZ)).date()
+
+
+BROKERAGE_SUFFIX_SHADOWS = (
+    "black label real estate",
+    "black label",
+    "real estate group",
+    "real estate team",
+    "real estate",
+    "property group",
+    "properties",
+    "brokerage",
+    "associates",
+    "partners",
+    "company",
+    "realty",
+    "group",
+    "team",
+    "homes",
+    "llc",
+    "inc",
+)
+
+
+def brokerage_suffix_shadow_name(value: str) -> dict[str, str]:
+    """Propose a person-only name without changing the parsed candidate."""
+    original = normalize_space(html.unescape(value or "")).strip(" .,:;|-")
+    if not original:
+        return {}
+    for suffix in BROKERAGE_SUFFIX_SHADOWS:
+        match = re.search(rf"(?i)\s+({re.escape(suffix)})\s*$", original)
+        if not match:
+            continue
+        proposed = normalize_space(original[: match.start()]).strip(" .,:;|-")
+        if len(proposed.split()) != 2 or not looks_like_person_name(proposed):
+            return {}
+        return {
+            "original_agent": original,
+            "proposed_agent": proposed,
+            "brokerage_suffix": match.group(1),
+        }
+    return {}
+
+
+def reconcile_pilot_link(
+    pilot_sheet_row: int,
+    pilot_row: dict[str, str],
+    main_rows: list[tuple[int, dict[str, str]]],
+) -> dict[str, Any]:
+    synthetic_zpid = normalize_space(pilot_row.get("synthetic_zpid", ""))
+    pilot_key = street_state_key(
+        pilot_row.get("listing_address", ""),
+        pilot_row.get("state", ""),
+    )
+    id_matches: list[tuple[int, dict[str, str]]] = []
+    address_matches: list[tuple[int, dict[str, str]]] = []
+    exact_matches: list[tuple[int, dict[str, str]]] = []
+    for main_sheet_row, main_row in main_rows:
+        main_id = first_mapped_value(main_row, "zpid", "synthetic_zpid", "property_id")
+        main_key = street_state_key(
+            first_mapped_value(main_row, "listing_address", "street", "address", "property_address"),
+            first_mapped_value(main_row, "state", "listing_state"),
+        )
+        id_match = bool(synthetic_zpid and main_id == synthetic_zpid)
+        address_match = bool(pilot_key and main_key == pilot_key)
+        if id_match:
+            id_matches.append((main_sheet_row, main_row))
+        if address_match:
+            address_matches.append((main_sheet_row, main_row))
+        if id_match and address_match:
+            exact_matches.append((main_sheet_row, main_row))
+
+    if len(id_matches) > 1 or len(exact_matches) > 1:
+        outcome = "multiple_matches"
+    elif len(exact_matches) == 1 and len(id_matches) == 1:
+        outcome = "linked"
+    elif len(id_matches) == 1:
+        outcome = "identity_address_mismatch"
+    elif address_matches:
+        outcome = "address_only"
+    else:
+        outcome = "missing"
+
+    matched_main_row = exact_matches[0][0] if outcome == "linked" else None
+    recorded_pointer = normalize_space(pilot_row.get("matched_main_row", ""))
+    pointer_matches = not recorded_pointer or str(matched_main_row or "") == recorded_pointer
+    return {
+        "pilot_row": pilot_sheet_row,
+        "synthetic_zpid": synthetic_zpid,
+        "address": pilot_row.get("listing_address", ""),
+        "state": pilot_row.get("state", ""),
+        "outcome": outcome,
+        "matched_main_row": matched_main_row,
+        "id_match_rows": [row for row, _ in id_matches],
+        "address_match_rows": [row for row, _ in address_matches],
+        "recorded_main_row": recorded_pointer,
+        "pointer_matches": pointer_matches,
+        "follow_on_hold": outcome != "linked",
+        "main_row": exact_matches[0][1] if outcome == "linked" else {},
+    }
+
+
+def run_linkage_and_suffix_audits(
+    token: str,
+    spreadsheet_id: str,
+    main_tab: str,
+    pilot_tab: str,
+    *,
+    run_date: dt.date,
+    phase: str,
+    force: bool = False,
+) -> dict[str, int]:
+    link_active = force or experiment_active(run_date, LINK_AUDIT_START_DATE, LINK_AUDIT_DAYS)
+    suffix_active = phase == "post_verifier" and (
+        force
+        or experiment_active(
+            run_date,
+            BROKERAGE_SUFFIX_SHADOW_START_DATE,
+            BROKERAGE_SUFFIX_SHADOW_DAYS,
+        )
+    )
+    stats = {
+        "pilot_rows": 0,
+        "linked": 0,
+        "held": 0,
+        "stale_pointers": 0,
+        "suffix_candidates": 0,
+        "suffix_exact_matches": 0,
+        "suffix_mismatches": 0,
+        "suffix_unlinked": 0,
+        "suffix_stopped": 0,
+        "unconfirmed": 0,
+    }
+    if not link_active and not suffix_active:
+        log_event(
+            "pilot_review_experiments_skipped",
+            phase=phase,
+            run_date=run_date.isoformat(),
+            reason="outside_bounded_windows",
+        )
+        return stats
+
+    main_raw = get_values(token, spreadsheet_id, f"{main_tab}!A:AQ")
+    pilot_raw = get_values(token, spreadsheet_id, f"{pilot_tab}!A:{column_letter(len(PILOT_HEADERS))}")
+    main_headers = {normalized_header(value) for value in (main_raw[0] if main_raw else [])}
+    pilot_headers = {normalized_header(value) for value in (pilot_raw[0] if pilot_raw else [])}
+    id_headers = {"zpid", "synthetic_zpid", "property_id"}
+    address_headers = {"listing_address", "street", "address", "property_address"}
+    required_pilot_headers = {"synthetic_zpid", "listing_address", "state", "promotion_status"}
+    if (
+        not main_headers.intersection(id_headers)
+        or not main_headers.intersection(address_headers)
+        or "state" not in main_headers
+        or not required_pilot_headers.issubset(pilot_headers)
+    ):
+        stats["unconfirmed"] = 1
+        log_event(
+            "pilot_review_experiments_unconfirmed",
+            phase=phase,
+            run_date=run_date.isoformat(),
+            reason="required_live_headers_missing",
+            main_headers=sorted(main_headers),
+            pilot_headers=sorted(pilot_headers),
+            writes=0,
+        )
+        return stats
+    main_rows = sheet_row_maps(main_raw)
+    pilot_rows = [
+        (sheet_row, row)
+        for sheet_row, row in sheet_row_maps(pilot_raw)
+        if row.get("promotion_status", "").strip().lower() == "promoted"
+    ]
+    stats["pilot_rows"] = len(pilot_rows)
+    log_event(
+        "pilot_review_experiments_start",
+        phase=phase,
+        run_date=run_date.isoformat(),
+        link_active=link_active,
+        suffix_active=suffix_active,
+        forced=force,
+        counts_toward_experiment=not force,
+        writes=0,
+    )
+    suffix_stopped = False
+    for pilot_sheet_row, pilot_row in pilot_rows:
+        reconciliation = reconcile_pilot_link(pilot_sheet_row, pilot_row, main_rows)
+        if link_active:
+            if reconciliation["outcome"] == "linked":
+                stats["linked"] += 1
+            else:
+                stats["held"] += 1
+            if not reconciliation["pointer_matches"]:
+                stats["stale_pointers"] += 1
+            log_event(
+                "pilot_linkage_audit",
+                phase=phase,
+                run_date=run_date.isoformat(),
+                **{key: value for key, value in reconciliation.items() if key != "main_row"},
+                writes=0,
+            )
+
+        candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+        candidate_in_scope = bool(
+            candidate_date
+            and candidate_date <= run_date
+            and (
+                force
+                or experiment_active(
+                    candidate_date,
+                    BROKERAGE_SUFFIX_SHADOW_START_DATE,
+                    BROKERAGE_SUFFIX_SHADOW_DAYS,
+                )
+            )
+        )
+        if not suffix_active or not candidate_in_scope or suffix_stopped:
+            continue
+        raw_agent = normalize_space(
+            f"{pilot_row.get('first_name', '')} {pilot_row.get('last_name', '')}"
+        )
+        shadow = brokerage_suffix_shadow_name(raw_agent)
+        if not shadow:
+            continue
+        stats["suffix_candidates"] += 1
+        if reconciliation["outcome"] != "linked":
+            stats["suffix_unlinked"] += 1
+            log_event(
+                "pilot_brokerage_suffix_shadow",
+                phase=phase,
+                run_date=run_date.isoformat(),
+                pilot_row=pilot_sheet_row,
+                synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+                linkage=reconciliation["outcome"],
+                benchmark="unlinked",
+                follow_on_hold=True,
+                writes=0,
+                **shadow,
+            )
+            continue
+        main_row = reconciliation["main_row"]
+        verifier_agent = normalize_space(
+            f"{first_mapped_value(main_row, 'first_name', 'first')} "
+            f"{first_mapped_value(main_row, 'last_name', 'last')}"
+        )
+        exact_match = normalize_key(shadow["proposed_agent"]) == normalize_key(verifier_agent)
+        if exact_match:
+            stats["suffix_exact_matches"] += 1
+        else:
+            stats["suffix_mismatches"] += 1
+            suffix_stopped = True
+            stats["suffix_stopped"] = 1
+        benchmarked = stats["suffix_exact_matches"] + stats["suffix_mismatches"]
+        agreement_rate = stats["suffix_exact_matches"] / benchmarked
+        if benchmarked >= 10 and agreement_rate < 0.8:
+            suffix_stopped = True
+            stats["suffix_stopped"] = 1
+        log_event(
+            "pilot_brokerage_suffix_shadow",
+            phase=phase,
+            run_date=run_date.isoformat(),
+            pilot_row=pilot_sheet_row,
+            main_row=reconciliation["matched_main_row"],
+            synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+            verifier_agent=verifier_agent,
+            exact_name_agreement=exact_match,
+            wrong_person_stop=not exact_match,
+            agreement_rate=round(agreement_rate, 4),
+            sample_size=benchmarked,
+            experiment_stopped=suffix_stopped,
+            promotion_changed=False,
+            writes=0,
+            **shadow,
+        )
+    log_event(
+        "pilot_review_experiments_done",
+        phase=phase,
+        run_date=run_date.isoformat(),
+        stats=stats,
+        forced=force,
+        counts_toward_experiment=not force,
+        writes=0,
+    )
+    return stats
+
+
 def promotion_status_updates(
     pilot_tab: str,
     sheet_row: int,
@@ -2678,6 +3022,17 @@ def run(args: argparse.Namespace) -> None:
     token = sheets_client(service_account)
     ensure_tab(token, args.spreadsheet_id, args.pilot_tab)
     run_date = parse_run_date(args.run_date)
+    if args.audit_links_only:
+        run_linkage_and_suffix_audits(
+            token,
+            args.spreadsheet_id,
+            args.main_tab,
+            args.pilot_tab,
+            run_date=run_date,
+            phase=args.audit_phase,
+            force=args.force_review_experiments,
+        )
+        return
     source_queries = configured_source_queries(run_date)
 
     main_rows = get_values(token, args.spreadsheet_id, f"{args.main_tab}!A:AQ")
@@ -2958,6 +3313,16 @@ def run(args: argparse.Namespace) -> None:
             cap=args.promotion_daily_cap,
             dry_run=args.dry_run or args.promotion_dry_run,
         )
+        if not args.dry_run and not args.promotion_dry_run:
+            run_linkage_and_suffix_audits(
+                token,
+                args.spreadsheet_id,
+                args.main_tab,
+                args.pilot_tab,
+                run_date=run_date,
+                phase="post_promotion",
+                force=args.force_review_experiments,
+            )
     run_direct_monitor(
         run_date,
         already_seen_urls,
@@ -2982,6 +3347,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--promote-ready", action="store_true", default=PROMOTION_ENABLED)
     parser.add_argument("--promotion-daily-cap", type=int, default=PROMOTION_DAILY_CAP)
     parser.add_argument("--promotion-dry-run", action="store_true", default=PROMOTION_DRY_RUN)
+    parser.add_argument("--audit-links-only", action="store_true")
+    parser.add_argument(
+        "--audit-phase",
+        choices=("post_promotion", "post_verifier"),
+        default="post_verifier",
+    )
+    parser.add_argument("--force-review-experiments", action="store_true")
     return parser.parse_args()
 
 

@@ -130,6 +130,7 @@ _queue_worker_lock = threading.Lock()
 _state_search_worker_lock = threading.Lock()
 _apify_backstop_worker_lock = threading.Lock()
 _free_source_pilot_worker_lock = threading.Lock()
+_free_source_pilot_audit_worker_lock = threading.Lock()
 _free_source_pilot_startup_catchup_lock = threading.Lock()
 _apify_backstop_day_lock = threading.Lock()
 _original_payload_signature_lock = threading.Lock()
@@ -240,6 +241,9 @@ FREE_SOURCE_PILOT_STARTUP_CATCHUP = os.getenv("FREE_SOURCE_PILOT_STARTUP_CATCHUP
 FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH = os.getenv(
     "FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH",
     "/tmp/free_source_pilot_startup_catchup.txt",
+)
+FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR = int(
+    os.getenv("FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR", "9")
 )
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
 _STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1}
@@ -918,6 +922,64 @@ def _process_free_source_pilot_callback(run_time: datetime) -> None:
         name="free-source-pilot",
         daemon=True,
     ).start()
+
+
+def _free_source_pilot_post_verifier_audit_due(run_time: datetime) -> bool:
+    local_dt = run_time.astimezone(SCHEDULER_TZ)
+    return FREE_SOURCE_PILOT_ENABLED and local_dt.hour == FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR
+
+
+def _process_free_source_pilot_post_verifier_audit(run_time: datetime) -> None:
+    if not _free_source_pilot_post_verifier_audit_due(run_time):
+        return
+    if not _free_source_pilot_audit_worker_lock.acquire(blocking=False):
+        logger.info("free-source-pilot-audit: skipped overlapping run")
+        return
+
+    def _runner() -> None:
+        try:
+            script_path = os.path.join(os.path.dirname(__file__), "scripts", "free_short_sale_source_pilot.py")
+            cmd = [
+                sys.executable,
+                script_path,
+                "--spreadsheet-id",
+                GSHEET_ID,
+                "--main-tab",
+                LEADS_SHEET_TAB,
+                "--pilot-tab",
+                FREE_SOURCE_PILOT_TAB,
+                "--run-date",
+                run_time.astimezone(SCHEDULER_TZ).date().isoformat(),
+                "--audit-links-only",
+                "--audit-phase",
+                "post_verifier",
+            ]
+            completed = subprocess.run(
+                cmd,
+                cwd=os.path.dirname(__file__),
+                capture_output=True,
+                text=True,
+                timeout=5 * 60,
+                check=False,
+            )
+            for line in completed.stdout.splitlines():
+                if line.strip():
+                    logger.info("free-source-pilot-audit: stdout %s", line.strip())
+            for line in completed.stderr.splitlines():
+                if line.strip():
+                    logger.warning("free-source-pilot-audit: stderr %s", line.strip())
+            if completed.returncode:
+                logger.error("free-source-pilot-audit: failed returncode=%s", completed.returncode)
+            else:
+                logger.info("free-source-pilot-audit: completed returncode=0")
+        except subprocess.TimeoutExpired:
+            logger.error("free-source-pilot-audit: timed out after 300s")
+        except Exception:
+            logger.exception("free-source-pilot-audit: crashed")
+        finally:
+            _free_source_pilot_audit_worker_lock.release()
+
+    threading.Thread(target=_runner, name="free-source-pilot-audit", daemon=True).start()
 
 
 def _ensure_free_source_pilot_scheduler_thread() -> None:
@@ -1963,6 +2025,7 @@ async def _start_scheduler() -> None:
         _process_deferred_rows,
         _process_pending_rows_callback,
         _process_apify_coverage_backstop_callback,
+        _process_free_source_pilot_post_verifier_audit,
     ]
     logger.info(
         "scheduler: registered hourly callbacks=%s",
