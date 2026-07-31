@@ -88,7 +88,7 @@ def test_find_next_open_row_checks_identity_columns(monkeypatch):
     assert bot_min._find_next_open_row(4733) == 4735
     assert captured == {
         "spreadsheetId": bot_min.GSHEET_ID,
-        "range": f"{bot_min.GSHEET_TAB}!A4733:G4932",
+        "range": f"{bot_min.GSHEET_TAB}!A4733:{bot_min.SHEET_LEAD_WRITE_END_COL}4932",
         "majorDimension": "ROWS",
     }
 
@@ -113,7 +113,7 @@ def test_row_index_from_append_range_rejects_multirow_receipt():
         bot_min._row_index_from_append_range("Sheet1!A4754:AQ4755")
 
 
-def test_append_row_atomically_appends_inside_active_lead_block(monkeypatch):
+def test_append_row_writes_exact_active_lead_row(monkeypatch):
     captured = {}
 
     class FakeRequest:
@@ -125,12 +125,15 @@ def test_append_row_atomically_appends_inside_active_lead_block(monkeypatch):
 
     class FakeValues:
         def get(self, **kwargs):
-            captured["get"] = kwargs
-            return FakeRequest()
+            captured.setdefault("get", []).append(kwargs)
+            return FakeRequest({"values": [[]]})
 
         def append(self, **kwargs):
-            captured["append"] = kwargs
-            return FakeRequest({"updates": {"updatedRange": "Sheet1!AQ4737"}})
+            raise AssertionError("lead rows must use values.update, not values.append")
+
+        def update(self, **kwargs):
+            captured["update"] = kwargs
+            return FakeRequest({"updatedRange": "Sheet1!A4737:AQ4737"})
 
     class FakeSpreadsheets:
         def values(self):
@@ -156,12 +159,21 @@ def test_append_row_atomically_appends_inside_active_lead_block(monkeypatch):
     row_idx = bot_min.append_row(row_values)
 
     assert row_idx == 4737
-    assert captured["append"] == {
+    assert captured["get"] == [
+        {
+            "spreadsheetId": bot_min.GSHEET_ID,
+            "range": f"{bot_min.GSHEET_TAB}!A4737:{bot_min.SHEET_LEAD_WRITE_END_COL}4737",
+            "majorDimension": "ROWS",
+        }
+    ]
+    padded_values = captured["update"]["body"]["values"][0]
+    assert padded_values[: len(row_values)] == row_values
+    assert len(padded_values) == bot_min.SHEET_LEAD_WRITE_COLS
+    assert captured["update"] == {
         "spreadsheetId": bot_min.GSHEET_ID,
-        "range": f"{bot_min.GSHEET_TAB}!A1:AQ4737",
+        "range": f"{bot_min.GSHEET_TAB}!A4737:{bot_min.SHEET_LEAD_WRITE_END_COL}4737",
         "valueInputOption": "RAW",
-        "insertDataOption": "INSERT_ROWS",
-        "body": {"values": [row_values]},
+        "body": {"values": [padded_values]},
     }
     assert bot_min._next_row_hint == 4738
     assert recorded_zpids == ["free-active-row-write"]

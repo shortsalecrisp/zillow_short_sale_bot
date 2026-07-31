@@ -445,7 +445,7 @@ GSHEET_ID      = os.environ["GSHEET_ID"]
 GSHEET_TAB     = os.getenv("GSHEET_TAB", "Sheet1")
 SEEN_ZPID_TAB  = "Seen Zpids"
 GSHEET_RANGE   = os.getenv("GSHEET_RANGE", f"{GSHEET_TAB}!A1")
-GSHEET_NEXT_ROW_HINT = int(os.getenv("GSHEET_NEXT_ROW_HINT", "4749"))
+GSHEET_NEXT_ROW_HINT = int(os.getenv("GSHEET_NEXT_ROW_HINT", "4797"))
 GSHEET_ROW_SCAN_WINDOW = int(os.getenv("GSHEET_ROW_SCAN_WINDOW", "200"))
 SC_JSON        = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -844,6 +844,8 @@ if _fu_parse_warning:
 BASE_MIN_COLS   = 30
 MIN_COLS        = max(BASE_MIN_COLS, COL_INIT_TS + 1, COL_FU_TS + 1)
 SHEET_READ_END_COL = _col_index_to_letter(MIN_COLS - 1)
+SHEET_LEAD_WRITE_END_COL = "AQ"
+SHEET_LEAD_WRITE_COLS = _col_letter_to_index(SHEET_LEAD_WRITE_END_COL, MIN_COLS - 1) + 1
 FOLLOWUP_REQUIRED_COLS = (
     COL_PHONE,
     COL_STREET,
@@ -12127,7 +12129,7 @@ def _find_next_open_row(start_row: Optional[int] = None) -> int:
         end_row = row + window - 1
         resp = sheets_service.spreadsheets().values().get(
             spreadsheetId=GSHEET_ID,
-            range=f"{GSHEET_TAB}!A{row}:G{end_row}",
+            range=f"{GSHEET_TAB}!A{row}:{SHEET_LEAD_WRITE_END_COL}{end_row}",
             majorDimension="ROWS",
         ).execute()
         values = resp.get("values", [])
@@ -12162,30 +12164,44 @@ def _row_index_from_append_range(updated_range: str) -> int:
 def append_row(vals) -> int:
     global _next_row_hint
     with _append_row_lock:
-        active_open_row = _find_next_open_row(_next_row_hint)
-        resp = sheets_service.spreadsheets().values().append(
+        while True:
+            active_open_row = _find_next_open_row(_next_row_hint)
+            occupied_resp = sheets_service.spreadsheets().values().get(
+                spreadsheetId=GSHEET_ID,
+                range=f"{GSHEET_TAB}!A{active_open_row}:{SHEET_LEAD_WRITE_END_COL}{active_open_row}",
+                majorDimension="ROWS",
+            ).execute()
+            existing_values = (occupied_resp.get("values") or [[]])[0]
+            if _row_is_empty(existing_values):
+                break
+            LOG.warning(
+                "Sheet append target row %s filled during allocation; advancing hint",
+                active_open_row,
+            )
+            _next_row_hint = active_open_row + 1
+
+        padded_vals = list(vals)
+        if len(padded_vals) < SHEET_LEAD_WRITE_COLS:
+            padded_vals.extend([""] * (SHEET_LEAD_WRITE_COLS - len(padded_vals)))
+        resp = sheets_service.spreadsheets().values().update(
             spreadsheetId=GSHEET_ID,
-            # Bound table discovery to the active lead block so legacy artifact
-            # cells far below it cannot pull the append away from the verifier.
-            range=f"{GSHEET_TAB}!A1:AQ{active_open_row}",
+            range=f"{GSHEET_TAB}!A{active_open_row}:{SHEET_LEAD_WRITE_END_COL}{active_open_row}",
             valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": [vals]},
+            body={"values": [padded_vals]},
         ).execute()
-        updates = resp.get("updates") or {}
-        updated_range = (
-            updates.get("updatedRange")
-            or resp.get("updatedRange")
-            or resp.get("range")
-        )
-        if not updated_range:
-            raise RuntimeError("Google Sheets append response missing updatedRange")
-        row_idx = _row_index_from_append_range(updated_range)
-        _next_row_hint = row_idx + 1
+        updated_range = resp.get("updatedRange")
+        if updated_range and f"{active_open_row}" not in str(updated_range):
+            LOG.warning(
+                "Sheet update returned unexpected range %s for target row %s",
+                updated_range,
+                active_open_row,
+            )
+        row_idx = active_open_row
+        _next_row_hint = active_open_row + 1
         if len(vals) > COL_ZPID and vals[COL_ZPID]:
             record_seen_zpid(str(vals[COL_ZPID]))
         LOG.info(
-            "Row atomically appended to active lead block (row %s); next hint %s",
+            "Row written to active lead block (row %s); next hint %s",
             row_idx,
             _next_row_hint,
         )

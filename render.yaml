@@ -195,7 +195,7 @@ services:
       - key: GSHEET_ID
         sync: false
       - key: GSHEET_NEXT_ROW_HINT
-        value: "4749"
+        value: "4797"
       - key: GSHEET_RANGE
         value: Sheet1!A1
       - key: GSHEET_ROW_SCAN_WINDOW
