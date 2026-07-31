@@ -65,6 +65,26 @@ function doPostLegacy_(e) {
   }
 }
 
+function doGet(e) {
+  try {
+    const params = e && e.parameter ? e.parameter : {};
+    const action = String(params.action || "").toLowerCase();
+    if (action === "approve_info_email") {
+      return htmlOutput_(approvePendingInfoEmail_(params.id));
+    }
+
+    return htmlOutput_({
+      ok: false,
+      message: "Unknown action"
+    });
+  } catch (err) {
+    return htmlOutput_({
+      ok: false,
+      message: String(err)
+    });
+  }
+}
+
 function isRecentDuplicateInboundText_(rowObj, inboundText, receivedAt) {
   const priorText = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_inbound_text] || ""));
   const currentText = normalizeWhitespace_(String(inboundText || ""));
@@ -3293,9 +3313,14 @@ function sendInfoEmailApprovalRequest_(data) {
   const props = PropertiesService.getScriptProperties();
   const toEmail = props.getProperty("INFO_EMAIL_APPROVAL_TO") || props.getProperty("HANDOFF_EMAIL") || "yoni.kutler@ygkutler.com";
   const agentName = getHandoffDisplayName_(data);
+  const approvalId = createInfoEmailApproval_(data);
+  const approvalUrl = buildInfoEmailApprovalUrl_(approvalId);
   const subject = "APPROVE INFO EMAIL - " + agentName + " - " + getStreetNameForInfoEmail_(data && data.listing_address);
   const body = `
 An agent requested the short-sale info email. Approval is required before sending.
+
+Approve and send:
+${approvalUrl}
 
 Agent: ${agentName}
 Email: ${data.to || ""}
@@ -3325,11 +3350,135 @@ function sendAgentInfoEmail_(data) {
     throw new Error("Missing valid agent info email recipient");
   }
 
-  MailApp.sendEmail({
+  return sendAgentInfoEmailViaBackend_({
     to: toEmail,
     subject: buildAgentInfoEmailSubject_(data),
     body: buildAgentInfoEmailBody_(data)
   });
+}
+
+function createInfoEmailApproval_(data) {
+  const approvalId = Utilities.getUuid();
+  const payload = {
+    created_at: new Date().toISOString(),
+    data: data
+  };
+
+  PropertiesService.getScriptProperties().setProperty(
+    "INFO_EMAIL_PENDING_" + approvalId,
+    JSON.stringify(payload)
+  );
+
+  return approvalId;
+}
+
+function buildInfoEmailApprovalUrl_(approvalId) {
+  const props = PropertiesService.getScriptProperties();
+  const configuredBaseUrl = String(props.getProperty("INFO_EMAIL_APPROVAL_BASE_URL") || "").trim();
+  const baseUrl = configuredBaseUrl || ScriptApp.getService().getUrl();
+  if (!baseUrl) {
+    throw new Error("Missing INFO_EMAIL_APPROVAL_BASE_URL for approval link");
+  }
+
+  return baseUrl + "?action=approve_info_email&id=" + encodeURIComponent(approvalId);
+}
+
+function approvePendingInfoEmail_(approvalId) {
+  const id = String(approvalId || "").trim();
+  if (!/^[0-9a-f-]{36}$/i.test(id)) {
+    return {
+      ok: false,
+      message: "Invalid approval link."
+    };
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const key = "INFO_EMAIL_PENDING_" + id;
+  const raw = props.getProperty(key);
+  if (!raw) {
+    return {
+      ok: false,
+      message: "This approval link is no longer available or was already used."
+    };
+  }
+
+  const parsed = JSON.parse(raw);
+  const data = parsed && parsed.data ? parsed.data : null;
+  if (!data) {
+    props.deleteProperty(key);
+    return {
+      ok: false,
+      message: "The saved approval payload was invalid."
+    };
+  }
+
+  const sendResult = sendAgentInfoEmail_(data);
+  props.deleteProperty(key);
+  return {
+    ok: true,
+    message: "Info email sent.",
+    to: data.to || "",
+    subject: buildAgentInfoEmailSubject_(data),
+    backend: sendResult
+  };
+}
+
+function sendAgentInfoEmailViaBackend_(payload) {
+  const props = PropertiesService.getScriptProperties();
+  const endpoint = String(props.getProperty("INFO_EMAIL_BACKEND_URL") || "").trim();
+  const secret = String(props.getProperty("INFO_EMAIL_BACKEND_SECRET") || "").trim();
+  if (!endpoint || !secret) {
+    throw new Error("Private info email backend is not configured");
+  }
+
+  const response = UrlFetchApp.fetch(endpoint, {
+    method: "post",
+    contentType: "application/json",
+    muteHttpExceptions: true,
+    headers: {
+      "x-crisp-info-email-secret": secret
+    },
+    payload: JSON.stringify(payload)
+  });
+
+  const status = response.getResponseCode();
+  const text = response.getContentText();
+  let parsed = {};
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch (_) {
+    parsed = { raw: text };
+  }
+
+  if (status < 200 || status >= 300 || !parsed.ok) {
+    throw new Error("Private info email backend failed: HTTP " + status + " " + text);
+  }
+
+  return parsed;
+}
+
+function htmlOutput_(result) {
+  const safeTitle = result && result.ok ? "Info email sent" : "Info email not sent";
+  const safeMessage = escapeHtmlForApprovalPage_(String(result && result.message || ""));
+  const details = result && result.ok
+    ? "<p><strong>To:</strong> " + escapeHtmlForApprovalPage_(String(result.to || "")) + "</p>"
+      + "<p><strong>Subject:</strong> " + escapeHtmlForApprovalPage_(String(result.subject || "")) + "</p>"
+    : "";
+
+  return HtmlService.createHtmlOutput(
+    "<!doctype html><html><head><base target=\"_top\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    + "<style>body{font-family:Arial,sans-serif;margin:32px;line-height:1.45;color:#17202a}main{max-width:680px}</style></head>"
+    + "<body><main><h2>" + escapeHtmlForApprovalPage_(safeTitle) + "</h2><p>" + safeMessage + "</p>" + details + "</main></body></html>"
+  );
+}
+
+function escapeHtmlForApprovalPage_(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function buildAgentInfoEmailSubject_(data) {
