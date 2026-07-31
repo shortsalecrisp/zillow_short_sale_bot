@@ -122,7 +122,7 @@ function parseCanonicalTaskerFormBody_(raw) {
   const action = actionMatch ? decodeFormComponent_(actionMatch[1]) : "";
   const fieldsByAction = {
     incoming_sms: ["token", "action", "phone", "message", "received_at", "message_id"],
-    reply_sent: ["token", "action", "request_id", "message_id", "phone", "reply_text", "sent_at"]
+    reply_sent: ["token", "action", "request_id", "message_id", "phone", "reply_text", "lease_token", "sent_at"]
   };
   const fields = fieldsByAction[action];
   if (!fields) return null;
@@ -173,9 +173,10 @@ function testSmsTransportParsing_() {
 
   const receiptText = "Free to you & the seller; buyer pays only if/when it closes.";
   const receiptRaw = "token=test&action=reply_sent&request_id=req-1&message_id=msg-1"
-    + "&phone=%2B18328984452&reply_text=" + encodeURIComponent(receiptText) + "&sent_at=1784412169582";
+    + "&phone=%2B18328984452&reply_text=" + encodeURIComponent(receiptText)
+    + "&lease_token=lease-1&sent_at=1784412169582";
   const recoveredReceipt = parseIncomingRequest_({ postData: { contents: receiptRaw }, parameter: {} });
-  if (recoveredReceipt.reply_text !== receiptText || recoveredReceipt.request_id !== "req-1") {
+  if (recoveredReceipt.reply_text !== receiptText || recoveredReceipt.request_id !== "req-1" || recoveredReceipt.lease_token !== "lease-1") {
     throw new Error("URL-encoded receipt regression: " + JSON.stringify(recoveredReceipt));
   }
 
@@ -265,6 +266,57 @@ function handleIncomingSms_(body) {
       };
     }
 
+    if (isSmsReactionToLastOutbound_(inboundText, rowObj)) {
+      updateRowFields_(sheet, row, {
+        [HEADERS.last_inbound_text]: inboundText,
+        [HEADERS.last_contact_time]: receivedAt,
+        [HEADERS.last_message_id]: messageId
+      });
+      appendHistory_(sheet, row, { role: "agent", text: inboundText, ts: receivedAt });
+      appendSmsDebugLog_("incoming_sms_reaction_suppressed", {
+        phone: phoneRaw,
+        message: inboundText,
+        reason: "Reaction to the last outbound message suppressed before response selection",
+        message_id: messageId
+      });
+
+      return {
+        ok: true,
+        reaction: true,
+        should_reply: false,
+        reply_text: "",
+        handoff_needed: false,
+        needs_review: false,
+        reason: "Reaction to the last outbound message; no reply needed"
+      };
+    }
+
+    if (
+      String(rowObj[HEADERS.ai_state] || "").toLowerCase() === "done" &&
+      isPunctuationCorrectionFragment_(inboundText)
+    ) {
+      appendHistory_(sheet, row, { role: "agent", text: inboundText, ts: receivedAt });
+      updateRowFields_(sheet, row, {
+        [HEADERS.last_contact_time]: receivedAt
+      });
+      appendSmsDebugLog_("incoming_sms_correction_suppressed", {
+        phone: phoneRaw,
+        message: inboundText,
+        reason: "Punctuation-only correction after closeout suppressed",
+        message_id: messageId
+      });
+
+      return {
+        ok: true,
+        correction: true,
+        should_reply: false,
+        reply_text: "",
+        handoff_needed: false,
+        needs_review: false,
+        reason: "Punctuation-only correction after closeout; no additional reply needed"
+      };
+    }
+
     updateRowFields_(sheet, row, {
       [HEADERS.last_inbound_text]: inboundText,
       [HEADERS.last_contact_time]: receivedAt,
@@ -281,6 +333,8 @@ function handleIncomingSms_(body) {
   const currentRowObj = refreshedRowInfo ? refreshedRowInfo.obj : rowObj;
   const currentCount = Number(currentRowObj[HEADERS.auto_reply_count] || 0);
   const capReached = currentCount >= 4;
+  const hasFeeQuestion = isPaymentOrFeeQuestionSignal_(inboundText);
+  const hasExperienceQuestion = isExperienceTrackRecordQuestionSignal_(inboundText);
 
   if (isOptOutSignal_(inboundText)) {
     updateRowFields_(sheet, row, {
@@ -346,6 +400,31 @@ function handleIncomingSms_(body) {
       handoff_needed: true,
       needs_review: false,
       reason: "Manual follow-up already active"
+    };
+  }
+
+  if (isIdentityResendSignal_(inboundText)) {
+    const replyText = buildIdentityResendReply_(currentRowObj);
+
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "Y",
+      [HEADERS.conversation_summary]: "Agent asked who this is; original introduction resent",
+      [HEADERS.ai_state]: "active",
+      [HEADERS.call_booking_status]: "interested_no_call",
+      [HEADERS.handoff_flag]: "FALSE",
+      [HEADERS.human_override]: "FALSE"
+    });
+
+    return {
+      ok: true,
+      should_reply: true,
+      reply_text: replyText,
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      reason: "Agent asked who this is; original introduction resent"
     };
   }
 
@@ -446,7 +525,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isNotShortSaleSignal_(inboundText)) {
+  if (!hasFeeQuestion && isNotShortSaleSignal_(inboundText)) {
     const replyText = "Ahh, ok... thanks for letting me know. Good luck with your listing!";
 
     updateRowFields_(sheet, row, {
@@ -470,7 +549,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isSelfHandlingFutureHelpSignal_(inboundText)) {
+  if (!hasFeeQuestion && isSelfHandlingFutureHelpSignal_(inboundText)) {
     const replyText = buildFutureKeepInMindServiceReply_();
 
     updateRowFields_(sheet, row, {
@@ -519,7 +598,32 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isAlreadyHandledSignal_(inboundText)) {
+  if (isNegotiatorRoleQuestionSignal_(inboundText)) {
+    const replyText = buildNegotiatorRoleQuestionReply_();
+
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "Y",
+      [HEADERS.conversation_summary]: "Agent asked whether Crisp acts as the short sale negotiator",
+      [HEADERS.ai_state]: "active",
+      [HEADERS.call_booking_status]: "interested_no_call",
+      [HEADERS.handoff_flag]: "FALSE",
+      [HEADERS.human_override]: "FALSE"
+    });
+
+    return {
+      ok: true,
+      should_reply: !capReached,
+      reply_text: capReached ? "" : replyText,
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      reason: "Clarified short sale negotiator role and invited a call"
+    };
+  }
+
+  if (!hasFeeQuestion && !hasExperienceQuestion && isAlreadyHandledSignal_(inboundText)) {
     const replyText = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -543,7 +647,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isClearNoSignal_(inboundText)) {
+  if (!hasFeeQuestion && !hasExperienceQuestion && isClearNoSignal_(inboundText)) {
     const closeoutReply = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -583,6 +687,10 @@ function handleIncomingSms_(body) {
       updates[HEADERS.handoff_flag] = decision.handoff_needed ? "TRUE" : "FALSE";
       updates[HEADERS.human_override] = decision.handoff_needed || decision.needs_review ? "TRUE" : "FALSE";
 
+      if (ruleResult.info_email_to && isValidEmailAddress_(ruleResult.info_email_to) && !String(currentRowObj[HEADERS.email] || "").trim()) {
+        updates[HEADERS.email] = ruleResult.info_email_to;
+      }
+
       if (decision.lead_status === "G") {
         updates[HEADERS.call_booking_status] = "call_set_or_hot";
       } else if (decision.lead_status === "Y") {
@@ -593,6 +701,15 @@ function handleIncomingSms_(body) {
     }
 
     updateRowFields_(sheet, row, updates);
+
+    if (shouldSendInfoEmail_(ruleResult, decision)) {
+      sendAgentInfoEmail_({
+        to: ruleResult.info_email_to,
+        first_name: getCanonicalFirstName_(currentRowObj),
+        agent_name: currentRowObj[HEADERS.agent_name] || "",
+        listing_address: currentRowObj[HEADERS.listing_address] || ""
+      });
+    }
 
     if (decision.handoff_needed || decision.needs_review) {
       const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
@@ -1072,6 +1189,34 @@ function applyFastRules_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const lastOutbound = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || ""));
 
+  if (isExperienceTrackRecordQuestionSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildExperienceTrackRecordReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Answered approved experience and track-record question"
+    };
+  }
+
+  if (isCurrentTextingNumberQuestionSignal_(t)) {
+    const existingStatus = String(rowObj && rowObj[HEADERS.mailshake_status] || "").toUpperCase();
+    const remainsClosed = existingStatus === "R";
+    return {
+      matched: true,
+      reply_text: "Yes, this number is great - call or text anytime. Thanks!",
+      lead_status: remainsClosed ? "R" : "Y",
+      conversation_done: remainsClosed,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Confirmed the current texting number without repeating the agent's phone"
+    };
+  }
+
   if (isNotShortSaleVagueFutureSignal_(t)) {
     return {
       matched: true,
@@ -1225,19 +1370,36 @@ function applyFastRules_(text, rowObj) {
     };
   }
 
-  if (containsEmailAddress_(t) || isEmailRequestSignal_(t)) {
+  const providedEmail = extractEmailAddress_(t);
+  const targetEmail = normalizeEmailAddress_(providedEmail || String(rowObj && rowObj[HEADERS.email] || ""));
+
+  if (providedEmail || isEmailRequestSignal_(t)) {
+    if (targetEmail) {
+      return {
+        matched: true,
+        reply_text: "Sure, no problem.",
+        lead_status: "Y",
+        conversation_done: false,
+        handoff_needed: false,
+        needs_review: false,
+        block_reply: false,
+        send_info_email: true,
+        info_email_to: targetEmail,
+        reason: providedEmail
+          ? "Agent sent an email address; info email will be sent automatically"
+          : "Agent asked for info by email; info email will be sent automatically"
+      };
+    }
+
     return {
       matched: true,
-      reply_text: "",
-      lead_status: "",
+      reply_text: "sure, no problem. What is your email?",
+      lead_status: "Y",
       conversation_done: false,
-      handoff_needed: true,
+      handoff_needed: false,
       needs_review: false,
-      block_reply: true,
-      handoff_type: containsEmailAddress_(t) ? "EMAIL PROVIDED" : "EMAIL REQUESTED",
-      reason: containsEmailAddress_(t)
-        ? "Agent sent an email address and needs manual follow-up"
-        : "Agent asked for info by email and needs manual follow-up"
+      block_reply: false,
+      reason: "Agent asked for info by email but no email address is available yet"
     };
   }
 
@@ -1662,8 +1824,60 @@ function isDeferredInterestSignal_(text) {
   return patterns.some(pattern => pattern.test(t));
 }
 
+function normalizeSmsReactionText_(text) {
+  return normalizeWhitespace_(
+    String(text || "")
+      .replace(/[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]/g, " ")
+      .replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, "")
+  ).toLowerCase();
+}
+
+function extractSmsReactionTarget_(text) {
+  const raw = normalizeWhitespace_(
+    String(text || "").replace(/[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]/g, " ")
+  );
+  if (!raw) return null;
+
+  let match = raw.match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+["“]?(.+?)["”]?$/i);
+  if (match) {
+    return {
+      explicit: true,
+      target: normalizeSmsReactionText_(match[2])
+    };
+  }
+
+  match = raw.match(/^to\s+["“]?(.+?)["”]?$/i);
+  if (match) {
+    return {
+      explicit: false,
+      target: normalizeSmsReactionText_(match[1])
+    };
+  }
+
+  return null;
+}
+
+function canonicalizeSmsInboundDedupeMessage_(text) {
+  const reaction = extractSmsReactionTarget_(text);
+  if (reaction && reaction.target) {
+    return "__reaction__|" + reaction.target;
+  }
+  return normalizeSmsReactionText_(text);
+}
+
+function isSmsReactionToLastOutbound_(text, rowObj) {
+  const reaction = extractSmsReactionTarget_(text);
+  if (!reaction || !reaction.target) return false;
+
+  const lastOutbound = normalizeSmsReactionText_(
+    rowObj && rowObj[HEADERS.last_outbound_text]
+  );
+  return Boolean(lastOutbound && reaction.target === lastOutbound);
+}
+
 function isFinalCourtesyReply_(text) {
-  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const t = normalizeWhitespace_(String(text || "").toLowerCase())
+    .replace(/(?:[\s.!?]+|[\u2600-\u27bf]|\ud83c[\udc00-\udfff]|\ud83d[\udc00-\udfff]|\ud83e[\udd00-\udfff])+$/g, "");
 
   const patterns = [
     /^thanks$/,
@@ -1672,7 +1886,12 @@ function isFinalCourtesyReply_(text) {
     /^ok$/,
     /^okay$/,
     /^got it$/,
+    /^will do$/,
+    /^will do thank you$/,
+    /^will do thanks$/,
     /^sounds good$/,
+    /^sounds good thank you$/,
+    /^sounds good thanks$/,
     /^appreciate it$/,
     /^thank you so much$/,
     /^thanks so much$/,
@@ -1684,7 +1903,8 @@ function isFinalCourtesyReply_(text) {
     /^thumbs up$/,
     /^great to know! thank you$/,
     /^great to know thank you$/,
-    /^thank you\.$/
+    /^thank you$/,
+    /^thanks$/
   ];
 
   return patterns.some(pattern => pattern.test(t));
@@ -1775,6 +1995,47 @@ function isLocalQuestionSignal_(text) {
   return patterns.some(pattern => pattern.test(t));
 }
 
+function isExperienceTrackRecordQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+
+  const unsupportedPerformanceQuestion = [
+    /\b(?:success|approval|approved|close|closing|conversion)\s+rate\b/,
+    /\bwhat\s+(?:percent|percentage)\b/,
+    /\bhow\s+often\b.*\b(?:approve|approved|approval|close|closing|success|successful)\b/,
+    /\bhow\s+(?:long|fast)\b.*\b(?:approval|approved|approve|close|closing|process|take|takes|timeline)\b/,
+    /\b(?:average|typical)\b.*\b(?:time|timeline|approval|close|closing|days|weeks|months)\b/
+  ].some(function(pattern) { return pattern.test(t); });
+  if (unsupportedPerformanceQuestion) return false;
+
+  const patterns = [
+    /\bhow\s+long\b.*\b(?:handled|handling|doing|done|worked|working|been)\b.*\bshort sales?\b/,
+    /\bhow\s+long\b.*\bshort sales?\b/,
+    /\bhow\s+many\s+years\b.*\bshort sales?\b/,
+    /\bhow\s+much\s+experience\b.*\bshort sales?\b/,
+    /\bwhat(?:'s| is)\s+(?:your|ur)\s+track record\b/,
+    /\b(?:your|ur)\s+track record\b/,
+    /\bhow\s+many\b.*\b(?:short sales?|deals?|files?|transactions?)\b.*\b(?:handled|done|closed|completed)\b/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function buildExperienceTrackRecordReply_() {
+  return "I've been doing this for over 15 years, and this is really all I do - help agents and homeowners with the short sale process. I'm confident I can help you and your clients with these deals and get them to closing as quickly as possible. Do you have some time today for a quick call so I can answer any questions you have?";
+}
+
+function isCurrentTextingNumberQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const patterns = [
+    /\bis\s+this\s+(?:the\s+)?(?:best|good|right)\s+number\s+to\s+(?:reach|call|text)\s+(?:you|u)\b/,
+    /\bis\s+this\s+(?:your|ur)\s+(?:(?:best|direct|cell|mobile)\s+)?number\b/,
+    /\bcan\s+i\s+(?:reach|call|text)\s+(?:you|u)\s+(?:at|on)\s+this\s+number\b/,
+    /\bcan\s+i\s+(?:(?:call|text)|call\s+or\s+text)\s+(?:you|u)\s+here\b/,
+    /\b(?:reach|call|text)\s+(?:you|u)\s+(?:at|on)\s+this\s+number\b/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
 function buildLocalQuestionReply_(rowObj) {
   const stateRaw = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.state] || "")).toUpperCase();
   const stateNames = { TX: "Texas", FL: "Florida", GA: "Georgia", CA: "California", CO: "Colorado", AZ: "Arizona", NC: "North Carolina", SC: "South Carolina", TN: "Tennessee", VA: "Virginia", WA: "Washington", HI: "Hawaii", MI: "Michigan", AK: "Alaska" };
@@ -1813,7 +2074,22 @@ function buildCredentialQuestionReply_() {
   return "No, I'm not an attorney. I specialize in helping agents and homeowners with the short sale process. I don't provide legal advice; title and the closing attorney handle the closing. I handle the process of obtaining the bank's approval of the deal.";
 }
 
+function isNegotiatorRoleQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const patterns = [
+    /^(?:(?:so|basically|essentially|like)\s+)?(?:(?:you(?:'re| are))\s+)?(?:a\s+)?(?:short\s+sale\s+)?negotiator\s*\??$/,
+    /\b(?:are|r)\s+(?:you|u)\s+(?:a\s+)?(?:short\s+sale\s+)?negotiator\b/,
+    /\b(?:does\s+that\s+mean|so|then)\s+(?:you(?:'re| are)|you\s+are)\s+(?:a\s+)?(?:short\s+sale\s+)?negotiator\b/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function buildNegotiatorRoleQuestionReply_() {
+  return "Yes, essentially that's what I do. I handle the short sale process and negotiate with the lender to get the deal approved. Happy to explain it and answer any questions over the phone. Is there a good time for me to call?";
+}
+
 function isAlreadyHandledSignal_(text) {
+  if (isNegotiatorRoleQuestionSignal_(text)) return false;
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const patterns = [
     /\blawyer\b/,
@@ -1865,6 +2141,8 @@ function isClearNoSignal_(text) {
     /\bwe're good for now\b/,
     /\bno thanks\b/,
     /\bnot interested\b/,
+    /\b(?:i|we)\s+(?:do not|don'?t)\s+need\s+(?:any\s+)?(?:help|assistance)\b/,
+    /\bno need for (?:any )?(?:help|assistance)\b/,
     /\bwe have it covered\b/,
     /\bwe got it covered\b/,
     /\bi'm good\b/,
@@ -1879,6 +2157,7 @@ function isClearNoSignal_(text) {
     /\bwe are all set\b/,
     /\bwe're all set\b/,
     /\ball set\b/,
+    /\b(?:i|we)\s+(?:think\s+)?(?:(?:i|we)\s+)?(?:have|got)\s+(?:(?:it|this|everything|the\s+file|the\s+listing|an?)\s+)?under\s+control\b/,
     /\bthank you.*we.*good\b/,
     /\bthank you.*we're good\b/,
     /\bthank you.*i'm fine\b/,
@@ -1886,6 +2165,11 @@ function isClearNoSignal_(text) {
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isPunctuationCorrectionFragment_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /^[!.,;:\s]*(?:not|no)[!?.;:\s]*$/.test(t);
 }
 
 function getStandardNoCloseoutReply_() {
@@ -2424,6 +2708,8 @@ IMPORTANT BEHAVIOR:
   "Ok, no problem. If anything changes in the future and you're looking for additional help with these files, please just keep me in mind. Thanks"
 - Treat polite declines like "I'm fine", "we're all set", and "thank you for reaching out" the same as "no thanks"
 - If they say they already have a negotiator, processor, lawyer, or someone handling it, treat that as a no and use the normal closeout
+- If they ask whether I am a negotiator, confirm that I handle the short sale process and lender negotiations, then invite a phone call. That is a clarification question, not a statement that they already have help.
+- If they ask whether this is the best or correct number to reach me, reply exactly: "Yes, this number is great - call or text anytime. Thanks!" Never include or repeat any numeric phone number because the phone in agent_context belongs to the agent, not me.
 - After a clear no closeout, if they later only say "thank you", "ok", "sounds good", thumbs up, or something similar, do not respond
 - The correct first name for this agent is "${agentFirstName || "unknown"}"
 - If you use their name, use only that exact first name
@@ -2458,20 +2744,21 @@ IMPORTANT BEHAVIOR:
 - If they say they will reach out later, circle back, get back to you, or reach out when they have time after showing interest, treat it as a deferred interested lead: set handoff_needed = true, block_reply = true, leave reply_text empty, and do not close them out as not interested
 - Never say "Calling you now", "I'll call you now", "Talk in a sec", or anything that implies the call is already happening this second
 - If they say they missed the call, the call did not come through, or they share an alternate callback number, do not keep texting promises about the call - set handoff_needed = true, block_reply = true, and let ${yourName} take over
-- Do not offer to send a short-sale packet, packet, docs, documents, materials, overview, deck, PDF, summary, email summary, text summary, or written explanation
+- Do not offer to send a short-sale packet, packet, docs, documents, materials, overview, deck, PDF, summary, email summary, text summary, or written explanation unless the agent specifically asks for your info by email
 - Never offer to send buyers, buyer leads, potential buyers, or anyone interested in the property
 - If they mention buyers but they already have help in place, ignore the buyer comment and just close out politely
-- Do not ask for their email address and do not offer to email or text materials
+- Do not ask for their email address and do not offer to email or text materials unless they specifically ask for your info by email and no email address is available yet
 - Even if a front desk person or gatekeeper replies, thank them briefly and ask for a good time for ${yourName} to call the agent directly
 - If anyone asks ${yourName} to meet in person, drop by the office, or come by the office, do not respond with availability and do not set the meeting yourself
 - In that situation, set handoff_needed = true, block_reply = true, and let ${yourName} respond manually
-- If they send an email address or ask you to email them info, do not promise to send anything and do not reply
-- In that situation, set handoff_needed = true, block_reply = true, leave reply_text empty, and let ${yourName} handle it personally
+- If they send an email address or ask you to email them info and the email address is available in the message or row, reply exactly: "Sure, no problem."
+- If they ask you to email them info and no email address is available yet, reply exactly: "sure, no problem. What is your email?"
 - If they ask what you charge, what percentage you get, or how the fee works, say this and do not improvise numbers:
   "There is no cost to you or the seller in this deal. We get paid by the buyer at closing, and charge a flat fee for our service. As long as you disclose this cost up front in the listing - the buyer should be able to take that into account with their offer price and then theres usually never any issue. If you want, we can hop on a quick call and ill explain all the specifics to you."
 - Never mention 1%, fee ranges, commission split percentages, or any made-up pricing details
-- Never provide or invent success rates, approval rates, close rates, closing rates, timelines, volume, counts, percentages, averages, or performance stats
-- If they ask for success rate, approval rate, close rate, track record, stats, numbers, how many files you have done, or how long the process takes, set handoff_needed = true, block_reply = true, leave reply_text empty, and let ${yourName} answer personally
+- If they ask how long I have handled short sales, how much experience I have, how many short sales I have handled, or what my track record is, answer with the approved 15-plus-year experience response and invite a quick call. Do not treat that as a rejection or a stats handoff.
+- Never provide or invent success rates, approval rates, close rates, closing rates, timelines, percentages, averages, or other unapproved performance stats
+- If they ask for a success rate, approval rate, close rate, percentage, average timeline, or another unapproved performance statistic, set handoff_needed = true, block_reply = true, leave reply_text empty, and let ${yourName} answer personally
 - Do not estimate, approximate, say "roughly", or include unsupported numeric claims
 - If you find yourself about to repeat the same or a very similar reply, do not repeat it - instead set handoff_needed = true, block_reply = true, and let ${yourName} take over
 
@@ -2514,6 +2801,38 @@ function getCanonicalFirstName_(rowObj) {
   const withoutTitle = rawName.replace(/^(mr|mrs|ms|miss|dr)\.?\s+/i, "");
   const firstToken = withoutTitle.split(/\s+/)[0] || "";
   return firstToken.replace(/[^A-Za-z'-]/g, "");
+}
+
+function isIdentityResendSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase())
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[.!?]+$/g, "")
+    .trim();
+
+  const patterns = [
+    /^(?:i'?m\s+)?sorry[, ]*(?:but\s+)?who is this$/,
+    /^who is this$/,
+    /^who'?s this$/,
+    /^who am i (?:speaking|talking|texting) (?:with|to)$/,
+    /^may i ask who this is$/,
+    /^can i ask who this is$/
+  ];
+
+  return patterns.some(pattern => pattern.test(t));
+}
+
+function buildIdentityResendReply_(rowObj) {
+  const firstName = getCanonicalFirstName_(rowObj) || "there";
+  const listingAddress = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.listing_address] || ""));
+  const listingReference = listingAddress
+    ? " I saw your short sale at " + listingAddress + "."
+    : " I saw your short sale listing.";
+
+  return "Sorry, I had messaged you earlier: Hey " + firstName
+    + ", this is Yoni Kutler with Crisp Short Sales."
+    + listingReference
+    + " I help agents by handling the bank side of the short sale process so files get approved faster and are less likely to fall apart."
+    + " There's no cost to you or your seller. Are you handling that part yourself or do you already have help?";
 }
 
 function sanitizeReplySelfIntro_(replyText) {
@@ -2721,7 +3040,21 @@ function sanitizeReplyFileCta_(replyText) {
   return text.replace(/\bwant me to take the file\??/gi, "Let me know if you want to find a time to talk it over.");
 }
 function containsEmailAddress_(text) {
-  return /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(String(text || ""));
+  return !!extractEmailAddress_(text);
+}
+
+function extractEmailAddress_(text) {
+  const match = String(text || "").match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i);
+  return match ? normalizeEmailAddress_(match[0]) : "";
+}
+
+function normalizeEmailAddress_(email) {
+  const cleaned = String(email || "").trim().replace(/[.,;:!?]+$/g, "").toLowerCase();
+  return isValidEmailAddress_(cleaned) ? cleaned : "";
+}
+
+function isValidEmailAddress_(email) {
+  return /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(String(email || "").trim());
 }
 
 function isEmailRequestSignal_(text) {
@@ -2747,6 +3080,9 @@ function isEmailRequestSignal_(text) {
 function isStatsOrNumericClaimQuestion_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) {
+    return false;
+  }
+  if (isExperienceTrackRecordQuestionSignal_(t)) {
     return false;
   }
 
@@ -2918,6 +3254,76 @@ ${historyText}
     subject: subject,
     body: body
   });
+}
+
+function shouldSendInfoEmail_(ruleResult, decision) {
+  return !!(
+    ruleResult &&
+    ruleResult.send_info_email &&
+    isValidEmailAddress_(ruleResult.info_email_to) &&
+    decision &&
+    !decision.block_reply &&
+    !decision.handoff_needed &&
+    !decision.needs_review &&
+    normalizeWhitespace_(decision.reply_text) === "Sure, no problem."
+  );
+}
+
+function sendAgentInfoEmail_(data) {
+  const toEmail = normalizeEmailAddress_(data && data.to);
+  if (!toEmail) {
+    throw new Error("Missing valid agent info email recipient");
+  }
+
+  MailApp.sendEmail({
+    to: toEmail,
+    subject: buildAgentInfoEmailSubject_(data),
+    body: buildAgentInfoEmailBody_(data)
+  });
+}
+
+function buildAgentInfoEmailSubject_(data) {
+  return "Short Sale Specialist - " + getStreetNameForInfoEmail_(data && data.listing_address);
+}
+
+function getStreetNameForInfoEmail_(listingAddress) {
+  const firstPart = String(listingAddress || "").split(",")[0].trim();
+  return firstPart || "Your Listing";
+}
+
+function buildAgentInfoEmailBody_(data) {
+  const firstName = getAgentInfoEmailFirstName_(data);
+
+  return `
+Hi ${firstName},
+
+Im glad we got a chance to speak this morning.  I wanted to share my contact info with you in case you can ever use some help with this listing or any other short sales in the future.  I specialize in helping agents with the short sale process and have over 15 years of experience doing this - so id love to help you and your team as well.  Its also completely free to work with me, because I dont charge any commission split with the agent or fees to the seller at any point.  I get paid by charging a small fee to the buyer, only owed if the deal closes, and that covers 100% of my work in the deal.  As long as you disclose that cost up front to them when theyre making their offer, they should be able to take it into account with their offer price and then there usually is no issue moving forward.
+
+Id love to help you guys if you ever need it, and can handle the entire short sale process for you so you wont have to worry about collecting documents, calling the banks, or fighting over valuations again.  Just let me know if you want to find some time to chat and I can answer any questions you may have.
+
+Thanks so much!
+
+Yoni Kutler
+404-300-9526
+www.crispshortsales.com
+www.facebook.com/CrispShortSales
+`.trim();
+}
+
+function getAgentInfoEmailFirstName_(data) {
+  const explicit = String(data && data.first_name || "").trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  const rawName = normalizeWhitespace_(String(data && data.agent_name || ""));
+  if (!rawName) {
+    return "there";
+  }
+
+  const withoutTitle = rawName.replace(/^(mr|mrs|ms|miss|dr)\.?\s+/i, "");
+  const firstToken = withoutTitle.split(/\s+/)[0] || "";
+  return firstToken.replace(/[^A-Za-z'-]/g, "") || "there";
 }
 
 function formatPhoneForEmail_(phone) {
@@ -3190,8 +3596,59 @@ function testApprovedLeadIntelligenceRules_() {
   if (buildCredentialQuestionReply_().indexOf("not an attorney") === -1 || buildCredentialQuestionReply_().indexOf("don't provide legal advice") === -1) {
     throw new Error("Attorney credential reply regression");
   }
+  if (!isNegotiatorRoleQuestionSignal_("So a negotiator?") ||
+      !isNegotiatorRoleQuestionSignal_("Are you a short sale negotiator?") ||
+      isNegotiatorRoleQuestionSignal_("I already have a negotiator")) {
+    throw new Error("Negotiator role-question classification regression");
+  }
+  if (isAlreadyHandledSignal_("So a negotiator?") ||
+      !isAlreadyHandledSignal_("I already have a negotiator")) {
+    throw new Error("Negotiator question versus already-handled regression");
+  }
+  if (buildNegotiatorRoleQuestionReply_().indexOf("essentially that's what I do") === -1 ||
+      buildNegotiatorRoleQuestionReply_().indexOf("Is there a good time for me to call?") === -1) {
+    throw new Error("Negotiator role reply regression");
+  }
+  if (!isCurrentTextingNumberQuestionSignal_("Will do. Is this the best number to reach you?") ||
+      !isCurrentTextingNumberQuestionSignal_("Is this your direct number?") ||
+      !isCurrentTextingNumberQuestionSignal_("Can I call or text you here?") ||
+      isCurrentTextingNumberQuestionSignal_("Is 305-555-0100 the best number to reach me?")) {
+    throw new Error("Current texting-number question classification regression");
+  }
+  const closedNumberDecision = applyFastRules_(
+    "Will do. Is this the best number to reach you?",
+    { [HEADERS.mailshake_status]: "R" }
+  );
+  if (!closedNumberDecision.matched ||
+      closedNumberDecision.reply_text !== "Yes, this number is great - call or text anytime. Thanks!" ||
+      closedNumberDecision.lead_status !== "R" ||
+      !closedNumberDecision.conversation_done ||
+      /\d{3}[-.)\s]*\d{3}[-.\s]*\d{4}/.test(closedNumberDecision.reply_text)) {
+    throw new Error("Current texting-number reply regression: " + JSON.stringify(closedNumberDecision));
+  }
+  const experienceQuestion = "Hi there, thanks for reaching out. What is your fee. I've closed them before too. How long have you handled short sales, what is your track record?";
+  const experienceDecision = applyFastRules_(experienceQuestion, {});
+  if (!isExperienceTrackRecordQuestionSignal_(experienceQuestion) ||
+      isStatsOrNumericClaimQuestion_(experienceQuestion) ||
+      !experienceDecision.matched ||
+      experienceDecision.reply_text !== buildExperienceTrackRecordReply_() ||
+      experienceDecision.lead_status !== "Y" ||
+      experienceDecision.conversation_done ||
+      experienceDecision.handoff_needed) {
+    throw new Error("Experience and track-record reply regression: " + JSON.stringify(experienceDecision));
+  }
+  if (isExperienceTrackRecordQuestionSignal_("What is your success rate and average closing timeline?") ||
+      !isStatsOrNumericClaimQuestion_("What is your success rate and average closing timeline?")) {
+    throw new Error("Unsupported performance-stat question must still hand off");
+  }
   if (!isClearNoSignal_("Thank you for reaching out, I'm handling it myself, but no thank you")) {
     throw new Error("Explicit self-handling rejection must still close out");
+  }
+  if (!isClearNoSignal_("I don't need help but thanks for reaching out?")) {
+    throw new Error("Explicit no-help rejection must use the standard closeout");
+  }
+  if (!isPunctuationCorrectionFragment_("! Not ?") || isPunctuationCorrectionFragment_("No, what is your fee?")) {
+    throw new Error("Punctuation-only correction suppression regression");
   }
 
   const directBankDecision = applyFastRules_("Hi, I am communicating with the bank directly", {});
@@ -3236,6 +3693,28 @@ function testApprovedLeadIntelligenceRules_() {
   if (isUnderControlFutureHelpCloseoutSignal_(underControlCallbackText) || !isSchedulingSignal_(underControlCallbackText)) {
     throw new Error("Real callback request must outrank the under-control closeout rule");
   }
+  if (!isClearNoSignal_("Thank you I think I have an under control")) {
+    throw new Error("Under-control voice typo must be recognized as a clear closeout");
+  }
+  if (!isFinalCourtesyReply_("Will do 👍") || !isFinalCourtesyReply_("Sounds good! 👍") || !isFinalCourtesyReply_("Thanks 👍")) {
+    throw new Error("Closed-conversation courtesy acknowledgment regression");
+  }
+  if (isFinalCourtesyReply_("Will do, can you send the website?")) {
+    throw new Error("Substantive follow-up must not be treated as final courtesy");
+  }
+  const reactionTarget = getStandardNoCloseoutReply_();
+  const reactionRow = { [HEADERS.last_outbound_text]: reactionTarget };
+  const explicitReaction = "Liked \u201c" + reactionTarget + "\u201d";
+  const strippedReaction = "to \u201c" + reactionTarget + "\u201d";
+  if (!isSmsReactionToLastOutbound_(explicitReaction, reactionRow) || !isSmsReactionToLastOutbound_(strippedReaction, reactionRow)) {
+    throw new Error("Reaction-to-last-outbound suppression regression");
+  }
+  if (canonicalizeSmsInboundDedupeMessage_(explicitReaction) !== canonicalizeSmsInboundDedupeMessage_(strippedReaction)) {
+    throw new Error("Explicit and stripped reaction artifacts must share one dedupe key");
+  }
+  if (isSmsReactionToLastOutbound_("to schedule a call tomorrow", reactionRow)) {
+    throw new Error("Ordinary substantive text must not be suppressed as a reaction");
+  }
 
   if (!isSpanishLanguageSignal_("No no tengo ayuda aun hablas espaol ??")) {
     throw new Error("Spanish-language signal regression");
@@ -3253,6 +3732,15 @@ function testApprovedLeadIntelligenceRules_() {
   const feeDecision = buildFeeQuestionDecision_(priorSpanishFeeRow, "");
   if (feeDecision.reply_text.indexOf("$5,000") === -1 || feeDecision.handoff_needed) {
     throw new Error("Prior flat-fee disclosure must trigger the specific $5,000 answer: " + JSON.stringify(feeDecision));
+  }
+  const mixedHandledFeeText = "I already have help, but what is the fee for using your service?";
+  if (!isPaymentOrFeeQuestionSignal_(mixedHandledFeeText)) {
+    throw new Error("Fee question must be recognized inside a soft-decline message");
+  }
+  const mixedHandledFeeDecision = applyFastRules_(mixedHandledFeeText, {});
+  if (!mixedHandledFeeDecision.matched || mixedHandledFeeDecision.lead_status !== "Y" ||
+      mixedHandledFeeDecision.reply_text.indexOf("flat fee to the buyer") === -1) {
+    throw new Error("Fee question must outrank soft-decline wording: " + JSON.stringify(mixedHandledFeeDecision));
   }
 
   const notShortDecision = applyFastRules_("Sorry it was not meant to be a short sale. If I ever get one I will keep you in mind!", {});
