@@ -52,19 +52,19 @@ test("ElevenLabs opener test assigns weighted opener variants by row", async () 
   });
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3701, firstName: "Norma", assistantName: "Maya" }).key,
+    "benefit_hook",
+  );
+  assert.equal(
+    buildElevenLabsOpenerVariant({ rowNumber: 3708, firstName: "Miriam", assistantName: "Maya" }).key,
     "direct_reason",
   );
   assert.equal(
-    buildElevenLabsOpenerVariant({ rowNumber: 3704, firstName: "Miriam", assistantName: "Maya" }).key,
+    buildElevenLabsOpenerVariant({ rowNumber: 3708, firstName: "Miriam", assistantName: "Maya" }).script,
+    "Hi Miriam, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",
+  );
+  assert.equal(
+    buildElevenLabsOpenerVariant({ rowNumber: 3709, firstName: "Marta", assistantName: "Maya" }).key,
     "yoni_name",
-  );
-  assert.equal(
-    buildElevenLabsOpenerVariant({ rowNumber: 3704, firstName: "Miriam", assistantName: "Maya" }).script,
-    "Hi Miriam, this is Maya with Crisp Short Sales calling for Yoni Kutler about your short sale listing. Are you handling the bank side yourself?",
-  );
-  assert.equal(
-    buildElevenLabsOpenerVariant({ rowNumber: 3707, firstName: "Marta", assistantName: "Maya" }).key,
-    "benefit_hook",
   );
 });
 
@@ -94,13 +94,13 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.assistantName, "Maya");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "bella");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Bella");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariant, "direct_reason");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Direct short sale reason");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariant, "benefit_hook");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Benefit hook upfront");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.scheduledWindow, "late_morning");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.agentTimeZone, "America/New_York");
   assert.equal(
     body.conversation_initiation_client_data.dynamic_variables.openerScript,
-    "Hi Tina, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",
+    "Hi Tina, this is Maya with Crisp Short Sales. We help agents with lender calls and paperwork on short sales. Are you handling that one yourself?",
   );
   assert.equal(
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,

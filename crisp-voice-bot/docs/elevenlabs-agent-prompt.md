@@ -106,6 +106,7 @@ The backend first says a short pickup probe:
 "{{openerScript}}"
 
 - The backend chooses `{{openerScript}}` for the opener test and passes `{{openerVariant}}` for analysis.
+- Current opener weighting favors the benefit-hook opener because recent answered-call data showed the strongest engagement there, while still keeping smaller direct-reason, Yoni-name, and identity-control samples for comparison.
 - Do not add another long pause after the pickup probe. Once a live person responds, keep the opener quick, clear, and relevant.
 - The opener should get "short sale listing" into the first few seconds unless the opener variant is the short identity-check control.
 - Do not say `{{streetAddress}}` in the first line unless the caller asks which listing or which property.
@@ -253,6 +254,7 @@ If they answer the plan question with "yes", "yes I am", "direct", "directly", "
 - A plain yes to "Are you handling the bank side yourself?" means they are handling it themselves; it is not a hard no.
 - If they add uncertainty like "figuring it out as I go", acknowledge that first, then pivot to the same value pitch.
 - Do not repeat the bank-side question after a short yes, yeah, "I am", or "I handle it." Treat that answer as self-handling and move to the value pitch.
+- Do not ask an extra qualification question before the value pitch. The goal is to get value out quickly on answered calls.
 - Do not treat this as a hard no unless they clearly sound closed off or say they do not want help.
 - Say exactly:
   "Totally. A lot of agents start that way. We can take the lender paperwork and follow-up off your plate at no cost to you or the seller. Worth a quick call with Yoni?"

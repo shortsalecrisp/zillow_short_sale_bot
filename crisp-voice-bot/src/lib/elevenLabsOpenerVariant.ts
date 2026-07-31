@@ -28,15 +28,15 @@ function weightedVariantForRow(rowNumber: number): ElevenLabsOpenerVariantKey {
     return "identity_check_short";
   }
 
-  if (bucket <= 3) {
+  if (bucket <= 6) {
+    return "benefit_hook";
+  }
+
+  if (bucket <= 8) {
     return "direct_reason";
   }
 
-  if (bucket <= 6) {
-    return "yoni_name";
-  }
-
-  return "benefit_hook";
+  return "yoni_name";
 }
 
 export function buildElevenLabsOpenerVariant(input: BuildOpenerVariantInput): ElevenLabsOpenerVariant {
