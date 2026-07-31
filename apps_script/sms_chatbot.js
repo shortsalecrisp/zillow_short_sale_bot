@@ -1407,7 +1407,7 @@ function applyFastRules_(text, rowObj) {
     if (targetEmail) {
       return {
         matched: true,
-        reply_text: "Sure, no problem.",
+        reply_text: getInfoEmailAcknowledgementReply_(),
         lead_status: "Y",
         conversation_done: false,
         handoff_needed: false,
@@ -1416,8 +1416,8 @@ function applyFastRules_(text, rowObj) {
         send_info_email: true,
         info_email_to: targetEmail,
         reason: providedEmail
-          ? "Agent sent an email address; info email will be sent automatically"
-          : "Agent asked for info by email; info email will be sent automatically"
+          ? "Agent sent an email address; info email approval requested"
+          : "Agent asked for info by email; info email approval requested"
       };
     }
 
@@ -3074,7 +3074,15 @@ function containsEmailAddress_(text) {
 }
 
 function extractEmailAddress_(text) {
-  const match = String(text || "").match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i);
+  const raw = String(text || "");
+  const spacedMatch = raw.match(
+    /\b(?:my\s+)?email(?:\s+address)?\s*(?:is|:)\s*([A-Z0-9._%+-]+(?:\s+[A-Z0-9._%+-]+){1,4})\s*@\s*([A-Z0-9.-]+\.[A-Z]{2,})\b/i
+  );
+  if (spacedMatch) {
+    return normalizeEmailAddress_(spacedMatch[1].replace(/\s+/g, "") + "@" + spacedMatch[2]);
+  }
+
+  const match = raw.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i);
   return match ? normalizeEmailAddress_(match[0]) : "";
 }
 
@@ -3101,7 +3109,10 @@ function isEmailRequestSignal_(text) {
     /\bemail your information\b/,
     /\bshoot me an email\b/,
     /\bemail me your info\b/,
-    /\bemail me your information\b/
+    /\bemail me your information\b/,
+    /\bsend (?:me|us) (?:some |more )?(?:info|information)\b/,
+    /\b(?:get|receive) (?:some |more )?(?:info|information)\b/,
+    /\b(?:info|information) (?:on|about) (?:your )?(?:services|company)\b/
   ];
 
   return patterns.some(pattern => pattern.test(t));
@@ -3295,8 +3306,12 @@ function shouldSendInfoEmail_(ruleResult, decision) {
     !decision.block_reply &&
     !decision.handoff_needed &&
     !decision.needs_review &&
-    normalizeWhitespace_(decision.reply_text) === "Sure, no problem."
+    normalizeWhitespace_(decision.reply_text) === normalizeWhitespace_(getInfoEmailAcknowledgementReply_())
   );
+}
+
+function getInfoEmailAcknowledgementReply_() {
+  return "Absolutely, I'll put some information together and email it over. I'd also be happy to talk whenever you have time.";
 }
 
 function isInfoEmailApprovalRequired_() {
@@ -3482,7 +3497,7 @@ function escapeHtmlForApprovalPage_(value) {
 }
 
 function buildAgentInfoEmailSubject_(data) {
-  return "Short Sale Specialist - " + getStreetNameForInfoEmail_(data && data.listing_address);
+  return "Crisp Short Sales - How I Can Help";
 }
 
 function getStreetNameForInfoEmail_(listingAddress) {
@@ -3496,11 +3511,13 @@ function buildAgentInfoEmailBody_(data) {
   return `
 Hi ${firstName},
 
-Im glad we got a chance to speak this morning.  I wanted to share my contact info with you in case you can ever use some help with this listing or any other short sales in the future.  I specialize in helping agents with the short sale process and have over 15 years of experience doing this - so id love to help you and your team as well.  Its also completely free to work with me, because I dont charge any commission split with the agent or fees to the seller at any point.  I get paid by charging a small fee to the buyer, only owed if the deal closes, and that covers 100% of my work in the deal.  As long as you disclose that cost up front to them when theyre making their offer, they should be able to take it into account with their offer price and then there usually is no issue moving forward.
+Thanks for reaching out. I help agents by handling the entire lender side of the short sale process, including collecting documents, submitting the package, lender calls and follow-up, valuations, negotiations, and getting the file through approval and closing.
 
-Id love to help you guys if you ever need it, and can handle the entire short sale process for you so you wont have to worry about collecting documents, calling the banks, or fighting over valuations again.  Just let me know if you want to find some time to chat and I can answer any questions you may have.
+There is no cost to the agent or seller and no commission split. I charge a flat fee to the buyer, paid only if the deal closes. As long as the fee is disclosed in the listing, buyers can factor it into their offer.
 
-Thanks so much!
+I have been handling short sales for over 15 years, and this is all I do. I would be happy to talk about your upcoming listings and answer any questions.
+
+Thanks!
 
 Yoni Kutler
 404-300-9526
