@@ -703,12 +703,22 @@ function handleIncomingSms_(body) {
     updateRowFields_(sheet, row, updates);
 
     if (shouldSendInfoEmail_(ruleResult, decision)) {
-      sendAgentInfoEmail_({
+      const infoEmailData = {
         to: ruleResult.info_email_to,
         first_name: getCanonicalFirstName_(currentRowObj),
         agent_name: currentRowObj[HEADERS.agent_name] || "",
-        listing_address: currentRowObj[HEADERS.listing_address] || ""
-      });
+        listing_address: currentRowObj[HEADERS.listing_address] || "",
+        city: currentRowObj[HEADERS.city] || "",
+        state: currentRowObj[HEADERS.state] || "",
+        phone: phoneRaw,
+        last_message: inboundText
+      };
+
+      if (isInfoEmailApprovalRequired_()) {
+        sendInfoEmailApprovalRequest_(infoEmailData);
+      } else {
+        sendAgentInfoEmail_(infoEmailData);
+      }
     }
 
     if (decision.handoff_needed || decision.needs_review) {
@@ -3267,6 +3277,46 @@ function shouldSendInfoEmail_(ruleResult, decision) {
     !decision.needs_review &&
     normalizeWhitespace_(decision.reply_text) === "Sure, no problem."
   );
+}
+
+function isInfoEmailApprovalRequired_() {
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty("INFO_EMAIL_APPROVAL_REQUIRED");
+  if (raw === null || raw === undefined || String(raw).trim() === "") {
+    return true;
+  }
+
+  return !/^(false|0|no|off)$/i.test(String(raw).trim());
+}
+
+function sendInfoEmailApprovalRequest_(data) {
+  const props = PropertiesService.getScriptProperties();
+  const toEmail = props.getProperty("INFO_EMAIL_APPROVAL_TO") || props.getProperty("HANDOFF_EMAIL") || "yoni.kutler@ygkutler.com";
+  const agentName = getHandoffDisplayName_(data);
+  const subject = "APPROVE INFO EMAIL - " + agentName + " - " + getStreetNameForInfoEmail_(data && data.listing_address);
+  const body = `
+An agent requested the short-sale info email. Approval is required before sending.
+
+Agent: ${agentName}
+Email: ${data.to || ""}
+Phone: ${formatPhoneForEmail_(data.phone)}
+Property: ${formatPropertyAddressForEmail_(data)}
+
+Last message:
+${data.last_message || ""}
+
+Draft subject:
+${buildAgentInfoEmailSubject_(data)}
+
+Draft body:
+${buildAgentInfoEmailBody_(data)}
+`.trim();
+
+  MailApp.sendEmail({
+    to: toEmail,
+    subject: subject,
+    body: body
+  });
 }
 
 function sendAgentInfoEmail_(data) {
