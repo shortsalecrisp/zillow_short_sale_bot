@@ -154,6 +154,15 @@ export const config = {
     smtpPass: readOptionalEnv("SMTP_PASS"),
     sendCallTranscripts: readBoolean("CALL_TRANSCRIPT_EMAILS_ENABLED", true),
   },
+  infoEmail: {
+    apiSecret: readOptionalEnv("INFO_EMAIL_API_SECRET") ?? readOptionalEnv("CRON_SECRET"),
+    from: readEnv("INFO_EMAIL_FROM", "Yoni Kutler <yoni@crispshortsales.com>"),
+    replyTo: readEnv("INFO_EMAIL_REPLY_TO", "yoni@crispshortsales.com"),
+    smtpHost: readEnv("INFO_EMAIL_SMTP_HOST", "mail.privateemail.com"),
+    smtpPort: readNumber("INFO_EMAIL_SMTP_PORT", 465),
+    smtpUser: readEnv("INFO_EMAIL_SMTP_USER", "yoni@crispshortsales.com"),
+    smtpPass: readOptionalEnv("INFO_EMAIL_SMTP_PASS"),
+  },
   elevenLabs: {
     apiKey: readOptionalEnv("ELEVENLABS_API_KEY"),
     baseUrl: stripTrailingSlash(readEnv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io")),

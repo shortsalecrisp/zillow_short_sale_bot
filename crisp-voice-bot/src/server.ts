@@ -9,6 +9,7 @@ import { startMailshakeSyncScheduler } from "./lib/mailshakeSync";
 import { startVoiceQueueScheduler } from "./lib/voiceQueue";
 import elevenLabsRouter from "./routes/elevenLabs";
 import gmailImportRouter from "./routes/gmailImport";
+import infoEmailRouter from "./routes/infoEmail";
 import mailshakeSyncRouter from "./routes/mailshakeSync";
 import smsReplyRouter from "./routes/smsReply";
 import startCallRouter from "./routes/startCall";
@@ -66,6 +67,7 @@ app.use("/elevenlabs", elevenLabsRouter);
 app.use("/voice-queue", voiceQueueRouter);
 app.use("/mailshake-sync", mailshakeSyncRouter);
 app.use("/gmail-import", gmailImportRouter);
+app.use("/info-email", infoEmailRouter);
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({
