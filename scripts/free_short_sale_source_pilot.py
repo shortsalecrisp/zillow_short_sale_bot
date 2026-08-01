@@ -840,6 +840,10 @@ def duplicate_listing_status(candidate: Candidate, existing: ExistingIndex) -> t
     return "", skey or akey, ""
 
 
+def duplicate_status_blocks_pilot_row(status: str) -> bool:
+    return status in {"duplicate_listing", "duplicate_agent_phone"}
+
+
 def is_valid_email(value: str) -> bool:
     compact = normalize_space(value)
     match = EMAIL_RE.fullmatch(compact)
@@ -3236,7 +3240,7 @@ def run(args: argparse.Namespace) -> None:
                     )
                     continue
                 dup_status, dup_key, matched = duplicate_status(candidate, existing)
-                if dup_status == "duplicate_listing":
+                if duplicate_status_blocks_pilot_row(dup_status):
                     stats["duplicates"] += 1
                     query_stats["duplicates"] += 1
                     log_event(

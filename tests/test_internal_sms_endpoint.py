@@ -90,6 +90,16 @@ class FakeWorksheet:
         next_row = max(self.rows.keys(), default=0) + 1
         self.rows[next_row] = list(row)
 
+    def delete_rows(self, start_index, end_index=None):
+        end_index = end_index or start_index
+        count = end_index - start_index + 1
+        for row_idx in range(start_index, end_index + 1):
+            self.rows.pop(row_idx, None)
+        shifted = {}
+        for row_idx, row in self.rows.items():
+            shifted[row_idx - count if row_idx > end_index else row_idx] = row
+        self.rows = shifted
+
     def get_all_values(self):
         if not self.rows:
             return [["zpid", "address", "source", "created_at", "status"]]
@@ -523,13 +533,10 @@ def test_internal_initial_sms_suppresses_duplicate_phone_elsewhere(monkeypatch):
     body = response.json()
     assert body["status"] == "already_contacted_phone"
     assert body["existing_row"] == 5
+    assert body["deleted_row"] == 17
+    assert body["row_deleted"] is True
     assert sender.calls == []
-    assert sheet.rows[17][7] == ""
-    assert sheet.rows[17][22] == ""
-    assert sheet.rows[17][24] == "duplicate_phone_suppressed"
-    assert "Sheet1 row 5" in sheet.rows[17][25]
-    assert "status=R" in sheet.rows[17][25]
-    assert sheet.rows[17][42] == "x"
+    assert 17 not in sheet.rows
 
 
 def test_internal_initial_sms_ignores_later_duplicate_suppression_marker(monkeypatch):

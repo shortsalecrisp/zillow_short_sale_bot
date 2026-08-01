@@ -2775,12 +2775,11 @@ def _find_duplicate_phone_row(
     return None
 
 
-def _mark_initial_sms_duplicate_suppressed(
+def _delete_initial_sms_duplicate_row(
     ws,
     *,
     row_idx: int,
     duplicate: Dict[str, Any],
-    mark_codex_verified: bool,
 ) -> str:
     ts = datetime.now(tz=TZ).isoformat()
     duplicate_row = int(duplicate.get("row") or 0)
@@ -2788,25 +2787,18 @@ def _mark_initial_sms_duplicate_suppressed(
     duplicate_agent = _row_value(duplicate_values, 0)
     duplicate_status = _row_value(duplicate_values, 10)
     duplicate_response = _row_value(duplicate_values, 9)
-    note_parts = [
-        f"{ts}: duplicate phone suppressed; same phone exists on Sheet1 row {duplicate_row}",
-    ]
-    if duplicate_agent:
-        note_parts.append(f"agent={duplicate_agent}")
-    if duplicate_status:
-        note_parts.append(f"status={duplicate_status}")
-    if duplicate_response:
-        note_parts.append(f"response={duplicate_response}")
-    note = "; ".join(note_parts)[:500]
-    updates = [
-        {"range": f"Y{row_idx}", "values": [["duplicate_phone_suppressed"]]},
-        {"range": f"Z{row_idx}", "values": [[note]]},
-    ]
-    if mark_codex_verified:
-        updates.append({"range": f"AQ{row_idx}", "values": [["x"]]})
     _retry_gspread_call(
-        "mark duplicate initial SMS suppression",
-        lambda: ws.batch_update(updates, value_input_option="RAW"),
+        "delete duplicate initial SMS row",
+        lambda: ws.delete_rows(row_idx),
+    )
+    logger.info(
+        "DELETE_INITIAL_SMS_DUPLICATE_ROW row=%s existing_row=%s existing_agent=%s existing_status=%s existing_response=%s deleted_at=%s",
+        row_idx,
+        duplicate_row,
+        duplicate_agent or "<blank>",
+        duplicate_status or "<blank>",
+        duplicate_response or "<blank>",
+        ts,
     )
     return ts
 
@@ -2844,27 +2836,27 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     duplicate = _find_duplicate_phone_row(ws, phone_digits=digits, row_idx=row_idx)
     if duplicate:
-        suppressed_at = _mark_initial_sms_duplicate_suppressed(
+        deleted_at = _delete_initial_sms_duplicate_row(
             ws,
             row_idx=row_idx,
             duplicate=duplicate,
-            mark_codex_verified=mark_codex_verified,
         )
         logger.info(
-            "INTERNAL_INITIAL_SMS_DUPLICATE_PHONE_SUPPRESSED row=%s phone=%s existing_row=%s existing_status=%s codex_verified=%s",
+            "INTERNAL_INITIAL_SMS_DUPLICATE_PHONE_DELETED row=%s phone=%s existing_row=%s existing_status=%s",
             row_idx,
             digits,
             duplicate["row"],
             _row_value(duplicate.get("values") or [], 10) or "<blank>",
-            mark_codex_verified,
         )
         return {
             "status": "already_contacted_phone",
             "row": row_idx,
             "phone": digits,
             "existing_row": duplicate["row"],
-            "suppressed_at": suppressed_at,
-            "codex_verified": mark_codex_verified,
+            "deleted_row": row_idx,
+            "deleted_at": deleted_at,
+            "row_deleted": True,
+            "codex_verified": False,
         }
 
     if initial_marked and not force_resend:

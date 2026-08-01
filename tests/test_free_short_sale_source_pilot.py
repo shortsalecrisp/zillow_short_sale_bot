@@ -300,8 +300,9 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(status, "duplicate_agent_phone")
         self.assertEqual(key, "4045551212")
         self.assertEqual(matched_row, "2")
+        self.assertTrue(pilot.duplicate_status_blocks_pilot_row(status))
 
-    def test_duplicate_agent_phone_can_still_be_written_for_listing_review(self):
+    def test_duplicate_agent_phone_row_shape_is_not_a_write_policy(self):
         candidate = pilot.Candidate(
             source="idx_broker_pages",
             query="query",
@@ -329,6 +330,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(row[16], "yes")
         self.assertEqual(row[22], "4045551212")
         self.assertEqual(row[23], "2")
+        self.assertTrue(pilot.duplicate_status_blocks_pilot_row("duplicate_agent_phone"))
+        self.assertFalse(pilot.duplicate_status_blocks_pilot_row("possible_existing_agent"))
 
     def test_pilot_row_starts_like_main_sheet(self):
         candidate = pilot.Candidate(
