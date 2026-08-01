@@ -286,6 +286,14 @@ BROKERAGE_SUFFIX_SHADOW_DAYS = max(
     1,
     int(os.getenv("FREE_SOURCE_PILOT_BROKERAGE_SUFFIX_SHADOW_DAYS", "7")),
 )
+QUALIFICATION_PRECEDENCE_SHADOW_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_QUALIFICATION_PRECEDENCE_SHADOW_START_DATE",
+    "2026-08-02",
+).strip()
+QUALIFICATION_PRECEDENCE_SHADOW_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_QUALIFICATION_PRECEDENCE_SHADOW_DAYS", "7")),
+)
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
 HEADLESS_DOMAIN_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET", "4")))
@@ -388,6 +396,14 @@ STRUCTURED_SHORT_SALE_NEGATIVE_PATTERNS = [
 DISQUALIFY_PATTERNS = [
     re.compile(r"\bapproved\s+short\s+sale\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s+approved\b", re.IGNORECASE),
+    re.compile(
+        r"\bshort\s+sale\b.{0,80}\bapproved\s+at\s+(?:the\s+)?(?:current\s+)?list(?:ing)?\s+price\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bapproved\s+at\s+(?:the\s+)?(?:current\s+)?list(?:ing)?\s+price\b.{0,80}\bshort\s+sale\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bshort\s+sale\b.{0,80}\bapproved\s+price\b", re.IGNORECASE),
     re.compile(r"\bapproved\s+price\b.{0,80}\bshort\s+sale\b", re.IGNORECASE),
     re.compile(r"\balready\s+approved\b", re.IGNORECASE),
@@ -1398,7 +1414,8 @@ def shadow_listing_agent_candidate(candidate: Candidate) -> dict[str, str]:
                         reason="courtesy_names_brokerage_not_person",
                     )
                     continue
-            name = clean_agent_name(segment)
+            artifact_shadow = agent_artifact_shadow_name(segment)
+            name = artifact_shadow.get("proposed_agent", "") or clean_agent_name(segment)
             if not name:
                 continue
             probe = Candidate(
@@ -1418,7 +1435,11 @@ def shadow_listing_agent_candidate(candidate: Candidate) -> dict[str, str]:
             )
             safe, reason = agent_name_promotion_safety(probe)
             if safe:
-                return {"agent_name": name, "label": label}
+                result = {"agent_name": name, "label": label}
+                if artifact_shadow:
+                    result.update(artifact_shadow)
+                    result["artifact_sanitized"] = "true"
+                return result
             log_event(
                 "pilot_agent_shadow_rejected",
                 url=candidate.url,
@@ -1564,6 +1585,50 @@ def strict_listing_description_evidence(candidate: Candidate) -> str:
         if section_match:
             return excerpt_around(section, section_match.start(), section_match.end())
     return ""
+
+
+def qualification_precedence_shadow(candidate: Candidate) -> dict[str, Any]:
+    """Evaluate broader agent-written description labels without changing intake."""
+    current_evidence = strict_listing_description_evidence(candidate)
+    proposed_evidence = current_evidence
+    if not proposed_evidence:
+        text = candidate.text
+        for label_match in DESCRIPTION_EVIDENCE_LABEL_RE.finditer(text):
+            prefix = text[max(0, label_match.start() - 40) : label_match.start()]
+            if DESCRIPTION_EVIDENCE_SKIP_PREFIX_RE.search(prefix):
+                continue
+            section = text[label_match.start() : min(len(text), label_match.end() + 900)]
+            stop_match = DESCRIPTION_SECTION_STOP_RE.search(
+                section,
+                max(20, label_match.end() - label_match.start()),
+            )
+            if stop_match:
+                section = section[: stop_match.start()]
+            section_match = SHORT_SALE_LISTING_RE.search(section)
+            if section_match:
+                proposed_evidence = excerpt_around(
+                    section,
+                    section_match.start(),
+                    section_match.end(),
+                )
+                break
+
+    shadow_text = candidate.text
+    home_status = normalize_space(candidate.fields.get("home_status", ""))
+    if home_status:
+        shadow_text = f"{shadow_text} homeStatus: {home_status}"
+    qualification = qualification_for_text(shadow_text)
+    proposed_ready = bool(qualification.status == "qualified" and proposed_evidence)
+    return {
+        "current_description_confirmed": bool(current_evidence),
+        "proposed_description_confirmed": bool(proposed_evidence),
+        "proposed_ready": proposed_ready,
+        "qualification_status": qualification.status,
+        "failure_reason": qualification.failure_reason,
+        "disqualifying_terms": qualification.disqualifying_terms,
+        "proposed_evidence": proposed_evidence[:500],
+        "writes": 0,
+    }
 
 
 def shadow_promotion_readiness(candidate: Candidate, qualification: Qualification) -> tuple[str, bool, str]:
@@ -2396,6 +2461,7 @@ def first_seen_date(value: str) -> dt.date | None:
 
 
 BROKERAGE_SUFFIX_SHADOWS = (
+    "provided stellar",
     "black label real estate",
     "black label",
     "real estate group",
@@ -2414,6 +2480,45 @@ BROKERAGE_SUFFIX_SHADOWS = (
     "llc",
     "inc",
 )
+
+
+AGENT_ARTIFACT_SUFFIX_RE = re.compile(
+    r"(?i)(?:\s*[|·•-]\s*|\s+)(?:provided\s+)?"
+    r"(?:stellar|equity(?:\s+real\s+estate)?|[a-z&.'-]+\s+real\s+estate|"
+    r"[a-z&.'-]+\s+realty|brokerage|properties|real\s+estate)\s*$"
+)
+
+
+def agent_artifact_shadow_name(value: str) -> dict[str, str]:
+    """Propose a person-only name from a feed artifact; never mutate live fields."""
+    original = normalize_space(html.unescape(value or "")).strip(" .,:;|-·•")
+    if not original:
+        return {}
+    suffix_shadow = brokerage_suffix_shadow_name(original)
+    if suffix_shadow:
+        return suffix_shadow
+    match = AGENT_ARTIFACT_SUFFIX_RE.search(original)
+    if not match:
+        return {}
+    proposed = normalize_space(original[: match.start()]).strip(" .,:;|-·•")
+    if len(proposed.split()) < 2 or len(proposed.split()) > 4 or not looks_like_person_name(proposed):
+        return {}
+    return {
+        "original_agent": original,
+        "proposed_agent": proposed,
+        "brokerage_suffix": normalize_space(match.group(0)).strip(" .,:;|-·•"),
+    }
+
+
+PILOT_ID_RE = re.compile(r"^free-[a-z0-9]{8,64}$", re.IGNORECASE)
+
+
+def stable_id_from_main_row(row: dict[str, str]) -> str:
+    stable_id = first_mapped_value(row, "zpid", "synthetic_zpid", "property_id")
+    if stable_id:
+        return stable_id
+    legacy_value = first_mapped_value(row, "created_at")
+    return legacy_value if PILOT_ID_RE.fullmatch(legacy_value) else ""
 
 
 def brokerage_suffix_shadow_name(value: str) -> dict[str, str]:
@@ -2450,7 +2555,7 @@ def reconcile_pilot_link(
     address_matches: list[tuple[int, dict[str, str]]] = []
     exact_matches: list[tuple[int, dict[str, str]]] = []
     for main_sheet_row, main_row in main_rows:
-        main_id = first_mapped_value(main_row, "zpid", "synthetic_zpid", "property_id")
+        main_id = stable_id_from_main_row(main_row)
         main_key = street_state_key(
             first_mapped_value(main_row, "listing_address", "street", "address", "property_address"),
             first_mapped_value(main_row, "state", "listing_state"),
@@ -2513,6 +2618,11 @@ def run_linkage_and_suffix_audits(
             BROKERAGE_SUFFIX_SHADOW_DAYS,
         )
     )
+    qualification_shadow_active = force or experiment_active(
+        run_date,
+        QUALIFICATION_PRECEDENCE_SHADOW_START_DATE,
+        QUALIFICATION_PRECEDENCE_SHADOW_DAYS,
+    )
     stats = {
         "pilot_rows": 0,
         "linked": 0,
@@ -2523,9 +2633,12 @@ def run_linkage_and_suffix_audits(
         "suffix_mismatches": 0,
         "suffix_unlinked": 0,
         "suffix_stopped": 0,
+        "qualification_shadow_rows": 0,
+        "qualification_shadow_ready": 0,
+        "qualification_shadow_disqualified": 0,
         "unconfirmed": 0,
     }
-    if not link_active and not suffix_active:
+    if not link_active and not suffix_active and not qualification_shadow_active:
         log_event(
             "pilot_review_experiments_skipped",
             phase=phase,
@@ -2541,8 +2654,9 @@ def run_linkage_and_suffix_audits(
     id_headers = {"zpid", "synthetic_zpid", "property_id"}
     address_headers = {"listing_address", "street", "address", "property_address"}
     required_pilot_headers = {"synthetic_zpid", "listing_address", "state", "promotion_status"}
+    legacy_id_header_available = "created_at" in main_headers
     if (
-        not main_headers.intersection(id_headers)
+        not (main_headers.intersection(id_headers) or legacy_id_header_available)
         or not main_headers.intersection(address_headers)
         or "state" not in main_headers
         or not required_pilot_headers.issubset(pilot_headers)
@@ -2559,9 +2673,10 @@ def run_linkage_and_suffix_audits(
         )
         return stats
     main_rows = sheet_row_maps(main_raw)
+    all_pilot_rows = sheet_row_maps(pilot_raw)
     pilot_rows = [
         (sheet_row, row)
-        for sheet_row, row in sheet_row_maps(pilot_raw)
+        for sheet_row, row in all_pilot_rows
         if row.get("promotion_status", "").strip().lower() == "promoted"
     ]
     stats["pilot_rows"] = len(pilot_rows)
@@ -2571,10 +2686,42 @@ def run_linkage_and_suffix_audits(
         run_date=run_date.isoformat(),
         link_active=link_active,
         suffix_active=suffix_active,
+        qualification_shadow_active=qualification_shadow_active,
         forced=force,
         counts_toward_experiment=not force,
         writes=0,
     )
+    if qualification_shadow_active:
+        for pilot_sheet_row, pilot_row in all_pilot_rows:
+            candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+            if not candidate_date or candidate_date > run_date:
+                continue
+            if not force and not experiment_active(
+                candidate_date,
+                QUALIFICATION_PRECEDENCE_SHADOW_START_DATE,
+                QUALIFICATION_PRECEDENCE_SHADOW_DAYS,
+            ):
+                continue
+            payload, payload_failure = parse_pilot_payload(pilot_row)
+            if payload_failure:
+                continue
+            candidate = candidate_from_pilot_row(dict(pilot_row), payload)
+            shadow = qualification_precedence_shadow(candidate)
+            stats["qualification_shadow_rows"] += 1
+            if shadow["proposed_ready"]:
+                stats["qualification_shadow_ready"] += 1
+            if shadow["qualification_status"] == "rejected" and shadow["disqualifying_terms"]:
+                stats["qualification_shadow_disqualified"] += 1
+            log_event(
+                "pilot_qualification_precedence_shadow",
+                phase=phase,
+                run_date=run_date.isoformat(),
+                pilot_row=pilot_sheet_row,
+                synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+                address=pilot_row.get("listing_address", ""),
+                current_promotion_status=pilot_row.get("promotion_status", ""),
+                **shadow,
+            )
     suffix_stopped = False
     for pilot_sheet_row, pilot_row in pilot_rows:
         reconciliation = reconcile_pilot_link(pilot_sheet_row, pilot_row, main_rows)
@@ -2740,6 +2887,7 @@ def candidate_from_pilot_row(row_data: dict[str, str], payload: dict[str, str]) 
         "broker_name": payload.get("brokerName")
         or payload.get("brokerageName")
         or row_data.get("broker_name", ""),
+        "home_status": payload.get("homeStatus", ""),
         "listing_description": payload.get("listing_description", "")
         or payload.get("description", ""),
     }

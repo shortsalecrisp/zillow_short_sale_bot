@@ -127,6 +127,19 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
 
+    def test_qualification_rejects_existing_negotiator_processor_or_attorney(self):
+        texts = [
+            "Status: Active. Remarks: Short Sale. Seller is already working with a short sale negotiator.",
+            "Status: Active. Remarks: Short Sale. A short sale processor is already handling the file.",
+            "Status: Active. Remarks: Short Sale. Seller is currently working with an attorney.",
+        ]
+
+        for text in texts:
+            with self.subTest(text=text):
+                result = pilot.qualification_for_text(text)
+                self.assertEqual(result.status, "rejected")
+                self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+
     def test_qualification_allows_third_party_approval_without_negotiator_fee(self):
         text = (
             "Status: Active. About This Home: Short Sale - Subject to Third-Party Approval. "
@@ -239,6 +252,18 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+
+    def test_qualification_rejects_short_sale_approved_at_list_price(self):
+        text = (
+            "Status: Pending. About this home: Short Sale. "
+            "Short Sale has been approved at list price. Investor opportunity."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+        self.assertIn("approved at list price", result.disqualifying_terms.lower())
 
     def test_qualification_rejects_potential_short_sale_no(self):
         text = (
@@ -1383,6 +1408,28 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(row[14], "needs_description_confirmation")
         self.assertEqual(row[16], "review")
 
+    def test_qualification_precedence_shadow_accepts_overview_without_writing(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street",
+            text="Status: Active. Overview: SHORT SALE. Updated three-bedroom home.",
+            fields={
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+                "home_status": "FOR_SALE",
+            },
+        )
+
+        result = pilot.qualification_precedence_shadow(candidate)
+
+        self.assertFalse(result["current_description_confirmed"])
+        self.assertTrue(result["proposed_description_confirmed"])
+        self.assertTrue(result["proposed_ready"])
+        self.assertEqual(result["writes"], 0)
+
     def test_dedupe_matches_street_and_state_when_city_differs(self):
         main_rows = [
             ["first", "last", "phone", "email", "listing_address", "city", "state"],
@@ -1614,6 +1661,21 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(pilot.brokerage_suffix_shadow_name("Mary Jane Smith Realty"), {})
         self.assertEqual(pilot.brokerage_suffix_shadow_name("Tyler Davis"), {})
 
+    def test_agent_artifact_shadow_strips_known_feed_suffixes(self):
+        self.assertEqual(
+            pilot.agent_artifact_shadow_name("Troy Funk Provided Stellar")["proposed_agent"],
+            "Troy Funk",
+        )
+        self.assertEqual(
+            pilot.agent_artifact_shadow_name("Jessica Estrada Provided Stellar")["proposed_agent"],
+            "Jessica Estrada",
+        )
+        self.assertEqual(
+            pilot.agent_artifact_shadow_name("Whitney Aldrich · Equity")["proposed_agent"],
+            "Whitney Aldrich",
+        )
+        self.assertEqual(pilot.agent_artifact_shadow_name("Stellar Realty"), {})
+
     def test_reconcile_pilot_link_requires_same_stable_id_and_address(self):
         pilot_row = {
             "synthetic_zpid": "free-abc",
@@ -1657,6 +1719,31 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result["matched_main_row"], 2)
         self.assertFalse(result["pointer_matches"])
         self.assertFalse(result["follow_on_hold"])
+
+    def test_reconcile_pilot_link_accepts_free_id_under_legacy_created_at_header(self):
+        pilot_row = {
+            "synthetic_zpid": "free-69f7af3e3812c17f",
+            "listing_address": "1507 Carlos Avenue",
+            "state": "FL",
+            "matched_main_row": "2",
+        }
+        main_rows = pilot.sheet_row_maps(
+            [
+                ["First Name", "Last Name", "Listing Address", "State", "created-at"],
+                ["Troy", "Funk", "1507 CARLOS AVENUE", "FL", "free-69f7af3e3812c17f"],
+            ]
+        )
+
+        result = pilot.reconcile_pilot_link(73, pilot_row, main_rows)
+
+        self.assertEqual(result["outcome"], "linked")
+        self.assertEqual(result["matched_main_row"], 2)
+        self.assertEqual(pilot.stable_id_from_main_row(main_rows[0][1]), "free-69f7af3e3812c17f")
+
+    def test_legacy_created_at_timestamp_is_not_treated_as_pilot_id(self):
+        row = {"created_at": "2026-08-01T14:14:49-04:00"}
+
+        self.assertEqual(pilot.stable_id_from_main_row(row), "")
 
     def test_review_audit_benchmarks_suffix_against_verifier_without_writes(self):
         promoted_row = self.pilot_row(
