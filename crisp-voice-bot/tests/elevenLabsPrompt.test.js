@@ -85,7 +85,7 @@ test("prompt uses dynamic opener scripts and keeps the address out of the first 
 }
 );
 
-test("prompt repairs pickup-probe confusion before repeating the pitch", () => {
+test("prompt repairs pickup-probe confusion with a clean identity before the pitch", () => {
   const prompt = readPrompt();
   const openingSection = extractSection(
     prompt,
@@ -95,7 +95,8 @@ test("prompt repairs pickup-probe confusion before repeating the pitch", () => {
 
   assert.match(openingSection, /Hello\? Hello\? What\?/);
   assert.match(openingSection, /do not repeat the full opener over them/);
-  assert.match(openingSection, /Sorry, I may have caught you fast\. Is this {{firstName}}\\?/);
+  assert.match(openingSection, /This is {{assistantName}} with Crisp Short Sales\./);
+  assert.match(openingSection, /Do not put the pitch in the same repair turn/);
 });
 
 test("prompt waits for voicemail greeting handoff before leaving voicemail", () => {
@@ -110,21 +111,24 @@ test("prompt waits for voicemail greeting handoff before leaving voicemail", () 
   assert.match(voicemailSection, /clear pause or the greeting has already asked for a message/);
 });
 
-test("prompt introduces Maya once and forbids repeated self-introductions after the opener", () => {
+test("prompt starts with a complete identity and allows one identity repair before the pitch", () => {
   const prompt = readPrompt();
   const oneIntroRule = extractSection(
     prompt,
-    "One self-introduction rule:",
+    "Identity-first delivery rule, highest priority for every live-human opener:",
     "Opening:",
   );
 
-  assert.match(oneIntroRule, /Say your name and Crisp Short Sales once in the opener/);
-  assert.match(oneIntroRule, /After that, do not repeat your name, Crisp Short Sales, or the listing reason/);
-  assert.match(oneIntroRule, /unless the caller asks who is calling/i);
+  assert.match(oneIntroRule, /first complete phrase of every live-human opener must be exactly/i);
+  assert.match(oneIntroRule, /This is {{assistantName}} with Crisp Short Sales\./);
+  assert.match(oneIntroRule, /Do not put "Hi", "Hey", the caller's name/);
+  assert.match(oneIntroRule, /clipped, incomplete, garbled, talked over/);
+  assert.match(oneIntroRule, /repeat exactly once before any pitch/i);
+  assert.match(oneIntroRule, /After the identity has been delivered clearly, do not repeat/);
   assert.match(oneIntroRule, /a new person comes onto the call/i);
   assert.match(oneIntroRule, /voicemail/i);
   assert.match(oneIntroRule, /gatekeeper/i);
-  assert.match(oneIntroRule, /Never use a repeat self-introduction as a repair phrase/);
+  assert.match(oneIntroRule, /no more than once as an audio repair/i);
 });
 
 test("prompt treats not-a-short-sale objections as a clear no", () => {
@@ -203,19 +207,19 @@ test("prompt confirms identity before repeating the pitch when caller is confuse
   const confusedRepair = extractSection(
     prompt,
     "- If the caller sounds confused right after the opener",
-    "- If the first response is clipped",
+    "- If the first response after the opener is clipped",
   );
 
   assert.match(confusedRepair, /what\?/i);
   assert.match(
     confusedRepair,
-    /Sorry, I may have caught you fast\. Is this {{firstName}}\?/,
+    /This is {{assistantName}} with Crisp Short Sales\./,
   );
   assert.match(
     confusedRepair,
     /Thanks\. I was calling about your short sale listing\. Are you handling the bank side yourself\?/,
   );
-  assert.match(confusedRepair, /Do not repeat Crisp Short Sales/);
+  assert.match(confusedRepair, /identity repair turn/);
   assert.match(confusedRepair, /{{streetAddress}}/);
 });
 
