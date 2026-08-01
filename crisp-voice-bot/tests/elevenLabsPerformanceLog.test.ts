@@ -61,7 +61,7 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   const parsed = JSON.parse(log.replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""));
   assert.equal(parsed.schema, "voice_call_metrics_v1");
   assert.equal(parsed.abTestScope.cohort, "time_bucket_and_voice_rotation");
-  assert.deepEqual(parsed.abTestScope.includeOnlyVoiceVariants, ["eryn", "finch", "rachel", "bella"]);
+  assert.deepEqual(parsed.abTestScope.includeOnlyVoiceVariants, ["eryn", "finch"]);
   assert.equal(parsed.abTestScope.excludePriorSingleVoiceEmmyCalls, true);
   assert.match(parsed.abTestScope.analysisRule, /Exclude all previous single-voice Emmy calls/i);
   assert.equal(parsed.call.voiceVariant, "eryn");
@@ -87,7 +87,7 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   assert.match(parsed.codexInstructions, /scheduledWindow by agent local time bucket/i);
   assert.match(parsed.codexInstructions, /openerVariant/i);
   assert.match(parsed.codexInstructions, /hangupBeforeReason/i);
-  assert.match(parsed.codexInstructions, /rotates Eryn, Finch, Rachel, and Bella/i);
+  assert.match(parsed.codexInstructions, /rotates Eryn and Finch only/i);
   assert.match(parsed.codexInstructions, /previous single-voice Emmy calls/i);
   assert.match(parsed.transcript, /Are you a chatbot/);
 });

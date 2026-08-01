@@ -100,7 +100,7 @@ function runSchedulerScript(script) {
   return vm.runInContext(script, loadSchedulerContext());
 }
 
-test("weekday calls are eligible during morning, mid-afternoon, and 4-5pm local test windows", () => {
+test("weekday calls are eligible only during morning and mid-afternoon local test windows", () => {
   const morning = runSchedulerExpression(
     'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T13:30:00Z"), "America/New_York")',
   );
@@ -124,27 +124,27 @@ test("weekday calls are eligible during morning, mid-afternoon, and 4-5pm local 
   assert.equal(earlyAfternoon, "");
   assert.equal(midAfternoon, "mid_afternoon");
   assert.equal(beforeWindow, "");
-  assert.equal(lateAfternoonControl, "late_afternoon_control");
+  assert.equal(lateAfternoonControl, "");
   assert.equal(afterWindow, "");
 });
 
-test("weekend calls stay in the late-afternoon control window only", () => {
-  const beforeWindow = runSchedulerExpression(
-    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-09T19:59:00Z"), "America/New_York")',
+test("weekend calls use the same morning and mid-afternoon test windows", () => {
+  const morningWindow = runSchedulerExpression(
+    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-09T13:30:00Z"), "America/New_York")',
   );
-  const saturdayWindow = runSchedulerExpression(
-    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-09T20:15:00Z"), "America/New_York")',
+  const midAfternoonWindow = runSchedulerExpression(
+    'getVoiceBotPreferredCallWindowName_(new Date("2026-05-09T18:45:00Z"), "America/New_York")',
   );
-  const sundayWindow = runSchedulerExpression(
+  const lateAfternoonWindow = runSchedulerExpression(
     'getVoiceBotPreferredCallWindowName_(new Date("2026-05-10T20:15:00Z"), "America/New_York")',
   );
   const afterWindow = runSchedulerExpression(
     'getVoiceBotPreferredCallWindowName_(new Date("2026-05-09T21:00:00Z"), "America/New_York")',
   );
 
-  assert.equal(beforeWindow, "");
-  assert.equal(saturdayWindow, "late_afternoon_control");
-  assert.equal(sundayWindow, "late_afternoon_control");
+  assert.equal(morningWindow, "morning_probe");
+  assert.equal(midAfternoonWindow, "mid_afternoon");
+  assert.equal(lateAfternoonWindow, "");
   assert.equal(afterWindow, "");
 });
 
@@ -215,12 +215,12 @@ test("start-call payload carries the scheduled call window but not the AP analys
     existingResponseStatus: "Left Vm",
     voiceNotes: "--- CODEX_VOICE_CALL_METRICS_V1 ---",
     dueAt: new Date("2026-05-02T20:00:00Z"),
-    callWindow: "late_afternoon_control",
+    callWindow: "mid_afternoon",
     agentTimeZone: "America/New_York"
   }))`));
 
   assert.equal(payload.notes, undefined);
-  assert.equal(payload.scheduledWindow, "late_afternoon_control");
+  assert.equal(payload.scheduledWindow, "mid_afternoon");
   assert.equal(payload.agentTimeZone, "America/New_York");
 });
 
@@ -402,11 +402,11 @@ test("first voice call uses the next local time-test window after follow-up text
   assert.equal(beforeLateMorning, "2026-05-04T13:00:00.000Z");
   assert.equal(duringLateMorning, "2026-05-04T13:30:00.000Z");
   assert.equal(betweenMorningAndAfternoon, "2026-05-04T18:30:00.000Z");
-  assert.equal(betweenAfternoonWindows, "2026-05-04T20:00:00.000Z");
-  assert.equal(duringLateAfternoon, "2026-05-04T20:30:00.000Z");
-  assert.equal(afterFridayWindow, "2026-05-09T20:00:00.000Z");
-  assert.equal(beforeSaturdayWindow, "2026-05-09T20:00:00.000Z");
-  assert.equal(duringSaturdayWindow, "2026-05-09T20:30:00.000Z");
+  assert.equal(betweenAfternoonWindows, "2026-05-05T13:00:00.000Z");
+  assert.equal(duringLateAfternoon, "2026-05-05T13:00:00.000Z");
+  assert.equal(afterFridayWindow, "2026-05-09T13:00:00.000Z");
+  assert.equal(beforeSaturdayWindow, "2026-05-09T18:30:00.000Z");
+  assert.equal(duringSaturdayWindow, "2026-05-10T13:00:00.000Z");
   assert.equal(afterSundayWindow, "2026-05-11T13:00:00.000Z");
 });
 
@@ -433,8 +433,8 @@ test("second voice call rotates into the next local time-test bucket on the next
   assert.equal(nextDayAfterLateAfternoon, "2026-05-05T13:00:00.000Z");
   assert.equal(nextDayAfterMorning, "2026-05-05T18:30:00.000Z");
   assert.equal(nextDayAfterEarlyAfternoon, "2026-05-05T13:00:00.000Z");
-  assert.equal(saturdayAfterFriday, "2026-05-09T20:00:00.000Z");
-  assert.equal(sundayAfterSaturday, "2026-05-10T20:00:00.000Z");
+  assert.equal(saturdayAfterFriday, "2026-05-09T13:00:00.000Z");
+  assert.equal(sundayAfterSaturday, "2026-05-10T13:00:00.000Z");
   assert.equal(mondayAfterSunday, "2026-05-11T13:00:00.000Z");
 });
 
@@ -457,8 +457,8 @@ test("queue scan can return multiple eligible rows in the same local call window
     getVoiceBotCallCandidatesFromRows_([
       { rowNumber: 3366, values: row("Colleen", "Whitney", "NH", "2026-05-06T17:14:41.692330-04:00") },
       { rowNumber: 3367, values: row("Robert", "DeFalco", "NJ", "2026-05-06T19:49:46.290207-04:00") },
-      { rowNumber: 3369, values: row("Silvia", "Andion", "FL", "2026-05-07T16:03:22.841775-04:00") },
-    ], new Date("2026-05-07T20:15:00Z"), 10).map(function(candidate) {
+      { rowNumber: 3369, values: row("Silvia", "Andion", "FL", "2026-05-06T16:03:22.841775-04:00") },
+    ], new Date("2026-05-07T18:45:00Z"), 10).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));
@@ -489,10 +489,10 @@ test("queue only starts enough calls to fill the two active call slots", () => {
     }
 
     getVoiceBotStartableCallCandidatesFromRows_([
-      { rowNumber: 3400, values: row("Active", "Call", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T20:05:00Z" }) },
+      { rowNumber: 3400, values: row("Active", "Call", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T18:35:00Z" }) },
       { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
       { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-    ], new Date("2026-05-09T20:15:00Z"), 10, 2).map(function(candidate) {
+    ], new Date("2026-05-09T18:45:00Z"), 10, 2).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));
@@ -520,11 +520,11 @@ test("stale unfinished call rows do not block new calls forever", () => {
     }
 
     getVoiceBotStartableCallCandidatesFromRows_([
-      { rowNumber: 3400, values: row("Stale", "Call", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T18:00:00Z" }) },
+      { rowNumber: 3400, values: row("Stale", "Call", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T17:00:00Z" }) },
       { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
       { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
       { rowNumber: 3403, values: row("Third", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-    ], new Date("2026-05-09T20:15:00Z"), 10, 2).map(function(candidate) {
+    ], new Date("2026-05-09T18:45:00Z"), 10, 2).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));
@@ -558,7 +558,7 @@ test("start-call failures are marked so one provider timeout cannot monopolize t
       rowNumber: 3721,
       callAttemptNumber: 1,
       dueAt: new Date("2026-06-22T20:00:00Z"),
-      callWindow: "late_afternoon_control",
+      callWindow: "mid_afternoon",
       agentTimeZone: "America/New_York"
     };
 
@@ -623,10 +623,10 @@ test("live-transfer-requested rows still count against active call slots", () =>
     }
 
     getVoiceBotStartableCallCandidatesFromRows_([
-      { rowNumber: 3400, values: row("Transfer", "Pending", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T20:05:00Z", call1Result: "live_transfer_requested" }) },
+      { rowNumber: 3400, values: row("Transfer", "Pending", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T18:35:00Z", call1Result: "live_transfer_requested" }) },
       { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
       { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-    ], new Date("2026-05-09T20:15:00Z"), 10, 2).map(function(candidate) {
+    ], new Date("2026-05-09T18:45:00Z"), 10, 2).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));

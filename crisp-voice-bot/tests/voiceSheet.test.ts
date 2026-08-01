@@ -14,7 +14,7 @@ test("replacement voice sheet helpers preserve the active call windows", () => {
   assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T18:45:00Z"), "America/New_York"), "mid_afternoon");
   assert.equal(
     getVoiceBotPreferredCallWindowName(new Date("2026-05-04T20:15:00Z"), "America/New_York"),
-    "late_afternoon_control",
+    "",
   );
 });
 

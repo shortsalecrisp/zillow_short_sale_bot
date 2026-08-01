@@ -1,41 +1,30 @@
 import { config } from "./config";
 
-export type ElevenLabsVoiceVariantKey = "eryn" | "finch" | "rachel" | "bella";
+export type ElevenLabsVoiceVariantKey = "eryn" | "finch";
 
 export type ElevenLabsVoiceVariant = {
   key: ElevenLabsVoiceVariantKey;
-  assistantName: "Maya";
-  voiceName: "Eryn" | "Finch" | "Rachel" | "Bella";
+  assistantName: "Maya" | "Finn";
+  voiceName: "Eryn" | "Finch";
   voiceId: string;
 };
 
-const ASSISTANT_NAME = "Maya";
+const ERYN_ASSISTANT_NAME = "Maya";
+const FINCH_ASSISTANT_NAME = "Finn";
 
 function buildVoiceVariants(): ElevenLabsVoiceVariant[] {
   return [
     {
       key: "eryn",
-      assistantName: ASSISTANT_NAME,
+      assistantName: ERYN_ASSISTANT_NAME,
       voiceName: "Eryn",
       voiceId: config.elevenLabs.voiceId ?? config.elevenLabs.erynVoiceId,
     },
     {
       key: "finch",
-      assistantName: ASSISTANT_NAME,
+      assistantName: FINCH_ASSISTANT_NAME,
       voiceName: "Finch",
       voiceId: config.elevenLabs.finchVoiceId,
-    },
-    {
-      key: "rachel",
-      assistantName: ASSISTANT_NAME,
-      voiceName: "Rachel",
-      voiceId: config.elevenLabs.rachelVoiceId,
-    },
-    {
-      key: "bella",
-      assistantName: ASSISTANT_NAME,
-      voiceName: "Bella",
-      voiceId: config.elevenLabs.bellaVoiceId,
     },
   ];
 }
@@ -46,7 +35,7 @@ export function getElevenLabsVoiceExperimentStatus() {
   return {
     enabled: config.elevenLabs.voiceAbTestEnabled,
     selectionRule: config.elevenLabs.voiceAbTestEnabled ? "abs(rowNumber) % voiceCount" : "fixed_primary_voice",
-    publicAssistantName: ASSISTANT_NAME,
+    publicAssistantName: "Maya/Finn",
     variants: variants.map((variant) => ({
       key: variant.key,
       voiceName: variant.voiceName,

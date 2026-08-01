@@ -9,10 +9,6 @@ export const CALL_WINDOWS: Record<string, { startMinutes: number; endMinutes: nu
     startMinutes: 14 * 60 + 30,
     endMinutes: 15 * 60 + 30,
   },
-  late_afternoon_control: {
-    startMinutes: 16 * 60,
-    endMinutes: 17 * 60,
-  },
 };
 
 export function getConfiguredCallWindows() {

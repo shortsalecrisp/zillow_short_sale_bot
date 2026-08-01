@@ -13,7 +13,7 @@ process.env.ELEVENLABS_RACHEL_VOICE_ID = "rachel-voice-id";
 process.env.ELEVENLABS_BELLA_VOICE_ID = "bella-voice-id";
 process.env.ELEVENLABS_VOICE_AB_TEST_ENABLED = "true";
 
-test("ElevenLabs calls rotate deterministically across four voices by row", async () => {
+test("ElevenLabs calls rotate deterministically across Eryn and Finch by row", async () => {
   const { selectElevenLabsVoiceVariant } = await import("../src/lib/elevenLabsVoiceVariant");
 
   assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3480 }), {
@@ -24,21 +24,21 @@ test("ElevenLabs calls rotate deterministically across four voices by row", asyn
   });
   assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3481 }), {
     key: "finch",
-    assistantName: "Maya",
+    assistantName: "Finn",
     voiceName: "Finch",
     voiceId: "finch-voice-id",
   });
   assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3482 }), {
-    key: "rachel",
+    key: "eryn",
     assistantName: "Maya",
-    voiceName: "Rachel",
-    voiceId: "rachel-voice-id",
+    voiceName: "Eryn",
+    voiceId: "eryn-voice-id",
   });
   assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3483 }), {
-    key: "bella",
-    assistantName: "Maya",
-    voiceName: "Bella",
-    voiceId: "bella-voice-id",
+    key: "finch",
+    assistantName: "Finn",
+    voiceName: "Finch",
+    voiceId: "finch-voice-id",
   });
 });
 
@@ -96,23 +96,23 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
     },
   });
 
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.assistantName, "Maya");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "bella");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Bella");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.assistantName, "Finn");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "finch");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Finch");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariant, "benefit_hook");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Benefit hook upfront");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.scheduledWindow, "late_morning");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.agentTimeZone, "America/New_York");
   assert.equal(
     body.conversation_initiation_client_data.dynamic_variables.openerScript,
-    "This is Maya with Crisp Short Sales. We help agents with lender calls and paperwork on short sales. Are you handling that one yourself?",
+    "This is Finn with Crisp Short Sales. We help agents with lender calls and paperwork on short sales. Are you handling that one yourself?",
   );
   assert.equal(
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,
-    "bella-voice-id",
+    "finch-voice-id",
   );
   assert.match(
     body.conversation_initiation_client_data.dynamic_variables.voicemailMessage,
-    /^Hi, this is Maya with Crisp Short Sales/,
+    /^Hi, this is Finn with Crisp Short Sales/,
   );
 });

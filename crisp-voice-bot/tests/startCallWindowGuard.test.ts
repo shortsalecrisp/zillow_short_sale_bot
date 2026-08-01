@@ -14,11 +14,11 @@ test("blocks unknown queue windows before dialing", () => {
 
   assert.equal(
     reason,
-    "scheduledWindow must be one of morning_probe, mid_afternoon, late_afternoon_control",
+    "scheduledWindow must be one of morning_probe, mid_afternoon",
   );
 });
 
-test("blocks approved windows outside their listing-local time", () => {
+test("blocks removed late-afternoon control window before dialing", () => {
   const reason = getStartCallWindowBlockReason(
     {
       scheduledWindow: "late_afternoon_control",
@@ -27,19 +27,7 @@ test("blocks approved windows outside their listing-local time", () => {
     new Date("2026-06-23T19:30:00Z"),
   );
 
-  assert.equal(reason, "current listing-local time is outside the late_afternoon_control call window");
-});
-
-test("allows late-afternoon requests during the listing local 4pm window", () => {
-  const reason = getStartCallWindowBlockReason(
-    {
-      scheduledWindow: "late_afternoon_control",
-      agentTimeZone: "America/Chicago",
-    },
-    new Date("2026-06-23T21:30:00Z"),
-  );
-
-  assert.equal(reason, null);
+  assert.equal(reason, "scheduledWindow must be one of morning_probe, mid_afternoon");
 });
 
 test("allows the approved weekday experiment buckets during their listing-local windows", () => {
@@ -61,7 +49,7 @@ test("allows the approved weekday experiment buckets during their listing-local 
       },
       new Date("2026-06-23T18:00:00Z"),
     ),
-    "scheduledWindow must be one of morning_probe, mid_afternoon, late_afternoon_control",
+    "scheduledWindow must be one of morning_probe, mid_afternoon",
   );
   assert.equal(
     getStartCallWindowBlockReason(
