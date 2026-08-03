@@ -1430,6 +1430,54 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(result["proposed_ready"])
         self.assertEqual(result["writes"], 0)
 
+    def test_description_block_shadow_holds_overview_only_false_accept(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/listing",
+            title="407 N Pittman Street",
+            text=(
+                "Status: Active. Overview: Updated century home. "
+                "Amenities Foreclosure Views Short Sale New Construction."
+            ),
+            fields={
+                "listing_address": "407 N Pittman Street",
+                "city": "Prairie Grove",
+                "state": "AR",
+                "home_status": "FOR_SALE",
+            },
+        )
+
+        result = pilot.description_block_shadow(candidate)
+
+        self.assertTrue(result["current_ready"])
+        self.assertFalse(result["description_block_confirmed"])
+        self.assertFalse(result["proposed_ready"])
+        self.assertTrue(result["would_hold"])
+        self.assertEqual(result["writes"], 0)
+
+    def test_description_block_shadow_keeps_property_description_evidence(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://example.com/listing",
+            title="202 Ridgewood Lane",
+            text="Status: Pending. Property Description: This is a short sale subject to approval.",
+            fields={
+                "listing_address": "202 Ridgewood Lane",
+                "city": "Shelbyville",
+                "state": "TN",
+                "home_status": "PENDING",
+            },
+        )
+
+        result = pilot.description_block_shadow(candidate)
+
+        self.assertTrue(result["description_block_confirmed"])
+        self.assertTrue(result["proposed_ready"])
+        self.assertFalse(result["would_hold"])
+        self.assertEqual(result["writes"], 0)
+
     def test_dedupe_matches_street_and_state_when_city_differs(self):
         main_rows = [
             ["first", "last", "phone", "email", "listing_address", "city", "state"],
@@ -1794,6 +1842,55 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(pilot.experiment_active(dt.date(2026, 8, 1), "2026-08-01", 3))
         self.assertTrue(pilot.experiment_active(dt.date(2026, 8, 3), "2026-08-01", 3))
         self.assertFalse(pilot.experiment_active(dt.date(2026, 8, 4), "2026-08-01", 3))
+
+    def test_description_block_shadow_is_capped_at_100_rows_per_run(self):
+        pilot_rows = [pilot.PILOT_HEADERS]
+        for index in range(105):
+            payload = {
+                "zpid": f"free-cap-{index}",
+                "address": f"{index + 1} Main Street",
+                "street": f"{index + 1} Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+                "homeStatus": "FOR_SALE",
+                "description": "Overview: SHORT SALE. Updated home.",
+            }
+            pilot_rows.append(
+                self.pilot_row(
+                    listing_address=payload["address"],
+                    city="Atlanta",
+                    state="GA",
+                    first_seen_at="2026-08-04T07:15:00-04:00",
+                    synthetic_zpid=payload["zpid"],
+                    pending_queue_listing_json=json.dumps(payload),
+                    description_excerpt="Status: Active. Overview: SHORT SALE. Updated home.",
+                )
+            )
+        events = []
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[
+                [["listing_address", "state", "created-at"]],
+                pilot_rows,
+            ],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 4),
+                phase="post_promotion",
+            )
+
+        shadow_events = [event for event, _ in events if event == "pilot_description_block_shadow"]
+        self.assertEqual(stats["description_block_rows"], 100)
+        self.assertEqual(len(shadow_events), 100)
 
 
 if __name__ == "__main__":

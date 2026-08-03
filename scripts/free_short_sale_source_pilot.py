@@ -294,6 +294,18 @@ QUALIFICATION_PRECEDENCE_SHADOW_DAYS = max(
     1,
     int(os.getenv("FREE_SOURCE_PILOT_QUALIFICATION_PRECEDENCE_SHADOW_DAYS", "7")),
 )
+DESCRIPTION_BLOCK_SHADOW_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_DESCRIPTION_BLOCK_SHADOW_START_DATE",
+    "2026-08-04",
+).strip()
+DESCRIPTION_BLOCK_SHADOW_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_DESCRIPTION_BLOCK_SHADOW_DAYS", "7")),
+)
+DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN", "100")),
+)
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
 HEADLESS_DOMAIN_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET", "4")))
@@ -1631,6 +1643,24 @@ def qualification_precedence_shadow(candidate: Candidate) -> dict[str, Any]:
     }
 
 
+def description_block_shadow(candidate: Candidate) -> dict[str, Any]:
+    """Compare broad description-label readiness with strict description proof."""
+    broad = qualification_precedence_shadow(candidate)
+    strict_evidence = strict_listing_description_evidence(candidate)
+    strict_ready = bool(broad["qualification_status"] == "qualified" and strict_evidence)
+    would_hold = bool(broad["proposed_ready"] and not strict_ready)
+    return {
+        "current_ready": bool(broad["proposed_ready"]),
+        "description_block_confirmed": bool(strict_evidence),
+        "proposed_ready": strict_ready,
+        "would_hold": would_hold,
+        "qualification_status": broad["qualification_status"],
+        "failure_reason": broad["failure_reason"],
+        "strict_evidence": strict_evidence[:500],
+        "writes": 0,
+    }
+
+
 def shadow_promotion_readiness(candidate: Candidate, qualification: Qualification) -> tuple[str, bool, str]:
     safe_agent, agent_reason = sanitize_candidate_identity(candidate)
     fields = candidate.fields
@@ -2623,6 +2653,14 @@ def run_linkage_and_suffix_audits(
         QUALIFICATION_PRECEDENCE_SHADOW_START_DATE,
         QUALIFICATION_PRECEDENCE_SHADOW_DAYS,
     )
+    description_block_shadow_active = phase == "post_promotion" and (
+        force
+        or experiment_active(
+            run_date,
+            DESCRIPTION_BLOCK_SHADOW_START_DATE,
+            DESCRIPTION_BLOCK_SHADOW_DAYS,
+        )
+    )
     stats = {
         "pilot_rows": 0,
         "linked": 0,
@@ -2636,9 +2674,17 @@ def run_linkage_and_suffix_audits(
         "qualification_shadow_rows": 0,
         "qualification_shadow_ready": 0,
         "qualification_shadow_disqualified": 0,
+        "description_block_rows": 0,
+        "description_block_ready": 0,
+        "description_block_would_hold": 0,
         "unconfirmed": 0,
     }
-    if not link_active and not suffix_active and not qualification_shadow_active:
+    if (
+        not link_active
+        and not suffix_active
+        and not qualification_shadow_active
+        and not description_block_shadow_active
+    ):
         log_event(
             "pilot_review_experiments_skipped",
             phase=phase,
@@ -2687,6 +2733,8 @@ def run_linkage_and_suffix_audits(
         link_active=link_active,
         suffix_active=suffix_active,
         qualification_shadow_active=qualification_shadow_active,
+        description_block_shadow_active=description_block_shadow_active,
+        description_block_max_per_run=DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN,
         forced=force,
         counts_toward_experiment=not force,
         writes=0,
@@ -2720,6 +2768,38 @@ def run_linkage_and_suffix_audits(
                 synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
                 address=pilot_row.get("listing_address", ""),
                 current_promotion_status=pilot_row.get("promotion_status", ""),
+                **shadow,
+            )
+    if description_block_shadow_active:
+        for pilot_sheet_row, pilot_row in all_pilot_rows:
+            if stats["description_block_rows"] >= DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN:
+                break
+            candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+            if candidate_date != run_date:
+                continue
+            payload, payload_failure = parse_pilot_payload(pilot_row)
+            if payload_failure:
+                continue
+            candidate = candidate_from_pilot_row(dict(pilot_row), payload)
+            shadow = description_block_shadow(candidate)
+            stats["description_block_rows"] += 1
+            if shadow["proposed_ready"]:
+                stats["description_block_ready"] += 1
+            if shadow["would_hold"]:
+                stats["description_block_would_hold"] += 1
+            log_event(
+                "pilot_description_block_shadow",
+                phase=phase,
+                run_date=run_date.isoformat(),
+                pilot_row=pilot_sheet_row,
+                synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+                address=pilot_row.get("listing_address", ""),
+                current_promotion_status=pilot_row.get("promotion_status", ""),
+                comparison_window_days=DESCRIPTION_BLOCK_SHADOW_DAYS,
+                stop_condition=(
+                    "first_verified_valid_listing_wrongly_held_or_agreement_below_90pct_after_10"
+                ),
+                benchmark_pending=True,
                 **shadow,
             )
     suffix_stopped = False
