@@ -13231,6 +13231,7 @@ def _follow_up_pass():
                 "no response after second call",
                 "call start failed before connecting",
                 "call received but agent hung up on maya",
+                "elevenlabs quota exceeded - call not counted",
             }
             or normalized_manual_note.startswith("no answer on ")
         )

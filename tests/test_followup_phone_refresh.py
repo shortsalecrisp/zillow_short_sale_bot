@@ -303,6 +303,28 @@ def test_follow_up_still_blocks_genuine_manual_response(monkeypatch):
     assert sent == []
 
 
+def test_follow_up_allows_elevenlabs_quota_note(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_MANUAL_NOTE] = "ElevenLabs quota exceeded - call not counted"
+    sent = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
+    monkeypatch.setattr(
+        bot_min,
+        "send_sms",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    bot_min._follow_up_pass()
+
+    assert len(sent) == 1
+    assert sent[0]["row_idx"] == 2
+    assert sent[0]["follow_up"] is True
+
+
 def test_follow_up_batch_pacing_skips_first_send_and_spaces_later_sends(monkeypatch):
     sleeps = []
     monkeypatch.setattr(bot_min, "FOLLOWUP_SMS_PACING_SECONDS", 6.0)
