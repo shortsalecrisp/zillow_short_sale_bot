@@ -2,7 +2,11 @@ import axios, { AxiosError } from "axios";
 import { config } from "./config";
 import { logger } from "./logger";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
-import { recordTelnyxD17Failure, resetProviderCircuit } from "./providerCircuitBreaker";
+import {
+  recordProviderQuotaFailure,
+  recordTelnyxD17Failure,
+  resetProviderCircuit,
+} from "./providerCircuitBreaker";
 import { sendCallbackEmail } from "./sendCallbackEmail";
 import { sendCallTranscriptEmail } from "./sendCallTranscriptEmail";
 import { getElevenLabsCallContextByConversationId } from "./elevenLabsCallContext";
@@ -1091,6 +1095,12 @@ async function processPostCallOutcomeForConversation(
     const failureReason = getFailedConversationReason(conversation);
     const outcome = buildVoiceResponseStatus("provider_quota_exceeded");
     const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();
+    const circuit = recordProviderQuotaFailure({
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      reason: failureReason,
+    });
 
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
@@ -1103,11 +1113,13 @@ async function processPostCallOutcomeForConversation(
 
     processedConversationIds.add(conversationId);
     conversationsWithoutQueueRefill.add(conversationId);
+    await ensureProviderCircuitAlert();
     logger.error("ElevenLabs provider quota exceeded; call attempt will not be counted", {
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       failureReason,
+      circuitOpen: circuit.status.open,
     });
     return true;
   }

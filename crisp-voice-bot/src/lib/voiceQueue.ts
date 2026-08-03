@@ -405,6 +405,20 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   const outboundPause = getOutboundCallPause(now);
   const providerCircuit = getProviderCircuitStatus();
 
+  if (!config.outboundVoice.enabled) {
+    logger.info("Voice queue paused by owner control", {
+      nowEt: formatVoiceBotDateEt(now),
+      reason: config.outboundVoice.pauseReason,
+    });
+    return {
+      ok: true,
+      queued: false,
+      reason: "outbound_voice_owner_paused",
+      nowEt: formatVoiceBotDateEt(now),
+      pauseReason: config.outboundVoice.pauseReason,
+    };
+  }
+
   if (outboundPause || providerCircuit.open) {
     if (providerCircuit.open) {
       await ensureProviderCircuitAlert();
@@ -412,7 +426,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
     logger.info("Voice queue paused", {
       nowEt: formatVoiceBotDateEt(now),
       pausedUntil: outboundPause?.pausedUntil.toISOString(),
-      reason: outboundPause?.reason ?? "Telnyx SIP 403 Account is disabled D17 circuit is open",
+      reason: outboundPause?.reason ?? `Provider circuit is open: ${providerCircuit.signature}`,
     });
 
     return {
@@ -421,7 +435,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       reason: providerCircuit.open ? "provider_circuit_open" : "paused",
       nowEt: formatVoiceBotDateEt(now),
       pausedUntil: outboundPause?.pausedUntil.toISOString(),
-      pauseReason: outboundPause?.reason ?? "Telnyx SIP 403 Account is disabled D17 circuit is open",
+      pauseReason: outboundPause?.reason ?? `Provider circuit is open: ${providerCircuit.signature}`,
     };
   }
 

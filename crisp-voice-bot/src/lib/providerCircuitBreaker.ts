@@ -1,4 +1,5 @@
 const D17_SIGNATURE = "sip_403_account_disabled_d17";
+const QUOTA_SIGNATURE = "elevenlabs_quota_exceeded";
 const D17_WINDOW_MS = 10 * 60_000;
 const D17_TRIP_THRESHOLD = 2;
 const ALERT_RETRY_MS = 10 * 60_000;
@@ -70,6 +71,15 @@ export function recordTelnyxD17Failure(
   evidence: Omit<ProviderCircuitFailureEvidence, "occurredAt"> & { occurredAt?: string },
   now = new Date(),
 ): { justOpened: boolean; status: ProviderCircuitStatus } {
+  if (!state.open && state.signature !== D17_SIGNATURE) {
+    state.signature = D17_SIGNATURE;
+    state.threshold = D17_TRIP_THRESHOLD;
+    state.windowMinutes = D17_WINDOW_MS / 60_000;
+    state.consecutiveFailures = 0;
+    state.firstFailureAt = undefined;
+    state.lastFailureAt = undefined;
+    state.evidence = [];
+  }
   const nowMs = now.getTime();
   const lastFailureMs = validTime(state.lastFailureAt);
   const withinWindow = lastFailureMs !== undefined && nowMs - lastFailureMs >= 0 && nowMs - lastFailureMs <= D17_WINDOW_MS;
@@ -99,6 +109,28 @@ export function recordTelnyxD17Failure(
   return { justOpened, status: getProviderCircuitStatus() };
 }
 
+export function recordProviderQuotaFailure(
+  evidence: Omit<ProviderCircuitFailureEvidence, "occurredAt"> & { occurredAt?: string },
+  now = new Date(),
+): { justOpened: boolean; status: ProviderCircuitStatus } {
+  const justOpened = !state.open;
+  state.open = true;
+  state.signature = QUOTA_SIGNATURE;
+  state.consecutiveFailures = Math.max(1, state.consecutiveFailures + 1);
+  state.threshold = 1;
+  state.windowMinutes = 0;
+  state.firstFailureAt = state.firstFailureAt ?? iso(now);
+  state.lastFailureAt = iso(now);
+  state.openedAt = state.openedAt ?? iso(now);
+  state.alertSentAt = undefined;
+  state.lastAlertAttemptAt = undefined;
+  state.evidence = [
+    ...state.evidence,
+    { ...evidence, occurredAt: evidence.occurredAt || iso(now) },
+  ].slice(-D17_TRIP_THRESHOLD);
+  return { justOpened, status: getProviderCircuitStatus() };
+}
+
 export function claimProviderCircuitAlertAttempt(now = new Date()): ProviderCircuitStatus | undefined {
   if (!state.open || state.alertSentAt) return undefined;
 
@@ -119,7 +151,10 @@ export function markProviderCircuitAlertSent(now = new Date()): void {
 
 export function resetProviderCircuit(reason: string, now = new Date()): ProviderCircuitStatus {
   state.open = false;
+  state.signature = D17_SIGNATURE;
   state.consecutiveFailures = 0;
+  state.threshold = D17_TRIP_THRESHOLD;
+  state.windowMinutes = D17_WINDOW_MS / 60_000;
   state.firstFailureAt = undefined;
   state.lastFailureAt = undefined;
   state.openedAt = undefined;
@@ -133,7 +168,10 @@ export function resetProviderCircuit(reason: string, now = new Date()): Provider
 
 export function resetProviderCircuitForTests(): void {
   state.open = false;
+  state.signature = D17_SIGNATURE;
   state.consecutiveFailures = 0;
+  state.threshold = D17_TRIP_THRESHOLD;
+  state.windowMinutes = D17_WINDOW_MS / 60_000;
   state.firstFailureAt = undefined;
   state.lastFailureAt = undefined;
   state.openedAt = undefined;

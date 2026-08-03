@@ -101,6 +101,13 @@ export const config = {
   port: readPort(),
   baseUrl: stripTrailingSlash(readEnv("BASE_URL", "http://localhost:3000")),
   voiceProvider: readVoiceProvider(),
+  outboundVoice: {
+    enabled: readBoolean("OUTBOUND_VOICE_ENABLED", false),
+    pauseReason: readEnv(
+      "OUTBOUND_VOICE_PAUSE_REASON",
+      "Owner pause: Sales OS proof threshold has not been met",
+    ),
+  },
   testMode: readBoolean("TEST_MODE", true),
   liveTransferTestMode: readBoolean("LIVE_TRANSFER_TEST_MODE", true),
   liveTransferNumber: readEnv("LIVE_TRANSFER_NUMBER", "+19542053205"),

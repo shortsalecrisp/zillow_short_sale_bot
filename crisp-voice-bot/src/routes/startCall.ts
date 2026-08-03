@@ -152,6 +152,20 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
       return;
     }
 
+    if (!config.outboundVoice.enabled) {
+      logger.warn("Outbound voice call blocked by owner control", {
+        rowNumber: payload.rowNumber,
+        reason: config.outboundVoice.pauseReason,
+      });
+      res.status(503).json({
+        ok: false,
+        error: "outbound_voice_owner_paused",
+        reason: config.outboundVoice.pauseReason,
+        requiresExplicitApproval: true,
+      });
+      return;
+    }
+
     if (outboundPause) {
       logger.warn("Outbound voice call start paused", {
         rowNumber: payload.rowNumber,
@@ -177,7 +191,7 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
       res.status(503).json({
         ok: false,
         error: "provider_circuit_open",
-        reason: "Telnyx SIP 403 Account is disabled D17 circuit is open",
+        reason: `Provider circuit is open: ${providerCircuit.signature}`,
         openedAt: providerCircuit.openedAt,
       });
       return;

@@ -4,6 +4,7 @@ import {
   claimProviderCircuitAlertAttempt,
   getProviderCircuitStatus,
   markProviderCircuitAlertSent,
+  recordProviderQuotaFailure,
   recordTelnyxD17Failure,
   resetProviderCircuit,
   resetProviderCircuitForTests,
@@ -52,4 +53,17 @@ test("alert is claimed once and confirmed restoration resets the circuit", () =>
   assert.equal(restored.open, false);
   assert.equal(restored.consecutiveFailures, 0);
   assert.equal(getProviderCircuitStatus().resetReason, "Telnyx support confirmed restoration");
+});
+
+test("one provider quota failure opens the global circuit immediately", () => {
+  resetProviderCircuitForTests();
+  const result = recordProviderQuotaFailure(
+    { ...failure(5001, "conv_quota"), reason: "ElevenLabs quota exceeded" },
+    new Date("2026-08-03T12:00:00Z"),
+  );
+
+  assert.equal(result.justOpened, true);
+  assert.equal(result.status.open, true);
+  assert.equal(result.status.signature, "elevenlabs_quota_exceeded");
+  assert.equal(result.status.threshold, 1);
 });

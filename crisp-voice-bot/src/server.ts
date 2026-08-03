@@ -39,6 +39,12 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
     testMode: config.testMode,
     commit: process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? null,
     voiceExperiment: getElevenLabsVoiceExperimentStatus(),
+    ownerControl: {
+      outboundEnabled: config.outboundVoice.enabled,
+      paused: !config.outboundVoice.enabled,
+      reason: config.outboundVoice.enabled ? null : config.outboundVoice.pauseReason,
+      requiresExplicitApproval: true,
+    },
     callWindowGuard: {
       requiresScheduledWindow: true,
       requiresAgentTimeZone: true,
