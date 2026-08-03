@@ -1478,6 +1478,37 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertFalse(result["would_hold"])
         self.assertEqual(result["writes"], 0)
 
+    def test_description_block_shadow_holds_site_navigation_after_description(self):
+        navigation = (
+            "Home Advanced-Search Foreclosure Property Short Sale Property "
+            "Featured Listing Buy A House Get Prequalified"
+        )
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://example.com/listing",
+            title="510 Boston Neck Road",
+            text=(
+                "Status: Active. Property Description. Duck Cove Condominium within a short "
+                f"distance to all amenities. Skip to content. {navigation}"
+            ),
+            fields={
+                "listing_address": "510 Boston Neck Road",
+                "city": "North Kingstown",
+                "state": "RI",
+                "home_status": "FOR_SALE",
+                "listing_description": navigation,
+            },
+        )
+
+        result = pilot.description_block_shadow(candidate)
+
+        self.assertTrue(result["current_ready"])
+        self.assertFalse(result["description_block_confirmed"])
+        self.assertFalse(result["proposed_ready"])
+        self.assertTrue(result["would_hold"])
+        self.assertEqual(result["writes"], 0)
+
     def test_dedupe_matches_street_and_state_when_city_differs(self):
         main_rows = [
             ["first", "last", "phone", "email", "listing_address", "city", "state"],

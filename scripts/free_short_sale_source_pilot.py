@@ -364,6 +364,18 @@ DESCRIPTION_SECTION_STOP_RE = re.compile(
     re.IGNORECASE,
 )
 
+DESCRIPTION_BLOCK_NAVIGATION_STOP_RE = re.compile(
+    r"\b(?:skip\s+to\s+content|home\s+advanced[- ]search|login\s+contact|search\s+sell\s+agents)\b",
+    re.IGNORECASE,
+)
+
+DESCRIPTION_BLOCK_TAXONOMY_NOISE_RE = re.compile(
+    r"\b(?:amenities?|foreclosure\s+property|home\s+advanced[- ]search)\b"
+    r".{0,180}\bshort\s+sale\b.{0,140}"
+    r"\b(?:new\s+construction|featured\s+listing|buy\s+a\s+house|get\s+prequalified|lease\s+to\s+own)\b",
+    re.IGNORECASE,
+)
+
 CURRENT_MARKET_STATUS_RE = re.compile(
     r"\b(?:"
     r"(?:source\s+listing\s+status|listing\s+status|mls\s+status|status)\s*[:#-]?\s*"
@@ -1643,10 +1655,39 @@ def qualification_precedence_shadow(candidate: Candidate) -> dict[str, Any]:
     }
 
 
+def description_block_evidence(candidate: Candidate) -> str:
+    """Return short-sale proof only when it remains inside a clean description block."""
+    description = normalize_space(candidate.fields.get("listing_description", ""))
+    if description and not DESCRIPTION_BLOCK_TAXONOMY_NOISE_RE.search(description):
+        description_match = SHORT_SALE_LISTING_RE.search(description)
+        if description_match:
+            return excerpt_around(description, description_match.start(), description_match.end())
+
+    text = candidate.text
+    for label_match in STRICT_DESCRIPTION_EVIDENCE_LABEL_RE.finditer(text):
+        prefix = text[max(0, label_match.start() - 40) : label_match.start()]
+        if DESCRIPTION_EVIDENCE_SKIP_PREFIX_RE.search(prefix):
+            continue
+        section = text[label_match.start() : min(len(text), label_match.end() + 900)]
+        stop_offsets = []
+        for stop_re in (DESCRIPTION_SECTION_STOP_RE, DESCRIPTION_BLOCK_NAVIGATION_STOP_RE):
+            stop_match = stop_re.search(section, max(20, label_match.end() - label_match.start()))
+            if stop_match:
+                stop_offsets.append(stop_match.start())
+        if stop_offsets:
+            section = section[: min(stop_offsets)]
+        if DESCRIPTION_BLOCK_TAXONOMY_NOISE_RE.search(section):
+            continue
+        section_match = SHORT_SALE_LISTING_RE.search(section)
+        if section_match:
+            return excerpt_around(section, section_match.start(), section_match.end())
+    return ""
+
+
 def description_block_shadow(candidate: Candidate) -> dict[str, Any]:
     """Compare broad description-label readiness with strict description proof."""
     broad = qualification_precedence_shadow(candidate)
-    strict_evidence = strict_listing_description_evidence(candidate)
+    strict_evidence = description_block_evidence(candidate)
     strict_ready = bool(broad["qualification_status"] == "qualified" and strict_evidence)
     would_hold = bool(broad["proposed_ready"] and not strict_ready)
     return {
