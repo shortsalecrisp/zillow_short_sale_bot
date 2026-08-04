@@ -1247,6 +1247,13 @@ function applyFastRules_(text, rowObj) {
     };
   }
 
+  if (isListingPromotionRequestSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Agent asked Yoni to post, share, advertise, or circulate the listing in his area or network",
+      "LISTING PROMOTION REQUEST"
+    );
+  }
+
   if (isNotShortSaleVagueFutureSignal_(t)) {
     return {
       matched: true,
@@ -2011,6 +2018,20 @@ function isSelfHandlingOpportunitySignal_(text) {
     /\b(?:interested|open to|might need|may need|could use|want help|call me|talk tomorrow|set up a time)\b/.test(t);
   return selfHandling && !clearRejection && !substantiveNextStep && !isNotShortSaleSignal_(t);
 }
+
+function isListingPromotionRequestSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+
+  const promotionAction = /\b(?:post|share|advertise|market|promote|circulate|send)\b/.test(t);
+  const listingReference = /\b(?:listing|property|home)\b/.test(t) ||
+    /\b(?:post|share|advertise|market|promote|circulate)\s+(?:it|this)\b/.test(t);
+  const targetAudience = /\b(?:your|local)\s+(?:area|market|network|agents?|buyers?)\b/.test(t) ||
+    /\b(?:in|to|with|around)\s+(?:your|the)\s+(?:area|market|network|agents?|buyers?)\b/.test(t);
+
+  return promotionAction && listingReference && targetAudience;
+}
+
 function isLocalQuestionSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const patterns = [
@@ -3967,6 +3988,20 @@ function testApprovedLeadIntelligenceRules_() {
     throw new Error("Substantive contact request must not use the vague-future closeout rule");
   }
 
+  const listingPromotionDecision = applyFastRules_("Can you post my listing in your area?", {});
+  if (!listingPromotionDecision.matched ||
+      listingPromotionDecision.handoff_type !== "LISTING PROMOTION REQUEST" ||
+      !listingPromotionDecision.handoff_needed ||
+      !listingPromotionDecision.block_reply ||
+      listingPromotionDecision.reply_text !== "") {
+    throw new Error("Listing-promotion manual handoff regression: " + JSON.stringify(listingPromotionDecision));
+  }
+  if (!isListingPromotionRequestSignal_("Would you share it with agents in your market?") ||
+      isListingPromotionRequestSignal_("Are you local to my market?") ||
+      isListingPromotionRequestSignal_("Do you have a buyer?")) {
+    throw new Error("Listing-promotion signal scope regression");
+  }
+
   const result = {
     selfHandling: selfDecision,
     politeSelfHandling: politeSelfHandlingDecision,
@@ -3979,6 +4014,7 @@ function testApprovedLeadIntelligenceRules_() {
     spanishCapability: buildSpanishCapabilityReply_(),
     spanishFee: feeDecision,
     notShortSale: notShortDecision,
+    listingPromotion: listingPromotionDecision,
     transportParsing: transportParsing,
     ok: true
   };
