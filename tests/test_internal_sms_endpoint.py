@@ -330,6 +330,11 @@ def test_internal_initial_sms_sends_and_marks_sheet_after_gateway_ok(monkeypatch
         }
     ]
     assert sheet.rows[12][7] == "x"
+    assert sheet.rows[12][11] == (
+        "Hey Alex, this is Yoni Kutler with Crisp Short Sales. "
+        "I saw your short sale at 123 Main."
+    )
+    assert datetime.fromisoformat(sheet.rows[12][14]).tzinfo is not None
     assert datetime.fromisoformat(sheet.rows[12][22]).tzinfo is not None
     assert sheet.rows[12][42] == "x"
 
@@ -369,6 +374,8 @@ def test_internal_initial_sms_does_not_mark_sheet_when_gateway_fails(monkeypatch
     assert response.status_code == 502
     assert sender.calls
     assert sheet.rows[12][7] == ""
+    assert sheet.rows[12][11] == ""
+    assert sheet.rows[12][14] == ""
     assert sheet.rows[12][22] == ""
     assert sheet.rows[12][42] == ""
 
@@ -595,7 +602,7 @@ def test_internal_followup_sms_requires_token(monkeypatch):
     assert sender.calls == []
 
 
-def test_internal_followup_sms_sends_custom_message_without_marking_sheet(monkeypatch):
+def test_internal_followup_sms_persists_confirmed_outbound_without_marking_initial(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True, status_code=200, response_text="OK"),
@@ -605,7 +612,7 @@ def test_internal_followup_sms_sends_custom_message_without_marking_sheet(monkey
     response = client.post(
         "/internal/send-followup-sms",
         headers={"authorization": "Bearer secret-token"},
-        json={"row": 12, "phone": "555-111-2222", "message": "Custom follow-up"},
+        json={"row": 12, "phone": "555-111-2212", "message": "Custom follow-up"},
     )
 
     assert response.status_code == 200
@@ -613,9 +620,10 @@ def test_internal_followup_sms_sends_custom_message_without_marking_sheet(monkey
     assert body["status"] == "sent"
     assert body["row"] == 12
     assert body["gateway_status"] == 200
+    assert body["outbound_persisted"] is True
     assert sender.calls == [
         {
-            "to": "15551112222",
+            "to": "15551112212",
             "message": "Custom follow-up",
             "sms_type": "followup",
             "row_idx": 12,
@@ -623,6 +631,8 @@ def test_internal_followup_sms_sends_custom_message_without_marking_sheet(monkey
         }
     ]
     assert sheet.rows[12][7] == ""
+    assert sheet.rows[12][11] == "Custom follow-up"
+    assert datetime.fromisoformat(sheet.rows[12][14]).tzinfo is not None
     assert sheet.rows[12][22] == ""
     assert sheet.rows[12][42] == ""
 
@@ -643,6 +653,70 @@ def test_internal_followup_sms_rejects_empty_message(monkeypatch):
     assert response.status_code == 400
     assert response.json()["detail"] == "empty_message"
     assert sender.calls == []
+
+
+def test_sms_name_and_number_request_gets_public_contact_without_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "Can you send me your name and number?",
+            "message_id": "name-number-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["should_reply"] is True
+    assert body["reply_text"] == "Yoni Kutler - 404-300-9526. You can call or text anytime."
+    assert body["handoff_needed"] is False
+    assert body["needs_review"] is False
+
+
+def test_sms_name_and_number_rule_does_not_match_agent_sending_buyer_contact(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    assert module._sms_is_yoni_name_and_number_request(
+        "I can send you the buyer's name and number tomorrow"
+    ) is False
+
+
+def test_sms_reaction_to_latest_outbound_is_suppressed_before_processing(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    outbound = "Thanks for letting me know. Good luck with the listing!"
+    sheet.rows[2][11] = outbound
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": f"Liked “{outbound}”",
+            "message_id": "reaction-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reaction"] is True
+    assert body["should_reply"] is False
+    assert sheet.rows[2][17] == "[]"
 
 
 def test_sms_chatbot_records_hot_handoff_without_apps_script_mail(monkeypatch):

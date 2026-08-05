@@ -449,7 +449,10 @@ function handleIncomingSms_(body) {
   }
 
   if (
-    String(currentRowObj[HEADERS.ai_state] || "").toLowerCase() === "done" &&
+    (
+      String(currentRowObj[HEADERS.ai_state] || "").toLowerCase() === "done" ||
+      lastOutboundWasYoniNameAndNumberReply_(currentRowObj)
+    ) &&
     isFinalCourtesyReply_(inboundText) &&
     !isSubstantiveFollowupSignal_(inboundText)
   ) {
@@ -1244,6 +1247,19 @@ function applyFastRules_(text, rowObj) {
       needs_review: false,
       block_reply: false,
       reason: "Confirmed the current texting number without repeating the agent's phone"
+    };
+  }
+
+  if (isYoniNameAndNumberRequestSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildYoniNameAndNumberReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Agent asked for Yoni's name and phone number"
     };
   }
 
@@ -2085,6 +2101,27 @@ function isCurrentTextingNumberQuestionSignal_(text) {
     /\b(?:reach|call|text)\s+(?:you|u)\s+(?:at|on)\s+this\s+number\b/
   ];
   return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function isYoniNameAndNumberRequestSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const patterns = [
+    /\b(?:can|could|would|will)\s+(?:you|u)\s+(?:please\s+)?(?:send|give|text|share)\s+(?:me|us)\s+(?:your|ur)\s+name\b.*\b(?:phone|cell|mobile|number)\b/,
+    /\b(?:send|give|text|share)\s+(?:me|us)\s+(?:your|ur)\s+name\b.*\b(?:phone|cell|mobile|number)\b/,
+    /\b(?:can|could|may)\s+i\s+(?:get|have)\s+(?:your|ur)\s+name\b.*\b(?:phone|cell|mobile|number)\b/,
+    /\bwhat(?:'s| is)\s+(?:your|ur)\s+name\b.*\b(?:phone|cell|mobile|number)\b/,
+    /\b(?:your|ur)\s+name\s+and\s+(?:phone\s+)?number\s*\??$/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function buildYoniNameAndNumberReply_() {
+  return "Yoni Kutler - 404-300-9526. You can call or text anytime.";
+}
+
+function lastOutboundWasYoniNameAndNumberReply_(rowObj) {
+  return normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || "")) ===
+    buildYoniNameAndNumberReply_();
 }
 
 function buildLocalQuestionReply_(rowObj) {
@@ -3862,6 +3899,23 @@ function testApprovedLeadIntelligenceRules_() {
       !closedNumberDecision.conversation_done ||
       /\d{3}[-.)\s]*\d{3}[-.\s]*\d{4}/.test(closedNumberDecision.reply_text)) {
     throw new Error("Current texting-number reply regression: " + JSON.stringify(closedNumberDecision));
+  }
+  const nameAndNumberDecision = applyFastRules_("Can you send me your name and number?", {});
+  if (!isYoniNameAndNumberRequestSignal_("Can you send me your name and number?") ||
+      !nameAndNumberDecision.matched ||
+      nameAndNumberDecision.reply_text !== "Yoni Kutler - 404-300-9526. You can call or text anytime." ||
+      nameAndNumberDecision.lead_status !== "Y" ||
+      nameAndNumberDecision.conversation_done ||
+      nameAndNumberDecision.handoff_needed ||
+      nameAndNumberDecision.needs_review ||
+      nameAndNumberDecision.block_reply) {
+    throw new Error("Yoni name-and-number reply regression: " + JSON.stringify(nameAndNumberDecision));
+  }
+  if (isYoniNameAndNumberRequestSignal_("I can send you the buyer's name and number tomorrow")) {
+    throw new Error("Buyer contact sharing must not match Yoni's name-and-number request rule");
+  }
+  if (!lastOutboundWasYoniNameAndNumberReply_({ [HEADERS.last_outbound_text]: buildYoniNameAndNumberReply_() })) {
+    throw new Error("Yoni name-and-number courtesy closeout regression");
   }
   const experienceQuestion = "Hi there, thanks for reaching out. What is your fee. I've closed them before too. How long have you handled short sales, what is your track record?";
   const experienceDecision = applyFastRules_(experienceQuestion, {});

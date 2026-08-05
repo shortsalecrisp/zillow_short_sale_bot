@@ -489,3 +489,26 @@ def test_mark_sent_retries_transient_sheet_failure(monkeypatch):
     assert body["data"][1]["range"] == "Sheet1!W42"
     assert body["data"][2]["range"] == "Sheet1!L42"
     assert body["data"][2]["values"] == [["msg-123"]]
+    assert body["data"][3]["range"] == "Sheet1!O42"
+    assert datetime.fromisoformat(body["data"][3]["values"][0][0]).tzinfo is not None
+
+
+def test_send_markers_persist_confirmed_outbound_text(monkeypatch):
+    fake_service = _FakeSheetsService()
+    monkeypatch.setattr(bot_min, "sheets_service", fake_service)
+
+    assert bot_min.mark_sent(42, "", "Initial outbound") is True
+    initial_data = fake_service.values_api._batch_updates[-1]["data"]
+    assert initial_data[2] == {
+        "range": "Sheet1!L42",
+        "values": [["Initial outbound"]],
+    }
+    assert initial_data[3]["range"] == "Sheet1!O42"
+
+    assert bot_min.mark_followup(42, "Follow-up outbound") is True
+    followup_data = fake_service.values_api._batch_updates[-1]["data"]
+    assert followup_data[2] == {
+        "range": "Sheet1!L42",
+        "values": [["Follow-up outbound"]],
+    }
+    assert followup_data[3]["range"] == "Sheet1!O42"

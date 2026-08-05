@@ -12031,13 +12031,14 @@ def is_active_listing(row_payload: Dict[str, Any]) -> bool:
                 break
     return (not status) or status in GOOD_STATUS
 
-def mark_sent(row_idx: int, msg_id: str) -> bool:
+def mark_sent(row_idx: int, msg_id: str, outbound_text: str = "") -> bool:
     ts = datetime.now(tz=TZ).isoformat()
     init_col = _col_index_to_letter(COL_INIT_TS)
     data = [
         {"range": f"{GSHEET_TAB}!H{row_idx}", "values": [["x"]]},
         {"range": f"{GSHEET_TAB}!{init_col}{row_idx}", "values": [[ts]]},
-        {"range": f"{GSHEET_TAB}!L{row_idx}", "values": [[msg_id]]},
+        {"range": f"{GSHEET_TAB}!L{row_idx}", "values": [[outbound_text or msg_id]]},
+        {"range": f"{GSHEET_TAB}!O{row_idx}", "values": [[ts]]},
     ]
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
@@ -12047,7 +12048,7 @@ def mark_sent(row_idx: int, msg_id: str) -> bool:
                 body={"valueInputOption": "RAW", "data": data},
             ).execute()
             LOG.info(
-                "Marked row %s H:x %s:init-ts L:msg-id (msg_id=%s, attempt=%s)",
+                "Marked row %s H:x %s:init-ts L:latest-outbound O:last-contact (msg_id=%s, attempt=%s)",
                 row_idx,
                 init_col,
                 msg_id,
@@ -12061,19 +12062,26 @@ def mark_sent(row_idx: int, msg_id: str) -> bool:
             LOG.warning("GSheet mark_sent retry row=%s attempt=%s error=%s", row_idx, attempt, e)
             time.sleep(attempt)
 
-def mark_followup(row_idx: int) -> bool:
+def mark_followup(row_idx: int, outbound_text: str = "") -> bool:
     ts = datetime.now(tz=TZ).isoformat()
     fu_col = _col_index_to_letter(COL_FU_TS)
     data = [
         {"range": f"{GSHEET_TAB}!I{row_idx}", "values": [["x"]]},
         {"range": f"{GSHEET_TAB}!{fu_col}{row_idx}", "values": [[ts]]},
     ]
+    if outbound_text:
+        data.extend(
+            [
+                {"range": f"{GSHEET_TAB}!L{row_idx}", "values": [[outbound_text]]},
+                {"range": f"{GSHEET_TAB}!O{row_idx}", "values": [[ts]]},
+            ]
+        )
     try:
         sheets_service.spreadsheets().values().batchUpdate(
             spreadsheetId=GSHEET_ID,
             body={"valueInputOption": "RAW", "data": data},
         ).execute()
-        LOG.info("Marked row %s I:x %s:follow-up done", row_idx, fu_col)
+        LOG.info("Marked row %s I:x %s:follow-up done L:latest-outbound O:last-contact", row_idx, fu_col)
         return True
     except Exception as e:
         LOG.error("GSheet mark_followup error %s", e)
@@ -12441,9 +12449,9 @@ def send_sms(
         if result.success:
             msg_id = ""
             if follow_up:
-                sheet_updated = mark_followup(row_idx)
+                sheet_updated = mark_followup(row_idx, msg_txt)
             else:
-                sheet_updated = mark_sent(row_idx, msg_id)
+                sheet_updated = mark_sent(row_idx, msg_id, msg_txt)
 
             if sheet_updated:
                 LOG.info(

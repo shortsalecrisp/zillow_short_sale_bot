@@ -2700,14 +2700,15 @@ def _mark_initial_sms_sent(
     ws,
     *,
     row_idx: int,
-    msg_id: str,
+    message: str,
     mark_codex_verified: bool,
 ) -> str:
     ts = datetime.now(tz=TZ).isoformat()
     updates = [
         {"range": f"H{row_idx}", "values": [["x"]]},
         {"range": f"W{row_idx}", "values": [[ts]]},
-        {"range": f"L{row_idx}", "values": [[msg_id]]},
+        {"range": f"L{row_idx}", "values": [[message]]},
+        {"range": f"O{row_idx}", "values": [[ts]]},
     ]
     if mark_codex_verified:
         updates.append({"range": f"AQ{row_idx}", "values": [["x"]]})
@@ -2899,11 +2900,10 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             },
         )
 
-    msg_id = str(payload.get("message_id") or "")
     sent_at = _mark_initial_sms_sent(
         ws,
         row_idx=row_idx,
-        msg_id=msg_id,
+        message=message,
         mark_codex_verified=mark_codex_verified,
     )
     logger.info(
@@ -2980,6 +2980,29 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     sent_at = datetime.now(tz=TZ).isoformat()
+    outbound_persisted = False
+    if row_idx is not None:
+        ws = _get_leads_ws()
+        row = _retry_gspread_call("read follow-up leads row", lambda: ws.row_values(row_idx))
+        current_phone = fmt_phone(_row_value(row, 2))
+        if current_phone and _digits_only(current_phone) == digits:
+            _retry_gspread_call(
+                "persist internal follow-up SMS",
+                lambda: ws.batch_update(
+                    [
+                        {"range": f"L{row_idx}", "values": [[message]]},
+                        {"range": f"O{row_idx}", "values": [[sent_at]]},
+                    ],
+                    value_input_option="RAW",
+                ),
+            )
+            outbound_persisted = True
+        else:
+            logger.error(
+                "INTERNAL_FOLLOWUP_SMS_OUTBOUND_NOT_PERSISTED row=%s phone=%s reason=row_phone_mismatch_after_send",
+                row_idx,
+                digits,
+            )
     logger.info(
         "INTERNAL_FOLLOWUP_SMS_SENT row=%s phone=%s http_status=%s response_body=%s",
         row_idx,
@@ -2994,6 +3017,7 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "sent_at": sent_at,
         "gateway_status": final_result.status_code,
         "gateway_response": final_result.response_text,
+        "outbound_persisted": outbound_persisted,
     }
 
 
@@ -3027,6 +3051,73 @@ SMS_SEND_GUARD_HEADERS = [
 
 def _sms_normalize_whitespace(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+YONI_PUBLIC_CONTACT_REPLY = "Yoni Kutler - 404-300-9526. You can call or text anytime."
+
+
+def _sms_normalize_reaction_text(value: Any) -> str:
+    text = re.sub(r"[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]", " ", str(value or ""))
+    return _sms_normalize_whitespace(text).strip(" \t\r\n\"'“”‘’").lower()
+
+
+def _sms_extract_reaction_target(value: Any) -> str:
+    text = _sms_normalize_whitespace(
+        re.sub(r"[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]", " ", str(value or ""))
+    )
+    if not text:
+        return ""
+    match = re.match(
+        r"^(liked|loved|emphasized|disliked|laughed at|questioned)\s+[\"“]?(.+?)[\"”]?$",
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        return _sms_normalize_reaction_text(match.group(2))
+    match = re.match(r"^to\s+[\"“]?(.+?)[\"”]?$", text, re.IGNORECASE)
+    return _sms_normalize_reaction_text(match.group(1)) if match else ""
+
+
+def _sms_is_reaction_to_last_outbound(inbound_text: Any, row_obj: Dict[str, str]) -> bool:
+    target = _sms_extract_reaction_target(inbound_text)
+    last_outbound = _sms_normalize_reaction_text(row_obj.get("last_outbound_text"))
+    return bool(target and last_outbound and target == last_outbound)
+
+
+def _sms_is_yoni_name_and_number_request(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    patterns = [
+        r"\b(?:can|could|would|will)\s+(?:you|u)\s+(?:please\s+)?(?:send|give|text|share)\s+(?:me|us)\s+(?:your|ur)\s+name\b.*\b(?:phone|cell|mobile|number)\b",
+        r"\b(?:send|give|text|share)\s+(?:me|us)\s+(?:your|ur)\s+name\b.*\b(?:phone|cell|mobile|number)\b",
+        r"\b(?:can|could|may)\s+i\s+(?:get|have)\s+(?:your|ur)\s+name\b.*\b(?:phone|cell|mobile|number)\b",
+        r"\bwhat(?:'s| is)\s+(?:your|ur)\s+name\b.*\b(?:phone|cell|mobile|number)\b",
+        r"\b(?:your|ur)\s+name\s+and\s+(?:phone\s+)?number\s*\??$",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_is_final_courtesy(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    text = re.sub(r"[\s.!?\U0001F000-\U0001FAFF\u2600-\u27bf]+$", "", text)
+    return text in {
+        "thanks",
+        "thank you",
+        "thankyou",
+        "ok",
+        "okay",
+        "got it",
+        "will do",
+        "will do thank you",
+        "will do thanks",
+        "sounds good",
+        "sounds good thank you",
+        "sounds good thanks",
+        "appreciate it",
+        "thank you so much",
+        "thanks so much",
+        "ok thank you",
+        "okay thank you",
+    }
 
 
 def _sms_normalize_phone(phone: Any) -> str:
@@ -3377,6 +3468,23 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
     if str(row_obj.get("human_override") or "").upper() == "TRUE":
         return _sms_decision(block_reply=True, reason="Human override enabled - inbound recorded only")
 
+    if _sms_is_yoni_name_and_number_request(t):
+        return _sms_decision(
+            reply_text=YONI_PUBLIC_CONTACT_REPLY,
+            lead_status="Y",
+            reason="Agent asked for Yoni's name and phone number",
+        )
+
+    if (
+        _sms_normalize_whitespace(row_obj.get("last_outbound_text")) == YONI_PUBLIC_CONTACT_REPLY
+        and _sms_is_final_courtesy(t)
+    ):
+        return _sms_decision(
+            lead_status="Y",
+            block_reply=True,
+            reason="Contact details acknowledged; no further reply needed",
+        )
+
     if re.search(r"\b(ai|bot|automated|real person|actually your phone)\b", t):
         return _sms_decision(
             handoff_needed=True,
@@ -3605,6 +3713,26 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
 
     ws, headers, rows = _sms_read_leads_sheet()
     row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
+
+    if _sms_is_reaction_to_last_outbound(inbound_text, row_obj):
+        result = _sms_normalize_tasker_payload(
+            {
+                "ok": True,
+                "reaction": True,
+                "should_reply": False,
+                "reason": "Reaction to latest confirmed outbound SMS ignored",
+            }
+        )
+        _sms_append_debug(
+            "incoming_sms_reaction_suppressed",
+            {
+                "request_id": request_id,
+                "phone": phone_raw,
+                "message": inbound_text,
+                "reason": result["reason"],
+            },
+        )
+        return result
 
     if message_id and str(row_obj.get("last_message_id") or "").strip() == message_id:
         return _sms_normalize_tasker_payload(
