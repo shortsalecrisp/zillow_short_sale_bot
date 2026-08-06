@@ -262,16 +262,21 @@ function handleUnifiedSmsPost_(e) {
           reason: "Send receipt was already confirmed"
         });
       }
-      var replySentResult = handleReplySent_(body);
+      var canonicalReceiptBody = Object.assign({}, body, {
+        phone: receiptCorrelation.canonical_phone || body.phone || "",
+        reply_text: receiptCorrelation.canonical_reply_text || body.reply_text || ""
+      });
+      var replySentResult = handleReplySent_(canonicalReceiptBody);
       if (typeof markPendingSmsSendComplete_ === "function") {
-        markPendingSmsSendComplete_(body);
+        markPendingSmsSendComplete_(canonicalReceiptBody);
       }
       try {
         if (typeof appendSmsDebugLog_ === "function") {
           appendSmsDebugLog_("reply_sent_result", {
             request_id: requestId,
-            phone: body.phone || "",
-            reply_text: body.reply_text || "",
+            phone: canonicalReceiptBody.phone,
+            reply_text: canonicalReceiptBody.reply_text,
+            reason: receiptCorrelation.correlation_mode || "exact_text",
             result: safeJsonStringify_(replySentResult)
           });
         }
@@ -618,6 +623,17 @@ function validatePendingSmsSendReceipt_(body) {
   ensurePendingSmsHeaders_(sheet, headers);
   var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues();
   var matchIndex = findPendingSmsRow_(rows, body);
+  var correlationMode = "exact_text";
+  if (matchIndex === -2 && typeof findPendingSmsRowByExactLeaseIdentityV10_ === "function") {
+    var leaseMatch = findPendingSmsRowByExactLeaseIdentityV10_(
+      body,
+      ["claimed", "send_started", "sent"]
+    );
+    if (leaseMatch.ok) {
+      matchIndex = leaseMatch.row - 2;
+      correlationMode = "exact_lease_identity";
+    }
+  }
   if (matchIndex === -2) {
     return { ok: false, reason: "Receipt identifiers matched a pending send but phone or reply text did not" };
   }
@@ -627,7 +643,10 @@ function validatePendingSmsSendReceipt_(body) {
   return {
     ok: true,
     pending_row: matchIndex + 2,
-    already_sent: String(rows[matchIndex][1] || "") === "sent"
+    already_sent: String(rows[matchIndex][1] || "") === "sent",
+    canonical_phone: normalizePhone_(rows[matchIndex][4]),
+    canonical_reply_text: String(rows[matchIndex][5] || ""),
+    correlation_mode: correlationMode
   };
 }
 

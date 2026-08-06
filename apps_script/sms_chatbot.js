@@ -3842,6 +3842,7 @@ function inspectTestNumber() {
 
 function testApprovedLeadIntelligenceRules_() {
   const transportParsing = testSmsTransportParsing_();
+  const receiptLeaseIdentity = testSmsReceiptLeaseIdentity_();
   const selfDecision = applyFastRules_("I have been handling that part myself", {});
   if (!selfDecision.matched || selfDecision.lead_status !== "Y" || selfDecision.conversation_done || selfDecision.handoff_needed) {
     throw new Error("Self-handling opportunity regression: " + JSON.stringify(selfDecision));
@@ -4070,6 +4071,7 @@ function testApprovedLeadIntelligenceRules_() {
     notShortSale: notShortDecision,
     listingPromotion: listingPromotionDecision,
     transportParsing: transportParsing,
+    receiptLeaseIdentity: receiptLeaseIdentity,
     ok: true
   };
   Logger.log(JSON.stringify(result));

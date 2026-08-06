@@ -65,3 +65,23 @@ def test_transport_retries_are_idempotent():
     assert 'activeStatus !== "claimed"' in OUTBOX
     assert 'String(match.values[1] || "") === "send_started"' in OUTBOX
     assert "receiptCorrelation.already_sent" in UNIFIED
+
+
+def test_receipts_recover_only_with_complete_exact_lease_identity():
+    for marker in (
+        "findPendingSmsRowByExactLeaseIdentityV10_",
+        "findPendingSmsRowIndexByExactLeaseIdentityV10_",
+        "Exact lease correlation requires request, message, phone, and lease",
+        'correlation_mode: "exact_lease_identity"',
+        "testSmsReceiptLeaseIdentity_",
+    ):
+        assert marker in OUTBOX
+    assert "!requestId || !messageId || !phone || !leaseToken" in OUTBOX
+    assert 'String(rows[i][10] || "") !== leaseToken' in OUTBOX
+
+
+def test_reply_history_uses_canonical_pending_text_after_transport_damage():
+    assert "canonicalReceiptBody" in UNIFIED
+    assert "canonical_reply_text" in UNIFIED
+    assert "handleReplySent_(canonicalReceiptBody)" in UNIFIED
+    assert "markPendingSmsSendComplete_(canonicalReceiptBody)" in UNIFIED

@@ -315,13 +315,29 @@ function noPendingSmsClaim_() {
 
 function markPendingSmsSendStartedV10_(body) {
   var match = findLeasedPendingSmsRow_(body, ["claimed", "send_started"]);
+  var correlationMode = "exact_text";
+  if (!match.ok) {
+    match = findPendingSmsRowByExactLeaseIdentityV10_(body, ["claimed", "send_started"]);
+    correlationMode = "exact_lease_identity";
+  }
   if (!match.ok) return match;
   if (String(match.values[1] || "") === "send_started") {
-    return { ok: true, duplicate: true, status: "send_started", pending_row: match.row };
+    return {
+      ok: true,
+      duplicate: true,
+      status: "send_started",
+      pending_row: match.row,
+      correlation_mode: correlationMode
+    };
   }
   match.sheet.getRange(match.row, 2).setValue("send_started");
   match.sheet.getRange(match.row, 14).setValue(new Date());
-  return { ok: true, status: "send_started", pending_row: match.row };
+  return {
+    ok: true,
+    status: "send_started",
+    pending_row: match.row,
+    correlation_mode: correlationMode
+  };
 }
 
 function requeuePendingSmsSendAfterFailureV10_(body) {
@@ -358,6 +374,92 @@ function findLeasedPendingSmsRow_(body, allowedStatuses) {
     return { ok: true, sheet: sheet, row: i + 2, values: rows[i] };
   }
   return { ok: false, reason: "No exact leased send matched the callback" };
+}
+
+// Tasker can alter an echoed form value without altering the SMS Android was
+// asked to send. The request, message, phone, and one-time lease together bind
+// the callback to one exact pending row, so this fallback never matches on
+// phone or text alone.
+function findPendingSmsRowByExactLeaseIdentityV10_(body, allowedStatuses) {
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_pending_sends");
+  if (!sheet || sheet.getLastRow() < 2) {
+    return { ok: false, reason: "No pending-send ledger is available" };
+  }
+  ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
+  var rows = sheet.getRange(
+    2,
+    1,
+    sheet.getLastRow() - 1,
+    SMS_PENDING_SEND_HEADERS_.length
+  ).getValues();
+  var rowIndex = findPendingSmsRowIndexByExactLeaseIdentityV10_(rows, body, allowedStatuses);
+  if (rowIndex < 0) {
+    return {
+      ok: false,
+      reason: rowIndex === -2
+        ? "Exact lease correlation requires request, message, phone, and lease"
+        : "No pending send matched the exact lease identity"
+    };
+  }
+  return {
+    ok: true,
+    sheet: sheet,
+    row: rowIndex + 2,
+    values: rows[rowIndex],
+    correlation_mode: "exact_lease_identity"
+  };
+}
+
+function findPendingSmsRowIndexByExactLeaseIdentityV10_(rows, body, allowedStatuses) {
+  var requestId = String(body && (body.request_id || body.sms_request_id) || "").trim();
+  var messageId = String(body && body.message_id || "").trim();
+  var phone = normalizePhone_(body && body.phone || "");
+  var leaseToken = String(body && body.lease_token || "").trim();
+  if (!requestId || !messageId || !phone || !leaseToken) return -2;
+
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (allowedStatuses.indexOf(String(rows[i][1] || "")) === -1) continue;
+    if (String(rows[i][2] || "") !== requestId) continue;
+    if (String(rows[i][3] || "") !== messageId) continue;
+    if (normalizePhone_(rows[i][4]) !== phone) continue;
+    if (String(rows[i][10] || "") !== leaseToken) continue;
+    return i;
+  }
+  return -1;
+}
+
+function testSmsReceiptLeaseIdentity_() {
+  var row = [
+    new Date(), "send_started", "request-1", "message-1", "4075528213",
+    "I’ve handled short sales for 15+ years.", "", "", "", 1,
+    "lease-1", new Date(), new Date(), new Date(), "", "", "", 4900, "pixel-v16"
+  ];
+  var alteredEcho = {
+    request_id: "request-1",
+    message_id: "message-1",
+    phone: "407-552-8213",
+    reply_text: "I’ve handled short sales for 15  years.",
+    lease_token: "lease-1"
+  };
+  var matched = findPendingSmsRowIndexByExactLeaseIdentityV10_(
+    [row], alteredEcho, ["claimed", "send_started", "sent"]
+  );
+  if (matched !== 0) throw new Error("Exact lease identity did not recover altered receipt text");
+
+  alteredEcho.lease_token = "wrong-lease";
+  if (findPendingSmsRowIndexByExactLeaseIdentityV10_(
+    [row], alteredEcho, ["claimed", "send_started", "sent"]
+  ) !== -1) {
+    throw new Error("Exact lease identity accepted a mismatched lease");
+  }
+  delete alteredEcho.message_id;
+  if (findPendingSmsRowIndexByExactLeaseIdentityV10_(
+    [row], alteredEcho, ["claimed", "send_started", "sent"]
+  ) !== -2) {
+    throw new Error("Exact lease identity accepted incomplete identifiers");
+  }
+  return { ok: true };
 }
 
 function getPendingSmsStaleReason_(outboxRow) {
