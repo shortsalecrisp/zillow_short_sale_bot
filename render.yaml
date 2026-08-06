@@ -165,11 +165,15 @@ services:
       - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_ENABLED
         value: "true"
       - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_START_DATE
-        value: "2026-07-29"
+        value: "2026-08-07"
       - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_DAYS
         value: "7"
       - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_MAX_URLS
         value: "50"
+      - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_MOMENTUM_URLS
+        value: "40"
+      - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_COLDWELL_URLS
+        value: "10"
       - key: FREE_SOURCE_PILOT_ALLOW_DDG_FALLBACK
         value: "false"
       - key: FREE_SOURCE_PILOT_PROMOTION_ENABLED

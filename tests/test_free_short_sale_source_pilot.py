@@ -1171,13 +1171,13 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             day_one = pilot.collect_direct_monitor_urls(
                 "momentum",
                 (feed,),
-                run_date=dt.date(2026, 7, 29),
+                run_date=dt.date(2026, 8, 7),
                 limit=3,
             )
             day_two = pilot.collect_direct_monitor_urls(
                 "momentum",
                 (feed,),
-                run_date=dt.date(2026, 7, 30),
+                run_date=dt.date(2026, 8, 8),
                 limit=3,
             )
 
@@ -1186,6 +1186,31 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(set(day_one).isdisjoint(day_two))
         day_one_numbers = sorted(int(url.rsplit("/", 1)[-1].split("-", 1)[0]) for url in day_one)
         self.assertGreater(day_one_numbers[-1] - day_one_numbers[0], 4)
+
+    def test_direct_monitor_uses_momentum_heavy_bounded_family_caps(self):
+        events = []
+        with mock.patch.object(
+            pilot,
+            "collect_direct_monitor_urls",
+            return_value=[],
+        ) as collect, mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_direct_monitor(
+                dt.date(2026, 8, 7),
+                set(),
+                pilot.build_existing_index([]),
+                set(),
+            )
+
+        self.assertEqual(pilot.direct_monitor_family_limits(), {"momentum": 40, "coldwell": 10})
+        self.assertEqual([call.kwargs["limit"] for call in collect.call_args_list], [40, 10])
+        self.assertEqual(stats["rows_written"], 0)
+        start = [details for event, details in events if event == "pilot_direct_monitor_start"]
+        self.assertEqual(start[0]["family_limits"], {"momentum": 40, "coldwell": 10})
+        self.assertTrue(start[0]["shadow_only"])
 
     def test_existing_agent_name_dedupes_even_when_contact_differs(self):
         existing = pilot.build_existing_index(

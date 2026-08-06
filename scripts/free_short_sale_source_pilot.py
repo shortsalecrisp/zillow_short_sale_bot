@@ -168,12 +168,22 @@ ROTATION_TZ = os.getenv("FREE_SOURCE_PILOT_ROTATION_TZ", "America/New_York")
 DAILY_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT", "w1").strip()
 ROTATING_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_ROTATING_DATE_RESTRICT", "w1").strip()
 DIRECT_MONITOR_ENABLED = os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_ENABLED", "true").lower() == "true"
-DIRECT_MONITOR_START_DATE = os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_START_DATE", "2026-07-29").strip()
+DIRECT_MONITOR_START_DATE = os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_START_DATE", "2026-08-07").strip()
 DIRECT_MONITOR_DAYS = max(1, int(os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_DAYS", "7")))
 DIRECT_MONITOR_MAX_URLS = min(
     50,
     max(1, int(os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_MAX_URLS", "50"))),
 )
+DIRECT_MONITOR_FAMILY_LIMITS = {
+    "momentum": max(
+        0,
+        int(os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_MOMENTUM_URLS", "40")),
+    ),
+    "coldwell": max(
+        0,
+        int(os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_COLDWELL_URLS", "10")),
+    ),
+}
 DIRECT_MONITOR_FEEDS = {
     "momentum": (
         "https://movewithmomentum.com/sitemap-idx-stellar-1.xml",
@@ -1957,6 +1967,17 @@ def direct_monitor_active(run_date: dt.date) -> bool:
     return start <= run_date < start + dt.timedelta(days=DIRECT_MONITOR_DAYS)
 
 
+def direct_monitor_family_limits() -> dict[str, int]:
+    """Return configured family caps while preserving the global URL ceiling."""
+    remaining = DIRECT_MONITOR_MAX_URLS
+    limits: dict[str, int] = {}
+    for family in DIRECT_MONITOR_FEEDS:
+        configured = DIRECT_MONITOR_FAMILY_LIMITS.get(family, 0)
+        limits[family] = min(configured, remaining)
+        remaining -= limits[family]
+    return limits
+
+
 def fetch_public_feed(url: str, timeout: int = 20, max_bytes: int = 6_000_000) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -2169,18 +2190,22 @@ def run_direct_monitor(
         )
         return stats
 
-    families = list(DIRECT_MONITOR_FEEDS)
-    base = DIRECT_MONITOR_MAX_URLS // len(families)
-    remainder = DIRECT_MONITOR_MAX_URLS % len(families)
+    family_limits = direct_monitor_family_limits()
+    families = [family for family in DIRECT_MONITOR_FEEDS if family_limits.get(family, 0) > 0]
     log_event(
         "pilot_direct_monitor_start",
         run_date=run_date.isoformat(),
         families=families,
+        family_limits=family_limits,
         max_urls=DIRECT_MONITOR_MAX_URLS,
+        comparison_window_days=DIRECT_MONITOR_DAYS,
+        hypothesis="momentum_heavy_free_monitoring_increases_net_new_qualified_yield",
+        success_metric="momentum_produces_at_least_two_net_new_qualified_and_outyields_coldwell",
+        stop_condition="any_write_or_promotion_or_daily_cap_breach_or_first_access_control_concern",
         shadow_only=True,
     )
-    for index, family in enumerate(families):
-        family_limit = base + (1 if index < remainder else 0)
+    for family in families:
+        family_limit = family_limits[family]
         try:
             urls = collect_direct_monitor_urls(
                 family,
