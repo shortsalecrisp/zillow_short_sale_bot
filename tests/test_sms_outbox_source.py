@@ -85,3 +85,8 @@ def test_reply_history_uses_canonical_pending_text_after_transport_damage():
     assert "canonical_reply_text" in UNIFIED
     assert "handleReplySent_(canonicalReceiptBody)" in UNIFIED
     assert "markPendingSmsSendComplete_(canonicalReceiptBody)" in UNIFIED
+
+
+def test_safe_deployment_probe_exercises_receipt_lease_identity():
+    assert "probe.receipt_lease_identity" in UNIFIED
+    assert "testSmsReceiptLeaseIdentity_()" in UNIFIED

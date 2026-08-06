@@ -121,6 +121,9 @@ function handleUnifiedSmsPost_(e) {
 
     if (action === "codex_probe") {
       var probe = { ok: true, action: action, has_append: typeof appendSmsDebugLog_ === "function", has_sheet_helper: typeof getSmsSpreadsheet_ === "function" };
+      probe.receipt_lease_identity = typeof testSmsReceiptLeaseIdentity_ === "function"
+        ? testSmsReceiptLeaseIdentity_()
+        : { ok: false, reason: "Receipt lease-identity test is unavailable" };
       try {
         var ss = getSmsSpreadsheet_();
         probe.spreadsheet_name = ss.getName();
