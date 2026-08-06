@@ -306,6 +306,22 @@ DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN = max(
     1,
     int(os.getenv("FREE_SOURCE_PILOT_DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN", "100")),
 )
+FUTURE_NEGOTIATOR_SHADOW_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_FUTURE_NEGOTIATOR_SHADOW_START_DATE",
+    "2026-08-06",
+).strip()
+FUTURE_NEGOTIATOR_SHADOW_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_FUTURE_NEGOTIATOR_SHADOW_DAYS", "7")),
+)
+FOLLOWUP_HOLD_SHADOW_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_FOLLOWUP_HOLD_SHADOW_START_DATE",
+    "2026-08-06",
+).strip()
+FOLLOWUP_HOLD_SHADOW_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_FOLLOWUP_HOLD_SHADOW_DAYS", "7")),
+)
 HEADLESS_FALLBACK = os.getenv("FREE_SOURCE_PILOT_HEADLESS_FALLBACK", "true").lower() == "true"
 HEADLESS_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_BUDGET", "12")))
 HEADLESS_DOMAIN_BUDGET = max(0, int(os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAIN_BUDGET", "4")))
@@ -373,6 +389,14 @@ DESCRIPTION_BLOCK_TAXONOMY_NOISE_RE = re.compile(
     r"\b(?:amenities?|foreclosure\s+property|home\s+advanced[- ]search)\b"
     r".{0,180}\bshort\s+sale\b.{0,140}"
     r"\b(?:new\s+construction|featured\s+listing|buy\s+a\s+house|get\s+prequalified|lease\s+to\s+own)\b",
+    re.IGNORECASE,
+)
+
+FUTURE_NEGOTIATOR_INVOLVEMENT_RE = re.compile(
+    r"\b(?:in\s+the\s+process\s+of\s+)?being\s+assigned\s+"
+    r"(?:an?\s+)?(?:bank\s+|lender\s+)?negotiator\b|"
+    r"\b(?:bank\s+|lender\s+)?negotiator\s+(?:is\s+being|will\s+be)\s+assigned\b|"
+    r"\bwill\s+(?:be\s+)?assign(?:ed)?\s+(?:an?\s+)?(?:bank\s+|lender\s+)?negotiator\b",
     re.IGNORECASE,
 )
 
@@ -1702,6 +1726,41 @@ def description_block_shadow(candidate: Candidate) -> dict[str, Any]:
     }
 
 
+def future_negotiator_phrase_shadow(candidate: Candidate) -> dict[str, Any]:
+    """Flag future or underway negotiator involvement without changing qualification."""
+    description = normalize_space(candidate.fields.get("listing_description", ""))
+    matches = list(FUTURE_NEGOTIATOR_INVOLVEMENT_RE.finditer(description)) if description else []
+    evidence = ""
+    if matches:
+        match = matches[0]
+        evidence = excerpt_around(description, match.start(), match.end())
+    else:
+        text = candidate.text
+        for label_match in STRICT_DESCRIPTION_EVIDENCE_LABEL_RE.finditer(text):
+            prefix = text[max(0, label_match.start() - 40) : label_match.start()]
+            if DESCRIPTION_EVIDENCE_SKIP_PREFIX_RE.search(prefix):
+                continue
+            section = text[label_match.start() : min(len(text), label_match.end() + 900)]
+            stop_offsets = []
+            for stop_re in (DESCRIPTION_SECTION_STOP_RE, DESCRIPTION_BLOCK_NAVIGATION_STOP_RE):
+                stop_match = stop_re.search(section, max(20, label_match.end() - label_match.start()))
+                if stop_match:
+                    stop_offsets.append(stop_match.start())
+            if stop_offsets:
+                section = section[: min(stop_offsets)]
+            match = FUTURE_NEGOTIATOR_INVOLVEMENT_RE.search(section)
+            if match:
+                evidence = excerpt_around(section, match.start(), match.end())
+                break
+    return {
+        "phrase_found": bool(evidence),
+        "would_hold": bool(evidence),
+        "reason": "future_negotiator_involvement" if evidence else "",
+        "evidence": evidence[:500],
+        "writes": 0,
+    }
+
+
 def shadow_promotion_readiness(candidate: Candidate, qualification: Qualification) -> tuple[str, bool, str]:
     safe_agent, agent_reason = sanitize_candidate_identity(candidate)
     fields = candidate.fields
@@ -2670,6 +2729,60 @@ def reconcile_pilot_link(
     }
 
 
+def pilot_followup_hold_reason(pilot_row: dict[str, str]) -> str:
+    """Return the qualification state that should suppress future follow-up in shadow."""
+    status = normalize_space(pilot_row.get("status", "")).lower()
+    failure_reason = normalize_space(pilot_row.get("failure_reason", ""))
+    promotion_status = normalize_space(pilot_row.get("promotion_status", "")).lower()
+    import_ready = normalize_space(pilot_row.get("import_ready", "")).lower()
+    disqualifying_terms = normalize_space(pilot_row.get("disqualifying_terms", ""))
+    if status in {"rejected", "duplicate"}:
+        return failure_reason or disqualifying_terms or f"pilot_{status}"
+    if status == "review" or import_ready == "review" or promotion_status.startswith("needs_"):
+        return failure_reason or disqualifying_terms or "pilot_review_required"
+    if import_ready == "skip" or promotion_status.startswith("disqualified_"):
+        return failure_reason or disqualifying_terms or "pilot_not_importable"
+    return ""
+
+
+def main_followup_hold_present(main_row: dict[str, str]) -> bool:
+    override = normalize_space(main_row.get("human_override", "")).lower()
+    if override in {"1", "true", "x", "yes", "hold"}:
+        return True
+    evidence = " ".join(
+        normalize_space(main_row.get(key, ""))
+        for key in ("contact_verification_note", "conversation_summary", "ai_state")
+    ).lower()
+    return any(
+        marker in evidence
+        for marker in ("follow-on hold", "no further outreach", "do not initiate further outreach")
+    )
+
+
+def qualification_followup_hold_shadow(
+    pilot_sheet_row: int,
+    pilot_row: dict[str, str],
+    main_rows: list[tuple[int, dict[str, str]]],
+) -> dict[str, Any]:
+    """Compare pilot qualification holds with the linked Sheet1 follow-up state."""
+    reason = pilot_followup_hold_reason(pilot_row)
+    reconciliation = reconcile_pilot_link(pilot_sheet_row, pilot_row, main_rows)
+    linked = reconciliation["outcome"] == "linked"
+    main_row = reconciliation["main_row"] if linked else {}
+    existing_hold = main_followup_hold_present(main_row) if linked else False
+    would_hold = bool(reason and linked)
+    return {
+        "hold_reason": reason,
+        "linkage_outcome": reconciliation["outcome"],
+        "matched_main_row": reconciliation["matched_main_row"],
+        "followup_already_sent": bool(normalize_space(main_row.get("followup_text_sent", ""))),
+        "existing_hold": existing_hold,
+        "would_hold": would_hold,
+        "hold_gap": bool(would_hold and not existing_hold),
+        "writes": 0,
+    }
+
+
 def run_linkage_and_suffix_audits(
     token: str,
     spreadsheet_id: str,
@@ -2702,6 +2815,22 @@ def run_linkage_and_suffix_audits(
             DESCRIPTION_BLOCK_SHADOW_DAYS,
         )
     )
+    future_negotiator_shadow_active = phase == "post_promotion" and (
+        force
+        or experiment_active(
+            run_date,
+            FUTURE_NEGOTIATOR_SHADOW_START_DATE,
+            FUTURE_NEGOTIATOR_SHADOW_DAYS,
+        )
+    )
+    followup_hold_shadow_active = phase == "post_promotion" and (
+        force
+        or experiment_active(
+            run_date,
+            FOLLOWUP_HOLD_SHADOW_START_DATE,
+            FOLLOWUP_HOLD_SHADOW_DAYS,
+        )
+    )
     stats = {
         "pilot_rows": 0,
         "linked": 0,
@@ -2718,6 +2847,13 @@ def run_linkage_and_suffix_audits(
         "description_block_rows": 0,
         "description_block_ready": 0,
         "description_block_would_hold": 0,
+        "future_negotiator_rows": 0,
+        "future_negotiator_would_hold": 0,
+        "followup_hold_rows": 0,
+        "followup_hold_linked": 0,
+        "followup_hold_existing": 0,
+        "followup_hold_gaps": 0,
+        "followup_hold_unlinked": 0,
         "unconfirmed": 0,
     }
     if (
@@ -2725,6 +2861,8 @@ def run_linkage_and_suffix_audits(
         and not suffix_active
         and not qualification_shadow_active
         and not description_block_shadow_active
+        and not future_negotiator_shadow_active
+        and not followup_hold_shadow_active
     ):
         log_event(
             "pilot_review_experiments_skipped",
@@ -2775,6 +2913,8 @@ def run_linkage_and_suffix_audits(
         suffix_active=suffix_active,
         qualification_shadow_active=qualification_shadow_active,
         description_block_shadow_active=description_block_shadow_active,
+        future_negotiator_shadow_active=future_negotiator_shadow_active,
+        followup_hold_shadow_active=followup_hold_shadow_active,
         description_block_max_per_run=DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN,
         forced=force,
         counts_toward_experiment=not force,
@@ -2809,6 +2949,59 @@ def run_linkage_and_suffix_audits(
                 synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
                 address=pilot_row.get("listing_address", ""),
                 current_promotion_status=pilot_row.get("promotion_status", ""),
+                **shadow,
+            )
+    if future_negotiator_shadow_active:
+        for pilot_sheet_row, pilot_row in all_pilot_rows:
+            candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+            if candidate_date != run_date:
+                continue
+            payload, payload_failure = parse_pilot_payload(pilot_row)
+            if payload_failure:
+                continue
+            candidate = candidate_from_pilot_row(dict(pilot_row), payload)
+            shadow = future_negotiator_phrase_shadow(candidate)
+            stats["future_negotiator_rows"] += 1
+            if shadow["would_hold"]:
+                stats["future_negotiator_would_hold"] += 1
+            log_event(
+                "pilot_future_negotiator_shadow",
+                phase=phase,
+                run_date=run_date.isoformat(),
+                pilot_row=pilot_sheet_row,
+                synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+                address=pilot_row.get("listing_address", ""),
+                comparison_window_days=FUTURE_NEGOTIATOR_SHADOW_DAYS,
+                hypothesis="future_assignment_language_identifies_existing_negotiator_involvement",
+                success_metric="all_verified_future_assignment_cases_flagged_with_zero_false_holds",
+                stop_condition="first_verified_valid_listing_wrongly_held_or_no_reviewable_cases_after_7_days",
+                **shadow,
+            )
+    if followup_hold_shadow_active:
+        for pilot_sheet_row, pilot_row in all_pilot_rows:
+            if not pilot_followup_hold_reason(pilot_row):
+                continue
+            shadow = qualification_followup_hold_shadow(pilot_sheet_row, pilot_row, main_rows)
+            stats["followup_hold_rows"] += 1
+            if shadow["linkage_outcome"] == "linked":
+                stats["followup_hold_linked"] += 1
+            else:
+                stats["followup_hold_unlinked"] += 1
+            if shadow["existing_hold"]:
+                stats["followup_hold_existing"] += 1
+            if shadow["hold_gap"]:
+                stats["followup_hold_gaps"] += 1
+            log_event(
+                "pilot_qualification_followup_hold_shadow",
+                phase=phase,
+                run_date=run_date.isoformat(),
+                pilot_row=pilot_sheet_row,
+                synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+                address=pilot_row.get("listing_address", ""),
+                comparison_window_days=FOLLOWUP_HOLD_SHADOW_DAYS,
+                hypothesis="pilot_rejection_or_review_state_should_propose_a_linked_sheet1_followup_hold",
+                success_metric="all_linked_nonqualifying_pilot_rows_propose_holds_with_zero_valid_rows_held",
+                stop_condition="first_verified_valid_listing_wrongly_held_or_any_linked_hold_gap_after_7_days",
                 **shadow,
             )
     if description_block_shadow_active:
