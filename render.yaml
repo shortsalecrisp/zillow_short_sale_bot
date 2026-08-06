@@ -164,7 +164,7 @@ services:
         value: w1
       - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_ENABLED
         value: "true"
-      - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_START_DATE
+      - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_REBALANCE_START_DATE
         value: "2026-08-07"
       - key: FREE_SOURCE_PILOT_DIRECT_MONITOR_DAYS
         value: "7"
