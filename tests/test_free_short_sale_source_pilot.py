@@ -1509,6 +1509,111 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(result["would_hold"])
         self.assertEqual(result["writes"], 0)
 
+    def test_future_negotiator_phrase_shadow_holds_assignment_in_progress_without_writing(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://www.rockspringsrealty.com/property/O6385349/",
+            title="2735 Grassmoor Loop",
+            text=(
+                "Status: Active. Property Description: Short Sale, Price is not approved. "
+                "We are in the process of being assigned a bank negotiator."
+            ),
+            fields={
+                "listing_address": "2735 Grassmoor Loop",
+                "city": "Apopka",
+                "state": "FL",
+                "home_status": "FOR_SALE",
+                "listing_description": (
+                    "Short Sale, Price is not approved. We are in the process of being "
+                    "assigned a bank negotiator."
+                ),
+            },
+        )
+
+        result = pilot.future_negotiator_phrase_shadow(candidate)
+
+        self.assertTrue(result["phrase_found"])
+        self.assertTrue(result["would_hold"])
+        self.assertEqual(result["reason"], "future_negotiator_involvement")
+        self.assertIn("assigned a bank negotiator", result["evidence"])
+        self.assertEqual(result["writes"], 0)
+
+    def test_future_negotiator_phrase_shadow_ignores_generic_reference(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://example.com/listing",
+            title="123 Main Street",
+            text="Status: Active. Remarks: Short Sale. Seller may consult a negotiator if needed.",
+            fields={
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+                "listing_description": "Short Sale. Seller may consult a negotiator if needed.",
+            },
+        )
+
+        result = pilot.future_negotiator_phrase_shadow(candidate)
+
+        self.assertFalse(result["phrase_found"])
+        self.assertFalse(result["would_hold"])
+        self.assertEqual(result["writes"], 0)
+
+    def test_qualification_followup_hold_shadow_finds_existing_linked_hold(self):
+        pilot_row = {
+            "status": "rejected",
+            "failure_reason": "disqualifying_short_sale_text",
+            "promotion_status": "disqualified_negotiator",
+            "import_ready": "skip",
+            "listing_address": "2735 Grassmoor Loop",
+            "state": "FL",
+            "synthetic_zpid": "free-bbbabe7d3f97f380",
+            "matched_main_row": "4864",
+        }
+        main_rows = [
+            (
+                4864,
+                {
+                    "listing_address": "2735 Grassmoor Loop",
+                    "state": "FL",
+                    "created_at": "free-bbbabe7d3f97f380",
+                    "followup_text_sent": "x",
+                    "human_override": "TRUE",
+                    "contact_verification_note": "FOLLOW-ON HOLD: do not initiate further outreach.",
+                },
+            )
+        ]
+
+        result = pilot.qualification_followup_hold_shadow(83, pilot_row, main_rows)
+
+        self.assertEqual(result["linkage_outcome"], "linked")
+        self.assertEqual(result["matched_main_row"], 4864)
+        self.assertTrue(result["followup_already_sent"])
+        self.assertTrue(result["would_hold"])
+        self.assertTrue(result["existing_hold"])
+        self.assertFalse(result["hold_gap"])
+        self.assertEqual(result["writes"], 0)
+
+    def test_qualification_followup_hold_shadow_keeps_unlinked_duplicate_unlinked(self):
+        pilot_row = {
+            "status": "duplicate",
+            "failure_reason": "existing_agent_owner_contacted",
+            "promotion_status": "duplicate_existing_agent",
+            "import_ready": "skip",
+            "listing_address": "9054 W Coronado Drive",
+            "state": "AZ",
+            "synthetic_zpid": "free-9859bb032d495240",
+            "matched_main_row": "",
+        }
+
+        result = pilot.qualification_followup_hold_shadow(70, pilot_row, [])
+
+        self.assertEqual(result["linkage_outcome"], "missing")
+        self.assertFalse(result["would_hold"])
+        self.assertFalse(result["hold_gap"])
+        self.assertEqual(result["writes"], 0)
+
     def test_dedupe_matches_street_and_state_when_city_differs(self):
         main_rows = [
             ["first", "last", "phone", "email", "listing_address", "city", "state"],
