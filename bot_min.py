@@ -12153,6 +12153,83 @@ _next_row_hint = GSHEET_NEXT_ROW_HINT
 _append_row_lock = threading.Lock()
 
 
+class SheetRowOwnershipError(RuntimeError):
+    """Raised when a lead row cannot be proven to own its intended identity."""
+
+
+def _lead_row_cell(row_vals: List[Any], column: int) -> str:
+    if column >= len(row_vals):
+        return ""
+    return str(row_vals[column] or "").strip()
+
+
+def _normalize_lead_row_address(value: Any) -> str:
+    tokens = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).split()
+    suffixes = {
+        "avenue": "ave",
+        "boulevard": "blvd",
+        "circle": "cir",
+        "court": "ct",
+        "drive": "dr",
+        "highway": "hwy",
+        "lane": "ln",
+        "parkway": "pkwy",
+        "place": "pl",
+        "road": "rd",
+        "street": "st",
+        "terrace": "ter",
+    }
+    return " ".join(suffixes.get(token, token) for token in tokens)
+
+
+def _lead_row_owns_values(actual_vals: List[Any], expected_vals: List[Any]) -> bool:
+    expected_zpid = _lead_row_cell(expected_vals, COL_ZPID)
+    expected_street = _normalize_lead_row_address(
+        _lead_row_cell(expected_vals, COL_STREET)
+    )
+    expected_city = _normalize_lead_row_address(
+        _lead_row_cell(expected_vals, COL_CITY)
+    )
+    expected_state = _lead_row_cell(expected_vals, COL_STATE).upper()
+    if not expected_zpid or not expected_street:
+        return True
+    return (
+        _lead_row_cell(actual_vals, COL_ZPID) == expected_zpid
+        and _normalize_lead_row_address(_lead_row_cell(actual_vals, COL_STREET))
+        == expected_street
+        and (
+            not expected_city
+            or _normalize_lead_row_address(_lead_row_cell(actual_vals, COL_CITY))
+            == expected_city
+        )
+        and (
+            not expected_state
+            or _lead_row_cell(actual_vals, COL_STATE).upper() == expected_state
+        )
+    )
+
+
+def _read_active_lead_row(row_idx: int) -> List[Any]:
+    response = sheets_service.spreadsheets().values().get(
+        spreadsheetId=GSHEET_ID,
+        range=f"{GSHEET_TAB}!A{row_idx}:{SHEET_LEAD_WRITE_END_COL}{row_idx}",
+        majorDimension="ROWS",
+    ).execute()
+    return (response.get("values") or [[]])[0]
+
+
+def _find_owned_lead_row(expected_vals: List[Any]) -> Optional[int]:
+    response = sheets_service.spreadsheets().values().get(
+        spreadsheetId=GSHEET_ID,
+        range=f"{GSHEET_TAB}!A2:{SHEET_LEAD_WRITE_END_COL}",
+        majorDimension="ROWS",
+    ).execute()
+    for offset, row_vals in enumerate(response.get("values") or []):
+        if _lead_row_owns_values(row_vals, expected_vals):
+            return offset + 2
+    return None
+
+
 def _row_index_from_append_range(updated_range: str) -> int:
     coordinate = str(updated_range or "").rsplit("!", 1)[-1].replace("$", "")
     match = re.fullmatch(
@@ -12172,48 +12249,83 @@ def _row_index_from_append_range(updated_range: str) -> int:
 def append_row(vals) -> int:
     global _next_row_hint
     with _append_row_lock:
-        while True:
-            active_open_row = _find_next_open_row(_next_row_hint)
-            occupied_resp = sheets_service.spreadsheets().values().get(
-                spreadsheetId=GSHEET_ID,
-                range=f"{GSHEET_TAB}!A{active_open_row}:{SHEET_LEAD_WRITE_END_COL}{active_open_row}",
-                majorDimension="ROWS",
-            ).execute()
-            existing_values = (occupied_resp.get("values") or [[]])[0]
-            if _row_is_empty(existing_values):
-                break
-            LOG.warning(
-                "Sheet append target row %s filled during allocation; advancing hint",
-                active_open_row,
-            )
-            _next_row_hint = active_open_row + 1
-
         padded_vals = list(vals)
         if len(padded_vals) < SHEET_LEAD_WRITE_COLS:
             padded_vals.extend([""] * (SHEET_LEAD_WRITE_COLS - len(padded_vals)))
-        resp = sheets_service.spreadsheets().values().update(
-            spreadsheetId=GSHEET_ID,
-            range=f"{GSHEET_TAB}!A{active_open_row}:{SHEET_LEAD_WRITE_END_COL}{active_open_row}",
-            valueInputOption="RAW",
-            body={"values": [padded_vals]},
-        ).execute()
-        updated_range = resp.get("updatedRange")
-        if updated_range and f"{active_open_row}" not in str(updated_range):
-            LOG.warning(
-                "Sheet update returned unexpected range %s for target row %s",
-                updated_range,
+        zpid = _lead_row_cell(padded_vals, COL_ZPID) or "<blank>"
+        for attempt in range(1, 3):
+            while True:
+                active_open_row = _find_next_open_row(_next_row_hint)
+                existing_values = _read_active_lead_row(active_open_row)
+                if _row_is_empty(existing_values):
+                    break
+                LOG.warning(
+                    "Sheet append target row %s filled during allocation; advancing hint",
+                    active_open_row,
+                )
+                _next_row_hint = active_open_row + 1
+
+            resp = sheets_service.spreadsheets().values().update(
+                spreadsheetId=GSHEET_ID,
+                range=f"{GSHEET_TAB}!A{active_open_row}:{SHEET_LEAD_WRITE_END_COL}{active_open_row}",
+                valueInputOption="RAW",
+                body={"values": [padded_vals]},
+            ).execute()
+            updated_range = resp.get("updatedRange")
+            if updated_range and f"{active_open_row}" not in str(updated_range):
+                LOG.warning(
+                    "Sheet update returned unexpected range %s for target row %s",
+                    updated_range,
+                    active_open_row,
+                )
+            _next_row_hint = active_open_row + 1
+            if _lead_row_owns_values(
+                _read_active_lead_row(active_open_row),
+                padded_vals,
+            ):
+                if len(vals) > COL_ZPID and vals[COL_ZPID]:
+                    record_seen_zpid(str(vals[COL_ZPID]))
+                LOG.info(
+                    "SHEET_ROW_OWNERSHIP_VERIFIED zpid=%s row=%s attempt=%s",
+                    zpid,
+                    active_open_row,
+                    attempt,
+                )
+                LOG.info(
+                    "Row written to active lead block (row %s); next hint %s",
+                    active_open_row,
+                    _next_row_hint,
+                )
+                return active_open_row
+
+            LOG.error(
+                "SHEET_ROW_OWNERSHIP_MISMATCH zpid=%s target_row=%s attempt=%s",
+                zpid,
                 active_open_row,
+                attempt,
             )
-        row_idx = active_open_row
-        _next_row_hint = active_open_row + 1
-        if len(vals) > COL_ZPID and vals[COL_ZPID]:
-            record_seen_zpid(str(vals[COL_ZPID]))
-        LOG.info(
-            "Row written to active lead block (row %s); next hint %s",
-            row_idx,
-            _next_row_hint,
+            surviving_row = _find_owned_lead_row(padded_vals)
+            if surviving_row is not None:
+                LOG.error(
+                    "SHEET_ROW_OWNERSHIP_HELD zpid=%s surviving_row=%s target_row=%s",
+                    zpid,
+                    surviving_row,
+                    active_open_row,
+                )
+                raise SheetRowOwnershipError(
+                    f"Lead row ownership moved to row {surviving_row}; outreach held"
+                )
+            if attempt == 1:
+                LOG.warning(
+                    "SHEET_ROW_OWNERSHIP_RETRY zpid=%s failed_row=%s next_hint=%s",
+                    zpid,
+                    active_open_row,
+                    _next_row_hint,
+                )
+
+        raise SheetRowOwnershipError(
+            f"Lead row ownership could not be verified for {zpid}; outreach held"
         )
-        return row_idx
 
 def delete_row(row_idx: int) -> None:
     global _next_row_hint

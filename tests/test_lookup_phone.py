@@ -115,6 +115,14 @@ def test_row_index_from_append_range_rejects_multirow_receipt():
 
 def test_append_row_writes_exact_active_lead_row(monkeypatch):
     captured = {}
+    row_values = [""] * bot_min.MIN_COLS
+    row_values[bot_min.COL_STREET] = "123 Elm Street"
+    row_values[bot_min.COL_CITY] = "Oakland"
+    row_values[bot_min.COL_STATE] = "CA"
+    row_values[bot_min.COL_ZPID] = "free-active-row-write"
+    padded_values = list(row_values) + [""] * (
+        bot_min.SHEET_LEAD_WRITE_COLS - len(row_values)
+    )
 
     class FakeRequest:
         def __init__(self, response=None):
@@ -124,9 +132,14 @@ def test_append_row_writes_exact_active_lead_row(monkeypatch):
             return self.response
 
     class FakeValues:
+        get_calls = 0
+
         def get(self, **kwargs):
             captured.setdefault("get", []).append(kwargs)
-            return FakeRequest({"values": [[]]})
+            FakeValues.get_calls += 1
+            if FakeValues.get_calls == 1:
+                return FakeRequest({"values": [[]]})
+            return FakeRequest({"values": [padded_values]})
 
         def append(self, **kwargs):
             raise AssertionError("lead rows must use values.update, not values.append")
@@ -144,8 +157,6 @@ def test_append_row_writes_exact_active_lead_row(monkeypatch):
             return FakeSpreadsheets()
 
     recorded_zpids = []
-    row_values = [""] * bot_min.MIN_COLS
-    row_values[bot_min.COL_ZPID] = "free-active-row-write"
     monkeypatch.setattr(bot_min, "sheets_service", FakeSheetsService())
 
     def fake_find_next_open_row(start_row):
@@ -164,19 +175,138 @@ def test_append_row_writes_exact_active_lead_row(monkeypatch):
             "spreadsheetId": bot_min.GSHEET_ID,
             "range": f"{bot_min.GSHEET_TAB}!A4737:{bot_min.SHEET_LEAD_WRITE_END_COL}4737",
             "majorDimension": "ROWS",
+        },
+        {
+            "spreadsheetId": bot_min.GSHEET_ID,
+            "range": f"{bot_min.GSHEET_TAB}!A4737:{bot_min.SHEET_LEAD_WRITE_END_COL}4737",
+            "majorDimension": "ROWS",
         }
     ]
-    padded_values = captured["update"]["body"]["values"][0]
-    assert padded_values[: len(row_values)] == row_values
-    assert len(padded_values) == bot_min.SHEET_LEAD_WRITE_COLS
+    written_values = captured["update"]["body"]["values"][0]
+    assert written_values[: len(row_values)] == row_values
+    assert len(written_values) == bot_min.SHEET_LEAD_WRITE_COLS
     assert captured["update"] == {
         "spreadsheetId": bot_min.GSHEET_ID,
         "range": f"{bot_min.GSHEET_TAB}!A4737:{bot_min.SHEET_LEAD_WRITE_END_COL}4737",
         "valueInputOption": "RAW",
-        "body": {"values": [padded_values]},
+        "body": {"values": [written_values]},
     }
     assert bot_min._next_row_hint == 4738
     assert recorded_zpids == ["free-active-row-write"]
+
+
+def test_append_row_retries_once_when_collision_has_no_surviving_owner(monkeypatch):
+    expected = [""] * bot_min.SHEET_LEAD_WRITE_COLS
+    expected[bot_min.COL_STREET] = "14653 S Astin Lane W #302"
+    expected[bot_min.COL_CITY] = "Herriman"
+    expected[bot_min.COL_STATE] = "UT"
+    expected[bot_min.COL_ZPID] = "free-retry-owner"
+    intruder = [""] * bot_min.SHEET_LEAD_WRITE_COLS
+    intruder[bot_min.COL_STREET] = "1911 Neal Way"
+    intruder[bot_min.COL_CITY] = "Santa Rosa"
+    intruder[bot_min.COL_STATE] = "CA"
+    intruder[bot_min.COL_ZPID] = "89575177"
+    reads = iter([
+        [],
+        intruder,
+        [],
+        [],
+        expected,
+    ])
+    updates = []
+
+    class FakeRequest:
+        def __init__(self, response=None):
+            self.response = response or {}
+
+        def execute(self):
+            return self.response
+
+    class FakeValues:
+        def get(self, **_kwargs):
+            return FakeRequest({"values": [next(reads)]})
+
+        def update(self, **kwargs):
+            updates.append(kwargs)
+            return FakeRequest({"updatedRange": kwargs["range"]})
+
+    class FakeSheetsService:
+        def spreadsheets(self):
+            return type("FakeSpreadsheets", (), {"values": lambda self: FakeValues()})()
+
+    open_rows = iter([4971, 4972])
+    recorded = []
+    monkeypatch.setattr(bot_min, "sheets_service", FakeSheetsService())
+    monkeypatch.setattr(bot_min, "_find_next_open_row", lambda _start: next(open_rows))
+    monkeypatch.setattr(bot_min, "record_seen_zpid", recorded.append)
+    monkeypatch.setattr(bot_min, "_next_row_hint", 4971)
+
+    assert bot_min.append_row(expected) == 4972
+    assert [request["range"] for request in updates] == [
+        f"{bot_min.GSHEET_TAB}!A4971:{bot_min.SHEET_LEAD_WRITE_END_COL}4971",
+        f"{bot_min.GSHEET_TAB}!A4972:{bot_min.SHEET_LEAD_WRITE_END_COL}4972",
+    ]
+    assert recorded == ["free-retry-owner"]
+
+
+def test_append_row_holds_when_collision_has_surviving_owner(monkeypatch):
+    expected = [""] * bot_min.SHEET_LEAD_WRITE_COLS
+    expected[bot_min.COL_STREET] = "14653 S Astin Ln W #302"
+    expected[bot_min.COL_CITY] = "Herriman"
+    expected[bot_min.COL_STATE] = "UT"
+    expected[bot_min.COL_ZPID] = "free-existing-owner"
+    intruder = [""] * bot_min.SHEET_LEAD_WRITE_COLS
+    intruder[bot_min.COL_STREET] = "1911 Neal Way"
+    intruder[bot_min.COL_CITY] = "Santa Rosa"
+    intruder[bot_min.COL_STATE] = "CA"
+    intruder[bot_min.COL_ZPID] = "89575177"
+    reads = iter([
+        [[]],
+        intruder,
+        [[], expected],
+    ])
+    recorded = []
+
+    class FakeRequest:
+        def __init__(self, response=None):
+            self.response = response or {}
+
+        def execute(self):
+            return self.response
+
+    class FakeValues:
+        def get(self, **_kwargs):
+            return FakeRequest({"values": next(reads)})
+
+        def update(self, **kwargs):
+            return FakeRequest({"updatedRange": kwargs["range"]})
+
+    class FakeSheetsService:
+        def spreadsheets(self):
+            return type("FakeSpreadsheets", (), {"values": lambda self: FakeValues()})()
+
+    monkeypatch.setattr(bot_min, "sheets_service", FakeSheetsService())
+    monkeypatch.setattr(bot_min, "_find_next_open_row", lambda _start: 4971)
+    monkeypatch.setattr(bot_min, "record_seen_zpid", recorded.append)
+    monkeypatch.setattr(bot_min, "_next_row_hint", 4971)
+
+    with pytest.raises(bot_min.SheetRowOwnershipError, match="outreach held"):
+        bot_min.append_row(expected)
+
+    assert recorded == []
+
+
+def test_lead_row_ownership_normalizes_address_suffixes():
+    expected = [""] * bot_min.SHEET_LEAD_WRITE_COLS
+    expected[bot_min.COL_STREET] = "14653 S Astin Lane W #302"
+    expected[bot_min.COL_CITY] = "Herriman"
+    expected[bot_min.COL_STATE] = "ut"
+    expected[bot_min.COL_ZPID] = "free-normalized-owner"
+    actual = list(expected)
+    actual[bot_min.COL_STREET] = "14653 S. Astin Ln W, #302"
+    actual[bot_min.COL_STATE] = "UT"
+
+    assert bot_min._lead_row_owns_values(actual, expected)
 
 
 def test_build_q_phone_prefers_locality_tokens():
