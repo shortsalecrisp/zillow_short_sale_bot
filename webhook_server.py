@@ -3061,6 +3061,10 @@ def _sms_normalize_reaction_text(value: Any) -> str:
     return _sms_normalize_whitespace(text).strip(" \t\r\n\"'“”‘’").lower()
 
 
+def _sms_normalize_reaction_comparison_text(value: Any) -> str:
+    return re.sub(r"['‘’]", "", _sms_normalize_reaction_text(value))
+
+
 def _sms_extract_reaction_target(value: Any) -> str:
     text = _sms_normalize_whitespace(
         re.sub(r"[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]", " ", str(value or ""))
@@ -3080,7 +3084,8 @@ def _sms_extract_reaction_target(value: Any) -> str:
 
 def _sms_is_reaction_to_last_outbound(inbound_text: Any, row_obj: Dict[str, str]) -> bool:
     target = _sms_extract_reaction_target(inbound_text)
-    last_outbound = _sms_normalize_reaction_text(row_obj.get("last_outbound_text"))
+    target = _sms_normalize_reaction_comparison_text(target)
+    last_outbound = _sms_normalize_reaction_comparison_text(row_obj.get("last_outbound_text"))
     return bool(target and last_outbound and target == last_outbound)
 
 
@@ -3441,15 +3446,90 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
         )
 
 
+def _sms_is_opt_out(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    patterns = [
+        r"^stop[.!?]*$",
+        r"^stop(?:\s*[.!?,;:\u2014-]+\s*|\s+(?!by\b|in\b|at\b|over\b|to\b)).+",
+        r"^unsubscribe[.!?]*$",
+        r"\b(?:stop|quit|end)\s+(?:texting|messaging|contacting|sms)\b",
+        r"\b(?:don't|dont|do not)\s+(?:text|message|contact|sms)\b",
+        r"\bremove (?:me|my (?:info|information)|this (?:info|information))\b",
+        r"\btake me off\b",
+        r"\bopt\s*out\b",
+        r"\bwrong number\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_is_client_consultation_interest(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    client_discussion = any(
+        re.search(pattern, text)
+        for pattern in [
+            r"\blet me (?:chat|talk|speak|check|discuss) with (?:my|our|the) client\b",
+            r"\b(?:i|we)(?:['\u2019]ll| will) (?:chat|talk|speak|check|discuss) with (?:my|our|the) client\b",
+            r"\b(?:run|bring) (?:this|it) (?:past|by) (?:my|our|the) client\b",
+        ]
+    )
+    present_interest = any(
+        re.search(pattern, text)
+        for pattern in [
+            r"\b(?:think|believe|feel)\b.{0,80}\b(?:best|better|helpful)\b.{0,80}\b(?:someone|somebody|you|yoni)\b.{0,80}\b(?:handle|help|assist)\b",
+            r"\b(?:think|believe|feel)\b.{0,80}\b(?:someone|somebody|you|yoni)\b.{0,80}\b(?:should|could|can|needs? to|would)\b.{0,40}\b(?:handle|help|assist)\b",
+            r"\b(?:need|want|would like|could use)\b.{0,40}\bhelp\b",
+        ]
+    )
+    followup_intent = any(
+        re.search(pattern, text)
+        for pattern in [
+            r"\b(?:i|we)(?:['\u2019]ll| will) get back to you\b",
+            r"\b(?:i|we)(?:['\u2019]ll| will) let you know\b",
+            r"\b(?:i|we)(?:['\u2019]ll| will) follow up with you\b",
+            r"\b(?:circle back|follow up) with you\b",
+        ]
+    )
+    explicit_rejection = any(
+        re.search(pattern, text)
+        for pattern in [
+            r"\bno thanks?\b",
+            r"\bnot interested\b",
+            r"\b(?:do not|don't|dont) (?:think (?:i|we) )?need (?:any )?(?:help|assistance)\b",
+            r"\balready have\b.{0,40}\b(?:someone|somebody|help|negotiator|processor|attorney|title company)\b",
+        ]
+    )
+    return client_discussion and (present_interest or followup_intent) and not explicit_rejection
+
+
+def _sms_client_consultation_reply() -> str:
+    return (
+        "Absolutely. I can handle the entire short sale process for you and your client - all the paperwork, lender calls, "
+        "follow-up, and negotiations needed to get the file approved. There's no cost to you or the seller. "
+        "I'm happy to speak with either of you whenever it works for you."
+    )
+
+
+def _sms_is_existing_crisp_relationship(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    relationship_marker = re.search(
+        r"\b(?:already|currently|active|existing|client|customer|portal|account|set\s*up|signed\s*up|registered|working\s+with)\b",
+        text,
+    )
+    crisp_relationship = re.search(r"\bcrisp(?: short sales?)?\b", text) and relationship_marker
+    yoni_relationship = re.search(r"\byoni\b", text) and re.search(
+        r"\b(?:already|currently|active|existing|client|customer|set\s*up|signed\s*up|registered|working\s+with)\b",
+        text,
+    )
+    return bool(crisp_relationship or yoni_relationship)
+
+
 def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
     t = _sms_normalize_whitespace(inbound_text).lower()
 
     if re.search(r"\berror\s+invalid\s+number\b", t) and "valid 10 digit" in t:
         return _sms_decision(reason="Carrier invalid-number notice ignored", block_reply=True)
 
-    if re.fullmatch(r"(stop|unsubscribe|quit|end|wrong number)[.!?]*", t) or re.search(
-        r"\b(remove me|take me off|do not text|don't text|dont text|opt out)\b", t
-    ):
+    if _sms_is_opt_out(t):
         return _sms_decision(
             lead_status="R",
             conversation_done=True,
@@ -3467,6 +3547,21 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
 
     if str(row_obj.get("human_override") or "").upper() == "TRUE":
         return _sms_decision(block_reply=True, reason="Human override enabled - inbound recorded only")
+
+    if _sms_is_existing_crisp_relationship(t):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            reason="Existing Crisp/Yoni relationship; exit marketing and route to Yoni",
+        )
+
+    if _sms_is_client_consultation_interest(t):
+        return _sms_decision(
+            reply_text=_sms_client_consultation_reply(),
+            lead_status="Y",
+            reason="Agent will discuss short-sale help with their client and get back to Yoni",
+        )
 
     if _sms_is_yoni_name_and_number_request(t):
         return _sms_decision(

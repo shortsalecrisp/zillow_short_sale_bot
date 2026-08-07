@@ -719,6 +719,86 @@ def test_sms_reaction_to_latest_outbound_is_suppressed_before_processing(monkeyp
     assert sheet.rows[2][17] == "[]"
 
 
+def test_sms_reaction_matches_when_transport_drops_internal_apostrophe(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    outbound = "Ok, no problem. If anything changes, I'll be glad to help."
+    inbound = "to “Ok, no problem. If anything changes, Ill be glad to help.”"
+
+    assert module._sms_is_reaction_to_last_outbound(
+        inbound,
+        {"last_outbound_text": outbound},
+    ) is True
+    assert module._sms_is_reaction_to_last_outbound(
+        "to schedule a call tomorrow",
+        {"last_outbound_text": outbound},
+    ) is False
+
+
+def test_sms_compound_opt_outs_are_suppressed_without_false_positive(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    for inbound in ["Stop. Already have a company.", "Please remove my info"]:
+        decision = module._sms_fast_decision({}, inbound)
+        assert decision["lead_status"] == "R"
+        assert decision["conversation_done"] is True
+        assert decision["block_reply"] is True
+        assert decision["reply_text"] == ""
+
+    assert module._sms_is_opt_out("Please stop by the office tomorrow") is False
+
+
+def test_sms_client_consultation_stays_active_and_gets_acknowledgement(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = (
+        "Let me chat with my client because I think it's best that somebody handled that "
+        "on her behalf I will get back to you."
+    )
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_client_consultation_interest(inbound) is True
+    assert decision["lead_status"] == "Y"
+    assert decision["conversation_done"] is False
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert decision["reply_text"] == module._sms_client_consultation_reply()
+    assert module._sms_is_client_consultation_interest(
+        "Let me ask my client, but no thanks, we already have someone"
+    ) is False
+
+
+def test_sms_existing_crisp_client_exits_marketing_for_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "I already have an active Crisp portal and am set up with Yoni."
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_existing_crisp_relationship(inbound) is True
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+    assert decision["reply_text"] == ""
+    assert module._sms_is_existing_crisp_relationship(
+        "I already have someone handling it"
+    ) is False
+    assert module._sms_is_existing_crisp_relationship(
+        "What company are you with?"
+    ) is False
+
+
 def test_sms_chatbot_records_hot_handoff_without_apps_script_mail(monkeypatch):
     module, sheet, _sender = _import_webhook_server(
         monkeypatch,

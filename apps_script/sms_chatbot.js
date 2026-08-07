@@ -355,6 +355,8 @@ function handleIncomingSms_(body) {
   const capReached = currentCount >= 4;
   const hasFeeQuestion = isPaymentOrFeeQuestionSignal_(inboundText);
   const hasExperienceQuestion = isExperienceTrackRecordQuestionSignal_(inboundText);
+  const hasClientConsultationInterest = isClientConsultationInterestSignal_(inboundText);
+  const hasExistingCrispRelationship = isExistingCrispRelationshipSignal_(inboundText);
 
   if (isOptOutSignal_(inboundText)) {
     updateRowFields_(sheet, row, {
@@ -646,7 +648,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasFeeQuestion && !hasExperienceQuestion && isAlreadyHandledSignal_(inboundText)) {
+  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && isAlreadyHandledSignal_(inboundText)) {
     const replyText = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -670,7 +672,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasFeeQuestion && !hasExperienceQuestion && isClearNoSignal_(inboundText)) {
+  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && isClearNoSignal_(inboundText)) {
     const closeoutReply = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -1087,10 +1089,11 @@ function isOptOutSignal_(text) {
 
   const patterns = [
     /^stop[.!?]*$/,
+    /^stop(?:\s*[.!?,;:\u2014-]+\s*|\s+(?!by\b|in\b|at\b|over\b|to\b)).+/,
     /^unsubscribe[.!?]*$/,
     /\b(?:stop|quit|end)\s+(?:texting|messaging|contacting|sms)\b/,
     /\b(?:don't|dont|do not)\s+(?:text|message|contact|sms)\b/,
-    /\bremove me\b/,
+    /\bremove (?:me|my (?:info|information)|this (?:info|information))\b/,
     /\btake me off\b/,
     /\bopt\s*out\b/,
     /\bwrong number\b/
@@ -1268,6 +1271,26 @@ function applyFastRules_(text, rowObj) {
       "Agent asked Yoni to post, share, advertise, or circulate the listing in his area or network",
       "LISTING PROMOTION REQUEST"
     );
+  }
+
+  if (isExistingCrispRelationshipSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Agent identified an active or existing Crisp/Yoni relationship; exit marketing and route to Yoni",
+      "EXISTING CRISP CLIENT"
+    );
+  }
+
+  if (isClientConsultationInterestSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildClientConsultationInterestReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Agent will discuss short-sale help with their client and get back to Yoni"
+    };
   }
 
   if (isNotShortSaleVagueFutureSignal_(t)) {
@@ -1885,6 +1908,10 @@ function normalizeSmsReactionText_(text) {
   ).toLowerCase();
 }
 
+function normalizeSmsReactionComparisonText_(text) {
+  return normalizeSmsReactionText_(text).replace(/['\u2018\u2019]/g, "");
+}
+
 function extractSmsReactionTarget_(text) {
   const raw = normalizeWhitespace_(
     String(text || "").replace(/[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]/g, " ")
@@ -1922,10 +1949,11 @@ function isSmsReactionToLastOutbound_(text, rowObj) {
   const reaction = extractSmsReactionTarget_(text);
   if (!reaction || !reaction.target) return false;
 
-  const lastOutbound = normalizeSmsReactionText_(
+  const reactionTarget = normalizeSmsReactionComparisonText_(reaction.target);
+  const lastOutbound = normalizeSmsReactionComparisonText_(
     rowObj && rowObj[HEADERS.last_outbound_text]
   );
-  return Boolean(lastOutbound && reaction.target === lastOutbound);
+  return Boolean(lastOutbound && reactionTarget === lastOutbound);
 }
 
 function isFinalCourtesyReply_(text) {
@@ -2010,6 +2038,54 @@ function isUnderControlFutureHelpCloseoutSignal_(text) {
     /\b(?:call|talk|meet|send|share|email|text)\s+(?:me|us|you)\b.*\b(?:now|today|tomorrow|this\s+week|next\s+week|at|after|before)\b/.test(t);
 
   return currentMatterControlled && futureOnly && !presentRequest;
+}
+
+function isClientConsultationInterestSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+
+  const clientDiscussion = [
+    /\blet me (?:chat|talk|speak|check|discuss) with (?:my|our|the) client\b/,
+    /\b(?:i|we)(?:['\u2019]ll| will) (?:chat|talk|speak|check|discuss) with (?:my|our|the) client\b/,
+    /\b(?:run|bring) (?:this|it) (?:past|by) (?:my|our|the) client\b/
+  ].some(function(pattern) { return pattern.test(t); });
+
+  const presentInterest = [
+    /\b(?:think|believe|feel)\b.{0,80}\b(?:best|better|helpful)\b.{0,80}\b(?:someone|somebody|you|yoni)\b.{0,80}\b(?:handle|help|assist)\b/,
+    /\b(?:think|believe|feel)\b.{0,80}\b(?:someone|somebody|you|yoni)\b.{0,80}\b(?:should|could|can|needs? to|would)\b.{0,40}\b(?:handle|help|assist)\b/,
+    /\b(?:need|want|would like|could use)\b.{0,40}\bhelp\b/
+  ].some(function(pattern) { return pattern.test(t); });
+
+  const followupIntent = [
+    /\b(?:i|we)(?:['\u2019]ll| will) get back to you\b/,
+    /\b(?:i|we)(?:['\u2019]ll| will) let you know\b/,
+    /\b(?:i|we)(?:['\u2019]ll| will) follow up with you\b/,
+    /\b(?:circle back|follow up) with you\b/
+  ].some(function(pattern) { return pattern.test(t); });
+
+  const explicitRejection = [
+    /\bno thanks?\b/,
+    /\bnot interested\b/,
+    /\b(?:do not|don't|dont) (?:think (?:i|we) )?need (?:any )?(?:help|assistance)\b/,
+    /\balready have\b.{0,40}\b(?:someone|somebody|help|negotiator|processor|attorney|title company)\b/
+  ].some(function(pattern) { return pattern.test(t); });
+
+  return clientDiscussion && (presentInterest || followupIntent) && !explicitRejection;
+}
+
+function buildClientConsultationInterestReply_() {
+  return "Absolutely. I can handle the entire short sale process for you and your client - all the paperwork, lender calls, follow-up, and negotiations needed to get the file approved. There's no cost to you or the seller. I'm happy to speak with either of you whenever it works for you.";
+}
+
+function isExistingCrispRelationshipSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+
+  const hasRelationshipMarker = /\b(?:already|currently|active|existing|client|customer|portal|account|set\s*up|signed\s*up|registered|working\s+with)\b/.test(t);
+  const hasCrispRelationship = /\bcrisp(?: short sales?)?\b/.test(t) && hasRelationshipMarker;
+  const hasYoniRelationship = /\byoni\b/.test(t) && /\b(?:already|currently|active|existing|client|customer|set\s*up|signed\s*up|registered|working\s+with)\b/.test(t);
+
+  return hasCrispRelationship || hasYoniRelationship;
 }
 
 function isSelfHandlingOpportunitySignal_(text) {
@@ -3841,6 +3917,12 @@ function inspectTestNumber() {
 }
 
 function testApprovedLeadIntelligenceRules_() {
+  if (!isOptOutSignal_("Stop. Already have a company.") ||
+      !isOptOutSignal_("Please remove my info") ||
+      isOptOutSignal_("Please stop by the office tomorrow")) {
+    throw new Error("Compound opt-out classification regression");
+  }
+
   const transportParsing = testSmsTransportParsing_();
   const receiptLeaseIdentity = testSmsReceiptLeaseIdentity_();
   const selfDecision = applyFastRules_("I have been handling that part myself", {});
@@ -4006,6 +4088,42 @@ function testApprovedLeadIntelligenceRules_() {
   }
   if (isSmsReactionToLastOutbound_("to schedule a call tomorrow", reactionRow)) {
     throw new Error("Ordinary substantive text must not be suppressed as a reaction");
+  }
+  const apostropheOutbound = "Ok, no problem. If anything changes, I'll be glad to help.";
+  const apostropheLossReaction = "to \u201cOk, no problem. If anything changes, Ill be glad to help.\u201d";
+  if (!isSmsReactionToLastOutbound_(apostropheLossReaction, { [HEADERS.last_outbound_text]: apostropheOutbound })) {
+    throw new Error("Reaction apostrophe-loss suppression regression");
+  }
+
+  const clientConsultationText = "Let me chat with my client because I think it's best that somebody handled that on her behalf I will get back to you.";
+  const clientConsultationDecision = applyFastRules_(clientConsultationText, {});
+  if (!isClientConsultationInterestSignal_(clientConsultationText) ||
+      !clientConsultationDecision.matched ||
+      clientConsultationDecision.lead_status !== "Y" ||
+      clientConsultationDecision.conversation_done ||
+      clientConsultationDecision.handoff_needed ||
+      clientConsultationDecision.block_reply ||
+      clientConsultationDecision.reply_text !== buildClientConsultationInterestReply_()) {
+    throw new Error("Client-consultation positive-intent regression: " + JSON.stringify(clientConsultationDecision));
+  }
+  if (isClientConsultationInterestSignal_("Let me ask my client, but no thanks, we already have someone")) {
+    throw new Error("Explicit client-consultation rejection must stay a decline");
+  }
+
+  const existingCrispText = "I already have an active Crisp portal and am set up with Yoni.";
+  const existingCrispDecision = applyFastRules_(existingCrispText, {});
+  if (!isExistingCrispRelationshipSignal_(existingCrispText) ||
+      !existingCrispDecision.matched ||
+      existingCrispDecision.lead_status !== "Y" ||
+      !existingCrispDecision.handoff_needed ||
+      !existingCrispDecision.block_reply ||
+      existingCrispDecision.reply_text !== "" ||
+      existingCrispDecision.handoff_type !== "EXISTING CRISP CLIENT") {
+    throw new Error("Existing Crisp client handoff regression: " + JSON.stringify(existingCrispDecision));
+  }
+  if (isExistingCrispRelationshipSignal_("I already have someone handling it") ||
+      isExistingCrispRelationshipSignal_("What company are you with?")) {
+    throw new Error("Generic handled/company text must not match an existing Crisp relationship");
   }
 
   if (!isSpanishLanguageSignal_("No no tengo ayuda aun hablas espaol ??")) {
