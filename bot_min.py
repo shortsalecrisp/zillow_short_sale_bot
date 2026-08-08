@@ -36,6 +36,7 @@ from headless_browser import (
     random_accept_language,
 )
 from lightweight_extract import extract_lightweight_snapshot
+from sheet_safety import sanitize_external_links_for_sheet
 try:
     import dns.resolver  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -12252,6 +12253,7 @@ def append_row(vals) -> int:
         padded_vals = list(vals)
         if len(padded_vals) < SHEET_LEAD_WRITE_COLS:
             padded_vals.extend([""] * (SHEET_LEAD_WRITE_COLS - len(padded_vals)))
+        padded_vals = [sanitize_external_links_for_sheet(value) for value in padded_vals]
         zpid = _lead_row_cell(padded_vals, COL_ZPID) or "<blank>"
         for attempt in range(1, 3):
             while True:

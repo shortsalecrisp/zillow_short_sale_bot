@@ -394,6 +394,83 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             ],
         )
 
+    def test_candidate_row_uses_safe_source_reference_and_sanitized_payload(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_pages",
+            query='site:example.com "short sale"',
+            url="https://www.example.com/listing/123?tracking=abc",
+            title="10 Main St https://www.example.com/title",
+            text=(
+                "Status: Active. Public Remarks: Short sale subject to lender approval. "
+                "Details at https://www.example.com/details"
+            ),
+            fields={
+                "agent_name": "Jane Smith",
+                "agent_name_source": "listing_agent_label",
+                "listing_address": "10 Main St",
+                "city": "Oak Hills",
+                "state": "CA",
+                "listing_description": (
+                    "Public Remarks: Short sale subject to lender approval. "
+                    "Photos: https://images.example.com/1.jpg"
+                ),
+            },
+        )
+        qualification = pilot.qualification_for_text(candidate.text)
+
+        row = pilot.candidate_to_row(candidate, qualification, "key", "", "")
+
+        self.assertIn("source_domain=example.com", row[11])
+        self.assertIn("source_ref=", row[11])
+        self.assertNotIn("http", row[11].lower())
+        payload = json.loads(row[27])
+        self.assertNotIn("url", payload)
+        self.assertNotIn("detailUrl", payload)
+        self.assertNotIn("propertyUrl", payload)
+        self.assertIn("sourceReference", payload)
+        self.assertNotIn("http", row[27].lower())
+        self.assertNotIn("http", row[28].lower())
+        self.assertNotIn("http", row[29].lower())
+
+    def test_parse_pilot_payload_reconstructs_cleaned_archived_payload(self):
+        pilot_row = self.pilot_row(
+            first_name="Jane",
+            last_name="Smith",
+            phone="404-555-1212",
+            email="jane@example.com",
+            listing_address="123 Main Street",
+            city="Atlanta",
+            state="GA",
+            synthetic_zpid="free-cleaned",
+            source="idx_broker_pages",
+            source_url="source_domain=example.com; source_ref=abc123",
+            status="qualified",
+            promotion_status="shadow_ready",
+            import_ready="yes",
+            zip="30301",
+            broker_name="Example Realty",
+            qualification_evidence="Public remarks: potential short sale subject to lender approval.",
+            pending_queue_source="free-source-pilot:idx_broker_pages",
+            pending_queue_address="123 Main Street",
+            pending_queue_listing_json="raw listing payload archived for Drive safety",
+            description_excerpt="Status: Active. Public remarks: potential short sale subject to lender approval.",
+            raw_title="123 Main Street",
+        )
+        row_data = pilot.pilot_row_map(pilot_row)
+
+        payload, failure = pilot.parse_pilot_payload(row_data)
+        normalized = pilot.normalize_payload_for_sheet1(row_data, payload)
+
+        self.assertEqual(failure, "")
+        self.assertEqual(payload["zpid"], "free-cleaned")
+        self.assertEqual(payload["source"], "free-source-pilot:idx_broker_pages")
+        self.assertEqual(payload["agentName"], "Jane Smith")
+        self.assertIn("short sale", normalized["listing_description"].lower())
+        self.assertEqual(normalized["requiresVerifierReview"], "true")
+        self.assertNotIn("url", normalized)
+        self.assertNotIn("detailUrl", normalized)
+        self.assertNotIn("propertyUrl", normalized)
+
     def test_pilot_headers_start_with_first_and_last_name(self):
         self.assertEqual(pilot.PILOT_HEADERS[:2], ["first_name", "last_name"])
 

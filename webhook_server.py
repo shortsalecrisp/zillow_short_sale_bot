@@ -38,6 +38,11 @@ from bot_min import (
     process_rows,
     run_hourly_scheduler,
 )
+from sheet_safety import (
+    safe_source_reference,
+    sanitize_external_links_for_sheet,
+    sanitize_payload_for_sheet_json,
+)
 from sms_providers import get_sender
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2182,7 +2187,7 @@ def _parse_iso_timestamp(value: str) -> Optional[datetime]:
 def _queue_row_values(record: Dict[str, Any]) -> List[str]:
     values: List[str] = []
     for col in QUEUE_HEADERS:
-        raw_value = str(record.get(col, "") or "")
+        raw_value = sanitize_external_links_for_sheet(record.get(col, "") or "")
         if len(raw_value) > QUEUE_CELL_SAFE_LIMIT:
             trimmed = raw_value[:QUEUE_CELL_SAFE_LIMIT]
             logger.warning(
@@ -2248,6 +2253,11 @@ def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str,
         or attribution.get("brokerageName")
         or ""
     )
+    detail_url = (
+        str(_extra_state_listing_url(row) or "").strip()
+        or str(row.get("detailUrl") or row.get("detailURL") or "").strip()
+        or str(row.get("propertyUrl") or row.get("propertyURL") or "").strip()
+    )
     payload: Dict[str, Any] = {
         "zpid": zpid,
         "address": sms_address or full_address,
@@ -2260,9 +2270,7 @@ def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str,
         "agentName": str(row.get("agentName") or "").strip(),
         "brokerName": str(broker_name or "").strip(),
         "brokerageName": str(broker_name or "").strip(),
-        "url": str(_extra_state_listing_url(row) or "").strip(),
-        "detailUrl": str(row.get("detailUrl") or row.get("detailURL") or "").strip(),
-        "propertyUrl": str(row.get("propertyUrl") or row.get("propertyURL") or "").strip(),
+        "sourceReference": safe_source_reference(detail_url),
         "homeStatus": str(
             row.get("homeStatus")
             or row.get("status")
@@ -2287,7 +2295,7 @@ def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str,
 
 
 def _serialize_queue_payload(payload: Dict[str, Any], zpid: str) -> str:
-    compact_payload = dict(payload)
+    compact_payload = sanitize_payload_for_sheet_json(dict(payload))
     serialized = json.dumps(compact_payload, separators=(",", ":"), ensure_ascii=False)
     if len(serialized) <= QUEUE_CELL_SAFE_LIMIT:
         return serialized
@@ -3302,6 +3310,7 @@ def _sms_append_debug(stage: str, details: Optional[Dict[str, Any]] = None) -> N
             str(data.get("lead_status") or ""),
             _sms_truncate(_sms_json(_sms_mask_sensitive(data)), 3000),
         ]
+        row = [sanitize_external_links_for_sheet(value) for value in row]
         _retry_gspread_call(f"append {SMS_CHATBOT_DEBUG_TAB}", lambda: ws.append_row(row))
     except Exception:
         logger.exception("sms-chatbot: failed to append debug row stage=%s", stage)
@@ -3337,7 +3346,7 @@ def _sms_update_row_fields(ws, row_idx: int, headers: List[str], updates: Dict[s
         batch.append(
             {
                 "range": f"{_sms_column_letter(col_idx + 1)}{row_idx}",
-                "values": [[str(value) if value is not None else ""]],
+                "values": [[sanitize_external_links_for_sheet(value)]],
             }
         )
     if batch:
@@ -4594,7 +4603,7 @@ async def sms_reply(request: Request):
 
     data = await request.json()
     phone_raw = data.get("number") or data.get("phone") or ""
-    msg       = data.get("message", "")
+    msg       = sanitize_external_links_for_sheet(data.get("message", ""))
     ts        = data.get("time_received") or datetime.utcnow().isoformat(timespec="seconds")
 
     phone = fmt_phone(phone_raw)

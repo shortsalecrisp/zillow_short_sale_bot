@@ -545,6 +545,27 @@ def test_state_search_queue_payload_uses_street_only_sms_address():
     assert payload["address"] == "1 Ocean Ave"
     assert payload["street"] == "1 Ocean Ave"
     assert payload["full_address"] == "1 Ocean Ave, Pahoa, HI 96778"
+    assert "source_ref=" in payload["sourceReference"]
+    assert "http" not in json.dumps(payload).lower()
+
+
+def test_pending_queue_serialization_removes_clickable_urls():
+    payload = {
+        "zpid": "hi-1",
+        "source": "state-search",
+        "address": "1 Ocean Ave",
+        "detailUrl": "https://www.zillow.com/homedetails/hi-1_zpid/",
+        "propertyUrl": "https://www.zillow.com/homedetails/hi-1_zpid/",
+        "listing_description": "Short sale subject to lender approval. See https://example.com/details",
+    }
+
+    serialized = webhook_server._serialize_queue_payload(payload, "hi-1")
+    parsed = json.loads(serialized)
+
+    assert "detailUrl" not in parsed
+    assert "propertyUrl" not in parsed
+    assert "http" not in serialized.lower()
+    assert "Short sale subject to lender approval" in parsed["listing_description"]
 
 
 def test_state_search_queue_payload_preserves_special_listing_conditions():

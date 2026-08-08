@@ -27,6 +27,16 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from sheet_safety import (  # noqa: E402
+    safe_source_reference,
+    sanitize_external_links_for_sheet,
+    sanitize_payload_for_sheet_json,
+)
+
 
 SPREADSHEET_ID = "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70"
 MAIN_TAB = "Sheet1"
@@ -2318,7 +2328,8 @@ def run_direct_monitor(
                 continue
             listing_status, listing_key, matched = duplicate_listing_status(candidate, existing)
             pilot_duplicate = listing_key and listing_key in pilot_seen_addresses
-            url_duplicate = url in already_seen_urls
+            source_ref = safe_source_reference(url)
+            url_duplicate = url in already_seen_urls or source_ref in already_seen_urls
             if listing_status or pilot_duplicate or url_duplicate:
                 stats["duplicates"] += 1
                 log_event(
@@ -2375,9 +2386,7 @@ def canonical_queue_payload(candidate: Candidate, qualification: Qualification, 
         "brokerageName": fields.get("broker_name", ""),
         "phone": fields.get("phone", ""),
         "email": fields.get("email", ""),
-        "url": candidate.url,
-        "detailUrl": candidate.url,
-        "propertyUrl": candidate.url,
+        "sourceReference": safe_source_reference(candidate.url),
         "homeStatus": "FOR_SALE",
         "specialListingConditions": "Short Sale",
         "listing_description": listing_description[:8_000],
@@ -2416,37 +2425,38 @@ def candidate_to_row(
     import_ready = "yes" if is_shadow_ready else "review"
     if matched or agent_rows:
         promotion_notes += " Existing agent/contact rows are recorded for reviewer context."
+    sheet_payload = sanitize_payload_for_sheet_json(payload)
     return [
-        first_name,
-        last_name,
-        fields.get("phone", ""),
-        fields.get("email", ""),
-        fields.get("listing_address", ""),
-        fields.get("city", ""),
-        fields.get("state", ""),
+        sanitize_external_links_for_sheet(first_name),
+        sanitize_external_links_for_sheet(last_name),
+        sanitize_external_links_for_sheet(fields.get("phone", "")),
+        sanitize_external_links_for_sheet(fields.get("email", "")),
+        sanitize_external_links_for_sheet(fields.get("listing_address", "")),
+        sanitize_external_links_for_sheet(fields.get("city", "")),
+        sanitize_external_links_for_sheet(fields.get("state", "")),
         now,
         synthetic_zpid,
-        candidate.source,
-        candidate.query,
-        candidate.url,
-        qualification.status,
-        qualification.failure_reason,
-        promotion_status,
-        promotion_notes,
+        sanitize_external_links_for_sheet(candidate.source),
+        sanitize_external_links_for_sheet(candidate.query),
+        safe_source_reference(candidate.url),
+        sanitize_external_links_for_sheet(qualification.status),
+        sanitize_external_links_for_sheet(qualification.failure_reason),
+        sanitize_external_links_for_sheet(promotion_status),
+        sanitize_external_links_for_sheet(promotion_notes),
         import_ready,
-        fields.get("zip", ""),
-        fields.get("broker_name", ""),
-        qualification.short_sale_evidence_type,
-        qualification.evidence,
-        qualification.disqualifying_terms,
-        duplicate_key,
-        matched,
-        agent_rows,
-        queue_source,
-        queue_address,
-        json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
-        candidate.text[:900],
-        candidate.title,
+        sanitize_external_links_for_sheet(fields.get("zip", "")),
+        sanitize_external_links_for_sheet(fields.get("broker_name", "")),
+        sanitize_external_links_for_sheet(qualification.short_sale_evidence_type),
+        sanitize_external_links_for_sheet(qualification.evidence),
+        sanitize_external_links_for_sheet(qualification.disqualifying_terms),
+        sanitize_external_links_for_sheet(duplicate_key),
+        sanitize_external_links_for_sheet(matched),
+        sanitize_external_links_for_sheet(agent_rows),
+        sanitize_external_links_for_sheet(queue_source),
+        sanitize_external_links_for_sheet(queue_address),
+        json.dumps(sheet_payload, separators=(",", ":"), ensure_ascii=False),
+        sanitize_external_links_for_sheet(candidate.text[:900]),
+        sanitize_external_links_for_sheet(candidate.title),
     ]
 
 
@@ -3304,17 +3314,89 @@ def promotion_status_updates(
     return updates
 
 
+def reconstructed_pilot_payload(row_data: dict[str, str]) -> dict[str, str]:
+    source = (row_data.get("pending_queue_source") or row_data.get("source") or "unknown").strip()
+    if not source.startswith("free-source-pilot:"):
+        source = f"free-source-pilot:{source or 'unknown'}"
+    agent_name = normalize_space(f"{row_data.get('first_name', '')} {row_data.get('last_name', '')}")
+    listing_text = normalize_space(
+        " ".join(
+            part
+            for part in (
+                row_data.get("qualification_evidence", ""),
+                row_data.get("description_excerpt", ""),
+            )
+            if part
+        )
+    )
+    address = row_data.get("pending_queue_address") or row_data.get("listing_address", "")
+    if not any(
+        normalize_space(part)
+        for part in (
+            row_data.get("synthetic_zpid", ""),
+            address,
+            listing_text,
+            agent_name,
+        )
+    ):
+        return {}
+    payload = {
+        "zpid": row_data.get("synthetic_zpid", ""),
+        "address": address,
+        "street": address,
+        "city": row_data.get("city", ""),
+        "state": row_data.get("state", ""),
+        "zip": row_data.get("zip", ""),
+        "source": source,
+        "search_source": source,
+        "agentName": agent_name,
+        "brokerName": row_data.get("broker_name", ""),
+        "brokerageName": row_data.get("broker_name", ""),
+        "phone": row_data.get("phone", ""),
+        "email": row_data.get("email", ""),
+        "homeStatus": "FOR_SALE",
+        "specialListingConditions": "Short Sale",
+        "listing_description": listing_text,
+        "description": listing_text,
+        "listingText": listing_text,
+        "sourceQuery": row_data.get("source_query", ""),
+        "sourceTitle": row_data.get("raw_title", ""),
+        "qualificationEvidence": row_data.get("qualification_evidence", ""),
+        "sourcePilotShadow": "true",
+        "requiresVerifierReview": "true",
+    }
+    return {
+        key: sanitize_external_links_for_sheet(value)
+        for key, value in payload.items()
+        if str(value or "").strip()
+    }
+
+
 def parse_pilot_payload(row_data: dict[str, str]) -> tuple[dict[str, str], str]:
     raw = row_data.get("pending_queue_listing_json", "").strip()
     if not raw:
+        reconstructed = reconstructed_pilot_payload(row_data)
+        if reconstructed:
+            return reconstructed, ""
         return {}, "missing_pending_queue_listing_json"
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
+        reconstructed = reconstructed_pilot_payload(row_data)
+        if reconstructed:
+            return reconstructed, ""
         return {}, "invalid_pending_queue_listing_json"
     if not isinstance(payload, dict):
+        reconstructed = reconstructed_pilot_payload(row_data)
+        if reconstructed:
+            return reconstructed, ""
         return {}, "invalid_pending_queue_listing_json"
-    return {str(key): str(value) for key, value in payload.items() if str(value or "").strip()}, ""
+    payload = sanitize_payload_for_sheet_json(payload)
+    return {
+        str(key): sanitize_external_links_for_sheet(value)
+        for key, value in payload.items()
+        if str(value or "").strip()
+    }, ""
 
 
 def agent_name_from_pilot(row_data: dict[str, str], payload: dict[str, str]) -> str:
@@ -3445,7 +3527,12 @@ def normalize_payload_for_sheet1(row_data: dict[str, str], payload: dict[str, st
         normalized.setdefault("listingText", listing_text[:8_000])
     normalized["sourcePilotShadow"] = "true"
     normalized["requiresVerifierReview"] = "true"
-    return {key: str(value) for key, value in normalized.items() if str(value or "").strip()}
+    normalized = sanitize_payload_for_sheet_json(normalized)
+    return {
+        key: sanitize_external_links_for_sheet(value)
+        for key, value in normalized.items()
+        if str(value or "").strip()
+    }
 
 
 def import_bot_processor() -> Any:
@@ -3734,7 +3821,8 @@ def run(args: argparse.Namespace) -> None:
                 "fetch_failed": 0,
             }
             for result in results:
-                if result.url in already_seen_urls:
+                result_source_ref = safe_source_reference(result.url)
+                if result.url in already_seen_urls or result_source_ref in already_seen_urls:
                     stats["duplicates"] += 1
                     query_stats["duplicates"] += 1
                     log_event("pilot_duplicate_url", state=state, source=source, url=result.url)
@@ -3889,6 +3977,8 @@ def run(args: argparse.Namespace) -> None:
                     promotion_status=row[14],
                 )
                 already_seen_urls.add(result.url)
+                if result_source_ref:
+                    already_seen_urls.add(result_source_ref)
                 if listing_dup_key:
                     pilot_seen_addresses.add(listing_dup_key)
                 time.sleep(args.sleep_seconds)
