@@ -3125,6 +3125,88 @@ def _sms_is_final_courtesy(value: Any) -> bool:
     }
 
 
+def _sms_is_substantive_followup(value: Any) -> bool:
+    raw = _sms_normalize_whitespace(value)
+    if not raw or _sms_is_final_courtesy(raw):
+        return False
+    if "?" in raw:
+        return True
+    return bool(
+        re.search(
+            r"^(?:who|what|when|where|why|how|can|could|would|do|does|did|is|are|am|will|should|may)\b"
+            r"|\b(?:send|share|email|text)\b.*\b(?:business\s+card|contact\s+card|contact\s+info|information|website|link)\b"
+            r"|\b(?:business\s+card|contact\s+card)\b",
+            raw.lower(),
+        )
+    )
+
+
+def _sms_is_closed_not_short_sale(row_obj: Dict[str, str]) -> bool:
+    if str(row_obj.get("ai_state") or "").lower() != "done":
+        return False
+    summary = _sms_normalize_whitespace(row_obj.get("conversation_summary") or "").lower()
+    return bool(re.search(r"\bnot (?:actually )?a short sale\b|\bchanged listing\b", summary))
+
+
+def _sms_is_post_closeout_not_short_sale_continuation(value: Any, row_obj: Dict[str, str]) -> bool:
+    if not _sms_is_closed_not_short_sale(row_obj) or _sms_is_substantive_followup(value):
+        return False
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or re.search(r"\b(?:help|call|talk|meet|send|share|email|text|website|link|fee|cost|service|work with)\b", text):
+        return False
+    patterns = [
+        r"\b(?:clone|cloned|copy|copied|duplicate|duplicated|carry|carried)\b.{0,60}\b(?:listing|over|forward|data|field|fields)\b",
+        r"\b(?:listing|data|field|fields)\b.{0,60}\b(?:clone|cloned|copy|copied|duplicate|duplicated|carry|carried)\b",
+        r"\b(?:typo|mistake|error|incorrect|wrong|syndicat|imported|carried over)\b",
+        r"\b(?:it(?:'s| is)|this is|the listing is)\s+(?:a\s+)?(?:probate|estate sale|foreclosure)\b",
+        r"\b(?:thanks|thank you)\b.{0,60}\b(?:attention|heads up|letting me know|bringing)\b",
+    ]
+    return _sms_is_final_courtesy(text) or bool(re.search(r"\bnot (?:actually )?a short sale\b", text)) or any(
+        re.search(pattern, text) for pattern in patterns
+    )
+
+
+def _sms_has_previously_covered_context(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    parts = [
+        inbound_text,
+        str(row_obj.get("response_status") or ""),
+        str(row_obj.get("conversation_summary") or ""),
+    ]
+    parts.extend(
+        str(entry.get("text") or "")
+        for entry in _sms_history_array(row_obj.get("history_json"))
+        if isinstance(entry, dict) and entry.get("role") == "agent"
+    )
+    combined = _sms_normalize_whitespace(" ".join(part for part in parts if part)).lower()
+    return bool(
+        re.search(
+            r"\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b"
+            r"|\balready represented\b|\balready handled\b",
+            combined,
+        )
+    )
+
+
+def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[str, str]) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or _sms_is_substantive_followup(text) or not _sms_has_previously_covered_context(row_obj, text):
+        return False
+    patterns = [
+        r"\b(?:i|we)(?:['\u2019]ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b",
+        r"\b(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b",
+        r"\bkeep\s+(?:me|us)\s+in\s+mind\b",
+        r"\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_relationship_only_reply(value: Any) -> str:
+    text = _sms_normalize_whitespace(value).lower()
+    if re.search(r"\bkeep\s+(?:me|us)\s+in\s+mind\b", text):
+        return "Absolutely - thanks. I'll keep you in mind, too."
+    return "Thanks, I appreciate it. Feel free to reach out if a short sale comes up."
+
+
 def _sms_normalize_phone(phone: Any) -> str:
     digits = re.sub(r"\D", "", str(phone or ""))
     if len(digits) == 11 and digits.startswith("1"):
@@ -3545,6 +3627,14 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason="Automated STOP instruction / non-agent responder",
         )
 
+    if _sms_is_post_closeout_not_short_sale_continuation(t, row_obj):
+        return _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "R"),
+            conversation_done=True,
+            block_reply=True,
+            reason="Same-topic continuation after not-short-sale closeout; no additional reply needed",
+        )
+
     if str(row_obj.get("human_override") or "").upper() == "TRUE":
         return _sms_decision(block_reply=True, reason="Human override enabled - inbound recorded only")
 
@@ -3561,6 +3651,14 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reply_text=_sms_client_consultation_reply(),
             lead_status="Y",
             reason="Agent will discuss short-sale help with their client and get back to Yoni",
+        )
+
+    if _sms_is_relationship_only_after_existing_coverage(t, row_obj):
+        return _sms_decision(
+            reply_text=_sms_relationship_only_reply(t),
+            lead_status="O",
+            conversation_done=True,
+            reason="Current file already covered; relationship left open without sales follow-up",
         )
 
     if _sms_is_yoni_name_and_number_request(t):
@@ -3877,7 +3975,11 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         "mailshake_status": lead_status,
         "conversation_summary": reason,
         "ai_state": "done" if conversation_done else ("handoff" if handoff_needed or needs_review else "active"),
-        "call_booking_status": "closed_no_interest" if conversation_done and lead_status == "R" else "interested_no_call",
+        "call_booking_status": (
+            "closed_no_interest"
+            if conversation_done and lead_status == "R"
+            else ("warm_future_interest" if conversation_done and lead_status == "O" else "interested_no_call")
+        ),
         "handoff_flag": "TRUE" if handoff_needed or needs_review else "FALSE",
         "human_override": "TRUE" if handoff_needed or needs_review or conversation_done else "FALSE",
     }

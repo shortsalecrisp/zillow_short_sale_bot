@@ -450,6 +450,19 @@ function handleIncomingSms_(body) {
     };
   }
 
+  if (isPostCloseoutNotShortSaleContinuation_(inboundText, currentRowObj)) {
+    return {
+      ok: true,
+      should_reply: false,
+      reply_text: "",
+      lead_status: String(currentRowObj[HEADERS.mailshake_status] || "R"),
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      reason: "Same-topic continuation after not-short-sale closeout; no additional reply needed"
+    };
+  }
+
   if (
     (
       String(currentRowObj[HEADERS.ai_state] || "").toLowerCase() === "done" ||
@@ -547,6 +560,37 @@ function handleIncomingSms_(body) {
       handoff_needed: false,
       needs_review: false,
       reason: reason
+    };
+  }
+
+  if (
+    !hasFeeQuestion &&
+    !hasExperienceQuestion &&
+    !hasClientConsultationInterest &&
+    !hasExistingCrispRelationship &&
+    isRelationshipOnlyAfterExistingCoverageSignal_(inboundText, currentRowObj)
+  ) {
+    const replyText = buildRelationshipOnlyCloseoutReply_(inboundText);
+
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "O",
+      [HEADERS.conversation_summary]: "Current file already covered; relationship left open without sales follow-up",
+      [HEADERS.ai_state]: "done",
+      [HEADERS.call_booking_status]: "warm_future_interest",
+      [HEADERS.handoff_flag]: "FALSE",
+      [HEADERS.human_override]: "FALSE"
+    });
+
+    return {
+      ok: true,
+      should_reply: !capReached,
+      reply_text: capReached ? "" : replyText,
+      lead_status: "O",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      reason: "Current file already covered; relationship left open without sales follow-up"
     };
   }
 
@@ -2002,6 +2046,70 @@ function isSubstantiveFollowupSignal_(text) {
     /\b(?:business\s+card|contact\s+card)\b/
   ];
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isClosedNotShortSaleConversation_(rowObj) {
+  if (!rowObj || String(rowObj[HEADERS.ai_state] || "").toLowerCase() !== "done") {
+    return false;
+  }
+  const summary = normalizeWhitespace_(String(rowObj[HEADERS.conversation_summary] || "").toLowerCase());
+  return /\bnot (?:actually )?a short sale\b|\bchanged listing\b/.test(summary);
+}
+
+function isPostCloseoutNotShortSaleContinuation_(text, rowObj) {
+  if (!isClosedNotShortSaleConversation_(rowObj) || isSubstantiveFollowupSignal_(text)) {
+    return false;
+  }
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+
+  const requestsAction = /\b(?:help|call|talk|meet|send|share|email|text|website|link|fee|cost|service|work with)\b/.test(t);
+  if (requestsAction) return false;
+
+  const sameTopicPatterns = [
+    /\b(?:clone|cloned|copy|copied|duplicate|duplicated|carry|carried)\b.{0,60}\b(?:listing|over|forward|data|field|fields)\b/,
+    /\b(?:listing|data|field|fields)\b.{0,60}\b(?:clone|cloned|copy|copied|duplicate|duplicated|carry|carried)\b/,
+    /\b(?:typo|mistake|error|incorrect|wrong|syndicat|imported|carried over)\b/,
+    /\b(?:it(?:'s| is)|this is|the listing is)\s+(?:a\s+)?(?:probate|estate sale|foreclosure)\b/,
+    /\b(?:thanks|thank you)\b.{0,60}\b(?:attention|heads up|letting me know|bringing)\b/
+  ];
+  return isFinalCourtesyReply_(t) || isNotShortSaleSignal_(t) || sameTopicPatterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function hasPreviouslyCoveredContext_(rowObj, inboundText) {
+  const parts = [
+    inboundText,
+    rowObj && rowObj[HEADERS.response_status],
+    rowObj && rowObj[HEADERS.conversation_summary]
+  ];
+  getHistoryArray_(rowObj && rowObj[HEADERS.history_json]).forEach(function(entry) {
+    if (entry && entry.role === "agent") parts.push(entry.text || "");
+  });
+  const combined = normalizeWhitespace_(String(parts.filter(Boolean).join(" ")).toLowerCase());
+  return /\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b/.test(combined) ||
+    /\balready represented\b|\balready handled\b/.test(combined);
+}
+
+function isRelationshipOnlyAfterExistingCoverageSignal_(text, rowObj) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || isSubstantiveFollowupSignal_(t) || !hasPreviouslyCoveredContext_(rowObj, t)) {
+    return false;
+  }
+  const passiveRelationshipPatterns = [
+    /\b(?:i|we)(?:['\u2019]ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b/,
+    /\b(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b/,
+    /\bkeep\s+(?:me|us)\s+in\s+mind\b/,
+    /\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b/
+  ];
+  return passiveRelationshipPatterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function buildRelationshipOnlyCloseoutReply_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (/\bkeep\s+(?:me|us)\s+in\s+mind\b/.test(t)) {
+    return "Absolutely - thanks. I'll keep you in mind, too.";
+  }
+  return "Thanks, I appreciate it. Feel free to reach out if a short sale comes up.";
 }
 
 function isNotShortSaleVagueFutureSignal_(text) {

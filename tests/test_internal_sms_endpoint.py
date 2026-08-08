@@ -799,6 +799,102 @@ def test_sms_existing_crisp_client_exits_marketing_for_handoff(monkeypatch):
     ) is False
 
 
+def test_sms_not_short_sale_closeout_suppresses_same_topic_continuations(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    row = {
+        "ai_state": "done",
+        "mailshake_status": "R",
+        "conversation_summary": "Not actually a short sale / changed listing",
+    }
+
+    for inbound in [
+        "I have cloned the listing it must have carried over",
+        "It's a probate.",
+        "Thanks for bringing it to my attention",
+    ]:
+        decision = module._sms_fast_decision(row, inbound)
+        assert decision["lead_status"] == "R"
+        assert decision["conversation_done"] is True
+        assert decision["block_reply"] is True
+        assert decision["reply_text"] == ""
+
+    assert module._sms_is_post_closeout_not_short_sale_continuation(
+        "Can you help with probate?", row
+    ) is False
+    assert module._sms_is_post_closeout_not_short_sale_continuation(
+        "Please send me your contact information", row
+    ) is False
+
+
+def test_sms_covered_but_relationship_open_closes_as_non_hot_without_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    row = {
+        "conversation_summary": "Already represented / handled",
+        "response_status": "I already have a negotiator",
+        "history_json": json.dumps([{"role": "agent", "text": "I already have a negotiator"}]),
+    }
+
+    keep_info = module._sms_fast_decision(row, "Great to know. I'll keep your info")
+    assert keep_info["lead_status"] == "O"
+    assert keep_info["conversation_done"] is True
+    assert keep_info["handoff_needed"] is False
+    assert keep_info["block_reply"] is False
+
+    reciprocal = module._sms_fast_decision(
+        row,
+        "If you have clients looking for a great agent, keep me in mind as well!",
+    )
+    assert reciprocal["lead_status"] == "O"
+    assert reciprocal["conversation_done"] is True
+    assert reciprocal["handoff_needed"] is False
+    assert reciprocal["reply_text"] == "Absolutely - thanks. I'll keep you in mind, too."
+
+    assert module._sms_is_relationship_only_after_existing_coverage(
+        "Can you call me about the next short sale?", row
+    ) is False
+
+
+def test_sms_relationship_only_disposition_persists_warm_closed_state(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][9] = "I already have a negotiator"
+    sheet.rows[2][12] = "Already represented / handled"
+    sheet.rows[2][13] = "done"
+    sheet.rows[2][17] = json.dumps([{"role": "agent", "text": "I already have a negotiator"}])
+    sheet.rows[2][19] = "FALSE"
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "Great to know. I'll keep your info",
+            "message_id": "relationship-only-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["lead_status"] == "O"
+    assert body["conversation_done"] is True
+    assert body["handoff_needed"] is False
+    assert body["should_reply"] is True
+    assert sheet.rows[2][10] == "O"
+    assert sheet.rows[2][13] == "done"
+    assert sheet.rows[2][15] == "warm_future_interest"
+    assert sheet.rows[2][16] == "FALSE"
+
+
 def test_sms_chatbot_records_hot_handoff_without_apps_script_mail(monkeypatch):
     module, sheet, _sender = _import_webhook_server(
         monkeypatch,
