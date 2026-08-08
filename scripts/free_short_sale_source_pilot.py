@@ -319,6 +319,26 @@ DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN = max(
     1,
     int(os.getenv("FREE_SOURCE_PILOT_DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN", "100")),
 )
+SITE_CHROME_SHADOW_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_START_DATE",
+    "2026-08-08",
+).strip()
+SITE_CHROME_SHADOW_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_DAYS", "7")),
+)
+SITE_CHROME_SHADOW_MAX_PER_RUN = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_MAX_PER_RUN", "100")),
+)
+SITE_CHROME_SHADOW_DOMAINS = {
+    domain.strip().lower()
+    for domain in os.getenv(
+        "FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_DOMAINS",
+        "nexusrealtync.com",
+    ).split(",")
+    if domain.strip()
+}
 FUTURE_NEGOTIATOR_SHADOW_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_FUTURE_NEGOTIATOR_SHADOW_START_DATE",
     "2026-08-06",
@@ -402,6 +422,12 @@ DESCRIPTION_BLOCK_TAXONOMY_NOISE_RE = re.compile(
     r"\b(?:amenities?|foreclosure\s+property|home\s+advanced[- ]search)\b"
     r".{0,180}\bshort\s+sale\b.{0,140}"
     r"\b(?:new\s+construction|featured\s+listing|buy\s+a\s+house|get\s+prequalified|lease\s+to\s+own)\b",
+    re.IGNORECASE,
+)
+
+SITE_CHROME_SHORT_SALE_CARD_RE = re.compile(
+    r"\bproperty\s+description\b\s*(?:\.{3}|\u2026)\s*"
+    r"(?P<label>\bshort\s+sale\b)\s*[.!]?\s*\$\s*[\d,]+",
     re.IGNORECASE,
 )
 
@@ -1739,6 +1765,43 @@ def description_block_shadow(candidate: Candidate) -> dict[str, Any]:
     }
 
 
+def site_chrome_exclusion_shadow(candidate: Candidate) -> dict[str, Any]:
+    """Flag a targeted site-card phrase without changing intake or promotion."""
+    broad = qualification_precedence_shadow(candidate)
+    domain = registered_domain(candidate.url)
+    platform_targeted = domain in SITE_CHROME_SHADOW_DOMAINS
+    description = normalize_space(candidate.fields.get("listing_description", ""))
+    description_confirmed = bool(SHORT_SALE_LISTING_RE.search(description))
+    chrome_match = SITE_CHROME_SHORT_SALE_CARD_RE.search(candidate.text)
+    chrome_evidence = ""
+    if chrome_match:
+        chrome_evidence = excerpt_around(
+            candidate.text,
+            chrome_match.start("label"),
+            chrome_match.end("label"),
+        )
+    would_hold = bool(
+        broad["proposed_ready"]
+        and platform_targeted
+        and description
+        and not description_confirmed
+        and chrome_match
+    )
+    return {
+        "current_ready": bool(broad["proposed_ready"]),
+        "platform_targeted": platform_targeted,
+        "target_domain": domain,
+        "listing_description_present": bool(description),
+        "listing_description_short_sale_confirmed": description_confirmed,
+        "site_chrome_pattern_found": bool(chrome_match),
+        "proposed_ready": bool(broad["proposed_ready"] and not would_hold),
+        "would_hold": would_hold,
+        "reason": "site_chrome_short_sale_card_only" if would_hold else "",
+        "evidence": chrome_evidence[:500],
+        "writes": 0,
+    }
+
+
 def future_negotiator_phrase_shadow(candidate: Candidate) -> dict[str, Any]:
     """Flag future or underway negotiator involvement without changing qualification."""
     description = normalize_space(candidate.fields.get("listing_description", ""))
@@ -2843,6 +2906,14 @@ def run_linkage_and_suffix_audits(
             DESCRIPTION_BLOCK_SHADOW_DAYS,
         )
     )
+    site_chrome_shadow_active = phase == "post_promotion" and (
+        force
+        or experiment_active(
+            run_date,
+            SITE_CHROME_SHADOW_START_DATE,
+            SITE_CHROME_SHADOW_DAYS,
+        )
+    )
     future_negotiator_shadow_active = phase == "post_promotion" and (
         force
         or experiment_active(
@@ -2875,6 +2946,9 @@ def run_linkage_and_suffix_audits(
         "description_block_rows": 0,
         "description_block_ready": 0,
         "description_block_would_hold": 0,
+        "site_chrome_rows": 0,
+        "site_chrome_targeted": 0,
+        "site_chrome_would_hold": 0,
         "future_negotiator_rows": 0,
         "future_negotiator_would_hold": 0,
         "followup_hold_rows": 0,
@@ -2889,6 +2963,7 @@ def run_linkage_and_suffix_audits(
         and not suffix_active
         and not qualification_shadow_active
         and not description_block_shadow_active
+        and not site_chrome_shadow_active
         and not future_negotiator_shadow_active
         and not followup_hold_shadow_active
     ):
@@ -2941,9 +3016,11 @@ def run_linkage_and_suffix_audits(
         suffix_active=suffix_active,
         qualification_shadow_active=qualification_shadow_active,
         description_block_shadow_active=description_block_shadow_active,
+        site_chrome_shadow_active=site_chrome_shadow_active,
         future_negotiator_shadow_active=future_negotiator_shadow_active,
         followup_hold_shadow_active=followup_hold_shadow_active,
         description_block_max_per_run=DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN,
+        site_chrome_max_per_run=SITE_CHROME_SHADOW_MAX_PER_RUN,
         forced=force,
         counts_toward_experiment=not force,
         writes=0,
@@ -3062,6 +3139,42 @@ def run_linkage_and_suffix_audits(
                     "first_verified_valid_listing_wrongly_held_or_agreement_below_90pct_after_10"
                 ),
                 benchmark_pending=True,
+                **shadow,
+            )
+    if site_chrome_shadow_active:
+        for pilot_sheet_row, pilot_row in all_pilot_rows:
+            if stats["site_chrome_rows"] >= SITE_CHROME_SHADOW_MAX_PER_RUN:
+                break
+            candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+            if candidate_date != run_date:
+                continue
+            payload, payload_failure = parse_pilot_payload(pilot_row)
+            if payload_failure:
+                continue
+            candidate = candidate_from_pilot_row(dict(pilot_row), payload)
+            shadow = site_chrome_exclusion_shadow(candidate)
+            stats["site_chrome_rows"] += 1
+            if shadow["platform_targeted"]:
+                stats["site_chrome_targeted"] += 1
+            if shadow["would_hold"]:
+                stats["site_chrome_would_hold"] += 1
+            log_event(
+                "pilot_site_chrome_exclusion_shadow",
+                phase=phase,
+                run_date=run_date.isoformat(),
+                pilot_row=pilot_sheet_row,
+                synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+                address=pilot_row.get("listing_address", ""),
+                current_promotion_status=pilot_row.get("promotion_status", ""),
+                comparison_window_days=SITE_CHROME_SHADOW_DAYS,
+                hypothesis=(
+                    "targeted_site_card_short_sale_phrases_outside_the_property_description_"
+                    "identify_false_qualification"
+                ),
+                success_metric="at_least_90pct_verifier_agreement_after_10_reviewable_cases",
+                stop_condition=(
+                    "first_verified_valid_listing_wrongly_held_or_agreement_below_90pct_after_10"
+                ),
                 **shadow,
             )
     suffix_stopped = False

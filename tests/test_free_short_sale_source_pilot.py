@@ -1534,6 +1534,93 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(result["would_hold"])
         self.assertEqual(result["writes"], 0)
 
+    def test_site_chrome_shadow_holds_nexus_card_phrase_outside_description(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url=(
+                "https://www.nexusrealtync.com/homes/409-Alicat-Drive/"
+                "Simpsonville/SC/29680/179690521/"
+            ),
+            title="409 Alicat Drive, Simpsonville, SC 29680 (#1599568) - Nexus Realty",
+            text=(
+                "Beds:3 Baths:2 Sq. Feet:1600-1799 Status: Active. "
+                "Property Description ... Short Sale. $216,500. "
+                "Baldwin Ridge | Simpsonville. 3 beds. 2 baths."
+            ),
+            fields={
+                "listing_address": "409 Alicat Drive",
+                "city": "Simpsonville",
+                "state": "SC",
+                "home_status": "FOR_SALE",
+                "listing_description": "Beds:3 Baths:2 Sq. Feet:1600-1799",
+            },
+        )
+
+        result = pilot.site_chrome_exclusion_shadow(candidate)
+
+        self.assertTrue(result["current_ready"])
+        self.assertTrue(result["platform_targeted"])
+        self.assertTrue(result["site_chrome_pattern_found"])
+        self.assertFalse(result["listing_description_short_sale_confirmed"])
+        self.assertFalse(result["proposed_ready"])
+        self.assertTrue(result["would_hold"])
+        self.assertEqual(result["reason"], "site_chrome_short_sale_card_only")
+        self.assertEqual(result["writes"], 0)
+
+    def test_site_chrome_shadow_keeps_nexus_listing_with_description_evidence(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://www.nexusrealtync.com/homes/123-Main-Street/Atlanta/GA/30303/1/",
+            title="123 Main Street",
+            text=(
+                "Status: Active. Property Description: This home is a short sale subject to "
+                "lender approval. Property Description ... Short Sale. $200,000."
+            ),
+            fields={
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+                "home_status": "FOR_SALE",
+                "listing_description": "This home is a short sale subject to lender approval.",
+            },
+        )
+
+        result = pilot.site_chrome_exclusion_shadow(candidate)
+
+        self.assertTrue(result["listing_description_short_sale_confirmed"])
+        self.assertTrue(result["proposed_ready"])
+        self.assertFalse(result["would_hold"])
+        self.assertEqual(result["writes"], 0)
+
+    def test_site_chrome_shadow_does_not_generalize_beyond_target_domain(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://example.com/listing/123",
+            title="123 Main Street",
+            text=(
+                "Status: Active. Beds:3 Baths:2. "
+                "Property Description ... Short Sale. $200,000."
+            ),
+            fields={
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+                "home_status": "FOR_SALE",
+                "listing_description": "Beds:3 Baths:2 Sq. Feet:1600-1799",
+            },
+        )
+
+        result = pilot.site_chrome_exclusion_shadow(candidate)
+
+        self.assertFalse(result["platform_targeted"])
+        self.assertTrue(result["site_chrome_pattern_found"])
+        self.assertTrue(result["proposed_ready"])
+        self.assertFalse(result["would_hold"])
+        self.assertEqual(result["writes"], 0)
+
     def test_future_negotiator_phrase_shadow_holds_assignment_in_progress_without_writing(self):
         candidate = pilot.Candidate(
             source="idx_broker_remarks",
@@ -2052,6 +2139,67 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         shadow_events = [event for event, _ in events if event == "pilot_description_block_shadow"]
         self.assertEqual(stats["description_block_rows"], 100)
         self.assertEqual(len(shadow_events), 100)
+
+    def test_site_chrome_shadow_is_capped_and_emits_zero_write_contract(self):
+        pilot_rows = [pilot.PILOT_HEADERS]
+        for index in range(105):
+            payload = {
+                "zpid": f"free-chrome-{index}",
+                "address": f"{index + 1} Main Street",
+                "street": f"{index + 1} Main Street",
+                "city": "Simpsonville",
+                "state": "SC",
+                "homeStatus": "FOR_SALE",
+                "listing_description": "Beds:3 Baths:2 Sq. Feet:1600-1799",
+            }
+            pilot_rows.append(
+                self.pilot_row(
+                    listing_address=payload["address"],
+                    city="Simpsonville",
+                    state="SC",
+                    first_seen_at="2026-08-08T07:15:00-04:00",
+                    synthetic_zpid=payload["zpid"],
+                    source_url=f"https://www.nexusrealtync.com/homes/{index}/",
+                    pending_queue_listing_json=json.dumps(payload),
+                    description_excerpt=(
+                        "Status: Active. Property Description ... Short Sale. $216,500. "
+                        "Baldwin Ridge | Simpsonville."
+                    ),
+                )
+            )
+        events = []
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[
+                [["listing_address", "state", "created-at"]],
+                pilot_rows,
+            ],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 8),
+                phase="post_promotion",
+            )
+
+        shadow_events = [
+            details for event, details in events if event == "pilot_site_chrome_exclusion_shadow"
+        ]
+        self.assertEqual(stats["site_chrome_rows"], 100)
+        self.assertEqual(stats["site_chrome_targeted"], 100)
+        self.assertEqual(stats["site_chrome_would_hold"], 100)
+        self.assertEqual(len(shadow_events), 100)
+        self.assertTrue(all(event["writes"] == 0 for event in shadow_events))
+        self.assertTrue(
+            all(event["comparison_window_days"] == 7 for event in shadow_events)
+        )
 
 
 if __name__ == "__main__":
