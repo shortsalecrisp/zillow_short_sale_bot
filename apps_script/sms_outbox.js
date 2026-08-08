@@ -28,8 +28,46 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
   ensureSmsSheetHeaders_(sheet, SMS_INBOUND_QUEUE_HEADERS_);
   var dedupeKey = buildSmsInboundDedupeKey_(phone, message);
   var now = new Date();
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "sms_inbound_" + dedupeKey;
+  var cachedQueueId = cache.get(cacheKey);
+  if (cachedQueueId) {
+    return {
+      ok: true,
+      queued: false,
+      duplicate: true,
+      queue_id: cachedQueueId,
+      reason: "Duplicate inbound transport suppressed"
+    };
+  }
+
   var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  var hasLock = lock.tryLock(3000);
+  var queueId;
+  var messageId = String(body && body.message_id || "").trim() || (phone + "-" + now.getTime());
+
+  // A duplicate queue row is safer than dropping a unique inbound. The
+  // downstream CRM dedupe still prevents a duplicate bot response.
+  if (!hasLock) {
+    queueId = Utilities.getUuid();
+    sheet.appendRow([
+      now, "queued", queueId, dedupeKey, messageId, phone, message,
+      String(body && body.received_at || now.toISOString()), 0, "", "", "", "", ""
+    ]);
+    cache.put(cacheKey, queueId, 600);
+    try {
+      appendSmsDebugLog_("incoming_sms_enqueued_lock_fallback", {
+        request_id: webhookRequestId || "",
+        phone: phone,
+        message: message,
+        reason: "Inbound appended without the global lock after brief contention",
+        queue_id: queueId,
+        message_id: messageId
+      });
+    } catch (_) {}
+    return buildQueuedSmsInboundResponse_(queueId, messageId);
+  }
+
   try {
     var lastRow = sheet.getLastRow();
     var firstDataRow = Math.max(2, lastRow - 249);
@@ -39,6 +77,7 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
     for (var i = rows.length - 1; i >= 0; i--) {
       var created = new Date(rows[i][0]).getTime();
       if (String(rows[i][3] || "") === dedupeKey && created && now.getTime() - created < 10 * 60 * 1000) {
+        cache.put(cacheKey, String(rows[i][2] || ""), 600);
         return {
           ok: true,
           queued: false,
@@ -49,12 +88,17 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
       }
     }
 
-    var queueId = Utilities.getUuid();
-    var messageId = String(body && body.message_id || "").trim() || (phone + "-" + now.getTime());
+    queueId = Utilities.getUuid();
     sheet.appendRow([
       now, "queued", queueId, dedupeKey, messageId, phone, message,
       String(body && body.received_at || now.toISOString()), 0, "", "", "", "", ""
     ]);
+    cache.put(cacheKey, queueId, 600);
+  } finally {
+    lock.releaseLock();
+  }
+
+  try {
     appendSmsDebugLog_("incoming_sms_enqueued", {
       request_id: webhookRequestId || "",
       phone: phone,
@@ -63,20 +107,22 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
       queue_id: queueId,
       message_id: messageId
     });
-    return {
-      ok: true,
-      queued: true,
-      queue_id: queueId,
-      message_id: messageId,
-      should_reply: false,
-      should_reply_text: "false",
-      handoff_needed: false,
-      handoff_needed_text: "false",
-      reason: "Inbound safely queued for processing"
-    };
-  } finally {
-    lock.releaseLock();
-  }
+  } catch (_) {}
+  return buildQueuedSmsInboundResponse_(queueId, messageId);
+}
+
+function buildQueuedSmsInboundResponse_(queueId, messageId) {
+  return {
+    ok: true,
+    queued: true,
+    queue_id: queueId,
+    message_id: messageId,
+    should_reply: false,
+    should_reply_text: "false",
+    handoff_needed: false,
+    handoff_needed_text: "false",
+    reason: "Inbound safely queued for processing"
+  };
 }
 
 function buildSmsInboundDedupeKey_(phone, message) {

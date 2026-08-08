@@ -65,3 +65,25 @@ def test_transport_retries_are_idempotent():
     assert 'activeStatus !== "claimed"' in OUTBOX
     assert 'String(match.values[1] || "") === "send_started"' in OUTBOX
     assert "receiptCorrelation.already_sent" in UNIFIED
+
+
+def test_inbound_enqueue_survives_global_lock_contention():
+    enqueue = OUTBOX.split("function enqueueIncomingSmsV10_", 1)[1].split(
+        "function buildSmsInboundDedupeKey_", 1
+    )[0]
+    assert "CacheService.getScriptCache()" in enqueue
+    assert "lock.tryLock(3000)" in enqueue
+    assert "lock.waitLock" not in enqueue
+    assert "if (!hasLock)" in enqueue
+    assert "incoming_sms_enqueued_lock_fallback" in enqueue
+    assert "A duplicate queue row is safer than dropping a unique inbound" in enqueue
+    assert "buildQueuedSmsInboundResponse_" in enqueue
+
+
+def test_inbound_enqueue_releases_lock_before_debug_logging():
+    enqueue = OUTBOX.split("function enqueueIncomingSmsV10_", 1)[1].split(
+        "function buildQueuedSmsInboundResponse_", 1
+    )[0]
+    assert enqueue.index("lock.releaseLock()") < enqueue.index(
+        'appendSmsDebugLog_("incoming_sms_enqueued"'
+    )
