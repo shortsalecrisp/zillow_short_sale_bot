@@ -17,6 +17,8 @@ const HEADERS = {
   ai_state: "ai_state",
   last_contact_time: "last_contact_time",
   call_booking_status: "call_booking_status",
+  callback_requested: "callback_requested",
+  callback_time: "callback_time",
   handoff_flag: "handoff_flag",
   history_json: "history_json",
   auto_reply_count: "auto_reply_count",
@@ -863,6 +865,9 @@ function handleIncomingSms_(body) {
 
   if (isSchedulingSignal_(inboundText)) {
     const decision = buildSchedulingReply_(inboundText);
+    const callbackTime = extractScheduledCallbackReference_(inboundText)
+      || extractSchedulingTimePhrase_(inboundText)
+      || normalizeWhitespace_(String(inboundText || ""));
     const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
 
     sendHandoffEmail_({
@@ -886,6 +891,8 @@ function handleIncomingSms_(body) {
       [HEADERS.conversation_summary]: "Scheduling / callback timing discussed",
       [HEADERS.ai_state]: "handoff",
       [HEADERS.call_booking_status]: "scheduled_callback",
+      [HEADERS.callback_requested]: "yes",
+      [HEADERS.callback_time]: callbackTime,
       [HEADERS.handoff_flag]: "TRUE",
       [HEADERS.human_override]: "TRUE"
     });
@@ -2524,8 +2531,47 @@ function isImmediateCallSignal_(text) {
   return patterns.some(pattern => pattern.test(t));
 }
 
+function extractScheduledCallbackReference_(text) {
+  const raw = normalizeWhitespace_(String(text || ""));
+  if (!raw) return "";
+
+  const match = raw.match(
+    /\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
+  );
+  if (!match) return "";
+
+  return match[0].replace(/\b[a-z]/g, function(letter) {
+    return letter.toUpperCase();
+  });
+}
+
+function isExplicitDayOrDateCallbackSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || !extractScheduledCallbackReference_(t)) return false;
+
+  if (/\b(?:do not|don['’]?t|dont)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b/.test(t) ||
+      /\bnot\s+(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(t)) {
+    return false;
+  }
+
+  const patterns = [
+    /\b(?:call|text|contact)\s+me\b/,
+    /\b(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?me\b/,
+    /\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b/,
+    /^(?:please\s+)?(?:call|text|contact|reach out|follow up|get in touch|connect)\b/,
+    /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b/,
+    /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b/
+  ];
+
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
 function isSchedulingSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
+
+  if (isExplicitDayOrDateCallbackSignal_(t)) {
+    return true;
+  }
 
   if (/\bnot tomorrow\b/.test(t)) {
     return false;
@@ -4174,6 +4220,19 @@ function testApprovedLeadIntelligenceRules_() {
   const underControlCallbackText = "I have everything under control, but can you call me tomorrow at 3?";
   if (isUnderControlFutureHelpCloseoutSignal_(underControlCallbackText) || !isSchedulingSignal_(underControlCallbackText)) {
     throw new Error("Real callback request must outrank the under-control closeout rule");
+  }
+  const weekdayCallbackText = "Feel free to reach out to me Monday. Today isn't a good day";
+  if (!isExplicitDayOrDateCallbackSignal_(weekdayCallbackText) ||
+      !isSchedulingSignal_(weekdayCallbackText) ||
+      extractScheduledCallbackReference_(weekdayCallbackText) !== "Monday") {
+    throw new Error("Explicit weekday callback classification regression");
+  }
+  if (!isSchedulingSignal_("Not tomorrow, please call me Monday")) {
+    throw new Error("A positive weekday callback must outrank a rejected earlier day");
+  }
+  if (isExplicitDayOrDateCallbackSignal_("Please don't call me Monday") ||
+      isExplicitDayOrDateCallbackSignal_("I have an open house Monday")) {
+    throw new Error("Weekday mention without a callback request must not schedule a callback");
   }
   if (!isClearNoSignal_("Thank you I think I have an under control")) {
     throw new Error("Under-control voice typo must be recognized as a clear closeout");

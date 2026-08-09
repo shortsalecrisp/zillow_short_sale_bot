@@ -3417,6 +3417,8 @@ def _sms_decision(
     needs_review: bool = False,
     block_reply: bool = False,
     reason: str = "",
+    call_booking_status: str = "",
+    callback_time: str = "",
 ) -> Dict[str, Any]:
     return {
         "reply_text": reply_text,
@@ -3426,6 +3428,8 @@ def _sms_decision(
         "needs_review": needs_review,
         "block_reply": block_reply,
         "reason": reason,
+        "call_booking_status": call_booking_status,
+        "callback_time": callback_time,
     }
 
 
@@ -3600,6 +3604,43 @@ def _sms_client_consultation_reply() -> str:
     )
 
 
+def _sms_extract_scheduled_callback_reference(value: Any) -> str:
+    text = _sms_normalize_whitespace(value)
+    match = re.search(
+        r"\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+        r"|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+"
+        r"\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b"
+        r"|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return match.group(0).title() if match else ""
+
+
+def _sms_is_scheduled_callback(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or not _sms_extract_scheduled_callback_reference(text):
+        return False
+    if re.search(
+        r"\b(?:do not|don't|dont)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b",
+        text,
+    ) or re.search(
+        r"\bnot\s+(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        text,
+    ):
+        return False
+
+    patterns = [
+        r"\b(?:call|text|contact)\s+me\b",
+        r"\b(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?me\b",
+        r"\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b",
+        r"^(?:please\s+)?(?:call|text|contact|reach out|follow up|get in touch|connect)\b",
+        r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b",
+        r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
 def _sms_is_existing_crisp_relationship(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     relationship_marker = re.search(
@@ -3692,6 +3733,16 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             handoff_needed=True,
             block_reply=True,
             reason="Agent asked whether this is AI/a bot; manual follow-up needed",
+        )
+
+    if _sms_is_scheduled_callback(t):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            reason="Scheduled callback timing",
+            call_booking_status="scheduled_callback",
+            callback_time=_sms_extract_scheduled_callback_reference(t),
         )
 
     if re.search(r"\b(i('| wi)?ll|i will|gonna|going to)\s+(call|phone|ring)\b", t) or re.search(
@@ -3984,7 +4035,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         "mailshake_status": lead_status,
         "conversation_summary": reason,
         "ai_state": "done" if conversation_done else ("handoff" if handoff_needed or needs_review else "active"),
-        "call_booking_status": (
+        "call_booking_status": str(decision.get("call_booking_status") or "") or (
             "closed_no_interest"
             if conversation_done and lead_status == "R"
             else ("warm_future_interest" if conversation_done and lead_status == "O" else "interested_no_call")
@@ -3992,6 +4043,10 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         "handoff_flag": "TRUE" if handoff_needed or needs_review else "FALSE",
         "human_override": "TRUE" if handoff_needed or needs_review or conversation_done else "FALSE",
     }
+    callback_time = str(decision.get("callback_time") or "")
+    if updates["call_booking_status"] == "scheduled_callback":
+        updates["callback_requested"] = "yes"
+        updates["callback_time"] = callback_time
     _sms_update_row_fields(ws, row_idx, headers, updates)
 
     result = _sms_normalize_tasker_payload(
@@ -4005,6 +4060,8 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
             "handoff_needed": handoff_needed,
             "needs_review": needs_review,
             "reason": reason,
+            "call_booking_status": updates["call_booking_status"],
+            "callback_time": callback_time,
             "row": row_idx,
         }
     )

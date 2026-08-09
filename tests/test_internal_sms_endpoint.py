@@ -169,6 +169,8 @@ CHATBOT_HEADERS = [
     "human_override",
     "last_message_id",
 ] + [f"extra_{idx}" for idx in range(21, 43)]
+CHATBOT_HEADERS[37] = "callback_requested"
+CHATBOT_HEADERS[38] = "callback_time"
 
 
 def _chatbot_row(
@@ -690,6 +692,44 @@ def test_sms_name_and_number_rule_does_not_match_agent_sending_buyer_contact(mon
     assert module._sms_is_yoni_name_and_number_request(
         "I can send you the buyer's name and number tomorrow"
     ) is False
+
+
+def test_sms_weekday_callback_is_handed_off_and_persisted_as_scheduled(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+    inbound = "Feel free to reach out to me Monday. Today isn't a good day"
+
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "weekday-callback-1",
+            "received_at": "2026-08-08T14:12:00-04:00",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert module._sms_is_scheduled_callback(inbound) is True
+    assert module._sms_extract_scheduled_callback_reference(inbound) == "Monday"
+    assert body["should_reply"] is False
+    assert body["handoff_needed"] is True
+    assert body["call_booking_status"] == "scheduled_callback"
+    assert body["callback_time"] == "Monday"
+    assert sheet.rows[2][15] == "scheduled_callback"
+    assert sheet.rows[2][16] == "TRUE"
+    assert sheet.rows[2][19] == "TRUE"
+    assert sheet.rows[2][37] == "yes"
+    assert sheet.rows[2][38] == "Monday"
+
+    assert module._sms_is_scheduled_callback("Please don't call me Monday") is False
+    assert module._sms_is_scheduled_callback("I have an open house Monday") is False
 
 
 def test_sms_reaction_to_latest_outbound_is_suppressed_before_processing(monkeypatch):
