@@ -349,6 +349,18 @@ SITE_CHROME_SHADOW_DOMAINS = {
     ).split(",")
     if domain.strip()
 }
+COMPOUND_NEGATIVE_SHADOW_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_COMPOUND_NEGATIVE_SHADOW_START_DATE",
+    "2026-08-09",
+).strip()
+COMPOUND_NEGATIVE_SHADOW_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_COMPOUND_NEGATIVE_SHADOW_DAYS", "7")),
+)
+COMPOUND_NEGATIVE_SHADOW_MAX_PER_RUN = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_COMPOUND_NEGATIVE_SHADOW_MAX_PER_RUN", "100")),
+)
 FUTURE_NEGOTIATOR_SHADOW_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_FUTURE_NEGOTIATOR_SHADOW_START_DATE",
     "2026-08-06",
@@ -489,6 +501,13 @@ STRUCTURED_SHORT_SALE_NEGATIVE_PATTERNS = [
     re.compile(r"\b(?:financial\s+status|contract\s+information|special\s+listing\s+conditions?)\s*[-:]?\s*(?:potential\s+)?short\s+sale\s*\??\s*[:=]?\s*(?:no|false)\b", re.IGNORECASE),
     re.compile(r"\bisShortSale[\"']?\s*[:=]\s*[\"']?false[\"']?\b", re.IGNORECASE),
 ]
+COMPOUND_SHORT_SALE_NEGATIVE_RE = re.compile(
+    r"\b(?P<label>"
+    r"(?:(?:foreclosure|pre-foreclosure)\s*/\s*)?(?:potential\s+)?short\s+sale(?:\s+status)?|"
+    r"is\s+short\s+sale"
+    r")\s*\??\s*[:=]\s*(?P<value>no|false)\b",
+    re.IGNORECASE,
+)
 
 DISQUALIFY_PATTERNS = [
     re.compile(r"\bapproved\s+short\s+sale\b", re.IGNORECASE),
@@ -1812,6 +1831,35 @@ def site_chrome_exclusion_shadow(candidate: Candidate) -> dict[str, Any]:
     }
 
 
+def compound_negative_field_shadow(candidate: Candidate) -> dict[str, Any]:
+    """Flag an explicit structured short-sale No/false field without writing."""
+    broad = qualification_precedence_shadow(candidate)
+    negative_match = COMPOUND_SHORT_SALE_NEGATIVE_RE.search(candidate.text)
+    evidence = ""
+    if negative_match:
+        evidence = excerpt_around(
+            candidate.text,
+            negative_match.start("label"),
+            negative_match.end("value"),
+        )
+    would_hold = bool(broad["proposed_ready"] and negative_match)
+    return {
+        "current_ready": bool(broad["proposed_ready"]),
+        "explicit_negative_field_found": bool(negative_match),
+        "negative_field_label": normalize_space(negative_match.group("label"))
+        if negative_match
+        else "",
+        "negative_field_value": negative_match.group("value").lower()
+        if negative_match
+        else "",
+        "proposed_ready": bool(broad["proposed_ready"] and not would_hold),
+        "would_hold": would_hold,
+        "reason": "explicit_negative_short_sale_field" if would_hold else "",
+        "evidence": evidence[:500],
+        "writes": 0,
+    }
+
+
 def future_negotiator_phrase_shadow(candidate: Candidate) -> dict[str, Any]:
     """Flag future or underway negotiator involvement without changing qualification."""
     description = normalize_space(candidate.fields.get("listing_description", ""))
@@ -2924,6 +2972,14 @@ def run_linkage_and_suffix_audits(
             SITE_CHROME_SHADOW_DAYS,
         )
     )
+    compound_negative_shadow_active = phase == "post_promotion" and (
+        force
+        or experiment_active(
+            run_date,
+            COMPOUND_NEGATIVE_SHADOW_START_DATE,
+            COMPOUND_NEGATIVE_SHADOW_DAYS,
+        )
+    )
     future_negotiator_shadow_active = phase == "post_promotion" and (
         force
         or experiment_active(
@@ -2959,6 +3015,9 @@ def run_linkage_and_suffix_audits(
         "site_chrome_rows": 0,
         "site_chrome_targeted": 0,
         "site_chrome_would_hold": 0,
+        "compound_negative_rows": 0,
+        "compound_negative_matches": 0,
+        "compound_negative_would_hold": 0,
         "future_negotiator_rows": 0,
         "future_negotiator_would_hold": 0,
         "followup_hold_rows": 0,
@@ -2974,6 +3033,7 @@ def run_linkage_and_suffix_audits(
         and not qualification_shadow_active
         and not description_block_shadow_active
         and not site_chrome_shadow_active
+        and not compound_negative_shadow_active
         and not future_negotiator_shadow_active
         and not followup_hold_shadow_active
     ):
@@ -3027,10 +3087,12 @@ def run_linkage_and_suffix_audits(
         qualification_shadow_active=qualification_shadow_active,
         description_block_shadow_active=description_block_shadow_active,
         site_chrome_shadow_active=site_chrome_shadow_active,
+        compound_negative_shadow_active=compound_negative_shadow_active,
         future_negotiator_shadow_active=future_negotiator_shadow_active,
         followup_hold_shadow_active=followup_hold_shadow_active,
         description_block_max_per_run=DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN,
         site_chrome_max_per_run=SITE_CHROME_SHADOW_MAX_PER_RUN,
+        compound_negative_max_per_run=COMPOUND_NEGATIVE_SHADOW_MAX_PER_RUN,
         forced=force,
         counts_toward_experiment=not force,
         writes=0,
@@ -3185,6 +3247,44 @@ def run_linkage_and_suffix_audits(
                 stop_condition=(
                     "first_verified_valid_listing_wrongly_held_or_agreement_below_90pct_after_10"
                 ),
+                **shadow,
+            )
+    if compound_negative_shadow_active:
+        for pilot_sheet_row, pilot_row in all_pilot_rows:
+            if stats["compound_negative_rows"] >= COMPOUND_NEGATIVE_SHADOW_MAX_PER_RUN:
+                break
+            candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+            if candidate_date != run_date:
+                continue
+            payload, payload_failure = parse_pilot_payload(pilot_row)
+            if payload_failure:
+                continue
+            candidate = candidate_from_pilot_row(dict(pilot_row), payload)
+            shadow = compound_negative_field_shadow(candidate)
+            stats["compound_negative_rows"] += 1
+            if shadow["explicit_negative_field_found"]:
+                stats["compound_negative_matches"] += 1
+            if shadow["would_hold"]:
+                stats["compound_negative_would_hold"] += 1
+            log_event(
+                "pilot_compound_negative_field_shadow",
+                phase=phase,
+                run_date=run_date.isoformat(),
+                pilot_row=pilot_sheet_row,
+                synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+                address=pilot_row.get("listing_address", ""),
+                current_promotion_status=pilot_row.get("promotion_status", ""),
+                comparison_window_days=COMPOUND_NEGATIVE_SHADOW_DAYS,
+                hypothesis=(
+                    "explicit_structured_short_sale_no_fields_identify_false_qualification_"
+                    "even_when_the_field_appears_inside_a_description_section"
+                ),
+                success_metric="100pct_verifier_agreement_after_10_reviewable_cases",
+                stop_condition=(
+                    "first_verified_valid_listing_wrongly_held_or_less_than_100pct_"
+                    "agreement_after_10_reviewable_cases"
+                ),
+                approval_required=False,
                 **shadow,
             )
     suffix_stopped = False

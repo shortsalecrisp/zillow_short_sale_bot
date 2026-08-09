@@ -1698,6 +1698,78 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertFalse(result["would_hold"])
         self.assertEqual(result["writes"], 0)
 
+    def test_compound_negative_shadow_holds_foreclosure_short_sale_no(self):
+        candidate = pilot.Candidate(
+            source="redfin.com",
+            query="query",
+            url="https://www.redfin.com/example/listing",
+            title="10556 Snohomish Avenue",
+            text=(
+                "Status: Active. Property Description: Foreclosure/Short Sale: No. "
+                "Updated home with four bedrooms."
+            ),
+            fields={
+                "listing_address": "10556 Snohomish Avenue",
+                "city": "Pacoima",
+                "state": "CA",
+                "home_status": "FOR_SALE",
+                "listing_description": (
+                    "Foreclosure/Short Sale: No. Updated home with four bedrooms."
+                ),
+            },
+        )
+
+        result = pilot.compound_negative_field_shadow(candidate)
+
+        self.assertTrue(result["current_ready"])
+        self.assertTrue(result["explicit_negative_field_found"])
+        self.assertEqual(result["negative_field_label"], "Foreclosure/Short Sale")
+        self.assertEqual(result["negative_field_value"], "no")
+        self.assertFalse(result["proposed_ready"])
+        self.assertTrue(result["would_hold"])
+        self.assertEqual(result["reason"], "explicit_negative_short_sale_field")
+        self.assertEqual(result["writes"], 0)
+
+    def test_compound_negative_shadow_matches_approved_field_variants(self):
+        for field_text in (
+            "Short Sale: No",
+            "Short Sale Status: No",
+            "Foreclosure/Short Sale: No",
+        ):
+            with self.subTest(field_text=field_text):
+                match = pilot.COMPOUND_SHORT_SALE_NEGATIVE_RE.search(field_text)
+                self.assertIsNotNone(match)
+                self.assertEqual(match.group("value").lower(), "no")
+
+    def test_compound_negative_shadow_keeps_genuine_agent_remarks(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://example.com/listing/123",
+            title="123 Main Street",
+            text=(
+                "Status: Active. Property Description: This is a short sale subject to "
+                "lender approval."
+            ),
+            fields={
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+                "home_status": "FOR_SALE",
+                "listing_description": (
+                    "This is a short sale subject to lender approval."
+                ),
+            },
+        )
+
+        result = pilot.compound_negative_field_shadow(candidate)
+
+        self.assertTrue(result["current_ready"])
+        self.assertFalse(result["explicit_negative_field_found"])
+        self.assertTrue(result["proposed_ready"])
+        self.assertFalse(result["would_hold"])
+        self.assertEqual(result["writes"], 0)
+
     def test_future_negotiator_phrase_shadow_holds_assignment_in_progress_without_writing(self):
         candidate = pilot.Candidate(
             source="idx_broker_remarks",
@@ -2276,6 +2348,74 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(all(event["writes"] == 0 for event in shadow_events))
         self.assertTrue(
             all(event["comparison_window_days"] == 7 for event in shadow_events)
+        )
+
+    def test_compound_negative_shadow_is_capped_and_emits_zero_write_contract(self):
+        pilot_rows = [pilot.PILOT_HEADERS]
+        for index in range(105):
+            payload = {
+                "zpid": f"free-negative-{index}",
+                "address": f"{index + 1} Main Street",
+                "street": f"{index + 1} Main Street",
+                "city": "Pacoima",
+                "state": "CA",
+                "homeStatus": "FOR_SALE",
+                "description": "Property Description: Foreclosure/Short Sale: No.",
+            }
+            pilot_rows.append(
+                self.pilot_row(
+                    listing_address=payload["address"],
+                    city="Pacoima",
+                    state="CA",
+                    first_seen_at="2026-08-09T07:15:00-04:00",
+                    synthetic_zpid=payload["zpid"],
+                    source_url=f"https://www.redfin.com/example/{index}",
+                    pending_queue_listing_json=json.dumps(payload),
+                    description_excerpt=(
+                        "Status: Active. Property Description: Foreclosure/Short Sale: No."
+                    ),
+                )
+            )
+        events = []
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[
+                [["listing_address", "state", "created-at"]],
+                pilot_rows,
+            ],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 9),
+                phase="post_promotion",
+            )
+
+        shadow_events = [
+            details for event, details in events
+            if event == "pilot_compound_negative_field_shadow"
+        ]
+        self.assertEqual(stats["compound_negative_rows"], 100)
+        self.assertEqual(stats["compound_negative_matches"], 100)
+        self.assertEqual(stats["compound_negative_would_hold"], 100)
+        self.assertEqual(len(shadow_events), 100)
+        self.assertTrue(all(event["writes"] == 0 for event in shadow_events))
+        self.assertTrue(
+            all(event["comparison_window_days"] == 7 for event in shadow_events)
+        )
+        self.assertTrue(
+            all(
+                event["success_metric"]
+                == "100pct_verifier_agreement_after_10_reviewable_cases"
+                for event in shadow_events
+            )
         )
 
 
