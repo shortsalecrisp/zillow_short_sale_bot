@@ -730,6 +730,7 @@ def test_sms_weekday_callback_is_handed_off_and_persisted_as_scheduled(monkeypat
 
     assert module._sms_is_scheduled_callback("Please don't call me Monday") is False
     assert module._sms_is_scheduled_callback("I have an open house Monday") is False
+    assert module._sms_is_scheduled_callback("Call the lender Monday") is False
 
 
 def test_sms_reaction_to_latest_outbound_is_suppressed_before_processing(monkeypatch):

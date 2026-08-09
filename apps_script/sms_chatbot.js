@@ -2558,7 +2558,6 @@ function isExplicitDayOrDateCallbackSignal_(text) {
     /\b(?:call|text|contact)\s+me\b/,
     /\b(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?me\b/,
     /\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b/,
-    /^(?:please\s+)?(?:call|text|contact|reach out|follow up|get in touch|connect)\b/,
     /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b/,
     /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b/
   ];
@@ -4231,7 +4230,8 @@ function testApprovedLeadIntelligenceRules_() {
     throw new Error("A positive weekday callback must outrank a rejected earlier day");
   }
   if (isExplicitDayOrDateCallbackSignal_("Please don't call me Monday") ||
-      isExplicitDayOrDateCallbackSignal_("I have an open house Monday")) {
+      isExplicitDayOrDateCallbackSignal_("I have an open house Monday") ||
+      isExplicitDayOrDateCallbackSignal_("Call the lender Monday")) {
     throw new Error("Weekday mention without a callback request must not schedule a callback");
   }
   if (!isClearNoSignal_("Thank you I think I have an under control")) {

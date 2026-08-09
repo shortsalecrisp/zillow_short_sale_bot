@@ -3634,7 +3634,6 @@ def _sms_is_scheduled_callback(value: Any) -> bool:
         r"\b(?:call|text|contact)\s+me\b",
         r"\b(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?me\b",
         r"\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b",
-        r"^(?:please\s+)?(?:call|text|contact|reach out|follow up|get in touch|connect)\b",
         r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b",
         r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b",
     ]
