@@ -12407,6 +12407,15 @@ def _followup_has_contact_hold(row: List[Any]) -> bool:
     phone_confidence = str(row[COL_PHONE_CONF] or "").strip().lower()
     contact_reason = str(row[COL_CONTACT_REASON] or "").strip().lower()
     combined = f"{phone_confidence} {contact_reason}"
+    if any(
+        resolved_marker in combined
+        for resolved_marker in (
+            "phone conflict resolved",
+            "phone_conflict_resolved",
+            "sol_exception_resolved",
+        )
+    ):
+        return False
     return any(
         marker in combined
         for marker in (
