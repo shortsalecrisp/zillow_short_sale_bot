@@ -855,6 +855,8 @@ FOLLOWUP_REQUIRED_COLS = (
     COL_MSG_ID,
     COL_INIT_TS,
     COL_FU_TS,
+    COL_PHONE_CONF,
+    COL_CONTACT_REASON,
 )
 FOLLOWUP_READ_END_COL = _col_index_to_letter(max(FOLLOWUP_REQUIRED_COLS))
 
@@ -12400,6 +12402,24 @@ def _redact_phone(phone: str) -> str:
     return f"...{digits[-4:]}"
 
 
+def _followup_has_contact_hold(row: List[Any]) -> bool:
+    """Honor verifier phone-conflict/no-resend holds before any follow-up."""
+    phone_confidence = str(row[COL_PHONE_CONF] or "").strip().lower()
+    contact_reason = str(row[COL_CONTACT_REASON] or "").strip().lower()
+    combined = f"{phone_confidence} {contact_reason}"
+    return any(
+        marker in combined
+        for marker in (
+            "phone_conflict",
+            "phone conflict",
+            "duplicate phone suppressed",
+            "no resend",
+            "no-resend",
+            "same-phone",
+        )
+    )
+
+
 _line_type_cache: Dict[str, bool] = {}
 _line_type_verified: Dict[str, bool] = {}
 _line_info_cache: Dict[str, Dict[str, Any]] = {}
@@ -13382,6 +13402,16 @@ def _follow_up_pass():
                 "FU-review row %s status=skip_lead_status lead_status=%s phone=%s address=%s",
                 sheet_row,
                 lead_status,
+                phone_redacted,
+                address,
+            )
+            continue
+        if _followup_has_contact_hold(row):
+            LOG.warning(
+                "FU-review row %s status=skip_contact_hold phone_conf=%s contact_reason=%s phone=%s address=%s",
+                sheet_row,
+                row[COL_PHONE_CONF],
+                row[COL_CONTACT_REASON],
                 phone_redacted,
                 address,
             )
