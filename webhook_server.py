@@ -80,6 +80,10 @@ SMS_CHATBOT_REPLY_DELAY_SECONDS = int(os.getenv("SMS_CHATBOT_REPLY_DELAY_SECONDS
 SMS_CHATBOT_OPENAI_MODEL = os.getenv("SMS_CHATBOT_OPENAI_MODEL", "gpt-5-mini")
 SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS = float(os.getenv("SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS", "25"))
 INITIAL_SMS_RETRY_ATTEMPTS = max(1, int(os.getenv("SMS_RETRY_ATTEMPTS", "3")))
+STARTUP_FOLLOWUP_WAIT_SECONDS = max(
+    30,
+    int(os.getenv("STARTUP_FOLLOWUP_WAIT_SECONDS", "900")),
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -108,6 +112,19 @@ async def _log_headless_status() -> None:
 async def _recover_pending_queue() -> None:
     async def _recover_in_background() -> None:
         try:
+            if _should_run_immediately():
+                logger.info(
+                    "queue: startup recovery waiting for follow-up catch-up"
+                )
+                catchup_finished = await asyncio.to_thread(
+                    _startup_followup_catchup_done.wait,
+                    STARTUP_FOLLOWUP_WAIT_SECONDS,
+                )
+                if not catchup_finished:
+                    logger.warning(
+                        "queue: startup follow-up catch-up wait timed out after %ss; continuing recovery",
+                        STARTUP_FOLLOWUP_WAIT_SECONDS,
+                    )
             processed = await asyncio.to_thread(_process_pending_queue, startup=True)
             logger.info("queue: startup processed count=%d", processed)
         except Exception:
@@ -122,6 +139,7 @@ _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_stop: Optional[threading.Event] = None
 _scheduler_start_lock = threading.Lock()
 _scheduler_started = False
+_startup_followup_catchup_done = threading.Event()
 _keepalive_thread: Optional[threading.Thread] = None
 _keepalive_stop: Optional[threading.Event] = None
 _free_source_pilot_scheduler_thread: Optional[threading.Thread] = None
@@ -1152,6 +1170,11 @@ def _ensure_scheduler_thread(
             return
 
         _scheduler_stop = threading.Event()
+        run_immediately = _should_run_immediately()
+        if run_immediately:
+            _startup_followup_catchup_done.clear()
+        else:
+            _startup_followup_catchup_done.set()
 
         def _runner() -> None:
             logger.info("Background hourly scheduler thread starting")
@@ -1160,8 +1183,9 @@ def _ensure_scheduler_thread(
                     run_hourly_scheduler(
                         stop_event=_scheduler_stop,
                         hourly_callbacks=hourly_callbacks,
-                        run_immediately=_should_run_immediately(),
+                        run_immediately=run_immediately,
                         initial_callbacks=initial_callbacks,
+                        initial_run_complete_event=_startup_followup_catchup_done,
                     )
                     break
                 except Exception:
@@ -2050,6 +2074,7 @@ async def _stop_scheduler() -> None:
     global _scheduler_thread, _scheduler_stop, _scheduler_started
     if _scheduler_stop:
         _scheduler_stop.set()
+    _startup_followup_catchup_done.set()
     if _scheduler_thread and _scheduler_thread.is_alive():
         _scheduler_thread.join(timeout=10)
     with _scheduler_start_lock:

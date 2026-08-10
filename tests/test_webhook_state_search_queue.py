@@ -3,6 +3,7 @@ import importlib.machinery
 import json
 import os
 import sys
+import threading
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -130,6 +131,7 @@ oauth2_module = sys.modules.setdefault("google.oauth2", types.ModuleType("google
 setattr(oauth2_module, "service_account", service_account_module)
 sys.modules["google.oauth2.service_account"] = service_account_module
 
+import bot_min
 import webhook_server
 
 
@@ -228,6 +230,38 @@ def test_scheduler_startup_work_can_be_enabled(monkeypatch):
     monkeypatch.delenv("SCHEDULER_RUN_IMMEDIATELY", raising=False)
 
     assert webhook_server._should_run_immediately() is True
+
+
+def test_scheduler_startup_catchup_signals_completion(monkeypatch):
+    completed = threading.Event()
+    stop = threading.Event()
+    stop.set()
+    cycles = []
+
+    monkeypatch.setattr(
+        bot_min,
+        "_within_scheduler_hours",
+        lambda _slot: True,
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "_run_hourly_cycle",
+        lambda run_time, callbacks, skip_callbacks=False: cycles.append(
+            (run_time, callbacks, skip_callbacks)
+        ),
+    )
+
+    bot_min.run_hourly_scheduler(
+        stop_event=stop,
+        hourly_callbacks=[lambda _run_time: None],
+        run_immediately=True,
+        initial_callbacks=False,
+        initial_run_complete_event=completed,
+    )
+
+    assert completed.is_set()
+    assert len(cycles) == 1
+    assert cycles[0][2] is True
 
 
 def test_extra_state_searches_exclude_mi(monkeypatch):

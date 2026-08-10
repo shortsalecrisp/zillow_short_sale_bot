@@ -12952,6 +12952,7 @@ def run_hourly_scheduler(
     *,
     run_immediately: bool = False,
     initial_callbacks: bool = True,
+    initial_run_complete_event: Optional[threading.Event] = None,
 ) -> None:
     LOG.info(
         "Hourly scheduler loop starting (thread=%s)",
@@ -13000,20 +13001,24 @@ def run_hourly_scheduler(
         run_immediately,
     )
 
-    if run_immediately:
-        initial_run = _hour_floor(datetime.now(tz=SCHEDULER_TZ))
-        if _within_scheduler_hours(initial_run):
-            _run_hourly_cycle(
-                initial_run,
-                hourly_callbacks,
-                skip_callbacks=not initial_callbacks,
-            )
-            next_run = _next_scheduler_run(initial_run + timedelta(seconds=1))
-        else:
-            LOG.info(
-                "Skipping immediate run outside work hours; next scheduled run at %s",
-                next_run.isoformat(),
-            )
+    try:
+        if run_immediately:
+            initial_run = _hour_floor(datetime.now(tz=SCHEDULER_TZ))
+            if _within_scheduler_hours(initial_run):
+                _run_hourly_cycle(
+                    initial_run,
+                    hourly_callbacks,
+                    skip_callbacks=not initial_callbacks,
+                )
+                next_run = _next_scheduler_run(initial_run + timedelta(seconds=1))
+            else:
+                LOG.info(
+                    "Skipping immediate run outside work hours; next scheduled run at %s",
+                    next_run.isoformat(),
+                )
+    finally:
+        if initial_run_complete_event is not None:
+            initial_run_complete_event.set()
 
     while True:
         try:
