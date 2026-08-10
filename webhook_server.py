@@ -3174,9 +3174,8 @@ def _sms_is_post_closeout_not_short_sale_continuation(value: Any, row_obj: Dict[
     )
 
 
-def _sms_has_previously_covered_context(row_obj: Dict[str, str], inbound_text: str) -> bool:
+def _sms_has_previously_covered_context(row_obj: Dict[str, str]) -> bool:
     parts = [
-        inbound_text,
         str(row_obj.get("response_status") or ""),
         str(row_obj.get("conversation_summary") or ""),
     ]
@@ -3197,7 +3196,7 @@ def _sms_has_previously_covered_context(row_obj: Dict[str, str], inbound_text: s
 
 def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[str, str]) -> bool:
     text = _sms_normalize_whitespace(value).lower()
-    if not text or _sms_is_substantive_followup(text) or not _sms_has_previously_covered_context(row_obj, text):
+    if not text or _sms_is_substantive_followup(text) or not _sms_has_previously_covered_context(row_obj):
         return False
     patterns = [
         r"\b(?:i|we)(?:['\u2019]ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b",
@@ -3642,16 +3641,15 @@ def _sms_is_scheduled_callback(value: Any) -> bool:
 
 def _sms_is_existing_crisp_relationship(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
-    relationship_marker = re.search(
-        r"\b(?:already|currently|active|existing|client|customer|portal|account|set\s*up|signed\s*up|registered|working\s+with)\b",
-        text,
-    )
-    crisp_relationship = re.search(r"\bcrisp(?: short sales?)?\b", text) and relationship_marker
-    yoni_relationship = re.search(r"\byoni\b", text) and re.search(
-        r"\b(?:already|currently|active|existing|client|customer|set\s*up|signed\s*up|registered|working\s+with)\b",
-        text,
-    )
-    return bool(crisp_relationship or yoni_relationship)
+    patterns = [
+        r"\b(?:i|we)(?:['\u2019]m| am|['\u2019]re| are)?\s+(?:already|currently)\s+(?:working|set\s*up|signed\s*up|registered)\s+with\s+(?:you|yoni|crisp(?: short sales?)?)\b",
+        r"\b(?:i|we)\s+(?:already\s+)?(?:have|use)\s+(?:an?\s+)?(?:active|existing)?\s*crisp(?: short sales?)?\s+(?:portal|account)\b",
+        r"\b(?:already|currently)\s+(?:an?\s+)?crisp(?: short sales?)?\s+(?:client|customer)\b",
+        r"\b(?:already|currently)\s+(?:an?\s+)?(?:client|customer)\s+(?:of|with)\s+crisp(?: short sales?)?\b",
+        r"\b(?:i|we)\s+(?:already|currently)?\s*(?:have|use)\s+(?:yoni|crisp(?: short sales?)?)\s+(?:handling|helping|assisting|working\s+on)\b",
+        r"\b(?:included|copied|looped)\s+(?:you|yoni)\s+(?:in|on)\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
@@ -3792,7 +3790,11 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason="Agent asked about fee or compensation",
         )
 
-    if re.search(r"\b(not a short sale|no short sale|already have help|have help|we handle|handling (it|this)|not interested|no thank)\b", t):
+    if re.search(
+        r"\b(not a short sale|no short sale|already have help|have help|we handle|handling (it|this)|not interested|no thank)\b"
+        r"|\b(?:i|we)\s+(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b",
+        t,
+    ):
         return _sms_decision(
             reply_text=(
                 "Ok, no problem. If anything ever changes in the future and you're looking for some additional help with these files, "

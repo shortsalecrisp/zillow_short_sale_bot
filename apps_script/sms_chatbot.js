@@ -2083,9 +2083,8 @@ function isPostCloseoutNotShortSaleContinuation_(text, rowObj) {
   return isFinalCourtesyReply_(t) || isNotShortSaleSignal_(t) || sameTopicPatterns.some(function(pattern) { return pattern.test(t); });
 }
 
-function hasPreviouslyCoveredContext_(rowObj, inboundText) {
+function hasPreviouslyCoveredContext_(rowObj) {
   const parts = [
-    inboundText,
     rowObj && rowObj[HEADERS.response_status],
     rowObj && rowObj[HEADERS.conversation_summary]
   ];
@@ -2099,7 +2098,7 @@ function hasPreviouslyCoveredContext_(rowObj, inboundText) {
 
 function isRelationshipOnlyAfterExistingCoverageSignal_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  if (!t || isSubstantiveFollowupSignal_(t) || !hasPreviouslyCoveredContext_(rowObj, t)) {
+  if (!t || isSubstantiveFollowupSignal_(t) || !hasPreviouslyCoveredContext_(rowObj)) {
     return false;
   }
   const passiveRelationshipPatterns = [
@@ -2196,11 +2195,16 @@ function isExistingCrispRelationshipSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return false;
 
-  const hasRelationshipMarker = /\b(?:already|currently|active|existing|client|customer|portal|account|set\s*up|signed\s*up|registered|working\s+with)\b/.test(t);
-  const hasCrispRelationship = /\bcrisp(?: short sales?)?\b/.test(t) && hasRelationshipMarker;
-  const hasYoniRelationship = /\byoni\b/.test(t) && /\b(?:already|currently|active|existing|client|customer|set\s*up|signed\s*up|registered|working\s+with)\b/.test(t);
+  const directRelationshipPatterns = [
+    /\b(?:i|we)(?:['\u2019]m| am|['\u2019]re| are)?\s+(?:already|currently)\s+(?:working|set\s*up|signed\s*up|registered)\s+with\s+(?:you|yoni|crisp(?: short sales?)?)\b/,
+    /\b(?:i|we)\s+(?:already\s+)?(?:have|use)\s+(?:an?\s+)?(?:active|existing)?\s*crisp(?: short sales?)?\s+(?:portal|account)\b/,
+    /\b(?:already|currently)\s+(?:an?\s+)?crisp(?: short sales?)?\s+(?:client|customer)\b/,
+    /\b(?:already|currently)\s+(?:an?\s+)?(?:client|customer)\s+(?:of|with)\s+crisp(?: short sales?)?\b/,
+    /\b(?:i|we)\s+(?:already|currently)?\s*(?:have|use)\s+(?:yoni|crisp(?: short sales?)?)\s+(?:handling|helping|assisting|working\s+on)\b/,
+    /\b(?:included|copied|looped)\s+(?:you|yoni)\s+(?:in|on)\b/
+  ];
 
-  return hasCrispRelationship || hasYoniRelationship;
+  return directRelationshipPatterns.some(function(pattern) { return pattern.test(t); });
 }
 
 function isSelfHandlingOpportunitySignal_(text) {
@@ -2389,6 +2393,7 @@ function isAlreadyHandledSignal_(text) {
     /\bwe have help\b/,
     /\bi have someone already\b/,
     /\bwe have someone already\b/,
+    /\b(?:i|we)\s+(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b/,
     /\balready have a processor\b/,
     /\b(?:i|we)\s+have\s+(?:a|my|our)?\s*team\s+(?:handling|working on|taking care of)\b/,
     /\b(?:my|our|the)\s+team\s+(?:is\s+)?(?:handling|working on|taking care of)\b/,
@@ -4291,6 +4296,14 @@ function testApprovedLeadIntelligenceRules_() {
   if (isExistingCrispRelationshipSignal_("I already have someone handling it") ||
       isExistingCrispRelationshipSignal_("What company are you with?")) {
     throw new Error("Generic handled/company text must not match an existing Crisp relationship");
+  }
+  const genericCurrentHelpText = "Hi Yoni, thank you for following up! I currently have someone assisting me with the short sale process for this property, but I appreciate you reaching out. I'll definitely keep your information for future short sale opportunities.";
+  if (isExistingCrispRelationshipSignal_(genericCurrentHelpText) ||
+      !isAlreadyHandledSignal_(genericCurrentHelpText)) {
+    throw new Error("Generic current-help message must route to the already-handled closeout");
+  }
+  if (!isExistingCrispRelationshipSignal_("Hi Yoni, I am currently working with you on this short sale.")) {
+    throw new Error("Direct existing Yoni relationship must still trigger handoff");
   }
 
   if (!isSpanishLanguageSignal_("No no tengo ayuda aun hablas espaol ??")) {

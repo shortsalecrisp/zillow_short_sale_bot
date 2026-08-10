@@ -839,6 +839,23 @@ def test_sms_existing_crisp_client_exits_marketing_for_handoff(monkeypatch):
         "What company are you with?"
     ) is False
 
+    generic_current_help = (
+        "Hi Yoni, thank you for following up! I currently have someone assisting me with the short sale process "
+        "for this property, but I appreciate you reaching out. I'll definitely keep your information for future "
+        "short sale opportunities."
+    )
+    generic_decision = module._sms_fast_decision({}, generic_current_help)
+    assert module._sms_is_existing_crisp_relationship(generic_current_help) is False
+    assert generic_decision["lead_status"] == "R"
+    assert generic_decision["conversation_done"] is True
+    assert generic_decision["handoff_needed"] is False
+    assert generic_decision["block_reply"] is False
+    assert generic_decision["reply_text"].startswith("Ok, no problem.")
+
+    assert module._sms_is_existing_crisp_relationship(
+        "Hi Yoni, I am currently working with you on this short sale."
+    ) is True
+
 
 def test_sms_not_short_sale_closeout_suppresses_same_topic_continuations(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
