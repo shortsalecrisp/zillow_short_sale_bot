@@ -1075,8 +1075,15 @@ def _start_extra_state_rows(payload: Dict[str, Any]) -> None:
 
 
 def _should_run_immediately() -> bool:
-    # Keep Render restarts lightweight. The hourly scheduler handles follow-ups;
-    # startup catch-up can be enabled explicitly for worker-only deployments.
+    # A restart during a paced follow-up batch must resume the unsent remainder.
+    # Keep this independent from the legacy FOLLOWUP_RUN_ON_STARTUP setting so
+    # stale Render configuration cannot silently disable recovery.
+    restart_recovery = os.getenv(
+        "FOLLOWUP_RESTART_RECOVERY_ENABLED",
+        "true",
+    ).strip().lower()
+    if restart_recovery not in {"0", "false", "no", "off"}:
+        return True
     run_on_startup = os.getenv("FOLLOWUP_RUN_ON_STARTUP", "false").strip().lower()
     if run_on_startup not in {"0", "false", "no", "off"}:
         return True

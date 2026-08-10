@@ -217,15 +217,25 @@ def test_startup_queue_recovery_is_backgrounded(monkeypatch):
     scheduled[0].close()
 
 
-def test_scheduler_startup_work_defaults_off(monkeypatch):
+def test_scheduler_restart_recovery_defaults_on(monkeypatch):
+    monkeypatch.delenv("FOLLOWUP_RESTART_RECOVERY_ENABLED", raising=False)
     monkeypatch.delenv("FOLLOWUP_RUN_ON_STARTUP", raising=False)
     monkeypatch.delenv("SCHEDULER_RUN_IMMEDIATELY", raising=False)
 
     assert webhook_server.FREE_SOURCE_PILOT_STARTUP_CATCHUP is False
+    assert webhook_server._should_run_immediately() is True
+
+
+def test_scheduler_restart_recovery_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("FOLLOWUP_RESTART_RECOVERY_ENABLED", "false")
+    monkeypatch.setenv("FOLLOWUP_RUN_ON_STARTUP", "false")
+    monkeypatch.setenv("SCHEDULER_RUN_IMMEDIATELY", "false")
+
     assert webhook_server._should_run_immediately() is False
 
 
 def test_scheduler_startup_work_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("FOLLOWUP_RESTART_RECOVERY_ENABLED", "false")
     monkeypatch.setenv("FOLLOWUP_RUN_ON_STARTUP", "true")
     monkeypatch.delenv("SCHEDULER_RUN_IMMEDIATELY", raising=False)
 
