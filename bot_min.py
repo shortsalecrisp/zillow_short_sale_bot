@@ -12413,9 +12413,6 @@ def _followup_has_contact_hold(row: List[Any]) -> bool:
             "phone_conflict",
             "phone conflict",
             "duplicate phone suppressed",
-            "no resend",
-            "no-resend",
-            "same-phone",
         )
     )
 

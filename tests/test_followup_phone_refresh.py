@@ -325,6 +325,30 @@ def test_follow_up_blocks_verifier_phone_conflict_hold(monkeypatch):
     assert bot_min.FOLLOWUP_READ_END_COL == "Z"
 
 
+def test_follow_up_allows_routine_verified_no_initial_resend_note(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_PHONE_CONF] = "verified_direct_mobile"
+    row[bot_min.COL_CONTACT_REASON] = (
+        "routine_verified: same-phone H/W already populated; no resend"
+    )
+    sent = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
+    monkeypatch.setattr(
+        bot_min,
+        "send_sms",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    bot_min._follow_up_pass()
+
+    assert len(sent) == 1
+    assert sent[0]["row_idx"] == 2
+
+
 def test_follow_up_allows_elevenlabs_quota_note(monkeypatch):
     row = _followup_test_row()
     row[bot_min.COL_MANUAL_NOTE] = "ElevenLabs quota exceeded - call not counted"
