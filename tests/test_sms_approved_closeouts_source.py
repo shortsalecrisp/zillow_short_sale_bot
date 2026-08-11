@@ -23,3 +23,17 @@ def test_apps_script_relationship_only_rule_closes_as_o_without_handoff():
     assert CHATBOT.index("isRelationshipOnlyAfterExistingCoverageSignal_(inboundText, currentRowObj)") < CHATBOT.index(
         "if (!hasFeeQuestion && isNotShortSaleSignal_(inboundText))"
     )
+    assert "Ill definitely keep your information for future short sale opportunities" in CHATBOT
+
+
+def test_apps_script_future_buyer_recontact_closes_warm_without_takeover():
+    assert "function isFutureBuyerRecontactSignal_" in CHATBOT
+    assert "function buildFutureBuyerRecontactReply_" in CHATBOT
+    assert "So let you know when I eventually get a buyer?" in CHATBOT
+    assert "Agent will reconnect after securing a buyer; warm future interest closed without takeover" in CHATBOT
+
+
+def test_apps_script_substantive_repeat_routes_to_handoff():
+    assert '"SUBSTANTIVE QUESTION FOLLOW-UP"' in CHATBOT
+    assert "Agent asked a new substantive question after a similar prior answer" in CHATBOT
+    assert "How is the buyer going to pay if they are losing money?" in CHATBOT

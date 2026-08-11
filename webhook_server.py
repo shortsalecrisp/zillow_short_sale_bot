@@ -3228,10 +3228,19 @@ def _sms_has_previously_covered_context(row_obj: Dict[str, str]) -> bool:
 
 def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[str, str]) -> bool:
     text = _sms_normalize_whitespace(value).lower()
-    if not text or _sms_is_substantive_followup(text) or not _sms_has_previously_covered_context(row_obj):
+    current_coverage = bool(
+        re.search(
+            r"\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b"
+            r"|\b(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b",
+            text,
+        )
+    )
+    if not text or _sms_is_substantive_followup(text) or (
+        not _sms_has_previously_covered_context(row_obj) and not current_coverage
+    ):
         return False
     patterns = [
-        r"\b(?:i|we)(?:['\u2019]ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b",
+        r"\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b",
         r"\b(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b",
         r"\bkeep\s+(?:me|us)\s+in\s+mind\b",
         r"\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b",
@@ -3244,6 +3253,33 @@ def _sms_relationship_only_reply(value: Any) -> str:
     if re.search(r"\bkeep\s+(?:me|us)\s+in\s+mind\b", text):
         return "Absolutely - thanks. I'll keep you in mind, too."
     return "Thanks, I appreciate it. Feel free to reach out if a short sale comes up."
+
+
+def _sms_is_future_buyer_recontact(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or _sms_is_scheduled_callback(text):
+        return False
+    recontact = re.search(
+        r"\b(?:let\s+(?:you|u)\s+know|reach\s+out(?:\s+to\s+(?:you|u))?|contact\s+(?:you|u)|"
+        r"get\s+back\s+to\s+(?:you|u)|circle\s+back(?:\s+with\s+(?:you|u))?)\b",
+        text,
+    )
+    future_buyer = re.search(
+        r"\b(?:when|once|after|if)\b.{0,60}\b(?:get|got|have|find|found|secure|secured|receive|received)\b"
+        r".{0,30}\b(?:a\s+)?buyer\b",
+        text,
+    )
+    present_request = re.search(
+        r"\b(?:call|talk|speak|chat|meet|email|send|text)\b.{0,40}\b(?:now|today|tomorrow|this\s+week|next\s+week|"
+        r"at\s+\d|after\s+\d|before\s+\d)\b",
+        text,
+    )
+    rejection = re.search(r"\b(?:no\s+thanks?|not\s+interested|do\s+not|don't|dont)\b", text)
+    return bool(recontact and future_buyer and not present_request and not rejection)
+
+
+def _sms_future_buyer_recontact_reply() -> str:
+    return "Yes, absolutely. Once you have a buyer, reach out and I can help with the lender side and paperwork."
 
 
 def _sms_normalize_phone(phone: Any) -> str:
@@ -3489,6 +3525,8 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
         "You write short SMS replies as Yoni from Crisp Short Sales. "
         "If the agent asks for a call now, asks whether this is AI/a bot, gives a callback window, "
         "asks for stats, or needs personal handling, set handoff_needed true, block_reply true, and leave reply_text empty. "
+        "A future-only promise to reconnect after securing a buyer is warm future interest, not an existing-client takeover. "
+        "If answering a new substantive question would repeat the prior answer, hand it off instead of suppressing the question. "
         "Never claim to have buyers. Never offer documents unless they explicitly ask for info by email. "
         "Keep any reply under 500 characters and casual."
     )
@@ -3637,8 +3675,10 @@ def _sms_client_consultation_reply() -> str:
 
 def _sms_extract_scheduled_callback_reference(value: Any) -> str:
     text = _sms_normalize_whitespace(value)
+    text = re.sub(r"\bnot\s+tomorrow\b", " ", text, flags=re.IGNORECASE)
     match = re.search(
-        r"\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+        r"\btomorrow\b"
+        r"|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
         r"|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+"
         r"\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b"
         r"|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b",
@@ -3658,6 +3698,9 @@ def _sms_is_scheduled_callback(value: Any) -> bool:
     ) or re.search(
         r"\bnot\s+(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
         text,
+    ) or re.search(
+        r"\b(?:talk|speak|chat)\s+(?:with|to)\s+(?:(?:the|a|my|our)\s+)?(?:lender|bank|client|seller|buyer)\b",
+        text,
     ):
         return False
 
@@ -3667,6 +3710,8 @@ def _sms_is_scheduled_callback(value: Any) -> bool:
         r"\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b",
         r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b",
         r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b",
+        r"\b(?:let['’]?s|lets|can\s+we|could\s+we|would\s+you|can\s+you)\s+(?:set\s+up\s+(?:a\s+)?time\s+to\s+)?(?:talk|speak|chat)\b",
+        r"\bset\s+up\s+(?:a\s+)?time\s+(?:for\s+us\s+)?to\s+(?:talk|speak|chat)\b",
     ]
     return any(re.search(pattern, text) for pattern in patterns)
 
@@ -3730,6 +3775,15 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reply_text=_sms_client_consultation_reply(),
             lead_status="Y",
             reason="Agent will discuss short-sale help with their client and get back to Yoni",
+        )
+
+    if _sms_is_future_buyer_recontact(t):
+        return _sms_decision(
+            reply_text=_sms_future_buyer_recontact_reply(),
+            lead_status="O",
+            conversation_done=True,
+            reason="Agent will reconnect after securing a buyer; warm future interest closed without takeover",
+            call_booking_status="warm_future_interest",
         )
 
     if _sms_is_relationship_only_after_existing_coverage(t, row_obj):
@@ -3861,11 +3915,56 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
     return None
 
 
+def _sms_normalize_loop_guard_text(value: Any) -> str:
+    text = str(value or "").lower()
+    text = re.sub(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", " email ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b\d{10,}\b", " phone ", text)
+    text = re.sub(r"\b\d{3}[-.)\s]*\d{3}[-.\s]*\d{4}\b", " phone ", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\b(?:the|a|an|to|for|of|and|or|it|this|that|now|just|really|very)\b", " ", text)
+    return _sms_normalize_whitespace(text)
+
+
+def _sms_is_potential_repeat_reply(reply_text: Any, last_outbound_text: Any) -> bool:
+    current = _sms_normalize_loop_guard_text(reply_text)
+    previous = _sms_normalize_loop_guard_text(last_outbound_text)
+    if not current or not previous:
+        return False
+    if current == previous:
+        return True
+    if len(current) >= 40 and (current in previous or previous in current):
+        return True
+    current_tokens = current.split()
+    previous_tokens = previous.split()
+    if len(current_tokens) < 6 or len(previous_tokens) < 6:
+        return False
+    previous_set = set(previous_tokens)
+    overlap = sum(1 for token in current_tokens if token in previous_set)
+    return overlap / max(len(current_tokens), len(previous_tokens)) >= 0.72
+
+
+def _sms_apply_repeat_guard(
+    decision: Dict[str, Any], row_obj: Dict[str, str], inbound_text: str
+) -> Dict[str, Any]:
+    if decision.get("block_reply") or not _sms_normalize_whitespace(decision.get("reply_text") or ""):
+        return decision
+    if not _sms_is_potential_repeat_reply(decision.get("reply_text"), row_obj.get("last_outbound_text")):
+        return decision
+    if not _sms_is_substantive_followup(inbound_text):
+        return decision
+    return _sms_decision(
+        lead_status="Y",
+        handoff_needed=True,
+        block_reply=True,
+        reason="Agent asked a new substantive question after a similar prior answer",
+    )
+
+
 def _sms_build_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str, Any]:
     fast = _sms_fast_decision(row_obj, inbound_text)
     if fast is not None:
-        return fast
-    return _sms_openai_decision(row_obj, inbound_text)
+        return _sms_apply_repeat_guard(fast, row_obj, inbound_text)
+    return _sms_apply_repeat_guard(_sms_openai_decision(row_obj, inbound_text), row_obj, inbound_text)
 
 
 def _sms_should_reply(decision: Dict[str, Any], auto_reply_count: int) -> bool:

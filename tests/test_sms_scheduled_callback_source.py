@@ -20,3 +20,5 @@ def test_apps_script_embeds_weekday_callback_positive_and_negative_controls():
     assert "Please don't call me Monday" in CHATBOT
     assert "I have an open house Monday" in CHATBOT
     assert "Call the lender Monday" in CHATBOT
+    assert "Let's set up a time to talk tomorrow. Let me know what time works best for you." in CHATBOT
+    assert "Let's talk to the lender tomorrow" in CHATBOT

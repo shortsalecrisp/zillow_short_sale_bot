@@ -523,6 +523,38 @@ function handleIncomingSms_(body) {
     };
   }
 
+  if (
+    !hasFeeQuestion &&
+    !hasExperienceQuestion &&
+    !hasClientConsultationInterest &&
+    !hasExistingCrispRelationship &&
+    isFutureBuyerRecontactSignal_(inboundText)
+  ) {
+    const replyText = buildFutureBuyerRecontactReply_();
+    const reason = "Agent will reconnect after securing a buyer; warm future interest closed without takeover";
+
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "O",
+      [HEADERS.conversation_summary]: reason,
+      [HEADERS.ai_state]: "done",
+      [HEADERS.call_booking_status]: "warm_future_interest",
+      [HEADERS.handoff_flag]: "FALSE",
+      [HEADERS.human_override]: "FALSE"
+    });
+
+    return {
+      ok: true,
+      should_reply: !capReached,
+      reply_text: capReached ? "" : replyText,
+      lead_status: "O",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      reason: reason
+    };
+  }
+
   if (isFutureNegotiationInterestSignal_(inboundText)) {
     const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
     const reason = "Agent expressed interest in future short-sale negotiation support";
@@ -1344,6 +1376,19 @@ function applyFastRules_(text, rowObj) {
     };
   }
 
+  if (isFutureBuyerRecontactSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildFutureBuyerRecontactReply_(),
+      lead_status: "O",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Agent will reconnect after securing a buyer; warm future interest closed without takeover"
+    };
+  }
+
   if (isNotShortSaleVagueFutureSignal_(t)) {
     return {
       matched: true,
@@ -2098,16 +2143,34 @@ function hasPreviouslyCoveredContext_(rowObj) {
 
 function isRelationshipOnlyAfterExistingCoverageSignal_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  if (!t || isSubstantiveFollowupSignal_(t) || !hasPreviouslyCoveredContext_(rowObj)) {
+  const currentCoverage = /\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b/.test(t) ||
+    /\b(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b/.test(t);
+  if (!t || isSubstantiveFollowupSignal_(t) || (!hasPreviouslyCoveredContext_(rowObj) && !currentCoverage)) {
     return false;
   }
   const passiveRelationshipPatterns = [
-    /\b(?:i|we)(?:['\u2019]ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b/,
+    /\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b/,
     /\b(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b/,
     /\bkeep\s+(?:me|us)\s+in\s+mind\b/,
     /\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b/
   ];
   return passiveRelationshipPatterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function isFutureBuyerRecontactSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || isImmediateCallSignal_(t) || isSchedulingSignal_(t)) return false;
+
+  const recontact = /\b(?:let\s+(?:you|u)\s+know|reach\s+out(?:\s+to\s+(?:you|u))?|contact\s+(?:you|u)|get\s+back\s+to\s+(?:you|u)|circle\s+back(?:\s+with\s+(?:you|u))?)\b/.test(t);
+  const futureBuyer = /\b(?:when|once|after|if)\b.{0,60}\b(?:get|got|have|find|found|secure|secured|receive|received)\b.{0,30}\b(?:a\s+)?buyer\b/.test(t);
+  const presentRequest = /\b(?:call|talk|speak|chat|meet|email|send|text)\b.{0,40}\b(?:now|today|tomorrow|this\s+week|next\s+week|at\s+\d|after\s+\d|before\s+\d)\b/.test(t);
+  const rejection = /\b(?:no\s+thanks?|not\s+interested|do\s+not|don['\u2019]?t|dont)\b/.test(t);
+
+  return recontact && futureBuyer && !presentRequest && !rejection;
+}
+
+function buildFutureBuyerRecontactReply_() {
+  return "Yes, absolutely. Once you have a buyer, reach out and I can help with the lender side and paperwork.";
 }
 
 function buildRelationshipOnlyCloseoutReply_(text) {
@@ -2539,9 +2602,10 @@ function isImmediateCallSignal_(text) {
 function extractScheduledCallbackReference_(text) {
   const raw = normalizeWhitespace_(String(text || ""));
   if (!raw) return "";
+  const searchable = raw.replace(/\bnot\s+tomorrow\b/ig, " ");
 
-  const match = raw.match(
-    /\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
+  const match = searchable.match(
+    /\btomorrow\b|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
   );
   if (!match) return "";
 
@@ -2555,7 +2619,8 @@ function isExplicitDayOrDateCallbackSignal_(text) {
   if (!t || !extractScheduledCallbackReference_(t)) return false;
 
   if (/\b(?:do not|don['’]?t|dont)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b/.test(t) ||
-      /\bnot\s+(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(t)) {
+      /\bnot\s+(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(t) ||
+      /\b(?:talk|speak|chat)\s+(?:with|to)\s+(?:(?:the|a|my|our)\s+)?(?:lender|bank|client|seller|buyer)\b/.test(t)) {
     return false;
   }
 
@@ -2564,7 +2629,9 @@ function isExplicitDayOrDateCallbackSignal_(text) {
     /\b(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?me\b/,
     /\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b/,
     /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b/,
-    /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b/
+    /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b/,
+    /\b(?:let['’]?s|lets|can\s+we|could\s+we|would\s+you|can\s+you)\s+(?:set\s+up\s+(?:a\s+)?time\s+to\s+)?(?:talk|speak|chat)\b/,
+    /\bset\s+up\s+(?:a\s+)?time\s+(?:for\s+us\s+)?to\s+(?:talk|speak|chat)\b/
   ];
 
   return patterns.some(function(pattern) { return pattern.test(t); });
@@ -2841,6 +2908,12 @@ function applyRepeatGuard_(decision, rowObj, inboundText) {
   }
 
   if (isPotentialRepeatReply_(guarded.reply_text, lastOutbound)) {
+    if (isSubstantiveFollowupSignal_(inbound)) {
+      return buildManualHandoffDecision_(
+        "Agent asked a new substantive question after a similar prior answer",
+        "SUBSTANTIVE QUESTION FOLLOW-UP"
+      );
+    }
     return buildStatePreservingRepeatSuppressionDecision_(rowObj);
   }
 
@@ -3063,7 +3136,8 @@ IMPORTANT BEHAVIOR:
 - In that situation, explain the flat-fee buyer-paid structure briefly and ask if they want to find a time later that week to talk
 - If they say they want to hop on a call or are interested in learning more by phone, set handoff_needed = true and do not reply so ${yourName} can respond personally
 - If they give an immediate live window like "I'm free now", "available now", or "anytime now until 2", set handoff_needed = true and do not reply so ${yourName} can take over
-- If they say they will reach out later, circle back, get back to you, or reach out when they have time after showing interest, treat it as a deferred interested lead: set handoff_needed = true, block_reply = true, leave reply_text empty, and do not close them out as not interested
+- If they say they will reconnect only after they get, find, or secure a buyer and make no present request, briefly confirm that they can reach out then and close as warm future interest without a handoff
+- For other deferred interest that asks for a current next step or needs personal follow-up, set handoff_needed = true, block_reply = true, leave reply_text empty, and do not close them out as not interested
 - Never say "Calling you now", "I'll call you now", "Talk in a sec", or anything that implies the call is already happening this second
 - If they say they missed the call, the call did not come through, or they share an alternate callback number, do not keep texting promises about the call - set handoff_needed = true, block_reply = true, and let ${yourName} take over
 - Do not offer to send a short-sale packet, packet, docs, documents, materials, overview, deck, PDF, summary, email summary, text summary, or written explanation unless the agent specifically asks for your info by email
@@ -4216,6 +4290,20 @@ function testApprovedLeadIntelligenceRules_() {
     throw new Error("State-preserving repeat suppression regression: " + JSON.stringify(preservedRepeatDecision));
   }
 
+  const substantiveRepeatDecision = applyRepeatGuard_({
+    reply_text: "There is no cost to you or the seller. We get paid by the buyer at closing, and charge a flat fee for our service.",
+    lead_status: "Y",
+    conversation_done: false,
+    handoff_needed: false,
+    needs_review: false,
+    block_reply: false
+  }, {
+    [HEADERS.last_outbound_text]: "There is no cost to you or the seller. We get paid by the buyer at closing, and charge a flat fee for our service."
+  }, "How is the buyer going to pay if they are losing money?");
+  if (!substantiveRepeatDecision.handoff_needed || !substantiveRepeatDecision.block_reply || substantiveRepeatDecision.reply_text !== "" || substantiveRepeatDecision.handoff_type !== "SUBSTANTIVE QUESTION FOLLOW-UP") {
+    throw new Error("Substantive repeated-answer handoff regression: " + JSON.stringify(substantiveRepeatDecision));
+  }
+
   const underControlText = "Thank you right now I have everything under control but will reach out to you if I need further assistance";
   const underControlDecision = applyFastRules_(underControlText, {});
   if (!underControlDecision.matched || underControlDecision.lead_status !== "R" || !underControlDecision.conversation_done || underControlDecision.handoff_needed || underControlDecision.block_reply) {
@@ -4231,13 +4319,21 @@ function testApprovedLeadIntelligenceRules_() {
       extractScheduledCallbackReference_(weekdayCallbackText) !== "Monday") {
     throw new Error("Explicit weekday callback classification regression");
   }
-  if (!isSchedulingSignal_("Not tomorrow, please call me Monday")) {
+  if (!isSchedulingSignal_("Not tomorrow, please call me Monday") ||
+      extractScheduledCallbackReference_("Not tomorrow, please call me Monday") !== "Monday") {
     throw new Error("A positive weekday callback must outrank a rejected earlier day");
   }
   if (isExplicitDayOrDateCallbackSignal_("Please don't call me Monday") ||
       isExplicitDayOrDateCallbackSignal_("I have an open house Monday") ||
-      isExplicitDayOrDateCallbackSignal_("Call the lender Monday")) {
+      isExplicitDayOrDateCallbackSignal_("Call the lender Monday") ||
+      isExplicitDayOrDateCallbackSignal_("Let's talk to the lender tomorrow")) {
     throw new Error("Weekday mention without a callback request must not schedule a callback");
+  }
+  const tomorrowCallbackText = "Let's set up a time to talk tomorrow. Let me know what time works best for you.";
+  if (!isExplicitDayOrDateCallbackSignal_(tomorrowCallbackText) ||
+      !isSchedulingSignal_(tomorrowCallbackText) ||
+      extractScheduledCallbackReference_(tomorrowCallbackText) !== "Tomorrow") {
+    throw new Error("Natural-language tomorrow callback classification regression");
   }
   if (!isClearNoSignal_("Thank you I think I have an under control")) {
     throw new Error("Under-control voice typo must be recognized as a clear closeout");
@@ -4299,8 +4395,20 @@ function testApprovedLeadIntelligenceRules_() {
   }
   const genericCurrentHelpText = "Hi Yoni, thank you for following up! I currently have someone assisting me with the short sale process for this property, but I appreciate you reaching out. I'll definitely keep your information for future short sale opportunities.";
   if (isExistingCrispRelationshipSignal_(genericCurrentHelpText) ||
-      !isAlreadyHandledSignal_(genericCurrentHelpText)) {
-    throw new Error("Generic current-help message must route to the already-handled closeout");
+      !isRelationshipOnlyAfterExistingCoverageSignal_(genericCurrentHelpText, {})) {
+    throw new Error("Generic current-help plus future-only relationship must route to the warm closeout");
+  }
+  const apostropheLossRelationshipRow = {
+    [HEADERS.conversation_summary]: "Already represented / handled",
+    [HEADERS.history_json]: JSON.stringify([{ role: "agent", text: "I currently have someone assisting me" }])
+  };
+  if (!isRelationshipOnlyAfterExistingCoverageSignal_("Ill definitely keep your information for future short sale opportunities", apostropheLossRelationshipRow)) {
+    throw new Error("Apostrophe-stripped relationship-only closeout regression");
+  }
+  const futureBuyerText = "So let you know when I eventually get a buyer?";
+  const futureBuyerDecision = applyFastRules_(futureBuyerText, {});
+  if (!isFutureBuyerRecontactSignal_(futureBuyerText) || !futureBuyerDecision.matched || futureBuyerDecision.lead_status !== "O" || !futureBuyerDecision.conversation_done || futureBuyerDecision.handoff_needed || futureBuyerDecision.block_reply || futureBuyerDecision.reply_text !== buildFutureBuyerRecontactReply_()) {
+    throw new Error("Future-buyer recontact closeout regression: " + JSON.stringify(futureBuyerDecision));
   }
   if (!isExistingCrispRelationshipSignal_("Hi Yoni, I am currently working with you on this short sale.")) {
     throw new Error("Direct existing Yoni relationship must still trigger handoff");

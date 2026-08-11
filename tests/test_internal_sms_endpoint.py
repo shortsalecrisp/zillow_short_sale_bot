@@ -731,6 +731,7 @@ def test_sms_weekday_callback_is_handed_off_and_persisted_as_scheduled(monkeypat
     assert module._sms_is_scheduled_callback("Please don't call me Monday") is False
     assert module._sms_is_scheduled_callback("I have an open house Monday") is False
     assert module._sms_is_scheduled_callback("Call the lender Monday") is False
+    assert module._sms_extract_scheduled_callback_reference("Not tomorrow, please call me Monday") == "Monday"
 
 
 def test_sms_reaction_to_latest_outbound_is_suppressed_before_processing(monkeypatch):
@@ -846,11 +847,11 @@ def test_sms_existing_crisp_client_exits_marketing_for_handoff(monkeypatch):
     )
     generic_decision = module._sms_fast_decision({}, generic_current_help)
     assert module._sms_is_existing_crisp_relationship(generic_current_help) is False
-    assert generic_decision["lead_status"] == "R"
+    assert generic_decision["lead_status"] == "O"
     assert generic_decision["conversation_done"] is True
     assert generic_decision["handoff_needed"] is False
     assert generic_decision["block_reply"] is False
-    assert generic_decision["reply_text"].startswith("Ok, no problem.")
+    assert generic_decision["reply_text"].startswith("Thanks, I appreciate it.")
 
     assert module._sms_is_existing_crisp_relationship(
         "Hi Yoni, I am currently working with you on this short sale."
@@ -904,6 +905,14 @@ def test_sms_covered_but_relationship_open_closes_as_non_hot_without_handoff(mon
     assert keep_info["handoff_needed"] is False
     assert keep_info["block_reply"] is False
 
+    apostrophe_stripped = module._sms_fast_decision(
+        row,
+        "Ill definitely keep your information for future short sale opportunities",
+    )
+    assert apostrophe_stripped["lead_status"] == "O"
+    assert apostrophe_stripped["conversation_done"] is True
+    assert apostrophe_stripped["handoff_needed"] is False
+
     reciprocal = module._sms_fast_decision(
         row,
         "If you have clients looking for a great agent, keep me in mind as well!",
@@ -916,6 +925,63 @@ def test_sms_covered_but_relationship_open_closes_as_non_hot_without_handoff(mon
     assert module._sms_is_relationship_only_after_existing_coverage(
         "Can you call me about the next short sale?", row
     ) is False
+
+
+def test_sms_future_buyer_recontact_closes_warm_without_takeover(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "So let you know when I eventually get a buyer?"
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_future_buyer_recontact(inbound) is True
+    assert decision["lead_status"] == "O"
+    assert decision["conversation_done"] is True
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert decision["call_booking_status"] == "warm_future_interest"
+    assert decision["reply_text"] == module._sms_future_buyer_recontact_reply()
+    assert module._sms_is_future_buyer_recontact(
+        "Let you know when I get a buyer; can you call me tomorrow?"
+    ) is False
+
+
+def test_sms_natural_tomorrow_callback_and_third_party_negative(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Let's set up a time to talk tomorrow. Let me know what time works best for you."
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_scheduled_callback(inbound) is True
+    assert module._sms_extract_scheduled_callback_reference(inbound) == "Tomorrow"
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+    assert decision["call_booking_status"] == "scheduled_callback"
+    assert decision["callback_time"] == "Tomorrow"
+    assert module._sms_is_scheduled_callback("Let's talk to the lender tomorrow") is False
+
+
+def test_sms_substantive_question_that_would_repeat_answer_routes_to_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    repeated = "There is no cost to you or the seller. We get paid by the buyer at closing, and charge a flat fee for our service."
+    decision = module._sms_apply_repeat_guard(
+        module._sms_decision(reply_text=repeated, lead_status="Y"),
+        {"last_outbound_text": repeated},
+        "How is the buyer going to pay if they are losing money?",
+    )
+
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+    assert decision["reply_text"] == ""
+    assert decision["reason"] == "Agent asked a new substantive question after a similar prior answer"
 
 
 def test_sms_relationship_only_disposition_persists_warm_closed_state(monkeypatch):
