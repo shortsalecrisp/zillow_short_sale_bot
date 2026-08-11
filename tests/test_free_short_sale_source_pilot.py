@@ -2235,6 +2235,197 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(suffix_events[0]["exact_name_agreement"])
         self.assertEqual(suffix_events[0]["writes"], 0)
 
+    def test_agent_address_shadow_strips_terminal_feed_artifact_without_guessing_address(self):
+        pilot_row = {
+            "first_name": "Jennifer",
+            "last_name": "Beaudreau of",
+            "listing_address": "5564 Spur",
+            "city": "Hemet",
+            "state": "CA",
+            "zip": "92545",
+        }
+        main_row = {
+            "agent_name": "Jennifer Beaudreau",
+            "listing_address": "5564 Spur Dr",
+        }
+
+        result = pilot.agent_address_normalization_shadow(pilot_row, main_row)
+
+        self.assertEqual(result["proposed_agent"], "Jennifer Beaudreau")
+        self.assertEqual(result["agent_proposal_reason"], "terminal_feed_artifact")
+        self.assertTrue(result["agent_exact_match"])
+        self.assertFalse(result["address_exact_match"])
+        self.assertFalse(result["wrong_person_stop"])
+        self.assertEqual(result["writes"], 0)
+
+    def test_agent_address_shadow_refuses_leading_site_or_team_article(self):
+        pilot_row = {
+            "first_name": "The",
+            "last_name": "David Hakimi",
+            "listing_address": "1519 W 55th St",
+            "city": "Los Angeles",
+            "state": "CA",
+            "zip": "90062",
+        }
+        main_row = {
+            "agent_name": "Patricia Castro",
+            "listing_address": "1519 W 55th Street",
+        }
+
+        result = pilot.agent_address_normalization_shadow(pilot_row, main_row)
+
+        self.assertEqual(result["proposed_agent"], "")
+        self.assertEqual(result["agent_proposal_reason"], "leading_site_or_team_article")
+        self.assertFalse(result["agent_exact_match"])
+        self.assertTrue(result["address_exact_match"])
+        self.assertFalse(result["wrong_person_stop"])
+
+    def test_agent_address_shadow_uses_only_safe_stored_street_extension(self):
+        pilot_row = {
+            "first_name": "Jennifer",
+            "last_name": "Beaudreau",
+            "listing_address": "5564 Spur",
+            "city": "Hemet",
+            "state": "CA",
+            "zip": "92545",
+            "pending_queue_listing_json": json.dumps(
+                {"street": "5564 Spur Dr", "city": "Hemet", "state": "CA"}
+            ),
+        }
+        main_row = {
+            "agent_name": "Jennifer Beaudreau",
+            "listing_address": "5564 Spur Drive",
+        }
+
+        result = pilot.agent_address_normalization_shadow(pilot_row, main_row)
+
+        self.assertEqual(result["proposed_address"], "5564 Spur Dr")
+        self.assertEqual(result["address_proposal_reason"], "stored_structured_extension")
+        self.assertTrue(result["address_exact_match"])
+        self.assertTrue(result["exact_agent_address_agreement"])
+
+    def test_agent_address_review_shadow_caps_first_ten_and_never_writes(self):
+        pilot_rows = [pilot.PILOT_HEADERS]
+        main_rows = [["Agent Name", "Listing Address", "State", "ZPID"]]
+        for index in range(11):
+            stable_id = f"free-shadow-{index:02d}"
+            address = f"{index + 1} Main Street"
+            pilot_rows.append(
+                self.pilot_row(
+                    first_name="Jane",
+                    last_name="Smith",
+                    listing_address=address,
+                    city="Atlanta",
+                    state="GA",
+                    first_seen_at="2026-08-12T07:15:00-04:00",
+                    synthetic_zpid=stable_id,
+                    source="idx_broker_remarks",
+                    status="qualified",
+                    promotion_status="promoted",
+                )
+            )
+            verifier_address = "1 Main Street Drive" if index == 0 else address
+            main_rows.append(["Jane Smith", verifier_address, "GA", stable_id])
+        events = []
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[main_rows, pilot_rows],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 12),
+                phase="post_verifier",
+            )
+
+        shadow_events = [
+            details
+            for event, details in events
+            if event == "pilot_agent_address_normalization_shadow"
+        ]
+        self.assertEqual(stats["agent_address_shadow_eligible"], 10)
+        self.assertEqual(stats["agent_address_shadow_reviewable"], 10)
+        self.assertEqual(stats["agent_address_shadow_exact"], 9)
+        self.assertEqual(stats["agent_address_shadow_supported"], 1)
+        self.assertEqual(len(shadow_events), 10)
+        self.assertEqual(shadow_events[0]["linkage"], "stable_id_only")
+        self.assertFalse(shadow_events[0]["address_exact_match"])
+        self.assertTrue(shadow_events[-1]["sample_complete"])
+        self.assertTrue(all(event["writes"] == 0 for event in shadow_events))
+        self.assertTrue(all(not event["promotion_changed"] for event in shadow_events))
+        self.assertTrue(all(not event["outreach_changed"] for event in shadow_events))
+
+    def test_agent_address_review_shadow_stops_on_first_wrong_person(self):
+        pilot_rows = [
+            pilot.PILOT_HEADERS,
+            self.pilot_row(
+                first_name="John",
+                last_name="Smith",
+                listing_address="1 Main Street",
+                city="Atlanta",
+                state="GA",
+                first_seen_at="2026-08-12T07:15:00-04:00",
+                synthetic_zpid="free-wrong-person",
+                source="idx_broker_remarks",
+                status="qualified",
+                promotion_status="promoted",
+            ),
+            self.pilot_row(
+                first_name="Jane",
+                last_name="Smith",
+                listing_address="2 Main Street",
+                city="Atlanta",
+                state="GA",
+                first_seen_at="2026-08-12T07:16:00-04:00",
+                synthetic_zpid="free-after-stop",
+                source="idx_broker_remarks",
+                status="qualified",
+                promotion_status="promoted",
+            ),
+        ]
+        main_rows = [
+            ["Agent Name", "Listing Address", "State", "ZPID"],
+            ["Jane Smith", "1 Main Street", "GA", "free-wrong-person"],
+            ["Jane Smith", "2 Main Street", "GA", "free-after-stop"],
+        ]
+        events = []
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[main_rows, pilot_rows],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 12),
+                phase="post_verifier",
+            )
+
+        shadow_events = [
+            details
+            for event, details in events
+            if event == "pilot_agent_address_normalization_shadow"
+        ]
+        self.assertEqual(stats["agent_address_shadow_evaluated"], 1)
+        self.assertEqual(stats["agent_address_shadow_wrong_person"], 1)
+        self.assertEqual(stats["agent_address_shadow_stopped"], 1)
+        self.assertEqual(len(shadow_events), 1)
+        self.assertTrue(shadow_events[0]["wrong_person_stop"])
+        self.assertTrue(shadow_events[0]["experiment_stopped"])
+
     def test_review_experiment_windows_are_bounded(self):
         self.assertTrue(pilot.experiment_active(dt.date(2026, 8, 1), "2026-08-01", 3))
         self.assertTrue(pilot.experiment_active(dt.date(2026, 8, 3), "2026-08-01", 3))

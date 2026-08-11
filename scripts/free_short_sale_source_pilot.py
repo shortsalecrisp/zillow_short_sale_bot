@@ -309,6 +309,18 @@ BROKERAGE_SUFFIX_SHADOW_DAYS = max(
     1,
     int(os.getenv("FREE_SOURCE_PILOT_BROKERAGE_SUFFIX_SHADOW_DAYS", "7")),
 )
+AGENT_ADDRESS_SHADOW_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_AGENT_ADDRESS_SHADOW_START_DATE",
+    "2026-08-12",
+).strip()
+AGENT_ADDRESS_SHADOW_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_AGENT_ADDRESS_SHADOW_DAYS", "7")),
+)
+AGENT_ADDRESS_SHADOW_MAX_CANDIDATES = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_AGENT_ADDRESS_SHADOW_MAX_CANDIDATES", "10")),
+)
 QUALIFICATION_PRECEDENCE_SHADOW_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_QUALIFICATION_PRECEDENCE_SHADOW_START_DATE",
     "2026-08-02",
@@ -2789,6 +2801,157 @@ def agent_artifact_shadow_name(value: str) -> dict[str, str]:
     }
 
 
+def conservative_agent_shadow_name(value: str) -> dict[str, str]:
+    """Return a person-only shadow proposal without guessing through site/team labels."""
+    original = normalize_space(html.unescape(value or "")).strip(" .,:;|-·•")
+    if not original:
+        return {
+            "raw_agent": "",
+            "proposed_agent": "",
+            "agent_proposal_reason": "missing_agent",
+        }
+    if re.match(r"(?i)^the\s+", original):
+        return {
+            "raw_agent": original,
+            "proposed_agent": "",
+            "agent_proposal_reason": "leading_site_or_team_article",
+        }
+    trailing_of = re.match(r"(?is)^(.+?)\s+of$", original)
+    if trailing_of:
+        proposed = normalize_space(trailing_of.group(1)).strip(" .,:;|-·•")
+        if looks_like_person_name(proposed):
+            return {
+                "raw_agent": original,
+                "proposed_agent": proposed,
+                "agent_proposal_reason": "terminal_feed_artifact",
+            }
+    artifact = agent_artifact_shadow_name(original)
+    if artifact:
+        return {
+            "raw_agent": original,
+            "proposed_agent": artifact["proposed_agent"],
+            "agent_proposal_reason": "brokerage_or_feed_suffix",
+        }
+    if looks_like_person_name(original):
+        return {
+            "raw_agent": original,
+            "proposed_agent": original,
+            "agent_proposal_reason": "already_person_like",
+        }
+    return {
+        "raw_agent": original,
+        "proposed_agent": "",
+        "agent_proposal_reason": "unsafe_or_unattributed_agent",
+    }
+
+
+def verifier_agent_from_main_row(main_row: dict[str, str]) -> str:
+    full_name = first_mapped_value(main_row, "agent_name", "listing_agent", "listing_agent_name")
+    if full_name:
+        return clean_agent_name(full_name)
+    return normalize_space(
+        f"{first_mapped_value(main_row, 'first_name', 'first')} "
+        f"{first_mapped_value(main_row, 'last_name', 'last')}"
+    )
+
+
+def conservative_address_shadow(pilot_row: dict[str, str]) -> dict[str, str]:
+    """Prefer only stored street extensions that preserve the parsed address prefix."""
+    raw_address = normalize_space(pilot_row.get("listing_address", ""))
+    proposed = clean_listing_address(
+        raw_address,
+        pilot_row.get("city", ""),
+        pilot_row.get("state", ""),
+        pilot_row.get("zip", ""),
+    )
+    alternatives: list[tuple[str, str]] = []
+    raw_payload = normalize_space(pilot_row.get("pending_queue_listing_json", ""))
+    if raw_payload:
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, ValueError):
+            payload = {}
+        if isinstance(payload, dict):
+            for key in ("street", "address", "listing_address", "propertyAddress"):
+                value = normalize_space(str(payload.get(key, "")))
+                if value:
+                    alternatives.append((value, "stored_structured_extension"))
+    title_parts = parse_address_parts(pilot_row.get("raw_title", ""))
+    if title_parts.get("listing_address"):
+        alternatives.append((title_parts["listing_address"], "stored_title_extension"))
+
+    proposed_key = normalize_key(proposed)
+    reason = "existing_pilot_address"
+    for alternative, alternative_reason in alternatives:
+        cleaned = clean_listing_address(
+            alternative,
+            pilot_row.get("city", ""),
+            pilot_row.get("state", ""),
+            pilot_row.get("zip", ""),
+        )
+        cleaned_key = normalize_key(cleaned)
+        if not looks_like_listing_address(cleaned):
+            continue
+        is_safe_extension = bool(
+            not proposed_key
+            or cleaned_key == proposed_key
+            or cleaned_key.startswith(f"{proposed_key} ")
+        )
+        if is_safe_extension and len(cleaned_key) > len(proposed_key):
+            proposed = cleaned
+            proposed_key = cleaned_key
+            reason = alternative_reason
+    return {
+        "raw_address": raw_address,
+        "proposed_address": proposed,
+        "address_proposal_reason": reason,
+    }
+
+
+def agent_address_normalization_shadow(
+    pilot_row: dict[str, str],
+    main_row: dict[str, str],
+) -> dict[str, Any]:
+    """Benchmark conservative intake normalization against verifier-confirmed fields."""
+    raw_agent = normalize_space(
+        f"{pilot_row.get('first_name', '')} {pilot_row.get('last_name', '')}"
+    )
+    agent_shadow = conservative_agent_shadow_name(raw_agent)
+    address_shadow = conservative_address_shadow(pilot_row)
+    proposed_address = address_shadow["proposed_address"]
+    verifier_agent = verifier_agent_from_main_row(main_row)
+    verifier_address = first_mapped_value(
+        main_row,
+        "listing_address",
+        "street",
+        "address",
+        "property_address",
+    )
+    proposed_agent = agent_shadow["proposed_agent"]
+    agent_exact = bool(
+        proposed_agent
+        and verifier_agent
+        and normalize_key(proposed_agent) == normalize_key(verifier_agent)
+    )
+    address_exact = bool(
+        proposed_address
+        and verifier_address
+        and normalize_key(proposed_address) == normalize_key(verifier_address)
+    )
+    wrong_person = bool(proposed_agent and verifier_agent and not agent_exact)
+    return {
+        **agent_shadow,
+        **address_shadow,
+        "verifier_agent": verifier_agent,
+        "verifier_address": verifier_address,
+        "agent_exact_match": agent_exact,
+        "address_exact_match": address_exact,
+        "exact_agent_address_agreement": agent_exact and address_exact,
+        "wrong_person_stop": wrong_person,
+        "writes": 0,
+    }
+
+
 PILOT_ID_RE = re.compile(r"^free-[a-z0-9]{8,64}$", re.IGNORECASE)
 
 
@@ -2951,6 +3114,14 @@ def run_linkage_and_suffix_audits(
             BROKERAGE_SUFFIX_SHADOW_DAYS,
         )
     )
+    agent_address_shadow_active = phase == "post_verifier" and (
+        force
+        or experiment_active(
+            run_date,
+            AGENT_ADDRESS_SHADOW_START_DATE,
+            AGENT_ADDRESS_SHADOW_DAYS,
+        )
+    )
     qualification_shadow_active = force or experiment_active(
         run_date,
         QUALIFICATION_PRECEDENCE_SHADOW_START_DATE,
@@ -3006,6 +3177,14 @@ def run_linkage_and_suffix_audits(
         "suffix_mismatches": 0,
         "suffix_unlinked": 0,
         "suffix_stopped": 0,
+        "agent_address_shadow_eligible": 0,
+        "agent_address_shadow_evaluated": 0,
+        "agent_address_shadow_reviewable": 0,
+        "agent_address_shadow_exact": 0,
+        "agent_address_shadow_unlinked": 0,
+        "agent_address_shadow_wrong_person": 0,
+        "agent_address_shadow_stopped": 0,
+        "agent_address_shadow_supported": 0,
         "qualification_shadow_rows": 0,
         "qualification_shadow_ready": 0,
         "qualification_shadow_disqualified": 0,
@@ -3030,6 +3209,7 @@ def run_linkage_and_suffix_audits(
     if (
         not link_active
         and not suffix_active
+        and not agent_address_shadow_active
         and not qualification_shadow_active
         and not description_block_shadow_active
         and not site_chrome_shadow_active
@@ -3084,6 +3264,7 @@ def run_linkage_and_suffix_audits(
         run_date=run_date.isoformat(),
         link_active=link_active,
         suffix_active=suffix_active,
+        agent_address_shadow_active=agent_address_shadow_active,
         qualification_shadow_active=qualification_shadow_active,
         description_block_shadow_active=description_block_shadow_active,
         site_chrome_shadow_active=site_chrome_shadow_active,
@@ -3093,6 +3274,7 @@ def run_linkage_and_suffix_audits(
         description_block_max_per_run=DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN,
         site_chrome_max_per_run=SITE_CHROME_SHADOW_MAX_PER_RUN,
         compound_negative_max_per_run=COMPOUND_NEGATIVE_SHADOW_MAX_PER_RUN,
+        agent_address_shadow_max_candidates=AGENT_ADDRESS_SHADOW_MAX_CANDIDATES,
         forced=force,
         counts_toward_experiment=not force,
         writes=0,
@@ -3287,6 +3469,120 @@ def run_linkage_and_suffix_audits(
                 approval_required=False,
                 **shadow,
             )
+    if agent_address_shadow_active:
+        eligible_agent_address_rows: list[tuple[int, dict[str, str], dt.date]] = []
+        for pilot_sheet_row, pilot_row in all_pilot_rows:
+            candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+            if not candidate_date or candidate_date > run_date:
+                continue
+            if not force and not experiment_active(
+                candidate_date,
+                AGENT_ADDRESS_SHADOW_START_DATE,
+                AGENT_ADDRESS_SHADOW_DAYS,
+            ):
+                continue
+            if normalize_space(pilot_row.get("source", "")).lower() != "idx_broker_remarks":
+                continue
+            if normalize_space(pilot_row.get("status", "")).lower() != "qualified":
+                continue
+            if normalize_space(pilot_row.get("promotion_status", "")).lower() != "promoted":
+                continue
+            eligible_agent_address_rows.append((pilot_sheet_row, pilot_row, candidate_date))
+
+        eligible_agent_address_rows.sort(key=lambda item: (item[2], item[0]))
+        eligible_agent_address_rows = eligible_agent_address_rows[
+            :AGENT_ADDRESS_SHADOW_MAX_CANDIDATES
+        ]
+        stats["agent_address_shadow_eligible"] = len(eligible_agent_address_rows)
+        main_rows_by_number = dict(main_rows)
+        agent_address_shadow_stopped = False
+        for sample_rank, (pilot_sheet_row, pilot_row, candidate_date) in enumerate(
+            eligible_agent_address_rows,
+            start=1,
+        ):
+            if agent_address_shadow_stopped:
+                break
+            stats["agent_address_shadow_evaluated"] += 1
+            reconciliation = reconcile_pilot_link(pilot_sheet_row, pilot_row, main_rows)
+            benchmark_main_row_number = reconciliation["matched_main_row"]
+            benchmark_linkage = "exact_id_and_address"
+            if benchmark_main_row_number is None and len(reconciliation["id_match_rows"]) == 1:
+                benchmark_main_row_number = reconciliation["id_match_rows"][0]
+                benchmark_linkage = "stable_id_only"
+            benchmark_main_row = main_rows_by_number.get(benchmark_main_row_number or 0, {})
+            emit_candidate_event = force or candidate_date == run_date
+            if not benchmark_main_row:
+                stats["agent_address_shadow_unlinked"] += 1
+                if emit_candidate_event:
+                    log_event(
+                        "pilot_agent_address_normalization_shadow",
+                        phase=phase,
+                        run_date=run_date.isoformat(),
+                        pilot_row=pilot_sheet_row,
+                        synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+                        source=pilot_row.get("source", ""),
+                        sample_rank=sample_rank,
+                        benchmark="unlinked",
+                        linkage=reconciliation["outcome"],
+                        counts_toward_experiment=not force,
+                        writes=0,
+                    )
+                continue
+
+            shadow = agent_address_normalization_shadow(pilot_row, benchmark_main_row)
+            stats["agent_address_shadow_reviewable"] += 1
+            if shadow["exact_agent_address_agreement"]:
+                stats["agent_address_shadow_exact"] += 1
+            if shadow["wrong_person_stop"]:
+                stats["agent_address_shadow_wrong_person"] += 1
+                agent_address_shadow_stopped = True
+
+            reviewable = stats["agent_address_shadow_reviewable"]
+            agreement_rate = stats["agent_address_shadow_exact"] / reviewable
+            sample_complete = bool(
+                sample_rank == AGENT_ADDRESS_SHADOW_MAX_CANDIDATES
+                and reviewable == AGENT_ADDRESS_SHADOW_MAX_CANDIDATES
+            )
+            if sample_complete and agreement_rate < 0.9:
+                agent_address_shadow_stopped = True
+            if sample_complete and agreement_rate >= 0.9 and not shadow["wrong_person_stop"]:
+                stats["agent_address_shadow_supported"] = 1
+            if agent_address_shadow_stopped:
+                stats["agent_address_shadow_stopped"] = 1
+
+            if emit_candidate_event:
+                log_event(
+                    "pilot_agent_address_normalization_shadow",
+                    phase=phase,
+                    run_date=run_date.isoformat(),
+                    pilot_row=pilot_sheet_row,
+                    main_row=benchmark_main_row_number,
+                    synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+                    source=pilot_row.get("source", ""),
+                    linkage=benchmark_linkage,
+                    sample_rank=sample_rank,
+                    sample_size=reviewable,
+                    agreement_rate=round(agreement_rate, 4),
+                    sample_complete=sample_complete,
+                    experiment_stopped=agent_address_shadow_stopped,
+                    comparison_window_days=AGENT_ADDRESS_SHADOW_DAYS,
+                    hypothesis=(
+                        "conservative_feed_artifact_and_address_cleanup_matches_"
+                        "verifier_confirmed_agent_and_street_fields"
+                    ),
+                    success_metric=(
+                        "at_least_90pct_exact_agent_address_agreement_after_10_"
+                        "with_zero_wrong_person_suggestions"
+                    ),
+                    stop_condition=(
+                        "first_wrong_person_suggestion_or_below_90pct_exact_"
+                        "agreement_after_10_reviewable_candidates"
+                    ),
+                    promotion_changed=False,
+                    outreach_changed=False,
+                    counts_toward_experiment=not force,
+                    **shadow,
+                )
     suffix_stopped = False
     for pilot_sheet_row, pilot_row in pilot_rows:
         reconciliation = reconcile_pilot_link(pilot_sheet_row, pilot_row, main_rows)
