@@ -411,6 +411,7 @@ function handleIncomingSms_(body) {
     const callbackTime = extractScheduledCallbackReference_(inboundText);
     const priorCallbackTime = normalizeCallbackTime_(currentRowObj[HEADERS.callback_time]);
     const changed = normalizeCallbackTime_(callbackTime) !== priorCallbackTime;
+    const preservedLeadStatus = String(currentRowObj[HEADERS.mailshake_status] || "Y");
     const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
 
     if (changed) {
@@ -432,7 +433,6 @@ function handleIncomingSms_(body) {
 
     updateRowFields_(sheet, row, {
       [HEADERS.response_status]: inboundText,
-      [HEADERS.mailshake_status]: "Y",
       [HEADERS.conversation_summary]: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff",
       [HEADERS.ai_state]: "handoff",
       [HEADERS.call_booking_status]: "scheduled_callback",
@@ -446,10 +446,13 @@ function handleIncomingSms_(body) {
       ok: true,
       should_reply: false,
       reply_text: "",
-      lead_status: "Y",
+      lead_status: preservedLeadStatus,
       conversation_done: false,
       handoff_needed: true,
       needs_review: false,
+      callback_updated: changed,
+      alert_needed: changed,
+      handoff_type: changed ? "CALLBACK UPDATED" : "",
       reason: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff"
     };
   }
@@ -4432,7 +4435,9 @@ function testApprovedLeadIntelligenceRules_() {
   if (!isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "Afternoon on Monday would work better") ||
       extractScheduledCallbackReference_("Afternoon on Monday would work better") !== "Monday Afternoon" ||
       !isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "Can we push it into next week?") ||
-      extractScheduledCallbackReference_("Can we push it into next week?") !== "Next Week") {
+      extractScheduledCallbackReference_("Can we push it into next week?") !== "Next Week" ||
+      isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "I have an open house Monday") ||
+      isPostHandoffCallbackUpdate_({ [HEADERS.human_override]: "FALSE" }, "Monday afternoon works better")) {
     throw new Error("Post-handoff callback update regression");
   }
   if (!isClearNoSignal_("Thank you I think I have an under control")) {

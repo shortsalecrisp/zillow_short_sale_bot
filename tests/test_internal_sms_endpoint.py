@@ -735,7 +735,7 @@ def test_sms_weekday_callback_is_handed_off_and_persisted_as_scheduled(monkeypat
 
 
 def test_sms_post_handoff_callback_update_persists_without_reply(monkeypatch):
-    module, sheet, _sender = _import_webhook_server(
+    module, sheet, sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
     )
@@ -743,6 +743,7 @@ def test_sms_post_handoff_callback_update_persists_without_reply(monkeypatch):
     sheet.rows[2][15] = "interested_no_call"
     sheet.rows[2][16] = "TRUE"
     sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][10] = "O"
     client = TestClient(module.app)
     inbound = "Afternoon on Monday would work better"
 
@@ -765,13 +766,77 @@ def test_sms_post_handoff_callback_update_persists_without_reply(monkeypatch):
     assert body["call_booking_status"] == "scheduled_callback"
     assert body["callback_time"] == "Monday Afternoon"
     assert body["reason"] == "Callback updated after human handoff"
-    assert sheet.rows[2][10] == "Y"
+    assert body["lead_status"] == "O"
+    assert body["callback_updated"] is True
+    assert body["alert_needed"] is True
+    assert body["handoff_type"] == "CALLBACK UPDATED"
+    assert sender.calls == []
+    assert sheet.rows[2][10] == "O"
     assert sheet.rows[2][13] == "handoff"
     assert sheet.rows[2][15] == "scheduled_callback"
     assert sheet.rows[2][16] == "TRUE"
     assert sheet.rows[2][19] == "TRUE"
     assert sheet.rows[2][37] == "yes"
     assert sheet.rows[2][38] == "Monday Afternoon"
+
+
+def test_sms_post_handoff_repeated_callback_time_does_not_request_another_alert(monkeypatch):
+    module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][15] = "scheduled_callback"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][38] = "Monday Afternoon"
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "Afternoon on Monday would work better",
+            "message_id": "post-handoff-callback-repeat-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["should_reply"] is False
+    assert body["reason"] == "Callback timing repeated after human handoff"
+    assert body["callback_updated"] is False
+    assert body["alert_needed"] is False
+    assert body["handoff_type"] == ""
+    assert sender.calls == []
+
+
+def test_sms_post_handoff_non_scheduling_day_reference_stays_under_human_override(monkeypatch):
+    module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][15] = "interested_no_call"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "I have an open house Monday",
+            "message_id": "post-handoff-non-scheduling-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["should_reply"] is False
+    assert body["reason"] == "Human override enabled - inbound recorded only"
+    assert body["callback_updated"] is False
+    assert body["alert_needed"] is False
+    assert body["handoff_type"] == ""
+    assert sheet.rows[2][37] == ""
+    assert sheet.rows[2][38] == ""
+    assert sender.calls == []
 
 
 def test_sms_reaction_to_latest_outbound_is_suppressed_before_processing(monkeypatch):

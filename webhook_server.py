@@ -3487,6 +3487,7 @@ def _sms_decision(
     call_booking_status: str = "",
     callback_time: str = "",
     handoff_type: str = "",
+    alert_needed: bool = False,
 ) -> Dict[str, Any]:
     return {
         "reply_text": reply_text,
@@ -3499,6 +3500,7 @@ def _sms_decision(
         "call_booking_status": call_booking_status,
         "callback_time": callback_time,
         "handoff_type": handoff_type,
+        "alert_needed": alert_needed,
     }
 
 
@@ -3808,17 +3810,19 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
     if _sms_is_post_handoff_callback_update(row_obj, t):
         callback_time = _sms_extract_scheduled_callback_reference(t)
         existing_callback_time = _sms_normalized_callback_time(row_obj.get("callback_time"))
+        callback_changed = existing_callback_time != _sms_normalized_callback_time(callback_time)
         reason = "Callback updated after human handoff"
-        if existing_callback_time == _sms_normalized_callback_time(callback_time):
+        if not callback_changed:
             reason = "Callback timing repeated after human handoff"
         return _sms_decision(
-            lead_status="Y",
+            lead_status=str(row_obj.get("mailshake_status") or "Y"),
             handoff_needed=True,
             block_reply=True,
             reason=reason,
             call_booking_status="scheduled_callback",
             callback_time=callback_time,
-            handoff_type="CALLBACK UPDATED",
+            handoff_type="CALLBACK UPDATED" if callback_changed else "",
+            alert_needed=callback_changed,
         )
 
     if str(row_obj.get("human_override") or "").upper() == "TRUE":
@@ -4256,6 +4260,9 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
             "reason": reason,
             "call_booking_status": updates["call_booking_status"],
             "callback_time": callback_time,
+            "callback_updated": bool(decision.get("alert_needed")),
+            "alert_needed": bool(decision.get("alert_needed")),
+            "handoff_type": str(decision.get("handoff_type") or ""),
             "row": row_idx,
         }
     )
