@@ -1457,7 +1457,7 @@ function applyFastRules_(text, rowObj) {
   if (isShortSaleSourceQuestion_(t)) {
     return {
       matched: true,
-      reply_text: "I thought i saw it marked online as a short sale, so thats why i called. If that was a mistake, i apologize. Good luck with the listing!",
+      reply_text: "I thought i saw in the listing that it said it was a short sale. My mistake if i misread that. Thanks",
       lead_status: "R",
       conversation_done: true,
       handoff_needed: false,
@@ -2543,6 +2543,16 @@ function isNotShortSaleSignal_(text) {
 
 function isShortSaleSourceQuestion_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
+
+  const anaphoricPhrases = [
+    "what would make you think it was",
+    "what made you think it was",
+    "why would you think it was",
+    "why did you think it was",
+    "why do you think it was"
+  ];
+
+  if (anaphoricPhrases.some(phrase => t.indexOf(phrase) !== -1)) return true;
   if (t.indexOf("short sale") === -1) return false;
 
   const directPhrases = [
