@@ -407,6 +407,53 @@ function handleIncomingSms_(body) {
       reason: "Agent requested Spanish communication; English response provided"
     };
   }
+  if (isPostHandoffCallbackUpdate_(currentRowObj, inboundText)) {
+    const callbackTime = extractScheduledCallbackReference_(inboundText);
+    const priorCallbackTime = normalizeCallbackTime_(currentRowObj[HEADERS.callback_time]);
+    const changed = normalizeCallbackTime_(callbackTime) !== priorCallbackTime;
+    const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
+
+    if (changed) {
+      sendHandoffEmail_({
+        handoff_type: "CALLBACK UPDATED",
+        agent_name: currentRowObj[HEADERS.agent_name] || "",
+        last_name: currentRowObj[HEADERS.last_name] || "",
+        initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
+        phone: phoneRaw,
+        email: currentRowObj[HEADERS.email] || "",
+        listing_address: currentRowObj[HEADERS.listing_address] || "",
+        city: currentRowObj[HEADERS.city] || "",
+        state: currentRowObj[HEADERS.state] || "",
+        zip: currentRowObj[HEADERS.zip] || "",
+        last_message: inboundText,
+        history: history
+      });
+    }
+
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "Y",
+      [HEADERS.conversation_summary]: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff",
+      [HEADERS.ai_state]: "handoff",
+      [HEADERS.call_booking_status]: "scheduled_callback",
+      [HEADERS.callback_requested]: "yes",
+      [HEADERS.callback_time]: callbackTime,
+      [HEADERS.handoff_flag]: "TRUE",
+      [HEADERS.human_override]: "TRUE"
+    });
+
+    return {
+      ok: true,
+      should_reply: false,
+      reply_text: "",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: true,
+      needs_review: false,
+      reason: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff"
+    };
+  }
+
   if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") {
     return {
       ok: true,
@@ -2615,13 +2662,44 @@ function extractScheduledCallbackReference_(text) {
   const searchable = raw.replace(/\bnot\s+tomorrow\b/ig, " ");
 
   const match = searchable.match(
-    /\btomorrow\b|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
+    /\btomorrow\b|\bnext\s+week\b|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
   );
   if (!match) return "";
+  let reference = match[0];
+  const escaped = reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const qualified = searchable.match(new RegExp("(?:\\b(?:morning|afternoon|evening)\\b\\s+(?:on\\s+)?)?" + escaped + "(?:\\s+\\b(?:morning|afternoon|evening)\\b)?", "i"));
+  if (qualified) {
+    reference = qualified[0];
+    const before = reference.match(/\b(morning|afternoon|evening)\b\s+(?:on\s+)?(.+)$/i);
+    if (before) {
+      reference = before[2] + " " + before[1];
+    }
+  }
 
-  return match[0].replace(/\b[a-z]/g, function(letter) {
+  return reference.replace(/\b[a-z]/g, function(letter) {
     return letter.toUpperCase();
   });
+}
+
+function normalizeCallbackTime_(value) {
+  return normalizeWhitespace_(String(value || "")).toLowerCase();
+}
+
+function isCallbackUpdateTiming_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || !extractScheduledCallbackReference_(t)) return false;
+  return /\b(?:would|will|works?|work)\s+(?:be\s+)?(?:better|best|good|fine|ok|okay)\b/.test(t) ||
+    /\b(?:push|move|reschedule|switch|change)\b.{0,40}\b(?:to|into|for|on)\b/.test(t) ||
+    /\b(?:better|best|good|fine|ok|okay)\b.{0,20}\b(?:on|for)\b/.test(t);
+}
+
+function isPostHandoffCallbackUpdate_(rowObj, inboundText) {
+  if (String(rowObj && rowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE") return false;
+  if (!isSchedulingSignal_(inboundText) && !isCallbackUpdateTiming_(inboundText)) return false;
+  const aiState = String(rowObj && rowObj[HEADERS.ai_state] || "").toLowerCase();
+  const handoffFlag = String(rowObj && rowObj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE";
+  const bookingStatus = String(rowObj && rowObj[HEADERS.call_booking_status] || "").toLowerCase();
+  return aiState === "handoff" || handoffFlag || bookingStatus === "scheduled_callback" || bookingStatus === "interested_no_call";
 }
 
 function isExplicitDayOrDateCallbackSignal_(text) {
@@ -4344,6 +4422,18 @@ function testApprovedLeadIntelligenceRules_() {
       !isSchedulingSignal_(tomorrowCallbackText) ||
       extractScheduledCallbackReference_(tomorrowCallbackText) !== "Tomorrow") {
     throw new Error("Natural-language tomorrow callback classification regression");
+  }
+  const postHandoffCallbackRow = {
+    [HEADERS.ai_state]: "handoff",
+    [HEADERS.call_booking_status]: "interested_no_call",
+    [HEADERS.handoff_flag]: "TRUE",
+    [HEADERS.human_override]: "TRUE"
+  };
+  if (!isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "Afternoon on Monday would work better") ||
+      extractScheduledCallbackReference_("Afternoon on Monday would work better") !== "Monday Afternoon" ||
+      !isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "Can we push it into next week?") ||
+      extractScheduledCallbackReference_("Can we push it into next week?") !== "Next Week") {
+    throw new Error("Post-handoff callback update regression");
   }
   if (!isClearNoSignal_("Thank you I think I have an under control")) {
     throw new Error("Under-control voice typo must be recognized as a clear closeout");

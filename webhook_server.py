@@ -3486,6 +3486,7 @@ def _sms_decision(
     reason: str = "",
     call_booking_status: str = "",
     callback_time: str = "",
+    handoff_type: str = "",
 ) -> Dict[str, Any]:
     return {
         "reply_text": reply_text,
@@ -3497,6 +3498,7 @@ def _sms_decision(
         "reason": reason,
         "call_booking_status": call_booking_status,
         "callback_time": callback_time,
+        "handoff_type": handoff_type,
     }
 
 
@@ -3678,6 +3680,7 @@ def _sms_extract_scheduled_callback_reference(value: Any) -> str:
     text = re.sub(r"\bnot\s+tomorrow\b", " ", text, flags=re.IGNORECASE)
     match = re.search(
         r"\btomorrow\b"
+        r"|\bnext\s+week\b"
         r"|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
         r"|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+"
         r"\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b"
@@ -3685,7 +3688,50 @@ def _sms_extract_scheduled_callback_reference(value: Any) -> str:
         text,
         flags=re.IGNORECASE,
     )
-    return match.group(0).title() if match else ""
+    if not match:
+        return ""
+    reference = match.group(0)
+    qualifier_match = re.search(
+        rf"(?:\b(?:morning|afternoon|evening)\b\s+(?:on\s+)?)?{re.escape(reference)}(?:\s+\b(?:morning|afternoon|evening)\b)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if qualifier_match:
+        reference = qualifier_match.group(0)
+        before_match = re.match(
+            r"\b(morning|afternoon|evening)\b\s+(?:on\s+)?(.+)$",
+            reference,
+            flags=re.IGNORECASE,
+        )
+        if before_match:
+            reference = f"{before_match.group(2)} {before_match.group(1)}"
+    return reference.title()
+
+
+def _sms_normalized_callback_time(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _sms_is_callback_update_timing(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or not _sms_extract_scheduled_callback_reference(text):
+        return False
+    return bool(
+        re.search(r"\b(?:would|will|works?|work)\s+(?:be\s+)?(?:better|best|good|fine|ok|okay)\b", text)
+        or re.search(r"\b(?:push|move|reschedule|switch|change)\b.{0,40}\b(?:to|into|for|on)\b", text)
+        or re.search(r"\b(?:better|best|good|fine|ok|okay)\b.{0,20}\b(?:on|for)\b", text)
+    )
+
+
+def _sms_is_post_handoff_callback_update(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    if str(row_obj.get("human_override") or "").upper() != "TRUE":
+        return False
+    if not (_sms_is_scheduled_callback(inbound_text) or _sms_is_callback_update_timing(inbound_text)):
+        return False
+    current_state = str(row_obj.get("ai_state") or "").lower()
+    current_handoff = str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
+    current_booking = str(row_obj.get("call_booking_status") or "").lower()
+    return current_state == "handoff" or current_handoff or current_booking in {"scheduled_callback", "interested_no_call"}
 
 
 def _sms_is_scheduled_callback(value: Any) -> bool:
@@ -3757,6 +3803,22 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             conversation_done=True,
             block_reply=True,
             reason="Same-topic continuation after not-short-sale closeout; no additional reply needed",
+        )
+
+    if _sms_is_post_handoff_callback_update(row_obj, t):
+        callback_time = _sms_extract_scheduled_callback_reference(t)
+        existing_callback_time = _sms_normalized_callback_time(row_obj.get("callback_time"))
+        reason = "Callback updated after human handoff"
+        if existing_callback_time == _sms_normalized_callback_time(callback_time):
+            reason = "Callback timing repeated after human handoff"
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            reason=reason,
+            call_booking_status="scheduled_callback",
+            callback_time=callback_time,
+            handoff_type="CALLBACK UPDATED",
         )
 
     if str(row_obj.get("human_override") or "").upper() == "TRUE":

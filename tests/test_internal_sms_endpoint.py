@@ -734,6 +734,46 @@ def test_sms_weekday_callback_is_handed_off_and_persisted_as_scheduled(monkeypat
     assert module._sms_extract_scheduled_callback_reference("Not tomorrow, please call me Monday") == "Monday"
 
 
+def test_sms_post_handoff_callback_update_persists_without_reply(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][15] = "interested_no_call"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    client = TestClient(module.app)
+    inbound = "Afternoon on Monday would work better"
+
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "post-handoff-callback-update-1",
+            "received_at": "2026-08-11T13:05:00-04:00",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["should_reply"] is False
+    assert body["handoff_needed"] is True
+    assert body["call_booking_status"] == "scheduled_callback"
+    assert body["callback_time"] == "Monday Afternoon"
+    assert body["reason"] == "Callback updated after human handoff"
+    assert sheet.rows[2][10] == "Y"
+    assert sheet.rows[2][13] == "handoff"
+    assert sheet.rows[2][15] == "scheduled_callback"
+    assert sheet.rows[2][16] == "TRUE"
+    assert sheet.rows[2][19] == "TRUE"
+    assert sheet.rows[2][37] == "yes"
+    assert sheet.rows[2][38] == "Monday Afternoon"
+
+
 def test_sms_reaction_to_latest_outbound_is_suppressed_before_processing(monkeypatch):
     module, sheet, _sender = _import_webhook_server(
         monkeypatch,
