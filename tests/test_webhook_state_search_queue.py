@@ -136,11 +136,23 @@ import webhook_server
 
 
 def test_free_source_pilot_post_verifier_audit_due_at_configured_hour():
-    before = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)  # 08:00 New York
-    due = datetime(2026, 8, 1, 13, 0, tzinfo=timezone.utc)  # 09:00 New York
+    before = datetime(2026, 8, 1, 13, 4, tzinfo=timezone.utc)  # 09:04 New York
+    due = datetime(2026, 8, 1, 13, 5, tzinfo=timezone.utc)  # 09:05 New York
 
     assert webhook_server._free_source_pilot_post_verifier_audit_due(before) is False
     assert webhook_server._free_source_pilot_post_verifier_audit_due(due) is True
+
+
+def test_next_free_source_pilot_post_verifier_audit_is_independent_daily_slot():
+    before = datetime(2026, 8, 1, 12, 30, tzinfo=timezone.utc)  # 08:30 New York
+    after = datetime(2026, 8, 1, 13, 6, tzinfo=timezone.utc)  # 09:06 New York
+
+    assert webhook_server._next_free_source_pilot_post_verifier_audit(before) == datetime(
+        2026, 8, 1, 13, 5, tzinfo=timezone.utc
+    )
+    assert webhook_server._next_free_source_pilot_post_verifier_audit(after) == datetime(
+        2026, 8, 2, 13, 5, tzinfo=timezone.utc
+    )
 
 
 class _FakeRequest:

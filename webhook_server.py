@@ -145,6 +145,9 @@ _keepalive_stop: Optional[threading.Event] = None
 _free_source_pilot_scheduler_thread: Optional[threading.Thread] = None
 _free_source_pilot_scheduler_stop: Optional[threading.Event] = None
 _free_source_pilot_scheduler_start_lock = threading.Lock()
+_free_source_pilot_audit_scheduler_thread: Optional[threading.Thread] = None
+_free_source_pilot_audit_scheduler_stop: Optional[threading.Event] = None
+_free_source_pilot_audit_scheduler_start_lock = threading.Lock()
 _deferred_rows_lock = threading.Lock()
 _deferred_rows: List[Dict[str, Any]] = []
 _deferred_zpids: set[str] = set()
@@ -267,6 +270,9 @@ FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH = os.getenv(
 )
 FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR = int(
     os.getenv("FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR", "9")
+)
+FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE = int(
+    os.getenv("FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE", "5")
 )
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
 _STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1}
@@ -949,7 +955,24 @@ def _process_free_source_pilot_callback(run_time: datetime) -> None:
 
 def _free_source_pilot_post_verifier_audit_due(run_time: datetime) -> bool:
     local_dt = run_time.astimezone(SCHEDULER_TZ)
-    return FREE_SOURCE_PILOT_ENABLED and local_dt.hour == FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR
+    return (
+        FREE_SOURCE_PILOT_ENABLED
+        and local_dt.hour == FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR
+        and local_dt.minute == FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE
+    )
+
+
+def _next_free_source_pilot_post_verifier_audit(now: datetime) -> datetime:
+    now = now.astimezone(SCHEDULER_TZ)
+    candidate = now.replace(
+        hour=FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR,
+        minute=FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if now <= candidate:
+        return candidate
+    return candidate + timedelta(days=1)
 
 
 def _process_free_source_pilot_post_verifier_audit(run_time: datetime) -> None:
@@ -1003,6 +1026,53 @@ def _process_free_source_pilot_post_verifier_audit(run_time: datetime) -> None:
             _free_source_pilot_audit_worker_lock.release()
 
     threading.Thread(target=_runner, name="free-source-pilot-audit", daemon=True).start()
+
+
+def _ensure_free_source_pilot_audit_scheduler_thread() -> None:
+    global _free_source_pilot_audit_scheduler_thread, _free_source_pilot_audit_scheduler_stop
+    if not FREE_SOURCE_PILOT_ENABLED:
+        logger.info("free-source-pilot-audit: daily scheduler disabled")
+        return
+    with _free_source_pilot_audit_scheduler_start_lock:
+        if (
+            _free_source_pilot_audit_scheduler_thread
+            and _free_source_pilot_audit_scheduler_thread.is_alive()
+        ):
+            logger.info("free-source-pilot-audit: daily scheduler already started")
+            return
+        stop_event = threading.Event()
+        _free_source_pilot_audit_scheduler_stop = stop_event
+
+        def _loop() -> None:
+            logger.info(
+                "free-source-pilot-audit: daily scheduler thread starting run_time=%02d:%02d",
+                FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR,
+                FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE,
+            )
+            while not stop_event.is_set():
+                now = datetime.now(tz=SCHEDULER_TZ)
+                next_run = _next_free_source_pilot_post_verifier_audit(now)
+                sleep_secs = max(0, (next_run - now).total_seconds())
+                logger.info(
+                    "free-source-pilot-audit: daily scheduler sleeping %.2fs until %s",
+                    sleep_secs,
+                    next_run.isoformat(),
+                )
+                if stop_event.wait(timeout=sleep_secs):
+                    break
+                logger.info(
+                    "free-source-pilot-audit: daily scheduler wake run_time=%s",
+                    next_run.isoformat(),
+                )
+                _process_free_source_pilot_post_verifier_audit(next_run)
+            logger.info("free-source-pilot-audit: daily scheduler thread stopped")
+
+        _free_source_pilot_audit_scheduler_thread = threading.Thread(
+            target=_loop,
+            name="free-source-pilot-audit-scheduler",
+            daemon=True,
+        )
+        _free_source_pilot_audit_scheduler_thread.start()
 
 
 def _ensure_free_source_pilot_scheduler_thread() -> None:
@@ -2061,7 +2131,6 @@ async def _start_scheduler() -> None:
         _process_deferred_rows,
         _process_pending_rows_callback,
         _process_apify_coverage_backstop_callback,
-        _process_free_source_pilot_post_verifier_audit,
     ]
     logger.info(
         "scheduler: registered hourly callbacks=%s",
@@ -2072,6 +2141,7 @@ async def _start_scheduler() -> None:
         initial_callbacks=False,
     )
     _ensure_free_source_pilot_scheduler_thread()
+    _ensure_free_source_pilot_audit_scheduler_thread()
     _start_free_source_pilot_startup_catchup()
     _ensure_keepalive_thread()
 
@@ -2096,6 +2166,17 @@ async def _stop_scheduler() -> None:
     with _free_source_pilot_scheduler_start_lock:
         _free_source_pilot_scheduler_thread = None
         _free_source_pilot_scheduler_stop = None
+    global _free_source_pilot_audit_scheduler_thread, _free_source_pilot_audit_scheduler_stop
+    if _free_source_pilot_audit_scheduler_stop:
+        _free_source_pilot_audit_scheduler_stop.set()
+    if (
+        _free_source_pilot_audit_scheduler_thread
+        and _free_source_pilot_audit_scheduler_thread.is_alive()
+    ):
+        _free_source_pilot_audit_scheduler_thread.join(timeout=5)
+    with _free_source_pilot_audit_scheduler_start_lock:
+        _free_source_pilot_audit_scheduler_thread = None
+        _free_source_pilot_audit_scheduler_stop = None
     global _keepalive_thread, _keepalive_stop
     if _keepalive_stop:
         _keepalive_stop.set()
