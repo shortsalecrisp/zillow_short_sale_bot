@@ -34,3 +34,14 @@ def test_info_email_acknowledgement_bypasses_phone_only_sanitizer():
         in CHATBOT
     )
     assert "the downstream approval workflow can recognize and queue the email" in CHATBOT
+
+
+def test_explicitly_provided_email_replaces_stale_crm_email():
+    assert (
+        'if (ruleResult.info_email_to && isValidEmailAddress_(ruleResult.info_email_to)) {'
+        in CHATBOT
+    )
+    assert (
+        'isValidEmailAddress_(ruleResult.info_email_to) && !String(currentRowObj[HEADERS.email] || "").trim()'
+        not in CHATBOT
+    )

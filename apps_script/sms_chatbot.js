@@ -914,7 +914,7 @@ function handleIncomingSms_(body) {
       updates[HEADERS.handoff_flag] = decision.handoff_needed ? "TRUE" : "FALSE";
       updates[HEADERS.human_override] = decision.handoff_needed || decision.needs_review ? "TRUE" : "FALSE";
 
-      if (ruleResult.info_email_to && isValidEmailAddress_(ruleResult.info_email_to) && !String(currentRowObj[HEADERS.email] || "").trim()) {
+      if (ruleResult.info_email_to && isValidEmailAddress_(ruleResult.info_email_to)) {
         updates[HEADERS.email] = ruleResult.info_email_to;
       }
 
