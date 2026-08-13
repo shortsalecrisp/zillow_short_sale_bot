@@ -2848,7 +2848,12 @@ def conservative_agent_shadow_name(value: str) -> dict[str, str]:
 def verifier_agent_from_main_row(main_row: dict[str, str]) -> str:
     full_name = first_mapped_value(main_row, "agent_name", "listing_agent", "listing_agent_name")
     if full_name:
-        return clean_agent_name(full_name)
+        cleaned_full_name = clean_agent_name(full_name)
+        if cleaned_full_name:
+            return cleaned_full_name
+        last_name = first_mapped_value(main_row, "last_name", "last")
+        if last_name:
+            return clean_agent_name(f"{full_name} {last_name}")
     return normalize_space(
         f"{first_mapped_value(main_row, 'first_name', 'first')} "
         f"{first_mapped_value(main_row, 'last_name', 'last')}"

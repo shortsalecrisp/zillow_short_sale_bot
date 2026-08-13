@@ -2258,6 +2258,28 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertFalse(result["wrong_person_stop"])
         self.assertEqual(result["writes"], 0)
 
+    def test_agent_address_shadow_combines_sheet1_agent_and_last_name_headers(self):
+        pilot_row = {
+            "first_name": "Angelica",
+            "last_name": "Gallego of",
+            "listing_address": "8926 W El Caminito Drive",
+            "city": "Peoria",
+            "state": "AZ",
+            "zip": "85345",
+        }
+        main_row = {
+            "agent_name": "Angelica",
+            "last_name": "Gallego",
+            "listing_address": "8926 W El Caminito Drive",
+        }
+
+        result = pilot.agent_address_normalization_shadow(pilot_row, main_row)
+
+        self.assertEqual(result["verifier_agent"], "Angelica Gallego")
+        self.assertEqual(result["proposed_agent"], "Angelica Gallego")
+        self.assertTrue(result["exact_agent_address_agreement"])
+        self.assertFalse(result["wrong_person_stop"])
+
     def test_agent_address_shadow_refuses_leading_site_or_team_article(self):
         pilot_row = {
             "first_name": "The",
