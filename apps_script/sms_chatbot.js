@@ -12,6 +12,7 @@ const HEADERS = {
   response_status: "response_status",
   mailshake_status: "mailshake_status",
   last_inbound_text: "last_inbound_text",
+  last_inbound_at: "last_inbound_at",
   last_outbound_text: "last_outbound_text",
   conversation_summary: "conversation_summary",
   ai_state: "ai_state",
@@ -87,12 +88,65 @@ function doGet(e) {
   }
 }
 
+function normalizeHandledInboundText_(value) {
+  return normalizeWhitespace_(String(value || "")).toLowerCase();
+}
+
+function historyHasConfirmedReplyAfterInbound_(rowObj, inboundText) {
+  const currentText = normalizeHandledInboundText_(inboundText);
+  if (!currentText) return false;
+
+  const history = getHistoryArray_(rowObj && rowObj[HEADERS.history_json]);
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i] || {};
+    if (String(entry.role || "").toLowerCase() !== "agent" ||
+        normalizeHandledInboundText_(entry.text) !== currentText) {
+      continue;
+    }
+
+    for (let j = i + 1; j < history.length; j += 1) {
+      const later = history[j] || {};
+      if (String(later.role || "").toLowerCase() === "assistant" &&
+          normalizeWhitespace_(String(later.text || ""))) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
+function isIntentionalNoReplyDisposition_(rowObj, inboundText) {
+  const aiState = String(rowObj && rowObj[HEADERS.ai_state] || "").toLowerCase();
+  const handoffFlag = String(rowObj && rowObj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE";
+  const humanOverride = String(rowObj && rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE";
+  return aiState === "handoff" || handoffFlag ||
+    (humanOverride && aiState !== "done") ||
+    isOptOutSignal_(inboundText) ||
+    isFinalCourtesyReply_(inboundText);
+}
+
+function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
+  const priorText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.last_inbound_text]);
+  const currentText = normalizeHandledInboundText_(inboundText);
+  if (!priorText || !currentText || priorText !== currentText) return false;
+  if (isSchedulingSignal_(inboundText) || isPostHandoffCallbackUpdate_(rowObj, inboundText)) return false;
+
+  const responseText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.response_status]);
+  if (responseText !== currentText) return false;
+
+  return historyHasConfirmedReplyAfterInbound_(rowObj, inboundText) ||
+    isIntentionalNoReplyDisposition_(rowObj, inboundText);
+}
+
 function isRecentDuplicateInboundText_(rowObj, inboundText, receivedAt) {
-  const priorText = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_inbound_text] || ""));
-  const currentText = normalizeWhitespace_(String(inboundText || ""));
+  const priorText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.last_inbound_text]);
+  const currentText = normalizeHandledInboundText_(inboundText);
   if (!priorText || !currentText || priorText !== currentText) return false;
 
-  const lastContactRaw = rowObj && rowObj[HEADERS.last_contact_time];
+  const lastContactRaw = rowObj && (
+    rowObj[HEADERS.last_inbound_at] || rowObj[HEADERS.last_contact_time]
+  );
   const lastContactTs = lastContactRaw instanceof Date
     ? lastContactRaw.getTime()
     : Date.parse(String(lastContactRaw || ""));
@@ -288,9 +342,25 @@ function handleIncomingSms_(body) {
       };
     }
 
+    if (isDurableHandledDuplicateInbound_(rowObj, inboundText)) {
+      appendSmsDebugLog_("incoming_sms_duplicate_suppressed", {
+        phone: phoneRaw,
+        message: inboundText,
+        reason: "Durable handled inbound duplicate suppressed"
+      });
+
+      return {
+        ok: true,
+        duplicate: true,
+        should_reply: false,
+        reason: "Durable handled inbound duplicate ignored"
+      };
+    }
+
     if (isSmsReactionToLastOutbound_(inboundText, rowObj)) {
       updateRowFields_(sheet, row, {
-        [HEADERS.last_inbound_text]: inboundText,
+        [HEADERS.last_inbound_text]: normalizeHandledInboundText_(inboundText),
+        [HEADERS.last_inbound_at]: receivedAt,
         [HEADERS.last_contact_time]: receivedAt,
         [HEADERS.last_message_id]: messageId
       });
@@ -319,7 +389,10 @@ function handleIncomingSms_(body) {
     ) {
       appendHistory_(sheet, row, { role: "agent", text: inboundText, ts: receivedAt });
       updateRowFields_(sheet, row, {
-        [HEADERS.last_contact_time]: receivedAt
+        [HEADERS.last_inbound_text]: normalizeHandledInboundText_(inboundText),
+        [HEADERS.last_inbound_at]: receivedAt,
+        [HEADERS.last_contact_time]: receivedAt,
+        [HEADERS.last_message_id]: messageId
       });
       appendSmsDebugLog_("incoming_sms_correction_suppressed", {
         phone: phoneRaw,
@@ -340,7 +413,8 @@ function handleIncomingSms_(body) {
     }
 
     updateRowFields_(sheet, row, {
-      [HEADERS.last_inbound_text]: inboundText,
+      [HEADERS.last_inbound_text]: normalizeHandledInboundText_(inboundText),
+      [HEADERS.last_inbound_at]: receivedAt,
       [HEADERS.last_contact_time]: receivedAt,
       [HEADERS.last_message_id]: messageId
     });
@@ -4197,6 +4271,7 @@ function resetTestConversation() {
         [HEADERS.response_status]: "",
         [HEADERS.mailshake_status]: "N",
         [HEADERS.last_inbound_text]: "",
+        [HEADERS.last_inbound_at]: "",
         [HEADERS.last_outbound_text]: "",
         [HEADERS.conversation_summary]: "",
         [HEADERS.ai_state]: "",
@@ -4439,6 +4514,41 @@ function testApprovedLeadIntelligenceRules_() {
       isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "I have an open house Monday") ||
       isPostHandoffCallbackUpdate_({ [HEADERS.human_override]: "FALSE" }, "Monday afternoon works better")) {
     throw new Error("Post-handoff callback update regression");
+  }
+  const handledDuplicateText = "I have someone thank you";
+  const handledDuplicateRow = {
+    [HEADERS.last_inbound_text]: "i have someone thank you",
+    [HEADERS.response_status]: handledDuplicateText,
+    [HEADERS.ai_state]: "done",
+    [HEADERS.history_json]: JSON.stringify([
+      { role: "agent", text: handledDuplicateText, ts: "2026-08-12T10:05:00-04:00" },
+      { role: "assistant", text: getStandardNoCloseoutReply_(), ts: "2026-08-12T10:07:00-04:00" }
+    ])
+  };
+  if (!isDurableHandledDuplicateInbound_(handledDuplicateRow, "  I HAVE someone thank you  ") ||
+      isDurableHandledDuplicateInbound_(handledDuplicateRow, "I have someone, but what do you charge?")) {
+    throw new Error("Durable handled-inbound duplicate regression");
+  }
+  const pendingDuplicateRow = Object.assign({}, handledDuplicateRow, {
+    [HEADERS.ai_state]: "active",
+    [HEADERS.history_json]: JSON.stringify([
+      { role: "agent", text: handledDuplicateText, ts: "2026-08-12T10:05:00-04:00" }
+    ])
+  });
+  if (isDurableHandledDuplicateInbound_(pendingDuplicateRow, handledDuplicateText)) {
+    throw new Error("Unconfirmed reply must not be durably suppressed");
+  }
+  const callbackDuplicateText = "Afternoon on Monday would work better";
+  const callbackDuplicateRow = Object.assign({}, postHandoffCallbackRow, {
+    [HEADERS.last_inbound_text]: callbackDuplicateText,
+    [HEADERS.response_status]: callbackDuplicateText,
+    [HEADERS.history_json]: JSON.stringify([
+      { role: "agent", text: callbackDuplicateText, ts: "2026-08-12T10:05:00-04:00" },
+      { role: "assistant", text: "Monday afternoon works.", ts: "2026-08-12T10:06:00-04:00" }
+    ])
+  });
+  if (isDurableHandledDuplicateInbound_(callbackDuplicateRow, callbackDuplicateText)) {
+    throw new Error("Callback updates must bypass durable duplicate suppression");
   }
   if (!isClearNoSignal_("Thank you I think I have an under control")) {
     throw new Error("Under-control voice typo must be recognized as a clear closeout");

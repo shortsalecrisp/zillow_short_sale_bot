@@ -168,9 +168,11 @@ CHATBOT_HEADERS = [
     "auto_reply_count",
     "human_override",
     "last_message_id",
-] + [f"extra_{idx}" for idx in range(21, 43)]
+] + [f"extra_{idx}" for idx in range(21, 45)]
 CHATBOT_HEADERS[37] = "callback_requested"
 CHATBOT_HEADERS[38] = "callback_time"
+CHATBOT_HEADERS[43] = "last_inbound_text"
+CHATBOT_HEADERS[44] = "last_inbound_at"
 
 
 def _chatbot_row(
@@ -806,6 +808,114 @@ def test_sms_post_handoff_repeated_callback_time_does_not_request_another_alert(
     assert body["callback_updated"] is False
     assert body["alert_needed"] is False
     assert body["handoff_type"] == ""
+    assert sender.calls == []
+
+
+def test_sms_durable_handled_duplicate_with_new_message_id_is_suppressed(monkeypatch):
+    module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    inbound = "I have someone thank you"
+    sheet.rows[2][9] = inbound
+    sheet.rows[2][13] = "done"
+    sheet.rows[2][17] = json.dumps(
+        [
+            {"role": "agent", "text": inbound, "ts": "2026-08-11T10:05:00-04:00"},
+            {"role": "assistant", "text": "Understood - thanks for letting me know.", "ts": "2026-08-11T10:07:00-04:00"},
+        ]
+    )
+    sheet.rows[2][20] = "first-message-id"
+    sheet.rows[2][43] = "i have someone thank you"
+    sheet.rows[2][44] = "2026-08-11T10:05:00-04:00"
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "  I HAVE someone thank you  ",
+            "message_id": "second-message-id",
+            "received_at": "2026-08-12T10:18:00-04:00",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["duplicate"] is True
+    assert body["should_reply"] is False
+    assert body["reason"] == "Durable handled inbound duplicate ignored"
+    assert sender.calls == []
+    assert sheet.rows[2][20] == "first-message-id"
+    assert sheet.rows[2][44] == "2026-08-11T10:05:00-04:00"
+
+
+def test_sms_unconfirmed_old_duplicate_is_reprocessed(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    inbound = "I have someone thank you"
+    sheet.rows[2][9] = inbound
+    sheet.rows[2][13] = "active"
+    sheet.rows[2][17] = json.dumps(
+        [{"role": "agent", "text": inbound, "ts": "2026-08-11T10:05:00-04:00"}]
+    )
+    sheet.rows[2][20] = "first-message-id"
+    sheet.rows[2][43] = inbound
+    sheet.rows[2][44] = "2026-08-11T10:05:00-04:00"
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "second-message-id",
+            "received_at": "2026-08-12T10:18:00-04:00",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("duplicate") is not True
+    assert sheet.rows[2][20] == "second-message-id"
+    assert sheet.rows[2][44] == "2026-08-12T10:18:00-04:00"
+
+
+def test_sms_callback_repeat_bypasses_durable_duplicate_guard(monkeypatch):
+    module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    inbound = "Afternoon on Monday would work better"
+    sheet.rows[2][9] = inbound
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][15] = "scheduled_callback"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][17] = json.dumps(
+        [
+            {"role": "agent", "text": inbound, "ts": "2026-08-11T10:05:00-04:00"},
+            {"role": "assistant", "text": "Monday afternoon works.", "ts": "2026-08-11T10:06:00-04:00"},
+        ]
+    )
+    sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][20] = "first-message-id"
+    sheet.rows[2][38] = "Monday Afternoon"
+    sheet.rows[2][43] = inbound.lower()
+    sheet.rows[2][44] = "2026-08-11T10:05:00-04:00"
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "second-message-id",
+            "received_at": "2026-08-12T10:18:00-04:00",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("duplicate") is not True
+    assert body["reason"] == "Callback timing repeated after human handoff"
+    assert body["alert_needed"] is False
+    assert sheet.rows[2][20] == "second-message-id"
     assert sender.calls == []
 
 

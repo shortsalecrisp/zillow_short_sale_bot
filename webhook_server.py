@@ -3460,6 +3460,83 @@ def _sms_history_array(value: Any) -> List[Dict[str, Any]]:
         return []
 
 
+def _sms_normalize_handled_inbound_text(value: Any) -> str:
+    return _sms_normalize_whitespace(value).lower()
+
+
+def _sms_history_has_confirmed_reply_after_inbound(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    current_text = _sms_normalize_handled_inbound_text(inbound_text)
+    if not current_text:
+        return False
+
+    history = _sms_history_array(row_obj.get("history_json"))
+    for index in range(len(history) - 1, -1, -1):
+        entry = history[index] if isinstance(history[index], dict) else {}
+        if str(entry.get("role") or "").lower() != "agent":
+            continue
+        if _sms_normalize_handled_inbound_text(entry.get("text")) != current_text:
+            continue
+        return any(
+            isinstance(later, dict)
+            and str(later.get("role") or "").lower() == "assistant"
+            and bool(_sms_normalize_whitespace(later.get("text")))
+            for later in history[index + 1 :]
+        )
+    return False
+
+
+def _sms_is_intentional_no_reply_disposition(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    ai_state = str(row_obj.get("ai_state") or "").lower()
+    handoff_flag = str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
+    human_override = str(row_obj.get("human_override") or "").upper() == "TRUE"
+    return bool(
+        ai_state == "handoff"
+        or handoff_flag
+        or (human_override and ai_state != "done")
+        or _sms_is_opt_out(inbound_text)
+        or _sms_is_final_courtesy(inbound_text)
+    )
+
+
+def _sms_is_durable_handled_duplicate(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    prior_text = _sms_normalize_handled_inbound_text(row_obj.get("last_inbound_text"))
+    current_text = _sms_normalize_handled_inbound_text(inbound_text)
+    if not prior_text or prior_text != current_text:
+        return False
+    if _sms_is_scheduled_callback(inbound_text) or _sms_is_post_handoff_callback_update(row_obj, inbound_text):
+        return False
+    if _sms_normalize_handled_inbound_text(row_obj.get("response_status")) != current_text:
+        return False
+    return _sms_history_has_confirmed_reply_after_inbound(row_obj, inbound_text) or _sms_is_intentional_no_reply_disposition(
+        row_obj, inbound_text
+    )
+
+
+def _sms_parse_inbound_timestamp(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _sms_is_recent_duplicate_inbound(row_obj: Dict[str, str], inbound_text: str, received_at: str) -> bool:
+    prior_text = _sms_normalize_handled_inbound_text(row_obj.get("last_inbound_text"))
+    current_text = _sms_normalize_handled_inbound_text(inbound_text)
+    if not prior_text or prior_text != current_text:
+        return False
+    prior_at = _sms_parse_inbound_timestamp(row_obj.get("last_inbound_at") or row_obj.get("last_contact_time"))
+    current_at = _sms_parse_inbound_timestamp(received_at)
+    if not prior_at or not current_at:
+        return False
+    return abs((current_at - prior_at).total_seconds()) <= 5 * 60
+
+
 def _sms_append_history(ws, row_idx: int, headers: List[str], row_obj: Dict[str, str], entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     history = _sms_history_array(row_obj.get("history_json"))
     history.append(entry)
@@ -4190,7 +4267,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
             {"ok": True, "duplicate": True, "should_reply": False, "reason": "Duplicate message_id ignored"}
         )
 
-    if _sms_normalize_whitespace(row_obj.get("last_inbound_text") or "").lower() == inbound_text.lower():
+    if _sms_is_recent_duplicate_inbound(row_obj, inbound_text, received_at):
         result = _sms_normalize_tasker_payload(
             {
                 "ok": True,
@@ -4205,17 +4282,40 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         )
         return result
 
+    if _sms_is_durable_handled_duplicate(row_obj, inbound_text):
+        result = _sms_normalize_tasker_payload(
+            {
+                "ok": True,
+                "duplicate": True,
+                "should_reply": False,
+                "reason": "Durable handled inbound duplicate ignored",
+            }
+        )
+        _sms_append_debug(
+            "incoming_sms_duplicate_suppressed",
+            {"request_id": request_id, "phone": phone_raw, "message": inbound_text, "reason": result["reason"]},
+        )
+        return result
+
     _sms_update_row_fields(
         ws,
         row_idx,
         headers,
         {
-            "last_inbound_text": inbound_text,
+            "last_inbound_text": _sms_normalize_handled_inbound_text(inbound_text),
+            "last_inbound_at": received_at,
             "last_contact_time": received_at,
             "last_message_id": message_id,
         },
     )
-    row_obj.update({"last_inbound_text": inbound_text, "last_contact_time": received_at, "last_message_id": message_id})
+    row_obj.update(
+        {
+            "last_inbound_text": _sms_normalize_handled_inbound_text(inbound_text),
+            "last_inbound_at": received_at,
+            "last_contact_time": received_at,
+            "last_message_id": message_id,
+        }
+    )
     _sms_append_history(ws, row_idx, headers, row_obj, {"role": "agent", "text": inbound_text, "ts": received_at})
 
     decision = _sms_build_decision(row_obj, inbound_text)
