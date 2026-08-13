@@ -26,3 +26,11 @@ def test_email_draft_does_not_claim_a_prior_conversation():
     assert "Im glad we got a chance to speak this morning" not in CHATBOT
     assert 'return "Crisp Short Sales - How I Can Help";' in CHATBOT
     assert "I have been handling short sales for over 15 years" in CHATBOT
+
+
+def test_info_email_acknowledgement_bypasses_phone_only_sanitizer():
+    assert (
+        "normalizeWhitespace_(text) === normalizeWhitespace_(getInfoEmailAcknowledgementReply_())"
+        in CHATBOT
+    )
+    assert "the downstream approval workflow can recognize and queue the email" in CHATBOT

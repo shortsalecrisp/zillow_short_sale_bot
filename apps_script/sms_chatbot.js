@@ -3547,6 +3547,12 @@ function sanitizeReplyPhoneOnlyCta_(replyText) {
     return text;
   }
 
+  // Approved info-email requests must keep the canonical acknowledgement so
+  // the downstream approval workflow can recognize and queue the email.
+  if (normalizeWhitespace_(text) === normalizeWhitespace_(getInfoEmailAcknowledgementReply_())) {
+    return text;
+  }
+
   if (/^thanks for sending your email[.!]?$/i.test(text)) {
     return text;
   }
