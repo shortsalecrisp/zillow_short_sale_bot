@@ -1145,6 +1145,29 @@ def _normalize_agent_name(name: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _agent_dedupe_key(name: str) -> str:
+    """Match the same agent even when one source includes a middle initial."""
+
+    tokens = _normalize_agent_name(name).split()
+    while len(tokens) > 2 and tokens[-1] in {"jr", "sr", "ii", "iii", "iv"}:
+        tokens.pop()
+    if len(tokens) >= 2:
+        return f"{tokens[0]} {tokens[-1]}"
+    return " ".join(tokens)
+
+
+def _agent_already_seen(name: str) -> bool:
+    normalized = _normalize_agent_name(name)
+    if not normalized:
+        return False
+    if normalized in seen_agents:
+        return True
+    target_key = _agent_dedupe_key(normalized)
+    return bool(target_key) and any(
+        _agent_dedupe_key(existing) == target_key for existing in seen_agents
+    )
+
+
 seen_phones: Set[str] = set()
 seen_agents: Set[str] = set()
 seen_zpids: Set[str] = set()
@@ -13605,6 +13628,12 @@ def process_rows(
             LOG.info("Skip stale/off-market zpid %s", zpid)
             continue
         name = (r.get("agentName") or "").strip()
+        normalized_agent = _normalize_agent_name(name)
+        if normalized_agent and _agent_already_seen(normalized_agent):
+            outcome = "skipped_already_contacted_agent"
+            outcomes[zpid] = outcome
+            LOG.info("SKIP already-contacted agent %s (%s)", name, r.get("zpid"))
+            continue
         if _pilot_origin_requires_verifier_hold(r) and str(r.get("requiresVerifierReview", "")).lower() == "true":
             if TEAM_RE.search(name):
                 name = ""
@@ -13641,12 +13670,6 @@ def process_rows(
             LOG.debug("SKIP team/office agent name for %s (%s): %s", r.get("street"), r.get("zpid"), name)
             continue
         state = r.get("state", "")
-        normalized_agent = _normalize_agent_name(name)
-        if normalized_agent and normalized_agent in seen_agents:
-            outcome = "skipped_already_contacted_agent"
-            outcomes[zpid] = outcome
-            LOG.info("SKIP already-contacted agent %s (%s)", name, r.get("zpid"))
-            continue
         phone_info = {"number": "", "confidence": "", "reason": ""}
         email_info = {"email": "", "confidence": "", "reason": ""}
         try:

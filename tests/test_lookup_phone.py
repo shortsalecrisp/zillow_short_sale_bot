@@ -1644,6 +1644,50 @@ def test_process_rows_holds_pilot_origin_sms_for_verifier(monkeypatch):
     bot_min.seen_phones.clear()
 
 
+def test_process_rows_skips_known_agent_before_pilot_row_append(monkeypatch):
+    bot_min.seen_agents.clear()
+    bot_min.seen_phones.clear()
+    bot_min.seen_agents.add("julia a hupp")
+    monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(
+        bot_min,
+        "load_seen_contacts",
+        lambda *args, **kwargs: (set(), set(bot_min.seen_agents)),
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "append_row",
+        lambda *_: (_ for _ in ()).throw(AssertionError("known agent must not append")),
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "schedule_initial_sms",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("known agent must not text")),
+    )
+
+    outcomes = bot_min.process_rows(
+        [
+            {
+                "description": "short sale listing",
+                "agentName": "Julia Hupp",
+                "state": "OH",
+                "street": "502 Frebis Avenue",
+                "city": "Columbus",
+                "zpid": "free-julia-duplicate",
+                "search_source": "free-source-pilot:idx_broker_remarks",
+                "requiresVerifierReview": "true",
+            }
+        ],
+        skip_dedupe=True,
+        return_outcomes=True,
+    )
+
+    assert outcomes == {"free-julia-duplicate": "skipped_already_contacted_agent"}
+    bot_min.seen_agents.clear()
+    bot_min.seen_phones.clear()
+
+
 def test_process_rows_accepts_address_only_pilot_for_verifier(monkeypatch):
     monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
     monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
