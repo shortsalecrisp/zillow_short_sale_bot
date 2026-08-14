@@ -46,6 +46,14 @@ def test_claim_revalidates_latest_crm_message_before_send():
     assert "inboundText && currentInboundText" in OUTBOX
 
 
+def test_stale_text_guard_uses_same_case_insensitive_normalization_on_both_sides():
+    assert 'function normalizePendingSmsInboundText_(value)' in OUTBOX
+    assert 'normalizeWhitespace_(String(value || "")).toLowerCase()' in OUTBOX
+    assert 'var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);' in OUTBOX
+    assert 'normalizePendingSmsInboundText_(rowObj[HEADERS.last_inbound_text])' in OUTBOX
+    assert 'function testPendingSmsStaleTextNormalization_()' in OUTBOX
+
+
 def test_watchdog_recovers_claims_but_does_not_blindly_resend_uncertain_sms():
     assert 'status === "claimed"' in OUTBOX
     assert 'setValue("queued")' in OUTBOX
@@ -90,3 +98,5 @@ def test_reply_history_uses_canonical_pending_text_after_transport_damage():
 def test_safe_deployment_probe_exercises_receipt_lease_identity():
     assert "probe.receipt_lease_identity" in UNIFIED
     assert "testSmsReceiptLeaseIdentity_()" in UNIFIED
+    assert "probe.stale_text_normalization" in UNIFIED
+    assert "testPendingSmsStaleTextNormalization_()" in UNIFIED

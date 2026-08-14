@@ -124,6 +124,9 @@ function handleUnifiedSmsPost_(e) {
       probe.receipt_lease_identity = typeof testSmsReceiptLeaseIdentity_ === "function"
         ? testSmsReceiptLeaseIdentity_()
         : { ok: false, reason: "Receipt lease-identity test is unavailable" };
+      probe.stale_text_normalization = typeof testPendingSmsStaleTextNormalization_ === "function"
+        ? testPendingSmsStaleTextNormalization_()
+        : { ok: false, reason: "Stale-text normalization test is unavailable" };
       try {
         var ss = getSmsSpreadsheet_();
         probe.spreadsheet_name = ss.getName();
