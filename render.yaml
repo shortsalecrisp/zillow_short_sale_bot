@@ -202,6 +202,28 @@ services:
         value: "7"
       - key: FREE_SOURCE_PILOT_AGENT_ADDRESS_SHADOW_MAX_CANDIDATES
         value: "10"
+      - key: FREE_SOURCE_PILOT_QUERY_EXCLUSION_START_DATE
+        value: "2026-08-15"
+      - key: FREE_SOURCE_PILOT_QUERY_EXCLUSION_DAYS
+        value: "7"
+      - key: FREE_SOURCE_PILOT_QUERY_EXCLUSION_BASELINE_PER_BUCKET
+        value: "5"
+      - key: FREE_SOURCE_PILOT_QUERY_EXCLUSION_DOMAINS
+        value: edinarealty.com,ikeyrealty.com
+      - key: FREE_SOURCE_PILOT_CANONICAL_ID_AUDIT_START_DATE
+        value: "2026-08-14"
+      - key: FREE_SOURCE_PILOT_CANONICAL_ID_AUDIT_DAYS
+        value: "7"
+      - key: FREE_SOURCE_PILOT_CANONICAL_ID_AUDIT_MAX_CANDIDATES
+        value: "10"
+      - key: FREE_SOURCE_PILOT_DELIVERY_RECEIPT_AUDIT_START_DATE
+        value: "2026-08-14"
+      - key: FREE_SOURCE_PILOT_DELIVERY_RECEIPT_AUDIT_DAYS
+        value: "7"
+      - key: FREE_SOURCE_PILOT_DELIVERY_RECEIPT_MATURE_TARGET
+        value: "6"
+      - key: FREE_SOURCE_PILOT_DELIVERY_RECEIPT_NEW_TARGET
+        value: "4"
       - key: FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR
         value: "9"
       - key: FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_START_DATE

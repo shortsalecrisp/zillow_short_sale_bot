@@ -321,6 +321,54 @@ AGENT_ADDRESS_SHADOW_MAX_CANDIDATES = max(
     1,
     int(os.getenv("FREE_SOURCE_PILOT_AGENT_ADDRESS_SHADOW_MAX_CANDIDATES", "10")),
 )
+QUERY_EXCLUSION_EXPERIMENT_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_QUERY_EXCLUSION_START_DATE",
+    "2026-08-15",
+).strip()
+QUERY_EXCLUSION_EXPERIMENT_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_QUERY_EXCLUSION_DAYS", "7")),
+)
+QUERY_EXCLUSION_BASELINE_PER_BUCKET = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_QUERY_EXCLUSION_BASELINE_PER_BUCKET", "5")),
+)
+QUERY_EXCLUSION_DOMAINS = tuple(
+    domain.strip().lower()
+    for domain in os.getenv(
+        "FREE_SOURCE_PILOT_QUERY_EXCLUSION_DOMAINS",
+        "edinarealty.com,ikeyrealty.com",
+    ).split(",")
+    if domain.strip()
+)
+CANONICAL_ID_AUDIT_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_CANONICAL_ID_AUDIT_START_DATE",
+    "2026-08-14",
+).strip()
+CANONICAL_ID_AUDIT_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_CANONICAL_ID_AUDIT_DAYS", "7")),
+)
+CANONICAL_ID_AUDIT_MAX_CANDIDATES = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_CANONICAL_ID_AUDIT_MAX_CANDIDATES", "10")),
+)
+DELIVERY_RECEIPT_AUDIT_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_DELIVERY_RECEIPT_AUDIT_START_DATE",
+    "2026-08-14",
+).strip()
+DELIVERY_RECEIPT_AUDIT_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_DELIVERY_RECEIPT_AUDIT_DAYS", "7")),
+)
+DELIVERY_RECEIPT_MATURE_TARGET = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_DELIVERY_RECEIPT_MATURE_TARGET", "6")),
+)
+DELIVERY_RECEIPT_NEW_TARGET = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_DELIVERY_RECEIPT_NEW_TARGET", "4")),
+)
 QUALIFICATION_PRECEDENCE_SHADOW_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_QUALIFICATION_PRECEDENCE_SHADOW_START_DATE",
     "2026-08-02",
@@ -2751,6 +2799,134 @@ def first_seen_date(value: str) -> dt.date | None:
     return parsed.astimezone(ZoneInfo(ROTATION_TZ)).date()
 
 
+def query_exclusion_baseline_states(states: list[str], source: str) -> set[str]:
+    """Choose exactly five reproducible baseline states per source bucket."""
+    ranked = sorted(
+        {state.upper() for state in states},
+        key=lambda state: hashlib.sha256(
+            f"{QUERY_EXCLUSION_EXPERIMENT_START_DATE}|{source}|{state}".encode("utf-8")
+        ).hexdigest(),
+    )
+    return set(ranked[: min(QUERY_EXCLUSION_BASELINE_PER_BUCKET, len(ranked))])
+
+
+def query_exclusion_arm(
+    run_date: dt.date,
+    state: str,
+    source: str,
+    baseline_states: dict[str, set[str]],
+) -> str:
+    if source not in DEFAULT_DAILY_SOURCE_BUCKETS or not experiment_active(
+        run_date,
+        QUERY_EXCLUSION_EXPERIMENT_START_DATE,
+        QUERY_EXCLUSION_EXPERIMENT_DAYS,
+    ):
+        return "not_in_experiment"
+    return "baseline" if state.upper() in baseline_states.get(source, set()) else "excluded"
+
+
+def query_with_exclusion_experiment(template: str, state_term: str, arm: str) -> str:
+    query = template.format(state=state_term)
+    if arm != "excluded":
+        return query
+    exclusions = " ".join(f"-site:{domain}" for domain in QUERY_EXCLUSION_DOMAINS)
+    return normalize_space(f"{query} {exclusions}")
+
+
+def evidence_hash(value: str) -> str:
+    compact = normalize_space(value)
+    return hashlib.sha256(compact.encode("utf-8")).hexdigest()[:16] if compact else ""
+
+
+MLS_IDENTIFIER_PATTERNS = (
+    re.compile(r"(?i)\bMLS\s*(?:number|no\.?|#|id)?\s*[:#]?\s*([A-Z]{0,6}[0-9][A-Z0-9-]{4,20})\b"),
+    re.compile(r"\(#([A-Z]{1,6}[0-9][A-Z0-9-]{4,20})\)"),
+)
+
+
+def canonical_listing_identifier(row: dict[str, str]) -> str:
+    """Extract a conservative MLS-like identifier from already-stored evidence."""
+    fields = (
+        "contact_verification_note",
+        "pending_queue_listing_json",
+        "raw_title",
+        "qualification_evidence",
+        "description_excerpt",
+    )
+    for field in fields:
+        value = normalize_space(row.get(field, ""))
+        for pattern in MLS_IDENTIFIER_PATTERNS:
+            match = pattern.search(value)
+            if match:
+                return re.sub(r"[^A-Z0-9]", "", match.group(1).upper())
+    return ""
+
+
+def parse_sheet_datetime(value: str) -> dt.datetime | None:
+    raw = normalize_space(value)
+    if not raw:
+        return None
+    candidates = (raw, raw.replace("Z", "+00:00"))
+    for candidate in candidates:
+        try:
+            parsed = dt.datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=ZoneInfo(ROTATION_TZ))
+            return parsed.astimezone(ZoneInfo(ROTATION_TZ))
+        except ValueError:
+            continue
+    for pattern in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%m-%d-%y %H.%M"):
+        try:
+            return dt.datetime.strptime(raw, pattern).replace(tzinfo=ZoneInfo(ROTATION_TZ))
+        except ValueError:
+            continue
+    return None
+
+
+def delivery_receipt_evidence(main_row: dict[str, str]) -> dict[str, Any]:
+    stable_id = stable_id_from_main_row(main_row)
+    phone = normalize_phone(first_mapped_value(main_row, "phone", "mobile", "agent_phone"))
+    initial_at = first_mapped_value(
+        main_row,
+        "initial_sms_at",
+        "initial_sms_timestamp",
+        "initial_text_sent_at",
+        "initial_send_timestamp",
+    )
+    timestamp_basis = "initial_sms_timestamp" if initial_at else "last_contact_time"
+    if not initial_at:
+        initial_at = first_mapped_value(main_row, "last_contact_time")
+    inbound = first_mapped_value(main_row, "last_inbound_text", "response_status")
+    inbound_at = first_mapped_value(main_row, "last_inbound_at", "last_contact_time")
+    message_id = first_mapped_value(main_row, "last_message_id", "inbound_message_id")
+    failure_text = " ".join(
+        first_mapped_value(main_row, header)
+        for header in ("sms_delivery_status", "mailshake_status", "contact_verification_note")
+    ).lower()
+    explicit_failure = bool(re.search(r"\b(?:sms|delivery|gateway)\s*(?:failed|error|undeliverable)\b", failure_text))
+    reply_backed = bool(inbound and message_id)
+    if explicit_failure:
+        outcome = "failed"
+    elif reply_backed:
+        outcome = "confirmed_by_inbound"
+    else:
+        outcome = "delivery_unconfirmed"
+    return {
+        "stable_id": stable_id,
+        "phone_hash": evidence_hash(phone),
+        "message_id_hash": evidence_hash(message_id),
+        "initial_sms_at": initial_at,
+        "timestamp_basis": timestamp_basis,
+        "receipt_at": inbound_at if reply_backed else "",
+        "outcome": outcome,
+        "definitive": outcome in {"failed", "confirmed_by_inbound"},
+        "provider_delivery_receipt_present": False,
+        "evidence_basis": "inbound_message_id" if reply_backed else ("explicit_failure" if explicit_failure else "none"),
+        "writes": 0,
+        "sends": 0,
+    }
+
+
 BROKERAGE_SUFFIX_SHADOWS = (
     "provided stellar",
     "black label real estate",
@@ -3127,6 +3303,22 @@ def run_linkage_and_suffix_audits(
             AGENT_ADDRESS_SHADOW_DAYS,
         )
     )
+    canonical_id_audit_active = phase == "post_verifier" and (
+        force
+        or experiment_active(
+            run_date,
+            CANONICAL_ID_AUDIT_START_DATE,
+            CANONICAL_ID_AUDIT_DAYS,
+        )
+    )
+    delivery_receipt_audit_active = phase == "post_verifier" and (
+        force
+        or experiment_active(
+            run_date,
+            DELIVERY_RECEIPT_AUDIT_START_DATE,
+            DELIVERY_RECEIPT_AUDIT_DAYS,
+        )
+    )
     qualification_shadow_active = force or experiment_active(
         run_date,
         QUALIFICATION_PRECEDENCE_SHADOW_START_DATE,
@@ -3190,6 +3382,21 @@ def run_linkage_and_suffix_audits(
         "agent_address_shadow_wrong_person": 0,
         "agent_address_shadow_stopped": 0,
         "agent_address_shadow_supported": 0,
+        "canonical_id_eligible": 0,
+        "canonical_id_evaluated": 0,
+        "canonical_id_reviewable": 0,
+        "canonical_id_exact": 0,
+        "canonical_id_missing": 0,
+        "canonical_id_mismatches": 0,
+        "canonical_id_stopped": 0,
+        "canonical_id_supported": 0,
+        "delivery_receipt_selected": 0,
+        "delivery_receipt_mature_selected": 0,
+        "delivery_receipt_new_selected": 0,
+        "delivery_receipt_definitive": 0,
+        "delivery_receipt_reply_backed": 0,
+        "delivery_receipt_failed": 0,
+        "delivery_receipt_unconfirmed": 0,
         "qualification_shadow_rows": 0,
         "qualification_shadow_ready": 0,
         "qualification_shadow_disqualified": 0,
@@ -3215,6 +3422,8 @@ def run_linkage_and_suffix_audits(
         not link_active
         and not suffix_active
         and not agent_address_shadow_active
+        and not canonical_id_audit_active
+        and not delivery_receipt_audit_active
         and not qualification_shadow_active
         and not description_block_shadow_active
         and not site_chrome_shadow_active
@@ -3230,7 +3439,7 @@ def run_linkage_and_suffix_audits(
         )
         return stats
 
-    main_raw = get_values(token, spreadsheet_id, f"{main_tab}!A:AQ")
+    main_raw = get_values(token, spreadsheet_id, f"{main_tab}!A:AS")
     pilot_raw = get_values(token, spreadsheet_id, f"{pilot_tab}!A:{column_letter(len(PILOT_HEADERS))}")
     main_headers = {normalized_header(value) for value in (main_raw[0] if main_raw else [])}
     pilot_headers = {normalized_header(value) for value in (pilot_raw[0] if pilot_raw else [])}
@@ -3270,6 +3479,8 @@ def run_linkage_and_suffix_audits(
         link_active=link_active,
         suffix_active=suffix_active,
         agent_address_shadow_active=agent_address_shadow_active,
+        canonical_id_audit_active=canonical_id_audit_active,
+        delivery_receipt_audit_active=delivery_receipt_audit_active,
         qualification_shadow_active=qualification_shadow_active,
         description_block_shadow_active=description_block_shadow_active,
         site_chrome_shadow_active=site_chrome_shadow_active,
@@ -3280,10 +3491,173 @@ def run_linkage_and_suffix_audits(
         site_chrome_max_per_run=SITE_CHROME_SHADOW_MAX_PER_RUN,
         compound_negative_max_per_run=COMPOUND_NEGATIVE_SHADOW_MAX_PER_RUN,
         agent_address_shadow_max_candidates=AGENT_ADDRESS_SHADOW_MAX_CANDIDATES,
+        canonical_id_audit_max_candidates=CANONICAL_ID_AUDIT_MAX_CANDIDATES,
+        delivery_receipt_mature_target=DELIVERY_RECEIPT_MATURE_TARGET,
+        delivery_receipt_new_target=DELIVERY_RECEIPT_NEW_TARGET,
         forced=force,
         counts_toward_experiment=not force,
         writes=0,
     )
+    main_rows_by_number = dict(main_rows)
+    if canonical_id_audit_active:
+        canonical_candidates: list[tuple[int, dict[str, str], dt.date]] = []
+        for pilot_sheet_row, pilot_row in all_pilot_rows:
+            candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+            if not candidate_date or candidate_date > run_date:
+                continue
+            if not force and not experiment_active(
+                candidate_date,
+                CANONICAL_ID_AUDIT_START_DATE,
+                CANONICAL_ID_AUDIT_DAYS,
+            ):
+                continue
+            if normalize_space(pilot_row.get("source", "")).lower() != "idx_broker_remarks":
+                continue
+            if normalize_space(pilot_row.get("status", "")).lower() != "qualified":
+                continue
+            if normalize_space(pilot_row.get("promotion_status", "")).lower() != "promoted":
+                continue
+            canonical_candidates.append((pilot_sheet_row, pilot_row, candidate_date))
+        canonical_candidates.sort(key=lambda item: (item[2], item[0]))
+        canonical_candidates = canonical_candidates[:CANONICAL_ID_AUDIT_MAX_CANDIDATES]
+        stats["canonical_id_eligible"] = len(canonical_candidates)
+        canonical_stopped = False
+        for sample_rank, (pilot_sheet_row, pilot_row, candidate_date) in enumerate(
+            canonical_candidates,
+            start=1,
+        ):
+            if canonical_stopped:
+                break
+            stats["canonical_id_evaluated"] += 1
+            reconciliation = reconcile_pilot_link(pilot_sheet_row, pilot_row, main_rows)
+            main_row_number = reconciliation.get("matched_main_row")
+            main_row = main_rows_by_number.get(main_row_number or 0, {})
+            pilot_identifier = canonical_listing_identifier(pilot_row)
+            verifier_identifier = canonical_listing_identifier(main_row)
+            reviewable = bool(
+                reconciliation["outcome"] == "linked"
+                and pilot_identifier
+                and verifier_identifier
+            )
+            exact = bool(reviewable and pilot_identifier == verifier_identifier)
+            if reviewable:
+                stats["canonical_id_reviewable"] += 1
+                if exact:
+                    stats["canonical_id_exact"] += 1
+                else:
+                    stats["canonical_id_mismatches"] += 1
+                    canonical_stopped = True
+                    stats["canonical_id_stopped"] = 1
+            else:
+                stats["canonical_id_missing"] += 1
+            reviewable_count = stats["canonical_id_reviewable"]
+            agreement_rate = (
+                stats["canonical_id_exact"] / reviewable_count if reviewable_count else 0.0
+            )
+            sample_complete = reviewable_count >= CANONICAL_ID_AUDIT_MAX_CANDIDATES
+            if sample_complete and agreement_rate < 0.9:
+                canonical_stopped = True
+                stats["canonical_id_stopped"] = 1
+            if sample_complete and agreement_rate >= 0.9:
+                stats["canonical_id_supported"] = 1
+            if force or candidate_date == run_date:
+                log_event(
+                    "pilot_canonical_listing_id_audit",
+                    phase=phase,
+                    run_date=run_date.isoformat(),
+                    pilot_row=pilot_sheet_row,
+                    main_row=main_row_number,
+                    stable_id=pilot_row.get("synthetic_zpid", ""),
+                    sample_rank=sample_rank,
+                    linkage=reconciliation["outcome"],
+                    address_exact=reconciliation["outcome"] == "linked",
+                    pilot_identifier_hash=evidence_hash(pilot_identifier),
+                    verifier_identifier_hash=evidence_hash(verifier_identifier),
+                    reviewable=reviewable,
+                    exact_identifier_agreement=exact,
+                    agreement_rate=round(agreement_rate, 4),
+                    sample_complete=sample_complete,
+                    experiment_stopped=canonical_stopped,
+                    raw_identifier_logged=False,
+                    raw_url_logged=False,
+                    writes=0,
+                    success_metric="at_least_90pct_exact_address_and_listing_id_agreement_after_10",
+                    stop_condition="first_mismatch_or_any_raw_url_or_data_write",
+                )
+
+    if delivery_receipt_audit_active:
+        linked_delivery_rows: list[tuple[dt.date, int, int, dict[str, str], dict[str, Any]]] = []
+        for pilot_sheet_row, pilot_row in pilot_rows:
+            candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+            if not candidate_date or candidate_date > run_date:
+                continue
+            reconciliation = reconcile_pilot_link(pilot_sheet_row, pilot_row, main_rows)
+            main_row_number = reconciliation.get("matched_main_row")
+            main_row = main_rows_by_number.get(main_row_number or 0, {})
+            if not main_row or normalize_space(main_row.get("initial_text_sent", "")).lower() != "x":
+                continue
+            receipt = delivery_receipt_evidence(main_row)
+            linked_delivery_rows.append(
+                (candidate_date, pilot_sheet_row, main_row_number or 0, main_row, receipt)
+            )
+        mature_cutoff = run_date - dt.timedelta(days=3)
+        mature_rows = sorted(
+            (item for item in linked_delivery_rows if item[0] <= mature_cutoff),
+            key=lambda item: (item[0], item[1]),
+            reverse=True,
+        )[:DELIVERY_RECEIPT_MATURE_TARGET]
+        new_rows = sorted(
+            (
+                item
+                for item in linked_delivery_rows
+                if experiment_active(
+                    item[0],
+                    DELIVERY_RECEIPT_AUDIT_START_DATE,
+                    DELIVERY_RECEIPT_AUDIT_DAYS,
+                )
+            ),
+            key=lambda item: (item[0], item[1]),
+        )[:DELIVERY_RECEIPT_NEW_TARGET]
+        selected_delivery_rows = [("mature", item) for item in mature_rows]
+        selected_delivery_rows.extend(("new_attempt", item) for item in new_rows)
+        stats["delivery_receipt_mature_selected"] = len(mature_rows)
+        stats["delivery_receipt_new_selected"] = len(new_rows)
+        stats["delivery_receipt_selected"] = len(selected_delivery_rows)
+        for cohort, (_, pilot_sheet_row, main_row_number, _, receipt) in selected_delivery_rows:
+            if receipt["definitive"]:
+                stats["delivery_receipt_definitive"] += 1
+            if receipt["outcome"] == "confirmed_by_inbound":
+                stats["delivery_receipt_reply_backed"] += 1
+            elif receipt["outcome"] == "failed":
+                stats["delivery_receipt_failed"] += 1
+            else:
+                stats["delivery_receipt_unconfirmed"] += 1
+            log_event(
+                "pilot_delivery_receipt_reconciliation",
+                phase=phase,
+                run_date=run_date.isoformat(),
+                cohort=cohort,
+                pilot_row=pilot_sheet_row,
+                main_row=main_row_number,
+                **receipt,
+            )
+        log_event(
+            "pilot_delivery_receipt_reconciliation_done",
+            phase=phase,
+            run_date=run_date.isoformat(),
+            selected=stats["delivery_receipt_selected"],
+            definitive=stats["delivery_receipt_definitive"],
+            success=bool(
+                stats["delivery_receipt_selected"] >= 10
+                and stats["delivery_receipt_definitive"] >= 9
+            ),
+            provider_receipts_available=False,
+            note="inbound_message_ids_prove_reply_backed_delivery_only",
+            writes=0,
+            sends=0,
+            success_metric="definitive_status_for_at_least_9_of_10_within_24h",
+            stop_condition="any_mutation_resend_or_ambiguous_linkage",
+        )
     if qualification_shadow_active:
         for pilot_sheet_row, pilot_row in all_pilot_rows:
             candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
@@ -4129,6 +4503,10 @@ def run(args: argparse.Namespace) -> None:
         )
         return
     source_queries = configured_source_queries(run_date)
+    experiment_baselines = {
+        source_query.source: query_exclusion_baseline_states(args.states, source_query.source)
+        for source_query in source_queries
+    }
 
     main_rows = get_values(token, args.spreadsheet_id, f"{args.main_tab}!A:AQ")
     existing = build_existing_index(main_rows)
@@ -4150,6 +4528,23 @@ def run(args: argparse.Namespace) -> None:
         "fetch_failed": 0,
         "rows_written": 0,
     }
+    exclusion_stats = {
+        source_query.source: {
+            arm: {
+                "searched": 0,
+                "results": 0,
+                "fetched": 0,
+                "qualified": 0,
+                "duplicates": 0,
+                "rejected": 0,
+                "fetch_failed": 0,
+                "rows_written": 0,
+                "excluded_domain_strict_hits": 0,
+            }
+            for arm in ("baseline", "excluded")
+        }
+        for source_query in source_queries
+    }
     log_event(
         "pilot_run_start",
         run_date=run_date.isoformat(),
@@ -4169,20 +4564,43 @@ def run(args: argparse.Namespace) -> None:
         promotion_daily_cap=args.promotion_daily_cap,
         promotion_dry_run=args.promotion_dry_run,
         dry_run=args.dry_run,
+        query_exclusion_experiment_active=experiment_active(
+            run_date,
+            QUERY_EXCLUSION_EXPERIMENT_START_DATE,
+            QUERY_EXCLUSION_EXPERIMENT_DAYS,
+        ),
+        query_exclusion_domains=QUERY_EXCLUSION_DOMAINS,
+        query_exclusion_baseline_states={
+            source: sorted(states) for source, states in experiment_baselines.items()
+        },
     )
 
     for state in args.states:
         state_query_term = STATE_QUERY_TERMS.get(state.upper(), state)
         for source_query in source_queries:
             source = source_query.source
-            query = source_query.template.format(state=state_query_term)
+            exclusion_arm = query_exclusion_arm(
+                run_date,
+                state,
+                source,
+                experiment_baselines,
+            )
+            query = query_with_exclusion_experiment(
+                source_query.template,
+                state_query_term,
+                exclusion_arm,
+            )
             stats["searched"] += 1
+            if exclusion_arm in {"baseline", "excluded"}:
+                exclusion_stats[source][exclusion_arm]["searched"] += 1
             log_event(
                 "pilot_query_start",
                 state=state,
                 source=source,
                 query=query,
                 date_restrict=source_query.date_restrict,
+                experiment_arm=exclusion_arm,
+                excluded_domains=QUERY_EXCLUSION_DOMAINS if exclusion_arm == "excluded" else (),
             )
             try:
                 engine, results = search_web(
@@ -4199,9 +4617,12 @@ def run(args: argparse.Namespace) -> None:
                     query=query,
                     date_restrict=source_query.date_restrict,
                     error=str(exc),
+                    experiment_arm=exclusion_arm,
                 )
                 continue
             stats["results"] += len(results)
+            if exclusion_arm in {"baseline", "excluded"}:
+                exclusion_stats[source][exclusion_arm]["results"] += len(results)
             log_event(
                 "pilot_query_results",
                 state=state,
@@ -4210,6 +4631,7 @@ def run(args: argparse.Namespace) -> None:
                 query=query,
                 date_restrict=source_query.date_restrict,
                 result_count=len(results),
+                experiment_arm=exclusion_arm,
             )
             time.sleep(args.sleep_seconds)
             query_rows: list[list[str]] = []
@@ -4376,7 +4798,26 @@ def run(args: argparse.Namespace) -> None:
                     duplicate_status=dup_status,
                     matched=matched,
                     promotion_status=row[14],
+                    experiment_arm=exclusion_arm,
                 )
+                result_host = urllib.parse.urlparse(result.url).netloc.lower()
+                if (
+                    exclusion_arm == "baseline"
+                    and any(
+                        result_host == domain or result_host.endswith("." + domain)
+                        for domain in QUERY_EXCLUSION_DOMAINS
+                    )
+                ):
+                    exclusion_stats[source][exclusion_arm]["excluded_domain_strict_hits"] += 1
+                    log_event(
+                        "pilot_query_exclusion_stop_recommended",
+                        run_date=run_date.isoformat(),
+                        state=state,
+                        source=source,
+                        experiment_arm=exclusion_arm,
+                        reason="baseline_strict_lead_from_excluded_domain",
+                        domain=result_host,
+                    )
                 already_seen_urls.add(result.url)
                 if result_source_ref:
                     already_seen_urls.add(result_source_ref)
@@ -4392,15 +4833,45 @@ def run(args: argparse.Namespace) -> None:
                     query_rows,
                 )
             stats["rows_written"] += 0 if args.dry_run else len(query_rows)
+            if exclusion_arm in {"baseline", "excluded"}:
+                arm_stats = exclusion_stats[source][exclusion_arm]
+                for metric in (
+                    "fetched",
+                    "qualified",
+                    "duplicates",
+                    "rejected",
+                    "fetch_failed",
+                ):
+                    arm_stats[metric] += query_stats[metric]
+                arm_stats["rows_written"] += 0 if args.dry_run else len(query_rows)
             log_event(
                 "pilot_query_done",
                 state=state,
                 source=source,
                 date_restrict=source_query.date_restrict,
                 rows_written=0 if args.dry_run else len(query_rows),
+                experiment_arm=exclusion_arm,
                 **query_stats,
             )
 
+    if experiment_active(
+        run_date,
+        QUERY_EXCLUSION_EXPERIMENT_START_DATE,
+        QUERY_EXCLUSION_EXPERIMENT_DAYS,
+    ):
+        log_event(
+            "pilot_query_exclusion_experiment_done",
+            run_date=run_date.isoformat(),
+            window_days=QUERY_EXCLUSION_EXPERIMENT_DAYS,
+            baseline_per_bucket=QUERY_EXCLUSION_BASELINE_PER_BUCKET,
+            excluded_domains=QUERY_EXCLUSION_DOMAINS,
+            same_search_budget=True,
+            stats=exclusion_stats,
+            success_metric="at_least_20pct_fewer_fetch_failures_without_lower_strict_yield",
+            stop_condition=(
+                "baseline_strict_lead_from_excluded_domain_or_excluded_arm_underperforms_after_300_searches"
+            ),
+        )
     log_event("pilot_run_done", stats=stats, dry_run=args.dry_run)
     if args.promote_ready:
         promote_ready_pilot_rows(

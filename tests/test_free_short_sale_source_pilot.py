@@ -2453,6 +2453,149 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(pilot.experiment_active(dt.date(2026, 8, 3), "2026-08-01", 3))
         self.assertFalse(pilot.experiment_active(dt.date(2026, 8, 4), "2026-08-01", 3))
 
+    def test_query_exclusion_split_keeps_five_of_fifty_as_baseline(self):
+        states = list(pilot.STATE_QUERY_TERMS)
+        baselines = {
+            source: pilot.query_exclusion_baseline_states(states, source)
+            for source in pilot.DEFAULT_DAILY_SOURCE_BUCKETS
+        }
+
+        for source in pilot.DEFAULT_DAILY_SOURCE_BUCKETS:
+            self.assertEqual(len(baselines[source]), 5)
+            arms = [
+                pilot.query_exclusion_arm(
+                    dt.date(2026, 8, 15), state, source, baselines
+                )
+                for state in states
+            ]
+            self.assertEqual(arms.count("baseline"), 5)
+            self.assertEqual(arms.count("excluded"), 45)
+
+        excluded_query = pilot.query_with_exclusion_experiment(
+            pilot.ALL_SOURCE_QUERY_MAP["idx_broker_remarks"],
+            "Minnesota",
+            "excluded",
+        )
+        self.assertIn("-site:edinarealty.com", excluded_query)
+        self.assertIn("-site:ikeyrealty.com", excluded_query)
+        baseline_query = pilot.query_with_exclusion_experiment(
+            pilot.ALL_SOURCE_QUERY_MAP["idx_broker_remarks"],
+            "Minnesota",
+            "baseline",
+        )
+        self.assertNotIn("-site:edinarealty.com", baseline_query)
+
+    def test_canonical_listing_identifier_matches_pilot_and_verifier_evidence(self):
+        pilot_row = {
+            "raw_title": "22 Davidson Street (#MDAL2015430)",
+        }
+        verifier_row = {
+            "contact_verification_note": (
+                "Bright IDX verifies this active short-sale as MLS MDAL2015430."
+            ),
+        }
+
+        self.assertEqual(
+            pilot.canonical_listing_identifier(pilot_row),
+            "MDAL2015430",
+        )
+        self.assertEqual(
+            pilot.canonical_listing_identifier(verifier_row),
+            "MDAL2015430",
+        )
+
+    def test_canonical_id_audit_logs_only_hashes_and_stops_on_first_mismatch(self):
+        pilot_rows = [
+            pilot.PILOT_HEADERS,
+            self.pilot_row(
+                listing_address="1 Main Street",
+                state="GA",
+                first_seen_at="2026-08-14T07:15:00-04:00",
+                synthetic_zpid="free-canonical01",
+                source="idx_broker_remarks",
+                status="qualified",
+                promotion_status="promoted",
+                raw_title="1 Main Street (#GA1234567)",
+            ),
+            self.pilot_row(
+                listing_address="2 Main Street",
+                state="GA",
+                first_seen_at="2026-08-14T07:16:00-04:00",
+                synthetic_zpid="free-canonical02",
+                source="idx_broker_remarks",
+                status="qualified",
+                promotion_status="promoted",
+                raw_title="2 Main Street (#GA2222222)",
+            ),
+            self.pilot_row(
+                listing_address="3 Main Street",
+                state="GA",
+                first_seen_at="2026-08-14T07:17:00-04:00",
+                synthetic_zpid="free-canonical03",
+                source="idx_broker_remarks",
+                status="qualified",
+                promotion_status="promoted",
+                raw_title="3 Main Street (#GA3333333)",
+            ),
+        ]
+        main_rows = [
+            ["Agent Name", "Listing Address", "State", "created-at", "contact_verification_note"],
+            ["One Agent", "1 Main Street", "GA", "free-canonical01", "MLS GA1234567"],
+            ["Two Agent", "2 Main Street", "GA", "free-canonical02", "MLS GA9999999"],
+            ["Three Agent", "3 Main Street", "GA", "free-canonical03", "MLS GA3333333"],
+        ]
+        events = []
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[main_rows, pilot_rows],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 14),
+                phase="post_verifier",
+            )
+
+        audit_events = [
+            details for event, details in events
+            if event == "pilot_canonical_listing_id_audit"
+        ]
+        self.assertEqual(stats["canonical_id_evaluated"], 2)
+        self.assertEqual(stats["canonical_id_mismatches"], 1)
+        self.assertEqual(stats["canonical_id_stopped"], 1)
+        self.assertEqual(len(audit_events), 2)
+        self.assertTrue(all(event["writes"] == 0 for event in audit_events))
+        self.assertTrue(all(not event["raw_identifier_logged"] for event in audit_events))
+        self.assertNotIn("pilot_identifier", audit_events[0])
+
+    def test_delivery_receipt_evidence_never_calls_inbound_a_provider_receipt(self):
+        evidence = pilot.delivery_receipt_evidence(
+            {
+                "created_at": "free-delivery-1",
+                "phone": "443-454-5322",
+                "initial_text_sent": "x",
+                "last_contact_time": "2026-08-14T08:08:00-04:00",
+                "last_message_id": "14434545322-1786709330257",
+                "last_inbound_text": "I already have help",
+                "last_inbound_at": "2026-08-14T08:08:50-04:00",
+            }
+        )
+
+        self.assertEqual(evidence["outcome"], "confirmed_by_inbound")
+        self.assertTrue(evidence["definitive"])
+        self.assertFalse(evidence["provider_delivery_receipt_present"])
+        self.assertEqual(evidence["evidence_basis"], "inbound_message_id")
+        self.assertEqual(evidence["writes"], 0)
+        self.assertEqual(evidence["sends"], 0)
+        self.assertNotEqual(evidence["phone_hash"], "4434545322")
+
     def test_description_block_shadow_is_capped_at_100_rows_per_run(self):
         pilot_rows = [pilot.PILOT_HEADERS]
         for index in range(105):
