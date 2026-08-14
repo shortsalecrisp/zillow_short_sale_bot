@@ -4489,7 +4489,6 @@ def run(args: argparse.Namespace) -> None:
     reset_agent_shadow_consensus_state()
     service_account = load_service_account_info(args.service_account)
     token = sheets_client(service_account)
-    ensure_tab(token, args.spreadsheet_id, args.pilot_tab)
     run_date = parse_run_date(args.run_date)
     if args.audit_links_only:
         run_linkage_and_suffix_audits(
@@ -4502,6 +4501,7 @@ def run(args: argparse.Namespace) -> None:
             force=args.force_review_experiments,
         )
         return
+    ensure_tab(token, args.spreadsheet_id, args.pilot_tab)
     source_queries = configured_source_queries(run_date)
     experiment_baselines = {
         source_query.source: query_exclusion_baseline_states(args.states, source_query.source)

@@ -2596,6 +2596,26 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(evidence["sends"], 0)
         self.assertNotEqual(evidence["phone_hash"], "4434545322")
 
+    def test_audit_only_mode_cannot_enter_tab_repair_write_path(self):
+        args = types.SimpleNamespace(
+            service_account="{}",
+            spreadsheet_id="sheet-id",
+            main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot",
+            run_date="2026-08-14",
+            audit_links_only=True,
+            audit_phase="post_verifier",
+            force_review_experiments=False,
+        )
+        with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
+             mock.patch.object(pilot, "sheets_client", return_value="token"), \
+             mock.patch.object(pilot, "ensure_tab") as ensure_tab, \
+             mock.patch.object(pilot, "run_linkage_and_suffix_audits") as audit:
+            pilot.run(args)
+
+        ensure_tab.assert_not_called()
+        audit.assert_called_once()
+
     def test_description_block_shadow_is_capped_at_100_rows_per_run(self):
         pilot_rows = [pilot.PILOT_HEADERS]
         for index in range(105):
