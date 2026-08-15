@@ -42,3 +42,50 @@ test("info email input validation rejects unsafe or empty payloads", async () =>
     /Invalid info email body/,
   );
 });
+
+test("mobile approval gateway only relays to an Apps Script exec deployment", async () => {
+  const { buildAppsScriptApprovalUrl } = await import("../src/routes/infoEmail");
+  const id = "f645697d-ee0b-40c8-a3dd-0aee4e3892cb";
+  const result = buildAppsScriptApprovalUrl(
+    "https://script.google.com/macros/s/AKfycb-test_123/exec?ignored=true",
+    id,
+  );
+
+  assert.equal(result.origin, "https://script.google.com");
+  assert.equal(result.pathname, "/macros/s/AKfycb-test_123/exec");
+  assert.equal(result.searchParams.get("action"), "approve_info_email");
+  assert.equal(result.searchParams.get("id"), id);
+  assert.equal(result.searchParams.has("ignored"), false);
+
+  assert.throws(
+    () => buildAppsScriptApprovalUrl("https://example.com/steal", id),
+    /Invalid approval target/,
+  );
+  assert.throws(
+    () => buildAppsScriptApprovalUrl("https://script.google.com/macros/s/test/exec", "bad-id"),
+    /Invalid approval link/,
+  );
+});
+
+test("mobile approval gateway accepts only a confirmed Apps Script send page", async () => {
+  const { relayInfoEmailApproval } = await import("../src/routes/infoEmail");
+  const target = "https://script.google.com/macros/s/AKfycb-test_123/exec";
+  const id = "f645697d-ee0b-40c8-a3dd-0aee4e3892cb";
+  let requestedUrl = "";
+
+  await relayInfoEmailApproval(target, id, async (input) => {
+    requestedUrl = String(input);
+    return new globalThis.Response("<h2>Info email sent</h2>", { status: 200 });
+  });
+  assert.match(requestedUrl, /action=approve_info_email/);
+  assert.match(requestedUrl, new RegExp(id));
+
+  await assert.rejects(
+    relayInfoEmailApproval(
+      target,
+      id,
+      async () => new globalThis.Response("<h2>Info email not sent</h2>", { status: 200 }),
+    ),
+    /approval could not be completed/i,
+  );
+});
