@@ -433,6 +433,7 @@ function handleIncomingSms_(body) {
   const hasExperienceQuestion = isExperienceTrackRecordQuestionSignal_(inboundText);
   const hasClientConsultationInterest = isClientConsultationInterestSignal_(inboundText);
   const hasExistingCrispRelationship = isExistingCrispRelationshipSignal_(inboundText);
+  const hasInformationRequest = isEmailRequestSignal_(inboundText) || !!extractEmailAddress_(inboundText);
 
   if (isOptOutSignal_(inboundText)) {
     updateRowFields_(sheet, row, {
@@ -850,7 +851,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && isAlreadyHandledSignal_(inboundText)) {
+  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && !hasInformationRequest && isAlreadyHandledSignal_(inboundText)) {
     const replyText = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -874,7 +875,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && isClearNoSignal_(inboundText)) {
+  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && !hasInformationRequest && isClearNoSignal_(inboundText)) {
     const closeoutReply = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -922,12 +923,23 @@ function handleIncomingSms_(body) {
         updates[HEADERS.call_booking_status] = "call_set_or_hot";
       } else if (decision.lead_status === "Y") {
         updates[HEADERS.call_booking_status] = "interested_no_call";
+      } else if (decision.lead_status === "O") {
+        updates[HEADERS.call_booking_status] = "warm_future_interest";
       } else if (decision.lead_status === "R") {
         updates[HEADERS.call_booking_status] = "closed_no_interest";
       }
     }
 
     updateRowFields_(sheet, row, updates);
+
+    if (decision.lead_status === "O" && ruleResult.info_email_to) {
+      syncWarmInfoOpportunityRows_(
+        sheet,
+        ruleResult.info_email_to,
+        currentRowObj,
+        inboundText
+      );
+    }
 
     if (shouldSendInfoEmail_(ruleResult, decision)) {
       const infoEmailData = {
@@ -1670,34 +1682,39 @@ function applyFastRules_(text, rowObj) {
 
   const providedEmail = extractEmailAddress_(t);
   const targetEmail = normalizeEmailAddress_(providedEmail || String(rowObj && rowObj[HEADERS.email] || ""));
+  const isWarmInfoOpportunity = isDeclineWithInfoRequestSignal_(t, rowObj);
 
   if (providedEmail || isEmailRequestSignal_(t)) {
     if (targetEmail) {
       return {
         matched: true,
         reply_text: getInfoEmailAcknowledgementReply_(),
-        lead_status: "Y",
-        conversation_done: false,
+        lead_status: isWarmInfoOpportunity ? "O" : "Y",
+        conversation_done: isWarmInfoOpportunity,
         handoff_needed: false,
         needs_review: false,
         block_reply: false,
         send_info_email: true,
         info_email_to: targetEmail,
-        reason: providedEmail
-          ? "Agent sent an email address; info email approval requested"
-          : "Agent asked for info by email; info email approval requested"
+        reason: isWarmInfoOpportunity
+          ? "Current opportunity declined or covered; agent requested information for future opportunities"
+          : (providedEmail
+            ? "Agent sent an email address; info email approval requested"
+            : "Agent asked for info by email; info email approval requested")
       };
     }
 
     return {
       matched: true,
       reply_text: "sure, no problem. What is your email?",
-      lead_status: "Y",
+      lead_status: isWarmInfoOpportunity ? "O" : "Y",
       conversation_done: false,
       handoff_needed: false,
       needs_review: false,
       block_reply: false,
-      reason: "Agent asked for info by email but no email address is available yet"
+      reason: isWarmInfoOpportunity
+        ? "Current opportunity declined or covered; requested future information and asked for email address"
+        : "Agent asked for info by email but no email address is available yet"
     };
   }
 
@@ -2938,7 +2955,7 @@ function getAiDecision_(rowInfo, inboundText) {
           additionalProperties: false,
           properties: {
             reply_text: { type: "string" },
-            lead_status: { type: "string", enum: ["R", "Y", "G", "N"] },
+            lead_status: { type: "string", enum: ["R", "Y", "G", "N", "O"] },
             conversation_done: { type: "boolean" },
             handoff_needed: { type: "boolean" },
             needs_review: { type: "boolean" },
@@ -3217,7 +3234,7 @@ function normalizeLoopGuardText_(text) {
 
 function getRespondedLeadStatusFallback_(existingStatus) {
   const existing = String(existingStatus || "").toUpperCase();
-  if (existing === "R" || existing === "Y" || existing === "G") {
+  if (existing === "R" || existing === "Y" || existing === "G" || existing === "O") {
     return existing;
   }
   return "Y";
@@ -3225,7 +3242,7 @@ function getRespondedLeadStatusFallback_(existingStatus) {
 
 function coerceRespondedLeadStatus_(candidateStatus, existingStatus) {
   const candidate = String(candidateStatus || "").toUpperCase();
-  if (candidate === "R" || candidate === "Y" || candidate === "G") {
+  if (candidate === "R" || candidate === "Y" || candidate === "G" || candidate === "O") {
     return candidate;
   }
   return getRespondedLeadStatusFallback_(existingStatus);
@@ -3338,6 +3355,7 @@ BUSINESS RULES:
 
 LEAD STATUS:
 - R = not interested / stop / already handled / closed out
+- O = not interested in help on the current file, but asked for information or left the door open for future opportunities
 - G = only use this when a human has actually connected live on the phone, not for text-based call interest or scheduling
 - Y = default for any inbound response that is not clearly R, including "let's talk", "call me", "available now", future availability, or callback timing by text
 - N = only for leads with no response at all and should never be returned here because this function only runs after an inbound response
@@ -3632,6 +3650,25 @@ function normalizeEmailAddress_(email) {
 
 function isValidEmailAddress_(email) {
   return /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(String(email || "").trim());
+}
+
+function isDeclineWithInfoRequestSignal_(text, rowObj) {
+  const parts = [
+    text,
+    rowObj && rowObj[HEADERS.response_status]
+  ];
+
+  getHistoryArray_(rowObj && rowObj[HEADERS.history_json]).forEach(function(entry) {
+    if (entry && entry.role === "agent") parts.push(entry.text || "");
+  });
+
+  const combined = normalizeWhitespace_(String(parts.filter(Boolean).join(" ")).toLowerCase());
+  if (!combined || !isEmailRequestSignal_(combined)) return false;
+
+  const selfHandled = /\b(?:i|we)\s+(?:am|are|will be|usually)?\s*(?:handling|handle|do)\s+(?:it|this|the file|the short sale|that part)?\s*(?:myself|ourselves|in[- ]house)\b/.test(combined) ||
+    /\b(?:i|we)\s+do\s+(?:my|our)\s+own\b/.test(combined);
+
+  return isAlreadyHandledSignal_(combined) || isClearNoSignal_(combined) || selfHandled;
 }
 
 function isEmailRequestSignal_(text) {
@@ -4275,6 +4312,35 @@ function updateRowFields_(sheet, row, updates) {
     if (Object.prototype.hasOwnProperty.call(updates, header)) {
       sheet.getRange(row, idx + 1).setValue(updates[header]);
     }
+  });
+}
+
+function syncWarmInfoOpportunityRows_(sheet, email, rowObj, latestInbound) {
+  const normalizedEmail = normalizeEmailAddress_(email);
+  if (!normalizedEmail) return;
+
+  const agentMessages = [];
+  getHistoryArray_(rowObj && rowObj[HEADERS.history_json]).forEach(function(entry) {
+    if (!entry || entry.role !== "agent") return;
+    const value = normalizeWhitespace_(String(entry.text || ""));
+    if (value && agentMessages.indexOf(value) === -1) agentMessages.push(value);
+  });
+
+  const latest = normalizeWhitespace_(String(latestInbound || ""));
+  if (latest && agentMessages.indexOf(latest) === -1) agentMessages.push(latest);
+  const responseSummary = agentMessages.slice(-6).join(" ").slice(0, 1000) || latest;
+  const updates = {
+    [HEADERS.response_status]: responseSummary,
+    [HEADERS.mailshake_status]: "O",
+    [HEADERS.conversation_summary]: "Current opportunity declined or covered; agent requested information for future opportunities",
+    [HEADERS.ai_state]: "done",
+    [HEADERS.call_booking_status]: "warm_future_interest",
+    [HEADERS.handoff_flag]: "FALSE"
+  };
+
+  getSheetData_(sheet).forEach(function(item) {
+    const rowEmail = normalizeEmailAddress_(item.obj && item.obj[HEADERS.email]);
+    if (rowEmail === normalizedEmail) updateRowFields_(sheet, item.row, updates);
   });
 }
 

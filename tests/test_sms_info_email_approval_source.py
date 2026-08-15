@@ -64,3 +64,19 @@ def test_explicitly_provided_email_replaces_stale_crm_email():
         'isValidEmailAddress_(ruleResult.info_email_to) && !String(currentRowObj[HEADERS.email] || "").trim()'
         not in CHATBOT
     )
+
+
+def test_decline_plus_information_request_is_a_warm_o_opportunity():
+    assert "function isDeclineWithInfoRequestSignal_(text, rowObj)" in CHATBOT
+    assert 'lead_status: isWarmInfoOpportunity ? "O" : "Y"' in CHATBOT
+    assert 'conversation_done: isWarmInfoOpportunity' in CHATBOT
+    assert 'updates[HEADERS.call_booking_status] = "warm_future_interest"' in CHATBOT
+    assert 'candidate === "O"' in CHATBOT
+
+
+def test_information_request_bypasses_early_decline_closeout_and_syncs_exact_email_rows():
+    assert "const hasInformationRequest = isEmailRequestSignal_(inboundText)" in CHATBOT
+    assert "!hasInformationRequest && isAlreadyHandledSignal_(inboundText)" in CHATBOT
+    assert "!hasInformationRequest && isClearNoSignal_(inboundText)" in CHATBOT
+    assert "function syncWarmInfoOpportunityRows_(sheet, email, rowObj, latestInbound)" in CHATBOT
+    assert "if (rowEmail === normalizedEmail) updateRowFields_(sheet, item.row, updates);" in CHATBOT
