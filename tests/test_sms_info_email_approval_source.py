@@ -24,8 +24,27 @@ def test_broad_information_request_phrases_are_recognized():
 
 def test_email_draft_does_not_claim_a_prior_conversation():
     assert "Im glad we got a chance to speak this morning" not in CHATBOT
-    assert 'return "Crisp Short Sales - How I Can Help";' in CHATBOT
+    assert 'return ("Crisp Short Sales - " + property).slice(0, 160);' in CHATBOT
     assert "I have been handling short sales for over 15 years" in CHATBOT
+
+
+def test_info_email_uses_mobile_safe_approval_gateway():
+    assert '"https://crisp-voice-bot.onrender.com/info-email/approve"' in CHATBOT
+    assert '"?target=" + encodeURIComponent(baseUrl)' in CHATBOT
+    assert '"&id=" + encodeURIComponent(approvalId)' in CHATBOT
+
+
+def test_info_email_rehydrates_personalization_from_crm():
+    assert "function hydrateInfoEmailDataFromSheet_(data)" in CHATBOT
+    assert "const hydratedData = hydrateInfoEmailDataFromSheet_(data);" in CHATBOT
+    assert "const data = savedData ? hydrateInfoEmailDataFromSheet_(savedData) : null;" in CHATBOT
+    assert 'fill("first_name", getCanonicalFirstName_(best));' in CHATBOT
+    assert 'fill("listing_address", best[HEADERS.listing_address]);' in CHATBOT
+
+
+def test_info_email_greeting_does_not_fall_back_to_hi_there():
+    assert 'const greeting = firstName ? "Hi " + firstName + "," : "Hi,";' in CHATBOT
+    assert 'return "there";' not in CHATBOT[CHATBOT.index("function getAgentInfoEmailFirstName_") :]
 
 
 def test_info_email_acknowledgement_bypasses_phone_only_sanitizer():

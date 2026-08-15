@@ -934,9 +934,11 @@ function handleIncomingSms_(body) {
         to: ruleResult.info_email_to,
         first_name: getCanonicalFirstName_(currentRowObj),
         agent_name: currentRowObj[HEADERS.agent_name] || "",
+        last_name: currentRowObj[HEADERS.last_name] || "",
         listing_address: currentRowObj[HEADERS.listing_address] || "",
         city: currentRowObj[HEADERS.city] || "",
         state: currentRowObj[HEADERS.state] || "",
+        zip: currentRowObj[HEADERS.zip] || "",
         phone: phoneRaw,
         last_message: inboundText
       };
@@ -3862,12 +3864,13 @@ function isInfoEmailApprovalRequired_() {
 }
 
 function sendInfoEmailApprovalRequest_(data) {
+  const hydratedData = hydrateInfoEmailDataFromSheet_(data);
   const props = PropertiesService.getScriptProperties();
   const toEmail = props.getProperty("INFO_EMAIL_APPROVAL_TO") || props.getProperty("HANDOFF_EMAIL") || "yoni.kutler@ygkutler.com";
-  const agentName = getHandoffDisplayName_(data);
-  const approvalId = createInfoEmailApproval_(data);
+  const agentName = getHandoffDisplayName_(hydratedData);
+  const approvalId = createInfoEmailApproval_(hydratedData);
   const approvalUrl = buildInfoEmailApprovalUrl_(approvalId);
-  const subject = "APPROVE INFO EMAIL - " + agentName + " - " + getStreetNameForInfoEmail_(data && data.listing_address);
+  const subject = "APPROVE INFO EMAIL - " + agentName + " - " + getStreetNameForInfoEmail_(hydratedData.listing_address);
   const body = `
 An agent requested the short-sale info email. Approval is required before sending.
 
@@ -3875,18 +3878,18 @@ Approve and send:
 ${approvalUrl}
 
 Agent: ${agentName}
-Email: ${data.to || ""}
-Phone: ${formatPhoneForEmail_(data.phone)}
-Property: ${formatPropertyAddressForEmail_(data)}
+Email: ${hydratedData.to || ""}
+Phone: ${formatPhoneForEmail_(hydratedData.phone)}
+Property: ${formatPropertyAddressForEmail_(hydratedData)}
 
 Last message:
-${data.last_message || ""}
+${hydratedData.last_message || ""}
 
 Draft subject:
-${buildAgentInfoEmailSubject_(data)}
+${buildAgentInfoEmailSubject_(hydratedData)}
 
 Draft body:
-${buildAgentInfoEmailBody_(data)}
+${buildAgentInfoEmailBody_(hydratedData)}
 `.trim();
 
   MailApp.sendEmail({
@@ -3897,16 +3900,71 @@ ${buildAgentInfoEmailBody_(data)}
 }
 
 function sendAgentInfoEmail_(data) {
-  const toEmail = normalizeEmailAddress_(data && data.to);
+  const hydratedData = hydrateInfoEmailDataFromSheet_(data);
+  const toEmail = normalizeEmailAddress_(hydratedData.to);
   if (!toEmail) {
     throw new Error("Missing valid agent info email recipient");
   }
 
   return sendAgentInfoEmailViaBackend_({
     to: toEmail,
-    subject: buildAgentInfoEmailSubject_(data),
-    body: buildAgentInfoEmailBody_(data)
+    subject: buildAgentInfoEmailSubject_(hydratedData),
+    body: buildAgentInfoEmailBody_(hydratedData)
   });
+}
+
+function hydrateInfoEmailDataFromSheet_(data) {
+  const hydrated = Object.assign({}, data || {});
+  const targetPhone = normalizePhone_(hydrated.phone);
+  const targetEmail = normalizeEmailAddress_(hydrated.to);
+  if (!targetPhone && !targetEmail) return hydrated;
+
+  try {
+    const sheet = getSheet_();
+    const rows = getSheetData_(sheet);
+    let best = null;
+    let bestScore = -1;
+
+    rows.forEach(item => {
+      const rowObj = item && item.obj ? item.obj : {};
+      const rowPhone = normalizePhone_(rowObj[HEADERS.phone]);
+      const rowEmail = normalizeEmailAddress_(rowObj[HEADERS.email]);
+      const phoneMatch = !!targetPhone && rowPhone === targetPhone;
+      const emailMatch = !!targetEmail && rowEmail === targetEmail;
+      if (!phoneMatch && !emailMatch) return;
+
+      let score = phoneMatch ? 20 : 0;
+      score += emailMatch ? 10 : 0;
+      score += String(rowObj[HEADERS.agent_name] || "").trim() ? 4 : 0;
+      score += String(rowObj[HEADERS.last_name] || "").trim() ? 2 : 0;
+      score += String(rowObj[HEADERS.listing_address] || "").trim() ? 4 : 0;
+      if (score > bestScore) {
+        best = rowObj;
+        bestScore = score;
+      }
+    });
+
+    if (!best) return hydrated;
+    const fill = (key, value) => {
+      if (!String(hydrated[key] || "").trim() && String(value || "").trim()) {
+        hydrated[key] = value;
+      }
+    };
+
+    fill("first_name", getCanonicalFirstName_(best));
+    fill("agent_name", best[HEADERS.agent_name]);
+    fill("last_name", best[HEADERS.last_name]);
+    fill("listing_address", best[HEADERS.listing_address]);
+    fill("city", best[HEADERS.city]);
+    fill("state", best[HEADERS.state]);
+    fill("zip", best[HEADERS.zip]);
+    fill("phone", best[HEADERS.phone]);
+    fill("to", best[HEADERS.email]);
+  } catch (_) {
+    // Approval should remain usable even if the live CRM lookup is temporarily unavailable.
+  }
+
+  return hydrated;
 }
 
 function createInfoEmailApproval_(data) {
@@ -3932,7 +3990,13 @@ function buildInfoEmailApprovalUrl_(approvalId) {
     throw new Error("Missing INFO_EMAIL_APPROVAL_BASE_URL for approval link");
   }
 
-  return baseUrl + "?action=approve_info_email&id=" + encodeURIComponent(approvalId);
+  const gatewayUrl = String(
+    props.getProperty("INFO_EMAIL_APPROVAL_GATEWAY_URL") ||
+    "https://crisp-voice-bot.onrender.com/info-email/approve"
+  ).trim();
+  return gatewayUrl
+    + "?target=" + encodeURIComponent(baseUrl)
+    + "&id=" + encodeURIComponent(approvalId);
 }
 
 function approvePendingInfoEmail_(approvalId) {
@@ -3955,7 +4019,8 @@ function approvePendingInfoEmail_(approvalId) {
   }
 
   const parsed = JSON.parse(raw);
-  const data = parsed && parsed.data ? parsed.data : null;
+  const savedData = parsed && parsed.data ? parsed.data : null;
+  const data = savedData ? hydrateInfoEmailDataFromSheet_(savedData) : null;
   if (!data) {
     props.deleteProperty(key);
     return {
@@ -4034,7 +4099,8 @@ function escapeHtmlForApprovalPage_(value) {
 }
 
 function buildAgentInfoEmailSubject_(data) {
-  return "Crisp Short Sales - How I Can Help";
+  const property = formatPropertyAddressForEmail_(data) || "Your Listing";
+  return ("Crisp Short Sales - " + property).slice(0, 160);
 }
 
 function getStreetNameForInfoEmail_(listingAddress) {
@@ -4044,9 +4110,10 @@ function getStreetNameForInfoEmail_(listingAddress) {
 
 function buildAgentInfoEmailBody_(data) {
   const firstName = getAgentInfoEmailFirstName_(data);
+  const greeting = firstName ? "Hi " + firstName + "," : "Hi,";
 
   return `
-Hi ${firstName},
+${greeting}
 
 Thanks for reaching out. I help agents by handling the entire lender side of the short sale process, including collecting documents, submitting the package, lender calls and follow-up, valuations, negotiations, and getting the file through approval and closing.
 
@@ -4071,12 +4138,12 @@ function getAgentInfoEmailFirstName_(data) {
 
   const rawName = normalizeWhitespace_(String(data && data.agent_name || ""));
   if (!rawName) {
-    return "there";
+    return "";
   }
 
   const withoutTitle = rawName.replace(/^(mr|mrs|ms|miss|dr)\.?\s+/i, "");
   const firstToken = withoutTitle.split(/\s+/)[0] || "";
-  return firstToken.replace(/[^A-Za-z'-]/g, "") || "there";
+  return firstToken.replace(/[^A-Za-z'-]/g, "");
 }
 
 function formatPhoneForEmail_(phone) {
