@@ -848,6 +848,48 @@ def test_sms_durable_handled_duplicate_with_new_message_id_is_suppressed(monkeyp
     assert sheet.rows[2][44] == "2026-08-11T10:05:00-04:00"
 
 
+def test_sms_answered_not_short_sale_replay_with_new_message_id_is_suppressed(monkeypatch):
+    module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    inbound = (
+        "That was an input error and has been corrected - this is not a short sale - "
+        "but appreciate your text."
+    )
+    sheet.rows[2][9] = inbound
+    sheet.rows[2][13] = "done"
+    sheet.rows[2][17] = json.dumps(
+        [
+            {"role": "agent", "text": inbound, "ts": "2026-08-14T17:14:00-04:00"},
+            {
+                "role": "assistant",
+                "text": "Ahh, ok... thanks for letting me know. Good luck with your listing!",
+                "ts": "2026-08-14T17:16:00-04:00",
+            },
+        ]
+    )
+    sheet.rows[2][20] = "randy-first-message-id"
+    sheet.rows[2][43] = inbound
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "randy-replay-message-id",
+            "received_at": "2026-08-15T08:07:00-04:00",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["duplicate"] is True
+    assert body["should_reply"] is False
+    assert body["reason"] == "Durable handled inbound duplicate ignored"
+    assert sender.calls == []
+    assert sheet.rows[2][20] == "randy-first-message-id"
+
+
 def test_sms_unconfirmed_old_duplicate_is_reprocessed(monkeypatch):
     module, sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
     inbound = "I have someone thank you"

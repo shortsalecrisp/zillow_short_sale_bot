@@ -130,7 +130,9 @@ function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
   const priorText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.last_inbound_text]);
   const currentText = normalizeHandledInboundText_(inboundText);
   if (!priorText || !currentText || priorText !== currentText) return false;
-  if (isSchedulingSignal_(inboundText) || isPostHandoffCallbackUpdate_(rowObj, inboundText)) return false;
+  const postHandoffCallbackUpdate = typeof isPostHandoffCallbackUpdate_ === "function" &&
+    isPostHandoffCallbackUpdate_(rowObj, inboundText);
+  if (isSchedulingSignal_(inboundText) || postHandoffCallbackUpdate) return false;
 
   const responseText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.response_status]);
   if (responseText !== currentText) return false;
@@ -343,10 +345,16 @@ function handleIncomingSms_(body) {
     }
 
     if (isDurableHandledDuplicateInbound_(rowObj, inboundText)) {
+      const historyConfirmedReply = historyHasConfirmedReplyAfterInbound_(rowObj, inboundText);
+      const intentionalNoReply = isIntentionalNoReplyDisposition_(rowObj, inboundText);
       appendSmsDebugLog_("incoming_sms_duplicate_suppressed", {
         phone: phoneRaw,
         message: inboundText,
-        reason: "Durable handled inbound duplicate suppressed"
+        reason: "Durable handled inbound duplicate suppressed",
+        message_id: messageId,
+        matched_response_status: true,
+        history_confirmed_reply: historyConfirmedReply,
+        intentional_no_reply: intentionalNoReply
       });
 
       return {
@@ -4667,6 +4675,19 @@ function testApprovedLeadIntelligenceRules_() {
   if (!isDurableHandledDuplicateInbound_(handledDuplicateRow, "  I HAVE someone thank you  ") ||
       isDurableHandledDuplicateInbound_(handledDuplicateRow, "I have someone, but what do you charge?")) {
     throw new Error("Durable handled-inbound duplicate regression");
+  }
+  const randyDuplicateText = "That was an input error and has been corrected - this is not a short sale - but appreciate your text.";
+  const randyDuplicateRow = {
+    [HEADERS.last_inbound_text]: randyDuplicateText,
+    [HEADERS.response_status]: randyDuplicateText,
+    [HEADERS.ai_state]: "done",
+    [HEADERS.history_json]: JSON.stringify([
+      { role: "agent", text: randyDuplicateText, ts: "2026-08-14T17:14:00-04:00" },
+      { role: "assistant", text: "Ahh, ok... thanks for letting me know. Good luck with your listing!", ts: "2026-08-14T17:16:00-04:00" }
+    ])
+  };
+  if (!isDurableHandledDuplicateInbound_(randyDuplicateRow, randyDuplicateText)) {
+    throw new Error("Answered not-short-sale replay must be durably suppressed");
   }
   const pendingDuplicateRow = Object.assign({}, handledDuplicateRow, {
     [HEADERS.ai_state]: "active",
