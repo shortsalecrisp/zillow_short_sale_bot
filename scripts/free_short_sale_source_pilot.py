@@ -353,6 +353,7 @@ CANONICAL_ID_AUDIT_MAX_CANDIDATES = max(
     1,
     int(os.getenv("FREE_SOURCE_PILOT_CANONICAL_ID_AUDIT_MAX_CANDIDATES", "10")),
 )
+CANONICAL_VERIFIER_EVIDENCE_HEADER = "contact_verification_note"
 DELIVERY_RECEIPT_AUDIT_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_DELIVERY_RECEIPT_AUDIT_START_DATE",
     "2026-08-14",
@@ -2847,7 +2848,7 @@ MLS_IDENTIFIER_PATTERNS = (
 def canonical_listing_identifier(row: dict[str, str]) -> str:
     """Extract a conservative MLS-like identifier from already-stored evidence."""
     fields = (
-        "contact_verification_note",
+        CANONICAL_VERIFIER_EVIDENCE_HEADER,
         "pending_queue_listing_json",
         "raw_title",
         "qualification_evidence",
@@ -3480,6 +3481,9 @@ def run_linkage_and_suffix_audits(
         suffix_active=suffix_active,
         agent_address_shadow_active=agent_address_shadow_active,
         canonical_id_audit_active=canonical_id_audit_active,
+        canonical_verifier_evidence_header_present=(
+            CANONICAL_VERIFIER_EVIDENCE_HEADER in main_headers
+        ),
         delivery_receipt_audit_active=delivery_receipt_audit_active,
         qualification_shadow_active=qualification_shadow_active,
         description_block_shadow_active=description_block_shadow_active,
@@ -3573,6 +3577,10 @@ def run_linkage_and_suffix_audits(
                     address_exact=reconciliation["outcome"] == "linked",
                     pilot_identifier_hash=evidence_hash(pilot_identifier),
                     verifier_identifier_hash=evidence_hash(verifier_identifier),
+                    verifier_evidence_header_present=(
+                        CANONICAL_VERIFIER_EVIDENCE_HEADER in main_headers
+                    ),
+                    verifier_evidence_hash_only=True,
                     reviewable=reviewable,
                     exact_identifier_agreement=exact,
                     agreement_rate=round(agreement_rate, 4),

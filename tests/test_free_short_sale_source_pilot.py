@@ -2504,6 +2504,63 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             "MDAL2015430",
         )
 
+    def test_canonical_id_audit_reads_named_verifier_evidence_from_sheet1_z(self):
+        pilot_rows = [
+            pilot.PILOT_HEADERS,
+            self.pilot_row(
+                listing_address="1 Main Street",
+                state="GA",
+                first_seen_at="2026-08-14T07:15:00-04:00",
+                synthetic_zpid="free-canonical01",
+                source="idx_broker_remarks",
+                status="qualified",
+                promotion_status="promoted",
+                raw_title="1 Main Street (#GA1234567)",
+            ),
+        ]
+        main_headers = [""] * 29
+        main_headers[0] = "Agent Name"
+        main_headers[4] = "Listing Address"
+        main_headers[6] = "State"
+        main_headers[25] = pilot.CANONICAL_VERIFIER_EVIDENCE_HEADER
+        main_headers[27] = "created-at"
+        main_row = [""] * 29
+        main_row[0] = "One Agent"
+        main_row[4] = "1 Main Street"
+        main_row[6] = "GA"
+        main_row[25] = "Verifier confirms MLS GA1234567."
+        main_row[27] = "free-canonical01"
+        events = []
+
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[[main_headers, main_row], pilot_rows],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 14),
+                phase="post_verifier",
+            )
+
+        audit_event = next(
+            details
+            for event, details in events
+            if event == "pilot_canonical_listing_id_audit"
+        )
+        self.assertEqual(stats["canonical_id_reviewable"], 1)
+        self.assertEqual(stats["canonical_id_exact"], 1)
+        self.assertTrue(audit_event["verifier_evidence_header_present"])
+        self.assertTrue(audit_event["verifier_evidence_hash_only"])
+        self.assertNotIn("verifier_identifier", audit_event)
+
     def test_canonical_id_audit_logs_only_hashes_and_stops_on_first_mismatch(self):
         pilot_rows = [
             pilot.PILOT_HEADERS,
@@ -2573,6 +2630,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(audit_events), 2)
         self.assertTrue(all(event["writes"] == 0 for event in audit_events))
         self.assertTrue(all(not event["raw_identifier_logged"] for event in audit_events))
+        self.assertTrue(all(event["verifier_evidence_hash_only"] for event in audit_events))
         self.assertNotIn("pilot_identifier", audit_events[0])
 
     def test_delivery_receipt_evidence_never_calls_inbound_a_provider_receipt(self):
