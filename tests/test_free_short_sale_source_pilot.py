@@ -1913,6 +1913,118 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(first, second)
 
+    def test_route_alias_shadow_matches_rt_and_county_road_without_changing_production_key(self):
+        self.assertNotEqual(
+            pilot.street_state_key("656 Rt 518", "NJ"),
+            pilot.street_state_key("656 County Road 518", "NJ"),
+        )
+        self.assertEqual(
+            pilot.route_alias_shadow_key("656 Rt 518", "NJ"),
+            pilot.route_alias_shadow_key("656 County Road 518", "NJ"),
+        )
+
+    def test_route_alias_dedupe_shadow_requires_exact_canonical_identifier(self):
+        prior_row = {
+            "listing_address": "656 County Road 518",
+            "state": "NJ",
+            "raw_title": "656 County Road 518 (MLS #NJSO2005976)",
+        }
+        candidate_row = {
+            "listing_address": "656 Rt 518",
+            "state": "NJ",
+            "raw_title": "656 Rt 518 (MLS #NJSO2005976)",
+        }
+
+        result = pilot.route_alias_dedupe_shadow(1113, candidate_row, [(1109, prior_row)])
+
+        self.assertTrue(result["alias_collision"])
+        self.assertTrue(result["reviewable"])
+        self.assertTrue(result["exact_identifier_agreement"])
+        self.assertFalse(result["conflicting_identifier_stop"])
+        self.assertEqual(result["matched_prior_row"], 1109)
+        self.assertEqual(result["writes"], 0)
+        self.assertNotIn("candidate_identifier", result)
+        self.assertNotIn("address", result)
+
+    def test_route_alias_dedupe_shadow_stops_on_conflicting_identifier(self):
+        prior_row = {
+            "listing_address": "656 County Road 518",
+            "state": "NJ",
+            "raw_title": "656 County Road 518 (MLS #NJSO2005000)",
+        }
+        candidate_row = {
+            "listing_address": "656 Rt 518",
+            "state": "NJ",
+            "raw_title": "656 Rt 518 (MLS #NJSO2005976)",
+        }
+
+        result = pilot.route_alias_dedupe_shadow(1113, candidate_row, [(1109, prior_row)])
+
+        self.assertTrue(result["alias_collision"])
+        self.assertTrue(result["reviewable"])
+        self.assertFalse(result["exact_identifier_agreement"])
+        self.assertTrue(result["conflicting_identifier_stop"])
+        self.assertEqual(result["writes"], 0)
+
+    def test_route_alias_shadow_audit_catches_known_pair_without_writes(self):
+        pilot_rows = [
+            pilot.PILOT_HEADERS,
+            self.pilot_row(
+                listing_address="656 County Road 518",
+                state="NJ",
+                first_seen_at="2026-08-16T07:15:00-04:00",
+                synthetic_zpid="free-prior",
+                source="idx_broker_remarks",
+                status="qualified",
+                promotion_status="promoted",
+                raw_title="656 County Road 518 (MLS #NJSO2005976)",
+            ),
+            self.pilot_row(
+                listing_address="656 Rt 518",
+                state="NJ",
+                first_seen_at="2026-08-17T07:15:00-04:00",
+                synthetic_zpid="free-candidate",
+                source="idx_broker_remarks",
+                status="duplicate",
+                promotion_status="skipped_duplicate_listing",
+                import_ready="skip",
+                raw_title="656 Rt 518 (MLS #NJSO2005976)",
+            ),
+        ]
+        events = []
+
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[[["created-at", "Listing Address", "State"]], pilot_rows],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 17),
+                phase="post_verifier",
+                force=True,
+            )
+
+        shadow_event = next(
+            details for event, details in events if event == "pilot_route_alias_dedupe_shadow"
+        )
+        self.assertEqual(stats["route_alias_shadow_exact"], 1)
+        self.assertEqual(stats["route_alias_shadow_conflicts"], 0)
+        self.assertEqual(shadow_event["candidate_row"], 3)
+        self.assertEqual(shadow_event["matched_prior_row"], 2)
+        self.assertTrue(shadow_event["exact_identifier_agreement"])
+        self.assertFalse(shadow_event["raw_identifier_logged"])
+        self.assertFalse(shadow_event["raw_address_logged"])
+        self.assertFalse(shadow_event["raw_url_logged"])
+        self.assertEqual(shadow_event["writes"], 0)
+
     def test_clean_listing_address_removes_repeated_adjacent_word(self):
         self.assertEqual(pilot.clean_listing_address("923 W Main Main Street"), "923 W Main Street")
 

@@ -354,6 +354,18 @@ CANONICAL_ID_AUDIT_MAX_CANDIDATES = max(
     int(os.getenv("FREE_SOURCE_PILOT_CANONICAL_ID_AUDIT_MAX_CANDIDATES", "10")),
 )
 CANONICAL_VERIFIER_EVIDENCE_HEADER = "contact_verification_note"
+ROUTE_ALIAS_DEDUPE_SHADOW_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_ROUTE_ALIAS_DEDUPE_SHADOW_START_DATE",
+    "2026-08-17",
+).strip()
+ROUTE_ALIAS_DEDUPE_SHADOW_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_ROUTE_ALIAS_DEDUPE_SHADOW_DAYS", "7")),
+)
+ROUTE_ALIAS_DEDUPE_SHADOW_MAX_CANDIDATES = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_ROUTE_ALIAS_DEDUPE_SHADOW_MAX_CANDIDATES", "50")),
+)
 DELIVERY_RECEIPT_AUDIT_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_DELIVERY_RECEIPT_AUDIT_START_DATE",
     "2026-08-14",
@@ -2863,6 +2875,85 @@ def canonical_listing_identifier(row: dict[str, str]) -> str:
     return ""
 
 
+ROUTE_ALIAS_SHADOW_RE = re.compile(
+    r"\b(?:county\s+(?:road|rd)|co(?:unty)?\s+(?:road|rd)|route|rte|rt)\b",
+    re.IGNORECASE,
+)
+
+
+def route_alias_shadow_key(address: str, state: str) -> str:
+    """Normalize Route address aliases for a zero-write dedupe shadow only."""
+    street = clean_listing_address(address, state=state)
+    street = ROUTE_ALIAS_SHADOW_RE.sub(" route ", street)
+    street_key = normalize_key(street)
+    state_key = normalize_key(state)
+    if not street_key or not state_key:
+        return ""
+    return f"{street_key}|{state_key}"
+
+
+def route_alias_dedupe_shadow(
+    candidate_sheet_row: int,
+    candidate_row: dict[str, str],
+    prior_rows: list[tuple[int, dict[str, str]]],
+) -> dict[str, Any]:
+    """Compare a pilot row with earlier pilot rows without changing live dedupe behavior."""
+    candidate_key = route_alias_shadow_key(
+        candidate_row.get("listing_address", ""), candidate_row.get("state", "")
+    )
+    candidate_identifier = canonical_listing_identifier(candidate_row)
+    collisions: list[tuple[int, str]] = []
+    for prior_sheet_row, prior_row in prior_rows:
+        prior_key = route_alias_shadow_key(
+            prior_row.get("listing_address", ""), prior_row.get("state", "")
+        )
+        if candidate_key and prior_key == candidate_key:
+            collisions.append((prior_sheet_row, canonical_listing_identifier(prior_row)))
+
+    matched_row: int | None = None
+    matched_identifier = ""
+    exact = False
+    conflict = False
+    missing_identifier = False
+    for prior_sheet_row, prior_identifier in collisions:
+        if not candidate_identifier or not prior_identifier:
+            missing_identifier = True
+            if matched_row is None:
+                matched_row = prior_sheet_row
+                matched_identifier = prior_identifier
+            continue
+        if candidate_identifier != prior_identifier:
+            matched_row = prior_sheet_row
+            matched_identifier = prior_identifier
+            conflict = True
+            exact = False
+            break
+        if not exact:
+            matched_row = prior_sheet_row
+            matched_identifier = prior_identifier
+            exact = True
+
+    return {
+        "candidate_row": candidate_sheet_row,
+        "matched_prior_row": matched_row,
+        "alias_key_hash": evidence_hash(candidate_key),
+        "candidate_identifier_hash": evidence_hash(candidate_identifier),
+        "prior_identifier_hash": evidence_hash(matched_identifier),
+        "alias_collision": bool(collisions),
+        "alias_collision_count": len(collisions),
+        "reviewable": bool(candidate_identifier and matched_identifier),
+        "exact_identifier_agreement": exact,
+        "missing_identifier": missing_identifier and not exact and not conflict,
+        "conflicting_identifier_stop": conflict,
+        "raw_identifier_logged": False,
+        "raw_address_logged": False,
+        "raw_url_logged": False,
+        "promotion_changed": False,
+        "outreach_changed": False,
+        "writes": 0,
+    }
+
+
 def parse_sheet_datetime(value: str) -> dt.datetime | None:
     raw = normalize_space(value)
     if not raw:
@@ -3312,6 +3403,14 @@ def run_linkage_and_suffix_audits(
             CANONICAL_ID_AUDIT_DAYS,
         )
     )
+    route_alias_dedupe_shadow_active = phase == "post_verifier" and (
+        force
+        or experiment_active(
+            run_date,
+            ROUTE_ALIAS_DEDUPE_SHADOW_START_DATE,
+            ROUTE_ALIAS_DEDUPE_SHADOW_DAYS,
+        )
+    )
     delivery_receipt_audit_active = phase == "post_verifier" and (
         force
         or experiment_active(
@@ -3391,6 +3490,15 @@ def run_linkage_and_suffix_audits(
         "canonical_id_mismatches": 0,
         "canonical_id_stopped": 0,
         "canonical_id_supported": 0,
+        "route_alias_shadow_eligible": 0,
+        "route_alias_shadow_evaluated": 0,
+        "route_alias_shadow_collisions": 0,
+        "route_alias_shadow_reviewable": 0,
+        "route_alias_shadow_exact": 0,
+        "route_alias_shadow_missing_identifier": 0,
+        "route_alias_shadow_conflicts": 0,
+        "route_alias_shadow_stopped": 0,
+        "route_alias_shadow_supported": 0,
         "delivery_receipt_selected": 0,
         "delivery_receipt_mature_selected": 0,
         "delivery_receipt_new_selected": 0,
@@ -3424,6 +3532,7 @@ def run_linkage_and_suffix_audits(
         and not suffix_active
         and not agent_address_shadow_active
         and not canonical_id_audit_active
+        and not route_alias_dedupe_shadow_active
         and not delivery_receipt_audit_active
         and not qualification_shadow_active
         and not description_block_shadow_active
@@ -3481,6 +3590,7 @@ def run_linkage_and_suffix_audits(
         suffix_active=suffix_active,
         agent_address_shadow_active=agent_address_shadow_active,
         canonical_id_audit_active=canonical_id_audit_active,
+        route_alias_dedupe_shadow_active=route_alias_dedupe_shadow_active,
         canonical_verifier_evidence_header_present=(
             CANONICAL_VERIFIER_EVIDENCE_HEADER in main_headers
         ),
@@ -3496,6 +3606,9 @@ def run_linkage_and_suffix_audits(
         compound_negative_max_per_run=COMPOUND_NEGATIVE_SHADOW_MAX_PER_RUN,
         agent_address_shadow_max_candidates=AGENT_ADDRESS_SHADOW_MAX_CANDIDATES,
         canonical_id_audit_max_candidates=CANONICAL_ID_AUDIT_MAX_CANDIDATES,
+        route_alias_dedupe_shadow_max_candidates=(
+            ROUTE_ALIAS_DEDUPE_SHADOW_MAX_CANDIDATES
+        ),
         delivery_receipt_mature_target=DELIVERY_RECEIPT_MATURE_TARGET,
         delivery_receipt_new_target=DELIVERY_RECEIPT_NEW_TARGET,
         forced=force,
@@ -3591,6 +3704,100 @@ def run_linkage_and_suffix_audits(
                     writes=0,
                     success_metric="at_least_90pct_exact_address_and_listing_id_agreement_after_10",
                     stop_condition="first_mismatch_or_any_raw_url_or_data_write",
+                )
+
+    if route_alias_dedupe_shadow_active:
+        route_alias_candidates: list[tuple[int, dict[str, str], dt.date]] = []
+        for pilot_sheet_row, pilot_row in all_pilot_rows:
+            candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
+            if not candidate_date or candidate_date > run_date:
+                continue
+            if not experiment_active(
+                candidate_date,
+                ROUTE_ALIAS_DEDUPE_SHADOW_START_DATE,
+                ROUTE_ALIAS_DEDUPE_SHADOW_DAYS,
+            ):
+                continue
+            if normalize_space(pilot_row.get("source", "")).lower() != "idx_broker_remarks":
+                continue
+            if normalize_space(pilot_row.get("status", "")).lower() not in {
+                "qualified",
+                "duplicate",
+            }:
+                continue
+            if normalize_space(pilot_row.get("promotion_status", "")).lower() not in {
+                "promoted",
+                "skipped_duplicate_listing",
+            }:
+                continue
+            route_alias_candidates.append((pilot_sheet_row, pilot_row, candidate_date))
+
+        route_alias_candidates.sort(key=lambda item: (item[2], item[0]))
+        route_alias_candidates = route_alias_candidates[
+            :ROUTE_ALIAS_DEDUPE_SHADOW_MAX_CANDIDATES
+        ]
+        stats["route_alias_shadow_eligible"] = len(route_alias_candidates)
+        route_alias_stopped = False
+        for sample_rank, (pilot_sheet_row, pilot_row, candidate_date) in enumerate(
+            route_alias_candidates,
+            start=1,
+        ):
+            if route_alias_stopped:
+                break
+            prior_rows = [
+                (prior_sheet_row, prior_row)
+                for prior_sheet_row, prior_row in all_pilot_rows
+                if prior_sheet_row < pilot_sheet_row
+            ]
+            shadow = route_alias_dedupe_shadow(pilot_sheet_row, pilot_row, prior_rows)
+            stats["route_alias_shadow_evaluated"] += 1
+            if shadow["alias_collision"]:
+                stats["route_alias_shadow_collisions"] += 1
+            if shadow["reviewable"]:
+                stats["route_alias_shadow_reviewable"] += 1
+            if shadow["exact_identifier_agreement"]:
+                stats["route_alias_shadow_exact"] += 1
+            if shadow["missing_identifier"]:
+                stats["route_alias_shadow_missing_identifier"] += 1
+            if shadow["conflicting_identifier_stop"]:
+                stats["route_alias_shadow_conflicts"] += 1
+                stats["route_alias_shadow_stopped"] = 1
+                route_alias_stopped = True
+
+            sample_complete = bool(
+                stats["route_alias_shadow_evaluated"]
+                >= ROUTE_ALIAS_DEDUPE_SHADOW_MAX_CANDIDATES
+            )
+            if (
+                sample_complete
+                and stats["route_alias_shadow_exact"] >= 1
+                and stats["route_alias_shadow_conflicts"] == 0
+            ):
+                stats["route_alias_shadow_supported"] = 1
+
+            if force or candidate_date == run_date:
+                log_event(
+                    "pilot_route_alias_dedupe_shadow",
+                    phase=phase,
+                    run_date=run_date.isoformat(),
+                    sample_rank=sample_rank,
+                    comparison_window_days=ROUTE_ALIAS_DEDUPE_SHADOW_DAYS,
+                    sample_complete=sample_complete,
+                    experiment_stopped=route_alias_stopped,
+                    counts_toward_experiment=not force,
+                    hypothesis=(
+                        "county_road_route_rte_and_rt_aliases_reveal_escaped_"
+                        "duplicates_when_canonical_listing_ids_agree"
+                    ),
+                    success_metric=(
+                        "known_escaped_pair_caught_and_zero_conflicting_aliases_after_50"
+                    ),
+                    stop_condition=(
+                        "first_conflicting_canonical_id_or_any_raw_identifier_url_"
+                        "address_or_data_write"
+                    ),
+                    approval_required=False,
+                    **shadow,
                 )
 
     if delivery_receipt_audit_active:
