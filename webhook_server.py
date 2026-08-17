@@ -2925,6 +2925,40 @@ def _delete_initial_sms_duplicate_row(
     return ts
 
 
+def _delete_later_duplicate_phone_suppression_rows(
+    ws,
+    *,
+    phone_digits: str,
+    row_idx: int,
+) -> List[int]:
+    rows = _retry_gspread_call(
+        "read leads for duplicate suppression cleanup",
+        lambda: ws.get_all_values(),
+    )
+    rows_to_delete: List[int] = []
+    for existing_idx, existing_row in enumerate(rows, start=1):
+        if existing_idx <= row_idx or existing_idx < 2:
+            continue
+        existing_phone = fmt_phone(_row_value(existing_row, 2))
+        if not existing_phone or _digits_only(existing_phone) != phone_digits:
+            continue
+        if _row_is_duplicate_phone_suppression(existing_row):
+            rows_to_delete.append(existing_idx)
+
+    for delete_idx in sorted(rows_to_delete, reverse=True):
+        _retry_gspread_call(
+            "delete later duplicate phone suppression row",
+            lambda delete_idx=delete_idx: ws.delete_rows(delete_idx),
+        )
+        logger.info(
+            "DELETE_LATER_DUPLICATE_PHONE_SUPPRESSION_ROW owner_row=%s deleted_row=%s phone=%s",
+            row_idx,
+            delete_idx,
+            phone_digits,
+        )
+    return rows_to_delete
+
+
 def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         row_idx = int(payload.get("row"))
@@ -2955,6 +2989,12 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail="row_phone_missing")
     if _digits_only(current_phone) != digits:
         raise HTTPException(status_code=409, detail="row_phone_mismatch")
+
+    deleted_later_suppression_rows = _delete_later_duplicate_phone_suppression_rows(
+        ws,
+        phone_digits=digits,
+        row_idx=row_idx,
+    )
 
     duplicate = _find_duplicate_phone_row(ws, phone_digits=digits, row_idx=row_idx)
     if duplicate:
@@ -3043,6 +3083,7 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "gateway_status": final_result.status_code,
         "gateway_response": final_result.response_text,
         "codex_verified": mark_codex_verified,
+        "deleted_duplicate_rows": deleted_later_suppression_rows,
     }
 
 

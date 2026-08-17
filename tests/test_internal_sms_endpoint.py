@@ -550,7 +550,7 @@ def test_internal_initial_sms_suppresses_duplicate_phone_elsewhere(monkeypatch):
     assert 17 not in sheet.rows
 
 
-def test_internal_initial_sms_ignores_later_duplicate_suppression_marker(monkeypatch):
+def test_internal_initial_sms_deletes_later_duplicate_suppression_marker(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True, status_code=200, response_text="OK"),
@@ -584,10 +584,13 @@ def test_internal_initial_sms_ignores_later_duplicate_suppression_marker(monkeyp
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "sent"
+    body = response.json()
+    assert body["status"] == "sent"
+    assert body["deleted_duplicate_rows"] == [17]
     assert sender.calls[0]["row_idx"] == 12
     assert sheet.rows[12][7] == "x"
     assert sheet.rows[12][42] == "x"
+    assert 17 not in sheet.rows
 
 
 def test_internal_followup_sms_requires_token(monkeypatch):
