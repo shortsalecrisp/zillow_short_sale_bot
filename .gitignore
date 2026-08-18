@@ -2,8 +2,10 @@ service_account.json
 .env
 config.json
 *.local.json
+.clasp.json
 
 seen.db
+jina_cache.sqlite
 
 __pycache__/
 *.pyc
