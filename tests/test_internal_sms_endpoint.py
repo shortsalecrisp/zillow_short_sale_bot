@@ -1226,6 +1226,65 @@ def test_sms_natural_tomorrow_callback_and_third_party_negative(monkeypatch):
     assert module._sms_is_scheduled_callback("Let's talk to the lender tomorrow") is False
 
 
+def test_sms_call_interest_reopens_closed_conversation_for_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    row = {
+        "ai_state": "done",
+        "mailshake_status": "R",
+        "call_booking_status": "closed_no_interest",
+        "human_override": "TRUE",
+    }
+    inbound = "I would be interested to have a call to see how your services differ from theirs."
+
+    decision = module._sms_fast_decision(row, inbound)
+
+    assert module._sms_is_phone_call_interest(inbound) is True
+    assert decision["lead_status"] == "Y"
+    assert decision["conversation_done"] is False
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+    assert decision["handoff_type"] == "CALL REQUESTED"
+    assert decision["alert_needed"] is True
+    assert decision["reason"] == "Agent expressed phone-call interest after a prior closeout"
+
+    service_interest = module._sms_fast_decision(
+        row,
+        "I am interested in your services and would like to learn more.",
+    )
+    assert module._sms_is_present_service_interest(
+        "I am interested in your services and would like to learn more."
+    ) is True
+    assert service_interest["handoff_needed"] is True
+    assert service_interest["block_reply"] is True
+    assert service_interest["handoff_type"] == "RENEWED INTEREST"
+    assert service_interest["reason"] == "Agent expressed present service interest after a prior closeout"
+    assert module._sms_is_present_service_interest(
+        "No thanks, but I will keep your information in mind for the future."
+    ) is False
+
+
+def test_sms_company_question_outranks_existing_coverage_closeout(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "I already have an attorney. What company are you so I can let my attorney know?"
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_company_identity_question(inbound) is True
+    assert module._sms_has_existing_coverage(inbound) is True
+    assert decision["lead_status"] == "R"
+    assert decision["conversation_done"] is True
+    assert decision["handoff_needed"] is False
+    assert decision["reply_text"].startswith("My company is Crisp Short Sales.")
+    assert "good luck with the file" in decision["reply_text"]
+    assert decision["reason"] == "Answered company identity directly while preserving prior closeout"
+
+
 def test_sms_substantive_question_that_would_repeat_answer_routes_to_handoff(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

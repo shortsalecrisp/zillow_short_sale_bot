@@ -3976,6 +3976,90 @@ def _sms_is_existing_crisp_relationship(value: Any) -> bool:
     return any(re.search(pattern, text) for pattern in patterns)
 
 
+def _sms_is_phone_call_interest(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    patterns = [
+        r"\binterested\b.*\bcall\b",
+        r"\bhop\w*\s+on\s+a\s+call\b",
+        r"\bwould like to\b.*\bcall\b",
+        r"\bwant to\b.*\bcall\b",
+        r"\bopen to\b.*\bcall\b",
+        r"\bwilling to\b.*\bcall\b",
+        r"\blearn more\b.*\bcall\b",
+        r"\btalk\b.*\bphone\b",
+        r"\bchat\b.*\bphone\b",
+        r"\bcall me\b",
+        r"\bgive me a call\b",
+        r"\bcan we talk\b",
+        r"\blet'?s talk\b",
+        r"\bquick call\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_is_present_service_interest(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or re.search(r"\b(?:not interested|no thanks?|do not|don't|dont)\b", text):
+        return False
+    if re.search(r"\b(?:in the future|someday|if i need|if we need|keep (?:you|your|the) (?:in mind|info|information))\b", text):
+        return False
+    interest = re.search(
+        r"\b(?:i(?:['’]?m| am)?|we(?:['’]?re| are)?)\s+(?:am\s+|are\s+)?"
+        r"(?:interested|open to|ready to|would like|want|need|could use)\b",
+        text,
+    )
+    service = re.search(
+        r"\b(?:your services?|crisp(?: short sales?)?|short sale help|help with (?:this|the|my|our) "
+        r"(?:file|listing|short sale)|work with you|learn more|see how you (?:can|could) help)\b",
+        text,
+    )
+    return bool(interest and service)
+
+
+def _sms_is_company_identity_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    patterns = [
+        r"\bwho are you with\b",
+        r"\bwhat company\b",
+        r"\bwho do you work with\b",
+        r"\bwho do you work for\b",
+        r"\bare you a mtg broker\b",
+        r"\bare you a mortgage broker\b",
+        r"\bwith what company\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_is_closed_marketing_conversation(row_obj: Dict[str, str]) -> bool:
+    return (
+        str(row_obj.get("ai_state") or "").lower() == "done"
+        or str(row_obj.get("call_booking_status") or "").lower() == "closed_no_interest"
+        or str(row_obj.get("mailshake_status") or "").upper() == "R"
+    )
+
+
+def _sms_has_existing_coverage(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(
+        re.search(
+            r"\b(?:already have|already working with|currently have|have)\b.{0,45}"
+            r"\b(?:help|someone|somebody|negotiator|processor|attorney|lawyer|company|team|representation)\b"
+            r"|\b(?:attorney|lawyer|negotiator)\b"
+            r"|\b(?:handled|covered|under contract)\b",
+            text,
+        )
+    )
+
+
+def _sms_company_identity_reply(covered: bool = False) -> str:
+    if covered:
+        return "My company is Crisp Short Sales. Thanks for letting me know you already have help, and good luck with the file."
+    return (
+        "My company is Crisp Short Sales. We specialize in handling the short sale process for agents and homeowners. "
+        "Want to chat for a few minutes about your situation?"
+    )
+
+
 def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
     t = _sms_normalize_whitespace(inbound_text).lower()
 
@@ -4022,6 +4106,33 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             callback_time=callback_time,
             handoff_type="CALLBACK UPDATED" if callback_changed else "",
             alert_needed=callback_changed,
+        )
+
+    if (_sms_is_phone_call_interest(t) or _sms_is_present_service_interest(t)) and _sms_is_closed_marketing_conversation(row_obj):
+        call_interest = _sms_is_phone_call_interest(t)
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            reason=(
+                "Agent expressed phone-call interest after a prior closeout"
+                if call_interest
+                else "Agent expressed present service interest after a prior closeout"
+            ),
+            call_booking_status="interested_no_call",
+            handoff_type="CALL REQUESTED" if call_interest else "RENEWED INTEREST",
+            alert_needed=True,
+        )
+
+    if _sms_is_company_identity_question(t) and (
+        _sms_has_existing_coverage(t) or _sms_is_closed_marketing_conversation(row_obj)
+    ):
+        return _sms_decision(
+            reply_text=_sms_company_identity_reply(covered=True),
+            lead_status="R",
+            conversation_done=True,
+            reason="Answered company identity directly while preserving prior closeout",
+            call_booking_status="closed_no_interest",
         )
 
     if str(row_obj.get("human_override") or "").upper() == "TRUE":
@@ -4093,14 +4204,24 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             callback_time=_sms_extract_scheduled_callback_reference(t),
         )
 
-    if re.search(r"\b(i('| wi)?ll|i will|gonna|going to)\s+(call|phone|ring)\b", t) or re.search(
-        r"\b(call me|give me a call|can we talk|let'?s talk|hop on a call|quick call)\b", t
-    ):
+    if _sms_is_present_service_interest(t) and not _sms_is_phone_call_interest(t):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            reason="Agent expressed present interest in Crisp's services",
+            handoff_type="RENEWED INTEREST",
+            alert_needed=True,
+        )
+
+    if re.search(r"\b(i('| wi)?ll|i will|gonna|going to)\s+(call|phone|ring)\b", t) or _sms_is_phone_call_interest(t):
         return _sms_decision(
             lead_status="Y",
             handoff_needed=True,
             block_reply=True,
             reason="Agent requested or promised a phone call; manual follow-up needed",
+            handoff_type="CALL REQUESTED",
+            alert_needed=True,
         )
 
     if re.search(r"\b(can use|need|would like|interested in|could use)\b.*\b(help|short sale|shellpoint|lender)\b", t):
@@ -4139,6 +4260,13 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             ),
             lead_status="Y",
             reason="Agent asked about fee or compensation",
+        )
+
+    if _sms_is_company_identity_question(t):
+        return _sms_decision(
+            reply_text=_sms_company_identity_reply(),
+            lead_status="Y",
+            reason="Asked who Yoni is with / whether he is a mortgage broker",
         )
 
     if re.search(

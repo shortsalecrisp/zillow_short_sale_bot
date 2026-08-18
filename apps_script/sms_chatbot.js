@@ -442,6 +442,9 @@ function handleIncomingSms_(body) {
   const hasClientConsultationInterest = isClientConsultationInterestSignal_(inboundText);
   const hasExistingCrispRelationship = isExistingCrispRelationshipSignal_(inboundText);
   const hasInformationRequest = isEmailRequestSignal_(inboundText) || !!extractEmailAddress_(inboundText);
+  const hasPhoneCallInterest = isPhoneCallInterestSignal_(inboundText);
+  const hasPresentServiceInterest = isPresentServiceInterestSignal_(inboundText);
+  const hasCompanyIdentityQuestion = isCompanyIdentityQuestionSignal_(inboundText);
 
   if (isOptOutSignal_(inboundText)) {
     updateRowFields_(sheet, row, {
@@ -537,6 +540,80 @@ function handleIncomingSms_(body) {
       alert_needed: changed,
       handoff_type: changed ? "CALLBACK UPDATED" : "",
       reason: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff"
+    };
+  }
+
+  if ((hasPhoneCallInterest || hasPresentServiceInterest) && isClosedMarketingConversation_(currentRowObj)) {
+    const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
+    const handoffType = hasPhoneCallInterest ? "CALL REQUESTED" : "RENEWED INTEREST";
+    const reason = hasPhoneCallInterest
+      ? "Agent expressed phone-call interest after a prior closeout"
+      : "Agent expressed present service interest after a prior closeout";
+
+    sendHandoffEmail_({
+      handoff_type: handoffType,
+      agent_name: currentRowObj[HEADERS.agent_name] || "",
+      last_name: currentRowObj[HEADERS.last_name] || "",
+      initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
+      phone: phoneRaw,
+      email: currentRowObj[HEADERS.email] || "",
+      listing_address: currentRowObj[HEADERS.listing_address] || "",
+      city: currentRowObj[HEADERS.city] || "",
+      state: currentRowObj[HEADERS.state] || "",
+      zip: currentRowObj[HEADERS.zip] || "",
+      last_message: inboundText,
+      history: history
+    });
+
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "Y",
+      [HEADERS.conversation_summary]: reason,
+      [HEADERS.ai_state]: "handoff",
+      [HEADERS.call_booking_status]: "interested_no_call",
+      [HEADERS.handoff_flag]: "TRUE",
+      [HEADERS.human_override]: "TRUE"
+    });
+
+    return {
+      ok: true,
+      should_reply: false,
+      reply_text: "",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: true,
+      needs_review: false,
+      handoff_type: handoffType,
+      reason: reason
+    };
+  }
+
+  if (
+    hasCompanyIdentityQuestion &&
+    (isAlreadyHandledSignal_(inboundText) || isClosedMarketingConversation_(currentRowObj))
+  ) {
+    const replyText = buildCoveredCompanyIdentityReply_();
+    const reason = "Answered company identity directly while preserving prior closeout";
+
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "R",
+      [HEADERS.conversation_summary]: reason,
+      [HEADERS.ai_state]: "done",
+      [HEADERS.call_booking_status]: "closed_no_interest",
+      [HEADERS.handoff_flag]: "FALSE",
+      [HEADERS.human_override]: "FALSE"
+    });
+
+    return {
+      ok: true,
+      should_reply: !capReached,
+      reply_text: capReached ? "" : replyText,
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      reason: reason
     };
   }
 
@@ -859,7 +936,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && !hasInformationRequest && isAlreadyHandledSignal_(inboundText)) {
+  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && !hasInformationRequest && !hasPhoneCallInterest && !hasPresentServiceInterest && !hasCompanyIdentityQuestion && isAlreadyHandledSignal_(inboundText)) {
     const replyText = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -1634,6 +1711,13 @@ function applyFastRules_(text, rowObj) {
     );
   }
 
+  if (isPresentServiceInterestSignal_(t) && !isPhoneCallInterestSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Agent expressed present interest in Crisp's services",
+      "RENEWED INTEREST"
+    );
+  }
+
   if (isPhoneCallInterestSignal_(t)) {
     return {
       matched: true,
@@ -1800,29 +1884,17 @@ function applyFastRules_(text, rowObj) {
     return buildFeeQuestionDecision_(rowObj, lastOutbound);
   }
 
-  const companyIdentityPatterns = [
-    /\bwho are you with\b/,
-    /\bwhat company\b/,
-    /\bwho do you work with\b/,
-    /\bwho do you work for\b/,
-    /\bare you a mtg broker\b/,
-    /\bare you a mortgage broker\b/,
-    /\bwith what company\b/
-  ];
-
-  for (const pattern of companyIdentityPatterns) {
-    if (pattern.test(t)) {
-      return {
-        matched: true,
-        reply_text: "My company is called Crisp Short Sales - and we specialize in helping agents and homeowners with the short sale process, ensuring lender approvals as quickly as possible. I have been in business over 15 years and this is all I do, help people with the short sale process. I am confident I could help you and your client too if interested. Want to chat for a few minutes about your situation?",
-        lead_status: "Y",
-        conversation_done: false,
-        handoff_needed: false,
-        needs_review: false,
-        block_reply: false,
-        reason: "Asked who Yoni is with / whether he is a mortgage broker"
-      };
-    }
+  if (isCompanyIdentityQuestionSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildCompanyIdentityReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Asked who Yoni is with / whether he is a mortgage broker"
+    };
   }
 
   const hardNoPatterns = [
@@ -1870,6 +1942,48 @@ function isPhoneCallInterestSignal_(text) {
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isPresentServiceInterestSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || /\b(?:not interested|no thanks?|do not|don['\u2019]?t|dont)\b/.test(t)) {
+    return false;
+  }
+  if (/\b(?:in the future|someday|if i need|if we need|keep (?:you|your|the) (?:in mind|info|information))\b/.test(t)) {
+    return false;
+  }
+  const interest = /\b(?:i(?:['\u2019]?m| am)?|we(?:['\u2019]?re| are)?)\s+(?:am\s+|are\s+)?(?:interested|open to|ready to|would like|want|need|could use)\b/.test(t);
+  const service = /\b(?:your services?|crisp(?: short sales?)?|short sale help|help with (?:this|the|my|our) (?:file|listing|short sale)|work with you|learn more|see how you (?:can|could) help)\b/.test(t);
+  return interest && service;
+}
+
+function isCompanyIdentityQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const patterns = [
+    /\bwho are you with\b/,
+    /\bwhat company\b/,
+    /\bwho do you work with\b/,
+    /\bwho do you work for\b/,
+    /\bare you a mtg broker\b/,
+    /\bare you a mortgage broker\b/,
+    /\bwith what company\b/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function buildCompanyIdentityReply_() {
+  return "My company is Crisp Short Sales. We specialize in handling the short sale process for agents and homeowners. Want to chat for a few minutes about your situation?";
+}
+
+function buildCoveredCompanyIdentityReply_() {
+  return "My company is Crisp Short Sales. Thanks for letting me know you already have help, and good luck with the file.";
+}
+
+function isClosedMarketingConversation_(rowObj) {
+  const aiState = String(rowObj && rowObj[HEADERS.ai_state] || "").toLowerCase();
+  const bookingStatus = String(rowObj && rowObj[HEADERS.call_booking_status] || "").toLowerCase();
+  const leadStatus = String(rowObj && rowObj[HEADERS.mailshake_status] || "").toUpperCase();
+  return aiState === "done" || bookingStatus === "closed_no_interest" || leadStatus === "R";
 }
 
 function isOpenCallWindowSignal_(text) {
@@ -4768,6 +4882,39 @@ function testApprovedLeadIntelligenceRules_() {
       isExistingCrispRelationshipSignal_("What company are you with?")) {
     throw new Error("Generic handled/company text must not match an existing Crisp relationship");
   }
+  const approvedCallInterestText = "I would be interested to have a call to see how your services differ from theirs.";
+  const approvedCallInterestDecision = applyFastRules_(approvedCallInterestText, {
+    [HEADERS.ai_state]: "done",
+    [HEADERS.mailshake_status]: "R",
+    [HEADERS.call_booking_status]: "closed_no_interest"
+  });
+  if (!isPhoneCallInterestSignal_(approvedCallInterestText) ||
+      !approvedCallInterestDecision.matched ||
+      !approvedCallInterestDecision.handoff_needed ||
+      approvedCallInterestDecision.handoff_type !== "CALL REQUESTED") {
+    throw new Error("Call interest must outrank prior closeout context: " + JSON.stringify(approvedCallInterestDecision));
+  }
+  const approvedServiceInterestText = "I am interested in your services and would like to learn more.";
+  const approvedServiceInterestDecision = applyFastRules_(approvedServiceInterestText, {});
+  if (!isPresentServiceInterestSignal_(approvedServiceInterestText) ||
+      !approvedServiceInterestDecision.matched ||
+      !approvedServiceInterestDecision.handoff_needed ||
+      approvedServiceInterestDecision.handoff_type !== "RENEWED INTEREST" ||
+      isPresentServiceInterestSignal_("No thanks, but I will keep your information in mind for the future.")) {
+    throw new Error("Present service interest must reopen for handoff: " + JSON.stringify(approvedServiceInterestDecision));
+  }
+  const approvedCompanyIdentityText = "I already have an attorney. What company are you so I can let my attorney know?";
+  const approvedCompanyIdentityDecision = applyFastRules_(approvedCompanyIdentityText, {});
+  if (!isCompanyIdentityQuestionSignal_(approvedCompanyIdentityText) ||
+      !isAlreadyHandledSignal_(approvedCompanyIdentityText) ||
+      !approvedCompanyIdentityDecision.matched ||
+      approvedCompanyIdentityDecision.reply_text.indexOf("My company is Crisp Short Sales.") !== 0) {
+    throw new Error("Company identity question must outrank existing-coverage wording: " + JSON.stringify(approvedCompanyIdentityDecision));
+  }
+  if (buildCoveredCompanyIdentityReply_().indexOf("My company is Crisp Short Sales.") !== 0 ||
+      !isClosedMarketingConversation_({ [HEADERS.ai_state]: "done" })) {
+    throw new Error("Covered company-identity closeout regression");
+  }
   const genericCurrentHelpText = "Hi Yoni, thank you for following up! I currently have someone assisting me with the short sale process for this property, but I appreciate you reaching out. I'll definitely keep your information for future short sale opportunities.";
   if (isExistingCrispRelationshipSignal_(genericCurrentHelpText) ||
       !isRelationshipOnlyAfterExistingCoverageSignal_(genericCurrentHelpText, {})) {
@@ -4851,6 +4998,9 @@ function testApprovedLeadIntelligenceRules_() {
     spanishFee: feeDecision,
     notShortSale: notShortDecision,
     listingPromotion: listingPromotionDecision,
+    approvedCallInterest: approvedCallInterestDecision,
+    approvedServiceInterest: approvedServiceInterestDecision,
+    approvedCompanyIdentity: approvedCompanyIdentityDecision,
     transportParsing: transportParsing,
     receiptLeaseIdentity: receiptLeaseIdentity,
     ok: true

@@ -48,3 +48,19 @@ def test_apps_script_substantive_repeat_routes_to_handoff():
     assert '"SUBSTANTIVE QUESTION FOLLOW-UP"' in CHATBOT
     assert "Agent asked a new substantive question after a similar prior answer" in CHATBOT
     assert "How is the buyer going to pay if they are losing money?" in CHATBOT
+
+
+def test_apps_script_call_interest_and_company_questions_outrank_closeout():
+    assert "const hasPhoneCallInterest = isPhoneCallInterestSignal_(inboundText);" in CHATBOT
+    assert "const hasPresentServiceInterest = isPresentServiceInterestSignal_(inboundText);" in CHATBOT
+    assert "const hasCompanyIdentityQuestion = isCompanyIdentityQuestionSignal_(inboundText);" in CHATBOT
+    assert "Agent expressed phone-call interest after a prior closeout" in CHATBOT
+    assert "Answered company identity directly while preserving prior closeout" in CHATBOT
+    assert "I would be interested to have a call to see how your services differ from theirs." in CHATBOT
+    assert "I already have an attorney. What company are you so I can let my attorney know?" in CHATBOT
+    assert CHATBOT.index("(hasPhoneCallInterest || hasPresentServiceInterest) && isClosedMarketingConversation_(currentRowObj)") < CHATBOT.index(
+        'String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE"'
+    )
+    assert CHATBOT.index("hasCompanyIdentityQuestion &&") < CHATBOT.index(
+        'String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE"'
+    )
