@@ -4,8 +4,10 @@ import io
 import json
 import os
 import sys
+import tempfile
 import types
 import unittest
+import urllib.error
 import urllib.parse
 from pathlib import Path
 from unittest import mock
@@ -2615,6 +2617,176 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.canonical_listing_identifier(verifier_row),
             "MDAL2015430",
         )
+
+    def test_source_durability_collects_next_ten_and_natural_alternate(self):
+        state = {"version": 1, "candidates": [], "stopped": False}
+        captured_at = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
+        for index in range(11):
+            candidate = pilot.Candidate(
+                source="idx_broker_remarks",
+                query="query",
+                url=f"https://broker.example/listing-{index}",
+                title="",
+                text="",
+                fields={
+                    "listing_address": f"{index + 1} Main St",
+                    "city": "Atlanta",
+                    "state": "GA",
+                },
+            )
+            pilot.observe_source_durability_candidate(
+                state,
+                candidate,
+                captured_at=captured_at,
+                primary_eligible=True,
+            )
+
+        alternate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://alternate.example/1-main-st",
+            title="",
+            text="",
+            fields={
+                "listing_address": "1 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+            },
+        )
+        changed = pilot.observe_source_durability_candidate(
+            state,
+            alternate,
+            captured_at=captured_at,
+            primary_eligible=False,
+        )
+
+        self.assertEqual(len(state["candidates"]), 10)
+        self.assertTrue(changed)
+        self.assertEqual(
+            state["candidates"][0]["alternate_url"],
+            "https://alternate.example/1-main-st",
+        )
+
+    def test_source_durability_audit_rechecks_mature_exact_and_alternate_urls(self):
+        captured_at = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
+        now = captured_at + dt.timedelta(hours=25)
+        state = {"version": 1, "candidates": [], "stopped": False, "stop_reason": ""}
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/1-main-st",
+            title="",
+            text="",
+            fields={
+                "listing_address": "1 Main St",
+                "city": "Atlanta",
+                "state": "GA",
+            },
+        )
+        pilot.observe_source_durability_candidate(
+            state,
+            candidate,
+            captured_at=captured_at,
+            primary_eligible=True,
+        )
+        alternate = pilot.Candidate(
+            source="idx_broker_pages",
+            query="query",
+            url="https://alternate.example/1-main-st",
+            title="",
+            text="",
+            fields={
+                "listing_address": "1 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+            },
+        )
+        pilot.observe_source_durability_candidate(
+            state,
+            alternate,
+            captured_at=captured_at,
+            primary_eligible=False,
+        )
+        markup = (
+            "Status: Active. About This Home: 1 Main Street, Atlanta, GA. "
+            "This is a short sale subject to lender approval."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = os.path.join(directory, "audit.json")
+            pilot.save_source_durability_state(state, state_path)
+            events = []
+            with mock.patch.object(pilot, "fetch_url", return_value=markup), \
+                 mock.patch.object(
+                     pilot,
+                     "log_event",
+                     side_effect=lambda event, **details: events.append((event, details)),
+                 ):
+                stats = pilot.run_source_durability_audit(
+                    run_date=dt.date(2026, 8, 21),
+                    force=True,
+                    now=now,
+                    state_path=state_path,
+                )
+
+            reread = pilot.load_source_durability_state(state_path)
+
+        self.assertEqual(stats["evaluated"], 1)
+        self.assertEqual(stats["primary_reviewable"], 1)
+        self.assertEqual(stats["alternate_observed"], 1)
+        self.assertEqual(stats["alternate_reviewable"], 1)
+        self.assertTrue(reread["candidates"][0]["evaluated_at"])
+        audit_event = next(
+            details for event, details in events
+            if event == "pilot_source_durability_audit"
+        )
+        self.assertEqual(audit_event["lead_data_writes"], 0)
+        self.assertEqual(audit_event["searches"], 0)
+        self.assertEqual(audit_event["sends"], 0)
+
+    def test_source_durability_audit_stops_on_first_access_control_concern(self):
+        captured_at = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
+        state = {"version": 1, "candidates": [], "stopped": False, "stop_reason": ""}
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/blocked",
+            title="",
+            text="",
+            fields={
+                "listing_address": "1 Main St",
+                "city": "Atlanta",
+                "state": "GA",
+            },
+        )
+        pilot.observe_source_durability_candidate(
+            state,
+            candidate,
+            captured_at=captured_at,
+            primary_eligible=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = os.path.join(directory, "audit.json")
+            pilot.save_source_durability_state(state, state_path)
+            error = urllib.error.HTTPError(
+                candidate.url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=None,
+            )
+            with mock.patch.object(pilot, "fetch_url", side_effect=error):
+                stats = pilot.run_source_durability_audit(
+                    run_date=dt.date(2026, 8, 21),
+                    force=True,
+                    now=captured_at + dt.timedelta(hours=25),
+                    state_path=state_path,
+                )
+            reread = pilot.load_source_durability_state(state_path)
+
+        self.assertEqual(stats["access_control_concerns"], 1)
+        self.assertEqual(stats["stopped"], 1)
+        self.assertTrue(reread["stopped"])
+        self.assertEqual(reread["stop_reason"], "first_access_control_concern")
 
     def test_canonical_id_audit_reads_named_verifier_evidence_from_sheet1_z(self):
         pilot_rows = [

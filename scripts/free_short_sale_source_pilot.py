@@ -354,6 +354,30 @@ CANONICAL_ID_AUDIT_MAX_CANDIDATES = max(
     int(os.getenv("FREE_SOURCE_PILOT_CANONICAL_ID_AUDIT_MAX_CANDIDATES", "10")),
 )
 CANONICAL_VERIFIER_EVIDENCE_HEADER = "contact_verification_note"
+SOURCE_DURABILITY_AUDIT_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_SOURCE_DURABILITY_AUDIT_START_DATE",
+    "2026-08-20",
+).strip()
+SOURCE_DURABILITY_AUDIT_DAYS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_SOURCE_DURABILITY_AUDIT_DAYS", "14")),
+)
+SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES", "10")),
+)
+SOURCE_DURABILITY_AUDIT_MIN_REVIEWABLE = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_SOURCE_DURABILITY_AUDIT_MIN_REVIEWABLE", "9")),
+)
+SOURCE_DURABILITY_AUDIT_MIN_AGE_HOURS = max(
+    1,
+    int(os.getenv("FREE_SOURCE_PILOT_SOURCE_DURABILITY_AUDIT_MIN_AGE_HOURS", "24")),
+)
+SOURCE_DURABILITY_AUDIT_STATE_PATH = os.getenv(
+    "FREE_SOURCE_PILOT_SOURCE_DURABILITY_AUDIT_STATE_PATH",
+    "/var/data/seen/free_source_pilot_source_durability_audit.json",
+).strip()
 ROUTE_ALIAS_DEDUPE_SHADOW_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_ROUTE_ALIAS_DEDUPE_SHADOW_START_DATE",
     "2026-08-17",
@@ -2799,6 +2823,310 @@ def experiment_active(run_date: dt.date, start_date: str, days: int) -> bool:
     return start <= run_date < start + dt.timedelta(days=days)
 
 
+def source_durability_audit_active(run_date: dt.date, force: bool = False) -> bool:
+    return force or experiment_active(
+        run_date,
+        SOURCE_DURABILITY_AUDIT_START_DATE,
+        SOURCE_DURABILITY_AUDIT_DAYS,
+    )
+
+
+def load_source_durability_state(path: str = SOURCE_DURABILITY_AUDIT_STATE_PATH) -> dict[str, Any]:
+    empty = {"version": 1, "candidates": [], "stopped": False, "stop_reason": ""}
+    if not path or not os.path.exists(path):
+        return empty
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError, TypeError) as exc:
+        log_event(
+            "pilot_source_durability_state_unconfirmed",
+            reason="state_read_failed",
+            error=str(exc)[:220],
+            lead_data_writes=0,
+            searches=0,
+            sends=0,
+        )
+        return empty
+    if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
+        return empty
+    payload.setdefault("version", 1)
+    payload.setdefault("stopped", False)
+    payload.setdefault("stop_reason", "")
+    return payload
+
+
+def save_source_durability_state(
+    state: dict[str, Any],
+    path: str = SOURCE_DURABILITY_AUDIT_STATE_PATH,
+) -> None:
+    if not path:
+        raise ValueError("source durability audit state path is empty")
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    temporary_path = f"{path}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, sort_keys=True, separators=(",", ":"))
+    os.replace(temporary_path, path)
+
+
+def observe_source_durability_candidate(
+    state: dict[str, Any],
+    candidate: Candidate,
+    *,
+    captured_at: dt.datetime,
+    primary_eligible: bool,
+) -> bool:
+    """Retain exact URLs only in private audit state; never update lead data."""
+    if state.get("stopped"):
+        return False
+    candidates = state.setdefault("candidates", [])
+    address = normalize_space(candidate.fields.get("listing_address", ""))
+    state_code = normalize_space(candidate.fields.get("state", "")).upper()
+    address_key = street_state_key(address, state_code)
+    if not address_key or not candidate.url:
+        return False
+    for item in candidates:
+        if item.get("address_key") != address_key:
+            continue
+        if candidate.url != item.get("primary_url") and not item.get("alternate_url"):
+            item["alternate_url"] = candidate.url
+            item["alternate_source"] = candidate.source
+            return True
+        return False
+    if not primary_eligible or len(candidates) >= SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES:
+        return False
+    stable_id = stable_synthetic_zpid(
+        candidate.source,
+        candidate.url,
+        address,
+        candidate.fields.get("city", ""),
+        state_code,
+    )
+    candidates.append(
+        {
+            "stable_id": stable_id,
+            "address": address,
+            "state": state_code,
+            "address_key": address_key,
+            "source": candidate.source,
+            "primary_url": candidate.url,
+            "alternate_url": "",
+            "alternate_source": "",
+            "captured_at": captured_at.astimezone(dt.timezone.utc).isoformat(),
+            "evaluated_at": "",
+            "primary_reviewable": False,
+            "alternate_reviewable": False,
+            "primary_outcome": "pending_24h",
+            "alternate_outcome": "not_observed",
+        }
+    )
+    return True
+
+
+def source_durability_url_reviewability(
+    url: str,
+    address: str,
+    state_code: str,
+) -> dict[str, Any]:
+    if not url:
+        return {
+            "reviewable": False,
+            "outcome": "not_observed",
+            "access_control_concern": False,
+        }
+    try:
+        markup = fetch_url(url, timeout=12, allow_headless=False)
+    except urllib.error.HTTPError as exc:
+        concern = exc.code in {401, 403, 429, 451}
+        return {
+            "reviewable": False,
+            "outcome": f"http_{exc.code}",
+            "access_control_concern": concern,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "reviewable": False,
+            "outcome": f"fetch_failed:{type(exc).__name__}",
+            "access_control_concern": False,
+        }
+    text = strip_html(markup)
+    qualification = qualification_for_text(text)
+    address_present = bool(
+        normalize_key(address)
+        and normalize_key(address) in normalize_key(text)
+        and re.search(rf"\b{re.escape(state_code.lower())}\b", text.lower())
+    )
+    reviewable = bool(address_present and qualification.status == "qualified")
+    if reviewable:
+        outcome = "current_short_sale_supported"
+    elif not address_present:
+        outcome = "exact_address_unconfirmed"
+    else:
+        outcome = qualification.failure_reason or "qualification_unconfirmed"
+    return {
+        "reviewable": reviewable,
+        "outcome": outcome,
+        "access_control_concern": False,
+    }
+
+
+def run_source_durability_audit(
+    *,
+    run_date: dt.date,
+    force: bool = False,
+    now: dt.datetime | None = None,
+    state_path: str = SOURCE_DURABILITY_AUDIT_STATE_PATH,
+) -> dict[str, int]:
+    stats = {
+        "selected": 0,
+        "mature": 0,
+        "evaluated": 0,
+        "primary_reviewable": 0,
+        "alternate_observed": 0,
+        "alternate_reviewable": 0,
+        "pending_24h": 0,
+        "access_control_concerns": 0,
+        "stopped": 0,
+        "supported": 0,
+    }
+    if not source_durability_audit_active(run_date, force=force):
+        return stats
+    state = load_source_durability_state(state_path)
+    candidates = state.get("candidates", [])[:SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES]
+    stats["selected"] = len(candidates)
+    if state.get("stopped"):
+        stats["stopped"] = 1
+        log_event(
+            "pilot_source_durability_audit_done",
+            run_date=run_date.isoformat(),
+            stats=stats,
+            sample_complete=False,
+            stop_reason=state.get("stop_reason", "previous_stop"),
+            lead_data_writes=0,
+            searches=0,
+            sends=0,
+        )
+        return stats
+    current_time = now or dt.datetime.now(dt.timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=dt.timezone.utc)
+    for item in candidates:
+        if item.get("alternate_url"):
+            stats["alternate_observed"] += 1
+        if item.get("evaluated_at"):
+            stats["evaluated"] += 1
+            stats["primary_reviewable"] += int(bool(item.get("primary_reviewable")))
+            stats["alternate_reviewable"] += int(bool(item.get("alternate_reviewable")))
+            continue
+        try:
+            captured_at = dt.datetime.fromisoformat(str(item.get("captured_at", "")).replace("Z", "+00:00"))
+        except ValueError:
+            stats["pending_24h"] += 1
+            continue
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=dt.timezone.utc)
+        age_hours = (current_time - captured_at.astimezone(dt.timezone.utc)).total_seconds() / 3600
+        if age_hours < SOURCE_DURABILITY_AUDIT_MIN_AGE_HOURS:
+            stats["pending_24h"] += 1
+            continue
+        stats["mature"] += 1
+        primary = source_durability_url_reviewability(
+            str(item.get("primary_url", "")),
+            str(item.get("address", "")),
+            str(item.get("state", "")),
+        )
+        if primary["access_control_concern"]:
+            stats["access_control_concerns"] += 1
+            stats["stopped"] = 1
+            state["stopped"] = True
+            state["stop_reason"] = "first_access_control_concern"
+            log_event(
+                "pilot_source_durability_audit_stopped",
+                run_date=run_date.isoformat(),
+                stable_id=item.get("stable_id", ""),
+                source=item.get("source", ""),
+                exact_url=item.get("primary_url", ""),
+                reason="first_access_control_concern",
+                outcome=primary["outcome"],
+                lead_data_writes=0,
+                searches=0,
+                sends=0,
+            )
+            break
+        alternate = source_durability_url_reviewability(
+            str(item.get("alternate_url", "")),
+            str(item.get("address", "")),
+            str(item.get("state", "")),
+        )
+        if alternate["access_control_concern"]:
+            stats["access_control_concerns"] += 1
+            stats["stopped"] = 1
+            state["stopped"] = True
+            state["stop_reason"] = "first_access_control_concern"
+            log_event(
+                "pilot_source_durability_audit_stopped",
+                run_date=run_date.isoformat(),
+                stable_id=item.get("stable_id", ""),
+                source=item.get("alternate_source", ""),
+                exact_url=item.get("alternate_url", ""),
+                reason="first_access_control_concern",
+                outcome=alternate["outcome"],
+                lead_data_writes=0,
+                searches=0,
+                sends=0,
+            )
+            break
+        item["evaluated_at"] = current_time.astimezone(dt.timezone.utc).isoformat()
+        item["primary_reviewable"] = bool(primary["reviewable"])
+        item["alternate_reviewable"] = bool(alternate["reviewable"])
+        item["primary_outcome"] = primary["outcome"]
+        item["alternate_outcome"] = alternate["outcome"]
+        stats["evaluated"] += 1
+        stats["primary_reviewable"] += int(primary["reviewable"])
+        stats["alternate_reviewable"] += int(alternate["reviewable"])
+        log_event(
+            "pilot_source_durability_audit",
+            run_date=run_date.isoformat(),
+            stable_id=item.get("stable_id", ""),
+            source=item.get("source", ""),
+            exact_url=item.get("primary_url", ""),
+            primary_reviewable=primary["reviewable"],
+            primary_outcome=primary["outcome"],
+            alternate_source=item.get("alternate_source", ""),
+            alternate_exact_url=item.get("alternate_url", ""),
+            alternate_reviewable=alternate["reviewable"],
+            alternate_outcome=alternate["outcome"],
+            age_hours=round(age_hours, 2),
+            lead_data_writes=0,
+            searches=0,
+            sends=0,
+        )
+    sample_complete = stats["evaluated"] >= SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES
+    if sample_complete and stats["primary_reviewable"] < 7:
+        stats["stopped"] = 1
+        state["stopped"] = True
+        state["stop_reason"] = "fewer_than_7_of_10_exact_links_reviewable"
+    if sample_complete and stats["primary_reviewable"] >= SOURCE_DURABILITY_AUDIT_MIN_REVIEWABLE:
+        stats["supported"] = 1
+    save_source_durability_state(state, state_path)
+    log_event(
+        "pilot_source_durability_audit_done",
+        run_date=run_date.isoformat(),
+        stats=stats,
+        sample_complete=sample_complete,
+        success_metric="at_least_9_of_10_exact_links_reviewable_after_24h",
+        comparison_window_days=SOURCE_DURABILITY_AUDIT_DAYS,
+        stop_condition="first_access_control_concern_or_any_lead_data_mutation_or_fewer_than_7_of_10_reviewable",
+        exact_urls_retained_in_private_audit_state=True,
+        lead_data_writes=0,
+        searches=0,
+        sends=0,
+    )
+    return stats
+
+
 def first_seen_date(value: str) -> dt.date | None:
     raw = normalize_space(value)
     if not raw:
@@ -3403,6 +3731,9 @@ def run_linkage_and_suffix_audits(
             CANONICAL_ID_AUDIT_DAYS,
         )
     )
+    source_durability_active = phase == "post_verifier" and source_durability_audit_active(
+        run_date
+    )
     route_alias_dedupe_shadow_active = phase == "post_verifier" and (
         force
         or experiment_active(
@@ -3490,6 +3821,16 @@ def run_linkage_and_suffix_audits(
         "canonical_id_mismatches": 0,
         "canonical_id_stopped": 0,
         "canonical_id_supported": 0,
+        "source_durability_selected": 0,
+        "source_durability_mature": 0,
+        "source_durability_evaluated": 0,
+        "source_durability_primary_reviewable": 0,
+        "source_durability_alternate_observed": 0,
+        "source_durability_alternate_reviewable": 0,
+        "source_durability_pending_24h": 0,
+        "source_durability_access_control_concerns": 0,
+        "source_durability_stopped": 0,
+        "source_durability_supported": 0,
         "route_alias_shadow_eligible": 0,
         "route_alias_shadow_evaluated": 0,
         "route_alias_shadow_collisions": 0,
@@ -3532,6 +3873,7 @@ def run_linkage_and_suffix_audits(
         and not suffix_active
         and not agent_address_shadow_active
         and not canonical_id_audit_active
+        and not source_durability_active
         and not route_alias_dedupe_shadow_active
         and not delivery_receipt_audit_active
         and not qualification_shadow_active
@@ -3590,6 +3932,7 @@ def run_linkage_and_suffix_audits(
         suffix_active=suffix_active,
         agent_address_shadow_active=agent_address_shadow_active,
         canonical_id_audit_active=canonical_id_audit_active,
+        source_durability_audit_active=source_durability_active,
         route_alias_dedupe_shadow_active=route_alias_dedupe_shadow_active,
         canonical_verifier_evidence_header_present=(
             CANONICAL_VERIFIER_EVIDENCE_HEADER in main_headers
@@ -3606,6 +3949,7 @@ def run_linkage_and_suffix_audits(
         compound_negative_max_per_run=COMPOUND_NEGATIVE_SHADOW_MAX_PER_RUN,
         agent_address_shadow_max_candidates=AGENT_ADDRESS_SHADOW_MAX_CANDIDATES,
         canonical_id_audit_max_candidates=CANONICAL_ID_AUDIT_MAX_CANDIDATES,
+        source_durability_audit_max_candidates=SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES,
         route_alias_dedupe_shadow_max_candidates=(
             ROUTE_ALIAS_DEDUPE_SHADOW_MAX_CANDIDATES
         ),
@@ -3616,6 +3960,12 @@ def run_linkage_and_suffix_audits(
         writes=0,
     )
     main_rows_by_number = dict(main_rows)
+    if source_durability_active:
+        durability_stats = run_source_durability_audit(
+            run_date=run_date,
+        )
+        for key, value in durability_stats.items():
+            stats[f"source_durability_{key}"] = value
     if canonical_id_audit_active:
         canonical_candidates: list[tuple[int, dict[str, str], dt.date]] = []
         for pilot_sheet_row, pilot_row in all_pilot_rows:
@@ -4717,6 +5067,13 @@ def run(args: argparse.Namespace) -> None:
         )
         return
     ensure_tab(token, args.spreadsheet_id, args.pilot_tab)
+    durability_active = source_durability_audit_active(run_date)
+    durability_state = (
+        load_source_durability_state()
+        if durability_active
+        else {"version": 1, "candidates": []}
+    )
+    durability_state_dirty = False
     source_queries = configured_source_queries(run_date)
     experiment_baselines = {
         source_query.source: query_exclusion_baseline_states(args.states, source_query.source)
@@ -4927,6 +5284,13 @@ def run(args: argparse.Namespace) -> None:
                             reason="missing_short_sale_confirmation",
                         )
                     continue
+                if durability_active:
+                    durability_state_dirty = observe_source_durability_candidate(
+                        durability_state,
+                        candidate,
+                        captured_at=dt.datetime.now(dt.timezone.utc),
+                        primary_eligible=False,
+                    ) or durability_state_dirty
                 listing_dup_status, listing_dup_key, listing_matched = duplicate_listing_status(candidate, existing)
                 if listing_dup_status:
                     stats["duplicates"] += 1
@@ -4989,6 +5353,13 @@ def run(args: argparse.Namespace) -> None:
                 query_stats["qualified"] += 1
                 row = candidate_to_row(candidate, qualification, dup_key, matched_main_row, agent_rows)
                 query_rows.append(row)
+                if durability_active:
+                    durability_state_dirty = observe_source_durability_candidate(
+                        durability_state,
+                        candidate,
+                        captured_at=dt.datetime.now(dt.timezone.utc),
+                        primary_eligible=True,
+                    ) or durability_state_dirty
                 if row[14] == "shadow_ready":
                     stats["shadow_ready"] += 1
                     query_stats["shadow_ready"] += 1
@@ -5068,6 +5439,24 @@ def run(args: argparse.Namespace) -> None:
                 experiment_arm=exclusion_arm,
                 **query_stats,
             )
+
+    if durability_active:
+        if durability_state_dirty:
+            save_source_durability_state(durability_state)
+        log_event(
+            "pilot_source_durability_collection_done",
+            run_date=run_date.isoformat(),
+            retained=min(
+                len(durability_state.get("candidates", [])),
+                SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES,
+            ),
+            max_candidates=SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES,
+            state_updated=durability_state_dirty,
+            exact_urls_retained_in_private_audit_state=True,
+            lead_data_writes=0,
+            searches_added=0,
+            sends=0,
+        )
 
     if experiment_active(
         run_date,
