@@ -1285,6 +1285,72 @@ def test_sms_company_question_outranks_existing_coverage_closeout(monkeypatch):
     assert decision["reason"] == "Answered company identity directly while preserving prior closeout"
 
 
+def test_sms_rate_question_outranks_existing_coverage_closeout(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "We already have a negotiator. What's your rate?"
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert decision["lead_status"] == "Y"
+    assert decision["conversation_done"] is False
+    assert decision["handoff_needed"] is False
+    assert "There is no cost to you or the seller" in decision["reply_text"]
+    assert decision["reason"] == "Agent asked about fee or compensation"
+
+
+def test_sms_differentiation_question_gets_deterministic_reply(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "How are you different from them with communication and documentation?"
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_differentiation_question(inbound) is True
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is False
+    assert "documentation and update process" in decision["reply_text"]
+    assert decision["reason"] == "Agent asked how Crisp differs on communication or documentation"
+
+
+def test_sms_testimonials_request_uses_reviews_reply_without_email_prompt(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Can you send testimonials?"
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is False
+    assert "crispshortsales.com" in decision["reply_text"]
+    assert "reviews" in decision["reply_text"].lower()
+    assert "what is your email" not in decision["reply_text"].lower()
+    assert decision["reason"] == "Agent asked for website, brochure, flyer, reviews, or testimonials"
+
+
+def test_sms_automated_alternate_number_notice_does_not_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Redfin: Your message was sent to a Redfin Premier Agent. Please text 214-427-8372 instead."
+
+    decision = module._sms_fast_decision({"mailshake_status": "R"}, inbound)
+
+    assert module._sms_is_automated_routing_notice(inbound) is True
+    assert decision["lead_status"] == "R"
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is True
+    assert decision["reply_text"] == ""
+    assert decision["reason"] == "Automated routing or alternate-number notice ignored"
+
+
 def test_sms_substantive_question_that_would_repeat_answer_routes_to_handoff(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

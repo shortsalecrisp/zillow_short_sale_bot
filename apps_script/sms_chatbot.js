@@ -617,6 +617,27 @@ function handleIncomingSms_(body) {
     };
   }
 
+  if (isAutomatedRoutingNoticeSignal_(inboundText)) {
+    const reason = "Automated routing or alternate-number notice ignored";
+
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.conversation_summary]: reason
+    });
+
+    return {
+      ok: true,
+      should_reply: false,
+      reply_text: "",
+      lead_status: String(currentRowObj[HEADERS.mailshake_status] || "Y"),
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: true,
+      reason: reason
+    };
+  }
+
   if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") {
     return {
       ok: true,
@@ -1426,6 +1447,13 @@ function isPaymentOrFeeQuestionSignal_(text) {
     "what is the charge",
     "what's your fee",
     "what is your fee",
+    "what's your rate",
+    "what is your rate",
+    "what's the rate",
+    "what is the rate",
+    "what's your pricing",
+    "what is your pricing",
+    "how much is your rate",
     "how much do you charge",
     "how much is the fee",
     "how much is your fee",
@@ -1455,7 +1483,10 @@ function isPaymentOrFeeQuestionSignal_(text) {
     t.indexOf("expense") !== -1 ||
     t.indexOf("paid") !== -1 ||
     t.indexOf("payment") !== -1 ||
-    t.indexOf("percentage") !== -1;
+    t.indexOf("percentage") !== -1 ||
+    t.indexOf("pricing") !== -1 ||
+    t.indexOf("price") !== -1 ||
+    /\b(?:your|the)\s+rate\b/.test(t);
 
   return asksAmount && mentionsFee;
 }
@@ -1772,6 +1803,32 @@ function applyFastRules_(text, rowObj) {
     };
   }
 
+  if (isWebsiteReviewsRequestSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildWebsiteReviewsReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Agent asked for website, brochure, flyer, reviews, or testimonials"
+    };
+  }
+
+  if (isDifferentiationQuestionSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildDifferentiationQuestionReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Agent asked how Crisp differs on communication or documentation"
+    };
+  }
+
   const providedEmail = extractEmailAddress_(t);
   const targetEmail = normalizeEmailAddress_(providedEmail || String(rowObj && rowObj[HEADERS.email] || ""));
   const isWarmInfoOpportunity = isDeclineWithInfoRequestSignal_(t, rowObj);
@@ -1977,6 +2034,47 @@ function buildCompanyIdentityReply_() {
 
 function buildCoveredCompanyIdentityReply_() {
   return "My company is Crisp Short Sales. Thanks for letting me know you already have help, and good luck with the file.";
+}
+
+function isAutomatedRoutingNoticeSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+
+  const patterns = [
+    /\byour message was sent to\b.*\b(?:agent|broker|realtor|representative)\b/,
+    /\b(?:we|i)\s+(?:sent|passed|forwarded|routed)\s+(?:your|this|the)\s+message\s+(?:to|along)\b/,
+    /\bmessage\s+(?:sent|forwarded|routed)\s+to\s+(?:a\s+)?(?:redfin\s+)?(?:premier\s+)?agent\b/,
+    /\b(?:please\s+)?(?:call|text|contact)\s+\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\s+instead\b/,
+    /\bautomated\s+(?:message|notice|notification)\b.*\b(?:agent|broker|routing|forward)\b/,
+    /\bredfin\b.*\b(?:premier\s+agent|passed\s+this\s+message|message\s+was\s+sent)\b/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function buildWebsiteReviewsReply_() {
+  return "https://www.crispshortsales.com\nYou can also look me up on Google and I have all kinds of reviews from past agents and homeowners that I have worked with.";
+}
+
+function isWebsiteReviewsRequestSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+  return /\b(?:website|web site|brochure|flyer|flier|one[- ]?pager|reviews?|testimonials?)\b/.test(t);
+}
+
+function isDifferentiationQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || !/\b(?:how|what|why|different|differs?|compare|compares?|communication|documentation|updates?)\b/.test(t)) {
+    return false;
+  }
+  const difference = /\b(?:how|what|why)\b.{0,80}\b(?:different|differs?|better|compare|compares?)\b/.test(t) ||
+    /\b(?:different|differs?|better)\b.{0,80}\b(?:than|from|with)\b/.test(t);
+  const communication = /\b(?:communication|communicat(?:e|ion|ing)|documentation|documents?|paperwork|updates?)\b/.test(t);
+  const existingHelp = isAlreadyHandledSignal_(t) || /\b(?:theirs?|them|their|my current|our current)\b/.test(t);
+  return (difference && existingHelp) || (difference && communication) || (communication && existingHelp);
+}
+
+function buildDifferentiationQuestionReply_() {
+  return "That's a fair concern. Crisp handles the lender paperwork, calls, follow-up, and negotiations. Yoni can walk you through our documentation and update process so you can compare it directly. Would you like a quick call?";
 }
 
 function isClosedMarketingConversation_(rowObj) {
@@ -4961,6 +5059,37 @@ function testApprovedLeadIntelligenceRules_() {
   if (!mixedHandledFeeDecision.matched || mixedHandledFeeDecision.lead_status !== "Y" ||
       mixedHandledFeeDecision.reply_text.indexOf("flat fee to the buyer") === -1) {
     throw new Error("Fee question must outrank soft-decline wording: " + JSON.stringify(mixedHandledFeeDecision));
+  }
+  const rateQuestionDecision = applyFastRules_("We already have a negotiator. What's your rate?", {});
+  if (!isPaymentOrFeeQuestionSignal_("What's your rate?") ||
+      !rateQuestionDecision.matched ||
+      rateQuestionDecision.lead_status !== "Y" ||
+      rateQuestionDecision.handoff_needed ||
+      rateQuestionDecision.reply_text.indexOf("flat fee to the buyer") === -1) {
+    throw new Error("Rate question must use the fee reply and outrank existing-help wording: " + JSON.stringify(rateQuestionDecision));
+  }
+
+  const testimonialsDecision = applyFastRules_("Can you send testimonials?", { [HEADERS.email]: "agent@example.com" });
+  if (!testimonialsDecision.matched ||
+      testimonialsDecision.handoff_needed ||
+      testimonialsDecision.reply_text.indexOf("crispshortsales.com") === -1 ||
+      testimonialsDecision.reply_text.toLowerCase().indexOf("what is your email") !== -1) {
+    throw new Error("Testimonials request must use website/reviews reply without an email prompt: " + JSON.stringify(testimonialsDecision));
+  }
+
+  const differentiationText = "How are you different from them with communication and documentation?";
+  const differentiationDecision = applyFastRules_(differentiationText, {});
+  if (!isDifferentiationQuestionSignal_(differentiationText) ||
+      !differentiationDecision.matched ||
+      differentiationDecision.handoff_needed ||
+      differentiationDecision.reply_text.indexOf("documentation and update process") === -1) {
+    throw new Error("Differentiation communication question regression: " + JSON.stringify(differentiationDecision));
+  }
+
+  const automatedNoticeText = "This is an automated message from Redfin: your message was sent to a Redfin Premier Agent. Please text 214-427-8372 instead.";
+  if (!isAutomatedRoutingNoticeSignal_(automatedNoticeText) ||
+      !isAiOrAutomationQuestionSignal_(automatedNoticeText)) {
+    throw new Error("Automated routing notice guard regression");
   }
 
   const notShortDecision = applyFastRules_("Sorry it was not meant to be a short sale. If I ever get one I will keep you in mind!", {});

@@ -3703,6 +3703,34 @@ def _sms_decision(
     }
 
 
+def _sms_is_automated_routing_notice(text: str) -> bool:
+    t = _sms_normalize_whitespace(text).lower()
+    if not t:
+        return False
+    patterns = [
+        r"\byour message was sent to\b.*\b(?:agent|broker|realtor|representative)\b",
+        r"\b(?:we|i)\s+(?:sent|passed|forwarded|routed)\s+(?:your|this|the)\s+message\s+(?:to|along)\b",
+        r"\bmessage\s+(?:sent|forwarded|routed)\s+to\s+(?:a\s+)?(?:redfin\s+)?(?:premier\s+)?agent\b",
+        r"\b(?:please\s+)?(?:call|text|contact)\s+\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\s+instead\b",
+        r"\bautomated\s+(?:message|notice|notification)\b.*\b(?:agent|broker|routing|forward)\b",
+        r"\bredfin\b.*\b(?:premier\s+agent|passed\s+this\s+message|message\s+was\s+sent)\b",
+    ]
+    return any(re.search(pattern, t) for pattern in patterns)
+
+
+def _sms_is_differentiation_question(text: str) -> bool:
+    t = _sms_normalize_whitespace(text).lower()
+    if not t or not re.search(r"\b(?:how|what|why|different|differs?|compare|compares?|communication|documentation|updates?)\b", t):
+        return False
+    difference = re.search(r"\b(?:how|what|why)\b.{0,80}\b(?:different|differs?|better|compare|compares?)\b", t) or re.search(
+        r"\b(?:different|differs?|better)\b.{0,80}\b(?:than|from|with)\b",
+        t,
+    )
+    communication = re.search(r"\b(?:communication|communicat(?:e|ion|ing)|documentation|documents?|paperwork|updates?)\b", t)
+    existing_help = _sms_has_existing_coverage(t) or re.search(r"\b(?:theirs?|them|their|my current|our current)\b", t)
+    return bool((difference and existing_help) or (difference and communication) or (communication and existing_help))
+
+
 def _sms_extract_openai_text(payload: Dict[str, Any]) -> str:
     if isinstance(payload.get("output_text"), str):
         return payload["output_text"]
@@ -4066,6 +4094,13 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
     if re.search(r"\berror\s+invalid\s+number\b", t) and "valid 10 digit" in t:
         return _sms_decision(reason="Carrier invalid-number notice ignored", block_reply=True)
 
+    if _sms_is_automated_routing_notice(t):
+        return _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "Y"),
+            block_reply=True,
+            reason="Automated routing or alternate-number notice ignored",
+        )
+
     if _sms_is_opt_out(t):
         return _sms_decision(
             lead_status="R",
@@ -4232,14 +4267,24 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason="Agent said they need help; manual follow-up needed",
         )
 
-    if re.search(r"\b(website|brochure|flyer|flier|one[- ]?pager|reviews?)\b", t):
+    if re.search(r"\b(website|brochure|flyer|flier|one[- ]?pager|reviews?|testimonials?)\b", t):
         return _sms_decision(
             reply_text=(
                 "https://www.crispshortsales.com\n"
                 "You can also look me up on Google and I have all kinds of reviews from past agents and homeowners that I have worked with."
             ),
             lead_status="Y",
-            reason="Agent asked for website, brochure, flyer, or reviews",
+            reason="Agent asked for website, brochure, flyer, reviews, or testimonials",
+        )
+
+    if _sms_is_differentiation_question(t):
+        return _sms_decision(
+            reply_text=(
+                "That's a fair concern. Crisp handles the lender paperwork, calls, follow-up, and negotiations. "
+                "Yoni can walk you through our documentation and update process so you can compare it directly. Would you like a quick call?"
+            ),
+            lead_status="Y",
+            reason="Agent asked how Crisp differs on communication or documentation",
         )
 
     if re.search(r"\b(how do you help|how can you help|what do you do|how does this work|what kind of help)\b", t):
@@ -4252,7 +4297,10 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason="Agent asked how Crisp helps",
         )
 
-    if re.search(r"\b(fee|cost|paid|compensat|commission|charge)\b", t):
+    if re.search(r"\b(fee|cost|paid|compensat|commission|charge|pricing|price)\b", t) or re.search(
+        r"\b(?:what(?:'s| is)|how much is)\s+(?:your|the)\s+rate\b",
+        t,
+    ):
         return _sms_decision(
             reply_text=(
                 "There is no cost to you or the seller. We get paid by the buyer at closing, and charge a flat fee for our service. "
