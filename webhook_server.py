@@ -3687,6 +3687,8 @@ def _sms_decision(
     callback_time: str = "",
     handoff_type: str = "",
     alert_needed: bool = False,
+    preserve_existing_state: bool = False,
+    preserve_reply_formatting: bool = False,
 ) -> Dict[str, Any]:
     return {
         "reply_text": reply_text,
@@ -3700,6 +3702,8 @@ def _sms_decision(
         "callback_time": callback_time,
         "handoff_type": handoff_type,
         "alert_needed": alert_needed,
+        "preserve_existing_state": preserve_existing_state,
+        "preserve_reply_formatting": preserve_reply_formatting,
     }
 
 
@@ -3714,6 +3718,7 @@ def _sms_is_automated_routing_notice(text: str) -> bool:
         r"\b(?:please\s+)?(?:call|text|contact)\s+\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\s+instead\b",
         r"\bautomated\s+(?:message|notice|notification)\b.*\b(?:agent|broker|routing|forward)\b",
         r"\bredfin\b.*\b(?:premier\s+agent|passed\s+this\s+message|message\s+was\s+sent)\b",
+        r"\byou(?:'|’)ve reached\b.*\b(?:different|another|alternate) number (?:for|to) text(?:ing)?\b.*\bwe(?:'|’)ll send you (?:a )?message from that number\b",
     ]
     return any(re.search(pattern, t) for pattern in patterns)
 
@@ -4098,6 +4103,7 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
         return _sms_decision(
             lead_status=str(row_obj.get("mailshake_status") or "Y"),
             block_reply=True,
+            preserve_existing_state=True,
             reason="Automated routing or alternate-number notice ignored",
         )
 
@@ -4280,11 +4286,15 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
     if _sms_is_differentiation_question(t):
         return _sms_decision(
             reply_text=(
-                "That's a fair concern. Crisp handles the lender paperwork, calls, follow-up, and negotiations. "
-                "Yoni can walk you through our documentation and update process so you can compare it directly. Would you like a quick call?"
+                "Well I pride myself in my communication and will keep you posted throughout the process. I’ll handle everything with the bank and we only get paid if/when the deal closes, so nothing is paid upfront and there’s nothing in it for us if we don’t get it done.\n\n"
+                "I built a whole system around giving agents and homeowners access to our notes so you can see everything that’s going on day to day with the file, I send weekly updates every Friday, and you can always reach my phone/text/email anytime.\n\n"
+                "Want to find some time tomorrow to talk over the phone and we can go over your listing and see if I’m the right fit to help? I’m sure we can get the job done!"
             ),
             lead_status="Y",
-            reason="Agent asked how Crisp differs on communication or documentation",
+            alert_needed=True,
+            handoff_type="HOT LEAD - DIFFERENTIATION QUESTION",
+            preserve_reply_formatting=True,
+            reason="Answered differentiation and communication question; hot-lead alert requested",
         )
 
     if re.search(r"\b(how do you help|how can you help|what do you do|how does this work|what kind of help)\b", t):
@@ -4619,14 +4629,18 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     decision = _sms_build_decision(row_obj, inbound_text)
     auto_count = _sms_count(row_obj)
     should_reply = _sms_should_reply(decision, auto_count)
-    reply_text = _sms_normalize_whitespace(decision.get("reply_text") or "") if should_reply else ""
+    if should_reply and decision.get("preserve_reply_formatting"):
+        reply_text = str(decision.get("reply_text") or "").strip()
+    else:
+        reply_text = _sms_normalize_whitespace(decision.get("reply_text") or "") if should_reply else ""
     lead_status = str(decision.get("lead_status") or "Y")
     conversation_done = bool(decision.get("conversation_done"))
     handoff_needed = bool(decision.get("handoff_needed"))
     needs_review = bool(decision.get("needs_review"))
     reason = str(decision.get("reason") or "")
 
-    updates = {
+    preserve_existing_state = bool(decision.get("preserve_existing_state"))
+    updates = {} if preserve_existing_state else {
         "response_status": inbound_text,
         "mailshake_status": lead_status,
         "conversation_summary": reason,
@@ -4640,10 +4654,11 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         "human_override": "TRUE" if handoff_needed or needs_review or conversation_done else "FALSE",
     }
     callback_time = str(decision.get("callback_time") or "")
-    if updates["call_booking_status"] == "scheduled_callback":
+    if not preserve_existing_state and updates["call_booking_status"] == "scheduled_callback":
         updates["callback_requested"] = "yes"
         updates["callback_time"] = callback_time
-    _sms_update_row_fields(ws, row_idx, headers, updates)
+    if updates:
+        _sms_update_row_fields(ws, row_idx, headers, updates)
 
     result = _sms_normalize_tasker_payload(
         {
@@ -4656,7 +4671,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
             "handoff_needed": handoff_needed,
             "needs_review": needs_review,
             "reason": reason,
-            "call_booking_status": updates["call_booking_status"],
+            "call_booking_status": str(row_obj.get("call_booking_status") or "") if preserve_existing_state else updates["call_booking_status"],
             "callback_time": callback_time,
             "callback_updated": bool(decision.get("alert_needed")),
             "alert_needed": bool(decision.get("alert_needed")),

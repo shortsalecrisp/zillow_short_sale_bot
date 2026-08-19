@@ -76,7 +76,13 @@ def test_decline_plus_information_request_is_a_warm_o_opportunity():
 
 def test_information_request_bypasses_early_decline_closeout_and_syncs_exact_email_rows():
     assert "const hasInformationRequest = isEmailRequestSignal_(inboundText)" in CHATBOT
-    assert "!hasInformationRequest && isAlreadyHandledSignal_(inboundText)" in CHATBOT
-    assert "!hasInformationRequest && isClearNoSignal_(inboundText)" in CHATBOT
+    assert any(
+        "!hasInformationRequest" in line and "isAlreadyHandledSignal_(inboundText)" in line
+        for line in CHATBOT.splitlines()
+    )
+    assert any(
+        "!hasInformationRequest" in line and "isClearNoSignal_(inboundText)" in line
+        for line in CHATBOT.splitlines()
+    )
     assert "function syncWarmInfoOpportunityRows_(sheet, email, rowObj, latestInbound)" in CHATBOT
     assert "if (rowEmail === normalizedEmail) updateRowFields_(sheet, item.row, updates);" in CHATBOT

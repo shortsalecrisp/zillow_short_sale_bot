@@ -1313,8 +1313,14 @@ def test_sms_differentiation_question_gets_deterministic_reply(monkeypatch):
     assert module._sms_is_differentiation_question(inbound) is True
     assert decision["lead_status"] == "Y"
     assert decision["handoff_needed"] is False
-    assert "documentation and update process" in decision["reply_text"]
-    assert decision["reason"] == "Agent asked how Crisp differs on communication or documentation"
+    assert decision["reply_text"] == (
+        "Well I pride myself in my communication and will keep you posted throughout the process. I’ll handle everything with the bank and we only get paid if/when the deal closes, so nothing is paid upfront and there’s nothing in it for us if we don’t get it done.\n\n"
+        "I built a whole system around giving agents and homeowners access to our notes so you can see everything that’s going on day to day with the file, I send weekly updates every Friday, and you can always reach my phone/text/email anytime.\n\n"
+        "Want to find some time tomorrow to talk over the phone and we can go over your listing and see if I’m the right fit to help? I’m sure we can get the job done!"
+    )
+    assert decision["alert_needed"] is True
+    assert decision["handoff_type"] == "HOT LEAD - DIFFERENTIATION QUESTION"
+    assert decision["reason"] == "Answered differentiation and communication question; hot-lead alert requested"
 
 
 def test_sms_testimonials_request_uses_reviews_reply_without_email_prompt(monkeypatch):
@@ -1339,7 +1345,7 @@ def test_sms_automated_alternate_number_notice_does_not_handoff(monkeypatch):
         monkeypatch,
         sender_result=FakeSendResult(success=True),
     )
-    inbound = "Redfin: Your message was sent to a Redfin Premier Agent. Please text 214-427-8372 instead."
+    inbound = "You've reached Redfin, but we actually use a different number for texting - (214) 427-8372. We'll send you a message from that number!"
 
     decision = module._sms_fast_decision({"mailshake_status": "R"}, inbound)
 
@@ -1347,8 +1353,74 @@ def test_sms_automated_alternate_number_notice_does_not_handoff(monkeypatch):
     assert decision["lead_status"] == "R"
     assert decision["handoff_needed"] is False
     assert decision["block_reply"] is True
+    assert decision["preserve_existing_state"] is True
     assert decision["reply_text"] == ""
     assert decision["reason"] == "Automated routing or alternate-number notice ignored"
+
+
+def test_sms_automated_alternate_number_notice_preserves_existing_handoff_state(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][10] = "Y"
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][15] = "interested_no_call"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    inbound = "You've reached Redfin, but we actually use a different number for texting - (214) 427-8372. We'll send you a message from that number!"
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "automated-routing-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["should_reply"] is False
+    assert body["handoff_needed"] is False
+    assert body["alert_needed"] is False
+    assert sender.calls == []
+    assert sheet.rows[2][10] == "Y"
+    assert sheet.rows[2][13] == "handoff"
+    assert sheet.rows[2][15] == "interested_no_call"
+    assert sheet.rows[2][16] == "TRUE"
+    assert sheet.rows[2][19] == "TRUE"
+
+
+def test_sms_differentiation_reply_preserves_paragraphs_and_requests_hot_lead_alert(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "How are you different from them with communication and documentation?"
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "differentiation-alert-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["should_reply"] is True
+    assert body["reply_text"] == module._sms_fast_decision({}, inbound)["reply_text"]
+    assert "\n\n" in body["reply_text"]
+    assert body["handoff_needed"] is False
+    assert body["alert_needed"] is True
+    assert body["handoff_type"] == "HOT LEAD - DIFFERENTIATION QUESTION"
+    assert sender.calls == []
 
 
 def test_sms_substantive_question_that_would_repeat_answer_routes_to_handoff(monkeypatch):

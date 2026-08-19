@@ -1068,7 +1068,7 @@ function handleIncomingSms_(body) {
       }
     }
 
-    if (decision.handoff_needed || decision.needs_review) {
+    if (decision.handoff_needed || decision.needs_review || decision.alert_needed) {
       const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
 
       sendHandoffEmail_({
@@ -1095,6 +1095,7 @@ function handleIncomingSms_(body) {
       conversation_done: !!decision.conversation_done,
       handoff_needed: !!decision.handoff_needed,
       needs_review: !!decision.needs_review,
+      alert_needed: !!decision.alert_needed,
       reason: decision.reason || ""
     };
   }
@@ -1255,7 +1256,7 @@ function handleIncomingSms_(body) {
 
   updateRowFields_(sheet, row, updates);
 
-  if (decision.handoff_needed || decision.needs_review) {
+  if (decision.handoff_needed || decision.needs_review || decision.alert_needed) {
     const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
     sendHandoffEmail_({
       handoff_type: decision.handoff_type || (decision.needs_review ? "NEEDS REVIEW" : "MANUAL FOLLOW-UP"),
@@ -1281,6 +1282,7 @@ function handleIncomingSms_(body) {
     conversation_done: !!decision.conversation_done,
     handoff_needed: !!decision.handoff_needed,
     needs_review: !!decision.needs_review,
+    alert_needed: !!decision.alert_needed,
     reason: decision.reason || ""
   };
 }
@@ -1825,7 +1827,9 @@ function applyFastRules_(text, rowObj) {
       handoff_needed: false,
       needs_review: false,
       block_reply: false,
-      reason: "Agent asked how Crisp differs on communication or documentation"
+      alert_needed: true,
+      handoff_type: "HOT LEAD - DIFFERENTIATION QUESTION",
+      reason: "Answered differentiation and communication question; hot-lead alert requested"
     };
   }
 
@@ -2046,7 +2050,8 @@ function isAutomatedRoutingNoticeSignal_(text) {
     /\bmessage\s+(?:sent|forwarded|routed)\s+to\s+(?:a\s+)?(?:redfin\s+)?(?:premier\s+)?agent\b/,
     /\b(?:please\s+)?(?:call|text|contact)\s+\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\s+instead\b/,
     /\bautomated\s+(?:message|notice|notification)\b.*\b(?:agent|broker|routing|forward)\b/,
-    /\bredfin\b.*\b(?:premier\s+agent|passed\s+this\s+message|message\s+was\s+sent)\b/
+    /\bredfin\b.*\b(?:premier\s+agent|passed\s+this\s+message|message\s+was\s+sent)\b/,
+    /\byou(?:'|’)ve reached\b.*\b(?:different|another|alternate) number (?:for|to) text(?:ing)?\b.*\bwe(?:'|’)ll send you (?:a )?message from that number\b/
   ];
   return patterns.some(function(pattern) { return pattern.test(t); });
 }
@@ -2074,7 +2079,7 @@ function isDifferentiationQuestionSignal_(text) {
 }
 
 function buildDifferentiationQuestionReply_() {
-  return "That's a fair concern. Crisp handles the lender paperwork, calls, follow-up, and negotiations. Yoni can walk you through our documentation and update process so you can compare it directly. Would you like a quick call?";
+  return "Well I pride myself in my communication and will keep you posted throughout the process. I’ll handle everything with the bank and we only get paid if/when the deal closes, so nothing is paid upfront and there’s nothing in it for us if we don’t get it done.\n\nI built a whole system around giving agents and homeowners access to our notes so you can see everything that’s going on day to day with the file, I send weekly updates every Friday, and you can always reach my phone/text/email anytime.\n\nWant to find some time tomorrow to talk over the phone and we can go over your listing and see if I’m the right fit to help? I’m sure we can get the job done!";
 }
 
 function isClosedMarketingConversation_(rowObj) {
@@ -5082,13 +5087,14 @@ function testApprovedLeadIntelligenceRules_() {
   if (!isDifferentiationQuestionSignal_(differentiationText) ||
       !differentiationDecision.matched ||
       differentiationDecision.handoff_needed ||
-      differentiationDecision.reply_text.indexOf("documentation and update process") === -1) {
+      !differentiationDecision.alert_needed ||
+      differentiationDecision.handoff_type !== "HOT LEAD - DIFFERENTIATION QUESTION" ||
+      differentiationDecision.reply_text !== buildDifferentiationQuestionReply_()) {
     throw new Error("Differentiation communication question regression: " + JSON.stringify(differentiationDecision));
   }
 
-  const automatedNoticeText = "This is an automated message from Redfin: your message was sent to a Redfin Premier Agent. Please text 214-427-8372 instead.";
-  if (!isAutomatedRoutingNoticeSignal_(automatedNoticeText) ||
-      !isAiOrAutomationQuestionSignal_(automatedNoticeText)) {
+  const automatedNoticeText = "You've reached Redfin, but we actually use a different number for texting - (214) 427-8372. We'll send you a message from that number!";
+  if (!isAutomatedRoutingNoticeSignal_(automatedNoticeText)) {
     throw new Error("Automated routing notice guard regression");
   }
 
