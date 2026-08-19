@@ -75,6 +75,19 @@ def test_transport_retries_are_idempotent():
     assert "receiptCorrelation.already_sent" in UNIFIED
 
 
+def test_pending_send_claim_treats_lock_contention_as_retryable():
+    claim_start = OUTBOX.index("function claimPendingSmsSendV10_(body)")
+    claim_end = OUTBOX.index("function buildPendingSmsClaimResponse_", claim_start)
+    claim_source = OUTBOX[claim_start:claim_end]
+
+    assert "lock.tryLock(3000)" in claim_source
+    assert "lock.waitLock(10000)" not in claim_source
+    assert "busyPendingSmsClaim_()" in claim_source
+    assert 'retryable: true' in OUTBOX
+    assert 'retry_after_seconds: 5' in OUTBOX
+    assert 'reason: "SMS outbox temporarily busy; retry"' in OUTBOX
+
+
 def test_receipts_recover_only_with_complete_exact_lease_identity():
     for marker in (
         "findPendingSmsRowByExactLeaseIdentityV10_",

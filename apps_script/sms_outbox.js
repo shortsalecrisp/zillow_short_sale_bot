@@ -280,7 +280,7 @@ function claimPendingSmsSendV10_(body) {
   if (!sheet || sheet.getLastRow() < 2) return noPendingSmsClaim_();
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
   var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  if (!lock.tryLock(3000)) return busyPendingSmsClaim_();
   try {
     var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
     var now = Date.now();
@@ -357,6 +357,17 @@ function buildPendingSmsClaimResponse_(row, sheetRow) {
 
 function noPendingSmsClaim_() {
   return { ok: true, should_send: false, should_send_text: "false", reason: "No due SMS reply" };
+}
+
+function busyPendingSmsClaim_() {
+  return {
+    ok: true,
+    should_send: false,
+    should_send_text: "false",
+    retryable: true,
+    retry_after_seconds: 5,
+    reason: "SMS outbox temporarily busy; retry"
+  };
 }
 
 function markPendingSmsSendStartedV10_(body) {
