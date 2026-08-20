@@ -192,6 +192,10 @@ def test_initial_outreach_uses_durable_outbox_and_marks_crm_only_on_tasker_recei
     assert "_mark_initial_sms_sent" not in send_source
     assert "function enqueueInitialSmsV13_" in OUTBOX
     assert "function applyInitialSmsReceiptV13_" in OUTBOX
+    assert "A late Tasker receipt proves the initial send recovered" in OUTBOX
+    assert "SMS OUTBOX NOT CLAIMED|SMS SEND RESULT UNCERTAIN|SMS SEND NOT CONFIRMED" in OUTBOX
+    assert 'range: "M" + crmRow, value: ""' in OUTBOX
+    assert 'range: "N" + crmRow, value: ""' in OUTBOX
     assert 'send_kind === "initial_outreach"' in UNIFIED
     assert 'send_kind: String(rows[matchIndex][6]' in UNIFIED
     send_sms_source = scheduler.split("def send_sms(", 1)[1].split("def _within_initial_hours", 1)[0]

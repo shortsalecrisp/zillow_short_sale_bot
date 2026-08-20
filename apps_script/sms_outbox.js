@@ -349,6 +349,17 @@ function applyInitialSmsReceiptV13_(body, correlation) {
     { range: "L" + crmRow, value: message },
     { range: "O" + crmRow, value: sentAt }
   ];
+  // A late Tasker receipt proves the initial send recovered. Remove only the
+  // transport-generated takeover state so a future agent reply is not muted.
+  var transportAlert = String(sheet.getRange(crmRow, 13).getValue() || "").trim();
+  if (/^(SMS OUTBOX NOT CLAIMED|SMS SEND RESULT UNCERTAIN|SMS SEND NOT CONFIRMED)$/i.test(transportAlert)) {
+    updates.push(
+      { range: "M" + crmRow, value: "" },
+      { range: "N" + crmRow, value: "" },
+      { range: "Q" + crmRow, value: "FALSE" },
+      { range: "T" + crmRow, value: "FALSE" }
+    );
+  }
   if (metadata.mark_codex_verified !== false) updates.push({ range: "AQ" + crmRow, value: "x" });
   updates.forEach(function(update) { sheet.getRange(update.range).setValue(update.value); });
   return { ok: true, initial_sms: true, row: crmRow, sent_at: sentAt.toISOString() };
