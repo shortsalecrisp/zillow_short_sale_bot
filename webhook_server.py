@@ -3216,6 +3216,39 @@ def _sms_normalize_whitespace(value: Any) -> str:
 
 
 YONI_PUBLIC_CONTACT_REPLY = "Yoni Kutler - 404-300-9526. You can call or text anytime."
+SHORT_SALE_TIMELINE_REPLY = (
+    "The short sale process generally takes 60-90 days to complete from the point we submit the full short sale "
+    "package and offer and all docs until the lender reviews the offer and gives us a decision."
+)
+
+
+def _sms_is_short_sale_timeline_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text:
+        return False
+    patterns = [
+        r"\b(?:timeline|timeframe|turnaround time)\b",
+        r"\bhow\s+(?:long|fast|soon|much\s+time)\b.{0,90}\b(?:short sale|process|bank|lender|foreclosure|approval|approved|approve|decision|review|close|closing|take|takes)\b",
+        r"\b(?:average|typical|minimum|maximum)\b.{0,90}\b(?:time|timeline|days|weeks|months|approval|decision|review|close|closing|process)\b",
+        r"\bhow\s+(?:long|soon)\b.{0,90}\b(?:stop|postpone|delay)\b.{0,40}\bforeclosure\b",
+        r"\b(?:time|days|weeks|months)\b.{0,50}\b(?:until|before|to|get)\b.{0,50}\b(?:lender|approval|approved|decision|review|close|closing)\b",
+        r"\bhow\s+many\s+(?:days|weeks|months)\b.{0,90}\b(?:short sale|process|bank|lender|approval|decision|review|close|closing|take|takes)\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_is_unsupported_performance_stats_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text:
+        return False
+    patterns = [
+        r"\b(?:success|approval|approved|close|closing|conversion)\s+rate\b",
+        r"\bwhat\s+(?:percent|percentage)\b",
+        r"\b(?:your|the)\s+(?:stats?|statistics|numbers)\b",
+        r"\bhow\s+often\b.{0,80}\b(?:approve|approved|approval|close|closing|success|successful)\b",
+        r"\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|approvals?|closings?|transactions?)\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _sms_normalize_reaction_text(value: Any) -> str:
@@ -3760,7 +3793,9 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
     system_prompt = (
         "You write short SMS replies as Yoni from Crisp Short Sales. "
         "If the agent asks for a call now, asks whether this is AI/a bot, gives a callback window, "
-        "asks for stats, or needs personal handling, set handoff_needed true, block_reply true, and leave reply_text empty. "
+        "asks for unsupported performance stats, or needs personal handling, set handoff_needed true, block_reply true, and leave reply_text empty. "
+        f"For a short-sale timeline question, reply exactly: {SHORT_SALE_TIMELINE_REPLY} "
+        "If the same message also asks for a success rate or other unsupported performance statistic, hand it off instead. "
         "A future-only promise to reconnect after securing a buyer is warm future interest, not an existing-client takeover. "
         "If answering a new substantive question would repeat the prior answer, hand it off instead of suppressing the question. "
         "Never claim to have buyers. Never offer documents unless they explicitly ask for info by email. "
@@ -4178,6 +4213,21 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
 
     if str(row_obj.get("human_override") or "").upper() == "TRUE":
         return _sms_decision(block_reply=True, reason="Human override enabled - inbound recorded only")
+
+    if _sms_is_short_sale_timeline_question(t) and not _sms_is_unsupported_performance_stats_question(t):
+        return _sms_decision(
+            reply_text=SHORT_SALE_TIMELINE_REPLY,
+            lead_status="Y",
+            reason="Answered approved short-sale timeline question",
+        )
+
+    if _sms_is_unsupported_performance_stats_question(t):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            reason="Agent asked for unsupported performance stats; manual follow-up needed",
+        )
 
     if _sms_is_existing_crisp_relationship(t):
         return _sms_decision(

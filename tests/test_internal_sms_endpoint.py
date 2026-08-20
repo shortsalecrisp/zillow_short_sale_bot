@@ -1079,6 +1079,37 @@ def test_sms_client_consultation_stays_active_and_gets_acknowledgement(monkeypat
     ) is False
 
 
+def test_sms_timeline_question_gets_approved_60_to_90_day_reply(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    decision = module._sms_fast_decision({}, "What is the minimum time to stop foreclosure?")
+
+    assert module._sms_is_short_sale_timeline_question("What is the minimum time to stop foreclosure?") is True
+    assert decision["reply_text"] == module.SHORT_SALE_TIMELINE_REPLY
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+
+
+def test_sms_mixed_timeline_and_unsupported_stats_still_hands_off(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    inbound = "What is your success rate and average closing timeline?"
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_short_sale_timeline_question(inbound) is True
+    assert module._sms_is_unsupported_performance_stats_question(inbound) is True
+    assert decision["reply_text"] == ""
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+
+
 def test_sms_existing_crisp_client_exits_marketing_for_handoff(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

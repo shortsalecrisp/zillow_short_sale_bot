@@ -1226,7 +1226,7 @@ function handleIncomingSms_(body) {
   let decision = getAiDecision_({ row: row, rowObj: currentRowObj }, inboundText);
   decision = normalizeAiDecision_(decision, currentRowObj[HEADERS.mailshake_status]);
   decision = applyReplySanitizers_(decision, currentRowObj);
-  if (containsUnsupportedStatsClaim_(decision.reply_text)) {
+  if (decision.reply_text !== buildShortSaleTimelineReply_() && containsUnsupportedStatsClaim_(decision.reply_text)) {
     decision = buildManualHandoffDecision_(
       "AI attempted to answer with unsupported stats or numeric performance claims",
       "STATS QUESTION"
@@ -1574,6 +1574,19 @@ function applyFastRules_(text, rowObj) {
       needs_review: false,
       block_reply: false,
       reason: "Answered approved experience and track-record question"
+    };
+  }
+
+  if (isShortSaleTimelineQuestionSignal_(t) && !isUnsupportedPerformanceStatsQuestionSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildShortSaleTimelineReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Answered approved short-sale timeline question"
     };
   }
 
@@ -2717,6 +2730,37 @@ function buildExperienceTrackRecordReply_() {
   return "I've been doing this for over 15 years, and this is really all I do - help agents and homeowners with the short sale process. I'm confident I can help you and your clients with these deals and get them to closing as quickly as possible. Do you have some time today for a quick call so I can answer any questions you have?";
 }
 
+function buildShortSaleTimelineReply_() {
+  return "The short sale process generally takes 60-90 days to complete from the point we submit the full short sale package and offer and all docs until the lender reviews the offer and gives us a decision.";
+}
+
+function isShortSaleTimelineQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+  const patterns = [
+    /\b(?:timeline|timeframe|turnaround time)\b/,
+    /\bhow\s+(?:long|fast|soon|much\s+time)\b.{0,90}\b(?:short sale|process|bank|lender|foreclosure|approval|approved|approve|decision|review|close|closing|take|takes)\b/,
+    /\b(?:average|typical|minimum|maximum)\b.{0,90}\b(?:time|timeline|days|weeks|months|approval|decision|review|close|closing|process)\b/,
+    /\bhow\s+(?:long|soon)\b.{0,90}\b(?:stop|postpone|delay)\b.{0,40}\bforeclosure\b/,
+    /\b(?:time|days|weeks|months)\b.{0,50}\b(?:until|before|to|get)\b.{0,50}\b(?:lender|approval|approved|decision|review|close|closing)\b/,
+    /\bhow\s+many\s+(?:days|weeks|months)\b.{0,90}\b(?:short sale|process|bank|lender|approval|decision|review|close|closing|take|takes)\b/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function isUnsupportedPerformanceStatsQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+  const patterns = [
+    /\b(?:success|approval|approved|close|closing|conversion)\s+rate\b/,
+    /\bwhat\s+(?:percent|percentage)\b/,
+    /\b(?:your|the)\s+(?:stats?|statistics|numbers)\b/,
+    /\bhow\s+often\b.{0,80}\b(?:approve|approved|approval|close|closing|success|successful)\b/,
+    /\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|approvals?|closings?|transactions?)\b/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
 function isCurrentTextingNumberQuestionSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const patterns = [
@@ -3562,8 +3606,9 @@ IMPORTANT BEHAVIOR:
   "There is no cost to you or the seller in this deal. We get paid by the buyer at closing, and charge a flat fee for our service. As long as you disclose this cost up front in the listing - the buyer should be able to take that into account with their offer price and then theres usually never any issue. If you want, we can hop on a quick call and ill explain all the specifics to you."
 - Never mention 1%, fee ranges, commission split percentages, or any made-up pricing details
 - If they ask how long I have handled short sales, how much experience I have, how many short sales I have handled, or what my track record is, answer with the approved 15-plus-year experience response and invite a quick call. Do not treat that as a rejection or a stats handoff.
-- Never provide or invent success rates, approval rates, close rates, closing rates, timelines, percentages, averages, or other unapproved performance stats
-- If they ask for a success rate, approval rate, close rate, percentage, average timeline, or another unapproved performance statistic, set handoff_needed = true, block_reply = true, leave reply_text empty, and let ${yourName} answer personally
+- For any short-sale timeline question, reply exactly: "The short sale process generally takes 60-90 days to complete from the point we submit the full short sale package and offer and all docs until the lender reviews the offer and gives us a decision."
+- Never provide or invent success rates, approval rates, close rates, closing rates, percentages, averages, or other unapproved performance stats beyond that approved timeline
+- If they ask for a success rate, approval rate, close rate, percentage, or another unapproved performance statistic, set handoff_needed = true, block_reply = true, leave reply_text empty, and let ${yourName} answer personally. If a message mixes a timeline question with one of those unsupported performance questions, hand it off rather than answering only part of it.
 - Do not estimate, approximate, say "roughly", or include unsupported numeric claims
 - If you find yourself about to repeat the same or a very similar reply, do not repeat it - instead set handoff_needed = true, block_reply = true, and let ${yourName} take over
 
@@ -4776,6 +4821,22 @@ function testApprovedLeadIntelligenceRules_() {
   if (isExperienceTrackRecordQuestionSignal_("What is your success rate and average closing timeline?") ||
       !isStatsOrNumericClaimQuestion_("What is your success rate and average closing timeline?")) {
     throw new Error("Unsupported performance-stat question must still hand off");
+  }
+  const timelineQuestion = "What is the minimum time to stop foreclosure?";
+  const timelineDecision = applyFastRules_(timelineQuestion, {});
+  if (!isShortSaleTimelineQuestionSignal_(timelineQuestion) ||
+      !timelineDecision.matched ||
+      timelineDecision.reply_text !== buildShortSaleTimelineReply_() ||
+      timelineDecision.handoff_needed ||
+      timelineDecision.block_reply) {
+    throw new Error("Approved short-sale timeline reply regression: " + JSON.stringify(timelineDecision));
+  }
+  const mixedStatsTimelineDecision = applyFastRules_("What is your success rate and average closing timeline?", {});
+  if (!mixedStatsTimelineDecision.matched ||
+      !mixedStatsTimelineDecision.handoff_needed ||
+      !mixedStatsTimelineDecision.block_reply ||
+      mixedStatsTimelineDecision.reply_text) {
+    throw new Error("Mixed timeline and unsupported stats must still hand off: " + JSON.stringify(mixedStatsTimelineDecision));
   }
   if (!isClearNoSignal_("Thank you for reaching out, I'm handling it myself, but no thank you")) {
     throw new Error("Explicit self-handling rejection must still close out");
