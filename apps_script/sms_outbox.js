@@ -968,7 +968,7 @@ function findSmsCrmRowByPhone_(phone) {
 
 function getSmsOutboxStatus_() {
   var ss = getSmsSpreadsheet_();
-  var result = { ok: true, inbound: {}, outbound: {} };
+  var result = { ok: true, inbound: {}, outbound: {}, transport: getTaskerTransportHealthV12_() };
   var inbound = ss.getSheetByName("sms_inbound_queue");
   var outbound = ss.getSheetByName("sms_pending_sends");
   if (inbound && inbound.getLastRow() > 1) {
@@ -984,6 +984,82 @@ function getSmsOutboxStatus_() {
     });
   }
   return result;
+}
+
+function recordTaskerTransportActivityV12_(kind, body) {
+  var now = Date.now();
+  var normalizedKind = String(kind || "activity").toLowerCase();
+  var props = PropertiesService.getScriptProperties();
+  var values = {
+    SMS_TASKER_LAST_ACTIVITY_MS: String(now),
+    SMS_TASKER_LAST_ACTIVITY_KIND: normalizedKind
+  };
+  if (normalizedKind === "heartbeat") values.SMS_TASKER_LAST_HEARTBEAT_MS = String(now);
+  if (normalizedKind === "claim") values.SMS_TASKER_LAST_CLAIM_MS = String(now);
+  if (body && body.transport_version) values.SMS_TASKER_TRANSPORT_VERSION = String(body.transport_version);
+  if (body && body.worker_id) values.SMS_TASKER_WORKER_ID = String(body.worker_id);
+  props.setProperties(values, false);
+  return getTaskerTransportHealthV12_(now);
+}
+
+function getTaskerTransportHealthV12_(nowOverride) {
+  var now = Number(nowOverride || Date.now());
+  var props = PropertiesService.getScriptProperties();
+  var lastActivityMs = Number(props.getProperty("SMS_TASKER_LAST_ACTIVITY_MS") || 0);
+  var lastHeartbeatMs = Number(props.getProperty("SMS_TASKER_LAST_HEARTBEAT_MS") || 0);
+  var lastClaimMs = Number(props.getProperty("SMS_TASKER_LAST_CLAIM_MS") || 0);
+  var maxAgeSeconds = Number(props.getProperty("SMS_TASKER_HEALTH_MAX_AGE_SECONDS") || 600);
+  if (!isFinite(maxAgeSeconds) || maxAgeSeconds < 60) maxAgeSeconds = 600;
+  var ageSeconds = lastActivityMs ? Math.max(0, Math.floor((now - lastActivityMs) / 1000)) : null;
+  var healthy = ageSeconds !== null && ageSeconds <= maxAgeSeconds;
+  var reason = healthy
+    ? "Tasker transport is active"
+    : (lastActivityMs ? "Tasker transport activity is stale" : "No Tasker transport activity has been recorded");
+  return {
+    ok: true,
+    healthy: healthy,
+    reason: reason,
+    max_age_seconds: maxAgeSeconds,
+    age_seconds: ageSeconds,
+    last_activity_at: lastActivityMs ? new Date(lastActivityMs).toISOString() : "",
+    last_activity_kind: props.getProperty("SMS_TASKER_LAST_ACTIVITY_KIND") || "",
+    last_heartbeat_at: lastHeartbeatMs ? new Date(lastHeartbeatMs).toISOString() : "",
+    last_claim_at: lastClaimMs ? new Date(lastClaimMs).toISOString() : "",
+    transport_version: props.getProperty("SMS_TASKER_TRANSPORT_VERSION") || "",
+    worker_id: props.getProperty("SMS_TASKER_WORKER_ID") || "",
+    server_time: new Date(now).toISOString()
+  };
+}
+
+function monitorTaskerTransportHealthV12_() {
+  var health = getTaskerTransportHealthV12_();
+  var props = PropertiesService.getScriptProperties();
+  var priorState = props.getProperty("SMS_TASKER_TRANSPORT_ALERT_STATE") || "unknown";
+  if (health.healthy) {
+    if (priorState !== "healthy") {
+      props.setProperty("SMS_TASKER_TRANSPORT_RECOVERED_AT", new Date().toISOString());
+    }
+    props.setProperty("SMS_TASKER_TRANSPORT_ALERT_STATE", "healthy");
+    return health;
+  }
+  if (priorState === "stale") return health;
+  var body = [
+    "The Android Tasker transport is not contacting Apps Script, so outbound SMS is being held instead of marked sent.",
+    "",
+    "Reason: " + health.reason,
+    "Last activity: " + (health.last_activity_at || "none recorded"),
+    "Last heartbeat: " + (health.last_heartbeat_at || "none recorded"),
+    "Last claim: " + (health.last_claim_at || "none recorded"),
+    "Transport version: " + (health.transport_version || "unknown"),
+    "",
+    "No Tasker settings were changed. Open Tasker and AutoRemote or restart the phone to restore the existing transport."
+  ].join("\n");
+  sendSystemAlertEmail_("SMS TASKER TRANSPORT OFFLINE", body);
+  props.setProperties({
+    SMS_TASKER_TRANSPORT_ALERT_STATE: "stale",
+    SMS_TASKER_TRANSPORT_ALERTED_AT: new Date().toISOString()
+  }, false);
+  return health;
 }
 
 function smsOutboxWatchdog_() {
@@ -1104,6 +1180,7 @@ function installSmsOutboxTriggers_() {
   var required = {
     processSmsInboundQueue_: 1,
     smsOutboxWatchdog_: 5,
+    monitorTaskerTransportHealthV12_: 5,
     drainHandoffEmailOutboxV11_: 1,
     drainPendingSmsControlEventsV11_: 1
   };

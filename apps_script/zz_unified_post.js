@@ -17,6 +17,7 @@ function isUnifiedSmsAction_(action) {
     send_started: true,
     install_outbox_triggers: true,
     outbox_status: true,
+    transport_health: true,
     reply_sent: true,
     manual_reply_sent: true,
     sms_send_failed: true,
@@ -105,6 +106,7 @@ function handleUnifiedSmsPost_(e) {
     var action = String(body.action || "incoming_sms").toLowerCase();
     if (action === "tasker_heartbeat") {
       var transportVersion = String(body.transport_version || "");
+      recordTaskerTransportActivityV12_("heartbeat", body);
       try {
         appendSmsDebugLog_("tasker_heartbeat", {
           request_id: requestId,
@@ -118,6 +120,10 @@ function handleUnifiedSmsPost_(e) {
         transport_version: transportVersion,
         server_time: new Date().toISOString()
       });
+    }
+
+    if (action === "transport_health") {
+      return jsonOutput_(getTaskerTransportHealthV12_());
     }
 
     if (action === "codex_probe") {
@@ -150,6 +156,7 @@ function handleUnifiedSmsPost_(e) {
 
 
     if (action === "enqueue_incoming_sms") {
+      if (body.transport_version) recordTaskerTransportActivityV12_("inbound", body);
       var queueIgnored = getUnifiedIgnoredInboundReason_(body);
       if (queueIgnored) {
         return jsonOutput_({
@@ -164,10 +171,12 @@ function handleUnifiedSmsPost_(e) {
     }
 
     if (action === "claim_pending_send") {
+      recordTaskerTransportActivityV12_("claim", body);
       return jsonOutput_(claimPendingSmsSendV10_(body));
     }
 
     if (action === "send_started") {
+      recordTaskerTransportActivityV12_("send_started", body);
       return jsonOutput_(markPendingSmsSendStartedV10_(body));
     }
 
@@ -208,6 +217,7 @@ function handleUnifiedSmsPost_(e) {
     }
 
     if (action === "reply_sent") {
+      recordTaskerTransportActivityV12_("reply_sent", body);
       var receiptCorrelation = validatePendingSmsSendReceipt_(body);
       if (!receiptCorrelation.ok) {
         try {

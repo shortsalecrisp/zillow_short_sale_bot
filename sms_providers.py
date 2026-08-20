@@ -34,15 +34,35 @@ class SMSGatewayForAndroid:
         "failed",
     )
     DEFAULT_ENDPOINT = "https://autoremotejoaomgcd.appspot.com/sendmessage"
+    DEFAULT_TASKER_HEALTH_ENDPOINT = (
+        "https://script.google.com/macros/s/"
+        "AKfycbxkazqXh3kku3L9dVG2DkTqSt4BEIEg0z4kalAHPTeeNShrtlG8ZK5nKew9iM7rRBWK/exec"
+    )
 
     def __init__(
         self,
         api_key: str,
         endpoint: str = DEFAULT_ENDPOINT,
+        tasker_health_endpoint: str = "",
+        tasker_health_token: str = "",
+        require_tasker_health: bool = False,
     ):
         self.api_key = api_key or ""
         self.endpoint = (endpoint or "").strip() or self.DEFAULT_ENDPOINT
         self.endpoint_root = self._normalize_endpoint_root(self.endpoint)
+        self.tasker_health_endpoint = (tasker_health_endpoint or "").strip()
+        self.tasker_health_token = tasker_health_token or ""
+        self.require_tasker_health = bool(require_tasker_health)
+        self._tasker_health_lock = threading.Lock()
+        self._tasker_health_cached_at = 0.0
+        self._tasker_health_cache = None
+        try:
+            self._tasker_health_cache_seconds = max(
+                5.0,
+                float(os.getenv("TASKER_TRANSPORT_HEALTH_CACHE_SECONDS", "30")),
+            )
+        except (TypeError, ValueError):
+            self._tasker_health_cache_seconds = 30.0
         self._send_slot_lock = threading.Lock()
         self._last_send_started_at = 0.0
         try:
@@ -121,6 +141,61 @@ class SMSGatewayForAndroid:
             self._last_send_started_at = now + wait_seconds
             return wait_seconds
 
+    def get_transport_health(self, *, force: bool = False) -> dict:
+        if not self.require_tasker_health:
+            return {
+                "ok": True,
+                "healthy": True,
+                "required": False,
+                "reason": "Tasker transport health gate is disabled",
+            }
+        if not self.tasker_health_endpoint or not self.tasker_health_token:
+            return {
+                "ok": False,
+                "healthy": False,
+                "required": True,
+                "reason": "Tasker transport health check is not configured",
+            }
+
+        with self._tasker_health_lock:
+            now = time.monotonic()
+            if (
+                not force
+                and self._tasker_health_cache is not None
+                and now - self._tasker_health_cached_at < self._tasker_health_cache_seconds
+            ):
+                return dict(self._tasker_health_cache)
+            try:
+                response = requests.post(
+                    self.tasker_health_endpoint,
+                    json={
+                        "token": self.tasker_health_token,
+                        "action": "transport_health",
+                    },
+                    timeout=10,
+                )
+                payload = response.json() if response.status_code == 200 else {}
+                healthy = response.status_code == 200 and payload.get("healthy") is True
+                result = {
+                    "ok": response.status_code == 200 and payload.get("ok") is True,
+                    "healthy": healthy,
+                    "required": True,
+                    "reason": str(payload.get("reason") or f"Health endpoint returned HTTP {response.status_code}"),
+                    "age_seconds": payload.get("age_seconds"),
+                    "last_activity_at": payload.get("last_activity_at") or "",
+                    "transport_version": payload.get("transport_version") or "",
+                }
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "healthy": False,
+                    "required": True,
+                    "reason": f"Tasker transport health check failed: {type(exc).__name__}",
+                }
+            self._tasker_health_cached_at = now
+            self._tasker_health_cache = dict(result)
+            return result
+
     def send_with_diagnostics(
         self,
         to: str,
@@ -171,6 +246,30 @@ class SMSGatewayForAndroid:
                 response_text="",
                 exception_type="MissingConfig",
                 exception_message="AutoRemote key missing",
+                payload_preview=payload_preview,
+            )
+
+        transport_health = self.get_transport_health()
+        if not transport_health.get("healthy"):
+            LOG.error(
+                "TASKER_TRANSPORT_BLOCKED row=%s phone=%s type=%s attempt=%s reason=%s age_seconds=%s last_activity_at=%s transport_version=%s request_not_sent=true",
+                row_idx,
+                to,
+                sms_type,
+                attempt,
+                transport_health.get("reason") or "Tasker transport is unavailable",
+                transport_health.get("age_seconds"),
+                transport_health.get("last_activity_at") or "",
+                transport_health.get("transport_version") or "",
+            )
+            return self._build_result(
+                success=False,
+                status_code=None,
+                response_text="",
+                exception_type="TaskerTransportUnavailable",
+                exception_message=str(
+                    transport_health.get("reason") or "Tasker transport is unavailable"
+                ),
                 payload_preview=payload_preview,
             )
 
@@ -343,4 +442,25 @@ def get_sender(provider: Optional[str] = None):
     # provider parameter is kept for backward compatibility but ignored
     key = os.getenv("AUTOREMOTE_KEY") or os.getenv("SMS_GATEWAY_API_KEY") or os.getenv("SMS_API_KEY", "")
     endpoint = os.getenv("AUTOREMOTE_ENDPOINT", SMSGatewayForAndroid.DEFAULT_ENDPOINT)
-    return SMSGatewayForAndroid(api_key=key, endpoint=endpoint)
+    health_endpoint = os.getenv(
+        "TASKER_TRANSPORT_HEALTH_URL",
+        SMSGatewayForAndroid.DEFAULT_TASKER_HEALTH_ENDPOINT,
+    )
+    health_token = (
+        os.getenv("SMS_CHATBOT_ALLOWED_TOKEN")
+        or os.getenv("GOOGLE_APPS_SCRIPT_TOKEN")
+        or os.getenv("CODEX_AUTOMATION_TOKEN", "")
+    )
+    health_required = os.getenv("TASKER_TRANSPORT_HEALTH_REQUIRED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    return SMSGatewayForAndroid(
+        api_key=key,
+        endpoint=endpoint,
+        tasker_health_endpoint=health_endpoint,
+        tasker_health_token=health_token,
+        require_tasker_health=health_required,
+    )
