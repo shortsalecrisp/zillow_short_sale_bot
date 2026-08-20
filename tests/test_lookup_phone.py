@@ -1624,6 +1624,10 @@ def test_process_rows_holds_pilot_origin_sms_for_verifier(monkeypatch):
             {
                 "description": "short sale listing",
                 "agentName": "Jane Agent",
+                "agentNameSource": "jsonld_bound_listing_agent",
+                "agentEvidenceGroup": "123 elm street|ca",
+                "agentSubjectKey": "jane agent",
+                "listingIdentityGroup": "123 elm street|ca",
                 "state": "CA",
                 "street": "123 Elm St",
                 "city": "Los Angeles",
@@ -1636,7 +1640,7 @@ def test_process_rows_holds_pilot_origin_sms_for_verifier(monkeypatch):
     )
 
     assert len(appended) == 1
-    assert appended[0][bot_min.COL_FIRST] == "Jane"
+    assert appended[0][bot_min.COL_FIRST] == ""
     assert appended[0][bot_min.COL_PHONE] == ""
     assert appended[0][bot_min.COL_EMAIL] == ""
     assert scheduled == []
@@ -1644,7 +1648,7 @@ def test_process_rows_holds_pilot_origin_sms_for_verifier(monkeypatch):
     bot_min.seen_phones.clear()
 
 
-def test_process_rows_skips_known_agent_before_pilot_row_append(monkeypatch):
+def test_process_rows_pilot_bypasses_unverified_agent_dedupe_and_holds(monkeypatch):
     bot_min.seen_agents.clear()
     bot_min.seen_phones.clear()
     bot_min.seen_agents.add("julia a hupp")
@@ -1655,11 +1659,8 @@ def test_process_rows_skips_known_agent_before_pilot_row_append(monkeypatch):
         "load_seen_contacts",
         lambda *args, **kwargs: (set(), set(bot_min.seen_agents)),
     )
-    monkeypatch.setattr(
-        bot_min,
-        "append_row",
-        lambda *_: (_ for _ in ()).throw(AssertionError("known agent must not append")),
-    )
+    appended = []
+    monkeypatch.setattr(bot_min, "append_row", lambda row: appended.append(row) or 44)
     monkeypatch.setattr(
         bot_min,
         "schedule_initial_sms",
@@ -1683,7 +1684,11 @@ def test_process_rows_skips_known_agent_before_pilot_row_append(monkeypatch):
         return_outcomes=True,
     )
 
-    assert outcomes == {"free-julia-duplicate": "skipped_already_contacted_agent"}
+    assert outcomes == {"free-julia-duplicate": "completed_short_sale"}
+    assert len(appended) == 1
+    assert appended[0][bot_min.COL_FIRST] == ""
+    assert appended[0][bot_min.COL_PHONE] == ""
+    assert appended[0][bot_min.COL_EMAIL] == ""
     bot_min.seen_agents.clear()
     bot_min.seen_phones.clear()
 
@@ -1732,6 +1737,48 @@ def test_process_rows_accepts_address_only_pilot_for_verifier(monkeypatch):
     assert appended[0][bot_min.COL_STREET] == "6060 Condor Drive"
     assert appended[0][bot_min.COL_PHONE] == ""
     assert appended[0][bot_min.COL_EMAIL] == ""
+
+
+def test_process_rows_forces_pilot_hold_even_with_forged_contact_and_false_flag(monkeypatch):
+    monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
+    appended = []
+    scheduled = []
+    monkeypatch.setattr(bot_min, "append_row", lambda row: appended.append(row) or 45)
+    monkeypatch.setattr(bot_min, "schedule_initial_sms", lambda *args, **kwargs: scheduled.append(args))
+
+    outcomes = bot_min.process_rows(
+        [{
+            "description": "short sale listing",
+            "agentName": "Wrong Person",
+            "phone": "404-555-1212",
+            "email": "wrong@example.com",
+            "state": "GA",
+            "street": "123 Main Street",
+            "city": "Atlanta",
+            "zpid": "free-forged",
+            "search_source": "free-source-pilot:idx_broker_remarks",
+            "requiresVerifierReview": "false",
+        }],
+        skip_dedupe=True,
+        return_outcomes=True,
+    )
+
+    assert outcomes == {"free-forged": "completed_short_sale"}
+    assert appended[0][bot_min.COL_FIRST] == ""
+    assert appended[0][bot_min.COL_PHONE] == ""
+    assert appended[0][bot_min.COL_EMAIL] == ""
+    assert scheduled == []
+
+
+def test_pilot_hold_detects_conflicting_source_aliases():
+    assert bot_min._pilot_origin_requires_verifier_hold(
+        {"search_source": "zillow", "source": "free-source-pilot:idx_broker_pages"}
+    )
+    assert bot_min._pilot_origin_requires_verifier_hold(
+        {"search_source": "free-source-pilot:idx_broker_pages", "source": "zillow"}
+    )
 
 
 def test_process_rows_skips_undisclosed_address_variants(monkeypatch):

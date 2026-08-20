@@ -8,6 +8,7 @@ import hashlib
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -157,7 +158,6 @@ _state_search_worker_lock = threading.Lock()
 _apify_backstop_worker_lock = threading.Lock()
 _free_source_pilot_worker_lock = threading.Lock()
 _free_source_pilot_audit_worker_lock = threading.Lock()
-_free_source_pilot_startup_catchup_lock = threading.Lock()
 _apify_backstop_day_lock = threading.Lock()
 _original_payload_signature_lock = threading.Lock()
 _previous_original_upstream_dataset_id: Optional[str] = None
@@ -261,18 +261,26 @@ else:
     ]
 FREE_SOURCE_PILOT_RESULTS_PER_QUERY = int(os.getenv("FREE_SOURCE_PILOT_RESULTS_PER_QUERY", "10"))
 FREE_SOURCE_PILOT_SLEEP_SECONDS = float(os.getenv("FREE_SOURCE_PILOT_SLEEP_SECONDS", "1.0"))
-FREE_SOURCE_PILOT_RUN_HOUR = int(os.getenv("FREE_SOURCE_PILOT_RUN_HOUR", "7"))
-FREE_SOURCE_PILOT_RUN_MINUTE = int(os.getenv("FREE_SOURCE_PILOT_RUN_MINUTE", "15"))
-FREE_SOURCE_PILOT_STARTUP_CATCHUP = os.getenv("FREE_SOURCE_PILOT_STARTUP_CATCHUP", "false").lower() == "true"
-FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH = os.getenv(
-    "FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH",
-    "/tmp/free_source_pilot_startup_catchup.txt",
+FREE_SOURCE_PILOT_RUN_HOUR = int(os.getenv("FREE_SOURCE_PILOT_RUN_HOUR", "9"))
+FREE_SOURCE_PILOT_RUN_MINUTE = int(os.getenv("FREE_SOURCE_PILOT_RUN_MINUTE", "0"))
+FREE_SOURCE_PILOT_STARTUP_CATCHUP = os.getenv("FREE_SOURCE_PILOT_STARTUP_CATCHUP", "true").lower() == "true"
+FREE_SOURCE_PILOT_STARTUP_CATCHUP_MAX_HOURS = int(
+    os.getenv("FREE_SOURCE_PILOT_STARTUP_CATCHUP_MAX_HOURS", "6")
 )
+FREE_SOURCE_PILOT_AUDIT_STARTUP_CATCHUP_MAX_HOURS = int(
+    os.getenv("FREE_SOURCE_PILOT_AUDIT_STARTUP_CATCHUP_MAX_HOURS", "30")
+)
+FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE = os.getenv(
+    "FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE", "2026-08-21"
+).strip()
 FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR = int(
-    os.getenv("FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR", "9")
+    os.getenv("FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR", "10")
 )
 FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE = int(
     os.getenv("FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE", "5")
+)
+FREE_SOURCE_PILOT_POST_SOURCE_AUDIT_GRACE_MINUTES = int(
+    os.getenv("FREE_SOURCE_PILOT_POST_SOURCE_AUDIT_GRACE_MINUTES", "30")
 )
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
 _STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1}
@@ -808,57 +816,229 @@ def _next_free_source_pilot_run(now: datetime) -> datetime:
     return candidate + timedelta(days=1)
 
 
-def _free_source_pilot_hour_key(run_time: datetime) -> str:
-    return run_time.astimezone(SCHEDULER_TZ).strftime("%Y-%m-%dT%H%z")
+def _free_source_pilot_run_receipt_id(run_time: datetime, mode: str = "source") -> str:
+    local_time = run_time.astimezone(SCHEDULER_TZ)
+    return hashlib.sha256(
+        f"free-source-pilot|{mode}|{local_time.isoformat()}|{os.getpid()}|{time.time_ns()}".encode("utf-8")
+    ).hexdigest()[:16]
 
 
-def _claim_free_source_pilot_startup_catchup(run_time: datetime) -> bool:
-    key = _free_source_pilot_hour_key(run_time)
-    with _free_source_pilot_startup_catchup_lock:
+def _log_free_source_pilot_wrapper_terminal(
+    *, run_time: datetime, run_receipt_id: str, status: str, returncode: int | None = None, error: str = ""
+) -> None:
+    logger.info(
+        "free-source-pilot: wrapper %s",
+        json.dumps(
+            {
+                "event": "pilot_scheduler_terminal",
+                "run_receipt_id": run_receipt_id,
+                "run_date": run_time.astimezone(SCHEDULER_TZ).date().isoformat(),
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "status": status,
+                "returncode": returncode,
+                "error": error[:500],
+            },
+            sort_keys=True,
+        ),
+    )
+
+
+def _terminate_pilot_process_group(process: subprocess.Popen, grace_seconds: float = 10.0) -> None:
+    process_group_id = process.pid
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + grace_seconds
+    group_alive = True
+    while time.monotonic() < deadline:
         try:
-            with open(FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH, "r", encoding="utf-8") as fh:
-                previous_key = fh.read().strip()
-        except FileNotFoundError:
-            previous_key = ""
-        except OSError:
-            logger.exception("free-source-pilot: startup catch-up marker read failed")
-            previous_key = ""
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            group_alive = False
+            break
+        time.sleep(0.1)
+    try:
+        if group_alive:
+            os.killpg(process_group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        process.wait(timeout=5)
+    else:
+        process.wait()
 
-        if previous_key == key:
-            logger.info("free-source-pilot: startup catch-up already claimed hour=%s", key)
-            return False
 
-        try:
-            with open(FREE_SOURCE_PILOT_STARTUP_CATCHUP_PATH, "w", encoding="utf-8") as fh:
-                fh.write(key)
-        except OSError:
-            logger.exception("free-source-pilot: startup catch-up marker write failed")
-        return True
+def _bounded_startup_catchup_slot(
+    now: datetime,
+    hour: int,
+    minute: int,
+    *,
+    max_hours: Optional[int] = None,
+    allow_previous_day: bool = False,
+) -> Optional[datetime]:
+    local_now = now.astimezone(SCHEDULER_TZ)
+    slot = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if allow_previous_day and local_now < slot:
+        slot -= timedelta(days=1)
+    if FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE:
+        start_date = datetime.strptime(
+            FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE, "%Y-%m-%d"
+        ).date()
+        if slot.date() < start_date:
+            return None
+    catchup_hours = (
+        FREE_SOURCE_PILOT_STARTUP_CATCHUP_MAX_HOURS
+        if max_hours is None
+        else max_hours
+    )
+    if slot <= local_now <= slot + timedelta(hours=catchup_hours):
+        return slot
+    return None
 
 
 def _start_free_source_pilot_startup_catchup() -> None:
     if not FREE_SOURCE_PILOT_STARTUP_CATCHUP:
         logger.info("free-source-pilot: startup catch-up disabled")
         return
-    run_time = datetime.now(tz=SCHEDULER_TZ).replace(minute=0, second=0, microsecond=0)
-    if not _free_source_pilot_due(run_time):
-        logger.info("free-source-pilot: startup catch-up skipped outside scheduled window")
-        return
-    if not _claim_free_source_pilot_startup_catchup(run_time):
+    run_time = _bounded_startup_catchup_slot(
+        datetime.now(tz=SCHEDULER_TZ),
+        FREE_SOURCE_PILOT_RUN_HOUR,
+        FREE_SOURCE_PILOT_RUN_MINUTE,
+    )
+    if run_time is None:
+        logger.info("free-source-pilot: startup catch-up skipped outside bounded window")
         return
     logger.info("free-source-pilot: startup catch-up triggering run_time=%s", run_time.isoformat())
     _process_free_source_pilot_callback(run_time)
+
+
+def _start_free_source_pilot_audit_startup_catchup() -> None:
+    if not FREE_SOURCE_PILOT_STARTUP_CATCHUP:
+        logger.info("free-source-pilot-audit: startup catch-up disabled")
+        return
+    run_times = _bounded_audit_startup_catchup_slots(datetime.now(tz=SCHEDULER_TZ))
+    if not run_times:
+        logger.info("free-source-pilot-audit: startup catch-up skipped outside bounded window")
+        return
+
+    def _run_slots() -> None:
+        for run_time in run_times:
+            logger.info(
+                "free-source-pilot-audit: startup catch-up triggering run_time=%s",
+                run_time.isoformat(),
+            )
+            completed = threading.Event()
+            _process_free_source_pilot_post_verifier_audit(
+                run_time,
+                completion_event=completed,
+            )
+            if not completed.wait(timeout=6 * 60):
+                logger.warning(
+                    "free-source-pilot-audit: startup catch-up timed out waiting for slot=%s",
+                    run_time.isoformat(),
+                )
+        local_now = datetime.now(tz=SCHEDULER_TZ)
+        today_slot = local_now.replace(
+            hour=FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR,
+            minute=FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+        if today_slot in run_times:
+            _schedule_post_source_audit(today_slot)
+
+    threading.Thread(
+        target=_run_slots,
+        name="free-source-pilot-audit-startup-catchup",
+        daemon=True,
+    ).start()
+
+
+def _bounded_audit_startup_catchup_slots(now: datetime) -> list[datetime]:
+    local_now = now.astimezone(SCHEDULER_TZ)
+    today_slot = local_now.replace(
+        hour=FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR,
+        minute=FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    candidates = [today_slot - timedelta(days=1), today_slot]
+    start_date = (
+        datetime.strptime(FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE, "%Y-%m-%d").date()
+        if FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE
+        else None
+    )
+    return [
+        slot
+        for slot in candidates
+        if slot <= local_now
+        and local_now <= slot + timedelta(hours=FREE_SOURCE_PILOT_AUDIT_STARTUP_CATCHUP_MAX_HOURS)
+        and (start_date is None or slot.date() >= start_date)
+    ]
+
+
+def _audit_slot_after_late_source_completion(
+    run_time: datetime,
+    now: Optional[datetime] = None,
+) -> Optional[datetime]:
+    local_run = run_time.astimezone(SCHEDULER_TZ)
+    local_now = (now or datetime.now(tz=SCHEDULER_TZ)).astimezone(SCHEDULER_TZ)
+    audit_slot = local_run.replace(
+        hour=FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR,
+        minute=FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if local_now.date() == local_run.date():
+        return audit_slot
+    return None
+
+
+def _post_source_audit_delay_seconds(
+    audit_slot: datetime,
+    now: Optional[datetime] = None,
+) -> float:
+    local_now = (now or datetime.now(tz=SCHEDULER_TZ)).astimezone(SCHEDULER_TZ)
+    seconds_until_slot = max((audit_slot - local_now).total_seconds(), 0)
+    return max(
+        seconds_until_slot,
+        max(FREE_SOURCE_PILOT_POST_SOURCE_AUDIT_GRACE_MINUTES, 0) * 60,
+    )
+
+
+def _schedule_post_source_audit(audit_slot: datetime) -> None:
+    delay_seconds = _post_source_audit_delay_seconds(audit_slot)
+    timer = threading.Timer(
+        delay_seconds,
+        _process_free_source_pilot_post_verifier_audit,
+        args=(audit_slot,),
+    )
+    timer.daemon = True
+    timer.start()
 
 
 def _run_free_source_pilot(run_time: datetime) -> None:
     if not _free_source_pilot_due(run_time):
         logger.info("free-source-pilot: skipped outside scheduled window run_time=%s", run_time.isoformat())
         return
+    run_receipt_id = _free_source_pilot_run_receipt_id(run_time)
+    schedule_slot_id = f"source:{run_time.astimezone(SCHEDULER_TZ).date().isoformat()}"
     if not FREE_SOURCE_PILOT_STATES:
         logger.info("free-source-pilot: skipped no states configured")
+        _log_free_source_pilot_wrapper_terminal(
+            run_time=run_time,
+            run_receipt_id=run_receipt_id,
+            status="skipped_no_states",
+        )
         return
     if not _free_source_pilot_worker_lock.acquire(blocking=False):
         logger.info("free-source-pilot: skipped overlapping run")
+        _log_free_source_pilot_wrapper_terminal(
+            run_time=run_time,
+            run_receipt_id=run_receipt_id,
+            status="skipped_overlap",
+        )
         return
 
     script_path = os.path.join(os.path.dirname(__file__), "scripts", "free_short_sale_source_pilot.py")
@@ -879,7 +1059,13 @@ def _run_free_source_pilot(run_time: datetime) -> None:
         str(FREE_SOURCE_PILOT_SLEEP_SECONDS),
         "--run-date",
         run_time.astimezone(SCHEDULER_TZ).date().isoformat(),
+        "--scheduled-run",
+        "--run-receipt-id",
+        run_receipt_id,
+        "--schedule-slot-id",
+        schedule_slot_id,
     ]
+    process = None
     try:
         logger.info(
             "free-source-pilot: starting run_time=%s states=%s results_per_query=%s tab=%s",
@@ -895,6 +1081,7 @@ def _run_free_source_pilot(run_time: datetime) -> None:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         stdout_thread = threading.Thread(
             target=_log_subprocess_lines,
@@ -915,16 +1102,50 @@ def _run_free_source_pilot(run_time: datetime) -> None:
         stderr_thread.join(timeout=5)
         if returncode:
             logger.error("free-source-pilot: failed returncode=%s", returncode)
+            _log_free_source_pilot_wrapper_terminal(
+                run_time=run_time,
+                run_receipt_id=run_receipt_id,
+                status="failed_nonzero",
+                returncode=returncode,
+            )
             return
         logger.info("free-source-pilot: completed returncode=%s", returncode)
+        _log_free_source_pilot_wrapper_terminal(
+            run_time=run_time,
+            run_receipt_id=run_receipt_id,
+            status="process_exited_zero_child_receipt_required",
+            returncode=returncode,
+        )
+        late_audit_slot = _audit_slot_after_late_source_completion(run_time)
+        if late_audit_slot is not None:
+            _schedule_post_source_audit(late_audit_slot)
     except subprocess.TimeoutExpired as exc:
+        cleanup_error = ""
         try:
-            process.kill()
-        except Exception:
-            pass
+            if process is not None:
+                _terminate_pilot_process_group(process)
+        except Exception as cleanup_exc:
+            cleanup_error = f"; cleanup_error={type(cleanup_exc).__name__}: {cleanup_exc}"
+            logger.exception("free-source-pilot: timeout cleanup failed")
+        if "stdout_thread" in locals():
+            stdout_thread.join(timeout=5)
+        if "stderr_thread" in locals():
+            stderr_thread.join(timeout=5)
         logger.error("free-source-pilot: timed out after %.0fs", exc.timeout)
-    except Exception:
+        _log_free_source_pilot_wrapper_terminal(
+            run_time=run_time,
+            run_receipt_id=run_receipt_id,
+            status="failed_timeout",
+            error=f"timeout after {exc.timeout:.0f}s{cleanup_error}",
+        )
+    except Exception as exc:
         logger.exception("free-source-pilot: crashed")
+        _log_free_source_pilot_wrapper_terminal(
+            run_time=run_time,
+            run_receipt_id=run_receipt_id,
+            status="failed_spawn_or_wrapper",
+            error=str(exc),
+        )
     finally:
         _free_source_pilot_worker_lock.release()
 
@@ -975,14 +1196,29 @@ def _next_free_source_pilot_post_verifier_audit(now: datetime) -> datetime:
     return candidate + timedelta(days=1)
 
 
-def _process_free_source_pilot_post_verifier_audit(run_time: datetime) -> None:
+def _process_free_source_pilot_post_verifier_audit(
+    run_time: datetime,
+    *,
+    completion_event: Optional[threading.Event] = None,
+) -> None:
     if not _free_source_pilot_post_verifier_audit_due(run_time):
+        if completion_event is not None:
+            completion_event.set()
         return
-    if not _free_source_pilot_audit_worker_lock.acquire(blocking=False):
+    if completion_event is not None:
+        acquired = _free_source_pilot_audit_worker_lock.acquire(timeout=6 * 60)
+    else:
+        acquired = _free_source_pilot_audit_worker_lock.acquire(blocking=False)
+    if not acquired:
         logger.info("free-source-pilot-audit: skipped overlapping run")
+        if completion_event is not None:
+            completion_event.set()
         return
 
     def _runner() -> None:
+        run_receipt_id = _free_source_pilot_run_receipt_id(run_time, mode="post_verifier_audit")
+        schedule_slot_id = f"post_verifier_audit:{run_time.astimezone(SCHEDULER_TZ).date().isoformat()}"
+        process = None
         try:
             script_path = os.path.join(os.path.dirname(__file__), "scripts", "free_short_sale_source_pilot.py")
             cmd = [
@@ -996,34 +1232,73 @@ def _process_free_source_pilot_post_verifier_audit(run_time: datetime) -> None:
                 FREE_SOURCE_PILOT_TAB,
                 "--run-date",
                 run_time.astimezone(SCHEDULER_TZ).date().isoformat(),
+                "--scheduled-run",
                 "--audit-links-only",
                 "--audit-phase",
                 "post_verifier",
+                "--run-receipt-id",
+                run_receipt_id,
+                "--schedule-slot-id",
+                schedule_slot_id,
             ]
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
                 cwd=os.path.dirname(__file__),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=5 * 60,
-                check=False,
+                start_new_session=True,
             )
-            for line in completed.stdout.splitlines():
+            stdout, stderr = process.communicate(timeout=5 * 60)
+            for line in stdout.splitlines():
                 if line.strip():
                     logger.info("free-source-pilot-audit: stdout %s", line.strip())
-            for line in completed.stderr.splitlines():
+            for line in stderr.splitlines():
                 if line.strip():
                     logger.warning("free-source-pilot-audit: stderr %s", line.strip())
-            if completed.returncode:
-                logger.error("free-source-pilot-audit: failed returncode=%s", completed.returncode)
+            if process.returncode:
+                logger.error("free-source-pilot-audit: failed returncode=%s", process.returncode)
+                _log_free_source_pilot_wrapper_terminal(
+                    run_time=run_time,
+                    run_receipt_id=run_receipt_id,
+                    status="audit_failed_nonzero",
+                    returncode=process.returncode,
+                )
             else:
                 logger.info("free-source-pilot-audit: completed returncode=0")
+                _log_free_source_pilot_wrapper_terminal(
+                    run_time=run_time,
+                    run_receipt_id=run_receipt_id,
+                    status="audit_process_exited_zero_child_receipt_required",
+                    returncode=0,
+                )
         except subprocess.TimeoutExpired:
+            cleanup_error = ""
+            try:
+                if process is not None:
+                    _terminate_pilot_process_group(process)
+            except Exception as cleanup_exc:
+                cleanup_error = f"; cleanup_error={type(cleanup_exc).__name__}: {cleanup_exc}"
+                logger.exception("free-source-pilot-audit: timeout cleanup failed")
             logger.error("free-source-pilot-audit: timed out after 300s")
-        except Exception:
+            _log_free_source_pilot_wrapper_terminal(
+                run_time=run_time,
+                run_receipt_id=run_receipt_id,
+                status="audit_failed_timeout",
+                error=f"timeout after 300s{cleanup_error}",
+            )
+        except Exception as exc:
             logger.exception("free-source-pilot-audit: crashed")
+            _log_free_source_pilot_wrapper_terminal(
+                run_time=run_time,
+                run_receipt_id=run_receipt_id,
+                status="audit_failed_spawn_or_wrapper",
+                error=str(exc),
+            )
         finally:
             _free_source_pilot_audit_worker_lock.release()
+            if completion_event is not None:
+                completion_event.set()
 
     threading.Thread(target=_runner, name="free-source-pilot-audit", daemon=True).start()
 
@@ -2143,6 +2418,7 @@ async def _start_scheduler() -> None:
     _ensure_free_source_pilot_scheduler_thread()
     _ensure_free_source_pilot_audit_scheduler_thread()
     _start_free_source_pilot_startup_catchup()
+    _start_free_source_pilot_audit_startup_catchup()
     _ensure_keepalive_thread()
 
 

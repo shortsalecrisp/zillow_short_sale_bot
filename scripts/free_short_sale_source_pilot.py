@@ -41,6 +41,37 @@ from sheet_safety import (  # noqa: E402
 SPREADSHEET_ID = "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70"
 MAIN_TAB = "Sheet1"
 PILOT_TAB = "Lead Source Pilot"
+RUN_RECEIPT_TAB = os.getenv("FREE_SOURCE_PILOT_RUN_RECEIPT_TAB", "Pilot Run Receipts")
+POST_SOURCE_AUDIT_GRACE_MINUTES = int(
+    os.getenv("FREE_SOURCE_PILOT_POST_SOURCE_AUDIT_GRACE_MINUTES", "30")
+)
+
+
+def validate_run_receipt_tab(main_tab: str, pilot_tab: str) -> None:
+    """Fail closed before any Sheet mutation if receipts could touch lead data."""
+    receipt_name = normalize_space(RUN_RECEIPT_TAB)
+    protected_names = {
+        normalize_space(main_tab).casefold(),
+        normalize_space(pilot_tab).casefold(),
+        "sheet1",
+        "lead source pilot",
+    }
+    if not receipt_name or receipt_name.casefold() in protected_names:
+        raise RuntimeError(
+            "FREE_SOURCE_PILOT_RUN_RECEIPT_TAB must name a dedicated tab distinct "
+            "from Sheet1 and Lead Source Pilot"
+        )
+RUN_RECEIPT_HEADERS = [
+    "schedule_slot_id",
+    "run_receipt_id",
+    "run_date",
+    "run_mode",
+    "status",
+    "observed_at",
+    "pipeline_complete",
+    "detail",
+]
+RUN_RECEIPT_STALE_MINUTES = int(os.getenv("FREE_SOURCE_PILOT_RUN_RECEIPT_STALE_MINUTES", "70"))
 
 PILOT_HEADERS = [
     "first_name",
@@ -428,7 +459,7 @@ DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN = max(
 )
 SITE_CHROME_SHADOW_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_START_DATE",
-    "2026-08-20",
+    "2026-08-21",
 ).strip()
 SITE_CHROME_SHADOW_DAYS = max(
     1,
@@ -486,6 +517,8 @@ HEADLESS_DOMAINS = {
 }
 _headless_used_total = 0
 _headless_used_by_domain: dict[str, int] = {}
+_site_chrome_prewrite_seen: set[str] = set()
+_site_chrome_prewrite_count = 0
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -551,10 +584,24 @@ SITE_CHROME_SHORT_SALE_CARD_RE = re.compile(
 )
 
 SITE_CHROME_SHORT_SALE_NAVIGATION_RE = re.compile(
-    r"\b(?:financing\s+options?\s+)?(?P<label>short\s+sale\s+option)\s+"
-    r"selecting\s+your\s+real\s+estate\s+agent\b",
+    r"\b(?:financing\s+options?\s+)?(?P<label>short[-\s]+sale\s+options?)"
+    r"(?:\s*[|:;,.\-/–—\u2022]\s*|\s+)"
+    r"(?:select(?:ing)?|choos(?:e|ing))\s+(?:your\s+)?(?:an?\s+)?(?:real\s+estate\s+)?agent\b",
     re.IGNORECASE,
 )
+
+SHORT_SALE_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|no\s+longer|isn['’]?t|is\s+not)\s+(?:an?\s+)?short[-\s]+sale\b|"
+    r"\bshort[-\s]+sale\s*[:=-]?\s*(?:no|false)\b|"
+    r"\b(?:will|would|does|do|did)?\s*not\s+(?:be\s+|consider\s+|pursue\s+|accept\s+|allow\s+|seek\s+)?(?:an?\s+)?short[-\s]+sale\b|"
+    r"\bshort[-\s]+sale\s+(?:is|was|will\s+be)?\s*not\s+(?:applicable|available|eligible|possible|considered|an?\s+option)\b",
+    re.IGNORECASE,
+)
+
+TRUSTED_LISTING_DESCRIPTION_SOURCES = {
+    "jsonld_listing_object",
+    "visible_listing_description",
+}
 
 FUTURE_NEGOTIATOR_INVOLVEMENT_RE = re.compile(
     r"\b(?:in\s+the\s+process\s+of\s+)?being\s+assigned\s+"
@@ -803,9 +850,98 @@ class ExistingIndex:
     agent_name_keys: dict[str, list[int]]
 
 
+_active_run_event_context: dict[str, Any] = {}
+
+
+def set_run_event_context(**fields: Any) -> None:
+    _active_run_event_context.clear()
+    _active_run_event_context.update({key: value for key, value in fields.items() if value not in (None, "")})
+
+
+def clear_run_event_context() -> None:
+    _active_run_event_context.clear()
+
+
 def log_event(event: str, **fields: Any) -> None:
-    payload = {"event": event, **fields}
+    payload = {
+        **_active_run_event_context,
+        "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "event": event,
+        **fields,
+    }
     print(json.dumps(payload, sort_keys=True, default=str), flush=True)
+
+
+_search_engine_attempt_stats: dict[str, int] = {
+    "attempted": 0,
+    "succeeded": 0,
+    "blocked": 0,
+    "failed": 0,
+}
+
+
+def reset_search_engine_attempt_stats() -> None:
+    for key in _search_engine_attempt_stats:
+        _search_engine_attempt_stats[key] = 0
+
+
+def source_error_class(error: BaseException | str) -> str:
+    text = str(error)
+    if re.search(
+        r"(?:\b(?:401|403|429|451)\b|forbidden|unauthori[sz]ed|access.?denied|"
+        r"rate.?limit|quota|resource.?exhausted|daily.?limit)",
+        text,
+        re.I,
+    ):
+        return "blocked"
+    return "failed"
+
+
+def source_failure_reason(error: BaseException | str) -> str:
+    text = str(error)
+    match = re.search(r"\b(?:HTTP(?:\s+Error)?\s*)?(401|403|404|429|451|500|502|503|504)\b", text, re.I)
+    if match:
+        return f"http_{match.group(1)}"
+    if re.search(r"timed?\s*out|timeout", text, re.I):
+        return "timeout"
+    if re.search(r"quota|resource.?exhausted|daily.?limit", text, re.I):
+        return "quota"
+    if re.search(r"rate.?limit", text, re.I):
+        return "rate_limit"
+    return type(error).__name__.lower() if isinstance(error, BaseException) else "unknown"
+
+
+def increment_reason(stats: dict[str, Any], bucket: str, reason: str) -> None:
+    reasons = stats.setdefault(bucket, {})
+    reasons[reason or "unknown"] = int(reasons.get(reason or "unknown", 0)) + 1
+
+
+TRACKING_QUERY_KEYS = {
+    "fbclid", "gclid", "msclkid", "dclid", "_ga", "mc_cid", "mc_eid",
+}
+
+
+def canonical_public_listing_url(url: str) -> str:
+    if not re.match(r"^https?://", normalize_space(url), re.I):
+        return ""
+    parsed = urllib.parse.urlsplit(url)
+    query_pairs = [
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and key.lower() not in TRACKING_QUERY_KEYS
+    ]
+    query = urllib.parse.urlencode(sorted(query_pairs))
+    return urllib.parse.urlunsplit(
+        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), query, "")
+    )
+
+
+def result_url_identity(url: str) -> str:
+    return canonical_public_listing_url(url)
+
+
+def public_source_url_for_receipt(url: str) -> str:
+    return canonical_public_listing_url(url)
 
 
 def normalize_space(value: str) -> str:
@@ -962,6 +1098,79 @@ def qualification_for_text(text: str) -> Qualification:
     )
 
 
+def qualification_for_candidate(candidate: Candidate) -> Qualification:
+    """Qualify only evidence scoped to the exact fetched listing."""
+    fields = candidate.fields
+    description = normalize_space(fields.get("listing_description", ""))
+    description_source = fields.get("listing_description_source", "")
+    exact_listing_confirmed = fields.get("exact_listing_confirmed", "").lower() == "true"
+    if not exact_listing_confirmed:
+        return Qualification("rejected", "exact_listing_not_confirmed", "", "", "")
+    if description_source not in TRUSTED_LISTING_DESCRIPTION_SOURCES or not description:
+        return Qualification("rejected", "needs_description_confirmation", "", "", "")
+
+    identity_group = fields.get("listing_identity_group", "")
+    description_group = fields.get("listing_description_group", "")
+    status_group = fields.get("scoped_listing_status_group", "")
+    if not identity_group or len({identity_group, description_group, status_group}) != 1:
+        return Qualification("rejected", "listing_evidence_not_bound", "", "", "")
+
+    navigation_match = SITE_CHROME_SHORT_SALE_NAVIGATION_RE.search(description)
+    description_without_navigation = SITE_CHROME_SHORT_SALE_NAVIGATION_RE.sub(" ", description)
+    if navigation_match and not SHORT_SALE_LISTING_RE.search(description_without_navigation):
+        return Qualification(
+            "rejected",
+            "short_sale_not_in_listing_evidence",
+            "",
+            excerpt_around(description, navigation_match.start("label"), navigation_match.end("label")),
+            "site_chrome_short_sale_navigation_only",
+        )
+
+    short_sale_match = SHORT_SALE_LISTING_RE.search(description)
+    if not short_sale_match:
+        return Qualification("rejected", "missing_listing_text_short_sale", "", "", "")
+    negation_match = SHORT_SALE_NEGATION_RE.search(description)
+    if negation_match:
+        return Qualification(
+            "rejected",
+            "disqualifying_short_sale_text",
+            "listing_description_or_remarks",
+            excerpt_around(description, short_sale_match.start(), short_sale_match.end()),
+            negation_match.group(0),
+        )
+    disqualified = []
+    for pattern in DISQUALIFY_PATTERNS:
+        match = pattern.search(description)
+        if match:
+            disqualified.append(match.group(0))
+    if disqualified:
+        return Qualification(
+            "rejected",
+            "disqualifying_short_sale_text",
+            "listing_description_or_remarks",
+            excerpt_around(description, short_sale_match.start(), short_sale_match.end()),
+            "; ".join(disqualified),
+        )
+
+    listing_status = fields.get("scoped_listing_status", "unknown")
+    listing_status_evidence = fields.get("scoped_listing_status_evidence", "")
+    if listing_status != "current":
+        return Qualification(
+            "rejected",
+            "not_current_listing" if listing_status == "not_current" else "missing_current_listing_status",
+            "listing_description_or_remarks",
+            excerpt_around(description, short_sale_match.start(), short_sale_match.end()),
+            listing_status_evidence,
+        )
+    return Qualification(
+        "qualified",
+        "",
+        "listing_description_or_remarks",
+        excerpt_around(description, short_sale_match.start(), short_sale_match.end()),
+        "",
+    )
+
+
 def verified_short_sale_match(text: str) -> re.Match[str] | None:
     short_sale_match = SHORT_SALE_LISTING_RE.search(text)
     if not short_sale_match:
@@ -1099,8 +1308,22 @@ def has_complete_agent_contact(candidate: Candidate) -> bool:
     return bool(
         first_name
         and last_name
-        and normalize_phone(fields.get("phone", ""))
+        and len(normalize_phone(fields.get("phone", ""))) == 10
         and is_valid_email(fields.get("email", ""))
+        and fields.get("phone_contact_type") in {"direct_mobile", "agent_specific_listing"}
+        and fields.get("email_contact_type") == "agent_specific_professional"
+        and fields.get("agent_evidence_group") == fields.get("listing_identity_group")
+        and fields.get("phone_evidence_group") == fields.get("listing_identity_group")
+        and fields.get("email_evidence_group") == fields.get("listing_identity_group")
+        and fields.get("phone_owner_key") == fields.get("agent_subject_key")
+        and fields.get("email_owner_key") == fields.get("agent_subject_key")
+    )
+
+
+def is_sms_ready_agent_contact(candidate: Candidate) -> bool:
+    return bool(
+        has_complete_agent_contact(candidate)
+        and candidate.fields.get("phone_contact_type") == "direct_mobile"
     )
 
 
@@ -1159,6 +1382,9 @@ def research_candidate_contact(candidate: Candidate) -> None:
 
 
 def registered_domain(url: str) -> str:
+    reference_match = re.search(r"(?:^|;\s*)source_domain=([^;\s]+)", url or "", re.I)
+    if reference_match:
+        return reference_match.group(1).strip().lower()
     host = urllib.parse.urlparse(url).netloc.lower()
     parts = [part for part in host.split(".") if part]
     if len(parts) >= 2:
@@ -1454,6 +1680,8 @@ def cse_search(query: str, source: str, limit: int, date_restrict: str | None = 
 def search_web(query: str, source: str, limit: int, date_restrict: str | None = None) -> tuple[str, list[SearchResult]]:
     engines: list[str]
     if SEARCH_ENGINE in {"cse", "google", "google_cse"}:
+        if not (CSE_API_KEY and CSE_CX):
+            raise RuntimeError("configured CSE search engine is missing CSE_API_KEY or CSE_CX")
         engines = ["cse"]
     elif SEARCH_ENGINE in {"ddg", "duckduckgo"}:
         engines = ["ddg"]
@@ -1467,15 +1695,27 @@ def search_web(query: str, source: str, limit: int, date_restrict: str | None = 
 
     last_error = ""
     for engine in engines:
+        _search_engine_attempt_stats["attempted"] += 1
         try:
             if engine == "cse":
                 results = cse_search(query, source, limit, date_restrict=date_restrict)
             else:
                 results = ddg_search(query, source, limit)
+            _search_engine_attempt_stats["succeeded"] += 1
             return engine, results
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
-            log_event("search_engine_failed", engine=engine, source=source, query=query, error=last_error)
+            failure_class = source_error_class(exc)
+            _search_engine_attempt_stats[failure_class] += 1
+            log_event(
+                "search_engine_failed",
+                engine=engine,
+                source=source,
+                query=query,
+                error=last_error,
+                failure_class=failure_class,
+                blocked=failure_class == "blocked",
+            )
     raise RuntimeError(last_error or "all search engines failed")
 
 
@@ -1549,8 +1789,9 @@ def clean_agent_name(value: str) -> str:
         "",
         compact,
     )
+    compact = re.sub(r"(?i)^the\s+", "", compact)
     compact = re.split(
-        r"(?i)\b(?:call|phone|cell|mobile|email|license|lic\.?|dre|brokerage|broker|"
+        r"(?i)\b(?:call|phone|cell|mobile|direct|main|email|license|lic\.?|dre|brokerage|broker|"
         r"brokered\s+by|shown\s+by|listed\s+by|listing\s+office|office|mls|fax|"
         r"website|provided\s+by|status|remarks|public\s+remarks|description|"
         r"property\s+description|special\s+listing\s+conditions?|realty|realtor|"
@@ -1605,6 +1846,38 @@ def extract_listing_agent_fields(text: str) -> dict[str, str]:
     return {}
 
 
+def extract_bound_listing_agent_fields(text: str) -> dict[str, str]:
+    """Return one unambiguous individual listing-agent label from a bound listing record."""
+    matches: dict[str, dict[str, str]] = {}
+    for match in TRUSTED_AGENT_LABEL_CONTEXT_RE.finditer(text):
+        context = match.group(1)
+        agent_segment = re.split(
+            r"(?i)\b(?:status|remarks|public\s+remarks|description|property\s+description|"
+            r"special\s+listing\s+conditions?|brokerage|listing\s+office|office|contact\s+phone)\b|"
+            r"[|•;\n\r]",
+            context,
+            maxsplit=1,
+        )[0]
+        if BUSINESS_NAME_RE.search(agent_segment):
+            continue
+        name = clean_agent_name(agent_segment)
+        if not name:
+            continue
+        details = {"agent_name": name}
+        phone_match = first_contact_phone_match(agent_segment)
+        if phone_match:
+            details["phone"] = format_phone(phone_match.group(0))
+        email_match = EMAIL_RE.search(agent_segment)
+        if email_match:
+            details["email"] = email_match.group(0).lower()
+        key = normalize_key(name)
+        existing = matches.setdefault(key, details)
+        for field in ("phone", "email"):
+            if details.get(field):
+                existing.setdefault(field, details[field])
+    return next(iter(matches.values())) if len(matches) == 1 else {}
+
+
 def shadow_listing_agent_candidate(candidate: Candidate) -> dict[str, str]:
     """Extract a high-confidence agent candidate without changing live fields."""
     for label, pattern in SHADOW_AGENT_LABEL_PATTERNS:
@@ -1652,7 +1925,7 @@ def shadow_listing_agent_candidate(candidate: Candidate) -> dict[str, str]:
                     "broker_name": candidate.fields.get("broker_name", ""),
                 },
             )
-            safe, reason = agent_name_promotion_safety(probe)
+            safe, reason = agent_name_promotion_safety(probe, require_source=False)
             if safe:
                 result = {"agent_name": name, "label": label}
                 if artifact_shadow:
@@ -1678,7 +1951,10 @@ def first_contact_phone_match(text: str) -> re.Match[str] | None:
     return None
 
 
-TRUSTED_AGENT_SOURCES = {"jsonld_real_estate_agent", "listing_agent_label"}
+TRUSTED_AGENT_SOURCES = {
+    "jsonld_bound_listing_agent",
+    "visible_listing_container",
+}
 
 
 def agent_name_promotion_safety(candidate: Candidate, *, require_source: bool = True) -> tuple[bool, str]:
@@ -1688,6 +1964,13 @@ def agent_name_promotion_safety(candidate: Candidate, *, require_source: bool = 
         return False, "missing_listing_agent"
     if require_source and fields.get("agent_name_source", "") not in TRUSTED_AGENT_SOURCES:
         return False, "unattributed_listing_agent"
+    if require_source and (
+        not fields.get("agent_evidence_group")
+        or fields.get("agent_evidence_group") != fields.get("listing_identity_group")
+    ):
+        return False, "unbound_listing_agent"
+    if require_source and fields.get("agent_subject_key") != normalize_key(name):
+        return False, "agent_subject_mismatch"
 
     raw_tokens = [token.strip(" .'()-") for token in name.split() if token.strip(" .'()-")]
     if any(len(token) >= 2 and token.isupper() for token in raw_tokens):
@@ -1732,23 +2015,64 @@ def sanitize_candidate_identity(candidate: Candidate) -> tuple[bool, str]:
         if fields.get("agent_name"):
             fields["rejected_agent_name"] = fields["agent_name"]
         fields["agent_name_rejection_reason"] = reason
-        for key in ("agent_name", "agent_name_source", "phone", "phone_source", "email", "email_source"):
+        for key in (
+            "agent_name", "agent_name_source", "agent_evidence_group",
+            "agent_subject_key",
+            "phone", "phone_source", "phone_evidence_group", "phone_contact_type",
+            "phone_owner_key",
+            "email", "email_source", "email_evidence_group", "email_contact_type",
+            "email_owner_key",
+        ):
             fields[key] = ""
         return False, reason
 
-    if fields.get("phone_source", "") not in TRUSTED_AGENT_SOURCES:
+    agent_group = fields.get("agent_evidence_group", "")
+    if (
+        fields.get("phone_source", "") not in TRUSTED_AGENT_SOURCES
+        or not agent_group
+        or fields.get("phone_evidence_group", "") != agent_group
+    ):
         fields["phone"] = ""
         fields["phone_source"] = ""
+        fields["phone_evidence_group"] = ""
+        fields["phone_contact_type"] = ""
+        fields["phone_owner_key"] = ""
     else:
         fields["phone"] = format_phone(fields.get("phone", ""))
-    if fields.get("email_source", "") not in TRUSTED_AGENT_SOURCES:
+        if fields.get("phone_contact_type") == "office_team_main":
+            fields["contact_phone_hint"] = fields["phone"]
+            fields["contact_phone_hint_type"] = fields["phone_contact_type"]
+            fields["phone"] = ""
+            fields["phone_source"] = ""
+            fields["phone_evidence_group"] = ""
+            fields["phone_contact_type"] = ""
+            fields["phone_owner_key"] = ""
+    if (
+        fields.get("email_source", "") not in TRUSTED_AGENT_SOURCES
+        or not agent_group
+        or fields.get("email_evidence_group", "") != agent_group
+    ):
         fields["email"] = ""
         fields["email_source"] = ""
+        fields["email_evidence_group"] = ""
+        fields["email_contact_type"] = ""
+        fields["email_owner_key"] = ""
     elif is_valid_email(fields.get("email", "")):
         fields["email"] = fields["email"].strip().lower()
+        if fields.get("email_contact_type") != "agent_specific_professional":
+            fields["contact_email_hint"] = fields["email"]
+            fields["contact_email_hint_type"] = fields.get("email_contact_type", "")
+            fields["email"] = ""
+            fields["email_source"] = ""
+            fields["email_evidence_group"] = ""
+            fields["email_contact_type"] = ""
+            fields["email_owner_key"] = ""
     else:
         fields["email"] = ""
         fields["email_source"] = ""
+        fields["email_evidence_group"] = ""
+        fields["email_contact_type"] = ""
+        fields["email_owner_key"] = ""
     return True, ""
 
 
@@ -1904,8 +2228,14 @@ def site_chrome_exclusion_shadow(candidate: Candidate) -> dict[str, Any]:
     platform_targeted = domain in SITE_CHROME_SHADOW_DOMAINS
     description = normalize_space(candidate.fields.get("listing_description", ""))
     navigation_match = SITE_CHROME_SHORT_SALE_NAVIGATION_RE.search(candidate.text)
+    description_without_navigation = SITE_CHROME_SHORT_SALE_NAVIGATION_RE.sub(
+        " ",
+        description,
+    )
     description_is_navigation = bool(
-        navigation_match and SITE_CHROME_SHORT_SALE_NAVIGATION_RE.search(description)
+        navigation_match
+        and SITE_CHROME_SHORT_SALE_NAVIGATION_RE.search(description)
+        and not SHORT_SALE_LISTING_RE.search(description_without_navigation)
     )
     description_confirmed = bool(
         SHORT_SALE_LISTING_RE.search(description) and not description_is_navigation
@@ -1944,6 +2274,75 @@ def site_chrome_exclusion_shadow(candidate: Candidate) -> dict[str, Any]:
         "evidence": chrome_evidence[:500],
         "writes": 0,
     }
+
+
+def log_site_chrome_prewrite_receipt(
+    candidate: Candidate,
+    qualification: Qualification,
+    *,
+    state: str,
+    source: str,
+    run_date: dt.date | None = None,
+) -> bool:
+    """Record every target-domain candidate before qualification can write a lead row."""
+    global _site_chrome_prewrite_count
+    shadow = site_chrome_exclusion_shadow(candidate)
+    if not shadow["platform_targeted"]:
+        return False
+    observed_date = run_date or dt.datetime.now(ZoneInfo("America/New_York")).date()
+    if not experiment_active(
+        observed_date,
+        SITE_CHROME_SHADOW_START_DATE,
+        SITE_CHROME_SHADOW_DAYS,
+    ):
+        return False
+    reviewable = bool(
+        candidate.fields.get("exact_listing_confirmed") == "true"
+        and candidate.fields.get("listing_description")
+        and candidate.fields.get("listing_identity_group")
+    )
+    if not reviewable:
+        return False
+    stable_id = stable_synthetic_zpid(
+        candidate.source,
+        candidate.url,
+        candidate.fields.get("listing_address", ""),
+        candidate.fields.get("city", ""),
+        candidate.fields.get("state", ""),
+    )
+    candidate_ref = hashlib.sha256(stable_id.encode("utf-8")).hexdigest()[:16]
+    if candidate_ref in _site_chrome_prewrite_seen:
+        return False
+    if _site_chrome_prewrite_count >= SITE_CHROME_SHADOW_MAX_PER_RUN:
+        return False
+    _site_chrome_prewrite_seen.add(candidate_ref)
+    _site_chrome_prewrite_count += 1
+    receipt_source_url = public_source_url_for_receipt(candidate.url)
+    log_event(
+        "pilot_site_chrome_prewrite_receipt",
+        run_date=observed_date.isoformat(),
+        state=state,
+        source=source,
+        candidate_ref=candidate_ref,
+        exact_source_url=receipt_source_url,
+        exact_source_url_reviewable=bool(receipt_source_url),
+        qualification_status=qualification.status,
+        qualification_reason=qualification.failure_reason,
+        reviewable=reviewable,
+        independent_review_required=True,
+        agreement_unconfirmed=True,
+        experiment_case_number_this_run=_site_chrome_prewrite_count,
+        experiment_window_days=SITE_CHROME_SHADOW_DAYS,
+        experiment_target_unique_properties=SITE_CHROME_SHADOW_MAX_PER_RUN,
+        denominator_key_type="normalized_property_identity_hash",
+        durable_receipt_surface="render_structured_logs",
+        window_case_number_requires_log_aggregation=True,
+        lead_data_writes=0,
+        searches_added=0,
+        sends=0,
+        **shadow,
+    )
+    return True
 
 
 def compound_negative_field_shadow(candidate: Candidate) -> dict[str, Any]:
@@ -2059,8 +2458,516 @@ def is_ad_or_tracking_url(url: str) -> bool:
     )
 
 
-def extract_jsonld_text(markup: str) -> tuple[str, dict[str, str]]:
+def address_appears_in_text(address: str, text: str) -> bool:
+    address_tokens = normalize_key(clean_listing_address(address)).split()
+    text_key = normalize_key(text)
+    if not address_tokens or not text_key:
+        return False
+    address_key_value = " ".join(address_tokens)
+    if address_key_value in text_key:
+        return True
+    number = next((token for token in address_tokens if token.isdigit()), "")
+    ignored = {
+        "street", "st", "road", "rd", "avenue", "ave", "drive", "dr", "lane", "ln",
+        "court", "ct", "trail", "trl", "way", "boulevard", "blvd", "circle", "cir",
+        "unit", "apt", "suite", "north", "south", "east", "west", "n", "s", "e", "w",
+    }
+    core = [token for token in address_tokens if token != number and token not in ignored]
+    if not number or not core:
+        return False
+    for match in re.finditer(rf"\b{re.escape(number)}\b", text_key):
+        window = text_key[max(0, match.start() - 40) : match.end() + 160]
+        if all(re.search(rf"\b{re.escape(token)}\b", window) for token in core[:3]):
+            return True
+    return False
+
+
+def jsonld_listing_status(obj: dict[str, Any]) -> tuple[str, str]:
+    values: list[str] = []
+    for key in ("homeStatus", "listingStatus", "status", "availability"):
+        value = obj.get(key)
+        if isinstance(value, str):
+            values.append(value)
+    offers = obj.get("offers")
+    if isinstance(offers, dict):
+        for key in ("availability", "status"):
+            value = offers.get(key)
+            if isinstance(value, str):
+                values.append(value)
+    evidence = normalize_space(" ".join(values))
+    if not evidence:
+        return "unknown", ""
+    normalized_values = {
+        re.sub(r"[^a-z0-9]+", "", value.rsplit("/", 1)[-1].rsplit("#", 1)[-1].lower())
+        for value in values
+    }
+    current_values = {
+        "instock", "forsale", "active", "activeundercontract", "pending", "contingent",
+        "undercontract", "comingsoon",
+    }
+    non_current_values = {
+        "inactive", "sold", "closed", "offmarket", "expired", "withdrawn", "cancelled",
+        "canceled", "outofstock",
+    }
+    has_current = bool(normalized_values.intersection(current_values))
+    has_non_current = bool(normalized_values.intersection(non_current_values))
+    if has_current and has_non_current:
+        return "unknown", f"conflicting_status:{evidence[:200]}"
+    if has_non_current:
+        return "not_current", evidence[:220]
+    if has_current:
+        return "current", evidence[:220]
+    return "unknown", evidence[:220]
+
+
+def listing_evidence_group(address: str, state: str = "", zip_code: str = "") -> str:
+    street = normalize_key(clean_listing_address(address, state=state, zip_code=zip_code))
+    if not street:
+        return ""
+    return "|".join(part for part in (street, normalize_key(state), normalize_key(zip_code)) if part)
+
+
+def expected_listing_fields(result: SearchResult) -> dict[str, str]:
+    normalized_title = re.sub(
+        r"\b([A-Z]{2})\.(?=\s*(?:[|–-]|$))",
+        r"\1",
+        result.title,
+    )
+    parts = parse_address_parts(normalized_title)
+    if not parts.get("listing_address"):
+        title_parts = [part.strip(" .") for part in re.split(r"\s*[|–-]\s*", normalized_title) if part.strip()]
+        if title_parts:
+            parts.update(parse_address_parts(title_parts[0]))
+        if title_parts and not parts.get("listing_address") and looks_like_listing_address(title_parts[0]):
+            parts["listing_address"] = clean_listing_address(title_parts[0])
+    if not parts.get("state"):
+        location = re.search(r"\b([A-Z][A-Za-z .'-]{2,40}),\s*([A-Z]{2})\s*(\d{5})?\b", result.title + " " + result.snippet)
+        if location:
+            parts.setdefault("city", normalize_space(location.group(1)))
+            parts["state"] = location.group(2)
+            parts.setdefault("zip", location.group(3) or "")
+    return parts
+
+
+def listing_fields_match_expected(candidate: dict[str, str], expected: dict[str, str]) -> bool:
+    candidate_street = normalize_key(clean_listing_address(
+        candidate.get("listing_address", ""),
+        candidate.get("city", ""),
+        candidate.get("state", ""),
+        candidate.get("zip", ""),
+    ))
+    expected_street = normalize_key(clean_listing_address(
+        expected.get("listing_address", ""),
+        expected.get("city", ""),
+        expected.get("state", ""),
+        expected.get("zip", ""),
+    ))
+    if not candidate_street or not expected_street or candidate_street != expected_street:
+        return False
+    candidate_state = normalize_key(candidate.get("state", ""))
+    expected_state = normalize_key(expected.get("state", ""))
+    if candidate_state and expected_state and candidate_state != expected_state:
+        return False
+    candidate_city = normalize_key(candidate.get("city", ""))
+    expected_city = normalize_key(expected.get("city", ""))
+    if candidate_city and expected_city and candidate_city != expected_city:
+        return False
+    candidate_zip = normalize_key(candidate.get("zip", ""))
+    expected_zip = normalize_key(expected.get("zip", ""))
+    if expected_zip and candidate_zip != expected_zip:
+        return False
+    return True
+
+
+def listing_url_matches_address(url: str, address: str) -> bool:
+    path_key = normalize_key(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+    address_tokens = normalize_key(clean_listing_address(address)).split()
+    number = next((token for token in address_tokens if token.isdigit()), "")
+    ignored = {
+        "street", "road", "avenue", "drive", "lane", "court", "trail", "way",
+        "boulevard", "circle", "parkway", "terrace", "highway", "route", "north",
+        "south", "east", "west", "n", "s", "e", "w",
+    }
+    core = [token for token in address_tokens if token != number and token not in ignored]
+    return bool(number and core and number in path_key.split() and all(token in path_key.split() for token in core[:2]))
+
+
+def bound_phone_contact_type(text: str, phone: str) -> str:
+    digits = normalize_phone(phone)
+    if not digits:
+        return ""
+    if digits[:3] in {"800", "833", "844", "855", "866", "877", "888"}:
+        return "office_team_main"
+    compact = normalize_space(text)
+    for match in PHONE_RE.finditer(compact):
+        if normalize_phone(match.group(0)) != digits:
+            continue
+        prefix = compact[max(0, match.start() - 35) : match.start()]
+        if re.search(r"\b(?:mobile|cell|direct)(?:\s+(?:phone|number))?\s*[:#-]?\s*$", prefix, re.I):
+            return "direct_mobile"
+        if re.search(r"\b(?:office|main|team|brokerage)(?:\s+(?:phone|number))?\s*[:#-]?\s*$", prefix, re.I):
+            return "office_team_main"
+    return "agent_specific_listing"
+
+
+def bound_email_contact_type(email_value: str, agent_name: str = "") -> str:
+    local = normalize_space(email_value).lower().split("@", 1)[0]
+    routing_tokens = (
+        "agent", "info", "support", "office", "team", "sales", "listing", "lead",
+        "contact", "admin", "hello", "home", "frontdesk", "reception", "inquiry",
+        "inquiries", "marketing", "showing", "appointment", "clientservice", "concierge",
+        "transaction", "closing",
+    )
+    if any(token in local for token in routing_tokens):
+        return "team_brokerage_routing"
+    name_tokens = normalize_key(agent_name).split()
+    first = name_tokens[0] if name_tokens else ""
+    last = name_tokens[-1] if len(name_tokens) >= 2 else ""
+    local_key = normalize_key(local).replace(" ", "")
+    approved_forms = {
+        first + last,
+        first[:1] + last if first else "",
+        last + first,
+    }
+    if local_key and local_key in approved_forms:
+        return "agent_specific_professional"
+    return "professional_unverified" if is_valid_email(email_value) else ""
+
+
+def bind_agent_fields(details: dict[str, str], group: str, source: str, context: str) -> dict[str, str]:
+    raw_name = normalize_space(details.get("agent_name", ""))
+    if BUSINESS_NAME_RE.search(raw_name):
+        return {}
+    name = clean_agent_name(raw_name)
+    if not name or not group:
+        return {}
+    bound = {
+        "agent_name": name,
+        "agent_name_source": source,
+        "agent_evidence_group": group,
+        "agent_subject_key": normalize_key(name),
+    }
+    phone = format_phone(details.get("phone", ""))
+    if phone:
+        bound.update({
+            "phone": phone,
+            "phone_source": source,
+            "phone_evidence_group": group,
+            "phone_contact_type": bound_phone_contact_type(context, phone),
+            "phone_owner_key": normalize_key(name),
+        })
+    email_value = normalize_space(details.get("email", "")).lower()
+    if is_valid_email(email_value):
+        bound.update({
+            "email": email_value,
+            "email_source": source,
+            "email_evidence_group": group,
+            "email_contact_type": bound_email_contact_type(email_value, name),
+            "email_owner_key": normalize_key(name),
+        })
+    return bound
+
+
+def visible_agent_subrecord(container: Any, group: str) -> dict[str, str]:
+    """Bind exactly one agent from an explicit agent subrecord, never the full listing container."""
+    if container is None or not hasattr(container, "find_all"):
+        return {}
+    bound_by_subject: dict[str, dict[str, str]] = {}
+    contact_values: dict[str, dict[str, set[str]]] = {}
+    for element in container.find_all(True):
+        attributes = " ".join(
+            str(value)
+            for key, value in getattr(element, "attrs", {}).items()
+            if key.lower() in {"id", "class", "itemprop", "data-testid", "aria-label"}
+        ).lower()
+        if not re.search(r"(?:listing[-_ ]?agent|agent[-_ ]?(?:info|contact|details|profile))", attributes):
+            continue
+        if re.search(r"(?:related|recommended|similar|team|office|brokerage|sidebar)", attributes):
+            continue
+        ancestor = getattr(element, "parent", None)
+        excluded_ancestor = False
+        while ancestor is not None and ancestor is not container:
+            ancestor_attributes = " ".join(
+                str(value)
+                for key, value in getattr(ancestor, "attrs", {}).items()
+                if key.lower() in {"id", "class", "itemprop", "data-testid", "aria-label"}
+            ).lower()
+            if re.search(r"(?:related|recommended|similar|team|office|brokerage|sidebar)", ancestor_attributes):
+                excluded_ancestor = True
+                break
+            ancestor = getattr(ancestor, "parent", None)
+        if excluded_ancestor:
+            continue
+        context = normalize_space(element.get_text(" ", strip=True))
+        details = extract_bound_listing_agent_fields(context)
+        bound = bind_agent_fields(details, group, "visible_listing_container", context)
+        if bound:
+            subject = bound["agent_subject_key"]
+            existing = bound_by_subject.setdefault(subject, bound)
+            values = contact_values.setdefault(subject, {"phone": set(), "email": set()})
+            for field in ("phone", "email"):
+                if bound.get(field):
+                    values[field].add(bound[field])
+                    existing.setdefault(field, bound[field])
+    if len(bound_by_subject) != 1:
+        return {}
+    subject, result = next(iter(bound_by_subject.items()))
+    conflicts = []
+    if len(contact_values.get(subject, {}).get("phone", set())) > 1:
+        conflicts.append("phone")
+        for field in ("phone", "phone_source", "phone_evidence_group", "phone_contact_type", "phone_owner_key"):
+            result.pop(field, None)
+    if len(contact_values.get(subject, {}).get("email", set())) > 1:
+        conflicts.append("email")
+        for field in ("email", "email_source", "email_evidence_group", "email_contact_type", "email_owner_key"):
+            result.pop(field, None)
+    if conflicts:
+        result["agent_contact_conflict"] = ",".join(conflicts)
+    return result
+
+
+def reconcile_bound_agent_fields(records: list[dict[str, str]]) -> dict[str, str]:
+    """Keep one attributable subject while blanking cross-record contact conflicts."""
+    bound_records = [record for record in records if record.get("agent_subject_key")]
+    subjects = {record["agent_subject_key"] for record in bound_records}
+    if len(subjects) != 1:
+        return {}
+    subject = next(iter(subjects))
+    result = dict(bound_records[0])
+    conflicts = {
+        field
+        for field in ("phone", "email")
+        if len({record[field] for record in bound_records if record.get(field)}) > 1
+    }
+    for record in bound_records[1:]:
+        for field, value in record.items():
+            if value:
+                result.setdefault(field, value)
+    inherited_conflicts = {
+        field
+        for record in bound_records
+        for field in record.get("agent_contact_conflict", "").split(",")
+        if field
+    }
+    conflicts.update(inherited_conflicts)
+    contact_fields = {
+        "phone": ("phone", "phone_source", "phone_evidence_group", "phone_contact_type", "phone_owner_key"),
+        "email": ("email", "email_source", "email_evidence_group", "email_contact_type", "email_owner_key"),
+    }
+    for conflict in conflicts:
+        for field in contact_fields.get(conflict, ()):
+            result.pop(field, None)
+    if conflicts:
+        result["agent_contact_conflict"] = ",".join(sorted(conflicts))
+    result["agent_subject_key"] = subject
+    return result
+
+
+def visible_listing_evidence(markup: str, expected: dict[str, str]) -> dict[str, str]:
+    """Return address, remarks, and status only when bound to one visible listing container."""
+    expected_address = expected.get("listing_address", "")
+    group = listing_evidence_group(expected_address, expected.get("state", ""), expected.get("zip", ""))
+    candidates: list[tuple[str, str, dict[str, str]]] = []
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(markup, "html.parser")
+        for element in soup.find_all(True):
+            attributes = " ".join(
+                str(value)
+                for key, value in element.attrs.items()
+                if key.lower() in {"id", "class", "itemprop", "data-testid", "aria-label"}
+            ).lower()
+            if re.search(r"(?:public[-_ ]?remarks|listing[-_ ]?description|property[-_ ]?description|remarks)", attributes):
+                description = normalize_space(element.get_text(" ", strip=True))
+                if not 20 <= len(description) <= 12_000:
+                    continue
+                container = element
+                depth = 0
+                while container.parent is not None and getattr(container.parent, "name", "") not in {"body", "html", "[document]"}:
+                    container = container.parent
+                    depth += 1
+                    container_text = normalize_space(container.get_text(" ", strip=True))
+                    container_attributes = " ".join(
+                        str(value)
+                        for key, value in getattr(container, "attrs", {}).items()
+                        if key.lower() in {"id", "class", "itemprop", "data-testid", "aria-label"}
+                    ).lower()
+                    semantic_boundary = bool(
+                        getattr(container, "name", "") in {"article", "section", "li", "aside"}
+                        or re.search(r"(?:listing|property|home|mls|detail|card)", container_attributes)
+                    )
+                    main_boundary = getattr(container, "name", "") == "main"
+                    if address_appears_in_text(expected_address, container_text) and (
+                        depth == 1 or semantic_boundary
+                    ):
+                        candidates.append((description, container_text, visible_agent_subrecord(container, group)))
+                        break
+                    if semantic_boundary or main_boundary or depth >= 3:
+                        break
+        for heading in soup.find_all(re.compile(r"^h[1-6]$")):
+            label = normalize_space(heading.get_text(" ", strip=True))
+            if not re.fullmatch(r"(?:public\s+remarks|listing\s+description|property\s+description|remarks)", label, re.I):
+                continue
+            sibling = heading.find_next_sibling()
+            if sibling is not None:
+                description = normalize_space(sibling.get_text(" ", strip=True))
+                container = heading.parent
+                container_text = normalize_space(container.get_text(" ", strip=True)) if container else ""
+                container_attributes = " ".join(
+                    str(value)
+                    for key, value in getattr(container, "attrs", {}).items()
+                    if key.lower() in {"id", "class", "itemprop", "data-testid", "aria-label"}
+                ).lower() if container else ""
+                semantic_container = bool(
+                    container
+                    and (
+                        getattr(container, "name", "") in {"main", "article", "section", "li", "aside"}
+                        or re.search(r"(?:listing|property|home|mls|detail|card)", container_attributes)
+                    )
+                )
+                if (
+                    20 <= len(description) <= 12_000
+                    and semantic_container
+                    and address_appears_in_text(expected_address, container_text)
+                ):
+                    candidates.append((description, container_text, visible_agent_subrecord(container, group)))
+    except ImportError:
+        pattern = re.compile(
+            r"<(?P<tag>[a-z0-9]+)[^>]*(?:id|class|itemprop|data-testid|aria-label)=[\"'][^\"']*"
+            r"(?:public[-_ ]?remarks|listing[-_ ]?description|property[-_ ]?description|remarks)[^\"']*[\"'][^>]*>"
+            r"(?P<body>.*?)</(?P=tag)>",
+            re.I | re.S,
+        )
+        for match in pattern.finditer(markup):
+            description = strip_html(match.group("body"))
+            if 20 <= len(description) <= 12_000 and address_appears_in_text(expected_address, description):
+                candidates.append((description, description, {}))
+    reviewable: list[tuple[str, str, str, dict[str, str]]] = []
+    for description, container_text, agent_fields in candidates:
+        status, status_evidence = current_listing_status(container_text)
+        without_navigation = SITE_CHROME_SHORT_SALE_NAVIGATION_RE.sub(" ", description)
+        if SHORT_SALE_LISTING_RE.search(without_navigation):
+            reviewable.append((description, status, status_evidence, agent_fields))
+    if not reviewable:
+        return {}
+    listing_fingerprints = {
+        (
+            normalize_key(description),
+            status,
+            normalize_key(status_evidence),
+        )
+        for description, status, status_evidence, _agent_fields in reviewable
+    }
+    if len(listing_fingerprints) != 1:
+        return {**expected, "listing_identity_ambiguous": "true"}
+    description, status, status_evidence, _agent_fields = reviewable[0]
+    evidence = {
+        **expected,
+        "exact_listing_confirmed": "true",
+        "listing_identity_source": "visible_listing_container",
+        "listing_identity_group": group,
+        "listing_description": description,
+        "listing_description_source": "visible_listing_description",
+        "listing_description_group": group,
+        "scoped_listing_status": status,
+        "scoped_listing_status_evidence": status_evidence,
+        "scoped_listing_status_source": "visible_listing_container",
+        "scoped_listing_status_group": group,
+    }
+    evidence.update(reconcile_bound_agent_fields([item[3] for item in reviewable]))
+    return evidence
+
+
+def jsonld_address_fields(obj: dict[str, Any]) -> dict[str, str]:
     fields: dict[str, str] = {}
+    address = obj.get("address")
+    if isinstance(address, dict):
+        fields = {
+            "listing_address": str(address.get("streetAddress") or ""),
+            "city": str(address.get("addressLocality") or ""),
+            "state": str(address.get("addressRegion") or ""),
+            "zip": str(address.get("postalCode") or ""),
+        }
+    elif isinstance(address, str):
+        fields = parse_address_parts(address)
+        fields.setdefault("listing_address", address)
+    name = obj.get("name")
+    if isinstance(name, str) and not looks_like_listing_address(fields.get("listing_address", "")):
+        apply_address_parts(fields, parse_address_parts(name), replace_bad_address=True)
+    normalize_candidate_address_fields(fields)
+    return fields
+
+
+def jsonld_bound_agent_fields(obj: dict[str, Any], group: str) -> dict[str, str]:
+    nodes: list[dict[str, Any]] = []
+    for key in ("listingAgent",):
+        value = obj.get(key)
+        if isinstance(value, dict):
+            nodes.append(value)
+        elif isinstance(value, list):
+            nodes.extend(item for item in value if isinstance(item, dict))
+    offers = obj.get("offers")
+    if isinstance(offers, dict):
+        for key in ("listingAgent",):
+            value = offers.get(key)
+            if isinstance(value, dict):
+                nodes.append(value)
+    bound_by_subject: dict[str, dict[str, str]] = {}
+    contact_values: dict[str, dict[str, set[str]]] = {}
+    for node in nodes:
+        type_names = jsonld_type_names(node.get("@type"))
+        if type_names and not type_names.intersection({"person", "realestateagent", "real estate agent"}):
+            continue
+        details = {
+            "agent_name": str(node.get("name") or ""),
+            "phone": str(node.get("mobilePhone") or node.get("telephone") or node.get("phone") or ""),
+            "email": str(node.get("email") or ""),
+        }
+        context = " ".join(
+            part for part in (
+                "Mobile" if node.get("mobilePhone") else "",
+                details["phone"],
+                details["email"],
+            ) if part
+        )
+        bound = bind_agent_fields(details, group, "jsonld_bound_listing_agent", context)
+        if bound:
+            subject = bound["agent_subject_key"]
+            existing = bound_by_subject.setdefault(subject, bound)
+            values = contact_values.setdefault(subject, {"phone": set(), "email": set()})
+            for field in (
+                "phone", "phone_source", "phone_evidence_group", "phone_contact_type", "phone_owner_key",
+                "email", "email_source", "email_evidence_group", "email_contact_type", "email_owner_key",
+            ):
+                if bound.get(field):
+                    existing.setdefault(field, bound[field])
+            for field in ("phone", "email"):
+                if bound.get(field):
+                    values[field].add(bound[field])
+    if len(bound_by_subject) != 1:
+        return {}
+    subject, result = next(iter(bound_by_subject.items()))
+    conflicts = []
+    if len(contact_values.get(subject, {}).get("phone", set())) > 1:
+        conflicts.append("phone")
+        for field in ("phone", "phone_source", "phone_evidence_group", "phone_contact_type", "phone_owner_key"):
+            result.pop(field, None)
+    if len(contact_values.get(subject, {}).get("email", set())) > 1:
+        conflicts.append("email")
+        for field in ("email", "email_source", "email_evidence_group", "email_contact_type", "email_owner_key"):
+            result.pop(field, None)
+    if conflicts:
+        result["agent_contact_conflict"] = ",".join(conflicts)
+    return result
+
+
+def extract_jsonld_text(
+    markup: str,
+    expected: dict[str, str],
+    source_url: str = "",
+) -> tuple[str, dict[str, str]]:
+    matches: list[tuple[int, dict[str, str]]] = []
     pieces: list[str] = []
     for match in re.finditer(
         r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
@@ -2077,39 +2984,69 @@ def extract_jsonld_text(markup: str) -> tuple[str, dict[str, str]]:
             if not isinstance(obj, dict):
                 continue
             type_names = jsonld_type_names(obj.get("@type"))
-            address = obj.get("address")
-            if type_names.intersection(LISTING_JSONLD_TYPES):
-                if isinstance(address, dict):
-                    fields.setdefault("listing_address", str(address.get("streetAddress") or ""))
-                    fields.setdefault("city", str(address.get("addressLocality") or ""))
-                    fields.setdefault("state", str(address.get("addressRegion") or ""))
-                    fields.setdefault("zip", str(address.get("postalCode") or ""))
-                elif isinstance(address, str):
-                    fields.setdefault("listing_address", address)
+            listing_object = bool(type_names.intersection(LISTING_JSONLD_TYPES))
             name = obj.get("name")
-            if isinstance(name, str) and not fields.get("raw_name"):
-                fields["raw_name"] = name
-            if type_names.intersection({"realestateagent", "real estate agent"}):
-                agent_name = clean_agent_name(str(name or ""))
-                if agent_name:
-                    fields.setdefault("agent_name", agent_name)
-                    fields.setdefault("agent_name_source", "jsonld_real_estate_agent")
-                    phone = obj.get("telephone") or obj.get("phone")
-                    if isinstance(phone, str) and format_phone(phone):
-                        fields.setdefault("phone", format_phone(phone))
-                        fields.setdefault("phone_source", "jsonld_real_estate_agent")
-                    email_value = obj.get("email")
-                    if isinstance(email_value, str) and is_valid_email(email_value):
-                        fields.setdefault("email", email_value.strip().lower())
-                        fields.setdefault("email_source", "jsonld_real_estate_agent")
-            if isinstance(name, str):
-                apply_address_parts(fields, parse_address_parts(name), replace_bad_address=True)
             description = obj.get("description")
             if isinstance(description, str):
                 pieces.append(description)
-                if type_names.intersection(LISTING_JSONLD_TYPES):
-                    fields.setdefault("listing_description", normalize_space(description))
-    return "\n".join(pieces), fields
+            if not listing_object:
+                continue
+            object_fields = jsonld_address_fields(obj)
+            expected_present = looks_like_listing_address(expected.get("listing_address", ""))
+            if expected_present and not listing_fields_match_expected(object_fields, expected):
+                continue
+            if not expected_present and not listing_url_matches_address(
+                source_url,
+                object_fields.get("listing_address", ""),
+            ):
+                continue
+            group = listing_evidence_group(
+                object_fields.get("listing_address", ""),
+                object_fields.get("state", ""),
+                object_fields.get("zip", ""),
+            )
+            object_fields.update({
+                "raw_name": str(name or ""),
+                "exact_listing_confirmed": "true",
+                "listing_identity_source": "jsonld_listing_object",
+                "listing_identity_group": group,
+            })
+            object_fields.update(jsonld_bound_agent_fields(obj, group))
+            if isinstance(description, str) and normalize_space(description):
+                object_fields["listing_description"] = normalize_space(description)
+                object_fields["listing_description_source"] = "jsonld_listing_object"
+                object_fields["listing_description_group"] = group
+            status, status_evidence = jsonld_listing_status(obj)
+            object_fields["scoped_listing_status"] = status
+            object_fields["scoped_listing_status_evidence"] = status_evidence
+            object_fields["scoped_listing_status_source"] = "jsonld_listing_object"
+            object_fields["scoped_listing_status_group"] = group
+            score = int(bool(object_fields.get("listing_description"))) + int(status != "unknown")
+            matches.append((score, object_fields))
+    if not matches:
+        return "\n".join(pieces), {}
+    matches.sort(key=lambda item: item[0], reverse=True)
+    best_score = matches[0][0]
+    best = [item[1] for item in matches if item[0] == best_score]
+    fingerprints = {
+        (
+            normalize_key(item.get("listing_description", "")),
+            item.get("scoped_listing_status", ""),
+            item.get("scoped_listing_status_evidence", ""),
+        )
+        for item in best
+    }
+    if len(fingerprints) > 1:
+        return "\n".join(pieces), {
+            **expected,
+            "listing_identity_ambiguous": "true",
+        }
+    result = dict(best[0])
+    for field in list(result):
+        if field.startswith(("agent_", "phone", "email")):
+            result.pop(field, None)
+    result.update(reconcile_bound_agent_fields(best))
+    return "\n".join(pieces), result
 
 
 def decode_json_string(value: str) -> str:
@@ -2162,26 +3099,30 @@ def iter_json_objects(data: Any) -> Iterable[Any]:
 
 
 def infer_fields(result: SearchResult, markup: str) -> Candidate:
-    json_text, json_fields = extract_jsonld_text(markup)
+    expected = expected_listing_fields(result)
+    json_text, json_fields = extract_jsonld_text(markup, expected, result.url)
     embedded_listing_text, embedded_description = extract_embedded_listing_text(markup)
     page_text = strip_html(markup)
     combined = normalize_space(" ".join([result.title, result.snippet, json_text, embedded_listing_text, page_text]))
 
-    fields = dict(json_fields)
+    fields = dict(expected)
+    fields.update(json_fields)
     if embedded_description:
-        fields.setdefault("listing_description", embedded_description)
-    title_parts = [part.strip() for part in re.split(r"\s*[|–-]\s*", result.title) if part.strip()]
-    if title_parts and not fields.get("listing_address"):
-        fields["listing_address"] = title_parts[0]
+        fields.setdefault("untrusted_description_hint", embedded_description)
     if not looks_like_listing_address(fields.get("listing_address", "")):
         apply_address_parts(fields, parse_address_parts(result.title), replace_bad_address=True)
-    if not looks_like_listing_address(fields.get("listing_address", "")) and fields.get("raw_name"):
-        apply_address_parts(fields, parse_address_parts(fields["raw_name"]), replace_bad_address=True)
+
+    visible_fields = visible_listing_evidence(markup, expected)
+    json_complete = bool(
+        fields.get("listing_identity_group")
+        and fields.get("listing_description_group")
+        and fields.get("scoped_listing_status_group")
+    )
+    visible_complete = bool(visible_fields.get("listing_description"))
+    if visible_complete and not json_complete:
+        fields.update(visible_fields)
 
     fields.setdefault("source_url", result.url)
-    for key, value in extract_listing_agent_fields(combined).items():
-        fields.setdefault(key, value)
-    fields.setdefault("broker_name", extract_labeled_value(combined, ["Broker", "Brokerage", "Listing Office"]))
 
     if not fields.get("city") or not fields.get("state"):
         city_state = re.search(r"\b([A-Z][A-Za-z .'-]{2,40}),\s*([A-Z]{2})\s*(\d{5})?\b", result.title + " " + result.snippet)
@@ -2334,6 +3275,12 @@ def reset_agent_shadow_consensus_state() -> None:
     _agent_shadow_consensus_logged.clear()
 
 
+def reset_site_chrome_prewrite_state() -> None:
+    global _site_chrome_prewrite_count
+    _site_chrome_prewrite_seen.clear()
+    _site_chrome_prewrite_count = 0
+
+
 def record_two_source_agent_shadow(
     candidate: Candidate,
     *,
@@ -2407,11 +3354,17 @@ def run_direct_monitor(
     pilot_seen_addresses: set[str],
     *,
     sleep_seconds: float = 0.0,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     stats = {
+        "active": direct_monitor_active(run_date),
+        "families_planned": 0,
+        "families_succeeded": 0,
+        "families_failed": 0,
+        "complete": True,
         "selected": 0,
         "fetched": 0,
         "fetch_failed": 0,
+        "fetch_failure_reasons": {},
         "qualified": 0,
         "net_new_qualified": 0,
         "duplicates": 0,
@@ -2431,6 +3384,9 @@ def run_direct_monitor(
 
     family_limits = direct_monitor_family_limits()
     families = [family for family in DIRECT_MONITOR_FEEDS if family_limits.get(family, 0) > 0]
+    stats["families_planned"] = len(families)
+    if not families:
+        stats["complete"] = False
     log_event(
         "pilot_direct_monitor_start",
         run_date=run_date.isoformat(),
@@ -2453,8 +3409,11 @@ def run_direct_monitor(
                 limit=family_limit,
             )
         except Exception as exc:  # noqa: BLE001
+            stats["families_failed"] += 1
+            stats["complete"] = False
             log_event("pilot_direct_monitor_feed_failed", family=family, error=str(exc)[:500])
             continue
+        stats["families_succeeded"] += 1
         for url in urls:
             if stats["selected"] >= DIRECT_MONITOR_MAX_URLS:
                 break
@@ -2464,6 +3423,7 @@ def run_direct_monitor(
                 stats["fetched"] += 1
             except Exception as exc:  # noqa: BLE001
                 stats["fetch_failed"] += 1
+                increment_reason(stats, "fetch_failure_reasons", source_failure_reason(exc))
                 log_event("pilot_direct_monitor_fetch_failed", family=family, url=url, error=str(exc)[:500])
                 continue
             result = SearchResult(
@@ -2476,7 +3436,14 @@ def run_direct_monitor(
             candidate = infer_fields(result, markup)
             if log_agent_shadow(candidate, monitor_family=family):
                 stats["agent_shadow_candidates"] += 1
-            qualification = qualification_for_text(candidate.text)
+            qualification = qualification_for_candidate(candidate)
+            log_site_chrome_prewrite_receipt(
+                candidate,
+                qualification,
+                state=candidate.fields.get("state", ""),
+                source=result.source,
+                run_date=run_date,
+            )
             rejection = required_review_field_failure(candidate, qualification)
             if rejection:
                 stats["rejected"] += 1
@@ -2545,16 +3512,40 @@ def canonical_queue_payload(candidate: Candidate, qualification: Qualification, 
         "source": source,
         "search_source": source,
         "agentName": fields.get("agent_name", ""),
+        "agentNameSource": fields.get("agent_name_source", ""),
+        "agentEvidenceGroup": fields.get("agent_evidence_group", ""),
+        "agentSubjectKey": fields.get("agent_subject_key", ""),
         "brokerName": fields.get("broker_name", ""),
         "brokerageName": fields.get("broker_name", ""),
         "phone": fields.get("phone", ""),
+        "phoneSource": fields.get("phone_source", ""),
+        "phoneEvidenceGroup": fields.get("phone_evidence_group", ""),
+        "phoneContactType": fields.get("phone_contact_type", ""),
+        "phoneOwnerKey": fields.get("phone_owner_key", ""),
         "email": fields.get("email", ""),
+        "emailSource": fields.get("email_source", ""),
+        "emailEvidenceGroup": fields.get("email_evidence_group", ""),
+        "emailContactType": fields.get("email_contact_type", ""),
+        "emailOwnerKey": fields.get("email_owner_key", ""),
+        "contactPhoneHint": fields.get("contact_phone_hint", ""),
+        "contactPhoneHintType": fields.get("contact_phone_hint_type", ""),
+        "contactEmailHint": fields.get("contact_email_hint", ""),
+        "contactEmailHintType": fields.get("contact_email_hint_type", ""),
         "sourceReference": safe_source_reference(candidate.url),
         "homeStatus": "FOR_SALE",
         "specialListingConditions": "Short Sale",
         "listing_description": listing_description[:8_000],
         "description": listing_description[:8_000],
         "listingText": listing_description[:8_000],
+        "listingDescriptionSource": fields.get("listing_description_source", ""),
+        "listingDescriptionGroup": fields.get("listing_description_group", ""),
+        "exactListingConfirmed": fields.get("exact_listing_confirmed", ""),
+        "listingIdentitySource": fields.get("listing_identity_source", ""),
+        "listingIdentityGroup": fields.get("listing_identity_group", ""),
+        "scopedListingStatus": fields.get("scoped_listing_status", ""),
+        "scopedListingStatusEvidence": fields.get("scoped_listing_status_evidence", ""),
+        "scopedListingStatusSource": fields.get("scoped_listing_status_source", ""),
+        "scopedListingStatusGroup": fields.get("scoped_listing_status_group", ""),
         "sourceQuery": candidate.query,
         "sourceTitle": candidate.title,
         "qualificationEvidence": qualification.evidence,
@@ -2778,6 +3769,172 @@ def append_values(token: str, spreadsheet_id: str, range_name: str, values: list
     )
 
 
+def ensure_headers_tab(
+    token: str,
+    spreadsheet_id: str,
+    tab_name: str,
+    headers: list[str],
+) -> None:
+    meta = sheets_request(token, "GET", f"{spreadsheet_id}?fields=sheets.properties.title")
+    titles = {sheet["properties"]["title"] for sheet in meta.get("sheets", [])}
+    if tab_name not in titles:
+        sheets_request(
+            token,
+            "POST",
+            f"{spreadsheet_id}:batchUpdate",
+            {"requests": [{"addSheet": {"properties": {"title": tab_name, "gridProperties": {"columnCount": len(headers)}}}}]},
+        )
+    header_range = f"{tab_name}!A1:{column_letter(len(headers))}1"
+    values = get_values(token, spreadsheet_id, header_range)
+    if not values or values[0] != headers:
+        update_values(token, spreadsheet_id, header_range, [headers])
+
+
+def append_run_slot_receipt(
+    token: str,
+    spreadsheet_id: str,
+    *,
+    schedule_slot_id: str,
+    run_receipt_id: str,
+    run_date: dt.date,
+    run_mode: str,
+    status: str,
+    pipeline_complete: bool,
+    detail: str = "",
+    observed_at: dt.datetime | None = None,
+) -> None:
+    timestamp = observed_at or dt.datetime.now(dt.timezone.utc)
+    append_values(
+        token,
+        spreadsheet_id,
+        f"{RUN_RECEIPT_TAB}!A:{column_letter(len(RUN_RECEIPT_HEADERS))}",
+        [[
+            schedule_slot_id,
+            run_receipt_id,
+            run_date.isoformat(),
+            run_mode,
+            status,
+            timestamp.isoformat(),
+            "true" if pipeline_complete else "false",
+            normalize_space(detail)[:500],
+        ]],
+    )
+
+
+def claim_run_schedule_slot(
+    token: str,
+    spreadsheet_id: str,
+    *,
+    schedule_slot_id: str,
+    run_receipt_id: str,
+    run_date: dt.date,
+    run_mode: str,
+    now: dt.datetime | None = None,
+) -> tuple[bool, str]:
+    """Atomically converge concurrent attempts on one durable Sheet-backed slot winner."""
+    if not schedule_slot_id:
+        return True, "unslotted"
+    current = now or dt.datetime.now(dt.timezone.utc)
+    ensure_headers_tab(token, spreadsheet_id, RUN_RECEIPT_TAB, RUN_RECEIPT_HEADERS)
+    rows = get_values(
+        token,
+        spreadsheet_id,
+        f"{RUN_RECEIPT_TAB}!A:{column_letter(len(RUN_RECEIPT_HEADERS))}",
+    )
+    if run_mode == "link_audit" and schedule_slot_id.startswith("post_verifier_audit:"):
+        slot_date = schedule_slot_id.split(":", 1)[1]
+        source_slot_id = f"source:{slot_date}"
+        source_completed_rows = [
+            row
+            for row in rows[1:]
+            if (
+                len(row) > 6
+                and row[0] == source_slot_id
+                and row[4] == "completed"
+                and row[6].lower() == "true"
+            )
+        ]
+        if not source_completed_rows:
+            return False, "source_slot_not_completed"
+        source_completed_times: list[dt.datetime] = []
+        for row in source_completed_rows:
+            try:
+                completed_at = dt.datetime.fromisoformat(row[5].replace("Z", "+00:00"))
+            except (IndexError, ValueError):
+                continue
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=dt.timezone.utc)
+            source_completed_times.append(completed_at.astimezone(dt.timezone.utc))
+        if not source_completed_times:
+            return False, "source_terminal_time_unconfirmed"
+        current_utc = current
+        if current_utc.tzinfo is None:
+            current_utc = current_utc.replace(tzinfo=dt.timezone.utc)
+        current_utc = current_utc.astimezone(dt.timezone.utc)
+        grace_deadline = max(source_completed_times) + dt.timedelta(
+            minutes=POST_SOURCE_AUDIT_GRACE_MINUTES
+        )
+        if current_utc < grace_deadline:
+            return False, "source_grace_not_elapsed"
+    slot_rows = [row for row in rows[1:] if row and row[0] == schedule_slot_id]
+    if any(len(row) > 6 and row[4] == "completed" and row[6].lower() == "true" for row in slot_rows):
+        return False, "already_completed"
+    append_run_slot_receipt(
+        token,
+        spreadsheet_id,
+        schedule_slot_id=schedule_slot_id,
+        run_receipt_id=run_receipt_id,
+        run_date=run_date,
+        run_mode=run_mode,
+        status="running",
+        pipeline_complete=False,
+        observed_at=current,
+    )
+    rows = get_values(
+        token,
+        spreadsheet_id,
+        f"{RUN_RECEIPT_TAB}!A:{column_letter(len(RUN_RECEIPT_HEADERS))}",
+    )
+    slot_rows = [row for row in rows[1:] if row and row[0] == schedule_slot_id]
+    if any(len(row) > 6 and row[4] == "completed" and row[6].lower() == "true" for row in slot_rows):
+        return False, "already_completed"
+    cutoff = current - dt.timedelta(minutes=RUN_RECEIPT_STALE_MINUTES)
+    terminal_attempt_ids = {
+        row[1]
+        for row in slot_rows
+        if len(row) > 4 and row[4] != "running" and len(row) > 1 and row[1]
+    }
+    contenders: list[tuple[int, str]] = []
+    for row_index, row in enumerate(slot_rows):
+        if len(row) < 6 or row[4] != "running":
+            continue
+        if len(row) > 1 and row[1] in terminal_attempt_ids:
+            continue
+        try:
+            observed = dt.datetime.fromisoformat(row[5].replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=dt.timezone.utc)
+        if observed >= cutoff:
+            contenders.append((row_index, row[1] if len(row) > 1 else ""))
+    winner = min(contenders, default=(len(slot_rows), run_receipt_id))
+    if winner[1] != run_receipt_id:
+        append_run_slot_receipt(
+            token,
+            spreadsheet_id,
+            schedule_slot_id=schedule_slot_id,
+            run_receipt_id=run_receipt_id,
+            run_date=run_date,
+            run_mode=run_mode,
+            status="skipped_lost_claim",
+            pipeline_complete=False,
+            detail=f"winner={winner[1]}",
+        )
+        return False, "active_attempt"
+    return True, "claimed"
+
+
 def batch_update_values(token: str, spreadsheet_id: str, updates: list[dict[str, Any]]) -> None:
     if not updates:
         return
@@ -2870,6 +4027,7 @@ def load_source_durability_state(
         with open(path, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
     except (OSError, ValueError, TypeError) as exc:
+        empty["state_unconfirmed"] = True
         log_event(
             "pilot_source_durability_state_unconfirmed",
             reason="state_read_failed",
@@ -2880,6 +4038,14 @@ def load_source_durability_state(
         )
         return empty
     if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
+        empty["state_unconfirmed"] = True
+        log_event(
+            "pilot_source_durability_state_unconfirmed",
+            reason="state_schema_invalid",
+            lead_data_writes=0,
+            searches=0,
+            sends=0,
+        )
         return empty
     payload.setdefault("version", 1)
     payload.setdefault("stopped", False)
@@ -2999,14 +4165,17 @@ def source_durability_url_reviewability(
             "outcome": f"fetch_failed:{type(exc).__name__}",
             "access_control_concern": False,
         }
-    text = strip_html(markup)
-    qualification = qualification_for_text(text)
-    address_present = bool(
-        normalize_key(address)
-        and normalize_key(address) in normalize_key(text)
-        and re.search(rf"\b{re.escape(state_code.lower())}\b", text.lower())
+    result = SearchResult(
+        source="source_durability_audit",
+        query="",
+        url=url,
+        title="",
+        snippet="",
     )
-    reviewable = bool(address_present and qualification.status == "qualified")
+    candidate = infer_fields(result, markup)
+    qualification = qualification_for_candidate(candidate)
+    address_present = candidate.fields.get("exact_listing_confirmed", "").lower() == "true"
+    reviewable = qualification.status == "qualified"
     if reviewable:
         outcome = "current_short_sale_supported"
     elif not address_present:
@@ -3016,6 +4185,9 @@ def source_durability_url_reviewability(
     return {
         "reviewable": reviewable,
         "outcome": outcome,
+        "address_confirmed": address_present,
+        "status_outcome": candidate.fields.get("scoped_listing_status", "unknown"),
+        "remarks_confirmed": bool(candidate.fields.get("listing_description_group")),
         "access_control_concern": False,
     }
 
@@ -3039,6 +4211,7 @@ def run_source_durability_audit(
         "stopped": 0,
         "supported": 0,
         "state_unconfirmed": 0,
+        "state_persistence_confirmed": 1,
     }
     if not source_durability_audit_active(run_date, force=force):
         return stats
@@ -3161,6 +4334,7 @@ def run_source_durability_audit(
     if sample_complete and stats["primary_reviewable"] >= SOURCE_DURABILITY_AUDIT_MIN_REVIEWABLE:
         stats["supported"] = 1
     state_saved = save_source_durability_state(state, state_path)
+    stats["state_persistence_confirmed"] = int(bool(state_saved))
     log_event(
         "pilot_source_durability_audit_done",
         run_date=run_date.isoformat(),
@@ -3847,6 +5021,25 @@ def run_linkage_and_suffix_audits(
         )
     )
     stats = {
+        "audit_checks_planned": sum(
+            bool(value)
+            for value in (
+                link_active,
+                suffix_active,
+                agent_address_shadow_active,
+                canonical_id_audit_active,
+                source_durability_active,
+                route_alias_dedupe_shadow_active,
+                delivery_receipt_audit_active,
+                qualification_shadow_active,
+                description_block_shadow_active,
+                site_chrome_shadow_active,
+                compound_negative_shadow_active,
+                future_negotiator_shadow_active,
+                followup_hold_shadow_active,
+            )
+        ),
+        "audit_evidence_unconfirmed": 0,
         "pilot_rows": 0,
         "linked": 0,
         "held": 0,
@@ -4017,6 +5210,11 @@ def run_linkage_and_suffix_audits(
         )
         for key, value in durability_stats.items():
             stats[f"source_durability_{key}"] = value
+        if (
+            durability_stats.get("state_unconfirmed", 0)
+            or not durability_stats.get("state_persistence_confirmed", 0)
+        ):
+            stats["audit_evidence_unconfirmed"] = 1
     if canonical_id_audit_active:
         canonical_candidates: list[tuple[int, dict[str, str], dt.date]] = []
         for pilot_sheet_row, pilot_row in all_pilot_rows:
@@ -4395,16 +5593,22 @@ def run_linkage_and_suffix_audits(
             site_chrome_start = dt.date.fromisoformat(SITE_CHROME_SHADOW_START_DATE)
         except ValueError:
             site_chrome_start = run_date
-        targeted_before_today = sum(
-            1
-            for _, prior_row in all_pilot_rows
-            if registered_domain(prior_row.get("source_url", "")) in SITE_CHROME_SHADOW_DOMAINS
-            and (
-                (prior_date := first_seen_date(prior_row.get("first_seen_at", "")))
-                is not None
-            )
-            and site_chrome_start <= prior_date < run_date
-        )
+        targeted_before_today = 0
+        for _, prior_row in all_pilot_rows:
+            prior_date = first_seen_date(prior_row.get("first_seen_at", ""))
+            if prior_date is None or not site_chrome_start <= prior_date < run_date:
+                continue
+            prior_payload, prior_failure = parse_pilot_payload(prior_row)
+            if prior_failure:
+                continue
+            prior_candidate = candidate_from_pilot_row(dict(prior_row), prior_payload)
+            prior_shadow = site_chrome_exclusion_shadow(prior_candidate)
+            if (
+                prior_shadow["platform_targeted"]
+                and prior_shadow["listing_description_present"]
+                and prior_shadow["current_ready"]
+            ):
+                targeted_before_today += 1
         remaining_site_chrome_candidates = max(
             0,
             SITE_CHROME_SHADOW_MAX_PER_RUN - targeted_before_today,
@@ -4420,7 +5624,11 @@ def run_linkage_and_suffix_audits(
                 continue
             candidate = candidate_from_pilot_row(dict(pilot_row), payload)
             shadow = site_chrome_exclusion_shadow(candidate)
-            if not shadow["platform_targeted"]:
+            if not (
+                shadow["platform_targeted"]
+                and shadow["listing_description_present"]
+                and shadow["current_ready"]
+            ):
                 continue
             stats["site_chrome_rows"] += 1
             stats["site_chrome_targeted"] += 1
@@ -4824,6 +6032,9 @@ def candidate_from_pilot_row(row_data: dict[str, str], payload: dict[str, str]) 
     agent_name = agent_name_from_pilot(row_data, payload)
     fields = {
         "agent_name": agent_name,
+        "agent_name_source": payload.get("agentNameSource", ""),
+        "agent_evidence_group": payload.get("agentEvidenceGroup", ""),
+        "agent_subject_key": payload.get("agentSubjectKey", ""),
         "listing_address": payload.get("street")
         or payload.get("address")
         or row_data.get("listing_address", ""),
@@ -4831,13 +6042,34 @@ def candidate_from_pilot_row(row_data: dict[str, str], payload: dict[str, str]) 
         "state": (payload.get("state") or row_data.get("state", "")).upper(),
         "zip": payload.get("zip") or row_data.get("zip", ""),
         "phone": payload.get("phone") or row_data.get("phone", ""),
+        "phone_source": payload.get("phoneSource", ""),
+        "phone_evidence_group": payload.get("phoneEvidenceGroup", ""),
+        "phone_contact_type": payload.get("phoneContactType", ""),
+        "phone_owner_key": payload.get("phoneOwnerKey", ""),
         "email": payload.get("email") or row_data.get("email", ""),
+        "email_source": payload.get("emailSource", ""),
+        "email_evidence_group": payload.get("emailEvidenceGroup", ""),
+        "email_contact_type": payload.get("emailContactType", ""),
+        "email_owner_key": payload.get("emailOwnerKey", ""),
+        "contact_phone_hint": payload.get("contactPhoneHint", ""),
+        "contact_phone_hint_type": payload.get("contactPhoneHintType", ""),
+        "contact_email_hint": payload.get("contactEmailHint", ""),
+        "contact_email_hint_type": payload.get("contactEmailHintType", ""),
         "broker_name": payload.get("brokerName")
         or payload.get("brokerageName")
         or row_data.get("broker_name", ""),
         "home_status": payload.get("homeStatus", ""),
         "listing_description": payload.get("listing_description", "")
         or payload.get("description", ""),
+        "listing_description_source": payload.get("listingDescriptionSource", ""),
+        "exact_listing_confirmed": payload.get("exactListingConfirmed", ""),
+        "listing_identity_source": payload.get("listingIdentitySource", ""),
+        "listing_identity_group": payload.get("listingIdentityGroup", ""),
+        "scoped_listing_status": payload.get("scopedListingStatus", ""),
+        "scoped_listing_status_evidence": payload.get("scopedListingStatusEvidence", ""),
+        "scoped_listing_status_source": payload.get("scopedListingStatusSource", ""),
+        "scoped_listing_status_group": payload.get("scopedListingStatusGroup", ""),
+        "listing_description_group": payload.get("listingDescriptionGroup", ""),
     }
     text = " ".join(
         part
@@ -4886,18 +6118,36 @@ def pilot_row_preflight_failure(
     agent_name = agent_name_from_pilot(row_data, payload)
     if agent_name:
         candidate.fields["agent_name"] = agent_name
-        agent_safe, _ = agent_name_promotion_safety(candidate, require_source=False)
-        if not agent_safe:
-            candidate.fields["agent_name"] = ""
-            row_data["first_name"] = ""
-            row_data["last_name"] = ""
-            for key in ("agentName", "phone", "email"):
-                payload.pop(key, None)
+    agent_safe, _ = sanitize_candidate_identity(candidate)
+    if not agent_safe:
+        row_data["first_name"] = ""
+        row_data["last_name"] = ""
+        for key in (
+            "agentName", "agentNameSource", "agentEvidenceGroup", "agentSubjectKey",
+            "phone", "phoneSource", "phoneEvidenceGroup", "phoneContactType", "phoneOwnerKey",
+            "email", "emailSource", "emailEvidenceGroup", "emailContactType", "emailOwnerKey",
+            "contactPhoneHint", "contactPhoneHintType", "contactEmailHint", "contactEmailHintType",
+        ):
+            payload.pop(key, None)
 
-    if not strict_listing_description_evidence(candidate):
+    required_provenance = (
+        "exactListingConfirmed",
+        "listingDescriptionSource",
+        "listingIdentityGroup",
+        "listingDescriptionGroup",
+        "scopedListingStatusGroup",
+    )
+    if not all(payload.get(key) for key in required_provenance):
         return (
-            "needs_description_confirmation",
-            "Short sale language was not confirmed in listing-agent remarks before promotion.",
+            "needs_exact_listing_evidence",
+            "Legacy pilot evidence is not bound to one exact listing record and must be reverified before promotion.",
+            "",
+        )
+    scoped_qualification = qualification_for_candidate(candidate)
+    if scoped_qualification.status != "qualified":
+        return (
+            scoped_qualification.failure_reason or "needs_description_confirmation",
+            "Exact-listing identity, current status, and agent-written short-sale remarks must all remain confirmed before promotion.",
             "",
         )
 
@@ -5121,13 +6371,220 @@ def promote_ready_pilot_rows(
     return stats
 
 
-def run(args: argparse.Namespace) -> None:
+def make_run_context(args: argparse.Namespace) -> dict[str, Any]:
+    run_date = parse_run_date(args.run_date)
+    started_at = dt.datetime.now(dt.timezone.utc)
+    receipt_id = normalize_space(getattr(args, "run_receipt_id", "")) or hashlib.sha256(
+        f"{run_date.isoformat()}|{started_at.isoformat()}|{os.getpid()}".encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "run_date": run_date,
+        "started_at": started_at,
+        "run_receipt_id": receipt_id,
+        "stage": "initializing",
+        "stats": {},
+    }
+
+
+def update_run_stage(context: dict[str, Any], stage: str) -> None:
+    context["stage"] = stage
+    _active_run_event_context["run_stage"] = stage
+
+
+def persist_run_slot_terminal(
+    args: argparse.Namespace,
+    context: dict[str, Any],
+    *,
+    status: str,
+    pipeline_complete: bool,
+    detail: str = "",
+) -> bool:
+    schedule_slot_id = normalize_space(getattr(args, "schedule_slot_id", ""))
+    if not schedule_slot_id or not context.get("slot_claimed"):
+        return True
+    try:
+        append_run_slot_receipt(
+            context["token"],
+            args.spreadsheet_id,
+            schedule_slot_id=schedule_slot_id,
+            run_receipt_id=context["run_receipt_id"],
+            run_date=context["run_date"],
+            run_mode=_active_run_event_context.get("run_mode", "scheduled_source"),
+            status=status,
+            pipeline_complete=pipeline_complete,
+            detail=detail,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            "pilot_run_slot_persistence_failed",
+            schedule_slot_id=schedule_slot_id,
+            attempted_status=status,
+            error_type=type(exc).__name__,
+            error=str(exc)[:500],
+        )
+        return False
+
+
+def source_pipeline_complete(
+    stats: dict[str, Any],
+    promotion_stats: dict[str, Any],
+    direct_monitor_stats: dict[str, Any],
+    *,
+    durability_persistence_confirmed: bool,
+) -> tuple[bool, bool]:
+    query_attempts_accounted = stats["searched"] == (
+        stats["search_succeeded"] + stats["search_blocked"] + stats["search_failed"]
+    )
+    complete = bool(
+        stats["planned_searches"] == stats["searched"]
+        and query_attempts_accounted
+        and stats["search_blocked"] == 0
+        and stats["search_failed"] == 0
+        and stats["search_engine_attempts"].get("blocked", 0) == 0
+        and stats["search_engine_attempts"].get("failed", 0) == 0
+        and durability_persistence_confirmed
+        and int(promotion_stats.get("errors", 0)) == 0
+        and bool(direct_monitor_stats.get("complete", True))
+    )
+    return complete, query_attempts_accounted
+
+
+def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) -> None:
     reset_agent_shadow_consensus_state()
+    reset_site_chrome_prewrite_state()
+    reset_search_engine_attempt_stats()
+    context = run_context if run_context is not None else make_run_context(args)
+    run_date = context["run_date"]
+    run_started_at = context["started_at"]
+    run_receipt_id = context["run_receipt_id"]
+    audit_links_only = bool(getattr(args, "audit_links_only", False))
+    set_run_event_context(
+        run_receipt_id=run_receipt_id,
+        run_date=run_date.isoformat(),
+        dry_run=bool(getattr(args, "dry_run", False)),
+        run_mode="link_audit" if audit_links_only else "scheduled_source" if getattr(args, "scheduled_run", False) else "manual_source",
+    )
+    log_event(
+        "pilot_run_start",
+        started_at=run_started_at.isoformat(),
+        scheduled_run=bool(getattr(args, "scheduled_run", False)),
+        audit_links_only=audit_links_only,
+    )
+    update_run_stage(context, "configuration")
+    source_queries = [] if audit_links_only else configured_source_queries(run_date)
+    planned_searches = 0 if audit_links_only else len(args.states) * len(source_queries)
+    stats = {
+        "planned_searches": planned_searches,
+        "searched": 0,
+        "search_succeeded": 0,
+        "search_blocked": 0,
+        "search_failed": 0,
+        "search_failure_reasons": {},
+        "results": 0,
+        "raw_results": 0,
+        "unique_result_urls": 0,
+        "unique_listing_urls": 0,
+        "listing_specific_candidates": 0,
+        "allowed_listing_result_occurrences": 0,
+        "fetch_operations": 0,
+        "unique_listing_pages_fetched": 0,
+        "fetched": 0,
+        "qualified_before_dedupe": 0,
+        "qualified_listing_duplicates": 0,
+        "qualified_contact_duplicates": 0,
+        "duplicate_url_prequalification": 0,
+        "net_new_qualified": 0,
+        "qualified": 0,
+        "shadow_ready": 0,
+        "duplicates": 0,
+        "rejected": 0,
+        "fetch_failed": 0,
+        "fetch_failure_reasons": {},
+        "rejection_reasons": {},
+        "rows_written": 0,
+    }
+    context["stats"] = stats
+    experiment_baselines = {
+        source_query.source: query_exclusion_baseline_states(args.states, source_query.source)
+        for source_query in source_queries
+    }
+    log_event(
+        "pilot_run_plan",
+        run_receipt_id=run_receipt_id,
+        started_at=run_started_at.isoformat(),
+        run_date=run_date.isoformat(),
+        scheduled_run=bool(getattr(args, "scheduled_run", False)),
+        audit_links_only=audit_links_only,
+        planned_searches=planned_searches,
+        source_plan=SOURCE_PLAN,
+        states=getattr(args, "states", []),
+        source_count=len(source_queries),
+        source_buckets=[query.source for query in source_queries],
+        source_date_restricts={query.source: query.date_restrict for query in source_queries},
+        results_per_query=getattr(args, "results_per_query", 0),
+        search_engine=SEARCH_ENGINE,
+        ddg_fallback_allowed=ALLOW_DDG_FALLBACK,
+        cse_configured=bool(CSE_API_KEY and CSE_CX),
+        shadow_mode=SHADOW_MODE,
+        shadow_review_target=SHADOW_REVIEW_TARGET,
+        shadow_review_days=SHADOW_REVIEW_DAYS,
+        automatic_promotion=getattr(args, "promote_ready", False),
+        promotion_daily_cap=getattr(args, "promotion_daily_cap", 0),
+        promotion_dry_run=getattr(args, "promotion_dry_run", False),
+        dry_run=getattr(args, "dry_run", False),
+        query_exclusion_experiment_active=experiment_active(
+            run_date,
+            QUERY_EXCLUSION_EXPERIMENT_START_DATE,
+            QUERY_EXCLUSION_EXPERIMENT_DAYS,
+        ),
+        query_exclusion_domains=QUERY_EXCLUSION_DOMAINS,
+        query_exclusion_baseline_states={
+            source: sorted(states) for source, states in experiment_baselines.items()
+        },
+    )
+    if not audit_links_only and planned_searches <= 0:
+        update_run_stage(context, "configuration")
+        raise RuntimeError("no planned source searches; states and source queries must both be configured")
+    if (
+        not audit_links_only
+        and SEARCH_ENGINE in {"cse", "google", "google_cse"}
+        and not (CSE_API_KEY and CSE_CX)
+    ):
+        update_run_stage(context, "configuration")
+        raise RuntimeError("configured CSE search engine is missing CSE_API_KEY or CSE_CX")
+
+    update_run_stage(context, "configuration")
+    validate_run_receipt_tab(args.main_tab, args.pilot_tab)
+    update_run_stage(context, "authentication")
     service_account = load_service_account_info(args.service_account)
     token = sheets_client(service_account)
-    run_date = parse_run_date(args.run_date)
-    if args.audit_links_only:
-        run_linkage_and_suffix_audits(
+    context["token"] = token
+    schedule_slot_id = normalize_space(getattr(args, "schedule_slot_id", ""))
+    if schedule_slot_id:
+        update_run_stage(context, "slot_claim")
+        claimed, claim_reason = claim_run_schedule_slot(
+            token,
+            args.spreadsheet_id,
+            schedule_slot_id=schedule_slot_id,
+            run_receipt_id=run_receipt_id,
+            run_date=run_date,
+            run_mode=_active_run_event_context.get("run_mode", "scheduled_source"),
+        )
+        context["slot_claimed"] = claimed
+        log_event(
+            "pilot_run_slot_claim",
+            schedule_slot_id=schedule_slot_id,
+            claimed=claimed,
+            reason=claim_reason,
+            durable_surface=f"{RUN_RECEIPT_TAB}",
+        )
+        if not claimed:
+            clear_run_event_context()
+            return
+    if audit_links_only:
+        update_run_stage(context, "link_audit")
+        audit_stats = run_linkage_and_suffix_audits(
             token,
             args.spreadsheet_id,
             args.main_tab,
@@ -5136,7 +6593,39 @@ def run(args: argparse.Namespace) -> None:
             phase=args.audit_phase,
             force=args.force_review_experiments,
         )
+        audit_stopped = any(
+            bool(value)
+            for key, value in audit_stats.items()
+            if key == "stopped" or key.endswith("_stopped")
+        )
+        audit_complete = (
+            bool(audit_stats.get("audit_checks_planned", 0))
+            and not bool(audit_stats.get("unconfirmed", 0))
+            and not bool(audit_stats.get("audit_evidence_unconfirmed", 0))
+            and not audit_stopped
+        )
+        update_run_stage(context, "completed")
+        if not persist_run_slot_terminal(
+            args,
+            context,
+            status="completed" if audit_complete else "completed_degraded",
+            pipeline_complete=audit_complete,
+            detail=("" if audit_complete else "audit evidence incomplete or stopped"),
+        ):
+            raise RuntimeError("post-verifier audit completed but durable slot receipt failed")
+        log_event(
+            "pilot_run_done",
+            started_at=run_started_at.isoformat(),
+            completed_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+            execution_terminal="completed",
+            pipeline_complete=audit_complete,
+            scheduled_run_proven_complete=False,
+            stats=stats,
+            audit_stats=audit_stats,
+        )
+        clear_run_event_context()
         return
+    update_run_stage(context, "sheet_setup")
     ensure_tab(token, args.spreadsheet_id, args.pilot_tab)
     durability_active = source_durability_audit_active(run_date)
     durability_state = (
@@ -5145,12 +6634,7 @@ def run(args: argparse.Namespace) -> None:
         else {"version": 1, "candidates": []}
     )
     durability_state_dirty = False
-    source_queries = configured_source_queries(run_date)
-    experiment_baselines = {
-        source_query.source: query_exclusion_baseline_states(args.states, source_query.source)
-        for source_query in source_queries
-    }
-
+    update_run_stage(context, "sheet_read")
     main_rows = get_values(token, args.spreadsheet_id, f"{args.main_tab}!A:AQ")
     existing = build_existing_index(main_rows)
     pilot_rows = get_values(token, args.spreadsheet_id, f"{args.pilot_tab}!A:{column_letter(len(PILOT_HEADERS))}")
@@ -5159,17 +6643,6 @@ def run(args: argparse.Namespace) -> None:
         street_state_key(row[4], row[6])
         for row in pilot_rows[1:]
         if len(row) > 6 and street_state_key(row[4], row[6])
-    }
-    stats = {
-        "searched": 0,
-        "results": 0,
-        "fetched": 0,
-        "qualified": 0,
-        "shadow_ready": 0,
-        "duplicates": 0,
-        "rejected": 0,
-        "fetch_failed": 0,
-        "rows_written": 0,
     }
     exclusion_stats = {
         source_query.source: {
@@ -5188,36 +6661,11 @@ def run(args: argparse.Namespace) -> None:
         }
         for source_query in source_queries
     }
-    log_event(
-        "pilot_run_start",
-        run_date=run_date.isoformat(),
-        source_plan=SOURCE_PLAN,
-        states=args.states,
-        source_count=len(source_queries),
-        source_buckets=[query.source for query in source_queries],
-        source_date_restricts={query.source: query.date_restrict for query in source_queries},
-        results_per_query=args.results_per_query,
-        search_engine=SEARCH_ENGINE,
-        ddg_fallback_allowed=ALLOW_DDG_FALLBACK,
-        cse_configured=bool(CSE_API_KEY and CSE_CX),
-        shadow_mode=SHADOW_MODE,
-        shadow_review_target=SHADOW_REVIEW_TARGET,
-        shadow_review_days=SHADOW_REVIEW_DAYS,
-        automatic_promotion=args.promote_ready,
-        promotion_daily_cap=args.promotion_daily_cap,
-        promotion_dry_run=args.promotion_dry_run,
-        dry_run=args.dry_run,
-        query_exclusion_experiment_active=experiment_active(
-            run_date,
-            QUERY_EXCLUSION_EXPERIMENT_START_DATE,
-            QUERY_EXCLUSION_EXPERIMENT_DAYS,
-        ),
-        query_exclusion_domains=QUERY_EXCLUSION_DOMAINS,
-        query_exclusion_baseline_states={
-            source: sorted(states) for source, states in experiment_baselines.items()
-        },
-    )
-
+    unique_result_urls: set[str] = set()
+    unique_listing_urls: set[str] = set()
+    unique_fetched_urls: set[str] = set()
+    unique_short_sale_candidates: set[str] = set()
+    update_run_stage(context, "discovery")
     for state in args.states:
         state_query_term = STATE_QUERY_TERMS.get(state.upper(), state)
         for source_query in source_queries:
@@ -5253,17 +6701,31 @@ def run(args: argparse.Namespace) -> None:
                     date_restrict=source_query.date_restrict,
                 )
             except Exception as exc:  # noqa: BLE001
+                error_text = str(exc)
+                failure_class = source_error_class(exc)
+                blocked = failure_class == "blocked"
+                stats["search_blocked" if blocked else "search_failed"] += 1
+                increment_reason(stats, "search_failure_reasons", source_failure_reason(exc))
                 log_event(
                     "pilot_query_failed",
                     state=state,
                     source=source,
+                    run_date=run_date,
                     query=query,
                     date_restrict=source_query.date_restrict,
                     error=str(exc),
+                    failure_class=failure_class,
+                    blocked=blocked,
                     experiment_arm=exclusion_arm,
                 )
                 continue
+            stats["search_succeeded"] += 1
             stats["results"] += len(results)
+            stats["raw_results"] += len(results)
+            unique_result_urls.update(
+                identity for identity in (result_url_identity(result.url) for result in results) if identity
+            )
+            stats["unique_result_urls"] = len(unique_result_urls)
             if exclusion_arm in {"baseline", "excluded"}:
                 exclusion_stats[source][exclusion_arm]["results"] += len(results)
             log_event(
@@ -5290,6 +6752,7 @@ def run(args: argparse.Namespace) -> None:
                 result_source_ref = safe_source_reference(result.url)
                 if result.url in already_seen_urls or result_source_ref in already_seen_urls:
                     stats["duplicates"] += 1
+                    stats["duplicate_url_prequalification"] += 1
                     query_stats["duplicates"] += 1
                     log_event("pilot_duplicate_url", state=state, source=source, url=result.url)
                     continue
@@ -5297,22 +6760,52 @@ def run(args: argparse.Namespace) -> None:
                 if not allowed:
                     stats["rejected"] += 1
                     query_stats["rejected"] += 1
+                    increment_reason(stats, "rejection_reasons", reason)
                     log_event("pilot_result_skipped", state=state, source=source, url=result.url, reason=reason)
                     continue
+                listing_url_key = result_url_identity(result.url)
+                if listing_url_key:
+                    unique_listing_urls.add(listing_url_key)
+                stats["unique_listing_urls"] = len(unique_listing_urls)
+                stats["allowed_listing_result_occurrences"] += 1
+                stats["fetch_operations"] += 1
                 try:
                     markup = fetch_url(result.url)
                     stats["fetched"] += 1
+                    if listing_url_key:
+                        unique_fetched_urls.add(listing_url_key)
+                    stats["unique_listing_pages_fetched"] = len(unique_fetched_urls)
                     query_stats["fetched"] += 1
                 except Exception as exc:  # noqa: BLE001
                     stats["fetch_failed"] += 1
                     query_stats["fetch_failed"] += 1
+                    increment_reason(stats, "fetch_failure_reasons", source_failure_reason(exc))
                     log_event("pilot_fetch_failed", state=state, source=source, url=result.url, error=str(exc))
                     continue
                 candidate = infer_fields(result, markup)
                 log_agent_shadow(candidate)
+                scoped_description = normalize_space(candidate.fields.get("listing_description", ""))
+                short_sale_without_navigation = SITE_CHROME_SHORT_SALE_NAVIGATION_RE.sub(
+                    " ", scoped_description
+                )
+                if (
+                    candidate.fields.get("exact_listing_confirmed") == "true"
+                    and SHORT_SALE_LISTING_RE.search(short_sale_without_navigation)
+                ):
+                    candidate_key = candidate.fields.get("listing_identity_group") or stable_synthetic_zpid(
+                        candidate.source,
+                        candidate.url,
+                        candidate.fields.get("listing_address", ""),
+                        candidate.fields.get("city", ""),
+                        candidate.fields.get("state", ""),
+                    )
+                    if candidate_key:
+                        unique_short_sale_candidates.add(candidate_key)
+                    stats["listing_specific_candidates"] = len(unique_short_sale_candidates)
                 if not looks_like_listing_address(candidate.fields.get("listing_address", "")):
                     stats["rejected"] += 1
                     query_stats["rejected"] += 1
+                    increment_reason(stats, "rejection_reasons", "missing_listing_detail_address")
                     log_event(
                         "pilot_candidate_rejected",
                         state=state,
@@ -5325,6 +6818,7 @@ def run(args: argparse.Namespace) -> None:
                 if not candidate_matches_requested_state(candidate, state):
                     stats["rejected"] += 1
                     query_stats["rejected"] += 1
+                    increment_reason(stats, "rejection_reasons", "listing_state_mismatch")
                     log_event(
                         "pilot_candidate_rejected",
                         state=state,
@@ -5334,10 +6828,18 @@ def run(args: argparse.Namespace) -> None:
                         evidence=candidate.fields.get("state", "")[:40],
                     )
                     continue
-                qualification = qualification_for_text(candidate.text)
+                qualification = qualification_for_candidate(candidate)
+                log_site_chrome_prewrite_receipt(
+                    candidate,
+                    qualification,
+                    state=state,
+                    source=source,
+                    run_date=run_date,
+                )
                 if qualification.status != "qualified":
                     stats["rejected"] += 1
                     query_stats["rejected"] += 1
+                    increment_reason(stats, "rejection_reasons", qualification.failure_reason)
                     log_event(
                         "pilot_candidate_rejected",
                         state=state,
@@ -5355,6 +6857,7 @@ def run(args: argparse.Namespace) -> None:
                             reason="missing_short_sale_confirmation",
                         )
                     continue
+                stats["qualified_before_dedupe"] += 1
                 if durability_active:
                     durability_state_dirty = observe_source_durability_candidate(
                         durability_state,
@@ -5365,6 +6868,7 @@ def run(args: argparse.Namespace) -> None:
                 listing_dup_status, listing_dup_key, listing_matched = duplicate_listing_status(candidate, existing)
                 if listing_dup_status:
                     stats["duplicates"] += 1
+                    stats["qualified_listing_duplicates"] += 1
                     query_stats["duplicates"] += 1
                     log_event(
                         "pilot_candidate_duplicate",
@@ -5378,6 +6882,7 @@ def run(args: argparse.Namespace) -> None:
                     continue
                 if listing_dup_key and listing_dup_key in pilot_seen_addresses:
                     stats["duplicates"] += 1
+                    stats["qualified_listing_duplicates"] += 1
                     query_stats["duplicates"] += 1
                     log_event(
                         "pilot_candidate_duplicate",
@@ -5392,6 +6897,7 @@ def run(args: argparse.Namespace) -> None:
                 if required_failure:
                     stats["rejected"] += 1
                     query_stats["rejected"] += 1
+                    increment_reason(stats, "rejection_reasons", required_failure)
                     log_event(
                         "pilot_candidate_rejected",
                         state=state,
@@ -5406,6 +6912,10 @@ def run(args: argparse.Namespace) -> None:
                 dup_status, dup_key, matched = duplicate_status(candidate, existing)
                 if duplicate_status_blocks_pilot_row(dup_status):
                     stats["duplicates"] += 1
+                    if dup_status == "duplicate_listing":
+                        stats["qualified_listing_duplicates"] += 1
+                    else:
+                        stats["qualified_contact_duplicates"] += 1
                     query_stats["duplicates"] += 1
                     log_event(
                         "pilot_candidate_duplicate",
@@ -5421,6 +6931,7 @@ def run(args: argparse.Namespace) -> None:
                 matched_main_row = matched if dup_status == "duplicate_agent_phone" else ""
                 agent_rows = matched if dup_status == "possible_existing_agent" else ""
                 stats["qualified"] += 1
+                stats["net_new_qualified"] += 1
                 query_stats["qualified"] += 1
                 row = candidate_to_row(candidate, qualification, dup_key, matched_main_row, agent_rows)
                 query_rows.append(row)
@@ -5511,6 +7022,7 @@ def run(args: argparse.Namespace) -> None:
                 **query_stats,
             )
 
+    durability_persistence_confirmed = True
     if durability_active:
         state_saved = True
         if durability_state_dirty:
@@ -5530,6 +7042,8 @@ def run(args: argparse.Namespace) -> None:
             searches_added=0,
             sends=0,
         )
+        durability_persistence_confirmed = state_saved
+    stats["durability_state_persistence_confirmed"] = durability_persistence_confirmed
 
     if experiment_active(
         run_date,
@@ -5549,9 +7063,10 @@ def run(args: argparse.Namespace) -> None:
                 "baseline_strict_lead_from_excluded_domain_or_excluded_arm_underperforms_after_300_searches"
             ),
         )
-    log_event("pilot_run_done", stats=stats, dry_run=args.dry_run)
+    promotion_stats: dict[str, Any] = {"enabled": False}
     if args.promote_ready:
-        promote_ready_pilot_rows(
+        update_run_stage(context, "promotion")
+        promotion_stats = promote_ready_pilot_rows(
             token,
             args.spreadsheet_id,
             args.main_tab,
@@ -5569,13 +7084,56 @@ def run(args: argparse.Namespace) -> None:
                 phase="post_promotion",
                 force=args.force_review_experiments,
             )
-    run_direct_monitor(
+    update_run_stage(context, "direct_monitor")
+    direct_monitor_stats = run_direct_monitor(
         run_date,
         already_seen_urls,
         existing,
         pilot_seen_addresses,
         sleep_seconds=min(args.sleep_seconds, 0.25),
     )
+    stats["search_engine_attempts"] = dict(_search_engine_attempt_stats)
+    pipeline_complete, query_attempts_accounted = source_pipeline_complete(
+        stats,
+        promotion_stats,
+        direct_monitor_stats,
+        durability_persistence_confirmed=durability_persistence_confirmed,
+    )
+    scheduled_run = bool(getattr(args, "scheduled_run", False))
+    schedule_slot_id = normalize_space(getattr(args, "schedule_slot_id", ""))
+    if scheduled_run and not schedule_slot_id:
+        pipeline_complete = False
+    update_run_stage(context, "slot_terminal")
+    slot_receipt_persisted = persist_run_slot_terminal(
+        args,
+        context,
+        status="completed" if pipeline_complete else "completed_degraded",
+        pipeline_complete=pipeline_complete,
+        detail=("" if pipeline_complete else "pipeline completion gate failed"),
+    )
+    if not slot_receipt_persisted:
+        pipeline_complete = False
+    update_run_stage(context, "completed")
+    log_event(
+        "pilot_run_done",
+        run_receipt_id=run_receipt_id,
+        run_date=run_date.isoformat(),
+        started_at=run_started_at.isoformat(),
+        completed_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        execution_terminal="completed",
+        schedule_slot_id=schedule_slot_id,
+        slot_receipt_persisted=slot_receipt_persisted,
+        scheduled_run=scheduled_run,
+        scheduled_run_proven_complete=bool(scheduled_run and pipeline_complete),
+        pipeline_complete=pipeline_complete,
+        completion_status="complete" if pipeline_complete else "completed_degraded",
+        query_attempts_accounted=query_attempts_accounted,
+        stats=stats,
+        promotion_stats=promotion_stats,
+        direct_monitor_stats=direct_monitor_stats,
+        dry_run=args.dry_run,
+    )
+    clear_run_event_context()
 
 
 def parse_args() -> argparse.Namespace:
@@ -5600,8 +7158,56 @@ def parse_args() -> argparse.Namespace:
         default="post_verifier",
     )
     parser.add_argument("--force-review-experiments", action="store_true")
+    parser.add_argument("--scheduled-run", action="store_true")
+    parser.add_argument("--run-receipt-id", default=os.getenv("FREE_SOURCE_PILOT_RUN_RECEIPT_ID", ""))
+    parser.add_argument("--schedule-slot-id", default=os.getenv("FREE_SOURCE_PILOT_SCHEDULE_SLOT_ID", ""))
     return parser.parse_args()
 
 
+def run_with_terminal_receipt(args: argparse.Namespace) -> None:
+    context = make_run_context(args)
+    try:
+        run(args, run_context=context)
+    except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            failure_type = "KeyboardInterrupt"
+        else:
+            failure_type = type(exc).__name__
+        if not _active_run_event_context:
+            set_run_event_context(
+                run_receipt_id=context["run_receipt_id"],
+                run_date=context["run_date"].isoformat(),
+                dry_run=bool(getattr(args, "dry_run", False)),
+                run_mode="link_audit" if getattr(args, "audit_links_only", False) else "scheduled_source" if getattr(args, "scheduled_run", False) else "manual_source",
+            )
+        update_run_stage(context, context.get("stage", "unknown"))
+        slot_failure_persisted = persist_run_slot_terminal(
+            args,
+            context,
+            status="failed",
+            pipeline_complete=False,
+            detail=f"{failure_type}: {str(exc)[:300]}",
+        )
+        log_event(
+            "pilot_run_terminal_failure",
+            run_receipt_id=context["run_receipt_id"],
+            run_date=context["run_date"].isoformat(),
+            started_at=context["started_at"].isoformat(),
+            completed_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+            execution_terminal="failed",
+            scheduled_run=bool(getattr(args, "scheduled_run", False)),
+            scheduled_run_proven_complete=False,
+            failure_stage=context.get("stage", "unknown"),
+            error_type=failure_type,
+            error=str(exc)[:500],
+            partial_stats=context.get("stats", {}),
+            search_engine_attempts=dict(_search_engine_attempt_stats),
+            slot_failure_persisted=slot_failure_persisted,
+        )
+        clear_run_event_context()
+        raise
+
+
 if __name__ == "__main__":
-    run(parse_args())
+    parsed_args = parse_args()
+    run_with_terminal_receipt(parsed_args)

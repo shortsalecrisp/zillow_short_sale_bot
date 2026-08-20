@@ -1,5 +1,6 @@
 import asyncio
 import importlib.machinery
+import io
 import json
 import os
 import sys
@@ -136,8 +137,8 @@ import webhook_server
 
 
 def test_free_source_pilot_post_verifier_audit_due_at_configured_hour():
-    before = datetime(2026, 8, 1, 13, 4, tzinfo=timezone.utc)  # 09:04 New York
-    due = datetime(2026, 8, 1, 13, 5, tzinfo=timezone.utc)  # 09:05 New York
+    before = datetime(2026, 8, 1, 14, 4, tzinfo=timezone.utc)  # 10:04 New York
+    due = datetime(2026, 8, 1, 14, 5, tzinfo=timezone.utc)  # 10:05 New York
 
     assert webhook_server._free_source_pilot_post_verifier_audit_due(before) is False
     assert webhook_server._free_source_pilot_post_verifier_audit_due(due) is True
@@ -145,13 +146,13 @@ def test_free_source_pilot_post_verifier_audit_due_at_configured_hour():
 
 def test_next_free_source_pilot_post_verifier_audit_is_independent_daily_slot():
     before = datetime(2026, 8, 1, 12, 30, tzinfo=timezone.utc)  # 08:30 New York
-    after = datetime(2026, 8, 1, 13, 6, tzinfo=timezone.utc)  # 09:06 New York
+    after = datetime(2026, 8, 1, 14, 6, tzinfo=timezone.utc)  # 10:06 New York
 
     assert webhook_server._next_free_source_pilot_post_verifier_audit(before) == datetime(
-        2026, 8, 1, 13, 5, tzinfo=timezone.utc
+        2026, 8, 1, 14, 5, tzinfo=timezone.utc
     )
     assert webhook_server._next_free_source_pilot_post_verifier_audit(after) == datetime(
-        2026, 8, 2, 13, 5, tzinfo=timezone.utc
+        2026, 8, 2, 14, 5, tzinfo=timezone.utc
     )
 
 
@@ -234,7 +235,7 @@ def test_scheduler_restart_recovery_defaults_on(monkeypatch):
     monkeypatch.delenv("FOLLOWUP_RUN_ON_STARTUP", raising=False)
     monkeypatch.delenv("SCHEDULER_RUN_IMMEDIATELY", raising=False)
 
-    assert webhook_server.FREE_SOURCE_PILOT_STARTUP_CATCHUP is False
+    assert webhook_server.FREE_SOURCE_PILOT_STARTUP_CATCHUP is True
     assert webhook_server._should_run_immediately() is True
 
 
@@ -319,6 +320,279 @@ def test_free_source_pilot_due_only_at_configured_daily_slot():
 
     assert webhook_server._free_source_pilot_due(due)
     assert not webhook_server._free_source_pilot_due(not_due)
+
+
+def test_bounded_startup_catchup_recovers_source_and_audit_after_slots():
+    source_now = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 1, 0))
+    audit_now = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 10, 6, 0))
+
+    assert webhook_server._bounded_startup_catchup_slot(source_now, 9, 0) == webhook_server.SCHEDULER_TZ.localize(
+        datetime(2026, 8, 21, 9, 0, 0)
+    )
+    assert webhook_server._bounded_startup_catchup_slot(audit_now, 10, 5) == webhook_server.SCHEDULER_TZ.localize(
+        datetime(2026, 8, 21, 10, 5, 0)
+    )
+
+
+def test_bounded_startup_catchup_does_not_run_before_launch_date(monkeypatch):
+    monkeypatch.setattr(webhook_server, "FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE", "2026-08-21")
+    before_launch = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 20, 10, 30, 0))
+
+    assert webhook_server._bounded_startup_catchup_slot(before_launch, 9, 0) is None
+
+
+def test_audit_startup_catchup_recovers_previous_day_after_timer_loss(monkeypatch):
+    monkeypatch.setattr(webhook_server, "FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE", "2026-08-21")
+    after_restart = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 22, 8, 0, 0))
+
+    slot = webhook_server._bounded_startup_catchup_slot(
+        after_restart,
+        10,
+        5,
+        max_hours=30,
+        allow_previous_day=True,
+    )
+
+    assert slot == webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 10, 5, 0))
+
+
+def test_audit_startup_catchup_dispatches_prior_and_current_missing_slots(monkeypatch):
+    monkeypatch.setattr(webhook_server, "FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE", "2026-08-21")
+    monkeypatch.setattr(webhook_server, "FREE_SOURCE_PILOT_AUDIT_STARTUP_CATCHUP_MAX_HOURS", 30)
+    after_current_slot = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 22, 11, 0, 0))
+
+    slots = webhook_server._bounded_audit_startup_catchup_slots(after_current_slot)
+
+    assert slots == [
+        webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 10, 5, 0)),
+        webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 22, 10, 5, 0)),
+    ]
+
+
+def test_audit_startup_catchup_never_reaches_before_launch_date(monkeypatch):
+    monkeypatch.setattr(webhook_server, "FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE", "2026-08-21")
+    launch_morning = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 8, 0, 0))
+
+    slot = webhook_server._bounded_startup_catchup_slot(
+        launch_morning,
+        10,
+        5,
+        max_hours=30,
+        allow_previous_day=True,
+    )
+
+    assert slot is None
+
+
+def test_startup_catchup_dispatches_every_startup_for_durable_child_claim(monkeypatch):
+    slot = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+    triggered = []
+    monkeypatch.setattr(webhook_server, "FREE_SOURCE_PILOT_STARTUP_CATCHUP", True)
+    monkeypatch.setattr(webhook_server, "_bounded_startup_catchup_slot", lambda *args: slot)
+    monkeypatch.setattr(webhook_server, "_process_free_source_pilot_callback", triggered.append)
+
+    webhook_server._start_free_source_pilot_startup_catchup()
+
+    assert triggered == [slot]
+
+
+def test_late_source_completion_schedules_post_verifier_audit_after_grace(monkeypatch):
+    captured = {}
+
+    class _Process:
+        pid = 12348
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    audit_slot = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 10, 5, 0))
+    monkeypatch.setattr(webhook_server.subprocess, "Popen", lambda *args, **kwargs: _Process())
+    monkeypatch.setattr(webhook_server, "_log_free_source_pilot_wrapper_terminal", lambda **kwargs: None)
+    monkeypatch.setattr(webhook_server, "_audit_slot_after_late_source_completion", lambda run_time: audit_slot)
+    monkeypatch.setattr(webhook_server, "_schedule_post_source_audit", lambda slot: captured.setdefault("slot", slot))
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+
+    webhook_server._run_free_source_pilot(run_time)
+
+    assert captured["slot"] == audit_slot
+
+
+def test_post_source_audit_delay_is_later_of_slot_or_thirty_minute_grace(monkeypatch):
+    monkeypatch.setattr(webhook_server, "FREE_SOURCE_PILOT_POST_SOURCE_AUDIT_GRACE_MINUTES", 30)
+    audit_slot = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 10, 5, 0))
+    early_completion = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+    late_completion = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 50, 0))
+
+    assert webhook_server._post_source_audit_delay_seconds(audit_slot, early_completion) == 65 * 60
+    assert webhook_server._post_source_audit_delay_seconds(audit_slot, late_completion) == 30 * 60
+
+
+def test_source_scheduler_passes_correlated_receipt_and_logs_completion(monkeypatch):
+    captured = {}
+    terminal = []
+
+    class _Process:
+        pid = 12345
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _Process()
+
+    monkeypatch.setattr(webhook_server.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        webhook_server,
+        "_log_free_source_pilot_wrapper_terminal",
+        lambda **details: terminal.append(details),
+    )
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+
+    webhook_server._run_free_source_pilot(run_time)
+
+    assert "--scheduled-run" in captured["cmd"]
+    receipt_index = captured["cmd"].index("--run-receipt-id") + 1
+    assert captured["cmd"][receipt_index] == terminal[0]["run_receipt_id"]
+    slot_index = captured["cmd"].index("--schedule-slot-id") + 1
+    assert captured["cmd"][slot_index] == "source:2026-08-21"
+    assert captured["kwargs"]["start_new_session"] is True
+    assert terminal[0]["status"] == "process_exited_zero_child_receipt_required"
+
+
+def test_source_scheduler_timeout_terminates_group_and_logs_failure(monkeypatch):
+    terminated = []
+    terminal = []
+
+    class _Process:
+        pid = 12346
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+
+        def wait(self, timeout=None):
+            raise webhook_server.subprocess.TimeoutExpired("pilot", timeout)
+
+    monkeypatch.setattr(webhook_server.subprocess, "Popen", lambda *args, **kwargs: _Process())
+    monkeypatch.setattr(
+        webhook_server, "_terminate_pilot_process_group", lambda process: terminated.append(process.pid)
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "_log_free_source_pilot_wrapper_terminal",
+        lambda **details: terminal.append(details),
+    )
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+
+    webhook_server._run_free_source_pilot(run_time)
+
+    assert terminated == [12346]
+    assert terminal[0]["status"] == "failed_timeout"
+
+
+def test_source_scheduler_timeout_logs_terminal_even_when_cleanup_fails(monkeypatch):
+    terminal = []
+
+    class _Process:
+        pid = 12347
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+
+        def wait(self, timeout=None):
+            raise webhook_server.subprocess.TimeoutExpired("pilot", timeout)
+
+    monkeypatch.setattr(webhook_server.subprocess, "Popen", lambda *args, **kwargs: _Process())
+    monkeypatch.setattr(
+        webhook_server,
+        "_terminate_pilot_process_group",
+        lambda process: (_ for _ in ()).throw(PermissionError("kill denied")),
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "_log_free_source_pilot_wrapper_terminal",
+        lambda **details: terminal.append(details),
+    )
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+
+    webhook_server._run_free_source_pilot(run_time)
+
+    assert terminal[0]["status"] == "failed_timeout"
+    assert "cleanup_error=PermissionError" in terminal[0]["error"]
+
+
+def test_post_verifier_audit_uses_correlated_receipt_and_logs_completion(monkeypatch):
+    captured = {}
+    terminal = []
+
+    class _ImmediateThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    class _Process:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _Process()
+
+    monkeypatch.setattr(webhook_server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(webhook_server.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        webhook_server,
+        "_log_free_source_pilot_wrapper_terminal",
+        lambda **details: terminal.append(details),
+    )
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 10, 5, 0))
+
+    webhook_server._process_free_source_pilot_post_verifier_audit(run_time)
+
+    receipt_index = captured["cmd"].index("--run-receipt-id") + 1
+    assert captured["cmd"][receipt_index] == terminal[0]["run_receipt_id"]
+    slot_index = captured["cmd"].index("--schedule-slot-id") + 1
+    assert captured["cmd"][slot_index] == "post_verifier_audit:2026-08-21"
+    assert "--scheduled-run" in captured["cmd"]
+    assert captured["kwargs"]["start_new_session"] is True
+    assert terminal[0]["status"] == "audit_process_exited_zero_child_receipt_required"
+
+
+def test_post_verifier_audit_spawn_failure_has_structured_terminal(monkeypatch):
+    terminal = []
+
+    class _ImmediateThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(webhook_server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        webhook_server.subprocess, "Popen", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("spawn failed"))
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "_log_free_source_pilot_wrapper_terminal",
+        lambda **details: terminal.append(details),
+    )
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 10, 5, 0))
+
+    webhook_server._process_free_source_pilot_post_verifier_audit(run_time)
+
+    assert terminal[0]["status"] == "audit_failed_spawn_or_wrapper"
+    assert terminal[0]["run_receipt_id"]
 
 
 def test_state_search_uses_shared_default_fetch_limit(monkeypatch):

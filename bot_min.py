@@ -13532,8 +13532,26 @@ def _expand_row(l: List[str], n: int = MIN_COLS) -> List[str]:
 
 
 def _pilot_origin_requires_verifier_hold(row: Dict[str, Any]) -> bool:
-    source = str(row.get("search_source") or row.get("source") or "").strip().lower()
-    return source.startswith("free-source-pilot:")
+    sources = {
+        str(row.get("search_source") or "").strip().lower(),
+        str(row.get("source") or "").strip().lower(),
+    }
+    return any(source.startswith("free-source-pilot:") for source in sources)
+
+
+def _bound_pilot_agent_name(row: Dict[str, Any]) -> str:
+    source = str(row.get("agentNameSource") or "").strip()
+    agent_group = str(row.get("agentEvidenceGroup") or "").strip()
+    listing_group = str(row.get("listingIdentityGroup") or "").strip()
+    if source not in {"jsonld_bound_listing_agent", "visible_listing_container"}:
+        return ""
+    if not agent_group or agent_group != listing_group:
+        return ""
+    name = str(row.get("agentName") or "").strip()
+    subject_key = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+    if not subject_key or str(row.get("agentSubjectKey") or "").strip() != subject_key:
+        return ""
+    return name
 
 
 def process_rows(
@@ -13627,16 +13645,10 @@ def process_rows(
             outcomes[zpid] = outcome
             LOG.info("Skip stale/off-market zpid %s", zpid)
             continue
-        name = (r.get("agentName") or "").strip()
-        normalized_agent = _normalize_agent_name(name)
-        if normalized_agent and _agent_already_seen(normalized_agent):
-            outcome = "skipped_already_contacted_agent"
-            outcomes[zpid] = outcome
-            LOG.info("SKIP already-contacted agent %s (%s)", name, r.get("zpid"))
-            continue
-        if _pilot_origin_requires_verifier_hold(r) and str(r.get("requiresVerifierReview", "")).lower() == "true":
-            if TEAM_RE.search(name):
-                name = ""
+        if _pilot_origin_requires_verifier_hold(r):
+            r["requiresVerifierReview"] = "true"
+            source_agent_hint_present = bool(_bound_pilot_agent_name(r))
+            name = ""
             name_parts = name.split()
             first = name_parts[0] if name_parts else ""
             last = name_parts[1:]
@@ -13652,12 +13664,20 @@ def process_rows(
             outcomes[zpid] = "completed_short_sale"
             LOG.info(
                 "PILOT_SHEET1_INTAKE zpid=%s row=%s agent=%s address=%s "
-                "contact_enrichment=false initial_sms_scheduled=false",
+                "source_agent_hint_present=%s contact_enrichment=false initial_sms_scheduled=false",
                 zpid,
                 row_idx,
                 name or "<blank>",
                 r.get("street", ""),
+                source_agent_hint_present,
             )
+            continue
+        name = (r.get("agentName") or "").strip()
+        normalized_agent = _normalize_agent_name(name)
+        if normalized_agent and _agent_already_seen(normalized_agent):
+            outcome = "skipped_already_contacted_agent"
+            outcomes[zpid] = outcome
+            LOG.info("SKIP already-contacted agent %s (%s)", name, r.get("zpid"))
             continue
         if not name:
             outcome = "failed_missing_agent"

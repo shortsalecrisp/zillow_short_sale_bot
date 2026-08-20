@@ -1,6 +1,7 @@
 import contextlib
 import datetime as dt
 import io
+import importlib.util
 import json
 import os
 import sys
@@ -26,6 +27,56 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             row[pilot.PILOT_HEADERS.index(header)] = value
         return row
 
+    def scoped_payload_evidence(self, address, state, zip_code=""):
+        group = pilot.listing_evidence_group(address, state, zip_code)
+        return {
+            "exactListingConfirmed": "true",
+            "listingIdentitySource": "jsonld_listing_object",
+            "listingIdentityGroup": group,
+            "listingDescriptionSource": "jsonld_listing_object",
+            "listingDescriptionGroup": group,
+            "scopedListingStatus": "current",
+            "scopedListingStatusEvidence": "Active",
+            "scopedListingStatusSource": "jsonld_listing_object",
+            "scopedListingStatusGroup": group,
+        }
+
+    def bound_agent_fields(self, name, address, state, phone="", email="", phone_type="direct_mobile"):
+        group = pilot.listing_evidence_group(address, state)
+        fields = {
+            "agent_name": name,
+            "agent_name_source": "jsonld_bound_listing_agent",
+            "agent_evidence_group": group,
+            "agent_subject_key": pilot.normalize_key(name),
+            "listing_identity_group": group,
+        }
+        if phone:
+            fields.update({
+                "phone": phone,
+                "phone_source": "jsonld_bound_listing_agent",
+                "phone_evidence_group": group,
+                "phone_contact_type": phone_type,
+                "phone_owner_key": pilot.normalize_key(name),
+            })
+        if email:
+            fields.update({
+                "email": email,
+                "email_source": "jsonld_bound_listing_agent",
+                "email_evidence_group": group,
+                "email_contact_type": "agent_specific_professional",
+                "email_owner_key": pilot.normalize_key(name),
+            })
+        return fields
+
+    def bound_agent_payload(self, name, address, state):
+        group = pilot.listing_evidence_group(address, state)
+        return {
+            "agentName": name,
+            "agentNameSource": "jsonld_bound_listing_agent",
+            "agentEvidenceGroup": group,
+            "agentSubjectKey": pilot.normalize_key(name),
+        }
+
     def test_qualification_accepts_listing_description_short_sale_without_label(self):
         text = "Status: Active. What's special: This home is being sold as a short sale subject to lender approval."
 
@@ -41,6 +92,425 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "missing_listing_text_short_sale")
+
+    def test_scoped_jsonld_listing_evidence_qualifies_exact_property(self):
+        result = pilot.SearchResult(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product","name":"123 Main Street, Atlanta, GA 30303",
+           "address":{"streetAddress":"123 Main Street","addressLocality":"Atlanta",
+                      "addressRegion":"GA","postalCode":"30303"},
+           "description":"Great community setting. Seller is offering this home as a short sale subject to lender approval.",
+           "offers":{"availability":"https://schema.org/InStock"}}
+        </script>
+        <body>123 Main Street, Atlanta, GA 30303</body>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+        qualification = pilot.qualification_for_candidate(candidate)
+
+        self.assertEqual(qualification.status, "qualified")
+        self.assertEqual(candidate.fields["exact_listing_confirmed"], "true")
+        self.assertEqual(candidate.fields["listing_description_source"], "jsonld_listing_object")
+        self.assertEqual(candidate.fields["scoped_listing_status"], "current")
+
+    def test_unscoped_embedded_description_does_not_qualify(self):
+        result = pilot.SearchResult(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <body>123 Main Street, Atlanta, GA 30303 Status: Active.</body>
+        <script>window.cards={"description":"Learn about our short sale option before choosing an agent."}</script>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+        qualification = pilot.qualification_for_candidate(candidate)
+
+        self.assertEqual(qualification.status, "rejected")
+        self.assertEqual(qualification.failure_reason, "exact_listing_not_confirmed")
+        self.assertNotIn("listing_description_source", candidate.fields)
+
+    def test_search_title_address_does_not_confirm_fetched_listing(self):
+        result = pilot.SearchResult(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/anything-not-blocked",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="Status: Active. Property Description: Short sale.",
+        )
+        markup = """
+        <div class="property-description">This is a short sale subject to lender approval.</div>
+        <div>Status: Active.</div>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+        qualification = pilot.qualification_for_candidate(candidate)
+
+        self.assertEqual(qualification.status, "rejected")
+        self.assertEqual(qualification.failure_reason, "exact_listing_not_confirmed")
+
+    def test_scoped_negated_short_sale_remarks_are_rejected(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/123-main-street",
+            title="123 Main Street",
+            text="",
+            fields={
+                "listing_address": "123 Main Street",
+                "state": "GA",
+                "exact_listing_confirmed": "true",
+                "listing_description_source": "jsonld_listing_object",
+                "listing_description": "This home is not a short sale; it is a traditional sale.",
+                "scoped_listing_status": "current",
+                "listing_identity_group": "123 main street|ga",
+                "listing_description_group": "123 main street|ga",
+                "scoped_listing_status_group": "123 main street|ga",
+            },
+        )
+
+        qualification = pilot.qualification_for_candidate(candidate)
+
+        self.assertEqual(qualification.status, "rejected")
+        self.assertEqual(qualification.failure_reason, "disqualifying_short_sale_text")
+
+    def test_bishop_navigation_is_held_at_intake(self):
+        navigation = (
+            "Financing Options Short Sale Options | Choosing Your Real Estate Agent"
+        )
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="source_domain=bishopcountry.com; source_ref=abc123",
+            title="1704 Langford Street",
+            text=navigation,
+            fields={
+                "listing_address": "1704 Langford Street",
+                "state": "TX",
+                "exact_listing_confirmed": "true",
+                "listing_description_source": "visible_listing_description",
+                "listing_description": navigation,
+                "scoped_listing_status": "current",
+                "listing_identity_group": "1704 langford street|tx",
+                "listing_description_group": "1704 langford street|tx",
+                "scoped_listing_status_group": "1704 langford street|tx",
+            },
+        )
+
+        qualification = pilot.qualification_for_candidate(candidate)
+
+        self.assertEqual(qualification.status, "rejected")
+        self.assertEqual(qualification.failure_reason, "short_sale_not_in_listing_evidence")
+
+    def test_valid_bishop_remarks_survive_appended_navigation(self):
+        navigation = (
+            "Financing Options Short Sale Option Selecting Your Real Estate Agent"
+        )
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="source_domain=bishopcountry.com; source_ref=def456",
+            title="123 Main Street",
+            text=navigation,
+            fields={
+                "listing_address": "123 Main Street",
+                "state": "TX",
+                "exact_listing_confirmed": "true",
+                "listing_description_source": "jsonld_listing_object",
+                "listing_description": (
+                    "Seller is offering this property as a short sale subject to lender approval. "
+                    + navigation
+                ),
+                "scoped_listing_status": "current",
+                "listing_identity_group": "123 main street|tx",
+                "listing_description_group": "123 main street|tx",
+                "scoped_listing_status_group": "123 main street|tx",
+            },
+        )
+
+        qualification = pilot.qualification_for_candidate(candidate)
+        shadow = pilot.site_chrome_exclusion_shadow(candidate)
+
+        self.assertEqual(qualification.status, "qualified")
+        self.assertFalse(shadow["listing_description_is_navigation"])
+        self.assertFalse(shadow["would_hold"])
+
+    def test_navigation_only_description_is_rejected_on_every_domain(self):
+        navigation = "Financing Options Short Sale Option Choosing Your Real Estate Agent"
+        group = "123 main street|ga"
+        for url in (
+            "https://www.nexusrealtync.com/homes/123/",
+            "https://other.example/listing/123-main-street",
+        ):
+            with self.subTest(url=url):
+                candidate = pilot.Candidate(
+                    source="idx_broker_remarks",
+                    query="query",
+                    url=url,
+                    title="123 Main Street",
+                    text=navigation,
+                    fields={
+                        "listing_address": "123 Main Street",
+                        "state": "GA",
+                        "exact_listing_confirmed": "true",
+                        "listing_identity_group": group,
+                        "listing_description": navigation,
+                        "listing_description_source": "visible_listing_description",
+                        "listing_description_group": group,
+                        "scoped_listing_status": "current",
+                        "scoped_listing_status_group": group,
+                    },
+                )
+                self.assertEqual(
+                    pilot.qualification_for_candidate(candidate).failure_reason,
+                    "short_sale_not_in_listing_evidence",
+                )
+
+        for navigation in (
+            "Short Sale Option – Choosing Your Real Estate Agent",
+            "Short-Sale Option Selecting Your Real Estate Agent",
+            "Short Sale Option Choose an Agent",
+        ):
+            with self.subTest(navigation=navigation):
+                candidate.fields["listing_description"] = navigation
+                candidate.text = navigation
+                self.assertEqual(
+                    pilot.qualification_for_candidate(candidate).failure_reason,
+                    "short_sale_not_in_listing_evidence",
+                )
+
+    def test_plain_no_short_sale_negations_are_rejected(self):
+        group = "123 main street|ga"
+        for description in (
+            "This property is no short sale.",
+            "No short sale; conventional transaction.",
+            "Seller will not consider a short sale.",
+            "Short sale is not applicable.",
+        ):
+            with self.subTest(description=description):
+                candidate = pilot.Candidate(
+                    source="idx_broker_remarks",
+                    query="query",
+                    url="https://broker.example/123-main-street",
+                    title="123 Main Street",
+                    text="",
+                    fields={
+                        "listing_address": "123 Main Street",
+                        "state": "GA",
+                        "exact_listing_confirmed": "true",
+                        "listing_identity_group": group,
+                        "listing_description": description,
+                        "listing_description_source": "jsonld_listing_object",
+                        "listing_description_group": group,
+                        "scoped_listing_status": "current",
+                        "scoped_listing_status_group": group,
+                    },
+                )
+                self.assertEqual(
+                    pilot.qualification_for_candidate(candidate).failure_reason,
+                    "disqualifying_short_sale_text",
+                )
+
+    def test_jsonld_listing_objects_are_not_combined_across_properties(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://broker.example/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <script type="application/ld+json">
+          [{"@type":"Product","address":{"streetAddress":"123 Main Street",
+             "addressLocality":"Atlanta","addressRegion":"GA","postalCode":"30303"}},
+           {"@type":"Product","address":{"streetAddress":"999 Other Road",
+             "addressLocality":"Atlanta","addressRegion":"GA","postalCode":"30303"},
+            "description":"This is a short sale subject to lender approval.",
+            "offers":{"availability":"InStock"}}]
+        </script>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+        qualification = pilot.qualification_for_candidate(candidate)
+
+        self.assertEqual(qualification.status, "rejected")
+        self.assertEqual(qualification.failure_reason, "needs_description_confirmation")
+        self.assertNotIn("listing_description", candidate.fields)
+
+    def test_jsonld_same_street_wrong_city_or_missing_zip_is_not_exact(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://broker.example/123-main-street-atlanta-ga-30303",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product","address":{"streetAddress":"123 Main Street",
+             "addressLocality":"Savannah","addressRegion":"GA"},
+           "description":"This is a short sale subject to lender approval.",
+           "listingStatus":"Active"}
+        </script>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(
+            pilot.qualification_for_candidate(candidate).failure_reason,
+            "exact_listing_not_confirmed",
+        )
+
+    def test_visible_description_cannot_borrow_identity_from_another_container(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://broker.example/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <main><h1>123 Main Street</h1><div>Status: Active. Traditional sale.</div></main>
+        <aside><div class="property-description">This is a short sale subject to lender approval.</div></aside>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertNotEqual(pilot.qualification_for_candidate(candidate).status, "qualified")
+
+    def test_visible_description_cannot_climb_to_shared_app_container(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://broker.example/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <div id="app"><main><h1>123 Main Street</h1><div>Status: Active.</div></main>
+        <aside><div class="property-description">This is a short sale subject to lender approval.</div></aside>
+        </div>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertNotEqual(pilot.qualification_for_candidate(candidate).status, "qualified")
+
+    def test_visible_bound_listing_ignores_unrelated_sold_card(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://broker.example/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <main><div class="property-description">123 Main Street. Status: Active.
+        This is a short sale subject to lender approval.</div></main>
+        <aside>Related home at 999 Other Road. Sold For $200,000.</aside>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(pilot.qualification_for_candidate(candidate).status, "qualified")
+
+    @unittest.skipUnless(importlib.util.find_spec("bs4"), "production BeautifulSoup dependency required")
+    def test_conflicting_duplicate_visible_listing_containers_hold_in_both_orders(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages", query="query",
+            url="https://broker.example/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303", snippet="",
+        )
+        active = """
+        <article class="listing-detail"><h1>123 Main Street</h1><div>Status: Active.</div>
+        <div class="property-description">Short sale subject to lender approval.</div></article>
+        """
+        sold = """
+        <article class="listing-detail"><h1>123 Main Street</h1><div>Status: Sold.</div>
+        <div class="property-description">Short sale subject to lender approval.</div></article>
+        """
+        for markup in (active + sold, sold + active):
+            with self.subTest(order=markup[:80]):
+                candidate = pilot.infer_fields(result, markup)
+                self.assertEqual(
+                    pilot.qualification_for_candidate(candidate).failure_reason,
+                    "exact_listing_not_confirmed",
+                )
+
+    @unittest.skipUnless(importlib.util.find_spec("bs4"), "production BeautifulSoup dependency required")
+    def test_identical_responsive_visible_listing_duplicates_preserve_qualification(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages", query="query",
+            url="https://broker.example/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303", snippet="",
+        )
+        record = """
+        <article class="listing-detail"><h1>123 Main Street</h1><div>Status: Active.</div>
+        <div class="property-description">Short sale subject to lender approval.</div></article>
+        """
+        candidate = pilot.infer_fields(result, record + record)
+        self.assertEqual(pilot.qualification_for_candidate(candidate).status, "qualified")
+
+    def test_structured_status_is_exact_and_conflicts_hold(self):
+        cases = [
+            ({"status": "Inactive"}, "not_current"),
+            ({"status": "Closed", "offers": {"availability": "InStock"}}, "unknown"),
+            ({"listingStatus": "Active", "status": "Sold"}, "unknown"),
+        ]
+        for obj, expected in cases:
+            with self.subTest(obj=obj):
+                self.assertEqual(pilot.jsonld_listing_status(obj)[0], expected)
+
+    def test_prewrite_site_chrome_receipt_has_zero_mutation_contract(self):
+        group = "1704 langford street|tx"
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="source_domain=bishopcountry.com; source_ref=abc123",
+            title="1704 Langford Street",
+            text="Financing Options Short Sale Option Choosing Your Real Estate Agent",
+            fields={
+                "listing_address": "1704 Langford Street",
+                "state": "TX",
+                "exact_listing_confirmed": "true",
+                "listing_identity_group": group,
+                "listing_description": "Financing Options Short Sale Option Choosing Your Real Estate Agent",
+                "listing_description_source": "visible_listing_description",
+                "listing_description_group": group,
+                "scoped_listing_status": "current",
+                "scoped_listing_status_group": group,
+            },
+        )
+        qualification = pilot.qualification_for_candidate(candidate)
+        events = []
+        with mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            emitted = pilot.log_site_chrome_prewrite_receipt(
+                candidate,
+                qualification,
+                state="TX",
+                source="idx_broker_remarks",
+                run_date=dt.date(2026, 8, 21),
+            )
+
+        self.assertTrue(emitted)
+        self.assertEqual(events[0][0], "pilot_site_chrome_prewrite_receipt")
+        self.assertEqual(events[0][1]["lead_data_writes"], 0)
+        self.assertEqual(events[0][1]["searches_added"], 0)
+        self.assertEqual(events[0][1]["sends"], 0)
 
     def test_qualification_rejects_generic_short_sale_search_page_noise(self):
         text = (
@@ -348,6 +818,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 "agent_name_source": "listing_agent_label",
             },
         )
+        candidate.fields.update(
+            self.bound_agent_fields(
+                "Jane Smith", "2 New St", "GA", "404-555-1212", "jane@example.com"
+            )
+        )
         qualification = pilot.qualification_for_text(candidate.text)
 
         row = pilot.candidate_to_row(candidate, qualification, "4045551212", "2", "")
@@ -378,6 +853,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 "city": "Oak Hills",
                 "state": "CA",
             },
+        )
+        candidate.fields.update(
+            self.bound_agent_fields(
+                "Maria Cahuenas", "10 Main St", "CA", "714-300-5277", "maria@example.com"
+            )
         )
         qualification = pilot.qualification_for_text(candidate.text)
 
@@ -605,7 +1085,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         result = pilot.SearchResult(
             source="idx_broker_pages",
             query="query",
-            url="https://example.com/listing",
+            url="https://example.com/listing/1794-n-parkside-lane",
             title="Viewing Listing MLS# 7033072 - Broker",
             snippet="Special Listing Conditions: Short Sale. Listing Agent: Maria Cahuenas.",
         )
@@ -625,10 +1105,10 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(candidate.fields["city"], "Casa Grande")
         self.assertEqual(candidate.fields["state"], "AZ")
         self.assertEqual(candidate.fields["zip"], "85122")
-        self.assertEqual(candidate.fields["agent_name"], "Maria Cahuenas")
+        self.assertEqual(candidate.fields["agent_name"], "")
         self.assertEqual(candidate.fields["phone"], "")
 
-    def test_infer_fields_extracts_jsonld_real_estate_agent_name(self):
+    def test_infer_fields_does_not_trust_standalone_jsonld_real_estate_agent(self):
         result = pilot.SearchResult(
             source="idx_broker_pages",
             query="query",
@@ -646,7 +1126,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         candidate = pilot.infer_fields(result, markup)
 
-        self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+        self.assertEqual(candidate.fields["agent_name"], "")
 
     def test_infer_fields_ignores_jsonld_real_estate_agent_address_for_listing(self):
         result = pilot.SearchResult(
@@ -671,7 +1151,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(candidate.fields["listing_address"], "8441 Sierra Vista")
         self.assertEqual(candidate.fields["city"], "Phelan")
         self.assertEqual(candidate.fields["state"], "CA")
-        self.assertEqual(candidate.fields["agent_name"], "Glenn Zimmerman")
+        self.assertEqual(candidate.fields["agent_name"], "")
 
     def test_infer_fields_uses_embedded_realtor_flags_and_description(self):
         result = pilot.SearchResult(
@@ -762,7 +1242,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(candidate.fields["listing_address"], "3301 64th Street")
         self.assertEqual(candidate.fields["city"], "Fort Smith")
         self.assertEqual(candidate.fields["state"], "AR")
-        self.assertEqual(candidate.fields["agent_name"], "Marsha Rogers")
+        self.assertEqual(candidate.fields["agent_name"], "")
         self.assertEqual(pilot.required_review_field_failure(candidate, qualification), "")
 
     def test_required_review_fields_require_address_and_short_sale_evidence_not_agent_contact(self):
@@ -837,6 +1317,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             "search_source": "free-source-pilot:idx_broker_pages",
             "listing_description": "Potential short sale subject to lender approval.",
         }
+        payload.update(self.scoped_payload_evidence("123 Main Street", "GA"))
         pilot_row = self.pilot_row(
             listing_address="123 Main Street",
             city="Atlanta",
@@ -887,6 +1368,39 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(status_updates["Lead Source Pilot!O2"], "promoted")
         self.assertEqual(status_updates["Lead Source Pilot!Q2"], "promoted")
 
+    def test_promotion_holds_legacy_payload_without_bound_provenance(self):
+        payload = {
+            "zpid": "free-legacy",
+            "street": "123 Main Street",
+            "city": "Atlanta",
+            "state": "GA",
+            "source": "free-source-pilot:idx_broker_pages",
+            "search_source": "free-source-pilot:idx_broker_pages",
+            "listing_description": "Potential short sale subject to lender approval.",
+        }
+        pilot_row = self.pilot_row(
+            listing_address="123 Main Street",
+            city="Atlanta",
+            state="GA",
+            synthetic_zpid="free-legacy",
+            source="idx_broker_pages",
+            source_url="source_domain=example.com; source_ref=legacy",
+            status="qualified",
+            promotion_status="shadow_ready",
+            import_ready="yes",
+            pending_queue_source="free-source-pilot:idx_broker_pages",
+            pending_queue_listing_json=json.dumps(payload),
+        )
+        existing = pilot.build_existing_index(
+            [["first_name", "last_name", "phone", "email", "listing_address", "city", "state"]]
+        )
+
+        status, _, _ = pilot.pilot_row_preflight_failure(
+            pilot.pilot_row_map(pilot_row), payload, existing
+        )
+
+        self.assertEqual(status, "needs_exact_listing_evidence")
+
     def test_promotion_skips_feed_or_brokerage_agent_identity(self):
         bad_names = [
             ("Corey Smallman Provided Stellar", "123 Main Street", "agent_name_contains_feed_or_brokerage_term"),
@@ -910,6 +1424,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                     "agentName": agent_name,
                     "listing_description": "Public remarks: potential short sale subject to lender approval.",
                 }
+                payload.update(self.scoped_payload_evidence(address, "CO"))
                 pilot_row = self.pilot_row(
                     first_name=agent_name.split()[0],
                     last_name=" ".join(agent_name.split()[1:]),
@@ -992,6 +1507,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             "listing_description": "Public remarks: potential short sale subject to lender approval.",
             "requiresVerifierReview": "true",
         }
+        payload.update(self.scoped_payload_evidence("456 Oak Street", "CO"))
+        payload.update(self.bound_agent_payload("Jane Smith", "456 Oak Street", "CO"))
         pilot_row = self.pilot_row(
             first_name="Jane",
             last_name="Smith",
@@ -1066,6 +1583,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             "agentName": "Dana Smith",
             "listing_description": "Remarks: potential short sale subject to lender approval.",
         }
+        payload.update(self.scoped_payload_evidence("789 Pine Street", "AZ"))
         pilot_row = self.pilot_row(
             first_name="Dana",
             last_name="Smith",
@@ -1291,6 +1809,19 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(start[0]["family_limits"], {"momentum": 40, "coldwell": 10})
         self.assertTrue(start[0]["shadow_only"])
 
+    def test_direct_monitor_feed_failure_is_explicitly_incomplete(self):
+        with mock.patch.object(
+            pilot, "collect_direct_monitor_urls", side_effect=TimeoutError("feed timed out")
+        ), mock.patch.object(pilot, "log_event"):
+            stats = pilot.run_direct_monitor(
+                dt.date(2026, 8, 7), set(), pilot.build_existing_index([]), set()
+            )
+
+        self.assertEqual(stats["families_planned"], 2)
+        self.assertEqual(stats["families_succeeded"], 0)
+        self.assertEqual(stats["families_failed"], 2)
+        self.assertFalse(stats["complete"])
+
     def test_existing_agent_name_dedupes_even_when_contact_differs(self):
         existing = pilot.build_existing_index(
             [
@@ -1379,9 +1910,9 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
             pilot.research_candidate_contact(candidate)
 
-            self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
-            self.assertEqual(candidate.fields["phone"], "404-555-1212")
-            self.assertEqual(candidate.fields["email"], "jane@example.com")
+            self.assertEqual(candidate.fields.get("agent_name", ""), "")
+            self.assertEqual(candidate.fields.get("phone", ""), "")
+            self.assertEqual(candidate.fields.get("email", ""), "")
             self.assertTrue(calls)
         finally:
             pilot.search_web = old_search_web
@@ -1420,7 +1951,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 self.assertFalse(safe)
                 self.assertEqual(candidate.fields["agent_name"], "")
 
-    def test_jsonld_real_estate_agent_contact_is_attributable(self):
+    def test_standalone_jsonld_real_estate_agent_contact_is_not_attributable(self):
         result = pilot.SearchResult(
             source="idx_broker_pages",
             query="query",
@@ -1440,10 +1971,303 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         candidate = pilot.infer_fields(result, markup)
 
-        self.assertEqual(candidate.fields["agent_name"], "Jane Q. Smith")
-        self.assertEqual(candidate.fields["phone"], "404-555-1212")
-        self.assertEqual(candidate.fields["email"], "jane@example.com")
-        self.assertEqual(candidate.fields["agent_name_source"], "jsonld_real_estate_agent")
+        self.assertEqual(candidate.fields["agent_name"], "")
+        self.assertEqual(candidate.fields["phone"], "")
+        self.assertEqual(candidate.fields["email"], "")
+
+    def test_nested_jsonld_listing_agent_is_bound_and_typed(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product",
+           "address":{"streetAddress":"123 Main Street","addressLocality":"Atlanta",
+                      "addressRegion":"GA","postalCode":"30303"},
+           "description":"Short sale subject to lender approval.",
+           "listingStatus":"Active",
+           "listingAgent":{"@type":"RealEstateAgent","name":"Jane Smith",
+                           "mobilePhone":"404-555-1212","email":"jane.smith@example.com"}}
+        </script>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+        self.assertEqual(candidate.fields["agent_name_source"], "jsonld_bound_listing_agent")
+        self.assertEqual(candidate.fields["phone_contact_type"], "direct_mobile")
+        self.assertEqual(candidate.fields["email_contact_type"], "agent_specific_professional")
+        self.assertTrue(pilot.has_complete_agent_contact(candidate))
+        self.assertTrue(pilot.is_sms_ready_agent_contact(candidate))
+
+    def test_multiple_nested_jsonld_agents_are_ambiguous(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages", query="query",
+            url="https://example.com/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303", snippet="",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product",
+           "address":{"streetAddress":"123 Main Street","addressLocality":"Atlanta",
+                      "addressRegion":"GA","postalCode":"30303"},
+           "description":"Short sale subject to lender approval.","listingStatus":"Active",
+           "agent":[
+             {"@type":"RealEstateAgent","name":"Wrong Person","mobilePhone":"404-555-1212",
+              "email":"wrong.person@example.com"},
+             {"@type":"RealEstateAgent","name":"Right Person","mobilePhone":"678-555-1212",
+              "email":"right.person@example.com"}]}
+        </script>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["agent_name"], "")
+        self.assertFalse(pilot.has_complete_agent_contact(candidate))
+
+    def test_same_jsonld_agent_with_conflicting_contacts_is_not_complete(self):
+        group = "123 main street|ga"
+        fields = pilot.jsonld_bound_agent_fields(
+            {
+                "listingAgent": [
+                    {"@type": "RealEstateAgent", "name": "Jane Smith",
+                     "mobilePhone": "404-555-1212", "email": "jane.smith@example.com"},
+                    {"@type": "RealEstateAgent", "name": "Jane Smith",
+                     "mobilePhone": "678-555-1212", "email": "jsmith@example.com"},
+                ]
+            },
+            group,
+        )
+        candidate = pilot.Candidate("s", "q", "u", "t", "", {**fields, "listing_identity_group": group})
+
+        self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+        self.assertEqual(candidate.fields.get("phone", ""), "")
+        self.assertEqual(candidate.fields.get("email", ""), "")
+        self.assertEqual(candidate.fields["agent_contact_conflict"], "phone,email")
+        self.assertFalse(pilot.has_complete_agent_contact(candidate))
+
+    def test_tied_jsonld_records_blank_same_subject_contact_conflicts(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages", query="query",
+            url="https://example.com/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303", snippet="",
+        )
+        listing = lambda phone, email: {
+            "@type": "Product",
+            "address": {"streetAddress": "123 Main Street", "addressLocality": "Atlanta",
+                        "addressRegion": "GA", "postalCode": "30303"},
+            "description": "Short sale subject to lender approval.",
+            "listingStatus": "Active",
+            "listingAgent": {"@type": "RealEstateAgent", "name": "Jane Smith",
+                             "mobilePhone": phone, "email": email},
+        }
+        markup = (
+            '<script type="application/ld+json">'
+            + json.dumps([listing("404-555-1212", "jane.smith@example.com"),
+                          listing("678-555-1212", "jsmith@example.com")])
+            + "</script>"
+        )
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(pilot.qualification_for_candidate(candidate).status, "qualified")
+        self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+        self.assertEqual(candidate.fields.get("phone", ""), "")
+        self.assertEqual(candidate.fields.get("email", ""), "")
+        self.assertEqual(candidate.fields["agent_contact_conflict"], "email,phone")
+        self.assertFalse(pilot.has_complete_agent_contact(candidate))
+
+    def test_generic_jsonld_agent_role_is_not_a_listing_agent(self):
+        group = "123 main street|ga"
+        fields = pilot.jsonld_bound_agent_fields(
+            {
+                "agent": {"@type": "Person", "name": "Alice Buyer",
+                          "jobTitle": "Buyer's Agent", "mobilePhone": "404-555-1212",
+                          "email": "alice.buyer@example.com"},
+                "offers": {"agent": {"@type": "Person", "name": "Content Writer"}},
+            },
+            group,
+        )
+        self.assertEqual(fields, {})
+
+    def test_non_agent_jsonld_roles_are_not_listing_agents(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages", query="query",
+            url="https://example.com/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303", snippet="",
+        )
+        for role in ("seller", "provider", "author", "broker"):
+            with self.subTest(role=role):
+                markup = f"""
+                <script type="application/ld+json">
+                  {{"@type":"Product",
+                   "address":{{"streetAddress":"123 Main Street","addressLocality":"Atlanta",
+                              "addressRegion":"GA","postalCode":"30303"}},
+                   "description":"Short sale subject to lender approval.","listingStatus":"Active",
+                   "{role}":{{"@type":"Person","name":"Content Writer",
+                              "mobilePhone":"404-555-1212","email":"content.writer@example.com"}}}}
+                </script>
+                """
+                candidate = pilot.infer_fields(result, markup)
+                self.assertEqual(candidate.fields["agent_name"], "")
+
+    def test_valid_listing_ignores_unrelated_page_wide_agent_sidebar(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="Listing Agent: Wrong Person 212-555-1212 wrong.person@example.com",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product",
+           "address":{"streetAddress":"123 Main Street","addressLocality":"Atlanta",
+                      "addressRegion":"GA","postalCode":"30303"},
+           "description":"Short sale subject to lender approval.",
+           "listingStatus":"Active"}
+        </script>
+        <aside>Listing Agent: Alice Owner Direct: 404-555-1212 Email: alice.owner@example.com</aside>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["agent_name"], "")
+        self.assertEqual(candidate.fields["phone"], "")
+        self.assertEqual(candidate.fields["email"], "")
+
+    @unittest.skipUnless(importlib.util.find_spec("bs4"), "production BeautifulSoup dependency required")
+    def test_visible_agent_requires_one_explicit_agent_subrecord(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <article class="listing-detail">
+          <div class="property-description">123 Main Street. Status: Active.
+          Short sale subject to lender approval.</div>
+          <div class="listing-agent-info">Listing Agent: Jane Smith Direct: 404-555-1212
+          Email: jane.smith@example.com</div>
+        </article>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+        self.assertTrue(pilot.has_complete_agent_contact(candidate))
+
+    @unittest.skipUnless(importlib.util.find_spec("bs4"), "production BeautifulSoup dependency required")
+    def test_visible_multiple_or_related_agents_are_left_blank(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages",
+            query="query",
+            url="https://example.com/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303",
+            snippet="",
+        )
+        markup = """
+        <article class="listing-detail">
+          <div class="property-description">123 Main Street. Status: Active.
+          Short sale subject to lender approval.</div>
+          <aside class="related-card listing-agent-info">Listing Agent: Alice Wrong Direct:
+          404-555-1212 Email: alice.wrong@example.com</aside>
+          <section class="listing-agent-info">Listing Agent: Bob Correct Direct:
+          678-555-1212 Email: bob.correct@example.com</section>
+        </article>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["agent_name"], "Bob Correct")
+        self.assertNotEqual(candidate.fields["agent_name"], "Alice Wrong")
+
+    @unittest.skipUnless(importlib.util.find_spec("bs4"), "production BeautifulSoup dependency required")
+    def test_visible_agent_inside_related_ancestor_is_ignored(self):
+        result = pilot.SearchResult(
+            source="idx_broker_pages", query="query",
+            url="https://example.com/123-main-street",
+            title="123 Main Street, Atlanta, GA 30303", snippet="",
+        )
+        markup = """
+        <article class="listing-detail">
+          <div class="property-description">123 Main Street. Status: Active.
+          Short sale subject to lender approval.</div>
+          <aside class="related-card"><div class="agent-profile">Listing Agent: Alice Wrong
+          Direct: 404-555-1212 Email: alice.wrong@example.com</div></aside>
+        </article>
+        """
+
+        candidate = pilot.infer_fields(result, markup)
+
+        self.assertEqual(candidate.fields["agent_name"], "")
+
+    def test_team_routing_and_toll_free_contacts_never_fill_primary_fields(self):
+        group = "123 main street|ga"
+        for name in ("Michael Saunders & Company", "The Alice Owner Team"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    pilot.bind_agent_fields(
+                        {"agent_name": name, "phone": "800-555-1212", "email": "info123@example.com"},
+                        group,
+                        "jsonld_bound_listing_agent",
+                        "Direct: 800-555-1212",
+                    ),
+                    {},
+                )
+        fields = pilot.bind_agent_fields(
+            {"agent_name": "Jane Smith", "phone": "800-555-1212", "email": "frontdesk@example.com"},
+            group,
+            "jsonld_bound_listing_agent",
+            "Direct: 800-555-1212",
+        )
+        candidate = pilot.Candidate("s", "q", "u", "t", "", {**fields, "listing_identity_group": group})
+        pilot.sanitize_candidate_identity(candidate)
+        self.assertEqual(candidate.fields["phone"], "")
+        self.assertEqual(candidate.fields["email"], "")
+        self.assertEqual(candidate.fields["contact_phone_hint_type"], "office_team_main")
+        self.assertEqual(candidate.fields["contact_email_hint_type"], "team_brokerage_routing")
+        self.assertFalse(pilot.has_complete_agent_contact(candidate))
+        for email_value in (
+            "smithteam@example.com",
+            "smithlistings@example.com",
+            "jsmithoffice@example.com",
+        ):
+            with self.subTest(email=email_value):
+                self.assertEqual(
+                    pilot.bound_email_contact_type(email_value, "Jane Smith"),
+                    "team_brokerage_routing",
+                )
+        for name, email_value in (
+            ("Al Ho", "showings@example.com"),
+            ("Joe Li", "clientservices@example.com"),
+        ):
+            with self.subTest(name=name, email=email_value):
+                self.assertEqual(
+                    pilot.bound_email_contact_type(email_value, name),
+                    "team_brokerage_routing",
+                )
+
+    def test_contact_complete_requires_ten_digit_same_owner_contact(self):
+        group = "123 main street|ga"
+        candidate = pilot.Candidate(
+            "s", "q", "u", "t", "",
+            {
+                "agent_name": "Jane Smith", "agent_subject_key": "jane smith",
+                "agent_evidence_group": group, "listing_identity_group": group,
+                "phone": "123", "phone_contact_type": "direct_mobile",
+                "phone_evidence_group": group, "phone_owner_key": "jane smith",
+                "email": "jane.smith@example.com",
+                "email_contact_type": "agent_specific_professional",
+                "email_evidence_group": group, "email_owner_key": "jane smith",
+            },
+        )
+        self.assertFalse(pilot.has_complete_agent_contact(candidate))
 
     def test_page_wide_office_contact_is_not_assigned_to_agent(self):
         result = pilot.SearchResult(
@@ -1460,7 +2284,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         candidate = pilot.infer_fields(result, markup)
 
-        self.assertEqual(candidate.fields["agent_name"], "Jane Smith")
+        self.assertEqual(candidate.fields["agent_name"], "")
         self.assertEqual(candidate.fields.get("phone", ""), "")
         self.assertEqual(candidate.fields.get("email", ""), "")
 
@@ -1478,6 +2302,9 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 "city": "Atlanta",
                 "state": "GA",
             },
+        )
+        candidate.fields.update(
+            self.bound_agent_fields("Jane Q. Smith", "123 Main Street", "GA")
         )
         qualification = pilot.qualification_for_text(candidate.text)
 
@@ -2107,6 +2934,21 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             "(508)594-3513",
         )
 
+    def test_listing_url_canonicalization_collapses_tracking_but_preserves_identity_query(self):
+        first = pilot.canonical_public_listing_url(
+            "https://Broker.Example/listing?id=123&utm_source=a#photos"
+        )
+        second = pilot.canonical_public_listing_url(
+            "https://broker.example/listing?utm_medium=email&id=123"
+        )
+        different = pilot.canonical_public_listing_url(
+            "https://broker.example/listing?id=456&utm_source=a"
+        )
+
+        self.assertEqual(first, "https://broker.example/listing?id=123")
+        self.assertEqual(second, first)
+        self.assertNotEqual(different, first)
+
     def test_search_web_prefers_google_cse_when_configured(self):
         old_engine = pilot.SEARCH_ENGINE
         old_key = pilot.CSE_API_KEY
@@ -2166,6 +3008,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.ALLOW_DDG_FALLBACK = True
             pilot.cse_search = fake_cse_search
             pilot.ddg_search = fake_ddg_search
+            pilot.reset_search_engine_attempt_stats()
 
             with contextlib.redirect_stdout(io.StringIO()):
                 engine, results = pilot.search_web("query", "source", 3)
@@ -2173,6 +3016,10 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             self.assertEqual(engine, "ddg")
             self.assertEqual(len(results), 1)
             self.assertEqual(calls, [("cse", "query", "source", 3, None), ("ddg", "query", "source", 3)])
+            self.assertEqual(
+                pilot._search_engine_attempt_stats,
+                {"attempted": 2, "succeeded": 1, "blocked": 0, "failed": 1},
+            )
         finally:
             pilot.SEARCH_ENGINE = old_engine
             pilot.CSE_API_KEY = old_key
@@ -2218,6 +3065,15 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.ALLOW_DDG_FALLBACK = old_allow_ddg
             pilot.cse_search = old_cse_search
             pilot.ddg_search = old_ddg_search
+
+    def test_explicit_cse_without_credentials_fails_closed(self):
+        with mock.patch.object(pilot, "SEARCH_ENGINE", "cse"), \
+             mock.patch.object(pilot, "CSE_API_KEY", ""), \
+             mock.patch.object(pilot, "CSE_CX", ""), \
+             mock.patch.object(pilot, "cse_search") as search:
+            with self.assertRaisesRegex(RuntimeError, "missing CSE_API_KEY"):
+                pilot.search_web("query", "source", 3)
+        search.assert_not_called()
 
     def test_cse_search_uses_configured_date_restrict(self):
         old_key = pilot.CSE_API_KEY
@@ -2757,10 +3613,14 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             captured_at=captured_at,
             primary_eligible=False,
         )
-        markup = (
-            "Status: Active. About This Home: 1 Main Street, Atlanta, GA. "
-            "This is a short sale subject to lender approval."
-        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product","name":"1 Main Street, Atlanta, GA",
+           "address":{"streetAddress":"1 Main Street","addressLocality":"Atlanta","addressRegion":"GA"},
+           "description":"This is a short sale subject to lender approval.",
+           "listingStatus":"Active"}
+        </script>
+        """
         with tempfile.TemporaryDirectory() as directory:
             state_path = os.path.join(directory, "audit.json")
             pilot.save_source_durability_state(state, state_path)
@@ -2858,6 +3718,207 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(details["searches"], 0)
         self.assertEqual(details["sends"], 0)
 
+    def test_durability_persistence_failure_degrades_pipeline_completion(self):
+        stats = {
+            "planned_searches": 1,
+            "searched": 1,
+            "search_succeeded": 1,
+            "search_blocked": 0,
+            "search_failed": 0,
+            "search_engine_attempts": {"attempted": 1, "succeeded": 1, "blocked": 0, "failed": 0},
+        }
+
+        complete, accounted = pilot.source_pipeline_complete(
+            stats,
+            {"errors": 0},
+            {"complete": True},
+            durability_persistence_confirmed=False,
+        )
+
+        self.assertTrue(accounted)
+        self.assertFalse(complete)
+
+    def test_durable_schedule_slot_skips_an_already_completed_run(self):
+        rows = [
+            pilot.RUN_RECEIPT_HEADERS,
+            ["source:2026-08-21", "old", "2026-08-21", "scheduled_source",
+             "completed", "2026-08-21T13:10:00+00:00", "true", ""],
+        ]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(pilot, "get_values", return_value=rows), \
+             mock.patch.object(pilot, "append_run_slot_receipt") as append:
+            claimed, reason = pilot.claim_run_schedule_slot(
+                "token", "sheet", schedule_slot_id="source:2026-08-21",
+                run_receipt_id="new", run_date=dt.date(2026, 8, 21),
+                run_mode="scheduled_source",
+            )
+
+        self.assertFalse(claimed)
+        self.assertEqual(reason, "already_completed")
+        append.assert_not_called()
+
+    def test_durable_schedule_slot_concurrent_attempts_choose_one_winner(self):
+        now = dt.datetime(2026, 8, 21, 13, 0, 0, tzinfo=dt.timezone.utc)
+        after_append = [
+            pilot.RUN_RECEIPT_HEADERS,
+            ["source:2026-08-21", "winner", "2026-08-21", "scheduled_source",
+             "running", "2026-08-21T13:00:05+00:00", "false", ""],
+            ["source:2026-08-21", "loser", "2026-08-21", "scheduled_source",
+             "running", now.isoformat(), "false", ""],
+        ]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(
+                 pilot, "get_values", side_effect=[[pilot.RUN_RECEIPT_HEADERS], after_append]
+             ), mock.patch.object(pilot, "append_run_slot_receipt") as append:
+            claimed, reason = pilot.claim_run_schedule_slot(
+                "token", "sheet", schedule_slot_id="source:2026-08-21",
+                run_receipt_id="loser", run_date=dt.date(2026, 8, 21),
+                run_mode="scheduled_source", now=now,
+            )
+
+        self.assertFalse(claimed)
+        self.assertEqual(reason, "active_attempt")
+        self.assertEqual(append.call_count, 2)
+
+    def test_durable_schedule_slot_allows_retry_after_failed_attempt(self):
+        now = dt.datetime(2026, 8, 21, 13, 30, 0, tzinfo=dt.timezone.utc)
+        after_append = [
+            pilot.RUN_RECEIPT_HEADERS,
+            ["source:2026-08-21", "failed-old", "2026-08-21", "scheduled_source",
+             "running", "2026-08-21T13:00:00+00:00", "false", ""],
+            ["source:2026-08-21", "failed-old", "2026-08-21", "scheduled_source",
+             "failed", "2026-08-21T13:05:00+00:00", "false", "error"],
+            ["source:2026-08-21", "retry", "2026-08-21", "scheduled_source",
+             "running", now.isoformat(), "false", ""],
+        ]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(
+                 pilot, "get_values", side_effect=[after_append[:-1], after_append]
+             ), mock.patch.object(pilot, "append_run_slot_receipt"):
+            claimed, reason = pilot.claim_run_schedule_slot(
+                "token", "sheet", schedule_slot_id="source:2026-08-21",
+                run_receipt_id="retry", run_date=dt.date(2026, 8, 21),
+                run_mode="scheduled_source", now=now,
+            )
+
+        self.assertTrue(claimed)
+        self.assertEqual(reason, "claimed")
+
+    def test_audit_schedule_slot_waits_for_completed_source_slot(self):
+        rows = [pilot.RUN_RECEIPT_HEADERS]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(pilot, "get_values", return_value=rows), \
+             mock.patch.object(pilot, "append_run_slot_receipt") as append:
+            claimed, reason = pilot.claim_run_schedule_slot(
+                "token", "sheet",
+                schedule_slot_id="post_verifier_audit:2026-08-21",
+                run_receipt_id="audit-1",
+                run_date=dt.date(2026, 8, 21),
+                run_mode="link_audit",
+            )
+
+        self.assertFalse(claimed)
+        self.assertEqual(reason, "source_slot_not_completed")
+        append.assert_not_called()
+
+    def test_audit_schedule_slot_claims_after_completed_source_slot(self):
+        source_row = [
+            "source:2026-08-21", "source-1", "2026-08-21", "scheduled_source",
+            "completed", "2026-08-21T13:20:00+00:00", "true", "",
+        ]
+        after_append = [
+            pilot.RUN_RECEIPT_HEADERS,
+            source_row,
+            ["post_verifier_audit:2026-08-21", "audit-1", "2026-08-21", "link_audit",
+             "running", "2026-08-21T14:05:00+00:00", "false", ""],
+        ]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(
+                 pilot,
+                 "get_values",
+                 side_effect=[[pilot.RUN_RECEIPT_HEADERS, source_row], after_append],
+             ), mock.patch.object(pilot, "append_run_slot_receipt"):
+            claimed, reason = pilot.claim_run_schedule_slot(
+                "token", "sheet",
+                schedule_slot_id="post_verifier_audit:2026-08-21",
+                run_receipt_id="audit-1",
+                run_date=dt.date(2026, 8, 21),
+                run_mode="link_audit",
+                now=dt.datetime(2026, 8, 21, 14, 5, tzinfo=dt.timezone.utc),
+            )
+
+        self.assertTrue(claimed)
+        self.assertEqual(reason, "claimed")
+
+    def test_audit_schedule_slot_enforces_thirty_minute_source_grace(self):
+        source_row = [
+            "source:2026-08-21", "source-1", "2026-08-21", "scheduled_source",
+            "completed", "2026-08-21T13:50:00+00:00", "true", "",
+        ]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(
+                 pilot, "get_values", return_value=[pilot.RUN_RECEIPT_HEADERS, source_row]
+             ), mock.patch.object(pilot, "append_run_slot_receipt") as append:
+            claimed, reason = pilot.claim_run_schedule_slot(
+                "token", "sheet",
+                schedule_slot_id="post_verifier_audit:2026-08-21",
+                run_receipt_id="audit-too-early",
+                run_date=dt.date(2026, 8, 21),
+                run_mode="link_audit",
+                now=dt.datetime(2026, 8, 21, 14, 5, tzinfo=dt.timezone.utc),
+            )
+
+        self.assertFalse(claimed)
+        self.assertEqual(reason, "source_grace_not_elapsed")
+        append.assert_not_called()
+
+    def test_receipt_tab_collision_fails_before_auth_or_sheet_mutation(self):
+        args = types.SimpleNamespace(
+            service_account="{}", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21",
+            audit_links_only=True, audit_phase="post_verifier",
+            force_review_experiments=False, scheduled_run=True,
+            run_receipt_id="audit-collision", schedule_slot_id="post_verifier_audit:2026-08-21",
+        )
+        with mock.patch.object(pilot, "RUN_RECEIPT_TAB", "Sheet1"), \
+             mock.patch.object(pilot, "load_service_account_info") as load_auth, \
+             mock.patch.object(pilot, "ensure_headers_tab") as ensure_headers:
+            with self.assertRaisesRegex(RuntimeError, "dedicated tab"):
+                pilot.run(args)
+
+        load_auth.assert_not_called()
+        ensure_headers.assert_not_called()
+
+    def test_audit_only_run_marks_no_planned_checks_degraded(self):
+        args = types.SimpleNamespace(
+            service_account="{}", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21",
+            audit_links_only=True, audit_phase="post_verifier",
+            force_review_experiments=False, scheduled_run=True,
+            run_receipt_id="audit-empty", schedule_slot_id="post_verifier_audit:2026-08-21",
+        )
+        persisted = []
+        events = []
+        with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
+             mock.patch.object(pilot, "sheets_client", return_value="token"), \
+             mock.patch.object(pilot, "claim_run_schedule_slot", return_value=(True, "claimed")), \
+             mock.patch.object(
+                 pilot, "run_linkage_and_suffix_audits",
+                 return_value={"audit_checks_planned": 0, "unconfirmed": 0},
+             ), mock.patch.object(
+                 pilot, "persist_run_slot_terminal",
+                 side_effect=lambda *args, **kwargs: persisted.append(kwargs) or True,
+             ), mock.patch.object(
+                 pilot, "log_event", side_effect=lambda event, **details: events.append((event, details)),
+             ):
+            pilot.run(args)
+
+        self.assertEqual(persisted[0]["status"], "completed_degraded")
+        self.assertFalse(persisted[0]["pipeline_complete"])
+        done = next(details for event, details in events if event == "pilot_run_done")
+        self.assertFalse(done["pipeline_complete"])
+        self.assertEqual(done["audit_stats"]["audit_checks_planned"], 0)
+
     def test_source_durability_audit_marks_missing_state_unconfirmed(self):
         events = []
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
@@ -2886,6 +3947,75 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(done_event["lead_data_writes"], 0)
         self.assertEqual(done_event["searches"], 0)
         self.assertEqual(done_event["sends"], 0)
+
+    def test_source_durability_state_read_failure_is_unconfirmed(self):
+        with mock.patch("free_short_sale_source_pilot.os.path.exists", return_value=True), \
+             mock.patch("builtins.open", side_effect=OSError("read failed")):
+            state = pilot.load_source_durability_state("/tmp/corrupt-state.json")
+
+        self.assertTrue(state["state_unconfirmed"])
+
+    def test_source_durability_state_schema_failure_is_unconfirmed(self):
+        with mock.patch("free_short_sale_source_pilot.os.path.exists", return_value=True), \
+             mock.patch("builtins.open", mock.mock_open(read_data='{"version":1}')):
+            state = pilot.load_source_durability_state("/tmp/corrupt-state.json")
+
+        self.assertTrue(state["state_unconfirmed"])
+
+    def test_source_durability_state_save_failure_is_returned_in_stats(self):
+        with mock.patch.object(
+            pilot,
+            "load_source_durability_state",
+            return_value={"version": 1, "candidates": [], "stopped": False},
+        ), mock.patch.object(pilot, "save_source_durability_state", return_value=False):
+            stats = pilot.run_source_durability_audit(
+                run_date=dt.date(2026, 8, 21),
+                force=True,
+                state_path="/tmp/state.json",
+            )
+
+        self.assertEqual(stats["state_persistence_confirmed"], 0)
+
+    def test_link_audit_propagates_missing_durability_state_to_completion_gate(self):
+        main_rows = [["Agent Name", "Listing Address", "State", "created-at"]]
+        pilot_rows = [pilot.PILOT_HEADERS]
+        with mock.patch.object(
+            pilot, "get_values", side_effect=[main_rows, pilot_rows]
+        ), mock.patch.object(
+            pilot,
+            "run_source_durability_audit",
+            return_value={"state_unconfirmed": 1, "stopped": 0},
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token", "sheet-id", "Sheet1", "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 21), phase="post_verifier",
+            )
+
+        self.assertGreater(stats["audit_checks_planned"], 0)
+        self.assertEqual(stats["source_durability_state_unconfirmed"], 1)
+        self.assertEqual(stats["audit_evidence_unconfirmed"], 1)
+
+    def test_link_audit_propagates_durability_save_failure_to_completion_gate(self):
+        main_rows = [["Agent Name", "Listing Address", "State", "created-at"]]
+        pilot_rows = [pilot.PILOT_HEADERS]
+        with mock.patch.object(
+            pilot, "get_values", side_effect=[main_rows, pilot_rows]
+        ), mock.patch.object(
+            pilot,
+            "run_source_durability_audit",
+            return_value={
+                "state_unconfirmed": 0,
+                "state_persistence_confirmed": 0,
+                "stopped": 0,
+            },
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token", "sheet-id", "Sheet1", "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 21), phase="post_verifier",
+            )
+
+        self.assertEqual(stats["source_durability_state_persistence_confirmed"], 0)
+        self.assertEqual(stats["audit_evidence_unconfirmed"], 1)
 
     def test_canonical_id_audit_reads_named_verifier_evidence_from_sheet1_z(self):
         pilot_rows = [
@@ -3056,6 +4186,216 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         ensure_tab.assert_not_called()
         audit.assert_called_once()
+
+    def test_run_rejects_navigation_candidate_before_row_write_and_emits_complete_receipt(self):
+        args = types.SimpleNamespace(
+            service_account="{}",
+            spreadsheet_id="sheet-id",
+            main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot",
+            run_date="2026-08-21",
+            audit_links_only=False,
+            audit_phase="post_verifier",
+            force_review_experiments=False,
+            states=["TX"],
+            results_per_query=10,
+            sleep_seconds=0,
+            include_rejected=False,
+            dry_run=False,
+            promote_ready=False,
+            promotion_daily_cap=10,
+            promotion_dry_run=False,
+            scheduled_run=True,
+            run_receipt_id="scheduled-receipt-1",
+            schedule_slot_id="source:2026-08-21",
+        )
+        result = pilot.SearchResult(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://www.bishopcountry.com/1704-langford-street",
+            title="1704 Langford Street, Greenville, TX 75401",
+            snippet="",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product",
+           "address":{"streetAddress":"1704 Langford Street","addressLocality":"Greenville",
+                      "addressRegion":"TX","postalCode":"75401"},
+           "description":"Short Sale Option Choosing Your Real Estate Agent",
+           "listingStatus":"Active"}
+        </script>
+        """
+        events = []
+        with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
+             mock.patch.object(pilot, "sheets_client", return_value="token"), \
+             mock.patch.object(pilot, "ensure_tab"), \
+             mock.patch.object(pilot, "source_durability_audit_active", return_value=False), \
+             mock.patch.object(
+                 pilot,
+                 "configured_source_queries",
+                 return_value=[pilot.SourceQuery("idx_broker_remarks", '"short sale" {state}', "w1")],
+             ), \
+             mock.patch.object(
+                 pilot,
+                 "get_values",
+                 side_effect=[
+                     [["first_name", "last_name", "listing_address", "state"]],
+                     [pilot.PILOT_HEADERS],
+                 ],
+             ), \
+             mock.patch.object(pilot, "search_web", return_value=("cse", [result])), \
+             mock.patch.object(pilot, "fetch_url", return_value=markup), \
+             mock.patch.object(pilot, "append_values", side_effect=AssertionError("rejected candidate must not write")), \
+             mock.patch.object(pilot, "claim_run_schedule_slot", return_value=(True, "claimed")), \
+             mock.patch.object(pilot, "persist_run_slot_terminal", return_value=True), \
+             mock.patch.object(pilot, "run_direct_monitor", return_value={"selected": 0}), \
+             mock.patch.object(
+                 pilot,
+                 "log_event",
+                 side_effect=lambda event, **details: events.append((event, details)),
+             ):
+            pilot.run(args)
+
+        self.assertTrue(any(event == "pilot_site_chrome_prewrite_receipt" for event, _ in events))
+        done = next(details for event, details in events if event == "pilot_run_done")
+        self.assertTrue(done["scheduled_run_proven_complete"])
+        self.assertEqual(done["stats"]["search_succeeded"], 1)
+        self.assertEqual(done["stats"]["raw_results"], 1)
+        self.assertEqual(done["stats"]["unique_result_urls"], 1)
+        self.assertEqual(done["stats"]["unique_listing_urls"], 1)
+        self.assertEqual(done["stats"]["fetch_operations"], 1)
+        self.assertEqual(done["stats"]["unique_listing_pages_fetched"], 1)
+        self.assertEqual(done["stats"]["rows_written"], 0)
+        self.assertEqual(done["stats"]["rejected"], 1)
+
+    def test_terminal_receipt_covers_auth_system_exit_with_same_run_id(self):
+        args = types.SimpleNamespace(
+            service_account="", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21",
+            audit_links_only=False, audit_phase="post_verifier", force_review_experiments=False,
+            states=["TX"], results_per_query=10, sleep_seconds=0, include_rejected=False,
+            dry_run=False, promote_ready=False, promotion_daily_cap=10,
+            promotion_dry_run=False, scheduled_run=True, run_receipt_id="auth-failure-1",
+        )
+        events = []
+        with mock.patch.object(
+            pilot, "configured_source_queries",
+            return_value=[pilot.SourceQuery("idx_broker_remarks", '"short sale" {state}', "w1")],
+        ), mock.patch.object(
+            pilot, "load_service_account_info", side_effect=SystemExit("missing credentials")
+        ), mock.patch.object(
+            pilot, "log_event", side_effect=lambda event, **details: events.append((event, details))
+        ), self.assertRaises(SystemExit):
+            pilot.run_with_terminal_receipt(args)
+
+        self.assertEqual(events[0][0], "pilot_run_start")
+        failure = next(details for event, details in events if event == "pilot_run_terminal_failure")
+        self.assertEqual(failure["run_receipt_id"], "auth-failure-1")
+        self.assertEqual(failure["failure_stage"], "authentication")
+        self.assertFalse(failure["scheduled_run_proven_complete"])
+        self.assertEqual(failure["partial_stats"]["planned_searches"], 1)
+
+    def test_empty_source_plan_emits_terminal_failure_not_done(self):
+        args = types.SimpleNamespace(
+            service_account="{}", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21",
+            audit_links_only=False, audit_phase="post_verifier", force_review_experiments=False,
+            states=["TX"], results_per_query=10, sleep_seconds=0, include_rejected=False,
+            dry_run=False, promote_ready=False, promotion_daily_cap=10,
+            promotion_dry_run=False, scheduled_run=True, run_receipt_id="empty-plan-1",
+        )
+        events = []
+        with mock.patch.object(pilot, "configured_source_queries", return_value=[]), \
+             mock.patch.object(pilot, "load_service_account_info") as auth, \
+             mock.patch.object(
+                 pilot, "log_event", side_effect=lambda event, **details: events.append((event, details))
+             ), self.assertRaisesRegex(RuntimeError, "no planned source searches"):
+            pilot.run_with_terminal_receipt(args)
+
+        auth.assert_not_called()
+        self.assertFalse(any(event == "pilot_run_done" for event, _ in events))
+        self.assertEqual(events[-1][0], "pilot_run_terminal_failure")
+
+    def test_search_403_is_blocked_and_prevents_proven_completion(self):
+        args = types.SimpleNamespace(
+            service_account="{}", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21",
+            audit_links_only=False, audit_phase="post_verifier", force_review_experiments=False,
+            states=["TX"], results_per_query=10, sleep_seconds=0, include_rejected=False,
+            dry_run=False, promote_ready=False, promotion_daily_cap=10,
+            promotion_dry_run=False, scheduled_run=True, run_receipt_id="blocked-1",
+        )
+        events = []
+        with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
+             mock.patch.object(pilot, "sheets_client", return_value="token"), \
+             mock.patch.object(pilot, "ensure_tab"), \
+             mock.patch.object(pilot, "source_durability_audit_active", return_value=False), \
+             mock.patch.object(
+                 pilot, "configured_source_queries",
+                 return_value=[pilot.SourceQuery("idx_broker_remarks", '"short sale" {state}', "w1")],
+             ), mock.patch.object(
+                 pilot, "get_values", side_effect=[[[]], [pilot.PILOT_HEADERS]]
+             ), mock.patch.object(
+                 pilot, "search_web", side_effect=RuntimeError("HTTP Error 403: Forbidden")
+             ), mock.patch.object(
+                 pilot, "run_direct_monitor", return_value={"complete": True, "selected": 0}
+             ), mock.patch.object(
+                 pilot, "log_event", side_effect=lambda event, **details: events.append((event, details))
+             ):
+            pilot.run(args)
+
+        done = next(details for event, details in events if event == "pilot_run_done")
+        self.assertEqual(done["stats"]["search_blocked"], 1)
+        self.assertEqual(done["stats"]["search_failed"], 0)
+        self.assertFalse(done["scheduled_run_proven_complete"])
+
+    def test_promotion_error_prevents_proven_completion(self):
+        args = types.SimpleNamespace(
+            service_account="{}", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21",
+            audit_links_only=False, audit_phase="post_verifier", force_review_experiments=False,
+            states=["TX"], results_per_query=10, sleep_seconds=0, include_rejected=False,
+            dry_run=False, promote_ready=True, promotion_daily_cap=10,
+            promotion_dry_run=False, scheduled_run=True, run_receipt_id="promotion-error-1",
+        )
+        events = []
+        with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
+             mock.patch.object(pilot, "sheets_client", return_value="token"), \
+             mock.patch.object(pilot, "ensure_tab"), \
+             mock.patch.object(pilot, "source_durability_audit_active", return_value=False), \
+             mock.patch.object(
+                 pilot, "configured_source_queries",
+                 return_value=[pilot.SourceQuery("idx_broker_remarks", '"short sale" {state}', "w1")],
+             ), mock.patch.object(
+                 pilot, "get_values", side_effect=[[[]], [pilot.PILOT_HEADERS]]
+             ), mock.patch.object(pilot, "search_web", return_value=("cse", [])), \
+             mock.patch.object(
+                 pilot, "promote_ready_pilot_rows",
+                 return_value={"considered": 1, "eligible": 1, "promoted": 0, "skipped": 0, "errors": 1},
+             ), mock.patch.object(pilot, "run_linkage_and_suffix_audits"), \
+             mock.patch.object(
+                 pilot, "run_direct_monitor", return_value={"complete": True, "selected": 0}
+             ), mock.patch.object(
+                 pilot, "log_event", side_effect=lambda event, **details: events.append((event, details))
+             ):
+            pilot.run(args)
+
+        done = next(details for event, details in events if event == "pilot_run_done")
+        self.assertFalse(done["pipeline_complete"])
+        self.assertFalse(done["scheduled_run_proven_complete"])
+
+    def test_every_structured_child_event_inherits_active_run_receipt(self):
+        stream = io.StringIO()
+        pilot.set_run_event_context(run_receipt_id="receipt-123", run_date="2026-08-21", run_stage="discovery")
+        try:
+            with contextlib.redirect_stdout(stream):
+                pilot.log_event("pilot_query_done", rows_written=0)
+        finally:
+            pilot.clear_run_event_context()
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(payload["run_receipt_id"], "receipt-123")
+        self.assertEqual(payload["run_stage"], "discovery")
+        self.assertTrue(payload["observed_at"])
 
     def test_description_block_shadow_is_capped_at_100_rows_per_run(self):
         pilot_rows = [pilot.PILOT_HEADERS]
