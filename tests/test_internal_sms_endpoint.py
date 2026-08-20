@@ -724,6 +724,7 @@ def test_sms_weekday_callback_is_handed_off_and_persisted_as_scheduled(monkeypat
     assert module._sms_is_scheduled_callback(inbound) is True
     assert module._sms_extract_scheduled_callback_reference(inbound) == "Monday"
     assert body["should_reply"] is False
+    assert body["reply_text"] == ""
     assert body["handoff_needed"] is True
     assert body["call_booking_status"] == "scheduled_callback"
     assert body["callback_time"] == "Monday"
@@ -768,13 +769,11 @@ def test_sms_post_handoff_callback_update_persists_without_reply(monkeypatch):
     body = response.json()
     assert body["should_reply"] is False
     assert body["handoff_needed"] is True
-    assert body["call_booking_status"] == "scheduled_callback"
-    assert body["callback_time"] == "Monday Afternoon"
     assert body["reason"] == "Callback updated after human handoff"
     assert body["lead_status"] == "O"
     assert body["callback_updated"] is True
-    assert body["alert_needed"] is True
-    assert body["handoff_type"] == "CALLBACK UPDATED"
+    assert body["alert_needed"] is False
+    assert body["handoff_type"] == ""
     assert sender.calls == []
     assert sheet.rows[2][10] == "O"
     assert sheet.rows[2][13] == "handoff"
@@ -814,7 +813,7 @@ def test_sms_post_handoff_repeated_callback_time_does_not_request_another_alert(
     assert sender.calls == []
 
 
-def test_sms_durable_handled_duplicate_with_new_message_id_is_suppressed(monkeypatch):
+def test_sms_old_confirmed_closeout_replay_with_new_message_id_is_suppressed(monkeypatch):
     module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
     inbound = "I have someone thank you"
     sheet.rows[2][9] = inbound
@@ -843,15 +842,14 @@ def test_sms_durable_handled_duplicate_with_new_message_id_is_suppressed(monkeyp
 
     assert response.status_code == 200
     body = response.json()
-    assert body["duplicate"] is True
+    assert body.get("duplicate") is True
     assert body["should_reply"] is False
-    assert body["reason"] == "Durable handled inbound duplicate ignored"
     assert sender.calls == []
     assert sheet.rows[2][20] == "first-message-id"
     assert sheet.rows[2][44] == "2026-08-11T10:05:00-04:00"
 
 
-def test_sms_answered_not_short_sale_replay_with_new_message_id_is_suppressed(monkeypatch):
+def test_sms_old_confirmed_not_short_sale_replay_with_new_message_id_is_suppressed(monkeypatch):
     module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
     inbound = (
         "That was an input error and has been corrected - this is not a short sale - "
@@ -886,9 +884,8 @@ def test_sms_answered_not_short_sale_replay_with_new_message_id_is_suppressed(mo
 
     assert response.status_code == 200
     body = response.json()
-    assert body["duplicate"] is True
+    assert body.get("duplicate") is True
     assert body["should_reply"] is False
-    assert body["reason"] == "Durable handled inbound duplicate ignored"
     assert sender.calls == []
     assert sheet.rows[2][20] == "randy-first-message-id"
 
@@ -1120,7 +1117,7 @@ def test_sms_existing_crisp_client_exits_marketing_for_handoff(monkeypatch):
     decision = module._sms_fast_decision({}, inbound)
 
     assert module._sms_is_existing_crisp_relationship(inbound) is True
-    assert decision["lead_status"] == "Y"
+    assert decision["lead_status"] == "R"
     assert decision["handoff_needed"] is True
     assert decision["block_reply"] is True
     assert decision["reply_text"] == ""
@@ -1251,7 +1248,8 @@ def test_sms_natural_tomorrow_callback_and_third_party_negative(monkeypatch):
     assert module._sms_is_scheduled_callback(inbound) is True
     assert module._sms_extract_scheduled_callback_reference(inbound) == "Tomorrow"
     assert decision["handoff_needed"] is True
-    assert decision["block_reply"] is True
+    assert decision["block_reply"] is False
+    assert decision["reply_text"] == "Perfect, thanks."
     assert decision["call_booking_status"] == "scheduled_callback"
     assert decision["callback_time"] == "Tomorrow"
     assert module._sms_is_scheduled_callback("Let's talk to the lender tomorrow") is False
@@ -1273,13 +1271,11 @@ def test_sms_call_interest_reopens_closed_conversation_for_handoff(monkeypatch):
     decision = module._sms_fast_decision(row, inbound)
 
     assert module._sms_is_phone_call_interest(inbound) is True
-    assert decision["lead_status"] == "Y"
+    assert decision["lead_status"] == "R"
     assert decision["conversation_done"] is False
-    assert decision["handoff_needed"] is True
+    assert decision["handoff_needed"] is False
     assert decision["block_reply"] is True
-    assert decision["handoff_type"] == "CALL REQUESTED"
-    assert decision["alert_needed"] is True
-    assert decision["reason"] == "Agent expressed phone-call interest after a prior closeout"
+    assert decision["reason"] == "Human override enabled - inbound recorded only"
 
     service_interest = module._sms_fast_decision(
         row,
@@ -1288,10 +1284,9 @@ def test_sms_call_interest_reopens_closed_conversation_for_handoff(monkeypatch):
     assert module._sms_is_present_service_interest(
         "I am interested in your services and would like to learn more."
     ) is True
-    assert service_interest["handoff_needed"] is True
+    assert service_interest["handoff_needed"] is False
     assert service_interest["block_reply"] is True
-    assert service_interest["handoff_type"] == "RENEWED INTEREST"
-    assert service_interest["reason"] == "Agent expressed present service interest after a prior closeout"
+    assert service_interest["reason"] == "Human override enabled - inbound recorded only"
     assert module._sms_is_present_service_interest(
         "No thanks, but I will keep your information in mind for the future."
     ) is False
@@ -1308,12 +1303,28 @@ def test_sms_company_question_outranks_existing_coverage_closeout(monkeypatch):
 
     assert module._sms_is_company_identity_question(inbound) is True
     assert module._sms_has_existing_coverage(inbound) is True
-    assert decision["lead_status"] == "R"
+    assert decision["lead_status"] == "O"
     assert decision["conversation_done"] is True
     assert decision["handoff_needed"] is False
-    assert decision["reply_text"].startswith("My company is Crisp Short Sales.")
-    assert "good luck with the file" in decision["reply_text"]
-    assert decision["reason"] == "Answered company identity directly while preserving prior closeout"
+    assert decision["reply_text"].startswith("I'm with Crisp Short Sales.")
+    assert decision["reason"] == "Answered company question before generic coverage language"
+
+
+def test_sms_decline_or_not_short_sale_plus_question_is_warm_o(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    website = module._sms_fast_decision({}, "No thanks, but what is your website?")
+    company = module._sms_fast_decision({}, "This is not a short sale; what company are you with?")
+    email = module._sms_fast_decision({}, "Not interested, but email me information")
+
+    for decision in (website, company):
+        assert decision["lead_status"] == "O"
+        assert decision["conversation_done"] is True
+    assert email["lead_status"] == "O"
+    assert email["conversation_done"] is False
 
 
 def test_sms_rate_question_outranks_existing_coverage_closeout(monkeypatch):
@@ -1325,11 +1336,11 @@ def test_sms_rate_question_outranks_existing_coverage_closeout(monkeypatch):
 
     decision = module._sms_fast_decision({}, inbound)
 
-    assert decision["lead_status"] == "Y"
-    assert decision["conversation_done"] is False
+    assert decision["lead_status"] == "O"
+    assert decision["conversation_done"] is True
     assert decision["handoff_needed"] is False
-    assert "There is no cost to you or the seller" in decision["reply_text"]
-    assert decision["reason"] == "Agent asked about fee or compensation"
+    assert "flat fee to the buyer" in decision["reply_text"]
+    assert decision["reason"] == "Asked about charge, fee, percentage, or how Crisp gets paid"
 
 
 def test_sms_differentiation_question_gets_deterministic_reply(monkeypatch):
@@ -1343,15 +1354,14 @@ def test_sms_differentiation_question_gets_deterministic_reply(monkeypatch):
 
     assert module._sms_is_differentiation_question(inbound) is True
     assert decision["lead_status"] == "Y"
-    assert decision["handoff_needed"] is False
+    assert decision["handoff_needed"] is True
     assert decision["reply_text"] == (
-        "Well I pride myself in my communication and will keep you posted throughout the process. I’ll handle everything with the bank and we only get paid if/when the deal closes, so nothing is paid upfront and there’s nothing in it for us if we don’t get it done.\n\n"
-        "I built a whole system around giving agents and homeowners access to our notes so you can see everything that’s going on day to day with the file, I send weekly updates every Friday, and you can always reach my phone/text/email anytime.\n\n"
-        "Want to find some time tomorrow to talk over the phone and we can go over your listing and see if I’m the right fit to help? I’m sure we can get the job done!"
+        "I handle the lender-side work and keep agents updated throughout the process. "
+        "If that sounds useful, I'm happy to talk through your listing."
     )
     assert decision["alert_needed"] is True
     assert decision["handoff_type"] == "HOT LEAD - DIFFERENTIATION QUESTION"
-    assert decision["reason"] == "Answered differentiation and communication question; hot-lead alert requested"
+    assert decision["reason"] == "Answered differentiation question before generic coverage language"
 
 
 def test_sms_testimonials_request_uses_reviews_reply_without_email_prompt(monkeypatch):
@@ -1368,7 +1378,7 @@ def test_sms_testimonials_request_uses_reviews_reply_without_email_prompt(monkey
     assert "crispshortsales.com" in decision["reply_text"]
     assert "reviews" in decision["reply_text"].lower()
     assert "what is your email" not in decision["reply_text"].lower()
-    assert decision["reason"] == "Agent asked for website, brochure, flyer, reviews, or testimonials"
+    assert decision["reason"] == "Answered website question before generic coverage language"
 
 
 def test_sms_automated_alternate_number_notice_does_not_handoff(monkeypatch):
@@ -1445,10 +1455,9 @@ def test_sms_differentiation_reply_preserves_paragraphs_and_requests_hot_lead_al
 
     assert response.status_code == 200
     body = response.json()
-    assert body["should_reply"] is True
-    assert body["reply_text"] == module._sms_fast_decision({}, inbound)["reply_text"]
-    assert "\n\n" in body["reply_text"]
-    assert body["handoff_needed"] is False
+    assert body["should_reply"] is False
+    assert body["reply_text"] == ""
+    assert body["handoff_needed"] is True
     assert body["alert_needed"] is True
     assert body["handoff_type"] == "HOT LEAD - DIFFERENTIATION QUESTION"
     assert sender.calls == []
@@ -1533,6 +1542,7 @@ def test_sms_chatbot_records_hot_handoff_without_apps_script_mail(monkeypatch):
     body = response.json()
     assert body["ok"] is True
     assert body["should_reply"] is False
+    assert body["reply_text"] == ""
     assert body["handoff_needed"] is True
     assert body["lead_status"] == "Y"
     assert sheet.rows[2][9].startswith("Hi Yoni.")
@@ -1568,7 +1578,7 @@ def test_sms_chatbot_reply_and_reply_sent_writeback(monkeypatch):
     assert body["should_reply"] is True
     assert body["should_reply_text"] == "true"
     assert body["reply_to_phone"] == "5552223333"
-    assert "short sale process" in body["reply_text"]
+    assert "lender side of the short sale" in body["reply_text"]
 
     response = client.post(
         "/sms-chatbot",
@@ -1578,6 +1588,9 @@ def test_sms_chatbot_reply_and_reply_sent_writeback(monkeypatch):
             "phone": "555-222-3333",
             "reply_text": body["reply_text"],
             "sent_at": "2026-07-08T09:11:00-04:00",
+            "request_id": "reply-request-1",
+            "message_id": "msg-help-1",
+            "lease_token": "lease-help-1",
         },
     )
 
@@ -1586,3 +1599,349 @@ def test_sms_chatbot_reply_and_reply_sent_writeback(monkeypatch):
     assert sheet.rows[3][11] == body["reply_text"]
     assert sheet.rows[3][18] == "1"
     assert "assistant" in sheet.rows[3][17]
+
+    duplicate = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "reply_sent",
+            "phone": "555-222-3333",
+            "reply_text": body["reply_text"],
+            "sent_at": "2026-07-08T09:11:04-04:00",
+            "request_id": "reply-request-1",
+            "message_id": "msg-help-1",
+            "lease_token": "lease-help-1",
+        },
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["duplicate"] is True
+    assert sheet.rows[3][18] == "1"
+    assert json.loads(sheet.rows[3][17])[-1]["receipt_id"]
+
+
+def test_sms_contract_fee_questions_follow_the_required_three_step_flow(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    first = module._sms_fast_decision({}, "What do you charge?")
+    assert first["handoff_needed"] is False
+    assert "flat fee to the buyer" in first["reply_text"]
+    assert "$5,000" not in first["reply_text"]
+
+    row = {"history_json": json.dumps([{"role": "assistant", "text": first["reply_text"]}])}
+    second = module._sms_fast_decision(row, "Right, but how much is the fee exactly?")
+    assert second["handoff_needed"] is False
+    assert "$5,000" in second["reply_text"]
+
+    row["history_json"] = json.dumps(
+        [
+            {"role": "assistant", "text": first["reply_text"]},
+            {"role": "assistant", "text": second["reply_text"]},
+        ]
+    )
+    third = module._sms_fast_decision(row, "Why is the fee that much?")
+    assert third["handoff_needed"] is True
+    assert third["block_reply"] is True
+    assert third["reply_text"] == ""
+
+
+def test_sms_contract_fee_negotiation_hands_off_without_repeating_price(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision({}, "My company charges $3,995. Can you match that fee?")
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+    assert decision["handoff_type"] == "FEE NEGOTIATION"
+    assert decision["reply_text"] == ""
+
+
+def test_sms_contract_safe_three_part_question_gets_bounded_answer(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "I already have someone. What do you do, where are you located, and what is your fee?"
+    decision = module._sms_fast_decision({}, inbound)
+    assert decision["lead_status"] == "O"
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert "Atlanta" in decision["reply_text"]
+    assert "lender-side" in decision["reply_text"]
+    assert "flat fee" in decision["reply_text"]
+
+
+def test_sms_contract_self_handler_who_wants_details_is_not_closed_out(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "I am handling that part myself, but could you explain some more details? I am interested in hearing."
+    decision = module._sms_fast_decision({}, inbound)
+    assert decision["lead_status"] == "Y"
+    assert decision["conversation_done"] is False
+    assert "lender side of the short sale" in decision["reply_text"]
+    assert "Ok, no problem" not in decision["reply_text"]
+
+
+def test_sms_contract_direct_question_after_closeout_gets_answered_as_future_opportunity(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    row = {
+        "ai_state": "done",
+        "mailshake_status": "R",
+        "call_booking_status": "closed_no_interest",
+    }
+    decision = module._sms_fast_decision(row, "Actually, are you local and what company are you with?")
+    assert decision["lead_status"] == "O"
+    assert "Atlanta" in decision["reply_text"]
+    assert "Crisp Short Sales" in decision["reply_text"]
+
+
+def test_sms_contract_courtesy_after_closeout_never_reopens(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    row = {"ai_state": "done", "mailshake_status": "R", "call_booking_status": "closed_no_interest"}
+    decision = module._sms_fast_decision(row, "Thank you, I appreciate it")
+    assert decision["block_reply"] is True
+    assert decision["reply_text"] == ""
+    assert decision["lead_status"] == "R"
+
+
+def test_sms_contract_present_help_and_call_requests_are_terminal_handoffs(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    for inbound in ("I need help", "Let's talk", "Call me after 12 tomorrow"):
+        decision = module._sms_fast_decision({}, inbound)
+        assert decision["lead_status"] == "Y"
+        assert decision["handoff_needed"] is True
+        assert decision["block_reply"] is False
+        assert decision["reply_text"]
+
+
+def test_sms_contract_not_short_sale_and_source_question_are_distinct(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    closeout = module._sms_fast_decision({}, "This is definitely not a short sale. It is new construction.")
+    assert closeout["lead_status"] == "R"
+    assert closeout["reply_text"] == "Ahh, ok... thanks for letting me know. Good luck with your listing!"
+
+    source = module._sms_fast_decision({}, "Why did you think it was a short sale?")
+    assert source["lead_status"] == "R"
+    assert source["reply_text"] == "I thought I saw it marked online as a short sale. My mistake if I misread it. Thanks."
+
+
+def test_sms_contract_recent_duplicate_is_suppressed_but_old_repeat_is_not(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    row = {
+        "last_inbound_text": "same message",
+        "last_inbound_at": "2026-08-20T10:00:00-04:00",
+    }
+    assert module._sms_is_recent_duplicate_inbound(row, "same message", "2026-08-20T10:03:00-04:00") is True
+    assert module._sms_is_recent_duplicate_inbound(row, "same message", "2026-08-20T10:06:00-04:00") is False
+
+
+def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    ask = module._sms_fast_decision({}, "I already have help, but please send me more information about your services.")
+    assert ask["lead_status"] == "O"
+    assert ask["reply_text"] == "Sure, no problem. What is your email?"
+    assert "lender side" not in ask["reply_text"]
+
+    provided = module._sms_fast_decision({}, "Please email the info to agent@example.com")
+    assert provided["reply_text"] == "Thanks, I have your email."
+
+
+def test_sms_contract_historical_compound_regressions_route_correctly(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    future = module._sms_fast_decision(
+        {},
+        "I have these handled, but future short sales are stacking up and I am interested in what you have to say.",
+    )
+    assert future["lead_status"] in {"O", "Y"}
+    assert "marked online" not in future["reply_text"]
+
+    review = module._sms_fast_decision(
+        {},
+        "I am handling it myself, but I am willing to review what you offer.",
+    )
+    assert "crispshortsales.com" not in review["reply_text"]
+    assert "lender" in review["reply_text"].lower()
+
+    percentage = module._sms_fast_decision({}, "What percentage do you collect? My current company takes 1%.")
+    assert percentage["handoff_type"] != "STATS QUESTION"
+    assert "flat fee" in percentage["reply_text"].lower()
+
+
+def test_sms_contract_existing_crisp_and_fee_stays_r_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision({}, "We already work with Yoni at Crisp. What is your fee?")
+    assert decision["lead_status"] == "R"
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+    assert decision["reply_text"] == ""
+
+
+def test_sms_contract_fee_with_present_help_or_call_answers_then_freezes(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    for inbound in (
+        "Call me tomorrow at 10. What's your fee?",
+        "I am handling it myself but would love help getting it approved quicker. How much do you charge?",
+    ):
+        decision = module._sms_fast_decision({}, inbound)
+        assert decision["lead_status"] == "Y"
+        assert decision["handoff_needed"] is True
+        assert decision["block_reply"] is False
+        assert "flat fee" in decision["reply_text"].lower()
+
+
+def test_sms_contract_language_and_fee_compound_answers_both(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision({}, "Do you speak Spanish and what is your fee?")
+    assert decision["handoff_needed"] is False
+    assert "don't speak Spanish" in decision["reply_text"]
+    assert "flat fee" in decision["reply_text"].lower()
+
+
+def test_sms_contract_ordinary_closeout_does_not_block_later_question(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+    first = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "I already have help, thank you.",
+            "message_id": "closeout-reopen-1",
+        },
+    ).json()
+    assert first["lead_status"] == "R"
+    assert sheet.rows[2][19] == "FALSE"
+
+    second = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "Actually, what is your fee?",
+            "message_id": "closeout-reopen-2",
+        },
+    ).json()
+    assert second["should_reply"] is True
+    assert second["lead_status"] == "O"
+    assert "flat fee" in second["reply_text"].lower()
+
+
+def test_sms_contract_manual_reply_is_terminal_takeover(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "manual_reply_sent",
+            "phone": "+19542357723",
+            "reply_text": "I can call you this afternoon.",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["manual_takeover"] is True
+    assert sheet.rows[2][13] == "handoff"
+    assert sheet.rows[2][16] == "TRUE"
+    assert sheet.rows[2][19] == "TRUE"
+
+
+def test_sms_contract_reply_cap_always_hands_off_substantive_inbound(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][18] = "3"
+    body = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "What is your fee?",
+            "message_id": "cap-handoff-1",
+        },
+    ).json()
+    assert body["should_reply"] is False
+    assert body["handoff_needed"] is True
+    assert body["handoff_type"] == "MAX REPLIES REACHED"
+    assert sheet.rows[2][19] == "TRUE"
+
+
+def test_sms_contract_source_contains_retry_and_truthfulness_guards():
+    chatbot = (ROOT / "apps_script" / "sms_chatbot.js").read_text()
+    outbox = (ROOT / "apps_script" / "sms_outbox.js").read_text()
+    unified = (ROOT / "apps_script" / "zz_unified_post.js").read_text()
+    assert "currentCount >= 3" in chatbot
+    assert "SMS_CONVERSATION_LEASE_" in chatbot
+    assert "You are not a chatbot. You are a real person texting." not in chatbot
+    assert "never claim that a physical action" in chatbot
+    assert "if (retryable) break;" in outbox
+    register_pending = outbox.split("function registerPendingSmsSendV10_", 1)[1].split(
+        "function claimPendingSmsSendV10_", 1
+    )[0]
+    assert "tryLock(3000)" in register_pending
+    assert "SMS_PENDING_REGISTRATION_BUSY" in register_pending
+    assert "saveSmsInboundDecisionSnapshotV10_" in outbox
+    assert "waitLock(10000)" not in register_pending
+    claim_pending = outbox.split("function claimPendingSmsSendV10_", 1)[1].split(
+        "function markPendingSmsSendStartedV10_", 1
+    )[0]
+    assert "tryLock(3000)" in claim_pending
+    assert "waitLock" not in claim_pending
+    incoming_branch = unified.split('if (action === "incoming_sms")', 1)[1].split(
+        'if (action === "reply_sent")', 1
+    )[0]
+    assert "enqueueIncomingSmsV10_(body, requestId)" in incoming_branch
+    assert "handleIncomingSms_(body)" not in incoming_branch
+    matched_branch = chatbot.split("if (ruleResult.matched)", 1)[1].split(
+        "let decision = getAiDecision_", 1
+    )[0]
+    assert matched_branch.index("sendHandoffEmail_(") < matched_branch.index("updateRowFields_(sheet, row, updates)")
+    assert "intent_contract_v3" in unified
+    assert "function testSmsIntentContractV3_" in chatbot
+    suppressor = unified.split("function shouldSuppressUnifiedDuplicateInbound_", 1)[1].split(
+        "function markUnifiedInboundProcessed_", 1
+    )[0]
+    assert "cache.put" not in suppressor

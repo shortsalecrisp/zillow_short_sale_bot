@@ -11,6 +11,257 @@ var SMS_PENDING_SEND_HEADERS_ = [
   "inbound_queue_id", "crm_row", "worker_id"
 ];
 
+var SMS_HANDOFF_EMAIL_HEADERS_ = [
+  "created_at", "status", "email_id", "payload_json", "attempts",
+  "last_error", "sent_at", "lease_token", "lease_until"
+];
+
+function queueHandoffEmailV11_(payload) {
+  var message = payload || {};
+  var to = String(message.to || "").trim();
+  var subject = String(message.subject || "").trim();
+  var body = String(message.body || "");
+  if (!to || !subject || !body) throw new Error("Handoff email requires to, subject, and body");
+
+  installSmsOutboxTriggers_();
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    [to.toLowerCase(), subject, body].join("\n---\n")
+  );
+  var emailId = digest.map(function(value) {
+    return (value + 256).toString(16).slice(-2);
+  }).join("").slice(0, 32);
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_handoff_email_outbox") || ss.insertSheet("sms_handoff_email_outbox");
+  ensureSmsSheetHeaders_(sheet, SMS_HANDOFF_EMAIL_HEADERS_);
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    // appendRow is atomic at the Sheet boundary. A duplicate row is safer
+    // than losing a terminal handoff; the drain dedupes by deterministic ID.
+    sheet.appendRow([
+      new Date(), "queued", emailId, JSON.stringify({ to: to, subject: subject, body: body }),
+      0, "Queued without dedupe lock after contention", "", "", ""
+    ]);
+    return { ok: true, queued: true, email_id: emailId, lock_fallback: true };
+  }
+  try {
+    var rows = sheet.getLastRow() > 1
+      ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_HANDOFF_EMAIL_HEADERS_.length).getValues()
+      : [];
+    for (var i = rows.length - 1; i >= 0; i--) {
+      if (String(rows[i][2] || "") === emailId &&
+          ["queued", "claimed", "reconciling", "sent", "uncertain"].indexOf(String(rows[i][1] || "")) !== -1) {
+        return { ok: true, queued: false, duplicate: true, email_id: emailId, status: String(rows[i][1] || "") };
+      }
+    }
+
+    sheet.appendRow([
+      new Date(), "queued", emailId, JSON.stringify({ to: to, subject: subject, body: body }),
+      0, "", "", "", ""
+    ]);
+  } finally {
+    lock.releaseLock();
+  }
+  try {
+    drainHandoffEmailOutboxV11_();
+  } catch (_) {}
+  return { ok: true, queued: true, email_id: emailId };
+}
+
+function drainHandoffEmailOutboxV11_() {
+  reconcileUncertainHandoffEmailV11_();
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_handoff_email_outbox");
+  if (!sheet || sheet.getLastRow() < 2) return { ok: true, processed: 0 };
+  ensureSmsSheetHeaders_(sheet, SMS_HANDOFF_EMAIL_HEADERS_);
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return { ok: false, retryable: true, reason: "Handoff email outbox is busy" };
+  var rowNumber = 0;
+  var leaseToken = Utilities.getUuid();
+  var payload = null;
+  try {
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_HANDOFF_EMAIL_HEADERS_.length).getValues();
+    var activeIds = {};
+    rows.forEach(function(row) {
+      var rowStatus = String(row[1] || "");
+      if (["claimed", "reconciling", "sent", "uncertain"].indexOf(rowStatus) !== -1) {
+        activeIds[String(row[2] || "")] = true;
+      }
+    });
+    for (var i = 0; i < rows.length; i++) {
+      var status = String(rows[i][1] || "");
+      var leaseUntil = new Date(rows[i][8]).getTime();
+      if (status === "claimed" && (!leaseUntil || leaseUntil < Date.now())) {
+        // The execution may have ended after MailApp accepted the email but
+        // before Sheets recorded the receipt. Never auto-resend that row.
+        var expiredClaimRow = i + 2;
+        var uncertainRow = rows[i].slice();
+        uncertainRow[1] = "uncertain";
+        uncertainRow[5] = "Claim expired; delivery outcome unknown";
+        uncertainRow[7] = "";
+        uncertainRow[8] = new Date(Date.now() + 5 * 60 * 1000);
+        sheet.getRange(expiredClaimRow, 1, 1, SMS_HANDOFF_EMAIL_HEADERS_.length)
+          .setValues([uncertainRow]);
+        activeIds[String(rows[i][2] || "")] = true;
+        continue;
+      }
+      if (status !== "queued") continue;
+      rowNumber = i + 2;
+      var emailId = String(rows[i][2] || "");
+      if (activeIds[emailId]) {
+        sheet.getRange(rowNumber, 2).setValue("duplicate");
+        rowNumber = 0;
+        continue;
+      }
+      try {
+        payload = JSON.parse(String(rows[i][3] || "{}"));
+      } catch (err) {
+        sheet.getRange(rowNumber, 2).setValue("failed");
+        sheet.getRange(rowNumber, 6).setValue("Invalid payload: " + err);
+        rowNumber = 0;
+        continue;
+      }
+      var claimedEmailRow = rows[i].slice();
+      claimedEmailRow[1] = "claimed";
+      claimedEmailRow[4] = Number(rows[i][4] || 0) + 1;
+      claimedEmailRow[7] = leaseToken;
+      claimedEmailRow[8] = new Date(Date.now() + 2 * 60 * 1000);
+      // Status and lease ownership are one transition. A failed Sheet write
+      // leaves the prior queued row intact and eligible for another worker.
+      sheet.getRange(rowNumber, 1, 1, SMS_HANDOFF_EMAIL_HEADERS_.length)
+        .setValues([claimedEmailRow]);
+      activeIds[emailId] = true;
+      break;
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  if (!rowNumber || !payload) return { ok: true, processed: 0 };
+
+  try {
+    MailApp.sendEmail({ to: payload.to, subject: payload.subject, body: payload.body });
+  } catch (err) {
+    sheet.getRange(rowNumber, 2).setValue("queued");
+    sheet.getRange(rowNumber, 6).setValue(String(err));
+    sheet.getRange(rowNumber, 8, 1, 2).setValues([["", ""]]);
+    throw err;
+  }
+
+  // MailApp returning successfully is the delivery boundary. Never retry that
+  // email merely because recording the receipt in Sheets has a transient error.
+  try {
+    sheet.getRange(rowNumber, 2).setValue("sent");
+    sheet.getRange(rowNumber, 6, 1, 4).setValues([["", new Date(), "", ""]]);
+    return { ok: true, processed: 1 };
+  } catch (err) {
+    try {
+      sheet.getRange(rowNumber, 2).setValue("uncertain");
+      sheet.getRange(rowNumber, 6).setValue("Email sent; receipt write failed: " + String(err));
+      sheet.getRange(rowNumber, 8, 1, 2).setValues([["", new Date(Date.now() + 5 * 60 * 1000)]]);
+    } catch (_) {}
+    return { ok: false, processed: 1, uncertain: true, reason: "Email sent but receipt write was uncertain" };
+  }
+}
+
+function reconcileUncertainHandoffEmailV11_() {
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_handoff_email_outbox");
+  if (!sheet || sheet.getLastRow() < 2) return { ok: true, processed: 0 };
+  ensureSmsSheetHeaders_(sheet, SMS_HANDOFF_EMAIL_HEADERS_);
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return { ok: false, retryable: true, reason: "Handoff reconciliation is busy" };
+  var rowNumber = 0;
+  var emailId = "";
+  var payload = null;
+  var leaseToken = Utilities.getUuid();
+  try {
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_HANDOFF_EMAIL_HEADERS_.length).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      var status = String(rows[i][1] || "");
+      var retryAt = new Date(rows[i][8]).getTime();
+      if (status === "reconciling" && (!retryAt || retryAt < Date.now())) {
+        var retryReconciliationRow = rows[i].slice();
+        retryReconciliationRow[1] = "uncertain";
+        retryReconciliationRow[5] = "Reconciliation lease expired; retrying owner-surface check";
+        retryReconciliationRow[7] = "";
+        retryReconciliationRow[8] = new Date();
+        sheet.getRange(i + 2, 1, 1, SMS_HANDOFF_EMAIL_HEADERS_.length)
+          .setValues([retryReconciliationRow]);
+        rows[i] = retryReconciliationRow;
+        status = "uncertain";
+        retryAt = Date.now();
+      }
+      if (status !== "uncertain" || (retryAt && retryAt > Date.now())) continue;
+      try {
+        payload = JSON.parse(String(rows[i][3] || "{}"));
+      } catch (_) {
+        sheet.getRange(i + 2, 2).setValue("failed");
+        continue;
+      }
+      rowNumber = i + 2;
+      emailId = String(rows[i][2] || "");
+      var reconcilingRow = rows[i].slice();
+      reconcilingRow[1] = "reconciling";
+      reconcilingRow[7] = leaseToken;
+      reconcilingRow[8] = new Date(Date.now() + 2 * 60 * 1000);
+      sheet.getRange(rowNumber, 1, 1, SMS_HANDOFF_EMAIL_HEADERS_.length)
+        .setValues([reconcilingRow]);
+      break;
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  if (!rowNumber || !payload) return { ok: true, processed: 0 };
+
+  var foundInSent = wasHandoffEmailSentV11_(payload, emailId);
+  if (!lock.tryLock(3000)) return { ok: false, retryable: true, reason: "Handoff reconciliation receipt is busy" };
+  try {
+    var currentStatus = String(sheet.getRange(rowNumber, 2).getValue() || "");
+    var currentLease = String(sheet.getRange(rowNumber, 8).getValue() || "");
+    if (currentStatus !== "reconciling" || currentLease !== leaseToken) {
+      return { ok: false, processed: 0, reason: "Reconciliation lease changed" };
+    }
+    sheet.getRange(rowNumber, 2).setValue(foundInSent ? "sent" : "queued");
+    sheet.getRange(rowNumber, 6).setValue(foundInSent
+      ? "Recovered sent receipt from Gmail"
+      : "No matching Gmail Sent message; safe to retry");
+    sheet.getRange(rowNumber, 7).setValue(foundInSent ? new Date() : "");
+    sheet.getRange(rowNumber, 8, 1, 2).setValues([["", ""]]);
+    return { ok: true, processed: 1, found_in_sent: foundInSent };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function wasHandoffEmailSentV11_(payload, emailId) {
+  if (!payload || !payload.to || !payload.subject || !emailId) return false;
+  var safeTo = String(payload.to).replace(/["\\]/g, " ");
+  var safeSubject = String(payload.subject).replace(/["\\]/g, " ");
+  var threads = GmailApp.search('in:sent to:"' + safeTo + '" subject:"' + safeSubject + '" newer_than:14d', 0, 30);
+  for (var i = 0; i < threads.length; i++) {
+    var messages = threads[i].getMessages();
+    for (var j = 0; j < messages.length; j++) {
+      var message = messages[j];
+      var digest = Utilities.computeDigest(
+        Utilities.DigestAlgorithm.SHA_256,
+        [
+          String(payload.to).toLowerCase(),
+          String(message.getSubject() || "").trim(),
+          String(message.getPlainBody() || "").replace(/\r\n/g, "\n")
+        ].join("\n---\n")
+      );
+      var candidateId = digest.map(function(value) {
+        return (value + 256).toString(16).slice(-2);
+      }).join("").slice(0, 32);
+      if (candidateId === emailId) return true;
+    }
+  }
+  return false;
+}
+
 function getPendingSmsHeaders_() {
   return SMS_PENDING_SEND_HEADERS_.slice();
 }
@@ -26,8 +277,9 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_inbound_queue") || ss.insertSheet("sms_inbound_queue");
   ensureSmsSheetHeaders_(sheet, SMS_INBOUND_QUEUE_HEADERS_);
-  var dedupeKey = buildSmsInboundDedupeKey_(phone, message);
   var now = new Date();
+  var suppliedMessageId = String(body && body.message_id || "").trim();
+  var dedupeKey = buildSmsInboundDedupeKey_(phone, message, suppliedMessageId);
   var cache = CacheService.getScriptCache();
   var cacheKey = "sms_inbound_" + dedupeKey;
   var cachedQueueId = cache.get(cacheKey);
@@ -44,7 +296,7 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
   var lock = LockService.getScriptLock();
   var hasLock = lock.tryLock(3000);
   var queueId;
-  var messageId = String(body && body.message_id || "").trim() || (phone + "-" + now.getTime());
+  var messageId = suppliedMessageId || (phone + "-" + now.getTime());
 
   // A duplicate queue row is safer than dropping a unique inbound. The
   // downstream CRM dedupe still prevents a duplicate bot response.
@@ -125,10 +377,12 @@ function buildQueuedSmsInboundResponse_(queueId, messageId) {
   };
 }
 
-function buildSmsInboundDedupeKey_(phone, message) {
+function buildSmsInboundDedupeKey_(phone, message, messageId) {
   var digest = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
-    normalizePhone_(phone) + "|" + normalizeWhitespace_(String(message || "")).toLowerCase()
+    normalizePhone_(phone) + "|" + (String(messageId || "").trim()
+      ? "id:" + String(messageId).trim()
+      : "text:" + normalizeWhitespace_(String(message || "")).toLowerCase())
   );
   return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, "");
 }
@@ -140,18 +394,23 @@ function processSmsInboundQueue_() {
     var claim = claimQueuedSmsInbound_();
     if (!claim) break;
     try {
-      var smsResult = handleIncomingSms_({
-        action: "incoming_sms",
-        phone: claim.phone,
-        message: claim.message,
-        received_at: claim.received_at,
-        message_id: claim.message_id
-      });
-      var normalized = normalizeTaskerPayload_(smsResult);
-      var outboxRequestId = Utilities.getUuid();
-      normalized.request_id = outboxRequestId;
-      normalized.message_id = claim.message_id;
-      normalized.reply_to_phone = claim.phone;
+      var normalized = loadSmsInboundDecisionSnapshotV10_(claim.queue_id);
+      var outboxRequestId = normalized && normalized.request_id || Utilities.getUuid();
+      if (!normalized) {
+        var smsResult = handleIncomingSms_({
+          action: "incoming_sms",
+          phone: claim.phone,
+          message: claim.message,
+          received_at: claim.received_at,
+          message_id: claim.message_id,
+          recovery_retry: claim.attempts > 1
+        });
+        normalized = normalizeTaskerPayload_(smsResult);
+        normalized.request_id = outboxRequestId;
+        normalized.message_id = claim.message_id;
+        normalized.reply_to_phone = claim.phone;
+        saveSmsInboundDecisionSnapshotV10_(claim.queue_id, normalized);
+      }
       if (normalized.should_reply === true) {
         registerPendingSmsSendV10_({
           phone: claim.phone,
@@ -159,7 +418,13 @@ function processSmsInboundQueue_() {
           message_id: claim.message_id
         }, normalized, outboxRequestId, claim.queue_id);
       }
-      completeQueuedSmsInbound_(claim, "processed", "", outboxRequestId);
+      if (!completeQueuedSmsInbound_(claim, "processed", "", outboxRequestId)) {
+        var completionBusy = new Error("Inbound completion is temporarily busy");
+        completionBusy.retryable = true;
+        completionBusy.code = "SMS_INBOUND_COMPLETION_BUSY";
+        throw completionBusy;
+      }
+      clearSmsInboundDecisionSnapshotV10_(claim.queue_id);
       appendSmsDebugLog_("incoming_sms_queue_processed", {
         request_id: outboxRequestId,
         phone: claim.phone,
@@ -171,7 +436,10 @@ function processSmsInboundQueue_() {
         queue_id: claim.queue_id
       });
     } catch (err) {
-      completeQueuedSmsInbound_(claim, claim.attempts >= 3 ? "failed" : "queued", String(err), "");
+      var retryable = !!(err && err.retryable);
+      var exhausted = claim.attempts >= (retryable ? 8 : 3);
+      completeQueuedSmsInbound_(claim, exhausted ? "failed" : "queued", String(err), "");
+      if (exhausted) clearSmsInboundDecisionSnapshotV10_(claim.queue_id);
       appendSmsDebugLog_("incoming_sms_queue_error", {
         request_id: claim.queue_id,
         phone: claim.phone,
@@ -179,15 +447,52 @@ function processSmsInboundQueue_() {
         reason: String(err),
         attempts: claim.attempts
       });
-      if (claim.attempts >= 3) {
+      if (exhausted) {
         try {
           sendSystemAlertEmail_("SMS BOT INBOUND PROCESSING FAILED", String(err));
         } catch (_) {}
       }
+      if (retryable) break;
     }
     processed++;
   }
   return { ok: true, processed: processed };
+}
+
+function smsInboundDecisionSnapshotKeyV10_(queueId) {
+  return "sms_inbound_decision_v10_" + String(queueId || "").replace(/[^A-Za-z0-9_-]/g, "");
+}
+
+function saveSmsInboundDecisionSnapshotV10_(queueId, normalized) {
+  if (!queueId || !normalized) return;
+  PropertiesService.getScriptProperties().setProperty(
+    smsInboundDecisionSnapshotKeyV10_(queueId),
+    JSON.stringify({ saved_at: Date.now(), decision: normalized })
+  );
+}
+
+function loadSmsInboundDecisionSnapshotV10_(queueId) {
+  if (!queueId) return null;
+  var props = PropertiesService.getScriptProperties();
+  var key = smsInboundDecisionSnapshotKeyV10_(queueId);
+  var raw = props.getProperty(key);
+  if (!raw) return null;
+  try {
+    var parsed = JSON.parse(raw);
+    if (!parsed || !parsed.decision || Date.now() - Number(parsed.saved_at || 0) > 24 * 60 * 60 * 1000) {
+      props.deleteProperty(key);
+      return null;
+    }
+    return parsed.decision;
+  } catch (_) {
+    props.deleteProperty(key);
+    return null;
+  }
+}
+
+function clearSmsInboundDecisionSnapshotV10_(queueId) {
+  if (!queueId) return;
+  PropertiesService.getScriptProperties().deleteProperty(smsInboundDecisionSnapshotKeyV10_(queueId));
 }
 
 function claimQueuedSmsInbound_() {
@@ -196,26 +501,82 @@ function claimQueuedSmsInbound_() {
   if (!sheet || sheet.getLastRow() < 2) return null;
   ensureSmsSheetHeaders_(sheet, SMS_INBOUND_QUEUE_HEADERS_);
   var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  if (!lock.tryLock(3000)) return null;
   try {
     var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_INBOUND_QUEUE_HEADERS_.length).getValues();
     var now = Date.now();
     for (var i = 0; i < rows.length; i++) {
       var status = String(rows[i][1] || "");
       var leaseUntil = new Date(rows[i][10]).getTime();
-      if (status !== "queued" && !(status === "processing" && leaseUntil && leaseUntil < now)) continue;
-      var attempts = Number(rows[i][8] || 0) + 1;
+      if (status !== "queued" && !(status === "processing" && (!leaseUntil || leaseUntil < now))) continue;
+      var createdAt = new Date(rows[i][0]).getTime();
+      var phone = normalizePhone_(rows[i][5]);
+      var fragmentIndexes = [i];
+      var newestCreatedAt = createdAt;
+      var previousFragmentAt = createdAt;
+      for (var j = i + 1; j < rows.length; j++) {
+        if (String(rows[j][1] || "") !== "queued" || normalizePhone_(rows[j][5]) !== phone) continue;
+        var fragmentCreatedAt = new Date(rows[j][0]).getTime();
+        if (!fragmentCreatedAt || !previousFragmentAt || fragmentCreatedAt - previousFragmentAt > 20000) break;
+        fragmentIndexes.push(j);
+        newestCreatedAt = Math.max(newestCreatedAt || 0, fragmentCreatedAt);
+        previousFragmentAt = fragmentCreatedAt;
+      }
+      // Wait through the entire burst window. Each new bubble refreshes the
+      // debounce, so one conversation turn is classified exactly once.
+      if (status === "queued" && newestCreatedAt && now - newestCreatedAt < 20000) continue;
+
+      var selectedIndex = fragmentIndexes[fragmentIndexes.length - 1];
+      var combinedMessage = fragmentIndexes.map(function(index) {
+        return normalizeWhitespace_(String(rows[index][6] || ""));
+      }).filter(Boolean).join(" ");
+      // Commit the combined message and every source disposition in one Sheet
+      // write. Retrying after a transient error can never concatenate an
+      // already-combined row with a surviving source fragment.
+      if (fragmentIndexes.length > 1) {
+        var blockStart = fragmentIndexes[0];
+        var blockEnd = selectedIndex;
+        var blockValues = rows.slice(blockStart, blockEnd + 1).map(function(row) {
+          return row.slice();
+        });
+        blockValues[selectedIndex - blockStart][6] = combinedMessage;
+        for (var k = 0; k < fragmentIndexes.length - 1; k++) {
+          var fragmentOffset = fragmentIndexes[k] - blockStart;
+          blockValues[fragmentOffset][1] = "coalesced";
+          blockValues[fragmentOffset][11] = "Combined with queue " + String(rows[selectedIndex][2] || "");
+          blockValues[fragmentOffset][12] = new Date();
+        }
+        sheet.getRange(
+          blockStart + 2,
+          1,
+          blockValues.length,
+          SMS_INBOUND_QUEUE_HEADERS_.length
+        ).setValues(blockValues);
+        for (var b = 0; b < blockValues.length; b++) {
+          rows[blockStart + b] = blockValues[b];
+        }
+        rows[selectedIndex][6] = combinedMessage;
+      }
+
+      var attempts = Number(rows[selectedIndex][8] || 0) + 1;
       var leaseToken = Utilities.getUuid();
-      var sheetRow = i + 2;
-      sheet.getRange(sheetRow, 2).setValue("processing");
-      sheet.getRange(sheetRow, 9, 1, 3).setValues([[attempts, leaseToken, new Date(now + 5 * 60 * 1000)]]);
+      var sheetRow = selectedIndex + 2;
+      var claimedInboundRow = rows[selectedIndex].slice();
+      claimedInboundRow[1] = "processing";
+      claimedInboundRow[8] = attempts;
+      claimedInboundRow[9] = leaseToken;
+      claimedInboundRow[10] = new Date(now + 5 * 60 * 1000);
+      // Status and lease metadata are one transition. A partial Sheets write
+      // can no longer leave a processing row without a reclaimable lease.
+      sheet.getRange(sheetRow, 1, 1, SMS_INBOUND_QUEUE_HEADERS_.length)
+        .setValues([claimedInboundRow]);
       return {
         row: sheetRow,
-        queue_id: String(rows[i][2] || ""),
-        message_id: String(rows[i][4] || ""),
-        phone: normalizePhone_(rows[i][5]),
-        message: String(rows[i][6] || ""),
-        received_at: String(rows[i][7] || ""),
+        queue_id: String(rows[selectedIndex][2] || ""),
+        message_id: String(rows[selectedIndex][4] || ""),
+        phone: normalizePhone_(rows[selectedIndex][5]),
+        message: String(rows[selectedIndex][6] || ""),
+        received_at: String(rows[selectedIndex][7] || ""),
         attempts: attempts,
         lease_token: leaseToken
       };
@@ -229,16 +590,23 @@ function claimQueuedSmsInbound_() {
 function completeQueuedSmsInbound_(claim, status, error, outboxRequestId) {
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_inbound_queue");
-  if (!sheet || !claim || !claim.row) return;
+  if (!sheet || !claim || !claim.row) return false;
   ensureSmsSheetHeaders_(sheet, SMS_INBOUND_QUEUE_HEADERS_);
-  var currentQueueId = String(sheet.getRange(claim.row, 3).getValue() || "");
-  var currentLease = String(sheet.getRange(claim.row, 10).getValue() || "");
-  if (currentQueueId !== claim.queue_id || currentLease !== claim.lease_token) return;
-  sheet.getRange(claim.row, 2).setValue(status);
-  sheet.getRange(claim.row, 10, 1, 2).setValues([["", ""]]);
-  sheet.getRange(claim.row, 12).setValue(error || "");
-  if (status === "processed") sheet.getRange(claim.row, 13).setValue(new Date());
-  if (outboxRequestId) sheet.getRange(claim.row, 14).setValue(outboxRequestId);
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return false;
+  try {
+    var currentQueueId = String(sheet.getRange(claim.row, 3).getValue() || "");
+    var currentLease = String(sheet.getRange(claim.row, 10).getValue() || "");
+    if (currentQueueId !== claim.queue_id || currentLease !== claim.lease_token) return false;
+    sheet.getRange(claim.row, 2).setValue(status);
+    sheet.getRange(claim.row, 10, 1, 2).setValues([["", ""]]);
+    sheet.getRange(claim.row, 12).setValue(error || "");
+    if (status === "processed") sheet.getRange(claim.row, 13).setValue(new Date());
+    if (outboxRequestId) sheet.getRange(claim.row, 14).setValue(outboxRequestId);
+    return true;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function registerPendingSmsSendV10_(body, normalized, requestId, inboundQueueId) {
@@ -250,8 +618,25 @@ function registerPendingSmsSendV10_(body, normalized, requestId, inboundQueueId)
   var messageId = String(body && body.message_id || "").trim();
   var delaySeconds = Math.max(0, Number(normalized && normalized.delay_seconds || 15));
   var now = new Date();
+  var pendingRow = [
+    now, "queued", requestId, messageId, phone, replyText,
+    String(body && body.message || ""), "", new Date(now.getTime() + delaySeconds * 1000),
+    0, "", "", "", "", "", "", inboundQueueId || "", findSmsCrmRowByPhone_(phone), ""
+  ];
+  if (typeof hasPendingSmsTakeoverV11_ === "function" && hasPendingSmsTakeoverV11_(phone)) {
+    return { ok: true, queued: false, suppressed: true, reason: "Manual takeover is pending" };
+  }
   var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  var hasLock = lock.tryLock(3000);
+  if (!hasLock) {
+    // The durable inbound decision snapshot lets the queue retry this exact
+    // registration. Never append without the lock because two workers could
+    // otherwise create two sendable rows for the same inbound message.
+    var busyError = new Error("Pending SMS registration is temporarily busy");
+    busyError.retryable = true;
+    busyError.code = "SMS_PENDING_REGISTRATION_BUSY";
+    throw busyError;
+  }
   try {
     var rows = sheet.getLastRow() > 1
       ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues()
@@ -263,11 +648,7 @@ function registerPendingSmsSendV10_(body, normalized, requestId, inboundQueueId)
         return { ok: true, duplicate: true, pending_row: i + 2 };
       }
     }
-    sheet.appendRow([
-      now, "queued", requestId, messageId, phone, replyText,
-      String(body && body.message || ""), "", new Date(now.getTime() + delaySeconds * 1000),
-      0, "", "", "", "", "", "", inboundQueueId || "", findSmsCrmRowByPhone_(phone), ""
-    ]);
+    sheet.appendRow(pendingRow);
     return { ok: true, queued: true, pending_row: sheet.getLastRow() };
   } finally {
     lock.releaseLock();
@@ -301,7 +682,7 @@ function claimPendingSmsSendV10_(body) {
       var notBefore = new Date(rows[i][8]).getTime();
       var leaseUntil = new Date(rows[i][11]).getTime();
       var eligible = status === "queued" && (!notBefore || notBefore <= now);
-      if (status === "claimed" && leaseUntil && leaseUntil < now && !rows[i][13]) eligible = true;
+      if (status === "claimed" && (!leaseUntil || leaseUntil < now) && !rows[i][13]) eligible = true;
       if (!eligible) continue;
 
       var sheetRow = i + 2;
@@ -321,17 +702,19 @@ function claimPendingSmsSendV10_(body) {
 
       var leaseToken = Utilities.getUuid();
       var attempts = Number(rows[i][9] || 0) + 1;
-      sheet.getRange(sheetRow, 2).setValue("claimed");
-      sheet.getRange(sheetRow, 10, 1, 4).setValues([[
-        attempts, leaseToken, new Date(now + 5 * 60 * 1000), new Date()
-      ]]);
-      sheet.getRange(sheetRow, 19).setValue(workerId);
-      rows[i][1] = "claimed";
-      rows[i][9] = attempts;
-      rows[i][10] = leaseToken;
-      rows[i][11] = new Date(now + 5 * 60 * 1000);
-      rows[i][18] = workerId;
-      return buildPendingSmsClaimResponse_(rows[i], sheetRow);
+      var claimedPendingRow = rows[i].slice();
+      claimedPendingRow[1] = "claimed";
+      claimedPendingRow[9] = attempts;
+      claimedPendingRow[10] = leaseToken;
+      claimedPendingRow[11] = new Date(now + 5 * 60 * 1000);
+      claimedPendingRow[12] = new Date();
+      claimedPendingRow[18] = workerId;
+      // Commit ownership, token, lease, and worker together. If this write
+      // fails, the prior queued/expired state remains eligible for retry.
+      sheet.getRange(sheetRow, 1, 1, SMS_PENDING_SEND_HEADERS_.length)
+        .setValues([claimedPendingRow]);
+      rows[i] = claimedPendingRow;
+      return buildPendingSmsClaimResponse_(claimedPendingRow, sheetRow);
     }
     return noPendingSmsClaim_();
   } finally {
@@ -378,6 +761,14 @@ function markPendingSmsSendStartedV10_(body) {
     correlationMode = "exact_lease_identity";
   }
   if (!match.ok) return match;
+  var staleReason = getPendingSmsStaleReason_(match.values);
+  if (staleReason) {
+    match.sheet.getRange(match.row, 2).setValue("superseded");
+    match.sheet.getRange(match.row, 16).setValue(staleReason);
+    match.sheet.getRange(match.row, 11, 1, 2).setValues([["", ""]]);
+    match.sheet.getRange(match.row, 19).setValue("");
+    return { ok: false, should_send: false, status: "superseded", reason: staleReason };
+  }
   if (String(match.values[1] || "") === "send_started") {
     return {
       ok: true,
@@ -535,6 +926,9 @@ function testPendingSmsStaleTextNormalization_() {
 
 function getPendingSmsStaleReason_(outboxRow) {
   var phone = normalizePhone_(outboxRow[4]);
+  if (typeof hasPendingSmsTakeoverV11_ === "function" && hasPendingSmsTakeoverV11_(phone)) {
+    return "Manual takeover is pending";
+  }
   var messageId = String(outboxRow[3] || "");
   var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);
   var sheet = getSheet_();
@@ -543,14 +937,20 @@ function getPendingSmsStaleReason_(outboxRow) {
     var rowObj = data[i].obj;
     if (normalizePhone_(rowObj[HEADERS.phone]) !== phone) continue;
     if (String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
-    if (messageId && String(rowObj[HEADERS.last_message_id] || "") !== messageId) return "A newer inbound message exists";
     // Older ShortSaleLeads layouts do not have last_inbound_text. In that
     // layout, last_message_id remains the authoritative stale-reply guard.
     var hasInboundColumn = Object.prototype.hasOwnProperty.call(rowObj, HEADERS.last_inbound_text);
     var currentInboundText = hasInboundColumn
       ? normalizePendingSmsInboundText_(rowObj[HEADERS.last_inbound_text])
       : "";
-    if (inboundText && currentInboundText && currentInboundText !== inboundText) return "Latest inbound text changed";
+    var newerInboundIsCourtesy = currentInboundText &&
+      (isFinalCourtesyReply_(currentInboundText) || isPunctuationCorrectionFragment_(currentInboundText));
+    if (messageId && String(rowObj[HEADERS.last_message_id] || "") !== messageId && !newerInboundIsCourtesy) {
+      return "A newer substantive inbound message exists";
+    }
+    if (inboundText && currentInboundText && currentInboundText !== inboundText && !newerInboundIsCourtesy) {
+      return "Latest inbound text changed";
+    }
     return "";
   }
   return "CRM row no longer matches destination";
@@ -618,6 +1018,7 @@ function smsOutboxWatchdog_() {
 
 function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
   var context = getSmsLeadContextByPhone_(row[4]);
+  lockSmsConversationAfterTransportAlertV10_(row[4], reason);
   sendHandoffEmail_({
     handoff_type: reason,
     agent_name: context.agent_name,
@@ -631,6 +1032,51 @@ function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
     history: context.history
   });
   sheet.getRange(sheetRow, 8).setValue(new Date());
+}
+
+function lockSmsConversationAfterTransportAlertV10_(phone, reason) {
+  try {
+    var sheet = getSheet_();
+    var data = getSheetData_(sheet);
+    for (var i = 0; i < data.length; i++) {
+      if (normalizePhone_(data[i].obj[HEADERS.phone]) !== normalizePhone_(phone)) continue;
+      updateRowFields_(sheet, data[i].row, {
+        [HEADERS.conversation_summary]: reason || "SMS transport needs manual follow-up",
+        [HEADERS.ai_state]: "handoff",
+        [HEADERS.handoff_flag]: "TRUE",
+        [HEADERS.human_override]: "TRUE"
+      });
+      break;
+    }
+  } catch (_) {}
+}
+
+function cancelPendingSmsForPhoneV10_(phone, status) {
+  var normalizedPhone = normalizePhone_(phone);
+  if (!normalizedPhone) return { ok: false, reason: "A phone number is required" };
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_pending_sends");
+  if (!sheet || sheet.getLastRow() < 2) return { ok: true, cancelled: 0 };
+  ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return { ok: false, retryable: true, reason: "SMS outbox is busy" };
+  try {
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+    var cancelled = 0;
+    for (var i = 0; i < rows.length; i++) {
+      if (normalizePhone_(rows[i][4]) !== normalizedPhone) continue;
+      if (["pending", "alerted", "queued", "claimed", "send_started"].indexOf(String(rows[i][1] || "")) === -1) continue;
+      var rowNumber = i + 2;
+      sheet.getRange(rowNumber, 2).setValue(status || "manual_sent");
+      sheet.getRange(rowNumber, 11, 1, 2).setValues([["", ""]]);
+      sheet.getRange(rowNumber, 16).setValue("Cancelled because human takeover is active");
+      sheet.getRange(rowNumber, 19).setValue("");
+      cancelled++;
+    }
+    return { ok: true, cancelled: cancelled };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function getSmsLeadContextByPhone_(phone) {
@@ -657,7 +1103,9 @@ function getSmsLeadContextByPhone_(phone) {
 function installSmsOutboxTriggers_() {
   var required = {
     processSmsInboundQueue_: 1,
-    smsOutboxWatchdog_: 5
+    smsOutboxWatchdog_: 5,
+    drainHandoffEmailOutboxV11_: 1,
+    drainPendingSmsControlEventsV11_: 1
   };
   var triggers = ScriptApp.getProjectTriggers();
   Object.keys(required).forEach(function(handler) {

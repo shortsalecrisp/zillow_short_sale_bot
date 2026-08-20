@@ -3519,7 +3519,7 @@ def _sms_is_unsupported_performance_stats_question(value: Any) -> bool:
         return False
     patterns = [
         r"\b(?:success|approval|approved|close|closing|conversion)\s+rate\b",
-        r"\bwhat\s+(?:percent|percentage)\b",
+        r"\bwhat\s+(?:percent|percentage)\b.{0,60}\b(?:success|approval|approved|close|closing|conversion|deals?|files?)\b",
         r"\b(?:your|the)\s+(?:stats?|statistics|numbers)\b",
         r"\bhow\s+often\b.{0,80}\b(?:approve|approved|approval|close|closing|success|successful)\b",
         r"\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|approvals?|closings?|transactions?)\b",
@@ -3575,6 +3575,8 @@ def _sms_is_yoni_name_and_number_request(value: Any) -> bool:
 def _sms_is_final_courtesy(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     text = re.sub(r"[\s.!?\U0001F000-\U0001FAFF\u2600-\u27bf]+$", "", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = _sms_normalize_whitespace(text)
     return text in {
         "thanks",
         "thank you",
@@ -3593,6 +3595,9 @@ def _sms_is_final_courtesy(value: Any) -> bool:
         "thanks so much",
         "ok thank you",
         "okay thank you",
+        "thank you i appreciate it",
+        "thanks i appreciate it",
+        "thank you appreciate it",
     }
 
 
@@ -3711,6 +3716,34 @@ def _sms_is_future_buyer_recontact(value: Any) -> bool:
 
 def _sms_future_buyer_recontact_reply() -> str:
     return "Yes, absolutely. Once you have a buyer, reach out and I can help with the lender side and paperwork."
+
+
+def _sms_is_future_negotiation_interest(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text:
+        return False
+    openness = re.search(
+        r"\b(?:open[- ]?minded|open to|interested|would like|i['’]?d like|would love|i['’]?d love|"
+        r"would consider|what you have to say)\b",
+        text,
+    )
+    future = re.search(r"\b(?:future|going forward|down the road|later|next one|stacking up)\b", text)
+    service = re.search(
+        r"\b(?:negotiations?|short sales?|distressed propert(?:y|ies)|foreclosures?|bank side|lender|"
+        r"fees?|charge|pricing|information|info|process(?:es)?)\b",
+        text,
+    )
+    return bool(openness and future and service)
+
+
+def _sms_future_negotiation_reply(value: Any) -> str:
+    text = _sms_normalize_whitespace(value).lower()
+    if _sms_is_fee_question(text):
+        return "Absolutely. There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes."
+    return (
+        "Absolutely. I handle the lender paperwork, calls, follow-up, and negotiations through approval. "
+        "If you want to compare notes on a future file, I'd be happy to talk."
+    )
 
 
 def _sms_normalize_phone(phone: Any) -> str:
@@ -3936,6 +3969,8 @@ def _sms_is_durable_handled_duplicate(row_obj: Dict[str, str], inbound_text: str
         return False
     if _sms_is_scheduled_callback(inbound_text) or _sms_is_post_handoff_callback_update(row_obj, inbound_text):
         return False
+    if _sms_is_substantive_followup(inbound_text) or _sms_is_fee_question(inbound_text):
+        return False
     if _sms_normalize_handled_inbound_text(row_obj.get("response_status")) != current_text:
         return False
     return _sms_history_has_confirmed_reply_after_inbound(row_obj, inbound_text) or _sms_is_intentional_no_reply_disposition(
@@ -3960,6 +3995,8 @@ def _sms_is_recent_duplicate_inbound(row_obj: Dict[str, str], inbound_text: str,
     prior_text = _sms_normalize_handled_inbound_text(row_obj.get("last_inbound_text"))
     current_text = _sms_normalize_handled_inbound_text(inbound_text)
     if not prior_text or prior_text != current_text:
+        return False
+    if _sms_is_substantive_followup(inbound_text) or _sms_is_fee_question(inbound_text):
         return False
     prior_at = _sms_parse_inbound_timestamp(row_obj.get("last_inbound_at") or row_obj.get("last_contact_time"))
     current_at = _sms_parse_inbound_timestamp(received_at)
@@ -3996,14 +4033,18 @@ def _sms_decision(
     callback_time: str = "",
     handoff_type: str = "",
     alert_needed: bool = False,
+    callback_updated: bool = False,
     preserve_existing_state: bool = False,
     preserve_reply_formatting: bool = False,
 ) -> Dict[str, Any]:
+    normalized_status = lead_status if lead_status in {"R", "Y", "O"} else "Y"
+    if preserve_existing_state and lead_status == "G":
+        normalized_status = "G"
     return {
         "reply_text": reply_text,
-        "lead_status": lead_status if lead_status in {"R", "Y", "G", "N", "O"} else "Y",
+        "lead_status": normalized_status,
         "conversation_done": conversation_done,
-        "handoff_needed": handoff_needed or lead_status == "G" or needs_review,
+        "handoff_needed": handoff_needed or needs_review or alert_needed,
         "needs_review": needs_review,
         "block_reply": block_reply,
         "reason": reason,
@@ -4011,6 +4052,7 @@ def _sms_decision(
         "callback_time": callback_time,
         "handoff_type": handoff_type,
         "alert_needed": alert_needed,
+        "callback_updated": callback_updated,
         "preserve_existing_state": preserve_existing_state,
         "preserve_reply_formatting": preserve_reply_formatting,
     }
@@ -4214,9 +4256,8 @@ def _sms_is_client_consultation_interest(value: Any) -> bool:
 
 def _sms_client_consultation_reply() -> str:
     return (
-        "Absolutely. I can handle the entire short sale process for you and your client - all the paperwork, lender calls, "
-        "follow-up, and negotiations needed to get the file approved. There's no cost to you or the seller. "
-        "I'm happy to speak with either of you whenever it works for you."
+        "That makes sense. I handle the lender paperwork, calls, follow-up, and negotiations through approval, "
+        "with no fee to you or the seller. I'm happy to speak with either of you whenever you're ready."
     )
 
 
@@ -4310,7 +4351,8 @@ def _sms_is_scheduled_callback(value: Any) -> bool:
 def _sms_is_existing_crisp_relationship(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     patterns = [
-        r"\b(?:i|we)(?:['\u2019]m| am|['\u2019]re| are)?\s+(?:already|currently)\s+(?:working|set\s*up|signed\s*up|registered)\s+with\s+(?:you|yoni|crisp(?: short sales?)?)\b",
+        r"\b(?:i|we)(?:['\u2019]m| am|['\u2019]re| are)?\s+(?:already|currently)\s+(?:work(?:ing)?|set\s*up|signed\s*up|registered)\s+with\s+(?:you|yoni|crisp(?: short sales?)?|kristina|lexi)\b",
+        r"\b(?:i|we)(?:['\u2019]m| am|['\u2019]re| are)?\s+(?:already|currently)?\s*work(?:ing)?\s+with\s+(?:kristina|lexi)(?:\s+and\s+(?:kristina|lexi))?\b",
         r"\b(?:i|we)\s+(?:already\s+)?(?:have|use)\s+(?:an?\s+)?(?:active|existing)?\s*crisp(?: short sales?)?\s+(?:portal|account)\b",
         r"\b(?:already|currently)\s+(?:an?\s+)?crisp(?: short sales?)?\s+(?:client|customer)\b",
         r"\b(?:already|currently)\s+(?:an?\s+)?(?:client|customer)\s+(?:of|with)\s+crisp(?: short sales?)?\b",
@@ -4337,6 +4379,9 @@ def _sms_is_phone_call_interest(value: Any) -> bool:
         r"\bcan we talk\b",
         r"\blet'?s talk\b",
         r"\bquick call\b",
+        r"\bplease call me\b",
+        r"\bcan you call me\b",
+        r"\bcould you call me\b",
     ]
     return any(re.search(pattern, text) for pattern in patterns)
 
@@ -4347,6 +4392,12 @@ def _sms_is_present_service_interest(value: Any) -> bool:
         return False
     if re.search(r"\b(?:in the future|someday|if i need|if we need|keep (?:you|your|the) (?:in mind|info|information))\b", text):
         return False
+    if re.search(
+        r"\b(?:would love|want|need|could use)\s+(?:some\s+)?help\b"
+        r"|\b(?:interested|open)\s+(?:in|to)\s+(?:what you have to say|a conversation|getting more details|more details|hearing more|learning more)\b",
+        text,
+    ):
+        return True
     interest = re.search(
         r"\b(?:i(?:['’]?m| am)?|we(?:['’]?re| are)?)\s+(?:am\s+|are\s+)?"
         r"(?:interested|open to|ready to|would like|want|need|could use)\b",
@@ -4354,7 +4405,8 @@ def _sms_is_present_service_interest(value: Any) -> bool:
     )
     service = re.search(
         r"\b(?:your services?|crisp(?: short sales?)?|short sale help|help with (?:this|the|my|our) "
-        r"(?:file|listing|short sale)|work with you|learn more|see how you (?:can|could) help)\b",
+        r"(?:file|listing|short sale)|work with you|learn more|more details|get(?:ting)? more details|"
+        r"see how you (?:can|could) help)\b",
         text,
     )
     return bool(interest and service)
@@ -4395,12 +4447,323 @@ def _sms_has_existing_coverage(value: Any) -> bool:
     )
 
 
+def _sms_has_decline_or_not_short_sale_clause(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(
+        re.search(
+            r"\b(?:no thanks?|not interested|don['’]?t need|do not need|dont need|"
+            r"i(?:'|’)m good|we(?:'|’)re good|we are good)\b"
+            r"|\b(?:not a short sale|no short sale|isn['’]?t a short sale|"
+            r"wasn['’]?t meant to be (?:a )?short sale)\b",
+            text,
+        )
+    )
+
+
+def _sms_is_self_handling_opportunity(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower().replace("my self", "myself")
+    self_handling = bool(
+        re.search(r"\b(?:handling|handle) (?:that part |it )?myself\b", text)
+        or re.search(r"\b(?:doing|do) it myself\b", text)
+        or re.search(r"\b(?:trying|attempting) to handle it\b", text)
+        or re.search(r"\b(?:communicating|working|dealing|talking) (?:directly )?with (?:the )?(?:bank|lender)\b", text)
+    )
+    clear_rejection = bool(
+        re.search(r"\b(?:no thanks?|not interested|don['’]?t need|do not need|dont need)\b", text)
+        or re.search(r"\b(?:thanks?|thank you) for (?:the|your) offer\b", text)
+        or re.search(r"\b(?:i am|i['’]?m|we are|we['’]?re) good\b", text)
+    )
+    substantive = bool(
+        _sms_is_fee_question(text)
+        or _sms_is_present_service_interest(text)
+        or re.search(r"\b(?:interested|open to|might need|may need|could use|want help|call me|talk tomorrow|set up a time)\b", text)
+        or "?" in text
+    )
+    return self_handling and not clear_rejection and not substantive and "not a short sale" not in text
+
+
 def _sms_company_identity_reply(covered: bool = False) -> str:
     if covered:
         return "My company is Crisp Short Sales. Thanks for letting me know you already have help, and good luck with the file."
-    return (
-        "My company is Crisp Short Sales. We specialize in handling the short sale process for agents and homeowners. "
-        "Want to chat for a few minutes about your situation?"
+    return "I'm with Crisp Short Sales. I handle lender-side short-sale processing and negotiations for agents and homeowners."
+
+
+def _sms_is_fee_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(
+        re.search(r"\b(?:fee|costs?|expenses?|paid|payment|compensat|commission|charge|pricing|price|percentage)\b", text)
+        or re.search(r"\b(?:what(?:'s| is)|how much is)\s+(?:your|the)\s+rate\b", text)
+        or re.search(r"\b(?:how do you get paid|how are you paid|who pays you|how do you make money)\b", text)
+        or re.search(r"\b(?:tarifa|cuanto cobras|cuanto cuesta|como te pagan|quien paga)\b", text)
+    )
+
+
+def _sms_is_spanish_language_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(
+        re.search(r"\b(?:spanish|espanol|español|espaol)\b", text)
+        or re.search(r"\b(?:hablas|habla|hablo)\s+(?:spanish|espanol|español|espaol)\b", text)
+    )
+
+
+def _sms_is_fee_negotiation(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    mentions_price = bool(re.search(r"\b(?:fee|price|pricing|rate|charge|cost|\$\s*\d|\d{3,5})\b", text))
+    asks_concession = bool(
+        re.search(r"\b(?:match|beat|lower|reduce|discount|negotiate|counter|concession)\b", text)
+        or re.search(r"\b(?:would|will|can|could)\s+you\s+(?:do|charge|take|accept)\b", text)
+        or re.search(r"\bi\s+(?:made|am making)\s+you\s+an?\s+offer\b", text)
+    )
+    return mentions_price and asks_concession
+
+
+def _sms_is_initial_fee_reply(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    compact = re.sub(r"[^a-z0-9]", "", text)
+    return "flat fee" in text and "buyer" in text and "closing" in text and "5000" not in compact
+
+
+def _sms_is_specific_fee_reply(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    compact = re.sub(r"[^a-z0-9]", "", text)
+    return "5000" in compact and "buyer" in text and "closing" in text
+
+
+def _sms_fee_decision(row_obj: Dict[str, str]) -> Dict[str, Any]:
+    prior = [
+        _sms_normalize_whitespace(entry.get("text"))
+        for entry in _sms_history_array(row_obj.get("history_json"))
+        if isinstance(entry, dict) and str(entry.get("role") or "").lower() == "assistant"
+    ]
+    last_outbound = _sms_normalize_whitespace(row_obj.get("last_outbound_text"))
+    if last_outbound:
+        prior.append(last_outbound)
+    if any(_sms_is_specific_fee_reply(item) for item in prior):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            handoff_type="FEE QUESTION FOLLOW-UP",
+            reason="Agent is still asking about fee/payment after the specific $5,000 answer",
+        )
+    if any(_sms_is_initial_fee_reply(item) for item in prior):
+        return _sms_decision(
+            reply_text=(
+                "The fee is $5,000, paid by the buyer at closing. As long as it's disclosed up front in the listing, "
+                "the buyer can factor it into their offer price."
+            ),
+            lead_status="Y",
+            reason="Repeated fee/payment question - gave specific $5,000 buyer-paid answer",
+        )
+    return _sms_decision(
+        reply_text=(
+            "There's no cost to you or the seller, and I don't take anything from your commission. "
+            "I charge a flat fee to the buyer at closing, only if the deal closes."
+        ),
+        lead_status="Y",
+        reason="Asked about charge, fee, percentage, or how Crisp gets paid",
+    )
+
+
+def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
+    text = _sms_normalize_whitespace(inbound_text).lower()
+    if _sms_is_existing_crisp_relationship(text):
+        return _sms_decision(
+            lead_status="R",
+            handoff_needed=True,
+            block_reply=True,
+            handoff_type="EXISTING CRISP CLIENT",
+            reason="Existing Crisp/Yoni relationship; exit marketing and route to Yoni",
+        )
+    asks_email_delivery = bool(
+        re.search(r"\b(?:email me|send (?:me|us) (?:some |more )?(?:info|information)|send (?:me|us) your (?:info|information)|shoot me an email)\b", text)
+    )
+    provided_email = re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", inbound_text, re.IGNORECASE)
+    if asks_email_delivery or provided_email:
+        covered = (
+            _sms_has_existing_coverage(text)
+            or _sms_has_decline_or_not_short_sale_clause(text)
+            or _sms_is_closed_marketing_conversation(row_obj)
+        )
+        if provided_email:
+            return _sms_decision(
+                reply_text="Thanks, I have your email.",
+                lead_status="O" if covered else "Y",
+                conversation_done=covered,
+                reason="Agent provided an email address for requested information",
+            )
+        return _sms_decision(
+            reply_text="Sure, no problem. What is your email?",
+            lead_status="O" if covered else "Y",
+            reason="Agent requested information by email; collecting the address",
+        )
+    if _sms_is_unsupported_performance_stats_question(text):
+        return _sms_decision(
+            lead_status="Y", handoff_needed=True, block_reply=True,
+            handoff_type="STATS QUESTION",
+            reason="Agent asked for unsupported performance stats; manual follow-up needed",
+        )
+    if _sms_is_fee_negotiation(text):
+        return _sms_decision(
+            lead_status="Y", handoff_needed=True, block_reply=True,
+            handoff_type="FEE NEGOTIATION",
+            reason="Agent proposed or requested a pricing concession",
+        )
+
+    flags = {
+        "fee": _sms_is_fee_question(text),
+        "help": bool(re.search(r"\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does (?:this|that) work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|offer|do))\b", text)),
+        "local": bool(re.search(r"\b(?:are you local|where are you located|where r u located|where are you based|based in)\b", text)),
+        "company": _sms_is_company_identity_question(text),
+        "website": bool(re.search(r"\b(?:website|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?)\b", text)),
+        "contact_card": bool(re.search(r"\b(?:business card|contact card|vcard)\b", text)),
+        "contact_info": bool(re.search(r"\b(?:your contact (?:info|information|details)|how (?:can|do) i (?:reach|contact) you|send (?:me )?your (?:phone|number|email))\b", text)),
+        "experience": bool(re.search(r"\b(?:how long|years?|experience|track record)\b.{0,80}\b(?:short sales?|doing this|handled|closed|business)\b|\bwhat is your track record\b", text)),
+        "timeline": _sms_is_short_sale_timeline_question(text),
+        "number": bool(re.search(r"\b(?:best|good|right)\s+number\b|\b(?:call|reach|text)\s+you\s+(?:at|on)\s+this\s+number\b", text)),
+        "credential": bool(re.search(r"\b(?:are you|you are|r u)\s+(?:an?\s+)?(?:attorney|lawyer)\b|\bdo you provide legal advice\b", text)),
+        "negotiator": bool(re.search(r"\b(?:are you|so you are|so a|r u)\s+(?:an?\s+)?(?:short sale\s+)?negotiator\b", text)),
+        "language": _sms_is_spanish_language_question(text),
+        "source": bool(re.search(r"\b(?:why|what)\b.{0,60}\b(?:think|thought|believe|make you think)\b.{0,60}\bshort sale\b", text)),
+        "different": _sms_is_differentiation_question(text),
+    }
+    matched = [name for name, enabled in flags.items() if enabled]
+    if not matched:
+        return None
+
+    if flags["source"] and len(matched) == 1:
+        return _sms_decision(
+            reply_text="I thought I saw it marked online as a short sale. My mistake if I misread it. Thanks.",
+            lead_status="R", conversation_done=True,
+            reason="Agent asked why the listing was considered a short sale",
+        )
+    if flags["different"] and len(matched) == 1:
+        return _sms_decision(
+            reply_text="I handle the lender-side work and keep agents updated throughout the process. If that sounds useful, I'm happy to talk through your listing.",
+            lead_status="Y", alert_needed=True,
+            handoff_type="HOT LEAD - DIFFERENTIATION QUESTION",
+            reason="Answered differentiation question before generic coverage language",
+        )
+
+    covered = (
+        _sms_has_existing_coverage(text)
+        or _sms_has_decline_or_not_short_sale_clause(text)
+        or _sms_is_closed_marketing_conversation(row_obj)
+    )
+    interested = _sms_is_present_service_interest(text)
+    status = "O" if covered and not interested else "Y"
+    done = status == "O"
+    direct_help_or_live_window = bool(
+        re.search(r"\b(?:i|we)\s+(?:(?:do\s+)?need|would\s+love|could\s+use|can\s+use)\s+(?:some\s+)?help\b", text)
+        or re.search(r"\b(?:i(?:'m| am)?\s+free|available)\s+now\b", text)
+        or re.search(r"\bcall\s+me(?:\s+now)?\b", text)
+    )
+    if flags["fee"] and (
+        _sms_is_phone_call_interest(text)
+        or _sms_is_scheduled_callback(text)
+        or direct_help_or_live_window
+        or interested
+    ):
+        result = _sms_fee_decision(row_obj)
+        if not result.get("handoff_needed"):
+            result.update(
+                lead_status="Y",
+                conversation_done=False,
+                handoff_needed=True,
+                block_reply=False,
+                handoff_type="HOT LEAD - FEE AND CALL INTEREST",
+                reason="Answered fee question and handed off present call or service interest",
+            )
+        return result
+
+    if flags["help"] and flags["local"] and flags["fee"] and len(matched) == 3:
+        fee_decision = _sms_fee_decision(row_obj)
+        if fee_decision.get("handoff_needed"):
+            return fee_decision
+        fee_clause = (
+            "The buyer-paid fee is a flat $5,000 at closing."
+            if "$5,000" in str(fee_decision.get("reply_text") or "")
+            else "There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes."
+        )
+        return _sms_decision(
+            reply_text=(
+                "I'm based in Atlanta and work nationwide, and I handle the lender-side paperwork, calls, "
+                f"follow-up, and negotiations through approval. {fee_clause}"
+            ),
+            lead_status=status,
+            conversation_done=done,
+            reason="Answered a bounded service, location, and fee question",
+        )
+
+    if len(matched) > 2 or (len(matched) > 1 and (flags["source"] or flags["different"])):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            handoff_type="COMPLEX MULTI-QUESTION",
+            reason="Agent asked multiple questions that need one careful human answer",
+        )
+    if len(matched) == 1:
+        if flags["fee"]:
+            result = _sms_fee_decision(row_obj)
+            if not result.get("handoff_needed"):
+                result.update(lead_status=status, conversation_done=done)
+            return result
+        replies = {
+            "help": "I handle the lender side of the short sale, including the paperwork, calls, follow-up, and negotiations through approval. It takes that work off your plate so you can focus on the listing and client.",
+            "local": "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
+            "company": "I'm with Crisp Short Sales. I handle lender-side short-sale processing and negotiations for agents and homeowners.",
+            "website": "https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.",
+            "contact_card": "Sure. What's the best email?",
+            "contact_info": "Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.",
+            "experience": "I've focused on short sales for more than 15 years. I'm happy to talk through my experience and your listing on a quick call.",
+            "timeline": SHORT_SALE_TIMELINE_REPLY,
+            "number": "Yes, this number is great - call or text anytime. Thanks!",
+            "credential": "No, I'm not an attorney. I handle short-sale processing and lender negotiations; I don't provide legal advice.",
+            "negotiator": "Yes, in essence. I handle the short-sale process and lender negotiations. Happy to answer any questions on a quick call.",
+            "language": "No, I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.",
+        }
+        key = matched[0]
+        if key in replies:
+            return _sms_decision(
+                reply_text=replies[key], lead_status=status, conversation_done=done,
+                reason=f"Answered {key} question before generic coverage language",
+            )
+
+    answers: List[str] = []
+    if flags["company"]:
+        answers.append("I'm with Crisp Short Sales.")
+    if flags["help"]:
+        answers.append("I handle the lender-side paperwork, calls, follow-up, and negotiations through approval.")
+    if flags["local"]:
+        answers.append("I'm based in Atlanta and work nationwide; the lender-side work is handled remotely.")
+    if flags["fee"]:
+        fee = _sms_fee_decision(row_obj)
+        if fee.get("handoff_needed"):
+            return fee
+        answers.append(str(fee.get("reply_text") or ""))
+    if flags["experience"]:
+        answers.append("I've focused on short sales for more than 15 years.")
+    if flags["timeline"]:
+        answers.append(SHORT_SALE_TIMELINE_REPLY)
+    if flags["website"]:
+        answers.append("https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.")
+    if flags["contact_card"]:
+        answers.append("What's the best email?")
+    if flags["contact_info"]:
+        answers.append("Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.")
+    if flags["number"]:
+        answers.append("Yes, this number is great - call or text anytime. Thanks!")
+    if flags["credential"]:
+        answers.append("No, I'm not an attorney and I don't provide legal advice.")
+    if flags["negotiator"]:
+        answers.append("Yes, in essence. I handle the short-sale process and lender negotiations.")
+    if flags["language"]:
+        answers.append("No, I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.")
+    return _sms_decision(
+        reply_text=" ".join(part for part in answers if part),
+        lead_status=status, conversation_done=done,
+        reason="Answered a bounded two-question inbound message",
     )
 
 
@@ -4456,8 +4819,30 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason=reason,
             call_booking_status="scheduled_callback",
             callback_time=callback_time,
-            handoff_type="CALLBACK UPDATED" if callback_changed else "",
-            alert_needed=callback_changed,
+            handoff_type="",
+            alert_needed=False,
+            callback_updated=callback_changed,
+        )
+
+    if str(row_obj.get("human_override") or "").upper() == "TRUE":
+        return _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "Y"),
+            block_reply=True,
+            preserve_existing_state=True,
+            reason="Human override enabled - inbound recorded only",
+        )
+
+    priority_question = _sms_question_priority_decision(row_obj, t)
+    if priority_question is not None:
+        return priority_question
+
+    if _sms_is_closed_marketing_conversation(row_obj) and _sms_is_final_courtesy(t):
+        return _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "R"),
+            conversation_done=True,
+            block_reply=True,
+            preserve_existing_state=True,
+            reason="Courtesy acknowledgment after closeout; no further reply needed",
         )
 
     if (_sms_is_phone_call_interest(t) or _sms_is_present_service_interest(t)) and _sms_is_closed_marketing_conversation(row_obj):
@@ -4507,9 +4892,10 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
 
     if _sms_is_existing_crisp_relationship(t):
         return _sms_decision(
-            lead_status="Y",
+            lead_status="R",
             handoff_needed=True,
             block_reply=True,
+            handoff_type="EXISTING CRISP CLIENT",
             reason="Existing Crisp/Yoni relationship; exit marketing and route to Yoni",
         )
 
@@ -4526,6 +4912,15 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             lead_status="O",
             conversation_done=True,
             reason="Agent will reconnect after securing a buyer; warm future interest closed without takeover",
+            call_booking_status="warm_future_interest",
+        )
+
+    if _sms_is_future_negotiation_interest(t):
+        return _sms_decision(
+            reply_text=_sms_future_negotiation_reply(t),
+            lead_status="O",
+            conversation_done=True,
+            reason="Agent expressed interest in future short-sale negotiation support",
             call_booking_status="warm_future_interest",
         )
 
@@ -4563,9 +4958,10 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
 
     if _sms_is_scheduled_callback(t):
         return _sms_decision(
+            reply_text="Perfect, thanks.",
             lead_status="Y",
             handoff_needed=True,
-            block_reply=True,
+            block_reply=False,
             reason="Scheduled callback timing",
             call_booking_status="scheduled_callback",
             callback_time=_sms_extract_scheduled_callback_reference(t),
@@ -4573,9 +4969,10 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
 
     if _sms_is_present_service_interest(t) and not _sms_is_phone_call_interest(t):
         return _sms_decision(
+            reply_text="Absolutely, I'd love to help. Are you free for a quick call now, or would later today be better?",
             lead_status="Y",
             handoff_needed=True,
-            block_reply=True,
+            block_reply=False,
             reason="Agent expressed present interest in Crisp's services",
             handoff_type="RENEWED INTEREST",
             alert_needed=True,
@@ -4583,23 +4980,26 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
 
     if re.search(r"\b(i('| wi)?ll|i will|gonna|going to)\s+(call|phone|ring)\b", t) or _sms_is_phone_call_interest(t):
         return _sms_decision(
+            reply_text="Sounds good. Are you free now, or would later today be better?",
             lead_status="Y",
             handoff_needed=True,
-            block_reply=True,
+            block_reply=False,
             reason="Agent requested or promised a phone call; manual follow-up needed",
             handoff_type="CALL REQUESTED",
             alert_needed=True,
         )
 
-    if re.search(r"\b(can use|need|would like|interested in|could use)\b.*\b(help|short sale|shellpoint|lender)\b", t):
+    if re.search(r"\b(?:i|we)?\s*(?:can use|need|would like|interested in|could use)\b.*\b(help|short sale|shellpoint|lender)\b", t):
         return _sms_decision(
+            reply_text="Absolutely, I'd love to help. Are you free for a quick call now, or would later today be better?",
             lead_status="Y",
             handoff_needed=True,
-            block_reply=True,
+            block_reply=False,
             reason="Agent said they need help; manual follow-up needed",
+            handoff_type="HOT LEAD - DIRECT HELP REQUEST",
         )
 
-    if re.search(r"\b(website|brochure|flyer|flier|one[- ]?pager|reviews?|testimonials?)\b", t):
+    if re.search(r"\b(website|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?)\b", t):
         return _sms_decision(
             reply_text=(
                 "https://www.crispshortsales.com\n"
@@ -4626,8 +5026,8 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
     if re.search(r"\b(how do you help|how can you help|what do you do|how does this work|what kind of help)\b", t):
         return _sms_decision(
             reply_text=(
-                "I handle the short sale process with the lender: paperwork, calls, negotiations, approvals, and getting the file to closing. "
-                "No cost to you or the seller - we get paid by the buyer at closing. Want to talk through your situation?"
+                "I handle the lender side of the short sale, including the paperwork, calls, follow-up, and negotiations through approval. "
+                "It takes that work off your plate so you can focus on the listing and client."
             ),
             lead_status="Y",
             reason="Agent asked how Crisp helps",
@@ -4653,8 +5053,26 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason="Asked who Yoni is with / whether he is a mortgage broker",
         )
 
-    if re.search(
-        r"\b(not a short sale|no short sale|already have help|have help|we handle|handling (it|this)|not interested|no thank)\b"
+    if re.search(r"\b(?:not a short sale|no short sale|isn['’]?t a short sale|wasn['’]?t meant to be (?:a )?short sale)\b", t):
+        return _sms_decision(
+            reply_text="Ahh, ok... thanks for letting me know. Good luck with your listing!",
+            lead_status="R",
+            conversation_done=True,
+            reason="Agent said the listing is not a short sale",
+        )
+
+    if _sms_is_self_handling_opportunity(t):
+        return _sms_decision(
+            reply_text=(
+                "I understand, and I help a lot of agents in the same situation. I can take the lender paperwork, calls, "
+                "follow-up, and negotiations off your plate if you ever want help with that part."
+            ),
+            lead_status="Y",
+            reason="Agent is handling the short sale themselves; gave one brief value response",
+        )
+
+    if _sms_has_existing_coverage(t) or re.search(
+        r"\b(already have help|have help|we handle|handling (it|this)|not interested|no thank)\b"
         r"|\b(?:i|we)\s+(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b",
         t,
     ):
@@ -4669,13 +5087,8 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
         )
 
     if re.search(r"\b(local|where are you located|where r u located|based)\b", t):
-        state = row_obj.get("state", "").strip()
-        location = f" in {state}" if state else ""
         return _sms_decision(
-            reply_text=(
-                f"I'm based in Chicago, but I help agents with short sales all over the country{location}. "
-                "Most of the work is with the lender by phone/email, so location usually is not an issue."
-            ),
+            reply_text="I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
             lead_status="Y",
             reason="Agent asked whether Yoni is local",
         )
@@ -4747,7 +5160,7 @@ def _sms_build_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str,
 def _sms_should_reply(decision: Dict[str, Any], auto_reply_count: int) -> bool:
     if auto_reply_count >= 3:
         return False
-    if decision.get("handoff_needed") or decision.get("needs_review") or decision.get("block_reply"):
+    if decision.get("handoff_needed") or decision.get("needs_review") or decision.get("alert_needed") or decision.get("block_reply"):
         return False
     return bool(_sms_normalize_whitespace(decision.get("reply_text") or ""))
 
@@ -4844,6 +5257,72 @@ def _sms_handle_reply_sent(body: Dict[str, Any], request_id: str) -> Dict[str, A
     guard_row, guard_request_id = _sms_find_pending_guard(phone_raw, reply_text)
     ws, headers, rows = _sms_read_leads_sheet()
     row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
+    transport_identity = [
+        str(body.get("request_id") or body.get("sms_request_id") or ""),
+        str(body.get("message_id") or ""),
+        str(body.get("lease_token") or ""),
+    ]
+    receipt_parts = (
+        transport_identity + [_sms_normalize_phone(phone_raw), reply_text]
+        if all(transport_identity)
+        else [_sms_normalize_phone(phone_raw), reply_text, sent_at]
+    )
+    receipt_material = "|".join(receipt_parts)
+    receipt_id = hashlib.sha256(receipt_material.encode("utf-8")).hexdigest()[:32]
+    history = _sms_history_array(row_obj.get("history_json"))
+    already_applied = any(str(entry.get("receipt_id") or "") == receipt_id for entry in history)
+    if not already_applied:
+        history.append(
+            {
+                "role": "assistant",
+                "text": reply_text,
+                "ts": sent_at,
+                "receipt_id": receipt_id,
+            }
+        )
+        values = list(rows[row_idx - 1]) if row_idx - 1 < len(rows) else [""] * len(headers)
+        if len(values) < len(headers):
+            values.extend([""] * (len(headers) - len(values)))
+        index = _sms_header_index(headers)
+        values[index["history_json"]] = _sms_json(history[-20:])
+        values[index["last_outbound_text"]] = reply_text
+        values[index["last_contact_time"]] = sent_at
+        values[index["auto_reply_count"]] = str(_sms_count(row_obj) + 1)
+        values = [sanitize_external_links_for_sheet(value) for value in values]
+        _retry_gspread_call(
+            "apply idempotent sms reply receipt",
+            lambda: ws.update(
+                f"A{row_idx}:{_sms_column_letter(len(headers))}{row_idx}",
+                [values],
+                value_input_option="RAW",
+            ),
+        )
+    guard_mode = "matched" if guard_row else "no_pending_fallback"
+    _sms_mark_guard_sent(guard_row, phone_raw, sent_at, "ok", "Matched pending bot reply" if guard_row else "No pending guard found")
+    result = {
+        "ok": True,
+        "duplicate": already_applied,
+        "receipt_id": receipt_id,
+        "guard": guard_mode,
+        "guard_request_id": guard_request_id,
+        "should_reply": False,
+    }
+    _sms_append_debug(
+        "reply_sent_result",
+        {"request_id": request_id, "phone": phone_raw, "reply_text": reply_text, "result": result},
+    )
+    return result
+
+
+def _sms_handle_manual_reply_sent(body: Dict[str, Any], request_id: str) -> Dict[str, Any]:
+    phone_raw = str(body.get("phone") or "").strip()
+    reply_text = _sms_normalize_whitespace(body.get("reply_text") or body.get("message") or "")
+    sent_at = str(body.get("sent_at") or datetime.now(timezone.utc).isoformat())
+    if not _sms_normalize_phone(phone_raw) or not reply_text:
+        return {"ok": False, "error": "Missing phone or reply text", "should_reply": False}
+
+    ws, headers, rows = _sms_read_leads_sheet()
+    row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
     _sms_append_history(ws, row_idx, headers, row_obj, {"role": "assistant", "text": reply_text, "ts": sent_at})
     _sms_update_row_fields(
         ws,
@@ -4852,14 +5331,15 @@ def _sms_handle_reply_sent(body: Dict[str, Any], request_id: str) -> Dict[str, A
         {
             "last_outbound_text": reply_text,
             "last_contact_time": sent_at,
-            "auto_reply_count": str(_sms_count(row_obj) + 1),
+            "ai_state": "handoff",
+            "handoff_flag": "TRUE",
+            "human_override": "TRUE",
+            "conversation_summary": "Manual reply sent; automation disabled for this conversation",
         },
     )
-    guard_mode = "matched" if guard_row else "no_pending_fallback"
-    _sms_mark_guard_sent(guard_row, phone_raw, sent_at, "ok", "Matched pending bot reply" if guard_row else "No pending guard found")
-    result = {"ok": True, "guard": guard_mode, "guard_request_id": guard_request_id, "should_reply": False}
+    result = {"ok": True, "manual_takeover": True, "row": row_idx, "should_reply": False}
     _sms_append_debug(
-        "reply_sent_result",
+        "manual_reply_sent_result",
         {"request_id": request_id, "phone": phone_raw, "reply_text": reply_text, "result": result},
     )
     return result
@@ -4922,7 +5402,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
                 "ok": True,
                 "duplicate": True,
                 "should_reply": False,
-                "reason": "Durable handled inbound duplicate ignored",
+                "reason": "Durably handled inbound replay ignored",
             }
         )
         _sms_append_debug(
@@ -4952,32 +5432,70 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     )
     _sms_append_history(ws, row_idx, headers, row_obj, {"role": "agent", "text": inbound_text, "ts": received_at})
 
-    decision = _sms_build_decision(row_obj, inbound_text)
     auto_count = _sms_count(row_obj)
+    classified_decision = _sms_build_decision(row_obj, inbound_text)
+    terminal_locked = (
+        str(row_obj.get("human_override") or "").upper() == "TRUE"
+        or str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
+        or str(row_obj.get("ai_state") or "").lower() == "handoff"
+    )
+    if terminal_locked:
+        decision = classified_decision
+    elif (
+        _sms_is_opt_out(inbound_text)
+        or re.search(r"\breply\s+stop\s+to\s+(?:end|unsubscribe|cancel|opt out)\b", inbound_text, re.IGNORECASE)
+        or _sms_is_automated_routing_notice(inbound_text)
+        or _sms_is_post_handoff_callback_update(row_obj, inbound_text)
+    ):
+        decision = classified_decision
+    elif auto_count >= 3 and _sms_is_final_courtesy(inbound_text):
+        decision = _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "Y"),
+            block_reply=True,
+            preserve_existing_state=True,
+            reason="Courtesy acknowledgment at reply cap; no further reply needed",
+        )
+    elif auto_count >= 3 and not (
+        classified_decision.get("handoff_needed")
+        or classified_decision.get("needs_review")
+        or classified_decision.get("alert_needed")
+    ):
+        decision = _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            handoff_type="MAX REPLIES REACHED",
+            reason="Max auto replies reached; manual follow-up needed",
+        )
+    else:
+        decision = classified_decision
     should_reply = _sms_should_reply(decision, auto_count)
     if should_reply and decision.get("preserve_reply_formatting"):
         reply_text = str(decision.get("reply_text") or "").strip()
     else:
         reply_text = _sms_normalize_whitespace(decision.get("reply_text") or "") if should_reply else ""
     lead_status = str(decision.get("lead_status") or "Y")
+    if lead_status not in {"R", "Y", "O"}:
+        lead_status = "Y"
     conversation_done = bool(decision.get("conversation_done"))
     handoff_needed = bool(decision.get("handoff_needed"))
     needs_review = bool(decision.get("needs_review"))
     reason = str(decision.get("reason") or "")
 
     preserve_existing_state = bool(decision.get("preserve_existing_state"))
+    terminal_handoff = handoff_needed or needs_review or bool(decision.get("alert_needed"))
     updates = {} if preserve_existing_state else {
         "response_status": inbound_text,
         "mailshake_status": lead_status,
         "conversation_summary": reason,
-        "ai_state": "done" if conversation_done else ("handoff" if handoff_needed or needs_review else "active"),
+        "ai_state": "handoff" if terminal_handoff else ("done" if conversation_done else "active"),
         "call_booking_status": str(decision.get("call_booking_status") or "") or (
             "closed_no_interest"
             if conversation_done and lead_status == "R"
             else ("warm_future_interest" if conversation_done and lead_status == "O" else "interested_no_call")
         ),
-        "handoff_flag": "TRUE" if handoff_needed or needs_review else "FALSE",
-        "human_override": "TRUE" if handoff_needed or needs_review or conversation_done else "FALSE",
+        "handoff_flag": "TRUE" if terminal_handoff else "FALSE",
+        "human_override": "TRUE" if terminal_handoff else "FALSE",
     }
     callback_time = str(decision.get("callback_time") or "")
     if not preserve_existing_state and updates["call_booking_status"] == "scheduled_callback":
@@ -4999,7 +5517,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
             "reason": reason,
             "call_booking_status": str(row_obj.get("call_booking_status") or "") if preserve_existing_state else updates["call_booking_status"],
             "callback_time": callback_time,
-            "callback_updated": bool(decision.get("alert_needed")),
+            "callback_updated": bool(decision.get("callback_updated")),
             "alert_needed": bool(decision.get("alert_needed")),
             "handoff_type": str(decision.get("handoff_type") or ""),
             "row": row_idx,
@@ -5053,6 +5571,8 @@ def _sms_handle_action(body: Dict[str, Any], request_id: str, request: Optional[
         return _sms_handle_incoming(body, request_id)
     if action == "reply_sent":
         return _sms_handle_reply_sent(body, request_id)
+    if action == "manual_reply_sent":
+        return _sms_handle_manual_reply_sent(body, request_id)
     return {"ok": False, "error": "Unknown action", "should_reply": False}
 
 

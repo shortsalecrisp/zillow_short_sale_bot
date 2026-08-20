@@ -21,6 +21,7 @@ function isUnifiedSmsAction_(action) {
     manual_reply_sent: true,
     sms_send_failed: true,
     tasker_heartbeat: true,
+    codex_probe: true,
     mark_override: true,
     takeover: true
   };
@@ -127,6 +128,9 @@ function handleUnifiedSmsPost_(e) {
       probe.stale_text_normalization = typeof testPendingSmsStaleTextNormalization_ === "function"
         ? testPendingSmsStaleTextNormalization_()
         : { ok: false, reason: "Stale-text normalization test is unavailable" };
+      probe.intent_contract_v3 = typeof testSmsIntentContractV3_ === "function"
+        ? testSmsIntentContractV3_()
+        : { ok: false, reason: "SMS intent contract V3 test is unavailable" };
       try {
         var ss = getSmsSpreadsheet_();
         probe.spreadsheet_name = ss.getName();
@@ -197,48 +201,10 @@ function handleUnifiedSmsPost_(e) {
         }));
       }
 
-      if (shouldSuppressUnifiedDuplicateInbound_(body)) {
-        try {
-          if (typeof appendSmsDebugLog_ === "function") {
-            appendSmsDebugLog_("incoming_sms_duplicate_suppressed", {
-              request_id: requestId,
-              phone: body.phone || "",
-              message: body.message || "",
-              reason: "Duplicate inbound notification suppressed"
-            });
-          }
-        } catch (_) {}
-        return jsonOutput_(normalizeTaskerPayload_({
-          ok: true,
-          should_reply: false,
-          handoff_needed: false,
-          needs_review: false,
-          reason: "Duplicate inbound notification suppressed"
-        }));
-      }
-
-      var smsResult = handleIncomingSms_(body);
-      var normalized = normalizeTaskerPayload_(smsResult);
-      normalized.request_id = requestId;
-      normalized.message_id = String(body.message_id || "");
-      normalized.reply_to_phone = normalizePhone_(body.phone || "");
-      if (normalized.should_reply === true && typeof registerPendingSmsSend_ === "function") {
-        registerPendingSmsSend_(body, normalized, requestId);
-      }
-      try {
-        if (typeof appendSmsDebugLog_ === "function") {
-          appendSmsDebugLog_("incoming_sms_result", {
-            request_id: requestId,
-            phone: body.phone || "",
-            message: body.message || "",
-            should_reply: normalized.should_reply_text || "",
-            reply_text: normalized.reply_text || "",
-            reason: normalized.reason || "",
-            lead_status: normalized.lead_status || ""
-          });
-        }
-      } catch (_) {}
-      return jsonOutput_(normalized);
+      // Every inbound uses the same durable queue. Direct classification can
+      // lose a reply when the HTTP response or pending-send write fails after
+      // CRM state has already advanced.
+      return jsonOutput_(enqueueIncomingSmsV10_(body, requestId));
     }
 
     if (action === "reply_sent") {
@@ -322,6 +288,9 @@ function handleUnifiedSmsPost_(e) {
 
     if (action === "mark_override" || action === "takeover") {
       var overrideResult = markOverride_(body);
+      if (String(body.value || "TRUE").toUpperCase() !== "FALSE" && typeof cancelPendingSmsForPhoneV10_ === "function") {
+        overrideResult.pending_send = cancelPendingSmsForPhoneV10_(body.phone, "manual_sent");
+      }
       try {
         if (typeof appendSmsDebugLog_ === "function") {
           appendSmsDebugLog_(action + "_result", {
@@ -394,6 +363,11 @@ function getUnifiedIgnoredInboundReason_(body) {
     return "Google Messages system notification ignored";
   }
 
+  if (/^\s*\d{10,11}\s+error\s+invalid\s+number\b/i.test(message) ||
+      /please re-send using a valid 10 digit mobile number or valid short code/i.test(message)) {
+    return "Carrier invalid-number notice ignored";
+  }
+
   if (phoneDigits.length < 10) {
     return "Non-phone notification ignored";
   }
@@ -410,7 +384,8 @@ function shouldSuppressUnifiedDuplicateInbound_(body) {
   var phoneDigits = phone.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
   if (!phoneDigits || !message) return false;
 
-  var keySource = phoneDigits + "|" + message.toLowerCase();
+  var messageId = String(body && body.message_id || "").trim();
+  var keySource = phoneDigits + "|" + (messageId ? "id:" + messageId : "text:" + message.toLowerCase());
   var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, keySource);
   var key = "sms_inbound_" + Utilities.base64EncodeWebSafe(digest).slice(0, 64);
   var cache = CacheService.getScriptCache();
@@ -419,8 +394,23 @@ function shouldSuppressUnifiedDuplicateInbound_(body) {
     return true;
   }
 
-  cache.put(key, "1", 600);
   return false;
+}
+
+function markUnifiedInboundProcessed_(body, result) {
+  if (!body || !result || result.ok === false) return;
+  var action = String(body.action || "incoming_sms").toLowerCase();
+  if (action !== "incoming_sms") return;
+
+  var phone = String(body.phone || "");
+  var message = normalizeWhitespace_(String(body.message || ""));
+  var phoneDigits = phone.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+  if (!phoneDigits || !message) return;
+
+  var keySource = phoneDigits + "|" + message.toLowerCase();
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, keySource);
+  var key = "sms_inbound_" + Utilities.base64EncodeWebSafe(digest).slice(0, 64);
+  CacheService.getScriptCache().put(key, "1", 600);
 }
 
 
@@ -523,6 +513,9 @@ function markPendingSmsSendFailed_(body) {
 }
 
 function markPendingSmsSendManuallyResolved_(body) {
+  if (typeof cancelPendingSmsForPhoneV10_ === "function") {
+    return cancelPendingSmsForPhoneV10_(body && body.phone || "", "manual_sent");
+  }
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_pending_sends");
   if (!sheet || sheet.getLastRow() < 2) return { ok: false, reason: "No pending-send ledger is available" };
@@ -535,7 +528,7 @@ function markPendingSmsSendManuallyResolved_(body) {
 
   for (var i = rows.length - 1; i >= 0; i--) {
     var status = String(rows[i][1] || "");
-    if (status !== "pending" && status !== "alerted") continue;
+    if (["pending", "alerted", "queued", "claimed", "send_started"].indexOf(status) === -1) continue;
     if (normalizePhone_(rows[i][4]) !== phone || normalizePendingSmsReply_(rows[i][5]) !== replyText) continue;
     sheet.getRange(i + 2, 2).setValue("manual_sent");
     sheet.getRange(i + 2, 8).setValue(new Date());

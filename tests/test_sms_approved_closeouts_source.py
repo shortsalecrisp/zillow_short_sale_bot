@@ -9,7 +9,7 @@ def test_apps_script_suppresses_same_topic_not_short_sale_continuations_before_g
     assert "function isPostCloseoutNotShortSaleContinuation_" in CHATBOT
     assert "Same-topic continuation after not-short-sale closeout; no additional reply needed" in CHATBOT
     assert CHATBOT.index("isPostCloseoutNotShortSaleContinuation_(inboundText, currentRowObj)") < CHATBOT.index(
-        "if (!hasFeeQuestion && isNotShortSaleSignal_(inboundText))"
+        "if (!ruleResult.matched && !hasFeeQuestion && isNotShortSaleSignal_(inboundText))"
     )
     assert "Can you help with probate?" not in CHATBOT
 
@@ -32,7 +32,7 @@ def test_apps_script_relationship_only_rule_closes_as_o_without_handoff():
     assert '[HEADERS.call_booking_status]: "warm_future_interest"' in CHATBOT
     assert 'reason: "Current file already covered; relationship left open without sales follow-up"' in CHATBOT
     assert CHATBOT.index("isRelationshipOnlyAfterExistingCoverageSignal_(inboundText, currentRowObj)") < CHATBOT.index(
-        "if (!hasFeeQuestion && isNotShortSaleSignal_(inboundText))"
+        "if (!ruleResult.matched && !hasFeeQuestion && isNotShortSaleSignal_(inboundText))"
     )
     assert "Ill definitely keep your information for future short sale opportunities" in CHATBOT
 
@@ -58,9 +58,9 @@ def test_apps_script_call_interest_and_company_questions_outrank_closeout():
     assert "Answered company identity directly while preserving prior closeout" in CHATBOT
     assert "I would be interested to have a call to see how your services differ from theirs." in CHATBOT
     assert "I already have an attorney. What company are you so I can let my attorney know?" in CHATBOT
-    assert CHATBOT.index("(hasPhoneCallInterest || hasPresentServiceInterest) && isClosedMarketingConversation_(currentRowObj)") < CHATBOT.index(
-        'String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE"'
+    assert CHATBOT.index('String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE"') < CHATBOT.index(
+        "(hasPhoneCallInterest || hasPresentServiceInterest) && isClosedMarketingConversation_(currentRowObj)"
     )
-    assert CHATBOT.index("hasCompanyIdentityQuestion &&") < CHATBOT.index(
-        'String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE"'
+    assert CHATBOT.index('String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE"') < CHATBOT.index(
+        "hasCompanyIdentityQuestion &&"
     )

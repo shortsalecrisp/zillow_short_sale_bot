@@ -133,6 +133,12 @@ function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
   const postHandoffCallbackUpdate = typeof isPostHandoffCallbackUpdate_ === "function" &&
     isPostHandoffCallbackUpdate_(rowObj, inboundText);
   if (isSchedulingSignal_(inboundText) || postHandoffCallbackUpdate) return false;
+  // A repeated substantive question can be intentional (for example, asking
+  // the exact fee again after a generic payment explanation). Never let
+  // text-only replay protection hide that follow-up.
+  if (isSubstantiveFollowupSignal_(inboundText) || isPaymentOrFeeQuestionSignal_(inboundText)) {
+    return false;
+  }
 
   const responseText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.response_status]);
   if (responseText !== currentText) return false;
@@ -145,6 +151,9 @@ function isRecentDuplicateInboundText_(rowObj, inboundText, receivedAt) {
   const priorText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.last_inbound_text]);
   const currentText = normalizeHandledInboundText_(inboundText);
   if (!priorText || !currentText || priorText !== currentText) return false;
+  if (isSubstantiveFollowupSignal_(inboundText) || isPaymentOrFeeQuestionSignal_(inboundText)) {
+    return false;
+  }
 
   const lastContactRaw = rowObj && (
     rowObj[HEADERS.last_inbound_at] || rowObj[HEADERS.last_contact_time]
@@ -281,10 +290,87 @@ function validateToken_(token) {
 }
 
 function handleIncomingSms_(body) {
+  const phone = normalizePhone_(body && body.phone || "");
+  const lease = acquireSmsConversationLease_(phone);
+  if (!lease.ok) {
+    const err = new Error(lease.reason || "Conversation is already being processed");
+    err.retryable = true;
+    err.code = "SMS_CONVERSATION_BUSY";
+    throw err;
+  }
+
+  try {
+    return handleIncomingSmsCore_(body);
+  } finally {
+    releaseSmsConversationLease_(lease);
+  }
+}
+
+function acquireSmsConversationLease_(phone) {
+  if (!phone || phone.length !== 10) {
+    return { ok: false, reason: "A valid phone is required for conversation processing" };
+  }
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) {
+    return { ok: false, reason: "Conversation lease registry is temporarily busy" };
+  }
+
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const key = "SMS_CONVERSATION_LEASE_" + phone;
+    const now = Date.now();
+    const existingRaw = props.getProperty(key);
+    if (existingRaw) {
+      try {
+        const existing = JSON.parse(existingRaw);
+        if (Number(existing.expires_at || 0) > now) {
+          return { ok: false, reason: "This conversation is already being processed" };
+        }
+      } catch (_) {}
+    }
+
+    const token = Utilities.getUuid();
+    props.setProperty(key, JSON.stringify({
+      token: token,
+      // Apps Script executions can approach six minutes when OpenAI or Sheets
+      // are slow. Keep the lease alive for the full execution window.
+      expires_at: now + 6 * 60 * 1000
+    }));
+    return { ok: true, key: key, token: token };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function releaseSmsConversationLease_(lease) {
+  if (!lease || !lease.ok || !lease.key || !lease.token) return;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return;
+
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const currentRaw = props.getProperty(lease.key);
+    if (!currentRaw) return;
+    try {
+      const current = JSON.parse(currentRaw);
+      if (String(current.token || "") === String(lease.token)) {
+        props.deleteProperty(lease.key);
+      }
+    } catch (_) {
+      props.deleteProperty(lease.key);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function handleIncomingSmsCore_(body) {
   const phoneRaw = String(body.phone || "").trim();
   const inboundText = normalizeWhitespace_(String(body.message || ""));
   const messageId = String(body.message_id || "");
   const receivedAt = body.received_at || new Date().toISOString();
+  const recoveryRetry = body && body.recovery_retry === true;
 
   if (!phoneRaw || !inboundText) {
     throw new Error("Missing phone or message");
@@ -303,14 +389,10 @@ function handleIncomingSms_(body) {
       reason: "Inbound dedupe lock busy; suppressed to prevent duplicate reply"
     });
 
-    return {
-      ok: true,
-      duplicate: true,
-      should_reply: false,
-      handoff_needed: false,
-      needs_review: false,
-      reason: "Inbound dedupe lock busy; duplicate reply suppressed"
-    };
+    const err = new Error("Inbound dedupe lock is temporarily busy");
+    err.retryable = true;
+    err.code = "SMS_INBOUND_DEDUPE_BUSY";
+    throw err;
   }
 
   try {
@@ -320,7 +402,11 @@ function handleIncomingSms_(body) {
     row = rowInfo.row;
     rowObj = rowInfo.rowObj;
 
-    if (rowObj[HEADERS.last_message_id] && rowObj[HEADERS.last_message_id] === messageId) {
+    const recoveringSameMessage = !!(
+      recoveryRetry && messageId &&
+      rowObj[HEADERS.last_message_id] && rowObj[HEADERS.last_message_id] === messageId
+    );
+    if (rowObj[HEADERS.last_message_id] && rowObj[HEADERS.last_message_id] === messageId && !recoveringSameMessage) {
       return {
         ok: true,
         duplicate: true,
@@ -329,7 +415,7 @@ function handleIncomingSms_(body) {
       };
     }
 
-    if (isRecentDuplicateInboundText_(rowObj, inboundText, receivedAt)) {
+    if (!recoveringSameMessage && isRecentDuplicateInboundText_(rowObj, inboundText, receivedAt)) {
       appendSmsDebugLog_("incoming_sms_duplicate_suppressed", {
         phone: phoneRaw,
         message: inboundText,
@@ -344,24 +430,17 @@ function handleIncomingSms_(body) {
       };
     }
 
-    if (isDurableHandledDuplicateInbound_(rowObj, inboundText)) {
-      const historyConfirmedReply = historyHasConfirmedReplyAfterInbound_(rowObj, inboundText);
-      const intentionalNoReply = isIntentionalNoReplyDisposition_(rowObj, inboundText);
+    if (!recoveringSameMessage && isDurableHandledDuplicateInbound_(rowObj, inboundText)) {
       appendSmsDebugLog_("incoming_sms_duplicate_suppressed", {
         phone: phoneRaw,
         message: inboundText,
-        reason: "Durable handled inbound duplicate suppressed",
-        message_id: messageId,
-        matched_response_status: true,
-        history_confirmed_reply: historyConfirmedReply,
-        intentional_no_reply: intentionalNoReply
+        reason: "Durably handled inbound replay suppressed"
       });
-
       return {
         ok: true,
         duplicate: true,
         should_reply: false,
-        reason: "Durable handled inbound duplicate ignored"
+        reason: "Durably handled inbound replay ignored"
       };
     }
 
@@ -420,23 +499,27 @@ function handleIncomingSms_(body) {
       };
     }
 
-    updateRowFields_(sheet, row, {
-      [HEADERS.last_inbound_text]: normalizeHandledInboundText_(inboundText),
-      [HEADERS.last_inbound_at]: receivedAt,
-      [HEADERS.last_contact_time]: receivedAt,
-      [HEADERS.last_message_id]: messageId
-    });
+    if (!recoveringSameMessage) {
+      updateRowFields_(sheet, row, {
+        [HEADERS.last_inbound_text]: normalizeHandledInboundText_(inboundText),
+        [HEADERS.last_inbound_at]: receivedAt,
+        [HEADERS.last_contact_time]: receivedAt,
+        [HEADERS.last_message_id]: messageId
+      });
+    }
   } finally {
     dedupeLock.releaseLock();
   }
 
-  appendHistory_(sheet, row, { role: "agent", text: inboundText, ts: receivedAt });
+  if (!(recoveryRetry && messageId && String(rowObj[HEADERS.last_message_id] || "") === messageId)) {
+    appendHistory_(sheet, row, { role: "agent", text: inboundText, ts: receivedAt });
+  }
 
   const refreshedData = getSheetData_(sheet);
   const refreshedRowInfo = refreshedData.find(r => r.row === row);
   const currentRowObj = refreshedRowInfo ? refreshedRowInfo.obj : rowObj;
   const currentCount = Number(currentRowObj[HEADERS.auto_reply_count] || 0);
-  const capReached = currentCount >= 4;
+  const capReached = currentCount >= 3;
   const hasFeeQuestion = isPaymentOrFeeQuestionSignal_(inboundText);
   const hasExperienceQuestion = isExperienceTrackRecordQuestionSignal_(inboundText);
   const hasClientConsultationInterest = isClientConsultationInterestSignal_(inboundText);
@@ -469,7 +552,61 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isSpanishLanguageSignal_(inboundText) && !isSpanishFeeQuestionSignal_(inboundText)) {
+  if (/\breply\s+stop\s+to\s+(?:end|unsubscribe|cancel|opt out)\b/i.test(inboundText)) {
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "R",
+      [HEADERS.conversation_summary]: "Automated STOP instruction / non-agent responder",
+      [HEADERS.ai_state]: "done",
+      [HEADERS.call_booking_status]: "closed_no_interest",
+      [HEADERS.handoff_flag]: "FALSE"
+    });
+    return {
+      ok: true,
+      should_reply: true,
+      reply_text: "STOP",
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      reason: "Automated STOP instruction / non-agent responder"
+    };
+  }
+
+  // Classify once before the cap so terminal high-value intents (scheduled
+  // callbacks, direct help, stats, fee negotiation) keep their specific
+  // handoff reason instead of being flattened into MAX REPLIES.
+  const ruleResult = applyFastRules_(inboundText, currentRowObj);
+
+  // The reply cap is a terminal human handoff, even for questions that have
+  // an early deterministic answer. Preserve opt-outs, routing noise, and an
+  // already-active handoff without generating another alert.
+  if (
+    capReached &&
+    String(currentRowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE" &&
+    !isManualFollowupLocked_(currentRowObj) &&
+    !isAutomatedRoutingNoticeSignal_(inboundText) &&
+    !isPostHandoffCallbackUpdate_(currentRowObj, inboundText) &&
+    !(ruleResult.matched && (ruleResult.handoff_needed || ruleResult.needs_review || ruleResult.alert_needed))
+  ) {
+    if (isFinalCourtesyReply_(inboundText)) {
+      return {
+        ok: true,
+        should_reply: false,
+        handoff_needed: false,
+        needs_review: false,
+        reason: "Courtesy acknowledgment at reply cap; no further reply needed"
+      };
+    }
+    return handleMaxRepliesHandoff_(sheet, row, currentRowObj, phoneRaw, inboundText);
+  }
+
+  if (
+    isSpanishLanguageSignal_(inboundText) &&
+    !isSpanishFeeQuestionSignal_(inboundText) &&
+    String(currentRowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE" &&
+    !isManualFollowupLocked_(currentRowObj)
+  ) {
     const replyText = buildSpanishCapabilityReply_();
 
     updateRowFields_(sheet, row, {
@@ -498,24 +635,6 @@ function handleIncomingSms_(body) {
     const priorCallbackTime = normalizeCallbackTime_(currentRowObj[HEADERS.callback_time]);
     const changed = normalizeCallbackTime_(callbackTime) !== priorCallbackTime;
     const preservedLeadStatus = String(currentRowObj[HEADERS.mailshake_status] || "Y");
-    const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
-
-    if (changed) {
-      sendHandoffEmail_({
-        handoff_type: "CALLBACK UPDATED",
-        agent_name: currentRowObj[HEADERS.agent_name] || "",
-        last_name: currentRowObj[HEADERS.last_name] || "",
-        initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
-        phone: phoneRaw,
-        email: currentRowObj[HEADERS.email] || "",
-        listing_address: currentRowObj[HEADERS.listing_address] || "",
-        city: currentRowObj[HEADERS.city] || "",
-        state: currentRowObj[HEADERS.state] || "",
-        zip: currentRowObj[HEADERS.zip] || "",
-        last_message: inboundText,
-        history: history
-      });
-    }
 
     updateRowFields_(sheet, row, {
       [HEADERS.response_status]: inboundText,
@@ -537,13 +656,33 @@ function handleIncomingSms_(body) {
       handoff_needed: true,
       needs_review: false,
       callback_updated: changed,
-      alert_needed: changed,
-      handoff_type: changed ? "CALLBACK UPDATED" : "",
+      alert_needed: false,
+      handoff_type: "",
       reason: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff"
     };
   }
 
-  if ((hasPhoneCallInterest || hasPresentServiceInterest) && isClosedMarketingConversation_(currentRowObj)) {
+  if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") {
+    return {
+      ok: true,
+      should_reply: false,
+      handoff_needed: true,
+      needs_review: false,
+      reason: "Human override enabled"
+    };
+  }
+
+  if (isManualFollowupLocked_(currentRowObj)) {
+    return {
+      ok: true,
+      should_reply: false,
+      handoff_needed: true,
+      needs_review: false,
+      reason: "Manual follow-up already active"
+    };
+  }
+
+  if (!ruleResult.matched && (hasPhoneCallInterest || hasPresentServiceInterest) && isClosedMarketingConversation_(currentRowObj)) {
     const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
     const handoffType = hasPhoneCallInterest ? "CALL REQUESTED" : "RENEWED INTEREST";
     const reason = hasPhoneCallInterest
@@ -589,6 +728,7 @@ function handleIncomingSms_(body) {
   }
 
   if (
+    !ruleResult.matched &&
     hasCompanyIdentityQuestion &&
     (isAlreadyHandledSignal_(inboundText) || isClosedMarketingConversation_(currentRowObj))
   ) {
@@ -638,26 +778,22 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") {
-    return {
-      ok: true,
-      should_reply: false,
-      handoff_needed: true,
-      needs_review: false,
-      reason: "Human override enabled"
-    };
+  if (capReached && !(ruleResult.matched && (ruleResult.handoff_needed || ruleResult.needs_review || ruleResult.alert_needed))) {
+    if (isFinalCourtesyReply_(inboundText)) {
+      return {
+        ok: true,
+        should_reply: false,
+        handoff_needed: false,
+        needs_review: false,
+        reason: "Courtesy acknowledgment at reply cap; no further reply needed"
+      };
+    }
+    return handleMaxRepliesHandoff_(sheet, row, currentRowObj, phoneRaw, inboundText);
   }
 
-  if (isManualFollowupLocked_(currentRowObj)) {
-    return {
-      ok: true,
-      should_reply: false,
-      handoff_needed: true,
-      needs_review: false,
-      reason: "Manual follow-up already active"
-    };
-  }
-
+  // Resolve direct questions and explicit requests before generic decline or
+  // already-covered language. This prevents a leading "I handle it" clause
+  // from hiding the agent's actual question later in the same message.
   if (isIdentityResendSignal_(inboundText)) {
     const replyText = buildIdentityResendReply_(currentRowObj);
 
@@ -755,6 +891,7 @@ function handleIncomingSms_(body) {
   }
 
   if (
+    !ruleResult.matched &&
     !hasFeeQuestion &&
     !hasExperienceQuestion &&
     !hasClientConsultationInterest &&
@@ -786,32 +923,16 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isFutureNegotiationInterestSignal_(inboundText)) {
-    const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
+  if (!ruleResult.matched && isFutureNegotiationInterestSignal_(inboundText)) {
     const reason = "Agent expressed interest in future short-sale negotiation support";
     const replyText = buildFutureInterestReply_(inboundText);
 
-    sendHandoffEmail_({
-      handoff_type: "FUTURE INTEREST",
-      agent_name: currentRowObj[HEADERS.agent_name] || "",
-      last_name: currentRowObj[HEADERS.last_name] || "",
-      initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
-      phone: phoneRaw,
-      email: currentRowObj[HEADERS.email] || "",
-      listing_address: currentRowObj[HEADERS.listing_address] || "",
-      city: currentRowObj[HEADERS.city] || "",
-      state: currentRowObj[HEADERS.state] || "",
-      zip: currentRowObj[HEADERS.zip] || "",
-      last_message: inboundText,
-      history: history
-    });
-
     updateRowFields_(sheet, row, {
       [HEADERS.response_status]: inboundText,
-      [HEADERS.mailshake_status]: "Y",
+      [HEADERS.mailshake_status]: "O",
       [HEADERS.conversation_summary]: reason,
-      [HEADERS.ai_state]: "active",
-      [HEADERS.call_booking_status]: "interested_no_call",
+      [HEADERS.ai_state]: "done",
+      [HEADERS.call_booking_status]: "warm_future_interest",
       [HEADERS.handoff_flag]: "FALSE",
       [HEADERS.human_override]: "FALSE"
     });
@@ -820,8 +941,8 @@ function handleIncomingSms_(body) {
       ok: true,
       should_reply: !capReached,
       reply_text: capReached ? "" : replyText,
-      lead_status: "Y",
-      conversation_done: false,
+      lead_status: "O",
+      conversation_done: true,
       handoff_needed: false,
       needs_review: false,
       reason: reason
@@ -829,6 +950,7 @@ function handleIncomingSms_(body) {
   }
 
   if (
+    !ruleResult.matched &&
     !hasFeeQuestion &&
     !hasExperienceQuestion &&
     !hasClientConsultationInterest &&
@@ -859,7 +981,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasFeeQuestion && isNotShortSaleSignal_(inboundText)) {
+  if (!ruleResult.matched && !hasFeeQuestion && isNotShortSaleSignal_(inboundText)) {
     const replyText = "Ahh, ok... thanks for letting me know. Good luck with your listing!";
 
     updateRowFields_(sheet, row, {
@@ -883,7 +1005,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasFeeQuestion && isSelfHandlingFutureHelpSignal_(inboundText)) {
+  if (!ruleResult.matched && !hasFeeQuestion && isSelfHandlingFutureHelpSignal_(inboundText)) {
     const replyText = buildFutureKeepInMindServiceReply_();
 
     updateRowFields_(sheet, row, {
@@ -907,7 +1029,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isCredentialQuestionSignal_(inboundText)) {
+  if (!ruleResult.matched && isCredentialQuestionSignal_(inboundText)) {
     const replyText = buildCredentialQuestionReply_();
 
     updateRowFields_(sheet, row, {
@@ -932,7 +1054,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (isNegotiatorRoleQuestionSignal_(inboundText)) {
+  if (!ruleResult.matched && isNegotiatorRoleQuestionSignal_(inboundText)) {
     const replyText = buildNegotiatorRoleQuestionReply_();
 
     updateRowFields_(sheet, row, {
@@ -957,7 +1079,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && !hasInformationRequest && !hasPhoneCallInterest && !hasPresentServiceInterest && !hasCompanyIdentityQuestion && isAlreadyHandledSignal_(inboundText)) {
+  if (!ruleResult.matched && !hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && !hasInformationRequest && !hasPhoneCallInterest && !hasPresentServiceInterest && !hasCompanyIdentityQuestion && isAlreadyHandledSignal_(inboundText)) {
     const replyText = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -981,7 +1103,7 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (!hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && !hasInformationRequest && isClearNoSignal_(inboundText)) {
+  if (!ruleResult.matched && !hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && !hasInformationRequest && isClearNoSignal_(inboundText)) {
     const closeoutReply = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
@@ -1005,7 +1127,6 @@ function handleIncomingSms_(body) {
     };
   }
 
-  const ruleResult = applyFastRules_(inboundText, currentRowObj);
   if (ruleResult.matched) {
     let decision = normalizeAiDecision_(ruleResult, currentRowObj[HEADERS.mailshake_status]);
     decision = applyReplySanitizers_(decision, currentRowObj);
@@ -1017,15 +1138,18 @@ function handleIncomingSms_(body) {
 
     if (!decision.preserve_existing_state) {
       updates[HEADERS.mailshake_status] = decision.lead_status;
-      updates[HEADERS.ai_state] = decision.conversation_done ? "done" : (decision.handoff_needed ? "handoff" : "active");
-      updates[HEADERS.handoff_flag] = decision.handoff_needed ? "TRUE" : "FALSE";
-      updates[HEADERS.human_override] = decision.handoff_needed || decision.needs_review ? "TRUE" : "FALSE";
+      const terminalHandoff = decision.handoff_needed || decision.needs_review || decision.alert_needed;
+      updates[HEADERS.ai_state] = terminalHandoff ? "handoff" : (decision.conversation_done ? "done" : "active");
+      updates[HEADERS.handoff_flag] = terminalHandoff ? "TRUE" : "FALSE";
+      updates[HEADERS.human_override] = terminalHandoff ? "TRUE" : "FALSE";
 
       if (ruleResult.info_email_to && isValidEmailAddress_(ruleResult.info_email_to)) {
         updates[HEADERS.email] = ruleResult.info_email_to;
       }
 
-      if (decision.lead_status === "G") {
+      if (decision.call_booking_status) {
+        updates[HEADERS.call_booking_status] = decision.call_booking_status;
+      } else if (decision.lead_status === "G") {
         updates[HEADERS.call_booking_status] = "call_set_or_hot";
       } else if (decision.lead_status === "Y") {
         updates[HEADERS.call_booking_status] = "interested_no_call";
@@ -1034,6 +1158,31 @@ function handleIncomingSms_(body) {
       } else if (decision.lead_status === "R") {
         updates[HEADERS.call_booking_status] = "closed_no_interest";
       }
+      if (decision.callback_time) {
+        updates[HEADERS.callback_requested] = decision.callback_requested || "yes";
+        updates[HEADERS.callback_time] = decision.callback_time;
+      }
+    }
+
+    // A terminal alert must be durably queued before the CRM is locked. If
+    // queuing fails, the inbound worker retries without being stopped by its
+    // own partially committed human-override state.
+    if (decision.handoff_needed || decision.needs_review || decision.alert_needed) {
+      const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
+      sendHandoffEmail_({
+        handoff_type: decision.handoff_type || ruleResult.handoff_type || (decision.needs_review ? "NEEDS REVIEW" : "MANUAL FOLLOW-UP"),
+        agent_name: currentRowObj[HEADERS.agent_name] || "",
+        last_name: currentRowObj[HEADERS.last_name] || "",
+        initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
+        phone: phoneRaw,
+        email: currentRowObj[HEADERS.email] || "",
+        listing_address: currentRowObj[HEADERS.listing_address] || "",
+        city: currentRowObj[HEADERS.city] || "",
+        state: currentRowObj[HEADERS.state] || "",
+        zip: currentRowObj[HEADERS.zip] || "",
+        last_message: inboundText,
+        history: history
+      });
     }
 
     updateRowFields_(sheet, row, updates);
@@ -1066,25 +1215,6 @@ function handleIncomingSms_(body) {
       } else {
         sendAgentInfoEmail_(infoEmailData);
       }
-    }
-
-    if (decision.handoff_needed || decision.needs_review || decision.alert_needed) {
-      const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
-
-      sendHandoffEmail_({
-        handoff_type: decision.handoff_type || ruleResult.handoff_type || (decision.needs_review ? "NEEDS REVIEW" : "MANUAL FOLLOW-UP"),
-        agent_name: currentRowObj[HEADERS.agent_name] || "",
-        last_name: currentRowObj[HEADERS.last_name] || "",
-        initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
-        phone: phoneRaw,
-        email: currentRowObj[HEADERS.email] || "",
-        listing_address: currentRowObj[HEADERS.listing_address] || "",
-        city: currentRowObj[HEADERS.city] || "",
-        state: currentRowObj[HEADERS.state] || "",
-        zip: currentRowObj[HEADERS.zip] || "",
-        last_message: inboundText,
-        history: history
-      });
     }
 
     return {
@@ -1186,43 +1316,6 @@ function handleIncomingSms_(body) {
     };
   }
 
-  if (capReached) {
-    const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
-
-    sendHandoffEmail_({
-      handoff_type: "Max Replies Reached",
-      agent_name: currentRowObj[HEADERS.agent_name] || "",
-      last_name: currentRowObj[HEADERS.last_name] || "",
-      initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
-      phone: phoneRaw,
-      email: currentRowObj[HEADERS.email] || "",
-      listing_address: currentRowObj[HEADERS.listing_address] || "",
-      city: currentRowObj[HEADERS.city] || "",
-      state: currentRowObj[HEADERS.state] || "",
-      zip: currentRowObj[HEADERS.zip] || "",
-      last_message: inboundText,
-      history: history
-    });
-
-    updateRowFields_(sheet, row, {
-      [HEADERS.response_status]: inboundText,
-      [HEADERS.mailshake_status]: "Y",
-      [HEADERS.conversation_summary]: "Max Replies Reached",
-      [HEADERS.ai_state]: "handoff",
-      [HEADERS.call_booking_status]: "interested_no_call",
-      [HEADERS.handoff_flag]: "TRUE",
-      [HEADERS.human_override]: "TRUE"
-    });
-
-    return {
-      ok: true,
-      should_reply: false,
-      handoff_needed: true,
-      needs_review: false,
-      reason: "Max auto replies reached - handoff to Yoni"
-    };
-  }
-
   let decision = getAiDecision_({ row: row, rowObj: currentRowObj }, inboundText);
   decision = normalizeAiDecision_(decision, currentRowObj[HEADERS.mailshake_status]);
   decision = applyReplySanitizers_(decision, currentRowObj);
@@ -1241,21 +1334,28 @@ function handleIncomingSms_(body) {
 
   if (!decision.preserve_existing_state) {
     updates[HEADERS.mailshake_status] = decision.lead_status;
-    updates[HEADERS.ai_state] = decision.conversation_done ? "done" : (decision.handoff_needed ? "handoff" : "active");
-    updates[HEADERS.handoff_flag] = decision.handoff_needed ? "TRUE" : "FALSE";
-    updates[HEADERS.human_override] = decision.handoff_needed || decision.needs_review ? "TRUE" : "FALSE";
+    const terminalHandoff = decision.handoff_needed || decision.needs_review || decision.alert_needed;
+    updates[HEADERS.ai_state] = terminalHandoff ? "handoff" : (decision.conversation_done ? "done" : "active");
+    updates[HEADERS.handoff_flag] = terminalHandoff ? "TRUE" : "FALSE";
+    updates[HEADERS.human_override] = terminalHandoff ? "TRUE" : "FALSE";
 
-    if (decision.lead_status === "G") {
+    if (decision.call_booking_status) {
+      updates[HEADERS.call_booking_status] = decision.call_booking_status;
+    } else if (decision.lead_status === "G") {
       updates[HEADERS.call_booking_status] = "call_set_or_hot";
     } else if (decision.lead_status === "Y") {
       updates[HEADERS.call_booking_status] = "interested_no_call";
     } else if (decision.lead_status === "R") {
       updates[HEADERS.call_booking_status] = "closed_no_interest";
     }
+    if (decision.callback_time) {
+      updates[HEADERS.callback_requested] = decision.callback_requested || "yes";
+      updates[HEADERS.callback_time] = decision.callback_time;
+    }
   }
 
-  updateRowFields_(sheet, row, updates);
-
+  // Queue the terminal alert before committing the terminal CRM lock. The
+  // deterministic email ID makes retries safe if a later Sheet write fails.
   if (decision.handoff_needed || decision.needs_review || decision.alert_needed) {
     const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
     sendHandoffEmail_({
@@ -1273,6 +1373,8 @@ function handleIncomingSms_(body) {
       history: history
     });
   }
+
+  updateRowFields_(sheet, row, updates);
 
   return {
     ok: true,
@@ -1311,7 +1413,7 @@ function shouldSendBotReply_(decision, capReached) {
   }
 
   const d = decision || {};
-  if (d.handoff_needed || d.needs_review || d.block_reply) {
+  if (d.handoff_needed || d.needs_review || d.alert_needed || d.block_reply) {
     return false;
   }
 
@@ -1322,59 +1424,260 @@ function handleReplySent_(body) {
   const phoneRaw = String(body.phone || "").trim();
   const replyText = normalizeWhitespace_(String(body.reply_text || ""));
   const sentAt = body.sent_at || new Date().toISOString();
+  const phone = normalizePhone_(phoneRaw);
+  if (!phone || !replyText) throw new Error("Reply receipt requires phone and reply text");
 
-  const sheet = getSheet_();
-  const data = getSheetData_(sheet);
-  const rowInfo = findOrCreateRowByPhone_(sheet, data, phoneRaw);
+  const conversationLease = acquireSmsConversationLease_(phone);
+  if (!conversationLease.ok) {
+    const leaseError = new Error(conversationLease.reason || "Conversation is already being processed");
+    leaseError.retryable = true;
+    leaseError.code = "SMS_REPLY_RECEIPT_BUSY";
+    throw leaseError;
+  }
 
-  appendHistory_(sheet, rowInfo.row, { role: "assistant", text: replyText, ts: sentAt });
+  try {
+    const sheet = getSheet_();
+    const data = getSheetData_(sheet);
+    const rowInfo = findOrCreateRowByPhone_(sheet, data, phoneRaw);
+    const receiptId = buildReplyReceiptId_(body, phone, replyText, sentAt);
+    const lock = LockService.getScriptLock();
+    if (!lock.tryLock(5000)) {
+      const lockError = new Error("Reply receipt ledger is temporarily busy");
+      lockError.retryable = true;
+      lockError.code = "SMS_REPLY_RECEIPT_LOCK_BUSY";
+      throw lockError;
+    }
 
-  const refreshedData = getSheetData_(sheet);
-  const refreshedRowInfo = refreshedData.find(r => r.row === rowInfo.row);
-  const currentCount = Number((refreshedRowInfo ? refreshedRowInfo.obj[HEADERS.auto_reply_count] : rowInfo.rowObj[HEADERS.auto_reply_count]) || 0);
+    try {
+      const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+      const rowValues = sheet.getRange(rowInfo.row, 1, 1, headers.length).getValues()[0];
+      const historyIndex = headers.indexOf(HEADERS.history_json);
+      const outboundIndex = headers.indexOf(HEADERS.last_outbound_text);
+      const contactIndex = headers.indexOf(HEADERS.last_contact_time);
+      const countIndex = headers.indexOf(HEADERS.auto_reply_count);
+      if (historyIndex < 0 || outboundIndex < 0 || contactIndex < 0 || countIndex < 0) {
+        throw new Error("Reply receipt columns are missing from the CRM sheet");
+      }
 
-  updateRowFields_(sheet, rowInfo.row, {
-    [HEADERS.last_outbound_text]: replyText,
-    [HEADERS.last_contact_time]: sentAt,
-    [HEADERS.auto_reply_count]: currentCount + 1
-  });
+      const history = getHistoryArray_(rowValues[historyIndex]);
+      if (history.some(entry => String(entry && entry.receipt_id || "") === receiptId)) {
+        return { ok: true, duplicate: true, reason: "Reply receipt was already applied to CRM" };
+      }
 
-  return { ok: true };
+      history.push({ role: "assistant", text: replyText, ts: sentAt, receipt_id: receiptId });
+      rowValues[historyIndex] = JSON.stringify(history.slice(-20));
+      rowValues[outboundIndex] = replyText;
+      rowValues[contactIndex] = sentAt;
+      rowValues[countIndex] = Number(rowValues[countIndex] || 0) + 1;
+      if (hasPendingSmsTakeoverV11_(phone)) {
+        const aiStateIndex = headers.indexOf(HEADERS.ai_state);
+        const handoffIndex = headers.indexOf(HEADERS.handoff_flag);
+        const overrideIndex = headers.indexOf(HEADERS.human_override);
+        if (aiStateIndex >= 0) rowValues[aiStateIndex] = "handoff";
+        if (handoffIndex >= 0) rowValues[handoffIndex] = "TRUE";
+        if (overrideIndex >= 0) rowValues[overrideIndex] = "TRUE";
+      }
+      // The history idempotency marker and reply count share one row write.
+      // A Tasker retry therefore either reapplies nothing or completes once.
+      sheet.getRange(rowInfo.row, 1, 1, headers.length).setValues([rowValues]);
+      return { ok: true, receipt_id: receiptId };
+    } finally {
+      lock.releaseLock();
+    }
+  } finally {
+    releaseSmsConversationLease_(conversationLease);
+  }
+}
+
+function buildReplyReceiptId_(body, phone, replyText, sentAt) {
+  const requestId = String(body && (body.request_id || body.sms_request_id) || "");
+  const messageId = String(body && body.message_id || "");
+  const leaseToken = String(body && body.lease_token || "");
+  const hasTransportIdentity = !!(requestId && messageId && leaseToken);
+  const material = hasTransportIdentity
+    ? [requestId, messageId, leaseToken, phone, replyText].join("|")
+    : [phone, replyText, String(sentAt || "")].join("|");
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, material);
+  return digest.map(value => (value + 256).toString(16).slice(-2)).join("").slice(0, 32);
 }
 
 function handleManualReplySent_(body) {
   const phoneRaw = String(body.phone || "").trim();
   const replyText = normalizeWhitespace_(String(body.reply_text || body.message || ""));
   const sentAt = body.sent_at || new Date().toISOString();
-  if (!normalizePhone_(phoneRaw) || !replyText) {
+  const phone = normalizePhone_(phoneRaw);
+  if (!phone || !replyText) {
     throw new Error("Manual reply receipt requires phone and reply text");
   }
 
+  const pendingControl = queuePendingSmsControlEventV11_(phone, {
+    action: "manual_reply_sent",
+    phone: phoneRaw,
+    reply_text: replyText,
+    sent_at: sentAt
+  });
+  const conversationLease = acquireSmsConversationLease_(phone);
+  if (!conversationLease.ok) {
+    return {
+      ok: true,
+      queued: true,
+      manual: true,
+      human_override: "TRUE",
+      reason: "Manual reply takeover queued behind active conversation"
+    };
+  }
+
+  try {
+    const result = applyManualReplySentCoreV11_(phoneRaw, replyText, sentAt, pendingControl.event_id);
+    clearPendingSmsControlEventV11_(phone, pendingControl.event_id);
+    return result;
+  } finally {
+    releaseSmsConversationLease_(conversationLease);
+  }
+}
+
+function applyManualReplySentCoreV11_(phoneRaw, replyText, sentAt, eventId) {
   const sheet = getSheet_();
   const data = getSheetData_(sheet);
   const rowInfo = findOrCreateRowByPhone_(sheet, data, phoneRaw);
-  appendHistory_(sheet, rowInfo.row, { role: "assistant", text: replyText, ts: sentAt });
+  const history = getHistoryArray_(rowInfo.rowObj[HEADERS.history_json]);
+  const alreadyRecorded = !!eventId && history.some(entry => String(entry && entry.control_event_id || "") === String(eventId));
+  if (!alreadyRecorded) {
+    appendHistory_(sheet, rowInfo.row, {
+      role: "assistant",
+      text: replyText,
+      ts: sentAt,
+      control_event_id: eventId || ""
+    });
+  }
   updateRowFields_(sheet, rowInfo.row, {
     [HEADERS.last_outbound_text]: replyText,
-    [HEADERS.last_contact_time]: sentAt
+    [HEADERS.last_contact_time]: sentAt,
+    [HEADERS.ai_state]: "handoff",
+    [HEADERS.handoff_flag]: "TRUE",
+    [HEADERS.human_override]: "TRUE"
   });
-
-  return { ok: true, row: rowInfo.row, manual: true };
+  return { ok: true, row: rowInfo.row, manual: true, duplicate: alreadyRecorded };
 }
 
 function markOverride_(body) {
   const phoneRaw = String(body.phone || "").trim();
   const value = String(body.value || "TRUE").toUpperCase() === "TRUE" ? "TRUE" : "FALSE";
+  const phone = normalizePhone_(phoneRaw);
+  if (!phone) throw new Error("Override requires a valid phone");
 
+  const pendingControl = queuePendingSmsControlEventV11_(phone, {
+    action: "mark_override",
+    phone: phoneRaw,
+    value: value
+  });
+  const conversationLease = acquireSmsConversationLease_(phone);
+  if (!conversationLease.ok) {
+    return {
+      ok: true,
+      queued: true,
+      phone: phoneRaw,
+      human_override: value,
+      reason: "Override queued behind active conversation"
+    };
+  }
+
+  try {
+    const result = applyOverrideCoreV11_(phoneRaw, value);
+    clearPendingSmsControlEventV11_(phone, pendingControl.event_id);
+    return result;
+  } finally {
+    releaseSmsConversationLease_(conversationLease);
+  }
+}
+
+function applyOverrideCoreV11_(phoneRaw, value) {
   const sheet = getSheet_();
   const data = getSheetData_(sheet);
   const rowInfo = findOrCreateRowByPhone_(sheet, data, phoneRaw);
-
   updateRowFields_(sheet, rowInfo.row, {
     [HEADERS.human_override]: value
   });
-
   return { ok: true, phone: phoneRaw, human_override: value };
+}
+
+function smsPendingControlKeyV11_(phone) {
+  return "SMS_PENDING_CONTROL_V11_" + normalizePhone_(phone);
+}
+
+function queuePendingSmsControlEventV11_(phone, payload) {
+  const event = Object.assign({}, payload || {}, {
+    event_id: Utilities.getUuid(),
+    queued_at: new Date().toISOString()
+  });
+  PropertiesService.getScriptProperties().setProperty(
+    smsPendingControlKeyV11_(phone),
+    JSON.stringify(event)
+  );
+  if (typeof installSmsOutboxTriggers_ === "function") installSmsOutboxTriggers_();
+  return event;
+}
+
+function getPendingSmsControlEventV11_(phone) {
+  const raw = PropertiesService.getScriptProperties().getProperty(smsPendingControlKeyV11_(phone));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    return { action: "mark_override", value: "TRUE", event_id: "malformed" };
+  }
+}
+
+function hasPendingSmsTakeoverV11_(phone) {
+  const event = getPendingSmsControlEventV11_(phone);
+  if (!event) return false;
+  return event.action === "manual_reply_sent" || String(event.value || "TRUE").toUpperCase() === "TRUE";
+}
+
+function clearPendingSmsControlEventV11_(phone, eventId) {
+  const props = PropertiesService.getScriptProperties();
+  const key = smsPendingControlKeyV11_(phone);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return false;
+  try {
+    const current = getPendingSmsControlEventV11_(phone);
+    if (!current || String(current.event_id || "") !== String(eventId || "")) return false;
+    props.deleteProperty(key);
+    return true;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function drainPendingSmsControlEventsV11_() {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  const prefix = "SMS_PENDING_CONTROL_V11_";
+  const keys = Object.keys(all).filter(key => key.indexOf(prefix) === 0).slice(0, 20);
+  let processed = 0;
+  keys.forEach(key => {
+    const phone = key.slice(prefix.length);
+    const event = getPendingSmsControlEventV11_(phone);
+    if (!event) return;
+    const lease = acquireSmsConversationLease_(phone);
+    if (!lease.ok) return;
+    try {
+      if (event.action === "manual_reply_sent") {
+        applyManualReplySentCoreV11_(
+          event.phone || phone,
+          normalizeWhitespace_(String(event.reply_text || "")),
+          event.sent_at || new Date().toISOString(),
+          event.event_id || ""
+        );
+      } else {
+        applyOverrideCoreV11_(event.phone || phone, String(event.value || "TRUE").toUpperCase() === "TRUE" ? "TRUE" : "FALSE");
+      }
+      if (clearPendingSmsControlEventV11_(phone, event.event_id)) processed++;
+    } finally {
+      releaseSmsConversationLease_(lease);
+    }
+  });
+  return { ok: true, processed: processed };
 }
 
 function normalizeLanguageSignalText_(text) {
@@ -1525,8 +1828,9 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
     priorAssistantTexts.push(normalizedLastOutbound);
   }
 
-  const hasPriorSpecificFeeReply = priorAssistantTexts.some(isSpecificFeeReplyText_);
-  const hasPriorInitialFeeReply = priorAssistantTexts.some(isInitialFeeReplyText_);
+  const pendingFeeStage = getPendingFeeReplyStageV3_(rowObj);
+  const hasPriorSpecificFeeReply = priorAssistantTexts.some(isSpecificFeeReplyText_) || pendingFeeStage === "specific";
+  const hasPriorInitialFeeReply = priorAssistantTexts.some(isInitialFeeReplyText_) || pendingFeeStage === "initial";
 
   if (hasPriorSpecificFeeReply) {
     return buildManualHandoffDecision_(
@@ -1538,7 +1842,7 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
   if (hasPriorInitialFeeReply) {
     return {
       matched: true,
-      reply_text: "The fee is $5,000, paid by the buyer at closing. As long as it's disclosed up front in the listing, the buyer can factor it into their offer price, and it's typically not an issue. Happy to walk you through exactly how that looks on this listing.",
+      reply_text: "The fee is $5,000, paid by the buyer at closing. As long as it's disclosed up front in the listing, the buyer can factor it into their offer price.",
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
@@ -1550,7 +1854,7 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
 
   return {
     matched: true,
-    reply_text: "I don't take a percentage or anything from your commission. It's completely free to the agent and seller. I charge a flat fee to the buyer at closing, only if/when the deal closes - happy to explain the details on a quick call.",
+    reply_text: "There's no cost to you or the seller, and I don't take anything from your commission. I charge a flat fee to the buyer at closing, only if the deal closes.",
     lead_status: "Y",
     conversation_done: false,
     handoff_needed: false,
@@ -1560,9 +1864,281 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
   };
 }
 
+function getPendingFeeReplyStageV3_(rowObj) {
+  const phone = normalizePhone_(String(rowObj && rowObj[HEADERS.phone] || ""));
+  if (!phone) return "";
+  try {
+    const ss = getSmsSpreadsheet_();
+    const sheet = ss.getSheetByName("sms_pending_sends");
+    if (!sheet || sheet.getLastRow() < 2) return "";
+    const firstRow = Math.max(2, sheet.getLastRow() - 99);
+    const rows = sheet.getRange(firstRow, 1, sheet.getLastRow() - firstRow + 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const status = String(rows[i][1] || "");
+      const createdAt = new Date(rows[i][0]).getTime();
+      if (["queued", "claimed", "send_started", "sent"].indexOf(status) === -1 ||
+          normalizePhone_(rows[i][4]) !== phone || !createdAt || createdAt < cutoff) continue;
+      if (isSpecificFeeReplyText_(rows[i][5])) return "specific";
+      if (isInitialFeeReplyText_(rows[i][5])) return "initial";
+    }
+  } catch (_) {}
+  return "";
+}
+
+function isFeeNegotiationSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+  const mentionsPricing = /\b(?:fee|price|pricing|rate|charge|cost|\$\s*\d|\d{3,5})\b/.test(t);
+  const asksConcession = /\b(?:match|beat|lower|reduce|discount|negotiate|counter|concession)\b/.test(t) ||
+    /\b(?:would|will|can|could)\s+you\s+(?:do|charge|take|accept)\b/.test(t) ||
+    /\bi\s+(?:made|am making)\s+you\s+an?\s+offer\b/.test(t);
+  return mentionsPricing && asksConcession;
+}
+
+function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return null;
+
+  // A request to send information is a delivery workflow, not a general
+  // "how do you help" question. Let the dedicated email branch collect or
+  // use the address and queue the approved info email.
+  if (isEmailRequestSignal_(t) || extractEmailAddress_(t)) return null;
+
+  if (isUnsupportedPerformanceStatsQuestionSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Agent asked for unsupported performance stats; manual follow-up needed",
+      "STATS QUESTION"
+    );
+  }
+
+  if (isFeeNegotiationSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Agent proposed or requested a pricing concession",
+      "FEE NEGOTIATION"
+    );
+  }
+
+  if (isExistingCrispRelationshipSignal_(t)) {
+    const existingClient = buildManualHandoffDecision_(
+      "Agent identified an active or existing Crisp/Yoni relationship",
+      "EXISTING CRISP CLIENT"
+    );
+    existingClient.lead_status = "R";
+    return existingClient;
+  }
+
+  const flags = {
+    fee: isPaymentOrFeeQuestionSignal_(t),
+    help: /\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does this work|how does that work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|do))\b/.test(t),
+    local: isLocalQuestionSignal_(t),
+    company: isCompanyIdentityQuestionSignal_(t),
+    website: isWebsiteReviewsRequestSignal_(t),
+    contact_card: isContactCardRequestSignal_(t),
+    contact_info: isPlainContactInfoRequestSignal_(t),
+    experience: isExperienceTrackRecordQuestionSignal_(t),
+    timeline: isShortSaleTimelineQuestionSignal_(t),
+    number: isCurrentTextingNumberQuestionSignal_(t),
+    credential: isCredentialQuestionSignal_(t),
+    negotiator: isNegotiatorRoleQuestionSignal_(t),
+    language: isSpanishLanguageSignal_(t),
+    source: isShortSaleSourceQuestion_(t),
+    differentiation: isDifferentiationQuestionSignal_(t)
+  };
+
+  const matchedKeys = Object.keys(flags).filter(function(key) { return flags[key]; });
+  if (!matchedKeys.length) return null;
+
+  if (flags.source && matchedKeys.length === 1) {
+    return {
+      matched: true,
+      reply_text: "I thought I saw it marked online as a short sale. My mistake if I misread it. Thanks.",
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Agent asked why the listing was considered a short sale"
+    };
+  }
+
+  if (flags.differentiation && matchedKeys.length === 1) {
+    return {
+      matched: true,
+      reply_text: buildDifferentiationQuestionReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      alert_needed: true,
+      handoff_type: "HOT LEAD - DIFFERENTIATION QUESTION",
+      reason: "Answered differentiation question before generic coverage language"
+    };
+  }
+
+  const covered = isAlreadyHandledSignal_(t) || isClearNoSignal_(t) ||
+    isNotShortSaleSignal_(t) || isClosedMarketingConversation_(rowObj);
+  const presentInterest = isPresentServiceInterestSignal_(t) || isOpenToReviewOfferSignal_(t);
+  const leadStatus = covered && !presentInterest ? "O" : "Y";
+  const done = leadStatus === "O";
+
+  if (flags.fee && (
+    isPhoneCallInterestSignal_(t) ||
+    isImmediateCallSignal_(t) ||
+    isOpenCallWindowSignal_(t) ||
+    isSchedulingSignal_(t) ||
+    isDirectHelpRequestSignal_(t) ||
+    /\b(?:call\s+me(?:\s+now)?|i\s+need\s+help|would\s+love\s+(?:some\s+)?help|can\s+use\s+(?:some\s+)?help)\b/.test(t) ||
+    /\b(?:can we|could we|would love to|i(?:'|’)d love to)\s+(?:talk|chat|speak)\b/.test(t) ||
+    presentInterest
+  )) {
+    const feeWithInterest = buildFeeQuestionDecision_(rowObj, lastOutbound);
+    if (feeWithInterest.handoff_needed) return feeWithInterest;
+    feeWithInterest.lead_status = "Y";
+    feeWithInterest.conversation_done = false;
+    feeWithInterest.handoff_needed = true;
+    feeWithInterest.block_reply = false;
+    feeWithInterest.handoff_type = "HOT LEAD - FEE AND CALL INTEREST";
+    feeWithInterest.reason = "Answered fee question and handed off present call or service interest";
+    return feeWithInterest;
+  }
+
+  if (flags.help && flags.local && flags.fee && matchedKeys.length === 3) {
+    const compositeFeeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound);
+    if (compositeFeeDecision.handoff_needed) return compositeFeeDecision;
+    const compositeFeeClause = compositeFeeDecision.reply_text.indexOf("$5,000") !== -1
+      ? "The buyer-paid fee is a flat $5,000 at closing."
+      : "There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes.";
+    return {
+      matched: true,
+      reply_text: "I'm based in Atlanta and work nationwide, and I handle the lender-side paperwork, calls, follow-up, and negotiations through approval. " + compositeFeeClause,
+      lead_status: leadStatus,
+      conversation_done: done,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Answered a bounded service, location, and fee question"
+    };
+  }
+
+  if (matchedKeys.length > 2 || (matchedKeys.length > 1 && (flags.source || flags.differentiation))) {
+    return buildManualHandoffDecision_(
+      "Agent asked multiple questions that need one careful human answer",
+      "COMPLEX MULTI-QUESTION"
+    );
+  }
+
+  if (matchedKeys.length === 1) {
+    if (flags.fee) {
+      const feeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound);
+      if (!feeDecision.handoff_needed) {
+        feeDecision.lead_status = leadStatus;
+        feeDecision.conversation_done = done;
+      }
+      return feeDecision;
+    }
+    if (flags.help) return {
+      matched: true, reply_text: buildHowWeHelpReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Answered how Crisp helps before generic coverage language"
+    };
+    if (flags.local) return {
+      matched: true, reply_text: buildLocalQuestionReply_(rowObj), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Answered where Yoni is located"
+    };
+    if (flags.company) return {
+      matched: true, reply_text: buildCompanyIdentityReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Answered company identity question"
+    };
+    if (flags.website) return {
+      matched: true, reply_text: buildWebsiteReviewsReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Answered website or reviews request"
+    };
+    if (flags.contact_card) return {
+      matched: true, reply_text: "Sure, what's the best email for you?", lead_status: leadStatus,
+      conversation_done: false, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Agent asked for a business card"
+    };
+    if (flags.contact_info) return {
+      matched: true, reply_text: "Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.", lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Agent asked for Yoni's contact information"
+    };
+    if (flags.experience) return {
+      matched: true, reply_text: buildExperienceTrackRecordReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Answered approved experience question"
+    };
+    if (flags.timeline) return {
+      matched: true, reply_text: buildShortSaleTimelineReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Answered approved short-sale timeline question"
+    };
+    if (flags.number) return {
+      matched: true, reply_text: "Yes, this number is great - call or text anytime. Thanks!", lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Confirmed the current texting number"
+    };
+    if (flags.credential) return {
+      matched: true, reply_text: buildCredentialQuestionReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Answered attorney or legal-advice question"
+    };
+    if (flags.negotiator) return {
+      matched: true, reply_text: buildNegotiatorRoleQuestionReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Clarified the short-sale negotiator role"
+    };
+    if (flags.language) return {
+      matched: true, reply_text: buildSpanishCapabilityReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Agent asked whether Yoni speaks Spanish"
+    };
+  }
+
+  const answers = [];
+  if (flags.company) answers.push("I'm with Crisp Short Sales.");
+  if (flags.help) answers.push("I handle the lender-side paperwork, calls, follow-up, and negotiations through approval.");
+  if (flags.local) answers.push("I'm based in Atlanta and work nationwide; the lender-side work is handled remotely.");
+  if (flags.fee) {
+    const feeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound);
+    if (feeDecision.handoff_needed) return feeDecision;
+    answers.push(feeDecision.reply_text.indexOf("$5,000") !== -1
+      ? "The buyer-paid fee is a flat $5,000 at closing."
+      : "There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes.");
+  }
+  if (flags.experience) answers.push("I've focused on short sales for more than 15 years.");
+  if (flags.timeline) answers.push("A complete package and offer often takes about 60-90 days for a lender decision, though timing varies.");
+  if (flags.website) answers.push("My website is https://www.crispshortsales.com.");
+  if (flags.contact_card) answers.push("What's the best email for you?");
+  if (flags.contact_info) answers.push("Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.");
+  if (flags.number) answers.push("Yes, this number is great - call or text anytime.");
+  if (flags.credential) answers.push("I'm not an attorney; I handle the lender-side short-sale process and negotiations.");
+  if (flags.negotiator) answers.push("Yes, essentially; I handle the short-sale process and lender negotiations through approval.");
+  if (flags.language) answers.push("I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.");
+
+  return {
+    matched: true,
+    reply_text: answers.join(" "),
+    lead_status: leadStatus,
+    conversation_done: done,
+    handoff_needed: false,
+    needs_review: false,
+    block_reply: false,
+    reason: "Answered a bounded two-question inbound message"
+  };
+}
+
 function applyFastRules_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const lastOutbound = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || ""));
+
+  const priorityQuestion = buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound);
+  if (priorityQuestion) return priorityQuestion;
 
   if (isExperienceTrackRecordQuestionSignal_(t)) {
     return {
@@ -1626,10 +2202,12 @@ function applyFastRules_(text, rowObj) {
   }
 
   if (isExistingCrispRelationshipSignal_(t)) {
-    return buildManualHandoffDecision_(
+    const existingClient = buildManualHandoffDecision_(
       "Agent identified an active or existing Crisp/Yoni relationship; exit marketing and route to Yoni",
       "EXISTING CRISP CLIENT"
     );
+    existingClient.lead_status = "R";
+    return existingClient;
   }
 
   if (isClientConsultationInterestSignal_(t)) {
@@ -1642,6 +2220,19 @@ function applyFastRules_(text, rowObj) {
       needs_review: false,
       block_reply: false,
       reason: "Agent will discuss short-sale help with their client and get back to Yoni"
+    };
+  }
+
+  if (isFutureNegotiationInterestSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildFutureInterestReply_(t),
+      lead_status: "O",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Agent expressed interest in future short-sale negotiation support"
     };
   }
 
@@ -1687,7 +2278,7 @@ function applyFastRules_(text, rowObj) {
   if (isSelfHandlingOpportunitySignal_(t)) {
     return {
       matched: true,
-      reply_text: "I understand, and I help a lot of agents in the same situation. I can take the lender side off your plate - the paperwork, calls, follow-up, and negotiations - so you can focus on the listing and your client. There is no cost to you or the seller. Would you be open to a quick call about this file?",
+      reply_text: "I understand, and I help a lot of agents in the same situation. I can take the lender paperwork, calls, follow-up, and negotiations off your plate if you ever want help with that part.",
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
@@ -1757,6 +2348,75 @@ function applyFastRules_(text, rowObj) {
     );
   }
 
+  if (isDirectHelpRequestSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: "Absolutely, I'd love to help. Are you free for a quick call now, or would later today be better?",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: true,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "interested_no_call",
+      handoff_type: "HOT LEAD - DIRECT HELP REQUEST",
+      reason: "Agent directly asked for help"
+    };
+  }
+
+  if (isImmediateCallSignal_(t) || isOpenCallWindowSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: "Perfect, thanks.",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: true,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "call_now",
+      handoff_type: "CALL WINDOW OPEN",
+      reason: "Agent is available for a call; acknowledged and handed off"
+    };
+  }
+
+  if (isSchedulingSignal_(t)) {
+    const hasSpecificTime = !!extractSchedulingTimePhrase_(t);
+    const callbackTime = extractScheduledCallbackReference_(t) ||
+      extractSchedulingTimePhrase_(t) || t;
+    return {
+      matched: true,
+      reply_text: hasSpecificTime ? "Perfect, thanks." : "Sounds good. What time works best for you?",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: true,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "scheduled_callback",
+      callback_requested: "yes",
+      callback_time: callbackTime,
+      handoff_type: "SCHEDULED CALLBACK",
+      reason: "Agent proposed callback timing; acknowledged and handed off"
+    };
+  }
+
+  if (isOfferSubmissionConfusionSignal_(t)) {
+    if (lastOutboundWasOfferScopeClarification_(rowObj)) {
+      return buildManualHandoffDecision_(
+        "Agent repeated a buyer or offer-submission request after Crisp's role was clarified",
+        "BUYER OR OFFER CONFUSION"
+      );
+    }
+    return {
+      matched: true,
+      reply_text: "I don't represent a buyer or submit offers. I handle the lender-side short-sale work for the listing agent.",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Clarified that Crisp does not represent a buyer or submit offers"
+    };
+  }
+
   if (isPresentServiceInterestSignal_(t) && !isPhoneCallInterestSignal_(t)) {
     return buildManualHandoffDecision_(
       "Agent expressed present interest in Crisp's services",
@@ -1781,7 +2441,7 @@ function applyFastRules_(text, rowObj) {
   if (isOpenCallWindowSignal_(t)) {
     return {
       matched: true,
-      reply_text: "Ok great, will give you a call shortly.",
+      reply_text: "Perfect, thanks.",
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: true,
@@ -2012,7 +2672,10 @@ function isPhoneCallInterestSignal_(text) {
     /\bwilling to\b.*\bcall\b/,
     /\blearn more\b.*\bcall\b/,
     /\btalk\b.*\bphone\b/,
-    /\bchat\b.*\bphone\b/
+    /\bchat\b.*\bphone\b/,
+    /\blet['’]?s\s+(?:talk|chat|speak)\b/,
+    /\bquick\s+call\b/,
+    /\b(?:please|can you|could you|would you)\s+call\s+me\b/
   ];
 
   return patterns.some(pattern => pattern.test(t));
@@ -2026,8 +2689,12 @@ function isPresentServiceInterestSignal_(text) {
   if (/\b(?:in the future|someday|if i need|if we need|keep (?:you|your|the) (?:in mind|info|information))\b/.test(t)) {
     return false;
   }
+  if (/\b(?:would love|want|need|could use|can use)\s+(?:some\s+)?help\b/.test(t) ||
+      /\b(?:interested|open)\s+(?:in|to)\s+(?:hearing|learning)\s+more\b/.test(t)) {
+    return true;
+  }
   const interest = /\b(?:i(?:['\u2019]?m| am)?|we(?:['\u2019]?re| are)?)\s+(?:am\s+|are\s+)?(?:interested|open to|ready to|would like|want|need|could use)\b/.test(t);
-  const service = /\b(?:your services?|crisp(?: short sales?)?|short sale help|help with (?:this|the|my|our) (?:file|listing|short sale)|work with you|learn more|see how you (?:can|could) help)\b/.test(t);
+  const service = /\b(?:your services?|crisp(?: short sales?)?|short sale help|help with (?:this|the|my|our) (?:file|listing|short sale)|work with you|learn more|more details|getting more details|see how you (?:can|could) help)\b/.test(t);
   return interest && service;
 }
 
@@ -2046,7 +2713,7 @@ function isCompanyIdentityQuestionSignal_(text) {
 }
 
 function buildCompanyIdentityReply_() {
-  return "My company is Crisp Short Sales. We specialize in handling the short sale process for agents and homeowners. Want to chat for a few minutes about your situation?";
+  return "I'm with Crisp Short Sales. I handle lender-side short-sale processing and negotiations for agents and homeowners.";
 }
 
 function buildCoveredCompanyIdentityReply_() {
@@ -2070,13 +2737,13 @@ function isAutomatedRoutingNoticeSignal_(text) {
 }
 
 function buildWebsiteReviewsReply_() {
-  return "https://www.crispshortsales.com\nYou can also look me up on Google and I have all kinds of reviews from past agents and homeowners that I have worked with.";
+  return "https://www.crispshortsales.com\nYou can also find reviews from agents and homeowners on Google.";
 }
 
 function isWebsiteReviewsRequestSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return false;
-  return /\b(?:website|web site|brochure|flyer|flier|one[- ]?pager|reviews?|testimonials?)\b/.test(t);
+  return /\b(?:website|web site|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?)\b/.test(t);
 }
 
 function isDifferentiationQuestionSignal_(text) {
@@ -2092,7 +2759,7 @@ function isDifferentiationQuestionSignal_(text) {
 }
 
 function buildDifferentiationQuestionReply_() {
-  return "Well I pride myself in my communication and will keep you posted throughout the process. I’ll handle everything with the bank and we only get paid if/when the deal closes, so nothing is paid upfront and there’s nothing in it for us if we don’t get it done.\n\nI built a whole system around giving agents and homeowners access to our notes so you can see everything that’s going on day to day with the file, I send weekly updates every Friday, and you can always reach my phone/text/email anytime.\n\nWant to find some time tomorrow to talk over the phone and we can go over your listing and see if I’m the right fit to help? I’m sure we can get the job done!";
+  return "I focus exclusively on the lender-side short-sale work and keep you updated throughout the process. If that sounds useful, I'm happy to talk through your listing.";
 }
 
 function isClosedMarketingConversation_(rowObj) {
@@ -2162,6 +2829,8 @@ function isFutureNegotiationInterestSignal_(text) {
     /\bi\s+would\s+like\b/,
     /\bi'?d\s+like\b/,
     /\bwould\s+like\b/,
+    /\bwould\s+love\b/,
+    /\bi(?:'|\u2019)?d\s+love\b/,
     /\bi\s+want\b/,
     /\bwant\s+to\s+know\b/,
     /\bwould\s+consider\b/,
@@ -2209,10 +2878,10 @@ function buildFutureInterestReply_(inboundText) {
     /\bhow\s+much\b/.test(t);
 
   if (asksAboutFee) {
-    return "Absolutely. There’s no cost to you or the seller. We get paid by the buyer at closing and charge a flat fee for the service. As long as that’s disclosed up front in the listing, the buyer can factor it into their offer and there’s typically no issue. If you have a few future short sales stacking up, happy to talk through how it works in detail. Want to find a time later this week to chat?";
+    return "Absolutely. There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes.";
   }
 
-  return "Absolutely, happy to explain. I handle the bank side of the short sale process - the paperwork, calls, follow-up, and everything needed to get the file approved. There’s no cost to you or the seller, and no commission split. Want to find a time later this week to talk through how it could work for your future short sales?";
+  return "Absolutely. I handle the lender paperwork, calls, follow-up, and negotiations through approval. If you want to compare notes on a future file, I'd be happy to talk.";
 }
 
 function isInPersonMeetingRequestSignal_(text) {
@@ -2286,10 +2955,10 @@ function isGatekeeperForwardingSignal_(text) {
 function buildGatekeeperForwardingReply_(rowObj) {
   const firstName = getCanonicalFirstName_(rowObj);
   if (firstName) {
-    return "Thanks, I appreciate it. If " + firstName + " has a few minutes to chat, just let me know a good time for me to call.";
+    return "Thanks, I appreciate it. Please have " + firstName + " text me here if they'd like to talk.";
   }
 
-  return "Thanks, I appreciate it. If there's a good time for us to chat, just let me know and I can give you a call.";
+  return "Thanks, I appreciate it. Please have the agent text me here if they'd like to talk.";
 }
 
 function isOpenToReviewOfferSignal_(text) {
@@ -2323,11 +2992,29 @@ function buildOfferReviewReply_(rowObj) {
   const firstName = getCanonicalFirstName_(rowObj);
   const thanksLine = firstName ? "Thanks " + firstName + ", I'd love to explain." : "Thanks, I'd love to explain.";
 
-  return thanksLine + " I can handle the entire short sale process for you including all the paperwork, the phone calls, and everything that goes into getting the deal approved with the lender. I will handle 100% of the short sale process for you, no matter how many liens or mortgages are on title, and the best part is there's no commission split with you or cost to your client at any point. Do you have some time for a quick chat to go over your listing specifics?";
+  return thanksLine + " I handle the lender paperwork, calls, follow-up, and negotiations through approval, with no cost to you or the seller. Would a quick call now or later today be easier?";
 }
 
 function buildHowWeHelpReply_() {
-  return "I can handle the entire short sale process for you - all the paperwork, the phone calls... everything that goes into getting the deal approved. It's also free to the agent and seller to work with me. There is no commission split with you and no cost to your client at any point. I get paid by charging a flat fee to the buyer at closing, and as long as you disclose this cost to them up front in the listing - they should be able to take that cost into account with their offer, and theres typically never any issue. Happy to go into more detail with you about your listing and the specifics of my fee and anything else whenever you have some time. Let me know when a good time to call is and I'll reach out. Thanks!";
+  return "I handle the lender side of the short sale, including the paperwork, calls, follow-up, and negotiations through approval. It takes that work off your plate so you can focus on the listing and your client.";
+}
+
+function isDirectHelpRequestSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /^(?:actually[, ]+)?(?:i|we)\s+(?:do\s+)?need\s+(?:some\s+)?help[.!?]*$/.test(t) ||
+    /\b(?:i|we)\s+(?:(?:do\s+)?need|would\s+love|could\s+use|can\s+use)\s+(?:some\s+)?help\b/.test(t);
+}
+
+function isOfferSubmissionConfusionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /\b(?:please\s+)?submit\s+(?:an?|the|my|our)\s+offer\b/.test(t) ||
+    /\b(?:can|could|will|would)\s+you\s+submit\s+(?:an?|the|my|our)\s+offer\b/.test(t) ||
+    /\bsubmit\s+(?:it|this)\s+to\s+(?:the\s+)?(?:seller|listing agent|agent)\b/.test(t);
+}
+
+function lastOutboundWasOfferScopeClarification_(rowObj) {
+  const t = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || "").toLowerCase());
+  return t.indexOf("i don't represent a buyer or submit offers") !== -1;
 }
 
 function isMissedCallOrAlternateNumberSignal_(text) {
@@ -2435,7 +3122,10 @@ function isSmsReactionToLastOutbound_(text, rowObj) {
 
 function isFinalCourtesyReply_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase())
-    .replace(/(?:[\s.!?]+|[\u2600-\u27bf]|\ud83c[\udc00-\udfff]|\ud83d[\udc00-\udfff]|\ud83e[\udd00-\udfff])+$/g, "");
+    .replace(/(?:[\s.!?]+|[\u2600-\u27bf]|\ud83c[\udc00-\udfff]|\ud83d[\udc00-\udfff]|\ud83e[\udd00-\udfff])+$/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
   const patterns = [
     /^thanks$/,
@@ -2455,6 +3145,9 @@ function isFinalCourtesyReply_(text) {
     /^thanks so much$/,
     /^ok thank you$/,
     /^okay thank you$/,
+    /^thank you i appreciate it$/,
+    /^thanks i appreciate it$/,
+    /^thank you appreciate it$/,
     /^thank you!$/,
     /^thanks!$/,
     /^👍$/,
@@ -2632,7 +3325,7 @@ function isClientConsultationInterestSignal_(text) {
 }
 
 function buildClientConsultationInterestReply_() {
-  return "Absolutely. I can handle the entire short sale process for you and your client - all the paperwork, lender calls, follow-up, and negotiations needed to get the file approved. There's no cost to you or the seller. I'm happy to speak with either of you whenever it works for you.";
+  return "That makes sense. I handle the lender paperwork, calls, follow-up, and negotiations through approval, with no fee to you or the seller. I'm happy to speak with either of you whenever you're ready.";
 }
 
 function isExistingCrispRelationshipSignal_(text) {
@@ -2640,7 +3333,8 @@ function isExistingCrispRelationshipSignal_(text) {
   if (!t) return false;
 
   const directRelationshipPatterns = [
-    /\b(?:i|we)(?:['\u2019]m| am|['\u2019]re| are)?\s+(?:already|currently)\s+(?:working|set\s*up|signed\s*up|registered)\s+with\s+(?:you|yoni|crisp(?: short sales?)?)\b/,
+    /\b(?:i|we)(?:['\u2019]m| am|['\u2019]re| are)?\s+(?:already|currently)\s+(?:work|working|set\s*up|signed\s*up|registered)\s+with\s+(?:you|yoni|crisp(?: short sales?)?|kristina|lexi)\b/,
+    /\b(?:i|we)(?:['\u2019]m| am|['\u2019]re| are)?\s+(?:already|currently)?\s*(?:work|working)\s+with\s+(?:kristina|lexi)(?:\s+and\s+(?:kristina|lexi))?\b/,
     /\b(?:i|we)\s+(?:already\s+)?(?:have|use)\s+(?:an?\s+)?(?:active|existing)?\s*crisp(?: short sales?)?\s+(?:portal|account)\b/,
     /\b(?:already|currently)\s+(?:an?\s+)?crisp(?: short sales?)?\s+(?:client|customer)\b/,
     /\b(?:already|currently)\s+(?:an?\s+)?(?:client|customer)\s+(?:of|with)\s+crisp(?: short sales?)?\b/,
@@ -2707,7 +3401,7 @@ function isExperienceTrackRecordQuestionSignal_(text) {
 
   const unsupportedPerformanceQuestion = [
     /\b(?:success|approval|approved|close|closing|conversion)\s+rate\b/,
-    /\bwhat\s+(?:percent|percentage)\b/,
+    /\bwhat\s+(?:percent|percentage)\b.{0,60}\b(?:success|approval|approved|close|closing|conversion|deals?|files?)\b/,
     /\bhow\s+often\b.*\b(?:approve|approved|approval|close|closing|success|successful)\b/,
     /\bhow\s+(?:long|fast)\b.*\b(?:approval|approved|approve|close|closing|process|take|takes|timeline)\b/,
     /\b(?:average|typical)\b.*\b(?:time|timeline|approval|close|closing|days|weeks|months)\b/
@@ -2727,11 +3421,11 @@ function isExperienceTrackRecordQuestionSignal_(text) {
 }
 
 function buildExperienceTrackRecordReply_() {
-  return "I've been doing this for over 15 years, and this is really all I do - help agents and homeowners with the short sale process. I'm confident I can help you and your clients with these deals and get them to closing as quickly as possible. Do you have some time today for a quick call so I can answer any questions you have?";
+  return "I've focused on short sales for more than 15 years, helping agents and homeowners through the process. I'm happy to talk through my experience and your listing on a quick call.";
 }
 
 function buildShortSaleTimelineReply_() {
-  return "The short sale process generally takes 60-90 days to complete from the point we submit the full short sale package and offer and all docs until the lender reviews the offer and gives us a decision.";
+  return "A complete short-sale package and offer often takes about 60-90 days for a lender decision, though timing varies by lender and lien complexity.";
 }
 
 function isShortSaleTimelineQuestionSignal_(text) {
@@ -2753,7 +3447,7 @@ function isUnsupportedPerformanceStatsQuestionSignal_(text) {
   if (!t) return false;
   const patterns = [
     /\b(?:success|approval|approved|close|closing|conversion)\s+rate\b/,
-    /\bwhat\s+(?:percent|percentage)\b/,
+    /\bwhat\s+(?:percent|percentage)\b.{0,60}\b(?:success|approval|approved|close|closing|conversion|deals?|files?)\b/,
     /\b(?:your|the)\s+(?:stats?|statistics|numbers)\b/,
     /\bhow\s+often\b.{0,80}\b(?:approve|approved|approval|close|closing|success|successful)\b/,
     /\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|approvals?|closings?|transactions?)\b/
@@ -2795,21 +3489,23 @@ function lastOutboundWasYoniNameAndNumberReply_(rowObj) {
 }
 
 function buildLocalQuestionReply_(rowObj) {
-  const stateRaw = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.state] || "")).toUpperCase();
-  const stateNames = { TX: "Texas", FL: "Florida", GA: "Georgia", CA: "California", CO: "Colorado", AZ: "Arizona", NC: "North Carolina", SC: "South Carolina", TN: "Tennessee", VA: "Virginia", WA: "Washington", HI: "Hawaii", MI: "Michigan", AK: "Alaska" };
-  const stateName = stateNames[stateRaw] || "";
-  const stateSentence = stateName ? " I have a lot of experience working in " + stateName + "." : "";
-  return "I'm actually located in Atlanta, GA but work all over the country. The short sale process is the same everywhere and the banks are located throughout the country as well." + stateSentence;
+  return "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.";
 }
 
 function isContactCardRequestSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const patterns = [
-    /\b(?:send|share|text|email)\b.*\b(?:business\s+card|contact\s+card|contact\s+info|vcard)\b/,
+    /\b(?:send|share|text|email)\b.*\b(?:business\s+card|contact\s+card|vcard)\b/,
     /\b(?:business\s+card|contact\s+card|vcard)\b/,
-    /\bcontact\s+information\b/
   ];
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isPlainContactInfoRequestSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || isContactCardRequestSignal_(t)) return false;
+  return /\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details)\b/.test(t) ||
+    /\b(?:send|share|give|text)\b.{0,40}\b(?:contact\s+info|contact\s+information)\b/.test(t);
 }
 function isSelfHandlingFutureHelpSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase()).replace(/\bmy\s+self\b/g, "myself");
@@ -2829,7 +3525,7 @@ function isCredentialQuestionSignal_(text) {
 }
 
 function buildCredentialQuestionReply_() {
-  return "No, I'm not an attorney. I specialize in helping agents and homeowners with the short sale process. I don't provide legal advice; title and the closing attorney handle the closing. I handle the process of obtaining the bank's approval of the deal.";
+  return "No, I'm not an attorney and I don't provide legal advice. I handle the lender-side short-sale process and negotiations needed for approval.";
 }
 
 function isNegotiatorRoleQuestionSignal_(text) {
@@ -2843,17 +3539,15 @@ function isNegotiatorRoleQuestionSignal_(text) {
 }
 
 function buildNegotiatorRoleQuestionReply_() {
-  return "Yes, essentially that's what I do. I handle the short sale process and negotiate with the lender to get the deal approved. Happy to explain it and answer any questions over the phone. Is there a good time for me to call?";
+  return "Yes, essentially. I handle the short-sale process and lender negotiations through approval; if you want, I can answer any questions on a quick call.";
 }
 
 function isAlreadyHandledSignal_(text) {
   if (isNegotiatorRoleQuestionSignal_(text)) return false;
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const patterns = [
-    /\blawyer\b/,
-    /\battorney\b/,
-    /\bnegotiator\b/,
-    /\bshort sale negotiator\b/,
+    /\b(?:my|our|the)\s+(?:lawyer|attorney|negotiator|short sale negotiator)\b/,
+    /\b(?:i|we)\s+(?:have|use|retained|hired|work with|are working with|already have)\s+(?:an?\s+)?(?:lawyer|attorney|negotiator|short sale negotiator)\b/,
     /\bwe have a negotiator\b/,
     /\bi have a negotiator\b/,
     /\bsigned agreement\b/,
@@ -2984,10 +3678,7 @@ function isShortSaleSourceQuestion_(text) {
 
   if (directPhrases.some(phrase => t.indexOf(phrase) !== -1)) return true;
 
-  const asksSource = t.indexOf("why") !== -1 || t.indexOf("where") !== -1 || t.indexOf("what") !== -1;
-  const sourceWords = ["think", "thought", "believe", "assume", "say", "said", "marked", "listed", "showing", "showed", "see", "saw", "find", "found", "get", "got"];
-
-  return asksSource && sourceWords.some(word => t.indexOf(word) !== -1);
+  return false;
 }
 
 function isImmediateCallSignal_(text) {
@@ -3279,7 +3970,9 @@ function normalizeAiDecision_(decision, existingStatus) {
   normalized.lead_status = coerceRespondedLeadStatus_(normalized.lead_status, existingStatus);
   normalized.lead_status = coerceSmsTextLeadStatus_(normalized.lead_status);
   normalized.conversation_done = !!normalized.conversation_done;
-  normalized.handoff_needed = !!normalized.handoff_needed || normalized.lead_status === "G" || !!normalized.needs_review;
+  normalized.alert_needed = !!normalized.alert_needed;
+  normalized.handoff_needed = !!normalized.handoff_needed || normalized.lead_status === "G" ||
+    !!normalized.needs_review || normalized.alert_needed;
   normalized.needs_review = !!normalized.needs_review;
   normalized.block_reply = !!normalized.block_reply;
   normalized.reply_text = typeof normalized.reply_text === "string" ? normalized.reply_text : "";
@@ -3384,6 +4077,44 @@ function buildManualHandoffDecision_(reason, handoffType) {
     block_reply: true,
     handoff_type: handoffType || "POTENTIAL BOT LOOP",
     reason: reason || "Manual follow-up needed"
+  };
+}
+
+function handleMaxRepliesHandoff_(sheet, row, rowObj, phoneRaw, inboundText) {
+  sendHandoffEmail_({
+    handoff_type: "MAX REPLIES REACHED",
+    agent_name: rowObj[HEADERS.agent_name] || "",
+    last_name: rowObj[HEADERS.last_name] || "",
+    initial_text: rowObj[HEADERS.initial_text_sent] || "",
+    phone: phoneRaw,
+    email: rowObj[HEADERS.email] || "",
+    listing_address: rowObj[HEADERS.listing_address] || "",
+    city: rowObj[HEADERS.city] || "",
+    state: rowObj[HEADERS.state] || "",
+    zip: rowObj[HEADERS.zip] || "",
+    last_message: inboundText,
+    history: getHistoryArray_(rowObj[HEADERS.history_json])
+  });
+
+  updateRowFields_(sheet, row, {
+    [HEADERS.response_status]: inboundText,
+    [HEADERS.mailshake_status]: "Y",
+    [HEADERS.conversation_summary]: "Max Replies Reached",
+    [HEADERS.ai_state]: "handoff",
+    [HEADERS.call_booking_status]: "interested_no_call",
+    [HEADERS.handoff_flag]: "TRUE",
+    [HEADERS.human_override]: "TRUE"
+  });
+
+  return {
+    ok: true,
+    should_reply: false,
+    reply_text: "",
+    lead_status: "Y",
+    conversation_done: false,
+    handoff_needed: true,
+    needs_review: false,
+    reason: "Max auto replies reached - handoff to Yoni"
   };
 }
 
@@ -3524,7 +4255,7 @@ function buildSystemPrompt_(rowObj) {
   return `
 You are texting as ${yourName}, who helps agents with short sale processing, lender negotiations, approvals, and getting deals to closing.
 
-You are not a chatbot. You are a real person texting.
+Write in Yoni's voice, but never claim that a physical action, call, email, location, language ability, or completed task happened unless the system context proves it.
 
 STYLE:
 - Match the tone of the agent
@@ -3538,6 +4269,9 @@ STYLE:
 - Never use bullet points
 - Never use em dashes
 - Never mention Calendly or any scheduling link
+- Default to no more than two short sentences and one call to action
+- Answer only what the agent asked; do not introduce fees, buyers, email, statistics, or scheduling unless relevant
+- Read the entire inbound message. A later direct question or expression of interest outranks an earlier self-handling or decline clause
 - Never claim to speak Spanish or reply in Spanish. If an agent asks whether I speak Spanish or writes in Spanish, reply in English: \"No, I'm sorry, I don't speak Spanish, but I'd still love to help if you think communicating in English would be possible.\"
 
 HOW TO RESPOND:
@@ -3571,22 +4305,19 @@ IMPORTANT BEHAVIOR:
 - If they give a callback time, keep your reply casual and short
 - If they give a time window, it is okay to suggest a time inside that window
 - If they ask for a website, link, agency info, or where to learn more, give the clean URL exactly as "https://www.crispshortsales.com" and add one short credibility line about Google reviews. Do not add spaces inside the URL.
-- If they ask if you are local, say you are based in Atlanta, work nationwide, and mention relevant state experience if it is obvious from the listing or conversation
+- If they ask if you are local, say you are based in Atlanta and work nationwide. Do not claim state-specific experience unless it is explicitly provided in system context.
 - If they say they are handling it themselves but are willing to review what you have to offer, explain the service directly in the text and ask for a quick call
 - If they say the offer was accepted and ask what you do or how you help, congratulate them briefly, ask whether the short sale still needs lender approval, explain that I can handle the approval and closing work, and end with: \"Let me know if you want to find a time to talk it over.\"
 - Never say \"Want me to take the file?\" or ask whether I should take the file; that is not how \${yourName} talks
-- In that situation, explain that you can handle the entire short sale process including paperwork, phone calls, lender approval work, difficult title situations, and that there is no commission split or cost to their client
-- If they ask "How do you help?" or anything similar about what you actually do, explain that you handle the entire short sale process including the paperwork, the phone calls, and everything needed to get the deal approved
-- In that situation, explain that it is free to the agent and seller, there is no commission split, you charge a flat fee to the buyer at closing, and as long as that cost is disclosed up front in the listing there is typically never any issue
-- End that kind of reply by inviting them to pick a time for a call so you can go into the listing specifics and the fee in more detail
+- If they ask "How do you help?" or anything similar, explain only that you handle the lender-side paperwork, calls, follow-up, and negotiations through approval. Do not discuss payment unless they also ask about it.
 - The goal of the conversation is always to move toward a phone conversation with ${yourName} when appropriate
 - If a conversation needs manual follow-up from ${yourName}, do not send a text reply to the agent
 - In any manual handoff situation, leave reply_text empty, set block_reply = true, and let ${yourName} take over
 - If they ask whether this is AI, a bot, automated, actually your phone, or whether they are texting a real person, do not reply
 - In that situation, set handoff_needed = true, block_reply = true, leave reply_text empty, and let ${yourName} respond personally
 - If they sound open to future short-sale negotiation help, distressed-property support, or future work together, treat it as an interested lead, answer naturally, and ask for a time to talk
-- If they say they already have the current file handled but ask for your information, fee, or what you offer for future short sales, do not close them out and do not go silent
-- In that situation, explain the flat-fee buyer-paid structure briefly and ask if they want to find a time later that week to talk
+- If they already have the current file handled but ask for information, a fee, or what I offer for future short sales, answer the specific question they asked
+- Explain payment only when they explicitly ask about fee, cost, price, percentage, or how I get paid
 - If they say they want to hop on a call or are interested in learning more by phone, set handoff_needed = true and do not reply so ${yourName} can respond personally
 - If they give an immediate live window like "I'm free now", "available now", or "anytime now until 2", set handoff_needed = true and do not reply so ${yourName} can take over
 - If they say they will reconnect only after they get, find, or secure a buyer and make no present request, briefly confirm that they can reach out then and close as warm future interest without a handoff
@@ -3597,16 +4328,17 @@ IMPORTANT BEHAVIOR:
 - Never offer to send buyers, buyer leads, potential buyers, or anyone interested in the property
 - If they mention buyers but they already have help in place, ignore the buyer comment and just close out politely
 - Do not ask for their email address and do not offer to email or text materials unless they specifically ask for your info by email and no email address is available yet
-- Even if a front desk person or gatekeeper replies, thank them briefly and ask for a good time for ${yourName} to call the agent directly
+- If a front desk person or gatekeeper replies, say: "Thanks, I appreciate it. Please have the agent text me here if they'd like to talk."
 - If anyone asks ${yourName} to meet in person, drop by the office, or come by the office, do not respond with availability and do not set the meeting yourself
 - In that situation, set handoff_needed = true, block_reply = true, and let ${yourName} respond manually
 - If they send an email address or ask you to email them info and the email address is available in the message or row, reply exactly: "Sure, no problem."
 - If they ask you to email them info and no email address is available yet, reply exactly: "sure, no problem. What is your email?"
-- If they ask what you charge, what percentage you get, or how the fee works, say this and do not improvise numbers:
-  "There is no cost to you or the seller in this deal. We get paid by the buyer at closing, and charge a flat fee for our service. As long as you disclose this cost up front in the listing - the buyer should be able to take that into account with their offer price and then theres usually never any issue. If you want, we can hop on a quick call and ill explain all the specifics to you."
+- For the first fee/payment question, explain that there is no fee to the agent or seller and Crisp charges the buyer a flat fee at closing only if the deal closes.
+- If they ask the amount again after that answer, state that the buyer-paid fee is $5,000 at closing.
+- If they negotiate the fee, request a discount, or keep pressing after the $5,000 answer, hand off without another bot reply.
 - Never mention 1%, fee ranges, commission split percentages, or any made-up pricing details
 - If they ask how long I have handled short sales, how much experience I have, how many short sales I have handled, or what my track record is, answer with the approved 15-plus-year experience response and invite a quick call. Do not treat that as a rejection or a stats handoff.
-- For any short-sale timeline question, reply exactly: "The short sale process generally takes 60-90 days to complete from the point we submit the full short sale package and offer and all docs until the lender reviews the offer and gives us a decision."
+- For any short-sale timeline question, reply exactly: "A complete short-sale package and offer often takes about 60-90 days for a lender decision, though timing varies by lender and lien complexity."
 - Never provide or invent success rates, approval rates, close rates, closing rates, percentages, averages, or other unapproved performance stats beyond that approved timeline
 - If they ask for a success rate, approval rate, close rate, percentage, or another unapproved performance statistic, set handoff_needed = true, block_reply = true, leave reply_text empty, and let ${yourName} answer personally. If a message mixes a timeline question with one of those unsupported performance questions, hand it off rather than answering only part of it.
 - Do not estimate, approximate, say "roughly", or include unsupported numeric claims
@@ -3772,7 +4504,7 @@ function sanitizeReplyCallPromise_(replyText) {
   }
 
   if (/(?:^|\b)(calling you now|i'?ll call you now|i will call you now|i'?ll call your cell now|i will call your cell now|talk in a sec)(?:\b|[.!?])/i.test(text)) {
-    return "Ok great, will give you a call shortly.";
+    return "Perfect, thanks.";
   }
 
   return text;
@@ -3844,6 +4576,10 @@ function sanitizeReplyPhoneOnlyCta_(replyText) {
   }
 
   if (/^thanks for sending your email[.!]?$/i.test(text)) {
+    return text;
+  }
+
+  if (/\b(?:what(?:'s| is)|which is)\s+(?:the\s+)?best email\b|\bwhat(?:'s| is) your email\b/i.test(text)) {
     return text;
   }
 
@@ -4136,7 +4872,7 @@ Full Convo:
 ${historyText}
 `.trim();
 
-  MailApp.sendEmail({
+  return queueHandoffEmailV11_({
     to: toEmail,
     subject: subject,
     body: body
@@ -4157,7 +4893,7 @@ function shouldSendInfoEmail_(ruleResult, decision) {
 }
 
 function getInfoEmailAcknowledgementReply_() {
-  return "Absolutely, I'll put some information together and email it over. I'd also be happy to talk whenever you have time.";
+  return "Thanks, I have your email.";
 }
 
 function isInfoEmailApprovalRequired_() {
@@ -4647,6 +5383,149 @@ function jsonOutput_(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+function testSmsIntentContractV3_() {
+  const baseRow = {};
+  baseRow[HEADERS.mailshake_status] = "N";
+  baseRow[HEADERS.history_json] = "[]";
+  baseRow[HEADERS.last_outbound_text] = "";
+  baseRow[HEADERS.ai_state] = "active";
+  baseRow[HEADERS.call_booking_status] = "";
+
+  const cases = [];
+  function record(name, passed, details) {
+    cases.push({ name: name, passed: !!passed, details: details || "" });
+  }
+
+  const compound = applyFastRules_(
+    "I already have someone. What do you do, where are you located, and what is your fee?",
+    baseRow
+  );
+  record(
+    "safe_compound_gets_bounded_answer",
+    compound.matched && !compound.handoff_needed &&
+      compound.reply_text.indexOf("Atlanta") !== -1 &&
+      compound.reply_text.indexOf("lender-side") !== -1 &&
+      compound.reply_text.indexOf("flat fee") !== -1,
+    compound.reason
+  );
+
+  const firstFee = applyFastRules_("What do you charge?", baseRow);
+  record(
+    "fee_tier_one",
+    firstFee.matched && !firstFee.handoff_needed &&
+      firstFee.reply_text.indexOf("flat fee") !== -1 &&
+      firstFee.reply_text.indexOf("$5,000") === -1,
+    firstFee.reason
+  );
+
+  const feeRow = Object.assign({}, baseRow);
+  feeRow[HEADERS.history_json] = JSON.stringify([{ role: "assistant", text: firstFee.reply_text }]);
+  const secondFee = applyFastRules_("Right, but how much is the fee exactly?", feeRow);
+  record(
+    "fee_tier_two",
+    secondFee.matched && !secondFee.handoff_needed && secondFee.reply_text.indexOf("$5,000") !== -1,
+    secondFee.reason
+  );
+
+  const negotiation = applyFastRules_("Can you match the $3,995 fee I pay now?", baseRow);
+  record(
+    "fee_negotiation_handoff",
+    negotiation.matched && negotiation.handoff_needed && negotiation.block_reply && !negotiation.reply_text,
+    negotiation.reason
+  );
+
+  const selfHandler = applyFastRules_(
+    "I am handling it myself, but could you explain some more details?",
+    baseRow
+  );
+  record(
+    "self_handler_question",
+    selfHandler.matched && selfHandler.lead_status === "Y" &&
+      selfHandler.reply_text.indexOf("lender side of the short sale") !== -1,
+    selfHandler.reason
+  );
+
+  const source = applyFastRules_("Why did you think it was a short sale?", baseRow);
+  record(
+    "short_sale_source",
+    source.matched && source.lead_status === "R" &&
+      source.reply_text.indexOf("marked online") !== -1,
+    source.reason
+  );
+
+  const futureInterest = applyFastRules_(
+    "I have these handled, but future short sales are stacking up and I am interested in what you have to say.",
+    baseRow
+  );
+  record(
+    "future_interest_not_source_question",
+    futureInterest.matched && futureInterest.lead_status !== "R" &&
+      futureInterest.reply_text.indexOf("marked online") === -1,
+    futureInterest.reason
+  );
+
+  const reviewOffer = applyFastRules_(
+    "I am handling it myself, but I am willing to review what you offer.",
+    baseRow
+  );
+  record(
+    "review_offer_not_website_reviews",
+    reviewOffer.matched && reviewOffer.reply_text.indexOf("crispshortsales.com") === -1 &&
+      reviewOffer.reply_text.indexOf("lender") !== -1,
+    reviewOffer.reason
+  );
+
+  const feePercent = applyFastRules_("What percentage do you collect? My current company takes 1%.", baseRow);
+  record(
+    "fee_percentage_not_performance_stats",
+    feePercent.matched && !feePercent.handoff_needed && feePercent.reply_text.indexOf("flat fee") !== -1,
+    feePercent.reason
+  );
+
+  const coveredExperience = applyFastRules_(
+    "I already have help, but how long have you been doing short sales?",
+    baseRow
+  );
+  record(
+    "covered_experience_preserves_o",
+    coveredExperience.matched && coveredExperience.lead_status === "O" &&
+      coveredExperience.conversation_done === true,
+    coveredExperience.reason
+  );
+
+  const coveredTimeline = applyFastRules_(
+    "I already have help, but how long does the process take?",
+    baseRow
+  );
+  record(
+    "covered_timeline_preserves_o",
+    coveredTimeline.matched && coveredTimeline.lead_status === "O" &&
+      coveredTimeline.conversation_done === true,
+    coveredTimeline.reason
+  );
+
+  const directHelp = applyFastRules_("I need help", baseRow);
+  record(
+    "direct_help_acknowledges_and_hands_off",
+    directHelp.matched && directHelp.handoff_needed && !directHelp.block_reply &&
+      directHelp.reply_text.indexOf("love to help") !== -1,
+    directHelp.reason
+  );
+
+  const submitOffer = applyFastRules_("Please submit an offer", baseRow);
+  record(
+    "offer_submission_scope_guard",
+    submitOffer.matched && !submitOffer.handoff_needed &&
+      submitOffer.reply_text.indexOf("don't represent a buyer") !== -1,
+    submitOffer.reason
+  );
+
+  return {
+    ok: cases.every(function(item) { return item.passed; }),
+    cases: cases
+  };
 }
 
 function testIncomingSmsManual() {
