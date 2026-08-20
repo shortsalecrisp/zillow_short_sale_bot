@@ -1636,7 +1636,12 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             },
         )
 
-        result = pilot.site_chrome_exclusion_shadow(candidate)
+        with mock.patch.object(
+            pilot,
+            "SITE_CHROME_SHADOW_DOMAINS",
+            {"nexusrealtync.com"},
+        ):
+            result = pilot.site_chrome_exclusion_shadow(candidate)
 
         self.assertTrue(result["current_ready"])
         self.assertTrue(result["platform_targeted"])
@@ -1666,7 +1671,12 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             },
         )
 
-        result = pilot.site_chrome_exclusion_shadow(candidate)
+        with mock.patch.object(
+            pilot,
+            "SITE_CHROME_SHADOW_DOMAINS",
+            {"nexusrealtync.com"},
+        ):
+            result = pilot.site_chrome_exclusion_shadow(candidate)
 
         self.assertTrue(result["listing_description_short_sale_confirmed"])
         self.assertTrue(result["proposed_ready"])
@@ -1692,12 +1702,52 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             },
         )
 
-        result = pilot.site_chrome_exclusion_shadow(candidate)
+        with mock.patch.object(
+            pilot,
+            "SITE_CHROME_SHADOW_DOMAINS",
+            {"nexusrealtync.com"},
+        ):
+            result = pilot.site_chrome_exclusion_shadow(candidate)
 
         self.assertFalse(result["platform_targeted"])
         self.assertTrue(result["site_chrome_pattern_found"])
         self.assertTrue(result["proposed_ready"])
         self.assertFalse(result["would_hold"])
+        self.assertEqual(result["writes"], 0)
+
+    def test_site_chrome_shadow_holds_bishop_navigation_phrase(self):
+        navigation = (
+            "Home Buying Process How Much House Can I Afford? Buyer Resource Videos "
+            "8 Steps to Buying a Home Financing Options Short Sale Option "
+            "Selecting Your Real Estate Agent CRS Sellers"
+        )
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://www.bishopcountry.com/1704-langford-street",
+            title="1704 Langford Street Greenville, TX 75401 -- MLS# 21231320",
+            text=(
+                "Property Description. Completely remodeled and move-in ready. "
+                f"{navigation}"
+            ),
+            fields={
+                "listing_address": "1704 Langford Street",
+                "city": "Greenville",
+                "state": "TX",
+                "home_status": "FOR_SALE",
+                "listing_description": navigation,
+            },
+        )
+
+        result = pilot.site_chrome_exclusion_shadow(candidate)
+
+        self.assertTrue(result["current_ready"])
+        self.assertTrue(result["platform_targeted"])
+        self.assertTrue(result["navigation_pattern_found"])
+        self.assertTrue(result["listing_description_is_navigation"])
+        self.assertFalse(result["listing_description_short_sale_confirmed"])
+        self.assertTrue(result["would_hold"])
+        self.assertEqual(result["reason"], "site_chrome_short_sale_navigation_only")
         self.assertEqual(result["writes"], 0)
 
     def test_compound_negative_shadow_holds_foreclosure_short_sale_no(self):
@@ -2788,6 +2838,55 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(reread["stopped"])
         self.assertEqual(reread["stop_reason"], "first_access_control_concern")
 
+    def test_source_durability_state_save_failure_is_nonfatal_and_observable(self):
+        events = []
+        with mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ), mock.patch("free_short_sale_source_pilot.os.makedirs", side_effect=PermissionError("denied")):
+            saved = pilot.save_source_durability_state(
+                {"version": 1, "candidates": []},
+                "/unwritable/audit.json",
+            )
+
+        self.assertFalse(saved)
+        event, details = events[-1]
+        self.assertEqual(event, "pilot_source_durability_state_unconfirmed")
+        self.assertEqual(details["reason"], "state_write_failed")
+        self.assertEqual(details["lead_data_writes"], 0)
+        self.assertEqual(details["searches"], 0)
+        self.assertEqual(details["sends"], 0)
+
+    def test_source_durability_audit_marks_missing_state_unconfirmed(self):
+        events = []
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_source_durability_audit(
+                run_date=dt.date(2026, 8, 21),
+                force=True,
+                state_path=os.path.join(directory, "missing.json"),
+            )
+
+        self.assertEqual(stats["state_unconfirmed"], 1)
+        missing_event = next(
+            details
+            for event, details in events
+            if event == "pilot_source_durability_state_unconfirmed"
+        )
+        self.assertEqual(missing_event["reason"], "state_missing")
+        done_event = next(
+            details
+            for event, details in events
+            if event == "pilot_source_durability_audit_done"
+        )
+        self.assertEqual(done_event["lead_data_writes"], 0)
+        self.assertEqual(done_event["searches"], 0)
+        self.assertEqual(done_event["sends"], 0)
+
     def test_canonical_id_audit_reads_named_verifier_evidence_from_sheet1_z(self):
         pilot_rows = [
             pilot.PILOT_HEADERS,
@@ -3046,6 +3145,18 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot,
             "log_event",
             side_effect=lambda event, **details: events.append((event, details)),
+        ), mock.patch.object(
+            pilot,
+            "SITE_CHROME_SHADOW_START_DATE",
+            "2026-08-08",
+        ), mock.patch.object(
+            pilot,
+            "SITE_CHROME_SHADOW_MAX_PER_RUN",
+            100,
+        ), mock.patch.object(
+            pilot,
+            "SITE_CHROME_SHADOW_DOMAINS",
+            {"nexusrealtync.com"},
         ):
             stats = pilot.run_linkage_and_suffix_audits(
                 "token",
@@ -3066,6 +3177,77 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(all(event["writes"] == 0 for event in shadow_events))
         self.assertTrue(
             all(event["comparison_window_days"] == 7 for event in shadow_events)
+        )
+
+    def test_site_chrome_shadow_stops_after_ten_target_domain_candidates(self):
+        prior_rows = [
+            self.pilot_row(
+                listing_address=f"{index + 1} Prior Street",
+                state="TX",
+                first_seen_at="2026-08-20T07:15:00-04:00",
+                source_url=f"https://www.bishopcountry.com/prior/{index}",
+            )
+            for index in range(10)
+        ]
+        navigation = (
+            "Financing Options Short Sale Option Selecting Your Real Estate Agent"
+        )
+        payload = {
+            "zpid": "free-bishop-next",
+            "street": "1704 Langford Street",
+            "city": "Greenville",
+            "state": "TX",
+            "homeStatus": "FOR_SALE",
+            "listing_description": navigation,
+        }
+        pilot_rows = [
+            pilot.PILOT_HEADERS,
+            *prior_rows,
+            self.pilot_row(
+                listing_address="1704 Langford Street",
+                city="Greenville",
+                state="TX",
+                first_seen_at="2026-08-21T07:15:00-04:00",
+                synthetic_zpid="free-bishop-next",
+                source_url="https://www.bishopcountry.com/1704-langford-street",
+                pending_queue_listing_json=json.dumps(payload),
+                description_excerpt=f"Status: Active. {navigation}",
+            ),
+        ]
+        events = []
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[[["listing_address", "state", "created-at"]], pilot_rows],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ), mock.patch.object(
+            pilot,
+            "SITE_CHROME_SHADOW_START_DATE",
+            "2026-08-20",
+        ), mock.patch.object(
+            pilot,
+            "SITE_CHROME_SHADOW_MAX_PER_RUN",
+            10,
+        ), mock.patch.object(
+            pilot,
+            "SITE_CHROME_SHADOW_DOMAINS",
+            {"bishopcountry.com"},
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 21),
+                phase="post_promotion",
+            )
+
+        self.assertEqual(stats["site_chrome_rows"], 0)
+        self.assertFalse(
+            any(event == "pilot_site_chrome_exclusion_shadow" for event, _ in events)
         )
 
     def test_compound_negative_shadow_is_capped_and_emits_zero_write_contract(self):

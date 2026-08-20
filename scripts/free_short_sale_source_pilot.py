@@ -376,7 +376,7 @@ SOURCE_DURABILITY_AUDIT_MIN_AGE_HOURS = max(
 )
 SOURCE_DURABILITY_AUDIT_STATE_PATH = os.getenv(
     "FREE_SOURCE_PILOT_SOURCE_DURABILITY_AUDIT_STATE_PATH",
-    "/var/data/seen/free_source_pilot_source_durability_audit.json",
+    "/tmp/free_source_pilot_source_durability_audit.json",
 ).strip()
 ROUTE_ALIAS_DEDUPE_SHADOW_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_ROUTE_ALIAS_DEDUPE_SHADOW_START_DATE",
@@ -428,7 +428,7 @@ DESCRIPTION_BLOCK_SHADOW_MAX_PER_RUN = max(
 )
 SITE_CHROME_SHADOW_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_START_DATE",
-    "2026-08-08",
+    "2026-08-20",
 ).strip()
 SITE_CHROME_SHADOW_DAYS = max(
     1,
@@ -436,13 +436,13 @@ SITE_CHROME_SHADOW_DAYS = max(
 )
 SITE_CHROME_SHADOW_MAX_PER_RUN = max(
     1,
-    int(os.getenv("FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_MAX_PER_RUN", "100")),
+    int(os.getenv("FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_MAX_PER_RUN", "10")),
 )
 SITE_CHROME_SHADOW_DOMAINS = {
     domain.strip().lower()
     for domain in os.getenv(
         "FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_DOMAINS",
-        "nexusrealtync.com",
+        "bishopcountry.com",
     ).split(",")
     if domain.strip()
 }
@@ -547,6 +547,12 @@ DESCRIPTION_BLOCK_TAXONOMY_NOISE_RE = re.compile(
 SITE_CHROME_SHORT_SALE_CARD_RE = re.compile(
     r"\bproperty\s+description\b\s*(?:\.{3}|\u2026)\s*"
     r"(?P<label>\bshort\s+sale\b)\s*[.!]?\s*\$\s*[\d,]+",
+    re.IGNORECASE,
+)
+
+SITE_CHROME_SHORT_SALE_NAVIGATION_RE = re.compile(
+    r"\b(?:financing\s+options?\s+)?(?P<label>short\s+sale\s+option)\s+"
+    r"selecting\s+your\s+real\s+estate\s+agent\b",
     re.IGNORECASE,
 )
 
@@ -1897,8 +1903,14 @@ def site_chrome_exclusion_shadow(candidate: Candidate) -> dict[str, Any]:
     domain = registered_domain(candidate.url)
     platform_targeted = domain in SITE_CHROME_SHADOW_DOMAINS
     description = normalize_space(candidate.fields.get("listing_description", ""))
-    description_confirmed = bool(SHORT_SALE_LISTING_RE.search(description))
-    chrome_match = SITE_CHROME_SHORT_SALE_CARD_RE.search(candidate.text)
+    navigation_match = SITE_CHROME_SHORT_SALE_NAVIGATION_RE.search(candidate.text)
+    description_is_navigation = bool(
+        navigation_match and SITE_CHROME_SHORT_SALE_NAVIGATION_RE.search(description)
+    )
+    description_confirmed = bool(
+        SHORT_SALE_LISTING_RE.search(description) and not description_is_navigation
+    )
+    chrome_match = SITE_CHROME_SHORT_SALE_CARD_RE.search(candidate.text) or navigation_match
     chrome_evidence = ""
     if chrome_match:
         chrome_evidence = excerpt_around(
@@ -1920,9 +1932,15 @@ def site_chrome_exclusion_shadow(candidate: Candidate) -> dict[str, Any]:
         "listing_description_present": bool(description),
         "listing_description_short_sale_confirmed": description_confirmed,
         "site_chrome_pattern_found": bool(chrome_match),
+        "navigation_pattern_found": bool(navigation_match),
+        "listing_description_is_navigation": description_is_navigation,
         "proposed_ready": bool(broad["proposed_ready"] and not would_hold),
         "would_hold": would_hold,
-        "reason": "site_chrome_short_sale_card_only" if would_hold else "",
+        "reason": (
+            "site_chrome_short_sale_navigation_only"
+            if would_hold and navigation_match
+            else "site_chrome_short_sale_card_only" if would_hold else ""
+        ),
         "evidence": chrome_evidence[:500],
         "writes": 0,
     }
@@ -2831,9 +2849,22 @@ def source_durability_audit_active(run_date: dt.date, force: bool = False) -> bo
     )
 
 
-def load_source_durability_state(path: str = SOURCE_DURABILITY_AUDIT_STATE_PATH) -> dict[str, Any]:
+def load_source_durability_state(
+    path: str = SOURCE_DURABILITY_AUDIT_STATE_PATH,
+    *,
+    missing_is_unconfirmed: bool = False,
+) -> dict[str, Any]:
     empty = {"version": 1, "candidates": [], "stopped": False, "stop_reason": ""}
     if not path or not os.path.exists(path):
+        if missing_is_unconfirmed:
+            empty["state_unconfirmed"] = True
+            log_event(
+                "pilot_source_durability_state_unconfirmed",
+                reason="state_missing",
+                lead_data_writes=0,
+                searches=0,
+                sends=0,
+            )
         return empty
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -2859,16 +2890,33 @@ def load_source_durability_state(path: str = SOURCE_DURABILITY_AUDIT_STATE_PATH)
 def save_source_durability_state(
     state: dict[str, Any],
     path: str = SOURCE_DURABILITY_AUDIT_STATE_PATH,
-) -> None:
-    if not path:
-        raise ValueError("source durability audit state path is empty")
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    temporary_path = f"{path}.tmp"
-    with open(temporary_path, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, sort_keys=True, separators=(",", ":"))
-    os.replace(temporary_path, path)
+) -> bool:
+    temporary_path = f"{path}.tmp" if path else ""
+    try:
+        if not path:
+            raise ValueError("source durability audit state path is empty")
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(temporary_path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, sort_keys=True, separators=(",", ":"))
+        os.replace(temporary_path, path)
+    except (OSError, ValueError, TypeError) as exc:
+        if temporary_path:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+        log_event(
+            "pilot_source_durability_state_unconfirmed",
+            reason="state_write_failed",
+            error=str(exc)[:220],
+            lead_data_writes=0,
+            searches=0,
+            sends=0,
+        )
+        return False
+    return True
 
 
 def observe_source_durability_candidate(
@@ -2990,10 +3038,12 @@ def run_source_durability_audit(
         "access_control_concerns": 0,
         "stopped": 0,
         "supported": 0,
+        "state_unconfirmed": 0,
     }
     if not source_durability_audit_active(run_date, force=force):
         return stats
-    state = load_source_durability_state(state_path)
+    state = load_source_durability_state(state_path, missing_is_unconfirmed=True)
+    stats["state_unconfirmed"] = int(bool(state.get("state_unconfirmed")))
     candidates = state.get("candidates", [])[:SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES]
     stats["selected"] = len(candidates)
     if state.get("stopped"):
@@ -3110,7 +3160,7 @@ def run_source_durability_audit(
         state["stop_reason"] = "fewer_than_7_of_10_exact_links_reviewable"
     if sample_complete and stats["primary_reviewable"] >= SOURCE_DURABILITY_AUDIT_MIN_REVIEWABLE:
         stats["supported"] = 1
-    save_source_durability_state(state, state_path)
+    state_saved = save_source_durability_state(state, state_path)
     log_event(
         "pilot_source_durability_audit_done",
         run_date=run_date.isoformat(),
@@ -3120,6 +3170,7 @@ def run_source_durability_audit(
         comparison_window_days=SOURCE_DURABILITY_AUDIT_DAYS,
         stop_condition="first_access_control_concern_or_any_lead_data_mutation_or_fewer_than_7_of_10_reviewable",
         exact_urls_retained_in_private_audit_state=True,
+        state_persistence_confirmed=state_saved,
         lead_data_writes=0,
         searches=0,
         sends=0,
@@ -4340,8 +4391,26 @@ def run_linkage_and_suffix_audits(
                 **shadow,
             )
     if site_chrome_shadow_active:
+        try:
+            site_chrome_start = dt.date.fromisoformat(SITE_CHROME_SHADOW_START_DATE)
+        except ValueError:
+            site_chrome_start = run_date
+        targeted_before_today = sum(
+            1
+            for _, prior_row in all_pilot_rows
+            if registered_domain(prior_row.get("source_url", "")) in SITE_CHROME_SHADOW_DOMAINS
+            and (
+                (prior_date := first_seen_date(prior_row.get("first_seen_at", "")))
+                is not None
+            )
+            and site_chrome_start <= prior_date < run_date
+        )
+        remaining_site_chrome_candidates = max(
+            0,
+            SITE_CHROME_SHADOW_MAX_PER_RUN - targeted_before_today,
+        )
         for pilot_sheet_row, pilot_row in all_pilot_rows:
-            if stats["site_chrome_rows"] >= SITE_CHROME_SHADOW_MAX_PER_RUN:
+            if stats["site_chrome_rows"] >= remaining_site_chrome_candidates:
                 break
             candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
             if candidate_date != run_date:
@@ -4351,9 +4420,10 @@ def run_linkage_and_suffix_audits(
                 continue
             candidate = candidate_from_pilot_row(dict(pilot_row), payload)
             shadow = site_chrome_exclusion_shadow(candidate)
+            if not shadow["platform_targeted"]:
+                continue
             stats["site_chrome_rows"] += 1
-            if shadow["platform_targeted"]:
-                stats["site_chrome_targeted"] += 1
+            stats["site_chrome_targeted"] += 1
             if shadow["would_hold"]:
                 stats["site_chrome_would_hold"] += 1
             log_event(
@@ -4365,8 +4435,9 @@ def run_linkage_and_suffix_audits(
                 address=pilot_row.get("listing_address", ""),
                 current_promotion_status=pilot_row.get("promotion_status", ""),
                 comparison_window_days=SITE_CHROME_SHADOW_DAYS,
+                experiment_candidate_number=targeted_before_today + stats["site_chrome_rows"],
                 hypothesis=(
-                    "targeted_site_card_short_sale_phrases_outside_the_property_description_"
+                    "targeted_site_chrome_short_sale_phrases_outside_the_property_description_"
                     "identify_false_qualification"
                 ),
                 success_metric="at_least_90pct_verifier_agreement_after_10_reviewable_cases",
@@ -5441,8 +5512,9 @@ def run(args: argparse.Namespace) -> None:
             )
 
     if durability_active:
+        state_saved = True
         if durability_state_dirty:
-            save_source_durability_state(durability_state)
+            state_saved = save_source_durability_state(durability_state)
         log_event(
             "pilot_source_durability_collection_done",
             run_date=run_date.isoformat(),
@@ -5451,7 +5523,8 @@ def run(args: argparse.Namespace) -> None:
                 SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES,
             ),
             max_candidates=SOURCE_DURABILITY_AUDIT_MAX_CANDIDATES,
-            state_updated=durability_state_dirty,
+            state_updated=durability_state_dirty and state_saved,
+            state_persistence_confirmed=state_saved,
             exact_urls_retained_in_private_audit_state=True,
             lead_data_writes=0,
             searches_added=0,

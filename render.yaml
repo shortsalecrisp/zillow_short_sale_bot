@@ -227,7 +227,7 @@ services:
       - key: FREE_SOURCE_PILOT_SOURCE_DURABILITY_AUDIT_MIN_AGE_HOURS
         value: "24"
       - key: FREE_SOURCE_PILOT_SOURCE_DURABILITY_AUDIT_STATE_PATH
-        value: /var/data/seen/free_source_pilot_source_durability_audit.json
+        value: /tmp/free_source_pilot_source_durability_audit.json
       - key: FREE_SOURCE_PILOT_DELIVERY_RECEIPT_AUDIT_START_DATE
         value: "2026-08-14"
       - key: FREE_SOURCE_PILOT_DELIVERY_RECEIPT_AUDIT_DAYS
@@ -239,13 +239,13 @@ services:
       - key: FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_HOUR
         value: "9"
       - key: FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_START_DATE
-        value: "2026-08-08"
+        value: "2026-08-20"
       - key: FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_DAYS
         value: "7"
       - key: FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_MAX_PER_RUN
-        value: "100"
+        value: "10"
       - key: FREE_SOURCE_PILOT_SITE_CHROME_SHADOW_DOMAINS
-        value: nexusrealtync.com
+        value: bishopcountry.com
       - key: FREE_SOURCE_PILOT_COMPOUND_NEGATIVE_SHADOW_START_DATE
         value: "2026-08-09"
       - key: FREE_SOURCE_PILOT_COMPOUND_NEGATIVE_SHADOW_DAYS
