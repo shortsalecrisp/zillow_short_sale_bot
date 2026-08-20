@@ -9,6 +9,7 @@ UNIFIED = (ROOT / "apps_script" / "zz_unified_post.js").read_text(encoding="utf-
 def test_v10_routes_are_registered():
     for action in (
         "enqueue_incoming_sms",
+        "enqueue_initial_sms",
         "claim_pending_send",
         "send_started",
         "install_outbox_triggers",
@@ -179,6 +180,24 @@ def test_reply_history_uses_canonical_pending_text_after_transport_damage():
     assert "canonical_reply_text" in UNIFIED
     assert "handleReplySent_(canonicalReceiptBody)" in UNIFIED
     assert "markPendingSmsSendComplete_(canonicalReceiptBody)" in UNIFIED
+
+
+def test_initial_outreach_uses_durable_outbox_and_marks_crm_only_on_tasker_receipt():
+    server = (ROOT / "webhook_server.py").read_text(encoding="utf-8")
+    scheduler = (ROOT / "bot_min.py").read_text(encoding="utf-8")
+    assert '"action": "enqueue_initial_sms"' in server
+    assert '"status": "queued"' in server
+    send_source = server.split("def _send_initial_sms_from_payload", 1)[1].split("def ", 1)[0]
+    assert "send_with_diagnostics" not in send_source
+    assert "_mark_initial_sms_sent" not in send_source
+    assert "function enqueueInitialSmsV13_" in OUTBOX
+    assert "function applyInitialSmsReceiptV13_" in OUTBOX
+    assert 'send_kind === "initial_outreach"' in UNIFIED
+    assert 'send_kind: String(rows[matchIndex][6]' in UNIFIED
+    send_sms_source = scheduler.split("def send_sms(", 1)[1].split("def _within_initial_hours", 1)[0]
+    assert '"action": "enqueue_initial_sms"' in send_sms_source
+    assert "if not follow_up:" in send_sms_source
+    assert "mark_sent(" not in send_sms_source
 
 
 def test_reply_sent_crm_writeback_is_idempotent_by_receipt_identity():

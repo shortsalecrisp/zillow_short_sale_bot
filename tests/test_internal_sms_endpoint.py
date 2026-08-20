@@ -279,6 +279,26 @@ def _import_webhook_server(monkeypatch, *, sender_result):
 
     sys.modules.pop("webhook_server", None)
     module = importlib.import_module("webhook_server")
+    def fake_enqueue_initial_sms(*, row_idx, phone, message, mark_codex_verified):
+        fake_sender.calls.append(
+            {
+                "to": phone,
+                "message": message,
+                "sms_type": "initial",
+                "row_idx": row_idx,
+                "attempt": 1,
+            }
+        )
+        if not fake_sender.result.success:
+            raise module.HTTPException(status_code=502, detail="tasker_outbox_enqueue_failed")
+        return {
+            "ok": True,
+            "queued": True,
+            "request_id": f"render-initial-{row_idx}",
+            "message_id": f"initial-{row_idx}-test",
+            "pending_row": 10 + row_idx,
+        }
+    module._enqueue_initial_sms_via_tasker_outbox = fake_enqueue_initial_sms
     return module, sheet1, fake_sender
 
 
@@ -298,7 +318,7 @@ def test_internal_initial_sms_requires_token(monkeypatch):
     assert sender.calls == []
 
 
-def test_internal_initial_sms_sends_and_marks_sheet_after_gateway_ok(monkeypatch):
+def test_internal_initial_sms_queues_and_waits_for_tasker_receipt_before_marking_sheet(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True, status_code=200, response_text="OK"),
@@ -319,8 +339,8 @@ def test_internal_initial_sms_sends_and_marks_sheet_after_gateway_ok(monkeypatch
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "sent"
-    assert body["gateway_status"] == 200
+    assert body["status"] == "queued"
+    assert body["request_id"] == "render-initial-12"
     assert sender.calls == [
         {
             "to": "15551112212",
@@ -333,14 +353,11 @@ def test_internal_initial_sms_sends_and_marks_sheet_after_gateway_ok(monkeypatch
             "attempt": 1,
         }
     ]
-    assert sheet.rows[12][7] == "x"
-    assert sheet.rows[12][11] == (
-        "Hey Alex, this is Yoni Kutler with Crisp Short Sales. "
-        "I saw your short sale at 123 Main."
-    )
-    assert datetime.fromisoformat(sheet.rows[12][14]).tzinfo is not None
-    assert datetime.fromisoformat(sheet.rows[12][22]).tzinfo is not None
-    assert sheet.rows[12][42] == "x"
+    assert sheet.rows[12][7] == ""
+    assert sheet.rows[12][11] == ""
+    assert sheet.rows[12][14] == ""
+    assert sheet.rows[12][22] == ""
+    assert sheet.rows[12][42] == ""
 
 
 def test_internal_initial_sms_uses_street_only_payload_address(monkeypatch):
@@ -457,10 +474,10 @@ def test_internal_initial_sms_force_resend_allows_already_sent_row(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "sent"
+    assert response.json()["status"] == "queued"
     assert sender.calls[0]["row_idx"] == 14
     assert sheet.rows[14][7] == "x"
-    assert sheet.rows[14][42] == "x"
+    assert sheet.rows[14][42] == ""
 
 
 def test_internal_initial_sms_returns_already_verified_without_sending(monkeypatch):
@@ -495,10 +512,10 @@ def test_internal_initial_sms_sends_when_verified_but_not_marked_sent(monkeypatc
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "sent"
+    assert response.json()["status"] == "queued"
     assert sender.calls[0]["row_idx"] == 16
-    assert sheet.rows[16][7] == "x"
-    assert sheet.rows[16][22]
+    assert sheet.rows[16][7] == ""
+    assert sheet.rows[16][22] == ""
     assert sheet.rows[16][42] == "x"
 
 
@@ -585,11 +602,11 @@ def test_internal_initial_sms_deletes_later_duplicate_suppression_marker(monkeyp
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "sent"
+    assert body["status"] == "queued"
     assert body["deleted_duplicate_rows"] == [17]
     assert sender.calls[0]["row_idx"] == 12
-    assert sheet.rows[12][7] == "x"
-    assert sheet.rows[12][42] == "x"
+    assert sheet.rows[12][7] == ""
+    assert sheet.rows[12][42] == ""
     assert 17 not in sheet.rows
 
 

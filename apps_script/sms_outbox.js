@@ -266,6 +266,94 @@ function getPendingSmsHeaders_() {
   return SMS_PENDING_SEND_HEADERS_.slice();
 }
 
+function enqueueInitialSmsV13_(body, webhookRequestId) {
+  var phone = normalizePhone_(body && body.phone || "");
+  var replyText = normalizeWhitespace_(String(body && (body.reply_text || body.message) || ""));
+  var crmRow = Number(body && body.crm_row || body && body.row || 0);
+  var messageId = String(body && body.message_id || "").trim();
+  var requestId = String(body && body.request_id || webhookRequestId || Utilities.getUuid()).trim();
+  if (phone.length !== 10 || !replyText || !Number.isInteger(crmRow) || crmRow < 2 || !messageId) {
+    return { ok: false, queued: false, error: "Initial SMS requires phone, message, CRM row, and message ID" };
+  }
+
+  installSmsOutboxTriggers_();
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_pending_sends") || ss.insertSheet("sms_pending_sends");
+  ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
+  var metadata = "__initial_outreach__:" + JSON.stringify({
+    crm_row: crmRow,
+    mark_codex_verified: body.mark_codex_verified !== false
+  });
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return { ok: false, queued: false, retryable: true, error: "Initial SMS outbox is temporarily busy" };
+  }
+  try {
+    var rows = sheet.getLastRow() > 1
+      ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues()
+      : [];
+    for (var i = rows.length - 1; i >= 0; i--) {
+      if (String(rows[i][3] || "") !== messageId) continue;
+      var existingStatus = String(rows[i][1] || "");
+      if (["queued", "claimed", "send_started", "sent"].indexOf(existingStatus) !== -1) {
+        return {
+          ok: true,
+          queued: existingStatus !== "sent",
+          duplicate: true,
+          status: existingStatus,
+          request_id: String(rows[i][2] || ""),
+          message_id: messageId,
+          pending_row: i + 2
+        };
+      }
+    }
+    sheet.appendRow([
+      new Date(), "queued", requestId, messageId, phone, replyText, metadata,
+      "", new Date(), 0, "", "", "", "", "", "", "", crmRow, ""
+    ]);
+    return {
+      ok: true,
+      queued: true,
+      status: "queued",
+      request_id: requestId,
+      message_id: messageId,
+      pending_row: sheet.getLastRow()
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function applyInitialSmsReceiptV13_(body, correlation) {
+  var crmRow = Number(correlation && correlation.crm_row || 0);
+  var phone = normalizePhone_(correlation && correlation.canonical_phone || body && body.phone || "");
+  var message = String(correlation && correlation.canonical_reply_text || body && body.reply_text || "").trim();
+  if (!Number.isInteger(crmRow) || crmRow < 2 || phone.length !== 10 || !message) {
+    throw new Error("Initial SMS receipt is missing its CRM correlation");
+  }
+  var metadata = {};
+  try {
+    metadata = JSON.parse(String(correlation.send_metadata || "").replace(/^__initial_outreach__:/, ""));
+  } catch (_) {}
+  var sheet = getSheet_();
+  var currentPhone = normalizePhone_(sheet.getRange(crmRow, 3).getValue());
+  if (currentPhone !== phone) throw new Error("Initial SMS receipt CRM phone no longer matches");
+  var sentAtRaw = body && body.sent_at;
+  var sentAt = /^\d{10,}$/.test(String(sentAtRaw || ""))
+    ? new Date(Number(sentAtRaw))
+    : new Date(sentAtRaw || new Date());
+  if (isNaN(sentAt.getTime())) sentAt = new Date();
+  var updates = [
+    { range: "H" + crmRow, value: "x" },
+    { range: "W" + crmRow, value: sentAt },
+    { range: "L" + crmRow, value: message },
+    { range: "O" + crmRow, value: sentAt }
+  ];
+  if (metadata.mark_codex_verified !== false) updates.push({ range: "AQ" + crmRow, value: "x" });
+  updates.forEach(function(update) { sheet.getRange(update.range).setValue(update.value); });
+  return { ok: true, initial_sms: true, row: crmRow, sent_at: sentAt.toISOString() };
+}
+
 function enqueueIncomingSmsV10_(body, webhookRequestId) {
   var phone = normalizePhone_(body && body.phone || "");
   var message = normalizeWhitespace_(String(body && body.message || ""));
@@ -930,6 +1018,7 @@ function getPendingSmsStaleReason_(outboxRow) {
     return "Manual takeover is pending";
   }
   var messageId = String(outboxRow[3] || "");
+  var isInitialOutreach = String(outboxRow[6] || "").indexOf("__initial_outreach__:") === 0;
   var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);
   var sheet = getSheet_();
   var data = getSheetData_(sheet);
@@ -937,6 +1026,7 @@ function getPendingSmsStaleReason_(outboxRow) {
     var rowObj = data[i].obj;
     if (normalizePhone_(rowObj[HEADERS.phone]) !== phone) continue;
     if (String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
+    if (isInitialOutreach) return "";
     // Older ShortSaleLeads layouts do not have last_inbound_text. In that
     // layout, last_message_id remains the authoritative stale-reply guard.
     var hasInboundColumn = Object.prototype.hasOwnProperty.call(rowObj, HEADERS.last_inbound_text);

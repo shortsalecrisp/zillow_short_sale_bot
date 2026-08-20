@@ -13,6 +13,7 @@ function isUnifiedSmsAction_(action) {
   var smsActions = {
     incoming_sms: true,
     enqueue_incoming_sms: true,
+    enqueue_initial_sms: true,
     claim_pending_send: true,
     send_started: true,
     install_outbox_triggers: true,
@@ -170,6 +171,10 @@ function handleUnifiedSmsPost_(e) {
       return jsonOutput_(enqueueIncomingSmsV10_(body, requestId));
     }
 
+    if (action === "enqueue_initial_sms") {
+      return jsonOutput_(enqueueInitialSmsV13_(body, requestId));
+    }
+
     if (action === "claim_pending_send") {
       recordTaskerTransportActivityV12_("claim", body);
       return jsonOutput_(claimPendingSmsSendV10_(body));
@@ -248,7 +253,9 @@ function handleUnifiedSmsPost_(e) {
         phone: receiptCorrelation.canonical_phone || body.phone || "",
         reply_text: receiptCorrelation.canonical_reply_text || body.reply_text || ""
       });
-      var replySentResult = handleReplySent_(canonicalReceiptBody);
+      var replySentResult = receiptCorrelation.send_kind === "initial_outreach"
+        ? applyInitialSmsReceiptV13_(canonicalReceiptBody, receiptCorrelation)
+        : handleReplySent_(canonicalReceiptBody);
       if (typeof markPendingSmsSendComplete_ === "function") {
         markPendingSmsSendComplete_(canonicalReceiptBody);
       }
@@ -655,6 +662,11 @@ function validatePendingSmsSendReceipt_(body) {
     already_sent: String(rows[matchIndex][1] || "") === "sent",
     canonical_phone: normalizePhone_(rows[matchIndex][4]),
     canonical_reply_text: String(rows[matchIndex][5] || ""),
+    send_kind: String(rows[matchIndex][6] || "").indexOf("__initial_outreach__:") === 0
+      ? "initial_outreach"
+      : "bot_reply",
+    crm_row: Number(rows[matchIndex][17] || 0),
+    send_metadata: String(rows[matchIndex][6] || ""),
     correlation_mode: correlationMode
   };
 }

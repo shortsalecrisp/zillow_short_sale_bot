@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import html
+import hashlib
 import json
 import logging
 import os
@@ -505,6 +506,15 @@ if SMS_TEST_MODE:
     )
 SMS_PROVIDER      = os.getenv("SMS_PROVIDER", "android_gateway")
 SMS_SENDER        = get_sender(SMS_PROVIDER)
+SMS_CHATBOT_ALLOWED_TOKEN = (
+    os.getenv("SMS_CHATBOT_ALLOWED_TOKEN")
+    or os.getenv("GOOGLE_APPS_SCRIPT_TOKEN")
+    or os.getenv("CODEX_AUTOMATION_TOKEN", "")
+).strip()
+TASKER_TRANSPORT_HEALTH_URL = os.getenv(
+    "TASKER_TRANSPORT_HEALTH_URL",
+    "https://script.google.com/macros/s/AKfycbxkazqXh3kku3L9dVG2DkTqSt4BEIEg0z4kalAHPTeeNShrtlG8ZK5nKew9iM7rRBWK/exec",
+).strip()
 logging.info(
     "SMS config: enabled=%s provider=%s api_key_present=%s",
     SMS_ENABLE,
@@ -12592,6 +12602,52 @@ def send_sms(
     tasker_label_prefix = "TASKER_SEND_FOLLOWUP" if follow_up else "TASKER_SEND_INITIAL"
     max_attempts = SMS_RETRY_ATTEMPTS
 
+    if not follow_up:
+        if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
+            LOG.error("TASKER_INITIAL_OUTBOX_NOT_CONFIGURED row=%s phone=%s", row_idx, digits)
+            return
+        message_hash = hashlib.sha256(msg_txt.encode("utf-8")).hexdigest()[:16]
+        message_id = f"initial-{row_idx}-{message_hash}"
+        try:
+            response = requests.post(
+                TASKER_TRANSPORT_HEALTH_URL,
+                json={
+                    "token": SMS_CHATBOT_ALLOWED_TOKEN,
+                    "action": "enqueue_initial_sms",
+                    "row": row_idx,
+                    "crm_row": row_idx,
+                    "phone": digits,
+                    "message": msg_txt,
+                    "reply_text": msg_txt,
+                    "message_id": message_id,
+                    "request_id": f"scheduler-{message_id}",
+                    "mark_codex_verified": False,
+                },
+                timeout=20,
+            )
+            payload = response.json() if response.status_code == 200 else {}
+        except Exception:
+            LOG.exception("TASKER_INITIAL_OUTBOX_ENQUEUE_FAILED row=%s phone=%s", row_idx, digits)
+            return
+        if response.status_code != 200 or payload.get("ok") is not True:
+            LOG.error(
+                "TASKER_INITIAL_OUTBOX_ENQUEUE_REJECTED row=%s phone=%s http_status=%s response=%s",
+                row_idx,
+                digits,
+                response.status_code,
+                payload or response.text[:500],
+            )
+            return
+        LOG.info(
+            "TASKER_INITIAL_OUTBOX_QUEUED row=%s phone=%s request_id=%s message_id=%s pending_row=%s",
+            row_idx,
+            digits,
+            payload.get("request_id"),
+            payload.get("message_id"),
+            payload.get("pending_row"),
+        )
+        return
+
     for attempt in range(1, max_attempts + 1):
         LOG.info(
             "%s_ATTEMPT row=%s phone=%s type=%s attempt=%s",
@@ -12610,11 +12666,7 @@ def send_sms(
         )
 
         if result.success:
-            msg_id = ""
-            if follow_up:
-                sheet_updated = mark_followup(row_idx, msg_txt)
-            else:
-                sheet_updated = mark_sent(row_idx, msg_id, msg_txt)
+            sheet_updated = mark_followup(row_idx, msg_txt)
 
             if sheet_updated:
                 LOG.info(

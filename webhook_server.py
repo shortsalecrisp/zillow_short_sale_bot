@@ -78,6 +78,10 @@ SMS_CHATBOT_ALLOWED_TOKEN = (
 SMS_CHATBOT_DEBUG_TAB = os.getenv("SMS_CHATBOT_DEBUG_TAB", "sms_debug_log")
 SMS_CHATBOT_SEND_GUARD_TAB = os.getenv("SMS_CHATBOT_SEND_GUARD_TAB", "sms_send_guard")
 SMS_CHATBOT_REPLY_DELAY_SECONDS = int(os.getenv("SMS_CHATBOT_REPLY_DELAY_SECONDS", "30"))
+TASKER_TRANSPORT_HEALTH_URL = os.getenv(
+    "TASKER_TRANSPORT_HEALTH_URL",
+    "https://script.google.com/macros/s/AKfycbxkazqXh3kku3L9dVG2DkTqSt4BEIEg0z4kalAHPTeeNShrtlG8ZK5nKew9iM7rRBWK/exec",
+).strip()
 SMS_CHATBOT_OPENAI_MODEL = os.getenv("SMS_CHATBOT_OPENAI_MODEL", "gpt-5-mini")
 SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS = float(os.getenv("SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS", "25"))
 INITIAL_SMS_RETRY_ATTEMPTS = max(1, int(os.getenv("SMS_RETRY_ATTEMPTS", "3")))
@@ -3116,6 +3120,46 @@ def _mark_initial_sms_sent(
     return ts
 
 
+def _enqueue_initial_sms_via_tasker_outbox(
+    *, row_idx: int, phone: str, message: str, mark_codex_verified: bool
+) -> Dict[str, Any]:
+    if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
+        raise HTTPException(status_code=503, detail="tasker_outbox_not_configured")
+    message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+    message_id = f"initial-{row_idx}-{message_hash}"
+    try:
+        response = requests.post(
+            TASKER_TRANSPORT_HEALTH_URL,
+            json={
+                "token": SMS_CHATBOT_ALLOWED_TOKEN,
+                "action": "enqueue_initial_sms",
+                "row": row_idx,
+                "crm_row": row_idx,
+                "phone": phone,
+                "message": message,
+                "reply_text": message,
+                "message_id": message_id,
+                "request_id": f"render-{message_id}",
+                "mark_codex_verified": mark_codex_verified,
+            },
+            timeout=20,
+        )
+        payload = response.json() if response.status_code == 200 else {}
+    except Exception as exc:
+        logger.exception("INITIAL_SMS_OUTBOX_ENQUEUE_FAILED row=%s phone=%s", row_idx, phone)
+        raise HTTPException(status_code=502, detail=f"tasker_outbox_enqueue_failed:{type(exc).__name__}")
+    if response.status_code != 200 or payload.get("ok") is not True:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "status": "tasker_outbox_enqueue_failed",
+                "http_status": response.status_code,
+                "response": payload or response.text[:500],
+            },
+        )
+    return payload
+
+
 def _row_is_duplicate_phone_suppression(row: List[str]) -> bool:
     return _row_value(row, 24).lower() == "duplicate_phone_suppressed" or (
         "duplicate phone suppressed" in _row_value(row, 25).lower()
@@ -3304,60 +3348,28 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not message:
         raise HTTPException(status_code=400, detail="empty_message")
 
-    final_result = None
-    for attempt in range(1, INITIAL_SMS_RETRY_ATTEMPTS + 1):
-        final_result = SMS_SENDER.send_with_diagnostics(
-            digits,
-            message,
-            sms_type="initial",
-            row_idx=row_idx,
-            attempt=attempt,
-        )
-        if final_result.success:
-            break
-        if attempt < INITIAL_SMS_RETRY_ATTEMPTS:
-            time.sleep(2)
-
-    if not final_result or not final_result.success:
-        logger.error(
-            "INTERNAL_INITIAL_SMS_FAILED row=%s phone=%s http_status=%s response_body=%s exception_type=%s exception_message=%s",
-            row_idx,
-            digits,
-            getattr(final_result, "status_code", None),
-            getattr(final_result, "response_text", "") or "<empty>",
-            getattr(final_result, "exception_type", ""),
-            getattr(final_result, "exception_message", ""),
-        )
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "status": "gateway_failed",
-                "gateway_status": getattr(final_result, "status_code", None),
-                "gateway_response": getattr(final_result, "response_text", ""),
-            },
-        )
-
-    sent_at = _mark_initial_sms_sent(
-        ws,
+    queued = _enqueue_initial_sms_via_tasker_outbox(
         row_idx=row_idx,
+        phone=digits,
         message=message,
         mark_codex_verified=mark_codex_verified,
     )
     logger.info(
-        "INTERNAL_INITIAL_SMS_SENT row=%s phone=%s http_status=%s response_body=%s codex_verified=%s",
+        "INTERNAL_INITIAL_SMS_QUEUED row=%s phone=%s request_id=%s message_id=%s codex_verified=%s",
         row_idx,
         digits,
-        final_result.status_code,
-        final_result.response_text or "<empty>",
+        queued.get("request_id"),
+        queued.get("message_id"),
         mark_codex_verified,
     )
     return {
-        "status": "sent",
+        "status": "queued",
         "row": row_idx,
         "phone": digits,
-        "sent_at": sent_at,
-        "gateway_status": final_result.status_code,
-        "gateway_response": final_result.response_text,
+        "request_id": queued.get("request_id"),
+        "message_id": queued.get("message_id"),
+        "pending_row": queued.get("pending_row"),
+        "duplicate": bool(queued.get("duplicate")),
         "codex_verified": mark_codex_verified,
         "deleted_duplicate_rows": deleted_later_suppression_rows,
     }
