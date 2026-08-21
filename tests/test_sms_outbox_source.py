@@ -61,9 +61,18 @@ def test_inbound_queue_coalesces_rapid_same_phone_bubbles_before_classification(
     assert 'fragmentCreatedAt - previousFragmentAt > 20000' in OUTBOX
     assert 'now - newestCreatedAt < 20000' in OUTBOX
     assert 'blockValues[fragmentOffset][1] = "coalesced"' in OUTBOX
-    assert 'filter(Boolean).join(" ")' in OUTBOX
+    assert "seenFragmentTexts" in OUTBOX
+    assert "if (seenFragmentTexts[fragmentKey]) return false" in OUTBOX
+    assert '}).join(" ")' in OUTBOX
     assert "SMS_INBOUND_QUEUE_HEADERS_.length" in OUTBOX
     assert ").setValues(blockValues)" in OUTBOX
+
+
+def test_inbound_queue_dedupes_same_transport_message_across_different_ids():
+    assert "buildSmsInboundTransportFingerprint_" in OUTBOX
+    assert 'var transportCacheKey = "sms_inbound_transport_" + transportFingerprint' in OUTBOX
+    assert "rowTransportFingerprint === transportFingerprint" in OUTBOX
+    assert "cache.put(transportCacheKey, queueId, 600)" in OUTBOX
 
 
 def test_inbound_retry_can_recover_after_crm_commit_before_decision_snapshot():

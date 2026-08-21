@@ -378,10 +378,13 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
   ensureSmsSheetHeaders_(sheet, SMS_INBOUND_QUEUE_HEADERS_);
   var now = new Date();
   var suppliedMessageId = String(body && body.message_id || "").trim();
+  var receivedAt = String(body && body.received_at || now.toISOString()).trim();
   var dedupeKey = buildSmsInboundDedupeKey_(phone, message, suppliedMessageId);
+  var transportFingerprint = buildSmsInboundTransportFingerprint_(phone, message, receivedAt);
   var cache = CacheService.getScriptCache();
   var cacheKey = "sms_inbound_" + dedupeKey;
-  var cachedQueueId = cache.get(cacheKey);
+  var transportCacheKey = "sms_inbound_transport_" + transportFingerprint;
+  var cachedQueueId = cache.get(cacheKey) || cache.get(transportCacheKey);
   if (cachedQueueId) {
     return {
       ok: true,
@@ -403,9 +406,10 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
     queueId = Utilities.getUuid();
     sheet.appendRow([
       now, "queued", queueId, dedupeKey, messageId, phone, message,
-      String(body && body.received_at || now.toISOString()), 0, "", "", "", "", ""
+      receivedAt, 0, "", "", "", "", ""
     ]);
     cache.put(cacheKey, queueId, 600);
+    cache.put(transportCacheKey, queueId, 600);
     try {
       appendSmsDebugLog_("incoming_sms_enqueued_lock_fallback", {
         request_id: webhookRequestId || "",
@@ -427,8 +431,13 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
       : [];
     for (var i = rows.length - 1; i >= 0; i--) {
       var created = new Date(rows[i][0]).getTime();
-      if (String(rows[i][3] || "") === dedupeKey && created && now.getTime() - created < 10 * 60 * 1000) {
+      var rowTransportFingerprint = buildSmsInboundTransportFingerprint_(
+        rows[i][5], rows[i][6], rows[i][7]
+      );
+      if ((String(rows[i][3] || "") === dedupeKey || rowTransportFingerprint === transportFingerprint) &&
+          created && now.getTime() - created < 10 * 60 * 1000) {
         cache.put(cacheKey, String(rows[i][2] || ""), 600);
+        cache.put(transportCacheKey, String(rows[i][2] || ""), 600);
         return {
           ok: true,
           queued: false,
@@ -442,9 +451,10 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
     queueId = Utilities.getUuid();
     sheet.appendRow([
       now, "queued", queueId, dedupeKey, messageId, phone, message,
-      String(body && body.received_at || now.toISOString()), 0, "", "", "", "", ""
+      receivedAt, 0, "", "", "", "", ""
     ]);
     cache.put(cacheKey, queueId, 600);
+    cache.put(transportCacheKey, queueId, 600);
   } finally {
     lock.releaseLock();
   }
@@ -482,6 +492,17 @@ function buildSmsInboundDedupeKey_(phone, message, messageId) {
     normalizePhone_(phone) + "|" + (String(messageId || "").trim()
       ? "id:" + String(messageId).trim()
       : "text:" + normalizeWhitespace_(String(message || "")).toLowerCase())
+  );
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, "");
+}
+
+function buildSmsInboundTransportFingerprint_(phone, message, receivedAt) {
+  var normalizedReceivedAt = normalizeWhitespace_(String(receivedAt || "")).toLowerCase();
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    normalizePhone_(phone) + "|" +
+      normalizeWhitespace_(String(message || "")).toLowerCase() + "|" +
+      normalizedReceivedAt
   );
   return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, "");
 }
@@ -626,9 +647,16 @@ function claimQueuedSmsInbound_() {
       if (status === "queued" && newestCreatedAt && now - newestCreatedAt < 20000) continue;
 
       var selectedIndex = fragmentIndexes[fragmentIndexes.length - 1];
+      var seenFragmentTexts = {};
       var combinedMessage = fragmentIndexes.map(function(index) {
         return normalizeWhitespace_(String(rows[index][6] || ""));
-      }).filter(Boolean).join(" ");
+      }).filter(function(fragmentText) {
+        if (!fragmentText) return false;
+        var fragmentKey = fragmentText.toLowerCase();
+        if (seenFragmentTexts[fragmentKey]) return false;
+        seenFragmentTexts[fragmentKey] = true;
+        return true;
+      }).join(" ");
       // Commit the combined message and every source disposition in one Sheet
       // write. Retrying after a transient error can never concatenate an
       // already-combined row with a surviving source fragment.
