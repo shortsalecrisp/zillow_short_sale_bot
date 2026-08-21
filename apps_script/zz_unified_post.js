@@ -24,6 +24,7 @@ function isUnifiedSmsAction_(action) {
     sms_send_failed: true,
     tasker_heartbeat: true,
     codex_probe: true,
+    request_info_email_approval: true,
     mark_override: true,
     takeover: true
   };
@@ -158,6 +159,10 @@ function handleUnifiedSmsPost_(e) {
         probe.stack = probeErr && probeErr.stack ? probeErr.stack : "";
       }
       return jsonOutput_(probe);
+    }
+
+    if (action === "request_info_email_approval") {
+      return jsonOutput_(requestInfoEmailApprovalForRow_(body));
     }
 
 

@@ -6,10 +6,32 @@ CHATBOT = (ROOT / "apps_script" / "sms_chatbot.js").read_text()
 
 
 def test_information_request_uses_approval_gated_acknowledgement():
-    assert "reply_text: getInfoEmailAcknowledgementReply_()" in CHATBOT
+    assert "reply_text: acknowledgementReply" in CHATBOT
     assert "sendInfoEmailApprovalRequest_(infoEmailData)" in CHATBOT
     assert "INFO_EMAIL_APPROVAL_REQUIRED" in CHATBOT
     assert "An agent requested the short-sale info email. Approval is required before sending." in CHATBOT
+    assert "Absolutely, I'll email you more information shortly. Thanks for sending your email." in CHATBOT
+
+
+def test_info_email_workflow_is_flag_driven_not_reply_copy_driven():
+    start = CHATBOT.index("function shouldSendInfoEmail_")
+    end = CHATBOT.index("function getInfoEmailAcknowledgementReply_", start)
+    source = CHATBOT[start:end]
+
+    assert "ruleResult.send_info_email" in source
+    assert "ruleResult.info_email_to" in source
+    assert "decision.reply_text" not in source
+    assert "getInfoEmailAcknowledgementReply_" not in source
+
+
+def test_info_email_approval_recovery_route_and_diagnostics_exist():
+    unified = (ROOT / "apps_script" / "zz_unified_post.js").read_text()
+    assert "request_info_email_approval: true" in unified
+    assert 'if (action === "request_info_email_approval")' in unified
+    assert "requestInfoEmailApprovalForRow_(body)" in unified
+    assert "function requestInfoEmailApprovalForRow_(body)" in CHATBOT
+    assert 'appendSmsDebugLog_("info_email_approval_requested"' in CHATBOT
+    assert 'appendSmsDebugLog_("info_email_approval_failed"' in CHATBOT
 
 
 def test_spaced_email_local_part_is_compacted_before_validation():

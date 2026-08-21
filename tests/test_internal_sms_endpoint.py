@@ -1778,11 +1778,31 @@ def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):
     )
     ask = module._sms_fast_decision({}, "I already have help, but please send me more information about your services.")
     assert ask["lead_status"] == "O"
-    assert "lender-side short-sale paperwork" in ask["reply_text"]
-    assert ask["reply_text"].endswith("What is your email?")
+    assert ask["reply_text"] == "Absolutely, I'd be happy to email you more information. What's the best email?"
 
     provided = module._sms_fast_decision({}, "Please email the info to agent@example.com")
-    assert provided["reply_text"] == "Thanks, I have your email."
+    assert provided["reply_text"] == (
+        "Absolutely, I'll email you more information shortly. Thanks for sending your email."
+    )
+
+
+def test_sms_contract_no_current_help_gets_conversational_service_explanation(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Hi there, actually I do not have anyone helping starting process"
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_has_no_current_short_sale_help(inbound) is True
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert "lender paperwork, calls, follow-up, and negotiations through approval" in decision["reply_text"]
+    assert decision["reply_text"].endswith("Would you like to go over everything briefly by phone?")
+    assert module._sms_has_no_current_short_sale_help("I don't need help") is False
+    assert module._sms_has_no_current_short_sale_help("I already have someone helping") is False
 
 
 def test_sms_contract_title_company_confusion_gets_role_clarification(monkeypatch):
@@ -1812,9 +1832,9 @@ def test_sms_contract_service_info_request_is_answered_before_email_followup(mon
     )
     assert decision["lead_status"] == "O"
     assert decision["conversation_done"] is True
-    assert "lender-side short-sale paperwork" in decision["reply_text"]
-    assert "I have your email" in decision["reply_text"]
-    assert decision["reply_text"] != "Thanks, I have your email."
+    assert decision["reply_text"] == (
+        "Absolutely, I'll email you more information shortly. Thanks for sending your email."
+    )
 
 
 def test_sms_contract_regulatory_license_question_hands_off_without_ai_reply(monkeypatch):

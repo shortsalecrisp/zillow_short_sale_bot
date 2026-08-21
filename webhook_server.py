@@ -4518,10 +4518,21 @@ def _sms_has_service_info_request_context(row_obj: Dict[str, str], inbound_text:
 
 
 def _sms_service_info_email_acknowledgement(has_email: bool = True) -> str:
-    next_step = "I have your email for the additional information." if has_email else "What is your email?"
-    return (
-        "I handle the lender-side short-sale paperwork, calls, follow-up, and negotiations through approval, "
-        f"so you can focus on the listing and client. {next_step}"
+    if not has_email:
+        return "Absolutely, I'd be happy to email you more information. What's the best email?"
+    return "Absolutely, I'll email you more information shortly. Thanks for sending your email."
+
+
+def _sms_has_no_current_short_sale_help(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or re.search(r"\b(?:do not|don['’]?t|dont)\s+need\s+help\b", text):
+        return False
+    if re.search(r"\b(?:already|currently)\s+(?:have|using|working with)\s+(?:help|someone|anyone|a company|a negotiator)\b", text):
+        return False
+    return bool(
+        re.search(r"\b(?:i|we)\s+(?:do not|don['’]?t|dont)\s+have\s+(?:any\s+)?(?:help|anyone|anybody|someone)\s+(?:helping|handling|working)?\b", text)
+        or re.search(r"\b(?:no one|nobody)\s+(?:is\s+)?(?:helping|handling|working)(?:\s+with\s+me)?\b", text)
+        or re.search(r"\b(?:i|we)\s+have\s+no\s+(?:help|one|one helping|one handling)\b", text)
     )
 
 
@@ -4669,11 +4680,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         )
         if provided_email:
             return _sms_decision(
-                reply_text=(
-                    _sms_service_info_email_acknowledgement()
-                    if service_info_request
-                    else "Thanks, I have your email."
-                ),
+                reply_text=_sms_service_info_email_acknowledgement(),
                 lead_status="O" if covered else "Y",
                 conversation_done=covered,
                 reason="Agent provided an email address for requested information",
@@ -4944,6 +4951,18 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
     priority_question = _sms_question_priority_decision(row_obj, t)
     if priority_question is not None:
         return priority_question
+
+    if _sms_has_no_current_short_sale_help(t):
+        return _sms_decision(
+            reply_text=(
+                "Absolutely, I'd be happy to help. I can handle the lender paperwork, calls, follow-up, "
+                "and negotiations through approval, so you can focus on your client and the listing. "
+                "Would you like to go over everything briefly by phone?"
+            ),
+            lead_status="Y",
+            reason="Agent said no one is currently helping with the short-sale process",
+            call_booking_status="interested_no_call",
+        )
 
     if _sms_is_closed_marketing_conversation(row_obj) and _sms_is_final_courtesy(t):
         return _sms_decision(

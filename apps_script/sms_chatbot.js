@@ -2368,6 +2368,20 @@ function applyFastRules_(text, rowObj) {
     );
   }
 
+  if (isNoCurrentShortSaleHelpSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: "Absolutely, I'd be happy to help. I can handle the lender paperwork, calls, follow-up, and negotiations through approval, so you can focus on your client and the listing. Would you like to go over everything briefly by phone?",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "interested_no_call",
+      reason: "Agent said no one is currently helping with the short-sale process"
+    };
+  }
+
   if (isDirectHelpRequestSignal_(t)) {
     return {
       matched: true,
@@ -3029,6 +3043,16 @@ function isDirectHelpRequestSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   return /^(?:actually[, ]+)?(?:i|we)\s+(?:do\s+)?need\s+(?:some\s+)?help[.!?]*$/.test(t) ||
     /\b(?:i|we)\s+(?:(?:do\s+)?need|would\s+love|could\s+use|can\s+use)\s+(?:some\s+)?help\b/.test(t);
+}
+
+function isNoCurrentShortSaleHelpSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || /\b(?:do not|don['’]?t|dont)\s+need\s+help\b/.test(t)) return false;
+  if (/\b(?:already|currently)\s+(?:have|using|working with)\s+(?:help|someone|anyone|a company|a negotiator)\b/.test(t)) return false;
+
+  return /\b(?:i|we)\s+(?:do not|don['’]?t|dont)\s+have\s+(?:any\s+)?(?:help|anyone|anybody|someone)\s+(?:helping|handling|working)?\b/.test(t) ||
+    /\b(?:no one|nobody)\s+(?:is\s+)?(?:helping|handling|working)(?:\s+with\s+me)?\b/.test(t) ||
+    /\b(?:i|we)\s+have\s+no\s+(?:help|one|one helping|one handling)\b/.test(t);
 }
 
 function isOfferSubmissionConfusionSignal_(text) {
@@ -4744,8 +4768,10 @@ function hasServiceInfoRequestContext_(text, rowObj) {
 }
 
 function buildServiceInfoEmailAcknowledgement_(hasEmail) {
-  const nextStep = hasEmail === false ? "What is your email?" : "I have your email for the additional information.";
-  return "I handle the lender-side short-sale paperwork, calls, follow-up, and negotiations through approval, so you can focus on the listing and client. " + nextStep;
+  if (hasEmail === false) {
+    return "Absolutely, I'd be happy to email you more information. What's the best email?";
+  }
+  return getInfoEmailAcknowledgementReply_();
 }
 
 function isEmailRequestSignal_(text) {
@@ -4958,13 +4984,12 @@ function shouldSendInfoEmail_(ruleResult, decision) {
     decision &&
     !decision.block_reply &&
     !decision.handoff_needed &&
-    !decision.needs_review &&
-    normalizeWhitespace_(decision.reply_text) === normalizeWhitespace_(getInfoEmailAcknowledgementReply_())
+    !decision.needs_review
   );
 }
 
 function getInfoEmailAcknowledgementReply_() {
-  return "Thanks, I have your email.";
+  return "Absolutely, I'll email you more information shortly. Thanks for sending your email.";
 }
 
 function isInfoEmailApprovalRequired_() {
@@ -5006,11 +5031,71 @@ Draft body:
 ${buildAgentInfoEmailBody_(hydratedData)}
 `.trim();
 
-  MailApp.sendEmail({
-    to: toEmail,
-    subject: subject,
-    body: body
+  try {
+    MailApp.sendEmail({
+      to: toEmail,
+      subject: subject,
+      body: body
+    });
+    try {
+      appendSmsDebugLog_("info_email_approval_requested", {
+        phone: hydratedData.phone || "",
+        message: hydratedData.to || "",
+        reason: subject,
+        result: approvalId
+      });
+    } catch (_) {}
+    return { ok: true, approval_id: approvalId, to: toEmail, subject: subject };
+  } catch (err) {
+    try {
+      appendSmsDebugLog_("info_email_approval_failed", {
+        phone: hydratedData.phone || "",
+        message: hydratedData.to || "",
+        reason: String(err),
+        stack: err && err.stack ? err.stack : ""
+      });
+    } catch (_) {}
+    throw err;
+  }
+}
+
+function requestInfoEmailApprovalForRow_(body) {
+  const sheet = getSheet_();
+  const rows = getSheetData_(sheet);
+  const requestedRow = Number(body && body.row || 0);
+  const requestedPhone = normalizePhone_(body && body.phone);
+  let item = null;
+
+  if (requestedRow >= 2) {
+    item = rows.find(candidate => candidate.row === requestedRow) || null;
+  }
+  if (!item && requestedPhone) {
+    item = rows.find(candidate =>
+      normalizePhone_(candidate && candidate.obj && candidate.obj[HEADERS.phone]) === requestedPhone
+    ) || null;
+  }
+  if (!item) throw new Error("SMS row not found for info-email approval recovery");
+
+  const rowObj = item.obj || {};
+  const targetEmail = normalizeEmailAddress_(body && body.email || rowObj[HEADERS.email]);
+  if (!isValidEmailAddress_(targetEmail)) {
+    throw new Error("Missing valid agent email for info-email approval recovery");
+  }
+
+  const result = sendInfoEmailApprovalRequest_({
+    to: targetEmail,
+    first_name: getCanonicalFirstName_(rowObj),
+    agent_name: rowObj[HEADERS.agent_name] || "",
+    last_name: rowObj[HEADERS.last_name] || "",
+    listing_address: rowObj[HEADERS.listing_address] || "",
+    city: rowObj[HEADERS.city] || "",
+    state: rowObj[HEADERS.state] || "",
+    zip: rowObj[HEADERS.zip] || "",
+    phone: rowObj[HEADERS.phone] || body.phone || "",
+    last_message: rowObj[HEADERS.last_inbound_text] || rowObj[HEADERS.response_status] || ""
   });
+
+  return Object.assign({ ok: true, row: item.row, agent_email: targetEmail }, result || {});
 }
 
 function sendAgentInfoEmail_(data) {
@@ -5516,6 +5601,33 @@ function testSmsIntentContractV3_() {
     selfHandler.matched && selfHandler.lead_status === "Y" &&
       selfHandler.reply_text.indexOf("lender side of the short sale") !== -1,
     selfHandler.reason
+  );
+
+  const noCurrentHelp = applyFastRules_(
+    "Hi there, actually I do not have anyone helping starting process",
+    baseRow
+  );
+  record(
+    "no_current_help_gets_conversational_reply",
+    noCurrentHelp.matched && noCurrentHelp.lead_status === "Y" &&
+      !noCurrentHelp.handoff_needed &&
+      noCurrentHelp.reply_text.indexOf("lender paperwork, calls, follow-up") !== -1 &&
+      noCurrentHelp.reply_text.indexOf("briefly by phone") !== -1,
+    noCurrentHelp.reason
+  );
+
+  const emailRequestRow = Object.assign({}, baseRow);
+  emailRequestRow[HEADERS.email] = "ashley@example.com";
+  const emailRequest = applyFastRules_(
+    "Are you able to email me ashley@example.com",
+    emailRequestRow
+  );
+  record(
+    "provided_email_sets_durable_workflow_flag",
+    emailRequest.matched && emailRequest.send_info_email === true &&
+      emailRequest.info_email_to === "ashley@example.com" &&
+      shouldSendInfoEmail_(emailRequest, emailRequest),
+    emailRequest.reason
   );
 
   const source = applyFastRules_("Why did you think it was a short sale?", baseRow);
