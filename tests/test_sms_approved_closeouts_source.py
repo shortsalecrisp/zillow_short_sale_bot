@@ -64,3 +64,17 @@ def test_apps_script_call_interest_and_company_questions_outrank_closeout():
     assert CHATBOT.index('String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE"') < CHATBOT.index(
         "hasCompanyIdentityQuestion &&"
     )
+
+
+def test_apps_script_title_company_service_info_and_compliance_rules_are_deterministic():
+    assert "function isTitleCompanyRoleConfusionSignal_" in CHATBOT
+    assert "function buildTitleCompanyRoleClarificationReply_" in CHATBOT
+    assert "Crisp isn't a title company" in CHATBOT
+    assert "function hasServiceInfoRequestContext_" in CHATBOT
+    assert "function buildServiceInfoEmailAcknowledgement_" in CHATBOT
+    assert "I have your email for the additional information" in CHATBOT
+    assert "function isComplianceOrLicensingQuestionSignal_" in CHATBOT
+    assert '"COMPLIANCE / LICENSING QUESTION"' in CHATBOT
+    assert CHATBOT.index("isComplianceOrLicensingQuestionSignal_(t)") < CHATBOT.index(
+        "const priorityQuestion = buildPriorityQuestionDecisionV3_"
+    )

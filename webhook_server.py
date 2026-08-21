@@ -4451,11 +4451,77 @@ def _sms_has_existing_coverage(value: Any) -> bool:
     return bool(
         re.search(
             r"\b(?:already have|already working with|currently have|have)\b.{0,45}"
-            r"\b(?:help|someone|somebody|negotiator|processor|attorney|lawyer|company|team|representation)\b"
-            r"|\b(?:attorney|lawyer|negotiator)\b"
+            r"\b(?:help|someone|somebody|negotiator|processor|attorney|lawyer|company|team|representation|housing counselor|counselor)\b"
+            r"|\b(?:attorney|lawyer|negotiator|housing counselor)\b"
             r"|\b(?:handled|covered|under contract)\b",
             text,
         )
+    )
+
+
+def _sms_is_title_company_role_confusion(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if "title company" not in text:
+        return False
+    if re.search(r"\b(?:no thanks?|not interested|do not|don't|dont)\b", text):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:already have|have|use|using|work with|working with|working for)\b.{0,50}\btitle company\b"
+            r"|\btitle company\b.{0,50}\b(?:if that(?:'s| is) what you mean|is that what you mean|do you mean)\b",
+            text,
+        )
+    )
+
+
+def _sms_title_company_clarification_reply() -> str:
+    return (
+        "Thanks for clarifying. Crisp isn't a title company. I handle the lender-side short-sale paperwork, calls, "
+        "and negotiations through approval, while your title company handles title and closing. "
+        "Would that kind of help be useful on this file?"
+    )
+
+
+def _sms_is_compliance_or_licensing_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or _sms_is_company_identity_question(text):
+        return False
+    if re.search(r"\b(?:attorney|lawyer|legal advice|law firm)\b", text):
+        return False
+    patterns = [
+        r"\bdebt adjust(?:er|or|ment|ing)\b",
+        r"\bbanking commission\b",
+        r"\b(?:statute|statutory|regulat(?:ion|ory)|compliance)\b",
+        r"\b(?:are|r) (?:you|u) licensed\b",
+        r"\bdo (?:you|u) (?:have|hold|need) (?:an? )?licen[cs]e\b",
+        r"\blicensed (?:in|to operate in|to work in)\b",
+        r"\bwhat (?:licen[cs]e|permit|authorization)\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_has_service_info_request_context(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    parts = [inbound_text, row_obj.get("response_status")]
+    parts.extend(
+        str(entry.get("text") or "")
+        for entry in _sms_history_array(row_obj.get("history_json"))
+        if isinstance(entry, dict) and str(entry.get("role") or "").lower() == "agent"
+    )
+    combined = _sms_normalize_whitespace(" ".join(str(part or "") for part in parts)).lower()
+    return bool(
+        re.search(
+            r"\b(?:more\s+)?info(?:rmation)?\s+(?:on|about)\s+(?:your\s+)?services?\b"
+            r"|\b(?:what|how)\b.{0,35}\b(?:services?|help|handle|offer)\b",
+            combined,
+        )
+    )
+
+
+def _sms_service_info_email_acknowledgement(has_email: bool = True) -> str:
+    next_step = "I have your email for the additional information." if has_email else "What is your email?"
+    return (
+        "I handle the lender-side short-sale paperwork, calls, follow-up, and negotiations through approval, "
+        f"so you can focus on the listing and client. {next_step}"
     )
 
 
@@ -4587,9 +4653,13 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
             handoff_type="EXISTING CRISP CLIENT",
             reason="Existing Crisp/Yoni relationship; exit marketing and route to Yoni",
         )
+    service_info_request = _sms_has_service_info_request_context(row_obj, inbound_text)
+    explicit_service_info_delivery_request = bool(
+        re.search(r"\b(?:more\s+)?info(?:rmation)?\s+(?:on|about)\s+(?:your\s+)?services?\b", text)
+    )
     asks_email_delivery = bool(
         re.search(r"\b(?:email me|send (?:me|us) (?:some |more )?(?:info|information)|send (?:me|us) your (?:info|information)|shoot me an email)\b", text)
-    )
+    ) or explicit_service_info_delivery_request
     provided_email = re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", inbound_text, re.IGNORECASE)
     if asks_email_delivery or provided_email:
         covered = (
@@ -4599,10 +4669,21 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         )
         if provided_email:
             return _sms_decision(
-                reply_text="Thanks, I have your email.",
+                reply_text=(
+                    _sms_service_info_email_acknowledgement()
+                    if service_info_request
+                    else "Thanks, I have your email."
+                ),
                 lead_status="O" if covered else "Y",
                 conversation_done=covered,
                 reason="Agent provided an email address for requested information",
+            )
+        if service_info_request:
+            return _sms_decision(
+                reply_text=_sms_service_info_email_acknowledgement(has_email=bool(row_obj.get("email"))),
+                lead_status="O" if covered else "Y",
+                conversation_done=covered,
+                reason="Answered requested service information before optional email follow-up",
             )
         return _sms_decision(
             reply_text="Sure, no problem. What is your email?",
@@ -4633,7 +4714,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         "experience": bool(re.search(r"\b(?:how long|years?|experience|track record)\b.{0,80}\b(?:short sales?|doing this|handled|closed|business)\b|\bwhat is your track record\b", text)),
         "timeline": _sms_is_short_sale_timeline_question(text),
         "number": bool(re.search(r"\b(?:best|good|right)\s+number\b|\b(?:call|reach|text)\s+you\s+(?:at|on)\s+this\s+number\b", text)),
-        "credential": bool(re.search(r"\b(?:are you|you are|r u)\s+(?:an?\s+)?(?:attorney|lawyer)\b|\bdo you provide legal advice\b", text)),
+        "credential": bool(re.search(r"\b(?:are you|you are|r u)\s+(?:licensed\s+as\s+)?(?:an?\s+)?(?:attorney|lawyer)\b|\bdo you provide legal advice\b", text)),
         "negotiator": bool(re.search(r"\b(?:are you|so you are|so a|r u)\s+(?:an?\s+)?(?:short sale\s+)?negotiator\b", text)),
         "language": _sms_is_spanish_language_question(text),
         "source": bool(re.search(r"\b(?:why|what)\b.{0,60}\b(?:think|thought|believe|make you think)\b.{0,60}\bshort sale\b", text)),
@@ -4842,6 +4923,22 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             block_reply=True,
             preserve_existing_state=True,
             reason="Human override enabled - inbound recorded only",
+        )
+
+    if _sms_is_compliance_or_licensing_question(t):
+        return _sms_decision(
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=True,
+            handoff_type="COMPLIANCE / LICENSING QUESTION",
+            reason="Agent asked a licensing, statutory, or regulatory compliance question; manual review required",
+        )
+
+    if _sms_is_title_company_role_confusion(t):
+        return _sms_decision(
+            reply_text=_sms_title_company_clarification_reply(),
+            lead_status="Y",
+            reason="Clarified that Crisp's lender-side role is separate from the title company",
         )
 
     priority_question = _sms_question_priority_decision(row_obj, t)

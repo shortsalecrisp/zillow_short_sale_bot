@@ -2137,6 +2137,26 @@ function applyFastRules_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const lastOutbound = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || ""));
 
+  if (isComplianceOrLicensingQuestionSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Agent asked a licensing, statutory, or regulatory compliance question; manual review required",
+      "COMPLIANCE / LICENSING QUESTION"
+    );
+  }
+
+  if (isTitleCompanyRoleConfusionSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildTitleCompanyRoleClarificationReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Clarified that Crisp's lender-side role is separate from the title company"
+    };
+  }
+
   const priorityQuestion = buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound);
   if (priorityQuestion) return priorityQuestion;
 
@@ -2512,9 +2532,12 @@ function applyFastRules_(text, rowObj) {
 
   if (providedEmail || isEmailRequestSignal_(t)) {
     if (targetEmail) {
+      const acknowledgementReply = hasServiceInfoRequestContext_(t, rowObj)
+        ? buildServiceInfoEmailAcknowledgement_()
+        : getInfoEmailAcknowledgementReply_();
       return {
         matched: true,
-        reply_text: getInfoEmailAcknowledgementReply_(),
+        reply_text: acknowledgementReply,
         lead_status: isWarmInfoOpportunity ? "O" : "Y",
         conversation_done: isWarmInfoOpportunity,
         handoff_needed: false,
@@ -2530,9 +2553,12 @@ function applyFastRules_(text, rowObj) {
       };
     }
 
+    const serviceInfoRequested = hasServiceInfoRequestContext_(t, rowObj);
     return {
       matched: true,
-      reply_text: "sure, no problem. What is your email?",
+      reply_text: serviceInfoRequested
+        ? buildServiceInfoEmailAcknowledgement_(false)
+        : "sure, no problem. What is your email?",
       lead_status: isWarmInfoOpportunity ? "O" : "Y",
       conversation_done: false,
       handoff_needed: false,
@@ -3522,6 +3548,36 @@ function isCredentialQuestionSignal_(text) {
     /\b(?:is|are)\s+crisp\s+(?:an?\s+)?(?:law\s+firm|attorney|lawyer)\b/
   ];
   return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function isComplianceOrLicensingQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || isCompanyIdentityQuestionSignal_(t) || /\b(?:attorney|lawyer|legal advice|law firm)\b/.test(t)) {
+    return false;
+  }
+  const patterns = [
+    /\bdebt adjust(?:er|or|ment|ing)\b/,
+    /\bbanking commission\b/,
+    /\b(?:statute|statutory|regulat(?:ion|ory)|compliance)\b/,
+    /\b(?:are|r) (?:you|u) licensed\b/,
+    /\bdo (?:you|u) (?:have|hold|need) (?:an? )?licen[cs]e\b/,
+    /\blicensed (?:in|to operate in|to work in)\b/,
+    /\bwhat (?:licen[cs]e|permit|authorization)\b/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function isTitleCompanyRoleConfusionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (t.indexOf("title company") === -1 || /\b(?:no thanks?|not interested|do not|don't|dont)\b/.test(t)) {
+    return false;
+  }
+  return /\b(?:already have|have|use|using|work with|working with|working for)\b.{0,50}\btitle company\b/.test(t) ||
+    /\btitle company\b.{0,50}\b(?:if that(?:'s| is) what you mean|is that what you mean|do you mean)\b/.test(t);
+}
+
+function buildTitleCompanyRoleClarificationReply_() {
+  return "Thanks for clarifying. Crisp isn't a title company. I handle the lender-side short-sale paperwork, calls, and negotiations through approval, while your title company handles title and closing. Would that kind of help be useful on this file?";
 }
 
 function buildCredentialQuestionReply_() {
@@ -4675,6 +4731,21 @@ function isDeclineWithInfoRequestSignal_(text, rowObj) {
     /\b(?:i|we)\s+do\s+(?:my|our)\s+own\b/.test(combined);
 
   return isAlreadyHandledSignal_(combined) || isClearNoSignal_(combined) || selfHandled;
+}
+
+function hasServiceInfoRequestContext_(text, rowObj) {
+  const parts = [text, rowObj && rowObj[HEADERS.response_status]];
+  getHistoryArray_(rowObj && rowObj[HEADERS.history_json]).forEach(function(entry) {
+    if (entry && entry.role === "agent") parts.push(entry.text || "");
+  });
+  const combined = normalizeWhitespace_(String(parts.filter(Boolean).join(" ")).toLowerCase());
+  return /\b(?:more\s+)?info(?:rmation)?\s+(?:on|about)\s+(?:your\s+)?services?\b/.test(combined) ||
+    /\b(?:what|how)\b.{0,35}\b(?:services?|help|handle|offer)\b/.test(combined);
+}
+
+function buildServiceInfoEmailAcknowledgement_(hasEmail) {
+  const nextStep = hasEmail === false ? "What is your email?" : "I have your email for the additional information.";
+  return "I handle the lender-side short-sale paperwork, calls, follow-up, and negotiations through approval, so you can focus on the listing and client. " + nextStep;
 }
 
 function isEmailRequestSignal_(text) {

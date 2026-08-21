@@ -1778,11 +1778,63 @@ def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):
     )
     ask = module._sms_fast_decision({}, "I already have help, but please send me more information about your services.")
     assert ask["lead_status"] == "O"
-    assert ask["reply_text"] == "Sure, no problem. What is your email?"
-    assert "lender side" not in ask["reply_text"]
+    assert "lender-side short-sale paperwork" in ask["reply_text"]
+    assert ask["reply_text"].endswith("What is your email?")
 
     provided = module._sms_fast_decision({}, "Please email the info to agent@example.com")
     assert provided["reply_text"] == "Thanks, I have your email."
+
+
+def test_sms_contract_title_company_confusion_gets_role_clarification(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision(
+        {},
+        "I already have a title company I'm working for if that's what you mean",
+    )
+    assert decision["lead_status"] == "Y"
+    assert decision["conversation_done"] is False
+    assert decision["handoff_needed"] is False
+    assert "Crisp isn't a title company" in decision["reply_text"]
+    assert "lender-side short-sale" in decision["reply_text"]
+
+
+def test_sms_contract_service_info_request_is_answered_before_email_followup(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision(
+        {"email": "agent@example.com"},
+        "We are working with a HUD Housing Counselor, but I will take more info on your services just in case",
+    )
+    assert decision["lead_status"] == "O"
+    assert decision["conversation_done"] is True
+    assert "lender-side short-sale paperwork" in decision["reply_text"]
+    assert "I have your email" in decision["reply_text"]
+    assert decision["reply_text"] != "Thanks, I have your email."
+
+
+def test_sms_contract_regulatory_license_question_hands_off_without_ai_reply(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision(
+        {},
+        "We are licensed debt adjusters, which is required by statute in New Hampshire. Are you licensed?",
+    )
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+    assert decision["reply_text"] == ""
+    assert decision["handoff_type"] == "COMPLIANCE / LICENSING QUESTION"
+
+    attorney = module._sms_fast_decision({}, "Are you licensed as an attorney?")
+    assert attorney["handoff_needed"] is False
+    assert "not an attorney" in attorney["reply_text"]
 
 
 def test_sms_contract_historical_compound_regressions_route_correctly(monkeypatch):
