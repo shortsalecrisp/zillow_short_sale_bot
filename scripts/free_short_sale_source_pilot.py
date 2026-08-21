@@ -71,6 +71,11 @@ RUN_RECEIPT_HEADERS = [
     "pipeline_complete",
     "detail",
 ]
+MAX_SOURCE_QUERY_RECOVERY = 10
+RECOVERY_PENDING_PREFIX = "recovery_pending_v1="
+RECOVERY_ATTEMPT_PREFIX = "recovery_attempt_v1="
+RECOVERY_COMPLETED_PREFIX = "recovery_completed_v1="
+RECOVERY_EXHAUSTED_PREFIX = "recovery_exhausted_v1="
 RUN_RECEIPT_STALE_MINUTES = int(os.getenv("FREE_SOURCE_PILOT_RUN_RECEIPT_STALE_MINUTES", "70"))
 
 PILOT_HEADERS = [
@@ -3821,6 +3826,29 @@ def append_run_slot_receipt(
     )
 
 
+def source_query_key(state: str, source: str) -> str:
+    return f"{normalize_space(state).upper()}:{normalize_space(source)}"
+
+
+def recovery_manifest_detail(prefix: str, query_keys: Iterable[str]) -> str:
+    keys = sorted({normalize_space(key) for key in query_keys if normalize_space(key)})
+    return f"{prefix}{','.join(keys)}"
+
+
+def parse_recovery_query_keys(detail: str, prefix: str = RECOVERY_PENDING_PREFIX) -> list[str]:
+    normalized = normalize_space(detail)
+    marker = normalized.find(prefix)
+    if marker < 0:
+        return []
+    raw = normalized[marker + len(prefix):].split(";", 1)[0]
+    keys = sorted({key.strip() for key in raw.split(",") if key.strip()})
+    if not keys or len(keys) > MAX_SOURCE_QUERY_RECOVERY:
+        return []
+    if any(not re.fullmatch(r"[A-Z]{2}:[a-z0-9_]+", key) for key in keys):
+        return []
+    return keys
+
+
 def claim_run_schedule_slot(
     token: str,
     spreadsheet_id: str,
@@ -3830,10 +3858,10 @@ def claim_run_schedule_slot(
     run_date: dt.date,
     run_mode: str,
     now: dt.datetime | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, list[str]]:
     """Atomically converge concurrent attempts on one durable Sheet-backed slot winner."""
     if not schedule_slot_id:
-        return True, "unslotted"
+        return True, "unslotted", []
     current = now or dt.datetime.now(dt.timezone.utc)
     ensure_headers_tab(token, spreadsheet_id, RUN_RECEIPT_TAB, RUN_RECEIPT_HEADERS)
     rows = get_values(
@@ -3855,7 +3883,7 @@ def claim_run_schedule_slot(
             )
         ]
         if not source_completed_rows:
-            return False, "source_slot_not_completed"
+            return False, "source_slot_not_completed", []
         source_completed_times: list[dt.datetime] = []
         for row in source_completed_rows:
             try:
@@ -3866,7 +3894,7 @@ def claim_run_schedule_slot(
                 completed_at = completed_at.replace(tzinfo=dt.timezone.utc)
             source_completed_times.append(completed_at.astimezone(dt.timezone.utc))
         if not source_completed_times:
-            return False, "source_terminal_time_unconfirmed"
+            return False, "source_terminal_time_unconfirmed", []
         current_utc = current
         if current_utc.tzinfo is None:
             current_utc = current_utc.replace(tzinfo=dt.timezone.utc)
@@ -3875,10 +3903,25 @@ def claim_run_schedule_slot(
             minutes=POST_SOURCE_AUDIT_GRACE_MINUTES
         )
         if current_utc < grace_deadline:
-            return False, "source_grace_not_elapsed"
+            return False, "source_grace_not_elapsed", []
     slot_rows = [row for row in rows[1:] if row and row[0] == schedule_slot_id]
     if any(len(row) > 6 and row[4] == "completed" and row[6].lower() == "true" for row in slot_rows):
-        return False, "already_completed"
+        return False, "already_completed", []
+    recovery_query_keys: list[str] = []
+    if run_mode == "scheduled_source":
+        substantive_terminal_rows = [
+            row for row in slot_rows
+            if len(row) > 4 and row[4] in {"completed", "completed_degraded", "failed"}
+        ]
+        latest_terminal = substantive_terminal_rows[-1] if substantive_terminal_rows else []
+        latest_status = latest_terminal[4] if len(latest_terminal) > 4 else ""
+        latest_detail = latest_terminal[7] if len(latest_terminal) > 7 else ""
+        if latest_status == "completed_degraded":
+            recovery_query_keys = parse_recovery_query_keys(latest_detail)
+            if not recovery_query_keys:
+                return False, "recovery_unavailable", []
+        elif latest_status == "failed" and RECOVERY_EXHAUSTED_PREFIX in latest_detail:
+            return False, "recovery_exhausted", []
     append_run_slot_receipt(
         token,
         spreadsheet_id,
@@ -3888,6 +3931,8 @@ def claim_run_schedule_slot(
         run_mode=run_mode,
         status="running",
         pipeline_complete=False,
+        detail=recovery_manifest_detail(RECOVERY_ATTEMPT_PREFIX, recovery_query_keys)
+        if recovery_query_keys else "",
         observed_at=current,
     )
     rows = get_values(
@@ -3897,7 +3942,7 @@ def claim_run_schedule_slot(
     )
     slot_rows = [row for row in rows[1:] if row and row[0] == schedule_slot_id]
     if any(len(row) > 6 and row[4] == "completed" and row[6].lower() == "true" for row in slot_rows):
-        return False, "already_completed"
+        return False, "already_completed", []
     cutoff = current - dt.timedelta(minutes=RUN_RECEIPT_STALE_MINUTES)
     terminal_attempt_ids = {
         row[1]
@@ -3931,8 +3976,8 @@ def claim_run_schedule_slot(
             pipeline_complete=False,
             detail=f"winner={winner[1]}",
         )
-        return False, "active_attempt"
-    return True, "claimed"
+        return False, "active_attempt", []
+    return True, "claimed_recovery" if recovery_query_keys else "claimed", recovery_query_keys
 
 
 def batch_update_values(token: str, spreadsheet_id: str, updates: list[dict[str, Any]]) -> None:
@@ -6563,7 +6608,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
     schedule_slot_id = normalize_space(getattr(args, "schedule_slot_id", ""))
     if schedule_slot_id:
         update_run_stage(context, "slot_claim")
-        claimed, claim_reason = claim_run_schedule_slot(
+        claimed, claim_reason, recovery_query_keys = claim_run_schedule_slot(
             token,
             args.spreadsheet_id,
             schedule_slot_id=schedule_slot_id,
@@ -6572,6 +6617,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
             run_mode=_active_run_event_context.get("run_mode", "scheduled_source"),
         )
         context["slot_claimed"] = claimed
+        context["recovery_query_keys"] = recovery_query_keys
         log_event(
             "pilot_run_slot_claim",
             schedule_slot_id=schedule_slot_id,
@@ -6582,6 +6628,23 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
         if not claimed:
             clear_run_event_context()
             return
+        if recovery_query_keys:
+            valid_query_keys = {
+                source_query_key(state, source_query.source)
+                for state in args.states
+                for source_query in source_queries
+            }
+            if not set(recovery_query_keys).issubset(valid_query_keys):
+                raise RuntimeError("durable recovery manifest contains an unconfigured query key")
+            planned_searches = len(recovery_query_keys)
+            stats["planned_searches"] = planned_searches
+            log_event(
+                "pilot_query_recovery_plan",
+                query_keys=recovery_query_keys,
+                planned_searches=planned_searches,
+                max_recovery_queries=MAX_SOURCE_QUERY_RECOVERY,
+                full_plan_searches=len(args.states) * len(source_queries),
+            )
     if audit_links_only:
         update_run_stage(context, "link_audit")
         audit_stats = run_linkage_and_suffix_audits(
@@ -6627,7 +6690,9 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
         return
     update_run_stage(context, "sheet_setup")
     ensure_tab(token, args.spreadsheet_id, args.pilot_tab)
-    durability_active = source_durability_audit_active(run_date)
+    recovery_query_keys = list(context.get("recovery_query_keys", []))
+    recovery_query_key_set = set(recovery_query_keys)
+    durability_active = source_durability_audit_active(run_date) and not recovery_query_keys
     durability_state = (
         load_source_durability_state()
         if durability_active
@@ -6666,10 +6731,14 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
     unique_fetched_urls: set[str] = set()
     unique_short_sale_candidates: set[str] = set()
     update_run_stage(context, "discovery")
+    failed_query_keys: list[str] = []
     for state in args.states:
         state_query_term = STATE_QUERY_TERMS.get(state.upper(), state)
         for source_query in source_queries:
             source = source_query.source
+            query_key = source_query_key(state, source)
+            if recovery_query_key_set and query_key not in recovery_query_key_set:
+                continue
             exclusion_arm = query_exclusion_arm(
                 run_date,
                 state,
@@ -6701,6 +6770,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                     date_restrict=source_query.date_restrict,
                 )
             except Exception as exc:  # noqa: BLE001
+                failed_query_keys.append(query_key)
                 error_text = str(exc)
                 failure_class = source_error_class(exc)
                 blocked = failure_class == "blocked"
@@ -7085,13 +7155,20 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                 force=args.force_review_experiments,
             )
     update_run_stage(context, "direct_monitor")
-    direct_monitor_stats = run_direct_monitor(
-        run_date,
-        already_seen_urls,
-        existing,
-        pilot_seen_addresses,
-        sleep_seconds=min(args.sleep_seconds, 0.25),
-    )
+    if recovery_query_keys:
+        direct_monitor_stats = {
+            "complete": True,
+            "selected": 0,
+            "skipped": "bounded_query_recovery",
+        }
+    else:
+        direct_monitor_stats = run_direct_monitor(
+            run_date,
+            already_seen_urls,
+            existing,
+            pilot_seen_addresses,
+            sleep_seconds=min(args.sleep_seconds, 0.25),
+        )
     stats["search_engine_attempts"] = dict(_search_engine_attempt_stats)
     pipeline_complete, query_attempts_accounted = source_pipeline_complete(
         stats,
@@ -7104,12 +7181,25 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
     if scheduled_run and not schedule_slot_id:
         pipeline_complete = False
     update_run_stage(context, "slot_terminal")
+    if recovery_query_keys:
+        terminal_detail = recovery_manifest_detail(
+            RECOVERY_COMPLETED_PREFIX if pipeline_complete else RECOVERY_EXHAUSTED_PREFIX,
+            recovery_query_keys if pipeline_complete else failed_query_keys or recovery_query_keys,
+        )
+    else:
+        recoverable_query_keys = sorted(set(failed_query_keys))
+        if not pipeline_complete and 0 < len(recoverable_query_keys) <= MAX_SOURCE_QUERY_RECOVERY:
+            terminal_detail = recovery_manifest_detail(RECOVERY_PENDING_PREFIX, recoverable_query_keys)
+        elif not pipeline_complete and len(recoverable_query_keys) > MAX_SOURCE_QUERY_RECOVERY:
+            terminal_detail = f"recovery_not_bounded_v1=count:{len(recoverable_query_keys)}"
+        else:
+            terminal_detail = "" if pipeline_complete else "pipeline completion gate failed"
     slot_receipt_persisted = persist_run_slot_terminal(
         args,
         context,
         status="completed" if pipeline_complete else "completed_degraded",
         pipeline_complete=pipeline_complete,
-        detail=("" if pipeline_complete else "pipeline completion gate failed"),
+        detail=terminal_detail,
     )
     if not slot_receipt_persisted:
         pipeline_complete = False
@@ -7186,7 +7276,15 @@ def run_with_terminal_receipt(args: argparse.Namespace) -> None:
             context,
             status="failed",
             pipeline_complete=False,
-            detail=f"{failure_type}: {str(exc)[:300]}",
+            detail=(
+                recovery_manifest_detail(
+                    RECOVERY_EXHAUSTED_PREFIX,
+                    context.get("recovery_query_keys", []),
+                )
+                + f"; {failure_type}: {str(exc)[:300]}"
+                if context.get("recovery_query_keys")
+                else f"{failure_type}: {str(exc)[:300]}"
+            ),
         )
         log_event(
             "pilot_run_terminal_failure",

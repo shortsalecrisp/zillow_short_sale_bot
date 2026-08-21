@@ -948,6 +948,11 @@ BAD_RE   = re.compile(
     re.I,
 )
 APPROVED_RE = re.compile(r"\bapproved\b", re.I)
+PILOT_APPROVED_SHORT_SALE_RE = re.compile(
+    r"\b(?:approved\s+short\s+sale|short\s+sale\s+(?:is\s+)?approved|"
+    r"approved\s+(?:price|at\s+(?:the\s+)?list(?:ing)?\s+price))\b",
+    re.I,
+)
 NEGOTIATOR_RE = re.compile(r"\bnegotiator\b", re.I)
 ATTORNEY_CONTEXT_RE = re.compile(
     r"(?:\battorney\b.{0,60}\b(?:negotiat|negotiation|negotiate|handling|handle|approval|short sale|third party)\b"
@@ -1690,12 +1695,13 @@ def _short_sale_text_from_payload(listing_text: str) -> str:
     return _normalize_listing_text(listing_text).strip().lower()
 
 
-def _short_sale_exclusion_reason(text: str) -> Optional[str]:
+def _short_sale_exclusion_reason(text: str, *, pilot_origin: bool = False) -> Optional[str]:
     if not text:
         return None
     if BAD_RE.search(text):
         return "existing_rule"
-    if APPROVED_RE.search(text):
+    approved_re = PILOT_APPROVED_SHORT_SALE_RE if pilot_origin else APPROVED_RE
+    if approved_re.search(text):
         return "approved"
     if NEGOTIATOR_RE.search(text):
         return "negotiator"
@@ -13657,7 +13663,10 @@ def process_rows(
                 bool(listing_text),
             )
         short_sale_text = _short_sale_text_from_payload(listing_text)
-        exclusion_reason = _short_sale_exclusion_reason(short_sale_text)
+        exclusion_reason = _short_sale_exclusion_reason(
+            short_sale_text,
+            pilot_origin=_pilot_origin_requires_verifier_hold(r),
+        )
         if exclusion_reason:
             LOG.info(
                 "SHORT_SALE_EXCLUDE zpid=%s reason=%s",

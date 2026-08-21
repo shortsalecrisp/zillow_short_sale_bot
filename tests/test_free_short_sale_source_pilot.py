@@ -3747,7 +3747,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         with mock.patch.object(pilot, "ensure_headers_tab"), \
              mock.patch.object(pilot, "get_values", return_value=rows), \
              mock.patch.object(pilot, "append_run_slot_receipt") as append:
-            claimed, reason = pilot.claim_run_schedule_slot(
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
                 "token", "sheet", schedule_slot_id="source:2026-08-21",
                 run_receipt_id="new", run_date=dt.date(2026, 8, 21),
                 run_mode="scheduled_source",
@@ -3755,6 +3755,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertFalse(claimed)
         self.assertEqual(reason, "already_completed")
+        self.assertEqual(recovery_keys, [])
         append.assert_not_called()
 
     def test_durable_schedule_slot_concurrent_attempts_choose_one_winner(self):
@@ -3770,7 +3771,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
              mock.patch.object(
                  pilot, "get_values", side_effect=[[pilot.RUN_RECEIPT_HEADERS], after_append]
              ), mock.patch.object(pilot, "append_run_slot_receipt") as append:
-            claimed, reason = pilot.claim_run_schedule_slot(
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
                 "token", "sheet", schedule_slot_id="source:2026-08-21",
                 run_receipt_id="loser", run_date=dt.date(2026, 8, 21),
                 run_mode="scheduled_source", now=now,
@@ -3778,6 +3779,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertFalse(claimed)
         self.assertEqual(reason, "active_attempt")
+        self.assertEqual(recovery_keys, [])
         self.assertEqual(append.call_count, 2)
 
     def test_durable_schedule_slot_allows_retry_after_failed_attempt(self):
@@ -3795,7 +3797,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
              mock.patch.object(
                  pilot, "get_values", side_effect=[after_append[:-1], after_append]
              ), mock.patch.object(pilot, "append_run_slot_receipt"):
-            claimed, reason = pilot.claim_run_schedule_slot(
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
                 "token", "sheet", schedule_slot_id="source:2026-08-21",
                 run_receipt_id="retry", run_date=dt.date(2026, 8, 21),
                 run_mode="scheduled_source", now=now,
@@ -3803,13 +3805,139 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertTrue(claimed)
         self.assertEqual(reason, "claimed")
+        self.assertEqual(recovery_keys, [])
+
+    def test_durable_schedule_slot_claims_only_bounded_missing_query_manifest(self):
+        now = dt.datetime(2026, 8, 21, 15, 30, 0, tzinfo=dt.timezone.utc)
+        pending_detail = pilot.recovery_manifest_detail(
+            pilot.RECOVERY_PENDING_PREFIX,
+            ["WI:idx_broker_pages", "WI:idx_broker_remarks", "WY:idx_broker_pages", "WY:idx_broker_remarks"],
+        )
+        prior = [
+            pilot.RUN_RECEIPT_HEADERS,
+            ["source:2026-08-21", "primary", "2026-08-21", "scheduled_source",
+             "completed_degraded", "2026-08-21T13:10:00+00:00", "false", pending_detail],
+        ]
+        after_append = prior + [[
+            "source:2026-08-21", "recovery", "2026-08-21", "scheduled_source",
+            "running", now.isoformat(), "false", "",
+        ]]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(pilot, "get_values", side_effect=[prior, after_append]), \
+             mock.patch.object(pilot, "append_run_slot_receipt") as append:
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
+                "token", "sheet", schedule_slot_id="source:2026-08-21",
+                run_receipt_id="recovery", run_date=dt.date(2026, 8, 21),
+                run_mode="scheduled_source", now=now,
+            )
+
+        self.assertTrue(claimed)
+        self.assertEqual(reason, "claimed_recovery")
+        self.assertEqual(
+            recovery_keys,
+            ["WI:idx_broker_pages", "WI:idx_broker_remarks", "WY:idx_broker_pages", "WY:idx_broker_remarks"],
+        )
+        self.assertEqual(append.call_args.kwargs["detail"], pilot.recovery_manifest_detail(
+            pilot.RECOVERY_ATTEMPT_PREFIX, recovery_keys
+        ))
+
+    def test_durable_degraded_slot_without_manifest_never_replays_full_plan(self):
+        rows = [
+            pilot.RUN_RECEIPT_HEADERS,
+            ["source:2026-08-21", "primary", "2026-08-21", "scheduled_source",
+             "completed_degraded", "2026-08-21T13:10:00+00:00", "false", "pipeline completion gate failed"],
+        ]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(pilot, "get_values", return_value=rows), \
+             mock.patch.object(pilot, "append_run_slot_receipt") as append:
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
+                "token", "sheet", schedule_slot_id="source:2026-08-21",
+                run_receipt_id="startup", run_date=dt.date(2026, 8, 21),
+                run_mode="scheduled_source",
+            )
+
+        self.assertFalse(claimed)
+        self.assertEqual(reason, "recovery_unavailable")
+        self.assertEqual(recovery_keys, [])
+        append.assert_not_called()
+
+    def test_recovery_manifest_rejects_more_than_bounded_cap(self):
+        detail = pilot.recovery_manifest_detail(
+            pilot.RECOVERY_PENDING_PREFIX,
+            [f"TX:bucket_{index}" for index in range(pilot.MAX_SOURCE_QUERY_RECOVERY + 1)],
+        )
+
+        self.assertEqual(pilot.parse_recovery_query_keys(detail), [])
+
+    def test_recovery_run_attempts_only_manifest_queries_and_skips_direct_monitor(self):
+        recovery_keys = [
+            "WI:idx_broker_pages", "WI:idx_broker_remarks",
+            "WY:idx_broker_pages", "WY:idx_broker_remarks",
+        ]
+        args = types.SimpleNamespace(
+            service_account="{}", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21",
+            audit_links_only=False, audit_phase="post_verifier", force_review_experiments=False,
+            states=["WI", "WY", "TX"], results_per_query=10, sleep_seconds=0,
+            include_rejected=False, dry_run=False, promote_ready=False,
+            promotion_daily_cap=10, promotion_dry_run=False, scheduled_run=True,
+            run_receipt_id="recovery-1", schedule_slot_id="source:2026-08-21",
+        )
+        searches = []
+        persisted = []
+        events = []
+
+        def fake_search(query, source, limit, date_restrict=None):
+            searches.append((query, source, limit, date_restrict))
+            return "cse", []
+
+        with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
+             mock.patch.object(pilot, "sheets_client", return_value="token"), \
+             mock.patch.object(pilot, "ensure_tab"), \
+             mock.patch.object(pilot, "source_durability_audit_active", return_value=True), \
+             mock.patch.object(
+                 pilot, "configured_source_queries",
+                 return_value=[
+                     pilot.SourceQuery("idx_broker_pages", 'pages {state}', "w1"),
+                     pilot.SourceQuery("idx_broker_remarks", 'remarks {state}', "w1"),
+                 ],
+             ), mock.patch.object(
+                 pilot, "claim_run_schedule_slot",
+                 return_value=(True, "claimed_recovery", recovery_keys),
+             ), mock.patch.object(
+                 pilot, "get_values", side_effect=[[[]], [pilot.PILOT_HEADERS]],
+             ), mock.patch.object(pilot, "search_web", side_effect=fake_search), \
+             mock.patch.object(
+                 pilot, "run_direct_monitor",
+                 side_effect=AssertionError("bounded recovery must skip direct monitor"),
+             ), mock.patch.object(
+                 pilot, "persist_run_slot_terminal",
+                 side_effect=lambda *args, **kwargs: persisted.append(kwargs) or True,
+             ), mock.patch.object(
+                 pilot, "log_event",
+                 side_effect=lambda event, **details: events.append((event, details)),
+             ):
+            pilot.run(args)
+
+        self.assertEqual(len(searches), 4)
+        self.assertEqual({source for _, source, _, _ in searches}, {"idx_broker_pages", "idx_broker_remarks"})
+        self.assertTrue(all("Texas" not in query for query, _, _, _ in searches))
+        self.assertEqual(persisted[-1]["status"], "completed")
+        self.assertEqual(
+            persisted[-1]["detail"],
+            pilot.recovery_manifest_detail(pilot.RECOVERY_COMPLETED_PREFIX, recovery_keys),
+        )
+        done = next(details for event, details in events if event == "pilot_run_done")
+        self.assertEqual(done["stats"]["planned_searches"], 4)
+        self.assertEqual(done["stats"]["searched"], 4)
+        self.assertTrue(done["scheduled_run_proven_complete"])
 
     def test_audit_schedule_slot_waits_for_completed_source_slot(self):
         rows = [pilot.RUN_RECEIPT_HEADERS]
         with mock.patch.object(pilot, "ensure_headers_tab"), \
              mock.patch.object(pilot, "get_values", return_value=rows), \
              mock.patch.object(pilot, "append_run_slot_receipt") as append:
-            claimed, reason = pilot.claim_run_schedule_slot(
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
                 "token", "sheet",
                 schedule_slot_id="post_verifier_audit:2026-08-21",
                 run_receipt_id="audit-1",
@@ -3819,6 +3947,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertFalse(claimed)
         self.assertEqual(reason, "source_slot_not_completed")
+        self.assertEqual(recovery_keys, [])
         append.assert_not_called()
 
     def test_audit_schedule_slot_claims_after_completed_source_slot(self):
@@ -3838,7 +3967,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                  "get_values",
                  side_effect=[[pilot.RUN_RECEIPT_HEADERS, source_row], after_append],
              ), mock.patch.object(pilot, "append_run_slot_receipt"):
-            claimed, reason = pilot.claim_run_schedule_slot(
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
                 "token", "sheet",
                 schedule_slot_id="post_verifier_audit:2026-08-21",
                 run_receipt_id="audit-1",
@@ -3849,6 +3978,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertTrue(claimed)
         self.assertEqual(reason, "claimed")
+        self.assertEqual(recovery_keys, [])
 
     def test_audit_schedule_slot_enforces_thirty_minute_source_grace(self):
         source_row = [
@@ -3859,7 +3989,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
              mock.patch.object(
                  pilot, "get_values", return_value=[pilot.RUN_RECEIPT_HEADERS, source_row]
              ), mock.patch.object(pilot, "append_run_slot_receipt") as append:
-            claimed, reason = pilot.claim_run_schedule_slot(
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
                 "token", "sheet",
                 schedule_slot_id="post_verifier_audit:2026-08-21",
                 run_receipt_id="audit-too-early",
@@ -3870,6 +4000,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertFalse(claimed)
         self.assertEqual(reason, "source_grace_not_elapsed")
+        self.assertEqual(recovery_keys, [])
         append.assert_not_called()
 
     def test_receipt_tab_collision_fails_before_auth_or_sheet_mutation(self):
@@ -3901,7 +4032,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         events = []
         with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
              mock.patch.object(pilot, "sheets_client", return_value="token"), \
-             mock.patch.object(pilot, "claim_run_schedule_slot", return_value=(True, "claimed")), \
+             mock.patch.object(pilot, "claim_run_schedule_slot", return_value=(True, "claimed", [])), \
              mock.patch.object(
                  pilot, "run_linkage_and_suffix_audits",
                  return_value={"audit_checks_planned": 0, "unconfirmed": 0},
@@ -4246,7 +4377,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
              mock.patch.object(pilot, "search_web", return_value=("cse", [result])), \
              mock.patch.object(pilot, "fetch_url", return_value=markup), \
              mock.patch.object(pilot, "append_values", side_effect=AssertionError("rejected candidate must not write")), \
-             mock.patch.object(pilot, "claim_run_schedule_slot", return_value=(True, "claimed")), \
+             mock.patch.object(pilot, "claim_run_schedule_slot", return_value=(True, "claimed", [])), \
              mock.patch.object(pilot, "persist_run_slot_terminal", return_value=True), \
              mock.patch.object(pilot, "run_direct_monitor", return_value={"selected": 0}), \
              mock.patch.object(

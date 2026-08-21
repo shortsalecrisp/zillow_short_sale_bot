@@ -1835,6 +1835,60 @@ def test_listing_text_rejects_short_sale_no_special_listing_conditions():
     assert not bot_min.is_short_sale(bot_min._short_sale_text_from_payload(listing_text))
 
 
+def test_pilot_short_sale_allows_unrelated_rental_approval(monkeypatch):
+    appended = []
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(bot_min, "append_row", lambda row: appended.append(row) or 5293)
+
+    outcomes = bot_min.process_rows(
+        [{
+            "zpid": "free-b06dac0f7c58f285",
+            "street": "1167 E Telegraph St",
+            "city": "Washington",
+            "state": "UT",
+            "homeStatus": "FOR_SALE",
+            "source": "free-source-pilot:idx_broker_remarks",
+            "search_source": "free-source-pilot:idx_broker_remarks",
+            "description": (
+                "Short sale, subject to 3rd party approval. Buyer to verify all. "
+                "This unit is approved as one of the 4 units that can be rented."
+            ),
+        }],
+        skip_dedupe=True,
+        return_outcomes=True,
+    )
+
+    assert outcomes == {"free-b06dac0f7c58f285": "completed_short_sale"}
+    assert len(appended) == 1
+
+
+def test_pilot_short_sale_still_rejects_approved_short_sale(monkeypatch):
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
+    monkeypatch.setattr(
+        bot_min,
+        "append_row",
+        lambda *_: (_ for _ in ()).throw(AssertionError("approved short sale must not append")),
+    )
+
+    outcomes = bot_min.process_rows(
+        [{
+            "zpid": "free-approved",
+            "street": "100 Main St",
+            "city": "Atlanta",
+            "state": "GA",
+            "homeStatus": "FOR_SALE",
+            "source": "free-source-pilot:idx_broker_remarks",
+            "search_source": "free-source-pilot:idx_broker_remarks",
+            "description": "Approved short sale at list price.",
+        }],
+        skip_dedupe=True,
+        return_outcomes=True,
+    )
+
+    assert outcomes == {"free-approved": "completed_non_short_sale"}
+
+
 def test_listing_payload_aliases_accept_curated_apify_fields():
     row = {
         "propertyId": "curated-300",
