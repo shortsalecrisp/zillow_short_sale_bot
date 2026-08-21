@@ -165,8 +165,14 @@ def test_follow_up_uses_latest_sheet_phone(monkeypatch):
 
 
 class _ConfiguredFollowupValuesAPI:
-    def __init__(self, row):
+    def __init__(self, row, init_scan_value=None):
         self.row = row
+        self.init_scan_value = (
+            row[bot_min.COL_INIT_TS]
+            if init_scan_value is None
+            else init_scan_value
+        )
+        self.column_render_option = None
 
     def batchGet(self, spreadsheetId, ranges, majorDimension, valueRenderOption):
         init_col = bot_min._col_index_to_letter(bot_min.COL_INIT_TS)
@@ -177,9 +183,10 @@ class _ConfiguredFollowupValuesAPI:
             f"{bot_min.GSHEET_TAB}!{init_col}2:{init_col}2",
             f"{bot_min.GSHEET_TAB}!{fu_flag_col}2:{fu_flag_col}2",
         ]:
+            self.column_render_option = valueRenderOption
             return _FakeRequest({
                 "valueRanges": [
-                    {"values": [[self.row[bot_min.COL_INIT_TS]]]},
+                    {"values": [[self.init_scan_value]]},
                     {"values": [[self.row[bot_min.COL_REPLY_FLAG]]]},
                 ]
             })
@@ -194,8 +201,8 @@ class _ConfiguredFollowupValuesAPI:
 
 
 class _ConfiguredFollowupSheetsService:
-    def __init__(self, row):
-        self.values_api = _ConfiguredFollowupValuesAPI(row)
+    def __init__(self, row, init_scan_value=None):
+        self.values_api = _ConfiguredFollowupValuesAPI(row, init_scan_value)
 
     def spreadsheets(self):
         return self
@@ -248,6 +255,40 @@ def test_follow_up_accepts_google_formatted_initial_timestamp(monkeypatch):
     assert len(sent) == 1
     assert sent[0]["row_idx"] == 2
     assert sent[0]["follow_up"] is True
+
+
+def test_follow_up_reads_native_timestamp_value_not_date_only_display(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_INIT_TS] = "8/20/2026"
+    service = _ConfiguredFollowupSheetsService(
+        row,
+        init_scan_value=46254.759919143515,
+    )
+    sent = []
+    reply_since = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(
+        bot_min,
+        "check_reply",
+        lambda phone, since: reply_since.append(since) or False,
+    )
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
+    monkeypatch.setattr(
+        bot_min,
+        "send_sms",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    bot_min._follow_up_pass()
+
+    assert service.values_api.column_render_option == "UNFORMATTED_VALUE"
+    assert len(reply_since) == 1
+    assert reply_since[0].startswith("2026-08-20T18:14:17.014")
+    assert reply_since[0].endswith("-04:00")
+    assert len(sent) == 1
+    assert sent[0]["row_idx"] == 2
 
 
 def test_follow_up_allows_stale_marker_and_nonresponse_call_note(monkeypatch):

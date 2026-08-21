@@ -13379,7 +13379,9 @@ def _follow_up_pass():
             f"{GSHEET_TAB}!{reply_col}2:{reply_col}{max_row}",
         ],
         majorDimension="COLUMNS",
-        valueRenderOption="FORMATTED_VALUE",
+        # Native timestamp cells in column W are displayed as date-only in the
+        # sheet. Read their serial values so the exact send time is retained.
+        valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
     value_ranges = init_resp.get("valueRanges", [])
     init_values = []
@@ -13547,7 +13549,7 @@ def _follow_up_pass():
             continue
 
         # auto-check for replies since initial message
-        if check_reply(row[COL_PHONE], row[COL_INIT_TS]):
+        if check_reply(row[COL_PHONE], ts.isoformat()):
             LOG.info(
                 "Auto-detected reply for row %s (msg_id=%s)",
                 sheet_row,
