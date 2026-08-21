@@ -12808,13 +12808,60 @@ REPLY_RECORDS_CACHE_SECONDS = int(os.getenv("REPLY_RECORDS_CACHE_SECONDS", "120"
 
 
 def _parse_sheet_datetime(raw: Any) -> Optional[datetime]:
-    text = str(raw or "").strip()
+    if raw is None or raw == "":
+        return None
+
+    # Google Sheets returns native date cells as serial day numbers when
+    # UNFORMATTED_VALUE is requested. The epoch intentionally starts on
+    # 1899-12-30 to match Sheets/Excel's date system.
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        try:
+            dt = datetime(1899, 12, 30) + timedelta(days=float(raw))
+            return SCHEDULER_TZ.localize(dt)
+        except Exception:
+            return None
+
+    text = str(raw).strip()
     if not text:
         return None
+
+    # Numeric strings can also be Sheets serial dates depending on the API
+    # caller's render option.
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        try:
+            serial = float(text)
+            if serial >= 1:
+                dt = datetime(1899, 12, 30) + timedelta(days=serial)
+                return SCHEDULER_TZ.localize(dt)
+        except Exception:
+            pass
+
     normalized = text.replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(normalized)
     except Exception:
+        dt = None
+
+    # FORMATTED_VALUE uses the spreadsheet locale rather than ISO-8601.
+    # Accept the date/time shapes produced by the production sheet so native
+    # date cells are not silently excluded from the follow-up queue.
+    if dt is None:
+        for fmt in (
+            "%m/%d/%Y %H:%M:%S",
+            "%m/%d/%Y %H:%M",
+            "%m/%d/%Y %I:%M:%S %p",
+            "%m/%d/%Y %I:%M %p",
+            "%m/%d/%y %H:%M:%S",
+            "%m/%d/%y %H:%M",
+            "%m-%d-%y %H.%M",
+            "%m-%d-%Y %H.%M",
+        ):
+            try:
+                dt = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
         return None
     if dt.tzinfo is None:
         try:
@@ -13356,15 +13403,10 @@ def _follow_up_pass():
             if not init_raw:
                 missing_init_ts_rows += 1
             continue
-        try:
-            ts = datetime.fromisoformat(init_raw)
-        except Exception:
+        ts = _parse_sheet_datetime(init_raw)
+        if ts is None:
             bad_init_ts_rows += 1
             continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=SCHEDULER_TZ)
-        else:
-            ts = ts.astimezone(SCHEDULER_TZ)
         init_rows.append((sheet_row, ts))
 
     if not init_rows:

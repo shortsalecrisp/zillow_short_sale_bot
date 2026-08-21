@@ -213,6 +213,43 @@ def _followup_test_row():
     return row
 
 
+def test_parse_sheet_datetime_accepts_native_sheet_serial():
+    parsed = bot_min._parse_sheet_datetime(46254.759919143515)
+
+    assert parsed is not None
+    assert parsed.isoformat().startswith("2026-08-20T18:14:17")
+    assert parsed.utcoffset() == timedelta(hours=-4)
+
+
+def test_parse_sheet_datetime_accepts_google_formatted_value():
+    parsed = bot_min._parse_sheet_datetime("8/20/2026 18:14:17")
+
+    assert parsed is not None
+    assert parsed.isoformat() == "2026-08-20T18:14:17-04:00"
+
+
+def test_follow_up_accepts_google_formatted_initial_timestamp(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_INIT_TS] = "8/20/2026 18:14:17"
+    sent = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
+    monkeypatch.setattr(
+        bot_min,
+        "send_sms",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    bot_min._follow_up_pass()
+
+    assert len(sent) == 1
+    assert sent[0]["row_idx"] == 2
+    assert sent[0]["follow_up"] is True
+
+
 def test_follow_up_allows_stale_marker_and_nonresponse_call_note(monkeypatch):
     row = _followup_test_row()
     row[bot_min.COL_REPLY_FLAG] = "x"
