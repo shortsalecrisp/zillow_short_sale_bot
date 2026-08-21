@@ -43,6 +43,11 @@ function parseUnifiedJsonPost_(e) {
   }
 }
 
+function isUnauthorizedError_(err) {
+  var message = err && err.message ? String(err.message) : String(err || "");
+  return /^\s*(?:Error:\s*)?Unauthorized\s*$/i.test(message);
+}
+
 function handleUnifiedVoicePost_(payload) {
   try {
     if (typeof isVoiceBotQueueDryRunPayload_ === "function" && isVoiceBotQueueDryRunPayload_(payload)) {

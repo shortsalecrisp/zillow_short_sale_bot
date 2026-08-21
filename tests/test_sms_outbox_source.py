@@ -20,6 +20,19 @@ def test_v10_routes_are_registered():
         assert f"{action}: true" in UNIFIED
 
 
+def test_unauthorized_webhook_noise_is_logged_without_per_request_email_alerts():
+    assert "function isUnauthorizedError_(err)" in UNIFIED
+    assert '/^\\s*(?:Error:\\s*)?Unauthorized\\s*$/i.test(message)' in UNIFIED
+
+    catch_source = UNIFIED.split("} catch (err) {", 1)[1].split(
+        "function getUnifiedIgnoredInboundReason_", 1
+    )[0]
+    unauthorized_pos = catch_source.index("isUnauthorizedError_(err)")
+    alert_pos = catch_source.index('sendSystemAlertEmail_("SMS BOT ERROR"')
+    assert unauthorized_pos < alert_pos
+    assert 'error: "Unauthorized"' in catch_source
+
+
 def test_inbound_queue_and_outbox_have_leases_and_durable_states():
     for marker in (
         '"sms_inbound_queue"',
