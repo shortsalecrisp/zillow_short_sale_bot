@@ -1053,18 +1053,23 @@ function testPendingSmsStaleTextNormalization_() {
 
 function getPendingSmsStaleReason_(outboxRow) {
   var phone = normalizePhone_(outboxRow[4]);
-  if (typeof hasPendingSmsTakeoverV11_ === "function" && hasPendingSmsTakeoverV11_(phone)) {
+  var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);
+  var replyText = normalizePendingSmsInboundText_(outboxRow[5]);
+  var approvedOfferScopeReply =
+    replyText === normalizePendingSmsInboundText_("I don't represent a buyer or submit offers. I handle the lender-side short-sale work for the listing agent.") &&
+    typeof isOfferSubmissionConfusionSignal_ === "function" &&
+    isOfferSubmissionConfusionSignal_(inboundText);
+  if (!approvedOfferScopeReply && typeof hasPendingSmsTakeoverV11_ === "function" && hasPendingSmsTakeoverV11_(phone)) {
     return "Manual takeover is pending";
   }
   var messageId = String(outboxRow[3] || "");
   var isInitialOutreach = String(outboxRow[6] || "").indexOf("__initial_outreach__:") === 0;
-  var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);
   var sheet = getSheet_();
   var data = getSheetData_(sheet);
   for (var i = 0; i < data.length; i++) {
     var rowObj = data[i].obj;
     if (normalizePhone_(rowObj[HEADERS.phone]) !== phone) continue;
-    if (String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
+    if (!approvedOfferScopeReply && String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
     if (isInitialOutreach) return "";
     // Older ShortSaleLeads layouts do not have last_inbound_text. In that
     // layout, last_message_id remains the authoritative stale-reply guard.
@@ -1211,8 +1216,9 @@ function smsOutboxWatchdog_() {
       return;
     }
     if (status === "send_started" && sendStarted && now - sendStarted >= 10 * 60 * 1000 && !row[7]) {
-      alertSmsOutboxProblem_(sheet, sheetRow, row, "SMS SEND RESULT UNCERTAIN");
-      sheet.getRange(sheetRow, 2).setValue("uncertain");
+      if (alertSmsOutboxProblem_(sheet, sheetRow, row, "SMS SEND RESULT UNCERTAIN")) {
+        sheet.getRange(sheetRow, 2).setValue("uncertain");
+      }
       return;
     }
     if (status === "queued" && created && now - created >= 15 * 60 * 1000 && !row[7]) {
@@ -1221,7 +1227,88 @@ function smsOutboxWatchdog_() {
   });
 }
 
+function findConfirmedSmsReplyReceiptInHistory_(history, inboundText, replyText) {
+  var inbound = normalizePendingSmsInboundText_(inboundText);
+  var reply = normalizePendingSmsInboundText_(replyText);
+  if (!inbound || !reply) return { confirmed: false, sent_at: "" };
+  var entries = Array.isArray(history) ? history : [];
+  for (var i = entries.length - 1; i >= 0; i--) {
+    var entry = entries[i] || {};
+    if (String(entry.role || "").toLowerCase() !== "agent" ||
+        normalizePendingSmsInboundText_(entry.text) !== inbound) continue;
+    for (var j = i + 1; j < entries.length; j++) {
+      var later = entries[j] || {};
+      if (String(later.role || "").toLowerCase() === "assistant" &&
+          normalizePendingSmsInboundText_(later.text) === reply &&
+          String(later.receipt_id || "").trim()) {
+        return { confirmed: true, sent_at: String(later.ts || "") };
+      }
+    }
+    return { confirmed: false, sent_at: "" };
+  }
+  return { confirmed: false, sent_at: "" };
+}
+
+function testConfirmedSmsReplyReceiptRecovery_() {
+  var inbound = "How does your service work?";
+  var reply = "I handle the lender paperwork, calls, follow-up, and negotiations through approval.";
+  var history = [
+    { role: "agent", text: inbound, ts: "2026-08-21T16:07:00-04:00" },
+    { role: "assistant", text: reply, ts: "2026-08-21T16:09:00-04:00", receipt_id: "receipt-1" }
+  ];
+  var confirmed = findConfirmedSmsReplyReceiptInHistory_(history, inbound, reply);
+  if (!confirmed.confirmed || confirmed.sent_at !== "2026-08-21T16:09:00-04:00") {
+    throw new Error("Confirmed CRM reply receipt did not recover uncertain send");
+  }
+  if (findConfirmedSmsReplyReceiptInHistory_(history, "What is your fee?", reply).confirmed ||
+      findConfirmedSmsReplyReceiptInHistory_(history, inbound, "Different reply").confirmed ||
+      findConfirmedSmsReplyReceiptInHistory_([
+        { role: "agent", text: inbound },
+        { role: "assistant", text: reply }
+      ], inbound, reply).confirmed) {
+    throw new Error("Receipt recovery accepted an uncorrelated or unconfirmed history entry");
+  }
+  return { ok: true };
+}
+
+function findConfirmedSmsReplyReceiptForPendingRow_(row) {
+  var inboundText = String(row && row[6] || "");
+  if (!inboundText || inboundText.indexOf("__initial_outreach__:") === 0) {
+    return { confirmed: false, sent_at: "" };
+  }
+  try {
+    var data = getSheetData_(getSheet_());
+    for (var i = 0; i < data.length; i++) {
+      var obj = data[i].obj;
+      if (normalizePhone_(obj[HEADERS.phone]) !== normalizePhone_(row[4])) continue;
+      return findConfirmedSmsReplyReceiptInHistory_(
+        getHistoryArray_(obj[HEADERS.history_json]),
+        inboundText,
+        row[5]
+      );
+    }
+  } catch (_) {}
+  return { confirmed: false, sent_at: "" };
+}
+
+function recordRecoveredSmsReplyReceipt_(sheet, sheetRow, receipt) {
+  var sentAt = new Date(receipt && receipt.sent_at || new Date());
+  if (isNaN(sentAt.getTime())) sentAt = new Date();
+  sheet.getRange(sheetRow, 2).setValue("sent");
+  sheet.getRange(sheetRow, 8).setValue("");
+  sheet.getRange(sheetRow, 15).setValue(sentAt);
+  sheet.getRange(sheetRow, 16).setValue("Recovered from confirmed CRM reply receipt");
+}
+
 function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
+  // The Tasker receipt can reach the CRM while the outbox status write is
+  // still uncertain. A same-phone, same-inbound, same-reply history receipt
+  // is terminal proof; recover the ledger instead of locking the conversation.
+  var receipt = findConfirmedSmsReplyReceiptForPendingRow_(row);
+  if (receipt.confirmed) {
+    recordRecoveredSmsReplyReceipt_(sheet, sheetRow, receipt);
+    return false;
+  }
   var context = getSmsLeadContextByPhone_(row[4]);
   lockSmsConversationAfterTransportAlertV10_(row[4], reason);
   sendHandoffEmail_({
@@ -1237,6 +1324,7 @@ function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
     history: context.history
   });
   sheet.getRange(sheetRow, 8).setValue(new Date());
+  return true;
 }
 
 function lockSmsConversationAfterTransportAlertV10_(phone, reason) {

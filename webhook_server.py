@@ -3940,8 +3940,22 @@ def _sms_normalize_handled_inbound_text(value: Any) -> str:
     return _sms_normalize_whitespace(value).lower()
 
 
+def _sms_canonicalize_repeated_complete_inbound_for_dedupe(value: Any) -> str:
+    normalized = _sms_normalize_handled_inbound_text(value)
+    tokens = normalized.split()
+    if len(tokens) < 6:
+        return normalized
+    for unit_length in range(3, (len(tokens) // 2) + 1):
+        if len(tokens) % unit_length:
+            continue
+        base = tokens[:unit_length]
+        if all(token == base[index % unit_length] for index, token in enumerate(tokens)):
+            return " ".join(base)
+    return normalized
+
+
 def _sms_history_has_confirmed_reply_after_inbound(row_obj: Dict[str, str], inbound_text: str) -> bool:
-    current_text = _sms_normalize_handled_inbound_text(inbound_text)
+    current_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(inbound_text)
     if not current_text:
         return False
 
@@ -3950,7 +3964,7 @@ def _sms_history_has_confirmed_reply_after_inbound(row_obj: Dict[str, str], inbo
         entry = history[index] if isinstance(history[index], dict) else {}
         if str(entry.get("role") or "").lower() != "agent":
             continue
-        if _sms_normalize_handled_inbound_text(entry.get("text")) != current_text:
+        if _sms_canonicalize_repeated_complete_inbound_for_dedupe(entry.get("text")) != current_text:
             continue
         return any(
             isinstance(later, dict)
@@ -3975,15 +3989,15 @@ def _sms_is_intentional_no_reply_disposition(row_obj: Dict[str, str], inbound_te
 
 
 def _sms_is_durable_handled_duplicate(row_obj: Dict[str, str], inbound_text: str) -> bool:
-    prior_text = _sms_normalize_handled_inbound_text(row_obj.get("last_inbound_text"))
-    current_text = _sms_normalize_handled_inbound_text(inbound_text)
+    prior_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(row_obj.get("last_inbound_text"))
+    current_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(inbound_text)
     if not prior_text or prior_text != current_text:
         return False
     if _sms_is_scheduled_callback(inbound_text) or _sms_is_post_handoff_callback_update(row_obj, inbound_text):
         return False
     if _sms_is_substantive_followup(inbound_text) or _sms_is_fee_question(inbound_text):
         return False
-    if _sms_normalize_handled_inbound_text(row_obj.get("response_status")) != current_text:
+    if _sms_canonicalize_repeated_complete_inbound_for_dedupe(row_obj.get("response_status")) != current_text:
         return False
     return _sms_history_has_confirmed_reply_after_inbound(row_obj, inbound_text) or _sms_is_intentional_no_reply_disposition(
         row_obj, inbound_text
@@ -4004,8 +4018,8 @@ def _sms_parse_inbound_timestamp(value: Any) -> Optional[datetime]:
 
 
 def _sms_is_recent_duplicate_inbound(row_obj: Dict[str, str], inbound_text: str, received_at: str) -> bool:
-    prior_text = _sms_normalize_handled_inbound_text(row_obj.get("last_inbound_text"))
-    current_text = _sms_normalize_handled_inbound_text(inbound_text)
+    prior_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(row_obj.get("last_inbound_text"))
+    current_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(inbound_text)
     if not prior_text or prior_text != current_text:
         return False
     if _sms_is_substantive_followup(inbound_text) or _sms_is_fee_question(inbound_text):
@@ -4048,6 +4062,7 @@ def _sms_decision(
     callback_updated: bool = False,
     preserve_existing_state: bool = False,
     preserve_reply_formatting: bool = False,
+    send_reply_before_handoff: bool = False,
 ) -> Dict[str, Any]:
     normalized_status = lead_status if lead_status in {"R", "Y", "O"} else "Y"
     if preserve_existing_state and lead_status == "G":
@@ -4067,6 +4082,7 @@ def _sms_decision(
         "callback_updated": callback_updated,
         "preserve_existing_state": preserve_existing_state,
         "preserve_reply_formatting": preserve_reply_formatting,
+        "send_reply_before_handoff": send_reply_before_handoff,
     }
 
 
@@ -4277,7 +4293,8 @@ def _sms_extract_scheduled_callback_reference(value: Any) -> str:
     text = _sms_normalize_whitespace(value)
     text = re.sub(r"\bnot\s+tomorrow\b", " ", text, flags=re.IGNORECASE)
     match = re.search(
-        r"\btomorrow\b"
+        r"\bafter\s+(?:the\s+)?weekend\b"
+        r"|\btomorrow\b"
         r"|\bnext\s+week\b"
         r"|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
         r"|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+"
@@ -4304,6 +4321,29 @@ def _sms_extract_scheduled_callback_reference(value: Any) -> str:
         if before_match:
             reference = f"{before_match.group(2)} {before_match.group(1)}"
     return reference.title()
+
+
+def _sms_is_unavailable_until_callback_reference(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or not _sms_extract_scheduled_callback_reference(text) or _sms_is_scheduled_callback(text):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:i(?:['’]?m|\s+am)|we(?:['’]?re|\s+are)|i(?:['’]?ll|\s+will)\s+be|"
+            r"we(?:['’]?ll|\s+will)\s+be)\s+(?:out(?:\s+of\s+(?:the\s+)?office)?|away|unavailable)\s+until\b",
+            text,
+        )
+        or re.search(r"\b(?:i|we)\s+(?:won['’]?t|will\s+not)\s+be\s+(?:back|available)\s+until\b", text)
+    )
+
+
+def _sms_is_offer_submission_request(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(
+        re.search(r"\b(?:please\s+)?submit\s+(?:an?|the|my|our|your)\s+offer\b", text)
+        or re.search(r"\b(?:can|could|will|would)\s+you\s+submit\s+(?:an?|the|my|our|your)\s+offer\b", text)
+        or re.search(r"\bsubmit\s+(?:it|this)\s+to\s+(?:the\s+)?(?:seller|listing agent|agent)\b", text)
+    )
 
 
 def _sms_normalized_callback_time(value: Any) -> str:
@@ -5084,6 +5124,17 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason="Agent asked whether this is AI/a bot; manual follow-up needed",
         )
 
+    if _sms_is_unavailable_until_callback_reference(t):
+        callback_reference = _sms_extract_scheduled_callback_reference(t)
+        return _sms_decision(
+            reply_text=f"No problem. What time {callback_reference} works best for a quick call?",
+            lead_status="Y",
+            call_booking_status="interested_no_call",
+            reason=(
+                "Agent is unavailable until a future day; asked for a time instead of promising an unscheduled follow-up"
+            ),
+        )
+
     if _sms_is_scheduled_callback(t):
         return _sms_decision(
             reply_text="Perfect, thanks.",
@@ -5221,6 +5272,19 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason="Agent asked whether Yoni is local",
         )
 
+    if _sms_is_offer_submission_request(t):
+        return _sms_decision(
+            reply_text=(
+                "I don't represent a buyer or submit offers. I handle the lender-side short-sale work for the listing agent."
+            ),
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=False,
+            handoff_type="OFFER SUBMISSION REQUEST",
+            send_reply_before_handoff=True,
+            reason="Clarified Crisp's role and routed the actionable offer-submission request to Yoni",
+        )
+
     if re.search(r"\b(buyer|buyers|offer|submit an offer|have an offer)\b", t):
         return _sms_decision(
             reply_text=(
@@ -5280,15 +5344,42 @@ def _sms_apply_repeat_guard(
 
 def _sms_build_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str, Any]:
     fast = _sms_fast_decision(row_obj, inbound_text)
-    if fast is not None:
-        return _sms_apply_repeat_guard(fast, row_obj, inbound_text)
-    return _sms_apply_repeat_guard(_sms_openai_decision(row_obj, inbound_text), row_obj, inbound_text)
+    decision = fast if fast is not None else _sms_openai_decision(row_obj, inbound_text)
+    decision = _sms_enforce_durable_followup_promise(decision, inbound_text)
+    return _sms_apply_repeat_guard(decision, row_obj, inbound_text)
+
+
+def _sms_enforce_durable_followup_promise(decision: Dict[str, Any], inbound_text: str) -> Dict[str, Any]:
+    guarded = dict(decision)
+    reply = _sms_normalize_whitespace(guarded.get("reply_text") or "")
+    if not re.search(
+        r"\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:check\s+back|follow\s+up|reach\s+out|call|text|contact)\b",
+        reply,
+        flags=re.IGNORECASE,
+    ):
+        return guarded
+    if str(guarded.get("call_booking_status") or "").lower() == "scheduled_callback" and guarded.get("callback_time"):
+        return guarded
+
+    reference = _sms_extract_scheduled_callback_reference(inbound_text) or _sms_extract_scheduled_callback_reference(reply)
+    guarded["reply_text"] = (
+        f"No problem. What time {reference} works best for a quick call?"
+        if reference
+        else "No problem. What day and time works best for a quick call?"
+    )
+    guarded["call_booking_status"] = "interested_no_call"
+    guarded["callback_time"] = ""
+    guarded["reason"] = "Replaced an unscheduled bot follow-up promise with a request for durable callback timing"
+    return guarded
 
 
 def _sms_should_reply(decision: Dict[str, Any], auto_reply_count: int) -> bool:
     if auto_reply_count >= 3:
         return False
-    if decision.get("handoff_needed") or decision.get("needs_review") or decision.get("alert_needed") or decision.get("block_reply"):
+    terminal_handoff = decision.get("handoff_needed") or decision.get("needs_review") or decision.get("alert_needed")
+    if terminal_handoff and not decision.get("send_reply_before_handoff"):
+        return False
+    if decision.get("block_reply"):
         return False
     return bool(_sms_normalize_whitespace(decision.get("reply_text") or ""))
 

@@ -92,15 +92,38 @@ function normalizeHandledInboundText_(value) {
   return normalizeWhitespace_(String(value || "")).toLowerCase();
 }
 
+function canonicalizeRepeatedCompleteInboundForDedupe_(value) {
+  const normalized = normalizeHandledInboundText_(value);
+  const tokens = normalized ? normalized.split(" ") : [];
+  if (tokens.length < 6) return normalized;
+
+  // Tasker can occasionally coalesce the same complete SMS bubble two or
+  // more times. Collapse only exact consecutive repetitions with a
+  // substantive (3+ token) base message, and use this value for dedupe only.
+  for (let unitLength = 3; unitLength <= Math.floor(tokens.length / 2); unitLength += 1) {
+    if (tokens.length % unitLength !== 0) continue;
+    const base = tokens.slice(0, unitLength);
+    let repeated = true;
+    for (let index = unitLength; index < tokens.length; index += 1) {
+      if (tokens[index] !== base[index % unitLength]) {
+        repeated = false;
+        break;
+      }
+    }
+    if (repeated) return base.join(" ");
+  }
+  return normalized;
+}
+
 function historyHasConfirmedReplyAfterInbound_(rowObj, inboundText) {
-  const currentText = normalizeHandledInboundText_(inboundText);
+  const currentText = canonicalizeRepeatedCompleteInboundForDedupe_(inboundText);
   if (!currentText) return false;
 
   const history = getHistoryArray_(rowObj && rowObj[HEADERS.history_json]);
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const entry = history[i] || {};
     if (String(entry.role || "").toLowerCase() !== "agent" ||
-        normalizeHandledInboundText_(entry.text) !== currentText) {
+        canonicalizeRepeatedCompleteInboundForDedupe_(entry.text) !== currentText) {
       continue;
     }
 
@@ -127,8 +150,8 @@ function isIntentionalNoReplyDisposition_(rowObj, inboundText) {
 }
 
 function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
-  const priorText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.last_inbound_text]);
-  const currentText = normalizeHandledInboundText_(inboundText);
+  const priorText = canonicalizeRepeatedCompleteInboundForDedupe_(rowObj && rowObj[HEADERS.last_inbound_text]);
+  const currentText = canonicalizeRepeatedCompleteInboundForDedupe_(inboundText);
   if (!priorText || !currentText || priorText !== currentText) return false;
   const postHandoffCallbackUpdate = typeof isPostHandoffCallbackUpdate_ === "function" &&
     isPostHandoffCallbackUpdate_(rowObj, inboundText);
@@ -140,7 +163,7 @@ function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
     return false;
   }
 
-  const responseText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.response_status]);
+  const responseText = canonicalizeRepeatedCompleteInboundForDedupe_(rowObj && rowObj[HEADERS.response_status]);
   if (responseText !== currentText) return false;
 
   return historyHasConfirmedReplyAfterInbound_(rowObj, inboundText) ||
@@ -148,8 +171,8 @@ function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
 }
 
 function isRecentDuplicateInboundText_(rowObj, inboundText, receivedAt) {
-  const priorText = normalizeHandledInboundText_(rowObj && rowObj[HEADERS.last_inbound_text]);
-  const currentText = normalizeHandledInboundText_(inboundText);
+  const priorText = canonicalizeRepeatedCompleteInboundForDedupe_(rowObj && rowObj[HEADERS.last_inbound_text]);
+  const currentText = canonicalizeRepeatedCompleteInboundForDedupe_(inboundText);
   if (!priorText || !currentText || priorText !== currentText) return false;
   if (isSubstantiveFollowupSignal_(inboundText) || isPaymentOrFeeQuestionSignal_(inboundText)) {
     return false;
@@ -1130,6 +1153,7 @@ function handleIncomingSmsCore_(body) {
   if (ruleResult.matched) {
     let decision = normalizeAiDecision_(ruleResult, currentRowObj[HEADERS.mailshake_status]);
     decision = applyReplySanitizers_(decision, currentRowObj);
+    decision = enforceDurableFollowupPromiseRule_(decision, inboundText);
     decision = applyRepeatGuard_(decision, currentRowObj, inboundText);
     const updates = {
       [HEADERS.response_status]: inboundText,
@@ -1319,6 +1343,7 @@ function handleIncomingSmsCore_(body) {
   let decision = getAiDecision_({ row: row, rowObj: currentRowObj }, inboundText);
   decision = normalizeAiDecision_(decision, currentRowObj[HEADERS.mailshake_status]);
   decision = applyReplySanitizers_(decision, currentRowObj);
+  decision = enforceDurableFollowupPromiseRule_(decision, inboundText);
   if (decision.reply_text !== buildShortSaleTimelineReply_() && containsUnsupportedStatsClaim_(decision.reply_text)) {
     decision = buildManualHandoffDecision_(
       "AI attempted to answer with unsupported stats or numeric performance claims",
@@ -1413,7 +1438,10 @@ function shouldSendBotReply_(decision, capReached) {
   }
 
   const d = decision || {};
-  if (d.handoff_needed || d.needs_review || d.alert_needed || d.block_reply) {
+  if ((d.handoff_needed || d.needs_review || d.alert_needed) && !d.send_reply_before_handoff) {
+    return false;
+  }
+  if (d.block_reply) {
     return false;
   }
 
@@ -2412,6 +2440,21 @@ function applyFastRules_(text, rowObj) {
     };
   }
 
+  if (isUnavailableUntilCallbackReferenceSignal_(t)) {
+    const callbackReference = extractScheduledCallbackReference_(t);
+    return {
+      matched: true,
+      reply_text: "No problem. What time " + callbackReference + " works best for a quick call?",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "interested_no_call",
+      reason: "Agent is unavailable until a future day; asked for a time instead of promising an unscheduled follow-up"
+    };
+  }
+
   if (isSchedulingSignal_(t)) {
     const hasSpecificTime = !!extractSchedulingTimePhrase_(t);
     const callbackTime = extractScheduledCallbackReference_(t) ||
@@ -2444,10 +2487,12 @@ function applyFastRules_(text, rowObj) {
       reply_text: "I don't represent a buyer or submit offers. I handle the lender-side short-sale work for the listing agent.",
       lead_status: "Y",
       conversation_done: false,
-      handoff_needed: false,
+      handoff_needed: true,
       needs_review: false,
       block_reply: false,
-      reason: "Clarified that Crisp does not represent a buyer or submit offers"
+      send_reply_before_handoff: true,
+      handoff_type: "OFFER SUBMISSION REQUEST",
+      reason: "Clarified Crisp's role and routed the actionable offer-submission request to Yoni"
     };
   }
 
@@ -3057,8 +3102,8 @@ function isNoCurrentShortSaleHelpSignal_(text) {
 
 function isOfferSubmissionConfusionSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  return /\b(?:please\s+)?submit\s+(?:an?|the|my|our)\s+offer\b/.test(t) ||
-    /\b(?:can|could|will|would)\s+you\s+submit\s+(?:an?|the|my|our)\s+offer\b/.test(t) ||
+  return /\b(?:please\s+)?submit\s+(?:an?|the|my|our|your)\s+offer\b/.test(t) ||
+    /\b(?:can|could|will|would)\s+you\s+submit\s+(?:an?|the|my|our|your)\s+offer\b/.test(t) ||
     /\bsubmit\s+(?:it|this)\s+to\s+(?:the\s+)?(?:seller|listing agent|agent)\b/.test(t);
 }
 
@@ -3798,7 +3843,7 @@ function extractScheduledCallbackReference_(text) {
   const searchable = raw.replace(/\bnot\s+tomorrow\b/ig, " ");
 
   const match = searchable.match(
-    /\btomorrow\b|\bnext\s+week\b|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
+    /\bafter\s+(?:the\s+)?weekend\b|\btomorrow\b|\bnext\s+week\b|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
   );
   if (!match) return "";
   let reference = match[0];
@@ -3815,6 +3860,13 @@ function extractScheduledCallbackReference_(text) {
   return reference.replace(/\b[a-z]/g, function(letter) {
     return letter.toUpperCase();
   });
+}
+
+function isUnavailableUntilCallbackReferenceSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || !extractScheduledCallbackReference_(t) || isExplicitDayOrDateCallbackSignal_(t)) return false;
+  return /\b(?:i(?:['’]?m|\s+am)|we(?:['’]?re|\s+are)|i(?:['’]?ll|\s+will)\s+be|we(?:['’]?ll|\s+will)\s+be)\s+(?:out(?:\s+of\s+(?:the\s+)?office)?|away|unavailable)\s+until\b/.test(t) ||
+    /\b(?:i|we)\s+(?:won['’]?t|will\s+not)\s+be\s+(?:back|available)\s+until\b/.test(t);
 }
 
 function normalizeCallbackTime_(value) {
@@ -4588,6 +4640,27 @@ function sanitizeReplyCallPromise_(replyText) {
   }
 
   return text;
+}
+
+function enforceDurableFollowupPromiseRule_(decision, inboundText) {
+  const guarded = Object.assign({}, decision || {});
+  const reply = normalizeWhitespace_(String(guarded.reply_text || ""));
+  if (!/\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:check\s+back|follow\s+up|reach\s+out|call|text|contact)\b/i.test(reply)) {
+    return guarded;
+  }
+  if (String(guarded.call_booking_status || "").toLowerCase() === "scheduled_callback" && guarded.callback_time) {
+    return guarded;
+  }
+
+  const reference = extractScheduledCallbackReference_(inboundText) || extractScheduledCallbackReference_(reply);
+  guarded.reply_text = reference
+    ? "No problem. What time " + reference + " works best for a quick call?"
+    : "No problem. What day and time works best for a quick call?";
+  guarded.call_booking_status = "interested_no_call";
+  guarded.callback_time = "";
+  guarded.callback_requested = "";
+  guarded.reason = "Replaced an unscheduled bot follow-up promise with a request for durable callback timing";
+  return guarded;
 }
 
 function sanitizeReplyPropertyReference_(replyText, rowObj) {
@@ -5697,12 +5770,32 @@ function testSmsIntentContractV3_() {
     directHelp.reason
   );
 
-  const submitOffer = applyFastRules_("Please submit an offer", baseRow);
+  const submitOffer = applyFastRules_("Submit your offer subject to inspection", baseRow);
   record(
-    "offer_submission_scope_guard",
-    submitOffer.matched && !submitOffer.handoff_needed &&
+    "offer_submission_scope_guard_and_handoff",
+    submitOffer.matched && submitOffer.handoff_needed && !submitOffer.block_reply &&
+      submitOffer.send_reply_before_handoff && shouldSendBotReply_(submitOffer, false) &&
+      submitOffer.handoff_type === "OFFER SUBMISSION REQUEST" &&
       submitOffer.reply_text.indexOf("don't represent a buyer") !== -1,
     submitOffer.reason
+  );
+
+  const weekendCallback = applyFastRules_("Lets talk after the weekend", baseRow);
+  record(
+    "relative_weekend_callback",
+    weekendCallback.matched && weekendCallback.handoff_needed &&
+      weekendCallback.call_booking_status === "scheduled_callback" &&
+      weekendCallback.callback_time === "After The Weekend",
+    weekendCallback.reason
+  );
+
+  const unavailableUntilMonday = applyFastRules_("I will be out until Monday", baseRow);
+  record(
+    "unavailable_until_asks_for_time",
+    unavailableUntilMonday.matched && !unavailableUntilMonday.handoff_needed &&
+      unavailableUntilMonday.call_booking_status === "interested_no_call" &&
+      unavailableUntilMonday.reply_text === "No problem. What time Monday works best for a quick call?",
+    unavailableUntilMonday.reason
   );
 
   return {
@@ -5988,6 +6081,30 @@ function testApprovedLeadIntelligenceRules_() {
       extractScheduledCallbackReference_(tomorrowCallbackText) !== "Tomorrow") {
     throw new Error("Natural-language tomorrow callback classification regression");
   }
+  const weekendCallbackText = "Lets talk after the weekend";
+  if (!isExplicitDayOrDateCallbackSignal_(weekendCallbackText) ||
+      !isSchedulingSignal_(weekendCallbackText) ||
+      extractScheduledCallbackReference_(weekendCallbackText) !== "After The Weekend") {
+    throw new Error("Relative post-weekend callback classification regression");
+  }
+  const unavailableUntilMondayDecision = applyFastRules_("I will be out until Monday", {});
+  if (!isUnavailableUntilCallbackReferenceSignal_("I will be out until Monday") ||
+      unavailableUntilMondayDecision.reply_text !== "No problem. What time Monday works best for a quick call?" ||
+      unavailableUntilMondayDecision.call_booking_status !== "interested_no_call") {
+    throw new Error("Unavailable-until callback-time question regression");
+  }
+  const guardedPromise = enforceDurableFollowupPromiseRule_({
+    reply_text: "No problem, I'll check back Monday.",
+    lead_status: "Y",
+    conversation_done: false,
+    handoff_needed: false,
+    needs_review: false,
+    block_reply: false
+  }, "I will be out until Monday");
+  if (guardedPromise.reply_text !== "No problem. What time Monday works best for a quick call?" ||
+      guardedPromise.call_booking_status !== "interested_no_call" || guardedPromise.callback_time) {
+    throw new Error("Unscheduled bot follow-up promise guard regression");
+  }
   const postHandoffCallbackRow = {
     [HEADERS.ai_state]: "handoff",
     [HEADERS.call_booking_status]: "interested_no_call",
@@ -6015,6 +6132,28 @@ function testApprovedLeadIntelligenceRules_() {
   if (!isDurableHandledDuplicateInbound_(handledDuplicateRow, "  I HAVE someone thank you  ") ||
       isDurableHandledDuplicateInbound_(handledDuplicateRow, "I have someone, but what do you charge?")) {
     throw new Error("Durable handled-inbound duplicate regression");
+  }
+  const coalescedDuplicateText = "I have someone already I have someone already I have someone already";
+  const coalescedDuplicateRow = {
+    [HEADERS.last_inbound_text]: coalescedDuplicateText,
+    [HEADERS.response_status]: coalescedDuplicateText,
+    [HEADERS.ai_state]: "done",
+    [HEADERS.history_json]: JSON.stringify([
+      { role: "agent", text: coalescedDuplicateText, ts: "2026-08-21T11:51:00-04:00" },
+      { role: "assistant", text: getStandardNoCloseoutReply_(), ts: "2026-08-21T11:53:00-04:00" }
+    ])
+  };
+  if (canonicalizeRepeatedCompleteInboundForDedupe_(coalescedDuplicateText) !== "i have someone already" ||
+      !isDurableHandledDuplicateInbound_(coalescedDuplicateRow, "I have someone already") ||
+      isDurableHandledDuplicateInbound_(coalescedDuplicateRow, "I have someone already, what is your fee?")) {
+    throw new Error("Coalesced complete-message replay suppression regression");
+  }
+  const offerSubmissionDecision = applyFastRules_("Submit your offer subject to inspection", {});
+  if (!isOfferSubmissionConfusionSignal_("Submit your offer subject to inspection") ||
+      !offerSubmissionDecision.handoff_needed || offerSubmissionDecision.block_reply ||
+      !offerSubmissionDecision.send_reply_before_handoff || !shouldSendBotReply_(offerSubmissionDecision, false) ||
+      offerSubmissionDecision.handoff_type !== "OFFER SUBMISSION REQUEST") {
+    throw new Error("Offer-submission role boundary and handoff regression");
   }
   const randyDuplicateText = "That was an input error and has been corrected - this is not a short sale - but appreciate your text.";
   const randyDuplicateRow = {

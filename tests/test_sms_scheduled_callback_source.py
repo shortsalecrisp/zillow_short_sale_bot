@@ -23,3 +23,10 @@ def test_apps_script_embeds_weekday_callback_positive_and_negative_controls():
     assert "Call the lender Monday" in CHATBOT
     assert "Let's set up a time to talk tomorrow. Let me know what time works best for you." in CHATBOT
     assert "Let's talk to the lender tomorrow" in CHATBOT
+
+
+def test_apps_script_captures_relative_weekend_callback_and_blocks_unscheduled_promises():
+    assert "After The Weekend" in CHATBOT
+    assert "function isUnavailableUntilCallbackReferenceSignal_" in CHATBOT
+    assert "function enforceDurableFollowupPromiseRule_" in CHATBOT
+    assert "No problem. What time Monday works best for a quick call?" in CHATBOT

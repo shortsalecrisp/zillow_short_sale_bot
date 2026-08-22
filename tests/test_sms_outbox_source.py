@@ -56,6 +56,13 @@ def test_claim_revalidates_latest_crm_message_before_send():
     assert "A newer substantive inbound message exists" in OUTBOX
 
 
+def test_offer_scope_clarification_can_send_before_approved_handoff_lock():
+    assert "approvedOfferScopeReply" in OUTBOX
+    assert "isOfferSubmissionConfusionSignal_(inboundText)" in OUTBOX
+    assert "!approvedOfferScopeReply && typeof hasPendingSmsTakeoverV11_" in OUTBOX
+    assert '!approvedOfferScopeReply && String(rowObj[HEADERS.human_override]' in OUTBOX
+
+
 def test_inbound_queue_coalesces_rapid_same_phone_bubbles_before_classification():
     assert "fragmentIndexes" in OUTBOX
     assert 'fragmentCreatedAt - previousFragmentAt > 20000' in OUTBOX
@@ -136,6 +143,17 @@ def test_watchdog_recovers_claims_but_does_not_blindly_resend_uncertain_sms():
     assert 'status === "send_started"' in OUTBOX
     assert 'setValue("uncertain")' in OUTBOX
     assert "SMS SEND RESULT UNCERTAIN" in OUTBOX
+
+
+def test_watchdog_recovers_confirmed_crm_receipt_before_transport_takeover():
+    assert "function findConfirmedSmsReplyReceiptInHistory_" in OUTBOX
+    assert "function findConfirmedSmsReplyReceiptForPendingRow_" in OUTBOX
+    assert "function recordRecoveredSmsReplyReceipt_" in OUTBOX
+    assert 'String(later.receipt_id || "").trim()' in OUTBOX
+    assert 'normalizePendingSmsInboundText_(later.text) === reply' in OUTBOX
+    assert 'setValue("Recovered from confirmed CRM reply receipt")' in OUTBOX
+    assert 'if (alertSmsOutboxProblem_(sheet, sheetRow, row, "SMS SEND RESULT UNCERTAIN"))' in OUTBOX
+    assert "function testConfirmedSmsReplyReceiptRecovery_" in OUTBOX
 
 
 def test_worker_and_watchdog_triggers_are_self_installed():
@@ -276,3 +294,5 @@ def test_safe_deployment_probe_exercises_receipt_lease_identity():
     assert "testSmsReceiptLeaseIdentity_()" in UNIFIED
     assert "probe.stale_text_normalization" in UNIFIED
     assert "testPendingSmsStaleTextNormalization_()" in UNIFIED
+    assert "probe.receipt_aware_watchdog" in UNIFIED
+    assert "testConfirmedSmsReplyReceiptRecovery_()" in UNIFIED

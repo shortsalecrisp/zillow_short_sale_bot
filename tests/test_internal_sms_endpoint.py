@@ -1771,6 +1771,70 @@ def test_sms_contract_recent_duplicate_is_suppressed_but_old_repeat_is_not(monke
     assert module._sms_is_recent_duplicate_inbound(row, "same message", "2026-08-20T10:06:00-04:00") is False
 
 
+def test_sms_contract_coalesced_complete_message_replay_is_durably_suppressed(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    coalesced = "I have someone already I have someone already I have someone already"
+    row = {
+        "last_inbound_text": coalesced,
+        "response_status": coalesced,
+        "ai_state": "done",
+        "history_json": json.dumps(
+            [
+                {"role": "agent", "text": coalesced, "ts": "2026-08-21T11:51:00-04:00"},
+                {"role": "assistant", "text": "Ok, no problem.", "ts": "2026-08-21T11:53:00-04:00"},
+            ]
+        ),
+    }
+
+    assert module._sms_canonicalize_repeated_complete_inbound_for_dedupe(coalesced) == "i have someone already"
+    assert module._sms_is_durable_handled_duplicate(row, "I have someone already") is True
+    assert module._sms_is_durable_handled_duplicate(row, "I have someone already, what is your fee?") is False
+
+
+def test_sms_contract_offer_submission_clarifies_and_hands_off(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision({}, "Submit your offer subject to inspection")
+
+    assert module._sms_is_offer_submission_request("Submit your offer subject to inspection") is True
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is False
+    assert decision["send_reply_before_handoff"] is True
+    assert decision["handoff_type"] == "OFFER SUBMISSION REQUEST"
+    assert "don't represent a buyer or submit offers" in decision["reply_text"]
+    assert module._sms_should_reply(decision, 0) is True
+
+
+def test_sms_contract_relative_callback_and_unscheduled_promise_guard(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    weekend = module._sms_fast_decision({}, "Lets talk after the weekend")
+    unavailable = module._sms_fast_decision({}, "I will be out until Monday")
+    guarded = module._sms_enforce_durable_followup_promise(
+        module._sms_decision(reply_text="No problem, I'll check back Monday."),
+        "I will be out until Monday",
+    )
+
+    assert module._sms_is_scheduled_callback("Lets talk after the weekend") is True
+    assert module._sms_extract_scheduled_callback_reference("Lets talk after the weekend") == "After The Weekend"
+    assert weekend["call_booking_status"] == "scheduled_callback"
+    assert weekend["callback_time"] == "After The Weekend"
+    assert weekend["handoff_needed"] is True
+    assert module._sms_is_unavailable_until_callback_reference("I will be out until Monday") is True
+    assert unavailable["call_booking_status"] == "interested_no_call"
+    assert unavailable["reply_text"] == "No problem. What time Monday works best for a quick call?"
+    assert guarded["call_booking_status"] == "interested_no_call"
+    assert guarded["callback_time"] == ""
+    assert guarded["reply_text"] == "No problem. What time Monday works best for a quick call?"
+
+
 def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

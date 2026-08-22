@@ -141,6 +141,9 @@ function handleUnifiedSmsPost_(e) {
       probe.stale_text_normalization = typeof testPendingSmsStaleTextNormalization_ === "function"
         ? testPendingSmsStaleTextNormalization_()
         : { ok: false, reason: "Stale-text normalization test is unavailable" };
+      probe.receipt_aware_watchdog = typeof testConfirmedSmsReplyReceiptRecovery_ === "function"
+        ? testConfirmedSmsReplyReceiptRecovery_()
+        : { ok: false, reason: "Receipt-aware watchdog test is unavailable" };
       probe.intent_contract_v3 = typeof testSmsIntentContractV3_ === "function"
         ? testSmsIntentContractV3_()
         : { ok: false, reason: "SMS intent contract V3 test is unavailable" };
