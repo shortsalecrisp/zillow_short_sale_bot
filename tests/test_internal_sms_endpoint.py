@@ -1139,7 +1139,29 @@ def test_sms_fee_and_recent_closing_count_are_answered_without_handoff(monkeypat
     assert decision["block_reply"] is False
     assert "buyer" in decision["reply_text"].lower()
     assert "15 years" in decision["reply_text"]
-    assert "exact recent closing count" in decision["reply_text"].lower()
+    assert "this is all that I do" in decision["reply_text"]
+    assert "confident I can get your deal closed" in decision["reply_text"]
+
+
+def test_sms_experience_questions_share_the_approved_response(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    expected = (
+        "I have been doing this over 15 years and this is all that I do - help agents and homeowners "
+        "with the short sale process. So I have a lot of experience and am confident I can get your deal closed."
+    )
+
+    for inbound in (
+        "How long have you been doing short sales?",
+        "How many short sales have you closed?",
+        "What is your track record with short sales?",
+    ):
+        decision = module._sms_fast_decision({}, inbound)
+        assert decision["reply_text"] == expected
+        assert decision["handoff_needed"] is False
+        assert decision["block_reply"] is False
 
 
 def test_sms_unanswered_substantive_question_fails_closed_to_handoff(monkeypatch):

@@ -3543,16 +3543,9 @@ def _sms_is_unsupported_performance_stats_question(value: Any) -> bool:
 
 
 def _sms_experience_reply(value: Any) -> str:
-    text = _sms_normalize_whitespace(value).lower()
-    if re.search(r"\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|transactions?)\b", text):
-        return (
-            "I've focused on short sales for more than 15 years, and this is all I do. "
-            "I don't have the exact recent closing count in front of me, but I'm happy to talk through "
-            "my experience and your listing on a quick call."
-        )
     return (
-        "I've focused on short sales for more than 15 years, helping agents and homeowners through "
-        "the process. I'm happy to talk through my experience and your listing on a quick call."
+        "I have been doing this over 15 years and this is all that I do - help agents and homeowners "
+        "with the short sale process. So I have a lot of experience and am confident I can get your deal closed."
     )
 
 
