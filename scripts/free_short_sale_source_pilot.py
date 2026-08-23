@@ -72,6 +72,9 @@ RUN_RECEIPT_HEADERS = [
     "detail",
 ]
 MAX_SOURCE_QUERY_RECOVERY = 10
+MAX_SOURCE_QUERY_RECOVERY_EXPERIMENT = 20
+SOURCE_QUERY_RECOVERY_EXPERIMENT_START_DATE = "2026-08-23"
+SOURCE_QUERY_RECOVERY_EXPERIMENT_DAYS = 7
 RECOVERY_PENDING_PREFIX = "recovery_pending_v1="
 RECOVERY_ATTEMPT_PREFIX = "recovery_attempt_v1="
 RECOVERY_COMPLETED_PREFIX = "recovery_completed_v1="
@@ -3835,14 +3838,29 @@ def recovery_manifest_detail(prefix: str, query_keys: Iterable[str]) -> str:
     return f"{prefix}{','.join(keys)}"
 
 
-def parse_recovery_query_keys(detail: str, prefix: str = RECOVERY_PENDING_PREFIX) -> list[str]:
+def source_query_recovery_limit(run_date: dt.date) -> int:
+    if experiment_active(
+        run_date,
+        SOURCE_QUERY_RECOVERY_EXPERIMENT_START_DATE,
+        SOURCE_QUERY_RECOVERY_EXPERIMENT_DAYS,
+    ):
+        return MAX_SOURCE_QUERY_RECOVERY_EXPERIMENT
+    return MAX_SOURCE_QUERY_RECOVERY
+
+
+def parse_recovery_query_keys(
+    detail: str,
+    prefix: str = RECOVERY_PENDING_PREFIX,
+    *,
+    max_recovery_queries: int = MAX_SOURCE_QUERY_RECOVERY,
+) -> list[str]:
     normalized = normalize_space(detail)
     marker = normalized.find(prefix)
     if marker < 0:
         return []
     raw = normalized[marker + len(prefix):].split(";", 1)[0]
     keys = sorted({key.strip() for key in raw.split(",") if key.strip()})
-    if not keys or len(keys) > MAX_SOURCE_QUERY_RECOVERY:
+    if not keys or len(keys) > max_recovery_queries:
         return []
     if any(not re.fullmatch(r"[A-Z]{2}:[a-z0-9_]+", key) for key in keys):
         return []
@@ -3917,7 +3935,10 @@ def claim_run_schedule_slot(
         latest_status = latest_terminal[4] if len(latest_terminal) > 4 else ""
         latest_detail = latest_terminal[7] if len(latest_terminal) > 7 else ""
         if latest_status == "completed_degraded":
-            recovery_query_keys = parse_recovery_query_keys(latest_detail)
+            recovery_query_keys = parse_recovery_query_keys(
+                latest_detail,
+                max_recovery_queries=source_query_recovery_limit(run_date),
+            )
             if not recovery_query_keys:
                 return False, "recovery_unavailable", []
         elif latest_status == "failed" and RECOVERY_EXHAUSTED_PREFIX in latest_detail:
@@ -6642,7 +6663,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                 "pilot_query_recovery_plan",
                 query_keys=recovery_query_keys,
                 planned_searches=planned_searches,
-                max_recovery_queries=MAX_SOURCE_QUERY_RECOVERY,
+                max_recovery_queries=source_query_recovery_limit(run_date),
                 full_plan_searches=len(args.states) * len(source_queries),
             )
     if audit_links_only:
@@ -7188,9 +7209,10 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
         )
     else:
         recoverable_query_keys = sorted(set(failed_query_keys))
-        if not pipeline_complete and 0 < len(recoverable_query_keys) <= MAX_SOURCE_QUERY_RECOVERY:
+        recovery_limit = source_query_recovery_limit(run_date)
+        if not pipeline_complete and 0 < len(recoverable_query_keys) <= recovery_limit:
             terminal_detail = recovery_manifest_detail(RECOVERY_PENDING_PREFIX, recoverable_query_keys)
-        elif not pipeline_complete and len(recoverable_query_keys) > MAX_SOURCE_QUERY_RECOVERY:
+        elif not pipeline_complete and len(recoverable_query_keys) > recovery_limit:
             terminal_detail = f"recovery_not_bounded_v1=count:{len(recoverable_query_keys)}"
         else:
             terminal_detail = "" if pipeline_complete else "pipeline completion gate failed"

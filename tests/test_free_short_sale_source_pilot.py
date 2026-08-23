@@ -3869,6 +3869,65 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(pilot.parse_recovery_query_keys(detail), [])
 
+    def test_recovery_cap_experiment_accepts_20_queries_for_seven_scheduled_days(self):
+        detail = pilot.recovery_manifest_detail(
+            pilot.RECOVERY_PENDING_PREFIX,
+            [f"TX:bucket_{index}" for index in range(20)],
+        )
+
+        for run_date in (dt.date(2026, 8, 23), dt.date(2026, 8, 29)):
+            limit = pilot.source_query_recovery_limit(run_date)
+            self.assertEqual(limit, 20)
+            self.assertEqual(
+                len(pilot.parse_recovery_query_keys(detail, max_recovery_queries=limit)),
+                20,
+            )
+
+    def test_recovery_cap_experiment_rejects_21_and_expires_after_seven_days(self):
+        detail = pilot.recovery_manifest_detail(
+            pilot.RECOVERY_PENDING_PREFIX,
+            [f"TX:bucket_{index}" for index in range(21)],
+        )
+
+        experiment_limit = pilot.source_query_recovery_limit(dt.date(2026, 8, 23))
+        self.assertEqual(
+            pilot.parse_recovery_query_keys(detail, max_recovery_queries=experiment_limit),
+            [],
+        )
+        self.assertEqual(pilot.source_query_recovery_limit(dt.date(2026, 8, 22)), 10)
+        self.assertEqual(pilot.source_query_recovery_limit(dt.date(2026, 8, 30)), 10)
+
+    def test_durable_schedule_slot_claims_20_query_experiment_manifest(self):
+        run_date = dt.date(2026, 8, 23)
+        now = dt.datetime(2026, 8, 23, 15, 30, 0, tzinfo=dt.timezone.utc)
+        recovery_keys = [f"TX:bucket_{index}" for index in range(20)]
+        pending_detail = pilot.recovery_manifest_detail(
+            pilot.RECOVERY_PENDING_PREFIX,
+            recovery_keys,
+        )
+        prior = [
+            pilot.RUN_RECEIPT_HEADERS,
+            ["source:2026-08-23", "primary", "2026-08-23", "scheduled_source",
+             "completed_degraded", "2026-08-23T13:10:00+00:00", "false", pending_detail],
+        ]
+        after_append = prior + [[
+            "source:2026-08-23", "recovery", "2026-08-23", "scheduled_source",
+            "running", now.isoformat(), "false", "",
+        ]]
+
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(pilot, "get_values", side_effect=[prior, after_append]), \
+             mock.patch.object(pilot, "append_run_slot_receipt"):
+            claimed, reason, claimed_keys = pilot.claim_run_schedule_slot(
+                "token", "sheet", schedule_slot_id="source:2026-08-23",
+                run_receipt_id="recovery", run_date=run_date,
+                run_mode="scheduled_source", now=now,
+            )
+
+        self.assertTrue(claimed)
+        self.assertEqual(reason, "claimed_recovery")
+        self.assertEqual(claimed_keys, sorted(recovery_keys))
+
     def test_recovery_run_attempts_only_manifest_queries_and_skips_direct_monitor(self):
         recovery_keys = [
             "WI:idx_broker_pages", "WI:idx_broker_remarks",
