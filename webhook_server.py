@@ -3504,6 +3504,10 @@ def _sms_normalize_whitespace(value: Any) -> str:
 
 
 YONI_PUBLIC_CONTACT_REPLY = "Yoni Kutler - 404-300-9526. You can call or text anytime."
+EQUATOR_PORTAL_REPLY = (
+    "I'm very familiar with Equator and can handle all of the tasks and communication in the system "
+    "to take that work off your hands."
+)
 SHORT_SALE_TIMELINE_REPLY = (
     "The short sale process generally takes 60-90 days to complete from the point we submit the full short sale "
     "package and offer and all docs until the lender reviews the offer and gives us a decision."
@@ -3679,7 +3683,8 @@ def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[
     current_coverage = bool(
         re.search(
             r"\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b"
-            r"|\b(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b",
+            r"|\b(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b"
+            r"|\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+(?:currently\s+)?working\s+with\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\b",
             text,
         )
     )
@@ -3688,8 +3693,8 @@ def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[
     ):
         return False
     patterns = [
-        r"\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b",
-        r"\b(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b",
+        r"\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b",
+        r"\b(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b",
         r"\bkeep\s+(?:me|us)\s+in\s+mind\b",
         r"\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b",
     ]
@@ -4063,6 +4068,7 @@ def _sms_decision(
     preserve_existing_state: bool = False,
     preserve_reply_formatting: bool = False,
     send_reply_before_handoff: bool = False,
+    bypass_reply_cap: bool = False,
 ) -> Dict[str, Any]:
     normalized_status = lead_status if lead_status in {"R", "Y", "O"} else "Y"
     if preserve_existing_state and lead_status == "G":
@@ -4083,7 +4089,18 @@ def _sms_decision(
         "preserve_existing_state": preserve_existing_state,
         "preserve_reply_formatting": preserve_reply_formatting,
         "send_reply_before_handoff": send_reply_before_handoff,
+        "bypass_reply_cap": bypass_reply_cap,
     }
+
+
+def _sms_is_terminal_closeout_decision(decision: Dict[str, Any]) -> bool:
+    return bool(
+        decision.get("conversation_done")
+        and decision.get("lead_status") in {"R", "O"}
+        and not decision.get("handoff_needed")
+        and not decision.get("needs_review")
+        and not decision.get("alert_needed")
+    )
 
 
 def _sms_is_automated_routing_notice(text: str) -> bool:
@@ -4972,6 +4989,15 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason="Human override enabled - inbound recorded only",
         )
 
+    if re.search(r"\bequator\b", t):
+        return _sms_decision(
+            reply_text=EQUATOR_PORTAL_REPLY,
+            lead_status="Y",
+            reason="Explained Yoni's Equator expertise and ability to handle portal tasks and communication",
+            call_booking_status="interested_no_call",
+            bypass_reply_cap=True,
+        )
+
     if _sms_is_compliance_or_licensing_question(t):
         return _sms_decision(
             lead_status="Y",
@@ -5098,6 +5124,7 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             lead_status="O",
             conversation_done=True,
             reason="Current file already covered; relationship left open without sales follow-up",
+            call_booking_status="warm_future_interest",
         )
 
     if _sms_is_yoni_name_and_number_request(t):
@@ -5252,6 +5279,7 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
 
     if _sms_has_existing_coverage(t) or re.search(
         r"\b(already have help|have help|we handle|handling (it|this)|not interested|no thank)\b"
+        r"|\bno\s*,?\s*thank(?:s|\s+you)?\b"
         r"|\b(?:i|we)\s+(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b",
         t,
     ):
@@ -5328,7 +5356,11 @@ def _sms_is_potential_repeat_reply(reply_text: Any, last_outbound_text: Any) -> 
 def _sms_apply_repeat_guard(
     decision: Dict[str, Any], row_obj: Dict[str, str], inbound_text: str
 ) -> Dict[str, Any]:
-    if decision.get("block_reply") or not _sms_normalize_whitespace(decision.get("reply_text") or ""):
+    if (
+        decision.get("bypass_reply_cap")
+        or decision.get("block_reply")
+        or not _sms_normalize_whitespace(decision.get("reply_text") or "")
+    ):
         return decision
     if not _sms_is_potential_repeat_reply(decision.get("reply_text"), row_obj.get("last_outbound_text")):
         return decision
@@ -5374,7 +5406,7 @@ def _sms_enforce_durable_followup_promise(decision: Dict[str, Any], inbound_text
 
 
 def _sms_should_reply(decision: Dict[str, Any], auto_reply_count: int) -> bool:
-    if auto_reply_count >= 3:
+    if auto_reply_count >= 3 and not decision.get("bypass_reply_cap"):
         return False
     terminal_handoff = decision.get("handoff_needed") or decision.get("needs_review") or decision.get("alert_needed")
     if terminal_handoff and not decision.get("send_reply_before_handoff"):
@@ -5674,10 +5706,15 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
             preserve_existing_state=True,
             reason="Courtesy acknowledgment at reply cap; no further reply needed",
         )
-    elif auto_count >= 3 and not (
-        classified_decision.get("handoff_needed")
-        or classified_decision.get("needs_review")
-        or classified_decision.get("alert_needed")
+    elif (
+        auto_count >= 3
+        and not classified_decision.get("bypass_reply_cap")
+        and not _sms_is_terminal_closeout_decision(classified_decision)
+        and not (
+            classified_decision.get("handoff_needed")
+            or classified_decision.get("needs_review")
+            or classified_decision.get("alert_needed")
+        )
     ):
         decision = _sms_decision(
             lead_status="Y",

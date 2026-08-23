@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1218,6 +1219,15 @@ def test_sms_covered_but_relationship_open_closes_as_non_hot_without_handoff(mon
     assert apostrophe_stripped["conversation_done"] is True
     assert apostrophe_stripped["handoff_needed"] is False
 
+    common_typo = module._sms_fast_decision(
+        {},
+        "We are working with someone right now but I will keep you contact in case anything changes",
+    )
+    assert common_typo["lead_status"] == "O"
+    assert common_typo["conversation_done"] is True
+    assert common_typo["handoff_needed"] is False
+    assert common_typo["call_booking_status"] == "warm_future_interest"
+
     reciprocal = module._sms_fast_decision(
         row,
         "If you have clients looking for a great agent, keep me in mind as well!",
@@ -1230,6 +1240,30 @@ def test_sms_covered_but_relationship_open_closes_as_non_hot_without_handoff(mon
     assert module._sms_is_relationship_only_after_existing_coverage(
         "Can you call me about the next short sale?", row
     ) is False
+
+
+@pytest.mark.parametrize(
+    "inbound",
+    [
+        "I'm using Agent Equator. Bank never responds.",
+        "Can you help on Equator?",
+        "The lender is managing the short sale in Equator.",
+    ],
+)
+def test_sms_equator_mentions_get_the_approved_portal_expertise_reply(monkeypatch, inbound):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert decision["reply_text"] == module.EQUATOR_PORTAL_REPLY
+    assert decision["lead_status"] == "Y"
+    assert decision["conversation_done"] is False
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert decision["bypass_reply_cap"] is True
 
 
 def test_sms_future_buyer_recontact_closes_warm_without_takeover(monkeypatch):
@@ -2060,6 +2094,70 @@ def test_sms_contract_reply_cap_always_hands_off_substantive_inbound(monkeypatch
     assert body["handoff_needed"] is True
     assert body["handoff_type"] == "MAX REPLIES REACHED"
     assert sheet.rows[2][19] == "TRUE"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_status"),
+    [
+        ("No, thank you. Five thousand dollars is insane.", "R"),
+        ("We have someone now, but I'll keep your information for the future.", "O"),
+    ],
+)
+def test_sms_contract_reply_cap_preserves_terminal_negative_and_future_only_closeouts(
+    monkeypatch, message, expected_status
+):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][18] = "3"
+
+    body = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": message,
+            "message_id": "cap-terminal-closeout-1",
+        },
+    ).json()
+
+    assert body["should_reply"] is False
+    assert body["lead_status"] == expected_status
+    assert body["conversation_done"] is True
+    assert body["handoff_needed"] is False
+    assert sheet.rows[2][13] == "done"
+    assert sheet.rows[2][16] == "FALSE"
+    assert sheet.rows[2][19] == "FALSE"
+    assert sender.calls == []
+
+
+def test_sms_contract_equator_reply_bypasses_cap_without_takeover(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][18] = "3"
+
+    body = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "Can you handle the file in Equator?",
+            "message_id": "equator-cap-1",
+        },
+    ).json()
+
+    assert body["should_reply"] is True
+    assert body["reply_text"] == module.EQUATOR_PORTAL_REPLY
+    assert body["lead_status"] == "Y"
+    assert body["handoff_needed"] is False
+    assert sheet.rows[2][13] == "active"
+    assert sheet.rows[2][16] == "FALSE"
+    assert sheet.rows[2][19] == "FALSE"
 
 
 def test_sms_contract_source_contains_retry_and_truthfulness_guards():

@@ -610,6 +610,8 @@ function handleIncomingSmsCore_(body) {
     !isManualFollowupLocked_(currentRowObj) &&
     !isAutomatedRoutingNoticeSignal_(inboundText) &&
     !isPostHandoffCallbackUpdate_(currentRowObj, inboundText) &&
+    !ruleResult.bypass_reply_cap &&
+    !isTerminalCloseoutDecision_(ruleResult) &&
     !(ruleResult.matched && (ruleResult.handoff_needed || ruleResult.needs_review || ruleResult.alert_needed))
   ) {
     if (isFinalCourtesyReply_(inboundText)) {
@@ -801,7 +803,12 @@ function handleIncomingSmsCore_(body) {
     };
   }
 
-  if (capReached && !(ruleResult.matched && (ruleResult.handoff_needed || ruleResult.needs_review || ruleResult.alert_needed))) {
+  if (
+    capReached &&
+    !ruleResult.bypass_reply_cap &&
+    !isTerminalCloseoutDecision_(ruleResult) &&
+    !(ruleResult.matched && (ruleResult.handoff_needed || ruleResult.needs_review || ruleResult.alert_needed))
+  ) {
     if (isFinalCourtesyReply_(inboundText)) {
       return {
         ok: true,
@@ -1243,8 +1250,8 @@ function handleIncomingSmsCore_(body) {
 
     return {
       ok: true,
-      should_reply: shouldSendBotReply_(decision, capReached),
-      reply_text: shouldSendBotReply_(decision, capReached) ? (decision.reply_text || "") : "",
+      should_reply: shouldSendBotReply_(decision, capReached && !decision.bypass_reply_cap),
+      reply_text: shouldSendBotReply_(decision, capReached && !decision.bypass_reply_cap) ? (decision.reply_text || "") : "",
       lead_status: decision.lead_status,
       conversation_done: !!decision.conversation_done,
       handoff_needed: !!decision.handoff_needed,
@@ -1430,6 +1437,16 @@ function isManualFollowupLocked_(rowObj) {
   const handoffFlag = String(rowObj && rowObj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE";
   const aiState = String(rowObj && rowObj[HEADERS.ai_state] || "").toLowerCase();
   return handoffFlag || aiState === "handoff";
+}
+
+function isTerminalCloseoutDecision_(decision) {
+  const d = decision || {};
+  return !!d.matched &&
+    !!d.conversation_done &&
+    (d.lead_status === "R" || d.lead_status === "O") &&
+    !d.handoff_needed &&
+    !d.needs_review &&
+    !d.alert_needed;
 }
 
 function shouldSendBotReply_(decision, capReached) {
@@ -2185,6 +2202,21 @@ function applyFastRules_(text, rowObj) {
     };
   }
 
+  if (isEquatorPortalSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildEquatorPortalReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "interested_no_call",
+      bypass_reply_cap: true,
+      reason: "Explained Yoni's Equator expertise and ability to handle portal tasks and communication"
+    };
+  }
+
   const priorityQuestion = buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound);
   if (priorityQuestion) return priorityQuestion;
 
@@ -2294,6 +2326,20 @@ function applyFastRules_(text, rowObj) {
       needs_review: false,
       block_reply: false,
       reason: "Agent will reconnect after securing a buyer; warm future interest closed without takeover"
+    };
+  }
+
+  if (isRelationshipOnlyAfterExistingCoverageSignal_(t, rowObj)) {
+    return {
+      matched: true,
+      reply_text: buildRelationshipOnlyCloseoutReply_(t),
+      lead_status: "O",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "warm_future_interest",
+      reason: "Current file already covered; relationship left open without sales follow-up"
     };
   }
 
@@ -2713,6 +2759,19 @@ function applyFastRules_(text, rowObj) {
       needs_review: false,
       block_reply: false,
       reason: "Asked who Yoni is with / whether he is a mortgage broker"
+    };
+  }
+
+  if (isClearNoSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: getStandardNoCloseoutReply_(),
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Clear no / closed out"
     };
   }
 
@@ -3313,13 +3372,14 @@ function hasPreviouslyCoveredContext_(rowObj) {
 function isRelationshipOnlyAfterExistingCoverageSignal_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const currentCoverage = /\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b/.test(t) ||
-    /\b(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b/.test(t);
+    /\b(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b/.test(t) ||
+    /\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+(?:currently\s+)?working\s+with\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\b/.test(t);
   if (!t || isSubstantiveFollowupSignal_(t) || (!hasPreviouslyCoveredContext_(rowObj) && !currentCoverage)) {
     return false;
   }
   const passiveRelationshipPatterns = [
-    /\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b/,
-    /\b(?:keep|save|hold onto)\s+(?:your|ur)\s+(?:info|information|contact|number|details)\b/,
+    /\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b/,
+    /\b(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b/,
     /\bkeep\s+(?:me|us)\s+in\s+mind\b/,
     /\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b/
   ];
@@ -3523,6 +3583,14 @@ function buildShortSaleTimelineReply_() {
   return "A complete short-sale package and offer often takes about 60-90 days for a lender decision, though timing varies by lender and lien complexity.";
 }
 
+function isEquatorPortalSignal_(text) {
+  return /\bequator\b/.test(normalizeWhitespace_(String(text || "").toLowerCase()));
+}
+
+function buildEquatorPortalReply_() {
+  return "I'm very familiar with Equator and can handle all of the tasks and communication in the system to take that work off your hands.";
+}
+
 function isShortSaleTimelineQuestionSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return false;
@@ -3717,7 +3785,7 @@ function isClearNoSignal_(text) {
     /\bwe're good\b/,
     /\bwe are good for now\b/,
     /\bwe're good for now\b/,
-    /\bno thanks\b/,
+    /\bno\s*,?\s*thank(?:s|\s+you)?\b/,
     /\bnot interested\b/,
     /\b(?:i|we)\s+(?:do not|don'?t)\s+need\s+(?:any\s+)?(?:help|assistance)\b/,
     /\bno need for (?:any )?(?:help|assistance)\b/,
@@ -6291,6 +6359,27 @@ function testApprovedLeadIntelligenceRules_() {
   };
   if (!isRelationshipOnlyAfterExistingCoverageSignal_("Ill definitely keep your information for future short sale opportunities", apostropheLossRelationshipRow)) {
     throw new Error("Apostrophe-stripped relationship-only closeout regression");
+  }
+  const relationshipTypoText = "We are working with someone right now but I will keep you contact in case anything changes";
+  const relationshipTypoDecision = applyFastRules_(relationshipTypoText, {});
+  if (!isRelationshipOnlyAfterExistingCoverageSignal_(relationshipTypoText, {}) ||
+      !relationshipTypoDecision.matched ||
+      relationshipTypoDecision.lead_status !== "O" ||
+      !relationshipTypoDecision.conversation_done ||
+      relationshipTypoDecision.handoff_needed) {
+    throw new Error("Common keep-you-contact typo must stay a warm closeout: " + JSON.stringify(relationshipTypoDecision));
+  }
+  const equatorDecision = applyFastRules_("I'm using Agent Equator. Bank never responds.", {});
+  if (!isEquatorPortalSignal_("Can you help on Equator?") ||
+      !equatorDecision.matched ||
+      equatorDecision.reply_text !== buildEquatorPortalReply_() ||
+      equatorDecision.handoff_needed ||
+      !equatorDecision.bypass_reply_cap) {
+    throw new Error("Equator portal expertise reply regression: " + JSON.stringify(equatorDecision));
+  }
+  const explicitNegativeDecision = applyFastRules_("No, thank you. Five thousand dollars is insane.", {});
+  if (!isTerminalCloseoutDecision_(explicitNegativeDecision) || explicitNegativeDecision.lead_status !== "R") {
+    throw new Error("Explicit rejection must remain a terminal closeout before reply-cap handling: " + JSON.stringify(explicitNegativeDecision));
   }
   const futureBuyerText = "So let you know when I eventually get a buyer?";
   const futureBuyerDecision = applyFastRules_(futureBuyerText, {});
