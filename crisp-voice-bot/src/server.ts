@@ -49,6 +49,7 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
       requiresScheduledWindow: true,
       requiresAgentTimeZone: true,
       windows: getConfiguredCallWindows(),
+      minCandidateBasisAt: config.voiceQueue.minCandidateBasisAt.toISOString(),
     },
     providerCircuit: {
       open: providerCircuit.open,

@@ -455,15 +455,72 @@ test("queue scan can return multiple eligible rows in the same local call window
     }
 
     getVoiceBotCallCandidatesFromRows_([
-      { rowNumber: 3366, values: row("Colleen", "Whitney", "NH", "2026-05-06T17:14:41.692330-04:00") },
-      { rowNumber: 3367, values: row("Robert", "DeFalco", "NJ", "2026-05-06T19:49:46.290207-04:00") },
-      { rowNumber: 3369, values: row("Silvia", "Andion", "FL", "2026-05-06T16:03:22.841775-04:00") },
-    ], new Date("2026-05-07T18:45:00Z"), 10).map(function(candidate) {
+      { rowNumber: 3366, values: row("Colleen", "Whitney", "NH", "2026-08-23T13:14:41.692330-04:00") },
+      { rowNumber: 3367, values: row("Robert", "DeFalco", "NJ", "2026-08-23T13:49:46.290207-04:00") },
+      { rowNumber: 3369, values: row("Silvia", "Andion", "FL", "2026-08-23T12:03:22.841775-04:00") },
+    ], new Date("2026-08-23T18:45:00Z"), 10).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));
 
   assert.deepEqual(rowNumbers, [3366, 3367, 3369]);
+});
+
+test("queue scan resumes from today forward and skips rows already staged for Mailshake", () => {
+  const rowNumbers = Array.from(runSchedulerScript(`
+    function row(first, last, state, followupSentAt, options) {
+      const values = Array(42).fill("");
+      values[VOICE_BOT_COL_FIRST_NAME - 1] = first;
+      values[VOICE_BOT_COL_LAST_NAME - 1] = last;
+      values[VOICE_BOT_COL_PHONE - 1] = "603-325-5909";
+      values[VOICE_BOT_COL_LISTING_ADDRESS - 1] = "20 Pearl Street";
+      values[VOICE_BOT_COL_CITY - 1] = "Hillsboro";
+      values[VOICE_BOT_COL_STATE - 1] = state;
+      values[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1] = "x";
+      values[VOICE_BOT_COL_FOLLOWUP_SENT_AT_PROXY - 1] = followupSentAt;
+      if (options && options.mailshakeStatus) {
+        values[VOICE_BOT_COL_LEAD_STATUS_CODE - 1] = options.mailshakeStatus;
+      }
+      return values;
+    }
+
+    getVoiceBotCallCandidatesFromRows_([
+      { rowNumber: 5001, values: row("Old", "Followup", "NH", "2026-08-22T18:45:00Z") },
+      { rowNumber: 5002, values: row("Mailshake", "Ready", "NJ", "2026-08-23T13:30:00Z", { mailshakeStatus: "N" }) },
+      { rowNumber: 5003, values: row("Fresh", "Today", "FL", "2026-08-23T13:30:00Z") },
+    ], new Date("2026-08-23T18:45:00Z"), 10).map(function(candidate) {
+      return candidate.rowNumber;
+    });
+  `));
+
+  assert.deepEqual(rowNumbers, [5003]);
+});
+
+test("second attempts are only queued when the first call happened after the resume cutoff", () => {
+  const rowNumbers = Array.from(runSchedulerScript(`
+    function row(first, last, state, firstAttemptSentAt) {
+      const values = Array(42).fill("");
+      values[VOICE_BOT_COL_FIRST_NAME - 1] = first;
+      values[VOICE_BOT_COL_LAST_NAME - 1] = last;
+      values[VOICE_BOT_COL_PHONE - 1] = "603-325-5909";
+      values[VOICE_BOT_COL_LISTING_ADDRESS - 1] = "20 Pearl Street";
+      values[VOICE_BOT_COL_CITY - 1] = "Hillsboro";
+      values[VOICE_BOT_COL_STATE - 1] = state;
+      values[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1] = "x";
+      values[VOICE_BOT_COL_CALL_1_SENT - 1] = firstAttemptSentAt;
+      values[VOICE_BOT_COL_CALL_1_RESULT - 1] = "agent_not_available";
+      return values;
+    }
+
+    getVoiceBotCallCandidatesFromRows_([
+      { rowNumber: 5010, values: row("Old", "Attempt", "NH", "2026-08-22T13:15:00Z") },
+      { rowNumber: 5011, values: row("Fresh", "Attempt", "NH", "2026-08-23T13:15:00Z") },
+    ], new Date("2026-08-24T18:45:00Z"), 10).map(function(candidate) {
+      return candidate.rowNumber;
+    });
+  `));
+
+  assert.deepEqual(rowNumbers, [5011]);
 });
 
 test("queue only starts enough calls to fill the two active call slots", () => {
@@ -489,10 +546,10 @@ test("queue only starts enough calls to fill the two active call slots", () => {
     }
 
     getVoiceBotStartableCallCandidatesFromRows_([
-      { rowNumber: 3400, values: row("Active", "Call", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T18:35:00Z" }) },
-      { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-      { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-    ], new Date("2026-05-09T18:45:00Z"), 10, 2).map(function(candidate) {
+      { rowNumber: 3400, values: row("Active", "Call", "NH", "2026-08-23T13:14:41.692330-04:00", { call1SentAt: "2026-08-23T18:35:00Z" }) },
+      { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-08-23T13:14:41.692330-04:00") },
+      { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-08-23T13:14:41.692330-04:00") },
+    ], new Date("2026-08-23T18:45:00Z"), 10, 2).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));
@@ -520,11 +577,11 @@ test("stale unfinished call rows do not block new calls forever", () => {
     }
 
     getVoiceBotStartableCallCandidatesFromRows_([
-      { rowNumber: 3400, values: row("Stale", "Call", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T17:00:00Z" }) },
-      { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-      { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-      { rowNumber: 3403, values: row("Third", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-    ], new Date("2026-05-09T18:45:00Z"), 10, 2).map(function(candidate) {
+      { rowNumber: 3400, values: row("Stale", "Call", "NH", "2026-08-23T13:14:41.692330-04:00", { call1SentAt: "2026-08-23T17:00:00Z" }) },
+      { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-08-23T13:14:41.692330-04:00") },
+      { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-08-23T13:14:41.692330-04:00") },
+      { rowNumber: 3403, values: row("Third", "Queued", "NH", "2026-08-23T13:14:41.692330-04:00") },
+    ], new Date("2026-08-23T18:45:00Z"), 10, 2).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));
@@ -623,10 +680,10 @@ test("live-transfer-requested rows still count against active call slots", () =>
     }
 
     getVoiceBotStartableCallCandidatesFromRows_([
-      { rowNumber: 3400, values: row("Transfer", "Pending", "NH", "2026-05-08T17:14:41.692330-04:00", { call1SentAt: "2026-05-09T18:35:00Z", call1Result: "live_transfer_requested" }) },
-      { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-      { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-05-08T17:14:41.692330-04:00") },
-    ], new Date("2026-05-09T18:45:00Z"), 10, 2).map(function(candidate) {
+      { rowNumber: 3400, values: row("Transfer", "Pending", "NH", "2026-08-23T13:14:41.692330-04:00", { call1SentAt: "2026-08-23T18:35:00Z", call1Result: "live_transfer_requested" }) },
+      { rowNumber: 3401, values: row("First", "Queued", "NH", "2026-08-23T13:14:41.692330-04:00") },
+      { rowNumber: 3402, values: row("Second", "Queued", "NH", "2026-08-23T13:14:41.692330-04:00") },
+    ], new Date("2026-08-23T18:45:00Z"), 10, 2).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));

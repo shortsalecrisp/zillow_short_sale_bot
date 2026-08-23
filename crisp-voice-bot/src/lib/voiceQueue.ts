@@ -250,6 +250,10 @@ export function getVoiceBotCallCandidateFromRowValues(
       return undefined;
     }
 
+    if (followupSentAt < config.voiceQueue.minCandidateBasisAt) {
+      return undefined;
+    }
+
     const dueAt = getNextVoiceBotFirstAttemptWindowStart(followupSentAt, agentTimeZone);
     if (now < dueAt) {
       return undefined;
@@ -259,6 +263,10 @@ export function getVoiceBotCallCandidateFromRowValues(
   }
 
   if (secondAttemptSentAt || !isRetryableVoiceBotResult(firstAttemptResult)) {
+    return undefined;
+  }
+
+  if (firstAttemptSentAt < config.voiceQueue.minCandidateBasisAt) {
     return undefined;
   }
 

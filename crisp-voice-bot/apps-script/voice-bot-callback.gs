@@ -55,6 +55,7 @@ const VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES = 60;
 const VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES = 240;
 const VOICE_BOT_PAUSED_UNTIL_ET = '2026-07-22T09:00:00-04:00';
 const VOICE_BOT_PAUSE_REASON = 'Paused until ElevenLabs billing cycle refreshes on July 22';
+const VOICE_BOT_MIN_QUEUE_BASIS_AT_ISO = '2026-08-23T04:00:00.000Z';
 const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
   {
     name: 'morning_probe',
@@ -728,6 +729,10 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
       return null;
     }
 
+    if (isBeforeVoiceBotMinQueueBasis_(followupSentAt)) {
+      return null;
+    }
+
     const dueAt = getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, agentTimeZone);
     if (now < dueAt) {
       return null;
@@ -741,6 +746,10 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
   }
 
   if (!isRetryableVoiceBotResult_(firstAttemptResult)) {
+    return null;
+  }
+
+  if (isBeforeVoiceBotMinQueueBasis_(firstAttemptSentAt)) {
     return null;
   }
 
@@ -1173,6 +1182,15 @@ function getVoiceBotQueuePauseEndsAt_() {
 function isVoiceBotQueuePaused_(date) {
   const pauseEndsAt = getVoiceBotQueuePauseEndsAt_();
   return pauseEndsAt && date < pauseEndsAt;
+}
+
+function getVoiceBotMinQueueBasisAt_() {
+  return VOICE_BOT_MIN_QUEUE_BASIS_AT_ISO ? new Date(VOICE_BOT_MIN_QUEUE_BASIS_AT_ISO) : null;
+}
+
+function isBeforeVoiceBotMinQueueBasis_(date) {
+  const minBasisAt = getVoiceBotMinQueueBasisAt_();
+  return minBasisAt && date < minBasisAt;
 }
 
 function getVoiceBotAgentTimeZone_(rowValues) {

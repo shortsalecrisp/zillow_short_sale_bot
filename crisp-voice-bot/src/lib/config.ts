@@ -54,6 +54,21 @@ function readOptionalNumber(name: string): number | undefined {
   return value;
 }
 
+function readOptionalDate(name: string): Date | undefined {
+  const raw = readOptionalEnv(name);
+
+  if (!raw) {
+    return undefined;
+  }
+
+  const value = new Date(raw);
+  if (Number.isNaN(value.getTime())) {
+    throw new Error(`${name} must be a valid date/time. Received: ${raw}`);
+  }
+
+  return value;
+}
+
 function readNumber(name: string, fallback: number): number {
   const raw = process.env[name];
 
@@ -102,7 +117,7 @@ export const config = {
   baseUrl: stripTrailingSlash(readEnv("BASE_URL", "http://localhost:3000")),
   voiceProvider: readVoiceProvider(),
   outboundVoice: {
-    enabled: readBoolean("OUTBOUND_VOICE_ENABLED", false),
+    enabled: readBoolean("OUTBOUND_VOICE_ENABLED", true),
     pauseReason: readEnv(
       "OUTBOUND_VOICE_PAUSE_REASON",
       "Owner pause: Sales OS proof threshold has not been met",
@@ -126,6 +141,9 @@ export const config = {
   voiceQueue: {
     schedulerEnabled: readBoolean("VOICE_QUEUE_SCHEDULER_ENABLED", false),
     intervalMinutes: readNumber("VOICE_QUEUE_INTERVAL_MINUTES", 15),
+    minCandidateBasisAt:
+      readOptionalDate("VOICE_QUEUE_MIN_CANDIDATE_BASIS_AT_ISO") ??
+      new Date("2026-08-23T04:00:00.000Z"),
   },
   mailshakeSync: {
     apiKey: readOptionalEnv("MAILSHAKE_API_KEY"),
