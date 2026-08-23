@@ -1125,6 +1125,40 @@ def test_sms_mixed_timeline_and_unsupported_stats_still_hands_off(monkeypatch):
     assert decision["block_reply"] is True
 
 
+def test_sms_fee_and_recent_closing_count_are_answered_without_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    inbound = "What's the fee and who pays it? How many short sales have you closed in 6 months?"
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_unsupported_performance_stats_question(inbound) is False
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert "buyer" in decision["reply_text"].lower()
+    assert "15 years" in decision["reply_text"]
+    assert "exact recent closing count" in decision["reply_text"].lower()
+
+
+def test_sms_unanswered_substantive_question_fails_closed_to_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    decision = module._sms_ensure_question_disposition(
+        module._sms_decision(lead_status="Y", block_reply=True),
+        "Can you explain that part?",
+    )
+
+    assert decision["reply_text"] == ""
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+    assert decision["handoff_type"] == "UNANSWERED QUESTION REVIEW"
+
+
 def test_sms_existing_crisp_client_exits_marketing_for_handoff(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

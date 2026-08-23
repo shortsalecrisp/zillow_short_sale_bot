@@ -3538,9 +3538,22 @@ def _sms_is_unsupported_performance_stats_question(value: Any) -> bool:
         r"\bwhat\s+(?:percent|percentage)\b.{0,60}\b(?:success|approval|approved|close|closing|conversion|deals?|files?)\b",
         r"\b(?:your|the)\s+(?:stats?|statistics|numbers)\b",
         r"\bhow\s+often\b.{0,80}\b(?:approve|approved|approval|close|closing|success|successful)\b",
-        r"\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|approvals?|closings?|transactions?)\b",
     ]
     return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_experience_reply(value: Any) -> str:
+    text = _sms_normalize_whitespace(value).lower()
+    if re.search(r"\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|transactions?)\b", text):
+        return (
+            "I've focused on short sales for more than 15 years, and this is all I do. "
+            "I don't have the exact recent closing count in front of me, but I'm happy to talk through "
+            "my experience and your listing on a quick call."
+        )
+    return (
+        "I've focused on short sales for more than 15 years, helping agents and homeowners through "
+        "the process. I'm happy to talk through my experience and your listing on a quick call."
+    )
 
 
 def _sms_normalize_reaction_text(value: Any) -> str:
@@ -4775,7 +4788,12 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         "website": bool(re.search(r"\b(?:website|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?)\b", text)),
         "contact_card": bool(re.search(r"\b(?:business card|contact card|vcard)\b", text)),
         "contact_info": bool(re.search(r"\b(?:your contact (?:info|information|details)|how (?:can|do) i (?:reach|contact) you|send (?:me )?your (?:phone|number|email))\b", text)),
-        "experience": bool(re.search(r"\b(?:how long|years?|experience|track record)\b.{0,80}\b(?:short sales?|doing this|handled|closed|business)\b|\bwhat is your track record\b", text)),
+        "experience": bool(re.search(
+            r"\b(?:how long|years?|experience|track record)\b.{0,80}\b(?:short sales?|doing this|handled|closed|business)\b"
+            r"|\bwhat is your track record\b"
+            r"|\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|transactions?)\b.{0,80}\b(?:handled|done|closed|completed)\b",
+            text,
+        )),
         "timeline": _sms_is_short_sale_timeline_question(text),
         "number": bool(re.search(r"\b(?:best|good|right)\s+number\b|\b(?:call|reach|text)\s+you\s+(?:at|on)\s+this\s+number\b", text)),
         "credential": bool(re.search(r"\b(?:are you|you are|r u)\s+(?:licensed\s+as\s+)?(?:an?\s+)?(?:attorney|lawyer)\b|\bdo you provide legal advice\b", text)),
@@ -4873,7 +4891,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
             "website": "https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.",
             "contact_card": "Sure. What's the best email?",
             "contact_info": "Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.",
-            "experience": "I've focused on short sales for more than 15 years. I'm happy to talk through my experience and your listing on a quick call.",
+            "experience": _sms_experience_reply(text),
             "timeline": SHORT_SALE_TIMELINE_REPLY,
             "number": "Yes, this number is great - call or text anytime. Thanks!",
             "credential": "No, I'm not an attorney. I handle short-sale processing and lender negotiations; I don't provide legal advice.",
@@ -4900,7 +4918,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
             return fee
         answers.append(str(fee.get("reply_text") or ""))
     if flags["experience"]:
-        answers.append("I've focused on short sales for more than 15 years.")
+        answers.append(_sms_experience_reply(text))
     if flags["timeline"]:
         answers.append(SHORT_SALE_TIMELINE_REPLY)
     if flags["website"]:
@@ -5378,7 +5396,28 @@ def _sms_build_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str,
     fast = _sms_fast_decision(row_obj, inbound_text)
     decision = fast if fast is not None else _sms_openai_decision(row_obj, inbound_text)
     decision = _sms_enforce_durable_followup_promise(decision, inbound_text)
+    decision = _sms_ensure_question_disposition(decision, inbound_text)
     return _sms_apply_repeat_guard(decision, row_obj, inbound_text)
+
+
+def _sms_ensure_question_disposition(decision: Dict[str, Any], inbound_text: str) -> Dict[str, Any]:
+    """Never silently consume a substantive question."""
+    guarded = dict(decision)
+    if not _sms_is_substantive_followup(inbound_text):
+        return guarded
+    if _sms_normalize_whitespace(guarded.get("reply_text") or ""):
+        return guarded
+    if guarded.get("handoff_needed") or guarded.get("needs_review") or guarded.get("alert_needed"):
+        return guarded
+    if guarded.get("conversation_done") or guarded.get("preserve_existing_state"):
+        return guarded
+    return _sms_decision(
+        lead_status=str(guarded.get("lead_status") or "Y"),
+        handoff_needed=True,
+        block_reply=True,
+        handoff_type="UNANSWERED QUESTION REVIEW",
+        reason="Substantive agent question had no safe automated answer; manual follow-up needed",
+    )
 
 
 def _sms_enforce_durable_followup_promise(decision: Dict[str, Any], inbound_text: str) -> Dict[str, Any]:

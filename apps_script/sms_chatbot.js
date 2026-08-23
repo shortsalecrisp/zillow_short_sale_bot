@@ -1161,6 +1161,7 @@ function handleIncomingSmsCore_(body) {
     let decision = normalizeAiDecision_(ruleResult, currentRowObj[HEADERS.mailshake_status]);
     decision = applyReplySanitizers_(decision, currentRowObj);
     decision = enforceDurableFollowupPromiseRule_(decision, inboundText);
+    decision = ensureQuestionDisposition_(decision, inboundText);
     decision = applyRepeatGuard_(decision, currentRowObj, inboundText);
     const updates = {
       [HEADERS.response_status]: inboundText,
@@ -1357,6 +1358,7 @@ function handleIncomingSmsCore_(body) {
       "STATS QUESTION"
     );
   }
+  decision = ensureQuestionDisposition_(decision, inboundText);
   decision = applyRepeatGuard_(decision, currentRowObj, inboundText);
 
   const updates = {
@@ -2114,7 +2116,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
       reason: "Agent asked for Yoni's contact information"
     };
     if (flags.experience) return {
-      matched: true, reply_text: buildExperienceTrackRecordReply_(), lead_status: leadStatus,
+      matched: true, reply_text: buildExperienceReplyForQuestion_(t), lead_status: leadStatus,
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
       reason: "Answered approved experience question"
     };
@@ -2156,7 +2158,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
       ? "The buyer-paid fee is a flat $5,000 at closing."
       : "There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes.");
   }
-  if (flags.experience) answers.push("I've focused on short sales for more than 15 years.");
+  if (flags.experience) answers.push(buildExperienceReplyForQuestion_(t));
   if (flags.timeline) answers.push("A complete package and offer often takes about 60-90 days for a lender decision, though timing varies.");
   if (flags.website) answers.push("My website is https://www.crispshortsales.com.");
   if (flags.contact_card) answers.push("What's the best email for you?");
@@ -3579,6 +3581,14 @@ function buildExperienceTrackRecordReply_() {
   return "I've focused on short sales for more than 15 years, helping agents and homeowners through the process. I'm happy to talk through my experience and your listing on a quick call.";
 }
 
+function buildExperienceReplyForQuestion_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (/\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|transactions?)\b/.test(t)) {
+    return "I've focused on short sales for more than 15 years, and this is all I do. I don't have the exact recent closing count in front of me, but I'm happy to talk through my experience and your listing on a quick call.";
+  }
+  return buildExperienceTrackRecordReply_();
+}
+
 function buildShortSaleTimelineReply_() {
   return "A complete short-sale package and offer often takes about 60-90 days for a lender decision, though timing varies by lender and lien complexity.";
 }
@@ -3612,8 +3622,7 @@ function isUnsupportedPerformanceStatsQuestionSignal_(text) {
     /\b(?:success|approval|approved|close|closing|conversion)\s+rate\b/,
     /\bwhat\s+(?:percent|percentage)\b.{0,60}\b(?:success|approval|approved|close|closing|conversion|deals?|files?)\b/,
     /\b(?:your|the)\s+(?:stats?|statistics|numbers)\b/,
-    /\bhow\s+often\b.{0,80}\b(?:approve|approved|approval|close|closing|success|successful)\b/,
-    /\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|approvals?|closings?|transactions?)\b/
+    /\bhow\s+often\b.{0,80}\b(?:approve|approved|approval|close|closing|success|successful)\b/
   ];
   return patterns.some(function(pattern) { return pattern.test(t); });
 }
@@ -4729,6 +4738,18 @@ function enforceDurableFollowupPromiseRule_(decision, inboundText) {
   guarded.callback_requested = "";
   guarded.reason = "Replaced an unscheduled bot follow-up promise with a request for durable callback timing";
   return guarded;
+}
+
+function ensureQuestionDisposition_(decision, inboundText) {
+  const guarded = Object.assign({}, decision || {});
+  if (!isSubstantiveFollowupSignal_(inboundText)) return guarded;
+  if (normalizeWhitespace_(String(guarded.reply_text || ""))) return guarded;
+  if (guarded.handoff_needed || guarded.needs_review || guarded.alert_needed) return guarded;
+  if (guarded.conversation_done || guarded.preserve_existing_state) return guarded;
+  return buildManualHandoffDecision_(
+    "Substantive agent question had no safe automated answer; manual follow-up needed",
+    "UNANSWERED QUESTION REVIEW"
+  );
 }
 
 function sanitizeReplyPropertyReference_(replyText, rowObj) {
