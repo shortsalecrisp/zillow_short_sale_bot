@@ -250,11 +250,12 @@ export function getVoiceBotCallCandidateFromRowValues(
       return undefined;
     }
 
-    if (followupSentAt < config.voiceQueue.minCandidateBasisAt) {
+    const dueAt = getNextVoiceBotFirstAttemptWindowStart(followupSentAt, agentTimeZone);
+    const candidateDueAt = scheduledFor && scheduledFor > dueAt ? scheduledFor : dueAt;
+    if (candidateDueAt < config.voiceQueue.minCandidateDueAt) {
       return undefined;
     }
 
-    const dueAt = getNextVoiceBotFirstAttemptWindowStart(followupSentAt, agentTimeZone);
     if (now < dueAt) {
       return undefined;
     }
@@ -266,11 +267,12 @@ export function getVoiceBotCallCandidateFromRowValues(
     return undefined;
   }
 
-  if (firstAttemptSentAt < config.voiceQueue.minCandidateBasisAt) {
+  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, agentTimeZone);
+  const candidateDueAt = scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt;
+  if (candidateDueAt < config.voiceQueue.minCandidateDueAt) {
     return undefined;
   }
 
-  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, agentTimeZone);
   if (now < nextAttemptAt) {
     return undefined;
   }

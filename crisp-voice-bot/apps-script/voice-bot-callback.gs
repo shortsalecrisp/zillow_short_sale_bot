@@ -55,7 +55,7 @@ const VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES = 60;
 const VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES = 240;
 const VOICE_BOT_PAUSED_UNTIL_ET = '2026-07-22T09:00:00-04:00';
 const VOICE_BOT_PAUSE_REASON = 'Paused until ElevenLabs billing cycle refreshes on July 22';
-const VOICE_BOT_MIN_QUEUE_BASIS_AT_ISO = '2026-08-23T04:00:00.000Z';
+const VOICE_BOT_MIN_QUEUE_DUE_AT_ISO = '2026-08-23T04:00:00.000Z';
 const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
   {
     name: 'morning_probe',
@@ -729,11 +729,12 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
       return null;
     }
 
-    if (isBeforeVoiceBotMinQueueBasis_(followupSentAt)) {
+    const dueAt = getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, agentTimeZone);
+    const candidateDueAt = scheduledFor && scheduledFor > dueAt ? scheduledFor : dueAt;
+    if (isBeforeVoiceBotMinQueueDueAt_(candidateDueAt)) {
       return null;
     }
 
-    const dueAt = getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, agentTimeZone);
     if (now < dueAt) {
       return null;
     }
@@ -749,11 +750,12 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
     return null;
   }
 
-  if (isBeforeVoiceBotMinQueueBasis_(firstAttemptSentAt)) {
+  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, agentTimeZone);
+  const candidateDueAt = scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt;
+  if (isBeforeVoiceBotMinQueueDueAt_(candidateDueAt)) {
     return null;
   }
 
-  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, agentTimeZone);
   if (now < nextAttemptAt) {
     return null;
   }
@@ -1184,13 +1186,13 @@ function isVoiceBotQueuePaused_(date) {
   return pauseEndsAt && date < pauseEndsAt;
 }
 
-function getVoiceBotMinQueueBasisAt_() {
-  return VOICE_BOT_MIN_QUEUE_BASIS_AT_ISO ? new Date(VOICE_BOT_MIN_QUEUE_BASIS_AT_ISO) : null;
+function getVoiceBotMinQueueDueAt_() {
+  return VOICE_BOT_MIN_QUEUE_DUE_AT_ISO ? new Date(VOICE_BOT_MIN_QUEUE_DUE_AT_ISO) : null;
 }
 
-function isBeforeVoiceBotMinQueueBasis_(date) {
-  const minBasisAt = getVoiceBotMinQueueBasisAt_();
-  return minBasisAt && date < minBasisAt;
+function isBeforeVoiceBotMinQueueDueAt_(date) {
+  const minDueAt = getVoiceBotMinQueueDueAt_();
+  return minDueAt && date < minDueAt;
 }
 
 function getVoiceBotAgentTimeZone_(rowValues) {

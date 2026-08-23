@@ -466,7 +466,7 @@ test("queue scan can return multiple eligible rows in the same local call window
   assert.deepEqual(rowNumbers, [3366, 3367, 3369]);
 });
 
-test("queue scan resumes from today forward and skips rows already staged for Mailshake", () => {
+test("queue scan resumes from today due times and skips rows already staged for Mailshake", () => {
   const rowNumbers = Array.from(runSchedulerScript(`
     function row(first, last, state, followupSentAt, options) {
       const values = Array(42).fill("");
@@ -485,18 +485,19 @@ test("queue scan resumes from today forward and skips rows already staged for Ma
     }
 
     getVoiceBotCallCandidatesFromRows_([
-      { rowNumber: 5001, values: row("Old", "Followup", "NH", "2026-08-22T18:45:00Z") },
+      { rowNumber: 5001, values: row("Old", "Followup", "NH", "2026-08-01T18:45:00Z") },
       { rowNumber: 5002, values: row("Mailshake", "Ready", "NJ", "2026-08-23T13:30:00Z", { mailshakeStatus: "N" }) },
       { rowNumber: 5003, values: row("Fresh", "Today", "FL", "2026-08-23T13:30:00Z") },
+      { rowNumber: 5004, values: row("Due", "Today", "FL", "2026-08-22T22:45:00Z") },
     ], new Date("2026-08-23T18:45:00Z"), 10).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));
 
-  assert.deepEqual(rowNumbers, [5003]);
+  assert.deepEqual(rowNumbers, [5003, 5004]);
 });
 
-test("second attempts are only queued when the first call happened after the resume cutoff", () => {
+test("second attempts are only queued when the retry is due after the resume cutoff", () => {
   const rowNumbers = Array.from(runSchedulerScript(`
     function row(first, last, state, firstAttemptSentAt) {
       const values = Array(42).fill("");
@@ -513,7 +514,7 @@ test("second attempts are only queued when the first call happened after the res
     }
 
     getVoiceBotCallCandidatesFromRows_([
-      { rowNumber: 5010, values: row("Old", "Attempt", "NH", "2026-08-22T13:15:00Z") },
+      { rowNumber: 5010, values: row("Old", "Attempt", "NH", "2026-08-01T13:15:00Z") },
       { rowNumber: 5011, values: row("Fresh", "Attempt", "NH", "2026-08-23T13:15:00Z") },
     ], new Date("2026-08-24T18:45:00Z"), 10).map(function(candidate) {
       return candidate.rowNumber;

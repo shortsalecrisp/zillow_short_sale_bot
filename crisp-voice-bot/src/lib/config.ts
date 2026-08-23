@@ -141,8 +141,8 @@ export const config = {
   voiceQueue: {
     schedulerEnabled: readBoolean("VOICE_QUEUE_SCHEDULER_ENABLED", false),
     intervalMinutes: readNumber("VOICE_QUEUE_INTERVAL_MINUTES", 15),
-    minCandidateBasisAt:
-      readOptionalDate("VOICE_QUEUE_MIN_CANDIDATE_BASIS_AT_ISO") ??
+    minCandidateDueAt:
+      readOptionalDate("VOICE_QUEUE_MIN_CANDIDATE_DUE_AT_ISO") ??
       new Date("2026-08-23T04:00:00.000Z"),
   },
   mailshakeSync: {
