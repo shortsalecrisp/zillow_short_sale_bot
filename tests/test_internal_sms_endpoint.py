@@ -1158,6 +1158,13 @@ def test_sms_unanswered_substantive_question_fails_closed_to_handoff(monkeypatch
     assert decision["block_reply"] is True
     assert decision["handoff_type"] == "UNANSWERED QUESTION REVIEW"
 
+    closed_decision = module._sms_ensure_question_disposition(
+        module._sms_decision(lead_status="R", conversation_done=True, block_reply=True),
+        "What do you charge?",
+    )
+    assert closed_decision["handoff_needed"] is True
+    assert closed_decision["block_reply"] is True
+
 
 def test_sms_existing_crisp_client_exits_marketing_for_handoff(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(

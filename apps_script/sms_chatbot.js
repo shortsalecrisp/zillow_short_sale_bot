@@ -4745,7 +4745,6 @@ function ensureQuestionDisposition_(decision, inboundText) {
   if (!isSubstantiveFollowupSignal_(inboundText)) return guarded;
   if (normalizeWhitespace_(String(guarded.reply_text || ""))) return guarded;
   if (guarded.handoff_needed || guarded.needs_review || guarded.alert_needed) return guarded;
-  if (guarded.conversation_done || guarded.preserve_existing_state) return guarded;
   return buildManualHandoffDecision_(
     "Substantive agent question had no safe automated answer; manual follow-up needed",
     "UNANSWERED QUESTION REVIEW"

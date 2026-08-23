@@ -5409,8 +5409,6 @@ def _sms_ensure_question_disposition(decision: Dict[str, Any], inbound_text: str
         return guarded
     if guarded.get("handoff_needed") or guarded.get("needs_review") or guarded.get("alert_needed"):
         return guarded
-    if guarded.get("conversation_done") or guarded.get("preserve_existing_state"):
-        return guarded
     return _sms_decision(
         lead_status=str(guarded.get("lead_status") or "Y"),
         handoff_needed=True,
