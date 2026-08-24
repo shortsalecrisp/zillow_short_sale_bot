@@ -213,6 +213,8 @@ When any valid call result is processed, `AG` (`voice_call_1_sent`) is stamped i
 
 When a caller requests a callback (`callResult: "callback_requested"`), the bot sends the sheet update first, then queues an email alert. Email failures are logged and do not interrupt the call flow.
 
+Per-call transcript wrap-up emails are disabled by default to avoid inbox clutter. Set `CALL_TRANSCRIPT_EMAILS_ENABLED=true` only when real-time call transcript emails are temporarily needed; nightly and weekly review automations should use the sheet/performance/transcript artifacts instead.
+
 Required env vars:
 
 ```env
@@ -222,6 +224,7 @@ SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_USER=bot@example.com
 SMTP_PASS=replace_with_smtp_password
+CALL_TRANSCRIPT_EMAILS_ENABLED=false
 ```
 
 Email subject:

@@ -61,6 +61,7 @@ When `VOICE_PROVIDER=elevenlabs`, the backend schedules a post-call transcript c
 - `LIVE_TRANSFER_FORCE_RESULT`: `none`, `accept`, or `fail` for controlled transfer testing.
 - `GOOGLE_APPS_SCRIPT_WEBHOOK_URL`: Current sheet update target.
 - `ALERT_EMAIL_TO`, `ALERT_EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`: Callback email settings.
+- `CALL_TRANSCRIPT_EMAILS_ENABLED`: Optional per-call transcript wrap-up email switch. Default is `false`; leave it off for normal production so nightly and weekly review loops consume call artifacts without cluttering the inbox.
 
 ## Baseline Protection
 

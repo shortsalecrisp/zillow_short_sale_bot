@@ -177,7 +177,7 @@ export const config = {
     smtpPort: readOptionalNumber("SMTP_PORT"),
     smtpUser: readOptionalEnv("SMTP_USER"),
     smtpPass: readOptionalEnv("SMTP_PASS"),
-    sendCallTranscripts: readBoolean("CALL_TRANSCRIPT_EMAILS_ENABLED", true),
+    sendCallTranscripts: readBoolean("CALL_TRANSCRIPT_EMAILS_ENABLED", false),
   },
   infoEmail: {
     apiSecret: readOptionalEnv("INFO_EMAIL_API_SECRET") ?? readOptionalEnv("CRON_SECRET"),
