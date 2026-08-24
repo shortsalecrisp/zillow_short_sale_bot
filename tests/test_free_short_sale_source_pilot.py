@@ -965,19 +965,41 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(len(set(pilot.DEFAULT_STATES)), 50)
         self.assertEqual(set(pilot.DEFAULT_STATES), set(pilot.STATE_QUERY_TERMS))
 
-    def test_default_source_plan_runs_two_idx_broker_buckets(self):
+    def test_default_source_plan_builds_permanent_90_10_all_state_allocation(self):
         queries = pilot.configured_source_queries(pilot.dt.date(2026, 7, 6))
+        plan = pilot.configured_search_plan(
+            pilot.DEFAULT_STATES,
+            pilot.dt.date(2026, 7, 6),
+            queries,
+        )
 
-        self.assertEqual([query.source for query in queries], ["idx_broker_pages", "idx_broker_remarks"])
+        self.assertEqual([query.source for query in queries], ["idx_broker_remarks", "idx_broker_pages"])
         self.assertEqual([query.date_restrict for query in queries], ["w1", "w1"])
-        self.assertEqual(len(queries) * len(pilot.DEFAULT_STATES), 100)
+        self.assertEqual(len(plan), 100)
+        self.assertEqual(
+            sum(entry.source_query.source == "idx_broker_remarks" for entry in plan),
+            90,
+        )
+        self.assertEqual(
+            sum(entry.source_query.source == "idx_broker_pages" for entry in plan),
+            10,
+        )
+        self.assertEqual(
+            sum(
+                entry.source_query.source == "idx_broker_remarks" and entry.result_start == 11
+                for entry in plan
+            ),
+            40,
+        )
 
-    def test_default_source_plan_is_stable_across_days(self):
-        day_1 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 6))
-        day_2 = pilot.configured_source_queries(pilot.dt.date(2026, 7, 7))
+    def test_permanent_baseline_covers_every_state_once_in_five_days(self):
+        dates = [pilot.dt.date(2026, 7, 6) + pilot.dt.timedelta(days=offset) for offset in range(5)]
+        daily = [pilot.permanent_baseline_states(pilot.DEFAULT_STATES, run_date) for run_date in dates]
 
-        self.assertEqual([query.source for query in day_1], ["idx_broker_pages", "idx_broker_remarks"])
-        self.assertEqual([query.source for query in day_2], ["idx_broker_pages", "idx_broker_remarks"])
+        self.assertTrue(all(len(states) == 10 for states in daily))
+        flattened = [state for states in daily for state in states]
+        self.assertEqual(set(flattened), set(pilot.DEFAULT_STATES))
+        self.assertEqual(len(flattened), len(set(flattened)))
 
     def test_legacy_source_plan_still_rotates_portal_bucket(self):
         old_plan = pilot.SOURCE_PLAN
@@ -1786,7 +1808,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
     def test_direct_monitor_uses_momentum_heavy_bounded_family_caps(self):
         events = []
-        with mock.patch.object(
+        with mock.patch.object(pilot, "DIRECT_MONITOR_ENABLED", True), mock.patch.object(
             pilot,
             "collect_direct_monitor_urls",
             return_value=[],
@@ -1810,7 +1832,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(start[0]["shadow_only"])
 
     def test_direct_monitor_feed_failure_is_explicitly_incomplete(self):
-        with mock.patch.object(
+        with mock.patch.object(pilot, "DIRECT_MONITOR_ENABLED", True), mock.patch.object(
             pilot, "collect_direct_monitor_urls", side_effect=TimeoutError("feed timed out")
         ), mock.patch.object(pilot, "log_event"):
             stats = pilot.run_direct_monitor(
@@ -3112,6 +3134,53 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pilot.CSE_CX = old_cx
             pilot.CSE_DATE_RESTRICT = old_date_restrict
             pilot.urllib.request.urlopen = old_urlopen
+
+    def test_cse_search_can_start_at_second_results_page(self):
+        old_key = pilot.CSE_API_KEY
+        old_cx = pilot.CSE_CX
+        old_urlopen = pilot.urllib.request.urlopen
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"items": []}).encode("utf-8")
+
+        def fake_urlopen(req, timeout=30):
+            captured["url"] = req.full_url
+            return FakeResponse()
+
+        try:
+            pilot.CSE_API_KEY = "key"
+            pilot.CSE_CX = "cx"
+            pilot.urllib.request.urlopen = fake_urlopen
+
+            pilot.cse_search("query", "source", 10, start_index=11)
+
+            parsed = urllib.parse.urlparse(captured["url"])
+            params = urllib.parse.parse_qs(parsed.query)
+            self.assertEqual(params["start"], ["11"])
+        finally:
+            pilot.CSE_API_KEY = old_key
+            pilot.CSE_CX = old_cx
+            pilot.urllib.request.urlopen = old_urlopen
+
+    def test_deep_page_recovery_key_is_distinct_and_parseable(self):
+        self.assertEqual(
+            pilot.source_query_key("ny", "idx_broker_remarks", 11),
+            "NY:idx_broker_remarks:p2",
+        )
+        self.assertEqual(
+            pilot.parse_recovery_query_keys(
+                pilot.RECOVERY_PENDING_PREFIX + "NY:idx_broker_remarks:p2"
+            ),
+            ["NY:idx_broker_remarks:p2"],
+        )
 
     def test_brokerage_suffix_shadow_is_two_part_and_never_mutates_input(self):
         self.assertEqual(

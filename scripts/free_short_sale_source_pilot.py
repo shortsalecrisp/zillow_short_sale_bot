@@ -206,7 +206,7 @@ ALL_SOURCE_QUERIES = [
 ALL_SOURCE_QUERY_MAP = dict(ALL_SOURCE_QUERIES)
 DEFAULT_SOURCE_BUCKETS = ("idx_broker_pages", "idx_broker_remarks")
 CSE_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DATE_RESTRICT", "d1").strip()
-SOURCE_PLAN = os.getenv("FREE_SOURCE_PILOT_SOURCE_PLAN", "idx_dual_shadow").strip().lower()
+SOURCE_PLAN = os.getenv("FREE_SOURCE_PILOT_SOURCE_PLAN", "idx_permanent_90_10").strip().lower()
 SHADOW_MODE = os.getenv("FREE_SOURCE_PILOT_SHADOW_MODE", "true").lower() == "true"
 SHADOW_REVIEW_TARGET = max(1, int(os.getenv("FREE_SOURCE_PILOT_SHADOW_REVIEW_TARGET", "10")))
 SHADOW_REVIEW_DAYS = max(1, int(os.getenv("FREE_SOURCE_PILOT_SHADOW_REVIEW_DAYS", "7")))
@@ -216,7 +216,7 @@ DEFAULT_ROTATION_ANCHOR_DATE = "2026-07-06"
 ROTATION_TZ = os.getenv("FREE_SOURCE_PILOT_ROTATION_TZ", "America/New_York")
 DAILY_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_DAILY_DATE_RESTRICT", "w1").strip()
 ROTATING_DATE_RESTRICT = os.getenv("FREE_SOURCE_PILOT_ROTATING_DATE_RESTRICT", "w1").strip()
-DIRECT_MONITOR_ENABLED = os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_ENABLED", "true").lower() == "true"
+DIRECT_MONITOR_ENABLED = os.getenv("FREE_SOURCE_PILOT_DIRECT_MONITOR_ENABLED", "false").lower() == "true"
 DIRECT_MONITOR_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_DIRECT_MONITOR_REBALANCE_START_DATE",
     "2026-08-07",
@@ -254,6 +254,13 @@ class SourceQuery:
     date_restrict: str
 
 
+@dataclass(frozen=True)
+class SearchPlanEntry:
+    state: str
+    source_query: SourceQuery
+    result_start: int = 1
+
+
 def configured_bucket_names(env_name: str, fallback: tuple[str, ...]) -> list[str]:
     raw = os.getenv(env_name, ",".join(fallback))
     buckets = []
@@ -286,6 +293,12 @@ def rotating_source_for_date(run_date: dt.date, sources: list[str]) -> str:
 
 
 def configured_source_queries(run_date: dt.date | None = None) -> list[SourceQuery]:
+    if SOURCE_PLAN == "idx_permanent_90_10":
+        return [
+            SourceQuery("idx_broker_remarks", ALL_SOURCE_QUERY_MAP["idx_broker_remarks"], DAILY_DATE_RESTRICT),
+            SourceQuery("idx_broker_pages", ALL_SOURCE_QUERY_MAP["idx_broker_pages"], DAILY_DATE_RESTRICT),
+        ]
+
     if SOURCE_PLAN in {"idx_dual_shadow", "idx_dual_daily"}:
         daily_sources = configured_bucket_names(
             "FREE_SOURCE_PILOT_DAILY_SOURCE_BUCKETS",
@@ -322,6 +335,50 @@ def configured_source_queries(run_date: dt.date | None = None) -> list[SourceQue
 
     buckets = configured_bucket_names("FREE_SOURCE_PILOT_SOURCE_BUCKETS", DEFAULT_SOURCE_BUCKETS)
     return [SourceQuery(source, ALL_SOURCE_QUERY_MAP[source], CSE_DATE_RESTRICT) for source in buckets]
+
+
+def permanent_baseline_states(states: list[str], run_date: dt.date) -> list[str]:
+    ordered_states = list(dict.fromkeys(normalize_space(state).upper() for state in states if normalize_space(state)))
+    if not ordered_states:
+        return []
+    daily_count = max(1, (len(ordered_states) + 4) // 5)
+    anchor = parse_run_date(os.getenv("FREE_SOURCE_PILOT_ROTATION_ANCHOR_DATE", DEFAULT_ROTATION_ANCHOR_DATE))
+    start = ((run_date - anchor).days % 5) * daily_count
+    return [ordered_states[(start + offset) % len(ordered_states)] for offset in range(daily_count)]
+
+
+def configured_search_plan(
+    states: list[str],
+    run_date: dt.date,
+    source_queries: list[SourceQuery] | None = None,
+) -> list[SearchPlanEntry]:
+    queries = source_queries if source_queries is not None else configured_source_queries(run_date)
+    if SOURCE_PLAN != "idx_permanent_90_10":
+        return [
+            SearchPlanEntry(state, source_query)
+            for state in states
+            for source_query in queries
+        ]
+
+    by_source = {query.source: query for query in queries}
+    remarks = by_source.get("idx_broker_remarks")
+    pages = by_source.get("idx_broker_pages")
+    if not remarks or not pages:
+        return [
+            SearchPlanEntry(state, source_query)
+            for state in states
+            for source_query in queries
+        ]
+
+    baseline_states = set(permanent_baseline_states(states, run_date))
+    plan: list[SearchPlanEntry] = []
+    for state in states:
+        plan.append(SearchPlanEntry(state, remarks, 1))
+        if normalize_space(state).upper() in baseline_states:
+            plan.append(SearchPlanEntry(state, pages, 1))
+        else:
+            plan.append(SearchPlanEntry(state, remarks, 11))
+    return plan
 
 
 SOURCE_QUERIES = configured_source_queries()
@@ -1639,12 +1696,19 @@ def ddg_search(query: str, source: str, limit: int) -> list[SearchResult]:
     return results
 
 
-def cse_search(query: str, source: str, limit: int, date_restrict: str | None = None) -> list[SearchResult]:
+def cse_search(
+    query: str,
+    source: str,
+    limit: int,
+    date_restrict: str | None = None,
+    *,
+    start_index: int = 1,
+) -> list[SearchResult]:
     if not CSE_API_KEY or not CSE_CX:
         return []
     results: list[SearchResult] = []
     effective_date_restrict = CSE_DATE_RESTRICT if date_restrict is None else date_restrict
-    start = 1
+    start = max(1, start_index)
     while len(results) < limit and start <= 91:
         num = min(10, limit - len(results))
         request_params = {
@@ -1685,7 +1749,14 @@ def cse_search(query: str, source: str, limit: int, date_restrict: str | None = 
     return results
 
 
-def search_web(query: str, source: str, limit: int, date_restrict: str | None = None) -> tuple[str, list[SearchResult]]:
+def search_web(
+    query: str,
+    source: str,
+    limit: int,
+    date_restrict: str | None = None,
+    *,
+    start_index: int = 1,
+) -> tuple[str, list[SearchResult]]:
     engines: list[str]
     if SEARCH_ENGINE in {"cse", "google", "google_cse"}:
         if not (CSE_API_KEY and CSE_CX):
@@ -1706,8 +1777,13 @@ def search_web(query: str, source: str, limit: int, date_restrict: str | None = 
         _search_engine_attempt_stats["attempted"] += 1
         try:
             if engine == "cse":
-                results = cse_search(query, source, limit, date_restrict=date_restrict)
+                cse_kwargs = {"date_restrict": date_restrict}
+                if start_index != 1:
+                    cse_kwargs["start_index"] = start_index
+                results = cse_search(query, source, limit, **cse_kwargs)
             else:
+                if start_index != 1:
+                    raise RuntimeError("deep-page searches require Google CSE")
                 results = ddg_search(query, source, limit)
             _search_engine_attempt_stats["succeeded"] += 1
             return engine, results
@@ -3829,8 +3905,10 @@ def append_run_slot_receipt(
     )
 
 
-def source_query_key(state: str, source: str) -> str:
-    return f"{normalize_space(state).upper()}:{normalize_space(source)}"
+def source_query_key(state: str, source: str, result_start: int = 1) -> str:
+    key = f"{normalize_space(state).upper()}:{normalize_space(source)}"
+    page = ((max(1, result_start) - 1) // 10) + 1
+    return key if page == 1 else f"{key}:p{page}"
 
 
 def recovery_manifest_detail(prefix: str, query_keys: Iterable[str]) -> str:
@@ -3862,7 +3940,7 @@ def parse_recovery_query_keys(
     keys = sorted({key.strip() for key in raw.split(",") if key.strip()})
     if not keys or len(keys) > max_recovery_queries:
         return []
-    if any(not re.fullmatch(r"[A-Z]{2}:[a-z0-9_]+", key) for key in keys):
+    if any(not re.fullmatch(r"[A-Z]{2}:[a-z0-9_]+(?::p[2-9][0-9]*)?", key) for key in keys):
         return []
     return keys
 
@@ -6539,7 +6617,8 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
     )
     update_run_stage(context, "configuration")
     source_queries = [] if audit_links_only else configured_source_queries(run_date)
-    planned_searches = 0 if audit_links_only else len(args.states) * len(source_queries)
+    search_plan = [] if audit_links_only else configured_search_plan(args.states, run_date, source_queries)
+    planned_searches = len(search_plan)
     stats = {
         "planned_searches": planned_searches,
         "searched": 0,
@@ -6588,6 +6667,28 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
         source_count=len(source_queries),
         source_buckets=[query.source for query in source_queries],
         source_date_restricts={query.source: query.date_restrict for query in source_queries},
+        source_allocations={
+            source: sum(1 for entry in search_plan if entry.source_query.source == source)
+            for source in sorted({entry.source_query.source for entry in search_plan})
+        },
+        source_page_allocations={
+            source: {
+                f"p{page}": sum(
+                    1
+                    for entry in search_plan
+                    if entry.source_query.source == source
+                    and ((entry.result_start - 1) // 10) + 1 == page
+                )
+                for page in sorted({
+                    ((entry.result_start - 1) // 10) + 1
+                    for entry in search_plan
+                    if entry.source_query.source == source
+                })
+            }
+            for source in sorted({entry.source_query.source for entry in search_plan})
+        },
+        baseline_states=permanent_baseline_states(getattr(args, "states", []), run_date)
+        if SOURCE_PLAN == "idx_permanent_90_10" else [],
         results_per_query=getattr(args, "results_per_query", 0),
         search_engine=SEARCH_ENGINE,
         ddg_fallback_allowed=ALLOW_DDG_FALLBACK,
@@ -6650,13 +6751,22 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
             clear_run_event_context()
             return
         if recovery_query_keys:
-            valid_query_keys = {
-                source_query_key(state, source_query.source)
-                for state in args.states
-                for source_query in source_queries
+            full_plan_searches = len(search_plan)
+            entries_by_key = {
+                source_query_key(entry.state, entry.source_query.source, entry.result_start): entry
+                for entry in search_plan
             }
-            if not set(recovery_query_keys).issubset(valid_query_keys):
+            # Preserve recovery compatibility for pre-allocation page-one manifests.
+            for state in args.states:
+                for source_query in source_queries:
+                    legacy_entry = SearchPlanEntry(state, source_query, 1)
+                    entries_by_key.setdefault(
+                        source_query_key(state, source_query.source),
+                        legacy_entry,
+                    )
+            if not set(recovery_query_keys).issubset(entries_by_key):
                 raise RuntimeError("durable recovery manifest contains an unconfigured query key")
+            search_plan = [entries_by_key[key] for key in recovery_query_keys]
             planned_searches = len(recovery_query_keys)
             stats["planned_searches"] = planned_searches
             log_event(
@@ -6664,7 +6774,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                 query_keys=recovery_query_keys,
                 planned_searches=planned_searches,
                 max_recovery_queries=source_query_recovery_limit(run_date),
-                full_plan_searches=len(args.states) * len(source_queries),
+                full_plan_searches=full_plan_searches,
             )
     if audit_links_only:
         update_run_stage(context, "link_audit")
@@ -6753,11 +6863,15 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
     unique_short_sale_candidates: set[str] = set()
     update_run_stage(context, "discovery")
     failed_query_keys: list[str] = []
+    search_plan_by_state: dict[str, list[SearchPlanEntry]] = {}
+    for entry in search_plan:
+        search_plan_by_state.setdefault(entry.state, []).append(entry)
     for state in args.states:
         state_query_term = STATE_QUERY_TERMS.get(state.upper(), state)
-        for source_query in source_queries:
+        for search_entry in search_plan_by_state.get(state, []):
+            source_query = search_entry.source_query
             source = source_query.source
-            query_key = source_query_key(state, source)
+            query_key = source_query_key(state, source, search_entry.result_start)
             if recovery_query_key_set and query_key not in recovery_query_key_set:
                 continue
             exclusion_arm = query_exclusion_arm(
@@ -6780,16 +6894,16 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                 source=source,
                 query=query,
                 date_restrict=source_query.date_restrict,
+                result_start=search_entry.result_start,
+                query_key=query_key,
                 experiment_arm=exclusion_arm,
                 excluded_domains=QUERY_EXCLUSION_DOMAINS if exclusion_arm == "excluded" else (),
             )
             try:
-                engine, results = search_web(
-                    query,
-                    source,
-                    args.results_per_query,
-                    date_restrict=source_query.date_restrict,
-                )
+                search_kwargs = {"date_restrict": source_query.date_restrict}
+                if search_entry.result_start != 1:
+                    search_kwargs["start_index"] = search_entry.result_start
+                engine, results = search_web(query, source, args.results_per_query, **search_kwargs)
             except Exception as exc:  # noqa: BLE001
                 failed_query_keys.append(query_key)
                 error_text = str(exc)
@@ -6804,7 +6918,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                     run_date=run_date,
                     query=query,
                     date_restrict=source_query.date_restrict,
-                    error=str(exc),
+                    error=error_text,
                     failure_class=failure_class,
                     blocked=blocked,
                     experiment_arm=exclusion_arm,
@@ -6826,6 +6940,8 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                 engine=engine,
                 query=query,
                 date_restrict=source_query.date_restrict,
+                result_start=search_entry.result_start,
+                query_key=query_key,
                 result_count=len(results),
                 experiment_arm=exclusion_arm,
             )
@@ -7108,6 +7224,8 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                 state=state,
                 source=source,
                 date_restrict=source_query.date_restrict,
+                result_start=search_entry.result_start,
+                query_key=query_key,
                 rows_written=0 if args.dry_run else len(query_rows),
                 experiment_arm=exclusion_arm,
                 **query_stats,
