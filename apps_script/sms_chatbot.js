@@ -661,6 +661,24 @@ function handleIncomingSmsCore_(body) {
     const changed = normalizeCallbackTime_(callbackTime) !== priorCallbackTime;
     const preservedLeadStatus = String(currentRowObj[HEADERS.mailshake_status] || "Y");
 
+    if (changed) {
+      const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
+      sendHandoffEmail_({
+        handoff_type: "CALLBACK UPDATE",
+        agent_name: currentRowObj[HEADERS.agent_name] || "",
+        last_name: currentRowObj[HEADERS.last_name] || "",
+        initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
+        phone: phoneRaw,
+        email: currentRowObj[HEADERS.email] || "",
+        listing_address: currentRowObj[HEADERS.listing_address] || "",
+        city: currentRowObj[HEADERS.city] || "",
+        state: currentRowObj[HEADERS.state] || "",
+        zip: currentRowObj[HEADERS.zip] || "",
+        last_message: inboundText,
+        history: history
+      });
+    }
+
     updateRowFields_(sheet, row, {
       [HEADERS.response_status]: inboundText,
       [HEADERS.conversation_summary]: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff",
@@ -681,9 +699,41 @@ function handleIncomingSmsCore_(body) {
       handoff_needed: true,
       needs_review: false,
       callback_updated: changed,
-      alert_needed: false,
-      handoff_type: "",
+      alert_needed: changed,
+      handoff_type: changed ? "CALLBACK UPDATE" : "",
       reason: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff"
+    };
+  }
+
+  if (
+    String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE" &&
+    (
+      String(currentRowObj[HEADERS.ai_state] || "").toLowerCase() === "handoff" ||
+      String(currentRowObj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE"
+    ) &&
+    isUnmistakableTerminalRejectionSignal_(inboundText)
+  ) {
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "R",
+      [HEADERS.conversation_summary]: "Explicit rejection after human handoff; closed with no automated reply",
+      [HEADERS.ai_state]: "done",
+      [HEADERS.call_booking_status]: "closed_no_interest",
+      [HEADERS.callback_requested]: "no",
+      [HEADERS.callback_time]: "",
+      [HEADERS.handoff_flag]: "FALSE",
+      [HEADERS.human_override]: "FALSE"
+    });
+
+    return {
+      ok: true,
+      should_reply: false,
+      reply_text: "",
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      reason: "Explicit rejection after human handoff; closed with no automated reply"
     };
   }
 
@@ -2184,6 +2234,20 @@ function applyFastRules_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const lastOutbound = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || ""));
 
+  if (isCourtesyInformationAcknowledgmentSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: "",
+      lead_status: String(rowObj && rowObj[HEADERS.mailshake_status] || "Y"),
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: true,
+      preserve_existing_state: true,
+      reason: "Courtesy acknowledgment of information; no response needed"
+    };
+  }
+
   if (isComplianceOrLicensingQuestionSignal_(t)) {
     return buildManualHandoffDecision_(
       "Agent asked a licensing, statutory, or regulatory compliance question; manual review required",
@@ -3672,8 +3736,19 @@ function isContactCardRequestSignal_(text) {
 function isPlainContactInfoRequestSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t || isContactCardRequestSignal_(t)) return false;
-  return /\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details)\b/.test(t) ||
-    /\b(?:send|share|give|text)\b.{0,40}\b(?:contact\s+info|contact\s+information)\b/.test(t);
+  if (isCourtesyInformationAcknowledgmentSignal_(t)) {
+    return false;
+  }
+  return /\b(?:send|share|give|text)\b.{0,40}\b(?:me|us)\b.{0,20}\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details|phone|number|email)\b/.test(t) ||
+    /\b(?:send|share|give|text)\b.{0,20}\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details|phone|number|email)\b/.test(t) ||
+    /\b(?:can|could|may)\s+i\s+(?:get|have)\b.{0,20}\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details|phone|number|email)\b/.test(t) ||
+    /\bhow\s+(?:can|do)\s+i\s+(?:reach|contact)\s+(?:you|u)\b/.test(t) ||
+    /\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details)\s*\?\s*$/.test(t);
+}
+
+function isCourtesyInformationAcknowledgmentSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /^(?:thank(?:s|\s+you)?|i\s+appreciate\s+you)\s+(?:for\s+)?(?:your|the)\s+(?:contact\s+)?(?:info|information|details)[.!]*$/.test(t);
 }
 function isSelfHandlingFutureHelpSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase()).replace(/\bmy\s+self\b/g, "myself");
@@ -3818,6 +3893,26 @@ function isClearNoSignal_(text) {
   return patterns.some(pattern => pattern.test(t));
 }
 
+function isUnmistakableTerminalRejectionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || /\?/.test(t) || isSchedulingSignal_(t) || isPhoneCallInterestSignal_(t) ||
+      isPresentServiceInterestSignal_(t) || isDirectHelpRequestSignal_(t)) {
+    return false;
+  }
+
+  const patterns = [
+    /\bno\s*,?\s*thank(?:s|\s+you)?\b/,
+    /\bnot interested\b/,
+    /\b(?:i|we)\s+(?:do not|don['’]?t|dont)\s+need\s+(?:any\s+)?(?:help|assistance)\b/,
+    /\b(?:we(?:'|’)re|we are)\s+all set\b/,
+    /\bwe\s+(?:have|got)\s+it\s+covered\b/,
+    /\b(?:i\s+just\s+)?(?:do not|don['’]?t|dont)\s+think\s+(?:a|the|any)?\s*buyer\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b/,
+    /\b(?:they|a buyer|the buyer|buyers?)\s+(?:aren['’]?t|are not|won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?(?:pay|go for|accept|agree to)\b/,
+    /\b(?:this|that)\s+(?:won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?work\b/
+  ];
+  return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
 function isPunctuationCorrectionFragment_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   return /^[!.,;:\s]*(?:not|no)[!?.;:\s]*$/.test(t);
@@ -3916,7 +4011,7 @@ function extractScheduledCallbackReference_(text) {
   const searchable = raw.replace(/\bnot\s+tomorrow\b/ig, " ");
 
   const match = searchable.match(
-    /\bafter\s+(?:the\s+)?weekend\b|\btomorrow\b|\bnext\s+week\b|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
+    /\bafter\s+(?:the\s+)?weekend\b|\btomorrow\b|\bnext\s+week\b|\b(?:first|second|third|fourth|last)\s+week\s+(?:of|in)\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)\b|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
   );
   if (!match) return "";
   let reference = match[0];
@@ -3951,6 +4046,7 @@ function isCallbackUpdateTiming_(text) {
   if (!t || !extractScheduledCallbackReference_(t)) return false;
   return /\b(?:would|will|works?|work)\s+(?:be\s+)?(?:better|best|good|fine|ok|okay)\b/.test(t) ||
     /\b(?:push|move|reschedule|switch|change)\b.{0,40}\b(?:to|into|for|on)\b/.test(t) ||
+    /\b(?:focus|aim|target)\b.{0,40}\b(?:for|on)\b/.test(t) ||
     /\b(?:better|best|good|fine|ok|okay)\b.{0,20}\b(?:on|for)\b/.test(t);
 }
 
@@ -3980,6 +4076,7 @@ function isExplicitDayOrDateCallbackSignal_(text) {
     /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b/,
     /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b/,
     /\b(?:let['’]?s|lets|can\s+we|could\s+we|would\s+you|can\s+you)\s+(?:set\s+up\s+(?:a\s+)?time\s+to\s+)?(?:talk|speak|chat)\b/,
+    /\b(?:i|we)\s+can\s+(?:talk|speak|chat)\b/,
     /\bset\s+up\s+(?:a\s+)?time\s+(?:for\s+us\s+)?to\s+(?:talk|speak|chat)\b/
   ];
 
@@ -6046,6 +6143,18 @@ function testApprovedLeadIntelligenceRules_() {
   if (!lastOutboundWasYoniNameAndNumberReply_({ [HEADERS.last_outbound_text]: buildYoniNameAndNumberReply_() })) {
     throw new Error("Yoni name-and-number courtesy closeout regression");
   }
+  const informationCourtesyDecision = applyFastRules_("Thank you for your information", {
+    [HEADERS.mailshake_status]: "N"
+  });
+  if (!isCourtesyInformationAcknowledgmentSignal_("Thank you for your information") ||
+      isPlainContactInfoRequestSignal_("Thank you for your information") ||
+      !isPlainContactInfoRequestSignal_("Please send me your contact information") ||
+      !informationCourtesyDecision.matched ||
+      !informationCourtesyDecision.block_reply ||
+      !informationCourtesyDecision.preserve_existing_state ||
+      informationCourtesyDecision.reply_text) {
+    throw new Error("Courtesy information acknowledgment regression: " + JSON.stringify(informationCourtesyDecision));
+  }
   const experienceQuestion = "Hi there, thanks for reaching out. What is your fee. I've closed them before too. How long have you handled short sales, what is your track record?";
   const experienceDecision = applyFastRules_(experienceQuestion, {});
   if (!isExperienceTrackRecordQuestionSignal_(experienceQuestion) ||
@@ -6171,6 +6280,12 @@ function testApprovedLeadIntelligenceRules_() {
       extractScheduledCallbackReference_(weekendCallbackText) !== "After The Weekend") {
     throw new Error("Relative post-weekend callback classification regression");
   }
+  const declarativeCallbackText = "We can talk sometime next week";
+  if (!isExplicitDayOrDateCallbackSignal_(declarativeCallbackText) ||
+      !isSchedulingSignal_(declarativeCallbackText) ||
+      extractScheduledCallbackReference_(declarativeCallbackText) !== "Next Week") {
+    throw new Error("Declarative callback classification regression");
+  }
   const unavailableUntilMondayDecision = applyFastRules_("I will be out until Monday", {});
   if (!isUnavailableUntilCallbackReferenceSignal_("I will be out until Monday") ||
       unavailableUntilMondayDecision.reply_text !== "No problem. What time Monday works best for a quick call?" ||
@@ -6202,6 +6317,16 @@ function testApprovedLeadIntelligenceRules_() {
       isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "I have an open house Monday") ||
       isPostHandoffCallbackUpdate_({ [HEADERS.human_override]: "FALSE" }, "Monday afternoon works better")) {
     throw new Error("Post-handoff callback update regression");
+  }
+  const monthWindowUpdateText = "Let's focus for the first week of September";
+  if (!isPostHandoffCallbackUpdate_(postHandoffCallbackRow, monthWindowUpdateText) ||
+      extractScheduledCallbackReference_(monthWindowUpdateText) !== "First Week Of September") {
+    throw new Error("Month-window callback refinement regression");
+  }
+  const terminalRejectionText = "I just don't think a buyer will go for this. They aren't going to pay extra for a short sale.";
+  if (!isUnmistakableTerminalRejectionSignal_(terminalRejectionText) ||
+      isUnmistakableTerminalRejectionSignal_("I don't think a buyer will pay extra. Can you explain the fee?")) {
+    throw new Error("Post-handoff terminal rejection regression");
   }
   const handledDuplicateText = "I have someone thank you";
   const handledDuplicateRow = {

@@ -4071,6 +4071,7 @@ def _sms_decision(
     handoff_type: str = "",
     alert_needed: bool = False,
     callback_updated: bool = False,
+    clear_callback: bool = False,
     preserve_existing_state: bool = False,
     preserve_reply_formatting: bool = False,
     send_reply_before_handoff: bool = False,
@@ -4092,6 +4093,7 @@ def _sms_decision(
         "handoff_type": handoff_type,
         "alert_needed": alert_needed,
         "callback_updated": callback_updated,
+        "clear_callback": clear_callback,
         "preserve_existing_state": preserve_existing_state,
         "preserve_reply_formatting": preserve_reply_formatting,
         "send_reply_before_handoff": send_reply_before_handoff,
@@ -4319,6 +4321,8 @@ def _sms_extract_scheduled_callback_reference(value: Any) -> str:
         r"\bafter\s+(?:the\s+)?weekend\b"
         r"|\btomorrow\b"
         r"|\bnext\s+week\b"
+        r"|\b(?:first|second|third|fourth|last)\s+week\s+(?:of|in)\s+"
+        r"(?:january|february|march|april|may|june|july|august|september|october|november|december)\b"
         r"|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
         r"|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+"
         r"\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b"
@@ -4380,6 +4384,7 @@ def _sms_is_callback_update_timing(value: Any) -> bool:
     return bool(
         re.search(r"\b(?:would|will|works?|work)\s+(?:be\s+)?(?:better|best|good|fine|ok|okay)\b", text)
         or re.search(r"\b(?:push|move|reschedule|switch|change)\b.{0,40}\b(?:to|into|for|on)\b", text)
+        or re.search(r"\b(?:focus|aim|target)\b.{0,40}\b(?:for|on)\b", text)
         or re.search(r"\b(?:better|best|good|fine|ok|okay)\b.{0,20}\b(?:on|for)\b", text)
     )
 
@@ -4418,9 +4423,34 @@ def _sms_is_scheduled_callback(value: Any) -> bool:
         r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b",
         r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b",
         r"\b(?:let['’]?s|lets|can\s+we|could\s+we|would\s+you|can\s+you)\s+(?:set\s+up\s+(?:a\s+)?time\s+to\s+)?(?:talk|speak|chat)\b",
+        r"\b(?:i|we)\s+can\s+(?:talk|speak|chat)\b",
         r"\bset\s+up\s+(?:a\s+)?time\s+(?:for\s+us\s+)?to\s+(?:talk|speak|chat)\b",
     ]
     return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_is_plain_contact_info_request(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or _sms_is_courtesy_information_acknowledgment(text):
+        return False
+    patterns = [
+        r"\b(?:send|share|give|text)\b.{0,40}\b(?:me|us)\b.{0,20}\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details|phone|number|email)\b",
+        r"\b(?:send|share|give|text)\b.{0,20}\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details|phone|number|email)\b",
+        r"\b(?:can|could|may)\s+i\s+(?:get|have)\b.{0,20}\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details|phone|number|email)\b",
+        r"\bhow\s+(?:can|do)\s+i\s+(?:reach|contact)\s+(?:you|u)\b",
+        r"\b(?:your|ur)\s+(?:contact\s+)?(?:info|information|details)\s*\?\s*$",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_is_courtesy_information_acknowledgment(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(
+        re.search(
+            r"^(?:thank(?:s|\s+you)?|i\s+appreciate\s+you)\s+(?:for\s+)?(?:your|the)\s+(?:contact\s+)?(?:info|information|details)[.!]*$",
+            text,
+        )
+    )
 
 
 def _sms_is_existing_crisp_relationship(value: Any) -> bool:
@@ -4485,6 +4515,30 @@ def _sms_is_present_service_interest(value: Any) -> bool:
         text,
     )
     return bool(interest and service)
+
+
+def _sms_is_unmistakable_terminal_rejection(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if (
+        not text
+        or "?" in text
+        or _sms_is_scheduled_callback(text)
+        or _sms_is_phone_call_interest(text)
+        or _sms_is_present_service_interest(text)
+        or re.search(r"\b(?:i|we)\s+(?:need|want|would love|could use|can use)\s+(?:some\s+)?help\b", text)
+    ):
+        return False
+    patterns = [
+        r"\bno\s*,?\s*thank(?:s|\s+you)?\b",
+        r"\bnot interested\b",
+        r"\b(?:i|we)\s+(?:do not|don['’]?t|dont)\s+need\s+(?:any\s+)?(?:help|assistance)\b",
+        r"\b(?:we(?:'|’)re|we are)\s+all set\b",
+        r"\bwe\s+(?:have|got)\s+it\s+covered\b",
+        r"\b(?:i\s+just\s+)?(?:do not|don['’]?t|dont)\s+think\s+(?:a|the|any)?\s*buyer\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b",
+        r"\b(?:they|a buyer|the buyer|buyers?)\s+(?:aren['’]?t|are not|won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?(?:pay|go for|accept|agree to)\b",
+        r"\b(?:this|that)\s+(?:won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?work\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _sms_is_company_identity_question(value: Any) -> bool:
@@ -4780,7 +4834,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         "company": _sms_is_company_identity_question(text),
         "website": bool(re.search(r"\b(?:website|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?)\b", text)),
         "contact_card": bool(re.search(r"\b(?:business card|contact card|vcard)\b", text)),
-        "contact_info": bool(re.search(r"\b(?:your contact (?:info|information|details)|how (?:can|do) i (?:reach|contact) you|send (?:me )?your (?:phone|number|email))\b", text)),
+        "contact_info": _sms_is_plain_contact_info_request(text),
         "experience": bool(re.search(
             r"\b(?:how long|years?|experience|track record)\b.{0,80}\b(?:short sales?|doing this|handled|closed|business)\b"
             r"|\bwhat is your track record\b"
@@ -4941,6 +4995,14 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
     if re.search(r"\berror\s+invalid\s+number\b", t) and "valid 10 digit" in t:
         return _sms_decision(reason="Carrier invalid-number notice ignored", block_reply=True)
 
+    if _sms_is_courtesy_information_acknowledgment(t):
+        return _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "Y"),
+            block_reply=True,
+            preserve_existing_state=True,
+            reason="Courtesy acknowledgment of information; no response needed",
+        )
+
     if _sms_is_automated_routing_notice(t):
         return _sms_decision(
             lead_status=str(row_obj.get("mailshake_status") or "Y"),
@@ -4987,9 +5049,26 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason=reason,
             call_booking_status="scheduled_callback",
             callback_time=callback_time,
-            handoff_type="",
-            alert_needed=False,
+            handoff_type="CALLBACK UPDATE" if callback_changed else "",
+            alert_needed=callback_changed,
             callback_updated=callback_changed,
+        )
+
+    if (
+        str(row_obj.get("human_override") or "").upper() == "TRUE"
+        and (
+            str(row_obj.get("ai_state") or "").lower() == "handoff"
+            or str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
+        )
+        and _sms_is_unmistakable_terminal_rejection(t)
+    ):
+        return _sms_decision(
+            lead_status="R",
+            conversation_done=True,
+            block_reply=True,
+            reason="Explicit rejection after human handoff; closed with no automated reply",
+            call_booking_status="closed_no_interest",
+            clear_callback=True,
         )
 
     if str(row_obj.get("human_override") or "").upper() == "TRUE":
@@ -5787,6 +5866,9 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     if not preserve_existing_state and updates["call_booking_status"] == "scheduled_callback":
         updates["callback_requested"] = "yes"
         updates["callback_time"] = callback_time
+    if not preserve_existing_state and decision.get("clear_callback"):
+        updates["callback_requested"] = "no"
+        updates["callback_time"] = ""
     if updates:
         _sms_update_row_fields(ws, row_idx, headers, updates)
 

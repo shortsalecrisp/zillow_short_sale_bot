@@ -790,8 +790,8 @@ def test_sms_post_handoff_callback_update_persists_without_reply(monkeypatch):
     assert body["reason"] == "Callback updated after human handoff"
     assert body["lead_status"] == "O"
     assert body["callback_updated"] is True
-    assert body["alert_needed"] is False
-    assert body["handoff_type"] == ""
+    assert body["alert_needed"] is True
+    assert body["handoff_type"] == "CALLBACK UPDATE"
     assert sender.calls == []
     assert sheet.rows[2][10] == "O"
     assert sheet.rows[2][13] == "handoff"
@@ -800,6 +800,58 @@ def test_sms_post_handoff_callback_update_persists_without_reply(monkeypatch):
     assert sheet.rows[2][19] == "TRUE"
     assert sheet.rows[2][37] == "yes"
     assert sheet.rows[2][38] == "Monday Afternoon"
+
+
+def test_sms_declarative_callback_and_month_window_refinement_are_captured(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+
+    first = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "We can talk sometime next week",
+            "message_id": "declarative-callback-1",
+        },
+    )
+
+    assert first.status_code == 200
+    first_body = first.json()
+    assert module._sms_is_scheduled_callback("We can talk sometime next week") is True
+    assert module._sms_extract_scheduled_callback_reference("We can talk sometime next week") == "Next Week"
+    assert first_body["should_reply"] is False
+    assert first_body["call_booking_status"] == "scheduled_callback"
+    assert first_body["callback_time"] == "Next Week"
+    assert sheet.rows[2][37] == "yes"
+    assert sheet.rows[2][38] == "Next Week"
+
+    refinement = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "Let's focus for the first week of September",
+            "message_id": "declarative-callback-2",
+        },
+    )
+
+    assert refinement.status_code == 200
+    refinement_body = refinement.json()
+    assert module._sms_extract_scheduled_callback_reference(
+        "Let's focus for the first week of September"
+    ) == "First Week Of September"
+    assert refinement_body["should_reply"] is False
+    assert refinement_body["callback_updated"] is True
+    assert refinement_body["alert_needed"] is True
+    assert refinement_body["handoff_type"] == "CALLBACK UPDATE"
+    assert sheet.rows[2][38] == "First Week Of September"
+    assert sender.calls == []
 
 
 def test_sms_post_handoff_repeated_callback_time_does_not_request_another_alert(monkeypatch):
@@ -1005,6 +1057,86 @@ def test_sms_post_handoff_non_scheduling_day_reference_stays_under_human_overrid
     assert body["alert_needed"] is False
     assert body["handoff_type"] == ""
     assert sheet.rows[2][37] == ""
+    assert sheet.rows[2][38] == ""
+    assert sender.calls == []
+
+
+def test_sms_courtesy_information_acknowledgment_is_not_a_contact_request(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Thank you for your information"
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "courtesy-information-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert module._sms_is_courtesy_information_acknowledgment(inbound) is True
+    assert module._sms_is_plain_contact_info_request(inbound) is False
+    assert module._sms_is_plain_contact_info_request(
+        "Please send me your contact information"
+    ) is True
+    assert body["should_reply"] is False
+    assert body["reason"] == "Courtesy acknowledgment of information; no response needed"
+    assert sheet.rows[2][10] == "N"
+    assert sender.calls == []
+
+
+def test_sms_terminal_rejection_closes_active_handoff_without_reply(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][10] = "Y"
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][15] = "scheduled_callback"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][37] = "yes"
+    sheet.rows[2][38] = "Tomorrow"
+    inbound = (
+        "I just don't think a buyer will go for this. "
+        "They aren't going to pay extra for a short sale."
+    )
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "terminal-rejection-after-handoff-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert module._sms_is_unmistakable_terminal_rejection(inbound) is True
+    assert module._sms_is_unmistakable_terminal_rejection(
+        "I don't think a buyer will pay extra. Can you explain the fee?"
+    ) is False
+    assert body["should_reply"] is False
+    assert body["lead_status"] == "R"
+    assert body["conversation_done"] is True
+    assert body["handoff_needed"] is False
+    assert body["reason"] == "Explicit rejection after human handoff; closed with no automated reply"
+    assert sheet.rows[2][10] == "R"
+    assert sheet.rows[2][13] == "done"
+    assert sheet.rows[2][15] == "closed_no_interest"
+    assert sheet.rows[2][16] == "FALSE"
+    assert sheet.rows[2][19] == "FALSE"
+    assert sheet.rows[2][37] == "no"
     assert sheet.rows[2][38] == ""
     assert sender.calls == []
 
