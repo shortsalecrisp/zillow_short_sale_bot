@@ -39,6 +39,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             "scopedListingStatusEvidence": "Active",
             "scopedListingStatusSource": "jsonld_listing_object",
             "scopedListingStatusGroup": group,
+            "sourceEvidenceState": "durable_reopenable",
+            "sourceEvidenceReceipt": f"fixture:{group}",
         }
 
     def bound_agent_fields(self, name, address, state, phone="", email="", phone_type="direct_mobile"):
@@ -464,8 +466,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
     def test_structured_status_is_exact_and_conflicts_hold(self):
         cases = [
             ({"status": "Inactive"}, "not_current"),
-            ({"status": "Closed", "offers": {"availability": "InStock"}}, "unknown"),
-            ({"listingStatus": "Active", "status": "Sold"}, "unknown"),
+            ({"status": "Closed", "offers": {"availability": "InStock"}}, "conflicting"),
+            ({"listingStatus": "Active", "status": "Sold"}, "conflicting"),
         ]
         for obj, expected in cases:
             with self.subTest(obj=obj):
@@ -588,6 +590,33 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
         self.assertIn("negotiation fee", result.disqualifying_terms.lower())
 
+    def test_qualification_rejects_loss_mitigation_fee_from_row_1148(self):
+        group = "337 edmonds avenue|pa|19026"
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/337-edmonds-ave",
+            title="337 Edmonds Ave",
+            text="",
+            fields={
+                "listing_address": "337 Edmonds Ave",
+                "state": "PA",
+                "exact_listing_confirmed": "true",
+                "listing_description_source": "jsonld_listing_object",
+                "listing_description": "Short Sale. Buyer pays $6,800 loss mitigation fee. Enter at your own risk.",
+                "scoped_listing_status": "current",
+                "listing_identity_group": group,
+                "listing_description_group": group,
+                "scoped_listing_status_group": group,
+            },
+        )
+
+        result = pilot.qualification_for_candidate(candidate)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+        self.assertIn("loss mitigation fee", result.disqualifying_terms.lower())
+
     def test_qualification_rejects_professional_third_party_negotiation_underway(self):
         text = (
             "Status: Active. About This Home: Short Sale offered with professional "
@@ -622,6 +651,16 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(result.status, "qualified")
 
+    def test_qualification_ignores_unrelated_generic_approved_wording(self):
+        text = (
+            "Status: Active. Remarks: Short sale subject to lender approval. "
+            "Home is in an approved subdivision with approved architectural plans."
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "qualified")
+
     def test_qualification_rejects_explicit_short_sale_no(self):
         text = (
             "For Sale. Property description: Status Active. "
@@ -644,13 +683,12 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
 
-    def test_qualification_rejects_short_sale_without_active_status(self):
+    def test_qualification_accepts_for_sale_short_sale_listing(self):
         text = "For Sale. Property description: Potential short sale subject to lender approval."
 
         result = pilot.qualification_for_text(text)
 
-        self.assertEqual(result.status, "rejected")
-        self.assertEqual(result.failure_reason, "missing_current_listing_status")
+        self.assertEqual(result.status, "qualified")
 
     def test_qualification_accepts_pending_short_sale_listing(self):
         text = (
@@ -673,7 +711,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "not_current_listing")
 
-    def test_qualification_accepts_coming_soon_short_sale_listing(self):
+    def test_qualification_holds_coming_soon_short_sale_listing(self):
         text = (
             "450 Stardust Court. Status: Coming Soon. "
             "Remarks: Potential short sale subject to lender approval."
@@ -681,7 +719,25 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         result = pilot.qualification_for_text(text)
 
-        self.assertEqual(result.status, "qualified")
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "coming_soon_status_hold")
+
+    def test_qualification_holds_contingent_and_conflicting_statuses(self):
+        cases = [
+            (
+                "Status: Contingent. Remarks: Potential short sale subject to lender approval.",
+                "unsupported_listing_status",
+            ),
+            (
+                "Status: Active. Share Closed. Remarks: Potential short sale subject to lender approval.",
+                "conflicting_status_hold",
+            ),
+        ]
+        for text, expected_reason in cases:
+            with self.subTest(text=text):
+                result = pilot.qualification_for_text(text)
+                self.assertEqual(result.status, "rejected")
+                self.assertEqual(result.failure_reason, expected_reason)
 
     def test_qualification_rejects_closed_short_sale_listing(self):
         text = (
@@ -828,8 +884,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         row = pilot.candidate_to_row(candidate, qualification, "4045551212", "2", "")
 
         self.assertEqual(row[:7], ["Jane", "Smith", "404-555-1212", "jane@example.com", "2 New St", "Atlanta", "GA"])
-        self.assertEqual(row[14], "shadow_ready")
-        self.assertEqual(row[16], "yes")
+        self.assertEqual(row[14], "needs_source_evidence_confirmation")
+        self.assertEqual(row[16], "review")
         self.assertEqual(row[22], "4045551212")
         self.assertEqual(row[23], "2")
         self.assertTrue(pilot.duplicate_status_blocks_pilot_row("duplicate_agent_phone"))
@@ -913,6 +969,50 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertNotIn("http", row[27].lower())
         self.assertNotIn("http", row[28].lower())
         self.assertNotIn("http", row[29].lower())
+
+        self.assertEqual(row[14], "needs_source_evidence_confirmation")
+        self.assertEqual(row[16], "review")
+        self.assertEqual(payload["sourceEvidenceState"], "evidence_gap")
+
+    def test_promotion_preflight_holds_hash_only_source_without_durable_receipt(self):
+        payload = {
+            "zpid": "free-source-gap",
+            "street": "123 Main Street",
+            "city": "Atlanta",
+            "state": "GA",
+            "source": "free-source-pilot:idx_broker_pages",
+            "search_source": "free-source-pilot:idx_broker_pages",
+            "listing_description": "Potential short sale subject to lender approval.",
+            "sourceReference": "source_domain=example.com; source_ref=abc123",
+            "sourceEvidenceState": "evidence_gap",
+        }
+        payload.update(self.scoped_payload_evidence("123 Main Street", "GA"))
+        payload.pop("sourceEvidenceState")
+        payload.pop("sourceEvidenceReceipt")
+        pilot_row = self.pilot_row(
+            listing_address="123 Main Street",
+            city="Atlanta",
+            state="GA",
+            synthetic_zpid="free-source-gap",
+            source="idx_broker_pages",
+            source_url="source_domain=example.com; source_ref=abc123",
+            status="qualified",
+            promotion_status="shadow_ready",
+            import_ready="yes",
+            pending_queue_source="free-source-pilot:idx_broker_pages",
+            pending_queue_listing_json=json.dumps(payload),
+        )
+        existing = pilot.build_existing_index(
+            [["first_name", "last_name", "phone", "email", "listing_address", "city", "state"]]
+        )
+
+        status, note, matched = pilot.pilot_row_preflight_failure(
+            pilot.pilot_row_map(pilot_row), payload, existing
+        )
+
+        self.assertEqual(status, "needs_source_evidence_confirmation")
+        self.assertIn("durable reopenable receipt", note)
+        self.assertEqual(matched, "")
 
     def test_parse_pilot_payload_reconstructs_cleaned_archived_payload(self):
         pilot_row = self.pilot_row(
@@ -1304,8 +1404,9 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(row[:7], ["", "", "", "", "123 Main Street", "Atlanta", "GA"])
         self.assertEqual(row[12], "qualified")
-        self.assertEqual(row[16], "yes")
-        self.assertIn("left blank", row[15])
+        self.assertEqual(row[14], "needs_source_evidence_confirmation")
+        self.assertEqual(row[16], "review")
+        self.assertIn("durable reopenable receipt", row[15])
 
     def test_phone_and_email_without_agent_name_still_needs_review(self):
         candidate = pilot.Candidate(
@@ -1326,8 +1427,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         row = pilot.candidate_to_row(candidate, qualification, "", "", "")
 
-        self.assertEqual(row[16], "yes")
-        self.assertIn("left blank", row[15])
+        self.assertEqual(row[14], "needs_source_evidence_confirmation")
+        self.assertEqual(row[16], "review")
 
     def test_promotion_accepts_shadow_ready_row_without_agent_identity(self):
         payload = {
@@ -2328,6 +2429,10 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         candidate.fields.update(
             self.bound_agent_fields("Jane Q. Smith", "123 Main Street", "GA")
         )
+        candidate.fields.update({
+            "source_evidence_state": "durable_reopenable",
+            "source_evidence_receipt": "fixture:123-main-street-ga",
+        })
         qualification = pilot.qualification_for_text(candidate.text)
 
         row = pilot.candidate_to_row(candidate, qualification, "", "", "")

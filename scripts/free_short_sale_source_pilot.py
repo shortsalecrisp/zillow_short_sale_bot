@@ -679,13 +679,32 @@ FUTURE_NEGOTIATOR_INVOLVEMENT_RE = re.compile(
 CURRENT_MARKET_STATUS_RE = re.compile(
     r"\b(?:"
     r"(?:source\s+listing\s+status|listing\s+status|mls\s+status|status)\s*[:#-]?\s*"
-    r"(?:active(?:\s+under\s+contract)?|pending|under\s+agreement|under\s+contract|contingent|coming\s+soon)\b|"
-    r"STATUS\s+(?:Active(?:\s+Under\s+Contract)?|Pending|Under\s+Agreement|Under\s+Contract|Contingent|Coming\s+Soon)\b|"
+    r"(?:active(?:\s+under\s+contract)?|pending(?:\s+lender\s+approval)?|under\s+contract|for\s+sale)\b|"
+    r"STATUS\s+(?:Active(?:\s+Under\s+Contract)?|Pending(?:\s+Lender\s+Approval)?|Under\s+Contract|For\s+Sale)\b|"
     r"Share\s+Active\b|"
+    r"\bFor\s+Sale\b|"
     r"currently\s+listed\s+for\s+sale\b|"
     r"homeStatus[\"']?\s*[:=]\s*[\"']?FOR_SALE[\"']?|"
-    r"listingStatus[\"']?\s*[:=]\s*[\"']?(?:ACTIVE|PENDING|CONTINGENT|COMING_SOON)[\"']?|"
+    r"listingStatus[\"']?\s*[:=]\s*[\"']?(?:ACTIVE|PENDING|UNDER_CONTRACT|FOR_SALE)[\"']?|"
     r"MLS#\s*\d+.{0,120}\bActive\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+COMING_SOON_STATUS_RE = re.compile(
+    r"\b(?:"
+    r"(?:source\s+listing\s+status|listing\s+status|mls\s+status|status)\s*[:#-]?\s*coming\s+soon|"
+    r"listingStatus[\"']?\s*[:=]\s*[\"']?COMING_SOON[\"']?|"
+    r"is_coming_soon[\"']?\s*[:=]\s*(?:true|1)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+UNSUPPORTED_LISTING_STATUS_RE = re.compile(
+    r"\b(?:"
+    r"(?:source\s+listing\s+status|listing\s+status|mls\s+status|status)\s*[:#-]?\s*"
+    r"(?:contingent|under\s+agreement)|"
+    r"listingStatus[\"']?\s*[:=]\s*[\"']?(?:CONTINGENT|UNDER_AGREEMENT)[\"']?"
     r")\b",
     re.IGNORECASE,
 )
@@ -737,8 +756,16 @@ DISQUALIFY_PATTERNS = [
     ),
     re.compile(r"\bshort\s+sale\b.{0,80}\bapproved\s+price\b", re.IGNORECASE),
     re.compile(r"\bapproved\s+price\b.{0,80}\bshort\s+sale\b", re.IGNORECASE),
-    re.compile(r"\balready\s+approved\b", re.IGNORECASE),
-    re.compile(r"\blender\s+approved\b", re.IGNORECASE),
+    re.compile(
+        r"\bshort\s+sale\b.{0,80}\b(?:already\s+approved|lender\s+approved)\b|"
+        r"\b(?:already\s+approved|lender\s+approved)\b.{0,80}\bshort\s+sale\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:loss\s+mitigation|short\s+sale|negotiator|negotiation|processing|processor|"
+        r"attorney|specialist|representation)\s+fee\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(?:short\s+sale\s+)?(?:negotiator|negotiation)\s+fee\b", re.IGNORECASE),
     re.compile(
         r"\b(?:buyer|purchaser)\s+to\s+pay\b.{0,80}"
@@ -1091,12 +1118,33 @@ def split_agent_name(full_name: str) -> tuple[str, str]:
 def current_listing_status(text: str) -> tuple[str, str]:
     compact = normalize_space(html.unescape(text or ""))
     non_current_match = NON_CURRENT_STATUS_RE.search(compact)
+    current_match = CURRENT_MARKET_STATUS_RE.search(compact)
+    if non_current_match and current_match:
+        evidence = f"{current_match.group(0)}; {non_current_match.group(0)}"
+        return "conflicting", evidence[:220]
     if non_current_match:
         return "not_current", non_current_match.group(0)
-    current_match = CURRENT_MARKET_STATUS_RE.search(compact)
+    coming_soon_match = COMING_SOON_STATUS_RE.search(compact)
+    if coming_soon_match:
+        return "coming_soon", coming_soon_match.group(0)
+    unsupported_match = UNSUPPORTED_LISTING_STATUS_RE.search(compact)
+    if unsupported_match:
+        return "unsupported", unsupported_match.group(0)
     if current_match:
         return "current", current_match.group(0)
     return "unknown", ""
+
+
+def listing_status_failure_reason(status: str) -> str:
+    if status == "not_current":
+        return "not_current_listing"
+    if status == "coming_soon":
+        return "coming_soon_status_hold"
+    if status == "conflicting":
+        return "conflicting_status_hold"
+    if status == "unsupported":
+        return "unsupported_listing_status"
+    return "missing_current_listing_status"
 
 
 def qualification_for_text(text: str) -> Qualification:
@@ -1148,7 +1196,7 @@ def qualification_for_text(text: str) -> Qualification:
     if listing_status != "current":
         return Qualification(
             "rejected",
-            "not_current_listing" if listing_status == "not_current" else "missing_current_listing_status",
+            listing_status_failure_reason(listing_status),
             extract_short_sale_evidence_type(compact),
             excerpt_around(compact, verified_match.start(), verified_match.end()),
             listing_status_evidence,
@@ -1222,7 +1270,7 @@ def qualification_for_candidate(candidate: Candidate) -> Qualification:
     if listing_status != "current":
         return Qualification(
             "rejected",
-            "not_current_listing" if listing_status == "not_current" else "missing_current_listing_status",
+            listing_status_failure_reason(listing_status),
             "listing_description_or_remarks",
             excerpt_around(description, short_sale_match.start(), short_sale_match.end()),
             listing_status_evidence,
@@ -2493,6 +2541,17 @@ def future_negotiator_phrase_shadow(candidate: Candidate) -> dict[str, Any]:
     }
 
 
+def has_durable_source_evidence(values: dict[str, Any]) -> bool:
+    """Require an explicit durable receipt; an in-memory exact URL or hash is insufficient."""
+    state = normalize_space(
+        str(values.get("source_evidence_state") or values.get("sourceEvidenceState") or "")
+    ).lower()
+    receipt = normalize_space(
+        str(values.get("source_evidence_receipt") or values.get("sourceEvidenceReceipt") or "")
+    )
+    return state == "durable_reopenable" and bool(receipt)
+
+
 def shadow_promotion_readiness(candidate: Candidate, qualification: Qualification) -> tuple[str, bool, str]:
     safe_agent, agent_reason = sanitize_candidate_identity(candidate)
     fields = candidate.fields
@@ -2509,6 +2568,12 @@ def shadow_promotion_readiness(candidate: Candidate, qualification: Qualificatio
             "needs_description_confirmation",
             False,
             "Short sale language was not confirmed in the listing agent's description or remarks.",
+        )
+    if not has_durable_source_evidence(candidate.fields):
+        return (
+            "needs_source_evidence_confirmation",
+            False,
+            "Exact source evidence is hash-only or lacks a durable reopenable receipt; promotion and outreach remain held.",
         )
     contact_note = (
         "Agent phone and email are attributable to the listing."
@@ -2586,19 +2651,28 @@ def jsonld_listing_status(obj: dict[str, Any]) -> tuple[str, str]:
         for value in values
     }
     current_values = {
-        "instock", "forsale", "active", "activeundercontract", "pending", "contingent",
-        "undercontract", "comingsoon",
+        "instock", "forsale", "active", "activeundercontract", "pending",
+        "pendinglenderapproval", "undercontract",
     }
+    coming_soon_values = {"comingsoon"}
+    unsupported_values = {"contingent", "underagreement"}
     non_current_values = {
         "inactive", "sold", "closed", "offmarket", "expired", "withdrawn", "cancelled",
         "canceled", "outofstock",
     }
     has_current = bool(normalized_values.intersection(current_values))
     has_non_current = bool(normalized_values.intersection(non_current_values))
-    if has_current and has_non_current:
-        return "unknown", f"conflicting_status:{evidence[:200]}"
+    has_coming_soon = bool(normalized_values.intersection(coming_soon_values))
+    has_unsupported = bool(normalized_values.intersection(unsupported_values))
+    observed_classes = sum(bool(value) for value in (has_current, has_non_current, has_coming_soon, has_unsupported))
+    if observed_classes > 1:
+        return "conflicting", f"conflicting_status:{evidence[:200]}"
     if has_non_current:
         return "not_current", evidence[:220]
+    if has_coming_soon:
+        return "coming_soon", evidence[:220]
+    if has_unsupported:
+        return "unsupported", evidence[:220]
     if has_current:
         return "current", evidence[:220]
     return "unknown", evidence[:220]
@@ -3616,6 +3690,8 @@ def canonical_queue_payload(candidate: Candidate, qualification: Qualification, 
         "contactEmailHint": fields.get("contact_email_hint", ""),
         "contactEmailHintType": fields.get("contact_email_hint_type", ""),
         "sourceReference": safe_source_reference(candidate.url),
+        "sourceEvidenceState": fields.get("source_evidence_state", "evidence_gap"),
+        "sourceEvidenceReceipt": fields.get("source_evidence_receipt", ""),
         "homeStatus": "FOR_SALE",
         "specialListingConditions": "Short Sale",
         "listing_description": listing_description[:8_000],
@@ -6214,6 +6290,8 @@ def candidate_from_pilot_row(row_data: dict[str, str], payload: dict[str, str]) 
         "scoped_listing_status_source": payload.get("scopedListingStatusSource", ""),
         "scoped_listing_status_group": payload.get("scopedListingStatusGroup", ""),
         "listing_description_group": payload.get("listingDescriptionGroup", ""),
+        "source_evidence_state": payload.get("sourceEvidenceState", ""),
+        "source_evidence_receipt": payload.get("sourceEvidenceReceipt", ""),
     }
     text = " ".join(
         part
@@ -6292,6 +6370,12 @@ def pilot_row_preflight_failure(
         return (
             scoped_qualification.failure_reason or "needs_description_confirmation",
             "Exact-listing identity, current status, and agent-written short-sale remarks must all remain confirmed before promotion.",
+            "",
+        )
+    if not has_durable_source_evidence(payload):
+        return (
+            "needs_source_evidence_confirmation",
+            "Exact source evidence is hash-only or lacks a durable reopenable receipt; promotion and outreach remain held.",
             "",
         )
 
