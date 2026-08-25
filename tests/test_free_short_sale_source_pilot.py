@@ -1014,6 +1014,119 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertIn("durable reopenable receipt", note)
         self.assertEqual(matched, "")
 
+    def test_source_evidence_persistence_is_idempotent_and_reopenable(self):
+        group = pilot.listing_evidence_group("123 Main Street", "GA")
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/listing/123?mls=ABC123",
+            title="123 Main Street",
+            text="Status: Active. Public Remarks: Potential short sale.",
+            fields={
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+                "listing_identity_group": group,
+                "scoped_listing_status": "current",
+                "listing_description": "Public Remarks: Potential short sale.",
+            },
+        )
+        stored_rows = [pilot.SOURCE_EVIDENCE_HEADERS]
+        appended = []
+
+        def fake_append(_token, _sheet_id, _range, values):
+            appended.extend(values)
+            stored_rows.extend(values)
+
+        with mock.patch.object(pilot, "ensure_headers_tab") as ensure_headers, mock.patch.object(
+            pilot, "get_values", side_effect=lambda *_args, **_kwargs: [list(row) for row in stored_rows]
+        ), mock.patch.object(pilot, "append_values", side_effect=fake_append):
+            first = pilot.persist_candidate_source_evidence(
+                "token",
+                "sheet",
+                candidate,
+                captured_at=dt.datetime(2026, 8, 25, 16, 0, tzinfo=dt.timezone.utc),
+            )
+            second = pilot.persist_candidate_source_evidence(
+                "token",
+                "sheet",
+                candidate,
+                captured_at=dt.datetime(2026, 8, 25, 17, 0, tzinfo=dt.timezone.utc),
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(candidate.fields["source_evidence_state"], "durable_reopenable")
+        self.assertEqual(candidate.fields["source_evidence_receipt"], first)
+        row = pilot.candidate_to_row(
+            candidate,
+            pilot.Qualification(
+                "qualified",
+                "",
+                "listing_description_or_remarks",
+                "Potential short sale.",
+                "",
+            ),
+            "",
+            "",
+            "",
+        )
+        payload = json.loads(row[27])
+        self.assertEqual(row[14], "shadow_ready")
+        self.assertEqual(payload["sourceEvidenceReceipt"], first)
+        self.assertEqual(payload["sourceEvidenceState"], "durable_reopenable")
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            return_value=[list(row) for row in stored_rows],
+        ):
+            self.assertEqual(
+                pilot.resolve_source_evidence_receipt("token", "sheet", first),
+                candidate.url,
+            )
+        self.assertNotIn("http", appended[0][4].lower())
+        self.assertEqual(
+            pilot.base64.urlsafe_b64decode(appended[0][4].encode("ascii")).decode("utf-8"),
+            candidate.url,
+        )
+        ensure_headers.assert_called_with(
+            "token",
+            "sheet",
+            pilot.SOURCE_EVIDENCE_TAB,
+            pilot.SOURCE_EVIDENCE_HEADERS,
+            hidden=True,
+        )
+
+    def test_source_evidence_persistence_fails_closed_without_readback(self):
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/listing/123",
+            title="123 Main Street",
+            text="Status: Active. Public Remarks: Potential short sale.",
+            fields={
+                "listing_address": "123 Main Street",
+                "city": "Atlanta",
+                "state": "GA",
+            },
+        )
+
+        with mock.patch.object(pilot, "ensure_headers_tab"), mock.patch.object(
+            pilot,
+            "get_values",
+            return_value=[pilot.SOURCE_EVIDENCE_HEADERS],
+        ), mock.patch.object(pilot, "append_values"):
+            receipt = pilot.persist_candidate_source_evidence("token", "sheet", candidate)
+
+        self.assertEqual(receipt, "")
+        self.assertEqual(candidate.fields["source_evidence_state"], "evidence_gap")
+        self.assertEqual(candidate.fields["source_evidence_receipt"], "")
+
+    def test_source_evidence_tab_must_be_separate_from_owner_tabs(self):
+        with mock.patch.object(pilot, "SOURCE_EVIDENCE_TAB", "Sheet1"):
+            with self.assertRaisesRegex(RuntimeError, "dedicated tab"):
+                pilot.validate_source_evidence_tab("Sheet1", "Lead Source Pilot")
+
     def test_parse_pilot_payload_reconstructs_cleaned_archived_payload(self):
         pilot_row = self.pilot_row(
             first_name="Jane",
@@ -3907,6 +4020,32 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             {"errors": 0},
             {"complete": True},
             durability_persistence_confirmed=False,
+        )
+
+        self.assertTrue(accounted)
+        self.assertFalse(complete)
+
+    def test_source_evidence_persistence_failure_degrades_pipeline_completion(self):
+        stats = {
+            "planned_searches": 1,
+            "searched": 1,
+            "search_succeeded": 1,
+            "search_blocked": 0,
+            "search_failed": 0,
+            "source_evidence_failed": 1,
+            "search_engine_attempts": {
+                "attempted": 1,
+                "succeeded": 1,
+                "blocked": 0,
+                "failed": 0,
+            },
+        }
+
+        complete, accounted = pilot.source_pipeline_complete(
+            stats,
+            {"errors": 0},
+            {"complete": True},
+            durability_persistence_confirmed=True,
         )
 
         self.assertTrue(accounted)

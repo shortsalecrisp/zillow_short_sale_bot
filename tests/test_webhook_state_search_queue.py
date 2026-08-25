@@ -230,13 +230,13 @@ def test_startup_queue_recovery_is_backgrounded(monkeypatch):
     scheduled[0].close()
 
 
-def test_scheduler_restart_recovery_defaults_on(monkeypatch):
+def test_scheduler_restart_recovery_defaults_to_scheduled_window(monkeypatch):
     monkeypatch.delenv("FOLLOWUP_RESTART_RECOVERY_ENABLED", raising=False)
     monkeypatch.delenv("FOLLOWUP_RUN_ON_STARTUP", raising=False)
     monkeypatch.delenv("SCHEDULER_RUN_IMMEDIATELY", raising=False)
 
     assert webhook_server.FREE_SOURCE_PILOT_STARTUP_CATCHUP is True
-    assert webhook_server._should_run_immediately() is True
+    assert webhook_server._should_run_immediately() is False
 
 
 def test_scheduler_restart_recovery_can_be_disabled(monkeypatch):
@@ -253,6 +253,24 @@ def test_scheduler_startup_work_can_be_enabled(monkeypatch):
     monkeypatch.delenv("SCHEDULER_RUN_IMMEDIATELY", raising=False)
 
     assert webhook_server._should_run_immediately() is True
+
+
+def test_startup_queue_recovery_only_requeues_stale_items(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        webhook_server,
+        "_requeue_stale_in_progress_items",
+        lambda *, startup=False: calls.append(startup) or 2,
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "_process_pending_queue",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not drain pending queue")),
+    )
+
+    assert webhook_server._recover_stale_queue_for_scheduled_window() == 2
+    assert calls == [True]
 
 
 def test_scheduler_startup_catchup_signals_completion(monkeypatch):

@@ -85,11 +85,6 @@ TASKER_TRANSPORT_HEALTH_URL = os.getenv(
 SMS_CHATBOT_OPENAI_MODEL = os.getenv("SMS_CHATBOT_OPENAI_MODEL", "gpt-5-mini")
 SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS = float(os.getenv("SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS", "25"))
 INITIAL_SMS_RETRY_ATTEMPTS = max(1, int(os.getenv("SMS_RETRY_ATTEMPTS", "3")))
-STARTUP_FOLLOWUP_WAIT_SECONDS = max(
-    30,
-    int(os.getenv("STARTUP_FOLLOWUP_WAIT_SECONDS", "900")),
-)
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
@@ -100,6 +95,11 @@ if not SMS_API_KEY:
 
 # FastAPI app
 app            = FastAPI()
+
+
+def _recover_stale_queue_for_scheduled_window() -> int:
+    """Recover interrupted claims without sending fresh pending work at startup."""
+    return _requeue_stale_in_progress_items(startup=True)
 
 
 @app.on_event("startup")
@@ -117,21 +117,11 @@ async def _log_headless_status() -> None:
 async def _recover_pending_queue() -> None:
     async def _recover_in_background() -> None:
         try:
-            if _should_run_immediately():
-                logger.info(
-                    "queue: startup recovery waiting for follow-up catch-up"
-                )
-                catchup_finished = await asyncio.to_thread(
-                    _startup_followup_catchup_done.wait,
-                    STARTUP_FOLLOWUP_WAIT_SECONDS,
-                )
-                if not catchup_finished:
-                    logger.warning(
-                        "queue: startup follow-up catch-up wait timed out after %ss; continuing recovery",
-                        STARTUP_FOLLOWUP_WAIT_SECONDS,
-                    )
-            processed = await asyncio.to_thread(_process_pending_queue, startup=True)
-            logger.info("queue: startup processed count=%d", processed)
+            requeued = await asyncio.to_thread(_recover_stale_queue_for_scheduled_window)
+            logger.info(
+                "queue: startup recovered stale count=%d; pending work waits for scheduled window",
+                requeued,
+            )
         except Exception:
             logger.exception("queue: startup recovery failed")
 
@@ -1424,15 +1414,8 @@ def _start_extra_state_rows(payload: Dict[str, Any]) -> None:
 
 
 def _should_run_immediately() -> bool:
-    # A restart during a paced follow-up batch must resume the unsent remainder.
-    # Keep this independent from the legacy FOLLOWUP_RUN_ON_STARTUP setting so
-    # stale Render configuration cannot silently disable recovery.
-    restart_recovery = os.getenv(
-        "FOLLOWUP_RESTART_RECOVERY_ENABLED",
-        "true",
-    ).strip().lower()
-    if restart_recovery not in {"0", "false", "no", "off"}:
-        return True
+    # Due rows are idempotently recovered by the next scheduled hourly pass.
+    # A process start must not create an unscheduled outbound messaging pass.
     run_on_startup = os.getenv("FOLLOWUP_RUN_ON_STARTUP", "false").strip().lower()
     if run_on_startup not in {"0", "false", "no", "off"}:
         return True

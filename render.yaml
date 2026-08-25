@@ -115,11 +115,7 @@ services:
       - key: FOLLOW_UP_HOURS
         value: "6"
       - key: FOLLOWUP_RUN_ON_STARTUP
-        value: "true"
-      - key: FOLLOWUP_RESTART_RECOVERY_ENABLED
-        value: "true"
-      - key: STARTUP_FOLLOWUP_WAIT_SECONDS
-        value: "900"
+        value: "false"
       - key: FREE_SOURCE_PILOT_ENABLED
         value: "true"
       - key: FREE_SOURCE_PILOT_FORCE_ALL_STATES
@@ -260,6 +256,8 @@ services:
         value: Lead Source Pilot
       - key: FREE_SOURCE_PILOT_RUN_RECEIPT_TAB
         value: Pilot Run Receipts
+      - key: FREE_SOURCE_PILOT_SOURCE_EVIDENCE_TAB
+        value: Pilot Source Evidence
       - key: FREE_SOURCE_PILOT_RUN_RECEIPT_STALE_MINUTES
         value: "70"
       - key: FREE_SOURCE_PILOT_STARTUP_CATCHUP_START_DATE

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import datetime as dt
 import hashlib
 import html
@@ -42,6 +43,10 @@ SPREADSHEET_ID = "12UzsoQCo4W0WB_lNl3BjKpQ_wXNhEH7xegkFRVu2M70"
 MAIN_TAB = "Sheet1"
 PILOT_TAB = "Lead Source Pilot"
 RUN_RECEIPT_TAB = os.getenv("FREE_SOURCE_PILOT_RUN_RECEIPT_TAB", "Pilot Run Receipts")
+SOURCE_EVIDENCE_TAB = os.getenv(
+    "FREE_SOURCE_PILOT_SOURCE_EVIDENCE_TAB",
+    "Pilot Source Evidence",
+)
 POST_SOURCE_AUDIT_GRACE_MINUTES = int(
     os.getenv("FREE_SOURCE_PILOT_POST_SOURCE_AUDIT_GRACE_MINUTES", "30")
 )
@@ -61,6 +66,24 @@ def validate_run_receipt_tab(main_tab: str, pilot_tab: str) -> None:
             "FREE_SOURCE_PILOT_RUN_RECEIPT_TAB must name a dedicated tab distinct "
             "from Sheet1 and Lead Source Pilot"
         )
+
+
+def validate_source_evidence_tab(main_tab: str, pilot_tab: str) -> None:
+    """Keep exact-source evidence isolated from lead and run-receipt rows."""
+    evidence_name = normalize_space(SOURCE_EVIDENCE_TAB)
+    protected_names = {
+        normalize_space(main_tab).casefold(),
+        normalize_space(pilot_tab).casefold(),
+        normalize_space(RUN_RECEIPT_TAB).casefold(),
+        "sheet1",
+        "lead source pilot",
+        "pilot run receipts",
+    }
+    if not evidence_name or evidence_name.casefold() in protected_names:
+        raise RuntimeError(
+            "FREE_SOURCE_PILOT_SOURCE_EVIDENCE_TAB must name a dedicated tab distinct "
+            "from Sheet1, Lead Source Pilot, and Pilot Run Receipts"
+        )
 RUN_RECEIPT_HEADERS = [
     "schedule_slot_id",
     "run_receipt_id",
@@ -70,6 +93,16 @@ RUN_RECEIPT_HEADERS = [
     "observed_at",
     "pipeline_complete",
     "detail",
+]
+SOURCE_EVIDENCE_HEADERS = [
+    "receipt_id",
+    "captured_at",
+    "stable_id",
+    "source_reference",
+    "encoded_source_url",
+    "listing_identity_group",
+    "qualification_hash",
+    "evidence_state",
 ]
 MAX_SOURCE_QUERY_RECOVERY = 10
 MAX_SOURCE_QUERY_RECOVERY_EXPERIMENT = 20
@@ -3934,20 +3967,187 @@ def ensure_headers_tab(
     spreadsheet_id: str,
     tab_name: str,
     headers: list[str],
+    *,
+    hidden: bool = False,
 ) -> None:
-    meta = sheets_request(token, "GET", f"{spreadsheet_id}?fields=sheets.properties.title")
-    titles = {sheet["properties"]["title"] for sheet in meta.get("sheets", [])}
-    if tab_name not in titles:
+    meta = sheets_request(
+        token,
+        "GET",
+        f"{spreadsheet_id}?fields=sheets.properties",
+    )
+    matching = next(
+        (
+            sheet.get("properties", {})
+            for sheet in meta.get("sheets", [])
+            if sheet.get("properties", {}).get("title") == tab_name
+        ),
+        None,
+    )
+    if matching is None:
+        properties: dict[str, Any] = {
+            "title": tab_name,
+            "gridProperties": {"columnCount": len(headers)},
+        }
+        if hidden:
+            properties["hidden"] = True
         sheets_request(
             token,
             "POST",
             f"{spreadsheet_id}:batchUpdate",
-            {"requests": [{"addSheet": {"properties": {"title": tab_name, "gridProperties": {"columnCount": len(headers)}}}}]},
+            {"requests": [{"addSheet": {"properties": properties}}]},
+        )
+    elif hidden and not matching.get("hidden"):
+        sheets_request(
+            token,
+            "POST",
+            f"{spreadsheet_id}:batchUpdate",
+            {
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {
+                                "sheetId": matching["sheetId"],
+                                "hidden": True,
+                            },
+                            "fields": "hidden",
+                        }
+                    }
+                ]
+            },
         )
     header_range = f"{tab_name}!A1:{column_letter(len(headers))}1"
     values = get_values(token, spreadsheet_id, header_range)
     if not values or values[0] != headers:
         update_values(token, spreadsheet_id, header_range, [headers])
+
+
+def _source_evidence_receipt_id(stable_id: str, exact_url: str) -> str:
+    source_digest = hashlib.sha256(exact_url.encode("utf-8")).hexdigest()
+    return "pse:v1:" + hashlib.sha256(
+        f"{stable_id}|{source_digest}".encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def _source_evidence_values(candidate: Candidate, captured_at: dt.datetime) -> list[str]:
+    exact_url = normalize_space(candidate.url)
+    if not exact_url or urllib.parse.urlparse(exact_url).scheme not in {"http", "https"}:
+        raise ValueError("exact listing source URL must use http or https")
+    fields = candidate.fields
+    stable_id = stable_synthetic_zpid(
+        candidate.source,
+        exact_url,
+        fields.get("listing_address", ""),
+        fields.get("city", ""),
+        fields.get("state", ""),
+    )
+    receipt_id = _source_evidence_receipt_id(stable_id, exact_url)
+    qualification_basis = "|".join(
+        [
+            normalize_space(fields.get("listing_identity_group", "")),
+            normalize_space(fields.get("scoped_listing_status", "")),
+            normalize_space(fields.get("listing_description", "")),
+        ]
+    )
+    encoded_url = base64.urlsafe_b64encode(exact_url.encode("utf-8")).decode("ascii")
+    return [
+        receipt_id,
+        captured_at.astimezone(dt.timezone.utc).isoformat(),
+        stable_id,
+        safe_source_reference(exact_url),
+        encoded_url,
+        normalize_space(fields.get("listing_identity_group", "")),
+        hashlib.sha256(qualification_basis.encode("utf-8")).hexdigest(),
+        "durable_reopenable",
+    ]
+
+
+def resolve_source_evidence_receipt(
+    token: str,
+    spreadsheet_id: str,
+    receipt_id: str,
+) -> str:
+    """Resolve and validate one durable receipt without exposing it in lead rows."""
+    evidence_range = f"{SOURCE_EVIDENCE_TAB}!A:{column_letter(len(SOURCE_EVIDENCE_HEADERS))}"
+    rows = get_values(token, spreadsheet_id, evidence_range)
+    if not rows or rows[0] != SOURCE_EVIDENCE_HEADERS:
+        raise RuntimeError("source evidence owner tab headers are missing or changed")
+    matching = [row for row in rows[1:] if row and row[0] == receipt_id]
+    if len(matching) != 1:
+        raise RuntimeError("source evidence receipt missing or duplicated")
+    stored = matching[0] + [""] * (len(SOURCE_EVIDENCE_HEADERS) - len(matching[0]))
+    if stored[7] != "durable_reopenable":
+        raise RuntimeError("source evidence receipt is not reopenable")
+    try:
+        exact_url = base64.urlsafe_b64decode(stored[4].encode("ascii")).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError("source evidence URL encoding is invalid") from exc
+    if urllib.parse.urlparse(exact_url).scheme not in {"http", "https"}:
+        raise RuntimeError("source evidence URL scheme is invalid")
+    if stored[3] != safe_source_reference(exact_url):
+        raise RuntimeError("source evidence URL does not match its safe reference")
+    if stored[0] != _source_evidence_receipt_id(stored[2], exact_url):
+        raise RuntimeError("source evidence receipt integrity check failed")
+    return exact_url
+
+
+def persist_candidate_source_evidence(
+    token: str,
+    spreadsheet_id: str,
+    candidate: Candidate,
+    *,
+    captured_at: dt.datetime | None = None,
+) -> str:
+    """Persist and reread an exact URL before allowing the candidate to promote."""
+    try:
+        evidence_values = _source_evidence_values(
+            candidate,
+            captured_at or dt.datetime.now(dt.timezone.utc),
+        )
+        receipt_id = evidence_values[0]
+        ensure_headers_tab(
+            token,
+            spreadsheet_id,
+            SOURCE_EVIDENCE_TAB,
+            SOURCE_EVIDENCE_HEADERS,
+            hidden=True,
+        )
+        evidence_range = (
+            f"{SOURCE_EVIDENCE_TAB}!A:{column_letter(len(SOURCE_EVIDENCE_HEADERS))}"
+        )
+        rows = get_values(token, spreadsheet_id, evidence_range)
+        matching = [row for row in rows[1:] if row and row[0] == receipt_id]
+        if not matching:
+            append_values(token, spreadsheet_id, evidence_range, [evidence_values])
+            rows = get_values(token, spreadsheet_id, evidence_range)
+            matching = [row for row in rows[1:] if row and row[0] == receipt_id]
+        if len(matching) != 1:
+            raise RuntimeError("source evidence receipt missing or duplicated after write")
+        stored = matching[0] + [""] * (len(SOURCE_EVIDENCE_HEADERS) - len(matching[0]))
+        immutable_indexes = (0, 2, 3, 5, 6, 7)
+        if any(stored[index] != evidence_values[index] for index in immutable_indexes):
+            raise RuntimeError("source evidence receipt does not match candidate")
+        resolved_url = resolve_source_evidence_receipt(token, spreadsheet_id, receipt_id)
+        if resolved_url != normalize_space(candidate.url):
+            raise RuntimeError("source evidence URL failed exact reopen readback")
+        candidate.fields["source_evidence_state"] = "durable_reopenable"
+        candidate.fields["source_evidence_receipt"] = receipt_id
+        log_event(
+            "pilot_source_evidence_persisted",
+            receipt_id=receipt_id,
+            source_reference=evidence_values[3],
+            evidence_tab=SOURCE_EVIDENCE_TAB,
+        )
+        return receipt_id
+    except Exception as exc:  # noqa: BLE001
+        candidate.fields["source_evidence_state"] = "evidence_gap"
+        candidate.fields["source_evidence_receipt"] = ""
+        log_event(
+            "pilot_source_evidence_persistence_failed",
+            source_reference=safe_source_reference(candidate.url),
+            error_type=type(exc).__name__,
+            error=str(exc)[:300],
+        )
+        return ""
 
 
 def append_run_slot_receipt(
@@ -6671,6 +6871,7 @@ def source_pipeline_complete(
         and stats["search_failed"] == 0
         and stats["search_engine_attempts"].get("blocked", 0) == 0
         and stats["search_engine_attempts"].get("failed", 0) == 0
+        and int(stats.get("source_evidence_failed", 0)) == 0
         and durability_persistence_confirmed
         and int(promotion_stats.get("errors", 0)) == 0
         and bool(direct_monitor_stats.get("complete", True))
@@ -6732,6 +6933,8 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
         "fetch_failure_reasons": {},
         "rejection_reasons": {},
         "rows_written": 0,
+        "source_evidence_persisted": 0,
+        "source_evidence_failed": 0,
     }
     context["stats"] = stats
     experiment_baselines = {
@@ -6807,6 +7010,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
 
     update_run_stage(context, "configuration")
     validate_run_receipt_tab(args.main_tab, args.pilot_tab)
+    validate_source_evidence_tab(args.main_tab, args.pilot_tab)
     update_run_stage(context, "authentication")
     service_account = load_service_account_info(args.service_account)
     token = sheets_client(service_account)
@@ -7224,6 +7428,16 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                 stats["qualified"] += 1
                 stats["net_new_qualified"] += 1
                 query_stats["qualified"] += 1
+                if not args.dry_run:
+                    receipt = persist_candidate_source_evidence(
+                        token,
+                        args.spreadsheet_id,
+                        candidate,
+                    )
+                    if receipt:
+                        stats["source_evidence_persisted"] += 1
+                    else:
+                        stats["source_evidence_failed"] += 1
                 row = candidate_to_row(candidate, qualification, dup_key, matched_main_row, agent_rows)
                 query_rows.append(row)
                 if durability_active:
