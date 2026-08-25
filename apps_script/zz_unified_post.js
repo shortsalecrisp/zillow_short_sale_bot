@@ -87,30 +87,26 @@ function handleUnifiedVoicePost_(payload) {
 function handleUnifiedSmsPost_(e) {
   var requestId = Utilities.getUuid();
 
-  // Self-install the five-minute watchdog on the first live webhook call so
-  // a separate one-time manual setup step cannot be forgotten.
-  try {
-    if (typeof installSmsPendingSendWatchdogTrigger_ === "function") {
-      installSmsPendingSendWatchdogTrigger_();
-    }
-  } catch (_) {}
-
-  try {
-    if (typeof appendSmsDebugLog_ === "function") {
-      appendSmsDebugLog_("doPost_start", {
-        request_id: requestId,
-        transport_format: detectIncomingTransport_(e),
-        raw_body: maskSensitiveDebugText_(getRawPostBody_(e)),
-        parameters: e && e.parameter ? maskSensitiveDebugText_(safeJsonStringify_(e.parameter)) : ""
-      });
-    }
-  } catch (_) {}
-
   try {
     var body = parseIncomingRequest_(e);
     validateToken_(body.token);
 
     var action = String(body.action || "incoming_sms").toLowerCase();
+    // Inbound messages write their own debug row only after the durable queue
+    // append. Avoid all Spreadsheet and ScriptApp work before that boundary.
+    if (action !== "incoming_sms" && action !== "enqueue_incoming_sms") {
+      try {
+        if (typeof appendSmsDebugLog_ === "function") {
+          appendSmsDebugLog_("doPost_start", {
+            request_id: requestId,
+            action: action,
+            transport_format: detectIncomingTransport_(e),
+            raw_body: maskSensitiveDebugText_(getRawPostBody_(e)),
+            parameters: e && e.parameter ? maskSensitiveDebugText_(safeJsonStringify_(e.parameter)) : ""
+          });
+        }
+      } catch (_) {}
+    }
     if (action === "tasker_heartbeat") {
       var transportVersion = String(body.transport_version || "");
       recordTaskerTransportActivityV12_("heartbeat", body);
@@ -170,9 +166,19 @@ function handleUnifiedSmsPost_(e) {
 
 
     if (action === "enqueue_incoming_sms") {
-      if (body.transport_version) recordTaskerTransportActivityV12_("inbound", body);
       var queueIgnored = getUnifiedIgnoredInboundReason_(body);
       if (queueIgnored) {
+        try {
+          appendSmsDebugLog_("incoming_sms_ignored", {
+            request_id: requestId,
+            phone: body.phone || "",
+            message: body.message || "",
+            reason: queueIgnored
+          });
+        } catch (_) {}
+        try {
+          if (body.transport_version) recordTaskerTransportActivityV12_("inbound_ignored", body);
+        } catch (_) {}
         return jsonOutput_({
           ok: true,
           queued: false,
@@ -181,7 +187,11 @@ function handleUnifiedSmsPost_(e) {
           reason: queueIgnored
         });
       }
-      return jsonOutput_(enqueueIncomingSmsV10_(body, requestId));
+      var queuedInbound = enqueueIncomingSmsV10_(body, requestId);
+      try {
+        if (body.transport_version) recordTaskerTransportActivityV12_("inbound", body);
+      } catch (_) {}
+      return jsonOutput_(queuedInbound);
     }
 
     if (action === "enqueue_initial_sms") {

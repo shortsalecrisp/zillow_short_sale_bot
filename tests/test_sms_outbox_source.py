@@ -158,8 +158,88 @@ def test_watchdog_recovers_confirmed_crm_receipt_before_transport_takeover():
 
 def test_worker_and_watchdog_triggers_are_self_installed():
     assert "processSmsInboundQueue_: 1" in OUTBOX
+    assert "auditSmsInboundCompletenessV14_: 5" in OUTBOX
     assert "smsOutboxWatchdog_: 5" in OUTBOX
     assert "drainPendingSmsControlEventsV11_: 1" in OUTBOX
+
+
+def test_inbound_is_persisted_before_best_effort_trigger_maintenance():
+    start = OUTBOX.index("function enqueueIncomingSmsV10_")
+    end = OUTBOX.index("function ensureSmsOutboxTriggersBestEffortV14_", start)
+    source = OUTBOX[start:end]
+
+    assert "installSmsOutboxTriggers_();" not in source
+    assert "ensureSmsOutboxTriggersBestEffortV14_();" in source
+    fallback_start = source.index("if (!hasLock)")
+    fallback_end = source.index("return buildQueuedSmsInboundResponse_", fallback_start)
+    fallback_source = source[fallback_start:fallback_end]
+    assert fallback_source.index("sheet.appendRow") < fallback_source.index(
+        "ensureSmsOutboxTriggersBestEffortV14_();"
+    )
+    assert source.rindex("sheet.appendRow") < source.rindex("ensureSmsOutboxTriggersBestEffortV14_();")
+    assert "Trigger maintenance is intentionally after the durable append" in source
+    cached_duplicate = source.index("if (cachedQueueId)")
+    assert source.index("ensureSmsOutboxTriggersBestEffortV14_();", cached_duplicate) > cached_duplicate
+
+
+def test_inbound_route_does_no_debug_or_transport_write_before_durable_enqueue():
+    handler_start = UNIFIED.index("function handleUnifiedSmsPost_")
+    enqueue_start = UNIFIED.index('if (action === "enqueue_incoming_sms")', handler_start)
+    enqueue_end = UNIFIED.index('if (action === "enqueue_initial_sms")', enqueue_start)
+    handler_preamble = UNIFIED[handler_start:enqueue_start]
+    enqueue_source = UNIFIED[enqueue_start:enqueue_end]
+
+    assert "installSmsPendingSendWatchdogTrigger_" not in handler_preamble
+    assert 'action !== "incoming_sms" && action !== "enqueue_incoming_sms"' in handler_preamble
+    queue_call = enqueue_source.index("enqueueIncomingSmsV10_(body, requestId)")
+    activity_call = enqueue_source.index('recordTaskerTransportActivityV12_("inbound", body)')
+    assert queue_call < activity_call
+
+
+def test_every_processed_inbound_gets_an_explicit_terminal_disposition():
+    assert '"disposition"' in OUTBOX
+    assert '"disposition_reason"' in OUTBOX
+    assert '"disposition_at"' in OUTBOX
+    assert "classifySmsInboundDispositionV14_" in OUTBOX
+    for disposition in (
+        'handoff ? "reply_queued_and_manual_review" : "reply_queued"',
+        'type: "manual_review"',
+        'type: "manual_takeover"',
+        'type: "intentional_skip"',
+        '"processing_failed"',
+    ):
+        assert disposition in OUTBOX
+
+    completion_start = OUTBOX.index("function completeQueuedSmsInbound_")
+    completion_end = OUTBOX.index("function auditSmsInboundCompletenessV14_", completion_start)
+    completion_source = OUTBOX[completion_start:completion_end]
+    assert "currentRow[14] = disposition" in completion_source
+    assert "currentRow[15] = dispositionReason" in completion_source
+    assert "currentRow[16] = disposition ? new Date()" in completion_source
+    assert ".setValues([currentRow])" in completion_source
+
+
+def test_inbound_completeness_auditor_retries_stale_work_and_alerts_once():
+    start = OUTBOX.index("function auditSmsInboundCompletenessV14_()")
+    end = OUTBOX.index("function hasSmsOutboxRecordForInboundV14_", start)
+    source = OUTBOX[start:end]
+
+    assert 'status === "queued"' in source
+    assert 'status === "processing"' in source
+    assert 'status === "failed"' in source
+    assert 'status === "processed" && !disposition' in source
+    assert "hasSmsOutboxRecordForInboundV14_" in source
+    assert "sendSmsInboundCompletenessHandoffV14_" in source
+    assert "if (auditAlertedAt) return" in source
+    assert "if (needsProcessor) processSmsInboundQueue_();" in source
+
+
+def test_enqueue_ignored_messages_are_durably_logged_with_reason():
+    enqueue_start = UNIFIED.index('if (action === "enqueue_incoming_sms")')
+    enqueue_end = UNIFIED.index('if (action === "enqueue_initial_sms")', enqueue_start)
+    source = UNIFIED[enqueue_start:enqueue_end]
+    assert 'appendSmsDebugLog_("incoming_sms_ignored"' in source
+    assert "reason: queueIgnored" in source
 
 
 def test_transport_retries_are_idempotent():

@@ -1,8 +1,14 @@
 var SMS_INBOUND_QUEUE_HEADERS_ = [
   "created_at", "status", "queue_id", "dedupe_key", "message_id", "phone",
   "message", "received_at", "attempts", "lease_token", "lease_until",
-  "last_error", "processed_at", "outbox_request_id"
+  "last_error", "processed_at", "outbox_request_id", "disposition",
+  "disposition_reason", "disposition_at", "audit_alerted_at"
 ];
+
+// Only rows created after this release are required to have the disposition
+// columns. Older processed rows predate the invariant and must not generate
+// retrospective alerts.
+var SMS_INBOUND_COMPLETENESS_V14_START_MS_ = Date.parse("2026-08-25T16:00:00Z");
 
 var SMS_PENDING_SEND_HEADERS_ = [
   "created_at", "status", "request_id", "message_id", "phone", "reply_text",
@@ -372,7 +378,6 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
     return { ok: false, queued: false, error: "A valid phone and message are required" };
   }
 
-  installSmsOutboxTriggers_();
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_inbound_queue") || ss.insertSheet("sms_inbound_queue");
   ensureSmsSheetHeaders_(sheet, SMS_INBOUND_QUEUE_HEADERS_);
@@ -386,6 +391,7 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
   var transportCacheKey = "sms_inbound_transport_" + transportFingerprint;
   var cachedQueueId = cache.get(cacheKey) || cache.get(transportCacheKey);
   if (cachedQueueId) {
+    ensureSmsOutboxTriggersBestEffortV14_();
     return {
       ok: true,
       queued: false,
@@ -406,7 +412,7 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
     queueId = Utilities.getUuid();
     sheet.appendRow([
       now, "queued", queueId, dedupeKey, messageId, phone, message,
-      receivedAt, 0, "", "", "", "", ""
+      receivedAt, 0, "", "", "", "", "", "", "", "", ""
     ]);
     cache.put(cacheKey, queueId, 600);
     cache.put(transportCacheKey, queueId, 600);
@@ -420,6 +426,7 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
         message_id: messageId
       });
     } catch (_) {}
+    ensureSmsOutboxTriggersBestEffortV14_();
     return buildQueuedSmsInboundResponse_(queueId, messageId);
   }
 
@@ -438,6 +445,7 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
           created && now.getTime() - created < 10 * 60 * 1000) {
         cache.put(cacheKey, String(rows[i][2] || ""), 600);
         cache.put(transportCacheKey, String(rows[i][2] || ""), 600);
+        ensureSmsOutboxTriggersBestEffortV14_();
         return {
           ok: true,
           queued: false,
@@ -451,7 +459,7 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
     queueId = Utilities.getUuid();
     sheet.appendRow([
       now, "queued", queueId, dedupeKey, messageId, phone, message,
-      receivedAt, 0, "", "", "", "", ""
+      receivedAt, 0, "", "", "", "", "", "", "", "", ""
     ]);
     cache.put(cacheKey, queueId, 600);
     cache.put(transportCacheKey, queueId, 600);
@@ -469,7 +477,27 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
       message_id: messageId
     });
   } catch (_) {}
+  // Trigger maintenance is intentionally after the durable append. A trigger
+  // quota, authorization issue, or slow ScriptApp call can no longer prevent
+  // the inbound message from reaching the queue.
+  ensureSmsOutboxTriggersBestEffortV14_();
   return buildQueuedSmsInboundResponse_(queueId, messageId);
+}
+
+function ensureSmsOutboxTriggersBestEffortV14_() {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = "sms_outbox_triggers_checked_v14";
+  if (cache.get(cacheKey)) return;
+  try {
+    installSmsOutboxTriggers_();
+    cache.put(cacheKey, "1", 60 * 60);
+  } catch (err) {
+    try {
+      appendSmsDebugLog_("sms_trigger_maintenance_deferred", {
+        reason: String(err)
+      });
+    } catch (_) {}
+  }
 }
 
 function buildQueuedSmsInboundResponse_(queueId, messageId) {
@@ -516,6 +544,7 @@ function processSmsInboundQueue_() {
     try {
       var normalized = loadSmsInboundDecisionSnapshotV10_(claim.queue_id);
       var outboxRequestId = normalized && normalized.request_id || Utilities.getUuid();
+      var pendingRegistration = null;
       if (!normalized) {
         var smsResult = handleIncomingSms_({
           action: "incoming_sms",
@@ -532,13 +561,29 @@ function processSmsInboundQueue_() {
         saveSmsInboundDecisionSnapshotV10_(claim.queue_id, normalized);
       }
       if (normalized.should_reply === true) {
-        registerPendingSmsSendV10_({
+        pendingRegistration = registerPendingSmsSendV10_({
           phone: claim.phone,
           message: claim.message,
           message_id: claim.message_id
         }, normalized, outboxRequestId, claim.queue_id);
+        if (!pendingRegistration || pendingRegistration.ok === false || !(
+          pendingRegistration.queued || pendingRegistration.duplicate || pendingRegistration.suppressed
+        )) {
+          var registrationError = new Error("Inbound reply did not reach a terminal outbox state");
+          registrationError.retryable = true;
+          registrationError.code = "SMS_INBOUND_REPLY_NOT_REGISTERED";
+          throw registrationError;
+        }
       }
-      if (!completeQueuedSmsInbound_(claim, "processed", "", outboxRequestId)) {
+      var disposition = classifySmsInboundDispositionV14_(normalized, pendingRegistration);
+      if (!completeQueuedSmsInbound_(
+        claim,
+        "processed",
+        "",
+        outboxRequestId,
+        disposition.type,
+        disposition.reason
+      )) {
         var completionBusy = new Error("Inbound completion is temporarily busy");
         completionBusy.retryable = true;
         completionBusy.code = "SMS_INBOUND_COMPLETION_BUSY";
@@ -553,12 +598,20 @@ function processSmsInboundQueue_() {
         reply_text: normalized.reply_text || "",
         reason: normalized.reason || "",
         lead_status: normalized.lead_status || "",
+        disposition: disposition.type,
         queue_id: claim.queue_id
       });
     } catch (err) {
       var retryable = !!(err && err.retryable);
       var exhausted = claim.attempts >= (retryable ? 8 : 3);
-      completeQueuedSmsInbound_(claim, exhausted ? "failed" : "queued", String(err), "");
+      completeQueuedSmsInbound_(
+        claim,
+        exhausted ? "failed" : "queued",
+        String(err),
+        "",
+        exhausted ? "processing_failed" : "",
+        exhausted ? String(err) : ""
+      );
       if (exhausted) clearSmsInboundDecisionSnapshotV10_(claim.queue_id);
       appendSmsDebugLog_("incoming_sms_queue_error", {
         request_id: claim.queue_id,
@@ -567,16 +620,38 @@ function processSmsInboundQueue_() {
         reason: String(err),
         attempts: claim.attempts
       });
-      if (exhausted) {
-        try {
-          sendSystemAlertEmail_("SMS BOT INBOUND PROCESSING FAILED", String(err));
-        } catch (_) {}
-      }
       if (retryable) break;
     }
     processed++;
   }
   return { ok: true, processed: processed };
+}
+
+function classifySmsInboundDispositionV14_(normalized, pendingRegistration) {
+  var decision = normalized || {};
+  var handoff = !!(decision.handoff_needed || decision.needs_review || decision.alert_needed);
+  if (decision.should_reply === true) {
+    if (pendingRegistration && pendingRegistration.suppressed) {
+      return {
+        type: "manual_takeover",
+        reason: String(pendingRegistration.reason || "Reply suppressed because manual takeover is active")
+      };
+    }
+    return {
+      type: handoff ? "reply_queued_and_manual_review" : "reply_queued",
+      reason: String(decision.reason || "Reply registered in durable SMS outbox")
+    };
+  }
+  if (handoff) {
+    return {
+      type: "manual_review",
+      reason: String(decision.reason || "Manual review requested by conversation decision")
+    };
+  }
+  return {
+    type: "intentional_skip",
+    reason: String(decision.reason || "No reply was intentionally required")
+  };
 }
 
 function smsInboundDecisionSnapshotKeyV10_(queueId) {
@@ -714,7 +789,7 @@ function claimQueuedSmsInbound_() {
   }
 }
 
-function completeQueuedSmsInbound_(claim, status, error, outboxRequestId) {
+function completeQueuedSmsInbound_(claim, status, error, outboxRequestId, disposition, dispositionReason) {
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_inbound_queue");
   if (!sheet || !claim || !claim.row) return false;
@@ -722,18 +797,118 @@ function completeQueuedSmsInbound_(claim, status, error, outboxRequestId) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return false;
   try {
-    var currentQueueId = String(sheet.getRange(claim.row, 3).getValue() || "");
-    var currentLease = String(sheet.getRange(claim.row, 10).getValue() || "");
+    var currentRow = sheet.getRange(claim.row, 1, 1, SMS_INBOUND_QUEUE_HEADERS_.length).getValues()[0];
+    var currentQueueId = String(currentRow[2] || "");
+    var currentLease = String(currentRow[9] || "");
     if (currentQueueId !== claim.queue_id || currentLease !== claim.lease_token) return false;
-    sheet.getRange(claim.row, 2).setValue(status);
-    sheet.getRange(claim.row, 10, 1, 2).setValues([["", ""]]);
-    sheet.getRange(claim.row, 12).setValue(error || "");
-    if (status === "processed") sheet.getRange(claim.row, 13).setValue(new Date());
-    if (outboxRequestId) sheet.getRange(claim.row, 14).setValue(outboxRequestId);
+    currentRow[1] = status;
+    currentRow[9] = "";
+    currentRow[10] = "";
+    currentRow[11] = error || "";
+    if (status === "processed") currentRow[12] = new Date();
+    if (outboxRequestId) currentRow[13] = outboxRequestId;
+    currentRow[14] = disposition || "";
+    currentRow[15] = dispositionReason || "";
+    currentRow[16] = disposition ? new Date() : "";
+    sheet.getRange(claim.row, 1, 1, SMS_INBOUND_QUEUE_HEADERS_.length).setValues([currentRow]);
     return true;
   } finally {
     lock.releaseLock();
   }
+}
+
+function auditSmsInboundCompletenessV14_() {
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_inbound_queue");
+  if (!sheet || sheet.getLastRow() < 2) return { ok: true, audited: 0, alerted: 0 };
+  ensureSmsSheetHeaders_(sheet, SMS_INBOUND_QUEUE_HEADERS_);
+
+  var rowCount = sheet.getLastRow() - 1;
+  var firstDataRow = Math.max(2, sheet.getLastRow() - 499);
+  var rows = sheet.getRange(
+    firstDataRow,
+    1,
+    sheet.getLastRow() - firstDataRow + 1,
+    SMS_INBOUND_QUEUE_HEADERS_.length
+  ).getValues();
+  var now = Date.now();
+  var needsProcessor = false;
+  var alerted = 0;
+
+  rows.forEach(function(row, index) {
+    var createdAt = new Date(row[0]).getTime();
+    if (!createdAt || createdAt < SMS_INBOUND_COMPLETENESS_V14_START_MS_) return;
+    var status = String(row[1] || "");
+    var leaseUntil = new Date(row[10]).getTime();
+    var disposition = String(row[14] || "");
+    var auditAlertedAt = row[17];
+    var ageMs = now - createdAt;
+    if (status === "queued" && ageMs >= 2 * 60 * 1000) needsProcessor = true;
+    if (status === "processing" && (!leaseUntil || leaseUntil < now)) needsProcessor = true;
+    if (auditAlertedAt) return;
+
+    var auditReason = "";
+    if (status === "failed") {
+      auditReason = "INBOUND PROCESSING FAILED";
+    } else if (status === "processed" && !disposition && ageMs >= 2 * 60 * 1000) {
+      auditReason = "INBOUND OUTCOME MISSING";
+    } else if (status === "processed" && disposition.indexOf("reply_queued") === 0 &&
+               ageMs >= 2 * 60 * 1000 && !hasSmsOutboxRecordForInboundV14_(row)) {
+      auditReason = "INBOUND REPLY OUTBOX MISSING";
+    }
+    if (!auditReason) return;
+
+    sendSmsInboundCompletenessHandoffV14_(row, auditReason);
+    sheet.getRange(firstDataRow + index, 18).setValue(new Date());
+    alerted++;
+  });
+
+  // This is a second scheduler lane for stale queue work. It invokes the same
+  // idempotent processor and does not alter classification or reply content.
+  if (needsProcessor) processSmsInboundQueue_();
+  return { ok: true, audited: rowCount, alerted: alerted, processor_invoked: needsProcessor };
+}
+
+function hasSmsOutboxRecordForInboundV14_(inboundRow) {
+  var requestId = String(inboundRow && inboundRow[13] || "");
+  var queueId = String(inboundRow && inboundRow[2] || "");
+  if (!requestId && !queueId) return false;
+  var sheet = getSmsSpreadsheet_().getSheetByName("sms_pending_sends");
+  if (!sheet || sheet.getLastRow() < 2) return false;
+  ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
+  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (requestId && String(rows[i][2] || "") === requestId) return true;
+    if (queueId && String(rows[i][16] || "") === queueId) return true;
+  }
+  return false;
+}
+
+function sendSmsInboundCompletenessHandoffV14_(inboundRow, reason) {
+  var phone = normalizePhone_(inboundRow && inboundRow[5] || "");
+  var context = getSmsLeadContextByPhone_(phone);
+  lockSmsConversationAfterTransportAlertV10_(phone, reason);
+  sendHandoffEmail_({
+    handoff_type: reason,
+    agent_name: context.agent_name,
+    last_name: context.last_name,
+    phone: phone,
+    email: context.email,
+    listing_address: context.listing_address,
+    city: context.city,
+    state: context.state,
+    last_message: String(inboundRow && inboundRow[6] || ""),
+    history: context.history
+  });
+  try {
+    appendSmsDebugLog_("incoming_sms_completeness_alert", {
+      request_id: String(inboundRow && inboundRow[2] || ""),
+      phone: phone,
+      message: String(inboundRow && inboundRow[6] || ""),
+      reason: reason,
+      disposition: String(inboundRow && inboundRow[14] || "")
+    });
+  } catch (_) {}
 }
 
 function registerPendingSmsSendV10_(body, normalized, requestId, inboundQueueId) {
@@ -1396,6 +1571,7 @@ function getSmsLeadContextByPhone_(phone) {
 function installSmsOutboxTriggers_() {
   var required = {
     processSmsInboundQueue_: 1,
+    auditSmsInboundCompletenessV14_: 5,
     smsOutboxWatchdog_: 5,
     monitorTaskerTransportHealthV12_: 5,
     drainHandoffEmailOutboxV11_: 1,
