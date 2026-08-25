@@ -316,25 +316,25 @@ def test_free_source_pilot_defaults_include_all_states():
     assert len(webhook_server.FREE_SOURCE_PILOT_STATES) == 50
 
 
-def test_free_source_pilot_next_run_uses_daily_9am_slot():
+def test_free_source_pilot_next_run_uses_daily_7am_slot():
     now = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 21, 12, 29))
 
     next_run = webhook_server._next_free_source_pilot_run(now)
 
-    assert next_run == webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 2, 9, 0, 0))
+    assert next_run == webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 2, 7, 0, 0))
 
 
-def test_free_source_pilot_next_run_returns_today_before_9am():
-    now = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 8, 12, 29))
+def test_free_source_pilot_next_run_returns_today_before_7am():
+    now = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 6, 12, 29))
 
     next_run = webhook_server._next_free_source_pilot_run(now)
 
-    assert next_run == webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 9, 0, 0))
+    assert next_run == webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 7, 0, 0))
 
 
 def test_free_source_pilot_due_only_at_configured_daily_slot():
-    due = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 9, 0, 0))
-    not_due = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 10, 0, 0))
+    due = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 7, 0, 0))
+    not_due = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 7, 1, 8, 0, 0))
 
     assert webhook_server._free_source_pilot_due(due)
     assert not webhook_server._free_source_pilot_due(not_due)
@@ -431,7 +431,7 @@ def test_late_source_completion_schedules_post_verifier_audit_after_grace(monkey
     monkeypatch.setattr(webhook_server, "_log_free_source_pilot_wrapper_terminal", lambda **kwargs: None)
     monkeypatch.setattr(webhook_server, "_audit_slot_after_late_source_completion", lambda run_time: audit_slot)
     monkeypatch.setattr(webhook_server, "_schedule_post_source_audit", lambda slot: captured.setdefault("slot", slot))
-    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 7, 0, 0))
 
     webhook_server._run_free_source_pilot(run_time)
 
@@ -472,7 +472,7 @@ def test_source_scheduler_passes_correlated_receipt_and_logs_completion(monkeypa
         "_log_free_source_pilot_wrapper_terminal",
         lambda **details: terminal.append(details),
     )
-    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 7, 0, 0))
 
     webhook_server._run_free_source_pilot(run_time)
 
@@ -506,7 +506,7 @@ def test_source_scheduler_timeout_terminates_group_and_logs_failure(monkeypatch)
         "_log_free_source_pilot_wrapper_terminal",
         lambda **details: terminal.append(details),
     )
-    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 7, 0, 0))
 
     webhook_server._run_free_source_pilot(run_time)
 
@@ -536,7 +536,7 @@ def test_source_scheduler_timeout_logs_terminal_even_when_cleanup_fails(monkeypa
         "_log_free_source_pilot_wrapper_terminal",
         lambda **details: terminal.append(details),
     )
-    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 9, 0, 0))
+    run_time = webhook_server.SCHEDULER_TZ.localize(datetime(2026, 8, 21, 7, 0, 0))
 
     webhook_server._run_free_source_pilot(run_time)
 

@@ -69,7 +69,7 @@ then calls the detail task for selected unseen rows. Defaults:
 ## Free-source lead pilot
 
 The free-source pilot checks public search results for non-Zillow short sale listings and writes review candidates to
-the `Lead Source Pilot` tab. It runs once per day by default at 9:00 AM ET, scanning the configured source buckets
+the `Lead Source Pilot` tab. It runs once per day by default at 7:00 AM ET, scanning the configured source buckets
 across all 50 states.
 
 The pilot searches the configured source queries with Google Custom Search when `GOOGLE_API_KEY`/`CS_API_KEY` and
@@ -99,7 +99,7 @@ rows, and sends each row's `pending_queue_listing_json` through `bot_min.process
 final duplicate check against `Sheet1`. Feed/brokerage strings and address fragments are rejected as `needs_agent`, and
 undisclosed addresses are rejected as `needs_address`. Missing-agent rows stay in the pilot tab as `needs_agent`. The
 main row processor suppresses initial SMS for any payload whose source starts with `free-source-pilot:` until the
-verifier path owns that send. The default production schedule is 7:15 AM ET so promoted rows are available before the
+verifier path owns that send. The default production schedule is 7:00 AM ET so promoted rows are available before the
 normal 8:00 AM lead verifier run.
 
 Configuration:
@@ -114,7 +114,7 @@ Configuration:
 * `FREE_SOURCE_PILOT_HEADLESS_DOMAINS=*`
 * `FREE_SOURCE_PILOT_RESULTS_PER_QUERY=10`
 * `FREE_SOURCE_PILOT_RUN_HOUR=7`
-* `FREE_SOURCE_PILOT_RUN_MINUTE=15`
+* `FREE_SOURCE_PILOT_RUN_MINUTE=0`
 * `FREE_SOURCE_PILOT_SLEEP_SECONDS=1.0`
 * `FREE_SOURCE_PILOT_SEARCH_ENGINE=cse`
 * `FREE_SOURCE_PILOT_SOURCE_PLAN=idx_dual_shadow`
