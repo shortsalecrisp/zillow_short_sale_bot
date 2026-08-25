@@ -2537,6 +2537,23 @@ function applyFastRules_(text, rowObj) {
     };
   }
 
+  if (isSelfInitiatedDeferredContactSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: "No problem - message me when you're free.",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      alert_needed: true,
+      send_reply_before_handoff: true,
+      block_reply: false,
+      call_booking_status: "interested_no_call",
+      handoff_type: "DEFERRED HOT LEAD",
+      reason: "Agent is busy and will initiate contact later; preserved as a hot lead without immediate call permission"
+    };
+  }
+
   if (isImmediateCallSignal_(t) || isOpenCallWindowSignal_(t)) {
     return {
       matched: true,
@@ -4035,6 +4052,18 @@ function isUnavailableUntilCallbackReferenceSignal_(text) {
   if (!t || !extractScheduledCallbackReference_(t) || isExplicitDayOrDateCallbackSignal_(t)) return false;
   return /\b(?:i(?:['’]?m|\s+am)|we(?:['’]?re|\s+are)|i(?:['’]?ll|\s+will)\s+be|we(?:['’]?ll|\s+will)\s+be)\s+(?:out(?:\s+of\s+(?:the\s+)?office)?|away|unavailable)\s+until\b/.test(t) ||
     /\b(?:i|we)\s+(?:won['’]?t|will\s+not)\s+be\s+(?:back|available)\s+until\b/.test(t);
+}
+
+function isSelfInitiatedDeferredContactSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+  const currentlyUnavailable = /\b(?:i(?:['’]?m|\s+am)\s+)?(?:working|busy)(?:\s+right\s+now)?\b/.test(t) ||
+    /\b(?:at|in)\s+(?:my|the)\s+(?:other\s+)?job\b/.test(t) ||
+    /\b(?:on\s+the\s+clock|at\s+work)\b/.test(t);
+  const selfInitiatedFollowup = /\b(?:i|we)(?:['’]?ll|\s+will)?\s+(?:let\s+you\s+know|message\s+you|text\s+you|reach\s+out(?:\s+to\s+you)?|contact\s+you|get\s+back\s+to\s+you)\b/.test(t);
+  const explicitInboundCallback = /\b(?:call|text|contact)\s+me\b/.test(t) ||
+    /\b(?:can|could|would|will)\s+you\s+(?:call|text|contact)\b/.test(t);
+  return currentlyUnavailable && selfInitiatedFollowup && !explicitInboundCallback;
 }
 
 function normalizeCallbackTime_(value) {
@@ -6251,6 +6280,21 @@ function testApprovedLeadIntelligenceRules_() {
   const underControlCallbackText = "I have everything under control, but can you call me tomorrow at 3?";
   if (isUnderControlFutureHelpCloseoutSignal_(underControlCallbackText) || !isSchedulingSignal_(underControlCallbackText)) {
     throw new Error("Real callback request must outrank the under-control closeout rule");
+  }
+  const deferredContactText = "Im working right now in my other job I let you know in the afternoon";
+  const deferredContactDecision = applyFastRules_(deferredContactText, {});
+  if (!isSelfInitiatedDeferredContactSignal_(deferredContactText) ||
+      !deferredContactDecision.matched ||
+      deferredContactDecision.handoff_type !== "DEFERRED HOT LEAD" ||
+      deferredContactDecision.call_booking_status !== "interested_no_call" ||
+      !deferredContactDecision.alert_needed ||
+      !deferredContactDecision.send_reply_before_handoff ||
+      deferredContactDecision.callback_time ||
+      deferredContactDecision.reply_text !== "No problem - message me when you're free.") {
+    throw new Error("Busy self-initiated follow-up must stay deferred without callback permission: " + JSON.stringify(deferredContactDecision));
+  }
+  if (isSelfInitiatedDeferredContactSignal_("I'm busy; please call me tomorrow afternoon")) {
+    throw new Error("Explicit callback request must not match self-initiated deferred contact");
   }
   const weekdayCallbackText = "Feel free to reach out to me Monday. Today isn't a good day";
   if (!isExplicitDayOrDateCallbackSignal_(weekdayCallbackText) ||

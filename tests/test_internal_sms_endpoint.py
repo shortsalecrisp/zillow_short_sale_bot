@@ -2064,6 +2064,33 @@ def test_sms_contract_relative_callback_and_unscheduled_promise_guard(monkeypatc
     assert guarded["reply_text"] == "No problem. What time Monday works best for a quick call?"
 
 
+def test_sms_busy_self_initiated_followup_is_deferred_hot_lead_not_callback(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Im working right now in my other job I let you know in the afternoon"
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_self_initiated_deferred_contact(inbound) is True
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is True
+    assert decision["alert_needed"] is True
+    assert decision["send_reply_before_handoff"] is True
+    assert decision["handoff_type"] == "DEFERRED HOT LEAD"
+    assert decision["call_booking_status"] == "interested_no_call"
+    assert decision["callback_time"] == ""
+    assert decision["reply_text"] == "No problem - message me when you're free."
+
+    explicit = module._sms_fast_decision({}, "I'm busy; please call me tomorrow afternoon")
+    assert module._sms_is_self_initiated_deferred_contact(
+        "I'm busy; please call me tomorrow afternoon"
+    ) is False
+    assert explicit["call_booking_status"] == "scheduled_callback"
+    assert explicit["callback_time"] == "Tomorrow Afternoon"
+
+
 def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

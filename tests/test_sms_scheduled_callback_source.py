@@ -30,3 +30,11 @@ def test_apps_script_captures_relative_weekend_callback_and_blocks_unscheduled_p
     assert "function isUnavailableUntilCallbackReferenceSignal_" in CHATBOT
     assert "function enforceDurableFollowupPromiseRule_" in CHATBOT
     assert "No problem. What time Monday works best for a quick call?" in CHATBOT
+
+
+def test_apps_script_defers_busy_self_initiated_contact_without_callback_permission():
+    assert "function isSelfInitiatedDeferredContactSignal_" in CHATBOT
+    assert 'handoff_type: "DEFERRED HOT LEAD"' in CHATBOT
+    assert 'call_booking_status: "interested_no_call"' in CHATBOT
+    assert 'send_reply_before_handoff: true' in CHATBOT
+    assert "No problem - message me when you're free." in CHATBOT

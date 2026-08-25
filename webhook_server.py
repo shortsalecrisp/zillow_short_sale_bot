@@ -4364,6 +4364,32 @@ def _sms_is_unavailable_until_callback_reference(value: Any) -> bool:
     )
 
 
+def _sms_is_self_initiated_deferred_contact(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text:
+        return False
+    currently_unavailable = bool(
+        re.search(
+            r"\b(?:i(?:['’]?m|\s+am)\s+)?(?:working|busy)(?:\s+right\s+now)?\b"
+            r"|\b(?:at|in)\s+(?:my|the)\s+(?:other\s+)?job\b"
+            r"|\b(?:on\s+the\s+clock|at\s+work)\b",
+            text,
+        )
+    )
+    self_initiated_followup = bool(
+        re.search(
+            r"\b(?:i|we)(?:['’]?ll|\s+will)?\s+(?:let\s+you\s+know|message\s+you|text\s+you|"
+            r"reach\s+out(?:\s+to\s+you)?|contact\s+you|get\s+back\s+to\s+you)\b",
+            text,
+        )
+    )
+    explicit_inbound_callback = bool(
+        re.search(r"\b(?:call|text|contact)\s+me\b", text)
+        or re.search(r"\b(?:can|could|would|will)\s+you\s+(?:call|text|contact)\b", text)
+    )
+    return currently_unavailable and self_initiated_followup and not explicit_inbound_callback
+
+
 def _sms_is_offer_submission_request(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(
@@ -5239,6 +5265,17 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             handoff_needed=True,
             block_reply=True,
             reason="Agent asked whether this is AI/a bot; manual follow-up needed",
+        )
+
+    if _sms_is_self_initiated_deferred_contact(t):
+        return _sms_decision(
+            reply_text="No problem - message me when you're free.",
+            lead_status="Y",
+            alert_needed=True,
+            send_reply_before_handoff=True,
+            call_booking_status="interested_no_call",
+            handoff_type="DEFERRED HOT LEAD",
+            reason="Agent is busy and will initiate contact later; preserved as a hot lead without immediate call permission",
         )
 
     if _sms_is_unavailable_until_callback_reference(t):
