@@ -159,8 +159,19 @@ function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
   // A repeated substantive question can be intentional (for example, asking
   // the exact fee again after a generic payment explanation). Never let
   // text-only replay protection hide that follow-up.
-  if (isSubstantiveFollowupSignal_(inboundText) || isPaymentOrFeeQuestionSignal_(inboundText)) {
+  if (/\?/.test(String(inboundText || "")) ||
+      isSubstantiveFollowupSignal_(inboundText) ||
+      isPaymentOrFeeQuestionSignal_(inboundText) ||
+      isPresentServiceInterestSignal_(inboundText) ||
+      isDirectHelpRequestSignal_(inboundText) ||
+      isPhoneCallInterestSignal_(inboundText)) {
     return false;
+  }
+
+  // Terminal state is the durable proof that the prior inbound was handled.
+  // Later closeout bookkeeping may replace response_status with other text.
+  if (String(rowObj && rowObj[HEADERS.ai_state] || "").toLowerCase() === "done") {
+    return true;
   }
 
   const responseText = canonicalizeRepeatedCompleteInboundForDedupe_(rowObj && rowObj[HEADERS.response_status]);
@@ -2550,7 +2561,7 @@ function applyFastRules_(text, rowObj) {
       block_reply: false,
       call_booking_status: "interested_no_call",
       handoff_type: "DEFERRED HOT LEAD",
-      reason: "Agent is busy and will initiate contact later; preserved as a hot lead without immediate call permission"
+      reason: "Agent will initiate contact later; no owner reply or callback is requested now"
     };
   }
 
@@ -4061,9 +4072,14 @@ function isSelfInitiatedDeferredContactSignal_(text) {
     /\b(?:at|in)\s+(?:my|the)\s+(?:other\s+)?job\b/.test(t) ||
     /\b(?:on\s+the\s+clock|at\s+work)\b/.test(t);
   const selfInitiatedFollowup = /\b(?:i|we)(?:['’]?ll|\s+will)?\s+(?:let\s+you\s+know|message\s+you|text\s+you|reach\s+out(?:\s+to\s+you)?|contact\s+you|get\s+back\s+to\s+you)\b/.test(t);
+  const selfInitiatedCall = /\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:call|phone|ring)\s+you\b/.test(t) &&
+    !/\b(?:now|right\s+now|immediately|in\s+(?:a|one)\s+(?:minute|second))\b/.test(t) &&
+    !/\b(?:can\s+use|could\s+use|need|would\s+like)\b.{0,30}\bhelp\b/.test(t) &&
+    !isPresentServiceInterestSignal_(t) &&
+    !isDirectHelpRequestSignal_(t);
   const explicitInboundCallback = /\b(?:call|text|contact)\s+me\b/.test(t) ||
     /\b(?:can|could|would|will)\s+you\s+(?:call|text|contact)\b/.test(t);
-  return currentlyUnavailable && selfInitiatedFollowup && !explicitInboundCallback;
+  return ((currentlyUnavailable && selfInitiatedFollowup) || selfInitiatedCall) && !explicitInboundCallback;
 }
 
 function normalizeCallbackTime_(value) {
@@ -5229,15 +5245,21 @@ function sendHandoffEmail_(data) {
   const props = PropertiesService.getScriptProperties();
   const toEmail = props.getProperty("HANDOFF_EMAIL") || "yoni.kutler@ygkutler.com";
   const fullName = getHandoffDisplayName_(data);
-  const handoffType = data.handoff_type || "MANUAL FOLLOW-UP";
+  const rawHandoffType = data.handoff_type || "MANUAL FOLLOW-UP";
+  const isDeferredHotLead = rawHandoffType === "DEFERRED HOT LEAD";
+  const handoffType = isDeferredHotLead ? "DEFERRED HOT LEAD - NO ACTION NOW" : rawHandoffType;
   const formattedPhone = formatPhoneForEmail_(data.phone);
   const formattedAddress = formatPropertyAddressForEmail_(data);
   const historyText = formatConversationHistory_(data.history || []);
 
   const subject = `NEW LEAD 🔥 - ${handoffType} - ${fullName}`;
 
+  const actionLine = isDeferredHotLead
+    ? "The agent said they will initiate contact. No reply or callback is requested now; keep this lead visible and wait for re-engagement."
+    : "We have a new lead interested in your services, and a manual follow-up is now needed.";
+
   const body = `
-We have a new lead interested in your services, and a manual follow-up is now needed.
+${actionLine}
 
 Handoff Reason: ${handoffType}
 Agent Name: ${fullName}
@@ -6296,6 +6318,14 @@ function testApprovedLeadIntelligenceRules_() {
   if (isSelfInitiatedDeferredContactSignal_("I'm busy; please call me tomorrow afternoon")) {
     throw new Error("Explicit callback request must not match self-initiated deferred contact");
   }
+  const agentWillCallDecision = applyFastRules_("I will call you", {});
+  if (!isSelfInitiatedDeferredContactSignal_("I will call you") ||
+      agentWillCallDecision.handoff_type !== "DEFERRED HOT LEAD" ||
+      agentWillCallDecision.call_booking_status !== "interested_no_call" ||
+      agentWillCallDecision.callback_time ||
+      isSelfInitiatedDeferredContactSignal_("I will call you now")) {
+    throw new Error("Self-initiated call must remain deferred without invented callback timing");
+  }
   const weekdayCallbackText = "Feel free to reach out to me Monday. Today isn't a good day";
   if (!isExplicitDayOrDateCallbackSignal_(weekdayCallbackText) ||
       !isSchedulingSignal_(weekdayCallbackText) ||
@@ -6385,6 +6415,14 @@ function testApprovedLeadIntelligenceRules_() {
   if (!isDurableHandledDuplicateInbound_(handledDuplicateRow, "  I HAVE someone thank you  ") ||
       isDurableHandledDuplicateInbound_(handledDuplicateRow, "I have someone, but what do you charge?")) {
     throw new Error("Durable handled-inbound duplicate regression");
+  }
+  const closedRepeatWithReplacedStatus = Object.assign({}, handledDuplicateRow, {
+    [HEADERS.last_inbound_text]: "They are already dealing with a bank thanks",
+    [HEADERS.response_status]: "Good luck with your listing"
+  });
+  if (!isDurableHandledDuplicateInbound_(closedRepeatWithReplacedStatus, "They are already dealing with a bank thanks") ||
+      isDurableHandledDuplicateInbound_(closedRepeatWithReplacedStatus, "Can you explain your service?")) {
+    throw new Error("Closed-conversation semantic repeat regression");
   }
   const coalescedDuplicateText = "I have someone already I have someone already I have someone already";
   const coalescedDuplicateRow = {

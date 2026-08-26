@@ -3989,8 +3989,16 @@ def _sms_is_durable_handled_duplicate(row_obj: Dict[str, str], inbound_text: str
         return False
     if _sms_is_scheduled_callback(inbound_text) or _sms_is_post_handoff_callback_update(row_obj, inbound_text):
         return False
-    if _sms_is_substantive_followup(inbound_text) or _sms_is_fee_question(inbound_text):
+    if (
+        "?" in str(inbound_text or "")
+        or _sms_is_substantive_followup(inbound_text)
+        or _sms_is_fee_question(inbound_text)
+        or _sms_is_present_service_interest(inbound_text)
+        or _sms_is_phone_call_interest(inbound_text)
+    ):
         return False
+    if str(row_obj.get("ai_state") or "").lower() == "done":
+        return True
     if _sms_canonicalize_repeated_complete_inbound_for_dedupe(row_obj.get("response_status")) != current_text:
         return False
     return _sms_history_has_confirmed_reply_after_inbound(row_obj, inbound_text) or _sms_is_intentional_no_reply_disposition(
@@ -4366,11 +4374,17 @@ def _sms_is_self_initiated_deferred_contact(value: Any) -> bool:
             text,
         )
     )
+    self_initiated_call = bool(
+        re.search(r"\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:call|phone|ring)\s+you\b", text)
+        and not re.search(r"\b(?:now|right\s+now|immediately|in\s+(?:a|one)\s+(?:minute|second))\b", text)
+        and not re.search(r"\b(?:can\s+use|could\s+use|need|would\s+like)\b.{0,30}\bhelp\b", text)
+        and not _sms_is_present_service_interest(text)
+    )
     explicit_inbound_callback = bool(
         re.search(r"\b(?:call|text|contact)\s+me\b", text)
         or re.search(r"\b(?:can|could|would|will)\s+you\s+(?:call|text|contact)\b", text)
     )
-    return currently_unavailable and self_initiated_followup and not explicit_inbound_callback
+    return ((currently_unavailable and self_initiated_followup) or self_initiated_call) and not explicit_inbound_callback
 
 
 def _sms_is_offer_submission_request(value: Any) -> bool:
@@ -5258,7 +5272,7 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             send_reply_before_handoff=True,
             call_booking_status="interested_no_call",
             handoff_type="DEFERRED HOT LEAD",
-            reason="Agent is busy and will initiate contact later; preserved as a hot lead without immediate call permission",
+            reason="Agent will initiate contact later; no owner reply or callback is requested now",
         )
 
     if _sms_is_unavailable_until_callback_reference(t):

@@ -2023,6 +2023,28 @@ def test_sms_contract_coalesced_complete_message_replay_is_durably_suppressed(mo
     assert module._sms_is_durable_handled_duplicate(row, "I have someone already, what is your fee?") is False
 
 
+def test_sms_closed_conversation_repeat_does_not_depend_on_response_status(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "They are already dealing with a bank thanks"
+    row = {
+        "last_inbound_text": inbound,
+        "response_status": "Good luck with your listing",
+        "ai_state": "done",
+        "history_json": json.dumps(
+            [
+                {"role": "agent", "text": inbound, "ts": "2026-08-25T17:05:00-04:00"},
+                {"role": "assistant", "text": "Ok, no problem.", "ts": "2026-08-25T17:07:00-04:00"},
+            ]
+        ),
+    }
+
+    assert module._sms_is_durable_handled_duplicate(row, inbound) is True
+    assert module._sms_is_durable_handled_duplicate(row, "Can you explain your service?") is False
+
+
 def test_sms_contract_offer_submission_clarifies_and_hands_off(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
@@ -2089,6 +2111,25 @@ def test_sms_busy_self_initiated_followup_is_deferred_hot_lead_not_callback(monk
     ) is False
     assert explicit["call_booking_status"] == "scheduled_callback"
     assert explicit["callback_time"] == "Tomorrow Afternoon"
+
+
+def test_sms_agent_will_call_is_deferred_without_invented_callback(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    decision = module._sms_fast_decision({}, "I will call you")
+
+    assert module._sms_is_self_initiated_deferred_contact("I will call you") is True
+    assert decision["handoff_type"] == "DEFERRED HOT LEAD"
+    assert decision["call_booking_status"] == "interested_no_call"
+    assert decision["callback_time"] == ""
+    assert decision["reason"] == "Agent will initiate contact later; no owner reply or callback is requested now"
+
+    immediate = module._sms_fast_decision({}, "I will call you now")
+    assert module._sms_is_self_initiated_deferred_contact("I will call you now") is False
+    assert immediate["handoff_type"] == "CALL REQUESTED"
 
 
 def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):
