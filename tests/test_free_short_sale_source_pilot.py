@@ -853,7 +853,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(status, "duplicate_agent_phone")
         self.assertEqual(key, "4045551212")
         self.assertEqual(matched_row, "2")
-        self.assertTrue(pilot.duplicate_status_blocks_pilot_row(status))
+        self.assertFalse(pilot.duplicate_status_blocks_pilot_row(status))
 
     def test_duplicate_agent_phone_row_shape_is_not_a_write_policy(self):
         candidate = pilot.Candidate(
@@ -888,7 +888,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(row[16], "review")
         self.assertEqual(row[22], "4045551212")
         self.assertEqual(row[23], "2")
-        self.assertTrue(pilot.duplicate_status_blocks_pilot_row("duplicate_agent_phone"))
+        self.assertFalse(pilot.duplicate_status_blocks_pilot_row("duplicate_agent_phone"))
         self.assertFalse(pilot.duplicate_status_blocks_pilot_row("possible_existing_agent"))
 
     def test_pilot_row_starts_like_main_sheet(self):
@@ -2105,7 +2105,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(
             pilot.duplicate_listing_status(candidate, existing),
-            ("duplicate_listing", "15790 easthaven court 510|bowie|md", "2"),
+            ("duplicate_listing", "15790 easthaven|md|unit:510", "2"),
         )
 
     def test_research_contact_runs_after_qualification_and_fills_missing_fields(self):
@@ -3011,8 +3011,51 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
 
         self.assertEqual(
             pilot.duplicate_listing_status(candidate, existing),
-            ("duplicate_listing", "610 farm to market road|ny", "2"),
+            ("duplicate_listing", "610 farm to market|ny|unit:-", "2"),
         )
+
+    def test_dedupe_matches_missing_street_suffix(self):
+        main_rows = [
+            ["first", "last", "phone", "email", "listing_address", "city", "state"],
+            ["Kara", "Wisely", "", "", "5056 Gandross Ln", "Mount Dora", "FL"],
+        ]
+        existing = pilot.build_existing_index(main_rows)
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://example.com/listing",
+            title="5056 Gandross, Mount Dora, FL",
+            text="Status: Active. Remarks: Short sale.",
+            fields={"listing_address": "5056 Gandross", "city": "Mount Dora", "state": "FL"},
+        )
+
+        result = pilot.classify_listing_identity(candidate, existing)
+
+        self.assertEqual(result["status"], "duplicate_listing")
+        self.assertEqual(result["matched_rows"], [2])
+        self.assertEqual(result["matched_attributions"], ["sheet1"])
+
+    def test_conflicting_mls_identifiers_hold_instead_of_merge(self):
+        header = [""] * 28
+        row = [""] * 28
+        row[4] = "5056 Gandross Ln"
+        row[6] = "FL"
+        row[25] = "Verified exact listing; MLS #ABC12345"
+        existing = pilot.build_existing_index([header, row])
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://example.com/listing",
+            title="5056 Gandross (MLS #ABC98765)",
+            text="Status: Active. Remarks: Short sale.",
+            fields={"listing_address": "5056 Gandross", "city": "Mount Dora", "state": "FL"},
+        )
+
+        result = pilot.classify_listing_identity(candidate, existing)
+
+        self.assertEqual(result["status"], "identity_conflict")
+        self.assertTrue(result["canonical_identifier_conflict"])
+        self.assertTrue(pilot.duplicate_status_blocks_pilot_row("identity_conflict"))
 
     def test_synthetic_zpid_is_stable_across_sources_and_city_aliases(self):
         first = pilot.stable_synthetic_zpid(

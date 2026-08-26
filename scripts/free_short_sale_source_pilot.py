@@ -973,6 +973,7 @@ class ExistingIndex:
     phone_keys: dict[str, int]
     agent_keys: dict[str, list[int]]
     agent_name_keys: dict[str, list[int]]
+    listing_records: list[dict[str, Any]]
 
 
 _active_run_event_context: dict[str, Any] = {}
@@ -1117,8 +1118,76 @@ def street_state_key(address: str, state: str) -> str:
     return f"{street}|{state_key}"
 
 
+CANONICAL_STREET_SUFFIXES = {
+    "avenue", "street", "road", "drive", "lane", "boulevard", "court",
+    "circle", "way", "place", "loop", "trail", "parkway", "terrace",
+    "highway", "route", "pass", "path", "point", "run", "row", "mews",
+}
+ADDRESS_UNIT_RE = re.compile(
+    r"(?i)(?:\s*,?\s*)(?:#|unit\s*#?|apt(?:artment)?\s*#?|suite\s*#?|ste\s*#?)\s*([a-z0-9-]+)\b"
+)
+
+
+def canonical_address_identity(address: str, state: str) -> dict[str, str]:
+    """Return a suffix-tolerant, unit-aware listing address identity."""
+    cleaned = clean_listing_address(address, state=state)
+    unit_matches = list(ADDRESS_UNIT_RE.finditer(cleaned))
+    unit = normalize_key(unit_matches[-1].group(1)) if unit_matches else ""
+    street = ADDRESS_UNIT_RE.sub(" ", cleaned)
+    street_key = normalize_key(street)
+    tokens = street_key.split()
+    relaxed_tokens = tokens[:-1] if tokens and tokens[-1] in CANONICAL_STREET_SUFFIXES else tokens
+    relaxed_street = " ".join(relaxed_tokens)
+    state_key = normalize_key(state)
+    base_key = f"{relaxed_street}|{state_key}" if relaxed_street and state_key else ""
+    listing_key = f"{base_key}|unit:{unit or '-'}" if base_key else ""
+    return {
+        "street": street_key,
+        "relaxed_street": relaxed_street,
+        "state": state_key,
+        "unit": unit,
+        "base_key": base_key,
+        "listing_key": listing_key,
+    }
+
+
+def canonical_listing_address_key(address: str, state: str) -> str:
+    return canonical_address_identity(address, state).get("listing_key", "")
+
+
+def listing_id_namespace(value: str) -> str:
+    compact = normalize_space(value)
+    if not compact:
+        return ""
+    if PILOT_ID_RE.fullmatch(compact):
+        return "pilot"
+    if compact.isdigit():
+        return "zillow"
+    return "source"
+
+
+def listing_identity_record(
+    *,
+    row: int,
+    address: str,
+    state: str,
+    stable_id: str = "",
+    canonical_id: str = "",
+) -> dict[str, Any]:
+    identity = canonical_address_identity(address, state)
+    namespace = listing_id_namespace(stable_id)
+    return {
+        "row": row,
+        **identity,
+        "stable_id": normalize_space(stable_id),
+        "stable_namespace": namespace,
+        "canonical_id": normalize_space(canonical_id).upper(),
+        "attribution": "pilot" if namespace == "pilot" else ("zillow" if namespace == "zillow" else "sheet1"),
+    }
+
+
 def stable_synthetic_zpid(source: str, url: str, address: str, city: str, state: str) -> str:
-    raw = street_state_key(address, state)
+    raw = canonical_listing_address_key(address, state)
     if not raw:
         raw = "|".join([normalize_key(source), normalize_key(url), address_key(address, city, state)])
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
@@ -1359,6 +1428,7 @@ def build_existing_index(rows: list[list[str]]) -> ExistingIndex:
     phone_keys: dict[str, int] = {}
     agent_keys: dict[str, list[int]] = {}
     agent_name_keys: dict[str, list[int]] = {}
+    listing_records: list[dict[str, Any]] = []
     for idx, row in enumerate(rows[1:], start=2):
         padded = row + [""] * 8
         agent = normalize_space(f"{padded[0]} {padded[1]}")
@@ -1382,7 +1452,26 @@ def build_existing_index(rows: list[list[str]]) -> ExistingIndex:
         name_key = agent_name_key(agent)
         if name_key:
             agent_name_keys.setdefault(name_key, []).append(idx)
-    return ExistingIndex(address_keys, street_state_keys, phone_keys, agent_keys, agent_name_keys)
+        stable_id = normalize_space(padded[27]) if len(padded) > 27 else ""
+        evidence = normalize_space(padded[25]) if len(padded) > 25 else ""
+        canonical_id = canonical_listing_identifier({CANONICAL_VERIFIER_EVIDENCE_HEADER: evidence})
+        record = listing_identity_record(
+            row=idx,
+            address=address,
+            state=state,
+            stable_id=stable_id,
+            canonical_id=canonical_id,
+        )
+        if record["base_key"]:
+            listing_records.append(record)
+    return ExistingIndex(
+        address_keys,
+        street_state_keys,
+        phone_keys,
+        agent_keys,
+        agent_name_keys,
+        listing_records,
+    )
 
 
 def duplicate_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str, str, str]:
@@ -1416,6 +1505,13 @@ def duplicate_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str
 
 
 def duplicate_listing_status(candidate: Candidate, existing: ExistingIndex) -> tuple[str, str, str]:
+    classification = classify_listing_identity(candidate, existing)
+    if classification["status"]:
+        return (
+            classification["status"],
+            classification["listing_key"],
+            ",".join(str(row) for row in classification["matched_rows"]),
+        )
     fields = candidate.fields
     akey = address_key(
         fields.get("listing_address", ""),
@@ -1430,8 +1526,78 @@ def duplicate_listing_status(candidate: Candidate, existing: ExistingIndex) -> t
     return "", skey or akey, ""
 
 
+def classify_listing_identity(candidate: Candidate, existing: ExistingIndex) -> dict[str, Any]:
+    """Classify listing ownership without using agent/contact history as identity."""
+    fields = candidate.fields
+    candidate_identifier = canonical_listing_identifier(
+        {
+            **fields,
+            "raw_title": candidate.title,
+            "qualification_evidence": candidate.text,
+        }
+    )
+    stable_id = normalize_space(fields.get("zpid", "") or fields.get("synthetic_zpid", ""))
+    identity = listing_identity_record(
+        row=0,
+        address=fields.get("listing_address", ""),
+        state=fields.get("state", ""),
+        stable_id=stable_id,
+        canonical_id=candidate_identifier,
+    )
+    same_unit: list[dict[str, Any]] = []
+    ambiguous_unit: list[dict[str, Any]] = []
+    for record in existing.listing_records:
+        if not identity["base_key"] or record["base_key"] != identity["base_key"]:
+            continue
+        if identity["unit"] == record["unit"]:
+            same_unit.append(record)
+        elif not identity["unit"] or not record["unit"]:
+            ambiguous_unit.append(record)
+
+    conflicts: list[dict[str, Any]] = list(ambiguous_unit)
+    matches: list[dict[str, Any]] = []
+    for record in same_unit:
+        canonical_conflict = bool(
+            identity["canonical_id"]
+            and record["canonical_id"]
+            and identity["canonical_id"] != record["canonical_id"]
+        )
+        stable_conflict = bool(
+            identity["stable_namespace"]
+            and identity["stable_namespace"] != "pilot"
+            and identity["stable_namespace"] == record["stable_namespace"]
+            and identity["stable_id"]
+            and record["stable_id"]
+            and identity["stable_id"] != record["stable_id"]
+        )
+        (conflicts if canonical_conflict or stable_conflict else matches).append(record)
+
+    if conflicts:
+        status = "identity_conflict"
+        selected = conflicts
+    elif matches:
+        status = "duplicate_listing"
+        selected = matches
+    else:
+        status = ""
+        selected = []
+    return {
+        "status": status,
+        "listing_key": identity["listing_key"],
+        "matched_rows": [record["row"] for record in selected],
+        "matched_attributions": sorted({record["attribution"] for record in selected}),
+        "unit_ambiguous": bool(ambiguous_unit),
+        "canonical_identifier_conflict": any(
+            identity["canonical_id"]
+            and record["canonical_id"]
+            and identity["canonical_id"] != record["canonical_id"]
+            for record in conflicts
+        ),
+    }
+
+
 def duplicate_status_blocks_pilot_row(status: str) -> bool:
-    return status in {"duplicate_listing", "duplicate_agent_phone"}
+    return status in {"duplicate_listing", "identity_conflict"}
 
 
 def is_valid_email(value: str) -> bool:
@@ -3480,7 +3646,7 @@ def record_two_source_agent_shadow(
     """Log a zero-write agent fallback only after two independent domains agree."""
     if AGENT_SHADOW_CONSENSUS_CAP <= 0:
         return False
-    listing_key = street_state_key(
+    listing_key = canonical_listing_address_key(
         candidate.fields.get("listing_address", ""),
         candidate.fields.get("state", ""),
     )
@@ -6582,10 +6748,12 @@ def pilot_row_preflight_failure(
     duplicate, duplicate_key, matched = duplicate_status(candidate, existing)
     if duplicate == "duplicate_listing":
         return "skipped_duplicate_listing", f"Already present in Sheet1 row {matched}.", matched
-    if duplicate == "duplicate_agent_phone":
-        return "skipped_duplicate_phone", f"Phone already present in Sheet1 row {matched}.", matched
-    if duplicate == "possible_existing_agent":
-        return "skipped_existing_agent", f"Possible existing agent already present in Sheet1 row(s) {matched}.", matched
+    if duplicate == "identity_conflict":
+        return (
+            "needs_identity_review",
+            f"Canonical listing identifiers or unit evidence conflict with Sheet1 row(s) {matched}; held without merge.",
+            matched,
+        )
 
     return "", duplicate_key, ""
 
@@ -6687,7 +6855,7 @@ def promote_ready_pilot_rows(
 
         failure_status, failure_note, matched = pilot_row_preflight_failure(row_data, payload, existing)
         candidate = candidate_from_pilot_row(row_data, payload)
-        listing_key = street_state_key(
+        listing_key = canonical_listing_address_key(
             candidate.fields.get("listing_address", ""),
             candidate.fields.get("state", ""),
         )
@@ -6695,9 +6863,6 @@ def promote_ready_pilot_rows(
         if not failure_status and listing_key and listing_key in promoted_listing_keys:
             failure_status = "skipped_duplicate_listing"
             failure_note = "Duplicate normalized address within this promotion batch."
-        if not failure_status and name_key and name_key in promoted_agent_names:
-            failure_status = "skipped_existing_agent"
-            failure_note = "Duplicate normalized agent name within this promotion batch."
         if failure_status:
             stats["skipped"] += 1
             updates.extend(
@@ -7124,9 +7289,9 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
     pilot_rows = get_values(token, args.spreadsheet_id, f"{args.pilot_tab}!A:{column_letter(len(PILOT_HEADERS))}")
     already_seen_urls = {row[11] for row in pilot_rows[1:] if len(row) > 11 and row[11]}
     pilot_seen_addresses = {
-        street_state_key(row[4], row[6])
+        canonical_listing_address_key(row[4], row[6])
         for row in pilot_rows[1:]
-        if len(row) > 6 and street_state_key(row[4], row[6])
+        if len(row) > 6 and canonical_listing_address_key(row[4], row[6])
     }
     exclusion_stats = {
         source_query.source: {
