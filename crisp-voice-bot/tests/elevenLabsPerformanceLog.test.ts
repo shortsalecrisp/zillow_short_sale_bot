@@ -194,3 +194,37 @@ test("voice performance log keeps transfer consent separate from later callback 
   assert.equal(parsed.flags.transferCompleted, false);
   assert.equal(parsed.flags.misfiredLiveTransferRequest, false);
 });
+
+test("voice performance log excludes punctuation-only silence from engagement", async () => {
+  const { buildVoicePerformanceLog } = await import("../src/lib/elevenLabsPerformanceLog");
+  const log = buildVoicePerformanceLog({
+    conversationId: "conv_punctuation_silence",
+    outcome: "Agent was not available",
+    summary: "Only placeholder silence followed the opening question.",
+    transcript: "Maya: Are you handling the bank side yourself?\nAgent: ...",
+    metadata: {
+      rowNumber: 5391,
+      fullName: "Phillis Nealy",
+      callAttemptNumber: 1,
+      listingAddress: "1 Main St",
+      requestedPhone: "+14045550123",
+      dialedPhone: "+14045550123",
+      testMode: false,
+    },
+    conversation: {
+      status: "done",
+      metadata: { call_duration_secs: 21, termination_reason: "Client disconnected: 1000" },
+      transcript: [
+        { role: "agent", message: "Are you handling the bank side yourself?", time_in_call_secs: 4 },
+        { role: "user", message: "...", time_in_call_secs: 8 },
+        { role: "user", message: "?!", time_in_call_secs: 10 },
+      ],
+    },
+  });
+
+  const parsed = JSON.parse(log.replace(`--- CODEX_VOICE_CALL_METRICS_V1 ---\n`, ""));
+  assert.equal(parsed.metrics.agentTurns, 0);
+  assert.equal(parsed.metrics.agentWords, 0);
+  assert.equal(parsed.flags.liveAnswered, false);
+  assert.equal(parsed.flags.agentRespondedAfterOpeningQuestion, false);
+});

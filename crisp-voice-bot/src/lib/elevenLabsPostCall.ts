@@ -114,6 +114,10 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
 }
 
+function hasMeaningfulSpokenContent(value: string): boolean {
+  return /[\p{L}\p{N}]/u.test(value);
+}
+
 function transcriptText(conversation: ElevenLabsConversation): string {
   return (conversation.transcript ?? [])
     .map((item) => `${item.role ?? "unknown"}: ${item.message ?? ""}`.trim())
@@ -247,6 +251,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
 
   if (callResult === "agent_not_available") {
     return "Agent was not available";
+  }
+
+  if (callResult === "identity_mismatch_voicemail") {
+    return "Identity mismatch voicemail - target not reached";
   }
 
   if (callResult === "call_received_agent_hung_up") {
@@ -768,7 +776,12 @@ async function retryUnconnectedElevenLabsCall(params: {
 
 function userMessages(conversation: ElevenLabsConversation): string[] {
   return (conversation.transcript ?? [])
-    .filter((item) => item.role === "user" && typeof item.message === "string" && item.message.trim() !== "")
+    .filter(
+      (item) =>
+        item.role === "user" &&
+        typeof item.message === "string" &&
+        hasMeaningfulSpokenContent(item.message),
+    )
     .map((item) => item.message!.trim());
 }
 
@@ -797,7 +810,7 @@ function endedBecauseCallerStoppedResponding(conversation: ElevenLabsConversatio
 }
 
 function hasMeaningfulUserInteraction(conversation: ElevenLabsConversation): boolean {
-  const messages = userMessages(conversation);
+  const messages = meaningfulUserMessages(conversation);
   if (messages.length >= 2) {
     return true;
   }
@@ -806,10 +819,32 @@ function hasMeaningfulUserInteraction(conversation: ElevenLabsConversation): boo
 }
 
 function meaningfulUserMessages(conversation: ElevenLabsConversation): string[] {
-  return userMessages(conversation).filter((message) => {
-    const normalized = normalizeText(message);
-    return normalized !== "" && normalized !== "...";
-  });
+  return userMessages(conversation).filter(hasMeaningfulSpokenContent);
+}
+
+export function shouldTreatAsIdentityMismatchVoicemail(
+  conversation: ElevenLabsConversation,
+  expectedFirstName = "",
+): boolean {
+  const text = normalizeText(userMessages(conversation).join(" "));
+  if (!text) {
+    return false;
+  }
+
+  const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  const namedGreeting = text.match(
+    /\b(?:you(?:'ve| have) reached|this is|mailbox (?:for|belonging to)|voicemail (?:for|of))\s+([a-z][a-z'-]*)\b/,
+  );
+  if (namedGreeting && expected && namedGreeting[1] !== expected) {
+    return true;
+  }
+
+  const clearlyUnrelatedBusiness =
+    /\b(?:hotline|superstore|retail store|customer service|service department|sales department)\b/.test(text) ||
+    /\b(?:thank you for calling|welcome to)\b.{0,80}\b(?:store|shop|restaurant|hotel|clinic|department|company)\b/.test(
+      text,
+    );
+  return clearlyUnrelatedBusiness && (!expected || !new RegExp(`\\b${expected}\\b`).test(text));
 }
 
 export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversation): boolean {
@@ -843,6 +878,22 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
     text.includes("check whether") ||
     text.includes("record your name and reason") ||
     text.includes("name and reason for calling");
+  const hasGatekeeper =
+    text.includes("gatekeeper") ||
+    text.includes("receptionist") ||
+    text.includes("administrative assistant") ||
+    text.includes("office assistant") ||
+    text.includes("call-screening") ||
+    text.includes("call screening");
+  const targetUnavailable =
+    text.includes("agent was not available") ||
+    text.includes("agent is not available") ||
+    text.includes("was unavailable") ||
+    text.includes("is unavailable") ||
+    text.includes("was busy") ||
+    text.includes("is busy") ||
+    text.includes("was out of the office") ||
+    text.includes("is out of the office");
   const wasPlacedOnHold =
     lastUserMessage.includes("please stay on the line") ||
     lastUserMessage.includes("stay on the line") ||
@@ -859,7 +910,11 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
     assistantText.includes("sure, i will wait") ||
     assistantText.includes("okay, i'll wait");
 
-  return hasAvailabilityScreen && wasPlacedOnHold && (assistantWaited || text.includes("placed the agent on hold"));
+  return (
+    hasAvailabilityScreen ||
+    (hasGatekeeper && targetUnavailable) ||
+    (wasPlacedOnHold && (assistantWaited || text.includes("placed the agent on hold")))
+  );
 }
 
 export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): boolean {
@@ -1124,6 +1179,76 @@ async function processPostCallOutcomeForConversation(
     return true;
   }
 
+  const expectedFirstName = metadata.firstName ?? metadata.fullName.split(/\s+/)[0] ?? "";
+  if (shouldTreatAsIdentityMismatchVoicemail(conversation, expectedFirstName)) {
+    const outcome = buildVoiceResponseStatus("identity_mismatch_voicemail");
+    const mismatchSummary =
+      "The greeting explicitly identified another person or an unrelated business; the target was not reached and no sales handoff was created.";
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "identity_mismatch_voicemail",
+      responseStatus: outcome,
+      leadStatusCode: "N",
+      callbackRequested: "",
+      callbackTime: "",
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(outcome, `${mismatchSummary} ${summary}`.trim()),
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary: mismatchSummary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback recorded explicit voicemail identity mismatch", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsAgentUnavailable(conversation)) {
+    const outcome = buildVoiceResponseStatus("agent_not_available");
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "agent_not_available",
+      responseStatus: outcome,
+      ...(metadata.callAttemptNumber > 1 ? { leadStatusCode: "N" } : {}),
+      callbackRequested: "",
+      callbackTime: "",
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback recorded screening, hold, gatekeeper, or unavailable agent", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      summary,
+    });
+    return true;
+  }
+
   if (shouldTreatAsRecordingArtifact(conversation)) {
     const isFirstAttempt = metadata.callAttemptNumber <= 1;
     const callResult = isFirstAttempt ? "no_answer_first_attempt" : "no_response_second_attempt";
@@ -1333,36 +1458,6 @@ async function processPostCallOutcomeForConversation(
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
-    });
-    return true;
-  }
-
-  if (shouldTreatAsAgentUnavailable(conversation)) {
-    const outcome = buildVoiceResponseStatus("agent_not_available");
-
-    await postSheetUpdate({
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      callResult: "agent_not_available",
-      responseStatus: outcome,
-      ...(metadata.callAttemptNumber > 1 ? { leadStatusCode: "N" } : {}),
-      voiceNotes: buildPerformanceNotes(outcome),
-    });
-
-    await sendTranscriptEmailIfEnabled({
-      conversationId,
-      metadata,
-      outcome,
-      summary,
-      transcript: fullTranscript,
-    });
-
-    processedConversationIds.add(conversationId);
-    logger.info("ElevenLabs post-call fallback recorded gatekeeper hold or unavailable agent", {
-      conversationId,
-      rowNumber: metadata.rowNumber,
-      callAttemptNumber: metadata.callAttemptNumber,
-      summary,
     });
     return true;
   }

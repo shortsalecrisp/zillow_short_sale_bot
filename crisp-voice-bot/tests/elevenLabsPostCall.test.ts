@@ -338,6 +338,52 @@ test("post-call fallback treats screening recordings and canned ASAP fragments a
   assert.equal(shouldTreatAsCallback(conversation), false);
 });
 
+test("post-call fallback identifies wrong-person and unrelated-business voicemail", async () => {
+  const { buildVoiceResponseStatus, shouldTreatAsIdentityMismatchVoicemail } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const wrongPerson = {
+    status: "done",
+    transcript: [{ role: "user", message: "Hi, you've reached Tina. Please leave a message." }],
+  };
+  const unrelatedBusiness = {
+    status: "done",
+    transcript: [
+      { role: "user", message: "Thank you for calling Dale's Superstore customer service hotline." },
+    ],
+  };
+  const matchingMailbox = {
+    status: "done",
+    transcript: [{ role: "user", message: "Hi, you've reached DeAnn. Please leave a message." }],
+  };
+
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(wrongPerson, "DeAnn"), true);
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(unrelatedBusiness, "Vanessa"), true);
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(matchingMailbox, "DeAnn"), false);
+  assert.equal(
+    buildVoiceResponseStatus("identity_mismatch_voicemail"),
+    "Identity mismatch voicemail - target not reached",
+  );
+});
+
+test("post-call fallback treats a completed screening prompt without live target contact as unavailable", async () => {
+  const { shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    analysis: { transcript_summary: "An automated call-screening service asked Maya to record her name and reason." },
+    transcript: [
+      { role: "user", message: "Please record your name and reason for calling." },
+      { role: "assistant", message: "Maya with Crisp Short Sales, calling about a short sale listing." },
+    ],
+  };
+
+  assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+});
+
 test("post-call fallback distinguishes a live do-not-call request from generic not interested", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsDoNotCall } = await import(
     "../src/lib/elevenLabsPostCall"

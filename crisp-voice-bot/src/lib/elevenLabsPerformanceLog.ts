@@ -77,6 +77,10 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function hasMeaningfulSpokenContent(value: string): boolean {
+  return /[\p{L}\p{N}]/u.test(value);
+}
+
 function isAssistantRole(role?: string): boolean {
   const normalizedRole = role?.toLowerCase();
   return normalizedRole === "assistant" || normalizedRole === "agent";
@@ -127,7 +131,7 @@ function getAgentToAssistantLatencies(transcript: PerformanceTranscriptItem[]): 
       continue;
     }
 
-    if (role === "user") {
+    if (role === "user" && typeof item.message === "string" && hasMeaningfulSpokenContent(item.message)) {
       latestAgentTime = timeSecs;
       continue;
     }
@@ -182,7 +186,14 @@ function hasUserMessageAfter(transcript: PerformanceTranscriptItem[], index: num
     return false;
   }
 
-  return transcript.slice(index + 1).some((item) => item.role === "user" && typeof item.message === "string" && item.message.trim() !== "");
+  return transcript
+    .slice(index + 1)
+    .some(
+      (item) =>
+        item.role === "user" &&
+        typeof item.message === "string" &&
+        hasMeaningfulSpokenContent(item.message),
+    );
 }
 
 function getMessageTimeAtIndex(transcript: PerformanceTranscriptItem[], index: number): number | null {
@@ -199,7 +210,12 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
     .filter((item) => isAssistantRole(item.role) && typeof item.message === "string" && item.message.trim() !== "")
     .map((item) => item.message!.trim());
   const agentMessages = transcript
-    .filter((item) => item.role === "user" && typeof item.message === "string" && item.message.trim() !== "")
+    .filter(
+      (item) =>
+        item.role === "user" &&
+        typeof item.message === "string" &&
+        hasMeaningfulSpokenContent(item.message),
+    )
     .map((item) => item.message!.trim());
   const assistantText = normalizeText(assistantMessages.join(" "));
   const agentText = normalizeText(agentMessages.join(" "));

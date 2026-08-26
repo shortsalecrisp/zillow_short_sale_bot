@@ -111,6 +111,19 @@ test("prompt waits for voicemail greeting handoff before leaving voicemail", () 
   assert.match(voicemailSection, /clear pause or the greeting has already asked for a message/);
 });
 
+test("prompt ends wrong-person and unrelated-business voicemail without a sales pitch", () => {
+  const prompt = readPrompt();
+  const start = prompt.indexOf("Wrong-person or unrelated-business voicemail hard stop:");
+  const end = prompt.indexOf("Main conversation:", start);
+  const section = prompt.slice(start, end);
+
+  assert.ok(start >= 0);
+  assert.match(section, /recorded greeting explicitly names someone other than/);
+  assert.match(section, /do not leave the normal voicemail/);
+  assert.match(section, /Say nothing further and immediately call `end_call`/);
+  assert.match(section, /Never request a callback, live transfer, or human sales handoff/);
+});
+
 test("prompt starts with a complete identity and allows one identity repair before the pitch", () => {
   const prompt = readPrompt();
   const oneIntroRule = extractSection(
