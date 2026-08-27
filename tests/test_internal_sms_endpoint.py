@@ -2057,6 +2057,52 @@ def test_sms_contract_courtesy_after_closeout_never_reopens(monkeypatch):
     assert decision["lead_status"] == "R"
 
 
+def test_sms_contract_answer_acknowledgment_preserves_closed_state_without_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    row = {
+        "ai_state": "done",
+        "mailshake_status": "R",
+        "call_booking_status": "closed_no_interest",
+        "last_outbound_text": "There's no cost to you or the seller.",
+    }
+    for inbound in ("I understand", "Makes sense"):
+        decision = module._sms_fast_decision(row, inbound)
+        assert decision["block_reply"] is True
+        assert decision["reply_text"] == ""
+        assert decision["handoff_needed"] is False
+        assert decision["preserve_existing_state"] is True
+        assert decision["lead_status"] == "R"
+
+    substantive = module._sms_fast_decision(
+        row,
+        "I understand. Who collects all the documents needed for the short sale?",
+    )
+    assert substantive["block_reply"] is False
+    assert substantive["handoff_needed"] is False
+    assert "collect and organize" in substantive["reply_text"]
+
+
+def test_sms_contract_document_collection_question_gets_direct_answer_then_one_call_invitation(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision(
+        {},
+        "Who collects all the documents needed for the Short?",
+    )
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert decision["reply_text"].startswith(
+        "I help collect and organize the lender-required short-sale documents"
+    )
+    assert decision["reply_text"].count("quick call") == 1
+
+
 def test_sms_contract_present_help_and_call_requests_are_terminal_handoffs(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

@@ -2038,6 +2038,9 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
 
   const flags = {
     fee: isPaymentOrFeeQuestionSignal_(t),
+    documents: /\bwho\s+(?:collects?|gathers?|gets?|organizes?|handles?)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t) ||
+      /\b(?:do|will|would|can|could)\s+you\s+(?:collect|gather|get|organize|handle)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t) ||
+      /\bwho\s+is\s+responsible\s+for\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t),
     help: /\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does this work|how does that work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|do))\b/.test(t),
     local: isLocalQuestionSignal_(t),
     company: isCompanyIdentityQuestionSignal_(t),
@@ -2151,6 +2154,16 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
       reason: "Answered how Crisp helps before generic coverage language"
     };
+    if (flags.documents) return {
+      matched: true,
+      reply_text: "I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up. If you want, I can walk you through the document checklist on a quick call.",
+      lead_status: leadStatus,
+      conversation_done: done,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Answered who collects and manages the short-sale documents"
+    };
     if (flags.local) return {
       matched: true, reply_text: buildLocalQuestionReply_(rowObj), lead_status: leadStatus,
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
@@ -2209,6 +2222,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   }
 
   const answers = [];
+  if (flags.documents) answers.push("I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up.");
   if (flags.company) answers.push("I'm with Crisp Short Sales.");
   if (flags.help) answers.push("I handle the lender-side paperwork, calls, follow-up, and negotiations through approval.");
   if (flags.local) answers.push("I'm based in Atlanta and work nationwide; the lender-side work is handled remotely.");
@@ -3396,6 +3410,10 @@ function isFinalCourtesyReply_(text) {
     /^thank you i appreciate it$/,
     /^thanks i appreciate it$/,
     /^thank you appreciate it$/,
+    /^i understand$/,
+    /^understood$/,
+    /^makes sense$/,
+    /^that makes sense$/,
     /^thank you!$/,
     /^thanks!$/,
     /^👍$/,
@@ -5941,6 +5959,44 @@ function testSmsIntentContractV3_() {
     source.matched && source.lead_status === "R" &&
       source.reply_text.indexOf("marked online") !== -1,
     source.reason
+  );
+
+  const answerAcknowledgmentRow = Object.assign({}, baseRow);
+  answerAcknowledgmentRow[HEADERS.ai_state] = "done";
+  answerAcknowledgmentRow[HEADERS.mailshake_status] = "R";
+  answerAcknowledgmentRow[HEADERS.call_booking_status] = "closed_no_interest";
+  answerAcknowledgmentRow[HEADERS.last_outbound_text] = "There's no cost to you or the seller.";
+  record(
+    "answer_only_acknowledgment_is_final_courtesy",
+    isFinalCourtesyReply_("I understand") &&
+      isFinalCourtesyReply_("Makes sense") &&
+      !isSubstantiveFollowupSignal_("I understand") &&
+      !isSubstantiveFollowupSignal_("Makes sense"),
+    "Exact answer-only acknowledgments are suppressible; follow-up questions remain substantive"
+  );
+
+  const documentQuestionDecision = applyFastRules_("Who collects all the documents needed for the Short?", baseRow);
+  record(
+    "document_collection_question_gets_direct_answer",
+    documentQuestionDecision.matched &&
+      !documentQuestionDecision.handoff_needed &&
+      !documentQuestionDecision.block_reply &&
+      documentQuestionDecision.reply_text.indexOf("collect and organize") !== -1 &&
+      documentQuestionDecision.reply_text.split("quick call").length === 2,
+    documentQuestionDecision.reason
+  );
+
+  const acknowledgmentWithQuestionDecision = applyFastRules_(
+    "I understand. Who collects all the documents needed for the short sale?",
+    answerAcknowledgmentRow
+  );
+  record(
+    "acknowledgment_with_question_is_not_suppressed",
+    acknowledgmentWithQuestionDecision.matched &&
+      !acknowledgmentWithQuestionDecision.block_reply &&
+      !acknowledgmentWithQuestionDecision.handoff_needed &&
+      acknowledgmentWithQuestionDecision.reply_text.indexOf("collect and organize") !== -1,
+    acknowledgmentWithQuestionDecision.reason
   );
 
   const futureInterest = applyFastRules_(

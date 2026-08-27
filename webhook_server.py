@@ -3729,6 +3729,10 @@ def _sms_is_final_courtesy(value: Any) -> bool:
         "thank you i appreciate it",
         "thanks i appreciate it",
         "thank you appreciate it",
+        "i understand",
+        "understood",
+        "makes sense",
+        "that makes sense",
     }
 
 
@@ -4978,6 +4982,12 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
 
     flags = {
         "fee": _sms_is_fee_question(text),
+        "documents": bool(re.search(
+            r"\bwho\s+(?:collects?|gathers?|gets?|organizes?|handles?)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b"
+            r"|\b(?:do|will|would|can|could)\s+you\s+(?:collect|gather|get|organize|handle)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b"
+            r"|\bwho\s+is\s+responsible\s+for\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b",
+            text,
+        )),
         "help": bool(re.search(r"\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does (?:this|that) work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|offer|do))\b", text)),
         "local": bool(re.search(r"\b(?:are you local|where are you located|where r u located|where are you based|based in)\b", text)),
         "company": _sms_is_company_identity_question(text),
@@ -5081,6 +5091,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
                 result.update(lead_status=status, conversation_done=done)
             return result
         replies = {
+            "documents": "I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up. If you want, I can walk you through the document checklist on a quick call.",
             "help": "I handle the lender side of the short sale, including the paperwork, calls, follow-up, and negotiations through approval. It takes that work off your plate so you can focus on the listing and client.",
             "local": "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
             "company": "I'm with Crisp Short Sales. I handle lender-side short-sale processing and negotiations for agents and homeowners.",
@@ -5102,6 +5113,8 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
             )
 
     answers: List[str] = []
+    if flags["documents"]:
+        answers.append("I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up.")
     if flags["company"]:
         answers.append("I'm with Crisp Short Sales.")
     if flags["help"]:
