@@ -578,7 +578,7 @@ def test_internal_initial_sms_suppresses_duplicate_phone_elsewhere(monkeypatch):
     assert 17 not in sheet.rows
 
 
-def test_internal_initial_sms_retains_distinct_pilot_listing_without_send(monkeypatch):
+def test_internal_initial_sms_deletes_distinct_pilot_listing_with_duplicate_phone(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -614,17 +614,53 @@ def test_internal_initial_sms_retains_distinct_pilot_listing_without_send(monkey
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "prior_agent_contact_no_send"
+    assert body["status"] == "already_contacted_phone"
     assert body["existing_row"] == 5
-    assert body["row_deleted"] is False
-    assert body["outreach_suppressed"] is True
-    assert body["identity_outcome"] == "distinct_listing"
+    assert body["deleted_row"] == 17
+    assert body["row_deleted"] is True
     assert sender.calls == []
-    assert sheet.rows[17][7] == ""
-    assert sheet.rows[17][22] == ""
-    assert sheet.rows[17][19] == "TRUE"
-    assert "prior_agent_contact_no_send:" in sheet.rows[17][25]
-    assert sheet.rows[17][42] == "x"
+    assert 17 not in sheet.rows
+
+
+def test_internal_initial_sms_allows_explicit_prior_contact_reengagement(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[5] = _row(
+        phone="555-222-1717",
+        email="agent@example.com",
+        sent="x",
+        init_ts="2025-04-18T20:22:09-04:00",
+        verified="x",
+        first="Julia",
+        address="116 Highland Ave",
+    )
+    sheet.rows[17] = _row(
+        phone="555-222-1717",
+        email="agent@example.com",
+        first="Julia",
+        address="340 S 3rd Street #2",
+        stable_id="free-45bdcc53dd5c8ff3",
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/internal/send-initial-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={
+            "row": 17,
+            "phone": "555-222-1717",
+            "force_resend": True,
+            "allow_prior_contact_resend": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert sender.calls[0]["row_idx"] == 17
+    assert 5 in sheet.rows
+    assert 17 in sheet.rows
 
 
 def test_internal_initial_sms_still_deletes_same_pilot_listing_with_missing_suffix(monkeypatch):

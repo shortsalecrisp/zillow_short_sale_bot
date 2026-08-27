@@ -3262,112 +3262,6 @@ def _delete_later_duplicate_phone_suppression_rows(
     return rows_to_delete
 
 
-_LISTING_UNIT_RE = re.compile(
-    r"(?i)(?:\s*,?\s*)(?:#|unit\s*#?|apt(?:artment)?\s*#?|suite\s*#?|ste\s*#?)\s*([a-z0-9-]+)\b"
-)
-_LISTING_SUFFIX_ALIASES = {
-    "ave": "avenue", "avenue": "avenue", "st": "street", "street": "street",
-    "rd": "road", "road": "road", "dr": "drive", "drive": "drive",
-    "ln": "lane", "lane": "lane", "blvd": "boulevard", "boulevard": "boulevard",
-    "ct": "court", "court": "court", "cir": "circle", "circle": "circle",
-    "pl": "place", "place": "place", "trl": "trail", "trail": "trail",
-    "pkwy": "parkway", "parkway": "parkway", "ter": "terrace", "terrace": "terrace",
-    "hwy": "highway", "highway": "highway", "rte": "route", "rt": "route",
-    "route": "route", "way": "way", "loop": "loop", "mews": "mews",
-}
-_LISTING_MLS_RE = re.compile(
-    r"(?i)\bMLS\s*(?:number|no\.?|#|id)?\s*[:#]?\s*([A-Z]{0,6}[0-9][A-Z0-9-]{4,20})\b"
-)
-
-
-def _listing_address_identity(row: List[str]) -> Dict[str, str]:
-    address = _row_value(row, 4).lower()
-    unit_matches = list(_LISTING_UNIT_RE.finditer(address))
-    unit = re.sub(r"[^a-z0-9]", "", unit_matches[-1].group(1).lower()) if unit_matches else ""
-    address = _LISTING_UNIT_RE.sub(" ", address)
-    for trailing in (_row_value(row, 5), _row_value(row, 6)):
-        token = re.sub(r"[^a-z0-9]+", " ", trailing.lower()).strip()
-        if token:
-            address = re.sub(rf"(?:,|\s)+{re.escape(token)}\s*$", " ", address)
-    address = re.sub(r"\b\d{5}(?:-\d{4})?\b\s*$", " ", address)
-    tokens = re.sub(r"[^a-z0-9]+", " ", address).split()
-    if tokens and tokens[-1] in _LISTING_SUFFIX_ALIASES:
-        tokens[-1] = _LISTING_SUFFIX_ALIASES[tokens[-1]]
-    relaxed = tokens[:-1] if tokens and tokens[-1] in set(_LISTING_SUFFIX_ALIASES.values()) else tokens
-    state = re.sub(r"[^a-z0-9]", "", _row_value(row, 6).lower())
-    note = _row_value(row, 25)
-    mls_match = _LISTING_MLS_RE.search(note)
-    stable_id = _row_value(row, 27).strip()
-    return {
-        "base": " ".join(relaxed),
-        "state": state,
-        "unit": unit,
-        "stable_id": stable_id,
-        "stable_namespace": "pilot" if re.fullmatch(r"(?i)free-[a-z0-9]{8,64}", stable_id) else ("zillow" if stable_id.isdigit() else "source" if stable_id else ""),
-        "mls_id": re.sub(r"[^A-Z0-9]", "", mls_match.group(1).upper()) if mls_match else "",
-    }
-
-
-def _pilot_listing_relationship(row: List[str], owner_row: List[str]) -> str:
-    current = _listing_address_identity(row)
-    owner = _listing_address_identity(owner_row)
-    if not current["base"] or not owner["base"]:
-        return "identity_conflict"
-    if current["base"] != owner["base"] or current["state"] != owner["state"]:
-        return "distinct_listing"
-    if current["unit"] != owner["unit"]:
-        if current["unit"] and owner["unit"]:
-            return "distinct_listing"
-        return "identity_conflict"
-    if current["mls_id"] and owner["mls_id"] and current["mls_id"] != owner["mls_id"]:
-        return "identity_conflict"
-    same_stable_namespace = (
-        current["stable_namespace"]
-        and current["stable_namespace"] != "pilot"
-        and current["stable_namespace"] == owner["stable_namespace"]
-    )
-    if same_stable_namespace and current["stable_id"] != owner["stable_id"]:
-        return "identity_conflict"
-    return "same_listing"
-
-
-def _retain_pilot_prior_contact_owner(
-    ws,
-    *,
-    row_idx: int,
-    row: List[str],
-    duplicate: Dict[str, Any],
-    relationship: str,
-) -> bool:
-    owner_row = int(duplicate.get("row") or 0)
-    prior_note = _row_value(row, 25).strip()
-    note = (
-        f"prior_agent_contact_no_send: distinct pilot listing retained; prior contact owner Sheet1 row "
-        f"{owner_row}; listing relationship={relationship}; outreach suppressed; H/W intentionally blank; human hold."
-    )
-    if prior_note and "prior_agent_contact_no_send:" not in prior_note:
-        note = f"{prior_note} {note}"
-    contact_complete = bool(_row_value(row, 2).strip() and _row_value(row, 3).strip())
-    updates = [
-        {"range": f"T{row_idx}", "values": [["TRUE"]]},
-        {"range": f"Z{row_idx}", "values": [[note]]},
-    ]
-    if contact_complete:
-        updates.append({"range": f"AQ{row_idx}", "values": [["x"]]})
-    _retry_gspread_call(
-        "retain distinct pilot listing with prior agent contact hold",
-        lambda: ws.batch_update(updates, value_input_option="USER_ENTERED"),
-    )
-    logger.info(
-        "PILOT_PRIOR_AGENT_CONTACT_NO_SEND row=%s owner_row=%s relationship=%s contact_complete=%s",
-        row_idx,
-        owner_row,
-        relationship,
-        contact_complete,
-    )
-    return contact_complete
-
-
 def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         row_idx = int(payload.get("row"))
@@ -3387,6 +3281,7 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="row_not_found")
 
     force_resend = bool(payload.get("force_resend") or payload.get("force"))
+    allow_prior_contact_resend = bool(payload.get("allow_prior_contact_resend"))
     mark_codex_verified = payload.get("mark_codex_verified", True) is not False
     initial_marked = _row_value(row, 7).lower() == "x"
     initial_ts = _row_value(row, 22).strip()
@@ -3400,27 +3295,7 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail="row_phone_mismatch")
 
     duplicate = _find_duplicate_phone_row(ws, phone_digits=digits, row_idx=row_idx)
-    if duplicate:
-        stable_id = _row_value(row, 27).strip()
-        relationship = _pilot_listing_relationship(row, duplicate.get("values") or [])
-        if re.fullmatch(r"(?i)free-[a-z0-9]{8,64}", stable_id) and relationship != "same_listing":
-            contact_complete = _retain_pilot_prior_contact_owner(
-                ws,
-                row_idx=row_idx,
-                row=row,
-                duplicate=duplicate,
-                relationship=relationship,
-            )
-            return {
-                "status": "prior_agent_contact_no_send",
-                "row": row_idx,
-                "phone": digits,
-                "existing_row": duplicate["row"],
-                "row_deleted": False,
-                "outreach_suppressed": True,
-                "identity_outcome": relationship,
-                "codex_verified": contact_complete,
-            }
+    if duplicate and not (force_resend and allow_prior_contact_resend):
         deleted_at = _delete_initial_sms_duplicate_row(
             ws,
             row_idx=row_idx,
@@ -3443,6 +3318,13 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             "row_deleted": True,
             "codex_verified": False,
         }
+    if duplicate:
+        logger.warning(
+            "INTERNAL_INITIAL_SMS_PRIOR_CONTACT_RESEND_APPROVED row=%s phone=%s existing_row=%s",
+            row_idx,
+            digits,
+            duplicate["row"],
+        )
 
     deleted_later_suppression_rows = _delete_later_duplicate_phone_suppression_rows(
         ws,

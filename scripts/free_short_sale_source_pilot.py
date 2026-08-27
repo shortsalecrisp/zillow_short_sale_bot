@@ -1597,7 +1597,7 @@ def classify_listing_identity(candidate: Candidate, existing: ExistingIndex) -> 
 
 
 def duplicate_status_blocks_pilot_row(status: str) -> bool:
-    return status in {"duplicate_listing", "identity_conflict"}
+    return status in {"duplicate_listing", "identity_conflict", "duplicate_agent_phone"}
 
 
 def is_valid_email(value: str) -> bool:
