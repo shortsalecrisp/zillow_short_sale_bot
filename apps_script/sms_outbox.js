@@ -343,7 +343,22 @@ function applyInitialSmsReceiptV13_(body, correlation) {
   } catch (_) {}
   var sheet = getSheet_();
   var currentPhone = normalizePhone_(sheet.getRange(crmRow, 3).getValue());
-  if (currentPhone !== phone) throw new Error("Initial SMS receipt CRM phone no longer matches");
+  if (currentPhone !== phone) {
+    // Tasker did send the outbox item, but the CRM contact changed before its
+    // receipt arrived. Acknowledge the physical send without writing sent
+    // fields onto the replacement contact. The recovery scanner will enqueue
+    // the current verified phone independently.
+    return {
+      ok: true,
+      initial_sms: false,
+      stale_receipt: true,
+      crm_write_skipped: true,
+      row: crmRow,
+      sent_phone: phone,
+      current_phone: currentPhone,
+      reason: "Initial SMS receipt matched an obsolete CRM phone"
+    };
+  }
   var sentAtRaw = body && body.sent_at;
   var sentAt = /^\d{10,}$/.test(String(sentAtRaw || ""))
     ? new Date(Number(sentAtRaw))

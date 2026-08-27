@@ -284,7 +284,9 @@ function handleUnifiedSmsPost_(e) {
       }
       try {
         if (typeof appendSmsDebugLog_ === "function") {
-          appendSmsDebugLog_("reply_sent_result", {
+          appendSmsDebugLog_(replySentResult && replySentResult.stale_receipt
+            ? "initial_sms_stale_receipt"
+            : "reply_sent_result", {
             request_id: requestId,
             phone: canonicalReceiptBody.phone,
             reply_text: canonicalReceiptBody.reply_text,

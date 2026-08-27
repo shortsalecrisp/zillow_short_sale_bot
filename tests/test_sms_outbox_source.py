@@ -324,6 +324,18 @@ def test_initial_outreach_uses_durable_outbox_and_marks_crm_only_on_tasker_recei
     assert "mark_sent(" not in send_sms_source
 
 
+def test_initial_receipt_for_replaced_crm_phone_is_terminal_without_mutating_new_contact():
+    receipt_start = OUTBOX.index("function applyInitialSmsReceiptV13_")
+    receipt_end = OUTBOX.index("function enqueueIncomingSmsV10_", receipt_start)
+    receipt_source = OUTBOX[receipt_start:receipt_end]
+
+    assert 'currentPhone !== phone' in receipt_source
+    assert 'stale_receipt: true' in receipt_source
+    assert 'crm_write_skipped: true' in receipt_source
+    assert 'throw new Error("Initial SMS receipt CRM phone no longer matches")' not in receipt_source
+    assert '"initial_sms_stale_receipt"' in UNIFIED
+
+
 def test_reply_sent_crm_writeback_is_idempotent_by_receipt_identity():
     chatbot = (ROOT / "apps_script" / "sms_chatbot.js").read_text(encoding="utf-8")
     start = chatbot.index("function handleReplySent_(body)")
