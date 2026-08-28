@@ -356,14 +356,61 @@ test("post-call fallback identifies wrong-person and unrelated-business voicemai
     status: "done",
     transcript: [{ role: "user", message: "Hi, you've reached DeAnn. Please leave a message." }],
   };
+  const matchingBusinessMailbox = {
+    status: "done",
+    transcript: [
+      { role: "user", message: "Ms. Foster at Foster and Williams Real Estate is currently unavailable. Please leave a message." },
+    ],
+  };
 
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(wrongPerson, "DeAnn"), true);
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(unrelatedBusiness, "Vanessa"), true);
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(matchingMailbox, "DeAnn"), false);
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(matchingBusinessMailbox, "Seatrice", "Foster"), false);
   assert.equal(
     buildVoiceResponseStatus("identity_mismatch_voicemail"),
     "Identity mismatch voicemail - target not reached",
   );
+});
+
+test("post-call fallback distinguishes a confirmed self-handling target from automated screening", async () => {
+  const {
+    buildVoiceResponseStatus,
+    shouldTreatAsAgentHungUp,
+    shouldTreatAsAgentUnavailable,
+    shouldTreatAsTargetReachedSelfHandlingDisconnect,
+  } = await import("../src/lib/elevenLabsPostCall");
+  const confirmedTarget = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "assistant", message: "Hey, is this Valerie?" },
+      { role: "user", message: "This is Valerie." },
+      { role: "assistant", message: "Are you handling the bank side of the short sale yourself?" },
+      { role: "user", message: "Yes, I am." },
+      { role: "assistant", message: "We can take the lender paperwork and follow-up off your plate." },
+    ],
+  };
+  const automatedScreen = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    analysis: { transcript_summary: "A Homes.com automated call-screening system answered; the agent was never reached." },
+    transcript: [
+      { role: "user", message: "Press one to connect. We are not able to connect your call. State your reason for calling." },
+      { role: "assistant", message: "Crisp Short Sales, calling about a short sale listing." },
+    ],
+  };
+
+  assert.equal(shouldTreatAsTargetReachedSelfHandlingDisconnect(confirmedTarget, "Valerie"), true);
+  assert.equal(shouldTreatAsAgentUnavailable(confirmedTarget), false);
+  assert.equal(shouldTreatAsAgentHungUp(confirmedTarget), true);
+  assert.equal(
+    buildVoiceResponseStatus("agent_reached_self_handling_disconnected"),
+    "Agent reached; handling bank side; call disconnected",
+  );
+  assert.equal(shouldTreatAsTargetReachedSelfHandlingDisconnect(automatedScreen, "Kevin"), false);
+  assert.equal(shouldTreatAsAgentUnavailable(automatedScreen), true);
+  assert.equal(shouldTreatAsAgentHungUp(automatedScreen), false);
 });
 
 test("post-call fallback treats a completed screening prompt without live target contact as unavailable", async () => {

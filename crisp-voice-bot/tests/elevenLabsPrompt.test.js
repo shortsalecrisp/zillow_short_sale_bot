@@ -120,6 +120,8 @@ test("prompt ends wrong-person and unrelated-business voicemail without a sales 
   assert.ok(start >= 0);
   assert.match(section, /recorded greeting explicitly names someone other than/);
   assert.match(section, /do not leave the normal voicemail/);
+  assert.match(section, /business greeting is target-matching/);
+  assert.match(section, /`\{\{lastName\}\}`/);
   assert.match(section, /Say nothing further and immediately call `end_call`/);
   assert.match(section, /Never request a callback, live transfer, or human sales handoff/);
 });

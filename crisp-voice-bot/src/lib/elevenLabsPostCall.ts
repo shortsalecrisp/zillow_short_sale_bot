@@ -253,6 +253,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Agent was not available";
   }
 
+  if (callResult === "agent_reached_self_handling_disconnected") {
+    return "Agent reached; handling bank side; call disconnected";
+  }
+
   if (callResult === "identity_mismatch_voicemail") {
     return "Identity mismatch voicemail - target not reached";
   }
@@ -825,6 +829,7 @@ function meaningfulUserMessages(conversation: ElevenLabsConversation): string[] 
 export function shouldTreatAsIdentityMismatchVoicemail(
   conversation: ElevenLabsConversation,
   expectedFirstName = "",
+  expectedLastName = "",
 ): boolean {
   const text = normalizeText(userMessages(conversation).join(" "));
   if (!text) {
@@ -832,10 +837,14 @@ export function shouldTreatAsIdentityMismatchVoicemail(
   }
 
   const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  const expectedLast = normalizeText(expectedLastName).replace(/[^a-z0-9'-]/g, "");
+  const mentionsExpectedTarget =
+    Boolean(expected && new RegExp(`\\b${expected}\\b`).test(text)) ||
+    Boolean(expectedLast && new RegExp(`\\b${expectedLast}\\b`).test(text));
   const namedGreeting = text.match(
     /\b(?:you(?:'ve| have) reached|this is|mailbox (?:for|belonging to)|voicemail (?:for|of))\s+([a-z][a-z'-]*)\b/,
   );
-  if (namedGreeting && expected && namedGreeting[1] !== expected) {
+  if (namedGreeting && expected && namedGreeting[1] !== expected && !mentionsExpectedTarget) {
     return true;
   }
 
@@ -844,7 +853,66 @@ export function shouldTreatAsIdentityMismatchVoicemail(
     /\b(?:thank you for calling|welcome to)\b.{0,80}\b(?:store|shop|restaurant|hotel|clinic|department|company)\b/.test(
       text,
     );
-  return clearlyUnrelatedBusiness && (!expected || !new RegExp(`\\b${expected}\\b`).test(text));
+  return clearlyUnrelatedBusiness && !mentionsExpectedTarget;
+}
+
+export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
+  conversation: ElevenLabsConversation,
+  expectedFirstName = "",
+): boolean {
+  if (
+    shouldTreatAsRecordingArtifact(conversation) ||
+    shouldTreatAsVoicemail(conversation) ||
+    shouldTreatAsNoAnswer(conversation) ||
+    shouldTreatAsCallback(conversation) ||
+    shouldTreatAsDoNotCall(conversation) ||
+    shouldTreatAsNotShortSale(conversation) ||
+    shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
+    shouldTreatAsNotInterested(conversation) ||
+    hasSuccessfulTransfer(conversation)
+  ) {
+    return false;
+  }
+
+  const terminationReason = normalizeText(conversation.metadata?.termination_reason ?? "");
+  if (!terminationReason.includes("client disconnected")) {
+    return false;
+  }
+
+  const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  const messages = conversation.transcript ?? [];
+  const identityConfirmed = messages.some((item) => {
+    if (item.role !== "user" || typeof item.message !== "string") {
+      return false;
+    }
+    const message = normalizeText(item.message);
+    return Boolean(
+      expected &&
+        (new RegExp(`\\bthis is ${expected}\\b`).test(message) ||
+          new RegExp(`\\b${expected} speaking\\b`).test(message)),
+    );
+  });
+
+  let selfHandlingConfirmed = false;
+  for (let index = 0; index < messages.length; index += 1) {
+    const item = messages[index];
+    if (item.role !== "assistant" || typeof item.message !== "string") {
+      continue;
+    }
+    const question = normalizeText(item.message);
+    if (!/\b(?:are you|you are)\b.{0,80}\bhandling\b.{0,60}\b(?:bank|lender|short sale)\b/.test(question)) {
+      continue;
+    }
+    const answer = messages.slice(index + 1).find(
+      (next) => next.role === "user" && typeof next.message === "string" && hasMeaningfulSpokenContent(next.message),
+    );
+    if (answer?.message && /^(?:yes|yeah|yep)(?:,?\s+i\s+am)?[.!?]*$/i.test(answer.message.trim())) {
+      selfHandlingConfirmed = true;
+      break;
+    }
+  }
+
+  return identityConfirmed && selfHandlingConfirmed;
 }
 
 export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversation): boolean {
@@ -1180,7 +1248,7 @@ async function processPostCallOutcomeForConversation(
   }
 
   const expectedFirstName = metadata.firstName ?? metadata.fullName.split(/\s+/)[0] ?? "";
-  if (shouldTreatAsIdentityMismatchVoicemail(conversation, expectedFirstName)) {
+  if (shouldTreatAsIdentityMismatchVoicemail(conversation, expectedFirstName, metadata.lastName ?? "")) {
     const outcome = buildVoiceResponseStatus("identity_mismatch_voicemail");
     const mismatchSummary =
       "The greeting explicitly identified another person or an unrelated business; the target was not reached and no sales handoff was created.";
@@ -1562,6 +1630,39 @@ async function processPostCallOutcomeForConversation(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callbackTime,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsTargetReachedSelfHandlingDisconnect(conversation, expectedFirstName)) {
+    const outcome = buildVoiceResponseStatus("agent_reached_self_handling_disconnected");
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "agent_reached_self_handling_disconnected",
+      responseStatus: outcome,
+      leadStatusCode: "N",
+      callbackRequested: "",
+      callbackTime: "",
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback recorded confirmed target self-handling before disconnect", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
     });
     return true;
   }

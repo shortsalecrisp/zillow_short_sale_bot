@@ -243,6 +243,7 @@ Wrong-person or unrelated-business voicemail hard stop:
 
 - This rule applies only to a recorded greeting or voicemail, not a live receptionist, admin, assistant, or gatekeeper.
 - If the recorded greeting explicitly names someone other than `{{firstName}}`, or clearly identifies an unrelated business such as a store or customer-service hotline, do not leave the normal voicemail.
+- A recorded business greeting is target-matching, not unrelated, when it includes `{{firstName}}`, `{{lastName}}`, or a business name clearly built from `{{lastName}}`. In that case, leave the normal voicemail.
 - Do not say `{{firstName}}`, `{{streetAddress}}`, the short-sale pitch, Yoni's name, or the callback number to that recording.
 - Say nothing further and immediately call `end_call`.
 - Never request a callback, live transfer, or human sales handoff from a wrong-person or unrelated-business recording.
