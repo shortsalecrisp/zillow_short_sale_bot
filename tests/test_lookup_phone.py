@@ -1835,7 +1835,7 @@ def test_listing_text_rejects_short_sale_no_special_listing_conditions():
     assert not bot_min.is_short_sale(bot_min._short_sale_text_from_payload(listing_text))
 
 
-def test_pilot_short_sale_allows_unrelated_rental_approval(monkeypatch):
+def test_pilot_short_sale_allows_unrelated_rental_approval_but_never_appends(monkeypatch):
     appended = []
     monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
     monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
@@ -1859,8 +1859,8 @@ def test_pilot_short_sale_allows_unrelated_rental_approval(monkeypatch):
         return_outcomes=True,
     )
 
-    assert outcomes == {"free-b06dac0f7c58f285": "completed_short_sale"}
-    assert len(appended) == 1
+    assert outcomes == {"free-b06dac0f7c58f285": "verifier_held"}
+    assert appended == []
 
 
 def test_pilot_short_sale_still_rejects_approved_short_sale(monkeypatch):

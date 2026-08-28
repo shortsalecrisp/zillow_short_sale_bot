@@ -13753,26 +13753,11 @@ def process_rows(
         if _pilot_origin_requires_verifier_hold(r):
             r["requiresVerifierReview"] = "true"
             source_agent_hint_present = bool(_bound_pilot_agent_name(r))
-            name = ""
-            name_parts = name.split()
-            first = name_parts[0] if name_parts else ""
-            last = name_parts[1:]
-            row_vals = [""] * MIN_COLS
-            row_vals[COL_FIRST] = first
-            row_vals[COL_LAST] = " ".join(last)
-            row_vals[COL_STREET] = r.get("street", "")
-            row_vals[COL_CITY] = r.get("city", "")
-            row_vals[COL_STATE] = r.get("state", "")
-            row_vals[COL_INIT_TS] = ""
-            row_vals[COL_ZPID] = zpid
-            row_idx = append_row(row_vals)
-            outcomes[zpid] = "completed_short_sale"
+            outcomes[zpid] = "verifier_held"
             LOG.info(
-                "PILOT_SHEET1_INTAKE zpid=%s row=%s agent=%s address=%s "
-                "source_agent_hint_present=%s contact_enrichment=false initial_sms_scheduled=false",
+                "PILOT_VERIFIER_HOLD zpid=%s address=%s source_agent_hint_present=%s "
+                "sheet1_writes=0 contact_enrichment=false initial_sms_scheduled=false",
                 zpid,
-                row_idx,
-                name or "<blank>",
                 r.get("street", ""),
                 source_agent_hint_present,
             )

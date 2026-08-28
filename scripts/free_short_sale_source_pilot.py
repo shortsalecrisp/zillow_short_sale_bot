@@ -6813,6 +6813,7 @@ def promote_ready_pilot_rows(
     stats = {
         "considered": 0,
         "eligible": 0,
+        "verifier_held": 0,
         "promoted": 0,
         "skipped": 0,
         "errors": 0,
@@ -6828,7 +6829,6 @@ def promote_ready_pilot_rows(
         log_event("pilot_promotion_skipped", reason="pilot_tab_empty")
         return stats
 
-    processor = None
     updates: list[dict[str, Any]] = []
     promoted_listing_keys: set[str] = set()
     promoted_agent_names: set[str] = set()
@@ -6888,7 +6888,7 @@ def promote_ready_pilot_rows(
         normalized_payload = normalize_payload_for_sheet1(row_data, payload)
         zpid = normalized_payload.get("zpid", "")
         if dry_run:
-            stats["promoted"] += 1
+            stats["verifier_held"] += 1
             if listing_key:
                 promoted_listing_keys.add(listing_key)
             if name_key:
@@ -6898,64 +6898,37 @@ def promote_ready_pilot_rows(
                     pilot_tab,
                     sheet_row,
                     status="dry_run_ready",
-                    notes="Dry run: row would be promoted through bot_min.process_rows.",
+                    notes="Dry run: row would be staged for the lead verifier; Sheet1 would remain unchanged.",
                 )
             )
             log_event("pilot_promotion_dry_run_ready", row=sheet_row, zpid=zpid)
         else:
-            try:
-                if processor is None:
-                    processor = import_bot_processor()
-                outcomes = processor.process_rows(
-                    [normalized_payload],
-                    skip_dedupe=True,
-                    return_outcomes=True,
-                ) or {}
-                outcome = outcomes.get(zpid, "")
-            except Exception as exc:  # noqa: BLE001
-                stats["errors"] += 1
-                updates.extend(
-                    promotion_status_updates(
-                        pilot_tab,
-                        sheet_row,
-                        status="promotion_error",
-                        notes=str(exc),
-                        import_ready="review",
-                    )
+            # Source-time listing evidence is not sufficient contact provenance. Keep
+            # Sheet1 unchanged until the verifier has attributable phone and email,
+            # performs whole-Sheet listing/phone ownership checks, appends once, and
+            # rereads the exact owner row.
+            stats["verifier_held"] += 1
+            if listing_key:
+                promoted_listing_keys.add(listing_key)
+            if name_key:
+                promoted_agent_names.add(name_key)
+            updates.extend(
+                promotion_status_updates(
+                    pilot_tab,
+                    sheet_row,
+                    status="verifier_held",
+                    notes=(
+                        "Qualified listing staged for the lead verifier. Sheet1 stays unchanged "
+                        "until exact-agent identity, direct phone, agent-specific email, whole-Sheet "
+                        "listing/phone ownership, append, and owner readback all pass."
+                    ),
+                    import_ready="verify",
+                    matched_main_row="",
                 )
-                log_event("pilot_promotion_error", row=sheet_row, zpid=zpid, error=str(exc))
-                continue
+            )
+            log_event("pilot_verifier_held", row=sheet_row, zpid=zpid, sheet1_writes=0)
 
-            if outcome == "completed_short_sale":
-                stats["promoted"] += 1
-                if listing_key:
-                    promoted_listing_keys.add(listing_key)
-                if name_key:
-                    promoted_agent_names.add(name_key)
-                updates.extend(
-                    promotion_status_updates(
-                        pilot_tab,
-                        sheet_row,
-                        status="promoted",
-                        notes="Promoted to Sheet1 through bot_min.process_rows; pilot-origin SMS remains verifier-held.",
-                        import_ready="promoted",
-                    )
-                )
-                log_event("pilot_promoted", row=sheet_row, zpid=zpid, outcome=outcome)
-            else:
-                stats["skipped"] += 1
-                updates.extend(
-                    promotion_status_updates(
-                        pilot_tab,
-                        sheet_row,
-                        status=outcome or "promotion_skipped",
-                        notes=f"bot_min.process_rows returned {outcome or 'no outcome'}.",
-                        import_ready="review",
-                    )
-                )
-                log_event("pilot_promotion_processor_skipped", row=sheet_row, zpid=zpid, outcome=outcome)
-
-        if stats["promoted"] >= cap:
+        if stats["verifier_held"] >= cap:
             break
 
     if updates and not dry_run:

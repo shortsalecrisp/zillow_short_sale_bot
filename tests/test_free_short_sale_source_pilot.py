@@ -1543,7 +1543,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(row[14], "needs_source_evidence_confirmation")
         self.assertEqual(row[16], "review")
 
-    def test_promotion_accepts_shadow_ready_row_without_agent_identity(self):
+    def test_promotion_stages_shadow_ready_row_without_agent_identity(self):
         payload = {
             "zpid": "free-abc",
             "street": "123 Main Street",
@@ -1585,9 +1585,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         ), mock.patch.object(
             pilot,
             "import_bot_processor",
-            return_value=types.SimpleNamespace(
-                process_rows=lambda rows, **kwargs: {"free-abc": "completed_short_sale"}
-            ),
+            side_effect=AssertionError("verifier-held staging must not call the Sheet1 processor"),
         ):
             stats = pilot.promote_ready_pilot_rows(
                 "token",
@@ -1598,11 +1596,13 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 dry_run=False,
             )
 
-        self.assertEqual(stats["promoted"], 1)
+        self.assertEqual(stats["verifier_held"], 1)
+        self.assertEqual(stats["promoted"], 0)
         self.assertEqual(stats["skipped"], 0)
         status_updates = {update["range"]: update["values"][0][0] for update in captured_updates}
-        self.assertEqual(status_updates["Lead Source Pilot!O2"], "promoted")
-        self.assertEqual(status_updates["Lead Source Pilot!Q2"], "promoted")
+        self.assertEqual(status_updates["Lead Source Pilot!O2"], "verifier_held")
+        self.assertEqual(status_updates["Lead Source Pilot!Q2"], "verify")
+        self.assertEqual(status_updates["Lead Source Pilot!X2"], "")
 
     def test_promotion_holds_legacy_payload_without_bound_provenance(self):
         payload = {
@@ -1731,7 +1731,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertIn("Street, city, and state", note)
         self.assertEqual(matched, "")
 
-    def test_promotion_routes_confirmed_agent_payload_through_sheet1_processor(self):
+    def test_promotion_never_routes_confirmed_agent_payload_through_sheet1_processor(self):
         payload = {
             "zpid": "free-def",
             "street": "456 Oak Street",
@@ -1762,15 +1762,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             pending_queue_source="free-source-pilot:idx_broker_remarks",
             pending_queue_listing_json=json.dumps(payload),
         )
-        captured = {}
         captured_updates = []
-
-        def fake_process_rows(rows, **kwargs):
-            captured["rows"] = rows
-            captured["kwargs"] = kwargs
-            return {"free-def": "completed_short_sale"}
-
-        fake_processor = types.SimpleNamespace(process_rows=fake_process_rows)
 
         with mock.patch.object(
             pilot,
@@ -1786,7 +1778,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         ), mock.patch.object(
             pilot,
             "import_bot_processor",
-            return_value=fake_processor,
+            side_effect=AssertionError("verifier-held staging must not call the Sheet1 processor"),
         ):
             stats = pilot.promote_ready_pilot_rows(
                 "token",
@@ -1797,16 +1789,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 dry_run=False,
             )
 
-        self.assertEqual(stats["promoted"], 1)
-        self.assertEqual(captured["kwargs"], {"skip_dedupe": True, "return_outcomes": True})
-        routed_payload = captured["rows"][0]
-        self.assertEqual(routed_payload["agentName"], "Jane Smith")
-        self.assertEqual(routed_payload["search_source"], "free-source-pilot:idx_broker_remarks")
-        self.assertEqual(routed_payload["requiresVerifierReview"], "true")
-        self.assertNotIn("phone", routed_payload)
+        self.assertEqual(stats["verifier_held"], 1)
+        self.assertEqual(stats["promoted"], 0)
         status_updates = {update["range"]: update["values"][0][0] for update in captured_updates}
-        self.assertEqual(status_updates["Lead Source Pilot!O2"], "promoted")
-        self.assertEqual(status_updates["Lead Source Pilot!Q2"], "promoted")
+        self.assertEqual(status_updates["Lead Source Pilot!O2"], "verifier_held")
+        self.assertEqual(status_updates["Lead Source Pilot!Q2"], "verify")
 
     def test_promotion_dry_run_does_not_write_or_import_processor(self):
         payload = {
@@ -1862,7 +1849,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
                 dry_run=True,
             )
 
-        self.assertEqual(stats["promoted"], 1)
+        self.assertEqual(stats["verifier_held"], 1)
+        self.assertEqual(stats["promoted"], 0)
         self.assertEqual(stats["eligible"], 1)
 
     def test_agent_name_cleaner_rejects_brokerage_names(self):
