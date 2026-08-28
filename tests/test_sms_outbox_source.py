@@ -321,6 +321,7 @@ def test_initial_outreach_uses_durable_outbox_and_marks_crm_only_on_tasker_recei
     send_sms_source = scheduler.split("def send_sms(", 1)[1].split("def _within_initial_hours", 1)[0]
     assert '"action": "enqueue_initial_sms"' in send_sms_source
     assert "if not follow_up:" in send_sms_source
+    assert '"stable_id": stable_id' in send_sms_source
     assert "mark_sent(" not in send_sms_source
 
 
@@ -329,11 +330,36 @@ def test_initial_receipt_for_replaced_crm_phone_is_terminal_without_mutating_new
     receipt_end = OUTBOX.index("function enqueueIncomingSmsV10_", receipt_start)
     receipt_source = OUTBOX[receipt_start:receipt_end]
 
-    assert 'currentPhone !== phone' in receipt_source
+    assert "resolveInitialSmsReceiptRowV14_" in receipt_source
+    assert "!resolvedRow.ok" in receipt_source
     assert 'stale_receipt: true' in receipt_source
     assert 'crm_write_skipped: true' in receipt_source
     assert 'throw new Error("Initial SMS receipt CRM phone no longer matches")' not in receipt_source
     assert '"initial_sms_stale_receipt"' in UNIFIED
+
+
+def test_initial_receipt_recovers_shifted_rows_by_stable_id_or_unique_phone():
+    assert 'stable_id: String(body && (body.stable_id || body.zpid || body.listing_id)' in OUTBOX
+    assert "function resolveInitialSmsReceiptRowV14_" in OUTBOX
+    assert 'mode: "stable_id"' in OUTBOX
+    assert 'mode: "unique_phone"' in OUTBOX
+    assert "testInitialSmsReceiptRowShiftRecoveryV14_" in OUTBOX
+    assert "probe.initial_receipt_row_shift_recovery" in UNIFIED
+    assert "Stable listing ID matched a different or ambiguous phone" in OUTBOX
+    server = (ROOT / "webhook_server.py").read_text(encoding="utf-8")
+    assert 'or _row_value(row, 27)' in server
+    assert '"stable_id": stable_id' in server
+
+
+def test_duplicate_listing_cleanup_uses_whole_row_deletes_not_blank_rows():
+    server = (ROOT / "webhook_server.py").read_text(encoding="utf-8")
+    scheduler = (ROOT / "bot_min.py").read_text(encoding="utf-8")
+    assert "ws.delete_rows(row_idx)" in server
+    assert "ws.delete_rows(delete_idx)" in server
+    assert '"deleteDimension"' in scheduler
+    assert "clearContents" not in server
+    assert "batch_clear" not in server
+    assert ".values().clear" not in scheduler
 
 
 def test_reply_sent_crm_writeback_is_idempotent_by_receipt_identity():

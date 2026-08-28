@@ -447,7 +447,7 @@ GSHEET_ID      = os.environ["GSHEET_ID"]
 GSHEET_TAB     = os.getenv("GSHEET_TAB", "Sheet1")
 SEEN_ZPID_TAB  = "Seen Zpids"
 GSHEET_RANGE   = os.getenv("GSHEET_RANGE", f"{GSHEET_TAB}!A1")
-GSHEET_NEXT_ROW_HINT = int(os.getenv("GSHEET_NEXT_ROW_HINT", "4797"))
+GSHEET_NEXT_ROW_HINT = int(os.getenv("GSHEET_NEXT_ROW_HINT", "4776"))
 GSHEET_ROW_SCAN_WINDOW = int(os.getenv("GSHEET_ROW_SCAN_WINDOW", "200"))
 SC_JSON        = json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -12592,6 +12592,7 @@ def send_sms(
     address: str,
     row_idx: int,
     follow_up: bool = False,
+    stable_id: str = "",
 ):
     if not SMS_ENABLE or not phone:
         LOG.info(
@@ -12604,6 +12605,7 @@ def send_sms(
         phone = SMS_TEST_NUMBER
     msg_txt = SMS_FU_TEMPLATE if follow_up else SMS_TEMPLATE.format(first=first, address=address)
     digits = _digits_only(phone)
+    stable_id = str(stable_id or "").strip()
     sms_type = "followup" if follow_up else "initial"
     tasker_label_prefix = "TASKER_SEND_FOLLOWUP" if follow_up else "TASKER_SEND_INITIAL"
     max_attempts = SMS_RETRY_ATTEMPTS
@@ -12627,6 +12629,8 @@ def send_sms(
                     "reply_text": msg_txt,
                     "message_id": message_id,
                     "request_id": f"scheduler-{message_id}",
+                    "stable_id": stable_id,
+                    "zpid": stable_id,
                     "mark_codex_verified": False,
                 },
                 timeout=20,
@@ -12645,9 +12649,10 @@ def send_sms(
             )
             return
         LOG.info(
-            "TASKER_INITIAL_OUTBOX_QUEUED row=%s phone=%s request_id=%s message_id=%s pending_row=%s",
+            "TASKER_INITIAL_OUTBOX_QUEUED row=%s phone=%s stable_id=%s request_id=%s message_id=%s pending_row=%s",
             row_idx,
             digits,
+            stable_id or "<blank>",
             payload.get("request_id"),
             payload.get("message_id"),
             payload.get("pending_row"),
@@ -12747,6 +12752,7 @@ def schedule_initial_sms(
     first: str,
     address: str,
     row_idx: int,
+    stable_id: str = "",
 ) -> None:
     """Send initial SMS during working hours, waiting if needed."""
 
@@ -12760,7 +12766,7 @@ def schedule_initial_sms(
 
     now = datetime.now(tz=SCHEDULER_TZ)
     if _within_initial_hours(now):
-        send_sms(phone, first, address, row_idx)
+        send_sms(phone, first, address, row_idx, stable_id=stable_id)
         return
 
     next_start = _next_work_start(now, include_weekends=True)
@@ -12777,7 +12783,7 @@ def schedule_initial_sms(
     def _delayed_send() -> None:
         if sleep_secs:
             time.sleep(sleep_secs)
-        send_sms(phone, first, address, row_idx)
+        send_sms(phone, first, address, row_idx, stable_id=stable_id)
 
     thread = threading.Thread(
         target=_delayed_send,
@@ -13892,7 +13898,7 @@ def process_rows(
                     r.get("search_source") or r.get("source") or "",
                 )
             else:
-                schedule_initial_sms(selected_phone, first, r.get("street", ""), row_idx)
+                schedule_initial_sms(selected_phone, first, r.get("street", ""), row_idx, zpid)
             LOG.info(
                 "SHEET_APPEND_RAPID_SNAPSHOT zpid=%s row=%s phones_found=%s rapid_selected=%s final_phone=%s final_email=%s",
                 zpid,

@@ -288,6 +288,7 @@ function enqueueInitialSmsV13_(body, webhookRequestId) {
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
   var metadata = "__initial_outreach__:" + JSON.stringify({
     crm_row: crmRow,
+    stable_id: String(body && (body.stable_id || body.zpid || body.listing_id) || "").trim(),
     mark_codex_verified: body.mark_codex_verified !== false
   });
   var lock = LockService.getScriptLock();
@@ -330,8 +331,107 @@ function enqueueInitialSmsV13_(body, webhookRequestId) {
   }
 }
 
+function resolveInitialSmsReceiptRowV14_(sheet, crmRow, phone, metadata) {
+  var stableId = String(metadata && (metadata.stable_id || metadata.zpid || metadata.listing_id) || "").trim();
+  var currentPhone = "";
+  if (Number.isInteger(crmRow) && crmRow >= 2) {
+    currentPhone = normalizePhone_(sheet.getRange(crmRow, 3).getValue());
+    var currentStableId = String(sheet.getRange(crmRow, 28).getValue() || "").trim();
+    if (currentPhone === phone && (!stableId || !currentStableId || currentStableId === stableId)) {
+      return {
+        ok: true,
+        row: crmRow,
+        current_phone: currentPhone,
+        mode: "crm_row",
+        stable_id: currentStableId || stableId
+      };
+    }
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    return {
+      ok: false,
+      current_phone: currentPhone,
+      reason: "No current lead rows are available",
+      stable_id: stableId,
+      phone_match_count: 0
+    };
+  }
+
+  var leadRows = sheet.getRange(2, 1, lastRow - 1, 28).getValues();
+  if (stableId) {
+    var stableMatches = [];
+    for (var i = 0; i < leadRows.length; i++) {
+      if (String(leadRows[i][27] || "").trim() !== stableId) continue;
+      stableMatches.push({
+        row: i + 2,
+        phone: normalizePhone_(leadRows[i][2])
+      });
+    }
+    if (stableMatches.length === 1 && stableMatches[0].phone === phone) {
+      return {
+        ok: true,
+        row: stableMatches[0].row,
+        current_phone: stableMatches[0].phone,
+        mode: "stable_id",
+        stable_id: stableId
+      };
+    }
+    if (stableMatches.length > 0) {
+      return {
+        ok: false,
+        current_phone: currentPhone,
+        reason: "Stable listing ID matched a different or ambiguous phone",
+        stable_id: stableId,
+        stable_match_count: stableMatches.length,
+        phone_match_count: 0
+      };
+    }
+  }
+
+  var phoneMatches = [];
+  for (var j = 0; j < leadRows.length; j++) {
+    var rowPhone = normalizePhone_(leadRows[j][2]);
+    if (rowPhone !== phone) continue;
+    phoneMatches.push({
+      row: j + 2,
+      phone: rowPhone,
+      stable_id: String(leadRows[j][27] || "").trim()
+    });
+  }
+  if (phoneMatches.length === 1) {
+    if (stableId && phoneMatches[0].stable_id && phoneMatches[0].stable_id !== stableId) {
+      return {
+        ok: false,
+        current_phone: currentPhone,
+        reason: "Unique phone match has a different stable listing ID",
+        stable_id: stableId,
+        phone_match_count: 1
+      };
+    }
+    return {
+      ok: true,
+      row: phoneMatches[0].row,
+      current_phone: phoneMatches[0].phone,
+      mode: "unique_phone",
+      stable_id: phoneMatches[0].stable_id || stableId
+    };
+  }
+  return {
+    ok: false,
+    current_phone: currentPhone,
+    reason: phoneMatches.length > 1
+      ? "Initial SMS receipt matched multiple current lead rows by phone"
+      : "Initial SMS receipt did not match a current lead row",
+    stable_id: stableId,
+    phone_match_count: phoneMatches.length
+  };
+}
+
 function applyInitialSmsReceiptV13_(body, correlation) {
   var crmRow = Number(correlation && correlation.crm_row || 0);
+  var originalCrmRow = crmRow;
   var phone = normalizePhone_(correlation && correlation.canonical_phone || body && body.phone || "");
   var message = String(correlation && correlation.canonical_reply_text || body && body.reply_text || "").trim();
   if (!Number.isInteger(crmRow) || crmRow < 2 || phone.length !== 10 || !message) {
@@ -342,8 +442,8 @@ function applyInitialSmsReceiptV13_(body, correlation) {
     metadata = JSON.parse(String(correlation.send_metadata || "").replace(/^__initial_outreach__:/, ""));
   } catch (_) {}
   var sheet = getSheet_();
-  var currentPhone = normalizePhone_(sheet.getRange(crmRow, 3).getValue());
-  if (currentPhone !== phone) {
+  var resolvedRow = resolveInitialSmsReceiptRowV14_(sheet, crmRow, phone, metadata);
+  if (!resolvedRow.ok) {
     // Tasker did send the outbox item, but the CRM contact changed before its
     // receipt arrived. Acknowledge the physical send without writing sent
     // fields onto the replacement contact. The recovery scanner will enqueue
@@ -355,10 +455,14 @@ function applyInitialSmsReceiptV13_(body, correlation) {
       crm_write_skipped: true,
       row: crmRow,
       sent_phone: phone,
-      current_phone: currentPhone,
+      current_phone: resolvedRow.current_phone || "",
+      row_resolution: resolvedRow.reason || "Initial SMS receipt matched an obsolete CRM phone",
+      stable_id: resolvedRow.stable_id || "",
+      phone_match_count: resolvedRow.phone_match_count || 0,
       reason: "Initial SMS receipt matched an obsolete CRM phone"
     };
   }
+  crmRow = resolvedRow.row;
   var sentAtRaw = body && body.sent_at;
   var sentAt = /^\d{10,}$/.test(String(sentAtRaw || ""))
     ? new Date(Number(sentAtRaw))
@@ -383,7 +487,15 @@ function applyInitialSmsReceiptV13_(body, correlation) {
   }
   if (metadata.mark_codex_verified !== false) updates.push({ range: "AQ" + crmRow, value: "x" });
   updates.forEach(function(update) { sheet.getRange(update.range).setValue(update.value); });
-  return { ok: true, initial_sms: true, row: crmRow, sent_at: sentAt.toISOString() };
+  return {
+    ok: true,
+    initial_sms: true,
+    row: crmRow,
+    original_row: originalCrmRow,
+    row_resolution: resolvedRow.mode,
+    stable_id: resolvedRow.stable_id || "",
+    sent_at: sentAt.toISOString()
+  };
 }
 
 function enqueueIncomingSmsV10_(body, webhookRequestId) {
@@ -1225,6 +1337,92 @@ function testSmsReceiptLeaseIdentity_() {
     throw new Error("Exact lease identity accepted incomplete identifiers");
   }
   return { ok: true };
+}
+
+function testInitialSmsReceiptRowShiftRecoveryV14_() {
+  function makeLeadRow(phone, stableId) {
+    var row = [];
+    for (var i = 0; i < 28; i++) row.push("");
+    row[2] = phone;
+    row[27] = stableId;
+    return row;
+  }
+
+  var rows = {
+    4: makeLeadRow("555-444-0000", "other-stable"),
+    5: makeLeadRow("555-222-0000", "bad-phone"),
+    6: makeLeadRow("555-333-0000", ""),
+    8: makeLeadRow("864-420-8441", "11056829")
+  };
+  var fakeSheet = {
+    getLastRow: function() {
+      return 8;
+    },
+    getRange: function(row, col, numRows, numCols) {
+      return {
+        getValue: function() {
+          var values = rows[row] || [];
+          return values[col - 1] || "";
+        },
+        getValues: function() {
+          var output = [];
+          for (var r = row; r < row + numRows; r++) {
+            var source = rows[r] || [];
+            var copy = source.slice(0, numCols);
+            while (copy.length < numCols) copy.push("");
+            output.push(copy);
+          }
+          return output;
+        }
+      };
+    }
+  };
+
+  var stableResolved = resolveInitialSmsReceiptRowV14_(
+    fakeSheet,
+    10,
+    "8644208441",
+    { stable_id: "11056829" }
+  );
+  if (!stableResolved.ok || stableResolved.row !== 8 || stableResolved.mode !== "stable_id") {
+    throw new Error("Initial SMS receipt did not recover the shifted row by stable ID");
+  }
+
+  var uniquePhoneResolved = resolveInitialSmsReceiptRowV14_(
+    fakeSheet,
+    10,
+    "5553330000",
+    {}
+  );
+  if (!uniquePhoneResolved.ok || uniquePhoneResolved.row !== 6 || uniquePhoneResolved.mode !== "unique_phone") {
+    throw new Error("Initial SMS receipt did not recover the shifted row by unique phone");
+  }
+
+  var mismatch = resolveInitialSmsReceiptRowV14_(
+    fakeSheet,
+    10,
+    "5551110000",
+    { stable_id: "bad-phone" }
+  );
+  if (mismatch.ok) {
+    throw new Error("Initial SMS receipt accepted a stable ID with the wrong phone");
+  }
+
+  var wrongStableSamePhone = resolveInitialSmsReceiptRowV14_(
+    fakeSheet,
+    4,
+    "5554440000",
+    { stable_id: "missing-stable" }
+  );
+  if (wrongStableSamePhone.ok) {
+    throw new Error("Initial SMS receipt accepted a same-phone row with the wrong stable ID");
+  }
+
+  return {
+    ok: true,
+    stable_row: stableResolved.row,
+    unique_phone_row: uniquePhoneResolved.row
+  };
 }
 
 function normalizePendingSmsInboundText_(value) {

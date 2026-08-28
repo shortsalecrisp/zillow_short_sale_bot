@@ -290,16 +290,17 @@ def _import_webhook_server(monkeypatch, *, sender_result):
 
     sys.modules.pop("webhook_server", None)
     module = importlib.import_module("webhook_server")
-    def fake_enqueue_initial_sms(*, row_idx, phone, message, mark_codex_verified):
-        fake_sender.calls.append(
-            {
-                "to": phone,
-                "message": message,
-                "sms_type": "initial",
-                "row_idx": row_idx,
-                "attempt": 1,
-            }
-        )
+    def fake_enqueue_initial_sms(*, row_idx, phone, message, mark_codex_verified, stable_id=""):
+        call = {
+            "to": phone,
+            "message": message,
+            "sms_type": "initial",
+            "row_idx": row_idx,
+            "attempt": 1,
+        }
+        if stable_id:
+            call["stable_id"] = stable_id
+        fake_sender.calls.append(call)
         if not fake_sender.result.success:
             raise module.HTTPException(status_code=502, detail="tasker_outbox_enqueue_failed")
         return {
@@ -515,6 +516,7 @@ def test_internal_initial_sms_sends_when_verified_but_not_marked_sent(monkeypatc
         sender_result=FakeSendResult(success=True),
     )
     client = TestClient(module.app)
+    sheet.rows[16][27] = "zpid-2216"
 
     response = client.post(
         "/internal/send-initial-sms",
@@ -525,6 +527,8 @@ def test_internal_initial_sms_sends_when_verified_but_not_marked_sent(monkeypatc
     assert response.status_code == 200
     assert response.json()["status"] == "queued"
     assert sender.calls[0]["row_idx"] == 16
+    assert sender.calls[0]["stable_id"] == "zpid-2216"
+    assert response.json()["stable_id"] == "zpid-2216"
     assert sheet.rows[16][7] == ""
     assert sheet.rows[16][22] == ""
     assert sheet.rows[16][42] == "x"

@@ -1566,15 +1566,21 @@ def test_process_rows_surfaces_override(monkeypatch):
     monkeypatch.setattr(bot_min, "build_q_email", fail)
     monkeypatch.setattr(bot_min, "google_items", fail)
     monkeypatch.setattr(bot_min, "pmap", fail)
+    monkeypatch.setattr(bot_min, "_find_existing_phone_row", lambda *args, **kwargs: None)
 
     captured = {}
+    scheduled = []
 
     def fake_append_row(row_vals):
         captured["row"] = row_vals
         return 42
 
     monkeypatch.setattr(bot_min, "append_row", fake_append_row)
-    monkeypatch.setattr(bot_min, "send_sms", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        bot_min,
+        "schedule_initial_sms",
+        lambda *args, **kwargs: scheduled.append((args, kwargs)),
+    )
 
     bot_min.process_rows(
         [
@@ -1593,6 +1599,7 @@ def test_process_rows_surfaces_override(monkeypatch):
     assert captured["row"][bot_min.COL_EMAIL] == "jane@example.com"
     assert captured["row"][bot_min.COL_PHONE_CONF] == "high"
     assert captured["row"][bot_min.COL_EMAIL_CONF] == "high"
+    assert scheduled == [(("555-444-3333", "Jane", "123 Elm St", 42, "abc"), {})]
 
 
 def test_process_rows_holds_pilot_origin_sms_for_verifier(monkeypatch):

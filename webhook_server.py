@@ -3104,12 +3104,18 @@ def _mark_initial_sms_sent(
 
 
 def _enqueue_initial_sms_via_tasker_outbox(
-    *, row_idx: int, phone: str, message: str, mark_codex_verified: bool
+    *,
+    row_idx: int,
+    phone: str,
+    message: str,
+    mark_codex_verified: bool,
+    stable_id: str = "",
 ) -> Dict[str, Any]:
     if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
         raise HTTPException(status_code=503, detail="tasker_outbox_not_configured")
     message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
     message_id = f"initial-{row_idx}-{message_hash}"
+    stable_id = str(stable_id or "").strip()
     try:
         response = requests.post(
             TASKER_TRANSPORT_HEALTH_URL,
@@ -3123,13 +3129,15 @@ def _enqueue_initial_sms_via_tasker_outbox(
                 "reply_text": message,
                 "message_id": message_id,
                 "request_id": f"render-{message_id}",
+                "stable_id": stable_id,
+                "zpid": stable_id,
                 "mark_codex_verified": mark_codex_verified,
             },
             timeout=20,
         )
         payload = response.json() if response.status_code == 200 else {}
     except Exception as exc:
-        logger.exception("INITIAL_SMS_OUTBOX_ENQUEUE_FAILED row=%s phone=%s", row_idx, phone)
+        logger.exception("INITIAL_SMS_OUTBOX_ENQUEUE_FAILED row=%s phone=%s stable_id=%s", row_idx, phone, stable_id)
         raise HTTPException(status_code=502, detail=f"tasker_outbox_enqueue_failed:{type(exc).__name__}")
     if response.status_code != 200 or payload.get("ok") is not True:
         raise HTTPException(
@@ -3338,17 +3346,26 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     message = _format_initial_message(payload, row)
     if not message:
         raise HTTPException(status_code=400, detail="empty_message")
+    stable_id = str(
+        payload.get("stable_id")
+        or payload.get("zpid")
+        or payload.get("listing_id")
+        or _row_value(row, 27)
+        or ""
+    ).strip()
 
     queued = _enqueue_initial_sms_via_tasker_outbox(
         row_idx=row_idx,
         phone=digits,
         message=message,
         mark_codex_verified=mark_codex_verified,
+        stable_id=stable_id,
     )
     logger.info(
-        "INTERNAL_INITIAL_SMS_QUEUED row=%s phone=%s request_id=%s message_id=%s codex_verified=%s",
+        "INTERNAL_INITIAL_SMS_QUEUED row=%s phone=%s stable_id=%s request_id=%s message_id=%s codex_verified=%s",
         row_idx,
         digits,
+        stable_id or "<blank>",
         queued.get("request_id"),
         queued.get("message_id"),
         mark_codex_verified,
@@ -3359,6 +3376,7 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "phone": digits,
         "request_id": queued.get("request_id"),
         "message_id": queued.get("message_id"),
+        "stable_id": stable_id,
         "pending_row": queued.get("pending_row"),
         "duplicate": bool(queued.get("duplicate")),
         "codex_verified": mark_codex_verified,
