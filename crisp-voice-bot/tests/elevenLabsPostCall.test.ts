@@ -149,7 +149,7 @@ const lorettaMisfiredTransferConversation = {
     {
       role: "agent",
       message:
-        "Got it. We can take the lender paperwork and follow-up off your plate at no cost to you or the seller. Worth a quick call with Yoni?",
+        "Got it. We can take the lender paperwork and follow-up off your plate at no cost to you or the seller. Would you rather have Yoni give you a quick call, or should I send over info?",
     },
     { role: "user", message: "Yeah, sure." },
     { role: "agent", message: "Ok, hold on, let me see if he's available one second." },

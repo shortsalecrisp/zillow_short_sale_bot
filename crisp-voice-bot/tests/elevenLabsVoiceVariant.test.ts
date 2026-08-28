@@ -48,7 +48,7 @@ test("ElevenLabs opener test assigns weighted opener variants by row", async () 
   assert.deepEqual(buildElevenLabsOpenerVariant({ rowNumber: 3700, firstName: "Karimah", assistantName: "Maya" }), {
     key: "identity_check_short",
     label: "Short identity check control",
-    script: "This is Maya with Crisp Short Sales. Is this Karimah?",
+    script: "Is this Karimah?",
   });
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3701, firstName: "Norma", assistantName: "Maya" }).key,
@@ -60,7 +60,7 @@ test("ElevenLabs opener test assigns weighted opener variants by row", async () 
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3708, firstName: "Miriam", assistantName: "Maya" }).script,
-    "This is Maya with Crisp Short Sales. I'm calling about your short sale listing. Are you handling the bank side yourself?",
+    "I'm calling about your short sale listing. Are you handling the bank side yourself?",
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3709, firstName: "Marta", assistantName: "Maya" }).key,
@@ -69,7 +69,7 @@ test("ElevenLabs opener test assigns weighted opener variants by row", async () 
 
   for (let rowNumber = 3700; rowNumber < 3710; rowNumber += 1) {
     const opener = buildElevenLabsOpenerVariant({ rowNumber, firstName: "Taylor", assistantName: "Maya" });
-    assert.match(opener.script, /^This is Maya with Crisp Short Sales\./);
+    assert.doesNotMatch(opener.script, /^This is Maya with Crisp Short Sales\./);
   }
 });
 
@@ -105,7 +105,7 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.agentTimeZone, "America/New_York");
   assert.equal(
     body.conversation_initiation_client_data.dynamic_variables.openerScript,
-    "This is Finn with Crisp Short Sales. We help agents with lender calls and paperwork on short sales. Are you handling that one yourself?",
+    "We help agents with lender calls and paperwork on short sales. Are you handling that one yourself?",
   );
   assert.equal(
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,

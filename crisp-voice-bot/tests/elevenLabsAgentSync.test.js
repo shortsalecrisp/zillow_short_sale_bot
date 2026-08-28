@@ -17,10 +17,10 @@ function readConfig() {
   );
 }
 
-test("agent sync uses a short interruptible pickup probe before the opener", () => {
+test("agent sync uses a short interruptible identity opener before the opener continuation", () => {
   const script = readSyncScript();
 
-  assert.match(script, /const FIRST_MESSAGE = "Hello\?";/);
+  assert.match(script, /const FIRST_MESSAGE = "This is {{assistantName}} with Crisp Short Sales\.";/);
   assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = 1;/);
   assert.match(script, /const TURN_TIMEOUT_SECONDS = 1\.5;/);
   assert.match(script, /const TURN_EAGERNESS = "normal";/);
@@ -67,7 +67,7 @@ test("agent sync blocks ambiguous okay-style replies from the transfer-check edg
   const script = readSyncScript();
 
   assert.match(script, /clearly and unambiguously wants to talk to Yoni right now/);
-  assert.match(script, /plain yes\/sure\/ok after the value-pitch line/);
+  assert.match(script, /plain yes\/sure\/ok after the value-pitch choice/);
   assert.match(script, /vague or overlapped replies like okay okay/);
   assert.match(script, /caller is busy, in a meeting, wants later\/tomorrow, will call back/);
   assert.match(script, /clarify callback versus trying Yoni now/);

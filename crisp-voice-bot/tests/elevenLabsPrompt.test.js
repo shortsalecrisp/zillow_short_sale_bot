@@ -59,14 +59,14 @@ test("prompt uses dynamic opener scripts and keeps the address out of the first 
     "- If they give any clear yes-type answer after that, do not repeat",
   );
 
-  assert.match(openingSection, /The backend first says a short pickup probe/);
-  assert.match(openingSection, /"Hello\?"/);
-  assert.match(openingSection, /That pickup probe is only to avoid dumping the full opener before the line is ready/);
-  assert.match(openingSection, /After the first real live-human response, deliver the selected opener/);
+  assert.match(openingSection, /The backend first says a short identity opener/);
+  assert.match(openingSection, /"This is {{assistantName}} with Crisp Short Sales\."/);
+  assert.match(openingSection, /Do not say "Hello\?" as the opener/);
+  assert.match(openingSection, /After the first real live-human response, deliver the selected opener continuation/);
   assert.match(prompt, /"{{openerScript}}"/);
   assert.match(prompt, /The backend chooses `{{openerScript}}` for the opener test/);
   assert.match(prompt, /passes `{{openerVariant}}` for analysis/);
-  assert.match(prompt, /Do not add another long pause after the pickup probe/);
+  assert.match(prompt, /Do not add another long pause after the identity opener/);
   assert.match(prompt, /Do not say `{{streetAddress}}` in the first line/);
   assert.match(openingSection, /do not deliver `{{openerScript}}`/);
   assert.match(
@@ -85,7 +85,7 @@ test("prompt uses dynamic opener scripts and keeps the address out of the first 
 }
 );
 
-test("prompt repairs pickup-probe confusion with a clean identity before the pitch", () => {
+test("prompt repairs identity-opener confusion with a clean identity before the pitch", () => {
   const prompt = readPrompt();
   const openingSection = extractSection(
     prompt,
@@ -95,6 +95,7 @@ test("prompt repairs pickup-probe confusion with a clean identity before the pit
 
   assert.match(openingSection, /Hello\? Hello\? What\?/);
   assert.match(openingSection, /do not repeat the full opener over them/);
+  assert.match(openingSection, /Repeat the exact identity phrase once/);
   assert.match(openingSection, /This is {{assistantName}} with Crisp Short Sales\./);
   assert.match(openingSection, /Do not put the pitch in the same repair turn/);
 });
@@ -257,7 +258,8 @@ test("prompt waits through office robots and gatekeeper transfer attempts", () =
   assert.match(prompt, /automated attendant/i);
   assert.match(prompt, /phone tree/i);
   assert.match(prompt, /record your name and reason for calling/i);
-  assert.match(prompt, /what's the best time for Yoni to call back/i);
+  assert.match(prompt, /Yoni's direct callback number is 404-300-9526/i);
+  assert.match(prompt, /What's the best time or direct number for {{firstName}}\?/i);
   assert.match(prompt, /Please stay on the line/i);
   assert.match(prompt, /Sure, I'll wait\./);
   assert.match(prompt, /Do not call `end_call`[\s\S]{0,160}transferred/i);
@@ -348,10 +350,11 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   assert.match(selfHandlingBranch, /Do not treat this as a hard no/);
   assert.match(selfHandlingBranch, /lender paperwork and follow-up/);
   assert.match(selfHandlingBranch, /no cost to you or the seller/);
-  assert.match(selfHandlingBranch, /Worth a quick call with Yoni/);
+  assert.match(selfHandlingBranch, /Would you rather have Yoni give you a quick call, or should I send over info/);
   assert.match(selfHandlingBranch, /do not start a transfer yet/i);
   assert.match(selfHandlingBranch, /Do you want me to try to bring Yoni onto this call now, or should he call you at a specific time\?/);
   assert.match(selfHandlingBranch, /interest only/i);
+  assert.match(selfHandlingBranch, /callbackTime` set to `send info/);
   assert.match(selfHandlingBranch, /What time should he call you\?/);
 });
 
@@ -393,7 +396,7 @@ test("prompt does not treat overlapped okay or busy later/callback language as l
   );
 
   assert.match(transferRule, /clearly and unambiguously agrees/);
-  assert.match(transferRule, /Worth a quick call with Yoni/);
+  assert.match(transferRule, /quick-call-or-info value pitch/);
   assert.match(transferRule, /not a clear live-transfer yes/i);
   assert.match(transferRule, /Do not treat a vague or overlapped "okay okay"/);
   assert.match(transferRule, /"I, so\.\.\. okay"/);
