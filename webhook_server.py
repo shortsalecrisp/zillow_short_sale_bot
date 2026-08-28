@@ -3695,6 +3695,7 @@ def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[
         return False
     patterns = [
         r"\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b",
+        r"\b(?:i|we)(?:['\u2019]?ll| will)\s+add\s+(?:you|your\s+(?:info|information|contact|number|details))\s+to\s+(?:my|our)\s+network\b",
         r"\b(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b",
         r"\bkeep\s+(?:me|us)\s+in\s+mind\b",
         r"\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b",

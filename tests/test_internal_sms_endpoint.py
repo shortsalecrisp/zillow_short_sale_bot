@@ -1556,6 +1556,16 @@ def test_sms_covered_but_relationship_open_closes_as_non_hot_without_handoff(mon
     assert common_typo["handoff_needed"] is False
     assert common_typo["call_booking_status"] == "warm_future_interest"
 
+    network_add = module._sms_fast_decision(
+        row,
+        "Sounds good! I'll add you to my network",
+    )
+    assert network_add["lead_status"] == "O"
+    assert network_add["conversation_done"] is True
+    assert network_add["handoff_needed"] is False
+    assert network_add["call_booking_status"] == "warm_future_interest"
+    assert network_add["reply_text"] == "Thanks, I appreciate it. Feel free to reach out if a short sale comes up."
+
     reciprocal = module._sms_fast_decision(
         row,
         "If you have clients looking for a great agent, keep me in mind as well!",

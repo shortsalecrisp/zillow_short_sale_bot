@@ -3491,6 +3491,7 @@ function isRelationshipOnlyAfterExistingCoverageSignal_(text, rowObj) {
   }
   const passiveRelationshipPatterns = [
     /\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b/,
+    /\b(?:i|we)(?:['\u2019]?ll| will)\s+add\s+(?:you|your\s+(?:info|information|contact|number|details))\s+to\s+(?:my|our)\s+network\b/,
     /\b(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b/,
     /\bkeep\s+(?:me|us)\s+in\s+mind\b/,
     /\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b/
@@ -6638,6 +6639,9 @@ function testApprovedLeadIntelligenceRules_() {
   };
   if (!isRelationshipOnlyAfterExistingCoverageSignal_("Ill definitely keep your information for future short sale opportunities", apostropheLossRelationshipRow)) {
     throw new Error("Apostrophe-stripped relationship-only closeout regression");
+  }
+  if (!isRelationshipOnlyAfterExistingCoverageSignal_("Sounds good! I'll add you to my network", apostropheLossRelationshipRow)) {
+    throw new Error("Network-add relationship-only closeout regression");
   }
   const relationshipTypoText = "We are working with someone right now but I will keep you contact in case anything changes";
   const relationshipTypoDecision = applyFastRules_(relationshipTypoText, {});
