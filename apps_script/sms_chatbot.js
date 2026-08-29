@@ -2063,13 +2063,13 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   if (flags.source && matchedKeys.length === 1) {
     return {
       matched: true,
-      reply_text: "I thought I saw it marked online as a short sale. My mistake if I misread it. Thanks.",
-      lead_status: "R",
-      conversation_done: true,
+      reply_text: buildSourceChallengeReply_(rowObj),
+      lead_status: "Y",
+      conversation_done: false,
       handoff_needed: false,
       needs_review: false,
       block_reply: false,
-      reason: "Agent asked why the listing was considered a short sale"
+      reason: "Answered source challenge without inventing property or lender facts"
     };
   }
 
@@ -2270,6 +2270,23 @@ function applyFastRules_(text, rowObj) {
       block_reply: true,
       preserve_existing_state: true,
       reason: "Courtesy acknowledgment of information; no response needed"
+    };
+  }
+
+  if (isCompoundServiceRequestSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildCompoundServiceRequestReply_(t),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: true,
+      needs_review: false,
+      block_reply: false,
+      handoff_type: "COMPOUND SERVICE DOCUMENTS / DEADLINE REVIEW",
+      call_booking_status: "interested_no_call",
+      send_reply_before_handoff: true,
+      bypass_reply_cap: true,
+      reason: "Answered each safe compound service question and routed documents or deadline review to Yoni"
     };
   }
 
@@ -3992,6 +4009,7 @@ function isShortSaleSourceQuestion_(text) {
 
   const anaphoricPhrases = [
     "what would make you think it was",
+    "what would make you think it would be",
     "what made you think it was",
     "why would you think it was",
     "why did you think it was",
@@ -3999,6 +4017,8 @@ function isShortSaleSourceQuestion_(text) {
   ];
 
   if (anaphoricPhrases.some(phrase => t.indexOf(phrase) !== -1)) return true;
+  if (/\b(?:what|which)\b.{0,40}\btrigger(?:ed|s)?\b.{0,60}\breach out\b/.test(t) ||
+      /\b(?:why|what made)\b.{0,40}\breach out\b/.test(t)) return true;
   if (t.indexOf("short sale") === -1) return false;
 
   const directPhrases = [
@@ -4019,6 +4039,58 @@ function isShortSaleSourceQuestion_(text) {
   if (directPhrases.some(phrase => t.indexOf(phrase) !== -1)) return true;
 
   return false;
+}
+
+function buildSourceChallengeReply_(rowObj) {
+  const initialText = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.initial_text_sent] || "")).toLowerCase();
+  if (initialText.indexOf("short sale") !== -1) {
+    return "I reached out because our initial message identified the listing as a possible short sale. I don't have verified lender, payoff, or lien information. If that identification is wrong, the source data may be inaccurate; please let me know and I'll close this out.";
+  }
+  return "I don't have a verified property-specific trigger in this conversation. Our source data may be inaccurate, and I don't have lender, payoff, or lien information. If this isn't a short sale, please let me know and I'll close this out.";
+}
+
+function compoundServiceRequestFlags_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return {
+    agreement: /\b(?:agent|service)?\s*agreement\b/.test(t),
+    fee_schedule: /\b(?:buyer[- ]paid\s+)?fee\s+schedule\b/.test(t),
+    scope: /\b(?:outline|explain|describe)\b.{0,80}\b(?:what|everything|services?|team)\b.{0,80}\b(?:handle|handles|handled)\b/.test(t) ||
+      /\bexactly\s+what\b.{0,60}\b(?:handle|handles|handled)\b/.test(t) ||
+      /\bfrom\s+submission\s+through\s+(?:approval|closing)\b/.test(t),
+    equator: /\bequator\b/.test(t),
+    deadline: /\bforeclosure\b.{0,50}\b(?:deadline|deadlines|date|dates|sale)\b/.test(t),
+    compliance: isComplianceOrLicensingQuestionSignal_(t)
+  };
+}
+
+function isCompoundServiceRequestSignal_(text) {
+  const flags = compoundServiceRequestFlags_(text);
+  return Object.keys(flags).filter(function(key) { return flags[key]; }).length >= 2;
+}
+
+function buildCompoundServiceRequestReply_(text) {
+  const flags = compoundServiceRequestFlags_(text);
+  const parts = [];
+  if (flags.scope) {
+    parts.push("I handle document collection, package submission, lender follow-up, negotiations, and coordination through approval and closing.");
+  }
+  if (flags.equator) parts.push("I also handle Equator tasks and communication.");
+  if (flags.fee_schedule) {
+    parts.push("There is no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes.");
+  }
+
+  const actions = [];
+  const requestedDocuments = [];
+  if (flags.agreement) requestedDocuments.push("agreement");
+  if (flags.fee_schedule) requestedDocuments.push("fee schedule");
+  if (requestedDocuments.length) actions.push("send the current " + requestedDocuments.join(" and "));
+  if (flags.deadline) actions.push("review any foreclosure deadline before anyone promises timing or a postponement");
+  if (flags.compliance) actions.push("answer the licensing or compliance question directly");
+  if (actions.length) {
+    parts.push("Yoni needs to " + actions.join("; ") + ".");
+    parts.push("I've flagged those items for his follow-up.");
+  }
+  return parts.join(" ");
 }
 
 function isImmediateCallSignal_(text) {
@@ -5954,12 +6026,43 @@ function testSmsIntentContractV3_() {
     emailRequest.reason
   );
 
-  const source = applyFastRules_("Why did you think it was a short sale?", baseRow);
+  const sourceRow = Object.assign({}, baseRow);
+  sourceRow[HEADERS.initial_text_sent] = "I noticed your listing may be a potential short sale.";
+  const source = applyFastRules_("What triggered you to reach out? I believe the only lien is about $150k.", sourceRow);
   record(
     "short_sale_source",
-    source.matched && source.lead_status === "R" &&
-      source.reply_text.indexOf("marked online") !== -1,
+    source.matched && source.lead_status === "Y" && !source.conversation_done &&
+      source.reply_text.indexOf("initial message identified") !== -1 &&
+      source.reply_text.indexOf("verified lender, payoff, or lien information") !== -1 &&
+      source.reply_text.indexOf("price drops") === -1 &&
+      source.reply_text.indexOf("days on market") === -1,
     source.reason
+  );
+
+  const compoundServiceText = "Can you send your service agreement, buyer-paid fee schedule, and explain exactly what your team handles from submission through approval? How do you handle Equator files and foreclosure deadlines?";
+  const compoundService = applyFastRules_(compoundServiceText, baseRow);
+  record(
+    "compound_service_answers_before_handoff",
+    compoundService.matched && compoundService.handoff_needed && !compoundService.block_reply &&
+      compoundService.send_reply_before_handoff && compoundService.bypass_reply_cap &&
+      compoundService.reply_text === buildCompoundServiceRequestReply_(compoundServiceText) &&
+      compoundService.reply_text.indexOf("Equator") !== -1 &&
+      compoundService.reply_text.indexOf("agreement and fee schedule") !== -1 &&
+      compoundService.reply_text.indexOf("foreclosure deadline") !== -1,
+    compoundService.reason
+  );
+
+  const compoundCompliance = applyFastRules_(
+    "Can you send your service agreement, and are you licensed to do this in Florida?",
+    baseRow
+  );
+  record(
+    "compound_compliance_names_human_boundary",
+    compoundCompliance.matched && compoundCompliance.handoff_needed &&
+      compoundCompliance.send_reply_before_handoff &&
+      compoundCompliance.reply_text.indexOf("send the current agreement") !== -1 &&
+      compoundCompliance.reply_text.indexOf("answer the licensing or compliance question directly") !== -1,
+    compoundCompliance.reason
   );
 
   const answerAcknowledgmentRow = Object.assign({}, baseRow);

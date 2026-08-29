@@ -3523,6 +3523,77 @@ SHORT_SALE_TIMELINE_REPLY = (
 )
 
 
+def _sms_compound_service_request_flags(value: Any) -> Dict[str, bool]:
+    text = _sms_normalize_whitespace(value).lower()
+    return {
+        "agreement": bool(re.search(r"\b(?:agent|service)?\s*agreement\b", text)),
+        "fee_schedule": bool(re.search(r"\b(?:buyer[- ]paid\s+)?fee\s+schedule\b", text)),
+        "scope": bool(re.search(
+            r"\b(?:outline|explain|describe)\b.{0,80}\b(?:what|everything|services?|team)\b.{0,80}\b(?:handle|handles|handled)\b"
+            r"|\bexactly\s+what\b.{0,60}\b(?:handle|handles|handled)\b"
+            r"|\bfrom\s+submission\s+through\s+(?:approval|closing)\b",
+            text,
+        )),
+        "equator": bool(re.search(r"\bequator\b", text)),
+        "deadline": bool(re.search(r"\bforeclosure\b.{0,50}\b(?:deadline|deadlines|date|dates|sale)\b", text)),
+        "compliance": _sms_is_compliance_or_licensing_question(text),
+    }
+
+
+def _sms_is_compound_service_request(value: Any) -> bool:
+    return sum(_sms_compound_service_request_flags(value).values()) >= 2
+
+
+def _sms_compound_service_request_reply(value: Any) -> str:
+    flags = _sms_compound_service_request_flags(value)
+    parts: List[str] = []
+    if flags["scope"]:
+        parts.append(
+            "I handle document collection, package submission, lender follow-up, negotiations, and coordination "
+            "through approval and closing."
+        )
+    if flags["equator"]:
+        parts.append("I also handle Equator tasks and communication.")
+    if flags["fee_schedule"]:
+        parts.append(
+            "There is no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes."
+        )
+
+    actions: List[str] = []
+    requested_documents: List[str] = []
+    if flags["agreement"]:
+        requested_documents.append("agreement")
+    if flags["fee_schedule"]:
+        requested_documents.append("fee schedule")
+    if requested_documents:
+        actions.append("send the current " + " and ".join(requested_documents))
+    if flags["deadline"]:
+        actions.append("review any foreclosure deadline before anyone promises timing or a postponement")
+    if flags["compliance"]:
+        actions.append("answer the licensing or compliance question directly")
+    if actions:
+        parts.append("Yoni needs to " + "; ".join(actions) + ".")
+        parts.append("I've flagged those items for his follow-up.")
+    return " ".join(parts)
+
+
+def _sms_source_challenge_reply(row_obj: Dict[str, str]) -> str:
+    initial_text = _sms_normalize_whitespace(
+        row_obj.get("initial_text") or row_obj.get("initial_text_sent")
+    ).lower()
+    if "short sale" in initial_text:
+        return (
+            "I reached out because our initial message identified the listing as a possible short sale. "
+            "I don't have verified lender, payoff, or lien information. If that identification is wrong, "
+            "the source data may be inaccurate; please let me know and I'll close this out."
+        )
+    return (
+        "I don't have a verified property-specific trigger in this conversation. Our source data may be inaccurate, "
+        "and I don't have lender, payoff, or lien information. If this isn't a short sale, please let me know and "
+        "I'll close this out."
+    )
+
+
 def _sms_is_short_sale_timeline_question(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     if not text:
@@ -4906,7 +4977,13 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         "credential": bool(re.search(r"\b(?:are you|you are|r u)\s+(?:licensed\s+as\s+)?(?:an?\s+)?(?:attorney|lawyer)\b|\bdo you provide legal advice\b", text)),
         "negotiator": bool(re.search(r"\b(?:are you|so you are|so a|r u)\s+(?:an?\s+)?(?:short sale\s+)?negotiator\b", text)),
         "language": _sms_is_spanish_language_question(text),
-        "source": bool(re.search(r"\b(?:why|what)\b.{0,60}\b(?:think|thought|believe|make you think)\b.{0,60}\bshort sale\b", text)),
+        "source": bool(re.search(
+            r"\b(?:why|what)\b.{0,80}\b(?:think|thought|believe|make you think)\b.{0,80}\bshort sale\b"
+            r"|\bwhat\s+(?:would\s+)?make\s+you\s+think\b.{0,80}\bshort sale\b"
+            r"|\b(?:what|which)\b.{0,40}\btrigger(?:ed|s)?\b.{0,60}\breach out\b"
+            r"|\b(?:why|what made)\b.{0,40}\breach out\b",
+            text,
+        )),
         "different": _sms_is_differentiation_question(text),
     }
     matched = [name for name, enabled in flags.items() if enabled]
@@ -4915,9 +4992,9 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
 
     if flags["source"] and len(matched) == 1:
         return _sms_decision(
-            reply_text="I thought I saw it marked online as a short sale. My mistake if I misread it. Thanks.",
-            lead_status="R", conversation_done=True,
-            reason="Agent asked why the listing was considered a short sale",
+            reply_text=_sms_source_challenge_reply(row_obj),
+            lead_status="Y", conversation_done=False,
+            reason="Answered source challenge without inventing property or lender facts",
         )
     if flags["different"] and len(matched) == 1:
         return _sms_decision(
@@ -5140,6 +5217,19 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             block_reply=True,
             preserve_existing_state=True,
             reason="Human override enabled - inbound recorded only",
+        )
+
+    if _sms_is_compound_service_request(t):
+        return _sms_decision(
+            reply_text=_sms_compound_service_request_reply(t),
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=False,
+            handoff_type="COMPOUND SERVICE DOCUMENTS / DEADLINE REVIEW",
+            reason="Answered each safe compound service question and routed documents or deadline review to Yoni",
+            call_booking_status="interested_no_call",
+            send_reply_before_handoff=True,
+            bypass_reply_cap=True,
         )
 
     if re.search(r"\bequator\b", t):
