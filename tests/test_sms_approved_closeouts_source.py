@@ -44,6 +44,15 @@ def test_apps_script_future_buyer_recontact_closes_warm_without_takeover():
     assert "Agent will reconnect after securing a buyer; warm future interest closed without takeover" in CHATBOT
 
 
+def test_apps_script_answers_buyer_provision_question_without_rejection_closeout():
+    assert "function isBuyerProvisionQuestionSignal_" in CHATBOT
+    assert "function buildBuyerProvisionClarificationReply_" in CHATBOT
+    assert 'const buyerProvision = applyFastRules_("So you bring the buyer?!", baseRow);' in CHATBOT
+    assert '"buyer_provision_question_gets_scope_clarification"' in CHATBOT
+    assert 'sanitizeReplyBuyerOffer_(buyerProvision.reply_text) === buyerProvision.reply_text' in CHATBOT
+    assert "No, I don't bring the buyer. I just handle the processing with the bank." in CHATBOT
+
+
 def test_apps_script_substantive_repeat_routes_to_handoff():
     assert '"SUBSTANTIVE QUESTION FOLLOW-UP"' in CHATBOT
     assert "Agent asked a new substantive question after a similar prior answer" in CHATBOT

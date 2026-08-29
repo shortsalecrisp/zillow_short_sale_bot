@@ -2052,6 +2052,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
     number: isCurrentTextingNumberQuestionSignal_(t),
     credential: isCredentialQuestionSignal_(t),
     negotiator: isNegotiatorRoleQuestionSignal_(t),
+    buyer_provision: isBuyerProvisionQuestionSignal_(t),
     language: isSpanishLanguageSignal_(t),
     source: isShortSaleSourceQuestion_(t),
     differentiation: isDifferentiationQuestionSignal_(t)
@@ -2214,6 +2215,11 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
       reason: "Clarified the short-sale negotiator role"
     };
+    if (flags.buyer_provision) return {
+      matched: true, reply_text: buildBuyerProvisionClarificationReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Clarified that Crisp handles bank processing and does not bring the buyer"
+    };
     if (flags.language) return {
       matched: true, reply_text: buildSpanishCapabilityReply_(), lead_status: leadStatus,
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
@@ -2241,6 +2247,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   if (flags.number) answers.push("Yes, this number is great - call or text anytime.");
   if (flags.credential) answers.push("I'm not an attorney; I handle the lender-side short-sale process and negotiations.");
   if (flags.negotiator) answers.push("Yes, essentially; I handle the short-sale process and lender negotiations through approval.");
+  if (flags.buyer_provision) answers.push(buildBuyerProvisionClarificationReply_());
   if (flags.language) answers.push("I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.");
 
   return {
@@ -3289,6 +3296,17 @@ function isOfferSubmissionConfusionSignal_(text) {
   return /\b(?:please\s+)?submit\s+(?:an?|the|my|our|your)\s+offer\b/.test(t) ||
     /\b(?:can|could|will|would)\s+you\s+submit\s+(?:an?|the|my|our|your)\s+offer\b/.test(t) ||
     /\bsubmit\s+(?:it|this)\s+to\s+(?:the\s+)?(?:seller|listing agent|agent)\b/.test(t);
+}
+
+function isBuyerProvisionQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /\b(?:so\s+)?you\s+(?:bring|provide|find|supply)\s+(?:the|a)\s+buyer\b/.test(t) ||
+    /\b(?:do|can|will|would)\s+you\s+(?:bring|provide|find|supply)\s+(?:the|a)\s+buyer\b/.test(t) ||
+    /\b(?:are\s+you|you(?:'re|\s+are))\s+(?:bringing|providing|finding|supplying)\s+(?:the|a)\s+buyer\b/.test(t);
+}
+
+function buildBuyerProvisionClarificationReply_() {
+  return "No, I don't bring the buyer. I just handle the processing with the bank. As long as you disclose the cost to the buyer up front in the listing, they should be able to take that cost into account with their offer price, and then there's usually never any issue.";
 }
 
 function lastOutboundWasOfferScopeClarification_(rowObj) {
@@ -5012,7 +5030,10 @@ function sanitizeReplyBuyerOffer_(replyText) {
 
   // Allow the approved clarification that we do not bring buyers, while still
   // blocking any reply that promises to send or bring buyer leads.
-  if (normalized.indexOf("i don't necessarily have a buyer") !== -1 || normalized.indexOf("i dont necessarily have a buyer") !== -1 || normalized.indexOf("i do not necessarily have a buyer") !== -1) {
+  if (normalized === normalizeWhitespace_(buildBuyerProvisionClarificationReply_().toLowerCase()) ||
+      normalized.indexOf("i don't necessarily have a buyer") !== -1 ||
+      normalized.indexOf("i dont necessarily have a buyer") !== -1 ||
+      normalized.indexOf("i do not necessarily have a buyer") !== -1) {
     return text;
   }
 
@@ -6170,6 +6191,17 @@ function testSmsIntentContractV3_() {
       submitOffer.handoff_type === "OFFER SUBMISSION REQUEST" &&
       submitOffer.reply_text.indexOf("don't represent a buyer") !== -1,
     submitOffer.reason
+  );
+
+  const buyerProvision = applyFastRules_("So you bring the buyer?!", baseRow);
+  record(
+    "buyer_provision_question_gets_scope_clarification",
+    buyerProvision.matched && !buyerProvision.handoff_needed && !buyerProvision.block_reply &&
+      buyerProvision.lead_status === "Y" &&
+      buyerProvision.reply_text === buildBuyerProvisionClarificationReply_() &&
+      sanitizeReplyBuyerOffer_(buyerProvision.reply_text) === buyerProvision.reply_text &&
+      buyerProvision.reply_text.indexOf("Ok, no problem") === -1,
+    buyerProvision.reason
   );
 
   const weekendCallback = applyFastRules_("Lets talk after the weekend", baseRow);
