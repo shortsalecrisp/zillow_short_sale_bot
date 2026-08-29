@@ -112,6 +112,7 @@ RECOVERY_PENDING_PREFIX = "recovery_pending_v1="
 RECOVERY_ATTEMPT_PREFIX = "recovery_attempt_v1="
 RECOVERY_COMPLETED_PREFIX = "recovery_completed_v1="
 RECOVERY_EXHAUSTED_PREFIX = "recovery_exhausted_v1="
+SOURCE_SCORECARD_PREFIX = "scorecard_v1:"
 RUN_RECEIPT_STALE_MINUTES = int(os.getenv("FREE_SOURCE_PILOT_RUN_RECEIPT_STALE_MINUTES", "70"))
 
 PILOT_HEADERS = [
@@ -430,6 +431,10 @@ AGENT_SHADOW_CONSENSUS_CAP = max(
 )
 LINK_AUDIT_START_DATE = os.getenv("FREE_SOURCE_PILOT_LINK_AUDIT_START_DATE", "2026-08-01").strip()
 LINK_AUDIT_DAYS = max(1, int(os.getenv("FREE_SOURCE_PILOT_LINK_AUDIT_DAYS", "3")))
+REQUIRED_POST_SOURCE_VERIFIER = os.getenv(
+    "FREE_SOURCE_PILOT_REQUIRED_POST_SOURCE_VERIFIER",
+    "lead-verifier-8-am",
+).strip()
 BROKERAGE_SUFFIX_SHADOW_START_DATE = os.getenv(
     "FREE_SOURCE_PILOT_BROKERAGE_SUFFIX_SHADOW_START_DATE",
     "2026-08-01",
@@ -789,6 +794,14 @@ DISQUALIFY_PATTERNS = [
     ),
     re.compile(r"\bshort\s+sale\b.{0,80}\bapproved\s+price\b", re.IGNORECASE),
     re.compile(r"\bapproved\s+price\b.{0,80}\bshort\s+sale\b", re.IGNORECASE),
+    re.compile(
+        r"\bshort\s+sale\b.{0,80}\bpric(?:e|ed|ing)\b.{0,40}\(?\s*approved\s*\)?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\(?\s*approved\s*\)?.{0,40}\bpric(?:e|ed|ing)\b.{0,80}\bshort\s+sale\b",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"\bshort\s+sale\b.{0,80}\b(?:already\s+approved|lender\s+approved)\b|"
         r"\b(?:already\s+approved|lender\s+approved)\b.{0,80}\bshort\s+sale\b",
@@ -4358,6 +4371,122 @@ def recovery_manifest_detail(prefix: str, query_keys: Iterable[str]) -> str:
     return f"{prefix}{','.join(keys)}"
 
 
+def source_scorecard_detail(stats: dict[str, Any]) -> str:
+    metrics = {
+        "planned": int(stats.get("planned_searches", 0)),
+        "searched": int(stats.get("searched", 0)),
+        "succeeded": int(stats.get("search_succeeded", 0)),
+        "blocked": int(stats.get("search_blocked", 0)),
+        "failed": int(stats.get("search_failed", 0)),
+        "fetched": int(stats.get("fetched", 0)),
+        "fetch_failed": int(stats.get("fetch_failed", 0)),
+        "evidence_failed": int(stats.get("source_evidence_failed", 0)),
+        "rows": int(stats.get("rows_written", 0)),
+    }
+    return SOURCE_SCORECARD_PREFIX + ",".join(
+        f"{key}={value}" for key, value in metrics.items()
+    )
+
+
+def with_source_scorecard_detail(detail: str, stats: dict[str, Any]) -> str:
+    parts = [normalize_space(detail), source_scorecard_detail(stats)]
+    return "; ".join(part for part in parts if part)
+
+
+def parse_source_scorecard_detail(detail: str) -> dict[str, int]:
+    marker = normalize_space(detail).find(SOURCE_SCORECARD_PREFIX)
+    if marker < 0:
+        return {}
+    raw = normalize_space(detail)[marker + len(SOURCE_SCORECARD_PREFIX):].split(";", 1)[0]
+    parsed: dict[str, int] = {}
+    for item in raw.split(","):
+        key, separator, value = item.partition("=")
+        if not separator or not re.fullmatch(r"[a-z_]+", key) or not value.isdigit():
+            return {}
+        parsed[key] = int(value)
+    required = {
+        "planned", "searched", "succeeded", "blocked", "failed",
+        "fetched", "fetch_failed", "evidence_failed", "rows",
+    }
+    return parsed if required.issubset(parsed) else {}
+
+
+def load_source_scorecard(
+    token: str,
+    spreadsheet_id: str,
+    run_date: dt.date,
+) -> dict[str, Any]:
+    rows = get_values(
+        token,
+        spreadsheet_id,
+        f"{RUN_RECEIPT_TAB}!A:{column_letter(len(RUN_RECEIPT_HEADERS))}",
+    )
+    start_date = run_date - dt.timedelta(days=6)
+    latest_by_date: dict[dt.date, dict[str, int]] = {}
+    for row in rows[1:]:
+        if len(row) < 8 or row[3] != "scheduled_source":
+            continue
+        try:
+            receipt_date = dt.date.fromisoformat(row[2])
+        except ValueError:
+            continue
+        if not start_date <= receipt_date <= run_date:
+            continue
+        parsed = parse_source_scorecard_detail(row[7])
+        if parsed:
+            latest_by_date[receipt_date] = parsed
+
+    today = latest_by_date.get(run_date, {})
+    fetched = int(today.get("fetched", 0))
+    fetch_failed = int(today.get("fetch_failed", 0))
+    fetch_total = fetched + fetch_failed
+    rolling_fetched = sum(int(item.get("fetched", 0)) for item in latest_by_date.values())
+    rolling_fetch_failed = sum(
+        int(item.get("fetch_failed", 0)) for item in latest_by_date.values()
+    )
+    rolling_fetch_total = rolling_fetched + rolling_fetch_failed
+    return {
+        "confirmed": bool(today),
+        "today": today,
+        "daily_fetch_failure_rate_bps": (
+            round(fetch_failed * 10_000 / fetch_total) if fetch_total else 0
+        ),
+        "rolling_days_confirmed": len(latest_by_date),
+        "rolling_fetch_failure_rate_bps": (
+            round(rolling_fetch_failed * 10_000 / rolling_fetch_total)
+            if rolling_fetch_total else 0
+        ),
+    }
+
+
+def audit_scorecard_detail(stats: dict[str, Any]) -> str:
+    row_groups = []
+    for label, key in (
+        ("unresolved", "same_day_unresolved_rows"),
+        ("qualification", "same_day_qualification_error_rows"),
+        ("linkage", "same_day_linkage_gap_rows"),
+    ):
+        rows = sorted({int(row) for row in stats.get(key, [])})
+        if rows:
+            row_groups.append(f"{label}_rows={','.join(str(row) for row in rows)}")
+    parts = [
+        "audit_scorecard_v1:"
+        f"rows={int(stats.get('same_day_rows', 0))},"
+        f"resolved={int(stats.get('same_day_resolved', 0))},"
+        f"promoted={int(stats.get('same_day_promoted', 0))},"
+        f"held={int(stats.get('same_day_verifier_held', 0))},"
+        f"rejected={int(stats.get('same_day_rejected', 0))},"
+        f"duplicates={int(stats.get('same_day_duplicates', 0))},"
+        f"alerts={int(stats.get('acceptance_alerts', 0))},"
+        f"daily_fetch_fail_bps={int(stats.get('daily_fetch_failure_rate_bps', 0))},"
+        f"rolling_days={int(stats.get('rolling_fetch_scorecard_days', 0))},"
+        f"rolling_fetch_fail_bps={int(stats.get('rolling_fetch_failure_rate_bps', 0))},"
+        f"bounded_evidence_pending={int(stats.get('bounded_experiment_evidence_pending', 0))}"
+    ]
+    parts.extend(row_groups)
+    return "; ".join(parts)
+
+
 def source_query_recovery_limit(run_date: dt.date) -> int:
     if experiment_active(
         run_date,
@@ -4442,6 +4571,35 @@ def claim_run_schedule_slot(
         )
         if current_utc < grace_deadline:
             return False, "source_grace_not_elapsed", []
+        verifier_slot_id = (
+            f"post_source_verifier:{slot_date}:{REQUIRED_POST_SOURCE_VERIFIER}"
+        )
+        verifier_rows = [row for row in rows[1:] if row and row[0] == verifier_slot_id]
+        if not verifier_rows:
+            return False, "post_source_verifier_receipt_missing", []
+        verifier_completed_rows = [
+            row
+            for row in verifier_rows
+            if (
+                len(row) > 6
+                and row[3] == "pilot_verifier"
+                and row[4] == "completed"
+                and row[6].lower() == "true"
+            )
+        ]
+        if not verifier_completed_rows:
+            return False, "post_source_verifier_incomplete", []
+        verifier_completed_times: list[dt.datetime] = []
+        for row in verifier_completed_rows:
+            try:
+                completed_at = dt.datetime.fromisoformat(row[5].replace("Z", "+00:00"))
+            except (IndexError, ValueError):
+                continue
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=dt.timezone.utc)
+            verifier_completed_times.append(completed_at.astimezone(dt.timezone.utc))
+        if not verifier_completed_times or max(verifier_completed_times) < max(source_completed_times):
+            return False, "post_source_verifier_time_unconfirmed", []
     slot_rows = [row for row in rows[1:] if row and row[0] == schedule_slot_id]
     if any(len(row) > 6 and row[4] == "completed" and row[6].lower() == "true" for row in slot_rows):
         return False, "already_completed", []
@@ -5516,8 +5674,14 @@ def run_linkage_and_suffix_audits(
     run_date: dt.date,
     phase: str,
     force: bool = False,
-) -> dict[str, int]:
-    link_active = force or experiment_active(run_date, LINK_AUDIT_START_DATE, LINK_AUDIT_DAYS)
+    source_scorecard: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    permanent_link_active = phase == "post_verifier"
+    link_active = (
+        permanent_link_active
+        or force
+        or experiment_active(run_date, LINK_AUDIT_START_DATE, LINK_AUDIT_DAYS)
+    )
     suffix_active = phase == "post_verifier" and (
         force
         or experiment_active(
@@ -5627,6 +5791,27 @@ def run_linkage_and_suffix_audits(
         ),
         "audit_evidence_unconfirmed": 0,
         "pilot_rows": 0,
+        "same_day_rows": 0,
+        "same_day_resolved": 0,
+        "same_day_promoted": 0,
+        "same_day_verifier_held": 0,
+        "same_day_rejected": 0,
+        "same_day_duplicates": 0,
+        "same_day_unresolved": 0,
+        "same_day_qualification_errors": 0,
+        "same_day_qualification_unconfirmed": 0,
+        "same_day_linkage_gaps": 0,
+        "same_day_stale_pointers": 0,
+        "same_day_unresolved_rows": [],
+        "same_day_qualification_error_rows": [],
+        "same_day_linkage_gap_rows": [],
+        "source_scorecard_unconfirmed": 0,
+        "daily_fetch_failure_rate_bps": 0,
+        "daily_fetch_failure_alert": 0,
+        "rolling_fetch_scorecard_days": 0,
+        "rolling_fetch_failure_rate_bps": 0,
+        "rolling_fetch_failure_alert": 0,
+        "acceptance_alerts": 0,
         "linked": 0,
         "held": 0,
         "stale_pointers": 0,
@@ -5748,6 +5933,79 @@ def run_linkage_and_suffix_audits(
         return stats
     main_rows = sheet_row_maps(main_raw)
     all_pilot_rows = sheet_row_maps(pilot_raw)
+    same_day_rows = [
+        (sheet_row, row)
+        for sheet_row, row in all_pilot_rows
+        if first_seen_date(row.get("first_seen_at", "")) == run_date
+    ]
+    stats["same_day_rows"] = len(same_day_rows)
+    for pilot_sheet_row, pilot_row in same_day_rows:
+        status = normalize_space(pilot_row.get("status", "")).lower()
+        promotion_status = normalize_space(pilot_row.get("promotion_status", "")).lower()
+        import_ready = normalize_space(pilot_row.get("import_ready", "")).lower()
+        promotion_notes = normalize_space(pilot_row.get("promotion_notes", "")).lower()
+
+        payload, payload_failure = parse_pilot_payload(pilot_row)
+        if payload_failure:
+            stats["same_day_qualification_unconfirmed"] += 1
+            stats["same_day_qualification_error_rows"].append(pilot_sheet_row)
+        else:
+            requalified = qualification_for_candidate(
+                candidate_from_pilot_row(dict(pilot_row), payload)
+            )
+            if (
+                status in {"qualified", "rejected"}
+                and requalified.status != status
+            ):
+                stats["same_day_qualification_errors"] += 1
+                stats["same_day_qualification_error_rows"].append(pilot_sheet_row)
+
+        resolved = False
+        if promotion_status == "promoted" and import_ready == "promoted":
+            stats["same_day_promoted"] += 1
+            resolved = True
+        elif status == "rejected" and import_ready == "skip":
+            stats["same_day_rejected"] += 1
+            resolved = True
+        elif status == "duplicate" and import_ready == "skip":
+            stats["same_day_duplicates"] += 1
+            resolved = True
+        elif (
+            promotion_status == "verifier_held"
+            and import_ready == "verify"
+            and (
+                "lead-verifier" in promotion_notes
+                or "verifier_reviewed_by=" in promotion_notes
+            )
+        ):
+            stats["same_day_verifier_held"] += 1
+            resolved = True
+        if resolved:
+            stats["same_day_resolved"] += 1
+        else:
+            stats["same_day_unresolved"] += 1
+            stats["same_day_unresolved_rows"].append(pilot_sheet_row)
+
+    source_scorecard = source_scorecard or {}
+    if permanent_link_active:
+        if not source_scorecard.get("confirmed"):
+            stats["source_scorecard_unconfirmed"] = 1
+        stats["daily_fetch_failure_rate_bps"] = int(
+            source_scorecard.get("daily_fetch_failure_rate_bps", 0)
+        )
+        stats["daily_fetch_failure_alert"] = int(
+            stats["daily_fetch_failure_rate_bps"] > 5_000
+        )
+        stats["rolling_fetch_scorecard_days"] = int(
+            source_scorecard.get("rolling_days_confirmed", 0)
+        )
+        stats["rolling_fetch_failure_rate_bps"] = int(
+            source_scorecard.get("rolling_fetch_failure_rate_bps", 0)
+        )
+        stats["rolling_fetch_failure_alert"] = int(
+            stats["rolling_fetch_scorecard_days"] >= 7
+            and stats["rolling_fetch_failure_rate_bps"] > 5_000
+        )
     pilot_rows = [
         (sheet_row, row)
         for sheet_row, row in all_pilot_rows
@@ -6409,6 +6667,12 @@ def run_linkage_and_suffix_audits(
                 **{key: value for key, value in reconciliation.items() if key != "main_row"},
                 writes=0,
             )
+            if first_seen_date(pilot_row.get("first_seen_at", "")) == run_date:
+                if reconciliation["outcome"] != "linked":
+                    stats["same_day_linkage_gaps"] += 1
+                    stats["same_day_linkage_gap_rows"].append(pilot_sheet_row)
+                if not reconciliation["pointer_matches"]:
+                    stats["same_day_stale_pointers"] += 1
 
         candidate_date = first_seen_date(pilot_row.get("first_seen_at", ""))
         candidate_in_scope = bool(
@@ -6480,6 +6744,45 @@ def run_linkage_and_suffix_audits(
             promotion_changed=False,
             writes=0,
             **shadow,
+        )
+    if permanent_link_active:
+        stats["acceptance_alerts"] = sum(
+            int(stats.get(key, 0))
+            for key in (
+                "source_scorecard_unconfirmed",
+                "daily_fetch_failure_alert",
+                "rolling_fetch_failure_alert",
+                "same_day_unresolved",
+                "same_day_qualification_errors",
+                "same_day_qualification_unconfirmed",
+                "same_day_linkage_gaps",
+                "same_day_stale_pointers",
+            )
+        )
+        log_event(
+            "pilot_permanent_scorecard",
+            phase=phase,
+            run_date=run_date.isoformat(),
+            source_rows=stats["same_day_rows"],
+            resolved=stats["same_day_resolved"],
+            promoted=stats["same_day_promoted"],
+            verifier_held=stats["same_day_verifier_held"],
+            rejected=stats["same_day_rejected"],
+            duplicates=stats["same_day_duplicates"],
+            unresolved=stats["same_day_unresolved"],
+            qualification_errors=stats["same_day_qualification_errors"],
+            qualification_unconfirmed=stats["same_day_qualification_unconfirmed"],
+            linkage_gaps=stats["same_day_linkage_gaps"],
+            stale_pointers=stats["same_day_stale_pointers"],
+            unresolved_rows=stats["same_day_unresolved_rows"],
+            qualification_error_rows=stats["same_day_qualification_error_rows"],
+            linkage_gap_rows=stats["same_day_linkage_gap_rows"],
+            source_scorecard_confirmed=not bool(stats["source_scorecard_unconfirmed"]),
+            daily_fetch_failure_rate_bps=stats["daily_fetch_failure_rate_bps"],
+            rolling_fetch_scorecard_days=stats["rolling_fetch_scorecard_days"],
+            rolling_fetch_failure_rate_bps=stats["rolling_fetch_failure_rate_bps"],
+            acceptance_alerts=stats["acceptance_alerts"],
+            writes=0,
         )
     log_event(
         "pilot_review_experiments_done",
@@ -7174,6 +7477,18 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
             durable_surface=f"{RUN_RECEIPT_TAB}",
         )
         if not claimed:
+            if audit_links_only and claim_reason != "already_completed":
+                append_run_slot_receipt(
+                    token,
+                    args.spreadsheet_id,
+                    schedule_slot_id=schedule_slot_id,
+                    run_receipt_id=run_receipt_id,
+                    run_date=run_date,
+                    run_mode="link_audit",
+                    status="completed_degraded",
+                    pipeline_complete=False,
+                    detail=f"audit_gate_blocked:{claim_reason}",
+                )
             clear_run_event_context()
             return
         if recovery_query_keys:
@@ -7204,6 +7519,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
             )
     if audit_links_only:
         update_run_stage(context, "link_audit")
+        source_scorecard = load_source_scorecard(token, args.spreadsheet_id, run_date)
         audit_stats = run_linkage_and_suffix_audits(
             token,
             args.spreadsheet_id,
@@ -7212,25 +7528,33 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
             run_date=run_date,
             phase=args.audit_phase,
             force=args.force_review_experiments,
+            source_scorecard=source_scorecard,
         )
         audit_stopped = any(
             bool(value)
             for key, value in audit_stats.items()
             if key == "stopped" or key.endswith("_stopped")
         )
+        audit_stats["bounded_experiment_evidence_pending"] = int(
+            bool(audit_stats.get("audit_evidence_unconfirmed", 0)) or audit_stopped
+        )
         audit_complete = (
             bool(audit_stats.get("audit_checks_planned", 0))
             and not bool(audit_stats.get("unconfirmed", 0))
-            and not bool(audit_stats.get("audit_evidence_unconfirmed", 0))
-            and not audit_stopped
+            and not bool(audit_stats.get("acceptance_alerts", 0))
         )
+        terminal_detail = audit_scorecard_detail(audit_stats)
+        if not audit_complete:
+            terminal_detail = (
+                f"{terminal_detail}; permanent audit evidence incomplete or above threshold"
+            )
         update_run_stage(context, "completed")
         if not persist_run_slot_terminal(
             args,
             context,
             status="completed" if audit_complete else "completed_degraded",
             pipeline_complete=audit_complete,
-            detail=("" if audit_complete else "audit evidence incomplete or stopped"),
+            detail=terminal_detail,
         ):
             raise RuntimeError("post-verifier audit completed but durable slot receipt failed")
         log_event(
@@ -7770,6 +8094,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
             terminal_detail = f"recovery_not_bounded_v1=count:{len(recoverable_query_keys)}"
         else:
             terminal_detail = "" if pipeline_complete else "pipeline completion gate failed"
+    terminal_detail = with_source_scorecard_detail(terminal_detail, stats)
     slot_receipt_persisted = persist_run_slot_terminal(
         args,
         context,

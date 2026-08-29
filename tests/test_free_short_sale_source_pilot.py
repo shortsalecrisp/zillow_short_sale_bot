@@ -781,6 +781,18 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
 
+    def test_qualification_rejects_parenthetical_approved_price_wording(self):
+        text = (
+            "Status: Active. About this home: This Clearfield gem is ready. "
+            "Short sale priced (approved) below market value for a quick sale!"
+        )
+
+        result = pilot.qualification_for_text(text)
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "disqualifying_short_sale_text")
+        self.assertIn("approved", result.disqualifying_terms.lower())
+
     def test_qualification_rejects_short_sale_approved_at_list_price(self):
         text = (
             "Status: Pending. About this home: Short Sale. "
@@ -1603,6 +1615,42 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(status_updates["Lead Source Pilot!O2"], "verifier_held")
         self.assertEqual(status_updates["Lead Source Pilot!Q2"], "verify")
         self.assertEqual(status_updates["Lead Source Pilot!X2"], "")
+
+    def test_promotion_preflight_rejects_parenthetical_approved_price(self):
+        payload = {
+            "zpid": "free-approved-price",
+            "street": "440 N 200 W",
+            "city": "Clearfield",
+            "state": "UT",
+            "source": "free-source-pilot:idx_broker_remarks",
+            "search_source": "free-source-pilot:idx_broker_remarks",
+            "listing_description": (
+                "Short sale priced (approved) below market value for a quick sale!"
+            ),
+        }
+        payload.update(self.scoped_payload_evidence("440 N 200 W", "UT"))
+        row = self.pilot_row(
+            listing_address="440 N 200 W",
+            city="Clearfield",
+            state="UT",
+            synthetic_zpid="free-approved-price",
+            source="idx_broker_remarks",
+            status="qualified",
+            promotion_status="shadow_ready",
+            import_ready="yes",
+            pending_queue_source="free-source-pilot:idx_broker_remarks",
+            pending_queue_listing_json=json.dumps(payload),
+        )
+        existing = pilot.build_existing_index(
+            [["first_name", "last_name", "phone", "email", "listing_address", "city", "state"]]
+        )
+
+        status, note, _ = pilot.pilot_row_preflight_failure(
+            pilot.pilot_row_map(row), payload, existing
+        )
+
+        self.assertEqual(status, "disqualifying_short_sale_text")
+        self.assertIn("must all remain confirmed", note)
 
     def test_promotion_holds_legacy_payload_without_bound_provenance(self):
         payload = {
@@ -4326,10 +4374,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual({source for _, source, _, _ in searches}, {"idx_broker_pages", "idx_broker_remarks"})
         self.assertTrue(all("Texas" not in query for query, _, _, _ in searches))
         self.assertEqual(persisted[-1]["status"], "completed")
-        self.assertEqual(
-            persisted[-1]["detail"],
+        self.assertIn(
             pilot.recovery_manifest_detail(pilot.RECOVERY_COMPLETED_PREFIX, recovery_keys),
+            persisted[-1]["detail"],
         )
+        self.assertIn(pilot.SOURCE_SCORECARD_PREFIX, persisted[-1]["detail"])
         done = next(details for event, details in events if event == "pilot_run_done")
         self.assertEqual(done["stats"]["planned_searches"], 4)
         self.assertEqual(done["stats"]["searched"], 4)
@@ -4358,9 +4407,15 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             "source:2026-08-21", "source-1", "2026-08-21", "scheduled_source",
             "completed", "2026-08-21T13:20:00+00:00", "true", "",
         ]
+        verifier_row = [
+            "post_source_verifier:2026-08-21:lead-verifier-8-am",
+            "verifier-1", "2026-08-21", "pilot_verifier", "completed",
+            "2026-08-21T14:00:00+00:00", "true", "rows=2; reviewed=2; unresolved=0",
+        ]
         after_append = [
             pilot.RUN_RECEIPT_HEADERS,
             source_row,
+            verifier_row,
             ["post_verifier_audit:2026-08-21", "audit-1", "2026-08-21", "link_audit",
              "running", "2026-08-21T14:05:00+00:00", "false", ""],
         ]
@@ -4368,7 +4423,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
              mock.patch.object(
                  pilot,
                  "get_values",
-                 side_effect=[[pilot.RUN_RECEIPT_HEADERS, source_row], after_append],
+                 side_effect=[[pilot.RUN_RECEIPT_HEADERS, source_row, verifier_row], after_append],
              ), mock.patch.object(pilot, "append_run_slot_receipt"):
             claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
                 "token", "sheet",
@@ -4382,6 +4437,29 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(claimed)
         self.assertEqual(reason, "claimed")
         self.assertEqual(recovery_keys, [])
+
+    def test_audit_schedule_slot_requires_green_first_verifier_receipt(self):
+        source_row = [
+            "source:2026-08-21", "source-1", "2026-08-21", "scheduled_source",
+            "completed", "2026-08-21T13:20:00+00:00", "true", "",
+        ]
+        rows = [pilot.RUN_RECEIPT_HEADERS, source_row]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(pilot, "get_values", return_value=rows), \
+             mock.patch.object(pilot, "append_run_slot_receipt") as append:
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
+                "token", "sheet",
+                schedule_slot_id="post_verifier_audit:2026-08-21",
+                run_receipt_id="audit-missing-verifier",
+                run_date=dt.date(2026, 8, 21),
+                run_mode="link_audit",
+                now=dt.datetime(2026, 8, 21, 14, 5, tzinfo=dt.timezone.utc),
+            )
+
+        self.assertFalse(claimed)
+        self.assertEqual(reason, "post_source_verifier_receipt_missing")
+        self.assertEqual(recovery_keys, [])
+        append.assert_not_called()
 
     def test_audit_schedule_slot_enforces_thirty_minute_source_grace(self):
         source_row = [
@@ -4437,6 +4515,11 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
              mock.patch.object(pilot, "sheets_client", return_value="token"), \
              mock.patch.object(pilot, "claim_run_schedule_slot", return_value=(True, "claimed", [])), \
              mock.patch.object(
+                 pilot,
+                 "load_source_scorecard",
+                 return_value={"confirmed": True},
+             ), \
+             mock.patch.object(
                  pilot, "run_linkage_and_suffix_audits",
                  return_value={"audit_checks_planned": 0, "unconfirmed": 0},
              ), mock.patch.object(
@@ -4452,6 +4535,134 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         done = next(details for event, details in events if event == "pilot_run_done")
         self.assertFalse(done["pipeline_complete"])
         self.assertEqual(done["audit_stats"]["audit_checks_planned"], 0)
+
+    def test_audit_gate_blocker_is_written_as_durable_degraded_receipt(self):
+        args = types.SimpleNamespace(
+            service_account="{}", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21",
+            audit_links_only=True, audit_phase="post_verifier",
+            force_review_experiments=False, scheduled_run=True,
+            run_receipt_id="audit-blocked",
+            schedule_slot_id="post_verifier_audit:2026-08-21",
+        )
+        with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
+             mock.patch.object(pilot, "sheets_client", return_value="token"), \
+             mock.patch.object(
+                 pilot,
+                 "claim_run_schedule_slot",
+                 return_value=(False, "post_source_verifier_receipt_missing", []),
+             ), \
+             mock.patch.object(pilot, "append_run_slot_receipt") as append, \
+             mock.patch.object(pilot, "run_linkage_and_suffix_audits") as audit:
+            pilot.run(args)
+
+        audit.assert_not_called()
+        self.assertEqual(append.call_args.kwargs["status"], "completed_degraded")
+        self.assertFalse(append.call_args.kwargs["pipeline_complete"])
+        self.assertEqual(
+            append.call_args.kwargs["detail"],
+            "audit_gate_blocked:post_source_verifier_receipt_missing",
+        )
+
+    def test_post_verifier_linkage_audit_is_permanent_outside_experiment_windows(self):
+        events = []
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[
+                [["created-at", "Listing Address", "State"]],
+                [pilot.PILOT_HEADERS],
+            ],
+        ), mock.patch.object(
+            pilot,
+            "log_event",
+            side_effect=lambda event, **details: events.append((event, details)),
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2030, 1, 5),
+                phase="post_verifier",
+                source_scorecard={
+                    "confirmed": True,
+                    "daily_fetch_failure_rate_bps": 4_000,
+                    "rolling_days_confirmed": 7,
+                    "rolling_fetch_failure_rate_bps": 4_500,
+                },
+            )
+
+        start = next(details for event, details in events if event == "pilot_review_experiments_start")
+        self.assertTrue(start["link_active"])
+        self.assertGreaterEqual(stats["audit_checks_planned"], 1)
+        self.assertEqual(stats["same_day_rows"], 0)
+        self.assertEqual(stats["acceptance_alerts"], 0)
+
+    def test_permanent_scorecard_alerts_when_daily_fetch_failures_exceed_half(self):
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[
+                [["created-at", "Listing Address", "State"]],
+                [pilot.PILOT_HEADERS],
+            ],
+        ), mock.patch.object(pilot, "log_event"):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2030, 1, 5),
+                phase="post_verifier",
+                source_scorecard={
+                    "confirmed": True,
+                    "daily_fetch_failure_rate_bps": 5_001,
+                    "rolling_days_confirmed": 6,
+                    "rolling_fetch_failure_rate_bps": 6_000,
+                },
+            )
+
+        self.assertEqual(stats["daily_fetch_failure_alert"], 1)
+        self.assertEqual(stats["rolling_fetch_failure_alert"], 0)
+        self.assertEqual(stats["acceptance_alerts"], 1)
+
+    def test_source_scorecard_round_trip_and_rolling_rates(self):
+        first_stats = {
+            "planned_searches": 100,
+            "searched": 100,
+            "search_succeeded": 100,
+            "search_blocked": 0,
+            "search_failed": 0,
+            "fetched": 60,
+            "fetch_failed": 40,
+            "source_evidence_failed": 0,
+            "rows_written": 2,
+        }
+        second_stats = {**first_stats, "fetched": 40, "fetch_failed": 60, "rows_written": 1}
+        rows = [
+            pilot.RUN_RECEIPT_HEADERS,
+            [
+                "source:2026-08-29", "one", "2026-08-29", "scheduled_source",
+                "completed", "2026-08-29T11:10:00+00:00", "true",
+                pilot.source_scorecard_detail(first_stats),
+            ],
+            [
+                "source:2026-08-30", "two", "2026-08-30", "scheduled_source",
+                "completed", "2026-08-30T11:10:00+00:00", "true",
+                pilot.source_scorecard_detail(second_stats),
+            ],
+        ]
+        with mock.patch.object(pilot, "get_values", return_value=rows):
+            scorecard = pilot.load_source_scorecard(
+                "token", "sheet-id", dt.date(2026, 8, 30)
+            )
+
+        self.assertTrue(scorecard["confirmed"])
+        self.assertEqual(scorecard["today"]["rows"], 1)
+        self.assertEqual(scorecard["daily_fetch_failure_rate_bps"], 6_000)
+        self.assertEqual(scorecard["rolling_days_confirmed"], 2)
+        self.assertEqual(scorecard["rolling_fetch_failure_rate_bps"], 5_000)
 
     def test_source_durability_audit_marks_missing_state_unconfirmed(self):
         events = []
@@ -4715,6 +4926,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
              mock.patch.object(pilot, "sheets_client", return_value="token"), \
              mock.patch.object(pilot, "ensure_tab") as ensure_tab, \
+             mock.patch.object(pilot, "load_source_scorecard", return_value={}), \
              mock.patch.object(pilot, "run_linkage_and_suffix_audits") as audit:
             pilot.run(args)
 
