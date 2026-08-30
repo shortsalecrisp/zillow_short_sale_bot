@@ -161,6 +161,14 @@ def test_targeted_uncertain_recovery_requires_exact_identity_and_transport_lock(
     assert 'if (action === "recover_uncertain_send")' in UNIFIED
 
 
+def test_successful_send_receipt_clears_stale_transport_error():
+    status_source = UNIFIED.split("function updatePendingSmsSendStatus_", 1)[1].split(
+        "function ensurePendingSmsHeaders_", 1
+    )[0]
+    assert 'if (status === "sent" && headers.length >= 15)' in status_source
+    assert 'sheet.getRange(matchRow, 16).setValue("")' in status_source
+
+
 def test_watchdog_recovers_confirmed_crm_receipt_before_transport_takeover():
     assert "function findConfirmedSmsReplyReceiptInHistory_" in OUTBOX
     assert "function findConfirmedSmsReplyReceiptForPendingRow_" in OUTBOX

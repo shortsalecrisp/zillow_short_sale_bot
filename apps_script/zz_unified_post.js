@@ -721,7 +721,12 @@ function updatePendingSmsSendStatus_(body, status, note) {
     var matchRow = matchIndex + 2;
     sheet.getRange(matchRow, 2).setValue(status);
     sheet.getRange(matchRow, 8).setValue(note || new Date());
-    if (status === "sent" && headers.length >= 15) sheet.getRange(matchRow, 15).setValue(new Date());
+    if (status === "sent" && headers.length >= 15) {
+      sheet.getRange(matchRow, 15).setValue(new Date());
+      // A successful handset receipt is terminal proof. Do not leave a stale
+      // retry or claim warning attached to an outbox row that is now sent.
+      if (headers.length >= 16) sheet.getRange(matchRow, 16).setValue("");
+    }
     return { ok: true, pending_row: matchRow, status: status };
   }
   return { ok: false, reason: matchIndex === -2 ? "Pending-send identifiers conflict with phone or reply text" : "No exact pending-send match" };
