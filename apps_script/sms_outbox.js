@@ -1604,15 +1604,155 @@ function smsOutboxWatchdog_() {
       return;
     }
     if (status === "send_started" && sendStarted && now - sendStarted >= 10 * 60 * 1000 && !row[7]) {
+      var automaticRecovery = recoverMissingSmsReceiptOnce_(sheet, sheetRow, row, now);
+      if (automaticRecovery.handled) return;
       if (alertSmsOutboxProblem_(sheet, sheetRow, row, "SMS SEND RESULT UNCERTAIN")) {
         sheet.getRange(sheetRow, 2).setValue("uncertain");
       }
       return;
     }
     if (status === "queued" && created && now - created >= 15 * 60 * 1000 && !row[7]) {
+      // A queued row remains claimable on every Tasker poll. Give that
+      // self-healing path 45 minutes before escalating to a person.
+      if (now - created < 45 * 60 * 1000) {
+        if (String(row[15] || "").indexOf("Automatic claim grace") === -1) {
+          sheet.getRange(sheetRow, 16).setValue("Automatic claim grace; still eligible for Tasker polling");
+        }
+        return;
+      }
       alertSmsOutboxProblem_(sheet, sheetRow, row, "SMS OUTBOX NOT CLAIMED");
     }
   });
+}
+
+function buildAutomaticSmsRetryRowV15_(row, now) {
+  var source = Array.isArray(row) ? row.slice() : [];
+  if (source.length < SMS_PENDING_SEND_HEADERS_.length || Number(source[9] || 0) >= 2) return null;
+  var retryRow = source.slice();
+  retryRow[1] = "queued";
+  retryRow[7] = "";
+  retryRow[8] = new Date(Number(now || Date.now()) + 60 * 1000);
+  retryRow[10] = "";
+  retryRow[11] = "";
+  retryRow[12] = "";
+  retryRow[13] = "";
+  retryRow[14] = "";
+  retryRow[15] = "Automatic one-time retry queued after missing Tasker send receipt";
+  retryRow[18] = "";
+  return retryRow;
+}
+
+function recoverMissingSmsReceiptOnce_(sheet, sheetRow, row, now) {
+  var receipt = findConfirmedSmsReplyReceiptForPendingRow_(row);
+  if (receipt.confirmed) {
+    recordRecoveredSmsReplyReceipt_(sheet, sheetRow, receipt);
+    return { handled: true, recovered_receipt: true };
+  }
+  var retryRow = buildAutomaticSmsRetryRowV15_(row, now);
+  if (!retryRow) return { handled: false, exhausted: true };
+  var staleReason = getPendingSmsStaleReason_(row);
+  if (staleReason) return { handled: false, stale_reason: staleReason };
+  sheet.getRange(sheetRow, 1, 1, SMS_PENDING_SEND_HEADERS_.length).setValues([retryRow]);
+  try {
+    appendSmsDebugLog_("sms_send_auto_retry", {
+      request_id: row[2] || "",
+      phone: row[4] || "",
+      message: row[5] || "",
+      reason: retryRow[15]
+    });
+  } catch (_) {}
+  return { handled: true, requeued: true, attempts: Number(row[9] || 0) };
+}
+
+function clearTransportGeneratedSmsHandoffV15_(phone, expectedReason) {
+  var normalizedPhone = normalizePhone_(phone);
+  var reason = String(expectedReason || "SMS SEND RESULT UNCERTAIN");
+  var sheet = getSheet_();
+  var data = getSheetData_(sheet);
+  for (var i = 0; i < data.length; i++) {
+    var rowObj = data[i].obj;
+    if (normalizePhone_(rowObj[HEADERS.phone]) !== normalizedPhone) continue;
+    if (String(rowObj[HEADERS.conversation_summary] || "") !== reason ||
+        String(rowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE") {
+      return { ok: false, reason: "CRM row is not locked by the expected transport alert" };
+    }
+    updateRowFields_(sheet, data[i].row, {
+      [HEADERS.conversation_summary]: "",
+      [HEADERS.ai_state]: "",
+      [HEADERS.handoff_flag]: "FALSE",
+      [HEADERS.human_override]: "FALSE"
+    });
+    return { ok: true, row: data[i].row };
+  }
+  return { ok: false, reason: "CRM phone was not found" };
+}
+
+function recoverUncertainSmsSendV15_(body) {
+  var phone = normalizePhone_(body && body.phone || "");
+  var requestId = String(body && body.request_id || "").trim();
+  if (phone.length !== 10 || !requestId) return { ok: false, error: "Phone and request ID are required" };
+  var health = getTaskerTransportHealthV12_();
+  if (!health.healthy) return { ok: false, retryable: true, error: "Tasker transport is not healthy", transport: health };
+
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_pending_sends");
+  if (!sheet || sheet.getLastRow() < 2) return { ok: false, error: "SMS outbox is empty" };
+  ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return { ok: false, retryable: true, error: "SMS outbox is busy" };
+  try {
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (String(row[2] || "") !== requestId || normalizePhone_(row[4]) !== phone) continue;
+      if (String(row[1] || "") !== "uncertain") return { ok: false, error: "Matching send is not uncertain" };
+      if (Number(row[9] || 0) >= 2) return { ok: false, exhausted: true, error: "Automatic retry limit reached" };
+      var isInitial = String(row[6] || "").indexOf("__initial_outreach__:") === 0;
+      if (isInitial) {
+        var crmRow = Number(row[17] || 0);
+        if (!Number.isInteger(crmRow) || crmRow < 2) return { ok: false, error: "Initial SMS CRM row is missing" };
+        var crmPhone = normalizePhone_(getSheet_().getRange(crmRow, 3).getValue());
+        var initialMarked = String(getSheet_().getRange(crmRow, 8).getValue() || "").toLowerCase() === "x";
+        var initialSentAt = String(getSheet_().getRange(crmRow, 23).getValue() || "").trim();
+        if (crmPhone !== phone || initialMarked || initialSentAt) {
+          return { ok: false, error: "CRM state no longer supports an initial SMS retry" };
+        }
+      }
+      var unlocked = clearTransportGeneratedSmsHandoffV15_(phone, "SMS SEND RESULT UNCERTAIN");
+      if (!unlocked.ok) return unlocked;
+      var retryRow = buildAutomaticSmsRetryRowV15_(row, Date.now());
+      if (!retryRow) return { ok: false, exhausted: true, error: "Automatic retry limit reached" };
+      sheet.getRange(i + 2, 1, 1, SMS_PENDING_SEND_HEADERS_.length).setValues([retryRow]);
+      return { ok: true, requeued: true, pending_row: i + 2, crm_row: unlocked.row, request_id: requestId };
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  return { ok: false, error: "Matching uncertain send was not found" };
+}
+
+function testAutomaticSmsRetryPolicyV15_() {
+  var row = new Array(SMS_PENDING_SEND_HEADERS_.length).fill("");
+  row[1] = "send_started";
+  row[2] = "request-1";
+  row[4] = "5551112222";
+  row[5] = "Test message";
+  row[9] = 1;
+  row[10] = "lease";
+  row[11] = new Date();
+  row[12] = new Date();
+  row[13] = new Date();
+  row[18] = "pixel-v12";
+  var retried = buildAutomaticSmsRetryRowV15_(row, Date.parse("2026-08-30T12:00:00Z"));
+  if (!retried || retried[1] !== "queued" || retried[10] || retried[11] || retried[12] ||
+      retried[13] || retried[18] || Number(retried[9]) !== 1) {
+    throw new Error("First missing receipt was not requeued safely");
+  }
+  row[9] = 2;
+  if (buildAutomaticSmsRetryRowV15_(row, Date.now())) {
+    throw new Error("Retry policy allowed more than one automatic resend");
+  }
+  return { ok: true };
 }
 
 function findConfirmedSmsReplyReceiptInHistory_(history, inboundText, replyText) {

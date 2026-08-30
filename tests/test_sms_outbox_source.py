@@ -137,12 +137,28 @@ def test_stale_text_guard_uses_same_case_insensitive_normalization_on_both_sides
     assert 'function testPendingSmsStaleTextNormalization_()' in OUTBOX
 
 
-def test_watchdog_recovers_claims_but_does_not_blindly_resend_uncertain_sms():
+def test_watchdog_recovers_claims_and_retries_one_missing_receipt_before_alerting():
     assert 'status === "claimed"' in OUTBOX
     assert 'setValue("queued")' in OUTBOX
     assert 'status === "send_started"' in OUTBOX
     assert 'setValue("uncertain")' in OUTBOX
     assert "SMS SEND RESULT UNCERTAIN" in OUTBOX
+    assert "function recoverMissingSmsReceiptOnce_" in OUTBOX
+    assert "function buildAutomaticSmsRetryRowV15_" in OUTBOX
+    assert 'Number(source[9] || 0) >= 2' in OUTBOX
+    assert "Automatic one-time retry queued after missing Tasker send receipt" in OUTBOX
+    assert "function testAutomaticSmsRetryPolicyV15_" in OUTBOX
+
+
+def test_targeted_uncertain_recovery_requires_exact_identity_and_transport_lock():
+    assert "function recoverUncertainSmsSendV15_" in OUTBOX
+    assert 'String(row[2] || "") !== requestId' in OUTBOX
+    assert 'String(row[1] || "") !== "uncertain"' in OUTBOX
+    assert "function clearTransportGeneratedSmsHandoffV15_" in OUTBOX
+    assert 'conversation_summary] || "") !== reason' in OUTBOX
+    assert "CRM state no longer supports an initial SMS retry" in OUTBOX
+    assert "recover_uncertain_send: true" in UNIFIED
+    assert 'if (action === "recover_uncertain_send")' in UNIFIED
 
 
 def test_watchdog_recovers_confirmed_crm_receipt_before_transport_takeover():

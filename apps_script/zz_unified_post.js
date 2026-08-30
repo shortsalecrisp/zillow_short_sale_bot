@@ -22,6 +22,7 @@ function isUnifiedSmsAction_(action) {
     reply_sent: true,
     manual_reply_sent: true,
     sms_send_failed: true,
+    recover_uncertain_send: true,
     tasker_heartbeat: true,
     codex_probe: true,
     request_info_email_approval: true,
@@ -140,6 +141,9 @@ function handleUnifiedSmsPost_(e) {
       probe.receipt_aware_watchdog = typeof testConfirmedSmsReplyReceiptRecovery_ === "function"
         ? testConfirmedSmsReplyReceiptRecovery_()
         : { ok: false, reason: "Receipt-aware watchdog test is unavailable" };
+      probe.automatic_sms_retry = typeof testAutomaticSmsRetryPolicyV15_ === "function"
+        ? testAutomaticSmsRetryPolicyV15_()
+        : { ok: false, reason: "Automatic SMS retry test is unavailable" };
       probe.initial_receipt_row_shift_recovery = typeof testInitialSmsReceiptRowShiftRecoveryV14_ === "function"
         ? testInitialSmsReceiptRowShiftRecoveryV14_()
         : { ok: false, reason: "Initial receipt row-shift recovery test is unavailable" };
@@ -217,6 +221,10 @@ function handleUnifiedSmsPost_(e) {
 
     if (action === "outbox_status") {
       return jsonOutput_(getSmsOutboxStatus_());
+    }
+
+    if (action === "recover_uncertain_send") {
+      return jsonOutput_(recoverUncertainSmsSendV15_(body));
     }
 
     if (action === "incoming_sms") {
