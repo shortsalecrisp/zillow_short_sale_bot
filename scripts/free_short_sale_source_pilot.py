@@ -4543,6 +4543,19 @@ def pilot_verifier_receipt_green(row: list[str]) -> bool:
     )
 
 
+def verifier_schedule_slot_matches(
+    schedule_slot_id: str,
+    slot_date: str,
+    required_verifier: str,
+) -> bool:
+    """Match equivalent automation display-name and saved-ID spellings."""
+    parts = schedule_slot_id.split(":", 2)
+    if len(parts) != 3 or parts[0] != "post_source_verifier" or parts[1] != slot_date:
+        return False
+    normalize_identity = lambda value: re.sub(r"[^a-z0-9]+", "", value.lower())
+    return normalize_identity(parts[2]) == normalize_identity(required_verifier)
+
+
 def claim_run_schedule_slot(
     token: str,
     spreadsheet_id: str,
@@ -4598,10 +4611,14 @@ def claim_run_schedule_slot(
         )
         if current_utc < grace_deadline:
             return False, "source_grace_not_elapsed", []
-        verifier_slot_id = (
-            f"post_source_verifier:{slot_date}:{REQUIRED_POST_SOURCE_VERIFIER}"
-        )
-        verifier_rows = [row for row in rows[1:] if row and row[0] == verifier_slot_id]
+        verifier_rows = [
+            row
+            for row in rows[1:]
+            if row
+            and verifier_schedule_slot_matches(
+                row[0], slot_date, REQUIRED_POST_SOURCE_VERIFIER
+            )
+        ]
         if not verifier_rows:
             return False, "post_source_verifier_receipt_missing", []
         verifier_completed_rows = [

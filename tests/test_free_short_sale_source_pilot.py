@@ -4495,7 +4495,7 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             "completed", "2026-08-21T13:20:00+00:00", "true", "",
         ]
         verifier_row = [
-            "post_source_verifier:2026-08-21:lead-verifier-8-am",
+            "post_source_verifier:2026-08-21:Lead verifier 8 AM",
             "verifier-1", "2026-08-21", "pilot_verifier", "completed",
             "2026-08-21T14:00:00+00:00", "true", "rows=2; reviewed=2; unresolved=0",
         ]
@@ -4571,6 +4571,22 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         ]
 
         self.assertFalse(pilot.pilot_verifier_receipt_green(row))
+
+    def test_verifier_slot_display_name_matches_saved_automation_id(self):
+        self.assertTrue(
+            pilot.verifier_schedule_slot_matches(
+                "post_source_verifier:2026-08-21:Lead verifier 8 AM",
+                "2026-08-21",
+                "lead-verifier-8-am",
+            )
+        )
+        self.assertFalse(
+            pilot.verifier_schedule_slot_matches(
+                "post_source_verifier:2026-08-21:Lead verifier 11 AM",
+                "2026-08-21",
+                "lead-verifier-8-am",
+            )
+        )
 
     def test_audit_schedule_slot_requires_green_first_verifier_receipt(self):
         source_row = [
