@@ -2008,6 +2008,21 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return null;
 
+  // Treat a source challenge as a correction of the short-sale premise even
+  // when the same message also contains another request.
+  if (isShortSaleSourceQuestion_(t)) {
+    return {
+      matched: true,
+      reply_text: buildSourceChallengeReply_(rowObj),
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Agent challenged the short-sale premise; apologized and closed out"
+    };
+  }
+
   // A request to send information is a delivery workflow, not a general
   // "how do you help" question. Let the dedicated email branch collect or
   // use the address and queue the approved info email.
@@ -2054,27 +2069,11 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
     negotiator: isNegotiatorRoleQuestionSignal_(t),
     buyer_provision: isBuyerProvisionQuestionSignal_(t),
     language: isSpanishLanguageSignal_(t),
-    source: isShortSaleSourceQuestion_(t),
     differentiation: isDifferentiationQuestionSignal_(t)
   };
 
   const matchedKeys = Object.keys(flags).filter(function(key) { return flags[key]; });
   if (!matchedKeys.length) return null;
-
-  // A source challenge means the agent is correcting the short-sale premise.
-  // Close it cleanly before any compound-question or generative explanation path.
-  if (flags.source) {
-    return {
-      matched: true,
-      reply_text: buildSourceChallengeReply_(rowObj),
-      lead_status: "R",
-      conversation_done: true,
-      handoff_needed: false,
-      needs_review: false,
-      block_reply: false,
-      reason: "Agent challenged the short-sale premise; apologized and closed out"
-    };
-  }
 
   if (flags.differentiation && matchedKeys.length === 1) {
     return {
@@ -2136,7 +2135,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
     };
   }
 
-  if (matchedKeys.length > 2 || (matchedKeys.length > 1 && (flags.source || flags.differentiation))) {
+  if (matchedKeys.length > 2 || (matchedKeys.length > 1 && flags.differentiation)) {
     return buildManualHandoffDecision_(
       "Agent asked multiple questions that need one careful human answer",
       "COMPLEX MULTI-QUESTION"
@@ -6064,7 +6063,8 @@ function testSmsIntentContractV3_() {
     "What made you think it was a short sale?",
     "Why was this marked as a short sale?",
     "What would make you think it was?",
-    "What gave you the impression this is a short sale?"
+    "What gave you the impression this is a short sale?",
+    "Why do you think this is a short sale, and can you email me?"
   ];
   const sourcePassed = sourceVariants.every(function(message) {
     const decision = applyFastRules_(message, sourceRow);

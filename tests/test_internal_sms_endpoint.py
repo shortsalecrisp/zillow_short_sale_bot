@@ -1657,6 +1657,7 @@ def test_sms_compound_compliance_request_identifies_yoni_boundary(monkeypatch):
         "What made you think it was a short sale?",
         "Why was this marked as a short sale?",
         "What gave you the impression this is a short sale?",
+        "Why do you think this is a short sale, and can you email me?",
         "What would make you think it would be a short sale? Maybe you know something I don't?",
         "What triggered you to reach out? I believe the only lien is about $150k.",
     ],

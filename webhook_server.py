@@ -4936,6 +4936,13 @@ def _sms_fee_decision(row_obj: Dict[str, str]) -> Dict[str, Any]:
 
 def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
     text = _sms_normalize_whitespace(inbound_text).lower()
+    if _sms_is_short_sale_source_question(text):
+        return _sms_decision(
+            reply_text=_sms_source_challenge_reply(row_obj),
+            lead_status="R",
+            conversation_done=True,
+            reason="Agent challenged the short-sale premise; apologized and closed out",
+        )
     if _sms_is_existing_crisp_relationship(text):
         return _sms_decision(
             lead_status="R",
@@ -5015,21 +5022,12 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         "credential": bool(re.search(r"\b(?:are you|you are|r u)\s+(?:licensed\s+as\s+)?(?:an?\s+)?(?:attorney|lawyer)\b|\bdo you provide legal advice\b", text)),
         "negotiator": bool(re.search(r"\b(?:are you|so you are|so a|r u)\s+(?:an?\s+)?(?:short sale\s+)?negotiator\b", text)),
         "language": _sms_is_spanish_language_question(text),
-        "source": _sms_is_short_sale_source_question(text),
         "different": _sms_is_differentiation_question(text),
     }
     matched = [name for name, enabled in flags.items() if enabled]
     if not matched:
         return None
 
-    # A source challenge means the agent is correcting the short-sale premise.
-    # Close it before compound-question handling can produce an explanation.
-    if flags["source"]:
-        return _sms_decision(
-            reply_text=_sms_source_challenge_reply(row_obj),
-            lead_status="R", conversation_done=True,
-            reason="Agent challenged the short-sale premise; apologized and closed out",
-        )
     if flags["different"] and len(matched) == 1:
         return _sms_decision(
             reply_text="I handle the lender-side work and keep agents updated throughout the process. If that sounds useful, I'm happy to talk through your listing.",
@@ -5088,7 +5086,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
             reason="Answered a bounded service, location, and fee question",
         )
 
-    if len(matched) > 2 or (len(matched) > 1 and (flags["source"] or flags["different"])):
+    if len(matched) > 2 or (len(matched) > 1 and flags["different"]):
         return _sms_decision(
             lead_status="Y",
             handoff_needed=True,
