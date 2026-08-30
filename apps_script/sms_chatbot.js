@@ -2061,16 +2061,18 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   const matchedKeys = Object.keys(flags).filter(function(key) { return flags[key]; });
   if (!matchedKeys.length) return null;
 
-  if (flags.source && matchedKeys.length === 1) {
+  // A source challenge means the agent is correcting the short-sale premise.
+  // Close it cleanly before any compound-question or generative explanation path.
+  if (flags.source) {
     return {
       matched: true,
       reply_text: buildSourceChallengeReply_(rowObj),
-      lead_status: "Y",
-      conversation_done: false,
+      lead_status: "R",
+      conversation_done: true,
       handoff_needed: false,
       needs_review: false,
       block_reply: false,
-      reason: "Answered source challenge without inventing property or lender facts"
+      reason: "Agent challenged the short-sale premise; apologized and closed out"
     };
   }
 
@@ -2526,7 +2528,7 @@ function applyFastRules_(text, rowObj) {
   if (isShortSaleSourceQuestion_(t)) {
     return {
       matched: true,
-      reply_text: "I thought i saw in the listing that it said it was a short sale. My mistake if i misread that. Thanks",
+      reply_text: buildSourceChallengeReply_(rowObj),
       lead_status: "R",
       conversation_done: true,
       handoff_needed: false,
@@ -4029,9 +4031,13 @@ function isShortSaleSourceQuestion_(text) {
     "what would make you think it was",
     "what would make you think it would be",
     "what made you think it was",
+    "what makes you think it is",
+    "what gave you that idea",
+    "what gave you that impression",
     "why would you think it was",
     "why did you think it was",
-    "why do you think it was"
+    "why do you think it was",
+    "why do you believe it is"
   ];
 
   if (anaphoricPhrases.some(phrase => t.indexOf(phrase) !== -1)) return true;
@@ -4051,7 +4057,14 @@ function isShortSaleSourceQuestion_(text) {
     "where do you see",
     "where was it",
     "what made you think",
-    "what makes you think"
+    "what makes you think",
+    "what gave you the idea",
+    "what gave you the impression",
+    "why do you believe",
+    "why is this marked",
+    "why was this marked",
+    "why is this listed",
+    "why was this listed"
   ];
 
   if (directPhrases.some(phrase => t.indexOf(phrase) !== -1)) return true;
@@ -4059,12 +4072,8 @@ function isShortSaleSourceQuestion_(text) {
   return false;
 }
 
-function buildSourceChallengeReply_(rowObj) {
-  const initialText = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.initial_text_sent] || "")).toLowerCase();
-  if (initialText.indexOf("short sale") !== -1) {
-    return "I reached out because our initial message identified the listing as a possible short sale. I don't have verified lender, payoff, or lien information. If that identification is wrong, the source data may be inaccurate; please let me know and I'll close this out.";
-  }
-  return "I don't have a verified property-specific trigger in this conversation. Our source data may be inaccurate, and I don't have lender, payoff, or lien information. If this isn't a short sale, please let me know and I'll close this out.";
+function buildSourceChallengeReply_() {
+  return "I'm sorry, I thought I saw it in the listing but I may have misread it.";
 }
 
 function compoundServiceRequestFlags_(text) {
@@ -4758,6 +4767,7 @@ IMPORTANT BEHAVIOR:
 - Never end a reply with "${yourName}", "- ${yourName}", "— ${yourName}", "Yoni", "- Yoni", or any similar signature
 - If a message ends with thanks, just end it with "Thanks" or "Thanks!" and not "Thanks, ${yourName}"
 - If they say the listing is not actually a short sale or was changed, just acknowledge it and wish them luck
+- If they ask why I thought it was a short sale, reply exactly: "I'm sorry, I thought I saw it in the listing but I may have misread it." Treat the question as a correction, close the lead, and do not explain signals, red flags, public records, liens, foreclosure information, or source data.
 - If they give a callback time, keep your reply casual and short
 - If they give a time window, it is okay to suggest a time inside that window
 - If they ask for a website, link, agency info, or where to learn more, give the clean URL exactly as "https://www.crispshortsales.com" and add one short credibility line about Google reviews. Do not add spaces inside the URL.
@@ -6049,15 +6059,23 @@ function testSmsIntentContractV3_() {
 
   const sourceRow = Object.assign({}, baseRow);
   sourceRow[HEADERS.initial_text_sent] = "I noticed your listing may be a potential short sale.";
-  const source = applyFastRules_("What triggered you to reach out? I believe the only lien is about $150k.", sourceRow);
+  const sourceVariants = [
+    "Why do you think this is a short sale?",
+    "What made you think it was a short sale?",
+    "Why was this marked as a short sale?",
+    "What would make you think it was?",
+    "What gave you the impression this is a short sale?"
+  ];
+  const sourcePassed = sourceVariants.every(function(message) {
+    const decision = applyFastRules_(message, sourceRow);
+    return decision.matched && decision.lead_status === "R" && decision.conversation_done &&
+      !decision.handoff_needed && !decision.block_reply &&
+      decision.reply_text === buildSourceChallengeReply_();
+  });
   record(
     "short_sale_source",
-    source.matched && source.lead_status === "Y" && !source.conversation_done &&
-      source.reply_text.indexOf("initial message identified") !== -1 &&
-      source.reply_text.indexOf("verified lender, payoff, or lien information") !== -1 &&
-      source.reply_text.indexOf("price drops") === -1 &&
-      source.reply_text.indexOf("days on market") === -1,
-    source.reason
+    sourcePassed,
+    sourcePassed ? "Source challenges receive the approved terminal apology" : "A source challenge did not close cleanly"
   );
 
   const compoundServiceText = "Can you send your service agreement, buyer-paid fee schedule, and explain exactly what your team handles from submission through approval? How do you handle Equator files and foreclosure deadlines?";

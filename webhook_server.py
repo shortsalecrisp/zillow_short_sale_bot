@@ -3577,21 +3577,59 @@ def _sms_compound_service_request_reply(value: Any) -> str:
     return " ".join(parts)
 
 
-def _sms_source_challenge_reply(row_obj: Dict[str, str]) -> str:
-    initial_text = _sms_normalize_whitespace(
-        row_obj.get("initial_text") or row_obj.get("initial_text_sent")
-    ).lower()
-    if "short sale" in initial_text:
-        return (
-            "I reached out because our initial message identified the listing as a possible short sale. "
-            "I don't have verified lender, payoff, or lien information. If that identification is wrong, "
-            "the source data may be inaccurate; please let me know and I'll close this out."
-        )
-    return (
-        "I don't have a verified property-specific trigger in this conversation. Our source data may be inaccurate, "
-        "and I don't have lender, payoff, or lien information. If this isn't a short sale, please let me know and "
-        "I'll close this out."
+def _sms_source_challenge_reply(_row_obj: Dict[str, str]) -> str:
+    return "I'm sorry, I thought I saw it in the listing but I may have misread it."
+
+
+def _sms_is_short_sale_source_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text:
+        return False
+
+    anaphoric_phrases = (
+        "what would make you think it was",
+        "what would make you think it would be",
+        "what made you think it was",
+        "what makes you think it is",
+        "what gave you that idea",
+        "what gave you that impression",
+        "why would you think it was",
+        "why did you think it was",
+        "why do you think it was",
+        "why do you believe it is",
     )
+    if any(phrase in text for phrase in anaphoric_phrases):
+        return True
+    if (
+        re.search(r"\b(?:what|which)\b.{0,40}\btrigger(?:ed|s)?\b.{0,60}\breach out\b", text)
+        or re.search(r"\b(?:why|what made)\b.{0,40}\breach out\b", text)
+    ):
+        return True
+    if "short sale" not in text:
+        return False
+
+    direct_phrases = (
+        "why did you think",
+        "why do you think",
+        "why would you think",
+        "why did you say",
+        "why do you say",
+        "why was it",
+        "why is it",
+        "where did you see",
+        "where do you see",
+        "where was it",
+        "what made you think",
+        "what makes you think",
+        "what gave you the idea",
+        "what gave you the impression",
+        "why do you believe",
+        "why is this marked",
+        "why was this marked",
+        "why is this listed",
+        "why was this listed",
+    )
+    return any(phrase in text for phrase in direct_phrases)
 
 
 def _sms_is_short_sale_timeline_question(value: Any) -> bool:
@@ -4977,24 +5015,20 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         "credential": bool(re.search(r"\b(?:are you|you are|r u)\s+(?:licensed\s+as\s+)?(?:an?\s+)?(?:attorney|lawyer)\b|\bdo you provide legal advice\b", text)),
         "negotiator": bool(re.search(r"\b(?:are you|so you are|so a|r u)\s+(?:an?\s+)?(?:short sale\s+)?negotiator\b", text)),
         "language": _sms_is_spanish_language_question(text),
-        "source": bool(re.search(
-            r"\b(?:why|what)\b.{0,80}\b(?:think|thought|believe|make you think)\b.{0,80}\bshort sale\b"
-            r"|\bwhat\s+(?:would\s+)?make\s+you\s+think\b.{0,80}\bshort sale\b"
-            r"|\b(?:what|which)\b.{0,40}\btrigger(?:ed|s)?\b.{0,60}\breach out\b"
-            r"|\b(?:why|what made)\b.{0,40}\breach out\b",
-            text,
-        )),
+        "source": _sms_is_short_sale_source_question(text),
         "different": _sms_is_differentiation_question(text),
     }
     matched = [name for name, enabled in flags.items() if enabled]
     if not matched:
         return None
 
-    if flags["source"] and len(matched) == 1:
+    # A source challenge means the agent is correcting the short-sale premise.
+    # Close it before compound-question handling can produce an explanation.
+    if flags["source"]:
         return _sms_decision(
             reply_text=_sms_source_challenge_reply(row_obj),
-            lead_status="Y", conversation_done=False,
-            reason="Answered source challenge without inventing property or lender facts",
+            lead_status="R", conversation_done=True,
+            reason="Agent challenged the short-sale premise; apologized and closed out",
         )
     if flags["different"] and len(matched) == 1:
         return _sms_decision(

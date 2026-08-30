@@ -14,15 +14,16 @@ def test_apps_script_suppresses_same_topic_not_short_sale_continuations_before_g
     assert "Can you help with probate?" not in CHATBOT
 
 
-def test_apps_script_answers_short_sale_source_follow_up_without_inventing_data_details():
+def test_apps_script_closes_short_sale_source_challenges_with_only_the_approved_apology():
     assert "function isShortSaleSourceQuestion_" in CHATBOT
     assert '"what would make you think it was"' in CHATBOT
     assert '"what made you think it was"' in CHATBOT
-    assert (
-        'reply_text: "I thought i saw in the listing that it said it was a short sale. '
-        'My mistake if i misread that. Thanks"'
-    ) in CHATBOT
+    assert '"what gave you the impression"' in CHATBOT
+    assert 'return "I\'m sorry, I thought I saw it in the listing but I may have misread it.";' in CHATBOT
+    assert 'reason: "Agent challenged the short-sale premise; apologized and closed out"' in CHATBOT
     assert "notice of default or lis pendens" not in CHATBOT
+    assert "initial message identified" not in CHATBOT
+    assert "verified lender, payoff, or lien information" not in CHATBOT
 
 
 def test_apps_script_relationship_only_rule_closes_as_o_without_handoff():

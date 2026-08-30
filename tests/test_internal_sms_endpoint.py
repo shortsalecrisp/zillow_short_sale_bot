@@ -1653,11 +1653,15 @@ def test_sms_compound_compliance_request_identifies_yoni_boundary(monkeypatch):
 @pytest.mark.parametrize(
     "inbound",
     [
+        "Why do you think this is a short sale?",
+        "What made you think it was a short sale?",
+        "Why was this marked as a short sale?",
+        "What gave you the impression this is a short sale?",
         "What would make you think it would be a short sale? Maybe you know something I don't?",
         "What triggered you to reach out? I believe the only lien is about $150k.",
     ],
 )
-def test_sms_source_challenge_stays_grounded_and_does_not_close(monkeypatch, inbound):
+def test_sms_source_challenge_uses_brief_apology_and_closes(monkeypatch, inbound):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -1666,17 +1670,13 @@ def test_sms_source_challenge_stays_grounded_and_does_not_close(monkeypatch, inb
 
     decision = module._sms_fast_decision(row, inbound)
 
-    assert decision["lead_status"] == "Y"
-    assert decision["conversation_done"] is False
+    assert decision["lead_status"] == "R"
+    assert decision["conversation_done"] is True
     assert decision["handoff_needed"] is False
-    assert "initial message identified" in decision["reply_text"]
-    assert "don't have verified lender, payoff, or lien information" in decision["reply_text"]
-    assert "price drop" not in decision["reply_text"].lower()
-    assert "days on market" not in decision["reply_text"].lower()
-    assert "pull lender" not in decision["reply_text"].lower()
+    assert decision["reply_text"] == "I'm sorry, I thought I saw it in the listing but I may have misread it."
 
 
-def test_sms_source_challenge_without_stored_trigger_acknowledges_missing_evidence(monkeypatch):
+def test_sms_source_challenge_without_stored_trigger_uses_same_apology(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -1684,10 +1684,9 @@ def test_sms_source_challenge_without_stored_trigger_acknowledges_missing_eviden
 
     decision = module._sms_fast_decision({}, "What triggered you to reach out?")
 
-    assert "don't have a verified property-specific trigger" in decision["reply_text"]
-    assert "source data may be inaccurate" in decision["reply_text"]
-    assert decision["lead_status"] == "Y"
-    assert decision["conversation_done"] is False
+    assert decision["reply_text"] == "I'm sorry, I thought I saw it in the listing but I may have misread it."
+    assert decision["lead_status"] == "R"
+    assert decision["conversation_done"] is True
 
 
 def test_sms_future_buyer_recontact_closes_warm_without_takeover(monkeypatch):
@@ -2248,7 +2247,7 @@ def test_sms_contract_present_help_and_call_requests_are_terminal_handoffs(monke
         assert decision["reply_text"]
 
 
-def test_sms_contract_not_short_sale_and_source_question_are_distinct(monkeypatch):
+def test_sms_contract_not_short_sale_and_source_question_use_distinct_closeouts(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -2258,9 +2257,9 @@ def test_sms_contract_not_short_sale_and_source_question_are_distinct(monkeypatc
     assert closeout["reply_text"] == "Ahh, ok... thanks for letting me know. Good luck with your listing!"
 
     source = module._sms_fast_decision({}, "Why did you think it was a short sale?")
-    assert source["lead_status"] == "Y"
-    assert source["conversation_done"] is False
-    assert "don't have a verified property-specific trigger" in source["reply_text"]
+    assert source["lead_status"] == "R"
+    assert source["conversation_done"] is True
+    assert source["reply_text"] == "I'm sorry, I thought I saw it in the listing but I may have misread it."
 
 
 def test_sms_contract_recent_duplicate_is_suppressed_but_old_repeat_is_not(monkeypatch):
