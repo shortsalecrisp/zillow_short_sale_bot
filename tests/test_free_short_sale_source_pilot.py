@@ -3571,6 +3571,93 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(result["matched_main_row"], 2)
         self.assertEqual(pilot.stable_id_from_main_row(main_rows[0][1]), "free-69f7af3e3812c17f")
 
+    def test_promoted_acceptance_requires_durable_evidence_and_exact_owner_pointer(self):
+        row = {
+            "synthetic_zpid": "free-abc",
+            "listing_address": "1 Main Street",
+            "state": "GA",
+            "matched_main_row": "",
+            "pending_queue_listing_json": json.dumps({"sourceEvidenceState": "evidence_gap"}),
+        }
+        reconciliation = {"outcome": "missing", "pointer_matches": True}
+
+        result = pilot.promoted_acceptance_contract(row, reconciliation)
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(
+            result["gap_reasons"],
+            ["source_evidence_missing", "sheet1_owner_missing"],
+        )
+
+    def test_promoted_acceptance_allows_reopenable_evidence_and_reread_owner(self):
+        row = {
+            "synthetic_zpid": "free-abc",
+            "listing_address": "1 Main Street",
+            "state": "GA",
+            "matched_main_row": "2",
+            "pending_queue_listing_json": json.dumps({
+                "sourceEvidenceState": "durable_reopenable",
+                "sourceEvidenceReceipt": "pse:v1:fixture",
+            }),
+        }
+        reconciliation = {"outcome": "linked", "pointer_matches": True}
+
+        self.assertTrue(
+            pilot.promoted_acceptance_contract(row, reconciliation)["accepted"]
+        )
+
+    def test_post_verifier_audit_does_not_count_invalid_promoted_row_as_resolved(self):
+        address = "1 Main Street"
+        payload = self.scoped_payload_evidence(address, "GA")
+        payload.update({
+            "address": address,
+            "state": "GA",
+            "listing_description": "Active short sale subject to lender approval.",
+            "description": "Active short sale subject to lender approval.",
+            "sourceEvidenceState": "evidence_gap",
+            "sourceEvidenceReceipt": "",
+        })
+        pilot_rows = [
+            pilot.PILOT_HEADERS,
+            self.pilot_row(
+                listing_address=address,
+                state="GA",
+                first_seen_at="2026-08-30T09:05:00-04:00",
+                synthetic_zpid="free-abc",
+                source="idx_broker_remarks",
+                source_url="https://broker.example/1-main-street",
+                status="qualified",
+                promotion_status="promoted",
+                import_ready="promoted",
+                pending_queue_listing_json=json.dumps(payload),
+            ),
+        ]
+        main_rows = [["Agent Name", "Listing Address", "State", "created-at"]]
+        with mock.patch.object(
+            pilot,
+            "get_values",
+            side_effect=[main_rows, pilot_rows],
+        ), mock.patch.object(
+            pilot,
+            "run_source_durability_audit",
+            return_value={"state_unconfirmed": 0, "state_persistence_confirmed": 1},
+        ):
+            stats = pilot.run_linkage_and_suffix_audits(
+                "token",
+                "sheet-id",
+                "Sheet1",
+                "Lead Source Pilot",
+                run_date=dt.date(2026, 8, 30),
+                phase="post_verifier",
+                source_scorecard={"confirmed": True},
+            )
+
+        self.assertEqual(stats["same_day_promoted"], 0)
+        self.assertEqual(stats["same_day_unresolved"], 1)
+        self.assertEqual(stats["promoted_acceptance_gaps"], 1)
+        self.assertEqual(stats["promoted_acceptance_gap_rows"], [2])
+        self.assertGreaterEqual(stats["acceptance_alerts"], 1)
+
     def test_legacy_created_at_timestamp_is_not_treated_as_pilot_id(self):
         row = {"created_at": "2026-08-01T14:14:49-04:00"}
 
@@ -4437,6 +4524,53 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertTrue(claimed)
         self.assertEqual(reason, "claimed")
         self.assertEqual(recovery_keys, [])
+
+    def test_audit_schedule_slot_accepts_pilot_scoped_green_with_global_sms_blockers(self):
+        source_row = [
+            "source:2026-08-21", "source-1", "2026-08-21", "scheduled_source",
+            "completed", "2026-08-21T13:20:00+00:00", "true", "",
+        ]
+        verifier_row = [
+            "post_source_verifier:2026-08-21:lead-verifier-8-am",
+            "verifier-1", "2026-08-21", "pilot_verifier", "completed_degraded",
+            "2026-08-21T14:00:00+00:00", "false",
+            "pilot_pipeline_complete=true; unresolved_pilot_rows=none; "
+            "global_sms_blockers=5470,5472",
+        ]
+        after_append = [
+            pilot.RUN_RECEIPT_HEADERS,
+            source_row,
+            verifier_row,
+            ["post_verifier_audit:2026-08-21", "audit-1", "2026-08-21", "link_audit",
+             "running", "2026-08-21T14:05:00+00:00", "false", ""],
+        ]
+        with mock.patch.object(pilot, "ensure_headers_tab"), \
+             mock.patch.object(
+                 pilot,
+                 "get_values",
+                 side_effect=[[pilot.RUN_RECEIPT_HEADERS, source_row, verifier_row], after_append],
+             ), mock.patch.object(pilot, "append_run_slot_receipt"):
+            claimed, reason, recovery_keys = pilot.claim_run_schedule_slot(
+                "token", "sheet",
+                schedule_slot_id="post_verifier_audit:2026-08-21",
+                run_receipt_id="audit-1",
+                run_date=dt.date(2026, 8, 21),
+                run_mode="link_audit",
+                now=dt.datetime(2026, 8, 21, 14, 5, tzinfo=dt.timezone.utc),
+            )
+
+        self.assertTrue(claimed)
+        self.assertEqual(reason, "claimed")
+        self.assertEqual(recovery_keys, [])
+
+    def test_pilot_scoped_receipt_flag_must_be_exact_and_true(self):
+        row = [
+            "slot", "receipt", "2026-08-21", "pilot_verifier", "completed_degraded",
+            "2026-08-21T14:00:00+00:00", "false",
+            "pilot_pipeline_complete=false; global_sms_blockers=5470",
+        ]
+
+        self.assertFalse(pilot.pilot_verifier_receipt_green(row))
 
     def test_audit_schedule_slot_requires_green_first_verifier_receipt(self):
         source_row = [

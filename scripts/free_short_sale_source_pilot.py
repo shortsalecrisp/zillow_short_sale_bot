@@ -4465,6 +4465,7 @@ def audit_scorecard_detail(stats: dict[str, Any]) -> str:
         ("unresolved", "same_day_unresolved_rows"),
         ("qualification", "same_day_qualification_error_rows"),
         ("linkage", "same_day_linkage_gap_rows"),
+        ("acceptance", "promoted_acceptance_gap_rows"),
     ):
         rows = sorted({int(row) for row in stats.get(key, [])})
         if rows:
@@ -4477,6 +4478,7 @@ def audit_scorecard_detail(stats: dict[str, Any]) -> str:
         f"held={int(stats.get('same_day_verifier_held', 0))},"
         f"rejected={int(stats.get('same_day_rejected', 0))},"
         f"duplicates={int(stats.get('same_day_duplicates', 0))},"
+        f"promotion_contract_gaps={int(stats.get('promoted_acceptance_gaps', 0))},"
         f"alerts={int(stats.get('acceptance_alerts', 0))},"
         f"daily_fetch_fail_bps={int(stats.get('daily_fetch_failure_rate_bps', 0))},"
         f"rolling_days={int(stats.get('rolling_fetch_scorecard_days', 0))},"
@@ -4514,6 +4516,31 @@ def parse_recovery_query_keys(
     if any(not re.fullmatch(r"[A-Z]{2}:[a-z0-9_]+(?::p[2-9][0-9]*)?", key) for key in keys):
         return []
     return keys
+
+
+def receipt_detail_flag(detail: str, key: str) -> bool:
+    """Return an exact semicolon-delimited boolean receipt flag."""
+    normalized_key = re.escape(normalize_space(key))
+    return bool(
+        re.search(
+            rf"(?:^|;)\s*{normalized_key}\s*=\s*true\s*(?:;|$)",
+            detail or "",
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def pilot_verifier_receipt_green(row: list[str]) -> bool:
+    """Accept a green Pilot receipt without conflating unrelated SMS blockers."""
+    padded = row + [""] * (len(RUN_RECEIPT_HEADERS) - len(row))
+    if padded[3] != "pilot_verifier":
+        return False
+    if padded[4] == "completed" and padded[6].lower() == "true":
+        return True
+    return bool(
+        padded[4] in {"completed", "completed_degraded"}
+        and receipt_detail_flag(padded[7], "pilot_pipeline_complete")
+    )
 
 
 def claim_run_schedule_slot(
@@ -4580,12 +4607,7 @@ def claim_run_schedule_slot(
         verifier_completed_rows = [
             row
             for row in verifier_rows
-            if (
-                len(row) > 6
-                and row[3] == "pilot_verifier"
-                and row[4] == "completed"
-                and row[6].lower() == "true"
-            )
+            if pilot_verifier_receipt_green(row)
         ]
         if not verifier_completed_rows:
             return False, "post_source_verifier_incomplete", []
@@ -5611,6 +5633,34 @@ def reconcile_pilot_link(
     }
 
 
+def promoted_acceptance_contract(
+    pilot_row: dict[str, str],
+    reconciliation: dict[str, Any],
+) -> dict[str, Any]:
+    """Require both reopenable source evidence and a reread exact Sheet1 owner."""
+    payload, payload_failure = parse_pilot_payload(pilot_row)
+    durable_source_evidence = bool(
+        not payload_failure and has_durable_source_evidence(payload)
+    )
+    recorded_owner = normalize_space(pilot_row.get("matched_main_row", ""))
+    exact_sheet1_owner = bool(
+        reconciliation.get("outcome") == "linked"
+        and recorded_owner
+        and reconciliation.get("pointer_matches")
+    )
+    reasons = []
+    if not durable_source_evidence:
+        reasons.append("source_evidence_missing")
+    if not exact_sheet1_owner:
+        reasons.append("sheet1_owner_missing")
+    return {
+        "accepted": not reasons,
+        "durable_source_evidence": durable_source_evidence,
+        "exact_sheet1_owner": exact_sheet1_owner,
+        "gap_reasons": reasons,
+    }
+
+
 def pilot_followup_hold_reason(pilot_row: dict[str, str]) -> str:
     """Return the qualification state that should suppress future follow-up in shadow."""
     status = normalize_space(pilot_row.get("status", "")).lower()
@@ -5802,6 +5852,10 @@ def run_linkage_and_suffix_audits(
         "same_day_qualification_unconfirmed": 0,
         "same_day_linkage_gaps": 0,
         "same_day_stale_pointers": 0,
+        "promoted_acceptance_gaps": 0,
+        "promoted_source_evidence_gaps": 0,
+        "promoted_owner_gaps": 0,
+        "promoted_acceptance_gap_rows": [],
         "same_day_unresolved_rows": [],
         "same_day_qualification_error_rows": [],
         "same_day_linkage_gap_rows": [],
@@ -5933,6 +5987,39 @@ def run_linkage_and_suffix_audits(
         return stats
     main_rows = sheet_row_maps(main_raw)
     all_pilot_rows = sheet_row_maps(pilot_raw)
+    promoted_rows = [
+        (sheet_row, row)
+        for sheet_row, row in all_pilot_rows
+        if normalize_space(row.get("promotion_status", "")).lower() == "promoted"
+    ]
+    promoted_reconciliations: dict[int, dict[str, Any]] = {}
+    promoted_contracts: dict[int, dict[str, Any]] = {}
+    for pilot_sheet_row, pilot_row in promoted_rows:
+        reconciliation = reconcile_pilot_link(pilot_sheet_row, pilot_row, main_rows)
+        contract = promoted_acceptance_contract(pilot_row, reconciliation)
+        promoted_reconciliations[pilot_sheet_row] = reconciliation
+        promoted_contracts[pilot_sheet_row] = contract
+        if contract["accepted"]:
+            continue
+        stats["promoted_acceptance_gaps"] += 1
+        stats["promoted_acceptance_gap_rows"].append(pilot_sheet_row)
+        stats["promoted_source_evidence_gaps"] += int(
+            not contract["durable_source_evidence"]
+        )
+        stats["promoted_owner_gaps"] += int(not contract["exact_sheet1_owner"])
+        log_event(
+            "pilot_promoted_acceptance_gap",
+            phase=phase,
+            run_date=run_date.isoformat(),
+            pilot_row=pilot_sheet_row,
+            synthetic_zpid=pilot_row.get("synthetic_zpid", ""),
+            address=pilot_row.get("listing_address", ""),
+            linkage=reconciliation["outcome"],
+            recorded_main_row=reconciliation["recorded_main_row"],
+            gap_reasons=contract["gap_reasons"],
+            follow_on_hold=True,
+            writes=0,
+        )
     same_day_rows = [
         (sheet_row, row)
         for sheet_row, row in all_pilot_rows
@@ -5962,8 +6049,10 @@ def run_linkage_and_suffix_audits(
 
         resolved = False
         if promotion_status == "promoted" and import_ready == "promoted":
-            stats["same_day_promoted"] += 1
-            resolved = True
+            contract = promoted_contracts.get(pilot_sheet_row, {"accepted": False})
+            if contract["accepted"]:
+                stats["same_day_promoted"] += 1
+                resolved = True
         elif status == "rejected" and import_ready == "skip":
             stats["same_day_rejected"] += 1
             resolved = True
@@ -6006,11 +6095,7 @@ def run_linkage_and_suffix_audits(
             stats["rolling_fetch_scorecard_days"] >= 7
             and stats["rolling_fetch_failure_rate_bps"] > 5_000
         )
-    pilot_rows = [
-        (sheet_row, row)
-        for sheet_row, row in all_pilot_rows
-        if row.get("promotion_status", "").strip().lower() == "promoted"
-    ]
+    pilot_rows = promoted_rows
     stats["pilot_rows"] = len(pilot_rows)
     log_event(
         "pilot_review_experiments_start",
@@ -6652,7 +6737,7 @@ def run_linkage_and_suffix_audits(
                 )
     suffix_stopped = False
     for pilot_sheet_row, pilot_row in pilot_rows:
-        reconciliation = reconcile_pilot_link(pilot_sheet_row, pilot_row, main_rows)
+        reconciliation = promoted_reconciliations[pilot_sheet_row]
         if link_active:
             if reconciliation["outcome"] == "linked":
                 stats["linked"] += 1
@@ -6757,6 +6842,7 @@ def run_linkage_and_suffix_audits(
                 "same_day_qualification_unconfirmed",
                 "same_day_linkage_gaps",
                 "same_day_stale_pointers",
+                "promoted_acceptance_gaps",
             )
         )
         log_event(
@@ -6774,6 +6860,8 @@ def run_linkage_and_suffix_audits(
             qualification_unconfirmed=stats["same_day_qualification_unconfirmed"],
             linkage_gaps=stats["same_day_linkage_gaps"],
             stale_pointers=stats["same_day_stale_pointers"],
+            promoted_acceptance_gaps=stats["promoted_acceptance_gaps"],
+            promoted_acceptance_gap_rows=stats["promoted_acceptance_gap_rows"],
             unresolved_rows=stats["same_day_unresolved_rows"],
             qualification_error_rows=stats["same_day_qualification_error_rows"],
             linkage_gap_rows=stats["same_day_linkage_gap_rows"],
