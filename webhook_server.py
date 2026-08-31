@@ -4934,6 +4934,22 @@ def _sms_fee_decision(row_obj: Dict[str, str]) -> Dict[str, Any]:
     )
 
 
+def _sms_is_speed_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(re.search(
+        r"\b(?:how|can|could|do|will|would)\b.{0,50}\b(?:you|crisp|your (?:service|team))\b.{0,60}"
+        r"\b(?:speed (?:it|this|that|things|the process) up|speed up|expedite|faster|reduce (?:the )?(?:wait|delays?))\b",
+        text,
+    ))
+
+
+def _sms_speed_question_reply() -> str:
+    return (
+        "I help reduce avoidable delays by organizing the lender's required documents and staying on top of follow-up. "
+        "The lender still controls review timing. Where is this file getting held up?"
+    )
+
+
 def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
     text = _sms_normalize_whitespace(inbound_text).lower()
     if _sms_is_short_sale_source_question(text):
@@ -4997,7 +5013,9 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
             reason="Agent proposed or requested a pricing concession",
         )
 
+    speed_question = _sms_is_speed_question(text)
     flags = {
+        "speed": speed_question,
         "fee": _sms_is_fee_question(text),
         "documents": bool(re.search(
             r"\bwho\s+(?:collects?|gathers?|gets?|organizes?|handles?)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b"
@@ -5024,6 +5042,9 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         "language": _sms_is_spanish_language_question(text),
         "different": _sms_is_differentiation_question(text),
     }
+    # A speed mechanism is more specific than the overlapping service question.
+    if speed_question:
+        flags["help"] = False
     matched = [name for name, enabled in flags.items() if enabled]
     if not matched:
         return None
@@ -5101,6 +5122,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
                 result.update(lead_status=status, conversation_done=done)
             return result
         replies = {
+            "speed": _sms_speed_question_reply(),
             "documents": "I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up. If you want, I can walk you through the document checklist on a quick call.",
             "help": "I handle the lender side of the short sale, including the paperwork, calls, follow-up, and negotiations through approval. It takes that work off your plate so you can focus on the listing and client.",
             "local": "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
@@ -5129,6 +5151,8 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         answers.append("I'm with Crisp Short Sales.")
     if flags["help"]:
         answers.append("I handle the lender-side paperwork, calls, follow-up, and negotiations through approval.")
+    if flags["speed"]:
+        answers.append(_sms_speed_question_reply())
     if flags["local"]:
         answers.append("I'm based in Atlanta and work nationwide; the lender-side work is handled remotely.")
     if flags["fee"]:

@@ -2004,6 +2004,15 @@ function isFeeNegotiationSignal_(text) {
   return mentionsPricing && asksConcession;
 }
 
+function isSpeedQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /\b(?:how|can|could|do|will|would)\b.{0,50}\b(?:you|crisp|your (?:service|team))\b.{0,60}\b(?:speed (?:it|this|that|things|the process) up|speed up|expedite|faster|reduce (?:the )?(?:wait|delays?))\b/.test(t);
+}
+
+function buildSpeedQuestionReply_() {
+  return "I help reduce avoidable delays by organizing the lender's required documents and staying on top of follow-up. The lender still controls review timing. Where is this file getting held up?";
+}
+
 function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return null;
@@ -2051,7 +2060,9 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
     return existingClient;
   }
 
+  const speedQuestion = isSpeedQuestionSignal_(t);
   const flags = {
+    speed: speedQuestion,
     fee: isPaymentOrFeeQuestionSignal_(t),
     documents: /\bwho\s+(?:collects?|gathers?|gets?|organizes?|handles?)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t) ||
       /\b(?:do|will|would|can|could)\s+you\s+(?:collect|gather|get|organize|handle)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t) ||
@@ -2072,6 +2083,8 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
     differentiation: isDifferentiationQuestionSignal_(t)
   };
 
+  // A speed mechanism is more specific than the overlapping service question.
+  if (speedQuestion) flags.help = false;
   const matchedKeys = Object.keys(flags).filter(function(key) { return flags[key]; });
   if (!matchedKeys.length) return null;
 
@@ -2143,6 +2156,11 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   }
 
   if (matchedKeys.length === 1) {
+    if (flags.speed) return {
+      matched: true, reply_text: buildSpeedQuestionReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Explained avoidable delays and lender-controlled review timing"
+    };
     if (flags.fee) {
       const feeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound);
       if (!feeDecision.handoff_needed) {
@@ -2231,6 +2249,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   const answers = [];
   if (flags.documents) answers.push("I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up.");
   if (flags.company) answers.push("I'm with Crisp Short Sales.");
+  if (flags.speed) answers.push(buildSpeedQuestionReply_());
   if (flags.help) answers.push("I handle the lender-side paperwork, calls, follow-up, and negotiations through approval.");
   if (flags.local) answers.push("I'm based in Atlanta and work nationwide; the lender-side work is handled remotely.");
   if (flags.fee) {
@@ -5979,6 +5998,28 @@ function testSmsIntentContractV3_() {
   function record(name, passed, details) {
     cases.push({ name: name, passed: !!passed, details: details || "" });
   }
+
+  const speedText = "How do you help speed it up?";
+  const speedExpected = "I help reduce avoidable delays by organizing the lender's required documents and staying on top of follow-up. The lender still controls review timing. Where is this file getting held up?";
+  const speed = applyFastRules_(speedText, baseRow);
+  record("speed_question_explains_delays_without_guarantee",
+    speed.matched && speed.reply_text === speedExpected && speed.lead_status === "Y" &&
+      !speed.handoff_needed && !speed.block_reply, speed.reason);
+  const speedVariants = ["How can you speed up the process?", "Can you expedite the short sale?",
+    "How do you get approvals faster?", "How would your team reduce delays?"];
+  record("speed_question_variants", speedVariants.every(function(text) {
+    return applyFastRules_(text, baseRow).reply_text === speedExpected;
+  }));
+  const speedRepeatRow = Object.assign({}, baseRow);
+  speedRepeatRow[HEADERS.last_outbound_text] = speedExpected;
+  const speedRepeat = applyRepeatGuard_(applyFastRules_(speedText, speedRepeatRow), speedRepeatRow, speedText);
+  record("speed_question_preserves_repeat_guard", speedRepeat.handoff_needed && !speedRepeat.reply_text,
+    speedRepeat.reason);
+  record("speed_question_preserves_reply_cap", !shouldSendBotReply_(speed, true));
+  const ordinaryTimeline = applyFastRules_("What's the timeline?", baseRow);
+  record("speed_question_preserves_general_timeline",
+    ordinaryTimeline.reply_text.indexOf("60-90 days") !== -1 &&
+      ordinaryTimeline.reply_text.indexOf("Where is this file") === -1, ordinaryTimeline.reason);
 
   const compound = applyFastRules_(
     "I already have someone. What do you do, where are you located, and what is your fee?",

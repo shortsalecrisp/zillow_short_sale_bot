@@ -2235,6 +2235,44 @@ def test_sms_contract_document_collection_question_gets_direct_answer_then_one_c
     assert decision["reply_text"].count("quick call") == 1
 
 
+def test_sms_speed_question_answers_delay_mechanism_and_preserves_guards(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    expected = (
+        "I help reduce avoidable delays by organizing the lender's required documents and staying on top of follow-up. "
+        "The lender still controls review timing. Where is this file getting held up?"
+    )
+    for inbound in (
+        "How do you help speed it up?",
+        "How can you speed up the process?",
+        "Can you expedite the short sale?",
+        "How do you get approvals faster?",
+        "How would your team reduce delays?",
+    ):
+        decision = module._sms_build_decision({}, inbound)
+        assert decision["reply_text"] == expected
+        assert decision["lead_status"] == "Y"
+        assert not decision["handoff_needed"]
+        assert not decision["block_reply"]
+
+    repeated = module._sms_build_decision(
+        {"last_outbound_text": expected}, "How do you help speed it up?",
+    )
+    assert repeated["handoff_needed"] is True
+    assert repeated["reply_text"] == ""
+    overridden = module._sms_fast_decision(
+        {"human_override": "TRUE", "mailshake_status": "Y"}, "How do you help speed it up?",
+    )
+    assert overridden["block_reply"] is True
+    assert overridden["preserve_existing_state"] is True
+    assert module._sms_fast_decision({}, "What's the timeline?")["reply_text"] == module.SHORT_SALE_TIMELINE_REPLY
+    assert "takes that work off your plate" in module._sms_fast_decision({}, "What do you do?")["reply_text"].lower()
+    source = module._sms_fast_decision({}, "Why did you think this was a short sale? How do you help speed it up?")
+    assert source["lead_status"] == "R"
+    assert source["reply_text"] == "I'm sorry, I thought I saw it in the listing but I may have misread it."
+
+
 def test_sms_contract_present_help_and_call_requests_are_terminal_handoffs(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
