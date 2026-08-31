@@ -93,9 +93,16 @@ def identity(row):
 
 def existing_listing_owner(row, main_rows):
     """Address-only duplicates also require city and exact agent/contact attribution."""
+    def address_identity(record):
+        address = re.sub(r"\bpl\b", "place", record.get("listing_address", ""), flags=re.IGNORECASE)
+        parsed = pilot.canonical_address_identity(address, record.get("state", ""))
+        # Use the full normalized street, not relaxed_street: Place and Road
+        # at the same number must not collapse merely because their agent agrees.
+        return parsed["street"], parsed["state"], parsed["unit"]
+
     matches = []
     for number, main in main_rows:
-        if identity(row)[1] != pilot.street_state_key(main.get("listing_address", ""), main.get("state", "")):
+        if address_identity(row) != address_identity(main):
             continue
         if pilot.normalize_key(row.get("city", "")) != pilot.normalize_key(main.get("city", "")):
             continue
@@ -108,7 +115,9 @@ def existing_listing_owner(row, main_rows):
         # Historical Pilot rows intentionally have blank A:D. Accept the explicit
         # verifier's named-agent/phone attribution, never a similar-name match.
         contact_matches = bool(pilot_name and pilot_name == main_name and len(phone) == 10 and phone == main_phone)
-        note_matches = bool(main_name and main_name in pilot.normalize_key(note) and len(main_phone) == 10 and main_phone in note_phones)
+        named_owner = re.search(r"(?:\bhas|\bto|\bowner_agent=)\s*" + re.escape(main_name) + r"(?:\b|$)",
+                                pilot.normalize_key(note).replace("owner agent ", "owner_agent="))
+        note_matches = bool(main_name and named_owner and len(main_phone) == 10 and main_phone in note_phones)
         if contact_matches or note_matches:
             matches.append(number)
     return matches[0] if len(matches) == 1 else None

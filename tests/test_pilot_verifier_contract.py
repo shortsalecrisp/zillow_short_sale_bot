@@ -101,6 +101,22 @@ class PilotVerifierContractTest(unittest.TestCase):
         self.row["promotion_notes"] = "Lead verifier 8 AM linked exact listing to Janet Agent, 555-222-3333"
         self.assertEqual(self.build()[0]["pipeline_complete"], "false")
 
+    def test_existing_listing_place_pl_alias_matches_without_dropping_unit(self):
+        self.row.update(listing_address="20111 Caroline Creek Place", status="duplicate",
+                        promotion_status="skipped_duplicate_listing", import_ready="skip")
+        self.owner["listing_address"] = "20111 Caroline Creek PL"
+        self.assertEqual(self.build()[0]["pipeline_complete"], "true")
+        self.owner["listing_address"] += " Unit 2"
+        self.assertEqual(self.build()[0]["pipeline_complete"], "false")
+        self.owner["listing_address"] = "20111 Caroline Creek Road"
+        self.assertEqual(self.build()[0]["pipeline_complete"], "false")
+
+    def test_similar_longer_name_in_note_is_not_identity(self):
+        self.row.update(first_name="", last_name="", phone="", email="", status="duplicate",
+                        promotion_status="skipped_duplicate_listing", import_ready="skip",
+                        promotion_notes="Lead verifier 8 AM linked exact listing to Mary Jane Agent, 555-222-3333")
+        self.assertEqual(self.build()[0]["pipeline_complete"], "false")
+
     def test_details_are_not_truncated_at_500_characters(self):
         receipt, _ = self.build(blockers=list(range(3000, 3100)))
         self.assertGreater(len(receipt["detail"]), 500)

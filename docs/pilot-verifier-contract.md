@@ -28,7 +28,7 @@ must remain the normalized street/state key, never a Sheet1 row number.
 For an existing-listing duplicate use `status=duplicate`,
 `failure_reason=duplicate_existing_listing`,
 `promotion_status=skipped_duplicate_listing`, `import_ready=skip`, and its exact
-owner pointer. Include the verified owner's full individual name and phone in
+owner pointer. Include `owner_agent=Full Individual Name; owner_phone=number` in
 `adjudication_reason`; the service checks the exact name/phone, address, and city
 against the owner. Existing-agent/different-listing suppression must have no
 listing-owner pointer. A hold must identify the exact missing/conflicting evidence.
