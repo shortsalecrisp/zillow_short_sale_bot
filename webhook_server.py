@@ -6218,6 +6218,28 @@ async def sms_chatbot_get(request: Request):
         return {"ok": False, "error": str(exc), "should_reply": False}
 
 
+@app.post("/internal/pilot-verifier-contract")
+async def internal_pilot_verifier_contract(request: Request):
+    """Shared Pilot-only owner writes/receipts; this route cannot send outreach."""
+    _auth_internal_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    def execute():
+        from pilot_verifier_contract import handle
+        from scripts.free_short_sale_source_pilot import sheets_client
+        return handle(sheets_client(SC_JSON), GSHEET_ID, payload)
+
+    try:
+        return await asyncio.to_thread(execute)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/internal/send-initial-sms")
 async def internal_send_initial_sms(request: Request):
     """Send an initial SMS from the production bot using Render-side credentials."""
