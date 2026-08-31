@@ -60,7 +60,7 @@ test("agent sync enables per-call voice overrides for A/B testing", () => {
 
   assert.match(script, /platform_settings:\s*updatedPlatformSettings,/);
   assert.match(script, /conversation_config_override/);
-  assert.match(script, /tts:\s*{\s*\.\.\.currentTtsOverrides,\s*voice_id:\s*true,/s);
+  assert.match(script, /tts:\s*{\s*\.\.\.currentTtsOverrides,\s*voice_id:\s*true,\s*speed:\s*true,/s);
 });
 
 test("agent sync blocks ambiguous okay-style replies from the transfer-check edge", () => {

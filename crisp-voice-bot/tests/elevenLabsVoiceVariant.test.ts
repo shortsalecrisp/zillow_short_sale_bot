@@ -11,6 +11,7 @@ process.env.ELEVENLABS_ERYN_VOICE_ID = "eryn-voice-id";
 process.env.ELEVENLABS_FINCH_VOICE_ID = "finch-voice-id";
 process.env.ELEVENLABS_RACHEL_VOICE_ID = "rachel-voice-id";
 process.env.ELEVENLABS_BELLA_VOICE_ID = "bella-voice-id";
+process.env.ELEVENLABS_FINCH_TTS_SPEED = "0.93";
 process.env.ELEVENLABS_VOICE_AB_TEST_ENABLED = "true";
 
 test("ElevenLabs calls rotate deterministically across Eryn and Finch by row", async () => {
@@ -27,6 +28,7 @@ test("ElevenLabs calls rotate deterministically across Eryn and Finch by row", a
     assistantName: "Finn",
     voiceName: "Finch",
     voiceId: "finch-voice-id",
+    ttsSpeed: 0.93,
   });
   assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3482 }), {
     key: "eryn",
@@ -39,6 +41,7 @@ test("ElevenLabs calls rotate deterministically across Eryn and Finch by row", a
     assistantName: "Finn",
     voiceName: "Finch",
     voiceId: "finch-voice-id",
+    ttsSpeed: 0.93,
   });
 });
 
@@ -111,6 +114,7 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,
     "finch-voice-id",
   );
+  assert.equal(body.conversation_initiation_client_data.conversation_config_override.tts.speed, 0.93);
   assert.match(
     body.conversation_initiation_client_data.dynamic_variables.voicemailMessage,
     /^Hi, this is Finn with Crisp Short Sales/,

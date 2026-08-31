@@ -343,6 +343,7 @@ async function main(): Promise<void> {
         tts: {
           ...currentTtsOverrides,
           voice_id: true,
+          speed: true,
         },
       },
     },

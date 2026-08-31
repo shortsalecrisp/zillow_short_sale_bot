@@ -7,6 +7,7 @@ export type ElevenLabsVoiceVariant = {
   assistantName: "Maya" | "Finn";
   voiceName: "Eryn" | "Finch";
   voiceId: string;
+  ttsSpeed?: number;
 };
 
 const ERYN_ASSISTANT_NAME = "Maya";
@@ -25,8 +26,13 @@ function buildVoiceVariants(): ElevenLabsVoiceVariant[] {
       assistantName: FINCH_ASSISTANT_NAME,
       voiceName: "Finch",
       voiceId: config.elevenLabs.finchVoiceId,
+      ttsSpeed: config.elevenLabs.finchTtsSpeed,
     },
   ];
+}
+
+export function findElevenLabsVoiceVariant(key: string): ElevenLabsVoiceVariant | undefined {
+  return buildVoiceVariants().find((variant) => variant.key === key);
 }
 
 export function getElevenLabsVoiceExperimentStatus() {
@@ -41,6 +47,7 @@ export function getElevenLabsVoiceExperimentStatus() {
       voiceName: variant.voiceName,
       assistantName: variant.assistantName,
       voiceIdConfigured: Boolean(variant.voiceId),
+      ttsSpeed: variant.ttsSpeed ?? null,
     })),
   };
 }

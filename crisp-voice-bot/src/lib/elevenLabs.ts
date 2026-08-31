@@ -3,7 +3,11 @@ import { config } from "./config";
 import { rememberElevenLabsCallContext } from "./elevenLabsCallContext";
 import { buildElevenLabsOpenerVariant } from "./elevenLabsOpenerVariant";
 import { scheduleElevenLabsPostCallFallback } from "./elevenLabsPostCall";
-import { selectElevenLabsVoiceVariant, type ElevenLabsVoiceVariant } from "./elevenLabsVoiceVariant";
+import {
+  findElevenLabsVoiceVariant,
+  selectElevenLabsVoiceVariant,
+  type ElevenLabsVoiceVariant,
+} from "./elevenLabsVoiceVariant";
 import { logger } from "./logger";
 import type { CallMetadata, ElevenLabsOutboundCallResponse } from "../types";
 
@@ -159,11 +163,14 @@ export function getStreetAddress(listingAddress: string): string {
 
 function resolveElevenLabsVoiceVariant(metadata: CallMetadata): ElevenLabsVoiceVariant {
   if (metadata.voiceVariant && metadata.assistantName && metadata.voiceName && metadata.voiceId) {
+    const configuredVariant = findElevenLabsVoiceVariant(metadata.voiceVariant);
+
     return {
       key: metadata.voiceVariant as ElevenLabsVoiceVariant["key"],
       assistantName: metadata.assistantName as ElevenLabsVoiceVariant["assistantName"],
       voiceName: metadata.voiceName as ElevenLabsVoiceVariant["voiceName"],
       voiceId: metadata.voiceId,
+      ttsSpeed: configuredVariant?.ttsSpeed,
     };
   }
 
@@ -236,6 +243,7 @@ export function buildElevenLabsOutboundCallBody(params: {
       conversation_config_override: {
         tts: {
           voice_id: voiceVariant.voiceId,
+          ...(voiceVariant.ttsSpeed === undefined ? {} : { speed: voiceVariant.ttsSpeed }),
         },
       },
     },
