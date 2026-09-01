@@ -54,6 +54,8 @@ def test_inbound_queue_and_outbox_have_leases_and_durable_states():
 def test_claim_revalidates_latest_crm_message_before_send():
     assert "getPendingSmsStaleReason_" in OUTBOX
     assert "A newer substantive inbound message exists" in OUTBOX
+    assert "shouldCarryOutstandingSpecificFeeReplyV15_" in OUTBOX
+    assert "carryOutstandingSpecificFee" in OUTBOX
 
 
 def test_offer_scope_clarification_can_send_before_approved_handoff_lock():

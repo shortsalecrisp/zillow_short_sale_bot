@@ -2121,6 +2121,79 @@ def test_sms_contract_fee_questions_follow_the_required_three_step_flow(monkeypa
     assert third["reply_text"] == ""
 
 
+def test_sms_exact_fee_survives_reply_cap_and_automated_takeover(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    initial_fee = module._sms_fee_decision({})["reply_text"]
+    sheet.rows[2][11] = initial_fee
+    sheet.rows[2][12] = "Max Replies Reached"
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][17] = json.dumps([{"role": "assistant", "text": initial_fee}])
+    sheet.rows[2][18] = "3"
+    sheet.rows[2][19] = "TRUE"
+
+    body = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "How much do you charge the buyer at closing?",
+            "message_id": "fee-recovery-1",
+        },
+    ).json()
+
+    assert body["should_reply"] is True
+    assert "$5,000" in body["reply_text"]
+    assert body["handoff_needed"] is False
+    assert sheet.rows[2][13] == "active"
+    assert sheet.rows[2][16] == "FALSE"
+    assert sheet.rows[2][19] == "FALSE"
+    assert sender.calls == []
+
+
+def test_sms_exact_fee_does_not_override_manual_takeover(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision(
+        {
+            "human_override": "TRUE",
+            "handoff_flag": "TRUE",
+            "ai_state": "handoff",
+            "conversation_summary": "Manual reply sent; automation disabled for this conversation",
+            "history_json": json.dumps([{
+                "role": "assistant",
+                "text": "There's no cost to you or the seller. I charge a flat fee to the buyer at closing.",
+            }]),
+        },
+        "How much is the fee?",
+    )
+
+    assert decision["block_reply"] is True
+    assert decision["reason"] == "Human override enabled - inbound recorded only"
+
+
+def test_sms_already_approved_is_a_closeout_unless_it_contains_a_live_request(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    closeout = module._sms_fast_decision({}, "Thanks for the offer, we have a short sale approval.")
+    question = module._sms_fast_decision({}, "We have short sale approval, but I need help with post-approval documents.")
+
+    assert closeout["lead_status"] == "R"
+    assert closeout["conversation_done"] is True
+    assert closeout["handoff_needed"] is False
+    assert closeout["call_booking_status"] == "closed_no_interest"
+    assert question["conversation_done"] is False
+    assert question["lead_status"] == "Y"
+
+
 def test_sms_contract_fee_negotiation_hands_off_without_repeating_price(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

@@ -748,6 +748,29 @@ function handleIncomingSmsCore_(body) {
     };
   }
 
+  const feeRecoveryDecision = buildAutomatedHandoffFeeRecoveryDecision_(currentRowObj, inboundText);
+  if (feeRecoveryDecision) {
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "Y",
+      [HEADERS.conversation_summary]: feeRecoveryDecision.reason,
+      [HEADERS.ai_state]: "active",
+      [HEADERS.call_booking_status]: "interested_no_call",
+      [HEADERS.handoff_flag]: "FALSE",
+      [HEADERS.human_override]: "FALSE"
+    });
+    return {
+      ok: true,
+      should_reply: true,
+      reply_text: feeRecoveryDecision.reply_text,
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      reason: feeRecoveryDecision.reason
+    };
+  }
+
   if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") {
     return {
       ok: true,
@@ -1937,7 +1960,10 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
   }
 
   const pendingFeeStage = getPendingFeeReplyStageV3_(rowObj);
-  const hasPriorSpecificFeeReply = priorAssistantTexts.some(isSpecificFeeReplyText_) || pendingFeeStage === "specific";
+  // Only a sent receipt or durable assistant history proves that the exact
+  // amount was answered. A queued reply may still be superseded by a newer
+  // inbound and must not advance the conversation to manual handoff.
+  const hasPriorSpecificFeeReply = priorAssistantTexts.some(isSpecificFeeReplyText_) || pendingFeeStage === "specific_delivered";
   const hasPriorInitialFeeReply = priorAssistantTexts.some(isInitialFeeReplyText_) || pendingFeeStage === "initial";
 
   if (hasPriorSpecificFeeReply) {
@@ -1956,6 +1982,7 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
       handoff_needed: false,
       needs_review: false,
       block_reply: false,
+      bypass_reply_cap: true,
       reason: "Repeated fee/payment question - gave specific $5,000 buyer-paid answer"
     };
   }
@@ -1987,11 +2014,37 @@ function getPendingFeeReplyStageV3_(rowObj) {
       const createdAt = new Date(rows[i][0]).getTime();
       if (["queued", "claimed", "send_started", "sent"].indexOf(status) === -1 ||
           normalizePhone_(rows[i][4]) !== phone || !createdAt || createdAt < cutoff) continue;
-      if (isSpecificFeeReplyText_(rows[i][5])) return "specific";
+      if (isSpecificFeeReplyText_(rows[i][5])) {
+        return status === "sent" ? "specific_delivered" : "specific_pending";
+      }
       if (isInitialFeeReplyText_(rows[i][5])) return "initial";
     }
   } catch (_) {}
   return "";
+}
+
+function buildAutomatedHandoffFeeRecoveryDecision_(rowObj, inboundText) {
+  if (String(rowObj && rowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE") return null;
+  const summary = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.conversation_summary] || "").toLowerCase());
+  if (summary.indexOf("max replies reached") === -1 && summary.indexOf("fee question follow-up") === -1) {
+    return null;
+  }
+  if (!isPaymentOrFeeQuestionSignal_(inboundText) || isUnmistakableTerminalRejectionSignal_(inboundText)) {
+    return null;
+  }
+  const decision = buildFeeQuestionDecision_(rowObj, rowObj && rowObj[HEADERS.last_outbound_text]);
+  return isSpecificFeeReplyText_(decision && decision.reply_text) ? decision : null;
+}
+
+function isAlreadyApprovedCloseoutSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const hasApproval = /\b(?:i|we)(?:\s+already)?\s+have(?:\s+(?:a|an|the))?\s+(?:short[- ]sale\s+)?approval\b/.test(t) ||
+    /\b(?:short[- ]sale|file|deal)\s+(?:is\s+)?already\s+approved\b/.test(t);
+  if (!hasApproval) return false;
+  return !/[?]/.test(t) && !/\bbut\b/.test(t) &&
+    !isPaymentOrFeeQuestionSignal_(t) && !isDirectHelpRequestSignal_(t) &&
+    !isPhoneCallInterestSignal_(t) && !isPresentServiceInterestSignal_(t) &&
+    !isSchedulingSignal_(t);
 }
 
 function isFeeNegotiationSignal_(text) {
@@ -2501,6 +2554,20 @@ function applyFastRules_(text, rowObj) {
       needs_review: false,
       block_reply: false,
       reason: "Agent has the current matter under control and will reach out only if help is later needed"
+    };
+  }
+
+  if (isAlreadyApprovedCloseoutSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: "Understood, thanks for letting me know. If anything changes, feel free to reach out.",
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "closed_no_interest",
+      reason: "Agent said the short sale is already approved; closed without human takeover"
     };
   }
 
@@ -6051,6 +6118,39 @@ function testSmsIntentContractV3_() {
     secondFee.matched && !secondFee.handoff_needed && secondFee.reply_text.indexOf("$5,000") !== -1,
     secondFee.reason
   );
+  record("fee_tier_two_bypasses_reply_cap_until_delivered",
+    secondFee.bypass_reply_cap && shouldSendBotReply_(secondFee, false), secondFee.reason);
+
+  const automatedFeeHandoffRow = Object.assign({}, feeRow);
+  automatedFeeHandoffRow[HEADERS.human_override] = "TRUE";
+  automatedFeeHandoffRow[HEADERS.handoff_flag] = "TRUE";
+  automatedFeeHandoffRow[HEADERS.ai_state] = "handoff";
+  automatedFeeHandoffRow[HEADERS.conversation_summary] = "Max Replies Reached";
+  const recoveredFee = buildAutomatedHandoffFeeRecoveryDecision_(
+    automatedFeeHandoffRow,
+    "How much do you charge the buyer at closing?"
+  );
+  record("exact_fee_recovers_from_automated_reply_cap_handoff",
+    recoveredFee && recoveredFee.reply_text.indexOf("$5,000") !== -1 && recoveredFee.bypass_reply_cap,
+    recoveredFee && recoveredFee.reason);
+
+  const manualFeeHandoffRow = Object.assign({}, automatedFeeHandoffRow);
+  manualFeeHandoffRow[HEADERS.conversation_summary] = "Manual reply sent; automation disabled for this conversation";
+  record("exact_fee_does_not_override_manual_takeover",
+    buildAutomatedHandoffFeeRecoveryDecision_(manualFeeHandoffRow, "How much is the fee?") === null);
+
+  const approvedCloseout = applyFastRules_("Thanks for the offer, we have a short sale approval.", baseRow);
+  record("already_approved_closes_without_takeover",
+    approvedCloseout.conversation_done && approvedCloseout.lead_status === "R" &&
+      !approvedCloseout.handoff_needed && approvedCloseout.call_booking_status === "closed_no_interest",
+    approvedCloseout.reason);
+  const approvedWithRequest = applyFastRules_(
+    "We have short sale approval, but I need help with post-approval documents.",
+    baseRow
+  );
+  record("already_approved_with_live_request_stays_open",
+    !approvedWithRequest.conversation_done && approvedWithRequest.lead_status === "Y",
+    approvedWithRequest.reason);
 
   const negotiation = applyFastRules_("Can you match the $3,995 fee I pay now?", baseRow);
   record(

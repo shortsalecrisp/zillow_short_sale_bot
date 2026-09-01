@@ -4922,6 +4922,7 @@ def _sms_fee_decision(row_obj: Dict[str, str]) -> Dict[str, Any]:
                 "the buyer can factor it into their offer price."
             ),
             lead_status="Y",
+            bypass_reply_cap=True,
             reason="Repeated fee/payment question - gave specific $5,000 buyer-paid answer",
         )
     return _sms_decision(
@@ -4931,6 +4932,37 @@ def _sms_fee_decision(row_obj: Dict[str, str]) -> Dict[str, Any]:
         ),
         lead_status="Y",
         reason="Asked about charge, fee, percentage, or how Crisp gets paid",
+    )
+
+
+def _sms_automated_handoff_fee_recovery(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
+    if str(row_obj.get("human_override") or "").upper() != "TRUE":
+        return None
+    summary = _sms_normalize_whitespace(row_obj.get("conversation_summary") or "").lower()
+    if "max replies reached" not in summary and "fee question follow-up" not in summary:
+        return None
+    if not _sms_is_fee_question(inbound_text) or _sms_is_unmistakable_terminal_rejection(inbound_text):
+        return None
+    decision = _sms_fee_decision(row_obj)
+    return decision if _sms_is_specific_fee_reply(decision.get("reply_text")) else None
+
+
+def _sms_is_already_approved_closeout(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    has_approval = bool(
+        re.search(r"\b(?:i|we)(?:\s+already)?\s+have(?:\s+(?:a|an|the))?\s+(?:short[- ]sale\s+)?approval\b", text)
+        or re.search(r"\b(?:short[- ]sale|file|deal)\s+(?:is\s+)?already\s+approved\b", text)
+    )
+    if not has_approval:
+        return False
+    return not (
+        "?" in text
+        or re.search(r"\bbut\b", text)
+        or _sms_is_fee_question(text)
+        or re.search(r"\b(?:need|want|would like|could use)\s+(?:some\s+)?help\b|\bcan you help\b", text)
+        or _sms_is_phone_call_interest(text)
+        or _sms_is_present_service_interest(text)
+        or _sms_is_scheduled_callback(text)
     )
 
 
@@ -5267,6 +5299,10 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             clear_callback=True,
         )
 
+    fee_recovery = _sms_automated_handoff_fee_recovery(row_obj, t)
+    if fee_recovery is not None:
+        return fee_recovery
+
     if str(row_obj.get("human_override") or "").upper() == "TRUE":
         return _sms_decision(
             lead_status=str(row_obj.get("mailshake_status") or "Y"),
@@ -5585,6 +5621,15 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             ),
             lead_status="Y",
             reason="Agent is handling the short sale themselves; gave one brief value response",
+        )
+
+    if _sms_is_already_approved_closeout(t):
+        return _sms_decision(
+            reply_text="Understood, thanks for letting me know. If anything changes, feel free to reach out.",
+            lead_status="R",
+            conversation_done=True,
+            reason="Agent said the short sale is already approved; closed without human takeover",
+            call_booking_status="closed_no_interest",
         )
 
     if _sms_has_existing_coverage(t) or re.search(

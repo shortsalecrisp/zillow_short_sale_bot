@@ -1439,6 +1439,27 @@ function testPendingSmsStaleTextNormalization_() {
   return { ok: true };
 }
 
+function shouldCarryOutstandingSpecificFeeReplyV15_(replyText, originalInboundText, currentInboundText, rowObj) {
+  if (typeof isSpecificFeeReplyText_ !== "function" || !isSpecificFeeReplyText_(replyText)) return false;
+  if (typeof isPaymentOrFeeQuestionSignal_ !== "function" || !isPaymentOrFeeQuestionSignal_(originalInboundText)) {
+    return false;
+  }
+  var deliveredTexts = [];
+  if (typeof getHistoryArray_ === "function") {
+    deliveredTexts = getHistoryArray_(rowObj && rowObj[HEADERS.history_json])
+      .filter(function(entry) { return entry && String(entry.role || "").toLowerCase() === "assistant"; })
+      .map(function(entry) { return String(entry.text || ""); });
+  }
+  deliveredTexts.push(String(rowObj && rowObj[HEADERS.last_outbound_text] || ""));
+  if (deliveredTexts.some(isSpecificFeeReplyText_)) return false;
+
+  return isPaymentOrFeeQuestionSignal_(currentInboundText) ||
+    (typeof isPresentServiceInterestSignal_ === "function" && isPresentServiceInterestSignal_(currentInboundText)) ||
+    (typeof isPhoneCallInterestSignal_ === "function" && isPhoneCallInterestSignal_(currentInboundText)) ||
+    (typeof isFinalCourtesyReply_ === "function" && isFinalCourtesyReply_(currentInboundText)) ||
+    (typeof isPunctuationCorrectionFragment_ === "function" && isPunctuationCorrectionFragment_(currentInboundText));
+}
+
 function getPendingSmsStaleReason_(outboxRow) {
   var phone = normalizePhone_(outboxRow[4]);
   var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);
@@ -1467,10 +1488,18 @@ function getPendingSmsStaleReason_(outboxRow) {
       : "";
     var newerInboundIsCourtesy = currentInboundText &&
       (isFinalCourtesyReply_(currentInboundText) || isPunctuationCorrectionFragment_(currentInboundText));
-    if (messageId && String(rowObj[HEADERS.last_message_id] || "") !== messageId && !newerInboundIsCourtesy) {
+    var carryOutstandingSpecificFee = shouldCarryOutstandingSpecificFeeReplyV15_(
+      replyText,
+      inboundText,
+      currentInboundText,
+      rowObj
+    );
+    if (messageId && String(rowObj[HEADERS.last_message_id] || "") !== messageId &&
+        !newerInboundIsCourtesy && !carryOutstandingSpecificFee) {
       return "A newer substantive inbound message exists";
     }
-    if (inboundText && currentInboundText && currentInboundText !== inboundText && !newerInboundIsCourtesy) {
+    if (inboundText && currentInboundText && currentInboundText !== inboundText &&
+        !newerInboundIsCourtesy && !carryOutstandingSpecificFee) {
       return "Latest inbound text changed";
     }
     return "";
