@@ -362,15 +362,38 @@ test("post-call fallback identifies wrong-person and unrelated-business voicemai
       { role: "user", message: "Ms. Foster at Foster and Williams Real Estate is currently unavailable. Please leave a message." },
     ],
   };
+  const similarSoundingMailbox = {
+    status: "done",
+    transcript: [{ role: "user", message: "Hi, you've reached Janine Peeler. Please leave a message." }],
+  };
 
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(wrongPerson, "DeAnn"), true);
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(unrelatedBusiness, "Vanessa"), true);
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(matchingMailbox, "DeAnn"), false);
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(matchingBusinessMailbox, "Seatrice", "Foster"), false);
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(similarSoundingMailbox, "Deneen", "Peeler"), false);
   assert.equal(
     buildVoiceResponseStatus("identity_mismatch_voicemail"),
     "Identity mismatch voicemail - target not reached",
   );
+});
+
+test("post-call fallback classifies a completed automated screener as agent unavailable", async () => {
+  const { shouldTreatAsAgentUnavailable } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "end_call tool was called." },
+    analysis: { transcript_summary: "An automated call screening service held Maya, then said the person was unavailable." },
+    transcript: [
+      { role: "user", message: "Please say your name and reason for calling, then stay on the line." },
+      { role: "assistant", message: "Maya with Crisp Short Sales, calling about a short sale listing." },
+      { role: "user", message: "Please stay on the line while I try to reach them." },
+      { role: "assistant", message: "Sure, I'll wait." },
+      { role: "user", message: "The person you are calling is not available. You may leave an additional message." },
+    ],
+  };
+
+  assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
 });
 
 test("post-call fallback distinguishes a confirmed self-handling target from automated screening", async () => {

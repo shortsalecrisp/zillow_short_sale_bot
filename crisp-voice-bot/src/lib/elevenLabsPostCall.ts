@@ -826,6 +826,41 @@ function meaningfulUserMessages(conversation: ElevenLabsConversation): string[] 
   return userMessages(conversation).filter(hasMeaningfulSpokenContent);
 }
 
+function nameSoundsSimilar(actualName: string, expectedName: string): boolean {
+  const actual = normalizeText(actualName).replace(/[^a-z]/g, "");
+  const expected = normalizeText(expectedName).replace(/[^a-z]/g, "");
+  if (!actual || !expected) {
+    return false;
+  }
+  if (actual === expected) {
+    return true;
+  }
+
+  const rows = Array.from({ length: actual.length + 1 }, () => Array<number>(expected.length + 1).fill(0));
+  for (let i = 0; i <= actual.length; i += 1) rows[i][0] = i;
+  for (let j = 0; j <= expected.length; j += 1) rows[0][j] = j;
+  for (let i = 1; i <= actual.length; i += 1) {
+    for (let j = 1; j <= expected.length; j += 1) {
+      rows[i][j] = Math.min(
+        rows[i - 1][j] + 1,
+        rows[i][j - 1] + 1,
+        rows[i - 1][j - 1] + (actual[i - 1] === expected[j - 1] ? 0 : 1),
+      );
+    }
+  }
+  if (rows[actual.length][expected.length] <= 2) {
+    return true;
+  }
+
+  // Long names with the same consonant body can sound alike even when the
+  // first consonant is transcribed differently (for example Deneen/Janine).
+  const actualConsonants = actual.replace(/[aeiouy]/g, "");
+  const expectedConsonants = expected.replace(/[aeiouy]/g, "");
+  return actual.length >= 6 && expected.length >= 6 &&
+    actualConsonants.slice(1).length >= 2 &&
+    actualConsonants.slice(1) === expectedConsonants.slice(1);
+}
+
 export function shouldTreatAsIdentityMismatchVoicemail(
   conversation: ElevenLabsConversation,
   expectedFirstName = "",
@@ -842,9 +877,14 @@ export function shouldTreatAsIdentityMismatchVoicemail(
     Boolean(expected && new RegExp(`\\b${expected}\\b`).test(text)) ||
     Boolean(expectedLast && new RegExp(`\\b${expectedLast}\\b`).test(text));
   const namedGreeting = text.match(
-    /\b(?:you(?:'ve| have) reached|this is|mailbox (?:for|belonging to)|voicemail (?:for|of))\s+([a-z][a-z'-]*)\b/,
+    /\b(?:you(?:'ve| have) reached|this is|mailbox (?:for|belonging to)|voicemail (?:for|of))\s+([a-z][a-z'-]*)(?:\s+([a-z][a-z'-]*))?\b/,
   );
-  if (namedGreeting && expected && namedGreeting[1] !== expected && !mentionsExpectedTarget) {
+  const greetingLast = normalizeText(namedGreeting?.[2] ?? "").replace(/[^a-z0-9'-]/g, "");
+  const matchingSurname = Boolean(expectedLast && greetingLast && greetingLast === expectedLast);
+  if (
+    namedGreeting && expected && !mentionsExpectedTarget && !matchingSurname &&
+    !nameSoundsSimilar(namedGreeting[1], expected)
+  ) {
     return true;
   }
 
@@ -916,6 +956,22 @@ export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
 }
 
 export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversation): boolean {
+  const earlyText = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+  const automatedScreenUnavailable =
+    (earlyText.includes("record your name and reason") ||
+      earlyText.includes("name and reason for calling") ||
+      earlyText.includes("call screening") ||
+      earlyText.includes("please stay on the line") ||
+      earlyText.includes("stay on the line")) &&
+    (earlyText.includes("person is not available") ||
+      earlyText.includes("person you are calling is not available") ||
+      earlyText.includes("currently unavailable") ||
+      earlyText.includes("unavailable to take your call") ||
+      earlyText.includes("leave an additional message"));
+  if (automatedScreenUnavailable) {
+    return true;
+  }
+
   if (shouldTreatAsRecordingArtifact(conversation)) {
     return true;
   }
@@ -956,6 +1012,8 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
   const targetUnavailable =
     text.includes("agent was not available") ||
     text.includes("agent is not available") ||
+    text.includes("person is not available") ||
+    text.includes("person you are calling is not available") ||
     text.includes("was unavailable") ||
     text.includes("is unavailable") ||
     text.includes("was busy") ||

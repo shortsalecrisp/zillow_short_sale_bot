@@ -81,7 +81,9 @@ test("prompt uses dynamic opener scripts and keeps the address out of the first 
   );
   assert.doesNotMatch(genericFallbackBranch, /this is {{assistantName}} with Crisp Short Sales/);
   assert.doesNotMatch(genericFallbackBranch, /{{streetAddress}}/);
-  assert.match(prompt, /If they ask which listing, which property, or what address/);
+  assert.match(prompt, /If they ask which listing, which property, what address/);
+  assert.match(prompt, /answer immediately with exactly/);
+  assert.match(prompt, /Give the address before any explanation or follow-up question/);
 }
 );
 
@@ -119,7 +121,8 @@ test("prompt ends wrong-person and unrelated-business voicemail without a sales 
   const section = prompt.slice(start, end);
 
   assert.ok(start >= 0);
-  assert.match(section, /recorded greeting explicitly names someone other than/);
+  assert.match(section, /sounds plausibly similar/);
+  assert.match(section, /clearly nothing alike/);
   assert.match(section, /do not leave the normal voicemail/);
   assert.match(section, /business greeting is target-matching/);
   assert.match(section, /`\{\{lastName\}\}`/);
