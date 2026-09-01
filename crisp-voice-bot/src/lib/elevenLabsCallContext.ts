@@ -4,6 +4,7 @@ type ElevenLabsLiveTransferStatus = "idle" | "pending" | "accepted" | "declined"
 
 type ElevenLabsCallContext = {
   metadata: CallMetadata;
+  conversationId?: string;
   liveTransferStatus: ElevenLabsLiveTransferStatus;
 };
 
@@ -24,7 +25,8 @@ export function buildElevenLabsCallContextKey(input: {
 
 export function rememberElevenLabsCallContext(metadata: CallMetadata, conversationId?: string | null): void {
   const context = {
-    metadata,
+    metadata: conversationId ? { ...metadata, conversationId } : metadata,
+    conversationId: conversationId ?? metadata.conversationId,
     liveTransferStatus: "idle" as const,
   };
 
@@ -48,6 +50,18 @@ export function getLatestElevenLabsCallContext(): CallMetadata | undefined {
 
 export function getElevenLabsCallContextByConversationId(conversationId: string): CallMetadata | undefined {
   return callContextsByKey.get(`conversation:${conversationId}`)?.metadata;
+}
+
+export function getElevenLabsConversationIdByCallContext(input: {
+  rowNumber?: number;
+  callAttemptNumber?: number;
+}): string | undefined {
+  const callContextKey = buildElevenLabsCallContextKey(input);
+  if (!callContextKey) {
+    return undefined;
+  }
+
+  return callContextsByKey.get(callContextKey)?.conversationId;
 }
 
 function getElevenLabsCallContext(contextKey?: string): ElevenLabsCallContext | undefined {

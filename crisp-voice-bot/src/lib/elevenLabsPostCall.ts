@@ -1457,6 +1457,21 @@ async function processPostCallOutcomeForConversation(
       voiceNotes: buildPerformanceNotes(outcome),
     });
 
+    await sendCallbackEmail({
+      agentName: metadata.fullName,
+      phone: metadata.dialedPhone,
+      email: metadata.email,
+      listingAddress: metadata.listingAddress,
+      rowNumber: metadata.rowNumber,
+      action: "Call this lead back at the requested time",
+      callbackTime,
+      conversationDescription: summary,
+      conversationTranscript: fullTranscript,
+      conversationId,
+      details:
+        "The callback tool fired during the live call. This post-call email includes the completed transcript and playback link.",
+    });
+
     await sendTranscriptEmailIfEnabled({
       conversationId,
       metadata,
@@ -1466,10 +1481,11 @@ async function processPostCallOutcomeForConversation(
     });
 
     processedConversationIds.add(conversationId);
-    logger.info("ElevenLabs post-call fallback skipped outcome handling because callback tool already ran", {
+    logger.info("ElevenLabs post-call fallback sent transcript-rich callback email after live callback tool", {
       conversationId,
       rowNumber: metadata.rowNumber,
       callbackTime,
+      handoffReady,
     });
     return true;
   }
@@ -1618,6 +1634,7 @@ async function processPostCallOutcomeForConversation(
       callbackTime,
       conversationDescription: summary,
       conversationTranscript: fullTranscript,
+      conversationId,
       details:
         "The caller accepted an immediate live transfer. The transfer did not complete cleanly, so Maya promised that Yoni would call back ASAP.",
     });
@@ -1670,6 +1687,7 @@ async function processPostCallOutcomeForConversation(
       callbackTime,
       conversationDescription: summary,
       conversationTranscript: fullTranscript,
+      conversationId,
       details:
         "The caller showed interest, but Maya started a live transfer without clear consent that the caller wanted Yoni immediately. Treat this as an interested callback, not a hangup or a completed transfer request.",
     });
@@ -1781,6 +1799,7 @@ async function processPostCallOutcomeForConversation(
       callbackTime,
       conversationDescription: summary,
       conversationTranscript: fullTranscript,
+      conversationId,
       details:
         "The caller agreed to a live transfer, but the patch-through did not complete cleanly. Call this lead back ASAP.",
     });
@@ -1972,6 +1991,7 @@ async function processPostCallOutcomeForConversation(
       callbackTime,
       conversationDescription: summary,
       conversationTranscript: fullTranscript,
+      conversationId,
       details: "Post-call fallback detected a callback request from the ElevenLabs transcript.",
     });
 

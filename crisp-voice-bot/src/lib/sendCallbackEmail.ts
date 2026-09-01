@@ -1,4 +1,5 @@
 import { createEmailTransporter, escapeHtml, formatPhoneNumber, requireEmailConfig } from "./emailAlerts";
+import { buildElevenLabsPlaybackUrl } from "./elevenLabsPlayback";
 
 type CallbackEmailInput = {
   agentName: string;
@@ -10,8 +11,15 @@ type CallbackEmailInput = {
   action?: string;
   conversationDescription?: string;
   conversationTranscript?: string;
+  conversationId?: string;
   callbackTime?: string;
   details?: string;
+};
+
+type CallbackEmailMessage = {
+  subject: string;
+  text: string;
+  html: string;
 };
 
 function formatDashedPhoneNumber(phone: string): string {
@@ -25,7 +33,7 @@ function formatDashedPhoneNumber(phone: string): string {
   return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
 }
 
-export async function sendCallbackEmail({
+export function buildCallbackEmailMessage({
   agentName,
   phone,
   email,
@@ -35,15 +43,15 @@ export async function sendCallbackEmail({
   action,
   conversationDescription,
   conversationTranscript,
+  conversationId,
   callbackTime,
   details,
-}: CallbackEmailInput): Promise<void> {
-  const emailConfig = requireEmailConfig();
-  const transporter = createEmailTransporter(emailConfig);
-
+}: CallbackEmailInput): CallbackEmailMessage {
   const formattedPhone = formatDashedPhoneNumber(phone);
   const effectiveCallbackTime = callbackTime?.trim() || "Unspecified";
   const effectiveEmail = email?.trim() || "";
+  const safeConversationId = conversationId?.trim();
+  const playbackUrl = safeConversationId ? buildElevenLabsPlaybackUrl(safeConversationId) : undefined;
   const fullConversation =
     conversationTranscript?.trim() ||
     conversationDescription?.trim() ||
@@ -58,6 +66,7 @@ Agent Name: ${agentName}
 Phone: ${formattedPhone}
 Email: ${effectiveEmail}
 Address: ${listingAddress}
+${safeConversationId ? `Conversation ID: ${safeConversationId}\n` : ""}${playbackUrl ? `Playback: ${playbackUrl}\n` : ""}
 
 Full Convo:
 ${fullConversation}`;
@@ -68,13 +77,26 @@ ${fullConversation}`;
 <strong>Agent Name:</strong> ${escapeHtml(agentName)}<br>
 <strong>Phone:</strong> ${escapeHtml(formattedPhone)}<br>
 <strong>Email:</strong> ${escapeHtml(effectiveEmail)}<br>
-<strong>Address:</strong> ${escapeHtml(listingAddress)}</p>
+<strong>Address:</strong> ${escapeHtml(listingAddress)}${safeConversationId ? `<br>\n<strong>Conversation ID:</strong> ${escapeHtml(safeConversationId)}` : ""}</p>
+${playbackUrl ? `<p><strong>Playback:</strong> <a href="${escapeHtml(playbackUrl)}" target="_blank" rel="noopener noreferrer">Play call recording</a></p>` : ""}
 <p><strong>Full Convo:</strong><br>${escapeHtml(fullConversation).replace(/\n/g, "<br>")}</p>`;
+
+  return {
+    subject: effectiveSubject,
+    text,
+    html,
+  };
+}
+
+export async function sendCallbackEmail(input: CallbackEmailInput): Promise<void> {
+  const emailConfig = requireEmailConfig();
+  const transporter = createEmailTransporter(emailConfig);
+  const { subject, text, html } = buildCallbackEmailMessage(input);
 
   await transporter.sendMail({
     to: emailConfig.to,
     from: emailConfig.from,
-    subject: effectiveSubject,
+    subject,
     text,
     html,
   });

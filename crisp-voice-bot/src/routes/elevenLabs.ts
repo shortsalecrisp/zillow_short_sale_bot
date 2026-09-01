@@ -4,6 +4,7 @@ import {
   beginElevenLabsLiveTransferAttempt,
   buildElevenLabsCallContextKey,
   completeElevenLabsLiveTransferAttempt,
+  getElevenLabsConversationIdByCallContext,
   getLatestElevenLabsCallContext,
 } from "../lib/elevenLabsCallContext";
 import { requestElevenLabsLiveTransferApproval } from "../lib/elevenLabsLiveTransferApproval";
@@ -287,6 +288,7 @@ function readLeadPayload(body: unknown): {
   listingAddress: string;
   callbackTime: string;
   conversationSummary: string;
+  conversationId: string;
 } {
   if (!isRecord(body)) {
     throw new ElevenLabsValidationError("Request body must be a JSON object");
@@ -301,6 +303,7 @@ function readLeadPayload(body: unknown): {
     listingAddress: readString(body, "listingAddress", "Unknown"),
     callbackTime: readString(body, "callbackTime", "unspecified"),
     conversationSummary: readString(body, "conversationSummary", "No conversation summary provided."),
+    conversationId: readString(body, "conversationId") || readString(body, "conversation_id"),
   };
 }
 
@@ -338,6 +341,7 @@ function applyLatestCallContextIfNeeded(payload: ReturnType<typeof readLeadPaylo
     phone: latestContext.dialedPhone,
     email: latestContext.email ?? payload.email,
     listingAddress: latestContext.listingAddress,
+    conversationId: latestContext.conversationId ?? payload.conversationId,
   };
 }
 
@@ -494,6 +498,12 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
     const payload = applyLatestCallContextIfNeeded(readLeadPayload(req.body));
     const callbackRequested = isRecord(req.body) ? readBoolean(req.body, "callbackRequested") : undefined;
     const handoffReady = isHandoffReadyCallback(payload.conversationSummary);
+    const conversationId =
+      payload.conversationId ||
+      getElevenLabsConversationIdByCallContext({
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+      });
 
     queueElevenLabsBackgroundTask(
       "ElevenLabs callback sheet update",
@@ -516,24 +526,33 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
         }),
     );
 
-    queueElevenLabsBackgroundTask(
-      "ElevenLabs callback email",
-      {
+    if (conversationId) {
+      logger.info("ElevenLabs callback email deferred until post-call transcript is available", {
         rowNumber: payload.rowNumber,
         agentName: payload.agentName,
         callbackTime: payload.callbackTime,
-      },
-      () =>
-        sendCallbackEmail({
-          agentName: payload.agentName,
-          phone: payload.phone,
-          email: payload.email,
-          listingAddress: payload.listingAddress,
+        conversationId,
+      });
+    } else {
+      queueElevenLabsBackgroundTask(
+        "ElevenLabs callback email",
+        {
           rowNumber: payload.rowNumber,
+          agentName: payload.agentName,
           callbackTime: payload.callbackTime,
-          conversationDescription: payload.conversationSummary,
-        }),
-    );
+        },
+        () =>
+          sendCallbackEmail({
+            agentName: payload.agentName,
+            phone: payload.phone,
+            email: payload.email,
+            listingAddress: payload.listingAddress,
+            rowNumber: payload.rowNumber,
+            callbackTime: payload.callbackTime,
+            conversationDescription: payload.conversationSummary,
+          }),
+      );
+    }
 
     logger.info("ElevenLabs callback requested tool handled", {
       rowNumber: payload.rowNumber,
@@ -541,6 +560,7 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
       phone: payload.phone,
       listingAddress: payload.listingAddress,
       callbackTime: payload.callbackTime,
+      conversationId,
       handoffReady,
     });
 

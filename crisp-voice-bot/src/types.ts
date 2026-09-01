@@ -36,6 +36,7 @@ export interface CallMetadata {
   voiceVariant?: string;
   voiceName?: string;
   voiceId?: string;
+  conversationId?: string;
   openerVariant?: string;
   openerVariantLabel?: string;
   openerScript?: string;

@@ -43,6 +43,7 @@ test("ElevenLabs live transfer state is isolated per active call", async () => {
 
 test("ElevenLabs call context can be recovered by conversation id", async () => {
   const {
+    getElevenLabsConversationIdByCallContext,
     getElevenLabsCallContextByConversationId,
     rememberElevenLabsCallContext,
     resetElevenLabsCallContextsForTest,
@@ -53,5 +54,9 @@ test("ElevenLabs call context can be recovered by conversation id", async () => 
   rememberElevenLabsCallContext(metadata(3403, 2), "conv_three");
 
   assert.equal(getElevenLabsCallContextByConversationId("conv_three")?.rowNumber, 3403);
+  assert.equal(
+    getElevenLabsConversationIdByCallContext({ rowNumber: 3403, callAttemptNumber: 2 }),
+    "conv_three",
+  );
   assert.equal(getElevenLabsCallContextByConversationId("missing"), undefined);
 });
