@@ -396,6 +396,38 @@ test("post-call fallback classifies a completed automated screener as agent unav
   assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
 });
 
+test("post-call fallback preserves full voicemail after automated screening", async () => {
+  const { shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "voicemail_detection tool was called." },
+    analysis: {
+      transcript_summary:
+        "An automated call screening service asked Finn to record his name and reason, then routed the call to voicemail.",
+    },
+    transcript: [
+      { role: "user", message: "Please record your name and reason for calling." },
+      {
+        role: "assistant",
+        message: "This is Finn calling from Crisp Short Sales about your listing at 626 Trevor Street.",
+      },
+      { role: "user", message: "Please stay on the line while I try to reach them." },
+      { role: "assistant", message: "Sure, I'll wait." },
+      { role: "user", message: "The person you are calling is not available. Please leave a message after the tone." },
+      {
+        role: "assistant",
+        message:
+          "Hi, this is Finn with Crisp Short Sales calling about the short sale listing at 626 Trevor Street. We help agents with the short sale bank paperwork, lender calls, and approval process. Give him a call back at 404-300-9526.",
+      },
+    ],
+  };
+
+  assert.equal(shouldTreatAsAgentUnavailable(conversation), false);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+});
+
 test("post-call fallback distinguishes a confirmed self-handling target from automated screening", async () => {
   const {
     buildVoiceResponseStatus,

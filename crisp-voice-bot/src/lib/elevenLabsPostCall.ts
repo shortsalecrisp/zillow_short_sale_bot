@@ -687,11 +687,8 @@ function hasDeliveredVoicemailMessage(conversation: ElevenLabsConversation): boo
     return false;
   }
 
-  return (
-    (assistantText.includes("this is emmy with crisp short sales") ||
-      assistantText.includes("this is maya with crisp short sales")) &&
-    assistantText.includes("call back at 404-300-9526")
-  );
+  return /\bthis is [a-z]+ with crisp short sales\b/.test(assistantText) &&
+    assistantText.includes("call back at 404-300-9526");
 }
 
 function shouldTreatAsNoAnswer(conversation: ElevenLabsConversation): boolean {
@@ -956,6 +953,10 @@ export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
 }
 
 export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversation): boolean {
+  if (hasDeliveredVoicemailMessage(conversation)) {
+    return false;
+  }
+
   const earlyText = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   const automatedScreenUnavailable =
     (earlyText.includes("record your name and reason") ||

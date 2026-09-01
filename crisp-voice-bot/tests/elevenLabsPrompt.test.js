@@ -257,15 +257,30 @@ test("prompt keeps third-party callback timing questions direct and name-specifi
 
 test("prompt waits through office robots and gatekeeper transfer attempts", () => {
   const prompt = readPrompt();
+  const gatekeeperSection = extractSection(
+    prompt,
+    "If a receptionist, office assistant, automated attendant, answering service, phone tree, or transfer robot answers:",
+    "If it is the wrong person",
+  );
 
-  assert.match(prompt, /automated attendant/i);
-  assert.match(prompt, /phone tree/i);
-  assert.match(prompt, /record your name and reason for calling/i);
-  assert.match(prompt, /Yoni's direct callback number is 404-300-9526/i);
-  assert.match(prompt, /What's the best time or direct number for {{firstName}}\?/i);
-  assert.match(prompt, /Please stay on the line/i);
-  assert.match(prompt, /Sure, I'll wait\./);
-  assert.match(prompt, /Do not call `end_call`[\s\S]{0,160}transferred/i);
+  assert.match(gatekeeperSection, /automated attendant/i);
+  assert.match(gatekeeperSection, /AI call assistant/i);
+  assert.match(gatekeeperSection, /record your name and reason for calling/i);
+  assert.match(
+    gatekeeperSection,
+    /This is {{assistantName}} calling from Crisp Short Sales about your listing at {{streetAddress}}\./,
+  );
+  assert.match(gatekeeperSection, /Then call `skip_turn`, stay quiet/);
+  assert.match(gatekeeperSection, /Do not pitch, do not ask a callback question/);
+  assert.match(gatekeeperSection, /phone rings, transfers, or waits for the agent/);
+  assert.match(gatekeeperSection, /Yoni's direct callback number is 404-300-9526/i);
+  assert.doesNotMatch(gatekeeperSection, /What's the best time or direct number for {{firstName}}\?/i);
+  assert.match(gatekeeperSection, /Please stay on the line/i);
+  assert.match(gatekeeperSection, /Sure, I'll wait\./);
+  assert.match(gatekeeperSection, /follow the Voicemail\/no-answer rules and leave the full voicemail on attempt 1/i);
+  assert.match(gatekeeperSection, /restart the normal live-human opener from scratch/i);
+  assert.match(gatekeeperSection, /This is {{assistantName}} with Crisp Short Sales\./);
+  assert.match(gatekeeperSection, /Do not call `end_call`[\s\S]{0,160}transferred/i);
 });
 
 test("prompt blocks recording fragments from creating human outcomes", () => {
