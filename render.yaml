@@ -2,7 +2,7 @@ services:
   - type: web
     name: zillow-short-sale-bot
     env: python
-    plan: pro
+    plan: standard
     buildCommand: |
       pip install -r requirements.txt &&
       PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.playwright-browsers python -m playwright install chromium
