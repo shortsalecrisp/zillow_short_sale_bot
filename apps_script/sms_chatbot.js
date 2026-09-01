@@ -2377,6 +2377,20 @@ function applyFastRules_(text, rowObj) {
     );
   }
 
+  if (isTitleCompanyCoverageRejectionSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: getStandardNoCloseoutReply_(),
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "closed_no_interest",
+      reason: "Agent said a title company is already handling the current short sale"
+    };
+  }
+
   if (isTitleCompanyRoleConfusionSignal_(t)) {
     return {
       matched: true,
@@ -3960,6 +3974,14 @@ function isTitleCompanyRoleConfusionSignal_(text) {
   }
   return /\b(?:already have|have|use|using|work with|working with|working for)\b.{0,50}\btitle company\b/.test(t) ||
     /\btitle company\b.{0,50}\b(?:if that(?:'s| is) what you mean|is that what you mean|do you mean)\b/.test(t);
+}
+
+function isTitleCompanyCoverageRejectionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (t.indexOf("title company") === -1 || t.indexOf("?") !== -1) return false;
+  if (/\b(?:if that(?:'s| is) what you mean|is that what you mean|do you mean)\b/.test(t)) return false;
+  return /\b(?:have|use|using|with)\s+(?:a|my|our|the)?\s*title company\b.{0,45}\b(?:doing|handling|taking care of|working on)\s+(?:it|this|that|the file|the short sale|the process)\b/.test(t) ||
+    /\btitle company\b.{0,45}\b(?:is\s+)?(?:doing|handling|taking care of|working on)\s+(?:it|this|that|the file|the short sale|the process)\b/.test(t);
 }
 
 function buildTitleCompanyRoleClarificationReply_() {
@@ -6151,6 +6173,22 @@ function testSmsIntentContractV3_() {
   record("already_approved_with_live_request_stays_open",
     !approvedWithRequest.conversation_done && approvedWithRequest.lead_status === "Y",
     approvedWithRequest.reason);
+
+  const titleCompanyCoverage = applyFastRules_("Hi. I have a title company doing it thanks.", baseRow);
+  record("title_company_doing_it_is_rejection",
+    titleCompanyCoverage.matched && titleCompanyCoverage.lead_status === "R" &&
+      titleCompanyCoverage.conversation_done && !titleCompanyCoverage.handoff_needed &&
+      titleCompanyCoverage.call_booking_status === "closed_no_interest" &&
+      titleCompanyCoverage.reply_text === getStandardNoCloseoutReply_(),
+    titleCompanyCoverage.reason);
+  const titleCompanyQuestion = applyFastRules_(
+    "I already have a title company I'm working for if that's what you mean",
+    baseRow
+  );
+  record("title_company_question_still_gets_clarification",
+    titleCompanyQuestion.matched && titleCompanyQuestion.lead_status === "Y" &&
+      titleCompanyQuestion.reply_text.indexOf("Crisp isn't a title company") !== -1,
+    titleCompanyQuestion.reason);
 
   const negotiation = applyFastRules_("Can you match the $3,995 fee I pay now?", baseRow);
   record(

@@ -4754,6 +4754,23 @@ def _sms_is_title_company_role_confusion(value: Any) -> bool:
     )
 
 
+def _sms_is_title_company_coverage_rejection(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if "title company" not in text or "?" in text:
+        return False
+    if re.search(r"\b(?:if that(?:'s| is) what you mean|is that what you mean|do you mean)\b", text):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:have|use|using|with)\s+(?:a|my|our|the)?\s*title company\b.{0,45}"
+            r"\b(?:doing|handling|taking care of|working on)\s+(?:it|this|that|the file|the short sale|the process)\b"
+            r"|\btitle company\b.{0,45}\b(?:is\s+)?(?:doing|handling|taking care of|working on)\s+"
+            r"(?:it|this|that|the file|the short sale|the process)\b",
+            text,
+        )
+    )
+
+
 def _sms_title_company_clarification_reply() -> str:
     return (
         "Thanks for clarifying. Crisp isn't a title company. I handle the lender-side short-sale paperwork, calls, "
@@ -5340,6 +5357,20 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             block_reply=True,
             handoff_type="COMPLIANCE / LICENSING QUESTION",
             reason="Agent asked a licensing, statutory, or regulatory compliance question; manual review required",
+        )
+
+    if _sms_is_title_company_coverage_rejection(t):
+        return _sms_decision(
+            reply_text=(
+                "Ok, no problem. If anything ever changes in the future and you're looking for some additional help with these files, "
+                "please just keep me in mind. Thanks!"
+            ),
+            lead_status="R",
+            conversation_done=True,
+            handoff_needed=False,
+            block_reply=False,
+            reason="Agent said a title company is already handling the current short sale",
+            call_booking_status="closed_no_interest",
         )
 
     if _sms_is_title_company_role_confusion(t):

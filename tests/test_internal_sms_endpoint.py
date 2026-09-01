@@ -2569,6 +2569,26 @@ def test_sms_contract_title_company_confusion_gets_role_clarification(monkeypatc
     assert "lender-side short-sale" in decision["reply_text"]
 
 
+def test_sms_contract_title_company_doing_it_is_terminal_rejection(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Hi. I have a title company doing it thanks."
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_title_company_coverage_rejection(inbound) is True
+    assert decision["lead_status"] == "R"
+    assert decision["conversation_done"] is True
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert decision["call_booking_status"] == "closed_no_interest"
+    assert decision["reply_text"] == (
+        "Ok, no problem. If anything ever changes in the future and you're looking for some additional help with these files, "
+        "please just keep me in mind. Thanks!"
+    )
+
+
 def test_sms_contract_service_info_request_is_answered_before_email_followup(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
