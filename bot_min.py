@@ -464,7 +464,16 @@ if RAPID_HOST in {"zillow-com1.p.rapidapi.com", "zillow-com.p.rapidapi.com"}:
 
 if not RAPID_KEY:
     logging.warning("RAPID_KEY is empty; RapidAPI fallback enrichment will be skipped")
-GOOD_STATUS    = {"FOR_SALE", "ACTIVE", "COMING_SOON", "PENDING", "NEW_CONSTRUCTION"}
+GOOD_STATUS    = {
+    "FOR_SALE",
+    "FORSALE",
+    "ACTIVE",
+    "COMING_SOON",
+    "COMINGSOON",
+    "PENDING",
+    "NEW_CONSTRUCTION",
+    "NEWCONSTRUCTION",
+}
 
 TZ             = pytz.timezone(os.getenv("BOT_TIMEZONE", "US/Eastern"))
 SCHEDULER_TZ   = pytz.timezone("America/New_York")
