@@ -1729,13 +1729,17 @@ def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     property_payload = payload.get("property") if isinstance(payload.get("property"), dict) else {}
     listing_payload = payload.get("listing") if isinstance(payload.get("listing"), dict) else {}
     home_payload = payload.get("home") if isinstance(payload.get("home"), dict) else {}
-    address = (
-        payload.get("address")
-        or property_payload.get("address")
-        or listing_payload.get("address")
-        or home_payload.get("address")
-        or {}
+    address_candidates = (
+        payload.get("address"),
+        payload.get("listingAddress"),
+        property_payload.get("address"),
+        property_payload.get("listingAddress"),
+        listing_payload.get("address"),
+        listing_payload.get("listingAddress"),
+        home_payload.get("address"),
+        home_payload.get("listingAddress"),
     )
+    address = next((candidate for candidate in address_candidates if candidate), {})
     result: Dict[str, str] = {}
     if isinstance(address, str):
         street = _street_only_address(address)
@@ -1761,9 +1765,11 @@ def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     state = address.get("state") if isinstance(address.get("state"), str) else payload.get("state") or payload.get("addressState") or ""
     postal = (
         address.get("zipcode")
+        or address.get("zipCode")
         or address.get("zip")
         or address.get("postalCode")
         or payload.get("zipcode")
+        or payload.get("zipCode")
         or payload.get("zip")
         or payload.get("addressZipcode")
         or payload.get("addressZip")
@@ -1802,7 +1808,7 @@ def _extract_agent_name_from_payload(payload: Dict[str, Any]) -> str:
         agent_name = _nested_value(payload, list(path))
         if isinstance(agent_name, str) and agent_name.strip():
             return agent_name.strip()
-    for key in ("listed_by", "listedBy", "listingAgents", "agents", "listing_agents"):
+    for key in ("agent", "listingAgent", "listed_by", "listedBy", "listingAgents", "agents", "listing_agents"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -1847,6 +1853,18 @@ def _normalize_listing_payload_aliases(row: Dict[str, Any]) -> None:
         agent_name = _extract_agent_name_from_payload(row)
         if agent_name:
             row["agentName"] = agent_name
+
+    if not row.get("brokerName") and not row.get("brokerageName"):
+        broker_name = ""
+        broker = row.get("broker")
+        listing_provider = row.get("listingProvider")
+        if isinstance(broker, dict):
+            broker_name = str(broker.get("name") or "").strip()
+        if not broker_name and isinstance(listing_provider, dict):
+            broker_name = str(listing_provider.get("name") or "").strip()
+        if broker_name:
+            row["brokerName"] = broker_name
+            row["brokerageName"] = broker_name
 
     address_fields = _extract_address_fields(row)
     if address_fields:

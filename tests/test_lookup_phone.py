@@ -309,6 +309,34 @@ def test_lead_row_ownership_normalizes_address_suffixes():
     assert bot_min._lead_row_owns_values(actual, expected)
 
 
+def test_bot_min_normalizes_current_apify_listing_address_schema():
+    row = {
+        "zpid": "2057678947",
+        "propertyUrl": "https://www.zillow.com/homedetails/2057678947_zpid/",
+        "listingAddress": {
+            "street": "22547 STORYBOOK CABIN WAY",
+            "city": "Land O Lakes",
+            "state": "FL",
+            "zipCode": "34637",
+            "full": "22547 STORYBOOK CABIN WAY, Land O Lakes, FL 34637",
+        },
+        "agent": {"name": "Ana Henriquez", "phoneNumber": "786-878-4474"},
+        "broker": {"name": "KELLER WILLIAMS TAMPA PROPERTIES"},
+        "description": "Virtually Staged. Short Sale. Welcome to spacious, modern living.",
+        "listingStatus": "forSale",
+    }
+
+    bot_min._normalize_listing_payload_aliases(row)
+
+    assert row["street"] == "22547 STORYBOOK CABIN WAY"
+    assert row["city"] == "Land O Lakes"
+    assert row["state"] == "FL"
+    assert row["zip"] == "34637"
+    assert row["agentName"] == "Ana Henriquez"
+    assert row["brokerName"] == "KELLER WILLIAMS TAMPA PROPERTIES"
+    assert row["listing_description"].startswith("Virtually Staged. Short Sale")
+
+
 def test_build_q_phone_prefers_locality_tokens():
     queries = bot_min.build_q_phone(
         "Antonio Flores",

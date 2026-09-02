@@ -874,6 +874,69 @@ def test_apify_normalizer_accepts_curated_detail_fields():
     assert payload["agentName"] == "Curated Agent"
 
 
+def test_apify_normalizer_accepts_current_listing_address_schema():
+    normalized = webhook_server._normalize_apify_row(
+        {
+            "zpid": "2057678947",
+            "propertyUrl": "https://www.zillow.com/homedetails/2057678947_zpid/",
+            "listingAddress": {
+                "street": "22547 STORYBOOK CABIN WAY",
+                "city": "Land O Lakes",
+                "state": "FL",
+                "zipCode": "34637",
+                "full": "22547 STORYBOOK CABIN WAY, Land O Lakes, FL 34637",
+            },
+            "agent": {"name": "Ana Henriquez", "phoneNumber": "786-878-4474"},
+            "broker": {"name": "KELLER WILLIAMS TAMPA PROPERTIES"},
+            "description": "Virtually Staged. Short Sale. Welcome to spacious, modern living.",
+            "listingStatus": "forSale",
+        }
+    )
+
+    payload = webhook_server._compact_queue_resume_payload(normalized, "payload.listings")
+
+    assert normalized["street"] == "22547 STORYBOOK CABIN WAY"
+    assert normalized["city"] == "Land O Lakes"
+    assert normalized["state"] == "FL"
+    assert normalized["zip"] == "34637"
+    assert normalized["agentName"] == "Ana Henriquez"
+    assert normalized["brokerName"] == "KELLER WILLIAMS TAMPA PROPERTIES"
+    assert payload["address"] == "22547 STORYBOOK CABIN WAY"
+    assert payload["agentName"] == "Ana Henriquez"
+    assert payload["brokerName"] == "KELLER WILLIAMS TAMPA PROPERTIES"
+
+
+def test_payload_listing_selection_normalizes_current_schema_before_enqueue(monkeypatch):
+    monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
+
+    selection = webhook_server._select_payload_listings(
+        {
+            "listings": [
+                {
+                    "zpid": "2057678947",
+                    "propertyUrl": "https://www.zillow.com/homedetails/2057678947_zpid/",
+                    "listingAddress": {
+                        "street": "22547 STORYBOOK CABIN WAY",
+                        "city": "Land O Lakes",
+                        "state": "FL",
+                        "zipCode": "34637",
+                    },
+                    "agent": {"name": "Ana Henriquez"},
+                    "description": "Short Sale. Welcome to spacious, modern living.",
+                    "listingStatus": "forSale",
+                }
+            ]
+        }
+    )
+
+    assert selection["selected"] == 1
+    selected = selection["rows"][0]
+    assert selected["street"] == "22547 STORYBOOK CABIN WAY"
+    assert selected["state"] == "FL"
+    assert selected["agentName"] == "Ana Henriquez"
+    assert selected["listing_description"].startswith("Short Sale")
+
+
 def test_state_search_queue_payload_uses_street_only_sms_address():
     row = {
         "zpid": "hi-1",

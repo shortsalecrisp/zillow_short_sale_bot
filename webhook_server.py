@@ -1640,6 +1640,8 @@ APIFY_AGENT_KEYS = (
     "listingAgentName",
     "listing_agent_name",
     "primaryAgentName",
+    "agent",
+    "listingAgent",
 )
 
 APIFY_AGENT_PATHS = (
@@ -1647,8 +1649,12 @@ APIFY_AGENT_PATHS = (
     ("attributionInfo", "listingAgentName"),
     ("contactFormRenderData", "agentName"),
     ("listingAgent", "name"),
+    ("listingAgent", "fullName"),
+    ("listingAgent", "displayName"),
     ("listing_agent", "name"),
     ("agent", "name"),
+    ("agent", "fullName"),
+    ("agent", "displayName"),
     ("postingContact", "name"),
     ("listedBy", "name"),
     ("listed_by", "name"),
@@ -1665,6 +1671,24 @@ APIFY_AGENT_LIST_KEYS = (
     "listing_agents",
 )
 
+APIFY_BROKER_KEYS = (
+    "brokerName",
+    "brokerageName",
+    "brokerage",
+    "broker",
+)
+
+APIFY_BROKER_PATHS = (
+    ("broker", "name"),
+    ("listingProvider", "name"),
+    ("attributionInfo", "brokerName"),
+    ("attributionInfo", "brokerageName"),
+    ("property", "brokerName"),
+    ("property", "brokerageName"),
+    ("listing", "brokerName"),
+    ("listing", "brokerageName"),
+)
+
 APIFY_STREET_KEYS = (
     "street",
     "streetAddress",
@@ -1675,14 +1699,19 @@ APIFY_STREET_KEYS = (
 )
 APIFY_CITY_KEYS = ("city", "addressCity", "locality")
 APIFY_STATE_KEYS = ("state", "addressState", "region")
-APIFY_ZIP_KEYS = ("zip", "zipcode", "postalCode", "addressZip", "addressZipcode")
+APIFY_ZIP_KEYS = ("zip", "zipcode", "zipCode", "postalCode", "addressZip", "addressZipcode")
 
 APIFY_ADDRESS_PATHS = (
     ("address",),
+    ("listingAddress",),
     ("property", "address"),
+    ("property", "listingAddress"),
     ("listing", "address"),
+    ("listing", "listingAddress"),
     ("home", "address"),
+    ("home", "listingAddress"),
     ("hdpData", "homeInfo", "address"),
+    ("hdpData", "homeInfo", "listingAddress"),
 )
 
 APIFY_URL_KEYS = (
@@ -1802,6 +1831,10 @@ def _extract_agent_name(row: Dict[str, Any]) -> str:
     return ""
 
 
+def _extract_broker_name(row: Dict[str, Any]) -> str:
+    return _first_text(row, APIFY_BROKER_KEYS, APIFY_BROKER_PATHS)
+
+
 def _address_field(address: Dict[str, Any], keys: Tuple[str, ...]) -> str:
     for key in keys:
         text = _text_fragment(address.get(key))
@@ -1880,6 +1913,11 @@ def _normalize_apify_row(row: Dict[str, Any]) -> Dict[str, Any]:
     agent_name = _extract_agent_name(row)
     if agent_name:
         normalized["agentName"] = agent_name
+
+    broker_name = _extract_broker_name(row)
+    if broker_name:
+        normalized.setdefault("brokerName", broker_name)
+        normalized.setdefault("brokerageName", broker_name)
 
     for key, value in _extract_address_fields(row).items():
         if value:
@@ -2029,7 +2067,7 @@ def _merge_rows_by_zpid(primary: List[Dict[str, Any]], secondary: List[Dict[str,
 
 
 def _format_listing_address(row: Dict[str, Any]) -> str:
-    address = row.get("address") or row.get("street")
+    address = row.get("address") or row.get("street") or row.get("listingAddress")
     if isinstance(address, str):
         return address.strip()
     if isinstance(address, dict):
@@ -2044,7 +2082,7 @@ def _format_listing_address(row: Dict[str, Any]) -> str:
             parts.append(street.strip())
         city = address.get("city")
         state = address.get("state")
-        zipcode = address.get("zip") or address.get("zipcode")
+        zipcode = address.get("zip") or address.get("zipcode") or address.get("zipCode")
         locality = ", ".join(part.strip() for part in [city, state] if isinstance(part, str) and part.strip())
         if locality:
             parts.append(locality)
@@ -2068,7 +2106,7 @@ def _format_sms_listing_address(row: Dict[str, Any]) -> str:
     if street:
         return street
 
-    address = row.get("address")
+    address = row.get("address") or row.get("listingAddress")
     if isinstance(address, dict):
         for key in ("streetAddress", "streetAddress1", "street", "addressLine1"):
             street = _street_only_address(address.get(key))
@@ -2201,9 +2239,13 @@ def _select_payload_listings(payload: Dict[str, Any]) -> Dict[str, Any]:
     received_rows = payload.get("listings")
     if not isinstance(received_rows, list):
         return {"rows": [], "received": 0, "hard_skipped": 0, "already_seen": 0, "invalid_rows": 0, "selected": 0}
+    normalized_rows = [
+        _normalize_apify_row(row) if isinstance(row, dict) else row
+        for row in received_rows
+    ]
     seen_set = load_seen_zpids()
     hard_skip = _extract_hard_skip_zpids(payload)
-    return _select_unseen_rows(received_rows, seen_set, hard_skip, max_rows=5)
+    return _select_unseen_rows(normalized_rows, seen_set, hard_skip, max_rows=5)
 
 
 def _prepare_extra_state_rows(
