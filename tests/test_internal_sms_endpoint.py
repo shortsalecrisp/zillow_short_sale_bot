@@ -510,6 +510,30 @@ def test_internal_initial_sms_returns_already_verified_without_sending(monkeypat
     assert sender.calls == []
 
 
+def test_internal_initial_sms_rejects_legacy_artifact_rows(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[9503] = _row(
+        phone="555-111-9503",
+        first="Pilot",
+        address="1948 W Amy Drive",
+        stable_id="free-756ed1b86267dbac",
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/internal/send-initial-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={"row": 9503, "phone": "555-111-9503"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "row_in_legacy_artifact_block"
+    assert sender.calls == []
+
+
 def test_internal_initial_sms_sends_when_verified_but_not_marked_sent(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,

@@ -70,6 +70,13 @@ SCOPES      = ["https://www.googleapis.com/auth/spreadsheets"]
 WEBHOOK_TOKEN = os.getenv("SMSM_WEBHOOK_TOKEN")  # e.g. "65-g84-jfy7t"
 CODEX_AUTOMATION_TOKEN = os.getenv("CODEX_AUTOMATION_TOKEN", "").strip()
 LEADS_SHEET_TAB = os.getenv("GSHEET_TAB", "Sheet1")
+INITIAL_SMS_LEGACY_ARTIFACT_ROW_FLOOR = int(
+    os.getenv("INITIAL_SMS_LEGACY_ARTIFACT_ROW_FLOOR", "9000")
+)
+INITIAL_SMS_ALLOW_LEGACY_ARTIFACT_ROWS = (
+    os.getenv("INITIAL_SMS_ALLOW_LEGACY_ARTIFACT_ROWS", "").strip().lower()
+    in {"1", "true", "yes"}
+)
 SMS_CHATBOT_ALLOWED_TOKEN = (
     os.getenv("SMS_CHATBOT_ALLOWED_TOKEN")
     or os.getenv("GOOGLE_APPS_SCRIPT_TOKEN")
@@ -3277,6 +3284,13 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="invalid_row")
     if row_idx < 2:
         raise HTTPException(status_code=400, detail="invalid_row")
+    if (
+        INITIAL_SMS_LEGACY_ARTIFACT_ROW_FLOOR > 0
+        and row_idx >= INITIAL_SMS_LEGACY_ARTIFACT_ROW_FLOOR
+        and not INITIAL_SMS_ALLOW_LEGACY_ARTIFACT_ROWS
+        and not payload.get("allow_legacy_artifact_row")
+    ):
+        raise HTTPException(status_code=409, detail="row_in_legacy_artifact_block")
 
     phone = fmt_phone(str(payload.get("phone") or ""))
     if not phone:
