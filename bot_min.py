@@ -12468,6 +12468,164 @@ def _redact_phone(phone: str) -> str:
     return f"...{digits[-4:]}"
 
 
+def _phone_dedupe_key(phone: Any) -> str:
+    return _normalize_phone_for_dedupe(str(phone or ""))
+
+
+def _iter_blocks(value: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                yield item
+
+
+def _phones_from_contact_block(block: Dict[str, Any]) -> Set[str]:
+    phones: Set[str] = set()
+    for key in (
+        "phone",
+        "phoneNumber",
+        "phone_number",
+        "officePhone",
+        "officePhoneNumber",
+        "mainPhone",
+        "mainPhoneNumber",
+        "brokerPhone",
+        "brokerPhoneNumber",
+        "brokeragePhone",
+        "brokeragePhoneNumber",
+        "listingOfficePhone",
+        "listingOfficePhoneNumber",
+    ):
+        value = block.get(key)
+        if isinstance(value, dict):
+            for nested_key in ("number", "phone", "value", "phoneNumber"):
+                key_value = _phone_dedupe_key(value.get(nested_key))
+                if key_value:
+                    phones.add(key_value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    for nested_key in ("number", "phone", "value", "phoneNumber"):
+                        key_value = _phone_dedupe_key(item.get(nested_key))
+                        if key_value:
+                            phones.add(key_value)
+                else:
+                    key_value = _phone_dedupe_key(item)
+                    if key_value:
+                        phones.add(key_value)
+        else:
+            key_value = _phone_dedupe_key(value)
+            if key_value:
+                phones.add(key_value)
+    return phones
+
+
+def _payload_brokerage_phone_keys(row_payload: Dict[str, Any]) -> Set[str]:
+    if not isinstance(row_payload, dict):
+        return set()
+    phones: Set[str] = set()
+    brokerage_keys = {
+        "broker",
+        "brokers",
+        "brokerage",
+        "brokerages",
+        "listingProvider",
+        "listingOffice",
+        "listingOffices",
+        "office",
+        "offices",
+    }
+    for key, value in row_payload.items():
+        low_key = str(key).lower()
+        if key in brokerage_keys:
+            for block in _iter_blocks(value):
+                phones.update(_phones_from_contact_block(block))
+        elif "phone" in low_key and any(term in low_key for term in ("broker", "office", "provider", "company")):
+            key_value = _phone_dedupe_key(value)
+            if key_value:
+                phones.add(key_value)
+    return phones
+
+
+def _rapid_phone_entry_has_shared_context(entry: Dict[str, Any]) -> bool:
+    haystack = " ".join(str(entry.get(key) or "") for key in ("context", "text", "source")).lower()
+    if not haystack:
+        return False
+    return any(term in haystack for term in PHONE_OFFICE_TERMS) or any(
+        term in haystack
+        for term in (
+            "broker",
+            "listing office",
+            "listingoffice",
+            "listing provider",
+            "listingprovider",
+        )
+    )
+
+
+def _selected_phone_is_shared_listing_phone(
+    selected_phone: str,
+    row_payload: Dict[str, Any],
+    rapid_snapshot: Optional[Dict[str, Any]] = None,
+) -> bool:
+    selected_key = _phone_dedupe_key(selected_phone)
+    if not selected_key:
+        return False
+    if selected_key in _payload_brokerage_phone_keys(row_payload):
+        return True
+    for entry in (rapid_snapshot or {}).get("phones", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if _phone_dedupe_key(entry.get("value") or entry.get("phone") or entry.get("number")) != selected_key:
+            continue
+        if _rapid_phone_entry_has_shared_context(entry):
+            return True
+    return False
+
+
+def _existing_phone_row_agent_matches(row_idx: int, candidate_agent: str) -> bool:
+    try:
+        resp = sheets_service.spreadsheets().values().get(
+            spreadsheetId=GSHEET_ID,
+            range=f"{GSHEET_TAB}!A{row_idx}:B{row_idx}",
+            majorDimension="ROWS",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+    except Exception as exc:
+        LOG.warning("Unable to inspect duplicate phone owner row=%s: %s", row_idx, exc)
+        return False
+    rows = resp.get("values") or []
+    if not rows:
+        return False
+    row = list(rows[0]) + ["", ""]
+    existing_agent = f"{row[COL_FIRST]} {row[COL_LAST]}".strip()
+    if not existing_agent or not candidate_agent:
+        return False
+    existing_key = _agent_dedupe_key(existing_agent)
+    candidate_key = _agent_dedupe_key(candidate_agent)
+    if existing_key and candidate_key and existing_key == candidate_key:
+        return True
+    return _names_match(existing_agent, candidate_agent)
+
+
+def _should_keep_shared_phone_duplicate_lead(
+    selected_phone: str,
+    name: str,
+    row_payload: Dict[str, Any],
+    existing_row: Optional[int],
+    rapid_snapshot: Optional[Dict[str, Any]] = None,
+) -> bool:
+    if not selected_phone or not existing_row:
+        return False
+    if not _selected_phone_is_shared_listing_phone(selected_phone, row_payload, rapid_snapshot):
+        return False
+    if _existing_phone_row_agent_matches(existing_row, name):
+        return False
+    return True
+
+
 def _followup_has_contact_hold(row: List[Any]) -> bool:
     """Honor verifier phone-conflict/no-resend holds before any follow-up."""
     phone_confidence = str(row[COL_PHONE_CONF] or "").strip().lower()
@@ -13831,19 +13989,44 @@ def process_rows(
 
         selected_phone = phone_info.get("number", "") if phone_info else ""
         selected_email = email_info.get("email", "") if email_info else ""
+        duplicate_phone_row: Optional[int] = None
         if selected_phone:
             load_seen_contacts(force=True)
-        if selected_phone and (phone_exists(selected_phone) or _find_existing_phone_row(selected_phone)):
-            LOG.info(
-                "SKIP already-contacted phone %s for agent %s (%s)",
-                _redact_phone(selected_phone),
+            duplicate_phone_row = _find_existing_phone_row(selected_phone)
+        if selected_phone and (phone_exists(selected_phone) or duplicate_phone_row):
+            if not duplicate_phone_row:
+                duplicate_phone_row = _find_existing_phone_row(selected_phone)
+            if _should_keep_shared_phone_duplicate_lead(
+                selected_phone,
                 name,
-                r.get("zpid"),
-            )
-            if zpid:
-                record_seen_zpid(zpid)
-            outcomes[zpid] = "completed_short_sale"
-            continue
+                r,
+                duplicate_phone_row,
+                rapid_snapshot,
+            ):
+                LOG.warning(
+                    "SHARED_LISTING_PHONE_DUPLICATE_HELD zpid=%s agent=%s phone=%s existing_row=%s; appending without phone for verifier cleanup",
+                    zpid,
+                    name,
+                    _redact_phone(selected_phone),
+                    duplicate_phone_row,
+                )
+                selected_phone = ""
+                phone_info = {
+                    "number": "",
+                    "confidence": "",
+                    "reason": "shared_brokerage_phone_duplicate",
+                }
+            else:
+                LOG.info(
+                    "SKIP already-contacted phone %s for agent %s (%s)",
+                    _redact_phone(selected_phone),
+                    name,
+                    r.get("zpid"),
+                )
+                if zpid:
+                    record_seen_zpid(zpid)
+                outcomes[zpid] = "completed_short_sale"
+                continue
         if rapid_candidates and not selected_phone:
             LOG.warning(
                 "SKIP_BLANK_PHONE_UPDATE zpid=%s rapid_candidates=%s rapid_selected=%s",
@@ -13875,6 +14058,8 @@ def process_rows(
             reason = "withheld_low_conf_mix"
         elif phone_reason == "no_personal_mobile":
             reason = "no_personal_mobile"
+        elif phone_reason == "shared_brokerage_phone_duplicate":
+            reason = "shared_brokerage_phone_duplicate"
         elif email_reason == "no_personal_email":
             reason = "no_personal_email"
         row_vals[COL_CONTACT_REASON] = reason

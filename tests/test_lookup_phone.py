@@ -2000,6 +2000,60 @@ def test_process_rows_skips_duplicate_enriched_phone_before_append(monkeypatch):
     )
 
 
+def test_process_rows_keeps_new_agent_when_duplicate_phone_is_shared_brokerage(monkeypatch):
+    bot_min.seen_agents.clear()
+    bot_min.seen_phones.clear()
+    monkeypatch.setattr(bot_min, "is_short_sale", lambda *_: True)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *_: True)
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *args, **kwargs: (set(), set()))
+    monkeypatch.setattr(bot_min, "phone_exists", lambda phone: True)
+    monkeypatch.setattr(bot_min, "_find_existing_phone_row", lambda *args, **kwargs: 12)
+    monkeypatch.setattr(bot_min, "_existing_phone_row_agent_matches", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_phone",
+        lambda *args, **kwargs: {"number": "708-788-1900", "confidence": "low", "reason": "rapid_fallback"},
+    )
+    monkeypatch.setattr(
+        bot_min,
+        "lookup_email",
+        lambda *args, **kwargs: {"email": "javier@example.com", "confidence": "high", "reason": ""},
+    )
+    monkeypatch.setattr(bot_min, "_rapid_contact_normalized", lambda *args, **kwargs: {"phones": []})
+    appended = []
+    monkeypatch.setattr(bot_min, "append_row", lambda row_vals: appended.append(row_vals) or 42)
+    monkeypatch.setattr(
+        bot_min,
+        "schedule_initial_sms",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("shared brokerage phone must not text")),
+    )
+
+    outcomes = bot_min.process_rows(
+        [
+            {
+                "description": "short sale subject to lender approval",
+                "agentName": "Javier Alday",
+                "state": "IL",
+                "street": "2139 Cherry Ave",
+                "city": "Hanover Park",
+                "zpid": "3399611",
+                "broker": {"name": "Realty of America", "phoneNumber": "708-788-1900"},
+            }
+        ],
+        skip_dedupe=True,
+        return_outcomes=True,
+    )
+
+    assert outcomes == {"3399611": "completed_short_sale"}
+    assert len(appended) == 1
+    assert appended[0][bot_min.COL_FIRST] == "Javier"
+    assert appended[0][bot_min.COL_LAST] == "Alday"
+    assert appended[0][bot_min.COL_PHONE] == ""
+    assert appended[0][bot_min.COL_EMAIL] == "javier@example.com"
+    assert appended[0][bot_min.COL_CONTACT_REASON] == "shared_brokerage_phone_duplicate"
+    assert appended[0][bot_min.COL_ZPID] == "3399611"
+
+
 def test_process_rows_deletes_raced_duplicate_before_text(monkeypatch):
     bot_min.seen_agents.clear()
     bot_min.seen_phones.clear()
