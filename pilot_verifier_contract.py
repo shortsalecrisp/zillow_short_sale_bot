@@ -26,6 +26,12 @@ WRITE_FIELDS = {
     "import_ready", "duplicate_key", "matched_main_row",
 }
 _WRITE_LOCK = threading.Lock()
+OWNER_ARTIFACT_ROW_FLOOR = 9000
+OWNER_WRITE_END_COLUMN = "AQ"
+OWNER_REQUIRED_FIELDS = {
+    "agent_name", "last_name", "phone", "email", "phone_confidence",
+    "contact_verification_note", "email_confidence",
+}
 
 
 def header_index(headers, name):
@@ -89,6 +95,152 @@ def snapshot(token, spreadsheet_id):
 def identity(row):
     return (row.get("synthetic_zpid", ""),
             pilot.street_state_key(row.get("listing_address", ""), row.get("state", "")))
+
+
+def normalized_phone(value):
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits[-10:] if len(digits) >= 10 else ""
+
+
+def validate_owner_payload(owner):
+    if not isinstance(owner, dict) or set(owner) != OWNER_REQUIRED_FIELDS:
+        raise ValueError("exact_owner_fields_required")
+    cleaned = {key: pilot.normalize_space(str(value)) for key, value in owner.items()}
+    if not pilot.looks_like_person_name(f"{cleaned['agent_name']} {cleaned['last_name']}"):
+        raise ValueError("individual_listing_agent_required")
+    if not normalized_phone(cleaned["phone"]):
+        raise ValueError("attributable_phone_required")
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", cleaned["email"]):
+        raise ValueError("agent_specific_email_required")
+    weak_phone = {"office", "team", "main", "generic"}
+    weak_email = {"team_or_listing", "routing", "generic", "low_pattern"}
+    if not cleaned["phone_confidence"] or any(token in cleaned["phone_confidence"].lower() for token in weak_phone):
+        raise ValueError("individual_phone_class_required")
+    if not cleaned["email_confidence"] or any(token in cleaned["email_confidence"].lower() for token in weak_email):
+        raise ValueError("agent_specific_email_class_required")
+    if not cleaned["contact_verification_note"]:
+        raise ValueError("contact_verification_note_required")
+    return cleaned
+
+
+def owner_row_number(main_rows):
+    real_rows = [
+        number for number, row in main_rows
+        if number < OWNER_ARTIFACT_ROW_FLOOR and any(
+            pilot.normalize_space(row.get(field, ""))
+            for field in ("agent_name", "last_name", "phone", "email", "listing_address", "city", "state", "created_at")
+        )
+    ]
+    target = (max(real_rows) + 1) if real_rows else 2
+    if target >= OWNER_ARTIFACT_ROW_FLOOR:
+        raise ValueError("no_safe_operational_owner_row")
+    return target
+
+
+def owner_header_positions(headers):
+    positions = {field: header_index(headers, field) for field in (
+        "agent_name", "last_name", "phone", "email", "listing_address",
+        "city", "state", "contact_verification_note", "created_at",
+    )}
+    note = positions["contact_verification_note"]
+    created = positions["created_at"]
+    if created != note + 2:
+        raise ValueError("owner_confidence_schema_drift")
+    normalized = [pilot.normalized_header(str(value)) for value in headers]
+
+    def confidence_position(name, fallback):
+        key = pilot.normalized_header(name)
+        if normalized.count(key) == 1:
+            return normalized.index(key)
+        if normalized.count(key) > 1 or fallback < 0 or fallback >= len(headers):
+            raise ValueError("owner_confidence_schema_drift")
+        if pilot.normalize_space(str(headers[fallback])):
+            raise ValueError("owner_confidence_schema_drift")
+        return fallback
+
+    phone_confidence = confidence_position("phone_confidence", note - 1)
+    email_confidence = confidence_position("email_confidence", note + 1)
+    if phone_confidence < 0 or email_confidence >= len(headers):
+        raise ValueError("owner_confidence_schema_drift")
+    positions.update(phone_confidence=phone_confidence, email_confidence=email_confidence)
+    return positions
+
+
+def owner_write_updates(headers, row_number, pilot_row, owner, automation):
+    positions = owner_header_positions(headers)
+    values = {
+        "agent_name": owner["agent_name"], "last_name": owner["last_name"],
+        "phone": owner["phone"], "email": owner["email"],
+        "listing_address": pilot_row["listing_address"], "city": pilot_row["city"],
+        "state": pilot_row["state"], "phone_confidence": owner["phone_confidence"],
+        "contact_verification_note": owner["contact_verification_note"] +
+            f"; verifier_contract={VERSION}; verifier={automation}",
+        "email_confidence": owner["email_confidence"],
+        "created_at": pilot_row["synthetic_zpid"],
+    }
+    updates = []
+    for fields in (("agent_name", "last_name", "phone", "email", "listing_address", "city", "state"),
+                   ("phone_confidence", "contact_verification_note", "email_confidence", "created_at")):
+        indexes = [positions[field] for field in fields]
+        if indexes != list(range(indexes[0], indexes[0] + len(indexes))):
+            raise ValueError("owner_write_schema_drift")
+        start = pilot.column_letter(indexes[0] + 1)
+        end = pilot.column_letter(indexes[-1] + 1)
+        updates.append({"range": f"'{MAIN_TAB}'!{start}{row_number}:{end}{row_number}",
+                        "values": [[values[field] for field in fields]]})
+    return updates
+
+
+def owner_row_is_empty(token, spreadsheet_id, row_number):
+    values = pilot.get_values(token, spreadsheet_id,
+        f"'{MAIN_TAB}'!A{row_number}:{OWNER_WRITE_END_COLUMN}{row_number}")
+    return not values or not any(pilot.normalize_space(str(value)) for value in values[0])
+
+
+def owner_matches(row, pilot_row, owner):
+    return (
+        pilot.stable_id_from_main_row(row) == pilot_row.get("synthetic_zpid")
+        and pilot.street_state_key(row.get("listing_address", ""), row.get("state", ""))
+            == pilot.street_state_key(pilot_row.get("listing_address", ""), pilot_row.get("state", ""))
+        and pilot.normalize_key(row.get("city", "")) == pilot.normalize_key(pilot_row.get("city", ""))
+        and pilot.normalize_key(f"{row.get('agent_name', '')} {row.get('last_name', '')}")
+            == pilot.normalize_key(f"{owner['agent_name']} {owner['last_name']}")
+        and normalized_phone(row.get("phone", "")) == normalized_phone(owner["phone"])
+        and row.get("email", "").strip().lower() == owner["email"].lower()
+    )
+
+
+def preappend_checks(pilot_number, pilot_row, main_rows, owner):
+    if (pilot_row.get("status") != "qualified" or pilot_row.get("promotion_status") != "verifier_held"
+            or pilot_row.get("import_ready") != "verify" or pilot_row.get("matched_main_row")):
+        raise ValueError("pilot_not_verifier_held")
+    link = pilot.reconcile_pilot_link(pilot_number, pilot_row, main_rows)
+    if link["outcome"] != "missing":
+        raise ValueError(f"existing_owner_conflict:{link['outcome']}")
+    phone = normalized_phone(owner["phone"])
+    matches = [number for number, row in main_rows if normalized_phone(row.get("phone", "")) == phone]
+    if matches:
+        raise ValueError(f"existing_phone_owner:{matches[0]}")
+    return owner_row_number(main_rows)
+
+
+def sheet_id(token, spreadsheet_id, tab):
+    result = pilot.sheets_request(token, "GET",
+        f"{spreadsheet_id}?fields=sheets(properties(sheetId,title))")
+    matches = [item.get("properties", {}).get("sheetId") for item in result.get("sheets", [])
+               if item.get("properties", {}).get("title") == tab]
+    if len(matches) != 1:
+        raise ValueError(f"missing_or_ambiguous_sheet:{tab}")
+    return matches[0]
+
+
+def delete_owner_row(token, spreadsheet_id, row_number):
+    pilot.sheets_request(token, "POST", f"{spreadsheet_id}:batchUpdate", {
+        "requests": [{"deleteDimension": {"range": {
+            "sheetId": sheet_id(token, spreadsheet_id, MAIN_TAB), "dimension": "ROWS",
+            "startIndex": row_number - 1, "endIndex": row_number,
+        }}}]
+    })
 
 
 def existing_listing_owner(row, main_rows):
@@ -208,7 +360,9 @@ def handle(token, spreadsheet_id, payload, *, now=None):
     now = now or dt.datetime.now(dt.timezone.utc)
     action = payload.get("action")
     automation = payload.get("automation_id")
-    if automation not in AUTOMATIONS or action not in {"update", "receipt", "preview"}:
+    if automation not in AUTOMATIONS or action not in {
+        "owner_write_preview", "promote_owner", "update", "receipt", "preview"
+    }:
         raise ValueError("invalid_action_or_automation")
     with _WRITE_LOCK:
         ph, rows, main_rows, rh, receipts = snapshot(token, spreadsheet_id)
@@ -226,6 +380,97 @@ def handle(token, spreadsheet_id, payload, *, now=None):
                 except (ValueError, RuntimeError):
                     evidence_cache[receipt] = False
             return evidence_cache[receipt]
+
+        if action == "owner_write_preview":
+            target = owner_row_number(main_rows)
+            owner_headers = pilot.get_values(token, spreadsheet_id, f"'{MAIN_TAB}'!1:1")
+            if not owner_headers:
+                raise ValueError("missing_headers:Sheet1")
+            positions = owner_header_positions(owner_headers[0])
+            return {
+                "ok": True, "preview": True, "contract": VERSION,
+                "owner_row": target, "artifact_row_floor": OWNER_ARTIFACT_ROW_FLOOR,
+                "owner_row_empty": owner_row_is_empty(token, spreadsheet_id, target),
+                "write_ranges": [
+                    f"'{MAIN_TAB}'!A{target}:G{target}",
+                    f"'{MAIN_TAB}'!{pilot.column_letter(positions['phone_confidence'] + 1)}{target}:"
+                    f"{pilot.column_letter(positions['created_at'] + 1)}{target}",
+                ],
+                "writes": 0, "sends": 0,
+            }
+
+        if action == "promote_owner":
+            expected = payload.get("expected", {})
+            required = {"synthetic_zpid", "listing_address", "city", "state", "status", "promotion_status", "import_ready"}
+            if not isinstance(expected, dict) or not required.issubset(expected):
+                raise ValueError("expected_identity_and_state_required")
+            matches = [(n, r) for n, r in rows if identity(r) == identity(expected)]
+            if len(matches) != 1 or not all(identity(expected)):
+                raise ValueError("pilot_identity_missing_or_ambiguous")
+            number, row = matches[0]
+            for key, value in expected.items():
+                if row.get(key, "") != str(value):
+                    raise ValueError(f"pilot_changed:{key}")
+            if not evidence_ok(number, row):
+                raise ValueError("durable_source_evidence_required")
+            owner = validate_owner_payload(payload.get("owner"))
+            reason = pilot.normalize_space(payload.get("adjudication_reason", ""))
+            if not reason:
+                raise ValueError("adjudication_reason_required")
+            target = preappend_checks(number, row, main_rows, owner)
+
+            # Reread both owner surfaces immediately before allocating the exact row.
+            ph2, rows2, main2, _, _ = snapshot(token, spreadsheet_id)
+            current = dict(rows2).get(number)
+            if ph2 != ph or current != row:
+                raise ValueError("pilot_changed_before_owner_write")
+            if preappend_checks(number, current, main2, owner) != target:
+                raise ValueError("active_owner_tail_changed")
+            if not owner_row_is_empty(token, spreadsheet_id, target):
+                raise ValueError("active_owner_row_not_empty")
+            owner_headers = pilot.get_values(token, spreadsheet_id, f"'{MAIN_TAB}'!1:1")
+            if not owner_headers:
+                raise ValueError("missing_headers:Sheet1")
+            pilot.batch_update_values(token, spreadsheet_id,
+                owner_write_updates(owner_headers[0], target, current, owner, automation))
+
+            try:
+                _, rows3, owners3, _, _ = snapshot(token, spreadsheet_id)
+                linked = pilot.reconcile_pilot_link(number, current, owners3)
+                if (linked.get("outcome") != "linked" or linked.get("matched_main_row") != target
+                        or not owner_matches(linked.get("main_row", {}), current, owner)):
+                    raise ValueError("owner_write_readback_failed_do_not_send")
+                changes = {
+                    "promotion_status": "promoted", "import_ready": "promoted",
+                    "matched_main_row": str(target),
+                    "promotion_notes": (current.get("promotion_notes", "") + "; " +
+                        f"verifier_reviewed_by={automation}; {reason}; owner Sheet1 row {target} has " +
+                        f"{owner['agent_name']} {owner['last_name']}; owner_phone={owner['phone']}; " +
+                        "owner append and identity readback passed").strip("; "),
+                }
+                proposed = {**current, **changes}
+                latest = dict(rows3).get(number)
+                if latest != current:
+                    raise ValueError("pilot_changed_before_promotion_write")
+                pilot.batch_update_values(token, spreadsheet_id,
+                    mapped_updates(PILOT_TAB, ph, number, changes))
+                _, rows4, owners4, _, _ = snapshot(token, spreadsheet_id)
+                final = dict(rows4).get(number, {})
+                final_link = pilot.reconcile_pilot_link(number, final, owners4)
+                if (final != proposed or final_link.get("outcome") != "linked"
+                        or final_link.get("matched_main_row") != target
+                        or not owner_matches(final_link.get("main_row", {}), final, owner)):
+                    raise ValueError("promotion_owner_readback_failed_do_not_send")
+            except Exception:
+                try:
+                    _, _, rollback_owners, _, _ = snapshot(token, spreadsheet_id)
+                    owned_rows = [n for n, candidate in rollback_owners if owner_matches(candidate, current, owner)]
+                    if owned_rows == [target]:
+                        delete_owner_row(token, spreadsheet_id, target)
+                finally:
+                    raise
+            return {"ok": True, "contract": VERSION, "pilot_row": number,
+                    "owner_row": target, "readback": True, "sheet1_writes": 1, "sends": 0}
 
         if action == "update":
             expected = payload.get("expected", {})

@@ -154,6 +154,54 @@ class PilotVerifierContractTest(unittest.TestCase):
         return (contract.pilot.PILOT_HEADERS, [(1172, self.row)], [(22, self.owner)],
                 contract.pilot.RUN_RECEIPT_HEADERS, self.source if receipts is None else receipts)
 
+    def owner_headers(self):
+        headers = [""] * 45
+        for index, value in enumerate([
+            "agent_name", "last_name", "phone", "email", "listing_address", "city", "state"
+        ]):
+            headers[index] = value
+        headers[25] = "contact_verification_note"
+        headers[27] = "created-at"
+        headers[42] = "codex-verified"
+        return headers
+
+    def promotion_request(self):
+        return {
+            "action": "promote_owner", "automation_id": "lead-verifier-8-am",
+            "expected": {key: self.row[key] for key in (
+                "synthetic_zpid", "listing_address", "city", "state", "status",
+                "promotion_status", "import_ready",
+            )},
+            "owner": {
+                "agent_name": "Jane", "last_name": "Smith", "phone": "555-222-3333",
+                "email": "jane@example.test", "phone_confidence": "verified_direct_mobile",
+                "contact_verification_note": "Official listing and brokerage profile agree",
+                "email_confidence": "verified_agent_specific_email",
+            },
+            "adjudication_reason": "exact listing agent and contact contract passed",
+        }
+
+    def promotion_snapshots(self):
+        unrelated = dict(agent_name="Prior", last_name="Owner", phone="5551110000",
+                         email="prior@example.test", listing_address="1 Other Road", city="Dover",
+                         state="DE", created_at="free-other-owner")
+        new_owner = dict(agent_name="Jane", last_name="Smith", phone="555-222-3333",
+                         email="jane@example.test", listing_address="123 Main Street", city="Dover",
+                         state="DE", created_at="free-12345678")
+        before = (contract.pilot.PILOT_HEADERS, [(1172, self.row)], [(30, unrelated)],
+                  contract.pilot.RUN_RECEIPT_HEADERS, self.source)
+        after_owner = (contract.pilot.PILOT_HEADERS, [(1172, self.row)],
+                       [(30, unrelated), (31, new_owner)], contract.pilot.RUN_RECEIPT_HEADERS, self.source)
+        promoted = {**self.row, "promotion_status": "promoted", "import_ready": "promoted",
+                    "matched_main_row": "31",
+                    "promotion_notes": self.row["promotion_notes"] +
+                    "; verifier_reviewed_by=lead-verifier-8-am; exact listing agent and contact contract passed" +
+                    "; owner Sheet1 row 31 has Jane Smith; owner_phone=555-222-3333" +
+                    "; owner append and identity readback passed"}
+        after_promotion = (contract.pilot.PILOT_HEADERS, [(1172, promoted)],
+                           [(30, unrelated), (31, new_owner)], contract.pilot.RUN_RECEIPT_HEADERS, self.source)
+        return before, after_owner, after_promotion
+
     def test_preview_has_no_mutations(self):
         with mock.patch.object(contract, "snapshot", return_value=self.snapshot()), \
              mock.patch.object(contract.pilot, "resolve_source_evidence_receipt", return_value="https://example.test/listing"), \
@@ -163,6 +211,81 @@ class PilotVerifierContractTest(unittest.TestCase):
         self.assertTrue(result["preview"])
         append.assert_not_called()
         write.assert_not_called()
+
+    def test_promote_owner_uses_exact_active_row_then_rereads_identity_pointer(self):
+        self.row.update(promotion_status="verifier_held", import_ready="verify", matched_main_row="",
+                        promotion_notes="Qualified listing staged for the lead verifier",
+                        source_url=contract.pilot.safe_source_reference("https://example.test/listing"))
+        before, after_owner, after_promotion = self.promotion_snapshots()
+        writes = []
+        with mock.patch.object(contract, "snapshot", side_effect=[before, before, after_owner, after_promotion]), \
+             mock.patch.object(contract, "owner_row_is_empty", return_value=True), \
+             mock.patch.object(contract.pilot, "get_values", return_value=[self.owner_headers()]), \
+             mock.patch.object(contract.pilot, "resolve_source_evidence_receipt", return_value="https://example.test/listing"), \
+             mock.patch.object(contract.pilot, "batch_update_values", side_effect=lambda *args: writes.append(args[2])), \
+             mock.patch.object(contract, "delete_owner_row") as delete:
+            result = contract.handle("token", "sheet", self.promotion_request(), now=self.now)
+        self.assertEqual(result["owner_row"], 31)
+        self.assertTrue(result["readback"])
+        self.assertEqual(result["sheet1_writes"], 1)
+        self.assertEqual(result["sends"], 0)
+        self.assertEqual([item["range"] for item in writes[0]], ["'Sheet1'!A31:G31", "'Sheet1'!Y31:AB31"])
+        self.assertTrue(all("Lead Source Pilot" in item["range"] for item in writes[1]))
+        delete.assert_not_called()
+
+    def test_promote_owner_rejects_duplicate_phone_and_artifact_tail(self):
+        self.row.update(promotion_status="verifier_held", import_ready="verify", matched_main_row="")
+        request = self.promotion_request()
+        prior = dict(agent_name="Prior", last_name="Owner", phone="555-222-3333",
+                     email="prior@example.test", listing_address="1 Other Road", city="Dover",
+                     state="DE", created_at="free-other-owner")
+        with self.assertRaisesRegex(ValueError, "existing_phone_owner:30"):
+            contract.preappend_checks(1172, self.row, [(30, prior)], request["owner"])
+        with self.assertRaisesRegex(ValueError, "no_safe_operational_owner_row"):
+            contract.owner_row_number([(8999, prior)])
+
+    def test_owner_confidence_columns_support_named_headers_or_anchored_blanks(self):
+        blank_positions = contract.owner_header_positions(self.owner_headers())
+        self.assertEqual(blank_positions["phone_confidence"], 24)
+        self.assertEqual(blank_positions["email_confidence"], 26)
+        named = self.owner_headers()
+        named[24] = "phone_confidence"
+        named[26] = "email_confidence"
+        self.assertEqual(contract.owner_header_positions(named), blank_positions)
+
+    def test_owner_write_preview_is_read_only_and_below_artifact_floor(self):
+        unrelated = dict(agent_name="Prior", last_name="Owner", phone="5551110000",
+                         email="prior@example.test", listing_address="1 Other Road", city="Dover",
+                         state="DE", created_at="free-other-owner")
+        current = (contract.pilot.PILOT_HEADERS, [(1172, self.row)], [(5586, unrelated)],
+                   contract.pilot.RUN_RECEIPT_HEADERS, self.source)
+        request = {"action": "owner_write_preview", "automation_id": "lead-verifier-8-am"}
+        with mock.patch.object(contract, "snapshot", return_value=current), \
+             mock.patch.object(contract.pilot, "get_values", return_value=[self.owner_headers()]), \
+             mock.patch.object(contract, "owner_row_is_empty", return_value=True), \
+             mock.patch.object(contract.pilot, "batch_update_values") as write:
+            result = contract.handle("token", "sheet", request, now=self.now)
+        self.assertEqual(result["owner_row"], 5587)
+        self.assertEqual(result["write_ranges"], ["'Sheet1'!A5587:G5587", "'Sheet1'!Y5587:AB5587"])
+        self.assertTrue(result["owner_row_empty"])
+        self.assertEqual(result["writes"], 0)
+        self.assertEqual(result["sends"], 0)
+        write.assert_not_called()
+
+    def test_promote_owner_rolls_back_exact_owned_row_when_pointer_readback_fails(self):
+        self.row.update(promotion_status="verifier_held", import_ready="verify", matched_main_row="",
+                        promotion_notes="Qualified listing staged for the lead verifier",
+                        source_url=contract.pilot.safe_source_reference("https://example.test/listing"))
+        before, after_owner, _ = self.promotion_snapshots()
+        with mock.patch.object(contract, "snapshot", side_effect=[before, before, after_owner, after_owner, after_owner]), \
+             mock.patch.object(contract, "owner_row_is_empty", return_value=True), \
+             mock.patch.object(contract.pilot, "get_values", return_value=[self.owner_headers()]), \
+             mock.patch.object(contract.pilot, "resolve_source_evidence_receipt", return_value="https://example.test/listing"), \
+             mock.patch.object(contract.pilot, "batch_update_values"), \
+             mock.patch.object(contract, "delete_owner_row") as delete:
+            with self.assertRaisesRegex(ValueError, "promotion_owner_readback_failed_do_not_send"):
+                contract.handle("token", "sheet", self.promotion_request(), now=self.now)
+        delete.assert_called_once_with("token", "sheet", 31)
 
     def test_existing_terminal_slot_cannot_be_rewritten(self):
         existing, _ = self.build()
