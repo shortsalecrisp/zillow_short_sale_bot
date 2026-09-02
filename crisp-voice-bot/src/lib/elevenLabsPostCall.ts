@@ -225,6 +225,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return `Requested callback at ${normalizedCallbackTime}`;
   }
 
+  if (callResult === "information_requested") {
+    return "Information requested - handoff ready";
+  }
+
   if (callResult === "answered_not_interested") {
     return "Not interested";
   }
@@ -863,8 +867,23 @@ export function shouldTreatAsIdentityMismatchVoicemail(
   expectedFirstName = "",
   expectedLastName = "",
 ): boolean {
+  if (hasLiveHumanGatekeeperEvidence(conversation)) {
+    return false;
+  }
+
   const text = normalizeText(userMessages(conversation).join(" "));
   if (!text) {
+    return false;
+  }
+
+  const explicitRecordedBusinessGreeting =
+    /\b(?:thank you for calling|welcome to)\b/.test(text) &&
+    /\b(?:hotline|store|shop|restaurant|hotel|clinic|department|company|customer service)\b/.test(text);
+  if (
+    !shouldTreatAsVoicemail(conversation) &&
+    !shouldTreatAsRecordingArtifact(conversation) &&
+    !explicitRecordedBusinessGreeting
+  ) {
     return false;
   }
 
@@ -891,6 +910,43 @@ export function shouldTreatAsIdentityMismatchVoicemail(
       text,
     );
   return clearlyUnrelatedBusiness && !mentionsExpectedTarget;
+}
+
+export function hasLiveHumanGatekeeperEvidence(conversation: ElevenLabsConversation): boolean {
+  const transcript = conversation.transcript ?? [];
+  const summary = normalizeText(conversation.analysis?.transcript_summary ?? "");
+  const summaryNamesLiveRole =
+    /\b(?:live |human )?(?:gatekeeper|receptionist|administrator|admin|office assistant|answering service)\b/.test(summary);
+  const contextualUserTurns = transcript.filter((item, index) => {
+    if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) {
+      return false;
+    }
+
+    return transcript.slice(0, index).some(
+      (prior) => prior.role === "assistant" && typeof prior.message === "string" && hasMeaningfulSpokenContent(prior.message),
+    );
+  });
+
+  if (contextualUserTurns.length === 0) {
+    return false;
+  }
+
+  const contextualText = normalizeText(contextualUserTurns.map((item) => item.message ?? "").join(" "));
+  const liveOfficeInteraction =
+    /\b(?:can i have|may i have|give me|repeat|what(?:'s| is))\b.{0,45}\b(?:phone|callback)?\s*number\b/.test(
+      contextualText,
+    ) ||
+    /\b(?:take|leave|send|give)\b.{0,35}\bmessage\b/.test(contextualText) ||
+    /\b(?:hold|one moment|stay on the line|transfer you|see if (?:he|she|they) (?:is|are) available)\b/.test(
+      contextualText,
+    );
+  const officeSelfIdentification = meaningfulUserMessages(conversation).some((message) =>
+    /\b(?:real estate|realty|properties|brokerage|office|group)\b.{0,35}\bthis is\b/i.test(message) ||
+    /\bthis is\b.{0,35}\b(?:real estate|realty|properties|brokerage|office|group)\b/i.test(message),
+  );
+
+  return liveOfficeInteraction || (summaryNamesLiveRole && contextualUserTurns.length > 0) ||
+    (officeSelfIdentification && contextualUserTurns.length >= 2);
 }
 
 export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
@@ -973,6 +1029,10 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
     return true;
   }
 
+  if (hasLiveHumanGatekeeperEvidence(conversation)) {
+    return true;
+  }
+
   if (shouldTreatAsRecordingArtifact(conversation)) {
     return true;
   }
@@ -984,6 +1044,7 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
     shouldTreatAsNotShortSale(conversation) ||
     shouldTreatAsNotInterested(conversation) ||
     hasToolCall(conversation, "callback_requested") ||
+    hasToolCall(conversation, "information_requested") ||
     hasToolCall(conversation, "not_interested") ||
     hasSuccessfulTransfer(conversation)
   ) {
@@ -1057,6 +1118,7 @@ export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): 
     shouldTreatAsNotShortSale(conversation) ||
     shouldTreatAsNotInterested(conversation) ||
     hasToolCall(conversation, "callback_requested") ||
+    hasToolCall(conversation, "information_requested") ||
     hasToolCall(conversation, "not_interested") ||
     hasSuccessfulTransfer(conversation)
   ) {
@@ -1310,7 +1372,7 @@ async function processPostCallOutcomeForConversation(
   if (shouldTreatAsIdentityMismatchVoicemail(conversation, expectedFirstName, metadata.lastName ?? "")) {
     const outcome = buildVoiceResponseStatus("identity_mismatch_voicemail");
     const mismatchSummary =
-      "The greeting explicitly identified another person or an unrelated business; the target was not reached and no sales handoff was created.";
+      "The recorded greeting explicitly identified another person or an unrelated business; the target was not reached and no sales handoff was created.";
 
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
@@ -1443,6 +1505,54 @@ async function processPostCallOutcomeForConversation(
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
+    });
+    return true;
+  }
+
+  if (hasToolCall(conversation, "information_requested")) {
+    const outcome = buildVoiceResponseStatus("information_requested");
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "information_requested",
+      responseStatus: outcome,
+      leadStatusCode: "G",
+      callbackRequested: "",
+      callbackTime: "",
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
+
+    await sendCallbackEmail({
+      agentName: metadata.fullName,
+      phone: metadata.dialedPhone,
+      email: metadata.email,
+      listingAddress: metadata.listingAddress,
+      rowNumber: metadata.rowNumber,
+      subject: `NEW LEAD 🔥 - INFORMATION REQUEST - ${metadata.fullName}`,
+      handoffType: "Information Request",
+      action: "Send the requested information to this lead",
+      conversationDescription: summary,
+      conversationTranscript: fullTranscript,
+      conversationId,
+      details:
+        "The information-request tool fired during the live call. This post-call email includes the completed transcript and playback link.",
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback sent transcript-rich information request email", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
     });
     return true;
   }

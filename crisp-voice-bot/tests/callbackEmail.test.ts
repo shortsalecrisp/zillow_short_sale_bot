@@ -10,7 +10,7 @@ process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 process.env.ELEVENLABS_API_KEY = "elevenlabs-api-key";
 process.env.ELEVENLABS_TOOL_SECRET = "playback-signing-secret";
 
-test("callback email includes a signed playback link and full transcript when a conversation id is available", async () => {
+test("information-request email includes a signed playback link and full transcript without a callback time", async () => {
   const { buildCallbackEmailMessage } = await import("../src/lib/sendCallbackEmail");
 
   const message = buildCallbackEmailMessage({
@@ -18,7 +18,8 @@ test("callback email includes a signed playback link and full transcript when a 
     phone: "+19124338239",
     listingAddress: "626 Trevor Street, Hinesville, GA",
     rowNumber: 5565,
-    callbackTime: "send info",
+    handoffType: "Information Request",
+    subject: "NEW LEAD 🔥 - INFORMATION REQUEST - James Louis Grekousis",
     conversationId: "conv_2201m1f4kmddfr78e6fnbhxbsx6p",
     conversationDescription: "handoff-ready interested callback",
     conversationTranscript: "Finn: We help agents with lender calls.\nAgent: Send me the information.",
@@ -30,6 +31,8 @@ test("callback email includes a signed playback link and full transcript when a 
     /Playback: https:\/\/voice\.example\.com\/elevenlabs\/playback\/conv_2201m1f4kmddfr78e6fnbhxbsx6p\?sig=[a-f0-9]{32}/,
   );
   assert.match(message.text, /Full Convo:\nFinn: We help agents with lender calls\.\nAgent: Send me the information\./);
+  assert.match(message.text, /Handoff Type: Information Request/);
+  assert.doesNotMatch(message.text, /Scheduled Time:/);
   assert.match(
     message.html,
     /<a href="https:\/\/voice\.example\.com\/elevenlabs\/playback\/conv_2201m1f4kmddfr78e6fnbhxbsx6p\?sig=[a-f0-9]{32}"[^>]*>Play call recording<\/a>/,

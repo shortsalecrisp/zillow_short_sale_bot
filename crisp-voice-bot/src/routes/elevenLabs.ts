@@ -139,6 +139,10 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
     return "Warm transfer accepted";
   }
 
+  if (callResult === "information_requested") {
+    return "Information requested - handoff ready";
+  }
+
   if (callResult === "callback_requested") {
     const normalizedCallbackTime = callbackTime?.trim();
     if (!normalizedCallbackTime || normalizedCallbackTime.toLowerCase() === "asap") {
@@ -574,6 +578,85 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
           : `Say exactly: Ok, I set up the callback with Yoni and I'll have him reach out to you ${formatCallbackConfirmationTime(
               payload.callbackTime,
             )}. Before I let you go, is there anything else you need from me? Then wait for the caller's answer. If they say no, all set, thanks, bye, or anything similar, say exactly: Ok thanks, bye. Then immediately call end_call.`,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/tool/information-requested", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    verifyToolSecret(req);
+    const payload = applyLatestCallContextIfNeeded(readLeadPayload(req.body));
+    const conversationId =
+      payload.conversationId ||
+      getElevenLabsConversationIdByCallContext({
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+      });
+    const outcome = buildVoiceResponseStatus("information_requested");
+
+    queueElevenLabsBackgroundTask(
+      "ElevenLabs information request sheet update",
+      {
+        rowNumber: payload.rowNumber,
+        agentName: payload.agentName,
+        callAttemptNumber: payload.callAttemptNumber,
+      },
+      () =>
+        postSheetUpdate({
+          rowNumber: payload.rowNumber,
+          callAttemptNumber: payload.callAttemptNumber,
+          callResult: "information_requested",
+          responseStatus: outcome,
+          leadStatusCode: "G",
+          callbackRequested: "",
+          callbackTime: "",
+          liveTransferRequested: "",
+          liveTransferCompleted: "",
+          voiceNotes: payload.conversationSummary,
+        }),
+    );
+
+    if (conversationId) {
+      logger.info("ElevenLabs information request email deferred until post-call transcript is available", {
+        rowNumber: payload.rowNumber,
+        agentName: payload.agentName,
+        conversationId,
+      });
+    } else {
+      queueElevenLabsBackgroundTask(
+        "ElevenLabs information request email",
+        {
+          rowNumber: payload.rowNumber,
+          agentName: payload.agentName,
+        },
+        () =>
+          sendCallbackEmail({
+            agentName: payload.agentName,
+            phone: payload.phone,
+            email: payload.email,
+            listingAddress: payload.listingAddress,
+            rowNumber: payload.rowNumber,
+            subject: `NEW LEAD 🔥 - INFORMATION REQUEST - ${payload.agentName}`,
+            handoffType: "Information Request",
+            conversationDescription: payload.conversationSummary,
+          }),
+      );
+    }
+
+    logger.info("ElevenLabs information requested tool handled", {
+      rowNumber: payload.rowNumber,
+      agentName: payload.agentName,
+      email: payload.email,
+      conversationId,
+    });
+
+    res.status(200).json({
+      ok: true,
+      intent: "information_requested",
+      email: payload.email,
+      nextAction: "Say exactly: Ok, I'll have Yoni send the information. Thanks. Then immediately call end_call.",
     });
   } catch (error) {
     next(error);

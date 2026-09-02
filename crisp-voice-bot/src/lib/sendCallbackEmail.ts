@@ -13,6 +13,7 @@ type CallbackEmailInput = {
   conversationTranscript?: string;
   conversationId?: string;
   callbackTime?: string;
+  handoffType?: "Callback Request" | "Information Request";
   details?: string;
 };
 
@@ -45,6 +46,7 @@ export function buildCallbackEmailMessage({
   conversationTranscript,
   conversationId,
   callbackTime,
+  handoffType = "Callback Request",
   details,
 }: CallbackEmailInput): CallbackEmailMessage {
   const formattedPhone = formatDashedPhoneNumber(phone);
@@ -57,12 +59,16 @@ export function buildCallbackEmailMessage({
     conversationDescription?.trim() ||
     "No conversation transcript available.";
   const effectiveSubject = subject ?? `NEW LEAD 🔥 - SCHEDULED CALLBACK - ${agentName}`;
+  const scheduledTimeLine = handoffType === "Callback Request" ? `Scheduled Time: ${effectiveCallbackTime}\n` : "";
+  const scheduledTimeHtml =
+    handoffType === "Callback Request"
+      ? `<strong>Scheduled Time:</strong> ${escapeHtml(effectiveCallbackTime)}<br>\n`
+      : "";
 
   const text = `We have a new lead interested in your services, and a manual follow-up is now needed.
 
-Handoff Type: Callback Request
-Scheduled Time: ${effectiveCallbackTime}
-Agent Name: ${agentName}
+Handoff Type: ${handoffType}
+${scheduledTimeLine}Agent Name: ${agentName}
 Phone: ${formattedPhone}
 Email: ${effectiveEmail}
 Address: ${listingAddress}
@@ -72,9 +78,8 @@ Full Convo:
 ${fullConversation}`;
 
   const html = `<p>We have a new lead interested in your services, and a manual follow-up is now needed.</p>
-<p><strong>Handoff Type:</strong> Callback Request<br>
-<strong>Scheduled Time:</strong> ${escapeHtml(effectiveCallbackTime)}<br>
-<strong>Agent Name:</strong> ${escapeHtml(agentName)}<br>
+<p><strong>Handoff Type:</strong> ${escapeHtml(handoffType)}<br>
+${scheduledTimeHtml}<strong>Agent Name:</strong> ${escapeHtml(agentName)}<br>
 <strong>Phone:</strong> ${escapeHtml(formattedPhone)}<br>
 <strong>Email:</strong> ${escapeHtml(effectiveEmail)}<br>
 <strong>Address:</strong> ${escapeHtml(listingAddress)}${safeConversationId ? `<br>\n<strong>Conversation ID:</strong> ${escapeHtml(safeConversationId)}` : ""}</p>

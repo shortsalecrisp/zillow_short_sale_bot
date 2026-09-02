@@ -106,6 +106,7 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Benefit hook upfront");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.scheduledWindow, "late_morning");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.agentTimeZone, "America/New_York");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.email, "tina@example.com");
   assert.equal(
     body.conversation_initiation_client_data.dynamic_variables.openerScript,
     "We help agents with lender calls and paperwork on short sales. Are you handling that one yourself?",

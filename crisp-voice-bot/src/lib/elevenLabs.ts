@@ -217,6 +217,7 @@ export function buildElevenLabsOutboundCallBody(params: {
     lastName: params.metadata.lastName ?? "",
     callAttemptNumber: params.metadata.callAttemptNumber,
     phone: params.metadata.dialedPhone,
+    email: params.metadata.email ?? "",
     requestedPhone: params.metadata.requestedPhone,
     listingAddress: params.metadata.listingAddress,
     streetAddress,

@@ -378,6 +378,56 @@ test("post-call fallback identifies wrong-person and unrelated-business voicemai
   );
 });
 
+test("post-call fallback gives live office gatekeeper evidence precedence over identity-mismatch voicemail", async () => {
+  const {
+    buildVoiceResponseStatus,
+    hasLiveHumanGatekeeperEvidence,
+    shouldTreatAsAgentHungUp,
+    shouldTreatAsAgentUnavailable,
+    shouldTreatAsIdentityMismatchVoicemail,
+  } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "assistant", message: "This is Finn with Crisp Short Sales." },
+      { role: "user", message: "Uh, Byrne Real Estate Group, this is Erica." },
+      {
+        role: "assistant",
+        message: "I'm calling about Clay's short sale listing. Yoni's direct callback number is 404-300-9526.",
+      },
+      { role: "user", message: "No. Can I have that phone number again?" },
+      { role: "assistant", message: "Sure, it's 404-300-9526." },
+      { role: "user", message: "..." },
+    ],
+  };
+
+  assert.equal(hasLiveHumanGatekeeperEvidence(conversation), true);
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(conversation, "Clay", "Byrne"), false);
+  assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+  assert.equal(buildVoiceResponseStatus("agent_not_available"), "Agent was not available");
+});
+
+test("post-call fallback treats information-request tooling as a handoff, not a callback or hangup", async () => {
+  const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsCallback } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "end_call tool was called." },
+    transcript: [
+      { role: "assistant", message: "Would you rather have Yoni give you a quick call, or should I send over info?" },
+      { role: "user", message: "Send me the information by email." },
+      { role: "assistant", tool_calls: [{ tool_name: "information_requested" }] },
+    ],
+  };
+
+  assert.equal(shouldTreatAsCallback(conversation), false);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+  assert.equal(buildVoiceResponseStatus("information_requested"), "Information requested - handoff ready");
+});
+
 test("post-call fallback classifies a completed automated screener as agent unavailable", async () => {
   const { shouldTreatAsAgentUnavailable } = await import("../src/lib/elevenLabsPostCall");
   const conversation = {

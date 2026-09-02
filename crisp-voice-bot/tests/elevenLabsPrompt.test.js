@@ -288,7 +288,10 @@ test("prompt blocks recording fragments from creating human outcomes", () => {
 
   assert.match(prompt, /Recording\/automated-system gate, highest priority/i);
   assert.match(prompt, /Canned fragments such as "as soon as possible"/i);
-  assert.match(prompt, /Never call `callback_requested`, `not_interested`, or `live_transfer_requested`/);
+  assert.match(
+    prompt,
+    /Never call `callback_requested`, `information_requested`, `not_interested`, or `live_transfer_requested`/,
+  );
   assert.match(prompt, /automated system asks for a callback number[\s\S]{0,100}404-300-9526/i);
 });
 
@@ -372,8 +375,20 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   assert.match(selfHandlingBranch, /do not start a transfer yet/i);
   assert.match(selfHandlingBranch, /Do you want me to try to bring Yoni onto this call now, or should he call you at a specific time\?/);
   assert.match(selfHandlingBranch, /interest only/i);
-  assert.match(selfHandlingBranch, /callbackTime` set to `send info/);
+  assert.match(selfHandlingBranch, /call `information_requested`/);
+  assert.match(selfHandlingBranch, /Do not call `callback_requested`/);
+  assert.match(selfHandlingBranch, /do not invent a callback time/);
+  assert.match(selfHandlingBranch, /Is \{\{email\}\} the best email for the information\?/);
   assert.match(selfHandlingBranch, /What time should he call you\?/);
+});
+
+test("prompt exposes email and keeps information requests out of callback handling", () => {
+  const prompt = readPrompt();
+
+  assert.match(prompt, /- `email`/);
+  assert.match(prompt, /capture a request for information/);
+  assert.match(prompt, /After `information_requested` succeeds/);
+  assert.doesNotMatch(prompt, /callbackTime` set to `send info/);
 });
 
 test("prompt keeps self-handling uncertainty out of the hard-no examples", () => {
