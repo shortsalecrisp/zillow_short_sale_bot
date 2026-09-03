@@ -23,15 +23,11 @@ function weightedVariantForRow(rowNumber: number): ElevenLabsOpenerVariantKey {
     return "identity_check_short";
   }
 
-  if (bucket <= 6) {
+  if (bucket <= 7) {
     return "benefit_hook";
   }
 
-  if (bucket <= 8) {
-    return "direct_reason";
-  }
-
-  return "yoni_name";
+  return "direct_reason";
 }
 
 export function buildElevenLabsOpenerVariant(input: BuildOpenerVariantInput): ElevenLabsOpenerVariant {
@@ -56,7 +52,7 @@ export function buildElevenLabsOpenerVariant(input: BuildOpenerVariantInput): El
       return {
         key,
         label: "Benefit hook upfront",
-        script: "We help agents with lender calls and paperwork on short sales. Are you handling that one yourself?",
+        script: "We help agents with the bank paperwork and lender calls on short sales. Are you handling that side yourself?",
       };
     case "direct_reason":
     default:

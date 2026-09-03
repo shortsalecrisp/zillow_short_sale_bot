@@ -67,7 +67,11 @@ test("ElevenLabs opener test assigns weighted opener variants by row", async () 
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3709, firstName: "Marta", assistantName: "Maya" }).key,
-    "yoni_name",
+    "direct_reason",
+  );
+  assert.equal(
+    buildElevenLabsOpenerVariant({ rowNumber: 3703, firstName: "Miriam", assistantName: "Maya" }).script,
+    "We help agents with the bank paperwork and lender calls on short sales. Are you handling that side yourself?",
   );
 
   for (let rowNumber = 3700; rowNumber < 3710; rowNumber += 1) {
@@ -109,7 +113,7 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.email, "tina@example.com");
   assert.equal(
     body.conversation_initiation_client_data.dynamic_variables.openerScript,
-    "We help agents with lender calls and paperwork on short sales. Are you handling that one yourself?",
+    "We help agents with the bank paperwork and lender calls on short sales. Are you handling that side yourself?",
   );
   assert.equal(
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,
