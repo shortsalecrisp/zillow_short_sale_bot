@@ -270,7 +270,9 @@ test("prompt waits through office robots and gatekeeper transfer attempts", () =
     gatekeeperSection,
     /This is {{assistantName}} calling from Crisp Short Sales about your listing at {{streetAddress}}\./,
   );
-  assert.match(gatekeeperSection, /Then call `skip_turn`, stay quiet/);
+  assert.match(gatekeeperSection, /Do not call `skip_turn` as the response to that screener prompt/);
+  assert.match(gatekeeperSection, /The response to the screener must be the spoken sentence above/);
+  assert.match(gatekeeperSection, /After you have spoken that sentence, stay quiet/);
   assert.match(gatekeeperSection, /Do not pitch, do not ask a callback question/);
   assert.match(gatekeeperSection, /phone rings, transfers, or waits for the agent/);
   assert.match(gatekeeperSection, /Yoni's direct callback number is 404-300-9526/i);

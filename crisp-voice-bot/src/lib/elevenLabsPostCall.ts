@@ -3,6 +3,7 @@ import { config } from "./config";
 import { logger } from "./logger";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
 import {
+  recordElevenLabsLlmFailure,
   recordProviderQuotaFailure,
   recordTelnyxD17Failure,
   resetProviderCircuit,
@@ -277,6 +278,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "ElevenLabs quota exceeded - call not counted";
   }
 
+  if (callResult === "provider_llm_failure") {
+    return "ElevenLabs LLM cascade failure - call not counted";
+  }
+
   if (callResult === "provider_d17_failure") {
     return "Telnyx account disabled (D17) - call not counted";
   }
@@ -316,16 +321,37 @@ function isInvalidDestinationNumberFailure(conversation: ElevenLabsConversation)
 }
 
 export function shouldTreatAsProviderQuotaExceeded(conversation: ElevenLabsConversation): boolean {
-  const errorCode = conversation.metadata?.error?.code;
   const reason = normalizeText(getFailedConversationReason(conversation));
 
   return (
     conversation.status === "failed" &&
-    (errorCode === 1002 ||
-      reason.includes("quota limit") ||
+    (reason.includes("quota limit") ||
       reason.includes("exceeds your quota") ||
       reason.includes("quota exceeded") ||
       (reason.includes("quota") && reason.includes("exceed")))
+  );
+}
+
+export function shouldTreatAsElevenLabsLlmFailure(conversation: ElevenLabsConversation): boolean {
+  if (conversation.status !== "failed" || shouldTreatAsProviderQuotaExceeded(conversation)) {
+    return false;
+  }
+
+  const errorCode = conversation.metadata?.error?.code;
+  const errorType = normalizeText(
+    typeof conversation.metadata?.error?.error_type === "string" ? conversation.metadata.error.error_type : "",
+  );
+  const reason = normalizeText(getFailedConversationReason(conversation));
+  const terminationReason = normalizeText(conversation.metadata?.termination_reason ?? "");
+
+  return (
+    errorCode === 1002 ||
+    errorType.includes("llm_error") ||
+    reason.includes("llm cascade") ||
+    reason.includes("all llms have failed") ||
+    reason.includes("all llm have failed") ||
+    terminationReason.includes("all llms have failed") ||
+    terminationReason.includes("all llm have failed")
   );
 }
 
@@ -1360,6 +1386,39 @@ async function processPostCallOutcomeForConversation(
     conversationsWithoutQueueRefill.add(conversationId);
     await ensureProviderCircuitAlert();
     logger.error("ElevenLabs provider quota exceeded; call attempt will not be counted", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      failureReason,
+      circuitOpen: circuit.status.open,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsElevenLabsLlmFailure(conversation)) {
+    const failureReason = getFailedConversationReason(conversation);
+    const outcome = buildVoiceResponseStatus("provider_llm_failure");
+    const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();
+    const circuit = recordElevenLabsLlmFailure({
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      reason: failureReason,
+    });
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "provider_llm_failure",
+      responseStatus: outcome,
+      providerLlmFailure: true,
+      voiceNotes: buildPerformanceNotes(outcome, outcomeSummary),
+    });
+
+    processedConversationIds.add(conversationId);
+    conversationsWithoutQueueRefill.add(conversationId);
+    await ensureProviderCircuitAlert();
+    logger.error("ElevenLabs LLM provider failure; call attempt will not be counted", {
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,

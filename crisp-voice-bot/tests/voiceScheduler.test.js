@@ -317,6 +317,73 @@ test("provider quota callbacks clear attempted markers and schedule a cooldown",
   ]);
 });
 
+test("provider LLM callbacks clear attempted markers and schedule a cooldown", () => {
+  const result = JSON.parse(runSchedulerScript(`
+    const cells = Array(VOICE_BOT_COL_VOICE_NOTES + 1).fill("");
+    cells[VOICE_BOT_COL_CALL_1_SENT] = "2026-09-03T13:15:00.000Z";
+    cells[VOICE_BOT_COL_CALL_1_RESULT] = "queued";
+    cells[VOICE_BOT_COL_CALL_ELIGIBLE] = "queued";
+    cells[VOICE_BOT_COL_CALL_TIME_BUCKET] = "voice_call_1_due";
+    cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR] = "2026-09-03T13:30:00.000Z";
+
+    const sheet = {
+      getRange(rowNumber, columnNumber) {
+        return {
+          getValue() {
+            return cells[columnNumber] || "";
+          },
+          setValue(value) {
+            cells[columnNumber] = value instanceof Date ? value.toISOString() : value;
+          },
+          clearContent() {
+            cells[columnNumber] = "";
+          }
+        };
+      }
+    };
+
+    const fieldsWritten = applyVoiceBotRowUpdates_(sheet, 5589, {
+      callAttemptNumber: 1,
+      callResult: "provider_llm_failure",
+      responseStatus: "ElevenLabs LLM cascade failure - call not counted",
+      providerLlmFailure: true,
+      voiceNotes: "LLM Cascade Error:"
+    });
+
+    JSON.stringify({
+      fieldsWritten,
+      call1Sent: cells[VOICE_BOT_COL_CALL_1_SENT],
+      call1Result: cells[VOICE_BOT_COL_CALL_1_RESULT],
+      callEligible: cells[VOICE_BOT_COL_CALL_ELIGIBLE],
+      callTimeBucket: cells[VOICE_BOT_COL_CALL_TIME_BUCKET],
+      callScheduledFor: cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR] instanceof Date
+        ? cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR].toISOString()
+        : cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR],
+      responseStatus: cells[VOICE_BOT_COL_RESPONSE_STATUS],
+      leadStatusCode: cells[VOICE_BOT_COL_LEAD_STATUS_CODE],
+      voiceNotes: cells[VOICE_BOT_COL_VOICE_NOTES]
+    });
+  `));
+
+  assert.equal(result.call1Sent, "");
+  assert.equal(result.call1Result, "");
+  assert.equal(result.callEligible, "provider_llm_pause");
+  assert.equal(result.callTimeBucket, "provider_llm_retry");
+  assert.match(result.callScheduledFor, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(result.responseStatus, "ElevenLabs LLM cascade failure - call not counted");
+  assert.equal(result.leadStatusCode, "");
+  assert.equal(result.voiceNotes, "LLM Cascade Error:");
+  assert.deepEqual(result.fieldsWritten, [
+    "AG:voice_call_1_sent_provider_llm_cleared",
+    "AH:voice_call_1_result_provider_llm_cleared",
+    "AD:call_eligible",
+    "AE:call_time_bucket",
+    "AF:call_scheduled_for",
+    "J:responseStatus",
+    "AP:voiceNotes_appended",
+  ]);
+});
+
 test("agent-not-available first attempts are retryable in the next local call window", () => {
   const result = JSON.parse(runSchedulerScript(`
     const cells = Array(VOICE_BOT_COL_VOICE_NOTES + 1).fill("");

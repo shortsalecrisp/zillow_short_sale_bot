@@ -44,6 +44,7 @@ export type VoiceLeadRowUpdates = {
   voiceNotes?: string;
   providerQuotaExceeded?: boolean;
   providerD17Failure?: boolean;
+  providerLlmFailure?: boolean;
 };
 
 type SheetCellWrite = {
@@ -152,10 +153,11 @@ export function buildVoiceLeadRowWrites(
   const callResultColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
   const providerQuotaExceeded = updates.providerQuotaExceeded || updates.callResult === "provider_quota_exceeded";
   const providerD17Failure = updates.providerD17Failure || updates.callResult === "provider_d17_failure";
+  const providerLlmFailure = updates.providerLlmFailure || updates.callResult === "provider_llm_failure";
 
-  if (providerQuotaExceeded || providerD17Failure) {
+  if (providerQuotaExceeded || providerD17Failure || providerLlmFailure) {
     const retryAt = new Date(now.getTime() + VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES * 60_000);
-    const reason = providerD17Failure ? "provider_d17" : "provider_quota";
+    const reason = providerD17Failure ? "provider_d17" : providerQuotaExceeded ? "provider_quota" : "provider_llm";
     clearWrite(writes, callSentColumn, `voice_call_${callAttemptNumber}_sent_${reason}_cleared`);
     clearWrite(writes, callResultColumn, `voice_call_${callAttemptNumber}_result_${reason}_cleared`);
     addWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible", `${reason}_pause`);
@@ -187,7 +189,7 @@ export function buildVoiceLeadRowWrites(
   );
   addWrite(writes, VOICE_BOT_COL_CALLBACK_TIME, "callbackTime", updates.callbackTime);
 
-  if (!providerQuotaExceeded && !providerD17Failure) {
+  if (!providerQuotaExceeded && !providerD17Failure && !providerLlmFailure) {
     addWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "callScheduledFor", updates.callScheduledFor);
     addSchedulingWrites(writes, rowValues, updates, callAttemptNumber, now);
   }

@@ -391,7 +391,7 @@ async function main(): Promise<void> {
             type: "system",
             name: "skip_turn",
             description:
-              "Use this instead of speaking when the caller turn is only placeholder silence like ..., background noise, road noise, static, breathing, or another non-word sound. Do not use it when the caller spoke actual words.",
+              "Use this instead of speaking when the caller turn is only placeholder silence like ..., background noise, road noise, static, breathing, or another non-word sound. Do not use it when the caller spoke actual words. Do not use it as the response to an automated screener asking for your name and reason for calling; speak the exact screener sentence first.",
             response_timeout_secs: 20,
             disable_interruptions: true,
             force_pre_tool_speech: false,

@@ -266,27 +266,33 @@ function applyVoiceBotRowUpdates_(sheet, rowNumber, payload) {
   const callSentColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
   const callResultColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
 
-  if (isVoiceBotProviderQuotaExceededPayload_(payload)) {
+  const providerFailureReason = getVoiceBotProviderFailureReason_(payload);
+
+  if (providerFailureReason) {
     const retryAt = new Date(new Date().getTime() + VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES * 60 * 1000);
     clearVoiceBotCellIfNeeded_(
       sheet,
       rowNumber,
       callSentColumn,
       fieldsWritten,
-      'voice_call_' + callAttemptNumber + '_sent_provider_quota_cleared'
+      'voice_call_' + callAttemptNumber + '_sent_' + providerFailureReason + '_cleared'
     );
     clearVoiceBotCellIfNeeded_(
       sheet,
       rowNumber,
       callResultColumn,
       fieldsWritten,
-      'voice_call_' + callAttemptNumber + '_result_provider_quota_cleared'
+      'voice_call_' + callAttemptNumber + '_result_' + providerFailureReason + '_cleared'
     );
-    sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE).setValue('provider_quota_pause');
+    sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE).setValue(providerFailureReason + '_pause');
     fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_CALL_ELIGIBLE) + ':call_eligible');
-    sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET).setValue('provider_quota_retry');
+    sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET).setValue(providerFailureReason + '_retry');
     fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_CALL_TIME_BUCKET) + ':call_time_bucket');
-    sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR).setValue(retryAt);
+    if (providerFailureReason === 'provider_d17') {
+      sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR).clearContent();
+    } else {
+      sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR).setValue(retryAt);
+    }
     fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_CALL_SCHEDULED_FOR) + ':call_scheduled_for');
     writeVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_RESPONSE_STATUS, payload, 'responseStatus', fieldsWritten);
     appendVoiceBotFieldIfPresent_(sheet, rowNumber, VOICE_BOT_COL_VOICE_NOTES, payload, 'voiceNotes', fieldsWritten);
@@ -1093,12 +1099,23 @@ function normalizeString_(value) {
   return String(value).trim();
 }
 
-function isVoiceBotProviderQuotaExceededPayload_(payload) {
-  return (
-    payload &&
-    (payload.providerQuotaExceeded === true ||
-      normalizeString_(payload.callResult).toLowerCase() === 'provider_quota_exceeded')
-  );
+function getVoiceBotProviderFailureReason_(payload) {
+  if (!payload) {
+    return '';
+  }
+
+  const callResult = normalizeString_(payload.callResult).toLowerCase();
+  if (payload.providerD17Failure === true || callResult === 'provider_d17_failure') {
+    return 'provider_d17';
+  }
+  if (payload.providerQuotaExceeded === true || callResult === 'provider_quota_exceeded') {
+    return 'provider_quota';
+  }
+  if (payload.providerLlmFailure === true || callResult === 'provider_llm_failure') {
+    return 'provider_llm';
+  }
+
+  return '';
 }
 
 function normalizeMarker_(value) {

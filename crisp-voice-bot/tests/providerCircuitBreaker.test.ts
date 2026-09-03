@@ -4,6 +4,7 @@ import {
   claimProviderCircuitAlertAttempt,
   getProviderCircuitStatus,
   markProviderCircuitAlertSent,
+  recordElevenLabsLlmFailure,
   recordProviderQuotaFailure,
   recordTelnyxD17Failure,
   resetProviderCircuit,
@@ -66,4 +67,18 @@ test("one provider quota failure opens the global circuit immediately", () => {
   assert.equal(result.status.open, true);
   assert.equal(result.status.signature, "elevenlabs_quota_exceeded");
   assert.equal(result.status.threshold, 1);
+});
+
+test("one ElevenLabs LLM cascade failure opens its own circuit signature", () => {
+  resetProviderCircuitForTests();
+  const result = recordElevenLabsLlmFailure(
+    { ...failure(5589, "conv_llm"), reason: "LLM Cascade Error:" },
+    new Date("2026-09-03T13:16:01Z"),
+  );
+
+  assert.equal(result.justOpened, true);
+  assert.equal(result.status.open, true);
+  assert.equal(result.status.signature, "elevenlabs_llm_failure");
+  assert.equal(result.status.threshold, 1);
+  assert.deepEqual(result.status.evidence.map((item) => item.rowNumber), [5589]);
 });

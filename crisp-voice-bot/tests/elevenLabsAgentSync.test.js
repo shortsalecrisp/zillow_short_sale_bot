@@ -33,6 +33,7 @@ test("agent sync enables skip_turn for placeholder-only noise turns", () => {
   assert.match(script, /skip_turn:\s*{/);
   assert.match(script, /name:\s*"skip_turn"/);
   assert.match(script, /system_tool_type:\s*"skip_turn"/);
+  assert.match(script, /Do not use it as the response to an automated screener asking for your name and reason for calling/);
 });
 
 test("agent sync tells voicemail detection to wait for the greeting handoff point", () => {

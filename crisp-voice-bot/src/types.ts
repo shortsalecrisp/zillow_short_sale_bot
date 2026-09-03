@@ -162,5 +162,6 @@ export interface SheetUpdateRequest {
   voiceNotes?: string;
   providerQuotaExceeded?: boolean;
   providerD17Failure?: boolean;
+  providerLlmFailure?: boolean;
   [key: string]: unknown;
 }

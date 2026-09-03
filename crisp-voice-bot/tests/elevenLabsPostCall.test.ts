@@ -206,6 +206,30 @@ const providerQuotaFailureConversation = {
   transcript: [{ role: "assistant", message: "Hi Celeste, this is Maya with Crisp Short Sales..." }],
 } as const;
 
+const providerLlmFailureConversation = {
+  status: "failed",
+  metadata: {
+    termination_reason: "All LLMs have failed",
+    error: {
+      code: 1002,
+      reason: "LLM Cascade Error: ",
+      error_type: "llm_error",
+    },
+  },
+  analysis: {
+    transcript_summary:
+      "The agent, identifying as Finn from Crisp Short Sales, reached a call screening assistant before the LLM failed.",
+  },
+  transcript: [
+    { role: "agent", message: "This is Finn with Crisp Short Sales." },
+    {
+      role: "user",
+      message: "Can you record your name and reason for calling? I'll see if this person is available.",
+    },
+    { role: "agent", tool_calls: [{ tool_name: "skip_turn" }] },
+  ],
+} as const;
+
 const telnyxD17FailureConversation = {
   status: "failed",
   metadata: {
@@ -219,14 +243,34 @@ const telnyxD17FailureConversation = {
 } as const;
 
 test("post-call fallback detects ElevenLabs quota failures as provider quota and not a prospect outcome", async () => {
-  const { buildVoiceResponseStatus, shouldTreatAsProviderQuotaExceeded } = await import(
-    "../src/lib/elevenLabsPostCall"
-  );
+  const {
+    buildVoiceResponseStatus,
+    shouldTreatAsElevenLabsLlmFailure,
+    shouldTreatAsProviderQuotaExceeded,
+  } = await import("../src/lib/elevenLabsPostCall");
 
   assert.equal(shouldTreatAsProviderQuotaExceeded(providerQuotaFailureConversation), true);
+  assert.equal(shouldTreatAsElevenLabsLlmFailure(providerQuotaFailureConversation), false);
   assert.equal(
     buildVoiceResponseStatus("provider_quota_exceeded"),
     "ElevenLabs quota exceeded - call not counted",
+  );
+});
+
+test("post-call fallback separates ElevenLabs LLM cascade failures from quota", async () => {
+  const {
+    buildVoiceResponseStatus,
+    shouldTreatAsElevenLabsLlmFailure,
+    shouldTreatAsProviderQuotaExceeded,
+    shouldTreatAsTelnyxD17Failure,
+  } = await import("../src/lib/elevenLabsPostCall");
+
+  assert.equal(shouldTreatAsElevenLabsLlmFailure(providerLlmFailureConversation), true);
+  assert.equal(shouldTreatAsProviderQuotaExceeded(providerLlmFailureConversation), false);
+  assert.equal(shouldTreatAsTelnyxD17Failure(providerLlmFailureConversation), false);
+  assert.equal(
+    buildVoiceResponseStatus("provider_llm_failure"),
+    "ElevenLabs LLM cascade failure - call not counted",
   );
 });
 

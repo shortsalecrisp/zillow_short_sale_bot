@@ -1,5 +1,6 @@
 const D17_SIGNATURE = "sip_403_account_disabled_d17";
 const QUOTA_SIGNATURE = "elevenlabs_quota_exceeded";
+const LLM_FAILURE_SIGNATURE = "elevenlabs_llm_failure";
 const D17_WINDOW_MS = 10 * 60_000;
 const D17_TRIP_THRESHOLD = 2;
 const ALERT_RETRY_MS = 10 * 60_000;
@@ -113,19 +114,35 @@ export function recordProviderQuotaFailure(
   evidence: Omit<ProviderCircuitFailureEvidence, "occurredAt"> & { occurredAt?: string },
   now = new Date(),
 ): { justOpened: boolean; status: ProviderCircuitStatus } {
+  return recordImmediateProviderFailure(QUOTA_SIGNATURE, evidence, now);
+}
+
+export function recordElevenLabsLlmFailure(
+  evidence: Omit<ProviderCircuitFailureEvidence, "occurredAt"> & { occurredAt?: string },
+  now = new Date(),
+): { justOpened: boolean; status: ProviderCircuitStatus } {
+  return recordImmediateProviderFailure(LLM_FAILURE_SIGNATURE, evidence, now);
+}
+
+function recordImmediateProviderFailure(
+  signature: string,
+  evidence: Omit<ProviderCircuitFailureEvidence, "occurredAt"> & { occurredAt?: string },
+  now: Date,
+): { justOpened: boolean; status: ProviderCircuitStatus } {
   const justOpened = !state.open;
+  const sameSignature = state.signature === signature;
   state.open = true;
-  state.signature = QUOTA_SIGNATURE;
-  state.consecutiveFailures = Math.max(1, state.consecutiveFailures + 1);
+  state.signature = signature;
+  state.consecutiveFailures = sameSignature ? Math.max(1, state.consecutiveFailures + 1) : 1;
   state.threshold = 1;
   state.windowMinutes = 0;
-  state.firstFailureAt = state.firstFailureAt ?? iso(now);
+  state.firstFailureAt = sameSignature ? state.firstFailureAt ?? iso(now) : iso(now);
   state.lastFailureAt = iso(now);
-  state.openedAt = state.openedAt ?? iso(now);
+  state.openedAt = sameSignature ? state.openedAt ?? iso(now) : iso(now);
   state.alertSentAt = undefined;
   state.lastAlertAttemptAt = undefined;
   state.evidence = [
-    ...state.evidence,
+    ...(sameSignature ? state.evidence : []),
     { ...evidence, occurredAt: evidence.occurredAt || iso(now) },
   ].slice(-D17_TRIP_THRESHOLD);
   return { justOpened, status: getProviderCircuitStatus() };
