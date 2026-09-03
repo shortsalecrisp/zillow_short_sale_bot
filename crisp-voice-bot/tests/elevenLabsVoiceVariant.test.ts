@@ -45,13 +45,13 @@ test("ElevenLabs calls rotate deterministically across Eryn and Finch by row", a
   });
 });
 
-test("ElevenLabs opener test assigns weighted opener variants by row", async () => {
+test("ElevenLabs opener test splits calls evenly across two plain-language variants", async () => {
   const { buildElevenLabsOpenerVariant } = await import("../src/lib/elevenLabsOpenerVariant");
 
   assert.deepEqual(buildElevenLabsOpenerVariant({ rowNumber: 3700, firstName: "Karimah", assistantName: "Maya" }), {
-    key: "identity_check_short",
-    label: "Short identity check control",
-    script: "Is this Karimah?",
+    key: "direct_reason",
+    label: "Plain handling question",
+    script: "Are you handling the short sale paperwork and lender calls yourself?",
   });
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3701, firstName: "Norma", assistantName: "Maya" }).key,
@@ -63,15 +63,15 @@ test("ElevenLabs opener test assigns weighted opener variants by row", async () 
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3708, firstName: "Miriam", assistantName: "Maya" }).script,
-    "I'm calling about your short sale listing. Are you handling the bank side yourself?",
+    "Are you handling the short sale paperwork and lender calls yourself?",
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3709, firstName: "Marta", assistantName: "Maya" }).key,
-    "direct_reason",
+    "benefit_hook",
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3703, firstName: "Miriam", assistantName: "Maya" }).script,
-    "We help agents with the bank paperwork and lender calls on short sales. Are you handling that side yourself?",
+    "We help agents with the short sale paperwork and lender calls. Are you looking for help with that?",
   );
 
   for (let rowNumber = 3700; rowNumber < 3710; rowNumber += 1) {
@@ -107,13 +107,13 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "finch");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Finch");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariant, "benefit_hook");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Benefit hook upfront");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Direct help question");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.scheduledWindow, "late_morning");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.agentTimeZone, "America/New_York");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.email, "tina@example.com");
   assert.equal(
     body.conversation_initiation_client_data.dynamic_variables.openerScript,
-    "We help agents with the bank paperwork and lender calls on short sales. Are you handling that side yourself?",
+    "We help agents with the short sale paperwork and lender calls. Are you looking for help with that?",
   );
   assert.equal(
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,

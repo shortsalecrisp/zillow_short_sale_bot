@@ -18,7 +18,7 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
     outcome: "Call received but agent hung up on Maya",
     summary: "The agent asked if Maya was a chatbot and hung up early.",
     transcript:
-      "Maya: Hi Chris, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?\nAgent: Are you a chatbot?",
+      "Maya: Hi, this is Maya with Crisp Short Sales. I'm calling about your short sale listing.\nAgent: Hello.\nMaya: Are you handling the short sale paperwork and lender calls yourself?\nAgent: Are you a chatbot?",
     metadata: {
       rowNumber: 3481,
       fullName: "Chris Agent",
@@ -32,9 +32,8 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
       assistantName: "Maya",
       voiceId: "voice_eryn",
       openerVariant: "direct_reason",
-      openerVariantLabel: "Direct short sale reason",
-      openerScript:
-        "Hi Chris, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",
+      openerVariantLabel: "Plain handling question",
+      openerScript: "Are you handling the short sale paperwork and lender calls yourself?",
       scheduledWindow: "late_morning",
       agentTimeZone: "America/New_York",
     },
@@ -47,9 +46,14 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
       transcript: [
         {
           role: "agent",
-          message:
-            "Hi Chris, this is Maya with Crisp Short Sales about your short sale listing. Are you handling the bank side yourself?",
+          message: "Hi, this is Maya with Crisp Short Sales. I'm calling about your short sale listing.",
           time_in_call_secs: 0.7,
+        },
+        { role: "user", message: "Hello.", time_in_call_secs: 3 },
+        {
+          role: "agent",
+          message: "Are you handling the short sale paperwork and lender calls yourself?",
+          time_in_call_secs: 4,
         },
         { role: "user", message: "Are you a chatbot?", time_in_call_secs: 12 },
       ],
@@ -71,15 +75,16 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   assert.equal(parsed.call.voiceVariant, "eryn");
   assert.equal(parsed.call.assistantName, "Maya");
   assert.equal(parsed.call.openerVariant, "direct_reason");
-  assert.equal(parsed.call.openerVariantLabel, "Direct short sale reason");
-  assert.match(parsed.call.openerScript, /short sale listing/);
+  assert.equal(parsed.call.openerVariantLabel, "Plain handling question");
+  assert.match(parsed.call.openerScript, /short sale paperwork and lender calls/);
   assert.equal(parsed.call.scheduledWindow, "late_morning");
   assert.equal(parsed.call.agentTimeZone, "America/New_York");
   assert.equal(parsed.metrics.durationSecs, 18);
-  assert.equal(parsed.metrics.agentTurns, 1);
-  assert.equal(parsed.metrics.assistantTurns, 1);
+  assert.equal(parsed.metrics.agentTurns, 2);
+  assert.equal(parsed.metrics.assistantTurns, 2);
   assert.equal(parsed.metrics.reasonMentionedAtSecs, 0.7);
-  assert.equal(parsed.metrics.openingQuestionAtSecs, 0.7);
+  assert.equal(parsed.metrics.openingQuestionAtSecs, 4);
+  assert.equal(parsed.metrics.identityStatementCount, 1);
   assert.equal(parsed.flags.aiSuspicion, true);
   assert.equal(parsed.flags.reasonDelivered, true);
   assert.equal(parsed.flags.openingQuestionDelivered, true);
@@ -87,6 +92,8 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   assert.equal(parsed.flags.agentRespondedAfterOpeningQuestion, true);
   assert.equal(parsed.flags.hangupBeforeReason, false);
   assert.equal(parsed.flags.hangupBeforeOpeningQuestion, false);
+  assert.equal(parsed.flags.repeatedIdentityStatement, false);
+  assert.equal(parsed.flags.liveYoniNowOfferDelivered, false);
   assert.match(parsed.codexInstructions, /Compare voiceVariant/i);
   assert.match(parsed.codexInstructions, /scheduledWindow by agent local time bucket/i);
   assert.match(parsed.codexInstructions, /openerVariant/i);
@@ -199,6 +206,9 @@ test("voice performance log keeps transfer consent separate from later callback 
   assert.equal(parsed.flags.callbackRequested, true);
   assert.equal(parsed.flags.transferCompleted, false);
   assert.equal(parsed.flags.misfiredLiveTransferRequest, false);
+  assert.equal(parsed.flags.liveYoniNowOfferDelivered, true);
+  assert.equal(parsed.flags.agentRespondedAfterLiveYoniNowOffer, true);
+  assert.equal(parsed.metrics.liveYoniNowOfferAtSecs, 20);
 });
 
 test("voice performance log excludes punctuation-only silence from engagement", async () => {

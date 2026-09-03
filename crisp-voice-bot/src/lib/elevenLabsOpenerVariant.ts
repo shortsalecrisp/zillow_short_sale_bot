@@ -17,17 +17,7 @@ type BuildOpenerVariantInput = {
 };
 
 function weightedVariantForRow(rowNumber: number): ElevenLabsOpenerVariantKey {
-  const bucket = Math.abs(rowNumber) % 10;
-
-  if (bucket === 0) {
-    return "identity_check_short";
-  }
-
-  if (bucket <= 7) {
-    return "benefit_hook";
-  }
-
-  return "direct_reason";
+  return Math.abs(rowNumber) % 2 === 0 ? "direct_reason" : "benefit_hook";
 }
 
 export function buildElevenLabsOpenerVariant(input: BuildOpenerVariantInput): ElevenLabsOpenerVariant {
@@ -46,20 +36,20 @@ export function buildElevenLabsOpenerVariant(input: BuildOpenerVariantInput): El
       return {
         key,
         label: "Yoni name upfront",
-        script: "I'm calling for Yoni Kutler about your short sale listing. Are you handling the bank side yourself?",
+        script: "I'm calling for Yoni Kutler. Are you handling the short sale paperwork and lender calls yourself?",
       };
     case "benefit_hook":
       return {
         key,
-        label: "Benefit hook upfront",
-        script: "We help agents with the bank paperwork and lender calls on short sales. Are you handling that side yourself?",
+        label: "Direct help question",
+        script: "We help agents with the short sale paperwork and lender calls. Are you looking for help with that?",
       };
     case "direct_reason":
     default:
       return {
         key: "direct_reason",
-        label: "Direct short sale reason",
-        script: "I'm calling about your short sale listing. Are you handling the bank side yourself?",
+        label: "Plain handling question",
+        script: "Are you handling the short sale paperwork and lender calls yourself?",
       };
   }
 }

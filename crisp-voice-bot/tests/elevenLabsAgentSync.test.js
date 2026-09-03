@@ -17,10 +17,10 @@ function readConfig() {
   );
 }
 
-test("agent sync uses a short non-interruptible identity opener before the opener continuation", () => {
+test("agent sync uses a clear non-interruptible identity and reason opener", () => {
   const script = readSyncScript();
 
-  assert.match(script, /const FIRST_MESSAGE = "This is {{assistantName}} with Crisp Short Sales\.";/);
+  assert.match(script, /Hi, this is {{assistantName}} with Crisp Short Sales\. I'm calling about your short sale listing\./);
   assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = 1\.6;/);
   assert.match(script, /const TURN_TIMEOUT_SECONDS = 1\.5;/);
   assert.match(script, /const TURN_EAGERNESS = "normal";/);
@@ -68,7 +68,8 @@ test("agent sync blocks ambiguous okay-style replies from the transfer-check edg
   const script = readSyncScript();
 
   assert.match(script, /clearly and unambiguously wants to talk to Yoni right now/);
-  assert.match(script, /plain yes\/sure\/ok after the value-pitch choice/);
+  assert.match(script, /A yes to an earlier handling, qualification, or help question means interest only/);
+  assert.match(script, /explicit offer to bring Yoni onto this call right now/);
   assert.match(script, /vague or overlapped replies like okay okay/);
   assert.match(script, /caller is busy, in a meeting, wants later\/tomorrow, will call back/);
   assert.match(script, /clarify callback versus trying Yoni now/);

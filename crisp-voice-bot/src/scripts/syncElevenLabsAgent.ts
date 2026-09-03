@@ -72,7 +72,8 @@ type ToolResponse = {
 
 
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
-const FIRST_MESSAGE = "This is {{assistantName}} with Crisp Short Sales.";
+const FIRST_MESSAGE =
+  "Hi, this is {{assistantName}} with Crisp Short Sales. I'm calling about your short sale listing.";
 const INITIAL_WAIT_TIME_SECONDS = 1.6;
 const TURN_TIMEOUT_SECONDS = 1.5;
 const TURN_EAGERNESS = "normal";
@@ -136,7 +137,7 @@ function buildWarmTransferWorkflow(options: {
         forward_condition: {
           type: "llm",
           condition:
-            "Route to transfer_check only when the caller clearly and unambiguously wants to talk to Yoni right now, asks if he is available right now, or agrees to trying him now after being offered a live Yoni handoff. Do not route on a plain yes/sure/ok after the value-pitch choice between a quick Yoni call and sending info; that means interest only and must first be clarified as trying Yoni now versus scheduling a callback. Do not route on vague or overlapped replies like okay okay, yes yes, I so okay, broken English fragments, background speech, or any reply that also says the caller is busy, in a meeting, wants later/tomorrow, will call back, or did not understand. If unclear, stay in the main conversation and clarify callback versus trying Yoni now. Do not route when there is already a fresh live_transfer_requested tool result waiting to be handled for this same handoff moment.",
+            "Route to transfer_check only when the caller clearly and unambiguously wants to talk to Yoni right now, asks if he is available right now, or says yes after the explicit offer to bring Yoni onto this call right now. A yes to an earlier handling, qualification, or help question means interest only; stay in the main conversation and make the explicit live-Yoni-now offer first. Do not route on vague or overlapped replies like okay okay, yes yes, I so okay, broken English fragments, background speech, or any reply that also says the caller is busy, in a meeting, wants later/tomorrow, will call back, or did not understand. If unclear, stay in the main conversation and clarify callback versus trying Yoni now. Do not route when there is already a fresh live_transfer_requested tool result waiting to be handled for this same handoff moment.",
         },
       },
       transfer_check_to_patch: {

@@ -20,86 +20,52 @@ function extractSection(text, startMarker, endMarker) {
   return text.slice(start, end);
 }
 
-test("opening generic pickup fallback moves forward instead of repeating quick-second", () => {
+test("opening generic pickup moves directly to the selected continuation", () => {
   const prompt = readPrompt();
-  const fallbackConfirmation = extractSection(
+  const openingSection = extractSection(
     prompt,
-    "- If they give any clear yes-type answer after that fallback line, continue immediately with:",
-    "- Do not ask for {{firstName}} a third time.",
+    "Opening delivery rule, highest priority for every live-human opener:",
+    "If the caller corrects the name",
   );
 
-  const spokenLines = fallbackConfirmation
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('"'));
-
-  assert.deepEqual(spokenLines, [
-    '"Thanks. I was calling about your short sale listing. Are you handling the bank side yourself?"',
-  ]);
-  assert.doesNotMatch(spokenLines.join("\n"), /{{streetAddress}}/);
-  assert.doesNotMatch(spokenLines.join("\n"), /Crisp Short Sales/);
-  assert.doesNotMatch(spokenLines.join("\n"), /Got a quick second/);
+  assert.match(openingSection, /normal greeting such as "hello", "hi", "yeah", "speaking"/i);
+  assert.match(openingSection, /Say `{{openerScript}}` immediately/);
+  assert.match(openingSection, /Do not ask "Is this {{firstName}}\?"/);
 });
 
-test("prompt uses dynamic opener scripts and keeps the address out of the first opener", () => {
+test("prompt uses a clear reason-first opening and two dynamic continuation variants", () => {
   const prompt = readPrompt();
   const openingSection = extractSection(
     prompt,
-    "Opening:",
+    "Opening delivery rule, highest priority for every live-human opener:",
     "If the caller corrects the name",
   );
-  const openerBranch = extractSection(
-    prompt,
-    "- If the caller confirms identity after the opener, your very next line must be:",
-    "- Do not ask \"Hey, is this {{firstName}}?\" twice after a clear identity confirmation.",
-  );
-  const genericFallbackBranch = extractSection(
-    prompt,
-    "- Instead say once:",
-    "- If they give any clear yes-type answer after that, do not repeat",
-  );
 
-  assert.match(openingSection, /The backend first says a short identity opener/);
-  assert.match(openingSection, /"This is {{assistantName}} with Crisp Short Sales\."/);
+  assert.match(openingSection, /The backend first says exactly/);
+  assert.match(openingSection, /Hi, this is {{assistantName}} with Crisp Short Sales\. I'm calling about your short sale listing\./);
   assert.match(openingSection, /Do not say "Hello\?" as the opener/);
-  assert.match(openingSection, /After the first real live-human response, deliver the selected opener continuation/);
-  assert.match(prompt, /"{{openerScript}}"/);
-  assert.match(prompt, /The backend chooses `{{openerScript}}` for the opener test/);
-  assert.match(prompt, /passes `{{openerVariant}}` for analysis/);
-  assert.match(prompt, /Do not add another long pause after the identity opener/);
-  assert.match(prompt, /Do not say `{{streetAddress}}` in the first line/);
+  assert.match(openingSection, /selected plain-language continuation/);
+  assert.match(openingSection, /"{{openerScript}}"/);
+  assert.match(openingSection, /two-variant test/);
+  assert.match(openingSection, /passes `{{openerVariant}}` for analysis/);
   assert.match(openingSection, /do not deliver `{{openerScript}}`/);
-  assert.match(
-    openerBranch,
-    /Thanks\. I was calling about your short sale listing\. Are you handling the bank side yourself\?/,
-  );
-  assert.doesNotMatch(openerBranch, /this is {{assistantName}} with Crisp Short Sales/);
-  assert.doesNotMatch(openerBranch, /short sale listing at {{streetAddress}}/);
-  assert.match(
-    genericFallbackBranch,
-    /Sorry, is this {{firstName}}\?/,
-  );
-  assert.doesNotMatch(genericFallbackBranch, /this is {{assistantName}} with Crisp Short Sales/);
-  assert.doesNotMatch(genericFallbackBranch, /{{streetAddress}}/);
-  assert.match(prompt, /If they ask which listing, which property, what address/);
-  assert.match(prompt, /answer immediately with exactly/);
-  assert.match(prompt, /Give the address before any explanation or follow-up question/);
-}
-);
+  assert.match(prompt, /If they ask which listing, which property/);
+  assert.match(prompt, /answer before any explanation or follow-up question/);
+});
 
-test("prompt repairs identity-opener confusion with a clean identity before the pitch", () => {
+test("prompt repairs an unclear opener once without stacking another question", () => {
   const prompt = readPrompt();
   const openingSection = extractSection(
     prompt,
-    "Opening:",
+    "Opening delivery rule, highest priority for every live-human opener:",
     "If the caller corrects the name",
   );
 
-  assert.match(openingSection, /Hello\? Hello\? What\?/);
-  assert.match(openingSection, /do not repeat the full opener over them/);
-  assert.match(openingSection, /Repeat the exact identity phrase once/);
-  assert.match(openingSection, /This is {{assistantName}} with Crisp Short Sales\./);
-  assert.match(openingSection, /Do not put the pitch in the same repair turn/);
+  assert.match(openingSection, /who is this\?/i);
+  assert.match(openingSection, /This is {{assistantName}} with Crisp Short Sales, calling about your short sale listing\./);
+  assert.match(openingSection, /Stop after the repair line/);
+  assert.match(openingSection, /no more than once/);
+  assert.match(openingSection, /never repeat the introduction a third time/);
 });
 
 test("prompt waits for voicemail greeting handoff before leaving voicemail", () => {
@@ -130,24 +96,19 @@ test("prompt ends wrong-person and unrelated-business voicemail without a sales 
   assert.match(section, /Never request a callback, live transfer, or human sales handoff/);
 });
 
-test("prompt starts with a complete identity and allows one identity repair before the pitch", () => {
+test("prompt starts with identity plus reason and avoids repeated introductions", () => {
   const prompt = readPrompt();
   const oneIntroRule = extractSection(
     prompt,
-    "Identity-first delivery rule, highest priority for every live-human opener:",
-    "Opening:",
+    "Opening delivery rule, highest priority for every live-human opener:",
+    "If the caller corrects the name",
   );
 
-  assert.match(oneIntroRule, /first complete phrase of every live-human opener must be exactly/i);
-  assert.match(oneIntroRule, /This is {{assistantName}} with Crisp Short Sales\./);
-  assert.match(oneIntroRule, /Do not put "Hi", "Hey", the caller's name/);
-  assert.match(oneIntroRule, /clipped, incomplete, garbled, talked over/);
-  assert.match(oneIntroRule, /repeat exactly once before any pitch/i);
-  assert.match(oneIntroRule, /After the identity has been delivered clearly, do not repeat/);
-  assert.match(oneIntroRule, /a new person comes onto the call/i);
-  assert.match(oneIntroRule, /voicemail/i);
-  assert.match(oneIntroRule, /gatekeeper/i);
-  assert.match(oneIntroRule, /no more than once as an audio repair/i);
+  assert.match(oneIntroRule, /caller name, company, and reason/);
+  assert.match(oneIntroRule, /Hi, this is {{assistantName}} with Crisp Short Sales/);
+  assert.match(oneIntroRule, /short sale listing/);
+  assert.match(oneIntroRule, /Do not repeat your name, Crisp Short Sales, or the listing reason/);
+  assert.match(oneIntroRule, /no more than once/);
 });
 
 test("prompt treats not-a-short-sale objections as a clear no", () => {
@@ -179,11 +140,10 @@ test("prompt turns human-only objections into immediate Yoni transfer rescue", (
 
   assert.match(
     humanRescueBranch,
-    /Totally fair\. I am an AI calling assistant for Crisp Short Sales\./,
+    /Totally fair\. Yoni is our live short sale specialist/,
   );
-  assert.match(humanRescueBranch, /Yoni is our live short sale specialist\./);
-  assert.match(humanRescueBranch, /I can get him on the phone right now\./);
-  assert.match(humanRescueBranch, /Would you like me to bring him in to the call\?/);
+  assert.match(humanRescueBranch, /bring him onto this call right now/);
+  assert.match(humanRescueBranch, /Want me to try him\?/);
   assert.match(humanRescueBranch, /move directly into the live transfer flow/);
   assert.doesNotMatch(humanRescueBranch, /callback_requested/);
 });
@@ -196,19 +156,18 @@ test("prompt answers AI questions truthfully and offers immediate Yoni transfer"
     "If they object to automation",
   );
 
-  assert.match(aiBranch, /Yes, I am an AI calling assistant for Crisp Short Sales\./);
-  assert.match(aiBranch, /Yoni is our live short sale specialist\./);
-  assert.match(aiBranch, /He can answer any questions you have/);
-  assert.match(aiBranch, /I can get him on the phone right now/);
-  assert.match(aiBranch, /Would you like me to bring him in to the call\?/);
+  assert.match(aiBranch, /Yes, I'm an AI calling assistant\./);
+  assert.match(aiBranch, /Yoni is our live short sale specialist/);
+  assert.match(aiBranch, /bring him onto this call right now/);
+  assert.match(aiBranch, /Want me to try him\?/);
 });
 
-test("prompt redirects unknown affiliation questions back to the bank-side help offer", () => {
+test("prompt redirects unknown affiliation questions to a plain-language handling question", () => {
   const prompt = readPrompt();
 
   assert.match(
     prompt,
-    /I'm with Crisp Short Sales, working with Yoni Kutler, our short sale specialist\. We help agents with short sale bank paperwork and lender calls\. Are you handling the bank side yourself\?/,
+    /I'm with Crisp Short Sales\. We help agents with short sale paperwork and lender calls\. Are you handling that work yourself\?/,
   );
 });
 
@@ -221,25 +180,18 @@ test("prompt treats placeholder-only user turns as background noise and skips sp
   assert.match(prompt, /Do not say[\s\S]{0,120}Are you still there\?/);
 });
 
-test("prompt confirms identity before repeating the pitch when caller is confused", () => {
+test("prompt stops speaking when the caller interrupts", () => {
   const prompt = readPrompt();
-  const confusedRepair = extractSection(
+  const interruptionSection = extractSection(
     prompt,
-    "- If the caller sounds confused right after the opener",
-    "- If the first response after the opener is clipped",
+    "If the caller interrupts:",
+    "If the caller's speech sounds like background conversation",
   );
 
-  assert.match(confusedRepair, /what\?/i);
-  assert.match(
-    confusedRepair,
-    /This is {{assistantName}} with Crisp Short Sales\./,
-  );
-  assert.match(
-    confusedRepair,
-    /Thanks\. I was calling about your short sale listing\. Are you handling the bank side yourself\?/,
-  );
-  assert.match(confusedRepair, /identity repair turn/);
-  assert.match(confusedRepair, /{{streetAddress}}/);
+  assert.match(interruptionSection, /Stop speaking and listen/);
+  assert.match(interruptionSection, /Do not finish the sentence over them/);
+  assert.match(interruptionSection, /Respond to the latest thing they said/);
+  assert.doesNotMatch(interruptionSection, /still kind of new/i);
 });
 
 test("prompt keeps third-party callback timing questions direct and name-specific", () => {
@@ -326,7 +278,7 @@ test("prompt pitches admins who answer instead of only taking a message", () => 
   assert.match(receptionistBranch, /Do not only ask them to relay a message/i);
   assert.match(
     receptionistBranch,
-    /No problem\. We help agents with short sale bank paperwork, lender calls, and approval\. I was calling to see if they wanted help with that\. Do you know if they are handling the bank side personally\?/,
+    /No problem\. We help agents with short sale paperwork, lender calls, and approval\. Do you know whether they're handling that work themselves\?/,
   );
 });
 
@@ -363,22 +315,22 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   const prompt = readPrompt();
   const selfHandlingBranch = extractSection(
     prompt,
-    "If they answer the plan question with \"yes\"",
+    "If they answer the handling question with \"yes\"",
     "If they say they already have a short sale negotiator",
   );
 
   assert.match(selfHandlingBranch, /handling it themselves/i);
   assert.match(selfHandlingBranch, /figuring it out as I go/i);
   assert.match(selfHandlingBranch, /plain yes/i);
-  assert.match(selfHandlingBranch, /Do not repeat the bank-side question/);
+  assert.match(selfHandlingBranch, /Do not repeat the handling question/);
   assert.match(selfHandlingBranch, /acknowledge that first/i);
   assert.match(selfHandlingBranch, /Do not treat this as a hard no/);
-  assert.match(selfHandlingBranch, /lender paperwork and follow-up/);
+  assert.match(selfHandlingBranch, /short sale paperwork and lender calls/);
   assert.match(selfHandlingBranch, /no cost to you or the seller/);
-  assert.match(selfHandlingBranch, /Would you rather have Yoni give you a quick call, or should I send over info/);
-  assert.match(selfHandlingBranch, /do not start a transfer yet/i);
-  assert.match(selfHandlingBranch, /Do you want me to try to bring Yoni onto this call now, or should he call you at a specific time\?/);
-  assert.match(selfHandlingBranch, /interest only/i);
+  assert.match(selfHandlingBranch, /Are you looking for help with this one\?/);
+  assert.match(selfHandlingBranch, /Interest-to-Yoni sequence/);
+  assert.match(selfHandlingBranch, /bring Yoni, our live short sale specialist, onto this call right now/);
+  assert.match(selfHandlingBranch, /Do not launch a live transfer only because they answered the earlier handling question/);
   assert.match(selfHandlingBranch, /call `information_requested`/);
   assert.match(selfHandlingBranch, /Do not call `callback_requested`/);
   assert.match(selfHandlingBranch, /do not invent a callback time/);
@@ -433,8 +385,8 @@ test("prompt does not treat overlapped okay or busy later/callback language as l
   );
 
   assert.match(transferRule, /clearly and unambiguously agrees/);
-  assert.match(transferRule, /quick-call-or-info value pitch/);
-  assert.match(transferRule, /not a clear live-transfer yes/i);
+  assert.match(transferRule, /explicit offer to bring Yoni onto this call right now/);
+  assert.match(transferRule, /earlier qualification or help question is interest only/i);
   assert.match(transferRule, /Do not treat a vague or overlapped "okay okay"/);
   assert.match(transferRule, /"I, so\.\.\. okay"/);
   assert.match(transferRule, /in a meeting/);
@@ -444,13 +396,17 @@ test("prompt does not treat overlapped okay or busy later/callback language as l
   assert.match(transferRule, /No problem\. What time should he call you\?/);
 });
 
-test("prompt treats partial this-is identity replies as confirmed", () => {
+test("prompt does not force another identity check after a normal live pickup", () => {
   const prompt = readPrompt();
+  const openingSection = extractSection(
+    prompt,
+    "Opening delivery rule, highest priority for every live-human opener:",
+    "If the caller corrects the name",
+  );
 
-  assert.match(prompt, /partial identity/i);
-  assert.match(prompt, /"this is"/i);
-  assert.match(prompt, /first recognized human response/i);
-  assert.match(prompt, /Do not wait for the caller to repeat/i);
+  assert.match(openingSection, /gives their name/);
+  assert.match(openingSection, /do not ask for their identity again/i);
+  assert.match(openingSection, /Say `{{openerScript}}` immediately/);
 });
 
 test("prompt treats corrected realtor identity as the active agent", () => {
@@ -458,16 +414,16 @@ test("prompt treats corrected realtor identity as the active agent", () => {
   const correctedIdentityBranch = extractSection(
     prompt,
     "If the caller corrects the name",
-    "If they confirm they are `{{firstName}}` after the opener",
+    "If they ask which listing",
   );
 
   assert.match(correctedIdentityBranch, /I'?m the realtor/i);
   assert.match(correctedIdentityBranch, /treat the current speaker as the agent/i);
-  assert.match(correctedIdentityBranch, /Do not ask to speak with {{firstName}}/);
-  assert.match(correctedIdentityBranch, /do not ask whether {{firstName}} is handling the bank side/i);
+  assert.match(correctedIdentityBranch, /Do not ask to speak with `{{firstName}}`/);
+  assert.match(correctedIdentityBranch, /do not route back to the original lead name/i);
   assert.match(
     correctedIdentityBranch,
-    /Got it\. We help agents with short sale bank paperwork, lender calls, and approval\. Are you handling the bank side yourself\?/,
+    /Got it\. Are you handling the short sale paperwork and lender calls yourself\?/,
   );
 });
 
@@ -487,39 +443,26 @@ test("prompt clarifies noisy background speech before treating it as consent", (
   );
 });
 
-test("prompt skips the address when identity confirmation already asks how to help", () => {
+test("prompt reserves the property address for an explicit listing question", () => {
   const prompt = readPrompt();
-  const identityHelpBranch = extractSection(
+  const openingSection = extractSection(
     prompt,
-    'If the caller confirms identity and asks "how may I help you?"',
-    "- If the caller answers your name question with something like",
+    "Opening delivery rule, highest priority for every live-human opener:",
+    "If the caller corrects the name",
   );
+  const propertyBranch = extractSection(prompt, "If they ask which listing", "If the caller says they are busy");
 
-  assert.match(identityHelpBranch, /already invited the reason for the call/);
-  assert.match(identityHelpBranch, /Do not say {{streetAddress}}/);
-  assert.match(identityHelpBranch, /Do not ask "Got a quick second\?"/);
-  assert.match(
-    identityHelpBranch,
-    /I was calling about your short sale listing to see whether you're handling the bank side yourself or already have someone on it\./,
-  );
-  assert.doesNotMatch(identityHelpBranch, /this is {{assistantName}} with Crisp Short Sales/);
-  assert.doesNotMatch(identityHelpBranch, /short sale listing at {{streetAddress}}/);
+  assert.match(openingSection, /do not lead with the property address/i);
+  assert.doesNotMatch(openingSection, /short sale listing at {{streetAddress}}/);
+  assert.match(propertyBranch, /The one at {{streetAddress}}\./);
+  assert.match(propertyBranch, /Then stop and let them respond/);
 });
 
-test("prompt answers quick-second how-can-I-help turns immediately", () => {
+test("prompt removes bank-side jargon from the live-human pitch", () => {
   const prompt = readPrompt();
-  const quickHelpBranch = extractSection(
-    prompt,
-    'If the caller answers "Got a quick second?" with a yes plus "how can I help you?"',
-    "If they ask who is calling",
-  );
 
-  assert.match(quickHelpBranch, /Treat that as permission to continue/);
-  assert.match(quickHelpBranch, /Do not pause to acknowledge it/);
-  assert.match(
-    quickHelpBranch,
-    /I was calling to see if you're handling the bank side of the short sale yourself, or if you already have someone helping with that\./,
-  );
+  assert.match(prompt, /short sale paperwork and lender calls/);
+  assert.doesNotMatch(prompt, /bank side/i);
 });
 
 test("prompt repairs confusion with the offer before mentioning Yoni or prior text", () => {
@@ -534,7 +477,7 @@ test("prompt repairs confusion with the offer before mentioning Yoni or prior te
   assert.match(confusionBranch, /Do not mention the earlier text yet/);
   assert.match(
     confusionBranch,
-    /Sorry if I wasn't clear\. We help agents with short sale bank paperwork, lender calls, and approval\. I was just calling to see if you wanted help with that\./,
+    /Sorry if I wasn't clear\. Crisp Short Sales can handle the short sale paperwork and lender calls for you\. Are you looking for help with that\?/,
   );
   assert.doesNotMatch(confusionBranch, /reached out earlier by text/);
   assert.doesNotMatch(confusionBranch, /what your plan/i);
@@ -552,10 +495,10 @@ test("prompt clearly explains purpose before callback when caller is busy or can
   assert.match(busyNoiseBranch, /Do not only say that Yoni can explain it better/);
   assert.match(
     busyNoiseBranch,
-    /No worries, I'll be quick\. I was calling about your short sale listing at {{streetAddress}}\./,
+    /No worries, I'll be quick\. We help with the paperwork and lender calls on your short sale\. Should Yoni call you at a better time\?/,
   );
   assert.doesNotMatch(busyNoiseBranch, /I'm {{assistantName}} with Crisp Short Sales/);
-  assert.match(busyNoiseBranch, /paperwork, lender calls, and approval process/);
+  assert.match(busyNoiseBranch, /paperwork and lender calls/);
   assert.match(busyNoiseBranch, /call `callback_requested`/);
 });
 

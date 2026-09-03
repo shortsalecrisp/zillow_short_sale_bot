@@ -18,7 +18,7 @@ const VOICE_PROVE_IT_BASELINE_CONVERSATION_COUNT = 1063;
 const VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MIN = 300;
 const VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MAX = 400;
 const CODEX_ANALYSIS_INSTRUCTIONS =
-  "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer, and compare scheduledWindow by agent local time bucket for answer-rate lift. For the current Eryn/Finch A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls and any call.voiceVariant other than eryn or finch. Current production rotates Eryn and Finch only when voice testing is enabled: Eryn uses the public Maya caller name and Finch uses the public Finn caller name. Also compare call.openerVariant for the opener test: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome. For the Pro prove-it cohort, evaluate calls after 2026-09-03T14:20:21Z against the 1063-conversation ElevenLabs baseline and trigger a decision review once 300-400 additional calls have accumulated. Count bot-labeled positives separately from transcript/playback-verified handoff-ready leads; continue only if the cohort produces at least 3 verified handoff-ready leads or 1 owner-confirmed serious file opportunity, otherwise recommend pausing or narrowing the test.";
+  "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer, and compare scheduledWindow by agent local time bucket for answer-rate lift. For the current Eryn/Finch A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls and any call.voiceVariant other than eryn or finch. Current production rotates Eryn and Finch only when voice testing is enabled: Eryn uses the public Maya caller name and Finch uses the public Finn caller name. Also compare call.openerVariant for the opener test: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, repeatedIdentityStatement, liveYoniNowOfferDelivered, agentRespondedAfterLiveYoniNowOffer, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityStatement, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome. For the Pro prove-it cohort, evaluate calls after 2026-09-03T14:20:21Z against the 1063-conversation ElevenLabs baseline and trigger a decision review once 300-400 additional calls have accumulated. Count bot-labeled positives separately from transcript/playback-verified handoff-ready leads; continue only if the cohort produces at least 3 verified handoff-ready leads or 1 owner-confirmed serious file opportunity, otherwise recommend pausing or narrowing the test.";
 
 type TranscriptToolCall = {
   tool_name?: string;
@@ -233,7 +233,11 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const reasonMessageIndex = firstAssistantMessageIndexMatching(transcript, /\bshort sale\b/i);
   const openingQuestionIndex = firstAssistantMessageIndexMatching(
     transcript,
-    /\b(?:handling the bank side|handling that one|already have someone)\b/i,
+    /\b(?:handling the bank side|handling that one|handling the short sale paperwork|short sale paperwork and lender calls|looking for help with that|looking for help with this)\b/i,
+  );
+  const liveYoniNowOfferIndex = firstAssistantMessageIndexMatching(
+    transcript,
+    /\b(?:bring Yoni|get Yoni|Yoni.*onto (?:this|the) call|Yoni.*on the phone|try him (?:right )?now|available (?:right )?now)\b/i,
   );
   const reasonDelivered = reasonMessageIndex !== -1;
   const openingQuestionDelivered = openingQuestionIndex !== -1;
@@ -246,6 +250,9 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const terminationReason = input.conversation.metadata?.termination_reason ?? null;
   const identityAskCount = assistantMessages.filter((message) =>
     /\b(?:is this|can i speak with|trying to reach)\b/i.test(message),
+  ).length;
+  const identityStatementCount = assistantMessages.filter((message) =>
+    /\b(?:this is|i'm)\s+\S+\s+with Crisp Short Sales\b/i.test(message),
   ).length;
   const aiSuspicion = /\b(?:ai|chatbot|robot|actual human|real person|human being)\b/i.test(agentText);
 
@@ -307,7 +314,9 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
         : null,
       reasonMentionedAtSecs: getMessageTimeAtIndex(transcript, reasonMessageIndex),
       openingQuestionAtSecs: getMessageTimeAtIndex(transcript, openingQuestionIndex),
+      liveYoniNowOfferAtSecs: getMessageTimeAtIndex(transcript, liveYoniNowOfferIndex),
       identityAskCount,
+      identityStatementCount,
       areYouThereCount: (assistantText.match(/\bare you (?:still )?(?:there|on the line)\b/g) ?? []).length,
       clarificationCount: (assistantText.match(/\b(?:what was that|say that again|repeat that|sorry,? i caught)\b/g) ?? [])
         .length,
@@ -333,6 +342,9 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
         normalizeText(terminationReason ?? "").includes("client disconnected") &&
         !openingQuestionDelivered,
       repeatedIdentityAsk: identityAskCount > 1,
+      repeatedIdentityStatement: identityStatementCount > 1,
+      liveYoniNowOfferDelivered: liveYoniNowOfferIndex !== -1,
+      agentRespondedAfterLiveYoniNowOffer: hasUserMessageAfter(transcript, liveYoniNowOfferIndex),
       aiSuspicion,
       audioConfusion: /\b(?:can'?t hear|can you hear|going in and out|breaking up|static|hello\?)\b/i.test(agentText),
       callbackRequested: toolCallNames.includes("callback_requested") || /requested callback/i.test(input.outcome),
