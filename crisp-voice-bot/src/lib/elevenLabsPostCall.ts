@@ -982,7 +982,8 @@ export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
     return Boolean(
       expected &&
         (new RegExp(`\\bthis is ${expected}\\b`).test(message) ||
-          new RegExp(`\\b${expected} speaking\\b`).test(message)),
+          new RegExp(`\\b(?:it is|it's) ${expected}\\b`).test(message) ||
+          new RegExp(`\\b${expected} (?:speaking|here)\\b`).test(message)),
     );
   });
 

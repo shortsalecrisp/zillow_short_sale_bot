@@ -505,8 +505,43 @@ test("post-call fallback distinguishes a confirmed self-handling target from aut
       { role: "assistant", message: "Crisp Short Sales, calling about a short sale listing." },
     ],
   };
+  const naturalTarget = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "assistant", message: "This is Finn with Crisp Short Sales." },
+      { role: "user", message: "It's Lisa." },
+      { role: "assistant", message: "Are you handling the bank side of the short sale yourself?" },
+      { role: "user", message: "Yes." },
+    ],
+  };
 
   assert.equal(shouldTreatAsTargetReachedSelfHandlingDisconnect(confirmedTarget, "Valerie"), true);
+  assert.equal(shouldTreatAsTargetReachedSelfHandlingDisconnect(naturalTarget, "Lisa"), true);
+  assert.equal(
+    shouldTreatAsTargetReachedSelfHandlingDisconnect(
+      {
+        ...naturalTarget,
+        transcript: naturalTarget.transcript.map((item, index) =>
+          index === 1 ? { ...item, message: "Lisa here." } : item,
+        ),
+      },
+      "Lisa",
+    ),
+    true,
+  );
+  assert.equal(
+    shouldTreatAsTargetReachedSelfHandlingDisconnect(
+      {
+        ...naturalTarget,
+        transcript: naturalTarget.transcript.map((item, index) =>
+          index === 1 ? { ...item, message: "It's Maria." } : item,
+        ),
+      },
+      "Lisa",
+    ),
+    false,
+  );
   assert.equal(shouldTreatAsAgentUnavailable(confirmedTarget), false);
   assert.equal(shouldTreatAsAgentHungUp(confirmedTarget), true);
   assert.equal(
