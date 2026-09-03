@@ -1728,6 +1728,59 @@ def _street_only_address(value: Any) -> str:
     return text.split(",", 1)[0].strip()
 
 
+US_STATE_CODES = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA",
+    "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO",
+    "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK",
+    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA", "WI",
+    "WV", "WY", "DC",
+}
+US_STATE_RE = re.compile(r"\b([A-Z]{2})\b", re.IGNORECASE)
+ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
+
+
+def _parse_full_address_string(value: Any) -> Dict[str, str]:
+    if not isinstance(value, str):
+        return {}
+    text = re.sub(r"\s+", " ", value).strip()
+    if not text or "," not in text:
+        return {}
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) < 3:
+        return {}
+
+    result: Dict[str, str] = {"street": parts[0]}
+    state_index: Optional[int] = None
+    for idx in range(len(parts) - 1, 0, -1):
+        state_match = US_STATE_RE.search(parts[idx])
+        if not state_match:
+            continue
+        state = state_match.group(1).upper()
+        if state not in US_STATE_CODES:
+            continue
+        result["state"] = state
+        state_index = idx
+        zip_match = ZIP_RE.search(parts[idx])
+        if zip_match:
+            result["zip"] = zip_match.group(0)
+        elif idx + 1 < len(parts):
+            zip_match = ZIP_RE.search(parts[idx + 1])
+            if zip_match:
+                result["zip"] = zip_match.group(0)
+        break
+
+    if state_index and state_index > 1:
+        city = ", ".join(parts[1:state_index]).strip()
+        if city:
+            result["city"] = city
+
+    if "zip" not in result:
+        zip_match = ZIP_RE.search(parts[-1])
+        if zip_match:
+            result["zip"] = zip_match.group(0)
+    return {key: val for key, val in result.items() if val}
+
+
 def _is_undisclosed_address(value: Any) -> bool:
     if not isinstance(value, str):
         return False
@@ -1751,12 +1804,23 @@ def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     address = next((candidate for candidate in address_candidates if candidate), {})
     result: Dict[str, str] = {}
     if isinstance(address, str):
-        street = _street_only_address(address)
-        if street:
-            result["street"] = street
+        parsed_address = _parse_full_address_string(address)
+        result.update(parsed_address)
+        if not result.get("street"):
+            street = _street_only_address(address)
+            if street:
+                result["street"] = street
         address = {}
     elif not isinstance(address, dict):
         address = {}
+    parsed_full = {}
+    if isinstance(address, dict):
+        for key in ("full", "fullAddress", "formattedAddress", "displayAddress", "value"):
+            value = address.get(key)
+            if isinstance(value, str) and value.strip():
+                parsed_full = _parse_full_address_string(value)
+                if parsed_full:
+                    break
     if not result.get("street"):
         street_candidates = [
             payload.get("street"),
@@ -1768,8 +1832,11 @@ def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
             payload.get("streetAddress"),
             payload.get("addressStreet"),
             payload.get("addressLine1"),
+            parsed_full.get("street"),
         ]
         street = next((val for val in street_candidates if isinstance(val, str) and val.strip()), "")
+    else:
+        street = result["street"]
     city = address.get("city") if isinstance(address.get("city"), str) else payload.get("city") or payload.get("addressCity") or ""
     state = address.get("state") if isinstance(address.get("state"), str) else payload.get("state") or payload.get("addressState") or ""
     postal = (
@@ -1784,6 +1851,9 @@ def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
         or payload.get("addressZip")
         or payload.get("postalCode")
     )
+    city = city or parsed_full.get("city", "")
+    state = state or parsed_full.get("state", "")
+    postal = postal or parsed_full.get("zip", "")
     if street:
         result["street"] = _street_only_address(street)
     if isinstance(city, str) and city.strip():

@@ -906,6 +906,28 @@ def test_apify_normalizer_accepts_current_listing_address_schema():
     assert payload["brokerName"] == "KELLER WILLIAMS TAMPA PROPERTIES"
 
 
+def test_apify_normalizer_splits_current_full_address_string_schema():
+    normalized = webhook_server._normalize_apify_row(
+        {
+            "zpid": "448492982",
+            "address": "671 NE 195th St APT 227-E, Miami, FL, 33179",
+            "agentName": "Micheli Melo Giordano",
+            "description": "Short sale subject to lender approval.",
+            "listingStatus": "FOR_SALE",
+        }
+    )
+
+    payload = webhook_server._compact_queue_resume_payload(normalized, "payload.listings")
+
+    assert normalized["street"] == "671 NE 195th St APT 227-E"
+    assert normalized["city"] == "Miami"
+    assert normalized["state"] == "FL"
+    assert normalized["zip"] == "33179"
+    assert payload["address"] == "671 NE 195th St APT 227-E"
+    assert payload["city"] == "Miami"
+    assert payload["state"] == "FL"
+
+
 def test_payload_listing_selection_normalizes_current_schema_before_enqueue(monkeypatch):
     monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
 

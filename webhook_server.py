@@ -1700,6 +1700,15 @@ APIFY_STREET_KEYS = (
 APIFY_CITY_KEYS = ("city", "addressCity", "locality")
 APIFY_STATE_KEYS = ("state", "addressState", "region")
 APIFY_ZIP_KEYS = ("zip", "zipcode", "zipCode", "postalCode", "addressZip", "addressZipcode")
+US_STATE_CODES = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA",
+    "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO",
+    "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK",
+    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA", "WI",
+    "WV", "WY", "DC",
+}
+US_STATE_RE = re.compile(r"\b([A-Z]{2})\b", re.IGNORECASE)
+ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 
 APIFY_ADDRESS_PATHS = (
     ("address",),
@@ -1843,6 +1852,46 @@ def _address_field(address: Dict[str, Any], keys: Tuple[str, ...]) -> str:
     return ""
 
 
+def _parse_full_address_string(value: Any) -> Dict[str, str]:
+    text = _text_fragment(value)
+    if not text or "," not in text:
+        return {}
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) < 3:
+        return {}
+
+    result: Dict[str, str] = {"street": parts[0]}
+    state_index: Optional[int] = None
+    for idx in range(len(parts) - 1, 0, -1):
+        state_match = US_STATE_RE.search(parts[idx])
+        if not state_match:
+            continue
+        state = state_match.group(1).upper()
+        if state not in US_STATE_CODES:
+            continue
+        result["state"] = state
+        state_index = idx
+        zip_match = ZIP_RE.search(parts[idx])
+        if zip_match:
+            result["zip"] = zip_match.group(0)
+        elif idx + 1 < len(parts):
+            zip_match = ZIP_RE.search(parts[idx + 1])
+            if zip_match:
+                result["zip"] = zip_match.group(0)
+        break
+
+    if state_index and state_index > 1:
+        city = ", ".join(parts[1:state_index]).strip()
+        if city:
+            result["city"] = city
+
+    if "zip" not in result:
+        zip_match = ZIP_RE.search(parts[-1])
+        if zip_match:
+            result["zip"] = zip_match.group(0)
+    return {key: val for key, val in result.items() if val}
+
+
 def _extract_address_fields(row: Dict[str, Any]) -> Dict[str, str]:
     address_sources: List[Any] = [_path_value(row, path) for path in APIFY_ADDRESS_PATHS]
     address_dicts = [address for address in address_sources if isinstance(address, dict)]
@@ -1854,16 +1903,30 @@ def _extract_address_fields(row: Dict[str, Any]) -> Dict[str, str]:
     zip_code = _first_text(row, APIFY_ZIP_KEYS)
 
     for address in address_dicts:
+        parsed_full = _parse_full_address_string(
+            _address_field(
+                address,
+                ("full", "fullAddress", "formattedAddress", "displayAddress", "value"),
+            )
+        )
         street = street or _address_field(address, APIFY_STREET_KEYS)
+        street = street or parsed_full.get("street", "")
         city = city or _address_field(address, APIFY_CITY_KEYS)
+        city = city or parsed_full.get("city", "")
         state = state or _address_field(address, APIFY_STATE_KEYS)
+        state = state or parsed_full.get("state", "")
         zip_code = zip_code or _address_field(address, APIFY_ZIP_KEYS)
+        zip_code = zip_code or parsed_full.get("zip", "")
 
     full_address = ""
     for address in address_strings:
         if address:
             full_address = address
-            street = street or address.split(",", 1)[0].strip()
+            parsed_full = _parse_full_address_string(address)
+            street = street or parsed_full.get("street") or address.split(",", 1)[0].strip()
+            city = city or parsed_full.get("city", "")
+            state = state or parsed_full.get("state", "")
+            zip_code = zip_code or parsed_full.get("zip", "")
             break
 
     result: Dict[str, str] = {}

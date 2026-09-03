@@ -337,6 +337,23 @@ def test_bot_min_normalizes_current_apify_listing_address_schema():
     assert row["listing_description"].startswith("Virtually Staged. Short Sale")
 
 
+def test_bot_min_normalizes_apify_full_address_string_schema():
+    row = {
+        "zpid": "307883759",
+        "address": "11516 SUNBURST MARBLE ROAD, Riverview, FL, 33579",
+        "agentName": "Kevin Jacobs",
+        "description": "Short sale. Buyer to verify all information.",
+        "listingStatus": "FOR_SALE",
+    }
+
+    bot_min._normalize_listing_payload_aliases(row)
+
+    assert row["street"] == "11516 SUNBURST MARBLE ROAD"
+    assert row["city"] == "Riverview"
+    assert row["state"] == "FL"
+    assert row["zip"] == "33579"
+
+
 def test_build_q_phone_prefers_locality_tokens():
     queries = bot_min.build_q_phone(
         "Antonio Flores",
