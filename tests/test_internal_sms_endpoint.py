@@ -311,6 +311,27 @@ def _import_webhook_server(monkeypatch, *, sender_result):
             "pending_row": 10 + row_idx,
         }
     module._enqueue_initial_sms_via_tasker_outbox = fake_enqueue_initial_sms
+    def fake_enqueue_followup_sms(*, row_idx, phone, message, stable_id=""):
+        call = {
+            "to": phone,
+            "message": message,
+            "sms_type": "followup_queued",
+            "row_idx": row_idx,
+            "attempt": 1,
+        }
+        if stable_id:
+            call["stable_id"] = stable_id
+        fake_sender.calls.append(call)
+        if not fake_sender.result.success:
+            raise module.HTTPException(status_code=502, detail="tasker_outbox_enqueue_failed")
+        return {
+            "ok": True,
+            "queued": True,
+            "request_id": f"render-followup-{row_idx}",
+            "message_id": f"followup-{row_idx}-test",
+            "pending_row": 20 + row_idx,
+        }
+    module._enqueue_followup_sms_via_tasker_outbox = fake_enqueue_followup_sms
     return module, sheet1, fake_sender
 
 
@@ -788,7 +809,7 @@ def test_internal_followup_sms_requires_token(monkeypatch):
     assert sender.calls == []
 
 
-def test_internal_followup_sms_persists_confirmed_outbound_without_marking_initial(monkeypatch):
+def test_internal_followup_sms_queues_outbox_without_marking_until_receipt(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True, status_code=200, response_text="OK"),
@@ -803,22 +824,25 @@ def test_internal_followup_sms_persists_confirmed_outbound_without_marking_initi
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "sent"
+    assert body["status"] == "queued"
     assert body["row"] == 12
-    assert body["gateway_status"] == 200
-    assert body["outbound_persisted"] is True
+    assert body["request_id"] == "render-followup-12"
+    assert body["message_id"] == "followup-12-test"
+    assert body["pending_row"] == 32
+    assert body["outbound_persisted"] is False
     assert sender.calls == [
         {
             "to": "15551112212",
             "message": "Custom follow-up",
-            "sms_type": "followup",
+            "sms_type": "followup_queued",
             "row_idx": 12,
             "attempt": 1,
         }
     ]
     assert sheet.rows[12][7] == ""
-    assert sheet.rows[12][11] == "Custom follow-up"
-    assert datetime.fromisoformat(sheet.rows[12][14]).tzinfo is not None
+    assert sheet.rows[12][8] == ""
+    assert sheet.rows[12][11] == ""
+    assert sheet.rows[12][14] == ""
     assert sheet.rows[12][22] == ""
     assert sheet.rows[12][42] == ""
 

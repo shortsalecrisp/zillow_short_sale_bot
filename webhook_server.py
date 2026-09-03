@@ -3263,6 +3263,52 @@ def _enqueue_initial_sms_via_tasker_outbox(
     return payload
 
 
+def _enqueue_followup_sms_via_tasker_outbox(
+    *,
+    row_idx: int,
+    phone: str,
+    message: str,
+    stable_id: str = "",
+) -> Dict[str, Any]:
+    if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
+        raise HTTPException(status_code=503, detail="tasker_outbox_not_configured")
+    message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+    message_id = f"followup-{row_idx}-{message_hash}"
+    stable_id = str(stable_id or "").strip()
+    try:
+        response = requests.post(
+            TASKER_TRANSPORT_HEALTH_URL,
+            json={
+                "token": SMS_CHATBOT_ALLOWED_TOKEN,
+                "action": "enqueue_followup_sms",
+                "row": row_idx,
+                "crm_row": row_idx,
+                "phone": phone,
+                "message": message,
+                "reply_text": message,
+                "message_id": message_id,
+                "request_id": f"render-{message_id}",
+                "stable_id": stable_id,
+                "zpid": stable_id,
+            },
+            timeout=20,
+        )
+        payload = response.json() if response.status_code == 200 else {}
+    except Exception as exc:
+        logger.exception("FOLLOWUP_SMS_OUTBOX_ENQUEUE_FAILED row=%s phone=%s stable_id=%s", row_idx, phone, stable_id)
+        raise HTTPException(status_code=502, detail=f"tasker_outbox_enqueue_failed:{type(exc).__name__}")
+    if response.status_code != 200 or payload.get("ok") is not True:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "status": "tasker_outbox_enqueue_failed",
+                "http_status": response.status_code,
+                "response": payload or response.text[:500],
+            },
+        )
+    return payload
+
+
 def _row_is_duplicate_phone_suppression(row: List[str]) -> bool:
     return _row_value(row, 24).lower() == "duplicate_phone_suppressed" or (
         "duplicate phone suppressed" in _row_value(row, 25).lower()
@@ -3523,6 +3569,48 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="invalid_row")
         if row_idx < 2:
             raise HTTPException(status_code=400, detail="invalid_row")
+
+    if row_idx is not None:
+        ws = _get_leads_ws()
+        row = _retry_gspread_call("read follow-up leads row", lambda: ws.row_values(row_idx))
+        current_phone = fmt_phone(_row_value(row, 2))
+        if not current_phone:
+            raise HTTPException(status_code=409, detail="row_phone_missing")
+        if _digits_only(current_phone) != digits:
+            raise HTTPException(status_code=409, detail="row_phone_mismatch")
+        stable_id = str(
+            payload.get("stable_id")
+            or payload.get("zpid")
+            or payload.get("listing_id")
+            or _row_value(row, 27)
+            or ""
+        ).strip()
+        queued = _enqueue_followup_sms_via_tasker_outbox(
+            row_idx=row_idx,
+            phone=digits,
+            message=message,
+            stable_id=stable_id,
+        )
+        logger.info(
+            "INTERNAL_FOLLOWUP_SMS_QUEUED row=%s phone=%s stable_id=%s request_id=%s message_id=%s pending_row=%s",
+            row_idx,
+            digits,
+            stable_id or "<blank>",
+            queued.get("request_id"),
+            queued.get("message_id"),
+            queued.get("pending_row"),
+        )
+        return {
+            "status": "queued",
+            "row": row_idx,
+            "phone": digits,
+            "request_id": queued.get("request_id"),
+            "message_id": queued.get("message_id"),
+            "stable_id": stable_id,
+            "pending_row": queued.get("pending_row"),
+            "duplicate": bool(queued.get("duplicate")),
+            "outbound_persisted": False,
+        }
 
     final_result = None
     for attempt in range(1, INITIAL_SMS_RETRY_ATTEMPTS + 1):

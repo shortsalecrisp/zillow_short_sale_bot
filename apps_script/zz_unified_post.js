@@ -14,6 +14,7 @@ function isUnifiedSmsAction_(action) {
     incoming_sms: true,
     enqueue_incoming_sms: true,
     enqueue_initial_sms: true,
+    enqueue_followup_sms: true,
     claim_pending_send: true,
     send_started: true,
     install_outbox_triggers: true,
@@ -205,6 +206,10 @@ function handleUnifiedSmsPost_(e) {
       return jsonOutput_(enqueueInitialSmsV13_(body, requestId));
     }
 
+    if (action === "enqueue_followup_sms") {
+      return jsonOutput_(enqueueFollowupSmsV13_(body, requestId));
+    }
+
     if (action === "claim_pending_send") {
       recordTaskerTransportActivityV12_("claim", body);
       return jsonOutput_(claimPendingSmsSendV10_(body));
@@ -287,9 +292,14 @@ function handleUnifiedSmsPost_(e) {
         phone: receiptCorrelation.canonical_phone || body.phone || "",
         reply_text: receiptCorrelation.canonical_reply_text || body.reply_text || ""
       });
-      var replySentResult = receiptCorrelation.send_kind === "initial_outreach"
-        ? applyInitialSmsReceiptV13_(canonicalReceiptBody, receiptCorrelation)
-        : handleReplySent_(canonicalReceiptBody);
+      var replySentResult;
+      if (receiptCorrelation.send_kind === "initial_outreach") {
+        replySentResult = applyInitialSmsReceiptV13_(canonicalReceiptBody, receiptCorrelation);
+      } else if (receiptCorrelation.send_kind === "scheduled_followup") {
+        replySentResult = applyScheduledFollowupReceiptV13_(canonicalReceiptBody, receiptCorrelation);
+      } else {
+        replySentResult = handleReplySent_(canonicalReceiptBody);
+      }
       if (typeof markPendingSmsSendComplete_ === "function") {
         markPendingSmsSendComplete_(canonicalReceiptBody);
       }
@@ -692,17 +702,20 @@ function validatePendingSmsSendReceipt_(body) {
   if (matchIndex < 0) {
     return { ok: false, reason: "Receipt did not match an exact pending phone/reply or correlated request/message ID" };
   }
+  var sendMetadata = String(rows[matchIndex][6] || "");
   return {
     ok: true,
     pending_row: matchIndex + 2,
     already_sent: String(rows[matchIndex][1] || "") === "sent",
     canonical_phone: normalizePhone_(rows[matchIndex][4]),
     canonical_reply_text: String(rows[matchIndex][5] || ""),
-    send_kind: String(rows[matchIndex][6] || "").indexOf("__initial_outreach__:") === 0
+    send_kind: sendMetadata.indexOf("__initial_outreach__:") === 0
       ? "initial_outreach"
+      : sendMetadata.indexOf("__scheduled_followup__:") === 0
+      ? "scheduled_followup"
       : "bot_reply",
     crm_row: Number(rows[matchIndex][17] || 0),
-    send_metadata: String(rows[matchIndex][6] || ""),
+    send_metadata: sendMetadata,
     correlation_mode: correlationMode
   };
 }

@@ -10,6 +10,7 @@ def test_v10_routes_are_registered():
     for action in (
         "enqueue_incoming_sms",
         "enqueue_initial_sms",
+        "enqueue_followup_sms",
         "claim_pending_send",
         "send_started",
         "install_outbox_triggers",
@@ -343,12 +344,46 @@ def test_initial_outreach_uses_durable_outbox_and_marks_crm_only_on_tasker_recei
     assert 'range: "M" + crmRow, value: ""' in OUTBOX
     assert 'range: "N" + crmRow, value: ""' in OUTBOX
     assert 'send_kind === "initial_outreach"' in UNIFIED
-    assert 'send_kind: String(rows[matchIndex][6]' in UNIFIED
+    assert "var sendMetadata = String(rows[matchIndex][6] || \"\")" in UNIFIED
+    assert 'send_kind: sendMetadata.indexOf("__initial_outreach__:")' in UNIFIED
     send_sms_source = scheduler.split("def send_sms(", 1)[1].split("def _within_initial_hours", 1)[0]
-    assert '"action": "enqueue_initial_sms"' in send_sms_source
+    assert 'action="enqueue_initial_sms"' in send_sms_source
     assert "if not follow_up:" in send_sms_source
-    assert '"stable_id": stable_id' in send_sms_source
+    assert "stable_id=stable_id" in send_sms_source
+    assert '"stable_id": stable_id' in scheduler
     assert "mark_sent(" not in send_sms_source
+
+
+def test_scheduled_followup_uses_durable_outbox_and_marks_crm_only_on_tasker_receipt():
+    server = (ROOT / "webhook_server.py").read_text(encoding="utf-8")
+    scheduler = (ROOT / "bot_min.py").read_text(encoding="utf-8")
+    assert '"action": "enqueue_followup_sms"' in server
+    assert 'action="enqueue_followup_sms"' in scheduler
+    assert "function enqueueFollowupSmsV13_" in OUTBOX
+    assert "function applyScheduledFollowupReceiptV13_" in OUTBOX
+    assert "__scheduled_followup__:" in OUTBOX
+    assert 'send_kind === "scheduled_followup"' in UNIFIED
+    assert 'sendMetadata.indexOf("__scheduled_followup__:")' in UNIFIED
+
+    send_source = server.split("def _send_followup_sms_from_payload", 1)[1].split("SMS_DEBUG_HEADERS", 1)[0]
+    assert "_enqueue_followup_sms_via_tasker_outbox" in send_source
+    assert "send_with_diagnostics" in send_source
+    assert 'if row_idx is not None:' in send_source
+    assert "row_phone_mismatch" in send_source
+
+    send_sms_source = scheduler.split("def send_sms(", 1)[1].split("def _within_initial_hours", 1)[0]
+    assert "TASKER_FOLLOWUP_OUTBOX_QUEUED" in send_sms_source
+    assert "mark_followup(row_idx, msg_txt)" in send_sms_source
+
+    receipt_start = OUTBOX.index("function applyScheduledFollowupReceiptV13_")
+    receipt_end = OUTBOX.index("function applyInitialSmsReceiptV13_", receipt_start)
+    receipt_source = OUTBOX[receipt_start:receipt_end]
+    assert 'range: "I" + crmRow, value: "x"' in receipt_source
+    assert 'range: "X" + crmRow, value: sentAt' in receipt_source
+    assert 'range: "L" + crmRow, value: message' in receipt_source
+    assert 'range: "O" + crmRow, value: sentAt' in receipt_source
+    assert 'range: "H" + crmRow' not in receipt_source
+    assert 'range: "AQ" + crmRow' not in receipt_source
 
 
 def test_initial_receipt_for_replaced_crm_phone_is_terminal_without_mutating_new_contact():

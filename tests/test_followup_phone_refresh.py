@@ -150,7 +150,7 @@ def test_follow_up_uses_latest_sheet_phone(monkeypatch):
     monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
     monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
 
-    def _capture_send(phone, first, address, row_idx, follow_up=False):
+    def _capture_send(phone, first, address, row_idx, follow_up=False, stable_id=""):
         sent["phone"] = phone
         sent["row_idx"] = row_idx
         sent["follow_up"] = follow_up

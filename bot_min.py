@@ -12841,6 +12841,60 @@ def is_mobile_number(phone: str) -> bool:
     return bool(info.get("mobile"))
 
 
+def _enqueue_tasker_sms_outbox(
+    *,
+    action: str,
+    row_idx: int,
+    phone_digits: str,
+    message: str,
+    stable_id: str = "",
+    mark_codex_verified: bool = False,
+    request_prefix: str = "scheduler",
+) -> Optional[Dict[str, Any]]:
+    if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
+        return None
+
+    send_kind = "followup" if action == "enqueue_followup_sms" else "initial"
+    message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+    message_id = f"{send_kind}-{row_idx}-{message_hash}"
+    stable_id = str(stable_id or "").strip()
+    body: Dict[str, Any] = {
+        "token": SMS_CHATBOT_ALLOWED_TOKEN,
+        "action": action,
+        "row": row_idx,
+        "crm_row": row_idx,
+        "phone": phone_digits,
+        "message": message,
+        "reply_text": message,
+        "message_id": message_id,
+        "request_id": f"{request_prefix}-{message_id}",
+        "stable_id": stable_id,
+        "zpid": stable_id,
+    }
+    if action == "enqueue_initial_sms":
+        body["mark_codex_verified"] = mark_codex_verified
+
+    try:
+        response = requests.post(TASKER_TRANSPORT_HEALTH_URL, json=body, timeout=20)
+        payload = response.json() if response.status_code == 200 else {}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "message_id": message_id,
+        }
+
+    if response.status_code != 200 or payload.get("ok") is not True:
+        return {
+            "ok": False,
+            "http_status": response.status_code,
+            "response": payload or response.text[:500],
+            "message_id": message_id,
+        }
+    payload.setdefault("message_id", message_id)
+    return payload
+
+
 def send_sms(
     phone: str,
     first: str,
@@ -12866,41 +12920,23 @@ def send_sms(
     max_attempts = SMS_RETRY_ATTEMPTS
 
     if not follow_up:
-        if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
+        queued = _enqueue_tasker_sms_outbox(
+            action="enqueue_initial_sms",
+            row_idx=row_idx,
+            phone_digits=digits,
+            message=msg_txt,
+            stable_id=stable_id,
+            mark_codex_verified=False,
+        )
+        if queued is None:
             LOG.error("TASKER_INITIAL_OUTBOX_NOT_CONFIGURED row=%s phone=%s", row_idx, digits)
             return
-        message_hash = hashlib.sha256(msg_txt.encode("utf-8")).hexdigest()[:16]
-        message_id = f"initial-{row_idx}-{message_hash}"
-        try:
-            response = requests.post(
-                TASKER_TRANSPORT_HEALTH_URL,
-                json={
-                    "token": SMS_CHATBOT_ALLOWED_TOKEN,
-                    "action": "enqueue_initial_sms",
-                    "row": row_idx,
-                    "crm_row": row_idx,
-                    "phone": digits,
-                    "message": msg_txt,
-                    "reply_text": msg_txt,
-                    "message_id": message_id,
-                    "request_id": f"scheduler-{message_id}",
-                    "stable_id": stable_id,
-                    "zpid": stable_id,
-                    "mark_codex_verified": False,
-                },
-                timeout=20,
-            )
-            payload = response.json() if response.status_code == 200 else {}
-        except Exception:
-            LOG.exception("TASKER_INITIAL_OUTBOX_ENQUEUE_FAILED row=%s phone=%s", row_idx, digits)
-            return
-        if response.status_code != 200 or payload.get("ok") is not True:
+        if queued.get("ok") is not True:
             LOG.error(
-                "TASKER_INITIAL_OUTBOX_ENQUEUE_REJECTED row=%s phone=%s http_status=%s response=%s",
+                "TASKER_INITIAL_OUTBOX_ENQUEUE_REJECTED row=%s phone=%s response=%s",
                 row_idx,
                 digits,
-                response.status_code,
-                payload or response.text[:500],
+                queued,
             )
             return
         LOG.info(
@@ -12908,11 +12944,39 @@ def send_sms(
             row_idx,
             digits,
             stable_id or "<blank>",
-            payload.get("request_id"),
-            payload.get("message_id"),
-            payload.get("pending_row"),
+            queued.get("request_id"),
+            queued.get("message_id"),
+            queued.get("pending_row"),
         )
         return
+
+    queued = _enqueue_tasker_sms_outbox(
+        action="enqueue_followup_sms",
+        row_idx=row_idx,
+        phone_digits=digits,
+        message=msg_txt,
+        stable_id=stable_id,
+    )
+    if queued and queued.get("ok") is True:
+        LOG.info(
+            "TASKER_FOLLOWUP_OUTBOX_QUEUED row=%s phone=%s stable_id=%s request_id=%s message_id=%s pending_row=%s",
+            row_idx,
+            digits,
+            stable_id or "<blank>",
+            queued.get("request_id"),
+            queued.get("message_id"),
+            queued.get("pending_row"),
+        )
+        return
+    if queued is None:
+        LOG.warning("TASKER_FOLLOWUP_OUTBOX_NOT_CONFIGURED row=%s phone=%s; falling back to direct send", row_idx, digits)
+    else:
+        LOG.error(
+            "TASKER_FOLLOWUP_OUTBOX_ENQUEUE_REJECTED row=%s phone=%s response=%s; falling back to direct send",
+            row_idx,
+            digits,
+            queued,
+        )
 
     for attempt in range(1, max_attempts + 1):
         LOG.info(
@@ -13877,6 +13941,7 @@ def _follow_up_pass():
             address=row[COL_STREET],
             row_idx=sheet_row,
             follow_up=True,
+            stable_id=row[27] if len(row) > 27 else "",
         )
         eligible_count += 1
 
