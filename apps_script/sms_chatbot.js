@@ -1999,6 +1999,14 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
   };
 }
 
+function shouldBypassReplyCapForFirstFeeAnswerAfterCloseout_(feeDecision, leadStatus, conversationDone) {
+  return !!feeDecision &&
+    !feeDecision.handoff_needed &&
+    leadStatus === "O" &&
+    !!conversationDone &&
+    isInitialFeeReplyText_(feeDecision.reply_text);
+}
+
 function getPendingFeeReplyStageV3_(rowObj) {
   const phone = normalizePhone_(String(rowObj && rowObj[HEADERS.phone] || ""));
   if (!phone) return "";
@@ -2186,6 +2194,11 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   if (flags.help && flags.local && flags.fee && matchedKeys.length === 3) {
     const compositeFeeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound);
     if (compositeFeeDecision.handoff_needed) return compositeFeeDecision;
+    const bypassReplyCap = shouldBypassReplyCapForFirstFeeAnswerAfterCloseout_(
+      compositeFeeDecision,
+      leadStatus,
+      done
+    );
     const compositeFeeClause = compositeFeeDecision.reply_text.indexOf("$5,000") !== -1
       ? "The buyer-paid fee is a flat $5,000 at closing."
       : "There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes.";
@@ -2197,6 +2210,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
       handoff_needed: false,
       needs_review: false,
       block_reply: false,
+      bypass_reply_cap: bypassReplyCap,
       reason: "Answered a bounded service, location, and fee question"
     };
   }
@@ -2219,6 +2233,9 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
       if (!feeDecision.handoff_needed) {
         feeDecision.lead_status = leadStatus;
         feeDecision.conversation_done = done;
+        if (shouldBypassReplyCapForFirstFeeAnswerAfterCloseout_(feeDecision, leadStatus, done)) {
+          feeDecision.bypass_reply_cap = true;
+        }
       }
       return feeDecision;
     }
@@ -6130,6 +6147,17 @@ function testSmsIntentContractV3_() {
       firstFee.reply_text.indexOf("flat fee") !== -1 &&
       firstFee.reply_text.indexOf("$5,000") === -1,
     firstFee.reason
+  );
+  const feeAfterCloseoutRow = Object.assign({}, baseRow);
+  feeAfterCloseoutRow[HEADERS.mailshake_status] = "O";
+  feeAfterCloseoutRow[HEADERS.ai_state] = "done";
+  const firstFeeAfterCloseout = applyFastRules_("What's your fee for this service?", feeAfterCloseoutRow);
+  record(
+    "first_fee_answer_after_closeout_bypasses_reply_cap_once",
+    firstFeeAfterCloseout.lead_status === "O" && firstFeeAfterCloseout.conversation_done &&
+      firstFeeAfterCloseout.bypass_reply_cap &&
+      shouldSendBotReply_(firstFeeAfterCloseout, true && !firstFeeAfterCloseout.bypass_reply_cap),
+    firstFeeAfterCloseout.reason
   );
 
   const feeRow = Object.assign({}, baseRow);

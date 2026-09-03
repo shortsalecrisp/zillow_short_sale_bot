@@ -5008,6 +5008,17 @@ def _sms_fee_decision(row_obj: Dict[str, str]) -> Dict[str, Any]:
     )
 
 
+def _sms_should_bypass_reply_cap_for_first_fee_answer_after_closeout(
+    fee_decision: Dict[str, Any], lead_status: str, conversation_done: bool
+) -> bool:
+    return bool(
+        not fee_decision.get("handoff_needed")
+        and lead_status == "O"
+        and conversation_done
+        and _sms_is_initial_fee_reply(fee_decision.get("reply_text"))
+    )
+
+
 def _sms_automated_handoff_fee_recovery(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
     if str(row_obj.get("human_override") or "").upper() != "TRUE":
         return None
@@ -5197,6 +5208,9 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         fee_decision = _sms_fee_decision(row_obj)
         if fee_decision.get("handoff_needed"):
             return fee_decision
+        bypass_reply_cap = _sms_should_bypass_reply_cap_for_first_fee_answer_after_closeout(
+            fee_decision, status, done
+        )
         fee_clause = (
             "The buyer-paid fee is a flat $5,000 at closing."
             if "$5,000" in str(fee_decision.get("reply_text") or "")
@@ -5209,6 +5223,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
             ),
             lead_status=status,
             conversation_done=done,
+            bypass_reply_cap=bypass_reply_cap,
             reason="Answered a bounded service, location, and fee question",
         )
 
@@ -5225,6 +5240,8 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
             result = _sms_fee_decision(row_obj)
             if not result.get("handoff_needed"):
                 result.update(lead_status=status, conversation_done=done)
+                if _sms_should_bypass_reply_cap_for_first_fee_answer_after_closeout(result, status, done):
+                    result["bypass_reply_cap"] = True
             return result
         replies = {
             "speed": _sms_speed_question_reply(),

@@ -2747,6 +2747,46 @@ def test_sms_contract_ordinary_closeout_does_not_block_later_question(monkeypatc
     assert "flat fee" in second["reply_text"].lower()
 
 
+def test_sms_contract_first_fee_answer_after_closeout_bypasses_reply_cap_once(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][10] = "O"
+    sheet.rows[2][13] = "done"
+    sheet.rows[2][16] = "FALSE"
+    sheet.rows[2][17] = json.dumps(
+        [
+            {"role": "assistant", "text": "I help with the lender paperwork and negotiations."},
+            {"role": "assistant", "text": "No, I'm not a real estate agent."},
+            {"role": "assistant", "text": "Understood. Thanks for letting me know."},
+        ]
+    )
+    sheet.rows[2][18] = "3"
+    sheet.rows[2][19] = "FALSE"
+
+    body = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "What's your fee for this service?",
+            "message_id": "fee-after-closeout-1",
+        },
+    ).json()
+
+    assert body["should_reply"] is True
+    assert body["lead_status"] == "O"
+    assert body["conversation_done"] is True
+    assert body["handoff_needed"] is False
+    assert "flat fee to the buyer" in body["reply_text"].lower()
+    assert sheet.rows[2][13] == "done"
+    assert sheet.rows[2][16] == "FALSE"
+    assert sheet.rows[2][19] == "FALSE"
+    assert sender.calls == []
+
+
 def test_sms_contract_manual_reply_is_terminal_takeover(monkeypatch):
     module, sheet, _sender = _import_webhook_server(
         monkeypatch,
