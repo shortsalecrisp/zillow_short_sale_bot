@@ -141,6 +141,65 @@ class _FakeSheetsService:
         return self.values_api
 
 
+def test_send_sms_followup_queues_tasker_outbox_before_direct_sender(monkeypatch):
+    posts = []
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "ok": True,
+                "queued": True,
+                "request_id": "scheduler-followup-12-test",
+                "message_id": "followup-12-test",
+                "pending_row": 44,
+            }
+
+    def _fake_post(url, json, timeout):
+        posts.append({"url": url, "json": json, "timeout": timeout})
+        return _Response()
+
+    class _NoDirectSender:
+        def send_with_diagnostics(self, *_args, **_kwargs):
+            raise AssertionError("follow-up should use the Tasker outbox before direct send")
+
+    monkeypatch.setattr(bot_min, "SMS_ENABLE", True)
+    monkeypatch.setattr(bot_min, "SMS_TEST_MODE", False)
+    monkeypatch.setattr(bot_min, "TASKER_TRANSPORT_HEALTH_URL", "https://script.example/exec")
+    monkeypatch.setattr(bot_min, "SMS_CHATBOT_ALLOWED_TOKEN", "token")
+    monkeypatch.setattr(bot_min, "SMS_SENDER", _NoDirectSender())
+    monkeypatch.setattr(bot_min.requests, "post", _fake_post)
+    monkeypatch.setattr(
+        bot_min,
+        "mark_followup",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("follow-up should be marked only from Apps Script receipt")
+        ),
+    )
+
+    bot_min.send_sms(
+        phone="555-111-2222",
+        first="Alex",
+        address="123 Main",
+        row_idx=12,
+        follow_up=True,
+        stable_id="zpid-12",
+    )
+
+    assert len(posts) == 1
+    body = posts[0]["json"]
+    assert posts[0]["timeout"] == 20
+    assert body["action"] == "enqueue_followup_sms"
+    assert body["row"] == 12
+    assert body["crm_row"] == 12
+    assert body["phone"] == "15551112222"
+    assert body["stable_id"] == "zpid-12"
+    assert body["message_id"].startswith("followup-12-")
+    assert body["request_id"].startswith("scheduler-followup-12-")
+
+
 def test_follow_up_uses_latest_sheet_phone(monkeypatch):
     fake_service = _FakeSheetsService()
     sent = {}
