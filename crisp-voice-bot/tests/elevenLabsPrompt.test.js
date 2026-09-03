@@ -275,6 +275,8 @@ test("prompt waits through office robots and gatekeeper transfer attempts", () =
   assert.match(gatekeeperSection, /After you have spoken that sentence, stay quiet/);
   assert.match(gatekeeperSection, /Do not pitch, do not ask a callback question/);
   assert.match(gatekeeperSection, /phone rings, transfers, or waits for the agent/);
+  assert.match(gatekeeperSection, /to see if they wanted help with the bank paperwork and approval side/i);
+  assert.match(gatekeeperSection, /Do not give Yoni's callback number in that sentence/i);
   assert.match(gatekeeperSection, /Yoni's direct callback number is 404-300-9526/i);
   assert.doesNotMatch(gatekeeperSection, /What's the best time or direct number for {{firstName}}\?/i);
   assert.match(gatekeeperSection, /Please stay on the line/i);
@@ -324,7 +326,7 @@ test("prompt pitches admins who answer instead of only taking a message", () => 
   assert.match(receptionistBranch, /Do not only ask them to relay a message/i);
   assert.match(
     receptionistBranch,
-    /No problem\. We help agents with short sale bank paperwork, lender calls, and approval\. I was calling to see if {{firstName}} wanted help with that\. Do you know if {{firstName}} is handling the bank side personally\?/,
+    /No problem\. We help agents with short sale bank paperwork, lender calls, and approval\. I was calling to see if they wanted help with that\. Do you know if they are handling the bank side personally\?/,
   );
 });
 

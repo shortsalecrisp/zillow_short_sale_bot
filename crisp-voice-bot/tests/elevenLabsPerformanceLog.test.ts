@@ -64,6 +64,10 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   assert.deepEqual(parsed.abTestScope.includeOnlyVoiceVariants, ["eryn", "finch"]);
   assert.equal(parsed.abTestScope.excludePriorSingleVoiceEmmyCalls, true);
   assert.match(parsed.abTestScope.analysisRule, /Exclude all previous single-voice Emmy calls/i);
+  assert.equal(parsed.proveItCohort.startedAt, "2026-09-03T14:20:21Z");
+  assert.equal(parsed.proveItCohort.baselineConversationCount, 1063);
+  assert.equal(parsed.proveItCohort.targetAdditionalCallsMin, 300);
+  assert.equal(parsed.proveItCohort.targetAdditionalCallsMax, 400);
   assert.equal(parsed.call.voiceVariant, "eryn");
   assert.equal(parsed.call.assistantName, "Maya");
   assert.equal(parsed.call.openerVariant, "direct_reason");
@@ -89,6 +93,8 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   assert.match(parsed.codexInstructions, /hangupBeforeReason/i);
   assert.match(parsed.codexInstructions, /rotates Eryn and Finch only/i);
   assert.match(parsed.codexInstructions, /previous single-voice Emmy calls/i);
+  assert.match(parsed.codexInstructions, /Pro prove-it cohort/i);
+  assert.match(parsed.codexInstructions, /transcript\/playback-verified handoff-ready leads/i);
   assert.match(parsed.transcript, /Are you a chatbot/);
 });
 

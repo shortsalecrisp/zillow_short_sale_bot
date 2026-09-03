@@ -21,7 +21,7 @@ test("agent sync uses a short interruptible identity opener before the opener co
   const script = readSyncScript();
 
   assert.match(script, /const FIRST_MESSAGE = "This is {{assistantName}} with Crisp Short Sales\.";/);
-  assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = 1;/);
+  assert.match(script, /const INITIAL_WAIT_TIME_SECONDS = 1\.6;/);
   assert.match(script, /const TURN_TIMEOUT_SECONDS = 1\.5;/);
   assert.match(script, /const TURN_EAGERNESS = "normal";/);
   assert.match(script, /const DISABLE_FIRST_MESSAGE_INTERRUPTION = false;/);

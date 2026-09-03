@@ -13,8 +13,12 @@ const VOICE_AB_TEST_COHORT = "time_bucket_and_voice_rotation";
 const VOICE_AB_TEST_STARTED_AT = "2026-05-29T23:33:59Z";
 const VOICE_AB_TEST_STARTED_LOCAL = "May 29, 2026 7:33 PM ET";
 const VOICE_AB_TEST_INCLUDED_VARIANTS = ["eryn", "finch"] as const;
+const VOICE_PROVE_IT_COHORT_STARTED_AT = "2026-09-03T14:20:21Z";
+const VOICE_PROVE_IT_BASELINE_CONVERSATION_COUNT = 1063;
+const VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MIN = 300;
+const VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MAX = 400;
 const CODEX_ANALYSIS_INSTRUCTIONS =
-  "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer, and compare scheduledWindow by agent local time bucket for answer-rate lift. For the current Eryn/Finch A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls and any call.voiceVariant other than eryn or finch. Current production rotates Eryn and Finch only when voice testing is enabled: Eryn uses the public Maya caller name and Finch uses the public Finn caller name. Also compare call.openerVariant for the opener test: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome.";
+  "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer, and compare scheduledWindow by agent local time bucket for answer-rate lift. For the current Eryn/Finch A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls and any call.voiceVariant other than eryn or finch. Current production rotates Eryn and Finch only when voice testing is enabled: Eryn uses the public Maya caller name and Finch uses the public Finn caller name. Also compare call.openerVariant for the opener test: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityAsk, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome. For the Pro prove-it cohort, evaluate calls after 2026-09-03T14:20:21Z against the 1063-conversation ElevenLabs baseline and trigger a decision review once 300-400 additional calls have accumulated. Count bot-labeled positives separately from transcript/playback-verified handoff-ready leads; continue only if the cohort produces at least 3 verified handoff-ready leads or 1 owner-confirmed serious file opportunity, otherwise recommend pausing or narrowing the test.";
 
 type TranscriptToolCall = {
   tool_name?: string;
@@ -257,6 +261,14 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       excludePriorSingleVoiceEmmyCalls: true,
       analysisRule:
         "Only include calls where call.voiceVariant is present and the call happened after the voice split started. Exclude all previous single-voice Emmy calls. Compare current voice variants and scheduledWindow buckets separately.",
+    },
+    proveItCohort: {
+      startedAt: VOICE_PROVE_IT_COHORT_STARTED_AT,
+      baselineConversationCount: VOICE_PROVE_IT_BASELINE_CONVERSATION_COUNT,
+      targetAdditionalCallsMin: VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MIN,
+      targetAdditionalCallsMax: VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MAX,
+      decisionRule:
+        "Analyze calls after startedAt once 300-400 additional calls have accumulated. Continue scaling only if there are at least 3 transcript/playback-verified handoff-ready leads or 1 owner-confirmed serious file opportunity.",
     },
     call: {
       conversationId: input.conversationId,
