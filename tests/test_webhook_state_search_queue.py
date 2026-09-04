@@ -1077,7 +1077,7 @@ def test_coverage_backstop_does_not_enqueue_rows_without_detail_text(monkeypatch
     }
 
     monkeypatch.setattr(webhook_server, "_coverage_backstop_skip_zpids", lambda: set())
-    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows: rows)
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows, **kwargs: rows)
     monkeypatch.setattr(
         webhook_server,
         "_enqueue_pending_rows",
@@ -1109,7 +1109,7 @@ def test_state_search_does_not_enqueue_rows_without_detail_text(monkeypatch):
 
     monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: [state_row])
     monkeypatch.setattr(webhook_server, "_pending_queue_state_skip_zpids", lambda: set())
-    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows: rows)
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows, **kwargs: rows)
     monkeypatch.setattr(
         webhook_server,
         "_enqueue_pending_rows",
@@ -1349,6 +1349,7 @@ def test_zillow_page_fallback_enriches_listing_details(monkeypatch):
     )
 
     class _Response:
+        status_code = 200
         text = html
 
         def raise_for_status(self):
@@ -1356,8 +1357,8 @@ def test_zillow_page_fallback_enriches_listing_details(monkeypatch):
 
     calls = []
 
-    def fake_get(url, headers, timeout):
-        calls.append((url, headers, timeout))
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
         return _Response()
 
     monkeypatch.setattr(webhook_server, "ZILLOW_DIRECT_DETAIL_FALLBACK_ENABLED", True)
@@ -1385,6 +1386,78 @@ def test_zillow_page_fallback_enriches_listing_details(monkeypatch):
     assert rows[0]["state"] == "CO"
     assert rows[0]["zip"] == "80010"
     assert rows[0]["contact_recipients"][0]["phones"][0]["number"] == "720-645-0660"
+
+
+def test_zillow_page_fallback_uses_apify_proxy_after_direct_403(monkeypatch):
+    property_payload = {
+        "property": {
+            "zpid": 2067568241,
+            "description": "Approved short sale, subject to lender approval.",
+            "address": {
+                "streetAddress": "12270 Karls Ln",
+                "city": "Northglenn",
+                "state": "CO",
+                "zipcode": "80241",
+            },
+            "attributionInfo": {"agentName": "Proxy Agent"},
+        }
+    }
+    next_data = {
+        "props": {
+            "pageProps": {
+                "componentProps": {
+                    "gdpClientCache": json.dumps(
+                        {'ForSalePriorityQuery{"zpid":2067568241}': property_payload}
+                    ),
+                }
+            }
+        }
+    }
+    html = f'<script id="__NEXT_DATA__">{json.dumps(next_data)}</script>'
+
+    class _Response:
+        def __init__(self, status_code, text=""):
+            self.status_code = status_code
+            self.text = text
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise webhook_server.requests.HTTPError(f"{self.status_code} error")
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return _Response(403, "forbidden")
+        return _Response(200, html)
+
+    monkeypatch.setattr(webhook_server, "ZILLOW_DIRECT_DETAIL_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "ZILLOW_DIRECT_DETAIL_PROXY_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "ZILLOW_DIRECT_DETAIL_PROXY_GROUP", "UNBLOCKER")
+    monkeypatch.setattr(webhook_server, "ZILLOW_DIRECT_DETAIL_PROXY_VERIFY_TLS", False)
+    monkeypatch.setattr(webhook_server, "ZILLOW_DIRECT_DETAIL_SLEEP_SECONDS", 0)
+    monkeypatch.setattr(webhook_server, "_get_apify_proxy_password", lambda: "proxy-secret")
+    monkeypatch.setattr(webhook_server.requests, "get", fake_get)
+
+    rows = webhook_server._enrich_rows_with_zillow_page(
+        [
+            {
+                "zpid": "2067568241",
+                "propertyUrl": "https://www.zillow.com/homedetails/12270-Karls-Ln-Northglenn-CO-80241/2067568241_zpid/",
+                "search_source": "payload.listings",
+            }
+        ],
+        source="payload.listings",
+    )
+
+    assert len(calls) == 2
+    assert "proxies" not in calls[0]
+    assert calls[1]["proxies"]["https"].startswith("http://groups-UNBLOCKER:")
+    assert calls[1]["verify"] is False
+    assert rows[0]["listing_description"] == "Approved short sale, subject to lender approval."
+    assert rows[0]["agentName"] == "Proxy Agent"
+    assert rows[0]["street"] == "12270 Karls Ln"
 
 
 def test_detail_enrichment_skips_apify_when_zillow_page_fallback_succeeds(monkeypatch):
@@ -1456,7 +1529,7 @@ def test_state_search_details_only_selected_unseen_rows(monkeypatch):
         for idx in range(7)
     ]
 
-    def fake_detail(rows):
+    def fake_detail(rows, **kwargs):
         detail_calls.extend(str(row.get("zpid")) for row in rows)
         return [
             {
@@ -1490,12 +1563,16 @@ def test_coverage_backstop_has_separate_main_and_state_caps(monkeypatch):
     enqueued_by_source = []
 
     main_rows = [_listing(f"main-{idx}", "FL", "main") for idx in range(4)]
+    for row in main_rows:
+        row.pop("description", None)
     state_rows = [
         _listing("ak-1", "AK", "ak"),
         _listing("mi-0", "MI", "mi"),
         _listing("mi-1", "MI", "mi"),
         _listing("mi-2", "MI", "mi"),
     ]
+    for row in state_rows:
+        row.pop("description", None)
 
     monkeypatch.setattr(webhook_server, "_fetch_apify_backstop_main_rows", lambda: main_rows)
     monkeypatch.setattr(webhook_server, "_fetch_apify_backstop_state_rows", lambda: state_rows)
@@ -1503,7 +1580,7 @@ def test_coverage_backstop_has_separate_main_and_state_caps(monkeypatch):
     monkeypatch.setattr(webhook_server, "APIFY_BACKSTOP_MAIN_LIMIT", 2)
     monkeypatch.setattr(webhook_server, "APIFY_BACKSTOP_STATE_LIMIT", 2)
 
-    def fake_detail(rows):
+    def fake_detail(rows, **kwargs):
         detail_calls.append([str(row.get("zpid")) for row in rows])
         return [
             {

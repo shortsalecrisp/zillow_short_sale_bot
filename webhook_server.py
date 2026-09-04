@@ -76,6 +76,16 @@ ZILLOW_DIRECT_DETAIL_USER_AGENT = os.getenv(
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
 )
+ZILLOW_DIRECT_DETAIL_PROXY_ENABLED = (
+    os.getenv("ZILLOW_DIRECT_DETAIL_PROXY_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+ZILLOW_DIRECT_DETAIL_PROXY_GROUP = os.getenv("ZILLOW_DIRECT_DETAIL_PROXY_GROUP", "UNBLOCKER").strip()
+ZILLOW_DIRECT_DETAIL_PROXY_VERIFY_TLS = (
+    os.getenv("ZILLOW_DIRECT_DETAIL_PROXY_VERIFY_TLS", "false").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+APIFY_PROXY_PASSWORD = os.getenv("APIFY_PROXY_PASSWORD", "").strip()
 
 # Google Sheets / Replies tab
 GSHEET_ID   = os.environ["GSHEET_ID"]
@@ -719,6 +729,101 @@ def _merge_zillow_page_property(row: Dict[str, Any], property_data: Dict[str, An
     return normalized
 
 
+_APIFY_PROXY_PASSWORD_CACHE: Optional[str] = None
+
+
+def _get_apify_proxy_password() -> str:
+    global _APIFY_PROXY_PASSWORD_CACHE
+    if APIFY_PROXY_PASSWORD:
+        return APIFY_PROXY_PASSWORD
+    if _APIFY_PROXY_PASSWORD_CACHE is not None:
+        return _APIFY_PROXY_PASSWORD_CACHE
+    if not APIFY_TOKEN:
+        _APIFY_PROXY_PASSWORD_CACHE = ""
+        return ""
+    try:
+        resp = requests.get(
+            "https://api.apify.com/v2/users/me",
+            params={"token": APIFY_TOKEN},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+        proxy = data.get("proxy") if isinstance(data, dict) else {}
+        password = proxy.get("password") if isinstance(proxy, dict) else ""
+        _APIFY_PROXY_PASSWORD_CACHE = _text_fragment(password)
+    except Exception as exc:
+        logger.warning(
+            "zillow-page-fallback: failed to load Apify proxy password err=%s",
+            _format_request_exception(exc) if isinstance(exc, requests.RequestException) else str(exc)[:200],
+        )
+        _APIFY_PROXY_PASSWORD_CACHE = ""
+    return _APIFY_PROXY_PASSWORD_CACHE or ""
+
+
+def _apify_zillow_proxy_url() -> str:
+    if not ZILLOW_DIRECT_DETAIL_PROXY_ENABLED:
+        return ""
+    password = _get_apify_proxy_password()
+    if not password:
+        return ""
+    username = f"groups-{ZILLOW_DIRECT_DETAIL_PROXY_GROUP}" if ZILLOW_DIRECT_DETAIL_PROXY_GROUP else "auto"
+    return "http://%s:%s@proxy.apify.com:8000" % (
+        urllib.parse.quote(username, safe=",-"),
+        urllib.parse.quote(password, safe=""),
+    )
+
+
+def _redact_proxy_secret(message: str) -> str:
+    password = APIFY_PROXY_PASSWORD or _APIFY_PROXY_PASSWORD_CACHE or ""
+    if password:
+        message = message.replace(password, "[REDACTED_PROXY_PASSWORD]")
+    if APIFY_TOKEN:
+        message = message.replace(APIFY_TOKEN, "[REDACTED_APIFY_TOKEN]")
+    return message
+
+
+def _fetch_zillow_page_html(detail_url: str, *, source: str, zpid: str, use_proxy: bool) -> tuple[str, str]:
+    request_kwargs: Dict[str, Any] = {
+        "headers": {
+            "User-Agent": ZILLOW_DIRECT_DETAIL_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "timeout": ZILLOW_DIRECT_DETAIL_TIMEOUT_SECONDS,
+    }
+    if use_proxy:
+        proxy_url = _apify_zillow_proxy_url()
+        if not proxy_url:
+            return "", "proxy_unavailable"
+        request_kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+        request_kwargs["verify"] = ZILLOW_DIRECT_DETAIL_PROXY_VERIFY_TLS
+        if not ZILLOW_DIRECT_DETAIL_PROXY_VERIFY_TLS:
+            try:
+                requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+    try:
+        resp = requests.get(detail_url, **request_kwargs)
+        if resp.status_code == 403:
+            return "", "blocked_403_proxy" if use_proxy else "blocked_403_direct"
+        resp.raise_for_status()
+        return resp.text or "", "ok_proxy" if use_proxy else "ok_direct"
+    except Exception as exc:
+        mode = "proxy" if use_proxy else "direct"
+        logger.warning(
+            "zillow-page-fallback: fetch failed mode=%s source=%s zpid=%s err=%s",
+            mode,
+            source,
+            zpid,
+            _redact_proxy_secret(
+                _format_request_exception(exc) if isinstance(exc, requests.RequestException) else str(exc)[:200]
+            ),
+        )
+        return "", f"error_{mode}"
+
+
 def _enrich_rows_with_zillow_page(rows: List[Dict[str, Any]], *, source: str) -> List[Dict[str, Any]]:
     if not rows or not ZILLOW_DIRECT_DETAIL_FALLBACK_ENABLED or not BeautifulSoup:
         return rows
@@ -728,6 +833,7 @@ def _enrich_rows_with_zillow_page(rows: List[Dict[str, Any]], *, source: str) ->
     matched = 0
     skipped = 0
     failed = 0
+    proxied = 0
     for row in rows:
         if not isinstance(row, dict) or _row_has_listing_text(row):
             enriched_rows.append(row)
@@ -744,32 +850,37 @@ def _enrich_rows_with_zillow_page(rows: List[Dict[str, Any]], *, source: str) ->
 
         attempted += 1
         zpid = str(row.get("zpid") or "").strip()
-        try:
-            resp = requests.get(
+        property_data: Dict[str, Any] = {}
+        last_reason = ""
+        for use_proxy in (False, True):
+            page_html, reason = _fetch_zillow_page_html(
                 detail_url,
-                headers={
-                    "User-Agent": ZILLOW_DIRECT_DETAIL_USER_AGENT,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-                timeout=ZILLOW_DIRECT_DETAIL_TIMEOUT_SECONDS,
+                source=source,
+                zpid=zpid,
+                use_proxy=use_proxy,
             )
-            resp.raise_for_status()
-            property_data = _extract_zillow_page_property(resp.text, zpid=zpid)
-        except Exception as exc:
-            failed += 1
-            logger.warning(
-                "zillow-page-fallback: fetch failed source=%s zpid=%s err=%s",
-                source,
-                zpid,
-                _format_request_exception(exc) if isinstance(exc, requests.RequestException) else str(exc)[:200],
-            )
-            enriched_rows.append(row)
-            continue
+            last_reason = reason
+            if use_proxy and page_html:
+                proxied += 1
+            if not page_html:
+                if use_proxy or reason not in {"blocked_403_direct", "error_direct"}:
+                    continue
+                continue
+            property_data = _extract_zillow_page_property(page_html, zpid=zpid)
+            if property_data:
+                break
+            last_reason = f"no_property_data_{'proxy' if use_proxy else 'direct'}"
+            if use_proxy:
+                break
 
         if not property_data:
             failed += 1
-            logger.warning("zillow-page-fallback: no property data source=%s zpid=%s", source, zpid)
+            logger.warning(
+                "zillow-page-fallback: no property data source=%s zpid=%s reason=%s",
+                source,
+                zpid,
+                last_reason,
+            )
             enriched_rows.append(row)
             continue
 
@@ -787,12 +898,13 @@ def _enrich_rows_with_zillow_page(rows: List[Dict[str, Any]], *, source: str) ->
     if attempted or skipped or failed:
         log = logger.info if matched else logger.warning
         log(
-            "zillow-page-fallback: source=%s attempted=%d matched=%d failed=%d skipped=%d",
+            "zillow-page-fallback: source=%s attempted=%d matched=%d failed=%d skipped=%d proxied=%d",
             source,
             attempted,
             matched,
             failed,
             skipped,
+            proxied,
         )
     return enriched_rows
 
@@ -979,7 +1091,7 @@ def _enqueue_extra_state_rows(payload: Dict[str, Any]) -> int:
     if not extra_selection["rows"]:
         return 0
     logger.info("state-search: selected_for_detail=%d", len(extra_selection["rows"]))
-    detail_rows = _run_state_detail_task_for_rows(extra_selection["rows"])
+    detail_rows = _enrich_rows_with_detail_task(extra_selection["rows"], source="state-search")
     detail_rows = _filter_rows_missing_listing_text_before_queue(
         detail_rows,
         source="state-search",
@@ -1067,7 +1179,7 @@ def _enqueue_apify_backstop_rows(
     if not selection["rows"]:
         return 0
     logger.info("coverage-backstop: source=%s selected_for_detail=%d", source, len(selection["rows"]))
-    detail_rows = _run_state_detail_task_for_rows(selection["rows"])
+    detail_rows = _enrich_rows_with_detail_task(selection["rows"], source=source)
     detail_rows = _filter_rows_missing_listing_text_before_queue(
         detail_rows,
         source=source,
