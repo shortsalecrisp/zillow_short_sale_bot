@@ -1063,6 +1063,98 @@ def test_payload_webhook_holds_rows_when_detail_text_is_unavailable(monkeypatch)
     assert seen_batches == []
 
 
+def test_coverage_backstop_does_not_enqueue_rows_without_detail_text(monkeypatch):
+    enqueued = []
+    search_only_row = {
+        "zpid": "backstop-search-only",
+        "detailUrl": "https://www.zillow.com/homedetails/backstop-search-only_zpid/",
+        "address": "650 Jefferson Avenue NE, Salem, OR 97301",
+        "street": "650 Jefferson Avenue NE",
+        "city": "Salem",
+        "state": "OR",
+        "listingStatus": "forSale",
+    }
+
+    monkeypatch.setattr(webhook_server, "_coverage_backstop_skip_zpids", lambda: set())
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows: rows)
+    monkeypatch.setattr(
+        webhook_server,
+        "_enqueue_pending_rows",
+        lambda rows, source: enqueued.extend(rows) or len(rows),
+    )
+
+    count = webhook_server._enqueue_apify_backstop_rows(
+        [search_only_row],
+        source="coverage-backstop-main",
+        max_rows=1,
+    )
+
+    assert count == 0
+    assert enqueued == []
+
+
+def test_state_search_does_not_enqueue_rows_without_detail_text(monkeypatch):
+    enqueued = []
+    state_row = {
+        "zpid": "ak-search-only",
+        "detailUrl": "https://www.zillow.com/homedetails/ak-search-only_zpid/",
+        "address": "1521 N Plateau Ave, Palmer, AK 99645",
+        "street": "1521 N Plateau Ave",
+        "city": "Palmer",
+        "state": "AK",
+        "listingStatus": "forSale",
+        "search_source": "ak",
+    }
+
+    monkeypatch.setattr(webhook_server, "_fetch_extra_state_rows", lambda: [state_row])
+    monkeypatch.setattr(webhook_server, "_pending_queue_state_skip_zpids", lambda: set())
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows: rows)
+    monkeypatch.setattr(
+        webhook_server,
+        "_enqueue_pending_rows",
+        lambda rows, source: enqueued.extend(rows) or len(rows),
+    )
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_SEARCH_LIMIT", 5)
+
+    count = webhook_server._enqueue_extra_state_rows({})
+
+    assert count == 0
+    assert enqueued == []
+
+
+def test_queue_worker_fails_rows_without_listing_text_before_processing(monkeypatch):
+    completions = []
+
+    item = {
+        "_row_num": 42,
+        "zpid": "queued-search-only",
+        "address": "808 Russet Valley Dr",
+        "source": "coverage-backstop-main",
+        "listing_json": json.dumps(
+            {
+                "zpid": "queued-search-only",
+                "address": "808 Russet Valley Dr",
+                "source": "coverage-backstop-main",
+            }
+        ),
+    }
+
+    monkeypatch.setattr(
+        webhook_server,
+        "process_rows",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("missing text should not be classified")),
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "_complete_queue_item",
+        lambda item, status, result="", error="": completions.append((status, result, error)),
+    )
+
+    webhook_server._process_claimed_queue_item(item)
+
+    assert completions == [("failed", "", "missing_listing_text")]
+
+
 def test_state_search_queue_payload_uses_street_only_sms_address():
     row = {
         "zpid": "hi-1",

@@ -97,6 +97,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("webhook_server")
+for noisy_logger_name in (
+    "urllib3",
+    "requests.packages.urllib3",
+    "googleapiclient.discovery",
+    "googleapiclient.http",
+    "google.auth.transport.requests",
+):
+    logging.getLogger(noisy_logger_name).setLevel(logging.WARNING)
 if not SMS_API_KEY:
     logger.warning("SMS gateway API key missing; outbound SMS will be skipped")
 
@@ -533,6 +541,34 @@ def _enrich_rows_with_detail_task(
     return rows
 
 
+def _filter_rows_missing_listing_text_before_queue(
+    rows: List[Dict[str, Any]],
+    *,
+    source: str,
+) -> List[Dict[str, Any]]:
+    ready_rows: List[Dict[str, Any]] = []
+    held_zpids: List[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if _row_has_listing_text(row):
+            ready_rows.append(row)
+            continue
+        zpid = str(row.get("zpid", "")).strip()
+        if zpid:
+            held_zpids.append(zpid)
+
+    held_count = len(rows) - len(ready_rows)
+    if held_count:
+        logger.warning(
+            "%s: holding %d rows missing listing text; not enqueued zpids=%s",
+            source,
+            held_count,
+            held_zpids,
+        )
+    return ready_rows
+
+
 def _run_apify_search_task_sync_dataset_items(
     task_id: str,
     source: str,
@@ -654,6 +690,10 @@ def _enqueue_extra_state_rows(payload: Dict[str, Any]) -> int:
         return 0
     logger.info("state-search: selected_for_detail=%d", len(extra_selection["rows"]))
     detail_rows = _run_state_detail_task_for_rows(extra_selection["rows"])
+    detail_rows = _filter_rows_missing_listing_text_before_queue(
+        detail_rows,
+        source="state-search",
+    )
     extra_enqueued = _enqueue_pending_rows(detail_rows, source="state-search")
     logger.info("state-search: enqueued_extra=%d", extra_enqueued)
     return extra_enqueued
@@ -738,6 +778,10 @@ def _enqueue_apify_backstop_rows(
         return 0
     logger.info("coverage-backstop: source=%s selected_for_detail=%d", source, len(selection["rows"]))
     detail_rows = _run_state_detail_task_for_rows(selection["rows"])
+    detail_rows = _filter_rows_missing_listing_text_before_queue(
+        detail_rows,
+        source=source,
+    )
     enqueued = _enqueue_pending_rows(detail_rows, source=source)
     logger.info("coverage-backstop: source=%s enqueued=%d", source, enqueued)
     return enqueued
@@ -3131,6 +3175,15 @@ def _process_claimed_queue_item(item: Dict[str, Any]) -> None:
         }
     if zpid and "zpid" not in row:
         row["zpid"] = zpid
+
+    if not _row_has_listing_text(row):
+        logger.warning(
+            "queue: missing listing text zpid=%s source=%s; marking failed for retry",
+            zpid,
+            item.get("source", ""),
+        )
+        _complete_queue_item(item, "failed", error="missing_listing_text")
+        return
 
     try:
         outcomes = process_rows([row], skip_dedupe=True, return_outcomes=True) or {}
