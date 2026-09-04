@@ -234,6 +234,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Not interested";
   }
 
+  if (callResult === "deferred_contact") {
+    return "Will follow up when ready";
+  }
+
   if (callResult === "already_working_with_negotiator") {
     return "Already working with negotiator";
   }
@@ -386,7 +390,11 @@ function extractCallbackTime(conversation: ElevenLabsConversation): string | und
 }
 
 export function shouldTreatAsCallback(conversation: ElevenLabsConversation): boolean {
-  if (shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsDoNotCall(conversation)) {
+  if (
+    shouldTreatAsRecordingArtifact(conversation) ||
+    shouldTreatAsDoNotCall(conversation) ||
+    shouldTreatAsDeferredContact(conversation)
+  ) {
     return false;
   }
 
@@ -423,6 +431,31 @@ export function shouldTreatAsCallback(conversation: ElevenLabsConversation): boo
     summary.includes("wanted yoni to call") ||
     summary.includes("arranged for yoni to call") ||
     summary.includes("scheduled callback")
+  );
+}
+
+export function shouldTreatAsDeferredContact(conversation: ElevenLabsConversation): boolean {
+  if (shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsDoNotCall(conversation)) {
+    return false;
+  }
+
+  const text = normalizeText(userMessages(conversation).join(" "));
+  if (
+    !text ||
+    /\b(?:not interested|no thanks|do not need help|don't need help|dont need help|all set|stop calling|do not call|don't call)\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+
+  return (
+    /\b(?:i(?:'ll| will|'m going to| am going to|'m gonna| am gonna)|let me)\s+(?:get back to|call|contact|reach(?: back)? out to|follow up with)\s+(?:you|yoni|him|crisp)\b/.test(
+      text,
+    ) ||
+    /\b(?:i(?:'ll| will|'m going to| am going to|'m gonna| am gonna)|let me)\s+(?:reach out|get back in touch|follow up)\b/.test(
+      text,
+    )
   );
 }
 
@@ -622,7 +655,11 @@ export function shouldTreatAsDoNotCall(conversation: ElevenLabsConversation): bo
 }
 
 function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
-  if (shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsDoNotCall(conversation)) {
+  if (
+    shouldTreatAsRecordingArtifact(conversation) ||
+    shouldTreatAsDoNotCall(conversation) ||
+    shouldTreatAsDeferredContact(conversation)
+  ) {
     return false;
   }
 
@@ -1661,6 +1698,38 @@ async function processPostCallOutcomeForConversation(
     return true;
   }
 
+  if (hasToolCall(conversation, "not_interested") && shouldTreatAsDeferredContact(conversation)) {
+    const outcome = buildVoiceResponseStatus("deferred_contact");
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "deferred_contact",
+      responseStatus: outcome,
+      callbackRequested: "",
+      callbackTime: "",
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback corrected self-initiated future contact to deferred", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+    });
+    return true;
+  }
+
   if (hasToolCall(conversation, "not_interested")) {
     const outcome = buildVoiceResponseStatus("answered_not_interested");
 
@@ -2134,6 +2203,38 @@ async function processPostCallOutcomeForConversation(
       status: conversation.status,
     });
     return false;
+  }
+
+  if (shouldTreatAsDeferredContact(conversation)) {
+    const outcome = buildVoiceResponseStatus("deferred_contact");
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "deferred_contact",
+      responseStatus: outcome,
+      callbackRequested: "",
+      callbackTime: "",
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(outcome),
+    });
+
+    await sendTranscriptEmailIfEnabled({
+      conversationId,
+      metadata,
+      outcome,
+      summary,
+      transcript: fullTranscript,
+    });
+
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs post-call fallback recorded self-initiated future contact as deferred", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+    });
+    return true;
   }
 
   if (shouldTreatAsCallback(conversation)) {

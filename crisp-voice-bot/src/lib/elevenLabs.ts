@@ -1,4 +1,5 @@
-import axios, { AxiosError } from "axios";
+import axios, { AxiosError, type AxiosInstance } from "axios";
+import { randomUUID } from "node:crypto";
 import { config } from "./config";
 import { rememberElevenLabsCallContext } from "./elevenLabsCallContext";
 import { buildElevenLabsOpenerVariant } from "./elevenLabsOpenerVariant";
@@ -19,6 +20,187 @@ const elevenLabsClient = axios.create({
     ...(config.elevenLabs.apiKey ? { "xi-api-key": config.elevenLabs.apiKey } : {}),
   },
 });
+
+const CALL_START_RECEIPT_ATTEMPTS = 3;
+const CALL_START_RECEIPT_DELAY_MS = 2_000;
+const CALL_START_RETRY_JITTER_MIN_MS = 1_500;
+const CALL_START_RETRY_JITTER_MAX_MS = 3_000;
+const MAX_CALL_START_RECEIPT_CANDIDATES = 12;
+
+type ElevenLabsConversationSummary = {
+  conversation_id?: string;
+  start_time_unix_secs?: number;
+  call_duration_secs?: number;
+  status?: string;
+};
+
+type ElevenLabsConversationDetails = ElevenLabsConversationSummary & {
+  has_audio?: boolean;
+  has_user_audio?: boolean;
+  has_response_audio?: boolean;
+  conversation_initiation_client_data?: {
+    dynamic_variables?: Record<string, unknown>;
+  };
+  metadata?: {
+    start_time_unix_secs?: number;
+    accepted_time_unix_secs?: number | null;
+    call_duration_secs?: number | null;
+    error?: Record<string, unknown> | null;
+  };
+};
+
+type ElevenLabsConversationListResponse = {
+  conversations?: ElevenLabsConversationSummary[];
+};
+
+export type ElevenLabsCallStartReceipt = {
+  status: "accepted" | "definitive_failure";
+  conversationId: string;
+  conversation: ElevenLabsConversationDetails;
+};
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readDynamicNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function normalizePhone(value: unknown): string {
+  return typeof value === "string" ? value.replace(/\D/g, "") : "";
+}
+
+export function isElevenLabsCallStartTimeout(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) {
+    return false;
+  }
+
+  return error.code === "ECONNABORTED" || /timeout/i.test(error.message);
+}
+
+export function classifyElevenLabsCallStartConversation(
+  conversation: ElevenLabsConversationDetails,
+  metadata: Pick<CallMetadata, "rowNumber" | "callAttemptNumber" | "dialedPhone" | "callStartRequestId">,
+  requestStartedAtUnixSecs: number,
+): ElevenLabsCallStartReceipt | undefined {
+  const conversationId = conversation.conversation_id;
+  const dynamicVariables = conversation.conversation_initiation_client_data?.dynamic_variables ?? {};
+  const rowNumber = readDynamicNumber(dynamicVariables.rowNumber);
+  const callAttemptNumber = readDynamicNumber(dynamicVariables.callAttemptNumber);
+  const phone = normalizePhone(dynamicVariables.phone);
+  const callStartRequestId =
+    typeof dynamicVariables.callStartRequestId === "string" ? dynamicVariables.callStartRequestId : undefined;
+  const startTime = conversation.start_time_unix_secs ?? conversation.metadata?.start_time_unix_secs;
+
+  if (
+    !conversationId ||
+    rowNumber !== metadata.rowNumber ||
+    callAttemptNumber !== metadata.callAttemptNumber ||
+    (metadata.callStartRequestId && callStartRequestId !== metadata.callStartRequestId) ||
+    (phone && phone !== normalizePhone(metadata.dialedPhone)) ||
+    (typeof startTime === "number" && startTime < requestStartedAtUnixSecs - 10)
+  ) {
+    return undefined;
+  }
+
+  const accepted =
+    Boolean(conversation.metadata?.accepted_time_unix_secs) ||
+    Boolean(conversation.metadata?.call_duration_secs) ||
+    Boolean(conversation.call_duration_secs) ||
+    conversation.has_audio === true ||
+    conversation.has_user_audio === true ||
+    conversation.has_response_audio === true ||
+    conversation.status !== "failed";
+
+  return {
+    status: accepted ? "accepted" : "definitive_failure",
+    conversationId,
+    conversation,
+  };
+}
+
+async function findElevenLabsCallStartReceipt(params: {
+  client: AxiosInstance;
+  agentId: string;
+  metadata: CallMetadata;
+  requestStartedAtUnixSecs: number;
+}): Promise<ElevenLabsCallStartReceipt | undefined> {
+  const response = await params.client.get<ElevenLabsConversationListResponse>("/v1/convai/conversations", {
+    params: {
+      agent_id: params.agentId,
+      call_start_after_unix: params.requestStartedAtUnixSecs - 10,
+      page_size: MAX_CALL_START_RECEIPT_CANDIDATES,
+      sort_direction: "desc",
+    },
+  });
+
+  const summaries = (response.data.conversations ?? []).slice(0, MAX_CALL_START_RECEIPT_CANDIDATES);
+  for (const summary of summaries) {
+    if (!summary.conversation_id) {
+      continue;
+    }
+
+    try {
+      const detailResponse = await params.client.get<ElevenLabsConversationDetails>(
+        `/v1/convai/conversations/${summary.conversation_id}`,
+      );
+      const receipt = classifyElevenLabsCallStartConversation(
+        detailResponse.data,
+        params.metadata,
+        params.requestStartedAtUnixSecs,
+      );
+      if (receipt) {
+        return receipt;
+      }
+    } catch (error) {
+      logger.warn("ElevenLabs call-start receipt detail lookup failed", {
+        conversationId: summary.conversation_id,
+        rowNumber: params.metadata.rowNumber,
+        callAttemptNumber: params.metadata.callAttemptNumber,
+        ...getElevenLabsError(error),
+      });
+    }
+  }
+
+  return undefined;
+}
+
+async function reconcileElevenLabsCallStartTimeout(params: {
+  client: AxiosInstance;
+  agentId: string;
+  metadata: CallMetadata;
+  requestStartedAtUnixSecs: number;
+}): Promise<ElevenLabsCallStartReceipt | undefined> {
+  for (let attempt = 1; attempt <= CALL_START_RECEIPT_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) {
+      await delay(CALL_START_RECEIPT_DELAY_MS);
+    }
+
+    try {
+      const receipt = await findElevenLabsCallStartReceipt(params);
+      if (receipt) {
+        return receipt;
+      }
+    } catch (error) {
+      logger.warn("ElevenLabs call-start receipt lookup failed", {
+        rowNumber: params.metadata.rowNumber,
+        callAttemptNumber: params.metadata.callAttemptNumber,
+        receiptAttempt: attempt,
+        ...getElevenLabsError(error),
+      });
+    }
+  }
+
+  return undefined;
+}
 
 const STREET_TYPE_SUFFIX_PATTERN =
   /\s+(?:ALY|ALLY|AVE|AVENUE|BLVD|BOULEVARD|CIR|CIRCLE|CT|COURT|CV|COVE|DR|DRIVE|HWY|HIGHWAY|LN|LANE|LOOP|PKWY|PARKWAY|PL|PLACE|RD|ROAD|ST|STREET|TER|TERRACE|TRL|TRAIL|WAY)\.?(?:\s+(?:N|S|E|W|NE|NW|SE|SW)\.?)?$/i;
@@ -216,6 +398,7 @@ export function buildElevenLabsOutboundCallBody(params: {
     firstName: params.metadata.firstName ?? "",
     lastName: params.metadata.lastName ?? "",
     callAttemptNumber: params.metadata.callAttemptNumber,
+    callStartRequestId: params.metadata.callStartRequestId ?? "",
     phone: params.metadata.dialedPhone,
     email: params.metadata.email ?? "",
     requestedPhone: params.metadata.requestedPhone,
@@ -269,13 +452,6 @@ export async function placeElevenLabsOutboundCall(params: {
   metadata.openerVariant = openerVariant.key;
   metadata.openerVariantLabel = openerVariant.label;
   metadata.openerScript = openerVariant.script;
-  const body = buildElevenLabsOutboundCallBody({
-    agentId,
-    agentPhoneNumberId,
-    to: params.to,
-    metadata,
-  });
-
   logger.info("Placing ElevenLabs outbound call via SIP trunk", {
     to: params.to,
     rowNumber: metadata.rowNumber,
@@ -292,42 +468,125 @@ export async function placeElevenLabsOutboundCall(params: {
     agentPhoneNumberId,
   });
 
-  try {
-    const response = await elevenLabsClient.post<ElevenLabsOutboundCallResponse>(
-      "/v1/convai/sip-trunk/outbound-call",
-      body,
-    );
-
+  const finalizeAcceptedCall = (response: ElevenLabsOutboundCallResponse, acceptedMetadata: CallMetadata) => {
     logger.info("ElevenLabs outbound call accepted", {
       rowNumber: params.metadata.rowNumber,
       callAttemptNumber: params.metadata.callAttemptNumber,
-      conversationId: response.data.conversation_id,
-      sipCallId: response.data.sip_call_id,
-      message: response.data.message,
+      callStartRequestId: acceptedMetadata.callStartRequestId,
+      conversationId: response.conversation_id,
+      sipCallId: response.sip_call_id,
+      message: response.message,
       assistantName: voiceVariant.assistantName,
       voiceVariant: voiceVariant.key,
     });
 
-    if (response.data.conversation_id) {
-      rememberElevenLabsCallContext(metadata, response.data.conversation_id);
+    if (response.conversation_id) {
+      rememberElevenLabsCallContext(acceptedMetadata, response.conversation_id);
 
       if (params.schedulePostCallFallback !== false) {
         scheduleElevenLabsPostCallFallback({
-          conversationId: response.data.conversation_id,
-          metadata,
+          conversationId: response.conversation_id,
+          metadata: acceptedMetadata,
         });
       }
     } else {
-      rememberElevenLabsCallContext(metadata);
+      rememberElevenLabsCallContext(acceptedMetadata);
     }
 
-    return response.data;
-  } catch (error) {
-    logger.error("ElevenLabs outbound call failed", {
-      rowNumber: params.metadata.rowNumber,
-      callAttemptNumber: params.metadata.callAttemptNumber,
-      ...getElevenLabsError(error),
+    return response;
+  };
+
+  const placeWithTimeoutRecovery = async (retryCount: number): Promise<ElevenLabsOutboundCallResponse> => {
+    const attemptMetadata: CallMetadata = {
+      ...metadata,
+      callStartRequestId: `${metadata.rowNumber}-${metadata.callAttemptNumber}-${randomUUID()}`,
+    };
+    const body = buildElevenLabsOutboundCallBody({
+      agentId,
+      agentPhoneNumberId,
+      to: params.to,
+      metadata: attemptMetadata,
     });
-    throw error;
-  }
+    const requestStartedAtUnixSecs = Math.floor(Date.now() / 1000);
+
+    try {
+      const response = await elevenLabsClient.post<ElevenLabsOutboundCallResponse>(
+        "/v1/convai/sip-trunk/outbound-call",
+        body,
+      );
+      return finalizeAcceptedCall(response.data, attemptMetadata);
+    } catch (error) {
+      if (!isElevenLabsCallStartTimeout(error)) {
+        logger.error("ElevenLabs outbound call failed", {
+          rowNumber: params.metadata.rowNumber,
+          callAttemptNumber: params.metadata.callAttemptNumber,
+          callStartRequestId: attemptMetadata.callStartRequestId,
+          ...getElevenLabsError(error),
+        });
+        throw error;
+      }
+
+      logger.warn("ElevenLabs outbound call timed out; reconciling provider receipt before any retry", {
+        rowNumber: params.metadata.rowNumber,
+        callAttemptNumber: params.metadata.callAttemptNumber,
+        callStartRequestId: attemptMetadata.callStartRequestId,
+        retryCount,
+      });
+
+      const receipt = await reconcileElevenLabsCallStartTimeout({
+        client: elevenLabsClient,
+        agentId,
+        metadata: attemptMetadata,
+        requestStartedAtUnixSecs,
+      });
+
+      if (receipt?.status === "accepted") {
+        logger.info("Recovered accepted ElevenLabs call receipt after request timeout", {
+          rowNumber: params.metadata.rowNumber,
+          callAttemptNumber: params.metadata.callAttemptNumber,
+          callStartRequestId: attemptMetadata.callStartRequestId,
+          conversationId: receipt.conversationId,
+          conversationStatus: receipt.conversation.status,
+        });
+        return finalizeAcceptedCall(
+          {
+            success: true,
+            conversation_id: receipt.conversationId,
+            message: "Recovered accepted provider receipt after outbound-call request timeout",
+          },
+          attemptMetadata,
+        );
+      }
+
+      if (receipt?.status === "definitive_failure" && retryCount === 0) {
+        const jitterMs =
+          CALL_START_RETRY_JITTER_MIN_MS +
+          Math.floor(Math.random() * (CALL_START_RETRY_JITTER_MAX_MS - CALL_START_RETRY_JITTER_MIN_MS + 1));
+        logger.warn("ElevenLabs receipt proves call was not accepted; retrying once", {
+          rowNumber: params.metadata.rowNumber,
+          callAttemptNumber: params.metadata.callAttemptNumber,
+          callStartRequestId: attemptMetadata.callStartRequestId,
+          failedConversationId: receipt.conversationId,
+          jitterMs,
+        });
+        await delay(jitterMs);
+        return placeWithTimeoutRecovery(1);
+      }
+
+      const message = receipt
+        ? "ElevenLabs call start definitively failed after the single receipt-safe retry"
+        : "ElevenLabs call start delivery is uncertain after timeout; no automatic retry was performed";
+      const recoveryError = new Error(message);
+      logger.error(message, {
+        rowNumber: params.metadata.rowNumber,
+        callAttemptNumber: params.metadata.callAttemptNumber,
+        callStartRequestId: attemptMetadata.callStartRequestId,
+        conversationId: receipt?.conversationId,
+        retryCount,
+      });
+      throw recoveryError;
+    }
+  };
+
+  return placeWithTimeoutRecovery(0);
 }

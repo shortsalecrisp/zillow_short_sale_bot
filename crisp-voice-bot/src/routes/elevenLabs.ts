@@ -127,6 +127,10 @@ function buildVoiceResponseStatus(callResult: string, callbackTime?: string): st
     return "Not interested";
   }
 
+  if (callResult === "deferred_contact") {
+    return "Will follow up when ready";
+  }
+
   if (callResult === "already_working_with_negotiator") {
     return "Already working with negotiator";
   }
@@ -250,6 +254,10 @@ function looksLikeAlreadyHasShortSaleHelp(value: string): boolean {
     /\b(?:already\s+)?(?:have|has|got)\s+(?:someone|somebody)\s+handling\b/.test(text) ||
     /\b(?:someone|somebody)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text)
   );
+}
+
+function looksLikeDeferredContact(value: string): boolean {
+  return normalizedText(value).startsWith("deferred contact:");
 }
 
 function formatCallbackConfirmationTime(callbackTime: string): string {
@@ -676,7 +684,9 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
         callAttemptNumber: payload.callAttemptNumber,
       },
       () => {
-        const callResult = looksLikeDoNotCall(payload.conversationSummary)
+        const callResult = looksLikeDeferredContact(payload.conversationSummary)
+          ? "deferred_contact"
+          : looksLikeDoNotCall(payload.conversationSummary)
           ? "do_not_call"
           : looksLikeNotShortSale(payload.conversationSummary)
           ? "not_short_sale"
@@ -689,7 +699,15 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
           callAttemptNumber: payload.callAttemptNumber,
           callResult,
           responseStatus: buildVoiceResponseStatus(callResult),
-          leadStatusCode: "R",
+          ...(callResult === "deferred_contact" ? {} : { leadStatusCode: "R" }),
+          ...(callResult === "deferred_contact"
+            ? {
+                callbackRequested: "",
+                callbackTime: "",
+                liveTransferRequested: "",
+                liveTransferCompleted: "",
+              }
+            : {}),
           ...(callResult === "do_not_call"
             ? {
                 callbackRequested: "",
@@ -712,8 +730,14 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
 
     res.status(200).json({
       ok: true,
-      intent: looksLikeDoNotCall(payload.conversationSummary) ? "do_not_call" : "not_interested",
-      nextAction: looksLikeDoNotCall(payload.conversationSummary)
+      intent: looksLikeDeferredContact(payload.conversationSummary)
+        ? "deferred_contact"
+        : looksLikeDoNotCall(payload.conversationSummary)
+          ? "do_not_call"
+          : "not_interested",
+      nextAction: looksLikeDeferredContact(payload.conversationSummary)
+        ? "Say exactly: Sounds good. Feel free to reach out when you're ready. Thanks! Then immediately call end_call. Do not ask for a callback time."
+        : looksLikeDoNotCall(payload.conversationSummary)
         ? "Say exactly: Understood. We won't call again. Goodbye. Then immediately call end_call. Do not pitch, ask another question, or wait for another caller response."
         : "Say exactly: Ok, well thanks for letting me know. If anything changes in the future and you're looking for some additional help, please just keep me in mind. Thanks! Then immediately call end_call. Do not wait for another caller response. Do not pitch again. Do not reopen the conversation.",
     });

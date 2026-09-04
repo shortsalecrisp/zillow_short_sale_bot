@@ -265,6 +265,22 @@ test("prompt gives explicit do-not-call requests a non-sales closeout", () => {
   assert.match(branch, /Do not pitch, mention future help, ask another question, offer Yoni/);
 });
 
+test("prompt records self-initiated future contact as deferred without a callback", () => {
+  const prompt = readPrompt();
+  const section = extractSection(
+    prompt,
+    "Self-initiated future contact, before generic not-interested or callback handling:",
+    "If the caller interrupts:",
+  );
+
+  assert.match(section, /I'm gonna get back to you as soon as I can/);
+  assert.match(section, /DEFERRED CONTACT: caller said they will initiate future contact/);
+  assert.match(section, /backend records `deferred_contact`, not a rejection/);
+  assert.match(section, /do not call `callback_requested`/);
+  assert.match(section, /do not create a handoff/);
+  assert.match(section, /call me later/);
+});
+
 test("prompt pitches admins who answer instead of only taking a message", () => {
   const prompt = readPrompt();
   const receptionistBranch = extractSection(

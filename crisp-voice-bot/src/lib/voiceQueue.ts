@@ -403,7 +403,9 @@ async function markVoiceBotAttemptStartFailed(
 async function postStartCall(candidate: VoiceQueueCandidate): Promise<unknown> {
   const url = `${config.baseUrl}/start-call`;
   const response = await axios.post(url, buildStartCallPayload(candidate), {
-    timeout: 45_000,
+    // The provider call may use its full 45-second timeout, perform bounded
+    // receipt reconciliation, and make one receipt-proven safe retry.
+    timeout: 120_000,
     headers: { "Content-Type": "application/json" },
   });
 

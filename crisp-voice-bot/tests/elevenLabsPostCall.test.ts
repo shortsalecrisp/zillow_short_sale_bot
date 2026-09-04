@@ -635,6 +635,38 @@ test("post-call fallback distinguishes a live do-not-call request from generic n
   assert.equal(buildVoiceResponseStatus("do_not_call"), "Do not call");
 });
 
+test("post-call fallback distinguishes self-initiated future contact from callback and rejection", async () => {
+  const {
+    buildVoiceResponseStatus,
+    shouldTreatAsCallback,
+    shouldTreatAsDeferredContact,
+  } = await import("../src/lib/elevenLabsPostCall");
+  const eugeneConversation = {
+    status: "done",
+    analysis: { transcript_summary: "The agent said he would get back to Crisp later." },
+    transcript: [
+      { role: "assistant", message: "Would you like help with the short sale?" },
+      { role: "user", message: "I'm gonna get back to you as soon as I can." },
+      { role: "assistant", tool_calls: [{ tool_name: "not_interested" }] },
+    ],
+  };
+  const requestedCallback = {
+    status: "done",
+    transcript: [{ role: "user", message: "Have Yoni call me later." }],
+  };
+  const hardNo = {
+    status: "done",
+    transcript: [{ role: "user", message: "I'm not interested, but I'll call you if that changes." }],
+  };
+
+  assert.equal(shouldTreatAsDeferredContact(eugeneConversation), true);
+  assert.equal(shouldTreatAsCallback(eugeneConversation), false);
+  assert.equal(buildVoiceResponseStatus("deferred_contact"), "Will follow up when ready");
+  assert.equal(shouldTreatAsDeferredContact(requestedCallback), false);
+  assert.equal(shouldTreatAsCallback(requestedCallback), true);
+  assert.equal(shouldTreatAsDeferredContact(hardNo), false);
+});
+
 test("post-call fallback treats stale initiated conversations with no audio as no-connect", async () => {
   const { shouldRetryUnconnectedConversation, shouldTreatAsUnconnectedInitiatedConversation } = await import(
     "../src/lib/elevenLabsPostCall"

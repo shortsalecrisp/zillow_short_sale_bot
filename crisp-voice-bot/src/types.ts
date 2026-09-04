@@ -32,6 +32,7 @@ export interface CallMetadata {
   dialedPhone: string;
   testMode: boolean;
   callConnectRetryCount?: number;
+  callStartRequestId?: string;
   assistantName?: string;
   voiceVariant?: string;
   voiceName?: string;
