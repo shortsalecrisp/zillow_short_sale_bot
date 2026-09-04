@@ -17,6 +17,10 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+try:
+    from bs4 import BeautifulSoup
+except Exception:  # pragma: no cover - production dependency is declared
+    BeautifulSoup = None
 from fastapi import FastAPI, HTTPException, Request, Response
 from starlette.requests import ClientDisconnect
 
@@ -60,6 +64,18 @@ RENDER_APIFY_TRIGGER_DISABLED = (
 KEEPALIVE_URL = os.getenv("KEEPALIVE_URL")
 KEEPALIVE_PERIOD_SECONDS = int(os.getenv("KEEPALIVE_PERIOD_SECONDS", "300"))
 KEEPALIVE_TIMEOUT_SECONDS = float(os.getenv("KEEPALIVE_TIMEOUT_SECONDS", "8"))
+ZILLOW_DIRECT_DETAIL_FALLBACK_ENABLED = (
+    os.getenv("ZILLOW_DIRECT_DETAIL_FALLBACK_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+ZILLOW_DIRECT_DETAIL_TIMEOUT_SECONDS = float(os.getenv("ZILLOW_DIRECT_DETAIL_TIMEOUT_SECONDS", "15"))
+ZILLOW_DIRECT_DETAIL_MAX_ROWS = max(0, int(os.getenv("ZILLOW_DIRECT_DETAIL_MAX_ROWS", "10")))
+ZILLOW_DIRECT_DETAIL_SLEEP_SECONDS = max(0.0, float(os.getenv("ZILLOW_DIRECT_DETAIL_SLEEP_SECONDS", "0.25")))
+ZILLOW_DIRECT_DETAIL_USER_AGENT = os.getenv(
+    "ZILLOW_DIRECT_DETAIL_USER_AGENT",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+)
 
 # Google Sheets / Replies tab
 GSHEET_ID   = os.environ["GSHEET_ID"]
@@ -408,28 +424,28 @@ def _run_state_detail_task_for_rows(
         if not zpid or zpid in seen_zpids:
             continue
         detail_url = _extra_state_listing_url(row)
-        if not detail_url:
-            continue
         selected_zpids.append(zpid)
-        start_urls.append({"url": detail_url})
+        if detail_url:
+            start_urls.append({"url": detail_url})
         source_by_zpid[zpid] = str(row.get("search_source") or source or "state-search")
         seen_zpids.add(zpid)
 
-    if not start_urls:
+    if not selected_zpids:
         return rows
 
     url = f"https://api.apify.com/v2/actor-tasks/{APIFY_STATE_DETAIL_TASK_ID}/run-sync-get-dataset-items"
     params = {
         "token": APIFY_TOKEN,
-        "limit": len(start_urls),
+        "limit": len(selected_zpids),
         "clean": "true",
         "format": "json",
     }
     payload = {
+        "zpids": selected_zpids,
         "startUrls": start_urls,
         "propertyStatus": "FOR_SALE",
         "extractBuildingUnits": "disabled",
-        "maxConcurrency": min(max(len(start_urls), 1), 10),
+        "maxConcurrency": min(max(len(selected_zpids), 1), 10),
     }
     try:
         resp = requests.post(
@@ -508,6 +524,279 @@ def _run_state_detail_task_for_rows(
     return []
 
 
+def _absolute_zillow_url(value: Any) -> str:
+    url = _text_fragment(value)
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = f"https:{url}"
+    elif url.startswith("/"):
+        url = urllib.parse.urljoin("https://www.zillow.com", url)
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+    if host == "zillow.com" or host.endswith(".zillow.com"):
+        return url
+    return ""
+
+
+def _looks_like_zillow_page_property(value: Dict[str, Any]) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if not value.get("zpid"):
+        return False
+    return any(
+        key in value
+        for key in (
+            "description",
+            "attributionInfo",
+            "contactFormRenderData",
+            "streetAddress",
+            "address",
+            "homeStatus",
+        )
+    )
+
+
+def _collect_zillow_page_property_candidates(value: Any, candidates: List[Dict[str, Any]], *, depth: int = 0) -> None:
+    if depth > 8 or len(candidates) >= 50:
+        return
+    if isinstance(value, dict):
+        property_value = value.get("property")
+        if isinstance(property_value, dict) and _looks_like_zillow_page_property(property_value):
+            candidates.append(property_value)
+        if _looks_like_zillow_page_property(value):
+            candidates.append(value)
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                _collect_zillow_page_property_candidates(child, candidates, depth=depth + 1)
+    elif isinstance(value, list):
+        for child in value[:100]:
+            if isinstance(child, (dict, list)):
+                _collect_zillow_page_property_candidates(child, candidates, depth=depth + 1)
+
+
+def _zillow_page_property_score(candidate: Dict[str, Any], zpid: str) -> int:
+    score = 0
+    candidate_zpid = str(candidate.get("zpid") or "").strip()
+    if zpid and candidate_zpid == zpid:
+        score += 100
+    if extract_description(candidate):
+        score += 20
+    if _extract_agent_name(candidate):
+        score += 10
+    if _format_listing_address(candidate):
+        score += 10
+    if candidate.get("homeStatus") or candidate.get("listingStatus"):
+        score += 5
+    return score
+
+
+def _extract_zillow_page_property(page_html: str, *, zpid: str = "") -> Dict[str, Any]:
+    if not page_html or not BeautifulSoup:
+        return {}
+    try:
+        soup = BeautifulSoup(page_html, "html.parser")
+    except Exception:
+        return {}
+
+    candidates: List[Dict[str, Any]] = []
+    script = soup.find("script", id="__NEXT_DATA__")
+    if script:
+        script_text = script.string or script.get_text() or ""
+        try:
+            next_data = json.loads(script_text)
+        except Exception:
+            next_data = {}
+        if isinstance(next_data, dict):
+            _collect_zillow_page_property_candidates(next_data, candidates)
+            component_props = (
+                ((next_data.get("props") or {}).get("pageProps") or {}).get("componentProps")
+                if isinstance(next_data.get("props"), dict)
+                else None
+            )
+            cache_raw = component_props.get("gdpClientCache") if isinstance(component_props, dict) else None
+            if isinstance(cache_raw, str) and cache_raw.strip():
+                try:
+                    cache_data = json.loads(cache_raw)
+                    _collect_zillow_page_property_candidates(cache_data, candidates)
+                except Exception:
+                    pass
+            elif isinstance(cache_raw, dict):
+                _collect_zillow_page_property_candidates(cache_raw, candidates)
+
+    if not candidates:
+        fallback: Dict[str, Any] = {}
+        description_node = soup.select_one('[data-testid="description"] article')
+        if description_node:
+            description = _text_fragment(description_node.get_text(" ", strip=True))
+            if description:
+                fallback["description"] = description
+        for script_node in soup.find_all("script", {"type": "application/ld+json"}):
+            try:
+                ld_data = json.loads(script_node.string or "")
+            except Exception:
+                continue
+            nodes = ld_data if isinstance(ld_data, list) else [ld_data]
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                offers = node.get("offers") if isinstance(node.get("offers"), dict) else {}
+                offered = offers.get("itemOffered") if isinstance(offers.get("itemOffered"), dict) else {}
+                address = offered.get("address") if isinstance(offered, dict) else None
+                if isinstance(address, dict):
+                    fallback["address"] = {
+                        "streetAddress": address.get("streetAddress"),
+                        "city": address.get("addressLocality"),
+                        "state": address.get("addressRegion"),
+                        "zipcode": address.get("postalCode"),
+                    }
+        if fallback:
+            if zpid:
+                fallback["zpid"] = zpid
+            return fallback
+        return {}
+
+    unique: Dict[str, Dict[str, Any]] = {}
+    for candidate in candidates:
+        candidate_zpid = str(candidate.get("zpid") or "").strip()
+        key = candidate_zpid or str(id(candidate))
+        existing = unique.get(key)
+        if not existing or _zillow_page_property_score(candidate, zpid) > _zillow_page_property_score(existing, zpid):
+            unique[key] = candidate
+    ranked = sorted(unique.values(), key=lambda item: _zillow_page_property_score(item, zpid), reverse=True)
+    if not ranked:
+        return {}
+    best = ranked[0]
+    if zpid and str(best.get("zpid") or "").strip() not in {"", zpid}:
+        return {}
+    return best
+
+
+def _merge_zillow_page_property(row: Dict[str, Any], property_data: Dict[str, Any], *, url: str, source: str) -> Dict[str, Any]:
+    candidate = dict(row)
+    candidate.update(property_data)
+    candidate.setdefault("detailUrl", url)
+    candidate.setdefault("propertyUrl", url)
+    candidate["search_source"] = str(row.get("search_source") or source or "zillow-page-fallback")
+
+    address = property_data.get("address")
+    if isinstance(address, dict):
+        candidate.setdefault("listingAddress", address)
+
+    attribution = property_data.get("attributionInfo") if isinstance(property_data.get("attributionInfo"), dict) else {}
+    agent_name = _text_fragment(attribution.get("agentName") or attribution.get("listingAgentName"))
+    agent_phone = _text_fragment(
+        attribution.get("agentPhoneNumber")
+        or attribution.get("agentPhone")
+        or attribution.get("phoneNumber")
+        or attribution.get("phone")
+    )
+    agent_email = _text_fragment(attribution.get("agentEmail") or attribution.get("email"))
+    if agent_name:
+        candidate.setdefault("agentName", agent_name)
+    if agent_phone:
+        candidate.setdefault("agentPhoneNumber", agent_phone)
+        candidate.setdefault("phoneNumber", agent_phone)
+    if agent_email:
+        candidate.setdefault("agentEmail", agent_email)
+    if agent_name or agent_phone or agent_email:
+        recipient: Dict[str, Any] = {
+            "display_name": agent_name or candidate.get("agentName") or "",
+            "name": agent_name or candidate.get("agentName") or "",
+            "title": "Zillow attribution",
+        }
+        if agent_phone:
+            recipient["phones"] = [{"number": agent_phone, "label": "zillow_attribution"}]
+        if agent_email:
+            recipient["emails"] = [{"email": agent_email, "label": "zillow_attribution"}]
+        candidate.setdefault("contact_recipients", [recipient])
+
+    normalized = _normalize_apify_row(candidate)
+    if isinstance(normalized.get("address"), dict) and not normalized.get("street"):
+        for key, value in _extract_address_fields(normalized).items():
+            if value:
+                normalized[key] = value
+    return normalized
+
+
+def _enrich_rows_with_zillow_page(rows: List[Dict[str, Any]], *, source: str) -> List[Dict[str, Any]]:
+    if not rows or not ZILLOW_DIRECT_DETAIL_FALLBACK_ENABLED or not BeautifulSoup:
+        return rows
+
+    enriched_rows: List[Dict[str, Any]] = []
+    attempted = 0
+    matched = 0
+    skipped = 0
+    failed = 0
+    for row in rows:
+        if not isinstance(row, dict) or _row_has_listing_text(row):
+            enriched_rows.append(row)
+            continue
+        if attempted >= ZILLOW_DIRECT_DETAIL_MAX_ROWS:
+            skipped += 1
+            enriched_rows.append(row)
+            continue
+        detail_url = _absolute_zillow_url(_extra_state_listing_url(row))
+        if not detail_url:
+            skipped += 1
+            enriched_rows.append(row)
+            continue
+
+        attempted += 1
+        zpid = str(row.get("zpid") or "").strip()
+        try:
+            resp = requests.get(
+                detail_url,
+                headers={
+                    "User-Agent": ZILLOW_DIRECT_DETAIL_USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                timeout=ZILLOW_DIRECT_DETAIL_TIMEOUT_SECONDS,
+            )
+            resp.raise_for_status()
+            property_data = _extract_zillow_page_property(resp.text, zpid=zpid)
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "zillow-page-fallback: fetch failed source=%s zpid=%s err=%s",
+                source,
+                zpid,
+                _format_request_exception(exc) if isinstance(exc, requests.RequestException) else str(exc)[:200],
+            )
+            enriched_rows.append(row)
+            continue
+
+        if not property_data:
+            failed += 1
+            logger.warning("zillow-page-fallback: no property data source=%s zpid=%s", source, zpid)
+            enriched_rows.append(row)
+            continue
+
+        enriched = _merge_zillow_page_property(row, property_data, url=detail_url, source=source)
+        if _row_has_listing_text(enriched):
+            matched += 1
+            enriched_rows.append(enriched)
+        else:
+            failed += 1
+            enriched_rows.append(row)
+
+        if ZILLOW_DIRECT_DETAIL_SLEEP_SECONDS and attempted < ZILLOW_DIRECT_DETAIL_MAX_ROWS:
+            time.sleep(ZILLOW_DIRECT_DETAIL_SLEEP_SECONDS)
+
+    if attempted or skipped or failed:
+        log = logger.info if matched else logger.warning
+        log(
+            "zillow-page-fallback: source=%s attempted=%d matched=%d failed=%d skipped=%d",
+            source,
+            attempted,
+            matched,
+            failed,
+            skipped,
+        )
+    return enriched_rows
+
+
 def _enrich_rows_with_detail_task(
     rows: List[Dict[str, Any]],
     *,
@@ -515,6 +804,7 @@ def _enrich_rows_with_detail_task(
 ) -> List[Dict[str, Any]]:
     if not rows:
         return []
+    rows = _enrich_rows_with_zillow_page(rows, source=source)
     missing_detail = [
         row
         for row in rows
@@ -529,9 +819,9 @@ def _enrich_rows_with_detail_task(
         len(missing_detail),
         len(rows),
     )
-    enriched_rows = _run_state_detail_task_for_rows(rows, source=source)
+    enriched_rows = _run_state_detail_task_for_rows(missing_detail, source=source)
     if enriched_rows:
-        return enriched_rows
+        return _merge_rows_by_zpid(rows, enriched_rows)
 
     logger.warning(
         "apify-hook: detail enrichment returned no rows source=%s missing_detail=%d; retaining originals for hold/retry",

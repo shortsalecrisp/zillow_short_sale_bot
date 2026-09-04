@@ -19,6 +19,7 @@ os.environ.setdefault("GOOGLE_CX", "test")
 os.environ.setdefault("GSHEET_ID", "test_sheet")
 os.environ.setdefault("GCP_SERVICE_ACCOUNT_JSON", "{}")
 os.environ.setdefault("SMS_GATEWAY_API_KEY", "dummy")
+os.environ.setdefault("ZILLOW_DIRECT_DETAIL_FALLBACK_ENABLED", "false")
 
 
 class _WorksheetNotFound(Exception):
@@ -1266,7 +1267,152 @@ def test_state_detail_task_uses_listing_urls(monkeypatch):
     assert captured["json"]["startUrls"] == [
         {"url": "https://www.zillow.com/homedetails/mi-1_zpid/"}
     ]
-    assert "zpids" not in captured["json"]
+    assert captured["json"]["zpids"] == ["mi-1"]
+
+
+def test_state_detail_task_can_use_zpid_when_listing_url_missing(monkeypatch):
+    captured = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {
+                    "zpid": "mi-1",
+                    "address": "1 Main St, Detroit, MI 48201",
+                    "state": "MI",
+                    "description": "Short sale subject to lender approval.",
+                }
+            ]
+
+    def fake_post(url, params, json, timeout):
+        captured["json"] = json
+        return _Response()
+
+    monkeypatch.setattr(webhook_server, "APIFY_TOKEN", "token")
+    monkeypatch.setattr(webhook_server, "APIFY_STATE_DETAIL_TASK_ID", "detail-task")
+    monkeypatch.setattr(webhook_server.requests, "post", fake_post)
+
+    rows = webhook_server._run_state_detail_task_for_rows(
+        [
+            {
+                "zpid": "mi-1",
+                "address": "1 Main St, Detroit, MI 48201",
+                "search_source": "mi",
+            }
+        ]
+    )
+
+    assert rows[0]["description"] == "Short sale subject to lender approval."
+    assert captured["json"]["zpids"] == ["mi-1"]
+    assert captured["json"]["startUrls"] == []
+
+
+def test_zillow_page_fallback_enriches_listing_details(monkeypatch):
+    property_payload = {
+        "property": {
+            "zpid": 13021414,
+            "description": "Short sale subject to lender approval.",
+            "address": {
+                "streetAddress": "1657 Kingston Street",
+                "city": "Aurora",
+                "state": "CO",
+                "zipcode": "80010",
+            },
+            "homeStatus": "FOR_SALE",
+            "attributionInfo": {
+                "agentName": "Dale Gibbs",
+                "agentPhoneNumber": "720-645-0660",
+                "agentEmail": "dale@example.com",
+                "brokerName": "Pristine Homes of Colorado LLC",
+            },
+        }
+    }
+    cache = {
+        'ForSalePriorityQuery{"zpid":13021414}': property_payload,
+    }
+    next_data = {
+        "props": {
+            "pageProps": {
+                "componentProps": {
+                    "gdpClientCache": json.dumps(cache),
+                }
+            }
+        }
+    }
+    html = (
+        "<html><head></head><body>"
+        f"<script id=\"__NEXT_DATA__\" type=\"application/json\">{json.dumps(next_data)}</script>"
+        "</body></html>"
+    )
+
+    class _Response:
+        text = html
+
+        def raise_for_status(self):
+            return None
+
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, headers, timeout))
+        return _Response()
+
+    monkeypatch.setattr(webhook_server, "ZILLOW_DIRECT_DETAIL_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(webhook_server, "ZILLOW_DIRECT_DETAIL_SLEEP_SECONDS", 0)
+    monkeypatch.setattr(webhook_server.requests, "get", fake_get)
+
+    rows = webhook_server._enrich_rows_with_zillow_page(
+        [
+            {
+                "zpid": "13021414",
+                "propertyUrl": "https://www.zillow.com/homedetails/1657-Kingston-St-Aurora-CO-80010/13021414_zpid/",
+                "search_source": "payload.listings",
+            }
+        ],
+        source="payload.listings",
+    )
+
+    assert len(calls) == 1
+    assert rows[0]["listing_description"] == "Short sale subject to lender approval."
+    assert rows[0]["agentName"] == "Dale Gibbs"
+    assert rows[0]["phoneNumber"] == "720-645-0660"
+    assert rows[0]["agentEmail"] == "dale@example.com"
+    assert rows[0]["street"] == "1657 Kingston Street"
+    assert rows[0]["city"] == "Aurora"
+    assert rows[0]["state"] == "CO"
+    assert rows[0]["zip"] == "80010"
+    assert rows[0]["contact_recipients"][0]["phones"][0]["number"] == "720-645-0660"
+
+
+def test_detail_enrichment_skips_apify_when_zillow_page_fallback_succeeds(monkeypatch):
+    fallback_row = {
+        "zpid": "13021414",
+        "propertyUrl": "https://www.zillow.com/homedetails/1657-Kingston-St-Aurora-CO-80010/13021414_zpid/",
+        "description": "Short sale subject to lender approval.",
+        "agentName": "Dale Gibbs",
+    }
+
+    monkeypatch.setattr(webhook_server, "_enrich_rows_with_zillow_page", lambda rows, *, source: [fallback_row])
+    monkeypatch.setattr(
+        webhook_server,
+        "_run_state_detail_task_for_rows",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Apify detail should not run")),
+    )
+
+    rows = webhook_server._enrich_rows_with_detail_task(
+        [
+            {
+                "zpid": "13021414",
+                "propertyUrl": "https://www.zillow.com/homedetails/1657-Kingston-St-Aurora-CO-80010/13021414_zpid/",
+            }
+        ],
+        source="payload.listings",
+    )
+
+    assert rows == [fallback_row]
 
 
 def test_state_detail_task_failure_does_not_return_search_only_rows(monkeypatch):
