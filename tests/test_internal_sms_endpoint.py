@@ -1460,6 +1460,22 @@ def test_sms_fee_and_recent_closing_count_are_answered_without_handoff(monkeypat
     assert "confident I can get your deal closed" in decision["reply_text"]
 
 
+def test_sms_generic_how_it_works_and_fee_are_answered_together(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    decision = module._sms_fast_decision({}, "Hi how does it work ? Who pays you ?")
+
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert "lender-side paperwork" in decision["reply_text"]
+    assert "buyer" in decision["reply_text"].lower()
+    assert "flat fee" in decision["reply_text"].lower()
+    assert decision["reason"] == "Answered a bounded two-question inbound message"
+
+
 def test_sms_experience_questions_share_the_approved_response(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

@@ -2128,7 +2128,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
     documents: /\bwho\s+(?:collects?|gathers?|gets?|organizes?|handles?)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t) ||
       /\b(?:do|will|would|can|could)\s+you\s+(?:collect|gather|get|organize|handle)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t) ||
       /\bwho\s+is\s+responsible\s+for\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t),
-    help: /\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does this work|how does that work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|do))\b/.test(t),
+    help: /\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does (?:this|that|it) work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|do))\b/.test(t),
     local: isLocalQuestionSignal_(t),
     company: isCompanyIdentityQuestionSignal_(t),
     website: isWebsiteReviewsRequestSignal_(t),
@@ -2973,7 +2973,7 @@ function applyFastRules_(text, rowObj) {
     /\bwhat do you do\b/,
     /\bwhat exactly do you do\b/,
     /\bwhat do you handle\b/,
-    /\bhow does this work\b/,
+    /\bhow does (?:this|that|it) work\b/,
     /\bhow does that work\b/,
     /\bwhat does that look like\b/,
     /\bwhat are you offering\b/,
@@ -6637,6 +6637,16 @@ function testApprovedLeadIntelligenceRules_() {
   if (isExperienceTrackRecordQuestionSignal_("What is your success rate and average closing timeline?") ||
       !isStatsOrNumericClaimQuestion_("What is your success rate and average closing timeline?")) {
     throw new Error("Unsupported performance-stat question must still hand off");
+  }
+  const genericHowItWorksAndFee = buildPriorityQuestionDecisionV3_("Hi how does it work ? Who pays you ?", {}, "");
+  if (!genericHowItWorksAndFee ||
+      genericHowItWorksAndFee.handoff_needed ||
+      genericHowItWorksAndFee.block_reply ||
+      genericHowItWorksAndFee.reply_text.indexOf("lender-side paperwork") === -1 ||
+      genericHowItWorksAndFee.reply_text.toLowerCase().indexOf("buyer") === -1 ||
+      genericHowItWorksAndFee.reply_text.toLowerCase().indexOf("flat fee") === -1 ||
+      genericHowItWorksAndFee.reason !== "Answered a bounded two-question inbound message") {
+    throw new Error("Generic how-it-works plus fee regression: " + JSON.stringify(genericHowItWorksAndFee));
   }
   const timelineQuestion = "What is the minimum time to stop foreclosure?";
   const timelineDecision = applyFastRules_(timelineQuestion, {});

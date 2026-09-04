@@ -5290,7 +5290,7 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
             r"|\bwho\s+is\s+responsible\s+for\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b",
             text,
         )),
-        "help": bool(re.search(r"\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does (?:this|that) work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|offer|do))\b", text)),
+        "help": bool(re.search(r"\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does (?:this|that|it) work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|offer|do))\b", text)),
         "local": bool(re.search(r"\b(?:are you local|where are you located|where r u located|where are you based|based in)\b", text)),
         "company": _sms_is_company_identity_question(text),
         "website": bool(re.search(r"\b(?:website|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?)\b", text)),
@@ -5830,7 +5830,7 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             reason="Answered differentiation and communication question; hot-lead alert requested",
         )
 
-    if re.search(r"\b(how do you help|how can you help|what do you do|how does this work|what kind of help)\b", t):
+    if re.search(r"\b(how do you help|how can you help|what do you do|how does (?:this|that|it) work|what kind of help)\b", t):
         return _sms_decision(
             reply_text=(
                 "I handle the lender side of the short sale, including the paperwork, calls, follow-up, and negotiations through approval. "
