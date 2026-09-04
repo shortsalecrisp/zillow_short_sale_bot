@@ -959,6 +959,110 @@ def test_payload_listing_selection_normalizes_current_schema_before_enqueue(monk
     assert selected["listing_description"].startswith("Short Sale")
 
 
+def test_payload_webhook_enriches_search_only_rows_before_queue_and_seen(monkeypatch):
+    detail_calls = []
+    enqueued = []
+    seen_batches = []
+
+    search_only_row = {
+        "zpid": "main-search-only",
+        "detailUrl": "https://www.zillow.com/homedetails/main-search-only_zpid/",
+        "address": "38 Jackson Avenue, North Plainfield, NJ 07060",
+        "street": "38 Jackson Avenue",
+        "city": "North Plainfield",
+        "state": "NJ",
+        "listingStatus": "forSale",
+    }
+
+    def fake_detail(rows, *, source="state-search"):
+        detail_calls.append((source, [str(row.get("zpid")) for row in rows]))
+        return [
+            {
+                **row,
+                "agentName": "Detail Agent",
+                "description": "Short sale subject to lender approval.",
+            }
+            for row in rows
+        ]
+
+    def fake_enqueue(rows, source):
+        enqueued.extend((source, dict(row)) for row in rows)
+        return len(rows)
+
+    monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", fake_detail)
+    monkeypatch.setattr(webhook_server, "_start_extra_state_rows", lambda payload: 0)
+    monkeypatch.setattr(webhook_server, "_start_apify_coverage_backstop", lambda run_time: None)
+    monkeypatch.setattr(webhook_server, "_within_initial_hours", lambda now: True)
+    monkeypatch.setattr(webhook_server, "_drain_deferred_rows", lambda: [])
+    monkeypatch.setattr(webhook_server, "_process_pending_queue", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        webhook_server,
+        "append_seen_zpids",
+        lambda zpids: seen_batches.append([str(zpid) for zpid in zpids]),
+    )
+    monkeypatch.setattr(webhook_server, "_enqueue_pending_rows", fake_enqueue)
+    monkeypatch.setattr(webhook_server, "APIFY_MAX_ITEMS", 5)
+    webhook_server.EXPORTED_ZPIDS.clear()
+
+    result = asyncio.run(
+        webhook_server.apify_hook(
+            _FakeRequest({"listings": [search_only_row], "upstreamDatasetId": "dataset-1"})
+        )
+    )
+
+    assert result["status"] == "processed"
+    assert detail_calls == [("payload.listings", ["main-search-only"])]
+    assert enqueued[0][0] == "payload.listings"
+    assert enqueued[0][1]["description"] == "Short sale subject to lender approval."
+    assert seen_batches == [["main-search-only"]]
+
+
+def test_payload_webhook_holds_rows_when_detail_text_is_unavailable(monkeypatch):
+    enqueued = []
+    seen_batches = []
+
+    search_only_row = {
+        "zpid": "main-missing-detail",
+        "detailUrl": "https://www.zillow.com/homedetails/main-missing-detail_zpid/",
+        "address": "544 Pine Grove Rd, Gardners, PA 17324",
+        "street": "544 Pine Grove Rd",
+        "city": "Gardners",
+        "state": "PA",
+        "listingStatus": "forSale",
+    }
+
+    monkeypatch.setattr(webhook_server, "load_seen_zpids", lambda: set())
+    monkeypatch.setattr(webhook_server, "_run_state_detail_task_for_rows", lambda rows, **kwargs: [])
+    monkeypatch.setattr(webhook_server, "_start_extra_state_rows", lambda payload: 0)
+    monkeypatch.setattr(webhook_server, "_start_apify_coverage_backstop", lambda run_time: None)
+    monkeypatch.setattr(webhook_server, "_within_initial_hours", lambda now: True)
+    monkeypatch.setattr(webhook_server, "_drain_deferred_rows", lambda: [])
+    monkeypatch.setattr(
+        webhook_server,
+        "_process_pending_queue",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("held rows should not process")),
+    )
+    monkeypatch.setattr(
+        webhook_server,
+        "append_seen_zpids",
+        lambda zpids: seen_batches.append([str(zpid) for zpid in zpids]),
+    )
+    monkeypatch.setattr(webhook_server, "_enqueue_pending_rows", lambda rows, source: enqueued.extend(rows))
+    monkeypatch.setattr(webhook_server, "APIFY_MAX_ITEMS", 5)
+    webhook_server.EXPORTED_ZPIDS.clear()
+
+    result = asyncio.run(
+        webhook_server.apify_hook(
+            _FakeRequest({"listings": [search_only_row], "upstreamDatasetId": "dataset-1"})
+        )
+    )
+
+    assert result == {"status": "held_missing_listing_text", "rows": 0, "held_missing_text": 1}
+    assert enqueued == []
+    assert seen_batches == []
+
+
 def test_state_search_queue_payload_uses_street_only_sms_address():
     row = {
         "zpid": "hi-1",

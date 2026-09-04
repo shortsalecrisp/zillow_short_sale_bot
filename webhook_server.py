@@ -375,7 +375,11 @@ def _prioritize_extra_state_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, A
     ]
 
 
-def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _run_state_detail_task_for_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    source: str = "state-search",
+) -> List[Dict[str, Any]]:
     if not rows:
         return []
     if not APIFY_TOKEN:
@@ -400,7 +404,7 @@ def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str
             continue
         selected_zpids.append(zpid)
         start_urls.append({"url": detail_url})
-        source_by_zpid[zpid] = str(row.get("search_source") or "state-search")
+        source_by_zpid[zpid] = str(row.get("search_source") or source or "state-search")
         seen_zpids.add(zpid)
 
     if not start_urls:
@@ -494,6 +498,39 @@ def _run_state_detail_task_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str
     except ValueError:
         logger.warning("state-search: detail_task_id=%s invalid_json", APIFY_STATE_DETAIL_TASK_ID)
     return []
+
+
+def _enrich_rows_with_detail_task(
+    rows: List[Dict[str, Any]],
+    *,
+    source: str,
+) -> List[Dict[str, Any]]:
+    if not rows:
+        return []
+    missing_detail = [
+        row
+        for row in rows
+        if isinstance(row, dict) and not _row_has_detail_marker(row)
+    ]
+    if not missing_detail:
+        return rows
+
+    logger.info(
+        "apify-hook: detail enrichment requested source=%s missing_detail=%d total=%d",
+        source,
+        len(missing_detail),
+        len(rows),
+    )
+    enriched_rows = _run_state_detail_task_for_rows(rows, source=source)
+    if enriched_rows:
+        return enriched_rows
+
+    logger.warning(
+        "apify-hook: detail enrichment returned no rows source=%s missing_detail=%d; retaining originals for hold/retry",
+        source,
+        len(missing_detail),
+    )
+    return rows
 
 
 def _run_apify_search_task_sync_dataset_items(
@@ -2363,6 +2400,7 @@ def _process_incoming_rows(
     skip_seen_append: bool = False,
     allow_deferred_drain: bool = True,
     skip_enqueue: bool = False,
+    require_listing_text_before_seen: bool = False,
 ) -> Dict[str, Any]:
     normalized_rows = [_normalize_apify_row(row) if isinstance(row, dict) else row for row in rows]
     normalized_rows = _prefer_detail_rows(normalized_rows)
@@ -2389,20 +2427,44 @@ def _process_incoming_rows(
         logger.info("apify-hook: no fresh rows to process (all zpids already seen)")
         return {"status": "no new rows"}
 
-    missing_text = 0
+    rows_missing_text: List[Dict[str, Any]] = []
     for row in db_filtered:
         if not _row_has_listing_text(row):
-            missing_text += 1
+            rows_missing_text.append(row)
             logger.warning(
                 "apify-hook: listing text missing for zpid=%s keys=%s",
                 row.get("zpid"),
                 list(row.keys()),
             )
-    if missing_text:
-        logger.warning(
-            "apify-hook: %d rows missing listing text; continuing to allow RapidAPI enrichment",
-            missing_text,
-        )
+    if rows_missing_text:
+        if require_listing_text_before_seen:
+            held_zpids = [
+                str(row.get("zpid", "")).strip()
+                for row in rows_missing_text
+                if str(row.get("zpid", "")).strip()
+            ]
+            held_ids = set(held_zpids)
+            db_filtered = [
+                row
+                for row in db_filtered
+                if str(row.get("zpid", "")).strip() not in held_ids and _row_has_listing_text(row)
+            ]
+            logger.warning(
+                "apify-hook: holding %d rows missing listing text; not enqueued and not marked seen zpids=%s",
+                len(rows_missing_text),
+                held_zpids,
+            )
+            if not db_filtered:
+                return {
+                    "status": "held_missing_listing_text",
+                    "rows": 0,
+                    "held_missing_text": len(rows_missing_text),
+                }
+        else:
+            logger.warning(
+                "apify-hook: %d rows missing listing text; continuing to allow RapidAPI enrichment",
+                len(rows_missing_text),
+            )
 
     if APIFY_MAX_ITEMS:
         original_count = len(db_filtered)
@@ -2434,6 +2496,7 @@ def _process_incoming_rows(
                 skip_seen_append=False,
                 allow_deferred_drain=False,
                 skip_enqueue=False,
+                require_listing_text_before_seen=False,
             )
     if not _within_initial_hours(now):
         deferred = _defer_rows(db_filtered)
@@ -6878,9 +6941,8 @@ async def apify_hook(request: Request):
             logger.info("apify-hook: selected zpids=%s", selection["selected_zpids"])
         if selection.get("selected_addresses"):
             logger.info("apify-hook: selected addresses=%s", selection["selected_addresses"])
-        rows = selection["rows"]
         row_source = "payload.listings"
-        _enqueue_pending_rows(rows, source=row_source)
+        rows = _enrich_rows_with_detail_task(selection["rows"], source=row_source)
         _start_extra_state_rows(payload)
         _start_apify_coverage_backstop(datetime.now(tz=SCHEDULER_TZ))
 
@@ -6999,7 +7061,8 @@ async def apify_hook(request: Request):
         source=row_source,
         skip_seen_dedupe=payload_listings is not None,
         skip_seen_append=False,
-        skip_enqueue=payload_listings is not None,
+        skip_enqueue=False,
+        require_listing_text_before_seen=payload_listings is not None,
     )
 
 
