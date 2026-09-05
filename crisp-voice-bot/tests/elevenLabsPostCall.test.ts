@@ -69,6 +69,53 @@ const danielConversation = {
   ],
 } as const;
 
+const cinthiaFullMailboxConversation = {
+  status: "done",
+  metadata: {
+    termination_reason: "Client disconnected: 1000",
+    call_duration_secs: 22,
+  },
+  analysis: {
+    transcript_summary:
+      "The agent, Finn from Crisp Short Sales, attempted to contact the user regarding a short sale listing. The call went to voicemail, which indicated the user was unavailable. However, the voicemail system then stated that the mailbox was full and could not accept any messages, ending the call without the agent being able to leave a message.",
+  },
+  transcript: [
+    { role: "agent", message: "Hi, this is Finn with Crisp Short Sales. I'm calling about your short sale listing." },
+    {
+      role: "user",
+      message:
+        "... not able to take your call right now. Please leave me a message and I will get back to you. Hola, se ha comunicado con Cynthia Martínez. Ahorita no está disponible para recibir su llamada. Por favor, de-dejar un mensaje. Gracias. The mailbox is full and cannot accept any messages at this time. Goodbye.",
+    },
+  ],
+} as const;
+
+const summerVoicemailConversation = {
+  status: "done",
+  metadata: {
+    termination_reason: "voicemail_detection tool was called.",
+    call_duration_secs: 43,
+    features_usage: { voicemail_detection: { used: true } },
+  },
+  analysis: {
+    transcript_summary:
+      "The agent, Maya from Crisp Short Sales, attempted to discuss a short sale listing. Upon encountering an automated voicemail greeting, the agent left a detailed message.",
+  },
+  transcript: [
+    { role: "agent", message: "Hi, this is Maya with Crisp Short Sales. I'm calling about your short sale listing." },
+    {
+      role: "user",
+      message:
+        "So your message is very important to me. Leave your name, number, and a brief message, and I'll get back to you shortly. Have a great day.",
+    },
+    {
+      role: "agent",
+      message:
+        "Hi, this is Maya with Crisp Short Sales calling about the short sale listing at Ninety Five Oh Six One Waikalani. We specialize in helping agents with the short sale process and can handle the paperwork, phone calls, and the whole process with the lender to take that work off your shoulders. Yoni is our short sale specialist, and he can answer any questions you have. Give him a call back at 404-300-9526 when you get a chance. Thanks.",
+      tool_calls: [{ tool_name: "voicemail_detection" }],
+    },
+  ],
+} as const;
+
 const parvanehGatekeeperHoldConversation = {
   status: "done",
   metadata: {
@@ -665,6 +712,13 @@ test("post-call fallback distinguishes self-initiated future contact from callba
   assert.equal(shouldTreatAsDeferredContact(requestedCallback), false);
   assert.equal(shouldTreatAsCallback(requestedCallback), true);
   assert.equal(shouldTreatAsDeferredContact(hardNo), false);
+});
+
+test("post-call fallback gives Cinthia and Summer voicemail evidence precedence over automated callback wording", async () => {
+  const { shouldTreatAsDeferredContact } = await import("../src/lib/elevenLabsPostCall");
+
+  assert.equal(shouldTreatAsDeferredContact(cinthiaFullMailboxConversation), false);
+  assert.equal(shouldTreatAsDeferredContact(summerVoicemailConversation), false);
 });
 
 test("post-call fallback treats stale initiated conversations with no audio as no-connect", async () => {

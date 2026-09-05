@@ -435,7 +435,12 @@ export function shouldTreatAsCallback(conversation: ElevenLabsConversation): boo
 }
 
 export function shouldTreatAsDeferredContact(conversation: ElevenLabsConversation): boolean {
-  if (shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsDoNotCall(conversation)) {
+  if (
+    shouldTreatAsRecordingArtifact(conversation) ||
+    shouldTreatAsDoNotCall(conversation) ||
+    shouldTreatAsVoicemail(conversation) ||
+    hasDeliveredVoicemailMessage(conversation)
+  ) {
     return false;
   }
 
