@@ -1624,6 +1624,15 @@ def test_sms_covered_but_relationship_open_closes_as_non_hot_without_handoff(mon
     assert common_typo["handoff_needed"] is False
     assert common_typo["call_booking_status"] == "warm_future_interest"
 
+    brian_exact = module._sms_fast_decision(
+        {},
+        "Thank you for reaching out. I have an attorney that handles that for me now but I will hold on to your information in case something changes.",
+    )
+    assert brian_exact["lead_status"] == "O"
+    assert brian_exact["conversation_done"] is True
+    assert brian_exact["handoff_needed"] is False
+    assert brian_exact["call_booking_status"] == "warm_future_interest"
+
     network_add = module._sms_fast_decision(
         row,
         "Sounds good! I'll add you to my network",
@@ -1646,6 +1655,17 @@ def test_sms_covered_but_relationship_open_closes_as_non_hot_without_handoff(mon
     assert module._sms_is_relationship_only_after_existing_coverage(
         "Can you call me about the next short sale?", row
     ) is False
+
+
+def test_sms_exact_final_courtesy_does_not_reopen_closed_conversation(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    assert module._sms_is_final_courtesy("Will do. Thanks for reaching out.") is True
+    assert module._sms_is_substantive_followup("Will do. Thanks for reaching out.") is False
+    assert module._sms_is_final_courtesy("Will do. Thanks for reaching out. Can you send your website?") is False
 
 
 @pytest.mark.parametrize(

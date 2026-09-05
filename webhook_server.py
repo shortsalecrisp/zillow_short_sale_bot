@@ -4452,6 +4452,7 @@ def _sms_is_final_courtesy(value: Any) -> bool:
         "will do",
         "will do thank you",
         "will do thanks",
+        "will do thanks for reaching out",
         "sounds good",
         "sounds good thank you",
         "sounds good thanks",
@@ -4524,7 +4525,7 @@ def _sms_has_previously_covered_context(row_obj: Dict[str, str]) -> bool:
     combined = _sms_normalize_whitespace(" ".join(part for part in parts if part)).lower()
     return bool(
         re.search(
-            r"\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b"
+            r"\b(?:already (?:have|has|working with|represented)|have (?:an? |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b"
             r"|\balready represented\b|\balready handled\b",
             combined,
         )
@@ -4535,7 +4536,7 @@ def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[
     text = _sms_normalize_whitespace(value).lower()
     current_coverage = bool(
         re.search(
-            r"\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b"
+            r"\b(?:already (?:have|has|working with|represented)|have (?:an? |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b"
             r"|\b(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b"
             r"|\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+(?:currently\s+)?working\s+with\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\b",
             text,
@@ -4546,9 +4547,9 @@ def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[
     ):
         return False
     patterns = [
-        r"\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b",
+        r"\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold(?:\s+on\s+to|\s+onto))\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b",
         r"\b(?:i|we)(?:['\u2019]?ll| will)\s+add\s+(?:you|your\s+(?:info|information|contact|number|details))\s+to\s+(?:my|our)\s+network\b",
-        r"\b(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b",
+        r"\b(?:keep|save|hold(?:\s+on\s+to|\s+onto))\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b",
         r"\bkeep\s+(?:me|us)\s+in\s+mind\b",
         r"\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b",
     ]

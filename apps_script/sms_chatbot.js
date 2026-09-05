@@ -3552,6 +3552,7 @@ function isFinalCourtesyReply_(text) {
     /^will do$/,
     /^will do thank you$/,
     /^will do thanks$/,
+    /^will do thanks for reaching out$/,
     /^sounds good$/,
     /^sounds good thank you$/,
     /^sounds good thanks$/,
@@ -3630,22 +3631,22 @@ function hasPreviouslyCoveredContext_(rowObj) {
     if (entry && entry.role === "agent") parts.push(entry.text || "");
   });
   const combined = normalizeWhitespace_(String(parts.filter(Boolean).join(" ")).toLowerCase());
-  return /\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b/.test(combined) ||
+  return /\b(?:already (?:have|has|working with|represented)|have (?:an? |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b/.test(combined) ||
     /\balready represented\b|\balready handled\b/.test(combined);
 }
 
 function isRelationshipOnlyAfterExistingCoverageSignal_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  const currentCoverage = /\b(?:already (?:have|has|working with|represented)|have (?:a |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b/.test(t) ||
+  const currentCoverage = /\b(?:already (?:have|has|working with|represented)|have (?:an? |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b/.test(t) ||
     /\b(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b/.test(t) ||
     /\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+(?:currently\s+)?working\s+with\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\b/.test(t);
   if (!t || isSubstantiveFollowupSignal_(t) || (!hasPreviouslyCoveredContext_(rowObj) && !currentCoverage)) {
     return false;
   }
   const passiveRelationshipPatterns = [
-    /\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b/,
+    /\b(?:i|we)(?:['\u2019]?ll| will)\s+(?:keep|save|hold(?:\s+on\s+to|\s+onto))\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b/,
     /\b(?:i|we)(?:['\u2019]?ll| will)\s+add\s+(?:you|your\s+(?:info|information|contact|number|details))\s+to\s+(?:my|our)\s+network\b/,
-    /\b(?:keep|save|hold onto)\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b/,
+    /\b(?:keep|save|hold(?:\s+on\s+to|\s+onto))\s+(?:your|ur|you)\s+(?:info|information|contact|number|details)\b/,
     /\bkeep\s+(?:me|us)\s+in\s+mind\b/,
     /\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b/
   ];
@@ -6910,7 +6911,8 @@ function testApprovedLeadIntelligenceRules_() {
   if (!isClearNoSignal_("Thank you I think I have an under control")) {
     throw new Error("Under-control voice typo must be recognized as a clear closeout");
   }
-  if (!isFinalCourtesyReply_("Will do 👍") || !isFinalCourtesyReply_("Sounds good! 👍") || !isFinalCourtesyReply_("Thanks 👍")) {
+  if (!isFinalCourtesyReply_("Will do 👍") || !isFinalCourtesyReply_("Sounds good! 👍") || !isFinalCourtesyReply_("Thanks 👍") ||
+      !isFinalCourtesyReply_("Will do. Thanks for reaching out.")) {
     throw new Error("Closed-conversation courtesy acknowledgment regression");
   }
   if (isFinalCourtesyReply_("Will do, can you send the website?")) {
