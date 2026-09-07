@@ -41,7 +41,9 @@ def test_apps_script_relationship_only_rule_closes_as_o_without_handoff():
 
 def test_apps_script_exact_final_courtesy_stays_closed_without_masking_questions():
     assert 'isFinalCourtesyReply_("Will do. Thanks for reaching out.")' in CHATBOT
+    assert 'isFinalCourtesyReply_("Will do, and thank you!")' in CHATBOT
     assert 'isFinalCourtesyReply_("Will do, can you send the website?")' in CHATBOT
+    assert 'isFinalCourtesyReply_("Will do, and can you send the website?")' in CHATBOT
 
 
 def test_apps_script_future_buyer_recontact_closes_warm_without_takeover():

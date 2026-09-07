@@ -4452,6 +4452,8 @@ def _sms_is_final_courtesy(value: Any) -> bool:
         "will do",
         "will do thank you",
         "will do thanks",
+        "will do and thank you",
+        "will do and thanks",
         "will do thanks for reaching out",
         "sounds good",
         "sounds good thank you",

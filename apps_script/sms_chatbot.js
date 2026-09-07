@@ -3561,6 +3561,8 @@ function isFinalCourtesyReply_(text) {
     /^will do$/,
     /^will do thank you$/,
     /^will do thanks$/,
+    /^will do and thank you$/,
+    /^will do and thanks$/,
     /^will do thanks for reaching out$/,
     /^sounds good$/,
     /^sounds good thank you$/,
@@ -7028,10 +7030,11 @@ function testApprovedLeadIntelligenceRules_() {
     throw new Error("Under-control voice typo must be recognized as a clear closeout");
   }
   if (!isFinalCourtesyReply_("Will do 👍") || !isFinalCourtesyReply_("Sounds good! 👍") || !isFinalCourtesyReply_("Thanks 👍") ||
-      !isFinalCourtesyReply_("Will do. Thanks for reaching out.")) {
+      !isFinalCourtesyReply_("Will do. Thanks for reaching out.") || !isFinalCourtesyReply_("Will do, and thank you!")) {
     throw new Error("Closed-conversation courtesy acknowledgment regression");
   }
-  if (isFinalCourtesyReply_("Will do, can you send the website?")) {
+  if (isFinalCourtesyReply_("Will do, can you send the website?") ||
+      isFinalCourtesyReply_("Will do, and can you send the website?")) {
     throw new Error("Substantive follow-up must not be treated as final courtesy");
   }
   const reactionTarget = getStandardNoCloseoutReply_();

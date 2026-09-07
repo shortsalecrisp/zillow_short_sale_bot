@@ -1664,8 +1664,10 @@ def test_sms_exact_final_courtesy_does_not_reopen_closed_conversation(monkeypatc
     )
 
     assert module._sms_is_final_courtesy("Will do. Thanks for reaching out.") is True
+    assert module._sms_is_final_courtesy("Will do, and thank you!") is True
     assert module._sms_is_substantive_followup("Will do. Thanks for reaching out.") is False
     assert module._sms_is_final_courtesy("Will do. Thanks for reaching out. Can you send your website?") is False
+    assert module._sms_is_final_courtesy("Will do, and can you send the website?") is False
 
 
 @pytest.mark.parametrize(
@@ -2421,6 +2423,16 @@ def test_sms_contract_courtesy_after_closeout_never_reopens(monkeypatch):
     assert decision["block_reply"] is True
     assert decision["reply_text"] == ""
     assert decision["lead_status"] == "R"
+
+    conjunction_courtesy = module._sms_fast_decision(row, "Will do, and thank you!")
+    assert conjunction_courtesy["block_reply"] is True
+    assert conjunction_courtesy["reply_text"] == ""
+    assert conjunction_courtesy["handoff_needed"] is False
+    assert conjunction_courtesy["preserve_existing_state"] is True
+    assert conjunction_courtesy["lead_status"] == "R"
+
+    substantive = module._sms_fast_decision(row, "Will do, and can you send the website?")
+    assert substantive["block_reply"] is False
 
 
 def test_sms_contract_answer_acknowledgment_preserves_closed_state_without_handoff(monkeypatch):
