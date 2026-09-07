@@ -1958,6 +1958,31 @@ def test_sms_automated_alternate_number_notice_does_not_handoff(monkeypatch):
     assert decision["reason"] == "Automated routing or alternate-number notice ignored"
 
 
+def test_sms_structured_autoresponder_precedes_ai_human_check(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = (
+        "Hello, this is a Beycome automated response. To respond, start your text with one of the "
+        "KEYWORDS below: REF [number], MLS [number], DETAIL [full address], or ASK [your question]."
+    )
+
+    decision = module._sms_fast_decision({"mailshake_status": "R"}, inbound)
+
+    assert module._sms_is_automated_routing_notice(inbound) is True
+    assert decision["lead_status"] == "R"
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is True
+    assert decision["preserve_existing_state"] is True
+    assert decision["reason"] == "Automated routing or alternate-number notice ignored"
+    assert module._sms_is_automated_routing_notice("Is this an automated response?") is False
+    assert module._sms_is_automated_routing_notice("Are you a bot or a real person?") is False
+    human_question = module._sms_fast_decision({}, "Is this an automated response?")
+    assert human_question["handoff_needed"] is True
+    assert human_question["block_reply"] is True
+
+
 def test_sms_automated_alternate_number_notice_preserves_existing_handoff_state(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
@@ -2038,6 +2063,58 @@ def test_sms_substantive_question_that_would_repeat_answer_routes_to_handoff(mon
     assert decision["block_reply"] is True
     assert decision["reply_text"] == ""
     assert decision["reason"] == "Agent asked a new substantive question after a similar prior answer"
+
+
+def test_sms_answered_question_plus_approved_no_offers_update_closes_without_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    prior_question = "Hello Yoni, We are handling the short sale ourselves. Are you an attorney?"
+    prior_answer = (
+        "No, I'm not an attorney and I don't provide legal advice. "
+        "I handle the lender-side short-sale process and negotiations needed for approval."
+    )
+    row = {
+        "last_outbound_text": prior_answer,
+        "history_json": json.dumps(
+            [
+                {"role": "agent", "text": prior_question},
+                {"role": "assistant", "text": prior_answer},
+            ]
+        ),
+    }
+    inbound = prior_question + " We have it approved already as a short sale- just no offers yet"
+
+    decision = module._sms_apply_repeat_guard(
+        module._sms_decision(reply_text=prior_answer, lead_status="R"),
+        row,
+        inbound,
+    )
+
+    assert decision["reply_text"] == ""
+    assert decision["lead_status"] == "R"
+    assert decision["conversation_done"] is True
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is True
+    assert decision["call_booking_status"] == "closed_no_interest"
+    assert decision["reason"] == "Previously answered question repeated with an approved/no-offers update; closed without takeover"
+
+    new_question = inbound + " Can you help me find a buyer?"
+    guarded = module._sms_apply_repeat_guard(
+        module._sms_decision(reply_text=prior_answer, lead_status="Y"),
+        row,
+        new_question,
+    )
+    assert guarded["handoff_needed"] is True
+    assert guarded["block_reply"] is True
+
+    unanswered = module._sms_apply_repeat_guard(
+        module._sms_decision(reply_text=prior_answer, lead_status="Y"),
+        {"last_outbound_text": prior_answer, "history_json": json.dumps([{"role": "agent", "text": prior_question}])},
+        inbound,
+    )
+    assert unanswered["handoff_needed"] is True
 
 
 def test_sms_relationship_only_disposition_persists_warm_closed_state(monkeypatch):

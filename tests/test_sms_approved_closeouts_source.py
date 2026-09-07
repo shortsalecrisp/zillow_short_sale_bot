@@ -66,6 +66,16 @@ def test_apps_script_substantive_repeat_routes_to_handoff():
     assert "How is the buyer going to pay if they are losing money?" in CHATBOT
 
 
+def test_apps_script_structured_autoresponder_and_answered_status_novelty_guards():
+    assert "function isStructuredAutomatedResponseSignal_" in CHATBOT
+    assert "Hello, this is a Beycome automated response." in CHATBOT
+    assert "Is this an automated response?" in CHATBOT
+    assert "function isPreviouslyAnsweredQuestionWithApprovedNoOffersUpdate_" in CHATBOT
+    assert "Previously answered question repeated with an approved/no-offers update; closed without takeover" in CHATBOT
+    assert "We have it approved already as a short sale- just no offers yet" in CHATBOT
+    assert "Can you help me find a buyer?" in CHATBOT
+
+
 def test_apps_script_call_interest_and_company_questions_outrank_closeout():
     assert "const hasPhoneCallInterest = isPhoneCallInterestSignal_(inboundText);" in CHATBOT
     assert "const hasPresentServiceInterest = isPresentServiceInterestSignal_(inboundText);" in CHATBOT

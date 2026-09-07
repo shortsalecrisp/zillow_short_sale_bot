@@ -4981,7 +4981,22 @@ def _sms_is_automated_routing_notice(text: str) -> bool:
         r"\bredfin\b.*\b(?:premier\s+agent|passed\s+this\s+message|message\s+was\s+sent)\b",
         r"\byou(?:'|’)ve reached\b.*\b(?:different|another|alternate) number (?:for|to) text(?:ing)?\b.*\bwe(?:'|’)ll send you (?:a )?message from that number\b",
     ]
-    return any(re.search(pattern, t) for pattern in patterns)
+    return any(re.search(pattern, t) for pattern in patterns) or _sms_is_structured_automated_response(t)
+
+
+def _sms_is_structured_automated_response(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text:
+        return False
+    declares_automated_response = re.search(
+        r"\b(?:this|it)\s+is\s+(?:(?:an?|the)\s+)?(?:[a-z0-9&.'-]+\s+){0,3}automated\s+response\b",
+        text,
+    )
+    gives_routing_instructions = re.search(
+        r"\b(?:to\s+(?:respond|reply)|reply\s+with|start\s+(?:your|the)\s+(?:text|message)\s+with|keywords?)\b",
+        text,
+    )
+    return bool(declares_automated_response and gives_routing_instructions)
 
 
 def _sms_is_differentiation_question(text: str) -> bool:
@@ -6493,6 +6508,18 @@ def _sms_apply_repeat_guard(
         return decision
     if not _sms_is_potential_repeat_reply(decision.get("reply_text"), row_obj.get("last_outbound_text")):
         return decision
+    if _sms_is_previously_answered_question_with_approved_no_offers_update(
+        row_obj,
+        inbound_text,
+        row_obj.get("last_outbound_text"),
+    ):
+        return _sms_decision(
+            lead_status="R",
+            conversation_done=True,
+            block_reply=True,
+            call_booking_status="closed_no_interest",
+            reason="Previously answered question repeated with an approved/no-offers update; closed without takeover",
+        )
     if not _sms_is_substantive_followup(inbound_text):
         return decision
     return _sms_decision(
@@ -6501,6 +6528,62 @@ def _sms_apply_repeat_guard(
         block_reply=True,
         reason="Agent asked a new substantive question after a similar prior answer",
     )
+
+
+def _sms_normalize_history_novelty_text(value: Any) -> str:
+    text = re.sub(r"[^a-z0-9\s]", " ", str(value or "").lower())
+    return _sms_normalize_whitespace(text)
+
+
+def _sms_is_approved_no_offers_status_update(value: Any) -> bool:
+    raw = str(value or "")
+    text = _sms_normalize_history_novelty_text(raw)
+    if not text or "?" in raw:
+        return False
+    approved = bool(
+        re.search(r"\b(?:i|we)\s+have\s+(?:it|the\s+(?:file|short\s+sale))\s+approved\b", text)
+        or re.search(r"\b(?:short\s+sale|file|deal)\s+(?:is\s+)?(?:already\s+)?approved\b", text)
+    )
+    no_offers = bool(
+        re.search(r"\b(?:just\s+)?no\s+(?:buyer\s+)?offers?\b", text)
+        or re.search(r"\b(?:do\s+not|don\s+t|dont)\s+have\s+(?:any\s+)?offers?\b", text)
+    )
+    requests_action = bool(
+        re.search(r"\b(?:can|could|would|will)\s+you\b", text)
+        or re.search(r"\b(?:help|call|text|email|send|explain|tell|need|want|interested|open\s+to)\b", text)
+    )
+    return approved and no_offers and not requests_action
+
+
+def _sms_is_previously_answered_question_with_approved_no_offers_update(
+    row_obj: Dict[str, str],
+    inbound_text: Any,
+    last_outbound_text: Any,
+) -> bool:
+    current = _sms_normalize_history_novelty_text(inbound_text)
+    last_outbound = _sms_normalize_whitespace(last_outbound_text)
+    if not current or not last_outbound:
+        return False
+
+    history = _sms_history_array(row_obj.get("history_json"))
+    for index, raw_entry in enumerate(history):
+        entry = raw_entry if isinstance(raw_entry, dict) else {}
+        if str(entry.get("role") or "").lower() != "agent":
+            continue
+        prior = _sms_normalize_history_novelty_text(entry.get("text"))
+        if not prior or not current.startswith(prior + " "):
+            continue
+        residual = current[len(prior) :].strip()
+        if not _sms_is_approved_no_offers_status_update(residual):
+            continue
+        for later_raw in history[index + 1 :]:
+            later = later_raw if isinstance(later_raw, dict) else {}
+            role = str(later.get("role") or "").lower()
+            if role == "agent":
+                break
+            if role == "assistant" and _sms_is_potential_repeat_reply(later.get("text"), last_outbound):
+                return True
+    return False
 
 
 def _sms_build_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str, Any]:

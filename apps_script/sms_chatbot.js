@@ -3127,7 +3127,16 @@ function isAutomatedRoutingNoticeSignal_(text) {
     /\bredfin\b.*\b(?:premier\s+agent|passed\s+this\s+message|message\s+was\s+sent)\b/,
     /\byou(?:'|’)ve reached\b.*\b(?:different|another|alternate) number (?:for|to) text(?:ing)?\b.*\bwe(?:'|’)ll send you (?:a )?message from that number\b/
   ];
-  return patterns.some(function(pattern) { return pattern.test(t); });
+  return patterns.some(function(pattern) { return pattern.test(t); }) || isStructuredAutomatedResponseSignal_(t);
+}
+
+function isStructuredAutomatedResponseSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+
+  const declaresAutomatedResponse = /\b(?:this|it)\s+is\s+(?:(?:an?|the)\s+)?(?:[a-z0-9&.'-]+\s+){0,3}automated\s+response\b/.test(t);
+  const givesRoutingInstructions = /\b(?:to\s+(?:respond|reply)|reply\s+with|start\s+(?:your|the)\s+(?:text|message)\s+with|keywords?)\b/.test(t);
+  return declaresAutomatedResponse && givesRoutingInstructions;
 }
 
 function buildWebsiteReviewsReply_() {
@@ -4644,6 +4653,9 @@ function applyRepeatGuard_(decision, rowObj, inboundText) {
   }
 
   if (isPotentialRepeatReply_(guarded.reply_text, lastOutbound)) {
+    if (isPreviouslyAnsweredQuestionWithApprovedNoOffersUpdate_(rowObj, inbound, lastOutbound)) {
+      return buildAnsweredQuestionApprovedStatusCloseoutDecision_();
+    }
     if (isSubstantiveFollowupSignal_(inbound)) {
       return buildManualHandoffDecision_(
         "Agent asked a new substantive question after a similar prior answer",
@@ -4654,6 +4666,63 @@ function applyRepeatGuard_(decision, rowObj, inboundText) {
   }
 
   return guarded;
+}
+
+function normalizeHistoryNoveltyText_(text) {
+  return normalizeWhitespace_(String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " "));
+}
+
+function isApprovedNoOffersStatusUpdate_(text) {
+  const t = normalizeHistoryNoveltyText_(text);
+  if (!t || /\?/.test(String(text || ""))) return false;
+  const approved = /\b(?:i|we)\s+have\s+(?:it|the\s+(?:file|short\s+sale))\s+approved\b/.test(t) ||
+    /\b(?:short\s+sale|file|deal)\s+(?:is\s+)?(?:already\s+)?approved\b/.test(t);
+  const noOffers = /\b(?:just\s+)?no\s+(?:buyer\s+)?offers?\b/.test(t) ||
+    /\b(?:do\s+not|don\s+t|dont)\s+have\s+(?:any\s+)?offers?\b/.test(t);
+  const requestsAction = /\b(?:can|could|would|will)\s+you\b/.test(t) ||
+    /\b(?:help|call|text|email|send|explain|tell|need|want|interested|open\s+to)\b/.test(t);
+  return approved && noOffers && !requestsAction;
+}
+
+function isPreviouslyAnsweredQuestionWithApprovedNoOffersUpdate_(rowObj, inboundText, lastOutboundText) {
+  const current = normalizeHistoryNoveltyText_(inboundText);
+  const lastOutbound = normalizeWhitespace_(String(lastOutboundText || ""));
+  if (!current || !lastOutbound) return false;
+
+  const history = getHistoryArray_(rowObj && rowObj[HEADERS.history_json]);
+  for (let i = 0; i < history.length; i += 1) {
+    const entry = history[i] || {};
+    if (String(entry.role || "").toLowerCase() !== "agent") continue;
+    const prior = normalizeHistoryNoveltyText_(entry.text);
+    if (!prior || current.indexOf(prior + " ") !== 0) continue;
+
+    const residual = current.slice(prior.length).trim();
+    if (!isApprovedNoOffersStatusUpdate_(residual)) continue;
+
+    for (let j = i + 1; j < history.length; j += 1) {
+      const later = history[j] || {};
+      const role = String(later.role || "").toLowerCase();
+      if (role === "agent") break;
+      if (role === "assistant" && isPotentialRepeatReply_(later.text, lastOutbound)) return true;
+    }
+  }
+  return false;
+}
+
+function buildAnsweredQuestionApprovedStatusCloseoutDecision_() {
+  return {
+    matched: true,
+    reply_text: "",
+    lead_status: "R",
+    conversation_done: true,
+    handoff_needed: false,
+    needs_review: false,
+    block_reply: true,
+    call_booking_status: "closed_no_interest",
+    reason: "Previously answered question repeated with an approved/no-offers update; closed without takeover"
+  };
 }
 
 function buildManualHandoffDecision_(reason, handoffType) {
@@ -6446,6 +6515,53 @@ function testSmsIntentContractV3_() {
       unavailableUntilMonday.call_booking_status === "interested_no_call" &&
       unavailableUntilMonday.reply_text === "No problem. What time Monday works best for a quick call?",
     unavailableUntilMonday.reason
+  );
+
+  const structuredAutoresponder = "Hello, this is a Beycome automated response. To respond, start your text with one of the KEYWORDS below: REF [number], MLS [number], DETAIL [full address], or ASK [your question].";
+  record(
+    "structured_autoresponder_precedes_ai_human_check",
+    isAutomatedRoutingNoticeSignal_(structuredAutoresponder) &&
+      !isAutomatedRoutingNoticeSignal_("Is this an automated response?") &&
+      !isAutomatedRoutingNoticeSignal_("Are you a bot or a real person?")
+  );
+
+  const answeredQuestion = "Hello Yoni, We are handling the short sale ourselves. Are you an attorney?";
+  const answeredQuestionReply = "No, I'm not an attorney and I don't provide legal advice. I handle the lender-side short-sale process and negotiations needed for approval.";
+  const answeredQuestionRow = {
+    [HEADERS.last_outbound_text]: answeredQuestionReply,
+    [HEADERS.history_json]: JSON.stringify([
+      { role: "agent", text: answeredQuestion },
+      { role: "assistant", text: answeredQuestionReply }
+    ])
+  };
+  const approvedNoOffersUpdate = answeredQuestion + " We have it approved already as a short sale- just no offers yet";
+  const answeredStatusDecision = applyRepeatGuard_({
+    reply_text: answeredQuestionReply,
+    lead_status: "R",
+    conversation_done: false,
+    handoff_needed: false,
+    needs_review: false,
+    block_reply: false
+  }, answeredQuestionRow, approvedNoOffersUpdate);
+  record(
+    "answered_question_with_approved_no_offers_update_closes",
+    answeredStatusDecision.lead_status === "R" && answeredStatusDecision.conversation_done &&
+      !answeredStatusDecision.handoff_needed && answeredStatusDecision.block_reply &&
+      answeredStatusDecision.call_booking_status === "closed_no_interest",
+    answeredStatusDecision.reason
+  );
+  const answeredStatusNewQuestion = applyRepeatGuard_({
+    reply_text: answeredQuestionReply,
+    lead_status: "Y",
+    conversation_done: false,
+    handoff_needed: false,
+    needs_review: false,
+    block_reply: false
+  }, answeredQuestionRow, approvedNoOffersUpdate + " Can you help me find a buyer?");
+  record(
+    "new_question_after_answered_message_still_hands_off",
+    answeredStatusNewQuestion.handoff_needed && answeredStatusNewQuestion.block_reply,
+    answeredStatusNewQuestion.reason
   );
 
   return {
