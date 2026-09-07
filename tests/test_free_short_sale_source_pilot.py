@@ -186,6 +186,60 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(qualification.status, "rejected")
         self.assertEqual(qualification.failure_reason, "disqualifying_short_sale_text")
 
+    def test_scoped_foreclosure_or_short_sale_negation_is_rejected(self):
+        group = "501 w 14th street|tn"
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/501-w-14th-street",
+            title="501 W 14th Street",
+            text="",
+            fields={
+                "listing_address": "501 W 14th Street",
+                "state": "TN",
+                "exact_listing_confirmed": "true",
+                "listing_description_source": "jsonld_listing_object",
+                "listing_description": "THIS IS NOT A FORECLOSURE OR SHORT SALE.",
+                "scoped_listing_status": "current",
+                "listing_identity_group": group,
+                "listing_description_group": group,
+                "scoped_listing_status_group": group,
+            },
+        )
+
+        qualification = pilot.qualification_for_candidate(candidate)
+
+        self.assertEqual(qualification.status, "rejected")
+        self.assertEqual(qualification.failure_reason, "disqualifying_short_sale_text")
+        self.assertIn("not a foreclosure or short sale", qualification.disqualifying_terms.lower())
+
+    def test_scoped_ss_approved_abbreviation_is_rejected(self):
+        group = "60 n beretania street 506|hi"
+        candidate = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="query",
+            url="https://broker.example/60-n-beretania-street-506",
+            title="60 N Beretania Street #506",
+            text="",
+            fields={
+                "listing_address": "60 N Beretania Street #506",
+                "state": "HI",
+                "exact_listing_confirmed": "true",
+                "listing_description_source": "jsonld_listing_object",
+                "listing_description": "Short Sale. SS Approved! Buyer to verify all information.",
+                "scoped_listing_status": "current",
+                "listing_identity_group": group,
+                "listing_description_group": group,
+                "scoped_listing_status_group": group,
+            },
+        )
+
+        qualification = pilot.qualification_for_candidate(candidate)
+
+        self.assertEqual(qualification.status, "rejected")
+        self.assertEqual(qualification.failure_reason, "disqualifying_short_sale_text")
+        self.assertIn("ss approved", qualification.disqualifying_terms.lower())
+
     def test_bishop_navigation_is_held_at_intake(self):
         navigation = (
             "Financing Options Short Sale Options | Choosing Your Real Estate Agent"
@@ -4685,6 +4739,66 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         done = next(details for event, details in events if event == "pilot_run_done")
         self.assertFalse(done["pipeline_complete"])
         self.assertEqual(done["audit_stats"]["audit_checks_planned"], 0)
+
+    def test_audit_fetch_loss_alerts_do_not_block_an_otherwise_complete_pipeline(self):
+        stats = {
+            "audit_checks_planned": 1,
+            "unconfirmed": 0,
+            "source_scorecard_unconfirmed": 0,
+            "daily_fetch_failure_alert": 1,
+            "rolling_fetch_failure_alert": 1,
+            "acceptance_alerts": 2,
+        }
+
+        self.assertEqual(pilot.audit_completion_blockers(stats), 0)
+        self.assertTrue(pilot.audit_pipeline_complete(stats))
+
+    def test_audit_only_run_persists_complete_with_fetch_loss_alerts_visible(self):
+        args = types.SimpleNamespace(
+            service_account="{}", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21",
+            audit_links_only=True, audit_phase="post_verifier",
+            force_review_experiments=False, scheduled_run=True,
+            run_receipt_id="audit-fetch-loss", schedule_slot_id="post_verifier_audit:2026-08-21",
+        )
+        audit_stats = {
+            "audit_checks_planned": 1,
+            "unconfirmed": 0,
+            "daily_fetch_failure_alert": 1,
+            "rolling_fetch_failure_alert": 1,
+            "daily_fetch_failure_rate_bps": 6_000,
+            "rolling_fetch_failure_rate_bps": 5_500,
+            "acceptance_alerts": 2,
+        }
+        persisted = []
+        with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
+             mock.patch.object(pilot, "sheets_client", return_value="token"), \
+             mock.patch.object(pilot, "claim_run_schedule_slot", return_value=(True, "claimed", [])), \
+             mock.patch.object(pilot, "load_source_scorecard", return_value={"confirmed": True}), \
+             mock.patch.object(pilot, "run_linkage_and_suffix_audits", return_value=audit_stats), \
+             mock.patch.object(
+                 pilot,
+                 "persist_run_slot_terminal",
+                 side_effect=lambda *args, **kwargs: persisted.append(kwargs) or True,
+             ), mock.patch.object(pilot, "log_event"):
+            pilot.run(args)
+
+        self.assertEqual(persisted[0]["status"], "completed")
+        self.assertTrue(persisted[0]["pipeline_complete"])
+        self.assertEqual(audit_stats["acceptance_alerts"], 2)
+        self.assertEqual(audit_stats["completion_blockers"], 0)
+        self.assertIn("alerts=2", persisted[0]["detail"])
+        self.assertIn("completion_blockers=0", persisted[0]["detail"])
+
+    def test_audit_correctness_gaps_still_block_pipeline_completion(self):
+        for blocker_key in pilot.AUDIT_COMPLETION_BLOCKER_KEYS:
+            with self.subTest(blocker_key=blocker_key):
+                stats = {
+                    "audit_checks_planned": 1,
+                    "unconfirmed": 0,
+                    blocker_key: 1,
+                }
+                self.assertFalse(pilot.audit_pipeline_complete(stats))
 
     def test_audit_gate_blocker_is_written_as_durable_degraded_receipt(self):
         args = types.SimpleNamespace(

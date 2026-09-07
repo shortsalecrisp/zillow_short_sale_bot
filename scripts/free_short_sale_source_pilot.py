@@ -694,6 +694,7 @@ SITE_CHROME_SHORT_SALE_NAVIGATION_RE = re.compile(
 )
 
 SHORT_SALE_NEGATION_RE = re.compile(
+    r"\bnot\s+(?:an?\s+)?(?:foreclosure|pre[-\s]+foreclosure)\s+(?:or|and)\s+(?:an?\s+)?short[-\s]+sale\b|"
     r"\b(?:not|never|no|no\s+longer|isn['’]?t|is\s+not)\s+(?:an?\s+)?short[-\s]+sale\b|"
     r"\bshort[-\s]+sale\s*[:=-]?\s*(?:no|false)\b|"
     r"\b(?:will|would|does|do|did)?\s*not\s+(?:be\s+|consider\s+|pursue\s+|accept\s+|allow\s+|seek\s+)?(?:an?\s+)?short[-\s]+sale\b|"
@@ -782,6 +783,7 @@ COMPOUND_SHORT_SALE_NEGATIVE_RE = re.compile(
 )
 
 DISQUALIFY_PATTERNS = [
+    re.compile(r"\bss\s+approved\b", re.IGNORECASE),
     re.compile(r"\bapproved\s+short\s+sale\b", re.IGNORECASE),
     re.compile(r"\bshort\s+sale\s+approved\b", re.IGNORECASE),
     re.compile(
@@ -839,6 +841,16 @@ DISQUALIFY_PATTERNS = [
         re.IGNORECASE,
     ),
 ]
+
+AUDIT_COMPLETION_BLOCKER_KEYS = (
+    "source_scorecard_unconfirmed",
+    "same_day_unresolved",
+    "same_day_qualification_errors",
+    "same_day_qualification_unconfirmed",
+    "same_day_linkage_gaps",
+    "same_day_stale_pointers",
+    "promoted_acceptance_gaps",
+)
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 PHONE_RE = re.compile(
@@ -4480,6 +4492,7 @@ def audit_scorecard_detail(stats: dict[str, Any]) -> str:
         f"duplicates={int(stats.get('same_day_duplicates', 0))},"
         f"promotion_contract_gaps={int(stats.get('promoted_acceptance_gaps', 0))},"
         f"alerts={int(stats.get('acceptance_alerts', 0))},"
+        f"completion_blockers={int(stats.get('completion_blockers', 0))},"
         f"daily_fetch_fail_bps={int(stats.get('daily_fetch_failure_rate_bps', 0))},"
         f"rolling_days={int(stats.get('rolling_fetch_scorecard_days', 0))},"
         f"rolling_fetch_fail_bps={int(stats.get('rolling_fetch_failure_rate_bps', 0))},"
@@ -4487,6 +4500,23 @@ def audit_scorecard_detail(stats: dict[str, Any]) -> str:
     ]
     parts.extend(row_groups)
     return "; ".join(parts)
+
+
+def audit_completion_blockers(stats: dict[str, Any]) -> int:
+    """Count correctness gaps that prevent a green post-verifier receipt.
+
+    Fetch-loss alerts remain observable quality signals, but do not establish
+    that an otherwise fully accounted and verified pipeline is incomplete.
+    """
+    return sum(int(stats.get(key, 0)) for key in AUDIT_COMPLETION_BLOCKER_KEYS)
+
+
+def audit_pipeline_complete(stats: dict[str, Any]) -> bool:
+    return (
+        bool(stats.get("audit_checks_planned", 0))
+        and not bool(stats.get("unconfirmed", 0))
+        and not bool(audit_completion_blockers(stats))
+    )
 
 
 def source_query_recovery_limit(run_date: dt.date) -> int:
@@ -6862,6 +6892,7 @@ def run_linkage_and_suffix_audits(
                 "promoted_acceptance_gaps",
             )
         )
+        stats["completion_blockers"] = audit_completion_blockers(stats)
         log_event(
             "pilot_permanent_scorecard",
             phase=phase,
@@ -7643,11 +7674,8 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
         audit_stats["bounded_experiment_evidence_pending"] = int(
             bool(audit_stats.get("audit_evidence_unconfirmed", 0)) or audit_stopped
         )
-        audit_complete = (
-            bool(audit_stats.get("audit_checks_planned", 0))
-            and not bool(audit_stats.get("unconfirmed", 0))
-            and not bool(audit_stats.get("acceptance_alerts", 0))
-        )
+        audit_stats["completion_blockers"] = audit_completion_blockers(audit_stats)
+        audit_complete = audit_pipeline_complete(audit_stats)
         terminal_detail = audit_scorecard_detail(audit_stats)
         if not audit_complete:
             terminal_detail = (
