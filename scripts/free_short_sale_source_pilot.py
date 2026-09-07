@@ -1123,6 +1123,21 @@ def normalize_key(value: str) -> str:
     return normalize_space(value)
 
 
+def normalize_state_key(value: str) -> str:
+    """Normalize a state without interpreting postal codes as street suffixes."""
+    compact = normalize_space(html.unescape(value or "")).strip(".")
+    if not compact:
+        return ""
+    upper = compact.upper()
+    if upper in STATE_QUERY_TERMS:
+        return upper.lower()
+    folded = normalize_space(re.sub(r"[^a-z0-9]+", " ", compact.lower()))
+    for code, state_name in STATE_QUERY_TERMS.items():
+        if folded == normalize_space(re.sub(r"[^a-z0-9]+", " ", state_name.lower())):
+            return code.lower()
+    return folded
+
+
 def normalize_phone(value: str) -> str:
     digits = re.sub(r"\D", "", value or "")
     if len(digits) == 11 and digits.startswith("1"):
@@ -1131,13 +1146,13 @@ def normalize_phone(value: str) -> str:
 
 
 def address_key(address: str, city: str, state: str) -> str:
-    parts = [normalize_key(clean_listing_address(address, city, state)), normalize_key(city), normalize_key(state)]
+    parts = [normalize_key(clean_listing_address(address, city, state)), normalize_key(city), normalize_state_key(state)]
     return "|".join(part for part in parts if part)
 
 
 def street_state_key(address: str, state: str) -> str:
     street = normalize_key(clean_listing_address(address, state=state))
-    state_key = normalize_key(state)
+    state_key = normalize_state_key(state)
     if not street or not state_key:
         return ""
     return f"{street}|{state_key}"
@@ -1163,7 +1178,7 @@ def canonical_address_identity(address: str, state: str) -> dict[str, str]:
     tokens = street_key.split()
     relaxed_tokens = tokens[:-1] if tokens and tokens[-1] in CANONICAL_STREET_SUFFIXES else tokens
     relaxed_street = " ".join(relaxed_tokens)
-    state_key = normalize_key(state)
+    state_key = normalize_state_key(state)
     base_key = f"{relaxed_street}|{state_key}" if relaxed_street and state_key else ""
     listing_key = f"{base_key}|unit:{unit or '-'}" if base_key else ""
     return {
@@ -1219,12 +1234,40 @@ def stable_synthetic_zpid(source: str, url: str, address: str, city: str, state:
     return f"free-{digest}"
 
 
+def pilot_candidate_identity(candidate: Candidate) -> tuple[str, str]:
+    """Return the two source-stage identities that block a repeat Pilot write."""
+    address = candidate.fields.get("listing_address", "")
+    state = candidate.fields.get("state", "")
+    return (
+        stable_synthetic_zpid(
+            candidate.source,
+            candidate.url,
+            address,
+            candidate.fields.get("city", ""),
+            state,
+        ),
+        canonical_listing_address_key(address, state),
+    )
+
+
+def pilot_candidate_already_seen(
+    candidate: Candidate,
+    stable_ids: set[str],
+    address_keys: set[str],
+) -> bool:
+    stable_id, address_key_value = pilot_candidate_identity(candidate)
+    return bool(
+        (stable_id and stable_id in stable_ids)
+        or (address_key_value and address_key_value in address_keys)
+    )
+
+
 def agent_key(agent: str, state: str, phone: str = "", email: str = "") -> str:
     phone_key = normalize_phone(phone)
     email_key = normalize_key(email)
     return "|".join(
         part
-        for part in [normalize_key(agent), normalize_key(state), phone_key or email_key]
+        for part in [normalize_key(agent), normalize_state_key(state), phone_key or email_key]
         if part
     )
 
@@ -2906,7 +2949,7 @@ def listing_evidence_group(address: str, state: str = "", zip_code: str = "") ->
     street = normalize_key(clean_listing_address(address, state=state, zip_code=zip_code))
     if not street:
         return ""
-    return "|".join(part for part in (street, normalize_key(state), normalize_key(zip_code)) if part)
+    return "|".join(part for part in (street, normalize_state_key(state), normalize_key(zip_code)) if part)
 
 
 def expected_listing_fields(result: SearchResult) -> dict[str, str]:
@@ -2946,8 +2989,8 @@ def listing_fields_match_expected(candidate: dict[str, str], expected: dict[str,
     ))
     if not candidate_street or not expected_street or candidate_street != expected_street:
         return False
-    candidate_state = normalize_key(candidate.get("state", ""))
-    expected_state = normalize_key(expected.get("state", ""))
+    candidate_state = normalize_state_key(candidate.get("state", ""))
+    expected_state = normalize_state_key(expected.get("state", ""))
     if candidate_state and expected_state and candidate_state != expected_state:
         return False
     candidate_city = normalize_key(candidate.get("city", ""))
@@ -5252,7 +5295,7 @@ def route_alias_shadow_key(address: str, state: str) -> str:
     street = clean_listing_address(address, state=state)
     street = ROUTE_ALIAS_SHADOW_RE.sub(" route ", street)
     street_key = normalize_key(street)
-    state_key = normalize_key(state)
+    state_key = normalize_state_key(state)
     if not street_key or not state_key:
         return ""
     return f"{street_key}|{state_key}"
@@ -7723,6 +7766,11 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
         for row in pilot_rows[1:]
         if len(row) > 6 and canonical_listing_address_key(row[4], row[6])
     }
+    pilot_seen_stable_ids = {
+        normalize_space(row[8])
+        for row in pilot_rows[1:]
+        if len(row) > 8 and normalize_space(row[8])
+    }
     exclusion_stats = {
         source_query.source: {
             arm: {
@@ -7955,6 +8003,20 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                         captured_at=dt.datetime.now(dt.timezone.utc),
                         primary_eligible=False,
                     ) or durability_state_dirty
+                candidate_stable_id, candidate_address_key = pilot_candidate_identity(candidate)
+                if pilot_candidate_already_seen(candidate, pilot_seen_stable_ids, pilot_seen_addresses):
+                    stats["duplicates"] += 1
+                    stats["qualified_listing_duplicates"] += 1
+                    query_stats["duplicates"] += 1
+                    log_event(
+                        "pilot_candidate_duplicate",
+                        state=state,
+                        source=source,
+                        url=result.url,
+                        duplicate_status="pilot_listing_identity",
+                        duplicate_key=candidate_address_key or candidate_stable_id,
+                    )
+                    continue
                 listing_dup_status, listing_dup_key, listing_matched = duplicate_listing_status(candidate, existing)
                 if listing_dup_status:
                     stats["duplicates"] += 1
@@ -8091,6 +8153,10 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                     already_seen_urls.add(result_source_ref)
                 if listing_dup_key:
                     pilot_seen_addresses.add(listing_dup_key)
+                if candidate_address_key:
+                    pilot_seen_addresses.add(candidate_address_key)
+                if candidate_stable_id:
+                    pilot_seen_stable_ids.add(candidate_stable_id)
                 time.sleep(args.sleep_seconds)
 
             if query_rows and not args.dry_run:

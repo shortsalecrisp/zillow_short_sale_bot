@@ -69,8 +69,33 @@ against the owner. Existing-agent/different-listing suppression must have no
 listing-owner pointer. A hold must identify the exact missing/conflicting evidence.
 
 Any failed readback is a handoff blocker: do not send. The API edits Sheet1 only
-for `action=promote_owner` and may delete only its own just-created owner during
-rollback. It never edits an older owner. Reread after any shift.
+for `action=promote_owner` and the explicit legacy repair below. Promotion may
+delete only its own just-created owner during rollback. Reread after any shift.
+
+## Narrow reconciliation actions
+
+`action=reconcile_pilot_duplicate` repairs only an exact later Pilot repeat. The
+caller supplies exact `canonical_expected` and `duplicate_expected` identities,
+including each row's `first_seen_at`; row numbers are never accepted as
+identity. The service requires identical stable IDs and canonical
+address/state/unit, an earlier terminal canonical row, and then applies the
+existing-agent duplicate terminal state with no Sheet1 write. If that outcome
+is already present, the action is an idempotent zero-write readback.
+
+`action=relocate_legacy_owner` is limited to already-promoted owners currently
+resolved at or below the historical artifact floor (row 9000 or later). Supply
+the exact live Pilot identity/state and current pointer plus an adjudication
+reason. The service re-resolves the owner by stable ID and address, chooses the
+next active owner row itself, copies the complete A:BT row with formulas,
+formats, history, and validation, deletes the exact legacy source row in the
+same Sheets batch, and then rereads all 72 displayed cells before updating the
+Pilot pointer. If the owner has already moved below row 9000, the same action
+only relinks the pointer when needed. It never sends outreach.
+
+Source intake independently indexes all existing Pilot stable IDs and canonical
+address/state/unit keys before discovery and adds each accepted candidate to
+both sets before the next result. A repeated listing from a different URL is
+therefore stopped before evidence persistence or row append.
 
 ## One terminal receipt per organic routine slot
 

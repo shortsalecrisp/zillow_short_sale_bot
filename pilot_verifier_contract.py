@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from scripts import free_short_sale_source_pilot as pilot
 
-VERSION = "pilot_verifier_contract_v1"
+VERSION = "pilot_verifier_contract_v2"
 PILOT_TAB = "Lead Source Pilot"
 MAIN_TAB = "Sheet1"
 NY = ZoneInfo("America/New_York")
@@ -28,6 +28,7 @@ WRITE_FIELDS = {
 _WRITE_LOCK = threading.Lock()
 OWNER_ARTIFACT_ROW_FLOOR = 9000
 OWNER_WRITE_END_COLUMN = "AQ"
+OWNER_COPY_END_COLUMN = "BT"
 OWNER_REQUIRED_FIELDS = {
     "agent_name", "last_name", "phone", "email", "phone_confidence",
     "contact_verification_note", "email_confidence",
@@ -243,6 +244,74 @@ def delete_owner_row(token, spreadsheet_id, row_number):
     })
 
 
+def owner_row_values(token, spreadsheet_id, row_number):
+    encoded = urllib.parse.quote(
+        f"'{MAIN_TAB}'!A{row_number}:{OWNER_COPY_END_COLUMN}{row_number}", safe=""
+    )
+    result = pilot.sheets_request(
+        token,
+        "GET",
+        f"{spreadsheet_id}/values/{encoded}?majorDimension=ROWS&valueRenderOption=FORMATTED_VALUE",
+    )
+    rows = result.get("values", [])
+    return [str(value) for value in rows[0]] if rows else []
+
+
+def relocate_owner_row(token, spreadsheet_id, source_row, target_row):
+    if source_row < OWNER_ARTIFACT_ROW_FLOOR or target_row >= OWNER_ARTIFACT_ROW_FLOOR:
+        raise ValueError("invalid_legacy_owner_relocation")
+    main_sheet_id = sheet_id(token, spreadsheet_id, MAIN_TAB)
+    pilot.sheets_request(token, "POST", f"{spreadsheet_id}:batchUpdate", {
+        "requests": [
+            {"copyPaste": {
+                "source": {
+                    "sheetId": main_sheet_id,
+                    "startRowIndex": source_row - 1,
+                    "endRowIndex": source_row,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 72,
+                },
+                "destination": {
+                    "sheetId": main_sheet_id,
+                    "startRowIndex": target_row - 1,
+                    "endRowIndex": target_row,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 72,
+                },
+                "pasteType": "PASTE_NORMAL",
+                "pasteOrientation": "NORMAL",
+            }},
+            {"deleteDimension": {"range": {
+                "sheetId": main_sheet_id,
+                "dimension": "ROWS",
+                "startIndex": source_row - 1,
+                "endIndex": source_row,
+            }}},
+        ]
+    })
+
+
+def resolve_exact_pilot_row(rows, expected, *, require_first_seen=False):
+    required = {"synthetic_zpid", "listing_address", "state"}
+    if require_first_seen:
+        required.add("first_seen_at")
+    if not isinstance(expected, dict) or not required.issubset(expected):
+        raise ValueError("expected_identity_required")
+    matches = [(number, row) for number, row in rows if identity(row) == identity(expected)]
+    if require_first_seen:
+        matches = [
+            (number, row) for number, row in matches
+            if row.get("first_seen_at", "") == str(expected.get("first_seen_at", ""))
+        ]
+    if len(matches) != 1 or not all(identity(expected)):
+        raise ValueError("pilot_identity_missing_or_ambiguous")
+    number, row = matches[0]
+    for key, value in expected.items():
+        if row.get(key, "") != str(value):
+            raise ValueError(f"pilot_changed:{key}")
+    return number, row
+
+
 def existing_listing_owner(row, main_rows):
     """Address-only duplicates also require city and exact agent/contact attribution."""
     def address_identity(record):
@@ -361,7 +430,8 @@ def handle(token, spreadsheet_id, payload, *, now=None):
     action = payload.get("action")
     automation = payload.get("automation_id")
     if automation not in AUTOMATIONS or action not in {
-        "owner_write_preview", "promote_owner", "update", "receipt", "preview"
+        "owner_write_preview", "promote_owner", "relocate_legacy_owner",
+        "reconcile_pilot_duplicate", "update", "receipt", "preview"
     }:
         raise ValueError("invalid_action_or_automation")
     with _WRITE_LOCK:
@@ -471,6 +541,143 @@ def handle(token, spreadsheet_id, payload, *, now=None):
                     raise
             return {"ok": True, "contract": VERSION, "pilot_row": number,
                     "owner_row": target, "readback": True, "sheet1_writes": 1, "sends": 0}
+
+        if action == "relocate_legacy_owner":
+            expected = payload.get("expected", {})
+            required = {
+                "synthetic_zpid", "listing_address", "city", "state", "status",
+                "promotion_status", "import_ready", "matched_main_row",
+            }
+            if not isinstance(expected, dict) or not required.issubset(expected):
+                raise ValueError("expected_identity_and_state_required")
+            number, row = resolve_exact_pilot_row(rows, expected)
+            if (row.get("status") != "qualified" or row.get("promotion_status") != "promoted"
+                    or row.get("import_ready") != "promoted"):
+                raise ValueError("pilot_not_promoted")
+            reason = pilot.normalize_space(payload.get("adjudication_reason", ""))
+            if not reason:
+                raise ValueError("adjudication_reason_required")
+            link = pilot.reconcile_pilot_link(number, row, main_rows)
+            if link.get("outcome") != "linked":
+                raise ValueError(f"legacy_owner_identity_gap:{link.get('outcome')}")
+            source = int(link["matched_main_row"])
+            target = source if source < OWNER_ARTIFACT_ROW_FLOOR else owner_row_number(main_rows)
+            moved = source >= OWNER_ARTIFACT_ROW_FLOOR
+            before_values = owner_row_values(token, spreadsheet_id, source)
+            if not before_values:
+                raise ValueError("legacy_owner_row_empty")
+
+            # Reread immediately before the copy/delete batch. The caller never
+            # controls either Sheet1 row, and identity is re-resolved after shifts.
+            ph2, rows2, main2, _, _ = snapshot(token, spreadsheet_id)
+            current = dict(rows2).get(number)
+            current_link = pilot.reconcile_pilot_link(number, current or {}, main2)
+            if ph2 != ph or current != row or current_link.get("matched_main_row") != source:
+                raise ValueError("owner_changed_before_relocation")
+            if moved:
+                if owner_row_number(main2) != target or not owner_row_is_empty(token, spreadsheet_id, target):
+                    raise ValueError("active_owner_tail_changed")
+                relocate_owner_row(token, spreadsheet_id, source, target)
+
+            _, rows3, owners3, _, _ = snapshot(token, spreadsheet_id)
+            latest = dict(rows3).get(number)
+            latest_link = pilot.reconcile_pilot_link(number, latest or {}, owners3)
+            after_values = owner_row_values(token, spreadsheet_id, target)
+            if (latest != row or latest_link.get("outcome") != "linked"
+                    or latest_link.get("matched_main_row") != target or after_values != before_values):
+                raise ValueError("owner_relocation_readback_failed_do_not_send")
+            changes = {
+                "matched_main_row": str(target),
+                "promotion_notes": (row.get("promotion_notes", "") + "; " +
+                    f"verifier_reviewed_by={automation}; {reason}; legacy owner moved "
+                    f"from Sheet1 row {source} to operational row {target}; full-row readback passed"
+                ).strip("; "),
+            }
+            proposed = {**row, **changes}
+            if latest != row:
+                raise ValueError("pilot_changed_before_relocation_pointer_write")
+            pilot.batch_update_values(token, spreadsheet_id, mapped_updates(PILOT_TAB, ph, number, changes))
+            _, rows4, owners4, _, _ = snapshot(token, spreadsheet_id)
+            final = dict(rows4).get(number, {})
+            final_link = pilot.reconcile_pilot_link(number, final, owners4)
+            if (final != proposed or final_link.get("outcome") != "linked"
+                    or final_link.get("matched_main_row") != target
+                    or owner_row_values(token, spreadsheet_id, target) != before_values):
+                raise ValueError("owner_relocation_pointer_readback_failed_do_not_send")
+            return {
+                "ok": True, "contract": VERSION, "pilot_row": number,
+                "source_owner_row": source, "owner_row": target, "moved": moved,
+                "readback": True, "sheet1_writes": int(moved), "sends": 0,
+            }
+
+        if action == "reconcile_pilot_duplicate":
+            canonical_number, canonical = resolve_exact_pilot_row(
+                rows, payload.get("canonical_expected", {}), require_first_seen=True
+            )
+            duplicate_number, duplicate = resolve_exact_pilot_row(
+                rows, payload.get("duplicate_expected", {}), require_first_seen=True
+            )
+            if canonical_number >= duplicate_number:
+                raise ValueError("canonical_pilot_row_must_precede_duplicate")
+            if (canonical.get("synthetic_zpid") != duplicate.get("synthetic_zpid")
+                    or pilot.canonical_listing_address_key(
+                        canonical.get("listing_address", ""), canonical.get("state", "")
+                    ) != pilot.canonical_listing_address_key(
+                        duplicate.get("listing_address", ""), duplicate.get("state", "")
+                    )):
+                raise ValueError("pilot_rows_are_not_exact_listing_duplicates")
+            canonical_terminal = (
+                (canonical.get("status") == "qualified"
+                 and canonical.get("promotion_status") == "promoted"
+                 and canonical.get("import_ready") == "promoted")
+                or (canonical.get("status") == "duplicate"
+                    and canonical.get("promotion_status") in {
+                        "duplicate_existing_agent", "skipped_duplicate_listing"
+                    }
+                    and canonical.get("import_ready") == "skip")
+            )
+            if not canonical_terminal:
+                raise ValueError("canonical_pilot_row_not_terminal")
+            desired = {
+                "status": "duplicate",
+                "failure_reason": "existing_agent_owner_contacted",
+                "promotion_status": "duplicate_existing_agent",
+                "import_ready": "skip",
+                "duplicate_key": pilot.street_state_key(
+                    duplicate.get("listing_address", ""), duplicate.get("state", "")
+                ),
+                "matched_main_row": "",
+            }
+            if all(duplicate.get(key, "") == value for key, value in desired.items()):
+                return {
+                    "ok": True, "contract": VERSION, "pilot_row": duplicate_number,
+                    "canonical_pilot_row": canonical_number, "already_reconciled": True,
+                    "readback": True, "sheet1_writes": 0, "sends": 0,
+                }
+            reason = pilot.normalize_space(payload.get("adjudication_reason", ""))
+            if not reason:
+                raise ValueError("adjudication_reason_required")
+            changes = {
+                **desired,
+                "promotion_notes": (duplicate.get("promotion_notes", "") + "; " +
+                    f"verifier_reviewed_by={automation}; {reason}; exact prior Pilot row "
+                    f"{canonical_number} retained; no Sheet1 owner write").strip("; "),
+            }
+            proposed = {**duplicate, **changes}
+            ph2, check = read_table(token, spreadsheet_id, PILOT_TAB, pilot.PILOT_HEADERS)
+            if ph2 != ph or dict(check).get(duplicate_number) != duplicate:
+                raise ValueError("pilot_changed_before_duplicate_write")
+            pilot.batch_update_values(
+                token, spreadsheet_id, mapped_updates(PILOT_TAB, ph, duplicate_number, changes)
+            )
+            _, after, _, _, _ = snapshot(token, spreadsheet_id)
+            if dict(after).get(duplicate_number) != proposed:
+                raise ValueError("pilot_duplicate_readback_failed_do_not_send")
+            return {
+                "ok": True, "contract": VERSION, "pilot_row": duplicate_number,
+                "canonical_pilot_row": canonical_number, "already_reconciled": False,
+                "readback": True, "sheet1_writes": 0, "sends": 0,
+            }
 
         if action == "update":
             expected = payload.get("expected", {})

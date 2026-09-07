@@ -79,6 +79,49 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
             "agentSubjectKey": pilot.normalize_key(name),
         }
 
+    def test_state_normalization_never_expands_connecticut_to_court(self):
+        self.assertEqual(pilot.normalize_state_key("CT"), "ct")
+        self.assertEqual(pilot.normalize_state_key("Connecticut"), "ct")
+        self.assertEqual(
+            pilot.street_state_key("101 Northwood Drive", "CT"),
+            "101 northwood drive|ct",
+        )
+        self.assertEqual(
+            pilot.canonical_listing_address_key("101 Northwood Dr.", "Connecticut"),
+            "101 northwood|ct|unit:-",
+        )
+
+    def test_source_stage_blocks_exact_pilot_identity_from_a_different_url(self):
+        first = pilot.Candidate(
+            source="idx_broker_remarks",
+            query="first",
+            url="https://broker-one.example/511-s-fairfield",
+            title="511-513 South Fairfield Avenue S",
+            text="",
+            fields={
+                "listing_address": "511-513 South Fairfield Avenue S",
+                "city": "Hartford",
+                "state": "CT",
+            },
+        )
+        repeat = pilot.Candidate(
+            source="broker_listing",
+            query="repeat",
+            url="https://broker-two.example/listing/511-fairfield",
+            title="511-513 S Fairfield Ave S",
+            text="",
+            fields={
+                "listing_address": "511-513 South Fairfield Avenue S",
+                "city": "Hartford",
+                "state": "Connecticut",
+            },
+        )
+        stable_id, address_key = pilot.pilot_candidate_identity(first)
+        self.assertEqual(stable_id, pilot.pilot_candidate_identity(repeat)[0])
+        self.assertTrue(
+            pilot.pilot_candidate_already_seen(repeat, {stable_id}, {address_key})
+        )
+
     def test_qualification_accepts_listing_description_short_sale_without_label(self):
         text = "Status: Active. What's special: This home is being sold as a short sale subject to lender approval."
 

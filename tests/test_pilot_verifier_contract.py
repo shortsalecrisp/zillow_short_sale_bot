@@ -272,6 +272,98 @@ class PilotVerifierContractTest(unittest.TestCase):
         self.assertEqual(result["sends"], 0)
         write.assert_not_called()
 
+    def test_relocate_owner_row_copies_full_row_then_deletes_legacy_source(self):
+        with mock.patch.object(contract, "sheet_id", return_value=0), \
+             mock.patch.object(contract.pilot, "sheets_request") as request:
+            contract.relocate_owner_row("token", "sheet", 9497, 31)
+        payload = request.call_args.args[3]
+        self.assertEqual(payload["requests"][0]["copyPaste"]["source"]["startRowIndex"], 9496)
+        self.assertEqual(payload["requests"][0]["copyPaste"]["destination"]["startRowIndex"], 30)
+        self.assertEqual(payload["requests"][0]["copyPaste"]["source"]["endColumnIndex"], 72)
+        self.assertEqual(payload["requests"][1]["deleteDimension"]["range"]["startIndex"], 9496)
+
+    def test_legacy_owner_relocation_rereads_full_row_and_updates_pointer(self):
+        row = dict(self.row, matched_main_row="9497", promotion_notes="Previously promoted")
+        legacy_owner = dict(self.owner)
+        active_owner = dict(agent_name="Prior", last_name="Owner", phone="5551110000",
+                            email="prior@example.test", listing_address="1 Other Road",
+                            city="Dover", state="DE", created_at="free-other-owner")
+        moved_row = dict(row, matched_main_row="31",
+                         promotion_notes=(
+                             "Previously promoted; verifier_reviewed_by=lead-verifier-8-am; "
+                             "approved legacy-owner normalization; legacy owner moved from "
+                             "Sheet1 row 9497 to operational row 31; full-row readback passed"
+                         ))
+        initial = (contract.pilot.PILOT_HEADERS, [(1172, row)], [(30, active_owner), (9497, legacy_owner)],
+                   contract.pilot.RUN_RECEIPT_HEADERS, self.source)
+        relocated = (contract.pilot.PILOT_HEADERS, [(1172, row)], [(30, active_owner), (31, legacy_owner)],
+                     contract.pilot.RUN_RECEIPT_HEADERS, self.source)
+        final = (contract.pilot.PILOT_HEADERS, [(1172, moved_row)], [(30, active_owner), (31, legacy_owner)],
+                 contract.pilot.RUN_RECEIPT_HEADERS, self.source)
+        request = {
+            "action": "relocate_legacy_owner",
+            "automation_id": "lead-verifier-8-am",
+            "expected": {
+                key: row[key] for key in (
+                    "synthetic_zpid", "listing_address", "city", "state", "status",
+                    "promotion_status", "import_ready", "matched_main_row",
+                )
+            },
+            "adjudication_reason": "approved legacy-owner normalization",
+        }
+        with mock.patch.object(contract, "snapshot", side_effect=[initial, initial, relocated, final]), \
+             mock.patch.object(contract, "owner_row_values", side_effect=[["full", "row"], ["full", "row"], ["full", "row"]]), \
+             mock.patch.object(contract, "owner_row_is_empty", return_value=True), \
+             mock.patch.object(contract, "relocate_owner_row") as relocate, \
+             mock.patch.object(contract.pilot, "batch_update_values") as write:
+            result = contract.handle("token", "sheet", request, now=self.now)
+        relocate.assert_called_once_with("token", "sheet", 9497, 31)
+        self.assertEqual(result["owner_row"], 31)
+        self.assertTrue(result["moved"])
+        self.assertEqual(result["sheet1_writes"], 1)
+        self.assertEqual(result["sends"], 0)
+        self.assertIn("'Lead Source Pilot'!X1172", [item["range"] for item in write.call_args.args[2]])
+
+    def test_exact_pilot_duplicate_already_reconciled_is_zero_write(self):
+        canonical = dict(self.row, first_seen_at="2026-08-31T11:01:00Z")
+        duplicate = dict(
+            canonical,
+            first_seen_at="2026-08-31T11:05:00Z",
+            status="duplicate",
+            failure_reason="existing_agent_owner_contacted",
+            promotion_status="duplicate_existing_agent",
+            import_ready="skip",
+            duplicate_key=contract.pilot.street_state_key(
+                canonical["listing_address"], canonical["state"]
+            ),
+            matched_main_row="",
+        )
+        current = (contract.pilot.PILOT_HEADERS, [(1194, canonical), (1219, duplicate)],
+                   [(22, self.owner)], contract.pilot.RUN_RECEIPT_HEADERS, self.source)
+        request = {
+            "action": "reconcile_pilot_duplicate",
+            "automation_id": "lead-verifier-8-am",
+            "canonical_expected": {
+                "synthetic_zpid": canonical["synthetic_zpid"],
+                "listing_address": canonical["listing_address"],
+                "state": canonical["state"],
+                "first_seen_at": canonical["first_seen_at"],
+            },
+            "duplicate_expected": {
+                "synthetic_zpid": duplicate["synthetic_zpid"],
+                "listing_address": duplicate["listing_address"],
+                "state": duplicate["state"],
+                "first_seen_at": duplicate["first_seen_at"],
+            },
+        }
+        with mock.patch.object(contract, "snapshot", return_value=current), \
+             mock.patch.object(contract.pilot, "batch_update_values") as write:
+            result = contract.handle("token", "sheet", request, now=self.now)
+        self.assertTrue(result["already_reconciled"])
+        self.assertEqual(result["sheet1_writes"], 0)
+        self.assertEqual(result["sends"], 0)
+        write.assert_not_called()
+
     def test_promote_owner_rolls_back_exact_owned_row_when_pointer_readback_fails(self):
         self.row.update(promotion_status="verifier_held", import_ready="verify", matched_main_row="",
                         promotion_notes="Qualified listing staged for the lead verifier",
