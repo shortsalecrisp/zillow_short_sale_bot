@@ -4407,6 +4407,13 @@ def _sms_extract_reaction_target(value: Any) -> str:
     )
     if not text:
         return ""
+    coalesced = _sms_extract_coalesced_reaction_targets(text)
+    if coalesced:
+        first, second = coalesced
+        first_compare = _sms_normalize_reaction_comparison_text(first)
+        second_compare = _sms_normalize_reaction_comparison_text(second)
+        if first_compare and first_compare == second_compare:
+            return first
     match = re.match(
         r"^(liked|loved|emphasized|disliked|laughed at|questioned)\s+[\"“]?(.+?)[\"”]?$",
         text,
@@ -4416,6 +4423,23 @@ def _sms_extract_reaction_target(value: Any) -> str:
         return _sms_normalize_reaction_text(match.group(2))
     match = re.match(r"^to\s+[\"“]?(.+?)[\"”]?$", text, re.IGNORECASE)
     return _sms_normalize_reaction_text(match.group(1)) if match else ""
+
+
+def _sms_extract_coalesced_reaction_targets(value: Any) -> tuple[str, str] | None:
+    text = _sms_normalize_whitespace(
+        re.sub(r"[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]", " ", str(value or ""))
+    )
+    match = re.match(
+        r"^(liked|loved|emphasized|disliked|laughed at|questioned)\s+[\"“](.+?)[\"”]\s+to\s+[\"“](.+?)[\"”]$",
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        return (
+            _sms_normalize_reaction_text(match.group(2)),
+            _sms_normalize_reaction_text(match.group(3)),
+        )
+    return None
 
 
 def _sms_is_reaction_to_last_outbound(inbound_text: Any, row_obj: Dict[str, str]) -> bool:

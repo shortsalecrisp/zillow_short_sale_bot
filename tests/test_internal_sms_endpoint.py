@@ -1372,6 +1372,44 @@ def test_sms_reaction_matches_when_transport_drops_internal_apostrophe(monkeypat
     ) is False
 
 
+def test_sms_coalesced_reaction_fragments_are_suppressed(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    outbound = "Thanks for letting me know. Good luck with the listing!"
+    inbound = f"Liked “{outbound}” to “{outbound}”"
+
+    assert module._sms_is_reaction_to_last_outbound(
+        inbound,
+        {"last_outbound_text": outbound},
+    ) is True
+    assert module._sms_is_reaction_to_last_outbound(
+        f"Liked “{outbound}” to “Please call me”",
+        {"last_outbound_text": outbound},
+    ) is False
+
+    sheet.rows[2][11] = outbound
+    client = TestClient(module.app)
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "reaction-coalesced-1",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reaction"] is True
+    assert body["should_reply"] is False
+    assert sheet.rows[2][17] == "[]"
+
+
 def test_sms_compound_opt_outs_are_suppressed_without_false_positive(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

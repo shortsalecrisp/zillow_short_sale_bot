@@ -3506,6 +3506,18 @@ function extractSmsReactionTarget_(text) {
   );
   if (!raw) return null;
 
+  const coalesced = extractCoalescedSmsReactionTargets_(raw);
+  if (coalesced) {
+    const first = normalizeSmsReactionComparisonText_(coalesced.first);
+    const second = normalizeSmsReactionComparisonText_(coalesced.second);
+    if (first && first === second) {
+      return {
+        explicit: true,
+        target: coalesced.first
+      };
+    }
+  }
+
   let match = raw.match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+["“]?(.+?)["”]?$/i);
   if (match) {
     return {
@@ -3523,6 +3535,18 @@ function extractSmsReactionTarget_(text) {
   }
 
   return null;
+}
+
+function extractCoalescedSmsReactionTargets_(text) {
+  const raw = normalizeWhitespace_(
+    String(text || "").replace(/[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]/g, " ")
+  );
+  const match = raw.match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+["“](.+?)["”]\s+to\s+["“](.+?)["”]$/i);
+  if (!match) return null;
+  return {
+    first: normalizeSmsReactionText_(match[2]),
+    second: normalizeSmsReactionText_(match[3])
+  };
 }
 
 function canonicalizeSmsInboundDedupeMessage_(text) {
@@ -7041,11 +7065,21 @@ function testApprovedLeadIntelligenceRules_() {
   const reactionRow = { [HEADERS.last_outbound_text]: reactionTarget };
   const explicitReaction = "Liked \u201c" + reactionTarget + "\u201d";
   const strippedReaction = "to \u201c" + reactionTarget + "\u201d";
+  const coalescedReaction = explicitReaction + " " + strippedReaction;
   if (!isSmsReactionToLastOutbound_(explicitReaction, reactionRow) || !isSmsReactionToLastOutbound_(strippedReaction, reactionRow)) {
     throw new Error("Reaction-to-last-outbound suppression regression");
   }
+  if (!isSmsReactionToLastOutbound_(coalescedReaction, reactionRow)) {
+    throw new Error("Coalesced reaction fragments must be suppressed as one reaction");
+  }
   if (canonicalizeSmsInboundDedupeMessage_(explicitReaction) !== canonicalizeSmsInboundDedupeMessage_(strippedReaction)) {
     throw new Error("Explicit and stripped reaction artifacts must share one dedupe key");
+  }
+  if (canonicalizeSmsInboundDedupeMessage_(explicitReaction) !== canonicalizeSmsInboundDedupeMessage_(coalescedReaction)) {
+    throw new Error("Coalesced reaction artifact must share the reaction dedupe key");
+  }
+  if (isSmsReactionToLastOutbound_(explicitReaction + " to \u201cPlease call me\u201d", reactionRow)) {
+    throw new Error("Mismatched coalesced reaction fragments must not be suppressed");
   }
   if (isSmsReactionToLastOutbound_("to schedule a call tomorrow", reactionRow)) {
     throw new Error("Ordinary substantive text must not be suppressed as a reaction");
