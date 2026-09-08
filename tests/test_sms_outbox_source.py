@@ -71,9 +71,11 @@ def test_inbound_queue_coalesces_rapid_same_phone_bubbles_before_classification(
     assert 'fragmentCreatedAt - previousFragmentAt > 20000' in OUTBOX
     assert 'now - newestCreatedAt < 20000' in OUTBOX
     assert 'blockValues[fragmentOffset][1] = "coalesced"' in OUTBOX
+    assert "coalesceSmsInboundFragmentTextsV10_" in OUTBOX
     assert "seenFragmentTexts" in OUTBOX
     assert "if (seenFragmentTexts[fragmentKey]) return false" in OUTBOX
-    assert '}).join(" ")' in OUTBOX
+    assert 'return fragments.join(" ")' in OUTBOX
+    assert "explicitTarget === continuationTarget" in OUTBOX
     assert "SMS_INBOUND_QUEUE_HEADERS_.length" in OUTBOX
     assert ").setValues(blockValues)" in OUTBOX
 

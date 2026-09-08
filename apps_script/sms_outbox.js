@@ -937,6 +937,42 @@ function clearSmsInboundDecisionSnapshotV10_(queueId) {
   PropertiesService.getScriptProperties().deleteProperty(smsInboundDecisionSnapshotKeyV10_(queueId));
 }
 
+function normalizeSmsInboundFragmentTargetV10_(text) {
+  return normalizeWhitespace_(
+    String(text || "")
+      .replace(/[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]/g, " ")
+      .replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, "")
+  ).toLowerCase().replace(/['\u2018\u2019]/g, "");
+}
+
+function coalesceSmsInboundFragmentTextsV10_(fragmentTexts) {
+  var seenFragmentTexts = {};
+  var fragments = (fragmentTexts || []).map(function(fragmentText) {
+    return normalizeWhitespace_(String(fragmentText || ""));
+  }).filter(function(fragmentText) {
+    if (!fragmentText) return false;
+    var fragmentKey = fragmentText.toLowerCase();
+    if (seenFragmentTexts[fragmentKey]) return false;
+    seenFragmentTexts[fragmentKey] = true;
+    return true;
+  });
+
+  // Some iMessage reaction notifications arrive as two bubbles:
+  // `Liked “…”` followed by `to “…”`. Collapse only that exact, quoted,
+  // duplicate-target shape so ordinary prose containing "to" is preserved.
+  if (fragments.length === 2) {
+    var explicitMatch = fragments[0].match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+["“](.+?)["”]$/i);
+    var continuationMatch = fragments[1].match(/^to\s+["“](.+?)["”]$/i);
+    if (explicitMatch && continuationMatch) {
+      var explicitTarget = normalizeSmsInboundFragmentTargetV10_(explicitMatch[2]);
+      var continuationTarget = normalizeSmsInboundFragmentTargetV10_(continuationMatch[1]);
+      if (explicitTarget && explicitTarget === continuationTarget) return fragments[0];
+    }
+  }
+
+  return fragments.join(" ");
+}
+
 function claimQueuedSmsInbound_() {
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_inbound_queue");
@@ -969,16 +1005,9 @@ function claimQueuedSmsInbound_() {
       if (status === "queued" && newestCreatedAt && now - newestCreatedAt < 20000) continue;
 
       var selectedIndex = fragmentIndexes[fragmentIndexes.length - 1];
-      var seenFragmentTexts = {};
-      var combinedMessage = fragmentIndexes.map(function(index) {
-        return normalizeWhitespace_(String(rows[index][6] || ""));
-      }).filter(function(fragmentText) {
-        if (!fragmentText) return false;
-        var fragmentKey = fragmentText.toLowerCase();
-        if (seenFragmentTexts[fragmentKey]) return false;
-        seenFragmentTexts[fragmentKey] = true;
-        return true;
-      }).join(" ");
+      var combinedMessage = coalesceSmsInboundFragmentTextsV10_(fragmentIndexes.map(function(index) {
+        return rows[index][6];
+      }));
       // Commit the combined message and every source disposition in one Sheet
       // write. Retrying after a transient error can never concatenate an
       // already-combined row with a surviving source fragment.
