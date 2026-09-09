@@ -561,7 +561,76 @@ test("queue scan resumes from today due times and skips rows already staged for 
     });
   `));
 
-  assert.deepEqual(rowNumbers, [5003, 5004]);
+  assert.deepEqual(rowNumbers, [5004, 5003]);
+});
+
+test("queue prioritizes overdue first calls before retries, then orders by due time", () => {
+  const candidates = JSON.parse(runSchedulerScript(`
+    function row(first, followupSentAt, options) {
+      const values = Array(42).fill("");
+      values[VOICE_BOT_COL_FIRST_NAME - 1] = first;
+      values[VOICE_BOT_COL_LAST_NAME - 1] = "Agent";
+      values[VOICE_BOT_COL_PHONE - 1] = "603-325-5909";
+      values[VOICE_BOT_COL_LISTING_ADDRESS - 1] = "20 Pearl Street";
+      values[VOICE_BOT_COL_CITY - 1] = "Hillsboro";
+      values[VOICE_BOT_COL_STATE - 1] = "NH";
+      values[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1] = "x";
+      values[VOICE_BOT_COL_FOLLOWUP_SENT_AT_PROXY - 1] = followupSentAt;
+      if (options && options.call1SentAt) {
+        values[VOICE_BOT_COL_CALL_1_SENT - 1] = options.call1SentAt;
+      }
+      if (options && options.call1Result) {
+        values[VOICE_BOT_COL_CALL_1_RESULT - 1] = options.call1Result;
+      }
+      return values;
+    }
+
+    JSON.stringify(getVoiceBotCallCandidatesFromRows_([
+      {
+        rowNumber: 6001,
+        values: row("Retry", "", {
+          call1SentAt: "2026-08-23T13:15:00Z",
+          call1Result: "agent_not_available"
+        })
+      },
+      { rowNumber: 6002, values: row("Newer", "2026-08-24T13:30:00Z") },
+      { rowNumber: 6003, values: row("Older", "2026-08-23T22:45:00Z") },
+    ], new Date("2026-08-24T18:45:00Z"), 10).map(function(candidate) {
+      return {
+        rowNumber: candidate.rowNumber,
+        callAttemptNumber: candidate.callAttemptNumber,
+        dueAt: candidate.dueAt.toISOString()
+      };
+    }));
+  `));
+
+  assert.deepEqual(candidates.map((candidate) => candidate.rowNumber), [6003, 6002, 6001]);
+  assert.deepEqual(candidates.map((candidate) => candidate.callAttemptNumber), [1, 1, 2]);
+  assert.equal(candidates[0].dueAt, "2026-08-24T13:00:00.000Z");
+  assert.equal(candidates[1].dueAt, "2026-08-24T13:30:00.000Z");
+});
+
+test("queue retains a later explicit scheduled time as the candidate due time", () => {
+  const dueAt = runSchedulerScript(`
+    const values = Array(42).fill("");
+    values[VOICE_BOT_COL_FIRST_NAME - 1] = "Scheduled";
+    values[VOICE_BOT_COL_LAST_NAME - 1] = "Agent";
+    values[VOICE_BOT_COL_PHONE - 1] = "603-325-5909";
+    values[VOICE_BOT_COL_LISTING_ADDRESS - 1] = "20 Pearl Street";
+    values[VOICE_BOT_COL_CITY - 1] = "Hillsboro";
+    values[VOICE_BOT_COL_STATE - 1] = "NH";
+    values[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1] = "x";
+    values[VOICE_BOT_COL_FOLLOWUP_SENT_AT_PROXY - 1] = "2026-08-24T13:30:00Z";
+    values[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1] = "2026-08-24T18:40:00Z";
+
+    getVoiceBotCallCandidateFromRowValues_(6004, values, new Date("2026-08-24T18:45:00Z")).dueAt.toISOString();
+  `);
+
+  assert.equal(dueAt, "2026-08-24T18:40:00.000Z");
+});
+
+test("a provider start failure remains eligible for one later call attempt", () => {
+  assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("call_start_failed")'), true);
 });
 
 test("second attempts are only queued when the retry is due after the resume cutoff", () => {

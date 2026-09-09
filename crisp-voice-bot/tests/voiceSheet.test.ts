@@ -5,6 +5,7 @@ import {
   getNextVoiceBotFirstAttemptWindowStart,
   getNextVoiceBotFollowupAttemptWindowStart,
   getVoiceBotPreferredCallWindowName,
+  isRetryableVoiceBotResult,
   normalizePhoneToE164,
 } from "../src/lib/voiceSheet";
 
@@ -16,6 +17,10 @@ test("replacement voice sheet helpers preserve the active call windows", () => {
     getVoiceBotPreferredCallWindowName(new Date("2026-05-04T20:15:00Z"), "America/New_York"),
     "",
   );
+});
+
+test("replacement voice sheet helpers retry provider start failures once", () => {
+  assert.equal(isRetryableVoiceBotResult("call_start_failed"), true);
 });
 
 test("replacement voice sheet helpers preserve first and second attempt scheduling", () => {

@@ -689,13 +689,20 @@ function getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates) {
     const candidate = getVoiceBotCallCandidateFromRowValues_(rows[i].rowNumber, rows[i].values, now);
     if (candidate) {
       candidates.push(candidate);
-      if (candidates.length >= limit) {
-        break;
-      }
     }
   }
 
-  return candidates;
+  candidates.sort(function(left, right) {
+    const attemptOrder = left.callAttemptNumber - right.callAttemptNumber;
+    if (attemptOrder !== 0) {
+      return attemptOrder;
+    }
+
+    const dueOrder = left.dueAt.getTime() - right.dueAt.getTime();
+    return dueOrder !== 0 ? dueOrder : left.rowNumber - right.rowNumber;
+  });
+
+  return candidates.slice(0, limit);
 }
 
 function getVoiceBotCallCandidateByRow_(sheet, rowNumber, now) {
@@ -745,7 +752,7 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
       return null;
     }
 
-    return buildVoiceBotCandidate_(rowNumber, rowValues, 1, now, currentWindow, agentTimeZone);
+    return buildVoiceBotCandidate_(rowNumber, rowValues, 1, candidateDueAt, currentWindow, agentTimeZone);
   }
 
   if (secondAttemptSentAt) {
@@ -766,7 +773,7 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
     return null;
   }
 
-  return buildVoiceBotCandidate_(rowNumber, rowValues, 2, nextAttemptAt, currentWindow, agentTimeZone);
+  return buildVoiceBotCandidate_(rowNumber, rowValues, 2, candidateDueAt, currentWindow, agentTimeZone);
 }
 
 function buildVoiceBotCandidate_(rowNumber, rowValues, callAttemptNumber, dueAt, callWindow, agentTimeZone) {
@@ -1177,7 +1184,10 @@ function parseVoiceBotDate_(value) {
 function isRetryableVoiceBotResult_(callResult) {
   const normalized = normalizeString_(callResult).toLowerCase();
 
-  return normalized === 'voicemail_left' || normalized === 'no_answer_first_attempt' || normalized === 'agent_not_available';
+  return normalized === 'voicemail_left' ||
+    normalized === 'no_answer_first_attempt' ||
+    normalized === 'agent_not_available' ||
+    normalized === 'call_start_failed';
 }
 
 function isWithinBusinessHours_(date) {

@@ -260,7 +260,7 @@ export function getVoiceBotCallCandidateFromRowValues(
       return undefined;
     }
 
-    return buildVoiceBotCandidate(rowNumber, rowValues, 1, now, currentWindow, agentTimeZone);
+    return buildVoiceBotCandidate(rowNumber, rowValues, 1, candidateDueAt, currentWindow, agentTimeZone);
   }
 
   if (secondAttemptSentAt || !isRetryableVoiceBotResult(firstAttemptResult)) {
@@ -277,10 +277,10 @@ export function getVoiceBotCallCandidateFromRowValues(
     return undefined;
   }
 
-  return buildVoiceBotCandidate(rowNumber, rowValues, 2, nextAttemptAt, currentWindow, agentTimeZone);
+  return buildVoiceBotCandidate(rowNumber, rowValues, 2, candidateDueAt, currentWindow, agentTimeZone);
 }
 
-function getVoiceBotCallCandidatesFromRows(
+export function getVoiceBotCallCandidatesFromRows(
   rows: Array<{ rowNumber: number; values: unknown[] }>,
   now: Date,
   maxCandidates: number,
@@ -295,12 +295,19 @@ function getVoiceBotCallCandidatesFromRows(
     }
 
     candidates.push(candidate);
-    if (candidates.length >= limit) {
-      break;
-    }
   }
 
-  return candidates;
+  return candidates
+    .sort((left, right) => {
+      const attemptOrder = left.callAttemptNumber - right.callAttemptNumber;
+      if (attemptOrder !== 0) {
+        return attemptOrder;
+      }
+
+      const dueOrder = left.dueAt.getTime() - right.dueAt.getTime();
+      return dueOrder !== 0 ? dueOrder : left.rowNumber - right.rowNumber;
+    })
+    .slice(0, limit);
 }
 
 function getVoiceBotStartableCallCandidatesFromRows(
