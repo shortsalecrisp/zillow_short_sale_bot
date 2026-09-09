@@ -667,7 +667,7 @@ function handleIncomingSmsCore_(body) {
     };
   }
   if (isPostHandoffCallbackUpdate_(currentRowObj, inboundText)) {
-    const callbackTime = extractScheduledCallbackReference_(inboundText);
+    const callbackTime = extractScheduledCallbackReference_(inboundText) || extractSameDayCallbackReference_(inboundText);
     const priorCallbackTime = normalizeCallbackTime_(currentRowObj[HEADERS.callback_time]);
     const changed = normalizeCallbackTime_(callbackTime) !== priorCallbackTime;
     const preservedLeadStatus = String(currentRowObj[HEADERS.mailshake_status] || "Y");
@@ -4336,6 +4336,29 @@ function extractScheduledCallbackReference_(text) {
   });
 }
 
+function extractSameDayCallbackReference_(text) {
+  const raw = normalizeWhitespace_(String(text || ""));
+  const lower = raw.toLowerCase();
+  if (!lower) return "";
+  if (!/\b(?:call|text|contact|reach out|follow up|get in touch|connect|talk|speak|chat|works?|work|fine|ok|okay|available|free|today|this afternoon|this morning|tonight)\b/.test(lower)) {
+    return "";
+  }
+  const match = lower.match(/\b(?:(around|about|approximately|at|after|before|by)\s+)?(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p)?)\b(?:\s*(today|this afternoon|this morning|tonight))?/i);
+  if (!match) return "";
+  const time = normalizeWhitespace_(match[2])
+    .replace(/\b([ap])\b/ig, "$1m")
+    .replace(/\b([ap])\.m\.\b/ig, "$1m");
+  const prefix = normalizeWhitespace_(match[1] || "");
+  const suffix = normalizeWhitespace_(match[3] || "");
+  const pieces = [];
+  if (suffix) pieces.push(suffix);
+  if (prefix && prefix !== "at") pieces.push(prefix);
+  pieces.push(time);
+  return normalizeWhitespace_(pieces.join(" ")).replace(/\b[a-z]/g, function(letter) {
+    return letter.toUpperCase();
+  });
+}
+
 function isUnavailableUntilCallbackReferenceSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t || !extractScheduledCallbackReference_(t) || isExplicitDayOrDateCallbackSignal_(t)) return false;
@@ -4366,8 +4389,9 @@ function normalizeCallbackTime_(value) {
 
 function isCallbackUpdateTiming_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  if (!t || !extractScheduledCallbackReference_(t)) return false;
+  if (!t || !(extractScheduledCallbackReference_(t) || extractSameDayCallbackReference_(t))) return false;
   return /\b(?:would|will|works?|work)\s+(?:be\s+)?(?:better|best|good|fine|ok|okay)\b/.test(t) ||
+    /\b(?:if\s+that\s+works|that\s+works|works\s+for\s+me|works\s+on\s+my\s+end)\b/.test(t) ||
     /\b(?:push|move|reschedule|switch|change)\b.{0,40}\b(?:to|into|for|on)\b/.test(t) ||
     /\b(?:focus|aim|target)\b.{0,40}\b(?:for|on)\b/.test(t) ||
     /\b(?:better|best|good|fine|ok|okay)\b.{0,20}\b(?:on|for)\b/.test(t);
@@ -6958,6 +6982,8 @@ function testApprovedLeadIntelligenceRules_() {
       extractScheduledCallbackReference_("Afternoon on Monday would work better") !== "Monday Afternoon" ||
       !isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "Can we push it into next week?") ||
       extractScheduledCallbackReference_("Can we push it into next week?") !== "Next Week" ||
+      !isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "Probably around 3:00 today if that works") ||
+      extractSameDayCallbackReference_("Probably around 3:00 today if that works") !== "Today Around 3:00" ||
       isPostHandoffCallbackUpdate_(postHandoffCallbackRow, "I have an open house Monday") ||
       isPostHandoffCallbackUpdate_({ [HEADERS.human_override]: "FALSE" }, "Monday afternoon works better")) {
     throw new Error("Post-handoff callback update regression");

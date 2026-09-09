@@ -5248,6 +5248,41 @@ def _sms_extract_scheduled_callback_reference(value: Any) -> str:
     return reference.title()
 
 
+def _sms_extract_same_day_callback_reference(value: Any) -> str:
+    text = _sms_normalize_whitespace(value)
+    lower = text.lower()
+    if not lower:
+        return ""
+    if not re.search(
+        r"\b(?:call|text|contact|reach out|follow up|get in touch|connect|talk|speak|chat|"
+        r"works?|work|fine|ok|okay|available|free|today|this afternoon|this morning|tonight)\b",
+        lower,
+    ):
+        return ""
+    match = re.search(
+        r"\b(?P<prefix>around|about|approximately|at|after|before|by)?\s*"
+        r"(?P<time>\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p)?)\b"
+        r"(?:\s*(?P<suffix>today|this afternoon|this morning|tonight))?",
+        lower,
+    )
+    if not match:
+        return ""
+    raw_time = _sms_normalize_whitespace(match.group("time"))
+    if not raw_time:
+        return ""
+    raw_time = re.sub(r"\b([ap])\b", lambda m: f"{m.group(1)}m", raw_time)
+    raw_time = re.sub(r"\b([ap])\.m\.\b", lambda m: f"{m.group(1)}m", raw_time)
+    prefix = _sms_normalize_whitespace(match.group("prefix") or "")
+    suffix = _sms_normalize_whitespace(match.group("suffix") or "")
+    pieces = []
+    if suffix:
+        pieces.append(suffix)
+    if prefix and prefix != "at":
+        pieces.append(prefix)
+    pieces.append(raw_time)
+    return _sms_normalize_whitespace(" ".join(pieces)).title()
+
+
 def _sms_is_unavailable_until_callback_reference(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     if not text or not _sms_extract_scheduled_callback_reference(text) or _sms_is_scheduled_callback(text):
@@ -5309,10 +5344,14 @@ def _sms_normalized_callback_time(value: Any) -> str:
 
 def _sms_is_callback_update_timing(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
-    if not text or not _sms_extract_scheduled_callback_reference(text):
+    if not text or not (
+        _sms_extract_scheduled_callback_reference(text)
+        or _sms_extract_same_day_callback_reference(text)
+    ):
         return False
     return bool(
         re.search(r"\b(?:would|will|works?|work)\s+(?:be\s+)?(?:better|best|good|fine|ok|okay)\b", text)
+        or re.search(r"\b(?:if\s+that\s+works|that\s+works|works\s+for\s+me|works\s+on\s+my\s+end)\b", text)
         or re.search(r"\b(?:push|move|reschedule|switch|change)\b.{0,40}\b(?:to|into|for|on)\b", text)
         or re.search(r"\b(?:focus|aim|target)\b.{0,40}\b(?:for|on)\b", text)
         or re.search(r"\b(?:better|best|good|fine|ok|okay)\b.{0,20}\b(?:on|for)\b", text)
@@ -6065,7 +6104,7 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
         )
 
     if _sms_is_post_handoff_callback_update(row_obj, t):
-        callback_time = _sms_extract_scheduled_callback_reference(t)
+        callback_time = _sms_extract_scheduled_callback_reference(t) or _sms_extract_same_day_callback_reference(t)
         existing_callback_time = _sms_normalized_callback_time(row_obj.get("callback_time"))
         callback_changed = existing_callback_time != _sms_normalized_callback_time(callback_time)
         reason = "Callback updated after human handoff"

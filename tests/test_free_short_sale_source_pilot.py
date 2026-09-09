@@ -728,6 +728,8 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
     def test_qualification_rejects_existing_negotiator_processor_or_attorney(self):
         texts = [
             "Status: Active. Remarks: Short Sale. Seller is already working with a short sale negotiator.",
+            "Status: Active. Remarks: Short Sale. Seller has retained a short sale negotiator.",
+            "Status: Active. Remarks: Short Sale. Seller is already engaged with a short-sale negotiator.",
             "Status: Active. Remarks: Short Sale. A short sale processor is already handling the file.",
             "Status: Active. Remarks: Short Sale. Seller is currently working with an attorney.",
         ]

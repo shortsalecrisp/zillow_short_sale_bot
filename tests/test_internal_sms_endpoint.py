@@ -987,6 +987,51 @@ def test_sms_post_handoff_callback_update_persists_without_reply(monkeypatch):
     assert sheet.rows[2][38] == "Monday Afternoon"
 
 
+def test_sms_post_handoff_same_day_clock_callback_update_persists(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][15] = "interested_no_call"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][10] = "O"
+    client = TestClient(module.app)
+    inbound = "Probably around 3:00 today if that works"
+
+    response = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "post-handoff-sameday-clock-1",
+            "received_at": "2026-09-08T10:25:00-04:00",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert module._sms_extract_same_day_callback_reference(inbound) == "Today Around 3:00"
+    assert body["should_reply"] is False
+    assert body["handoff_needed"] is True
+    assert body["reason"] == "Callback updated after human handoff"
+    assert body["lead_status"] == "O"
+    assert body["callback_updated"] is True
+    assert body["alert_needed"] is True
+    assert body["handoff_type"] == "CALLBACK UPDATE"
+    assert sender.calls == []
+    assert sheet.rows[2][10] == "O"
+    assert sheet.rows[2][13] == "handoff"
+    assert sheet.rows[2][15] == "scheduled_callback"
+    assert sheet.rows[2][16] == "TRUE"
+    assert sheet.rows[2][19] == "TRUE"
+    assert sheet.rows[2][37] == "yes"
+    assert sheet.rows[2][38] == "Today Around 3:00"
+
+
 def test_sms_declarative_callback_and_month_window_refinement_are_captured(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,

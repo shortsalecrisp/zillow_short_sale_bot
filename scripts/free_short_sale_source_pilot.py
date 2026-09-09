@@ -831,6 +831,18 @@ DISQUALIFY_PATTERNS = [
         re.IGNORECASE,
     ),
     re.compile(
+        r"\b(?:seller|owner|borrower)\s+(?:has\s+)?(?:already\s+)?"
+        r"(?:retained|hired|engaged)\s+(?:a\s+|an\s+|the\s+)?"
+        r"(?:short[-\s]+sale\s+)?(?:specialist|attorney|negotiator|processor)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:seller|owner|borrower)\s+(?:is\s+)?(?:already\s+|currently\s+)?"
+        r"(?:engaged|working)\s+with\s+(?:a\s+|an\s+|the\s+)?"
+        r"(?:short[-\s]+sale\s+)?(?:specialist|attorney|negotiator|processor)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"\b(?:short\s+sale\s+)?(?:specialist|attorney|negotiator|processor)\b.{0,80}"
         r"\b(?:assisting|handling|assigned|involved|processing|negotiating)\b",
         re.IGNORECASE,
