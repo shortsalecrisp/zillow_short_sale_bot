@@ -278,6 +278,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Call failed - invalid phone number";
   }
 
+  if (callResult === "call_failed_before_completion") {
+    return "Call failed before completion";
+  }
+
   if (callResult === "provider_quota_exceeded") {
     return "ElevenLabs quota exceeded - call not counted";
   }
@@ -322,6 +326,12 @@ function isInvalidDestinationNumberFailure(conversation: ElevenLabsConversation)
       reason.includes("invalid number") ||
       reason.includes("sip status: 404"))
   );
+}
+
+export function getTerminalFailedConversationCallResult(conversation: ElevenLabsConversation): string {
+  return isInvalidDestinationNumberFailure(conversation)
+    ? "call_failed_invalid_number"
+    : "call_failed_before_completion";
 }
 
 export function shouldTreatAsProviderQuotaExceeded(conversation: ElevenLabsConversation): boolean {
@@ -2112,7 +2122,7 @@ async function processPostCallOutcomeForConversation(
     if (conversation.status === "failed") {
       const failureReason = getFailedConversationReason(conversation);
       const invalidDestinationNumber = isInvalidDestinationNumberFailure(conversation);
-      const outcome = invalidDestinationNumber ? "call_failed_invalid_number" : "Call failed before completion";
+      const outcome = getTerminalFailedConversationCallResult(conversation);
       const responseStatus = buildVoiceResponseStatus(outcome);
       const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();
 
@@ -2129,6 +2139,8 @@ async function processPostCallOutcomeForConversation(
         await postSheetUpdate({
           rowNumber: metadata.rowNumber,
           callAttemptNumber: metadata.callAttemptNumber,
+          callResult: outcome,
+          responseStatus,
           voiceNotes: buildPerformanceNotes(responseStatus, outcomeSummary),
         });
       }
@@ -2145,7 +2157,7 @@ async function processPostCallOutcomeForConversation(
       logger.info(
         invalidDestinationNumber
           ? "ElevenLabs post-call fallback recorded invalid destination number"
-          : "ElevenLabs post-call fallback skipped because conversation failed before a final outcome",
+          : "ElevenLabs post-call fallback recorded terminal failure before completion",
         {
           conversationId,
           rowNumber: metadata.rowNumber,

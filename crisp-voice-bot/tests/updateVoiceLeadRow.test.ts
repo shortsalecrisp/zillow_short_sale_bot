@@ -61,3 +61,26 @@ test("ElevenLabs LLM failures clear the attempt and schedule provider retry", as
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_TIME_BUCKET), "provider_llm_retry");
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "2026-09-03T17:16:00.000Z");
 });
+
+test("terminal first-attempt failures persist an outcome and clear stale scheduling", async () => {
+  const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
+  const row = Array.from({ length: 42 }, () => "");
+  row[VOICE_BOT_COL_CALL_ELIGIBLE - 1] = "yes";
+  row[VOICE_BOT_COL_CALL_TIME_BUCKET - 1] = "voice_call_2_due";
+  row[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1] = "2026-09-09T18:30:00.000Z";
+  const writes = buildVoiceLeadRowWrites(
+    row,
+    {
+      callAttemptNumber: 1,
+      callResult: "call_failed_before_completion",
+      responseStatus: "Call failed before completion",
+    },
+    new Date("2026-09-09T13:00:00.000Z"),
+  );
+  const byColumn = new Map(writes.map((write) => [write.columnNumber, write.value]));
+
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_1_RESULT), "call_failed_before_completion");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_ELIGIBLE), "");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_TIME_BUCKET), "");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "");
+});

@@ -135,7 +135,7 @@ function addSchedulingWrites(
     return;
   }
 
-  if (leadStatusCode || callAttemptNumber === 2) {
+  if (callResult || leadStatusCode) {
     clearWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible");
     clearWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket");
     clearWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "call_scheduled_for");

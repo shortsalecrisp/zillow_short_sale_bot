@@ -437,6 +437,50 @@ test("agent-not-available first attempts are retryable in the next local call wi
   ]);
 });
 
+test("terminal first-attempt failures clear stale retry markers in Apps Script", () => {
+  const result = JSON.parse(runSchedulerScript(`
+    const cells = Array(VOICE_BOT_COL_VOICE_NOTES + 1).fill("");
+    cells[VOICE_BOT_COL_CALL_ELIGIBLE] = "yes";
+    cells[VOICE_BOT_COL_CALL_TIME_BUCKET] = "voice_call_2_due";
+    cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR] = "2026-09-09T18:30:00.000Z";
+
+    const sheet = {
+      getRange(rowNumber, columnNumber) {
+        return {
+          getValue() {
+            return cells[columnNumber] || "";
+          },
+          setValue(value) {
+            cells[columnNumber] = value instanceof Date ? value.toISOString() : value;
+          },
+          clearContent() {
+            cells[columnNumber] = "";
+          }
+        };
+      }
+    };
+    const fields = [];
+
+    updateVoiceBotSchedulingCells_(sheet, 5632, { callResult: "call_failed_before_completion" }, 1, fields);
+
+    JSON.stringify({
+      callEligible: cells[VOICE_BOT_COL_CALL_ELIGIBLE],
+      callTimeBucket: cells[VOICE_BOT_COL_CALL_TIME_BUCKET],
+      callScheduledFor: cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR],
+      fields
+    });
+  `));
+
+  assert.equal(result.callEligible, "");
+  assert.equal(result.callTimeBucket, "");
+  assert.equal(result.callScheduledFor, "");
+  assert.deepEqual(result.fields, [
+    "AD:call_eligible",
+    "AE:call_time_bucket",
+    "AF:call_scheduled_for",
+  ]);
+});
+
 test("first voice call uses the next local time-test window after follow-up text", () => {
   const beforeLateMorning = runSchedulerExpression(
     'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T12:30:00Z"), "America/New_York").toISOString()',

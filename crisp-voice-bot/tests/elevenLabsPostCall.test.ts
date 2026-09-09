@@ -289,6 +289,21 @@ const telnyxD17FailureConversation = {
   transcript: [],
 } as const;
 
+const georgeNetworkBlockedConversation = {
+  status: "failed",
+  metadata: {
+    termination_reason: "error",
+    error: {
+      code: 603,
+      reason: "SIP status: 603. Network Blocked",
+    },
+  },
+  analysis: {
+    transcript_summary: "The outbound call failed before the agent connected.",
+  },
+  transcript: [],
+} as const;
+
 test("post-call fallback detects ElevenLabs quota failures as provider quota and not a prospect outcome", async () => {
   const {
     buildVoiceResponseStatus,
@@ -332,6 +347,16 @@ test("post-call fallback detects Telnyx D17 as a provider failure and not a pros
     buildVoiceResponseStatus("provider_d17_failure"),
     "Telnyx account disabled (D17) - call not counted",
   );
+});
+
+test("post-call fallback gives SIP 603 Network Blocked a durable terminal outcome", async () => {
+  const { buildVoiceResponseStatus, getTerminalFailedConversationCallResult } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+
+  const callResult = getTerminalFailedConversationCallResult(georgeNetworkBlockedConversation);
+  assert.equal(callResult, "call_failed_before_completion");
+  assert.equal(buildVoiceResponseStatus(callResult), "Call failed before completion");
 });
 
 test("post-call fallback classifies an agent saying it is not a short sale as not_short_sale", async () => {

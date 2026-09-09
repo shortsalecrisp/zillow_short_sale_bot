@@ -349,7 +349,7 @@ function updateVoiceBotSchedulingCells_(sheet, rowNumber, payload, callAttemptNu
     return;
   }
 
-  if (leadStatusCode || callAttemptNumber === 2) {
+  if (callResult || leadStatusCode) {
     clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE, fieldsWritten, 'call_eligible');
     clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET, fieldsWritten, 'call_time_bucket');
     clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR, fieldsWritten, 'call_scheduled_for');
