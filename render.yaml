@@ -50,6 +50,8 @@ services:
         value: "900"
       - key: BOT_TIMEZONE
         value: US/Eastern
+      - key: MAILSHAKE_VOICE_MAX_WAIT_HOURS
+        value: "72"
       - key: CLOUDMERSIVE_KEY
         sync: false
       - key: CLOUDMERSIVE_MOBILE_BOOST

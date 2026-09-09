@@ -177,14 +177,17 @@ Saturday or Sunday. To include weekends, explicitly opt in by setting the enviro
 
 * `FOLLOWUP_INCLUDE_WEEKENDS=true`
 
-After a follow-up text is sent, the hourly scheduler now waits two hours before marking column `K` with the Mailshake
-code `N`. Rows are only released to Mailshake when `I=x`, the follow-up timestamp column is at least two hours old, and
-both `J` and `K` are still blank. If a matching inbound SMS reply exists on the `Replies` tab, the row is treated as
-replied instead and is not marked `N`.
+After a follow-up text is sent, the hourly scheduler waits at least two hours before marking column `K` with the
+Mailshake code `N`. Rows are only released when `I=x`, both `J` and `K` are blank, and the voice-call lifecycle is
+complete: a terminal first-call result, or a completed second attempt after a retryable first-call result. This keeps
+Mailshake from claiming a row before its listing-local call window. A 72-hour failsafe releases a row if the voice
+provider or scheduler never produces a terminal result. If a matching inbound SMS reply exists on the `Replies` tab,
+the row is treated as replied instead and is not marked `N`.
 
 You can tune this handoff with:
 
 * `MAILSHAKE_AFTER_FOLLOWUP_HOURS` (default `2`)
+* `MAILSHAKE_VOICE_MAX_WAIT_HOURS` (default `72`)
 * `MAILSHAKE_AFTER_FOLLOWUP_CODE` (default `N`)
 * `GSHEET_REPLIES_TAB` (default `Replies`)
 

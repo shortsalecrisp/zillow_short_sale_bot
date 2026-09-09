@@ -485,6 +485,10 @@ FOLLOWUP_DUE_GRACE_MINUTES = max(
 FOLLOWUP_MIN_LOOKBACK_ROWS = int(os.getenv("FOLLOWUP_MIN_LOOKBACK_ROWS", "500"))
 FU_LOOKBACK_ROWS = max(int(os.getenv("FU_LOOKBACK_ROWS", "50")), FOLLOWUP_MIN_LOOKBACK_ROWS)
 MAILSHAKE_AFTER_FOLLOWUP_HOURS = float(os.getenv("MAILSHAKE_AFTER_FOLLOWUP_HOURS", "2"))
+MAILSHAKE_VOICE_MAX_WAIT_HOURS = max(
+    MAILSHAKE_AFTER_FOLLOWUP_HOURS,
+    float(os.getenv("MAILSHAKE_VOICE_MAX_WAIT_HOURS", "72")),
+)
 MAILSHAKE_AFTER_FOLLOWUP_CODE = (os.getenv("MAILSHAKE_AFTER_FOLLOWUP_CODE", "N").strip().upper() or "N")
 GSHEET_REPLIES_TAB = os.getenv("GSHEET_REPLIES_TAB", "Replies")
 WORK_START     = int(os.getenv("WORK_START_HOUR", "8"))   # inclusive (8 am)
@@ -793,6 +797,17 @@ COL_EMAIL_CONF  = 26  # AA
 COL_ZPID        = 27  # AB
 COL_STATUS      = 28  # AC
 COL_NOTES       = 29  # AD
+COL_VOICE_CALL_1_SENT = 32    # AG
+COL_VOICE_CALL_1_RESULT = 33  # AH
+COL_VOICE_CALL_2_SENT = 39    # AN
+COL_VOICE_CALL_2_RESULT = 40  # AO
+
+VOICE_CALL_RETRYABLE_RESULTS = frozenset({
+    "voicemail_left",
+    "no_answer_first_attempt",
+    "agent_not_available",
+    "call_start_failed",
+})
 
 
 def _resolve_timestamp_columns(init_idx: int, fu_idx: int) -> tuple[int, int, List[str]]:
@@ -13588,8 +13603,25 @@ def _column_values(value_ranges: List[Dict[str, Any]], index: int) -> List[str]:
     return [str(v or "").strip() for v in values[0]]
 
 
+def _voice_call_lifecycle_pending(
+    call_1_sent: str,
+    call_1_result: str,
+    call_2_sent: str,
+    call_2_result: str,
+) -> bool:
+    """Return whether Mailshake must wait for the configured voice attempts."""
+
+    if not call_1_sent or not call_1_result:
+        return True
+
+    if call_1_result.strip().lower() not in VOICE_CALL_RETRYABLE_RESULTS:
+        return False
+
+    return not call_2_sent or not call_2_result
+
+
 def release_due_followups_to_mailshake(now: Optional[datetime] = None) -> int:
-    """Mark K=N after the follow-up has had the configured reply grace period."""
+    """Release a follow-up to Mailshake after its voice-call lifecycle completes."""
 
     run_time = now or datetime.now(tz=SCHEDULER_TZ)
     if run_time.tzinfo is None:
@@ -13615,6 +13647,10 @@ def release_due_followups_to_mailshake(now: Optional[datetime] = None) -> int:
     manual_col = _col_index_to_letter(COL_MANUAL_NOTE)
     mailshake_col = _col_index_to_letter(COL_REPLY_TS)
     followup_ts_col = _col_index_to_letter(COL_FU_TS)
+    call_1_sent_col = _col_index_to_letter(COL_VOICE_CALL_1_SENT)
+    call_1_result_col = _col_index_to_letter(COL_VOICE_CALL_1_RESULT)
+    call_2_sent_col = _col_index_to_letter(COL_VOICE_CALL_2_SENT)
+    call_2_result_col = _col_index_to_letter(COL_VOICE_CALL_2_RESULT)
 
     resp = sheets_service.spreadsheets().values().batchGet(
         spreadsheetId=GSHEET_ID,
@@ -13624,6 +13660,10 @@ def release_due_followups_to_mailshake(now: Optional[datetime] = None) -> int:
             f"{GSHEET_TAB}!{manual_col}2:{manual_col}{max_row}",
             f"{GSHEET_TAB}!{mailshake_col}2:{mailshake_col}{max_row}",
             f"{GSHEET_TAB}!{followup_ts_col}2:{followup_ts_col}{max_row}",
+            f"{GSHEET_TAB}!{call_1_sent_col}2:{call_1_sent_col}{max_row}",
+            f"{GSHEET_TAB}!{call_1_result_col}2:{call_1_result_col}{max_row}",
+            f"{GSHEET_TAB}!{call_2_sent_col}2:{call_2_sent_col}{max_row}",
+            f"{GSHEET_TAB}!{call_2_result_col}2:{call_2_result_col}{max_row}",
         ],
         majorDimension="COLUMNS",
         valueRenderOption="FORMATTED_VALUE",
@@ -13634,16 +13674,26 @@ def release_due_followups_to_mailshake(now: Optional[datetime] = None) -> int:
     manual_values = _column_values(value_ranges, 2)
     mailshake_values = _column_values(value_ranges, 3)
     followup_ts_values = _column_values(value_ranges, 4)
+    call_1_sent_values = _column_values(value_ranges, 5)
+    call_1_result_values = _column_values(value_ranges, 6)
+    call_2_sent_values = _column_values(value_ranges, 7)
+    call_2_result_values = _column_values(value_ranges, 8)
 
     due_rows: List[int] = []
     replied_rows: List[int] = []
     bad_ts_rows = 0
+    voice_pending_rows = 0
+    voice_fallback_rows = 0
     candidate_count = max(
         len(followup_flags),
         len(phone_values),
         len(manual_values),
         len(mailshake_values),
         len(followup_ts_values),
+        len(call_1_sent_values),
+        len(call_1_result_values),
+        len(call_2_sent_values),
+        len(call_2_result_values),
     )
 
     for idx in range(candidate_count):
@@ -13653,6 +13703,10 @@ def release_due_followups_to_mailshake(now: Optional[datetime] = None) -> int:
         manual_status = manual_values[idx] if idx < len(manual_values) else ""
         mailshake_status = mailshake_values[idx] if idx < len(mailshake_values) else ""
         followup_ts_raw = followup_ts_values[idx] if idx < len(followup_ts_values) else ""
+        call_1_sent = call_1_sent_values[idx] if idx < len(call_1_sent_values) else ""
+        call_1_result = call_1_result_values[idx] if idx < len(call_1_result_values) else ""
+        call_2_sent = call_2_sent_values[idx] if idx < len(call_2_sent_values) else ""
+        call_2_result = call_2_result_values[idx] if idx < len(call_2_result_values) else ""
 
         if followup_flag.strip().lower() != "x" or not followup_ts_raw:
             continue
@@ -13673,17 +13727,32 @@ def release_due_followups_to_mailshake(now: Optional[datetime] = None) -> int:
             replied_rows.append(sheet_row)
             continue
 
+        voice_pending = _voice_call_lifecycle_pending(
+            call_1_sent,
+            call_1_result,
+            call_2_sent,
+            call_2_result,
+        )
+        if voice_pending and elapsed_hours < MAILSHAKE_VOICE_MAX_WAIT_HOURS:
+            voice_pending_rows += 1
+            continue
+        if voice_pending:
+            voice_fallback_rows += 1
+
         due_rows.append(sheet_row)
 
     updated = mark_mailshake_ready(due_rows)
     LOG.info(
-        "Mailshake release scan complete candidates=%s due=%s marked=%s replied=%s bad_ts=%s grace_hours=%.2f code=%s",
+        "Mailshake release scan complete candidates=%s due=%s marked=%s replied=%s bad_ts=%s voice_pending=%s voice_fallback=%s grace_hours=%.2f voice_max_wait_hours=%.2f code=%s",
         candidate_count,
         len(due_rows),
         updated,
         len(replied_rows),
         bad_ts_rows,
+        voice_pending_rows,
+        voice_fallback_rows,
         MAILSHAKE_AFTER_FOLLOWUP_HOURS,
+        MAILSHAKE_VOICE_MAX_WAIT_HOURS,
         MAILSHAKE_AFTER_FOLLOWUP_CODE,
     )
     return updated

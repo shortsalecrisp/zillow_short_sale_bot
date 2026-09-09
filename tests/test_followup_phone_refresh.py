@@ -580,7 +580,15 @@ def test_mailshake_release_marks_due_followup_after_two_hour_grace(monkeypatch):
     due_ts = (now - timedelta(hours=2, minutes=5)).isoformat()
     recent_ts = (now - timedelta(hours=1, minutes=59)).isoformat()
     service = _MailshakeSheetsService([
-        {"I": "x", "C": "5550001111", "J": "", "K": "", "X": due_ts},
+        {
+            "I": "x",
+            "C": "5550001111",
+            "J": "",
+            "K": "",
+            "X": due_ts,
+            "AG": due_ts,
+            "AH": "answered_not_interested",
+        },
         {"I": "x", "C": "5550002222", "J": "", "K": "", "X": recent_ts},
         {"I": "x", "C": "5550003333", "J": "", "K": "Y", "X": due_ts},
         {"I": "x", "C": "5550004444", "J": "manual", "K": "", "X": due_ts},
@@ -596,6 +604,96 @@ def test_mailshake_release_marks_due_followup_after_two_hour_grace(monkeypatch):
 
     updates = service.values_api.batch_updates[0]["data"]
     assert updates == [{"range": f"{bot_min.GSHEET_TAB}!K2", "values": [["N"]]}]
+
+
+def test_mailshake_release_waits_for_first_voice_call(monkeypatch):
+    now = bot_min.SCHEDULER_TZ.localize(datetime(2026, 7, 2, 16, 0, 0))
+    due_ts = (now - timedelta(hours=3)).isoformat()
+    service = _MailshakeSheetsService([
+        {"I": "x", "C": "5550001111", "J": "", "K": "", "X": due_ts},
+    ])
+
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "_get_reply_records", lambda *args, **kwargs: [])
+    bot_min._reply_records_cache["last_error"] = None
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+
+    assert bot_min.release_due_followups_to_mailshake(now) == 0
+    assert service.values_api.batch_updates == []
+
+
+def test_mailshake_release_waits_for_retryable_second_voice_call(monkeypatch):
+    now = bot_min.SCHEDULER_TZ.localize(datetime(2026, 7, 2, 16, 0, 0))
+    due_ts = (now - timedelta(hours=26)).isoformat()
+    service = _MailshakeSheetsService([
+        {
+            "I": "x",
+            "C": "5550001111",
+            "J": "",
+            "K": "",
+            "X": due_ts,
+            "AG": (now - timedelta(hours=20)).isoformat(),
+            "AH": "voicemail_left",
+        },
+    ])
+
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "_get_reply_records", lambda *args, **kwargs: [])
+    bot_min._reply_records_cache["last_error"] = None
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+
+    assert bot_min.release_due_followups_to_mailshake(now) == 0
+    assert service.values_api.batch_updates == []
+
+
+def test_mailshake_release_allows_completed_second_voice_call(monkeypatch):
+    now = bot_min.SCHEDULER_TZ.localize(datetime(2026, 7, 2, 16, 0, 0))
+    due_ts = (now - timedelta(hours=30)).isoformat()
+    service = _MailshakeSheetsService([
+        {
+            "I": "x",
+            "C": "5550001111",
+            "J": "",
+            "K": "",
+            "X": due_ts,
+            "AG": (now - timedelta(hours=25)).isoformat(),
+            "AH": "agent_not_available",
+            "AN": (now - timedelta(hours=1)).isoformat(),
+            "AO": "no_response_second_attempt",
+        },
+    ])
+
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "_get_reply_records", lambda *args, **kwargs: [])
+    bot_min._reply_records_cache["last_error"] = None
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+
+    assert bot_min.release_due_followups_to_mailshake(now) == 1
+    assert service.values_api.batch_updates[0]["data"] == [
+        {"range": f"{bot_min.GSHEET_TAB}!K2", "values": [["N"]]},
+    ]
+
+
+def test_mailshake_release_uses_bounded_voice_failsafe(monkeypatch):
+    now = bot_min.SCHEDULER_TZ.localize(datetime(2026, 7, 5, 16, 0, 0))
+    due_ts = (now - timedelta(hours=bot_min.MAILSHAKE_VOICE_MAX_WAIT_HOURS + 1)).isoformat()
+    service = _MailshakeSheetsService([
+        {"I": "x", "C": "5550001111", "J": "", "K": "", "X": due_ts},
+    ])
+
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "_get_reply_records", lambda *args, **kwargs: [])
+    bot_min._reply_records_cache["last_error"] = None
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+
+    assert bot_min.release_due_followups_to_mailshake(now) == 1
+    assert service.values_api.batch_updates[0]["data"] == [
+        {"range": f"{bot_min.GSHEET_TAB}!K2", "values": [["N"]]},
+    ]
 
 
 def test_mailshake_release_skips_rows_with_sms_reply(monkeypatch):
