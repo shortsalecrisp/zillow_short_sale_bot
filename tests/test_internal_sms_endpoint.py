@@ -2615,6 +2615,34 @@ def test_sms_contract_present_help_and_call_requests_are_terminal_handoffs(monke
         assert decision["reply_text"]
 
 
+def test_sms_self_handling_with_contingent_future_help_is_relationship_closeout(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = (
+        "I'm sorry I'm a little behind and catching up on my messages. I appreciate the offer for help. "
+        "But I am also a short sell specialist and think that I can manage this one. However, if something "
+        "happens and I need help, I will definitely reach out to you."
+    )
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_relationship_only_after_existing_coverage(inbound, {}) is True
+    assert decision["lead_status"] == "O"
+    assert decision["conversation_done"] is True
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert decision["call_booking_status"] == "warm_future_interest"
+    assert decision["reply_text"] == (
+        "Understood - thanks for letting me know. If anything changes, I'm happy to help."
+    )
+
+    current_help = module._sms_fast_decision({}, "I can manage this file, but I need help now. Can you call me?")
+    assert current_help["lead_status"] == "Y"
+    assert current_help["handoff_needed"] is True
+
+
 def test_sms_contract_not_short_sale_and_source_question_use_distinct_closeouts(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
@@ -2727,6 +2755,32 @@ def test_sms_contract_relative_callback_and_unscheduled_promise_guard(monkeypatc
     assert guarded["call_booking_status"] == "interested_no_call"
     assert guarded["callback_time"] == ""
     assert guarded["reply_text"] == "No problem. What time Monday works best for a quick call?"
+
+
+def test_sms_relative_duration_callback_resolves_from_inbound_timestamp(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "I wont have time. Can you touch base in three weeks time?"
+    received_at = "2026-09-09T10:33:00-04:00"
+    row = {
+        "human_override": "TRUE",
+        "ai_state": "handoff",
+        "handoff_flag": "TRUE",
+        "call_booking_status": "interested_no_call",
+        "mailshake_status": "Y",
+    }
+
+    decision = module._sms_fast_decision(row, inbound, received_at)
+
+    assert module._sms_extract_scheduled_callback_reference(inbound) == "In Three Weeks Time"
+    assert module._sms_extract_scheduled_callback_reference(inbound, received_at) == "September 30, 2026"
+    assert module._sms_is_post_handoff_callback_update(row, inbound) is True
+    assert decision["callback_time"] == "September 30, 2026"
+    assert decision["call_booking_status"] == "scheduled_callback"
+    assert decision["block_reply"] is True
+    assert decision["handoff_needed"] is True
 
 
 def test_sms_busy_self_initiated_followup_is_deferred_hot_lead_not_callback(monkeypatch):

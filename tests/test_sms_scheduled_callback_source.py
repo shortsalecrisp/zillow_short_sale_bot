@@ -11,7 +11,9 @@ def test_apps_script_preserves_explicit_weekday_callback_through_reply_cap():
     assert '[HEADERS.call_booking_status]: "scheduled_callback"' in CHATBOT
     assert '[HEADERS.callback_requested]: "yes"' in CHATBOT
     assert '[HEADERS.callback_time]: callbackTime' in CHATBOT
-    assert "const ruleResult = applyFastRules_(inboundText, currentRowObj);" in CHATBOT
+    assert "const ruleResult = applyFastRules_(inboundText, currentRowObj, receivedAt);" in CHATBOT
+    assert 'extractScheduledCallbackReference_(relativeCallbackText, "2026-09-09T10:33:00-04:00")' in CHATBOT
+    assert '"September 30, 2026"' in CHATBOT
     assert "ruleResult.handoff_needed || ruleResult.needs_review || ruleResult.alert_needed" in CHATBOT
 
 

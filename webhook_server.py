@@ -4568,8 +4568,17 @@ def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[
             text,
         )
     )
+    self_handling_current_file = bool(
+        re.search(
+            r"\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+(?:also\s+)?(?:a\s+)?short[- ]sale\s+(?:specialist|negotiator|processor)\b"
+            r"|\b(?:i|we)\s+(?:think\s+(?:that\s+)?)?(?:i|we)?\s*(?:can|could)\s+(?:manage|handle)\s+(?:this|the)\s+(?:one|file|short\s+sale)\b",
+            text,
+        )
+    )
     if not text or _sms_is_substantive_followup(text) or (
-        not _sms_has_previously_covered_context(row_obj) and not current_coverage
+        not _sms_has_previously_covered_context(row_obj)
+        and not current_coverage
+        and not self_handling_current_file
     ):
         return False
     patterns = [
@@ -4579,11 +4588,30 @@ def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[
         r"\bkeep\s+(?:me|us)\s+in\s+mind\b",
         r"\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b",
     ]
-    return any(re.search(pattern, text) for pattern in patterns)
+    contingent_future_help = bool(
+        re.search(
+            r"\bif\b.{0,80}\b(?:something|anything|circumstances?|things?)\b.{0,50}\b(?:happens?|changes?|comes?\s+up)\b"
+            r"|\bif\b.{0,80}\b(?:need|want|could\s+use)\b.{0,30}\bhelp\b",
+            text,
+        )
+        and re.search(
+            r"\b(?:i|we)(?:['\u2019]?ll|\s+will)\s+(?:definitely\s+)?(?:reach\s+out(?:\s+to\s+you)?|contact\s+you|get\s+back\s+to\s+you|let\s+you\s+know)\b",
+            text,
+        )
+    )
+    present_request = bool(
+        re.search(r"\b(?:please|can|could|would|will)\s+you\s+(?:help|call|contact|text|email)\b", text)
+        or re.search(r"\b(?:need|want|could\s+use)\b.{0,30}\bhelp\b.{0,20}\b(?:now|today|currently|right\s+now)\b", text)
+    )
+    return any(re.search(pattern, text) for pattern in patterns) or (
+        self_handling_current_file and contingent_future_help and not present_request
+    )
 
 
 def _sms_relationship_only_reply(value: Any) -> str:
     text = _sms_normalize_whitespace(value).lower()
+    if re.search(r"\b(?:manage|handle)\s+(?:this|the)\s+(?:one|file|short\s+sale)\b", text):
+        return "Understood - thanks for letting me know. If anything changes, I'm happy to help."
     if re.search(r"\bkeep\s+(?:me|us)\s+in\s+mind\b", text):
         return "Absolutely - thanks. I'll keep you in mind, too."
     return "Thanks, I appreciate it. Feel free to reach out if a short sale comes up."
@@ -5212,11 +5240,12 @@ def _sms_client_consultation_reply() -> str:
     )
 
 
-def _sms_extract_scheduled_callback_reference(value: Any) -> str:
+def _sms_extract_scheduled_callback_reference(value: Any, reference_at: Any = None) -> str:
     text = _sms_normalize_whitespace(value)
     text = re.sub(r"\bnot\s+tomorrow\b", " ", text, flags=re.IGNORECASE)
     match = re.search(
-        r"\bafter\s+(?:the\s+)?weekend\b"
+        r"\bin\s+(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})\s+(?:days?|weeks?)(?:['\u2019]?\s+time)?\b"
+        r"|\bafter\s+(?:the\s+)?weekend\b"
         r"|\btomorrow\b"
         r"|\bnext\s+week\b"
         r"|\b(?:first|second|third|fourth|last)\s+week\s+(?:of|in)\s+"
@@ -5231,6 +5260,24 @@ def _sms_extract_scheduled_callback_reference(value: Any) -> str:
     if not match:
         return ""
     reference = match.group(0)
+    relative_match = re.fullmatch(
+        r"in\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})\s+(days?|weeks?)(?:['\u2019]?\s+time)?",
+        reference,
+        flags=re.IGNORECASE,
+    )
+    if relative_match and reference_at is not None:
+        parsed = _sms_parse_inbound_timestamp(reference_at)
+        if parsed:
+            number_words = {
+                "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
+                "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+                "ten": 10, "eleven": 11, "twelve": 12,
+            }
+            raw_count = relative_match.group(1).lower()
+            count = number_words.get(raw_count, int(raw_count) if raw_count.isdigit() else 0)
+            days = count * (7 if relative_match.group(2).lower().startswith("week") else 1)
+            due = parsed + timedelta(days=days)
+            return f"{due.strftime('%B')} {due.day}, {due.year}"
     qualifier_match = re.search(
         rf"(?:\b(?:morning|afternoon|evening)\b\s+(?:on\s+)?)?{re.escape(reference)}(?:\s+\b(?:morning|afternoon|evening)\b)?",
         text,
@@ -5387,10 +5434,10 @@ def _sms_is_scheduled_callback(value: Any) -> bool:
 
     patterns = [
         r"\b(?:call|text|contact)\s+me\b",
-        r"\b(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?me\b",
-        r"\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b",
+        r"\b(?:reach out|follow up|get in touch|connect|touch base)\s+(?:with\s+|to\s+)?me\b",
+        r"\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect|touch base)\b",
         r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b",
-        r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b",
+        r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect|touch base)\s+(?:with\s+|to\s+)?you\b",
         r"\b(?:let['’]?s|lets|can\s+we|could\s+we|would\s+you|can\s+you)\s+(?:set\s+up\s+(?:a\s+)?time\s+to\s+)?(?:talk|speak|chat)\b",
         r"\b(?:i|we)\s+can\s+(?:talk|speak|chat)\b",
         r"\bset\s+up\s+(?:a\s+)?time\s+(?:for\s+us\s+)?to\s+(?:talk|speak|chat)\b",
@@ -6057,7 +6104,9 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
     )
 
 
-def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
+def _sms_fast_decision(
+    row_obj: Dict[str, str], inbound_text: str, received_at: Any = None
+) -> Optional[Dict[str, Any]]:
     t = _sms_normalize_whitespace(inbound_text).lower()
 
     if re.search(r"\berror\s+invalid\s+number\b", t) and "valid 10 digit" in t:
@@ -6104,7 +6153,7 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
         )
 
     if _sms_is_post_handoff_callback_update(row_obj, t):
-        callback_time = _sms_extract_scheduled_callback_reference(t) or _sms_extract_same_day_callback_reference(t)
+        callback_time = _sms_extract_scheduled_callback_reference(t, received_at) or _sms_extract_same_day_callback_reference(t)
         existing_callback_time = _sms_normalized_callback_time(row_obj.get("callback_time"))
         callback_changed = existing_callback_time != _sms_normalized_callback_time(callback_time)
         reason = "Callback updated after human handoff"
@@ -6352,7 +6401,7 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
         )
 
     if _sms_is_unavailable_until_callback_reference(t):
-        callback_reference = _sms_extract_scheduled_callback_reference(t)
+        callback_reference = _sms_extract_scheduled_callback_reference(t, received_at)
         return _sms_decision(
             reply_text=f"No problem. What time {callback_reference} works best for a quick call?",
             lead_status="Y",
@@ -6370,7 +6419,7 @@ def _sms_fast_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[D
             block_reply=False,
             reason="Scheduled callback timing",
             call_booking_status="scheduled_callback",
-            callback_time=_sms_extract_scheduled_callback_reference(t),
+            callback_time=_sms_extract_scheduled_callback_reference(t, received_at),
         )
 
     if _sms_is_present_service_interest(t) and not _sms_is_phone_call_interest(t):
@@ -6651,8 +6700,10 @@ def _sms_is_previously_answered_question_with_approved_no_offers_update(
     return False
 
 
-def _sms_build_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str, Any]:
-    fast = _sms_fast_decision(row_obj, inbound_text)
+def _sms_build_decision(
+    row_obj: Dict[str, str], inbound_text: str, received_at: Any = None
+) -> Dict[str, Any]:
+    fast = _sms_fast_decision(row_obj, inbound_text, received_at)
     decision = fast if fast is not None else _sms_openai_decision(row_obj, inbound_text)
     decision = _sms_enforce_durable_followup_promise(decision, inbound_text)
     decision = _sms_ensure_question_disposition(decision, inbound_text)
@@ -6980,7 +7031,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     _sms_append_history(ws, row_idx, headers, row_obj, {"role": "agent", "text": inbound_text, "ts": received_at})
 
     auto_count = _sms_count(row_obj)
-    classified_decision = _sms_build_decision(row_obj, inbound_text)
+    classified_decision = _sms_build_decision(row_obj, inbound_text, received_at)
     terminal_locked = (
         str(row_obj.get("human_override") or "").upper() == "TRUE"
         or str(row_obj.get("handoff_flag") or "").upper() == "TRUE"

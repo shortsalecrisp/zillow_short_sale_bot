@@ -610,7 +610,7 @@ function handleIncomingSmsCore_(body) {
   // Classify once before the cap so terminal high-value intents (scheduled
   // callbacks, direct help, stats, fee negotiation) keep their specific
   // handoff reason instead of being flattened into MAX REPLIES.
-  const ruleResult = applyFastRules_(inboundText, currentRowObj);
+  const ruleResult = applyFastRules_(inboundText, currentRowObj, receivedAt);
 
   // The reply cap is a terminal human handoff, even for questions that have
   // an early deterministic answer. Preserve opt-outs, routing noise, and an
@@ -667,7 +667,7 @@ function handleIncomingSmsCore_(body) {
     };
   }
   if (isPostHandoffCallbackUpdate_(currentRowObj, inboundText)) {
-    const callbackTime = extractScheduledCallbackReference_(inboundText) || extractSameDayCallbackReference_(inboundText);
+    const callbackTime = extractScheduledCallbackReference_(inboundText, receivedAt) || extractSameDayCallbackReference_(inboundText);
     const priorCallbackTime = normalizeCallbackTime_(currentRowObj[HEADERS.callback_time]);
     const changed = normalizeCallbackTime_(callbackTime) !== priorCallbackTime;
     const preservedLeadStatus = String(currentRowObj[HEADERS.mailshake_status] || "Y");
@@ -1388,7 +1388,7 @@ function handleIncomingSmsCore_(body) {
 
   if (isSchedulingSignal_(inboundText)) {
     const decision = buildSchedulingReply_(inboundText);
-    const callbackTime = extractScheduledCallbackReference_(inboundText)
+    const callbackTime = extractScheduledCallbackReference_(inboundText, receivedAt)
       || extractSchedulingTimePhrase_(inboundText)
       || normalizeWhitespace_(String(inboundText || ""));
     const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
@@ -2352,7 +2352,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   };
 }
 
-function applyFastRules_(text, rowObj) {
+function applyFastRules_(text, rowObj, receivedAt) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const lastOutbound = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || ""));
 
@@ -2737,7 +2737,7 @@ function applyFastRules_(text, rowObj) {
   }
 
   if (isUnavailableUntilCallbackReferenceSignal_(t)) {
-    const callbackReference = extractScheduledCallbackReference_(t);
+    const callbackReference = extractScheduledCallbackReference_(t, receivedAt);
     return {
       matched: true,
       reply_text: "No problem. What time " + callbackReference + " works best for a quick call?",
@@ -2753,7 +2753,7 @@ function applyFastRules_(text, rowObj) {
 
   if (isSchedulingSignal_(t)) {
     const hasSpecificTime = !!extractSchedulingTimePhrase_(t);
-    const callbackTime = extractScheduledCallbackReference_(t) ||
+    const callbackTime = extractScheduledCallbackReference_(t, receivedAt) ||
       extractSchedulingTimePhrase_(t) || t;
     return {
       matched: true,
@@ -3675,7 +3675,10 @@ function isRelationshipOnlyAfterExistingCoverageSignal_(text, rowObj) {
   const currentCoverage = /\b(?:already (?:have|has|working with|represented)|have (?:an? |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b/.test(t) ||
     /\b(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b/.test(t) ||
     /\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+(?:currently\s+)?working\s+with\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\b/.test(t);
-  if (!t || isSubstantiveFollowupSignal_(t) || (!hasPreviouslyCoveredContext_(rowObj) && !currentCoverage)) {
+  const selfHandlingCurrentFile = /\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+(?:also\s+)?(?:a\s+)?short[- ]sale\s+(?:specialist|negotiator|processor)\b/.test(t) ||
+    /\b(?:i|we)\s+(?:think\s+(?:that\s+)?)?(?:i|we)?\s*(?:can|could)\s+(?:manage|handle)\s+(?:this|the)\s+(?:one|file|short\s+sale)\b/.test(t);
+  if (!t || isSubstantiveFollowupSignal_(t) ||
+      (!hasPreviouslyCoveredContext_(rowObj) && !currentCoverage && !selfHandlingCurrentFile)) {
     return false;
   }
   const passiveRelationshipPatterns = [
@@ -3685,7 +3688,14 @@ function isRelationshipOnlyAfterExistingCoverageSignal_(text, rowObj) {
     /\bkeep\s+(?:me|us)\s+in\s+mind\b/,
     /\bfeel free to\s+(?:keep|save)\s+(?:my|our)\s+(?:info|information|contact|number|details)\b/
   ];
-  return passiveRelationshipPatterns.some(function(pattern) { return pattern.test(t); });
+  const contingentFutureHelp = (
+    /\bif\b.{0,80}\b(?:something|anything|circumstances?|things?)\b.{0,50}\b(?:happens?|changes?|comes?\s+up)\b/.test(t) ||
+    /\bif\b.{0,80}\b(?:need|want|could\s+use)\b.{0,30}\bhelp\b/.test(t)
+  ) && /\b(?:i|we)(?:['\u2019]?ll|\s+will)\s+(?:definitely\s+)?(?:reach\s+out(?:\s+to\s+you)?|contact\s+you|get\s+back\s+to\s+you|let\s+you\s+know)\b/.test(t);
+  const presentRequest = /\b(?:please|can|could|would|will)\s+you\s+(?:help|call|contact|text|email)\b/.test(t) ||
+    /\b(?:need|want|could\s+use)\b.{0,30}\bhelp\b.{0,20}\b(?:now|today|currently|right\s+now)\b/.test(t);
+  return passiveRelationshipPatterns.some(function(pattern) { return pattern.test(t); }) ||
+    (selfHandlingCurrentFile && contingentFutureHelp && !presentRequest);
 }
 
 function isFutureBuyerRecontactSignal_(text) {
@@ -3706,6 +3716,9 @@ function buildFutureBuyerRecontactReply_() {
 
 function buildRelationshipOnlyCloseoutReply_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (/\b(?:manage|handle)\s+(?:this|the)\s+(?:one|file|short\s+sale)\b/.test(t)) {
+    return "Understood - thanks for letting me know. If anything changes, I'm happy to help.";
+  }
   if (/\bkeep\s+(?:me|us)\s+in\s+mind\b/.test(t)) {
     return "Absolutely - thanks. I'll keep you in mind, too.";
   }
@@ -4311,16 +4324,36 @@ function isImmediateCallSignal_(text) {
   return patterns.some(pattern => pattern.test(t));
 }
 
-function extractScheduledCallbackReference_(text) {
+function extractScheduledCallbackReference_(text, referenceAt) {
   const raw = normalizeWhitespace_(String(text || ""));
   if (!raw) return "";
   const searchable = raw.replace(/\bnot\s+tomorrow\b/ig, " ");
 
   const match = searchable.match(
-    /\bafter\s+(?:the\s+)?weekend\b|\btomorrow\b|\bnext\s+week\b|\b(?:first|second|third|fourth|last)\s+week\s+(?:of|in)\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)\b|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
+    /\bin\s+(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})\s+(?:days?|weeks?)(?:['\u2019]?\s+time)?\b|\bafter\s+(?:the\s+)?weekend\b|\btomorrow\b|\bnext\s+week\b|\b(?:first|second|third|fourth|last)\s+week\s+(?:of|in)\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)\b|\b(?:(?:this|next|coming)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/i
   );
   if (!match) return "";
   let reference = match[0];
+  const relativeMatch = reference.match(/^in\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})\s+(days?|weeks?)(?:['\u2019]?\s+time)?$/i);
+  if (relativeMatch && referenceAt) {
+    const numberWords = {
+      a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+      seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12
+    };
+    const rawCount = String(relativeMatch[1]).toLowerCase();
+    const count = Object.prototype.hasOwnProperty.call(numberWords, rawCount)
+      ? numberWords[rawCount]
+      : Number(rawCount);
+    const dateKeyMatch = String(referenceAt).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    const parsed = dateKeyMatch
+      ? new Date(Date.UTC(Number(dateKeyMatch[1]), Number(dateKeyMatch[2]) - 1, Number(dateKeyMatch[3]), 12))
+      : new Date(referenceAt);
+    if (Number.isFinite(count) && !isNaN(parsed.getTime())) {
+      parsed.setUTCDate(parsed.getUTCDate() + count * (/^weeks?$/i.test(relativeMatch[2]) ? 7 : 1));
+      const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+      return months[parsed.getUTCMonth()] + " " + parsed.getUTCDate() + ", " + parsed.getUTCFullYear();
+    }
+  }
   const escaped = reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const qualified = searchable.match(new RegExp("(?:\\b(?:morning|afternoon|evening)\\b\\s+(?:on\\s+)?)?" + escaped + "(?:\\s+\\b(?:morning|afternoon|evening)\\b)?", "i"));
   if (qualified) {
@@ -4418,10 +4451,10 @@ function isExplicitDayOrDateCallbackSignal_(text) {
 
   const patterns = [
     /\b(?:call|text|contact)\s+me\b/,
-    /\b(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?me\b/,
-    /\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b/,
+    /\b(?:reach out|follow up|get in touch|connect|touch base)\s+(?:with\s+|to\s+)?me\b/,
+    /\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect|touch base)\b/,
     /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b/,
-    /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect)\s+(?:with\s+|to\s+)?you\b/,
+    /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect|touch base)\s+(?:with\s+|to\s+)?you\b/,
     /\b(?:let['’]?s|lets|can\s+we|could\s+we|would\s+you|can\s+you)\s+(?:set\s+up\s+(?:a\s+)?time\s+to\s+)?(?:talk|speak|chat)\b/,
     /\b(?:i|we)\s+can\s+(?:talk|speak|chat)\b/,
     /\bset\s+up\s+(?:a\s+)?time\s+(?:for\s+us\s+)?to\s+(?:talk|speak|chat)\b/
@@ -6988,6 +7021,15 @@ function testApprovedLeadIntelligenceRules_() {
       isPostHandoffCallbackUpdate_({ [HEADERS.human_override]: "FALSE" }, "Monday afternoon works better")) {
     throw new Error("Post-handoff callback update regression");
   }
+  const relativeCallbackText = "I wont have time. Can you touch base in three weeks time?";
+  const relativeCallbackDecision = applyFastRules_(relativeCallbackText, postHandoffCallbackRow, "2026-09-09T10:33:00-04:00");
+  if (extractScheduledCallbackReference_(relativeCallbackText) !== "In Three Weeks Time" ||
+      extractScheduledCallbackReference_(relativeCallbackText, "2026-09-09T10:33:00-04:00") !== "September 30, 2026" ||
+      !relativeCallbackDecision.matched ||
+      relativeCallbackDecision.callback_time !== "September 30, 2026" ||
+      relativeCallbackDecision.call_booking_status !== "scheduled_callback") {
+    throw new Error("Relative-duration callback resolution regression: " + JSON.stringify(relativeCallbackDecision));
+  }
   const monthWindowUpdateText = "Let's focus for the first week of September";
   if (!isPostHandoffCallbackUpdate_(postHandoffCallbackRow, monthWindowUpdateText) ||
       extractScheduledCallbackReference_(monthWindowUpdateText) !== "First Week Of September") {
@@ -7183,6 +7225,20 @@ function testApprovedLeadIntelligenceRules_() {
   if (isExistingCrispRelationshipSignal_(genericCurrentHelpText) ||
       !isRelationshipOnlyAfterExistingCoverageSignal_(genericCurrentHelpText, {})) {
     throw new Error("Generic current-help plus future-only relationship must route to the warm closeout");
+  }
+  const contingentSelfHandlingText = "I'm sorry I'm a little behind and catching up on my messages. I appreciate the offer for help. But I am also a short sell specialist and think that I can manage this one. However, if something happens and I need help, I will definitely reach out to you.";
+  const contingentSelfHandlingDecision = applyFastRules_(contingentSelfHandlingText, {});
+  if (!isRelationshipOnlyAfterExistingCoverageSignal_(contingentSelfHandlingText, {}) ||
+      !contingentSelfHandlingDecision.matched ||
+      contingentSelfHandlingDecision.lead_status !== "O" ||
+      !contingentSelfHandlingDecision.conversation_done ||
+      contingentSelfHandlingDecision.handoff_needed ||
+      contingentSelfHandlingDecision.reply_text !== "Understood - thanks for letting me know. If anything changes, I'm happy to help.") {
+    throw new Error("Contingent future-help self-handler must get a relationship closeout: " + JSON.stringify(contingentSelfHandlingDecision));
+  }
+  const currentHelpRequestDecision = applyFastRules_("I can manage this file, but I need help now. Can you call me?", {});
+  if (!currentHelpRequestDecision.handoff_needed || currentHelpRequestDecision.lead_status !== "Y") {
+    throw new Error("A present help request must still create a handoff: " + JSON.stringify(currentHelpRequestDecision));
   }
   const apostropheLossRelationshipRow = {
     [HEADERS.conversation_summary]: "Already represented / handled",
