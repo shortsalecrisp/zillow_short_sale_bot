@@ -38,6 +38,7 @@ from headless_browser import (
 )
 from lightweight_extract import extract_lightweight_snapshot
 from sheet_safety import sanitize_external_links_for_sheet
+from listing_address import extract_address_fields, parse_full_address, missing_address_fields
 try:
     import dns.resolver  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -1740,60 +1741,13 @@ def _street_only_address(value: Any) -> str:
     text = value.strip()
     if not text:
         return ""
-    return text.split(",", 1)[0].strip()
+    return parse_full_address(text).get("street") or text
 
 
-US_STATE_CODES = {
-    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA",
-    "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO",
-    "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK",
-    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA", "WI",
-    "WV", "WY", "DC",
-}
-US_STATE_RE = re.compile(r"\b([A-Z]{2})\b", re.IGNORECASE)
-ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 
 
 def _parse_full_address_string(value: Any) -> Dict[str, str]:
-    if not isinstance(value, str):
-        return {}
-    text = re.sub(r"\s+", " ", value).strip()
-    if not text or "," not in text:
-        return {}
-    parts = [part.strip() for part in text.split(",") if part.strip()]
-    if len(parts) < 3:
-        return {}
-
-    result: Dict[str, str] = {"street": parts[0]}
-    state_index: Optional[int] = None
-    for idx in range(len(parts) - 1, 0, -1):
-        state_match = US_STATE_RE.search(parts[idx])
-        if not state_match:
-            continue
-        state = state_match.group(1).upper()
-        if state not in US_STATE_CODES:
-            continue
-        result["state"] = state
-        state_index = idx
-        zip_match = ZIP_RE.search(parts[idx])
-        if zip_match:
-            result["zip"] = zip_match.group(0)
-        elif idx + 1 < len(parts):
-            zip_match = ZIP_RE.search(parts[idx + 1])
-            if zip_match:
-                result["zip"] = zip_match.group(0)
-        break
-
-    if state_index and state_index > 1:
-        city = ", ".join(parts[1:state_index]).strip()
-        if city:
-            result["city"] = city
-
-    if "zip" not in result:
-        zip_match = ZIP_RE.search(parts[-1])
-        if zip_match:
-            result["zip"] = zip_match.group(0)
-    return {key: val for key, val in result.items() if val}
+    return parse_full_address(value)
 
 
 def _is_undisclosed_address(value: Any) -> bool:
@@ -1803,81 +1757,7 @@ def _is_undisclosed_address(value: Any) -> bool:
 
 
 def _extract_address_fields(payload: Dict[str, Any]) -> Dict[str, str]:
-    property_payload = payload.get("property") if isinstance(payload.get("property"), dict) else {}
-    listing_payload = payload.get("listing") if isinstance(payload.get("listing"), dict) else {}
-    home_payload = payload.get("home") if isinstance(payload.get("home"), dict) else {}
-    address_candidates = (
-        payload.get("address"),
-        payload.get("listingAddress"),
-        property_payload.get("address"),
-        property_payload.get("listingAddress"),
-        listing_payload.get("address"),
-        listing_payload.get("listingAddress"),
-        home_payload.get("address"),
-        home_payload.get("listingAddress"),
-    )
-    address = next((candidate for candidate in address_candidates if candidate), {})
-    result: Dict[str, str] = {}
-    if isinstance(address, str):
-        parsed_address = _parse_full_address_string(address)
-        result.update(parsed_address)
-        if not result.get("street"):
-            street = _street_only_address(address)
-            if street:
-                result["street"] = street
-        address = {}
-    elif not isinstance(address, dict):
-        address = {}
-    parsed_full = {}
-    if isinstance(address, dict):
-        for key in ("full", "fullAddress", "formattedAddress", "displayAddress", "value"):
-            value = address.get(key)
-            if isinstance(value, str) and value.strip():
-                parsed_full = _parse_full_address_string(value)
-                if parsed_full:
-                    break
-    if not result.get("street"):
-        street_candidates = [
-            payload.get("street"),
-            address.get("street"),
-            address.get("streetAddress"),
-            address.get("streetAddress1"),
-            address.get("line1"),
-            address.get("addressLine1"),
-            payload.get("streetAddress"),
-            payload.get("addressStreet"),
-            payload.get("addressLine1"),
-            parsed_full.get("street"),
-        ]
-        street = next((val for val in street_candidates if isinstance(val, str) and val.strip()), "")
-    else:
-        street = result["street"]
-    city = address.get("city") if isinstance(address.get("city"), str) else payload.get("city") or payload.get("addressCity") or ""
-    state = address.get("state") if isinstance(address.get("state"), str) else payload.get("state") or payload.get("addressState") or ""
-    postal = (
-        address.get("zipcode")
-        or address.get("zipCode")
-        or address.get("zip")
-        or address.get("postalCode")
-        or payload.get("zipcode")
-        or payload.get("zipCode")
-        or payload.get("zip")
-        or payload.get("addressZipcode")
-        or payload.get("addressZip")
-        or payload.get("postalCode")
-    )
-    city = city or parsed_full.get("city", "")
-    state = state or parsed_full.get("state", "")
-    postal = postal or parsed_full.get("zip", "")
-    if street:
-        result["street"] = _street_only_address(street)
-    if isinstance(city, str) and city.strip():
-        result["city"] = city.strip()
-    if isinstance(state, str) and state.strip():
-        result["state"] = state.strip()
-    if isinstance(postal, str) and postal.strip():
-        result["zip"] = postal.strip()
-    return result
+    return extract_address_fields(payload)
 
 
 def _extract_agent_name_from_payload(payload: Dict[str, Any]) -> str:
@@ -1962,15 +1842,15 @@ def _normalize_listing_payload_aliases(row: Dict[str, Any]) -> None:
 
     address_fields = _extract_address_fields(row)
     if address_fields:
-        if not row.get("street") and address_fields.get("street"):
+        if address_fields.get("street"):
             row["street"] = address_fields["street"]
         if not row.get("address") and address_fields.get("street"):
             row["address"] = address_fields["street"]
-        if not row.get("city") and address_fields.get("city"):
+        if address_fields.get("city"):
             row["city"] = address_fields["city"]
-        if not row.get("state") and address_fields.get("state"):
+        if address_fields.get("state"):
             row["state"] = address_fields["state"]
-        if not row.get("zip") and address_fields.get("zip"):
+        if address_fields.get("zip"):
             row["zip"] = address_fields["zip"]
 
     listing_text = _listing_text_from_payload(row)
@@ -12402,6 +12282,15 @@ def _row_index_from_append_range(updated_range: str) -> int:
 
 def append_row(vals) -> int:
     global _next_row_hint
+    vals = list(vals)
+    address = {"street": _lead_row_cell(vals, COL_STREET),
+               "city": _lead_row_cell(vals, COL_CITY), "state": _lead_row_cell(vals, COL_STATE)}
+    missing = missing_address_fields(address)
+    if missing:
+        raise ValueError("incomplete_listing_address:" + ",".join(missing))
+    normalized_address = extract_address_fields(address)
+    for column, field in ((COL_STREET, "street"), (COL_CITY, "city"), (COL_STATE, "state")):
+        vals[column] = normalized_address[field]
     with _append_row_lock:
         padded_vals = list(vals)
         if len(padded_vals) < SHEET_LEAD_WRITE_COLS:
@@ -12434,10 +12323,12 @@ def append_row(vals) -> int:
                     active_open_row,
                 )
             _next_row_hint = active_open_row + 1
-            if _lead_row_owns_values(
-                _read_active_lead_row(active_open_row),
-                padded_vals,
-            ):
+            actual_values = _read_active_lead_row(active_open_row)
+            owns_values = _lead_row_owns_values(actual_values, padded_vals)
+            if not owns_values and _lead_row_cell(actual_values, COL_ZPID) == zpid:
+                LOG.error("SHEET_ADDRESS_READBACK_MISMATCH zpid=%s row=%s; outreach held", zpid, active_open_row)
+                raise SheetRowOwnershipError("Listing address readback mismatch; outreach held")
+            if owns_values:
                 if len(vals) > COL_ZPID and vals[COL_ZPID]:
                     record_seen_zpid(str(vals[COL_ZPID]))
                 LOG.info(
@@ -12446,6 +12337,8 @@ def append_row(vals) -> int:
                     active_open_row,
                     attempt,
                 )
+                LOG.info("SHEET_ADDRESS_VERIFIED zpid=%s row=%s city=%s state=%s", zpid, active_open_row,
+                         _lead_row_cell(actual_values, COL_CITY), _lead_row_cell(actual_values, COL_STATE))
                 LOG.info(
                     "Row written to active lead block (row %s); next hint %s",
                     active_open_row,
@@ -14133,13 +14026,22 @@ def process_rows(
             "description",
         )
         street = _street_only_address(r.get("street")) or _street_only_address(r.get("address"))
-        if not street or _is_undisclosed_address(street):
+        if not street:
+            outcomes[zpid] = "address_pending"
+            LOG.warning("LISTING_ADDRESS_HELD zpid=%s missing=street", zpid)
+            continue
+        if _is_undisclosed_address(street):
             outcome = "skipped_undisclosed_address"
             outcomes[zpid] = outcome
             LOG.debug("SKIP undisclosed address zpid %s", r.get("zpid"))
             continue
         if street:
             r["street"] = street
+        missing = missing_address_fields(r)
+        if missing:
+            outcomes[zpid] = "address_pending"
+            LOG.warning("LISTING_ADDRESS_HELD zpid=%s missing=%s", zpid, ",".join(missing))
+            continue
         if zpid and not is_active_listing(r):
             outcome = "skipped_stale_listing"
             outcomes[zpid] = outcome

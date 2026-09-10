@@ -1179,6 +1179,125 @@ def test_state_search_queue_payload_uses_street_only_sms_address():
     assert "http" not in json.dumps(payload).lower()
 
 
+def test_null_location_survives_intake_queue_worker_and_sheet_readback(monkeypatch):
+    raw = {"zpid": "442030188", "address": "317 Garden Park Ave, Calhan, CO, 80808",
+           "city": None, "state": "", "agentName": "Suzanne Strawbridge",
+           "description": "Short sale subject to lender approval."}
+    normalized = webhook_server._normalize_apify_row(raw)
+    payload = webhook_server._compact_queue_resume_payload(normalized, "payload.listings")
+    assert (payload["street"], payload["city"], payload["state"]) == ("317 Garden Park Ave", "Calhan", "CO")
+    # Replay the old queue format as well as freshly normalized intake.
+    legacy = dict(payload, full_address=raw["address"])
+    legacy.pop("city")
+    legacy.pop("state")
+    writes, sends, completed = [], [], []
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *a, **k: None)
+    monkeypatch.setattr(bot_min, "_agent_already_seen", lambda *a: False)
+    monkeypatch.setattr(bot_min, "is_active_listing", lambda *a: True)
+    monkeypatch.setattr(bot_min, "lookup_phone", lambda *a: {})
+    monkeypatch.setattr(bot_min, "lookup_email", lambda *a: {})
+    monkeypatch.setattr(bot_min, "_rapid_contact_normalized", lambda *a: {})
+    monkeypatch.setattr(bot_min, "_find_next_open_row", lambda *a: 5664)
+    monkeypatch.setattr(bot_min, "_read_active_lead_row", lambda *a: writes[-1] if writes else [])
+    monkeypatch.setattr(bot_min, "record_seen_zpid", lambda *a: None)
+    monkeypatch.setattr(bot_min, "schedule_initial_sms", lambda *a: sends.append(a))
+    class Values:
+        def update(self, **kwargs):
+            writes.append(kwargs["body"]["values"][0])
+            return types.SimpleNamespace(execute=lambda: {"updatedRange": "Sheet1!A5664:AQ5664"})
+    monkeypatch.setattr(bot_min, "sheets_service", types.SimpleNamespace(spreadsheets=lambda: types.SimpleNamespace(values=lambda: Values())))
+    monkeypatch.setattr(webhook_server, "_complete_queue_item", lambda item, status, **kw: completed.append(status))
+    webhook_server._process_claimed_queue_item({"zpid": "442030188", "listing_json": json.dumps(legacy)})
+    assert writes[0][4:7] == ["317 Garden Park Ave", "Calhan", "CO"]
+    assert completed == ["completed_short_sale"]
+    assert sends == []
+
+
+def test_incomplete_qualified_listing_is_held_before_contact_lookup(monkeypatch):
+    monkeypatch.setattr(bot_min, "load_seen_contacts", lambda *a, **k: None)
+    monkeypatch.setattr(bot_min, "lookup_phone", lambda *a: (_ for _ in ()).throw(AssertionError("must hold before contact lookup")))
+    outcomes = bot_min.process_rows([{"zpid": "missing-location", "street": "317 Garden Park Ave",
+                                     "agentName": "Suzanne Strawbridge", "description": "Short sale subject to lender approval."}],
+                                   skip_dedupe=True, return_outcomes=True)
+    assert outcomes == {"missing-location": "address_pending"}
+
+
+def test_address_retries_are_durable_and_capped(monkeypatch):
+    completed, lookups = [], []
+    row = {"zpid": "442030188", "street": "317 Garden Park Ave", "description": "Short sale", "_address_lookup_attempts": 2}
+    monkeypatch.setattr(webhook_server, "process_rows", lambda *a, **k: {"442030188": "address_pending"})
+    monkeypatch.setattr(webhook_server, "_enrich_rows_with_zillow_page", lambda rows, **kw: lookups.append(kw) or rows)
+    monkeypatch.setattr(webhook_server, "_complete_queue_item", lambda item, status, **kw: completed.append(status))
+    item = {"zpid": "442030188", "listing_json": json.dumps(row)}
+    webhook_server._process_claimed_queue_item(item)
+    assert completed == ["address_review"]
+    assert json.loads(item["listing_json"])["_address_lookup_attempts"] == 3
+    webhook_server._process_claimed_queue_item(item)
+    assert len(lookups) == 1
+
+
+def test_address_retry_waits_one_day_and_prioritizes_fresh_rows(monkeypatch):
+    now = datetime.now(timezone.utc)
+    records = [
+        {"zpid": "recent", "status": "address_pending", "processed_at": now.isoformat(), "_row_num": 2},
+        {"zpid": "due", "status": "address_pending", "processed_at": (now - timedelta(days=2)).isoformat(), "_row_num": 3},
+        {"zpid": "fresh", "status": "pending", "_row_num": 4},
+    ]
+    monkeypatch.setattr(webhook_server, "_load_pending_queue_records", lambda *a: records)
+    monkeypatch.setattr(webhook_server, "_update_pending_queue_row", lambda *a: None)
+    assert webhook_server._claim_next_pending_item()["zpid"] == "fresh"
+    assert webhook_server._claim_next_pending_item()["zpid"] == "due"
+    assert webhook_server._claim_next_pending_item() is None
+
+
+def test_sheet_address_mismatch_stops_before_seen_or_second_append(monkeypatch):
+    expected = [""] * bot_min.SHEET_LEAD_WRITE_COLS
+    expected[4:7] = ["317 Garden Park Ave", "Calhan", "CO"]
+    expected[bot_min.COL_ZPID] = "442030188"
+    actual = list(expected)
+    actual[5] = ""
+    reads = iter([[], actual])
+    writes = []
+    monkeypatch.setattr(bot_min, "_find_next_open_row", lambda *a: 5664)
+    monkeypatch.setattr(bot_min, "_read_active_lead_row", lambda *a: next(reads))
+    monkeypatch.setattr(bot_min, "record_seen_zpid", lambda *a: (_ for _ in ()).throw(AssertionError("must not mark complete")))
+    class Values:
+        def update(self, **kwargs):
+            writes.append(kwargs)
+            return types.SimpleNamespace(execute=lambda: {})
+    monkeypatch.setattr(bot_min, "sheets_service", types.SimpleNamespace(spreadsheets=lambda: types.SimpleNamespace(values=lambda: Values())))
+    try:
+        bot_min.append_row(expected)
+    except bot_min.SheetRowOwnershipError as exc:
+        assert "address readback mismatch" in str(exc)
+    else:
+        raise AssertionError("address mismatch must block outreach")
+    assert len(writes) == 1
+
+
+def test_schema_health_counts_missing_city_and_state(caplog):
+    webhook_server._log_apify_schema_health([{"street": "317 Garden Park Ave", "description": "Short sale", "agentName": "Suzanne"}], "test")
+    assert "missing_city=1 missing_state=1" in caplog.text
+
+
+def test_queue_keeps_comma_separated_unit_in_street_column():
+    payload = webhook_server._compact_queue_resume_payload({"zpid": "unit", "address": "101 Main St, Apt 2, Calhan, CO 80808"}, "payload.listings")
+    bot_min._normalize_listing_payload_aliases(payload)
+    assert bot_min._street_only_address(payload["street"]) == "101 Main St, Apt 2"
+    assert (payload["city"], payload["state"]) == ("Calhan", "CO")
+
+
+def test_append_rejects_missing_city_before_any_sheet_call():
+    row = [""] * bot_min.SHEET_LEAD_WRITE_COLS
+    row[4:7] = ["317 Garden Park Ave", "", "CO"]
+    try:
+        bot_min.append_row(row)
+    except ValueError as exc:
+        assert str(exc) == "incomplete_listing_address:city"
+    else:
+        raise AssertionError("incomplete address must not be appended")
+
+
 def test_pending_queue_serialization_removes_clickable_urls():
     payload = {
         "zpid": "hi-1",

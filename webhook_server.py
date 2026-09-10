@@ -28,6 +28,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from apify_fetcher import fetch_rows  # unchanged helper
+from listing_address import extract_address_fields, parse_full_address, missing_address_fields
 from bot_min import (
     INITIAL_SMS_END,
     TZ,
@@ -824,7 +825,7 @@ def _fetch_zillow_page_html(detail_url: str, *, source: str, zpid: str, use_prox
         return "", f"error_{mode}"
 
 
-def _enrich_rows_with_zillow_page(rows: List[Dict[str, Any]], *, source: str) -> List[Dict[str, Any]]:
+def _enrich_rows_with_zillow_page(rows: List[Dict[str, Any]], *, source: str, repair_address: bool = False) -> List[Dict[str, Any]]:
     if not rows or not ZILLOW_DIRECT_DETAIL_FALLBACK_ENABLED or not BeautifulSoup:
         return rows
 
@@ -835,7 +836,7 @@ def _enrich_rows_with_zillow_page(rows: List[Dict[str, Any]], *, source: str) ->
     failed = 0
     proxied = 0
     for row in rows:
-        if not isinstance(row, dict) or _row_has_listing_text(row):
+        if not isinstance(row, dict) or (_row_has_listing_text(row) and not (repair_address and missing_address_fields(row))):
             enriched_rows.append(row)
             continue
         if attempted >= ZILLOW_DIRECT_DETAIL_MAX_ROWS:
@@ -843,6 +844,8 @@ def _enrich_rows_with_zillow_page(rows: List[Dict[str, Any]], *, source: str) ->
             enriched_rows.append(row)
             continue
         detail_url = _absolute_zillow_url(_extra_state_listing_url(row))
+        if not detail_url and repair_address and str(row.get("zpid", "")).isdigit():
+            detail_url = f"https://www.zillow.com/homedetails/{row['zpid']}_zpid/"
         if not detail_url:
             skipped += 1
             enriched_rows.append(row)
@@ -2172,39 +2175,6 @@ APIFY_BROKER_PATHS = (
     ("listing", "brokerageName"),
 )
 
-APIFY_STREET_KEYS = (
-    "street",
-    "streetAddress",
-    "streetAddress1",
-    "addressStreet",
-    "addressLine1",
-    "line1",
-)
-APIFY_CITY_KEYS = ("city", "addressCity", "locality")
-APIFY_STATE_KEYS = ("state", "addressState", "region")
-APIFY_ZIP_KEYS = ("zip", "zipcode", "zipCode", "postalCode", "addressZip", "addressZipcode")
-US_STATE_CODES = {
-    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA",
-    "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO",
-    "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK",
-    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA", "WI",
-    "WV", "WY", "DC",
-}
-US_STATE_RE = re.compile(r"\b([A-Z]{2})\b", re.IGNORECASE)
-ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
-
-APIFY_ADDRESS_PATHS = (
-    ("address",),
-    ("listingAddress",),
-    ("property", "address"),
-    ("property", "listingAddress"),
-    ("listing", "address"),
-    ("listing", "listingAddress"),
-    ("home", "address"),
-    ("home", "listingAddress"),
-    ("hdpData", "homeInfo", "address"),
-    ("hdpData", "homeInfo", "listingAddress"),
-)
 
 APIFY_URL_KEYS = (
     "detailUrl",
@@ -2336,95 +2306,14 @@ def _address_field(address: Dict[str, Any], keys: Tuple[str, ...]) -> str:
 
 
 def _parse_full_address_string(value: Any) -> Dict[str, str]:
-    text = _text_fragment(value)
-    if not text or "," not in text:
-        return {}
-    parts = [part.strip() for part in text.split(",") if part.strip()]
-    if len(parts) < 3:
-        return {}
-
-    result: Dict[str, str] = {"street": parts[0]}
-    state_index: Optional[int] = None
-    for idx in range(len(parts) - 1, 0, -1):
-        state_match = US_STATE_RE.search(parts[idx])
-        if not state_match:
-            continue
-        state = state_match.group(1).upper()
-        if state not in US_STATE_CODES:
-            continue
-        result["state"] = state
-        state_index = idx
-        zip_match = ZIP_RE.search(parts[idx])
-        if zip_match:
-            result["zip"] = zip_match.group(0)
-        elif idx + 1 < len(parts):
-            zip_match = ZIP_RE.search(parts[idx + 1])
-            if zip_match:
-                result["zip"] = zip_match.group(0)
-        break
-
-    if state_index and state_index > 1:
-        city = ", ".join(parts[1:state_index]).strip()
-        if city:
-            result["city"] = city
-
-    if "zip" not in result:
-        zip_match = ZIP_RE.search(parts[-1])
-        if zip_match:
-            result["zip"] = zip_match.group(0)
-    return {key: val for key, val in result.items() if val}
+    return parse_full_address(value)
 
 
 def _extract_address_fields(row: Dict[str, Any]) -> Dict[str, str]:
-    address_sources: List[Any] = [_path_value(row, path) for path in APIFY_ADDRESS_PATHS]
-    address_dicts = [address for address in address_sources if isinstance(address, dict)]
-    address_strings = [_text_fragment(address) for address in address_sources if isinstance(address, str)]
-
-    street = _first_text(row, APIFY_STREET_KEYS)
-    city = _first_text(row, APIFY_CITY_KEYS)
-    state = _first_text(row, APIFY_STATE_KEYS)
-    zip_code = _first_text(row, APIFY_ZIP_KEYS)
-
-    for address in address_dicts:
-        parsed_full = _parse_full_address_string(
-            _address_field(
-                address,
-                ("full", "fullAddress", "formattedAddress", "displayAddress", "value"),
-            )
-        )
-        street = street or _address_field(address, APIFY_STREET_KEYS)
-        street = street or parsed_full.get("street", "")
-        city = city or _address_field(address, APIFY_CITY_KEYS)
-        city = city or parsed_full.get("city", "")
-        state = state or _address_field(address, APIFY_STATE_KEYS)
-        state = state or parsed_full.get("state", "")
-        zip_code = zip_code or _address_field(address, APIFY_ZIP_KEYS)
-        zip_code = zip_code or parsed_full.get("zip", "")
-
-    full_address = ""
-    for address in address_strings:
-        if address:
-            full_address = address
-            parsed_full = _parse_full_address_string(address)
-            street = street or parsed_full.get("street") or address.split(",", 1)[0].strip()
-            city = city or parsed_full.get("city", "")
-            state = state or parsed_full.get("state", "")
-            zip_code = zip_code or parsed_full.get("zip", "")
-            break
-
-    result: Dict[str, str] = {}
-    if full_address:
-        result["address"] = full_address
-    if street:
-        result["street"] = street
-        result.setdefault("address", street)
-    if city:
-        result["city"] = city
-    if state:
-        result["state"] = state
-    if zip_code:
-        result["zip"] = zip_code
-    return result
+    fields = extract_address_fields(row)
+    if fields.get("street"):
+        fields["address"] = fields["street"]
+    return fields
 
 
 def _extract_listing_url(row: Dict[str, Any]) -> str:
@@ -2467,7 +2356,8 @@ def _normalize_apify_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
     for key, value in _extract_address_fields(row).items():
         if value:
-            normalized.setdefault(key, value)
+            if key != "address" or not normalized.get(key):
+                normalized[key] = value
 
     detail_url = _extract_listing_url(row)
     if detail_url:
@@ -2568,20 +2458,24 @@ def _log_apify_schema_health(rows: List[Dict[str, Any]], context: str) -> None:
         if isinstance(row, dict) and not (_format_listing_address(row) or row.get("address") or row.get("street"))
     )
     missing_status = sum(1 for row in rows if isinstance(row, dict) and not _extract_listing_status(row))
+    missing_city = sum(1 for row in rows if "city" in missing_address_fields(row))
+    missing_state = sum(1 for row in rows if "state" in missing_address_fields(row))
     sample_keys: List[str] = []
     for row in rows:
         if isinstance(row, dict):
             sample_keys = sorted(str(key) for key in row.keys())[:30]
             break
-    level = logger.warning if (missing_text or missing_agent or missing_address) else logger.info
+    level = logger.warning if (missing_text or missing_agent or missing_address or missing_city or missing_state) else logger.info
     level(
-        "APIFY_SCHEMA_HEALTH context=%s total=%d missing_text=%d missing_agent=%d missing_address=%d missing_status=%d sample_keys=%s",
+        "APIFY_SCHEMA_HEALTH context=%s total=%d missing_text=%d missing_agent=%d missing_address=%d missing_status=%d missing_city=%d missing_state=%d sample_keys=%s",
         context,
         total,
         missing_text,
         missing_agent,
         missing_address,
         missing_status,
+        missing_city,
+        missing_state,
         sample_keys,
     )
 
@@ -2644,7 +2538,7 @@ def _street_only_address(value: Any) -> str:
     text = value.strip()
     if not text:
         return ""
-    return text.split(",", 1)[0].strip()
+    return parse_full_address(text).get("street") or text
 
 
 def _format_sms_listing_address(row: Dict[str, Any]) -> str:
@@ -3234,6 +3128,7 @@ def _extract_special_listing_conditions(row: Dict[str, Any]) -> str:
 
 
 def _compact_queue_resume_payload(row: Dict[str, Any], source: str) -> Dict[str, Any]:
+    row = _normalize_apify_row(row)
     zpid = str(row.get("zpid", "")).strip()
     listing_text = extract_description(row)
     special_conditions = _extract_special_listing_conditions(row)
@@ -3343,7 +3238,7 @@ def _serialize_queue_payload(payload: Dict[str, Any], zpid: str) -> str:
 
 
 def _pending_queue_state_skip_zpids() -> set[str]:
-    skip_statuses = FINAL_QUEUE_STATUSES | {"pending", "in_progress"}
+    skip_statuses = FINAL_QUEUE_STATUSES | {"pending", "in_progress", "address_pending", "address_review"}
     with _queue_lock:
         records = _load_pending_queue_records(PENDING_QUEUE_WS)
     skip: set[str] = set()
@@ -3529,9 +3424,13 @@ def _claim_next_pending_item() -> Optional[Dict[str, Any]]:
     with _queue_lock:
         ws = PENDING_QUEUE_WS
         records = _load_pending_queue_records(ws)
-        for rec in records:
+        for rec in sorted(records, key=lambda rec: rec.get("status") != "pending"):
             status = str(rec.get("status", "")).strip()
-            if status != "pending":
+            if status == "address_pending":
+                last_attempt = _parse_iso_timestamp(str(rec.get("processed_at", "")))
+                if last_attempt and datetime.now(timezone.utc) - last_attempt < timedelta(hours=24):
+                    continue
+            elif status != "pending":
                 continue
             zpid = str(rec.get("zpid", "")).strip()
             if not zpid:
@@ -3577,6 +3476,7 @@ def _process_claimed_queue_item(item: Dict[str, Any]) -> None:
         }
     if zpid and "zpid" not in row:
         row["zpid"] = zpid
+    row = _normalize_apify_row(row)
 
     if not _row_has_listing_text(row):
         logger.warning(
@@ -3589,9 +3489,25 @@ def _process_claimed_queue_item(item: Dict[str, Any]) -> None:
 
     try:
         outcomes = process_rows([row], skip_dedupe=True, return_outcomes=True) or {}
-        if _row_has_detail_marker(row) and zpid:
-            EXPORTED_ZPIDS.add(zpid)
         result_status = outcomes.get(zpid)
+        if result_status == "address_pending":
+            attempts = int(row.get("_address_lookup_attempts") or 0)
+            if attempts < 3:
+                attempts += 1
+                repaired = _enrich_rows_with_zillow_page([row], source="address-retry", repair_address=True)
+                row = _normalize_apify_row(repaired[0])
+                row["_address_lookup_attempts"] = attempts
+                item["listing_json"] = _serialize_queue_payload(row, zpid)
+                if not missing_address_fields(row):
+                    outcomes = process_rows([row], skip_dedupe=True, return_outcomes=True) or {}
+                    result_status = outcomes.get(zpid)
+            if result_status == "address_pending":
+                status = "address_review" if attempts >= 3 else "address_pending"
+                logger.warning("LISTING_ADDRESS_RETRY zpid=%s attempts=%s status=%s missing=%s", zpid, attempts, status, missing_address_fields(row))
+                _complete_queue_item(item, status, error="missing_listing_address:" + ",".join(missing_address_fields(row)))
+                return
+        if result_status in {"completed_short_sale", "completed_non_short_sale"} and zpid:
+            EXPORTED_ZPIDS.add(zpid)
         if result_status not in {"completed_short_sale", "completed_non_short_sale"}:
             if result_status in TERMINAL_QUEUE_RESULTS:
                 _complete_queue_item(item, "completed_non_short_sale", result=result_status)
