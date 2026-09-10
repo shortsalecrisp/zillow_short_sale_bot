@@ -1133,7 +1133,6 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   const assistantText = normalizeText(assistantMessages(conversation).join(" "));
   const messages = meaningfulUserMessages(conversation).map(normalizeText);
-  const lastUserMessage = messages.at(-1) ?? "";
   const hasAvailabilityScreen =
     text.includes("see if this person is available") ||
     text.includes("see if they are available") ||
@@ -1162,11 +1161,14 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
     text.includes("was out of the office") ||
     text.includes("is out of the office");
   const wasPlacedOnHold =
-    lastUserMessage.includes("please stay on the line") ||
-    lastUserMessage.includes("stay on the line") ||
-    lastUserMessage.includes("hold on") ||
-    lastUserMessage.includes("one moment") ||
-    lastUserMessage.includes("transfer you") ||
+    messages.some(
+      (message) =>
+        message.includes("please stay on the line") ||
+        message.includes("stay on the line") ||
+        message.includes("hold on") ||
+        message.includes("one moment") ||
+        message.includes("transfer you"),
+    ) ||
     text.includes("placed the agent on hold") ||
     text.includes("placed maya on hold") ||
     text.includes("asked maya to stay on the line");

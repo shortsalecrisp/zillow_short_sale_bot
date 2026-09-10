@@ -562,6 +562,28 @@ test("post-call fallback classifies a completed automated screener as agent unav
   assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
 });
 
+test("post-call fallback retains an earlier hold instruction when the final screener turn is truncated", async () => {
+  const { shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "assistant", message: "Hello, may I speak with Jacquelyn?" },
+      { role: "user", message: "Let me see if the person is available." },
+      { role: "assistant", message: "I'm calling about a short sale listing." },
+      { role: "user", message: "Thanks. Please stay on the line." },
+      { role: "assistant", message: "Sure, I'll wait." },
+      { role: "user", message: "..." },
+      { role: "user", message: "I'm sorry, this per-" },
+    ],
+  };
+
+  assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+});
+
 test("post-call fallback preserves full voicemail after automated screening", async () => {
   const { shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import(
     "../src/lib/elevenLabsPostCall"
