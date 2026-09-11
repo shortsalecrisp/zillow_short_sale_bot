@@ -112,6 +112,11 @@ function handleUnifiedSmsPost_(e) {
     if (action === "tasker_heartbeat") {
       var transportVersion = String(body.transport_version || "");
       recordTaskerTransportActivityV12_("heartbeat", body);
+      var heartbeatInboundSnapshot = enqueueTaskerInboundSnapshotBestEffortV17_(
+        body,
+        requestId,
+        "tasker_heartbeat"
+      );
       try {
         appendSmsDebugLog_("tasker_heartbeat", {
           request_id: requestId,
@@ -123,6 +128,7 @@ function handleUnifiedSmsPost_(e) {
         ok: true,
         action: action,
         transport_version: transportVersion,
+        inbound_snapshot: heartbeatInboundSnapshot,
         server_time: new Date().toISOString()
       });
     }
@@ -212,7 +218,14 @@ function handleUnifiedSmsPost_(e) {
 
     if (action === "claim_pending_send") {
       recordTaskerTransportActivityV12_("claim", body);
-      return jsonOutput_(claimPendingSmsSendV10_(body));
+      var claimInboundSnapshot = enqueueTaskerInboundSnapshotBestEffortV17_(
+        body,
+        requestId,
+        "claim_pending_send"
+      );
+      var claimResult = claimPendingSmsSendV10_(body);
+      claimResult.inbound_snapshot = claimInboundSnapshot;
+      return jsonOutput_(claimResult);
     }
 
     if (action === "send_started") {
@@ -436,6 +449,57 @@ function getUnifiedIgnoredInboundReason_(body) {
   }
 
   return "";
+}
+
+function enqueueTaskerInboundSnapshotBestEffortV17_(body, webhookRequestId, sourceAction) {
+  var snapshot = {
+    phone: String(body && body.snapshot_phone || ""),
+    message: String(body && body.snapshot_message || ""),
+    received_at: String(body && body.snapshot_received_at || ""),
+    message_id: String(body && body.snapshot_message_id || ""),
+    transport_version: String(body && body.transport_version || "")
+  };
+  var ignoredReason = getUnifiedIgnoredInboundReason_(snapshot);
+  if (ignoredReason) {
+    return { ok: true, observed: false, reason: ignoredReason };
+  }
+
+  try {
+    var result = enqueueIncomingSmsV10_(snapshot, webhookRequestId);
+    if (result && result.queued) {
+      try {
+        appendSmsDebugLog_("tasker_inbound_snapshot_recovered", {
+          request_id: webhookRequestId || "",
+          phone: snapshot.phone,
+          message: snapshot.message,
+          message_id: snapshot.message_id,
+          queue_id: result.queue_id || "",
+          reason: "Recovered latest inbound SMS through " + String(sourceAction || "Tasker activity")
+        });
+      } catch (_) {}
+    }
+    return {
+      ok: result && result.ok !== false,
+      observed: true,
+      queued: !!(result && result.queued),
+      duplicate: !!(result && result.duplicate),
+      queue_id: result && result.queue_id || ""
+    };
+  } catch (err) {
+    try {
+      appendSmsDebugLog_("tasker_inbound_snapshot_retryable_error", {
+        request_id: webhookRequestId || "",
+        phone: snapshot.phone,
+        message: snapshot.message,
+        message_id: snapshot.message_id,
+        reason: String(err),
+        source_action: sourceAction || ""
+      });
+    } catch (_) {}
+    // Heartbeat and outbound claiming must remain healthy. The same stable
+    // snapshot is retried by both activity lanes until it reaches the queue.
+    return { ok: false, observed: true, retryable: true, error: String(err) };
+  }
 }
 
 function shouldSuppressUnifiedDuplicateInbound_(body) {

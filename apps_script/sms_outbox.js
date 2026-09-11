@@ -685,11 +685,14 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
       : [];
     for (var i = rows.length - 1; i >= 0; i--) {
       var created = new Date(rows[i][0]).getTime();
+      var rowMessageId = String(rows[i][4] || "").trim();
       var rowTransportFingerprint = buildSmsInboundTransportFingerprint_(
         rows[i][5], rows[i][6], rows[i][7]
       );
-      if ((String(rows[i][3] || "") === dedupeKey || rowTransportFingerprint === transportFingerprint) &&
-          created && now.getTime() - created < 10 * 60 * 1000) {
+      var stableMessageIdMatch = !!suppliedMessageId && rowMessageId === suppliedMessageId;
+      var recentFingerprintMatch = created && now.getTime() - created < 10 * 60 * 1000 &&
+        (String(rows[i][3] || "") === dedupeKey || rowTransportFingerprint === transportFingerprint);
+      if (stableMessageIdMatch || recentFingerprintMatch) {
         cache.put(cacheKey, String(rows[i][2] || ""), 600);
         cache.put(transportCacheKey, String(rows[i][2] || ""), 600);
         ensureSmsOutboxTriggersBestEffortV14_();

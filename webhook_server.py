@@ -4158,6 +4158,24 @@ EQUATOR_PORTAL_REPLY = (
     "I'm very familiar with Equator and can handle all of the tasks and communication in the system "
     "to take that work off your hands."
 )
+
+
+def _sms_equator_fee_and_location_reply(value: Any) -> str:
+    text = _sms_normalize_whitespace(value).lower()
+    location = (
+        "I'm based in Atlanta and work nationwide. "
+        if re.search(r"\b(?:are you local|local to|where are you located|where are you based|based in)\b", text)
+        else ""
+    )
+    return (
+        f"Thanks for explaining. {location}I'm very familiar with Equator, and I handle the lender-side paperwork, "
+        "calls, follow-up, negotiations, and portal communication so you aren't left doing the work. "
+        "There's no cost to you or the seller, and I don't take anything from your commission. I charge a flat "
+        "fee to the buyer at closing, only if the deal closes. You can check us out at "
+        "www.crispshortsales.com, and I'm happy to answer any questions."
+    )
+
+
 SHORT_SALE_TIMELINE_REPLY = (
     "The short sale process generally takes 60-90 days to complete from the point we submit the full short sale "
     "package and offer and all docs until the lender reviews the offer and gives us a decision."
@@ -5648,7 +5666,7 @@ def _sms_is_fee_question(value: Any) -> bool:
     return bool(
         re.search(r"\b(?:fee|costs?|expenses?|paid|payment|compensat|commission|charge|pricing|price|percentage)\b", text)
         or re.search(r"\b(?:what(?:'s| is)|how much is)\s+(?:your|the)\s+rate\b", text)
-        or re.search(r"\b(?:how do you get paid|how are you paid|who pays you|how do you make money)\b", text)
+        or re.search(r"\b(?:how do you get paid|how are you paid|who pays you|how do you make (?:your )?money)\b", text)
         or re.search(r"\b(?:tarifa|cuanto cobras|cuanto cuesta|como te pagan|quien paga)\b", text)
     )
 
@@ -6126,6 +6144,15 @@ def _sms_fast_decision(
             reason="Answered each safe compound service question and routed documents or deadline review to Yoni",
             call_booking_status="interested_no_call",
             send_reply_before_handoff=True,
+            bypass_reply_cap=True,
+        )
+
+    if re.search(r"\bequator\b", t) and _sms_is_fee_question(t):
+        return _sms_decision(
+            reply_text=_sms_equator_fee_and_location_reply(t),
+            lead_status="Y",
+            reason="Answered Equator, location, and buyer-paid fee questions together",
+            call_booking_status="interested_no_call",
             bypass_reply_cap=True,
         )
 

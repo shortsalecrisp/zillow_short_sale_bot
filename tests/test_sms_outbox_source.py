@@ -87,6 +87,17 @@ def test_inbound_queue_dedupes_same_transport_message_across_different_ids():
     assert "cache.put(transportCacheKey, queueId, 600)" in OUTBOX
 
 
+def test_activity_requests_recover_latest_tasker_inbound_with_stable_dedupe():
+    assert "function enqueueTaskerInboundSnapshotBestEffortV17_" in UNIFIED
+    assert '"tasker_heartbeat"' in UNIFIED
+    assert '"claim_pending_send"' in UNIFIED
+    assert "heartbeatInboundSnapshot" in UNIFIED
+    assert "claimInboundSnapshot" in UNIFIED
+    assert 'appendSmsDebugLog_("tasker_inbound_snapshot_recovered"' in UNIFIED
+    assert "stableMessageIdMatch" in OUTBOX
+    assert "stableMessageIdMatch || recentFingerprintMatch" in OUTBOX
+
+
 def test_inbound_retry_can_recover_after_crm_commit_before_decision_snapshot():
     chatbot = (ROOT / "apps_script" / "sms_chatbot.js").read_text(encoding="utf-8")
     assert "recovery_retry: claim.attempts > 1" in OUTBOX

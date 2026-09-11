@@ -1777,6 +1777,31 @@ def test_sms_equator_mentions_get_the_approved_portal_expertise_reply(monkeypatc
     assert decision["bypass_reply_cap"] is True
 
 
+def test_sms_ramona_equator_location_and_fee_questions_receive_one_complete_answer(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = (
+        "Are you local to this area? I did pay somebody one last year to help with a short sale. "
+        "They took 2% and they didn't do a thing. I did all the work, so not sure I can check out "
+        "your company and how do you make your money. This system goes to Equator. You're welcome "
+        "to tell me more."
+    )
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert decision["reply_text"] == module._sms_equator_fee_and_location_reply(inbound)
+    assert "based in Atlanta and work nationwide" in decision["reply_text"]
+    assert "familiar with Equator" in decision["reply_text"]
+    assert "flat fee to the buyer at closing" in decision["reply_text"]
+    assert "www.crispshortsales.com" in decision["reply_text"]
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is False
+    assert decision["block_reply"] is False
+    assert decision["bypass_reply_cap"] is True
+
+
 def test_sms_compound_service_request_answers_all_safe_items_before_handoff(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

@@ -1898,6 +1898,7 @@ function isPaymentOrFeeQuestionSignal_(text) {
     "how are you paid",
     "who pays you",
     "how do you make money",
+    "how do you make your money",
     "how does crisp get paid",
     "what percentage",
     "what is the percentage",
@@ -2418,6 +2419,21 @@ function applyFastRules_(text, rowObj, receivedAt) {
       needs_review: false,
       block_reply: false,
       reason: "Clarified that Crisp's lender-side role is separate from the title company"
+    };
+  }
+
+  if (isEquatorPortalSignal_(t) && isPaymentOrFeeQuestionSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildEquatorFeeAndLocationReply_(t),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "interested_no_call",
+      bypass_reply_cap: true,
+      reason: "Answered Equator, location, and buyer-paid fee questions together"
     };
   }
 
@@ -3908,6 +3924,16 @@ function isEquatorPortalSignal_(text) {
 
 function buildEquatorPortalReply_() {
   return "I'm very familiar with Equator and can handle all of the tasks and communication in the system to take that work off your hands.";
+}
+
+function buildEquatorFeeAndLocationReply_(text) {
+  const location = isLocalQuestionSignal_(text)
+    ? "I'm based in Atlanta and work nationwide. "
+    : "";
+  return "Thanks for explaining. " + location +
+    "I'm very familiar with Equator, and I handle the lender-side paperwork, calls, follow-up, negotiations, and portal communication so you aren't left doing the work. " +
+    "There's no cost to you or the seller, and I don't take anything from your commission. I charge a flat fee to the buyer at closing, only if the deal closes. " +
+    "You can check us out at www.crispshortsales.com, and I'm happy to answer any questions.";
 }
 
 function isShortSaleTimelineQuestionSignal_(text) {
@@ -6436,6 +6462,17 @@ function testSmsIntentContractV3_() {
     "short_sale_source",
     sourcePassed,
     sourcePassed ? "Source challenges receive the approved terminal apology" : "A source challenge did not close cleanly"
+  );
+
+  const ramonaText = "Are you local to this area? I paid somebody to help with a short sale, but I did all the work. How do you make your money? This system goes to Equator.";
+  const ramonaDecision = applyFastRules_(ramonaText, baseRow);
+  record(
+    "equator_location_fee_complete_answer",
+    ramonaDecision.matched && !ramonaDecision.handoff_needed && !ramonaDecision.block_reply &&
+      ramonaDecision.reply_text === buildEquatorFeeAndLocationReply_(ramonaText) &&
+      ramonaDecision.reply_text.indexOf("based in Atlanta and work nationwide") !== -1 &&
+      ramonaDecision.reply_text.indexOf("flat fee to the buyer at closing") !== -1,
+    ramonaDecision.reason
   );
 
   const compoundServiceText = "Can you send your service agreement, buyer-paid fee schedule, and explain exactly what your team handles from submission through approval? How do you handle Equator files and foreclosure deadlines?";

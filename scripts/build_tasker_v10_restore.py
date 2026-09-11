@@ -212,7 +212,7 @@ def reconcile_last_sms_actions(*, transport_version: int = 11) -> list[ET.Elemen
         variable_set("%inbound_phone", "%SMSRF"),
         variable_set("%inbound_message", "%SMSRB"),
         variable_set("%inbound_received_at_raw", "%SMSRD %SMSRT"),
-        variable_set("%inbound_message_id", "reconcile-%SMSRF-%SMSRD-%SMSRT"),
+        variable_set("%inbound_message_id", "reconcile-%SMSRF-%SMSRD-%SMSRT-%SMSRB"),
         stop_if("%SMSBOT_RECONCILE_KEY", "%inbound_message_id"),
         stop_if("%inbound_phone", "Device pairing"),
         stop_if("%inbound_message", "Your messages are available*"),
@@ -228,12 +228,35 @@ def reconcile_last_sms_actions(*, transport_version: int = 11) -> list[ET.Elemen
     ]
 
 
+def tasker_last_inbound_snapshot_actions() -> list[ET.Element]:
+    """Encode Tasker's latest received SMS for piggyback recovery requests."""
+
+    return [
+        variable_set("%snapshot_phone_raw", "%SMSRF"),
+        variable_set("%snapshot_message_raw", "%SMSRB"),
+        variable_set("%snapshot_received_at_raw", "%SMSRD %SMSRT"),
+        variable_set("%snapshot_message_id_raw", "reconcile-%SMSRF-%SMSRD-%SMSRT-%SMSRB"),
+        url_encode("%snapshot_phone_raw", "%snapshot_phone"),
+        url_encode("%snapshot_message_raw", "%snapshot_message"),
+        url_encode("%snapshot_received_at_raw", "%snapshot_received_at"),
+        url_encode("%snapshot_message_id_raw", "%snapshot_message_id"),
+    ]
+
+
+def tasker_last_inbound_snapshot_body() -> str:
+    return (
+        "&snapshot_phone=%snapshot_phone&snapshot_message=%snapshot_message"
+        "&snapshot_received_at=%snapshot_received_at&snapshot_message_id=%snapshot_message_id"
+    )
+
+
 def heartbeat_actions(*, transport_version: int) -> list[ET.Element]:
     """Report that the imported Tasker transport is enabled and executing."""
 
     body = (
         "token=%transport_token&action=tasker_heartbeat"
         f"&transport_version={transport_version}&device_time=%transport_device_time"
+        + tasker_last_inbound_snapshot_body()
     )
     return [
         variable_set("%api_url", API_URL),
@@ -241,6 +264,7 @@ def heartbeat_actions(*, transport_version: int) -> list[ET.Element]:
         variable_set("%transport_device_time_raw", "%TIMEMS"),
         url_encode("%token", "%transport_token"),
         url_encode("%transport_device_time_raw", "%transport_device_time"),
+        *tasker_last_inbound_snapshot_actions(),
         *retry_http(body),
     ]
 
@@ -293,7 +317,10 @@ def dispatcher_actions_inline_receipt() -> list[ET.Element]:
     receipt and the server lease can safely retry it later.
     """
 
-    claim_body = "token=%transport_token&action=claim_pending_send&worker_id=pixel-v12"
+    claim_body = (
+        "token=%transport_token&action=claim_pending_send&worker_id=pixel-v17"
+        + tasker_last_inbound_snapshot_body()
+    )
     started_body = (
         "token=%transport_token&action=send_started&request_id=%transport_request_id"
         "&message_id=%transport_message_id&phone=%transport_phone"
@@ -314,6 +341,7 @@ def dispatcher_actions_inline_receipt() -> list[ET.Element]:
         variable_set("%api_url", API_URL),
         variable_set("%token", TOKEN_PLACEHOLDER),
         url_encode("%token", "%transport_token"),
+        *tasker_last_inbound_snapshot_actions(),
         *retry_http(claim_body),
         if_action("%http_data.should_send_text", "true"),
         variable_set("%SMSOUT_REQUEST", "%http_data.request_id"),
