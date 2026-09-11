@@ -129,6 +129,10 @@ function addSchedulingWrites(
     const firstAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_1_SENT - 1]) ?? now;
     const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, getVoiceBotAgentTimeZone(rowValues));
 
+    // A retryable first attempt must remain queue-eligible. Clear any stale
+    // terminal status left by an earlier or partial classifier write so K
+    // cannot suppress the already-scheduled second attempt.
+    clearWrite(writes, VOICE_BOT_COL_LEAD_STATUS_CODE, "leadStatusCode_retry_cleared");
     addWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "call_scheduled_for", nextAttemptAt.toISOString());
     addWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible", "yes");
     addWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket", "voice_call_2_due");

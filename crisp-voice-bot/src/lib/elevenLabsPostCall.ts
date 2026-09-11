@@ -990,7 +990,10 @@ export function shouldTreatAsIdentityMismatchVoicemail(
   return clearlyUnrelatedBusiness && !mentionsExpectedTarget;
 }
 
-export function hasLiveHumanGatekeeperEvidence(conversation: ElevenLabsConversation): boolean {
+export function hasLiveHumanGatekeeperEvidence(
+  conversation: ElevenLabsConversation,
+  expectedFirstName = "",
+): boolean {
   const transcript = conversation.transcript ?? [];
   const summary = normalizeText(conversation.analysis?.transcript_summary ?? "");
   const summaryNamesLiveRole =
@@ -1022,9 +1025,17 @@ export function hasLiveHumanGatekeeperEvidence(conversation: ElevenLabsConversat
     /\b(?:real estate|realty|properties|brokerage|office|group)\b.{0,35}\bthis is\b/i.test(message) ||
     /\bthis is\b.{0,35}\b(?:real estate|realty|properties|brokerage|office|group)\b/i.test(message),
   );
+  const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  const differentTeamResponder = Boolean(expected) && contextualUserTurns.some((item) => {
+    const message = normalizeText(item.message ?? "");
+    const selfIntroduction = message.match(
+      /\bthis is\s+([a-z][a-z'-]*)\b.{0,60}\b(?:real estate|realty|properties|brokerage|office|group|team)\b/,
+    );
+    return Boolean(selfIntroduction && !nameSoundsSimilar(selfIntroduction[1], expected));
+  });
 
   return liveOfficeInteraction || (summaryNamesLiveRole && contextualUserTurns.length > 0) ||
-    (officeSelfIdentification && contextualUserTurns.length >= 2);
+    (officeSelfIdentification && contextualUserTurns.length >= 2) || differentTeamResponder;
 }
 
 export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
@@ -1087,7 +1098,10 @@ export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
   return identityConfirmed && selfHandlingConfirmed;
 }
 
-export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversation): boolean {
+export function shouldTreatAsAgentUnavailable(
+  conversation: ElevenLabsConversation,
+  expectedFirstName = "",
+): boolean {
   if (hasDeliveredVoicemailMessage(conversation)) {
     return false;
   }
@@ -1108,7 +1122,7 @@ export function shouldTreatAsAgentUnavailable(conversation: ElevenLabsConversati
     return true;
   }
 
-  if (hasLiveHumanGatekeeperEvidence(conversation)) {
+  if (hasLiveHumanGatekeeperEvidence(conversation, expectedFirstName)) {
     return true;
   }
 
@@ -1518,7 +1532,7 @@ async function processPostCallOutcomeForConversation(
     return true;
   }
 
-  if (shouldTreatAsAgentUnavailable(conversation)) {
+  if (shouldTreatAsAgentUnavailable(conversation, expectedFirstName)) {
     const outcome = buildVoiceResponseStatus("agent_not_available");
 
     await postSheetUpdate({

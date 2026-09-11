@@ -525,6 +525,38 @@ test("post-call fallback gives live office gatekeeper evidence precedence over i
   assert.equal(buildVoiceResponseStatus("agent_not_available"), "Agent was not available");
 });
 
+test("post-call fallback treats a different person answering for the target's realty team as unavailable", async () => {
+  const { hasLiveHumanGatekeeperEvidence, shouldTreatAsAgentUnavailable } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "end_call tool was called." },
+    transcript: [
+      { role: "assistant", message: "Hi Christina, this is Maya with Crisp Short Sales." },
+      { role: "user", message: "Good afternoon. This is Lalaina with The Welch Team." },
+      { role: "assistant", message: "We help agents with short sale lender paperwork and follow-up." },
+      { role: "user", message: "No, thank you." },
+    ],
+  };
+
+  assert.equal(hasLiveHumanGatekeeperEvidence(conversation, "Christina"), true);
+  assert.equal(shouldTreatAsAgentUnavailable(conversation, "Christina"), true);
+});
+
+test("post-call fallback does not treat the named target's own team introduction as a gatekeeper", async () => {
+  const { hasLiveHumanGatekeeperEvidence } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    transcript: [
+      { role: "assistant", message: "Hi Christina, this is Maya with Crisp Short Sales." },
+      { role: "user", message: "Good afternoon. This is Christina with The Welch Team." },
+    ],
+  };
+
+  assert.equal(hasLiveHumanGatekeeperEvidence(conversation, "Christina"), false);
+});
+
 test("post-call fallback treats information-request tooling as a handoff, not a callback or hangup", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsCallback } = await import(
     "../src/lib/elevenLabsPostCall"

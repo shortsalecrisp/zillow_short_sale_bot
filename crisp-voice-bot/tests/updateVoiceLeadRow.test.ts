@@ -6,6 +6,7 @@ import {
   VOICE_BOT_COL_CALL_ELIGIBLE,
   VOICE_BOT_COL_CALL_SCHEDULED_FOR,
   VOICE_BOT_COL_CALL_TIME_BUCKET,
+  VOICE_BOT_COL_LEAD_STATUS_CODE,
 } from "../src/lib/voiceSheet";
 
 process.env.BASE_URL = "https://example.com";
@@ -83,4 +84,27 @@ test("terminal first-attempt failures persist an outcome and clear stale schedul
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_ELIGIBLE), "");
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_TIME_BUCKET), "");
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "");
+});
+
+test("retryable first attempts clear stale terminal lead status before scheduling call two", async () => {
+  const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
+  const row = Array.from({ length: 42 }, () => "");
+  row[VOICE_BOT_COL_CALL_1_SENT - 1] = "2026-09-09T13:03:44.000Z";
+  row[VOICE_BOT_COL_LEAD_STATUS_CODE - 1] = "N";
+
+  const writes = buildVoiceLeadRowWrites(
+    row,
+    {
+      callAttemptNumber: 1,
+      callResult: "agent_not_available",
+      responseStatus: "Agent was not available",
+    },
+    new Date("2026-09-09T13:04:00.000Z"),
+  );
+  const byColumn = new Map(writes.map((write) => [write.columnNumber, write.value]));
+
+  assert.equal(byColumn.get(VOICE_BOT_COL_LEAD_STATUS_CODE), "");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_ELIGIBLE), "yes");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_TIME_BUCKET), "voice_call_2_due");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "2026-09-10T18:30:00.000Z");
 });
