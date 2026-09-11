@@ -1022,20 +1022,29 @@ export function hasLiveHumanGatekeeperEvidence(
       contextualText,
     );
   const officeSelfIdentification = meaningfulUserMessages(conversation).some((message) =>
-    /\b(?:real estate|realty|properties|brokerage|office|group)\b.{0,35}\bthis is\b/i.test(message) ||
-    /\bthis is\b.{0,35}\b(?:real estate|realty|properties|brokerage|office|group)\b/i.test(message),
+    /\b(?:real estate|realty|properties|brokerage|office|group|team)\b.{0,35}\bthis is\b/i.test(message) ||
+    /\bthis is\b.{0,35}\b(?:real estate|realty|properties|brokerage|office|group|team)\b/i.test(message),
   );
   const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  const responderAuthorityConfirmed =
+    /\b(?:i|we)\s+(?:am |are |(?:'m|'re) )?(?:the )?(?:listing agent|agent of record|handling|handle|manage|responsible for)\b.{0,80}\b(?:short sale|listing|bank|lender)\b/.test(
+      contextualText,
+    );
   const differentTeamResponder = Boolean(expected) && contextualUserTurns.some((item) => {
     const message = normalizeText(item.message ?? "");
-    const selfIntroduction = message.match(
+    const forwardIntroduction = message.match(
       /\bthis is\s+([a-z][a-z'-]*)\b.{0,60}\b(?:real estate|realty|properties|brokerage|office|group|team)\b/,
     );
-    return Boolean(selfIntroduction && !nameSoundsSimilar(selfIntroduction[1], expected));
+    const reverseIntroduction = message.match(
+      /\b(?:real estate|realty|properties|brokerage|office|group|team)\b.{0,60}\bthis is\s+([a-z][a-z'-]*)\b/,
+    );
+    const responderName = forwardIntroduction?.[1] ?? reverseIntroduction?.[1] ?? "";
+    return Boolean(responderName && !nameSoundsSimilar(responderName, expected));
   });
 
   return liveOfficeInteraction || (summaryNamesLiveRole && contextualUserTurns.length > 0) ||
-    (officeSelfIdentification && contextualUserTurns.length >= 2) || differentTeamResponder;
+    (officeSelfIdentification && contextualUserTurns.length >= 2) ||
+    (differentTeamResponder && !responderAuthorityConfirmed);
 }
 
 export function shouldTreatAsTargetReachedSelfHandlingDisconnect(

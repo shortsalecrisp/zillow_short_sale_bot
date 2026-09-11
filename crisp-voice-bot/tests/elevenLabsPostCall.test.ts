@@ -557,6 +557,19 @@ test("post-call fallback does not treat the named target's own team introduction
   assert.equal(hasLiveHumanGatekeeperEvidence(conversation, "Christina"), false);
 });
 
+test("post-call fallback accepts a different team responder who explicitly confirms listing authority", async () => {
+  const { hasLiveHumanGatekeeperEvidence } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    transcript: [
+      { role: "assistant", message: "Hi Christina, this is Maya with Crisp Short Sales." },
+      { role: "user", message: "The Welch Team, this is Lalaina. I handle this short sale listing." },
+    ],
+  };
+
+  assert.equal(hasLiveHumanGatekeeperEvidence(conversation, "Christina"), false);
+});
+
 test("post-call fallback treats information-request tooling as a handoff, not a callback or hangup", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsCallback } = await import(
     "../src/lib/elevenLabsPostCall"
