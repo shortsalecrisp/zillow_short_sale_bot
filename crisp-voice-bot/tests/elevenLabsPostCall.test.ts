@@ -494,6 +494,48 @@ test("post-call fallback identifies wrong-person and unrelated-business voicemai
   );
 });
 
+test("post-call fallback accepts a lead's email-verified middle name on voicemail only", async () => {
+  const { shouldTreatAsIdentityMismatchVoicemail } = await import("../src/lib/elevenLabsPostCall");
+  const oliverGreeting = {
+    status: "done",
+    analysis: { transcript_summary: "Oliver's automated voicemail greeting prompted the caller to leave a message." },
+    transcript: [
+      { role: "user", message: "This is Oliver with AmeriFamily Realty. Please leave your name and phone number, and I will call you back." },
+    ],
+  };
+
+  assert.equal(
+    shouldTreatAsIdentityMismatchVoicemail(
+      oliverGreeting,
+      "Constantin",
+      "Oliver Ene",
+      "Constantin Oliver Ene",
+      "oliver@ameropanrealty.com",
+    ),
+    false,
+  );
+  assert.equal(
+    shouldTreatAsIdentityMismatchVoicemail(
+      oliverGreeting,
+      "Constantin",
+      "Oliver Ene",
+      "Constantin Oliver Ene",
+      "office@ameropanrealty.com",
+    ),
+    true,
+  );
+  assert.equal(
+    shouldTreatAsIdentityMismatchVoicemail(
+      { status: "done", transcript: [{ role: "user", message: "This is Tina. Please leave a message." }] },
+      "Constantin",
+      "Oliver Ene",
+      "Constantin Oliver Ene",
+      "oliver@ameropanrealty.com",
+    ),
+    true,
+  );
+});
+
 test("post-call fallback gives live office gatekeeper evidence precedence over identity-mismatch voicemail", async () => {
   const {
     buildVoiceResponseStatus,

@@ -944,6 +944,8 @@ export function shouldTreatAsIdentityMismatchVoicemail(
   conversation: ElevenLabsConversation,
   expectedFirstName = "",
   expectedLastName = "",
+  expectedFullName = "",
+  expectedEmail = "",
 ): boolean {
   if (hasLiveHumanGatekeeperEvidence(conversation)) {
     return false;
@@ -975,8 +977,27 @@ export function shouldTreatAsIdentityMismatchVoicemail(
   );
   const greetingLast = normalizeText(namedGreeting?.[2] ?? "").replace(/[^a-z0-9'-]/g, "");
   const matchingSurname = Boolean(expectedLast && greetingLast && greetingLast === expectedLast);
+  // A row can store a middle/preferred name with the surname (for example
+  // Constantin | Oliver Ene). Only trust that name on a recorded greeting when
+  // the same name also anchors the lead's own email address. A shared phone or
+  // an unverified middle-name token alone is not enough to dismiss a mismatch.
+  const greetingFirst = normalizeText(namedGreeting?.[1] ?? "").replace(/[^a-z0-9'-]/g, "");
+  const fullNameTokens = normalizeText(expectedFullName).split(/\s+/).map((token) => token.replace(/[^a-z0-9'-]/g, ""));
+  const emailLocalPart = normalizeText(expectedEmail).split("@")[0] ?? "";
+  const matchingVerifiedMiddleName = Boolean(
+    greetingFirst &&
+    fullNameTokens.slice(1, -1).some((middleName) =>
+      middleName.length >= 4 &&
+      middleName === greetingFirst &&
+      (emailLocalPart === middleName ||
+        emailLocalPart.startsWith(`${middleName}.`) ||
+        emailLocalPart.startsWith(`${middleName}_`) ||
+        emailLocalPart.startsWith(`${middleName}-`) ||
+        emailLocalPart.startsWith(`${middleName}+`)),
+    ),
+  );
   if (
-    namedGreeting && expected && !mentionsExpectedTarget && !matchingSurname &&
+    namedGreeting && expected && !mentionsExpectedTarget && !matchingSurname && !matchingVerifiedMiddleName &&
     !nameSoundsSimilar(namedGreeting[1], expected)
   ) {
     return true;
@@ -1506,7 +1527,13 @@ async function processPostCallOutcomeForConversation(
   }
 
   const expectedFirstName = metadata.firstName ?? metadata.fullName.split(/\s+/)[0] ?? "";
-  if (shouldTreatAsIdentityMismatchVoicemail(conversation, expectedFirstName, metadata.lastName ?? "")) {
+  if (shouldTreatAsIdentityMismatchVoicemail(
+    conversation,
+    expectedFirstName,
+    metadata.lastName ?? "",
+    metadata.fullName,
+    metadata.email ?? "",
+  )) {
     const outcome = buildVoiceResponseStatus("identity_mismatch_voicemail");
     const mismatchSummary =
       "The recorded greeting explicitly identified another person or an unrelated business; the target was not reached and no sales handoff was created.";
