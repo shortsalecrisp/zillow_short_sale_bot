@@ -4154,6 +4154,35 @@ def _sms_normalize_whitespace(value: Any) -> str:
 
 
 YONI_PUBLIC_CONTACT_REPLY = "Yoni Kutler - 404-300-9526. You can call or text anytime."
+SMS_SELF_HANDLING_REPLY = (
+    "That makes sense. You keep the listing and client relationship; I can take the lender paperwork, calls, "
+    "and follow-up off your plate. There's no fee to you or the seller and no commission split; the buyer "
+    "pays my fee at closing. Would a brief call to see if that helps on this file be worthwhile?"
+)
+SMS_SPECIFIC_FEE_REPLY = (
+    "My fee is $5,000, paid by the buyer at closing only if the deal closes. There's no service fee to you "
+    "or the seller, and I don't take anything from your commission."
+)
+SMS_BUYER_COST_CONCERN_REPLY = (
+    "The buyer does need to consider that cost with their offer, so we discuss the fee and disclosure up front. "
+    "I'm happy to walk through how that would work on this listing before you decide anything."
+)
+SMS_FAILED_PROVIDER_REPLY = (
+    "I understand why you'd be cautious after that. I handle the lender paperwork, calls, follow-up, and "
+    "negotiations while you focus on the listing and your client. We can go through exactly what I'd handle "
+    "and what I'd need from you before you decide. Would a brief call be helpful?"
+)
+SMS_EXPERIENCE_REPLY = (
+    "I've been handling short sales for over 15 years, and this is all I do: help agents and homeowners "
+    "through the process. I'd be happy to talk through your listing and explain how I can help."
+)
+SMS_CLOSED_COUNT_REPLY = "I don't have a verified closed count to quote here; I'll need to confirm that number."
+SMS_EMAIL_ADDRESS_REQUEST_REPLY = "Absolutely. What's the best email for an overview of what I handle and how the fee works?"
+SMS_BUYER_PROVISION_REPLY = "No, I don't bring the buyer. I handle the lender-side short-sale processing and negotiations."
+SMS_STANDARD_CLOSEOUT_REPLY = (
+    "Ok, no problem. If anything ever changes in the future and you're looking for some additional help "
+    "with these files, please just keep me in mind. Thanks!"
+)
 EQUATOR_PORTAL_REPLY = (
     "I'm very familiar with Equator and can handle all of the tasks and communication in the system "
     "to take that work off your hands."
@@ -4320,9 +4349,137 @@ def _sms_is_unsupported_performance_stats_question(value: Any) -> bool:
 
 
 def _sms_experience_reply(value: Any) -> str:
-    return (
-        "I have been doing this over 15 years and this is all that I do - help agents and homeowners "
-        "with the short sale process. So I have a lot of experience and am confident I can get your deal closed."
+    return SMS_EXPERIENCE_REPLY
+
+
+def _sms_response_id_for_text(value: Any) -> str:
+    text = _sms_normalize_whitespace(value).lower()
+    known_replies = {
+        "self_handling_value": SMS_SELF_HANDLING_REPLY,
+        "fee_specific": SMS_SPECIFIC_FEE_REPLY,
+        "buyer_cost_concern": SMS_BUYER_COST_CONCERN_REPLY,
+        "failed_provider": SMS_FAILED_PROVIDER_REPLY,
+        "experience": SMS_EXPERIENCE_REPLY,
+    }
+    for response_id, reply in known_replies.items():
+        if text == _sms_normalize_whitespace(reply).lower():
+            return response_id
+    if _sms_is_specific_fee_reply(text):
+        return "fee_specific"
+    if _sms_is_initial_fee_reply(text):
+        return "fee_initial"
+    if (
+        "i help a lot of agents in the same situation" in text
+        and ("off your plate" in text or "lender side" in text)
+    ):
+        return "self_handling_value"
+    return ""
+
+
+def _sms_has_delivered_response(row_obj: Dict[str, str], response_id: str) -> bool:
+    # Pending reply text is not a receipt. Legacy assistant history remains readable.
+    for entry in _sms_history_array(row_obj.get("history_json")):
+        if not isinstance(entry, dict) or str(entry.get("role") or "").lower() != "assistant":
+            continue
+        if entry.get("response_id") == response_id:
+            return True
+        if not entry.get("response_id") and _sms_response_id_for_text(entry.get("text")) == response_id:
+            return True
+    return _sms_response_id_for_text(row_obj.get("last_outbound_text")) == response_id
+
+
+def _sms_rejection_text(value: Any) -> str:
+    text = _sms_normalize_whitespace(value).lower().replace("\u2019", "'")
+    return re.sub(
+        r"\b(?:i(?:'m| am)?\s+)?(?:not|never)\s+(?:saying|said|claiming)\s+(?:that\s+)?"
+        r"(?:i(?:'m| am)\s+)?(?:not interested|uninterested)\b",
+        " open to information ",
+        text,
+    )
+
+
+def _sms_is_fee_amount_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(re.search(
+        r"\b(?:how much|dollar amount|exact (?:fee|cost|price)|what do you charge|what would you charge)\b"
+        r"|\b(?:what(?:'s| is| are)|how much is)\s+(?:the|your|a|buyer(?:'s)?|service)?\s*"
+        r"(?:fee|fees|cost|costs|charge|charges|price|pricing|rate)\b"
+        r"|\bwhat does (?:it|this|that|your service) cost\b"
+        r"|^(?:cost|price|pricing|fee|fees)[?!.]*$"
+        r"|\b(?:cual|cul|cuanto|que)\b.{0,40}\b(?:tarifa|costo|costaria|cobra|cobran|precio)\b",
+        text,
+    ))
+
+
+def _sms_is_buyer_cost_concern(value: Any) -> bool:
+    text = _sms_rejection_text(value)
+    return bool(
+        re.search(r"\bbuyer(?:s|'s)?\b", text)
+        and re.search(r"\b(?:fee|cost|pays?|paying|offer|price|afford|cash|financ(?:e|ing))\b", text)
+        and re.search(
+            r"\b(?:concern|worried|worry|hesitant|reluctant|issue|problem|refus\w*|won't|will not|wouldn't|"
+            r"would not|can't|cannot|couldn't|could not|don't think|do not think|what if|how|why|"
+            r"lower|reduce|factor|affect|deter|discourage|willing|scare|account|confused)\b",
+            text,
+        )
+    )
+
+
+def _sms_is_failed_provider_experience(value: Any) -> bool:
+    text = _sms_rejection_text(value)
+    return bool(
+        re.search(r"\b(?:processor|negotiator|company|provider|specialist)\b", text)
+        and re.search(r"\b(?:last|prior|previous|past|before|used|hired|had|tried)\b", text)
+        and re.search(
+            r"\b(?:fail\w*|didn't|did not|never|no (?:help|updates|communication)|left me|left us|"
+            r"burned|bad|terrible|awful|disappoint\w*|fell apart|doing all|did all)\b",
+            text,
+        )
+    )
+
+
+def _sms_is_exact_closed_count_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(re.search(
+        r"\b(?:how many|number of|exact count|closed count)\b(?!\s+(?:years|days|weeks|months)\b).{0,100}"
+        r"\b(?:short sales?|deals?|files?|transactions?|closings?)\b"
+        r"|\bhow many\b(?!\s+(?:years|days|weeks|months)\b).{0,70}\b(?:closed|completed)\b",
+        text,
+    ))
+
+
+def _sms_is_information_delivery_request(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(re.search(
+        r"\b(?:email|e-mail)\s+(?:me|us|your|the|an?|it|to)\b"
+        r"|\bshoot me an email\b"
+        r"|\b(?:send|share)\s+(?:me|us)?\s*(?:your|some|more|an?|the)?\s*"
+        r"(?:info(?:rmation)?|overview|details|brochure)\b"
+        r"|\binfo(?:rmation)?\s+(?:on|about)\s+(?:your\s+)?services?\b",
+        text,
+    ))
+
+
+def _sms_is_conditional_call(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(re.search(
+        r"\b(?:before|until)\b.{0,90}\b(?:call|talk|speak|chat)\b"
+        r"|\bif\b[^.!?;]{0,120}\b(?:might|may|would|could|consider|open to)\b[^.!?;]{0,60}\b(?:call|talk|speak|chat)\b"
+        r"|\b(?:might|maybe|consider(?:ing)?)\b.{0,60}\b(?:call|talk|speak|chat)\b",
+        text,
+    ))
+
+
+def _sms_is_urgent_sale_review(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(
+        re.search(r"\b(?:auction|foreclosure|sheriff(?:'s)? sale|trustee(?:'s)? sale)\b", text)
+        and re.search(
+            r"\b(?:today|tomorrow|deadline|scheduled|date|stop|postpone|delay|hold|save|cancel|"
+            r"minimum|soon|this week|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+            r"|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}[/-]\d{1,2}\b",
+            text,
+        )
     )
 
 
@@ -4921,6 +5078,9 @@ def _sms_decision(
     preserve_reply_formatting: bool = False,
     send_reply_before_handoff: bool = False,
     bypass_reply_cap: bool = False,
+    response_id: str = "",
+    info_email_to: str = "",
+    info_email_approval_required: bool = False,
 ) -> Dict[str, Any]:
     normalized_status = lead_status if lead_status in {"R", "Y", "O"} else "Y"
     if preserve_existing_state and lead_status == "G":
@@ -4943,6 +5103,9 @@ def _sms_decision(
         "preserve_reply_formatting": preserve_reply_formatting,
         "send_reply_before_handoff": send_reply_before_handoff,
         "bypass_reply_cap": bypass_reply_cap,
+        "response_id": response_id,
+        "info_email_to": info_email_to,
+        "info_email_approval_required": info_email_approval_required,
     }
 
 
@@ -5029,7 +5192,14 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
         "If the same message also asks for a success rate or other unsupported performance statistic, hand it off instead. "
         "A future-only promise to reconnect after securing a buyer is warm future interest, not an existing-client takeover. "
         "If answering a new substantive question would repeat the prior answer, hand it off instead of suppressing the question. "
-        "Never claim to have buyers. Never offer documents unless they explicitly ask for info by email. "
+        "Do not treat a different fee or buyer-cost question as a repetition of the fee amount. "
+        f"For an explicit amount question, answer: {SMS_SPECIFIC_FEE_REPLY} "
+        f"For experience, answer: {SMS_EXPERIENCE_REPLY} "
+        "Never invent a closed count, success rate, guarantee, buyer acceptance, or owner availability. "
+        "A negated refusal such as 'not saying I am not interested' is not a rejection. "
+        "Conditional calls or requests to email first are not call consent. "
+        "Never claim to have buyers. Document collection and process explanations are allowed. "
+        "Do not offer unsolicited materials, or claim email is sent or will be sent without a durable approval request. "
         "Keep any reply under 500 characters and casual."
     )
     user_payload = {
@@ -5264,6 +5434,34 @@ def _sms_extract_same_day_callback_reference(value: Any) -> str:
     return _sms_normalize_whitespace(" ".join(pieces)).title()
 
 
+def _sms_complete_callback_reference(value: Any, reference_at: Any = None) -> str:
+    text = _sms_normalize_whitespace(value)
+    date = _sms_extract_scheduled_callback_reference(text, reference_at)
+    time = re.search(
+        r"\b(?:(?:at|after|before|around|about)\s+)?"
+        r"(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|noon|midnight)\b"
+        r"|\b(?:at|after|before|around|about)\s+\d{1,2}(?::\d{2})?\b(?![/-])",
+        text,
+        re.IGNORECASE,
+    )
+    zone = re.search(
+        r"\b(?:ET|EST|EDT|CT|CST|CDT|MT|MST|MDT|PT|PST|PDT|UTC|GMT|"
+        r"Eastern|Central|Mountain|Pacific)(?:\s+(?:Standard|Daylight))?(?:\s+Time)?\b",
+        text,
+        re.IGNORECASE,
+    )
+    same_day = re.search(r"\b(?:today|this afternoon|this morning|tonight)\b", text, re.IGNORECASE)
+    pieces = [date or (same_day.group(0).title() if same_day else "")]
+    if time:
+        clock_text = time.group(0)
+        if not date and same_day and not re.search(r"[ap]\.?m", clock_text, re.IGNORECASE):
+            clock_text = clock_text.title()
+        pieces.append(clock_text)
+    if zone and (date or time):
+        pieces.append(zone.group(0))
+    return _sms_normalize_whitespace(" ".join(pieces))
+
+
 def _sms_is_unavailable_until_callback_reference(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     if not text or not _sms_extract_scheduled_callback_reference(text) or _sms_is_scheduled_callback(text):
@@ -5342,6 +5540,13 @@ def _sms_is_callback_update_timing(value: Any) -> bool:
 def _sms_is_post_handoff_callback_update(row_obj: Dict[str, str], inbound_text: str) -> bool:
     if str(row_obj.get("human_override") or "").upper() != "TRUE":
         return False
+    if (
+        _sms_is_information_delivery_request(inbound_text)
+        or _sms_is_conditional_call(inbound_text)
+        or _sms_is_urgent_sale_review(inbound_text)
+        or _sms_is_unmistakable_terminal_rejection(inbound_text)
+    ):
+        return False
     if not (_sms_is_scheduled_callback(inbound_text) or _sms_is_callback_update_timing(inbound_text)):
         return False
     current_state = str(row_obj.get("ai_state") or "").lower()
@@ -5352,7 +5557,13 @@ def _sms_is_post_handoff_callback_update(row_obj: Dict[str, str], inbound_text: 
 
 def _sms_is_scheduled_callback(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
-    if not text or not _sms_extract_scheduled_callback_reference(text):
+    if (
+        not text
+        or _sms_is_conditional_call(text)
+        or _sms_is_information_delivery_request(text)
+        or _sms_is_self_initiated_deferred_contact(text)
+        or not _sms_complete_callback_reference(text)
+    ):
         return False
     if re.search(
         r"\b(?:do not|don't|dont)\s+(?:call|text|contact|reach out|follow up|get in touch|connect)\b",
@@ -5419,6 +5630,8 @@ def _sms_is_existing_crisp_relationship(value: Any) -> bool:
 
 def _sms_is_phone_call_interest(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
+    if _sms_is_conditional_call(text) or _sms_is_information_delivery_request(text):
+        return False
     patterns = [
         r"\binterested\b.*\bcall\b",
         r"\bhop\w*\s+on\s+a\s+call\b",
@@ -5442,7 +5655,7 @@ def _sms_is_phone_call_interest(value: Any) -> bool:
 
 
 def _sms_is_present_service_interest(value: Any) -> bool:
-    text = _sms_normalize_whitespace(value).lower()
+    text = _sms_rejection_text(value)
     if not text or re.search(r"\b(?:not interested|no thanks?|do not|don't|dont)\b", text):
         return False
     if re.search(r"\b(?:in the future|someday|if i need|if we need|keep (?:you|your|the) (?:in mind|info|information))\b", text):
@@ -5468,7 +5681,7 @@ def _sms_is_present_service_interest(value: Any) -> bool:
 
 
 def _sms_is_unmistakable_terminal_rejection(value: Any) -> bool:
-    text = _sms_normalize_whitespace(value).lower()
+    text = _sms_rejection_text(value)
     if (
         not text
         or "?" in text
@@ -5514,12 +5727,16 @@ def _sms_is_closed_marketing_conversation(row_obj: Dict[str, str]) -> bool:
 
 
 def _sms_has_existing_coverage(value: Any) -> bool:
-    text = _sms_normalize_whitespace(value).lower()
+    text = _sms_rejection_text(value)
+    if _sms_is_failed_provider_experience(text):
+        return False
     return bool(
         re.search(
             r"\b(?:already have|already working with|currently have|have)\b.{0,45}"
             r"\b(?:help|someone|somebody|negotiator|processor|attorney|lawyer|company|team|representation|housing counselor|counselor)\b"
-            r"|\b(?:attorney|lawyer|negotiator|housing counselor)\b"
+            r"|\b(?:my|our|the)\s+(?:attorney|lawyer|negotiator|housing counselor)\b"
+            r"|\b(?:i|we|seller|owner|borrower)\b.{0,30}\b(?:retained|hired|engaged|using|working with)\b"
+            r".{0,40}\b(?:attorney|lawyer|negotiator|processor|specialist|company|team|housing counselor)\b"
             r"|\b(?:handled|covered|under contract)\b",
             text,
         )
@@ -5601,10 +5818,10 @@ def _sms_has_service_info_request_context(row_obj: Dict[str, str], inbound_text:
     )
 
 
-def _sms_service_info_email_acknowledgement(has_email: bool = True) -> str:
-    if not has_email:
-        return "Absolutely, I'd be happy to email you more information. What's the best email?"
-    return "Absolutely, I'll email you more information shortly. Thanks for sending your email."
+def _sms_service_info_email_acknowledgement(has_email: bool = True, email: str = "") -> str:
+    if not has_email or not email:
+        return SMS_EMAIL_ADDRESS_REQUEST_REPLY
+    return f"Absolutely. I'll send an overview of what I handle and how the fee works to {email}."
 
 
 def _sms_has_no_current_short_sale_help(value: Any) -> bool:
@@ -5621,7 +5838,7 @@ def _sms_has_no_current_short_sale_help(value: Any) -> bool:
 
 
 def _sms_has_decline_or_not_short_sale_clause(value: Any) -> bool:
-    text = _sms_normalize_whitespace(value).lower()
+    text = _sms_rejection_text(value)
     return bool(
         re.search(
             r"\b(?:no thanks?|not interested|don['’]?t need|do not need|dont need|"
@@ -5634,7 +5851,7 @@ def _sms_has_decline_or_not_short_sale_clause(value: Any) -> bool:
 
 
 def _sms_is_self_handling_opportunity(value: Any) -> bool:
-    text = _sms_normalize_whitespace(value).lower().replace("my self", "myself")
+    text = _sms_rejection_text(value).replace("my self", "myself")
     self_handling = bool(
         re.search(r"\b(?:handling|handle) (?:that part |it )?myself\b", text)
         or re.search(r"\b(?:doing|do) it myself\b", text)
@@ -5664,9 +5881,11 @@ def _sms_company_identity_reply(covered: bool = False) -> str:
 def _sms_is_fee_question(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(
-        re.search(r"\b(?:fee|costs?|expenses?|paid|payment|compensat|commission|charge|pricing|price|percentage)\b", text)
+        _sms_is_fee_amount_question(text)
+        or re.search(r"\b(?:fee|costs?|expenses?|paid|payment|compensat\w*|commission|charge|pricing|price|percentage)\b", text)
         or re.search(r"\b(?:what(?:'s| is)|how much is)\s+(?:your|the)\s+rate\b", text)
         or re.search(r"\b(?:how do you get paid|how are you paid|who pays you|how do you make (?:your )?money)\b", text)
+        or re.search(r"\b(?:does|do|will)\s+(?:i|we|you|(?:the\s+)?(?:seller|agent|buyer))\s+pay\b", text)
         or re.search(r"\b(?:tarifa|cuanto cobras|cuanto cuesta|como te pagan|quien paga)\b", text)
     )
 
@@ -5681,10 +5900,16 @@ def _sms_is_spanish_language_question(value: Any) -> bool:
 
 def _sms_is_fee_negotiation(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
+    if (
+        _sms_is_buyer_cost_concern(text)
+        and re.search(r"\b(?:lower|reduce)\b.{0,25}\boffer\b", text)
+        and not re.search(r"\b(?:can|could|would|will) you\b.{0,40}\b(?:lower|reduce|discount)\b", text)
+    ):
+        return False
     mentions_price = bool(re.search(r"\b(?:fee|price|pricing|rate|charge|cost|\$\s*\d|\d{3,5})\b", text))
     asks_concession = bool(
         re.search(r"\b(?:match|beat|lower|reduce|discount|negotiate|counter|concession)\b", text)
-        or re.search(r"\b(?:would|will|can|could)\s+you\s+(?:do|charge|take|accept)\b", text)
+        or re.search(r"\b(?:would|will|can|could)\s+you\s+(?:do|charge|take|accept)\b.{0,30}\$?\s*\d", text)
         or re.search(r"\bi\s+(?:made|am making)\s+you\s+an?\s+offer\b", text)
     )
     return mentions_price and asks_concession
@@ -5702,40 +5927,40 @@ def _sms_is_specific_fee_reply(value: Any) -> bool:
     return "5000" in compact and "buyer" in text and "closing" in text
 
 
-def _sms_fee_decision(row_obj: Dict[str, str]) -> Dict[str, Any]:
-    prior = [
-        _sms_normalize_whitespace(entry.get("text"))
-        for entry in _sms_history_array(row_obj.get("history_json"))
-        if isinstance(entry, dict) and str(entry.get("role") or "").lower() == "assistant"
-    ]
-    last_outbound = _sms_normalize_whitespace(row_obj.get("last_outbound_text"))
-    if last_outbound:
-        prior.append(last_outbound)
-    if any(_sms_is_specific_fee_reply(item) for item in prior):
+def _sms_fee_decision(row_obj: Dict[str, str], inbound_text: str = "") -> Dict[str, Any]:
+    specific_delivered = _sms_has_delivered_response(row_obj, "fee_specific")
+    initial_delivered = _sms_has_delivered_response(row_obj, "fee_initial")
+    asks_amount = _sms_is_fee_amount_question(inbound_text)
+    if _sms_is_buyer_cost_concern(inbound_text) and not asks_amount:
+        return _sms_decision(
+            reply_text=SMS_BUYER_COST_CONCERN_REPLY,
+            response_id="buyer_cost_concern",
+            reason="Answered a distinct buyer-cost concern without assuming buyer acceptance",
+        )
+    if specific_delivered and (asks_amount or not inbound_text):
         return _sms_decision(
             lead_status="Y",
             handoff_needed=True,
             block_reply=True,
             handoff_type="FEE QUESTION FOLLOW-UP",
-            reason="Agent is still asking about fee/payment after the specific $5,000 answer",
+            reason="Agent repeated the amount question after the delivered $5,000 answer",
         )
-    if any(_sms_is_initial_fee_reply(item) for item in prior):
+    if asks_amount or (initial_delivered and not specific_delivered):
         return _sms_decision(
-            reply_text=(
-                "The fee is $5,000, paid by the buyer at closing. As long as it's disclosed up front in the listing, "
-                "the buyer can factor it into their offer price."
-            ),
+            reply_text=SMS_SPECIFIC_FEE_REPLY,
+            response_id="fee_specific",
             lead_status="Y",
-            bypass_reply_cap=True,
-            reason="Repeated fee/payment question - gave specific $5,000 buyer-paid answer",
+            bypass_reply_cap=initial_delivered and not specific_delivered,
+            reason="Answered the explicit amount question with the $5,000 buyer-paid fee",
         )
     return _sms_decision(
         reply_text=(
             "There's no cost to you or the seller, and I don't take anything from your commission. "
             "I charge a flat fee to the buyer at closing, only if the deal closes."
         ),
+        response_id="fee_initial",
         lead_status="Y",
-        reason="Asked about charge, fee, percentage, or how Crisp gets paid",
+        reason="Explained who pays without treating a different payment question as a repeat",
     )
 
 
@@ -5746,7 +5971,10 @@ def _sms_should_bypass_reply_cap_for_first_fee_answer_after_closeout(
         not fee_decision.get("handoff_needed")
         and lead_status == "O"
         and conversation_done
-        and _sms_is_initial_fee_reply(fee_decision.get("reply_text"))
+        and (
+            _sms_is_initial_fee_reply(fee_decision.get("reply_text"))
+            or _sms_is_specific_fee_reply(fee_decision.get("reply_text"))
+        )
     )
 
 
@@ -5797,111 +6025,21 @@ def _sms_speed_question_reply() -> str:
     )
 
 
-def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) -> Optional[Dict[str, Any]]:
-    text = _sms_normalize_whitespace(inbound_text).lower()
+def _sms_question_priority_decision(
+    row_obj: Dict[str, str], inbound_text: str, received_at: Any = None
+) -> Optional[Dict[str, Any]]:
+    text = _sms_rejection_text(inbound_text)
     if _sms_is_short_sale_source_question(text):
         return _sms_decision(
             reply_text=_sms_source_challenge_reply(row_obj),
-            lead_status="R",
-            conversation_done=True,
+            lead_status="R", conversation_done=True,
             reason="Agent challenged the short-sale premise; apologized and closed out",
         )
     if _sms_is_existing_crisp_relationship(text):
         return _sms_decision(
-            lead_status="R",
-            handoff_needed=True,
-            block_reply=True,
+            lead_status="R", handoff_needed=True, block_reply=True,
             handoff_type="EXISTING CRISP CLIENT",
             reason="Existing Crisp/Yoni relationship; exit marketing and route to Yoni",
-        )
-    service_info_request = _sms_has_service_info_request_context(row_obj, inbound_text)
-    explicit_service_info_delivery_request = bool(
-        re.search(r"\b(?:more\s+)?info(?:rmation)?\s+(?:on|about)\s+(?:your\s+)?services?\b", text)
-    )
-    asks_email_delivery = bool(
-        re.search(r"\b(?:email me|send (?:me|us) (?:some |more )?(?:info|information)|send (?:me|us) your (?:info|information)|shoot me an email)\b", text)
-    ) or explicit_service_info_delivery_request
-    provided_email = re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", inbound_text, re.IGNORECASE)
-    if asks_email_delivery or provided_email:
-        covered = (
-            _sms_has_existing_coverage(text)
-            or _sms_has_decline_or_not_short_sale_clause(text)
-            or _sms_is_closed_marketing_conversation(row_obj)
-        )
-        if provided_email:
-            return _sms_decision(
-                reply_text=_sms_service_info_email_acknowledgement(),
-                lead_status="O" if covered else "Y",
-                conversation_done=covered,
-                reason="Agent provided an email address for requested information",
-            )
-        if service_info_request:
-            return _sms_decision(
-                reply_text=_sms_service_info_email_acknowledgement(has_email=bool(row_obj.get("email"))),
-                lead_status="O" if covered else "Y",
-                conversation_done=covered,
-                reason="Answered requested service information before optional email follow-up",
-            )
-        return _sms_decision(
-            reply_text="Sure, no problem. What is your email?",
-            lead_status="O" if covered else "Y",
-            reason="Agent requested information by email; collecting the address",
-        )
-    if _sms_is_unsupported_performance_stats_question(text):
-        return _sms_decision(
-            lead_status="Y", handoff_needed=True, block_reply=True,
-            handoff_type="STATS QUESTION",
-            reason="Agent asked for unsupported performance stats; manual follow-up needed",
-        )
-    if _sms_is_fee_negotiation(text):
-        return _sms_decision(
-            lead_status="Y", handoff_needed=True, block_reply=True,
-            handoff_type="FEE NEGOTIATION",
-            reason="Agent proposed or requested a pricing concession",
-        )
-
-    speed_question = _sms_is_speed_question(text)
-    flags = {
-        "speed": speed_question,
-        "fee": _sms_is_fee_question(text),
-        "documents": bool(re.search(
-            r"\bwho\s+(?:collects?|gathers?|gets?|organizes?|handles?)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b"
-            r"|\b(?:do|will|would|can|could)\s+you\s+(?:collect|gather|get|organize|handle)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b"
-            r"|\bwho\s+is\s+responsible\s+for\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b",
-            text,
-        )),
-        "help": bool(re.search(r"\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does (?:this|that|it) work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|offer|do))\b", text)),
-        "local": bool(re.search(r"\b(?:are you local|where are you located|where r u located|where are you based|based in)\b", text)),
-        "company": _sms_is_company_identity_question(text),
-        "website": bool(re.search(r"\b(?:website|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?)\b", text)),
-        "contact_card": bool(re.search(r"\b(?:business card|contact card|vcard)\b", text)),
-        "contact_info": _sms_is_plain_contact_info_request(text),
-        "experience": bool(re.search(
-            r"\b(?:how long|years?|experience|track record)\b.{0,80}\b(?:short sales?|doing this|handled|closed|business)\b"
-            r"|\bwhat is your track record\b"
-            r"|\bhow\s+many\b.{0,80}\b(?:short sales?|deals?|files?|transactions?)\b.{0,80}\b(?:handled|done|closed|completed)\b",
-            text,
-        )),
-        "timeline": _sms_is_short_sale_timeline_question(text),
-        "number": bool(re.search(r"\b(?:best|good|right)\s+number\b|\b(?:call|reach|text)\s+you\s+(?:at|on)\s+this\s+number\b", text)),
-        "credential": bool(re.search(r"\b(?:are you|you are|r u)\s+(?:licensed\s+as\s+)?(?:an?\s+)?(?:attorney|lawyer)\b|\bdo you provide legal advice\b", text)),
-        "negotiator": bool(re.search(r"\b(?:are you|so you are|so a|r u)\s+(?:an?\s+)?(?:short sale\s+)?negotiator\b", text)),
-        "language": _sms_is_spanish_language_question(text),
-        "different": _sms_is_differentiation_question(text),
-    }
-    # A speed mechanism is more specific than the overlapping service question.
-    if speed_question:
-        flags["help"] = False
-    matched = [name for name, enabled in flags.items() if enabled]
-    if not matched:
-        return None
-
-    if flags["different"] and len(matched) == 1:
-        return _sms_decision(
-            reply_text="I handle the lender-side work and keep agents updated throughout the process. If that sounds useful, I'm happy to talk through your listing.",
-            lead_status="Y", alert_needed=True,
-            handoff_type="HOT LEAD - DIFFERENTIATION QUESTION",
-            reason="Answered differentiation question before generic coverage language",
         )
 
     covered = (
@@ -5909,139 +6047,164 @@ def _sms_question_priority_decision(row_obj: Dict[str, str], inbound_text: str) 
         or _sms_has_decline_or_not_short_sale_clause(text)
         or _sms_is_closed_marketing_conversation(row_obj)
     )
+    provided_email = re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", inbound_text, re.IGNORECASE)
+    if _sms_is_information_delivery_request(text) or provided_email:
+        target_email = provided_email.group(0) if provided_email else str(row_obj.get("email") or "").strip()
+        if not re.fullmatch(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", target_email, re.IGNORECASE):
+            target_email = ""
+        if not target_email:
+            return _sms_decision(
+                reply_text=SMS_EMAIL_ADDRESS_REQUEST_REPLY,
+                lead_status="O" if covered else "Y",
+                call_booking_status="information_requested",
+                clear_callback=True,
+                reason="Agent requested information by email; collecting the address without call consent",
+            )
+        # The Python fallback has no approval enqueue. Do not promise an email that
+        # only the primary Apps Script approval workflow can durably request.
+        return _sms_decision(
+            lead_status="O" if covered else "Y",
+            conversation_done=covered,
+            handoff_needed=True, block_reply=True,
+            handoff_type="INFO EMAIL APPROVAL REQUIRED",
+            call_booking_status="information_requested",
+            clear_callback=True,
+            info_email_to=target_email,
+            info_email_approval_required=True,
+            reason="Information requested by email; owner approval is required before promising delivery",
+        )
+
+    if _sms_is_unsupported_performance_stats_question(text) and not _sms_is_exact_closed_count_question(text):
+        return _sms_decision(
+            handoff_needed=True, block_reply=True, handoff_type="STATS QUESTION",
+            reason="Agent asked for unsupported performance stats; manual follow-up needed",
+        )
+    if _sms_is_fee_negotiation(text):
+        return _sms_decision(
+            handoff_needed=True, block_reply=True, handoff_type="FEE NEGOTIATION",
+            reason="Agent proposed or requested a pricing concession",
+        )
+
+    buyer_concern = _sms_is_buyer_cost_concern(text)
+    flags = {
+        "speed": _sms_is_speed_question(text),
+        "fee": _sms_is_fee_question(text) and (not buyer_concern or _sms_is_fee_amount_question(text)),
+        "documents": bool(re.search(
+            r"\bwho\s+(?:collects?|gathers?|gets?|organizes?|handles?)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b"
+            r"|\b(?:do|will|would|can|could)\s+you\s+(?:collect|gather|get|organize|handle)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b"
+            r"|\bwho\s+is\s+responsible\s+for\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b", text,
+        )),
+        "help": _sms_compound_service_request_flags(text)["scope"] or bool(re.search(
+            r"\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|"
+            r"how does (?:this|that|it) work|what does (?:this|that|the service|your service) look like|"
+            r"what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|"
+            r"willing to (?:review|hear) what you (?:have to offer|offer|do))\b", text,
+        )),
+        "local": bool(re.search(r"\b(?:are you local|where are you located|where r u located|where are you based|based in|local to)\b", text)),
+        "company": _sms_is_company_identity_question(text),
+        "website": bool(re.search(r"\b(?:website|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?|check out your company)\b", text)),
+        "contact_card": bool(re.search(r"\b(?:business card|contact card|vcard)\b", text)),
+        "contact_info": _sms_is_plain_contact_info_request(text),
+        "experience": bool(re.search(
+            r"\b(?:how long|how many years|experience|track record)\b.{0,80}\b(?:short sales?|doing this|handled|business|been doing)\b"
+            r"|\b(?:what(?:'s| is) )?your track record\b", text,
+        )),
+        "closed_count": _sms_is_exact_closed_count_question(text),
+        "timeline": _sms_is_short_sale_timeline_question(text),
+        "number": bool(re.search(r"\b(?:best|good|right)\s+number\b|\b(?:call|reach|text)\s+you\s+(?:at|on)\s+this\s+number\b", text)),
+        "credential": bool(re.search(r"\b(?:are you|you are|r u)\s+(?:licensed\s+as\s+)?(?:an?\s+)?(?:attorney|lawyer)\b|\bdo you provide legal advice\b", text)),
+        "negotiator": bool(re.search(r"\b(?:are you|so you are|so a|r u)\s+(?:an?\s+)?(?:short sale\s+)?negotiator\b", text)),
+        "language": _sms_is_spanish_language_question(text),
+        "different": _sms_is_differentiation_question(text),
+        "buyer_provision": bool(re.search(r"\b(?:you\s+(?:bring|provide|find|supply)|you\s+(?:bringing|providing|finding|supplying))\s+(?:the|a)\s+buyer\b", text)),
+        "buyer_concern": buyer_concern,
+        "failed_provider": _sms_is_failed_provider_experience(text),
+        "equator": bool(re.search(r"\bequator\b", text)),
+    }
+    if flags["speed"] or flags["documents"]:
+        flags["help"] = False
+    matched = [name for name, enabled in flags.items() if enabled]
+    if not matched:
+        return None
     interested = _sms_is_present_service_interest(text)
     status = "O" if covered and not interested else "Y"
-    done = status == "O"
-    direct_help_or_live_window = bool(
-        re.search(r"\b(?:i|we)\s+(?:(?:do\s+)?need|would\s+love|could\s+use|can\s+use)\s+(?:some\s+)?help\b", text)
-        or re.search(r"\b(?:i(?:'m| am)?\s+free|available)\s+now\b", text)
-        or re.search(r"\bcall\s+me(?:\s+now)?\b", text)
-    )
-    if flags["fee"] and (
-        _sms_is_phone_call_interest(text)
-        or _sms_is_scheduled_callback(text)
-        or direct_help_or_live_window
-        or interested
-    ):
-        result = _sms_fee_decision(row_obj)
-        if not result.get("handoff_needed"):
-            result.update(
-                lead_status="Y",
-                conversation_done=False,
-                handoff_needed=True,
-                block_reply=False,
-                handoff_type="HOT LEAD - FEE AND CALL INTEREST",
-                reason="Answered fee question and handed off present call or service interest",
+    requests_call = _sms_is_phone_call_interest(text) or _sms_is_scheduled_callback(text)
+    call_now = bool(re.search(r"\b(?:free|available)\s+now\b|\bcall me now\b", text)) and not _sms_is_conditional_call(text)
+    fee_decision = _sms_fee_decision(row_obj, inbound_text) if flags["fee"] else None
+    if fee_decision and fee_decision.get("handoff_needed"):
+        return fee_decision
+
+    replies = {
+        "speed": _sms_speed_question_reply(),
+        "documents": "I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up. If you want, I can walk you through the document checklist on a quick call.",
+        "help": "I handle the lender side of the short sale, including the paperwork, calls, follow-up, and negotiations through approval. It takes that work off your plate so you can focus on the listing and client.",
+        "local": "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
+        "company": _sms_company_identity_reply(),
+        "website": "https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.",
+        "contact_card": "Sure. What's the best email?",
+        "contact_info": "Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.",
+        "experience": SMS_EXPERIENCE_REPLY,
+        "closed_count": SMS_CLOSED_COUNT_REPLY,
+        "timeline": SHORT_SALE_TIMELINE_REPLY,
+        "number": "Yes, this number is great - call or text anytime. Thanks!",
+        "credential": "No, I'm not an attorney. I handle short-sale processing and lender negotiations; I don't provide legal advice.",
+        "negotiator": "Yes, in essence. I handle the short-sale process and lender negotiations. Happy to answer any questions on a quick call.",
+        "language": "No, I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.",
+        "different": "I focus exclusively on the lender-side short-sale work and keep you updated throughout the process. If that sounds useful, I'm happy to talk through your listing.",
+        "buyer_provision": SMS_BUYER_PROVISION_REPLY,
+        "buyer_concern": SMS_BUYER_COST_CONCERN_REPLY,
+        "failed_provider": SMS_FAILED_PROVIDER_REPLY,
+        "equator": EQUATOR_PORTAL_REPLY,
+        "fee": str((fee_decision or {}).get("reply_text") or ""),
+    }
+    if len(matched) > 1:
+        replies["company"] = "I'm with Crisp Short Sales."
+        replies["help"] = "I handle the lender-side paperwork, calls, follow-up, and negotiations through approval."
+        replies["documents"] = "I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up."
+        if flags["experience"] and flags["closed_count"]:
+            replies["experience"] = SMS_EXPERIENCE_REPLY.split(" I'd be happy")[0]
+    answers = [replies[key] for key in matched if key != "closed_count" and replies.get(key)]
+    if flags["closed_count"]:
+        answers.append(SMS_CLOSED_COUNT_REPLY)
+    handoff = flags["closed_count"] or requests_call or call_now or flags["different"] or (flags["fee"] and interested)
+    callback = _sms_complete_callback_reference(inbound_text, received_at) if requests_call else ""
+    result = _sms_decision(
+        reply_text=" ".join(answers),
+        lead_status="Y" if requests_call or call_now else status,
+        conversation_done=status == "O" and not handoff,
+        handoff_needed=handoff,
+        send_reply_before_handoff=handoff,
+        alert_needed=flags["different"],
+        handoff_type=("STATS QUESTION" if flags["closed_count"] else (
+            "SCHEDULED CALLBACK" if callback else (
+                "HOT LEAD - DIFFERENTIATION QUESTION" if flags["different"] else (
+                    "HOT LEAD - FEE AND CALL INTEREST" if flags["fee"] else "CALL REQUESTED"
+                )
             )
-        return result
-
-    if flags["help"] and flags["local"] and flags["fee"] and len(matched) == 3:
-        fee_decision = _sms_fee_decision(row_obj)
-        if fee_decision.get("handoff_needed"):
-            return fee_decision
-        bypass_reply_cap = _sms_should_bypass_reply_cap_for_first_fee_answer_after_closeout(
-            fee_decision, status, done
-        )
-        fee_clause = (
-            "The buyer-paid fee is a flat $5,000 at closing."
-            if "$5,000" in str(fee_decision.get("reply_text") or "")
-            else "There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes."
-        )
-        return _sms_decision(
-            reply_text=(
-                "I'm based in Atlanta and work nationwide, and I handle the lender-side paperwork, calls, "
-                f"follow-up, and negotiations through approval. {fee_clause}"
-            ),
-            lead_status=status,
-            conversation_done=done,
-            bypass_reply_cap=bypass_reply_cap,
-            reason="Answered a bounded service, location, and fee question",
-        )
-
-    if len(matched) > 2 or (len(matched) > 1 and flags["different"]):
-        return _sms_decision(
-            lead_status="Y",
-            handoff_needed=True,
-            block_reply=True,
-            handoff_type="COMPLEX MULTI-QUESTION",
-            reason="Agent asked multiple questions that need one careful human answer",
-        )
-    if len(matched) == 1:
-        if flags["fee"]:
-            result = _sms_fee_decision(row_obj)
-            if not result.get("handoff_needed"):
-                result.update(lead_status=status, conversation_done=done)
-                if _sms_should_bypass_reply_cap_for_first_fee_answer_after_closeout(result, status, done):
-                    result["bypass_reply_cap"] = True
-            return result
-        replies = {
-            "speed": _sms_speed_question_reply(),
-            "documents": "I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up. If you want, I can walk you through the document checklist on a quick call.",
-            "help": "I handle the lender side of the short sale, including the paperwork, calls, follow-up, and negotiations through approval. It takes that work off your plate so you can focus on the listing and client.",
-            "local": "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
-            "company": "I'm with Crisp Short Sales. I handle lender-side short-sale processing and negotiations for agents and homeowners.",
-            "website": "https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.",
-            "contact_card": "Sure. What's the best email?",
-            "contact_info": "Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.",
-            "experience": _sms_experience_reply(text),
-            "timeline": SHORT_SALE_TIMELINE_REPLY,
-            "number": "Yes, this number is great - call or text anytime. Thanks!",
-            "credential": "No, I'm not an attorney. I handle short-sale processing and lender negotiations; I don't provide legal advice.",
-            "negotiator": "Yes, in essence. I handle the short-sale process and lender negotiations. Happy to answer any questions on a quick call.",
-            "language": "No, I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.",
-        }
-        key = matched[0]
-        if key in replies:
-            return _sms_decision(
-                reply_text=replies[key], lead_status=status, conversation_done=done,
-                reason=f"Answered {key} question before generic coverage language",
-            )
-
-    answers: List[str] = []
-    if flags["documents"]:
-        answers.append("I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up.")
-    if flags["company"]:
-        answers.append("I'm with Crisp Short Sales.")
-    if flags["help"]:
-        answers.append("I handle the lender-side paperwork, calls, follow-up, and negotiations through approval.")
-    if flags["speed"]:
-        answers.append(_sms_speed_question_reply())
-    if flags["local"]:
-        answers.append("I'm based in Atlanta and work nationwide; the lender-side work is handled remotely.")
-    if flags["fee"]:
-        fee = _sms_fee_decision(row_obj)
-        if fee.get("handoff_needed"):
-            return fee
-        answers.append(str(fee.get("reply_text") or ""))
-    if flags["experience"]:
-        answers.append(_sms_experience_reply(text))
-    if flags["timeline"]:
-        answers.append(SHORT_SALE_TIMELINE_REPLY)
-    if flags["website"]:
-        answers.append("https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.")
-    if flags["contact_card"]:
-        answers.append("What's the best email?")
-    if flags["contact_info"]:
-        answers.append("Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.")
-    if flags["number"]:
-        answers.append("Yes, this number is great - call or text anytime. Thanks!")
-    if flags["credential"]:
-        answers.append("No, I'm not an attorney and I don't provide legal advice.")
-    if flags["negotiator"]:
-        answers.append("Yes, in essence. I handle the short-sale process and lender negotiations.")
-    if flags["language"]:
-        answers.append("No, I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.")
-    return _sms_decision(
-        reply_text=" ".join(part for part in answers if part),
-        lead_status=status, conversation_done=done,
-        reason="Answered a bounded two-question inbound message",
+        )) if handoff else "",
+        call_booking_status="scheduled_callback" if callback else ("call_now" if call_now else ""),
+        callback_time=callback,
+        bypass_reply_cap=not handoff and (
+            bool(fee_decision and fee_decision.get("bypass_reply_cap"))
+            or (flags["equator"] and status == "Y")
+            or bool(fee_decision and not _sms_has_delivered_response(row_obj, "fee_initial")
+                    and not _sms_has_delivered_response(row_obj, "fee_specific")
+                    and _sms_should_bypass_reply_cap_for_first_fee_answer_after_closeout(
+                fee_decision, status, status == "O",
+            ))
+        ),
+        response_id=_sms_response_id_for_text(" ".join(answers)),
+        reason="Answered supported questions; unverified closed count needs confirmation" if flags["closed_count"]
+        else (f"Answered a bounded {'two' if len(matched) == 2 else 'multi'}-question inbound message" if len(matched) > 1
+              else f"Answered {'differentiation' if matched[0] == 'different' else matched[0]} question before generic coverage language"),
     )
+    return result
 
 
 def _sms_fast_decision(
     row_obj: Dict[str, str], inbound_text: str, received_at: Any = None
 ) -> Optional[Dict[str, Any]]:
-    t = _sms_normalize_whitespace(inbound_text).lower()
+    t = _sms_rejection_text(inbound_text)
 
     if re.search(r"\berror\s+invalid\s+number\b", t) and "valid 10 digit" in t:
         return _sms_decision(reason="Carrier invalid-number notice ignored", block_reply=True)
@@ -6087,7 +6250,7 @@ def _sms_fast_decision(
         )
 
     if _sms_is_post_handoff_callback_update(row_obj, t):
-        callback_time = _sms_extract_scheduled_callback_reference(t, received_at) or _sms_extract_same_day_callback_reference(t)
+        callback_time = _sms_complete_callback_reference(inbound_text, received_at)
         existing_callback_time = _sms_normalized_callback_time(row_obj.get("callback_time"))
         callback_changed = existing_callback_time != _sms_normalized_callback_time(callback_time)
         reason = "Callback updated after human handoff"
@@ -6122,11 +6285,13 @@ def _sms_fast_decision(
             clear_callback=True,
         )
 
-    fee_recovery = _sms_automated_handoff_fee_recovery(row_obj, t)
-    if fee_recovery is not None:
-        return fee_recovery
-
-    if str(row_obj.get("human_override") or "").upper() == "TRUE":
+    # A new safe answer may precede a handoff, but a later fee question must
+    # never reopen an existing owner takeover, including a reply-cap handoff.
+    if (
+        str(row_obj.get("human_override") or "").upper() == "TRUE"
+        or str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
+        or str(row_obj.get("ai_state") or "").lower() == "handoff"
+    ):
         return _sms_decision(
             lead_status=str(row_obj.get("mailshake_status") or "Y"),
             block_reply=True,
@@ -6134,7 +6299,51 @@ def _sms_fast_decision(
             reason="Human override enabled - inbound recorded only",
         )
 
-    if _sms_is_compound_service_request(t):
+    terminal_statement = (
+        _sms_has_decline_or_not_short_sale_clause(t)
+        or _sms_has_existing_coverage(t)
+        or _sms_is_title_company_coverage_rejection(t)
+    )
+    if (
+        terminal_statement
+        and not _sms_is_substantive_followup(t)
+        and not _sms_is_fee_question(t)
+        and not _sms_is_information_delivery_request(t)
+        and not _sms_is_present_service_interest(t)
+        and not _sms_is_phone_call_interest(t)
+        and not _sms_is_client_consultation_interest(t)
+        and not _sms_is_title_company_role_confusion(t)
+        and not _sms_has_no_current_short_sale_help(t)
+        and not _sms_is_future_negotiation_interest(t)
+        and not _sms_is_relationship_only_after_existing_coverage(t, row_obj)
+        and not _sms_is_self_handling_opportunity(t)
+    ):
+        not_short_sale = bool(re.search(r"\b(?:not a short sale|no short sale|isn't a short sale)\b", t))
+        return _sms_decision(
+            reply_text="Ahh, ok... thanks for letting me know. Good luck with your listing!" if not_short_sale else SMS_STANDARD_CLOSEOUT_REPLY,
+            lead_status="R", conversation_done=True, clear_callback=True,
+            reason="Agent declined or confirmed existing coverage before a portal keyword",
+            call_booking_status="closed_no_interest",
+        )
+
+    if _sms_is_urgent_sale_review(t):
+        return _sms_decision(
+            lead_status="Y", handoff_needed=True, block_reply=True,
+            handoff_type="URGENT AUCTION REVIEW", clear_callback=True,
+            call_booking_status="interested_no_call",
+            reason="Auction or foreclosure deadline needs file-specific review; the deadline is not call consent",
+        )
+
+    if re.search(r"\b(?:ai|bot|automated|real person|actually your phone)\b", t):
+        return _sms_decision(
+            handoff_needed=True, block_reply=True,
+            reason="Agent asked whether this is AI/a bot; manual follow-up needed",
+        )
+
+    compound_flags = _sms_compound_service_request_flags(t)
+    if _sms_is_compound_service_request(t) and any(
+        compound_flags[key] for key in ("agreement", "fee_schedule", "deadline", "compliance")
+    ):
         return _sms_decision(
             reply_text=_sms_compound_service_request_reply(t),
             lead_status="Y",
@@ -6144,24 +6353,6 @@ def _sms_fast_decision(
             reason="Answered each safe compound service question and routed documents or deadline review to Yoni",
             call_booking_status="interested_no_call",
             send_reply_before_handoff=True,
-            bypass_reply_cap=True,
-        )
-
-    if re.search(r"\bequator\b", t) and _sms_is_fee_question(t):
-        return _sms_decision(
-            reply_text=_sms_equator_fee_and_location_reply(t),
-            lead_status="Y",
-            reason="Answered Equator, location, and buyer-paid fee questions together",
-            call_booking_status="interested_no_call",
-            bypass_reply_cap=True,
-        )
-
-    if re.search(r"\bequator\b", t):
-        return _sms_decision(
-            reply_text=EQUATOR_PORTAL_REPLY,
-            lead_status="Y",
-            reason="Explained Yoni's Equator expertise and ability to handle portal tasks and communication",
-            call_booking_status="interested_no_call",
             bypass_reply_cap=True,
         )
 
@@ -6195,9 +6386,16 @@ def _sms_fast_decision(
             reason="Clarified that Crisp's lender-side role is separate from the title company",
         )
 
-    priority_question = _sms_question_priority_decision(row_obj, t)
+    priority_question = _sms_question_priority_decision(row_obj, inbound_text, received_at)
     if priority_question is not None:
         return priority_question
+
+    if _sms_is_conditional_call(t):
+        return _sms_decision(
+            lead_status="Y", block_reply=True, clear_callback=True,
+            call_booking_status="interested_no_call",
+            reason="Conditional call discussion is not a callback request",
+        )
 
     if _sms_has_no_current_short_sale_help(t):
         return _sms_decision(
@@ -6362,7 +6560,8 @@ def _sms_fast_decision(
             block_reply=False,
             reason="Scheduled callback timing",
             call_booking_status="scheduled_callback",
-            callback_time=_sms_extract_scheduled_callback_reference(t, received_at),
+            callback_time=_sms_complete_callback_reference(inbound_text, received_at),
+            handoff_type="SCHEDULED CALLBACK",
         )
 
     if _sms_is_present_service_interest(t) and not _sms_is_phone_call_interest(t):
@@ -6460,11 +6659,16 @@ def _sms_fast_decision(
         )
 
     if _sms_is_self_handling_opportunity(t):
+        if _sms_has_delivered_response(row_obj, "self_handling_value"):
+            return _sms_decision(
+                reply_text=SMS_STANDARD_CLOSEOUT_REPLY,
+                lead_status="R", conversation_done=True, clear_callback=True,
+                call_booking_status="closed_no_interest",
+                reason="Self-handling value response was already delivered; no repeated sales push",
+            )
         return _sms_decision(
-            reply_text=(
-                "I understand, and I help a lot of agents in the same situation. I can take the lender paperwork, calls, "
-                "follow-up, and negotiations off your plate if you ever want help with that part."
-            ),
+            reply_text=SMS_SELF_HANDLING_REPLY,
+            response_id="self_handling_value",
             lead_status="Y",
             reason="Agent is handling the short sale themselves; gave one brief value response",
         )
@@ -6563,6 +6767,10 @@ def _sms_apply_repeat_guard(
         or not _sms_normalize_whitespace(decision.get("reply_text") or "")
     ):
         return decision
+    current_id = decision.get("response_id") or _sms_response_id_for_text(decision.get("reply_text"))
+    previous_id = _sms_response_id_for_text(row_obj.get("last_outbound_text"))
+    if current_id in {"fee_initial", "fee_specific", "buyer_cost_concern"} and current_id != previous_id:
+        return decision
     if not _sms_is_potential_repeat_reply(decision.get("reply_text"), row_obj.get("last_outbound_text")):
         return decision
     if _sms_is_previously_answered_question_with_approved_no_offers_update(
@@ -6648,6 +6856,7 @@ def _sms_build_decision(
 ) -> Dict[str, Any]:
     fast = _sms_fast_decision(row_obj, inbound_text, received_at)
     decision = fast if fast is not None else _sms_openai_decision(row_obj, inbound_text)
+    decision = _sms_sanitize_unsolicited_material_promise(decision, inbound_text)
     decision = _sms_enforce_durable_followup_promise(decision, inbound_text)
     decision = _sms_ensure_question_disposition(decision, inbound_text)
     return _sms_apply_repeat_guard(decision, row_obj, inbound_text)
@@ -6656,6 +6865,8 @@ def _sms_build_decision(
 def _sms_ensure_question_disposition(decision: Dict[str, Any], inbound_text: str) -> Dict[str, Any]:
     """Never silently consume a substantive question."""
     guarded = dict(decision)
+    if guarded.get("preserve_existing_state") or _sms_is_opt_out(inbound_text):
+        return guarded
     if not _sms_is_substantive_followup(inbound_text):
         return guarded
     if _sms_normalize_whitespace(guarded.get("reply_text") or ""):
@@ -6669,6 +6880,25 @@ def _sms_ensure_question_disposition(decision: Dict[str, Any], inbound_text: str
         handoff_type="UNANSWERED QUESTION REVIEW",
         reason="Substantive agent question had no safe automated answer; manual follow-up needed",
     )
+
+
+def _sms_sanitize_unsolicited_material_promise(decision: Dict[str, Any], inbound_text: str) -> Dict[str, Any]:
+    guarded = dict(decision)
+    if _sms_is_information_delivery_request(inbound_text):
+        return guarded
+    reply = _sms_normalize_whitespace(guarded.get("reply_text"))
+    if not re.search(
+        r"\b(?:i|we)(?:['’]ll|\s+will|\s+can)\s+(?:send|email|text|share)\b[^.!?]{0,100}"
+        r"\b(?:documents?|docs?|paperwork|checklist|package|materials?|overview|information|brochure|details)\b",
+        reply, re.IGNORECASE,
+    ):
+        return guarded
+    guarded["reply_text"] = (
+        "I handle the lender-side paperwork, calls, follow-up, and negotiations through approval. "
+        "Would a brief call be helpful?"
+    )
+    guarded["response_id"] = ""
+    return guarded
 
 
 def _sms_enforce_durable_followup_promise(decision: Dict[str, Any], inbound_text: str) -> Dict[str, Any]:
@@ -6819,6 +7049,7 @@ def _sms_handle_reply_sent(body: Dict[str, Any], request_id: str) -> Dict[str, A
                 "text": reply_text,
                 "ts": sent_at,
                 "receipt_id": receipt_id,
+                "response_id": _sms_response_id_for_text(reply_text),
             }
         )
         values = list(rows[row_idx - 1]) if row_idx - 1 < len(rows) else [""] * len(headers)
@@ -6864,7 +7095,10 @@ def _sms_handle_manual_reply_sent(body: Dict[str, Any], request_id: str) -> Dict
 
     ws, headers, rows = _sms_read_leads_sheet()
     row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
-    _sms_append_history(ws, row_idx, headers, row_obj, {"role": "assistant", "text": reply_text, "ts": sent_at})
+    _sms_append_history(ws, row_idx, headers, row_obj, {
+        "role": "assistant", "text": reply_text, "ts": sent_at,
+        "response_id": _sms_response_id_for_text(reply_text),
+    })
     _sms_update_row_fields(
         ws,
         row_idx,
@@ -7050,6 +7284,8 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     if not preserve_existing_state and decision.get("clear_callback"):
         updates["callback_requested"] = "no"
         updates["callback_time"] = ""
+    if not preserve_existing_state and decision.get("info_email_to"):
+        updates["email"] = str(decision["info_email_to"])
     if updates:
         _sms_update_row_fields(ws, row_idx, headers, updates)
 
@@ -7069,6 +7305,9 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
             "callback_updated": bool(decision.get("callback_updated")),
             "alert_needed": bool(decision.get("alert_needed")),
             "handoff_type": str(decision.get("handoff_type") or ""),
+            "response_id": str(decision.get("response_id") or _sms_response_id_for_text(reply_text)) if should_reply else "",
+            "info_email_to": str(decision.get("info_email_to") or ""),
+            "info_email_approval_required": bool(decision.get("info_email_approval_required")),
             "row": row_idx,
         }
     )

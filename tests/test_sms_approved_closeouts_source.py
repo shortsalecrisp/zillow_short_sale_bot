@@ -59,7 +59,7 @@ def test_apps_script_answers_buyer_provision_question_without_rejection_closeout
     assert 'const buyerProvision = applyFastRules_("So you bring the buyer?!", baseRow);' in CHATBOT
     assert '"buyer_provision_question_gets_scope_clarification"' in CHATBOT
     assert 'sanitizeReplyBuyerOffer_(buyerProvision.reply_text) === buyerProvision.reply_text' in CHATBOT
-    assert "No, I don't bring the buyer. I just handle the processing with the bank." in CHATBOT
+    assert "No, I don't bring the buyer. I handle the processing with the bank." in CHATBOT
 
 
 def test_apps_script_substantive_repeat_routes_to_handoff():
@@ -100,7 +100,7 @@ def test_apps_script_title_company_service_info_and_compliance_rules_are_determi
     assert "Crisp isn't a title company" in CHATBOT
     assert "function hasServiceInfoRequestContext_" in CHATBOT
     assert "function buildServiceInfoEmailAcknowledgement_" in CHATBOT
-    assert "I have your email for the additional information" in CHATBOT
+    assert "I'll send an overview of what I handle and how the fee works" in CHATBOT
     assert "function isComplianceOrLicensingQuestionSignal_" in CHATBOT
     assert '"COMPLIANCE / LICENSING QUESTION"' in CHATBOT
     assert CHATBOT.index("isComplianceOrLicensingQuestionSignal_(t)") < CHATBOT.index(

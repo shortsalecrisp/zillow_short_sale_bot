@@ -10,7 +10,8 @@ def test_information_request_uses_approval_gated_acknowledgement():
     assert "sendInfoEmailApprovalRequest_(infoEmailData)" in CHATBOT
     assert "INFO_EMAIL_APPROVAL_REQUIRED" in CHATBOT
     assert "An agent requested the short-sale info email. Approval is required before sending." in CHATBOT
-    assert "Absolutely, I'll email you more information shortly. Thanks for sending your email." in CHATBOT
+    assert "Absolutely. I'll send an overview of what I handle and how the fee works" in CHATBOT
+    assert "more information shortly" not in CHATBOT
 
 
 def test_info_email_workflow_is_flag_driven_not_reply_copy_driven():

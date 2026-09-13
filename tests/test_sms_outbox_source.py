@@ -63,7 +63,8 @@ def test_offer_scope_clarification_can_send_before_approved_handoff_lock():
     assert "approvedOfferScopeReply" in OUTBOX
     assert "isOfferSubmissionConfusionSignal_(inboundText)" in OUTBOX
     assert "!approvedOfferScopeReply && typeof hasPendingSmsTakeoverV11_" in OUTBOX
-    assert '!approvedOfferScopeReply && String(rowObj[HEADERS.human_override]' in OUTBOX
+    assert '!approvedOfferScopeReply && !newHandoffReply && String(rowObj[HEADERS.human_override]' in OUTBOX
+    assert 'isAuthorizedNewHandoffReply_(phone, messageId, outboxRow[5], rowObj)' in OUTBOX
 
 
 def test_inbound_queue_coalesces_rapid_same_phone_bubbles_before_classification():

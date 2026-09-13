@@ -14,6 +14,35 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+APPROVED_SPECIFIC_FEE_REPLY = (
+    "My fee is $5,000, paid by the buyer at closing only if the deal closes. There's no service fee to you "
+    "or the seller, and I don't take anything from your commission."
+)
+GENERAL_FEE_REPLY = (
+    "There's no cost to you or the seller, and I don't take anything from your commission. "
+    "I charge a flat fee to the buyer at closing, only if the deal closes."
+)
+APPROVED_EXPERIENCE_REPLY = (
+    "I've been handling short sales for over 15 years, and this is all I do: help agents and homeowners "
+    "through the process. I'd be happy to talk through your listing and explain how I can help."
+)
+APPROVED_CLOSED_COUNT_ADMISSION = "I don't have a verified closed count to quote here; I'll need to confirm that number."
+APPROVED_BUYER_COST_REPLY = (
+    "The buyer does need to consider that cost with their offer, so we discuss the fee and disclosure up front. "
+    "I'm happy to walk through how that would work on this listing before you decide anything."
+)
+APPROVED_FAILED_PROVIDER_REPLY = (
+    "I understand why you'd be cautious after that. I handle the lender paperwork, calls, follow-up, and "
+    "negotiations while you focus on the listing and your client. We can go through exactly what I'd handle "
+    "and what I'd need from you before you decide. Would a brief call be helpful?"
+)
+APPROVED_EMAIL_ADDRESS_REQUEST = "Absolutely. What's the best email for an overview of what I handle and how the fee works?"
+APPROVED_DIFFERENTIATION_REPLY = (
+    "I focus exclusively on the lender-side short-sale work and keep you updated throughout the process. "
+    "If that sounds useful, I'm happy to talk through your listing."
+)
+
+
 class FakeSendResult:
     def __init__(self, success=True, status_code=200, response_text="OK"):
         self.success = success
@@ -1500,13 +1529,26 @@ def test_sms_timeline_question_gets_approved_60_to_90_day_reply(monkeypatch):
         sender_result=FakeSendResult(success=True),
     )
 
-    decision = module._sms_fast_decision({}, "What is the minimum time to stop foreclosure?")
+    decision = module._sms_fast_decision({}, "How many days does lender approval take for short sales?")
 
     assert module._sms_is_short_sale_timeline_question("What is the minimum time to stop foreclosure?") is True
     assert decision["reply_text"] == module.SHORT_SALE_TIMELINE_REPLY
     assert decision["lead_status"] == "Y"
     assert decision["handoff_needed"] is False
     assert decision["block_reply"] is False
+    assert decision["handoff_type"] == ""
+
+    urgent = module._sms_fast_decision({}, "What is the minimum time to stop foreclosure?")
+    assert urgent["reply_text"] == ""
+    assert urgent["lead_status"] == "Y"
+    assert urgent["handoff_needed"] is True
+    assert urgent["block_reply"] is True
+    assert urgent["handoff_type"] == "URGENT AUCTION REVIEW"
+    assert urgent["callback_time"] == ""
+    assert urgent["call_booking_status"] == "interested_no_call"
+    assert urgent["clear_callback"] is True
+    assert module._sms_should_reply(urgent, 0) is False
+    assert module._sms_should_reply(urgent, 3) is False
 
 
 def test_sms_mixed_timeline_and_unsupported_stats_still_hands_off(monkeypatch):
@@ -1525,7 +1567,7 @@ def test_sms_mixed_timeline_and_unsupported_stats_still_hands_off(monkeypatch):
     assert decision["block_reply"] is True
 
 
-def test_sms_fee_and_recent_closing_count_are_answered_without_handoff(monkeypatch):
+def test_sms_fee_and_recent_closing_count_answer_known_facts_before_handoff(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -1535,12 +1577,17 @@ def test_sms_fee_and_recent_closing_count_are_answered_without_handoff(monkeypat
     decision = module._sms_fast_decision({}, inbound)
 
     assert module._sms_is_unsupported_performance_stats_question(inbound) is False
-    assert decision["handoff_needed"] is False
+    assert decision["handoff_needed"] is True
     assert decision["block_reply"] is False
-    assert "buyer" in decision["reply_text"].lower()
-    assert "15 years" in decision["reply_text"]
-    assert "this is all that I do" in decision["reply_text"]
-    assert "confident I can get your deal closed" in decision["reply_text"]
+    assert decision["reply_text"] == f"{APPROVED_SPECIFIC_FEE_REPLY} {APPROVED_CLOSED_COUNT_ADMISSION}"
+    assert decision["handoff_type"] == "STATS QUESTION"
+    assert decision["send_reply_before_handoff"] is True
+    assert decision["bypass_reply_cap"] is False
+    assert decision["response_id"] == "fee_specific"
+    assert "15 years" not in decision["reply_text"]
+    assert "confident I can get your deal closed" not in decision["reply_text"]
+    assert module._sms_should_reply(decision, 2) is True
+    assert module._sms_should_reply(decision, 3) is False
 
 
 def test_sms_generic_how_it_works_and_fee_are_answered_together(monkeypatch):
@@ -1564,20 +1611,26 @@ def test_sms_experience_questions_share_the_approved_response(monkeypatch):
         monkeypatch,
         sender_result=FakeSendResult(success=True),
     )
-    expected = (
-        "I have been doing this over 15 years and this is all that I do - help agents and homeowners "
-        "with the short sale process. So I have a lot of experience and am confident I can get your deal closed."
-    )
-
     for inbound in (
         "How long have you been doing short sales?",
-        "How many short sales have you closed?",
         "What is your track record with short sales?",
     ):
         decision = module._sms_fast_decision({}, inbound)
-        assert decision["reply_text"] == expected
+        assert decision["reply_text"] == APPROVED_EXPERIENCE_REPLY
         assert decision["handoff_needed"] is False
         assert decision["block_reply"] is False
+        assert decision["response_id"] == "experience"
+
+    count = module._sms_fast_decision({}, "How many short sales have you closed?")
+    assert count["reply_text"] == APPROVED_CLOSED_COUNT_ADMISSION
+    assert count["handoff_needed"] is True
+    assert count["block_reply"] is False
+    assert count["handoff_type"] == "STATS QUESTION"
+    assert count["send_reply_before_handoff"] is True
+    assert count["response_id"] != "experience"
+    assert "15 years" not in count["reply_text"]
+    assert module._sms_should_reply(count, 2) is True
+    assert module._sms_should_reply(count, 3) is False
 
 
 def test_sms_unanswered_substantive_question_fails_closed_to_handoff(monkeypatch):
@@ -1791,7 +1844,14 @@ def test_sms_ramona_equator_location_and_fee_questions_receive_one_complete_answ
 
     decision = module._sms_fast_decision({}, inbound)
 
-    assert decision["reply_text"] == module._sms_equator_fee_and_location_reply(inbound)
+    assert decision["reply_text"] == " ".join([
+        GENERAL_FEE_REPLY,
+        "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
+        "https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.",
+        APPROVED_FAILED_PROVIDER_REPLY,
+        "I'm very familiar with Equator and can handle all of the tasks and communication in the system "
+        "to take that work off your hands.",
+    ])
     assert "based in Atlanta and work nationwide" in decision["reply_text"]
     assert "familiar with Equator" in decision["reply_text"]
     assert "flat fee to the buyer at closing" in decision["reply_text"]
@@ -2008,8 +2068,9 @@ def test_sms_rate_question_outranks_existing_coverage_closeout(monkeypatch):
     assert decision["lead_status"] == "O"
     assert decision["conversation_done"] is True
     assert decision["handoff_needed"] is False
-    assert "flat fee to the buyer" in decision["reply_text"]
-    assert decision["reason"] == "Asked about charge, fee, percentage, or how Crisp gets paid"
+    assert decision["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+    assert decision["response_id"] == "fee_specific"
+    assert decision["reason"] == "Answered fee question before generic coverage language"
 
 
 def test_sms_differentiation_question_gets_deterministic_reply(monkeypatch):
@@ -2024,13 +2085,14 @@ def test_sms_differentiation_question_gets_deterministic_reply(monkeypatch):
     assert module._sms_is_differentiation_question(inbound) is True
     assert decision["lead_status"] == "Y"
     assert decision["handoff_needed"] is True
-    assert decision["reply_text"] == (
-        "I handle the lender-side work and keep agents updated throughout the process. "
-        "If that sounds useful, I'm happy to talk through your listing."
-    )
+    assert decision["reply_text"] == APPROVED_DIFFERENTIATION_REPLY
     assert decision["alert_needed"] is True
     assert decision["handoff_type"] == "HOT LEAD - DIFFERENTIATION QUESTION"
     assert decision["reason"] == "Answered differentiation question before generic coverage language"
+    assert decision["send_reply_before_handoff"] is True
+    assert decision["bypass_reply_cap"] is False
+    assert module._sms_should_reply(decision, 2) is True
+    assert module._sms_should_reply(decision, 3) is False
 
 
 def test_sms_testimonials_request_uses_reviews_reply_without_email_prompt(monkeypatch):
@@ -2129,8 +2191,8 @@ def test_sms_automated_alternate_number_notice_preserves_existing_handoff_state(
     assert sheet.rows[2][19] == "TRUE"
 
 
-def test_sms_differentiation_reply_preserves_paragraphs_and_requests_hot_lead_alert(monkeypatch):
-    module, _sheet, sender = _import_webhook_server(
+def test_sms_differentiation_reply_is_sent_before_new_hot_lead_handoff(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
     )
@@ -2149,11 +2211,26 @@ def test_sms_differentiation_reply_preserves_paragraphs_and_requests_hot_lead_al
 
     assert response.status_code == 200
     body = response.json()
-    assert body["should_reply"] is False
-    assert body["reply_text"] == ""
+    assert body["should_reply"] is True
+    assert body["reply_text"] == APPROVED_DIFFERENTIATION_REPLY
     assert body["handoff_needed"] is True
     assert body["alert_needed"] is True
     assert body["handoff_type"] == "HOT LEAD - DIFFERENTIATION QUESTION"
+    assert sheet.rows[2][13] == "handoff"
+    assert sheet.rows[2][16] == "TRUE"
+    assert sheet.rows[2][19] == "TRUE"
+    assert sheet.rows[2][18] == "0"
+    assert not any(entry["role"] == "assistant" for entry in json.loads(sheet.rows[2][17]))
+    followup = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+            "message": "What is your fee?", "message_id": "differentiation-locked-followup",
+        },
+    ).json()
+    assert followup["should_reply"] is False
+    assert followup["reply_text"] == ""
+    assert sheet.rows[2][19] == "TRUE"
     assert sender.calls == []
 
 
@@ -2365,34 +2442,54 @@ def test_sms_chatbot_reply_and_reply_sent_writeback(monkeypatch):
     assert json.loads(sheet.rows[3][17])[-1]["receipt_id"]
 
 
-def test_sms_contract_fee_questions_follow_the_required_three_step_flow(monkeypatch):
+def test_sms_contract_fee_amount_is_first_and_delivered_history_controls_followup(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
     )
     first = module._sms_fast_decision({}, "What do you charge?")
     assert first["handoff_needed"] is False
-    assert "flat fee to the buyer" in first["reply_text"]
-    assert "$5,000" not in first["reply_text"]
+    assert first["block_reply"] is False
+    assert first["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+    assert first["response_id"] == "fee_specific"
 
     row = {"history_json": json.dumps([{"role": "assistant", "text": first["reply_text"]}])}
     second = module._sms_fast_decision(row, "Right, but how much is the fee exactly?")
-    assert second["handoff_needed"] is False
-    assert "$5,000" in second["reply_text"]
+    assert second["handoff_needed"] is True
+    assert second["block_reply"] is True
+    assert second["reply_text"] == ""
+    assert second["handoff_type"] == "FEE QUESTION FOLLOW-UP"
 
     row["history_json"] = json.dumps(
         [
-            {"role": "assistant", "text": first["reply_text"]},
-            {"role": "assistant", "text": second["reply_text"]},
+            {"role": "assistant", "text": "Earlier delivered amount wording", "response_id": "fee_specific"},
         ]
     )
+    by_id = module._sms_fast_decision(row, "How much is the fee?")
+    assert by_id["handoff_type"] == "FEE QUESTION FOLLOW-UP"
+    assert by_id["block_reply"] is True
+    assert by_id["reply_text"] == ""
+
     third = module._sms_fast_decision(row, "Why is the fee that much?")
-    assert third["handoff_needed"] is True
-    assert third["block_reply"] is True
-    assert third["reply_text"] == ""
+    assert third["handoff_needed"] is False
+    assert third["block_reply"] is False
+    assert third["reply_text"] == GENERAL_FEE_REPLY
+    assert third["response_id"] == "fee_initial"
+
+    concern = module._sms_fast_decision(row, "What if the buyer cannot afford that fee?")
+    assert concern["reply_text"] == APPROVED_BUYER_COST_REPLY
+    assert concern["response_id"] == "buyer_cost_concern"
+    assert concern["handoff_needed"] is False
+    assert concern["block_reply"] is False
+
+    pending_only = {"history_json": json.dumps([{"role": "agent", "text": "What do you charge?"}])}
+    pending_question = module._sms_fast_decision(pending_only, "Who pays you?")
+    assert pending_question["reply_text"] == GENERAL_FEE_REPLY
+    assert pending_question["handoff_needed"] is False
+    assert pending_question["response_id"] == "fee_initial"
 
 
-def test_sms_exact_fee_survives_reply_cap_and_automated_takeover(monkeypatch):
+def test_sms_exact_fee_does_not_reopen_reply_cap_handoff(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -2417,12 +2514,12 @@ def test_sms_exact_fee_survives_reply_cap_and_automated_takeover(monkeypatch):
         },
     ).json()
 
-    assert body["should_reply"] is True
-    assert "$5,000" in body["reply_text"]
+    assert body["should_reply"] is False
+    assert body["reply_text"] == ""
     assert body["handoff_needed"] is False
-    assert sheet.rows[2][13] == "active"
-    assert sheet.rows[2][16] == "FALSE"
-    assert sheet.rows[2][19] == "FALSE"
+    assert sheet.rows[2][13] == "handoff"
+    assert sheet.rows[2][16] == "TRUE"
+    assert sheet.rows[2][19] == "TRUE"
     assert sender.calls == []
 
 
@@ -2489,7 +2586,13 @@ def test_sms_contract_safe_three_part_question_gets_bounded_answer(monkeypatch):
     assert decision["block_reply"] is False
     assert "Atlanta" in decision["reply_text"]
     assert "lender-side" in decision["reply_text"]
-    assert "flat fee" in decision["reply_text"]
+    assert decision["reply_text"] == (
+        f"{APPROVED_SPECIFIC_FEE_REPLY} "
+        "I handle the lender-side paperwork, calls, follow-up, and negotiations through approval. "
+        "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely."
+    )
+    assert decision["conversation_done"] is True
+    assert decision["response_id"] == "fee_specific"
 
 
 def test_sms_contract_self_handler_who_wants_details_is_not_closed_out(monkeypatch):
@@ -2861,12 +2964,25 @@ def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):
     )
     ask = module._sms_fast_decision({}, "I already have help, but please send me more information about your services.")
     assert ask["lead_status"] == "O"
-    assert ask["reply_text"] == "Absolutely, I'd be happy to email you more information. What's the best email?"
+    assert ask["reply_text"] == APPROVED_EMAIL_ADDRESS_REQUEST
+    assert ask["conversation_done"] is False
+    assert ask["handoff_needed"] is False
+    assert ask["block_reply"] is False
+    assert ask["call_booking_status"] == "information_requested"
+    assert ask["callback_time"] == ""
+    assert ask["info_email_approval_required"] is False
 
     provided = module._sms_fast_decision({}, "Please email the info to agent@example.com")
-    assert provided["reply_text"] == (
-        "Absolutely, I'll email you more information shortly. Thanks for sending your email."
-    )
+    assert provided["reply_text"] == ""
+    assert provided["lead_status"] == "Y"
+    assert provided["handoff_needed"] is True
+    assert provided["block_reply"] is True
+    assert provided["handoff_type"] == "INFO EMAIL APPROVAL REQUIRED"
+    assert provided["call_booking_status"] == "information_requested"
+    assert provided["callback_time"] == ""
+    assert provided["info_email_to"] == "agent@example.com"
+    assert provided["info_email_approval_required"] is True
+    assert module._sms_should_reply(provided, 0) is False
 
 
 def test_sms_contract_no_current_help_gets_conversational_service_explanation(monkeypatch):
@@ -2935,9 +3051,15 @@ def test_sms_contract_service_info_request_is_answered_before_email_followup(mon
     )
     assert decision["lead_status"] == "O"
     assert decision["conversation_done"] is True
-    assert decision["reply_text"] == (
-        "Absolutely, I'll email you more information shortly. Thanks for sending your email."
-    )
+    assert decision["reply_text"] == ""
+    assert decision["handoff_needed"] is True
+    assert decision["block_reply"] is True
+    assert decision["handoff_type"] == "INFO EMAIL APPROVAL REQUIRED"
+    assert decision["call_booking_status"] == "information_requested"
+    assert decision["callback_time"] == ""
+    assert decision["info_email_to"] == "agent@example.com"
+    assert decision["info_email_approval_required"] is True
+    assert module._sms_should_reply(decision, 0) is False
 
 
 def test_sms_contract_regulatory_license_question_hands_off_without_ai_reply(monkeypatch):
@@ -3002,15 +3124,22 @@ def test_sms_contract_fee_with_present_help_or_call_answers_then_freezes(monkeyp
         monkeypatch,
         sender_result=FakeSendResult(success=True),
     )
-    for inbound in (
-        "Call me tomorrow at 10. What's your fee?",
-        "I am handling it myself but would love help getting it approved quicker. How much do you charge?",
+    for inbound, expected_callback in (
+        ("Call me tomorrow at 10. What's your fee?", "Tomorrow at 10"),
+        ("I am handling it myself but would love help getting it approved quicker. How much do you charge?", ""),
     ):
         decision = module._sms_fast_decision({}, inbound)
         assert decision["lead_status"] == "Y"
         assert decision["handoff_needed"] is True
         assert decision["block_reply"] is False
-        assert "flat fee" in decision["reply_text"].lower()
+        assert decision["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+        assert decision["response_id"] == "fee_specific"
+        assert decision["send_reply_before_handoff"] is True
+        assert decision["bypass_reply_cap"] is False
+        assert decision["callback_time"] == expected_callback
+        assert decision["call_booking_status"] == ("scheduled_callback" if expected_callback else "")
+        assert module._sms_should_reply(decision, 2) is True
+        assert module._sms_should_reply(decision, 3) is False
 
 
 def test_sms_contract_language_and_fee_compound_answers_both(monkeypatch):
@@ -3021,7 +3150,11 @@ def test_sms_contract_language_and_fee_compound_answers_both(monkeypatch):
     decision = module._sms_fast_decision({}, "Do you speak Spanish and what is your fee?")
     assert decision["handoff_needed"] is False
     assert "don't speak Spanish" in decision["reply_text"]
-    assert "flat fee" in decision["reply_text"].lower()
+    assert decision["reply_text"] == (
+        f"{APPROVED_SPECIFIC_FEE_REPLY} No, I'm sorry, I don't speak Spanish, but I'd still be happy to help in English."
+    )
+    assert decision["response_id"] == "fee_specific"
+    assert decision["block_reply"] is False
 
 
 def test_sms_contract_ordinary_closeout_does_not_block_later_question(monkeypatch):
@@ -3055,7 +3188,11 @@ def test_sms_contract_ordinary_closeout_does_not_block_later_question(monkeypatc
     ).json()
     assert second["should_reply"] is True
     assert second["lead_status"] == "O"
-    assert "flat fee" in second["reply_text"].lower()
+    assert second["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+    assert second["response_id"] == "fee_specific"
+    assert second["conversation_done"] is True
+    assert second["handoff_needed"] is False
+    assert sheet.rows[2][19] == "FALSE"
 
 
 def test_sms_contract_first_fee_answer_after_closeout_bypasses_reply_cap_once(monkeypatch):
@@ -3091,10 +3228,36 @@ def test_sms_contract_first_fee_answer_after_closeout_bypasses_reply_cap_once(mo
     assert body["lead_status"] == "O"
     assert body["conversation_done"] is True
     assert body["handoff_needed"] is False
-    assert "flat fee to the buyer" in body["reply_text"].lower()
+    assert body["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+    assert body["response_id"] == "fee_specific"
     assert sheet.rows[2][13] == "done"
     assert sheet.rows[2][16] == "FALSE"
     assert sheet.rows[2][19] == "FALSE"
+    assert sheet.rows[2][18] == "3"
+
+    receipt = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token", "action": "reply_sent", "phone": "+19542357723",
+            "reply_text": body["reply_text"], "sent_at": "2026-09-12T16:00:00+00:00",
+        },
+    ).json()
+    assert receipt["ok"] is True
+    assert receipt["duplicate"] is False
+    assert sheet.rows[2][18] == "4"
+    assert json.loads(sheet.rows[2][17])[-1]["response_id"] == "fee_specific"
+    repeated = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+            "message": "How much exactly?", "message_id": "fee-after-closeout-repeat",
+        },
+    ).json()
+    assert repeated["should_reply"] is False
+    assert repeated["reply_text"] == ""
+    assert repeated["handoff_needed"] is True
+    assert repeated["handoff_type"] == "FEE QUESTION FOLLOW-UP"
+    assert sheet.rows[2][18] == "4"
     assert sender.calls == []
 
 

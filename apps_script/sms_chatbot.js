@@ -667,7 +667,7 @@ function handleIncomingSmsCore_(body) {
     };
   }
   if (isPostHandoffCallbackUpdate_(currentRowObj, inboundText)) {
-    const callbackTime = extractScheduledCallbackReference_(inboundText, receivedAt) || extractSameDayCallbackReference_(inboundText);
+    const callbackTime = extractCompleteCallbackTiming_(inboundText, receivedAt);
     const priorCallbackTime = normalizeCallbackTime_(currentRowObj[HEADERS.callback_time]);
     const changed = normalizeCallbackTime_(callbackTime) !== priorCallbackTime;
     const preservedLeadStatus = String(currentRowObj[HEADERS.mailshake_status] || "Y");
@@ -748,7 +748,9 @@ function handleIncomingSmsCore_(body) {
     };
   }
 
-  const feeRecoveryDecision = buildAutomatedHandoffFeeRecoveryDecision_(currentRowObj, inboundText);
+  // Never reopen an existing manual takeover just to answer another fee question.
+  const feeRecoveryDecision = String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE" ||
+    isManualFollowupLocked_(currentRowObj) ? null : buildAutomatedHandoffFeeRecoveryDecision_(currentRowObj, inboundText);
   if (feeRecoveryDecision) {
     updateRowFields_(sheet, row, {
       [HEADERS.response_status]: inboundText,
@@ -1301,6 +1303,10 @@ function handleIncomingSmsCore_(body) {
       });
     }
 
+    if (decision.send_reply_before_handoff && shouldSendBotReply_(decision, capReached && !decision.bypass_reply_cap)) {
+      authorizeNewHandoffReply_(phoneRaw, body.message_id, decision.reply_text);
+    }
+
     updateRowFields_(sheet, row, updates);
 
     if (decision.lead_status === "O" && ruleResult.info_email_to) {
@@ -1595,7 +1601,10 @@ function handleReplySent_(body) {
         return { ok: true, duplicate: true, reason: "Reply receipt was already applied to CRM" };
       }
 
-      history.push({ role: "assistant", text: replyText, ts: sentAt, receipt_id: receiptId });
+      const deliveredEntry = { role: "assistant", text: replyText, ts: sentAt, receipt_id: receiptId };
+      const responseId = getDeliveredResponseId_(replyText);
+      if (responseId) deliveredEntry.response_id = responseId;
+      history.push(deliveredEntry);
       rowValues[historyIndex] = JSON.stringify(history.slice(-20));
       rowValues[outboundIndex] = replyText;
       rowValues[contactIndex] = sentAt;
@@ -1611,6 +1620,9 @@ function handleReplySent_(body) {
       // The history idempotency marker and reply count share one row write.
       // A Tasker retry therefore either reapplies nothing or completes once.
       sheet.getRange(rowInfo.row, 1, 1, headers.length).setValues([rowValues]);
+      if (String(body.message_id || "") && isAuthorizedNewHandoffReply_(phone, body.message_id, replyText, rowInfo.rowObj)) {
+        clearNewHandoffReply_(phone);
+      }
       return { ok: true, receipt_id: receiptId };
     } finally {
       lock.releaseLock();
@@ -1668,6 +1680,7 @@ function handleManualReplySent_(body) {
 }
 
 function applyManualReplySentCoreV11_(phoneRaw, replyText, sentAt, eventId) {
+  clearNewHandoffReply_(phoneRaw);
   const sheet = getSheet_();
   const data = getSheetData_(sheet);
   const rowInfo = findOrCreateRowByPhone_(sheet, data, phoneRaw);
@@ -1723,6 +1736,7 @@ function markOverride_(body) {
 }
 
 function applyOverrideCoreV11_(phoneRaw, value) {
+  clearNewHandoffReply_(phoneRaw);
   const sheet = getSheet_();
   const data = getSheetData_(sheet);
   const rowInfo = findOrCreateRowByPhone_(sheet, data, phoneRaw);
@@ -1737,6 +1751,7 @@ function smsPendingControlKeyV11_(phone) {
 }
 
 function queuePendingSmsControlEventV11_(phone, payload) {
+  clearNewHandoffReply_(phone);
   const event = Object.assign({}, payload || {}, {
     event_id: Utilities.getUuid(),
     queued_at: new Date().toISOString()
@@ -1763,6 +1778,39 @@ function hasPendingSmsTakeoverV11_(phone) {
   const event = getPendingSmsControlEventV11_(phone);
   if (!event) return false;
   return event.action === "manual_reply_sent" || String(event.value || "TRUE").toUpperCase() === "TRUE";
+}
+
+function newHandoffReplyKey_(phone) {
+  return "SMS_NEW_HANDOFF_REPLY_V1_" + normalizePhone_(phone);
+}
+
+function authorizeNewHandoffReply_(phone, messageId, replyText) {
+  if (!messageId || !replyText || hasPendingSmsTakeoverV11_(phone)) return;
+  // One exact answer may accompany the transition to a NEW human handoff.
+  // This is not permission to restart later automation or send old replies.
+  PropertiesService.getScriptProperties().setProperty(newHandoffReplyKey_(phone), JSON.stringify({
+    message_id: String(messageId), reply_text: normalizeWhitespace_(String(replyText)),
+    expires_at: Date.now() + 10 * 60 * 1000
+  }));
+}
+
+function clearNewHandoffReply_(phone) {
+  PropertiesService.getScriptProperties().deleteProperty(newHandoffReplyKey_(phone));
+}
+
+function isAuthorizedNewHandoffReply_(phone, messageId, replyText, rowObj) {
+  const raw = PropertiesService.getScriptProperties().getProperty(newHandoffReplyKey_(phone));
+  if (!raw || hasPendingSmsTakeoverV11_(phone)) return false;
+  let permit;
+  try { permit = JSON.parse(raw); } catch (_) { return false; }
+  if (!(Number(permit.expires_at) > Date.now())) {
+    clearNewHandoffReply_(phone);
+    return false;
+  }
+  return normalizePhone_(rowObj && rowObj[HEADERS.phone]) === normalizePhone_(phone) &&
+    String(rowObj && rowObj[HEADERS.last_message_id] || "") === String(messageId) &&
+    String(permit.message_id) === String(messageId) &&
+    permit.reply_text === normalizeWhitespace_(String(replyText || ""));
 }
 
 function clearPendingSmsControlEventV11_(phone, eventId) {
@@ -1869,6 +1917,7 @@ function isPaymentOrFeeQuestionSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return false;
   if (isSpanishFeeQuestionSignal_(t)) return true;
+  if (/^(?:how much|fees?|cost|price|pricing)[?!.]*$/.test(t)) return true;
 
   const directPhrases = [
     "what is the cost",
@@ -1933,7 +1982,7 @@ function isInitialFeeReplyText_(text) {
   const englishDisclosure = t.indexOf("flat fee") !== -1 &&
     t.indexOf("buyer") !== -1 &&
     t.indexOf("closing") !== -1 &&
-    (t.indexOf("free") !== -1 || t.indexOf("no cost") !== -1);
+    (t.indexOf("free") !== -1 || t.indexOf("no cost") !== -1 || t.indexOf("no fee") !== -1);
   const spanishDisclosure = t.indexOf("tarifa fija") !== -1 &&
     t.indexOf("comprador") !== -1 &&
     t.indexOf("cierre") !== -1 &&
@@ -1949,7 +1998,62 @@ function isSpecificFeeReplyText_(text) {
   return compact.indexOf("5000") !== -1 && mentionsBuyer && mentionsClosing;
 }
 
-function buildFeeQuestionDecision_(rowObj, lastOutbound) {
+function isExplicitFeeAmountQuestion_(text) {
+  const t = normalizeLanguageSignalText_(text);
+  return /\b(?:how much|what(?:'s| is| are| would be) (?:your |the |a |my |buyer(?:'s)? |service )?(?:flat )?(?:fees?|costs?|price|pricing|rate|charges?)|what (?:do|would|will) you charge|dollar amount)\b/.test(t) ||
+    /\bwhat does (?:it|this|that|your service) cost\b/.test(t) ||
+    /^(?:(?:and|your|the)\s+)*(?:fee|cost|price|rate|charge)\s*\??$/.test(t) ||
+    /\b(?:cuanto|cual)\b.{0,40}\b(?:tarifa|costo|cobras)\b/.test(t);
+}
+
+function buildSpecificFeeReply_() {
+  return "My fee is $5,000, paid by the buyer at closing only if the deal closes. There's no service fee to you or the seller, and I don't take anything from your commission.";
+}
+
+function buildSelfHandlingValueReply_() {
+  return "That makes sense. You keep the listing and client relationship; I can take the lender paperwork, calls, and follow-up off your plate. There's no fee to you or the seller and no commission split; the buyer pays my fee at closing. Would a brief call to see if that helps on this file be worthwhile?";
+}
+
+function buildBuyerCostConcernReply_() {
+  return "The buyer does need to consider that cost with their offer, so we discuss the fee and disclosure up front. I'm happy to walk through how that would work on this listing before you decide anything.";
+}
+
+function isBuyerCostConcernSignal_(text) {
+  const t = normalizeLanguageSignalText_(text);
+  return /\bbuyer(?:s|'s)?\b/.test(t) && /\b(?:fee|cost|pays?|paying|offer|price|afford|cash|financ(?:e|ing))\b/.test(t) &&
+    /\b(?:lower|reduce|factor|affect|concern|worried|worry|deter|discourage|willing|afford|scare|account|confused|how|why|hesitant|reluctant|issue|problem|refus\w*|won't|will not|wouldn't|would not|can't|cannot|couldn't|could not|don't think|do not think|what if)\b/.test(t) &&
+    !isBuyerProvisionQuestionSignal_(t);
+}
+
+function buildFailedProviderReply_() {
+  return "I understand why you'd be cautious after that. I handle the lender paperwork, calls, follow-up, and negotiations while you focus on the listing and your client. We can go through exactly what I'd handle and what I'd need from you before you decide. Would a brief call be helpful?";
+}
+
+function isFailedProviderSignal_(text) {
+  const t = normalizeLanguageSignalText_(text);
+  return /\b(?:last|previous|prior|before|used|hired|paid)\b/.test(t) &&
+    /\b(?:company|processor|negotiator|someone|somebody|service)\b/.test(t) &&
+    /\b(?:did nothing|didn't do|did not do|all the work|bad experience|burned|never|unsuccessful|failed)\b/.test(t);
+}
+
+function hasDeliveredResponseId_(rowObj, responseId) {
+  return getHistoryArray_(rowObj && rowObj[HEADERS.history_json]).some(function(entry) {
+    return entry && entry.role === "assistant" && entry.response_id === responseId;
+  });
+}
+
+function getDeliveredResponseId_(text) {
+  const t = normalizeWhitespace_(String(text || ""));
+  if (isSpecificFeeReplyText_(t)) return "fee_specific";
+  if (t === buildSelfHandlingValueReply_() || isSelfHandlingValueReplyText_(t)) return "self_handling_value";
+  if (isInitialFeeReplyText_(t)) return "fee_initial";
+  if (t === buildBuyerCostConcernReply_()) return "buyer_cost_concern";
+  if (t === buildFailedProviderReply_()) return "failed_provider";
+  if (t === buildExperienceTrackRecordReply_()) return "experience";
+  return "";
+}
+
+function buildFeeQuestionDecision_(rowObj, lastOutbound, inboundText) {
   const history = getHistoryArray_(rowObj && rowObj[HEADERS.history_json]);
   const priorAssistantTexts = history
     .filter(function(entry) { return entry && entry.role === "assistant"; })
@@ -1964,8 +2068,16 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
   // Only a sent receipt or durable assistant history proves that the exact
   // amount was answered. A queued reply may still be superseded by a newer
   // inbound and must not advance the conversation to manual handoff.
-  const hasPriorSpecificFeeReply = priorAssistantTexts.some(isSpecificFeeReplyText_) || pendingFeeStage === "specific_delivered";
-  const hasPriorInitialFeeReply = priorAssistantTexts.some(isInitialFeeReplyText_) || pendingFeeStage === "initial";
+  const hasPriorSpecificFeeReply = hasDeliveredResponseId_(rowObj, "fee_specific") ||
+    priorAssistantTexts.some(isSpecificFeeReplyText_) || pendingFeeStage === "specific_delivered";
+  const hasPriorInitialFeeReply = hasDeliveredResponseId_(rowObj, "fee_initial") ||
+    priorAssistantTexts.some(isInitialFeeReplyText_) || pendingFeeStage === "initial_delivered";
+
+  if (isBuyerCostConcernSignal_(inboundText) && !isExplicitFeeAmountQuestion_(inboundText)) {
+    return {matched: true, reply_text: buildBuyerCostConcernReply_(), lead_status: "Y",
+      conversation_done: false, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Answered buyer cost and offer concern without promising buyer acceptance"};
+  }
 
   if (hasPriorSpecificFeeReply) {
     return buildManualHandoffDecision_(
@@ -1974,17 +2086,18 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
     );
   }
 
-  if (hasPriorInitialFeeReply) {
+  if (hasPriorInitialFeeReply || isExplicitFeeAmountQuestion_(inboundText)) {
     return {
       matched: true,
-      reply_text: "The fee is $5,000, paid by the buyer at closing. As long as it's disclosed up front in the listing, the buyer can factor it into their offer price.",
+      reply_text: buildSpecificFeeReply_(),
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
       needs_review: false,
       block_reply: false,
-      bypass_reply_cap: true,
-      reason: "Repeated fee/payment question - gave specific $5,000 buyer-paid answer"
+      bypass_reply_cap: hasPriorInitialFeeReply,
+      first_fee_answer: !hasPriorInitialFeeReply,
+      reason: "Answered requested fee amount with $5,000 buyer-paid, closing-contingent terms"
     };
   }
 
@@ -1996,6 +2109,7 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound) {
     handoff_needed: false,
     needs_review: false,
     block_reply: false,
+    first_fee_answer: true,
     reason: "Asked about charge, fee, percentage, or how Crisp gets paid"
   };
 }
@@ -2005,7 +2119,7 @@ function shouldBypassReplyCapForFirstFeeAnswerAfterCloseout_(feeDecision, leadSt
     !feeDecision.handoff_needed &&
     leadStatus === "O" &&
     !!conversationDone &&
-    isInitialFeeReplyText_(feeDecision.reply_text);
+    (isInitialFeeReplyText_(feeDecision.reply_text) || !!feeDecision.first_fee_answer);
 }
 
 function getPendingFeeReplyStageV3_(rowObj) {
@@ -2026,13 +2140,14 @@ function getPendingFeeReplyStageV3_(rowObj) {
       if (isSpecificFeeReplyText_(rows[i][5])) {
         return status === "sent" ? "specific_delivered" : "specific_pending";
       }
-      if (isInitialFeeReplyText_(rows[i][5])) return "initial";
+      if (isInitialFeeReplyText_(rows[i][5])) return status === "sent" ? "initial_delivered" : "initial_pending";
     }
   } catch (_) {}
   return "";
 }
 
 function buildAutomatedHandoffFeeRecoveryDecision_(rowObj, inboundText) {
+  if (isManualFollowupLocked_(rowObj)) return null;
   if (String(rowObj && rowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE") return null;
   const summary = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.conversation_summary] || "").toLowerCase());
   if (summary.indexOf("max replies reached") === -1 && summary.indexOf("fee question follow-up") === -1) {
@@ -2059,9 +2174,11 @@ function isAlreadyApprovedCloseoutSignal_(text) {
 function isFeeNegotiationSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return false;
+  if (isBuyerCostConcernSignal_(t) && /\b(?:lower|reduce)\b.{0,25}\boffer\b/.test(t) &&
+      !/\b(?:can|could|would|will) you\b.{0,40}\b(?:lower|reduce|discount)\b/.test(t)) return false;
   const mentionsPricing = /\b(?:fee|price|pricing|rate|charge|cost|\$\s*\d|\d{3,5})\b/.test(t);
   const asksConcession = /\b(?:match|beat|lower|reduce|discount|negotiate|counter|concession)\b/.test(t) ||
-    /\b(?:would|will|can|could)\s+you\s+(?:do|charge|take|accept)\b/.test(t) ||
+    /\b(?:would|will|can|could)\s+you\s+(?:do|charge|take|accept)\s+(?:it for\s+|less|a lower|\$?\d)/.test(t) ||
     /\bi\s+(?:made|am making)\s+you\s+an?\s+offer\b/.test(t);
   return mentionsPricing && asksConcession;
 }
@@ -2075,7 +2192,79 @@ function buildSpeedQuestionReply_() {
   return "I help reduce avoidable delays by organizing the lender's required documents and staying on top of follow-up. The lender still controls review timing. Where is this file getting held up?";
 }
 
-function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
+function withoutNegatedRejection_(text) {
+  return normalizeWhitespace_(String(text || "").toLowerCase())
+    .replace(/\b(?:i(?:['\u2019]?m| am)\s+)?not\s+(?:saying|suggesting)\s+(?:(?:that\s+)?i(?:['\u2019]?m| am)\s+)?not\s+interested\b/g, " ")
+    .replace(/\b(?:it(?:['\u2019]s| is)\s+)?not\s+that\s+i(?:['\u2019]?m| am)\s+not\s+interested\b/g, " ");
+}
+
+function isExactClosedCountQuestion_(text) {
+  const t = normalizeLanguageSignalText_(text);
+  return /\bhow many\b.{0,65}\b(?:short sales?|deals?|files?|transactions?)\b.{0,55}\b(?:closed|completed|handled|done)\b/.test(t) ||
+    /\bhow many\b.{0,30}\b(?:closed|completed)\b/.test(t) ||
+    /\b(?:number|count) of\b.{0,30}\b(?:closings|closed|deals|short sales)\b/.test(t);
+}
+
+function buildInfoRequestDecisionV4_(text, rowObj) {
+  const providedEmail = extractEmailAddress_(text);
+  if (!providedEmail && !isEmailRequestSignal_(text)) return null;
+  const targetEmail = normalizeEmailAddress_(providedEmail || String(rowObj && rowObj[HEADERS.email] || ""));
+  const warm = isDeclineWithInfoRequestSignal_(text, rowObj);
+  return {matched: true,
+    reply_text: targetEmail ? getInfoEmailAcknowledgementReply_(targetEmail) : buildServiceInfoEmailAcknowledgement_(false),
+    lead_status: warm ? "O" : "Y", conversation_done: warm && !!targetEmail,
+    handoff_needed: false, needs_review: false, block_reply: false,
+    send_info_email: !!targetEmail, info_email_to: targetEmail,
+    reason: targetEmail ? "Agent requested information; owner approval queued before SMS acknowledgement" : "Agent requested information; collecting email address"};
+}
+
+function buildTerminalCoverageDecisionV4_(text, rowObj) {
+  const t = withoutNegatedRejection_(text);
+  if (isShortSaleSourceQuestion_(t) || isEmailRequestSignal_(t) || extractEmailAddress_(t) ||
+      isExistingCrispRelationshipSignal_(t) || isClientConsultationInterestSignal_(t) ||
+      isFutureNegotiationInterestSignal_(t) || isRelationshipOnlyAfterExistingCoverageSignal_(t, rowObj) ||
+      isFutureBuyerRecontactSignal_(t) || isFailedProviderSignal_(t) ||
+      isPhoneCallInterestSignal_(t) || isSchedulingSignal_(t) || isPresentServiceInterestSignal_(t) ||
+      isDirectHelpRequestSignal_(t) || isPaymentOrFeeQuestionSignal_(t) || isBuyerCostConcernSignal_(t) ||
+      /\b(?:what|why|who|where|how|can you|could you|would you|are you|do you|will you|send me|tell me)\b/.test(t)) return null;
+  const notShortSale = isNotShortSaleSignal_(t);
+  const covered = !isSelfHandlingOpportunitySignal_(t) && isAlreadyHandledSignal_(t);
+  if (!notShortSale && !covered && !isClearNoSignal_(t)) return null;
+  return {matched: true,
+    reply_text: notShortSale ? "Ahh, ok... thanks for letting me know. Good luck with your listing!" : getStandardNoCloseoutReply_(),
+    lead_status: "R", conversation_done: true, handoff_needed: false, needs_review: false, block_reply: false,
+    call_booking_status: "closed_no_interest",
+    reason: notShortSale ? "Listing is not a short sale; closed out" : "Explicit refusal or current provider coverage; closed out"};
+}
+
+function isUrgentAuctionReviewSignal_(text) {
+  const t = normalizeLanguageSignalText_(text);
+  return /\b(?:auction|foreclosure (?:sale|date|deadline)|sale date)\b/.test(t) &&
+    /\b(?:tomorrow|today|next week|this week|scheduled|deadline|stop|postpone|delay|in \d+ days?|\d{1,2}[/-]\d{1,2})\b/.test(t);
+}
+
+function withNewCallHandoff_(decision, text, receivedAt) {
+  if (!decision || decision.handoff_needed) return decision;
+  const feeAndHelp = isPaymentOrFeeQuestionSignal_(text) &&
+    (isPresentServiceInterestSignal_(text) || isDirectHelpRequestSignal_(text));
+  if (!isPhoneCallInterestSignal_(text) && !isImmediateCallSignal_(text) &&
+      !isOpenCallWindowSignal_(text) && !isSchedulingSignal_(text) && !feeAndHelp) return decision;
+  decision.handoff_needed = true;
+  decision.bypass_reply_cap = false;
+  decision.send_reply_before_handoff = true;
+  decision.block_reply = false;
+  decision.handoff_type = feeAndHelp ? "HOT LEAD - FEE AND HELP INTEREST" : "HOT LEAD - ANSWERED QUESTION AND CALL INTEREST";
+  decision.lead_status = "Y";
+  decision.conversation_done = false;
+  if (isSchedulingSignal_(text)) {
+    decision.callback_time = extractCompleteCallbackTiming_(text, receivedAt);
+    decision.callback_requested = "yes";
+    decision.call_booking_status = "scheduled_callback";
+  }
+  return decision;
+}
+
+function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return null;
 
@@ -2125,28 +2314,34 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   const speedQuestion = isSpeedQuestionSignal_(t);
   const flags = {
     speed: speedQuestion,
+    equator: isEquatorPortalSignal_(t),
     fee: isPaymentOrFeeQuestionSignal_(t),
     documents: /\bwho\s+(?:collects?|gathers?|gets?|organizes?|handles?)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t) ||
       /\b(?:do|will|would|can|could)\s+you\s+(?:collect|gather|get|organize|handle)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t) ||
       /\bwho\s+is\s+responsible\s+for\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b/.test(t),
-    help: /\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|how does (?:this|that|it) work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|do))\b/.test(t),
+    help: /\b(?:how do you help|how can you help|what do you do|what exactly do you do|what do you handle|what work would you take off|how does (?:this|that|it) work|what does (?:this|that|the service|your service) look like|what are you offering|what kind of help|what (?:are|is) your services?|explain (?:some )?more details?|more information about your services?|willing to (?:review|hear) what you (?:have to offer|do))\b/.test(t),
     local: isLocalQuestionSignal_(t),
     company: isCompanyIdentityQuestionSignal_(t),
     website: isWebsiteReviewsRequestSignal_(t),
     contact_card: isContactCardRequestSignal_(t),
     contact_info: isPlainContactInfoRequestSignal_(t),
-    experience: isExperienceTrackRecordQuestionSignal_(t),
+    experience: isExperienceTrackRecordQuestionSignal_(t) || isExactClosedCountQuestion_(t),
+    exact_count: isExactClosedCountQuestion_(t),
     timeline: isShortSaleTimelineQuestionSignal_(t),
     number: isCurrentTextingNumberQuestionSignal_(t),
     credential: isCredentialQuestionSignal_(t),
     negotiator: isNegotiatorRoleQuestionSignal_(t),
     buyer_provision: isBuyerProvisionQuestionSignal_(t),
     language: isSpanishLanguageSignal_(t),
-    differentiation: isDifferentiationQuestionSignal_(t)
+    differentiation: isDifferentiationQuestionSignal_(t),
+    buyer_cost_concern: isBuyerCostConcernSignal_(t),
+    failed_provider: isFailedProviderSignal_(t)
   };
 
   // A speed mechanism is more specific than the overlapping service question.
   if (speedQuestion) flags.help = false;
+  if (flags.buyer_cost_concern && !isExplicitFeeAmountQuestion_(t)) flags.fee = false;
+  if (flags.failed_provider) flags.differentiation = false;
   const matchedKeys = Object.keys(flags).filter(function(key) { return flags[key]; });
   if (!matchedKeys.length) return null;
 
@@ -2160,6 +2355,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
       needs_review: false,
       block_reply: false,
       alert_needed: true,
+      send_reply_before_handoff: true,
       handoff_type: "HOT LEAD - DIFFERENTIATION QUESTION",
       reason: "Answered differentiation question before generic coverage language"
     };
@@ -2171,66 +2367,24 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   const leadStatus = covered && !presentInterest ? "O" : "Y";
   const done = leadStatus === "O";
 
-  if (flags.fee && (
-    isPhoneCallInterestSignal_(t) ||
-    isImmediateCallSignal_(t) ||
-    isOpenCallWindowSignal_(t) ||
-    isSchedulingSignal_(t) ||
-    isDirectHelpRequestSignal_(t) ||
-    /\b(?:call\s+me(?:\s+now)?|i\s+need\s+help|would\s+love\s+(?:some\s+)?help|can\s+use\s+(?:some\s+)?help)\b/.test(t) ||
-    /\b(?:can we|could we|would love to|i(?:'|’)d love to)\s+(?:talk|chat|speak)\b/.test(t) ||
-    presentInterest
-  )) {
-    const feeWithInterest = buildFeeQuestionDecision_(rowObj, lastOutbound);
-    if (feeWithInterest.handoff_needed) return feeWithInterest;
-    feeWithInterest.lead_status = "Y";
-    feeWithInterest.conversation_done = false;
-    feeWithInterest.handoff_needed = true;
-    feeWithInterest.block_reply = false;
-    feeWithInterest.handoff_type = "HOT LEAD - FEE AND CALL INTEREST";
-    feeWithInterest.reason = "Answered fee question and handed off present call or service interest";
-    return feeWithInterest;
-  }
-
-  if (flags.help && flags.local && flags.fee && matchedKeys.length === 3) {
-    const compositeFeeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound);
-    if (compositeFeeDecision.handoff_needed) return compositeFeeDecision;
-    const bypassReplyCap = shouldBypassReplyCapForFirstFeeAnswerAfterCloseout_(
-      compositeFeeDecision,
-      leadStatus,
-      done
-    );
-    const compositeFeeClause = compositeFeeDecision.reply_text.indexOf("$5,000") !== -1
-      ? "The buyer-paid fee is a flat $5,000 at closing."
-      : "There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes.";
-    return {
-      matched: true,
-      reply_text: "I'm based in Atlanta and work nationwide, and I handle the lender-side paperwork, calls, follow-up, and negotiations through approval. " + compositeFeeClause,
-      lead_status: leadStatus,
-      conversation_done: done,
-      handoff_needed: false,
-      needs_review: false,
-      block_reply: false,
-      bypass_reply_cap: bypassReplyCap,
-      reason: "Answered a bounded service, location, and fee question"
-    };
-  }
-
-  if (matchedKeys.length > 2 || (matchedKeys.length > 1 && flags.differentiation)) {
-    return buildManualHandoffDecision_(
-      "Agent asked multiple questions that need one careful human answer",
-      "COMPLEX MULTI-QUESTION"
-    );
-  }
-
   if (matchedKeys.length === 1) {
+    if (flags.equator) return {
+      matched: true, reply_text: buildEquatorPortalReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      bypass_reply_cap: true, reason: "Explained Equator tasks and communication"
+    };
+    if (flags.buyer_cost_concern || flags.failed_provider) return {
+      matched: true, reply_text: flags.buyer_cost_concern ? buildBuyerCostConcernReply_() : buildFailedProviderReply_(),
+      lead_status: leadStatus, conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: flags.buyer_cost_concern ? "Answered buyer fee concern" : "Acknowledged failed provider experience and explained concrete scope"
+    };
     if (flags.speed) return {
       matched: true, reply_text: buildSpeedQuestionReply_(), lead_status: leadStatus,
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
       reason: "Explained avoidable delays and lender-controlled review timing"
     };
     if (flags.fee) {
-      const feeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound);
+      const feeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound, t);
       if (!feeDecision.handoff_needed) {
         feeDecision.lead_status = leadStatus;
         feeDecision.conversation_done = done;
@@ -2238,7 +2392,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
           feeDecision.bypass_reply_cap = true;
         }
       }
-      return feeDecision;
+      return withNewCallHandoff_(feeDecision, t, receivedAt);
     }
     if (flags.help) return {
       matched: true, reply_text: buildHowWeHelpReply_(), lead_status: leadStatus,
@@ -2318,17 +2472,19 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   }
 
   const answers = [];
+  let feeCapBypass = false;
+  if (flags.equator) answers.push(buildEquatorPortalReply_());
   if (flags.documents) answers.push("I help collect and organize the lender-required short-sale documents, submit the package, and handle the lender follow-up.");
   if (flags.company) answers.push("I'm with Crisp Short Sales.");
   if (flags.speed) answers.push(buildSpeedQuestionReply_());
   if (flags.help) answers.push("I handle the lender-side paperwork, calls, follow-up, and negotiations through approval.");
   if (flags.local) answers.push("I'm based in Atlanta and work nationwide; the lender-side work is handled remotely.");
   if (flags.fee) {
-    const feeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound);
+    const feeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound, t);
     if (feeDecision.handoff_needed) return feeDecision;
-    answers.push(feeDecision.reply_text.indexOf("$5,000") !== -1
-      ? "The buyer-paid fee is a flat $5,000 at closing."
-      : "There's no fee to you or the seller; the buyer pays a flat fee at closing only if the deal closes.");
+    answers.push(feeDecision.reply_text);
+    feeCapBypass = feeDecision.bypass_reply_cap ||
+      shouldBypassReplyCapForFirstFeeAnswerAfterCloseout_(feeDecision, leadStatus, done);
   }
   if (flags.experience) answers.push(buildExperienceReplyForQuestion_(t));
   if (flags.timeline) answers.push("A complete package and offer often takes about 60-90 days for a lender decision, though timing varies.");
@@ -2340,17 +2496,24 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound) {
   if (flags.negotiator) answers.push("Yes, essentially; I handle the short-sale process and lender negotiations through approval.");
   if (flags.buyer_provision) answers.push(buildBuyerProvisionClarificationReply_());
   if (flags.language) answers.push("I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.");
+  if (flags.buyer_cost_concern) answers.push(buildBuyerCostConcernReply_());
+  if (flags.failed_provider) answers.push(buildFailedProviderReply_());
+  if (flags.differentiation) answers.push(buildDifferentiationQuestionReply_());
+  if (flags.exact_count) answers.push("I don't have a verified closed count to quote here; I'll need to confirm that number.");
 
-  return {
+  return withNewCallHandoff_({
     matched: true,
     reply_text: answers.join(" "),
     lead_status: leadStatus,
     conversation_done: done,
-    handoff_needed: false,
+    handoff_needed: !!flags.exact_count,
+    send_reply_before_handoff: !!flags.exact_count,
+    handoff_type: flags.exact_count ? "STATS QUESTION" : "",
+    bypass_reply_cap: !flags.exact_count && (flags.equator || feeCapBypass),
     needs_review: false,
     block_reply: false,
-    reason: "Answered a bounded two-question inbound message"
-  };
+    reason: flags.exact_count ? "Answered supported questions; owner must verify exact closed count" : "Answered all bounded supported questions in one message"
+  }, t, receivedAt);
 }
 
 function applyFastRules_(text, rowObj, receivedAt) {
@@ -2371,6 +2534,15 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  const terminal = buildTerminalCoverageDecisionV4_(t, rowObj);
+  if (terminal) return terminal;
+  if (isShortSaleSourceQuestion_(t)) return buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound, receivedAt);
+
+  // An information request is not consent to a hypothetical future call.
+  const infoRequest = buildInfoRequestDecisionV4_(t, rowObj);
+  if (infoRequest && !isCompoundServiceRequestSignal_(t) &&
+      !isListingPromotionRequestSignal_(t) && !isComplianceOrLicensingQuestionSignal_(t)) return infoRequest;
+
   if (isCompoundServiceRequestSignal_(t)) {
     return {
       matched: true,
@@ -2386,6 +2558,10 @@ function applyFastRules_(text, rowObj, receivedAt) {
       bypass_reply_cap: true,
       reason: "Answered each safe compound service question and routed documents or deadline review to Yoni"
     };
+  }
+
+  if (isUrgentAuctionReviewSignal_(t)) {
+    return buildManualHandoffDecision_("Agent described an auction or foreclosure deadline requiring personal review", "URGENT AUCTION REVIEW");
   }
 
   if (isComplianceOrLicensingQuestionSignal_(t)) {
@@ -2422,37 +2598,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
-  if (isEquatorPortalSignal_(t) && isPaymentOrFeeQuestionSignal_(t)) {
-    return {
-      matched: true,
-      reply_text: buildEquatorFeeAndLocationReply_(t),
-      lead_status: "Y",
-      conversation_done: false,
-      handoff_needed: false,
-      needs_review: false,
-      block_reply: false,
-      call_booking_status: "interested_no_call",
-      bypass_reply_cap: true,
-      reason: "Answered Equator, location, and buyer-paid fee questions together"
-    };
-  }
-
-  if (isEquatorPortalSignal_(t)) {
-    return {
-      matched: true,
-      reply_text: buildEquatorPortalReply_(),
-      lead_status: "Y",
-      conversation_done: false,
-      handoff_needed: false,
-      needs_review: false,
-      block_reply: false,
-      call_booking_status: "interested_no_call",
-      bypass_reply_cap: true,
-      reason: "Explained Yoni's Equator expertise and ability to handle portal tasks and communication"
-    };
-  }
-
-  const priorityQuestion = buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound);
+  const priorityQuestion = buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound, receivedAt);
   if (priorityQuestion) return priorityQuestion;
 
   if (isExperienceTrackRecordQuestionSignal_(t)) {
@@ -2621,7 +2767,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
   if (isSelfHandlingOpportunitySignal_(t)) {
     return {
       matched: true,
-      reply_text: "I understand, and I help a lot of agents in the same situation. I can take the lender paperwork, calls, follow-up, and negotiations off your plate if you ever want help with that part.",
+      reply_text: buildSelfHandlingValueReply_(),
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
@@ -2769,8 +2915,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
 
   if (isSchedulingSignal_(t)) {
     const hasSpecificTime = !!extractSchedulingTimePhrase_(t);
-    const callbackTime = extractScheduledCallbackReference_(t, receivedAt) ||
-      extractSchedulingTimePhrase_(t) || t;
+    const callbackTime = extractCompleteCallbackTiming_(t, receivedAt);
     return {
       matched: true,
       reply_text: hasSpecificTime ? "Perfect, thanks." : "Sounds good. What time works best for you?",
@@ -3012,7 +3157,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
   }
 
   if (isPaymentOrFeeQuestionSignal_(t)) {
-    return buildFeeQuestionDecision_(rowObj, lastOutbound);
+    return buildFeeQuestionDecision_(rowObj, lastOutbound, t);
   }
 
   if (isCompanyIdentityQuestionSignal_(t)) {
@@ -3069,7 +3214,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
 function isPhoneCallInterestSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
 
-  if (isSchedulingSignal_(t) || isImmediateCallSignal_(t)) {
+  if (isConditionalCallSignal_(t) || isSchedulingSignal_(t) || isImmediateCallSignal_(t)) {
     return false;
   }
 
@@ -3092,7 +3237,7 @@ function isPhoneCallInterestSignal_(text) {
 }
 
 function isPresentServiceInterestSignal_(text) {
-  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const t = withoutNegatedRejection_(text);
   if (!t || /\b(?:not interested|no thanks?|do not|don['\u2019]?t|dont)\b/.test(t)) {
     return false;
   }
@@ -3449,7 +3594,7 @@ function isBuyerProvisionQuestionSignal_(text) {
 }
 
 function buildBuyerProvisionClarificationReply_() {
-  return "No, I don't bring the buyer. I just handle the processing with the bank. As long as you disclose the cost to the buyer up front in the listing, they should be able to take that cost into account with their offer price, and then there's usually never any issue.";
+  return "No, I don't bring the buyer. I handle the processing with the bank. The fee should be disclosed to the buyer up front in the listing so they can consider it when making their offer.";
 }
 
 function lastOutboundWasOfferScopeClarification_(rowObj) {
@@ -3907,7 +4052,7 @@ function isExperienceTrackRecordQuestionSignal_(text) {
 }
 
 function buildExperienceTrackRecordReply_() {
-  return "I have been doing this over 15 years and this is all that I do - help agents and homeowners with the short sale process. So I have a lot of experience and am confident I can get your deal closed.";
+  return "I've been handling short sales for over 15 years, and this is all I do: help agents and homeowners through the process. I'd be happy to talk through your listing and explain how I can help.";
 }
 
 function buildExperienceReplyForQuestion_(text) {
@@ -4137,7 +4282,7 @@ function isAlreadyHandledSignal_(text) {
 }
 
 function isClearNoSignal_(text) {
-  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const t = withoutNegatedRejection_(text);
 
   if (isSelfHandlingOpportunitySignal_(t)) {
     return false;
@@ -4177,7 +4322,7 @@ function isClearNoSignal_(text) {
 }
 
 function isUnmistakableTerminalRejectionSignal_(text) {
-  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const t = withoutNegatedRejection_(text);
   if (!t || /\?/.test(t) || isSchedulingSignal_(t) || isPhoneCallInterestSignal_(t) ||
       isPresentServiceInterestSignal_(t) || isDirectHelpRequestSignal_(t)) {
     return false;
@@ -4492,6 +4637,12 @@ function isExplicitDayOrDateCallbackSignal_(text) {
 function isSchedulingSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
 
+  if (isConditionalCallSignal_(t) || /\b(?:do not|don['\u2019]?t|dont)\s+call\b/.test(t)) return false;
+  const callContext = /\b(?:call|text|phone|talk|speak|chat|reach out|contact|available|free|works for me|open house)\b/.test(t);
+  if (/\b(?:auction|foreclosure|sale date|closing date|deadline)\b/.test(t) &&
+      !/\b(?:call|text|phone|talk|speak|chat)\b/.test(t)) return false;
+  if (!callContext && !/^(?:yes[, ]+|ok[, ]+)?(?:tomorrow|today|this afternoon|after|around|at|\d{1,2}(?::\d{2})?\s*(?:am|pm)|(?:next |this )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/.test(t)) return false;
+
   if (isExplicitDayOrDateCallbackSignal_(t)) {
     return true;
   }
@@ -4522,6 +4673,22 @@ function isSchedulingSignal_(text) {
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isConditionalCallSignal_(text) {
+  const t = normalizeLanguageSignalText_(text);
+  return /\bbefore\b.{0,70}\b(?:call|talk|speak|phone)\b/.test(t) ||
+    /\b(?:if|whether|decide|consider)\b.{0,50}\b(?:call|talk|speak|phone)\b/.test(t) &&
+    !/\b(?:please call me|call me (?:today|tomorrow|at)|can you call me)\b/.test(t);
+}
+
+function extractCompleteCallbackTiming_(text, referenceAt) {
+  const date = extractScheduledCallbackReference_(text, referenceAt);
+  const clock = String(text || "").match(/\b(?:(?:at|after|before|around|about)\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|noon|midnight)\b|\b(?:at|after|before|around|about)\s+\d{1,2}(?::\d{2})?\b(?![/-])/i);
+  const time = clock ? normalizeTimePhrase_(clock[0]) : "";
+  const zone = String(text || "").match(/\b(?:[ECMP][DS]?T|Eastern|Central|Mountain|Pacific)(?:\s+(?:standard|daylight))?(?:\s+time)?\b/i);
+  return normalizeWhitespace_([date, time, zone && zone[0]].filter(Boolean).join(" ")) ||
+    extractSameDayCallbackReference_(text) || normalizeWhitespace_(String(text || ""));
 }
 
 function buildSchedulingReply_(inboundText) {
@@ -4701,6 +4868,8 @@ function coerceSmsTextLeadStatus_(candidateStatus) {
 
 function isSelfHandlingValueReplyText_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (t === buildSelfHandlingValueReply_().toLowerCase() ||
+      t.indexOf("i understand, and i help a lot of agents in the same situation") !== -1) return true;
   return (t.indexOf("i can take the lender side off your plate") !== -1 ||
       t.indexOf("i can take lender side off your plate") !== -1) &&
     t.indexOf("there is no cost to you or the seller") !== -1 &&
@@ -4757,8 +4926,16 @@ function applyRepeatGuard_(decision, rowObj, inboundText) {
     );
   }
 
-  if (isSelfHandlingOpportunitySignal_(inbound) && isSelfHandlingValueReplyText_(lastOutbound)) {
+  if (isSelfHandlingOpportunitySignal_(inbound) &&
+      (hasDeliveredResponseId_(rowObj, "self_handling_value") || isSelfHandlingValueReplyText_(lastOutbound))) {
     return buildSelfHandlingRepeatCloseDecision_();
+  }
+
+  if (isSpecificFeeReplyText_(guarded.reply_text) && isPaymentOrFeeQuestionSignal_(inbound) &&
+      !hasDeliveredResponseId_(rowObj, "fee_specific") && !isSpecificFeeReplyText_(lastOutbound)) {
+    // Stating the amount is new information even when the surrounding payer
+    // wording resembles the preceding general fee explanation.
+    return guarded;
   }
 
   if (isPotentialRepeatReply_(guarded.reply_text, lastOutbound)) {
@@ -5037,7 +5214,7 @@ STYLE:
 - Never use bullet points
 - Never use em dashes
 - Never mention Calendly or any scheduling link
-- Default to no more than two short sentences and one call to action
+- Default to two short sentences and one call to action, but answer all supported questions when an agent asks several
 - Answer only what the agent asked; do not introduce fees, buyers, email, statistics, or scheduling unless relevant
 - Read the entire inbound message. A later direct question or expression of interest outranks an earlier self-handling or decline clause
 - Never claim to speak Spanish or reply in Spanish. If an agent asks whether I speak Spanish or writes in Spanish, reply in English: \"No, I'm sorry, I don't speak Spanish, but I'd still love to help if you think communicating in English would be possible.\"
@@ -5056,7 +5233,7 @@ HOW TO RESPOND:
 IMPORTANT BEHAVIOR:
 - For a clear no, your final closeout should be something like:
   "Ok, no problem. If anything changes in the future and you're looking for additional help with these files, please just keep me in mind. Thanks"
-- Treat polite declines like "I'm fine", "we're all set", and "thank you for reaching out" the same as "no thanks"
+- Treat clear polite declines like "I'm fine" and "we're all set" as "no thanks". A courtesy greeting or "thank you for reaching out" is not a rejection when followed by questions or interest. "I'm not saying I'm not interested" is not a rejection.
 - If they say they already have a negotiator, processor, lawyer, or someone handling it, treat that as a no and use the normal closeout
 - If they ask whether I am a negotiator, confirm that I handle the short sale process and lender negotiations, then invite a phone call. That is a clarification question, not a statement that they already have help.
 - If they ask whether this is the best or correct number to reach me, reply exactly: "Yes, this number is great - call or text anytime. Thanks!" Never include or repeat any numeric phone number because the phone in agent_context belongs to the agent, not me.
@@ -5100,14 +5277,17 @@ IMPORTANT BEHAVIOR:
 - If a front desk person or gatekeeper replies, say: "Thanks, I appreciate it. Please have the agent text me here if they'd like to talk."
 - If anyone asks ${yourName} to meet in person, drop by the office, or come by the office, do not respond with availability and do not set the meeting yourself
 - In that situation, set handoff_needed = true, block_reply = true, and let ${yourName} respond manually
-- If they send an email address or ask you to email them info and the email address is available in the message or row, reply exactly: "Sure, no problem."
-- If they ask you to email them info and no email address is available yet, reply exactly: "sure, no problem. What is your email?"
-- For the first fee/payment question, explain that there is no fee to the agent or seller and Crisp charges the buyer a flat fee at closing only if the deal closes.
-- If they ask the amount again after that answer, state that the buyer-paid fee is $5,000 at closing.
-- If they negotiate the fee, request a discount, or keep pressing after the $5,000 answer, hand off without another bot reply.
+- Email requests are handled by the deterministic approval workflow. Never claim an email was sent, promise immediate delivery, or infer call consent from "email me before I decide about a call".
+- If they ask for information and no email is available, say: "Absolutely. What's the best email for an overview of what I handle and how the fee works?"
+- For a general "how do you get paid" question, explain that there is no service fee to the agent or seller and the buyer pays a flat fee at closing only if the deal closes.
+- If they ask what it costs, how much, or what my fee is, answer $5,000 directly even the first time: "${buildSpecificFeeReply_()}"
+- If they negotiate my fee or request a discount, hand off. A different question about buyer costs, disclosure, or who brings the buyer is not automatically a loop or rejection.
+- For concerns about the buyer lowering an offer to account for the fee, say: "${buildBuyerCostConcernReply_()}" Never promise buyer acceptance or say it is never an issue.
+- For neutral self-handling, use one respectful value explanation: "${buildSelfHandlingValueReply_()}". Do not repeat that pitch after a second refusal or when they already have another provider.
+- When an agent describes a failed prior processor, acknowledge the experience and explain concrete scope: "${buildFailedProviderReply_()}"
 - Never mention 1%, fee ranges, commission split percentages, or any made-up pricing details
-- If they ask how long I have handled short sales, how much experience I have, how many short sales I have handled, or what my track record is, answer with the approved 15-plus-year experience response and invite a quick call. Do not treat that as a rejection or a stats handoff.
-- For any short-sale timeline question, reply exactly: "A complete short-sale package and offer often takes about 60-90 days for a lender decision, though timing varies by lender and lien complexity."
+- For general experience or tenure, say: "${buildExperienceTrackRecordReply_()}". Never guarantee a closing. An exact closed-deal count is not supplied: acknowledge that it needs verification and route that part for personal follow-up.
+- For a general short-sale timeline question, reply exactly: "A complete short-sale package and offer often takes about 60-90 days for a lender decision, though timing varies by lender and lien complexity." An imminent auction or foreclosure deadline needs personal review instead; a deadline is not callback consent.
 - Never provide or invent success rates, approval rates, close rates, closing rates, percentages, averages, or other unapproved performance stats beyond that approved timeline
 - If they ask for a success rate, approval rate, close rate, percentage, or another unapproved performance statistic, set handoff_needed = true, block_reply = true, leave reply_text empty, and let ${yourName} answer personally. If a message mixes a timeline question with one of those unsupported performance questions, hand it off rather than answering only part of it.
 - Do not estimate, approximate, say "roughly", or include unsupported numeric claims
@@ -5375,7 +5555,8 @@ function sanitizeReplyPhoneOnlyCta_(replyText) {
 
   // Approved info-email requests must keep the canonical acknowledgement so
   // the downstream approval workflow can recognize and queue the email.
-  if (normalizeWhitespace_(text) === normalizeWhitespace_(getInfoEmailAcknowledgementReply_())) {
+  if (normalizeWhitespace_(text) === normalizeWhitespace_(getInfoEmailAcknowledgementReply_()) ||
+      /^Absolutely\. I'll send an overview of what I handle and how the fee works to [^\s@]+@[^\s@]+\.[^\s@]+\.$/.test(text)) {
     return text;
   }
 
@@ -5421,7 +5602,7 @@ function sanitizeReplyPhoneOnlyCta_(replyText) {
     /\bshould i email\b/
   ].some(pattern => pattern.test(normalized));
 
-  if (mentionsWrittenMaterials || offersDelivery) {
+  if (mentionsWrittenMaterials && offersDelivery) {
     return "I appreciate it. If there's a good time for us to chat about your listing, just let me know and I can give you a call.";
   }
 
@@ -5493,7 +5674,7 @@ function hasServiceInfoRequestContext_(text, rowObj) {
 
 function buildServiceInfoEmailAcknowledgement_(hasEmail) {
   if (hasEmail === false) {
-    return "Absolutely, I'd be happy to email you more information. What's the best email?";
+    return "Absolutely. What's the best email for an overview of what I handle and how the fee works?";
   }
   return getInfoEmailAcknowledgementReply_();
 }
@@ -5718,8 +5899,9 @@ function shouldSendInfoEmail_(ruleResult, decision) {
   );
 }
 
-function getInfoEmailAcknowledgementReply_() {
-  return "Absolutely, I'll email you more information shortly. Thanks for sending your email.";
+function getInfoEmailAcknowledgementReply_(email) {
+  const target = normalizeEmailAddress_(email);
+  return "Absolutely. I'll send an overview of what I handle and how the fee works" + (target ? " to " + target : "") + ".";
 }
 
 function isInfoEmailApprovalRequired_() {
@@ -6243,7 +6425,12 @@ function appendHistory_(sheet, row, entry) {
 
   const current = sheet.getRange(row, historyCol).getValue();
   const arr = getHistoryArray_(current);
-  arr.push(entry);
+  const deliveredEntry = Object.assign({}, entry);
+  if (deliveredEntry.role === "assistant") {
+    const responseId = getDeliveredResponseId_(deliveredEntry.text);
+    if (responseId) deliveredEntry.response_id = responseId;
+  }
+  arr.push(deliveredEntry);
   sheet.getRange(row, historyCol).setValue(JSON.stringify(arr.slice(-20)));
 }
 
@@ -6315,11 +6502,11 @@ function testSmsIntentContractV3_() {
     compound.matched && !compound.handoff_needed &&
       compound.reply_text.indexOf("Atlanta") !== -1 &&
       compound.reply_text.indexOf("lender-side") !== -1 &&
-      compound.reply_text.indexOf("flat fee") !== -1,
+      compound.reply_text.indexOf("$5,000") !== -1,
     compound.reason
   );
 
-  const firstFee = applyFastRules_("What do you charge?", baseRow);
+  const firstFee = applyFastRules_("How do you get paid?", baseRow);
   record(
     "fee_tier_one",
     firstFee.matched && !firstFee.handoff_needed &&
@@ -6331,6 +6518,9 @@ function testSmsIntentContractV3_() {
   feeAfterCloseoutRow[HEADERS.mailshake_status] = "O";
   feeAfterCloseoutRow[HEADERS.ai_state] = "done";
   const firstFeeAfterCloseout = applyFastRules_("What's your fee for this service?", feeAfterCloseoutRow);
+  record("first_explicit_amount_question_answers_amount",
+    firstFeeAfterCloseout.reply_text.indexOf("$5,000") !== -1,
+    firstFeeAfterCloseout.reason);
   record(
     "first_fee_answer_after_closeout_bypasses_reply_cap_once",
     firstFeeAfterCloseout.lead_status === "O" && firstFeeAfterCloseout.conversation_done &&
@@ -6359,9 +6549,8 @@ function testSmsIntentContractV3_() {
     automatedFeeHandoffRow,
     "How much do you charge the buyer at closing?"
   );
-  record("exact_fee_recovers_from_automated_reply_cap_handoff",
-    recoveredFee && recoveredFee.reply_text.indexOf("$5,000") !== -1 && recoveredFee.bypass_reply_cap,
-    recoveredFee && recoveredFee.reason);
+  record("exact_fee_preserves_existing_handoff_lock",
+    recoveredFee === null);
 
   const manualFeeHandoffRow = Object.assign({}, automatedFeeHandoffRow);
   manualFeeHandoffRow[HEADERS.conversation_summary] = "Manual reply sent; automation disabled for this conversation";
@@ -6469,7 +6658,8 @@ function testSmsIntentContractV3_() {
   record(
     "equator_location_fee_complete_answer",
     ramonaDecision.matched && !ramonaDecision.handoff_needed && !ramonaDecision.block_reply &&
-      ramonaDecision.reply_text === buildEquatorFeeAndLocationReply_(ramonaText) &&
+      ramonaDecision.reply_text.indexOf("why you'd be cautious") !== -1 &&
+      ramonaDecision.reply_text.indexOf("Equator") !== -1 &&
       ramonaDecision.reply_text.indexOf("based in Atlanta and work nationwide") !== -1 &&
       ramonaDecision.reply_text.indexOf("flat fee to the buyer at closing") !== -1,
     ramonaDecision.reason
@@ -6777,7 +6967,7 @@ function testApprovedLeadIntelligenceRules_() {
   if (!selfDecision.matched || selfDecision.lead_status !== "Y" || selfDecision.conversation_done || selfDecision.handoff_needed) {
     throw new Error("Self-handling opportunity regression: " + JSON.stringify(selfDecision));
   }
-  if (selfDecision.reply_text.indexOf("I understand") !== 0 || selfDecision.reply_text.indexOf("I help a lot of agents in the same situation") === -1 || selfDecision.reply_text.indexOf("Would you be open to a quick call about this file?") === -1) {
+  if (selfDecision.reply_text !== buildSelfHandlingValueReply_()) {
     throw new Error("Self-handling acknowledgement reply regression: " + JSON.stringify(selfDecision));
   }
 

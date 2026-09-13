@@ -1630,7 +1630,9 @@ function getPendingSmsStaleReason_(outboxRow) {
   for (var i = 0; i < data.length; i++) {
     var rowObj = data[i].obj;
     if (normalizePhone_(rowObj[HEADERS.phone]) !== phone) continue;
-    if (!approvedOfferScopeReply && String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
+    var newHandoffReply = typeof isAuthorizedNewHandoffReply_ === "function" &&
+      isAuthorizedNewHandoffReply_(phone, messageId, outboxRow[5], rowObj);
+    if (!approvedOfferScopeReply && !newHandoffReply && String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
     if (isInitialOutreach) return "";
     // Older ShortSaleLeads layouts do not have last_inbound_text. In that
     // layout, last_message_id remains the authoritative stale-reply guard.
