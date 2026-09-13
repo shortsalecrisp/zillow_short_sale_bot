@@ -4184,8 +4184,7 @@ SMS_STANDARD_CLOSEOUT_REPLY = (
     "with these files, please just keep me in mind. Thanks!"
 )
 EQUATOR_PORTAL_REPLY = (
-    "I'm very familiar with Equator and can handle all of the tasks and communication in the system "
-    "to take that work off your hands."
+    "I'm familiar with Equator and can help manage the lender-side tasks and communication."
 )
 
 

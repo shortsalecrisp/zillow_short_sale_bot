@@ -536,11 +536,11 @@ logging.info(
     bool(_sms_api_key),
 )
 SMS_TEMPLATE      = (
-    "Hey {first}, this is Yoni Kutler with Crisp Short Sales. I saw your "
-    "short sale at {address}. I help agents by handling the bank side of "
-    "the short sale process so files get approved faster and are less "
-    "likely to fall apart. There's no cost to you or your seller. Are you "
-    "handling that part yourself or do you already have help?"
+    "Hey {first}, this is Yoni Kutler with Crisp Short Sales. I saw {address} "
+    "listed as a short sale. I can take the lender paperwork, calls, and "
+    "follow-up off your plate. There's no service fee to you or the seller; "
+    "my fee is buyer-paid at closing. Are you handling the lender side "
+    "yourself, or do you already have help?"
 )
 SMS_FU_TEMPLATE   = (
     "Hey, just wanted to follow up on my message from earlier. "

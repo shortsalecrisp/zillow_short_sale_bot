@@ -1918,6 +1918,8 @@ function isPaymentOrFeeQuestionSignal_(text) {
   if (!t) return false;
   if (isSpanishFeeQuestionSignal_(t)) return true;
   if (/^(?:how much|fees?|cost|price|pricing)[?!.]*$/.test(t)) return true;
+  if (/\b(?:does|do|will)\s+(?:i|we|you|(?:the\s+)?(?:seller|agent|buyer))\s+pay\b/.test(t)) return true;
+  if (/\b(?:do|does|will|would|can)\b.{0,45}\b(?:take|charge|split|share)\b.{0,35}\bcommission\b/.test(t)) return true;
 
   const directPhrases = [
     "what is the cost",
@@ -2079,14 +2081,14 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound, inboundText) {
       reason: "Answered buyer cost and offer concern without promising buyer acceptance"};
   }
 
-  if (hasPriorSpecificFeeReply) {
+  if (hasPriorSpecificFeeReply && (isExplicitFeeAmountQuestion_(inboundText) || !inboundText)) {
     return buildManualHandoffDecision_(
-      "Agent is still asking about fee/payment after the specific $5,000 answer",
+      "Agent repeated the amount question after the delivered $5,000 answer",
       "FEE QUESTION FOLLOW-UP"
     );
   }
 
-  if (hasPriorInitialFeeReply || isExplicitFeeAmountQuestion_(inboundText)) {
+  if ((hasPriorInitialFeeReply && !hasPriorSpecificFeeReply) || isExplicitFeeAmountQuestion_(inboundText)) {
     return {
       matched: true,
       reply_text: buildSpecificFeeReply_(),
@@ -2109,8 +2111,8 @@ function buildFeeQuestionDecision_(rowObj, lastOutbound, inboundText) {
     handoff_needed: false,
     needs_review: false,
     block_reply: false,
-    first_fee_answer: true,
-    reason: "Asked about charge, fee, percentage, or how Crisp gets paid"
+    first_fee_answer: !hasPriorSpecificFeeReply && !hasPriorInitialFeeReply,
+    reason: "Explained who pays without treating a different payment question as a repeat"
   };
 }
 
@@ -3117,7 +3119,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
     if (pattern.test(t)) {
       return {
         matched: true,
-        reply_text: "I don't necessarily have a buyer I can bring you in the deal, but I can help you find a buyer by letting them know you have a short sale specialist helping to expedite the process with the lender.",
+        reply_text: buildBuyerProvisionClarificationReply_(),
         lead_status: "Y",
         conversation_done: false,
         handoff_needed: false,
@@ -4068,7 +4070,7 @@ function isEquatorPortalSignal_(text) {
 }
 
 function buildEquatorPortalReply_() {
-  return "I'm very familiar with Equator and can handle all of the tasks and communication in the system to take that work off your hands.";
+  return "I'm familiar with Equator and can help manage the lender-side tasks and communication.";
 }
 
 function buildEquatorFeeAndLocationReply_(text) {
@@ -4938,6 +4940,14 @@ function applyRepeatGuard_(decision, rowObj, inboundText) {
     return guarded;
   }
 
+  if (isInitialFeeReplyText_(guarded.reply_text) && isSpecificFeeReplyText_(lastOutbound) &&
+      isPaymentOrFeeQuestionSignal_(inbound) && !isExplicitFeeAmountQuestion_(inbound) &&
+      !hasDeliveredResponseId_(rowObj, "fee_initial")) {
+    // A new payer/commission clarification can share words with the amount
+    // answer. Permit that clarification once, without bypassing the reply cap.
+    return guarded;
+  }
+
   if (isPotentialRepeatReply_(guarded.reply_text, lastOutbound)) {
     if (isPreviouslyAnsweredQuestionWithApprovedNoOffersUpdate_(rowObj, inbound, lastOutbound)) {
       return buildAnsweredQuestionApprovedStatusCloseoutDecision_();
@@ -5354,17 +5364,22 @@ function isIdentityResendSignal_(text) {
 }
 
 function buildIdentityResendReply_(rowObj) {
+  const originalText = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.initial_text_sent] || ""));
+  if (/\bCrisp Short Sales\b/i.test(originalText) && /\bYoni\b/i.test(originalText)) {
+    return "Sorry, I had messaged you earlier: " + originalText;
+  }
   const firstName = getCanonicalFirstName_(rowObj) || "there";
   const listingAddress = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.listing_address] || ""));
   const listingReference = listingAddress
-    ? " I saw your short sale at " + listingAddress + "."
-    : " I saw your short sale listing.";
+    ? " I saw " + listingAddress + " listed as a short sale."
+    : "";
 
   return "Sorry, I had messaged you earlier: Hey " + firstName
     + ", this is Yoni Kutler with Crisp Short Sales."
     + listingReference
-    + " I help agents by handling the bank side of the short sale process so files get approved faster and are less likely to fall apart."
-    + " There's no cost to you or your seller. Are you handling that part yourself or do you already have help?";
+    + " I can take the lender paperwork, calls, and follow-up off your plate."
+    + " There's no service fee to you or the seller; my fee is buyer-paid at closing."
+    + " Are you handling the lender side yourself, or do you already have help?";
 }
 
 function sanitizeReplySelfIntro_(replyText) {
@@ -5523,10 +5538,7 @@ function sanitizeReplyBuyerOffer_(replyText) {
 
   // Allow the approved clarification that we do not bring buyers, while still
   // blocking any reply that promises to send or bring buyer leads.
-  if (normalized === normalizeWhitespace_(buildBuyerProvisionClarificationReply_().toLowerCase()) ||
-      normalized.indexOf("i don't necessarily have a buyer") !== -1 ||
-      normalized.indexOf("i dont necessarily have a buyer") !== -1 ||
-      normalized.indexOf("i do not necessarily have a buyer") !== -1) {
+  if (normalized === normalizeWhitespace_(buildBuyerProvisionClarificationReply_().toLowerCase())) {
     return text;
   }
 
@@ -5536,12 +5548,13 @@ function sanitizeReplyBuyerOffer_(replyText) {
     /\bhave buyers?\b/,
     /\bbuyer leads?\b/,
     /\bbring\b.*\bbuyers?\b/,
+    /\bhelp\b.*\bfind\b.*\bbuyers?\b/,
     /\bpotential buyers?\b/,
     /\binterested buyers?\b/
   ].some(pattern => pattern.test(normalized));
 
   if (offersBuyers) {
-    return getStandardNoCloseoutReply_();
+    return buildBuyerProvisionClarificationReply_();
   }
 
   return text;

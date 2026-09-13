@@ -1,3 +1,4 @@
+import ast
 import importlib
 import json
 import sys
@@ -12,6 +13,27 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+def _source_sms_template(name):
+    # Extract constants without importing the live scheduler or SMS transport.
+    for statement in ast.parse((ROOT / "bot_min.py").read_text()).body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in statement.targets
+        ):
+            return ast.literal_eval(statement.value)
+    raise AssertionError(f"Missing template: {name}")
+
+
+APPROVED_OPENER = json.loads((ROOT / "tests/fixtures/sms_approved_opener.json").read_text())["template"]
+
+
+def test_final_opener_is_exact_and_followup_is_unchanged():
+    assert _source_sms_template("SMS_TEMPLATE") == APPROVED_OPENER
+    assert _source_sms_template("SMS_FU_TEMPLATE") == (
+        "Hey, just wanted to follow up on my message from earlier. "
+        "Let me know if I can help with anything\u2014happy to connect whenever works for you!"
+    )
 
 
 APPROVED_SPECIFIC_FEE_REPLY = (
@@ -281,10 +303,7 @@ def _import_webhook_server(monkeypatch, *, sender_result):
     fake_bot_min.WORK_START = 8
     fake_bot_min.WORK_END = 20
     fake_bot_min.SCHEDULER_TZ = ZoneInfo("America/New_York")
-    fake_bot_min.SMS_TEMPLATE = (
-        "Hey {first}, this is Yoni Kutler with Crisp Short Sales. "
-        "I saw your short sale at {address}."
-    )
+    fake_bot_min.SMS_TEMPLATE = _source_sms_template("SMS_TEMPLATE")
     fake_bot_min.append_seen_zpids = lambda *args, **kwargs: None
     fake_bot_min.dedupe_rows_by_zpid = lambda rows: rows
     fake_bot_min.fetch_contact_page = lambda *args, **kwargs: ("", "")
@@ -406,10 +425,7 @@ def test_internal_initial_sms_queues_and_waits_for_tasker_receipt_before_marking
     assert sender.calls == [
         {
             "to": "15551112212",
-            "message": (
-                "Hey Alex, this is Yoni Kutler with Crisp Short Sales. "
-                "I saw your short sale at 123 Main."
-            ),
+            "message": APPROVED_OPENER.format(first="Alex", address="123 Main"),
             "sms_type": "initial",
             "row_idx": 12,
             "attempt": 1,
@@ -433,7 +449,7 @@ def test_internal_initial_sms_uses_street_only_payload_address(monkeypatch):
         _row(first="Alex", address="Fallback Address"),
     )
 
-    assert "at 123 Main St." in message
+    assert message == APPROVED_OPENER.format(first="Alex", address="123 Main St")
     assert "Honolulu" not in message
 
 
@@ -1849,8 +1865,7 @@ def test_sms_ramona_equator_location_and_fee_questions_receive_one_complete_answ
         "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
         "https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.",
         APPROVED_FAILED_PROVIDER_REPLY,
-        "I'm very familiar with Equator and can handle all of the tasks and communication in the system "
-        "to take that work off your hands.",
+        "I'm familiar with Equator and can help manage the lender-side tasks and communication.",
     ])
     assert "based in Atlanta and work nationwide" in decision["reply_text"]
     assert "familiar with Equator" in decision["reply_text"]
