@@ -5922,6 +5922,9 @@ def _sms_is_initial_fee_reply(value: Any) -> bool:
 
 def _sms_is_specific_fee_reply(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
+    # The initial introduction may contain a 5000 street/unit number, not a fee.
+    if "this is yoni kutler with crisp short sales" in text and "are you handling" in text:
+        return False
     compact = re.sub(r"[^a-z0-9]", "", text)
     return "5000" in compact and "buyer" in text and "closing" in text
 

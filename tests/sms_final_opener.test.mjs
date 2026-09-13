@@ -6,6 +6,20 @@ import {smsHarness} from './helpers/sms_core_harness.mjs';
 const {template} = JSON.parse(fs.readFileSync(new URL('./fixtures/sms_approved_opener.json', import.meta.url), 'utf8'));
 const opener = template.replace('{first}', 'Taylor').replace('{address}', '123 Example Lane');
 
+for (const address of ['5000 Example Lane', '123 Main St Unit 5000']) {
+  test(`listing numbers are not delivered fee evidence: ${address}`, () => {
+    const text = template.replace('{first}', 'Taylor').replace('{address}', address);
+    const h = smsHarness({initial_text: text, last_outbound_text: text,
+      history_json: JSON.stringify([{role: 'assistant', text}])});
+    assert.equal(h.evaluate(`getDeliveredResponseId_(${JSON.stringify(text)})`), '');
+    assert.equal(h.evaluate(`getDeliveredResponseId_(${JSON.stringify('Sorry, I had messaged you earlier: ' + text)})`), '');
+    const r = h.incoming('What is your fee?');
+    assert.equal(r.should_reply, true);
+    assert.equal(r.handoff_needed, false);
+    assert.match(r.reply_text, /My fee is \$5,000/);
+  });
+}
+
 test('identity fallback uses the exact approved final opener', () => {
   const r = smsHarness().incoming('Who is this?');
   assert.equal(r.should_reply, true);

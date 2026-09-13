@@ -1994,6 +1994,8 @@ function isInitialFeeReplyText_(text) {
 
 function isSpecificFeeReplyText_(text) {
   const t = normalizeLanguageSignalText_(text);
+  // Listing numbers in the opener are not a quoted service fee.
+  if (/\bthis is yoni kutler with crisp short sales\b/.test(t) && /\bare you handling\b/.test(t)) return false;
   const compact = t.replace(/[^a-z0-9]/g, "");
   const mentionsBuyer = t.indexOf("buyer") !== -1 || t.indexOf("comprador") !== -1;
   const mentionsClosing = t.indexOf("closing") !== -1 || t.indexOf("cierre") !== -1;

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from test_internal_sms_endpoint import CHATBOT_HEADERS, FakeSendResult, _import_webhook_server
+from test_internal_sms_endpoint import APPROVED_OPENER, CHATBOT_HEADERS, FakeSendResult, _import_webhook_server
 
 
 SELF_REPLY = (
@@ -201,6 +201,16 @@ def test_new_payer_question_after_amount_is_not_fee_loop(chatbot):
     assert result["should_reply"] is True
     assert "no cost to you or the seller" in result["reply_text"]
     assert result["handoff_needed"] is False
+
+
+@pytest.mark.parametrize("address", ["5000 Example Lane", "123 Main St Unit 5000"])
+def test_opener_listing_number_is_not_a_delivered_fee_answer(chatbot, address):
+    text = APPROVED_OPENER.format(first="Taylor", address=address)
+    chatbot.set(last_outbound_text=text, history_json=json.dumps([{"role": "assistant", "text": text}]))
+    result = chatbot.receive("What is your fee?")
+    assert result["should_reply"] is True
+    assert result["handoff_needed"] is False
+    assert result["reply_text"] == FEE_REPLY
 
 
 def test_amount_and_buyer_concern_both_answered(chatbot):
