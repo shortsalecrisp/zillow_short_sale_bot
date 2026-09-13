@@ -29,7 +29,8 @@ test("opening generic pickup moves directly to the selected continuation", () =>
   );
 
   assert.match(openingSection, /normal greeting such as "hello", "hi", "yeah", "speaking"/i);
-  assert.match(openingSection, /Say `{{openerScript}}` immediately/);
+  assert.match(openingSection, /Continue with `{{openerScript}}` using the service-explanation rule/);
+  assert.match(openingSection, /purpose question: answer it before qualifying/);
   assert.match(openingSection, /Do not ask "Is this {{firstName}}\?"/);
 });
 
@@ -53,7 +54,7 @@ test("prompt uses a clear reason-first opening and two dynamic continuation vari
   assert.match(prompt, /answer before any explanation or follow-up question/);
 });
 
-test("prompt repairs an unclear opener once without stacking another question", () => {
+test("prompt repairs only the missing point without stacking a sales question", () => {
   const prompt = readPrompt();
   const openingSection = extractSection(
     prompt,
@@ -61,9 +62,9 @@ test("prompt repairs an unclear opener once without stacking another question", 
     "If the caller corrects the name",
   );
 
-  assert.match(openingSection, /who is this\?/i);
-  assert.match(openingSection, /This is {{assistantName}} with Crisp Short Sales, calling about your short sale listing\./);
-  assert.match(openingSection, /Stop after the repair line/);
+  assert.match(openingSection, /answer only the missing point/);
+  assert.match(openingSection, /Do not use the same full introduction/);
+  assert.match(openingSection, /Do not ask a qualification question until/);
   assert.match(openingSection, /no more than once/);
   assert.match(openingSection, /never repeat the introduction a third time/);
 });
@@ -148,7 +149,7 @@ test("prompt turns human-only objections into immediate Yoni transfer rescue", (
   assert.doesNotMatch(humanRescueBranch, /callback_requested/);
 });
 
-test("prompt answers AI questions truthfully and offers immediate Yoni transfer", () => {
+test("prompt answers AI questions truthfully without an automatic transfer pitch", () => {
   const prompt = readPrompt();
   const aiBranch = extractSection(
     prompt,
@@ -156,18 +157,18 @@ test("prompt answers AI questions truthfully and offers immediate Yoni transfer"
     "If they object to automation",
   );
 
-  assert.match(aiBranch, /Yes, I'm an AI calling assistant\./);
-  assert.match(aiBranch, /Yoni is our live short sale specialist/);
-  assert.match(aiBranch, /bring him onto this call right now/);
-  assert.match(aiBranch, /Want me to try him\?/);
+  assert.match(aiBranch, /Yes, I'm an AI assistant with Crisp Short Sales\./);
+  assert.match(aiBranch, /Then stop for their reply/);
+  assert.match(aiBranch, /an opt-out takes priority/);
+  assert.doesNotMatch(aiBranch, /Want me to try him\?/);
 });
 
-test("prompt redirects unknown affiliation questions to a plain-language handling question", () => {
+test("prompt answers affiliation questions without implying an existing relationship", () => {
   const prompt = readPrompt();
 
   assert.match(
     prompt,
-    /I'm with Crisp Short Sales\. We help agents with short sale paperwork and lender calls\. Are you handling that work yourself\?/,
+    /I'm with Crisp Short Sales\." Do not imply you are their existing provider or repeat a qualification question/,
   );
 });
 
@@ -341,9 +342,9 @@ test("prompt treats direct or self-handling answers as a soft value-pitch opport
   assert.match(selfHandlingBranch, /Do not repeat the handling question/);
   assert.match(selfHandlingBranch, /acknowledge that first/i);
   assert.match(selfHandlingBranch, /Do not treat this as a hard no/);
-  assert.match(selfHandlingBranch, /short sale paperwork and lender calls/);
-  assert.match(selfHandlingBranch, /no cost to you or the seller/);
-  assert.match(selfHandlingBranch, /Are you looking for help with this one\?/);
+  assert.match(selfHandlingBranch, /Is any part of the lender follow-up something you'd like help with\?/);
+  assert.match(selfHandlingBranch, /Do not ask when they already said they have it covered/);
+  assert.doesNotMatch(selfHandlingBranch, /no cost to you or the seller/);
   assert.match(selfHandlingBranch, /Interest-to-Yoni sequence/);
   assert.match(selfHandlingBranch, /bring Yoni, our live short sale specialist, onto this call right now/);
   assert.match(selfHandlingBranch, /Do not launch a live transfer only because they answered the earlier handling question/);
@@ -358,7 +359,7 @@ test("prompt exposes email and keeps information requests out of callback handli
   const prompt = readPrompt();
 
   assert.match(prompt, /- `email`/);
-  assert.match(prompt, /capture a request for information/);
+  assert.match(prompt, /call `information_requested` with that email/);
   assert.match(prompt, /After `information_requested` succeeds/);
   assert.doesNotMatch(prompt, /callbackTime` set to `send info/);
 });
@@ -387,9 +388,9 @@ test("prompt answers service questions after a soft-no closeout instead of endin
   assert.match(softNoBranch, /If they ask any question after this/i);
   assert.match(softNoBranch, /how much do you charge/i);
   assert.match(softNoBranch, /answer it instead of calling `not_interested`/i);
-  assert.match(softNoBranch, /no cost to the agent or seller/i);
-  assert.match(softNoBranch, /buyer pays a flat fee only if the deal closes/i);
-  assert.match(softNoBranch, /treat that as re-engagement/i);
+  assert.match(softNoBranch, /no charge to you or the seller/i);
+  assert.match(softNoBranch, /buyer typically pays a flat fee only if the deal closes/i);
+  assert.match(softNoBranch, /not an automatic handoff pitch/i);
 });
 
 test("prompt does not treat overlapped okay or busy later/callback language as live-transfer consent", () => {
@@ -422,7 +423,7 @@ test("prompt does not force another identity check after a normal live pickup", 
 
   assert.match(openingSection, /gives their name/);
   assert.match(openingSection, /do not ask for their identity again/i);
-  assert.match(openingSection, /Say `{{openerScript}}` immediately/);
+  assert.match(openingSection, /Continue with `{{openerScript}}`/);
 });
 
 test("prompt treats corrected realtor identity as the active agent", () => {
@@ -439,7 +440,7 @@ test("prompt treats corrected realtor identity as the active agent", () => {
   assert.match(correctedIdentityBranch, /do not route back to the original lead name/i);
   assert.match(
     correctedIdentityBranch,
-    /Got it\. Are you handling the short sale paperwork and lender calls yourself\?/,
+    /Do not repeat a handling question they already answered/,
   );
 });
 
@@ -455,8 +456,9 @@ test("prompt clarifies noisy background speech before treating it as consent", (
   assert.match(noisySpeechBranch, /Do not treat a single yes, sure, or okay inside that noisy turn as consent/i);
   assert.match(
     noisySpeechBranch,
-    /Sorry, I may be catching background conversation\. Just to confirm, do you want Yoni to call you about the short sale\?/,
+    /Sorry, I heard part of that\. Could you repeat the last part\?/,
   );
+  assert.match(noisySpeechBranch, /Do not infer a callback, rejection, or transfer from noise/);
 });
 
 test("prompt reserves the property address for an explicit listing question", () => {
@@ -477,11 +479,11 @@ test("prompt reserves the property address for an explicit listing question", ()
 test("prompt removes bank-side jargon from the live-human pitch", () => {
   const prompt = readPrompt();
 
-  assert.match(prompt, /short sale paperwork and lender calls/);
+  assert.match(prompt, /short-sale paperwork and follow up with the lender/);
   assert.doesNotMatch(prompt, /bank side/i);
 });
 
-test("prompt repairs confusion with the offer before mentioning Yoni or prior text", () => {
+test("prompt repairs confusion with plain service wording and pauses the pitch", () => {
   const prompt = readPrompt();
   const confusionBranch = extractSection(
     prompt,
@@ -493,8 +495,10 @@ test("prompt repairs confusion with the offer before mentioning Yoni or prior te
   assert.match(confusionBranch, /Do not mention the earlier text yet/);
   assert.match(
     confusionBranch,
-    /Sorry if I wasn't clear\. Crisp Short Sales can handle the short sale paperwork and lender calls for you\. Are you looking for help with that\?/,
+    /We help prepare the short-sale paperwork and follow up with the lender\./,
   );
+  assert.match(confusionBranch, /Understanding that sentence is not a request for a transfer/);
+  assert.match(confusionBranch, /Do not repeat the pitch or attach a handling or handoff question/);
   assert.doesNotMatch(confusionBranch, /reached out earlier by text/);
   assert.doesNotMatch(confusionBranch, /what your plan/i);
 });
@@ -507,21 +511,21 @@ test("prompt clearly explains purpose before callback when caller is busy or can
     "If a receptionist, office assistant",
   );
 
-  assert.match(busyNoiseBranch, /Do not ask for a callback before explaining why you called/);
-  assert.match(busyNoiseBranch, /Do not only say that Yoni can explain it better/);
+  assert.match(busyNoiseBranch, /Answer the purpose question briefly/);
+  assert.match(busyNoiseBranch, /Hearing difficulty alone is not a callback request/);
   assert.match(
     busyNoiseBranch,
-    /No worries, I'll be quick\. We help with the paperwork and lender calls on your short sale\. Should Yoni call you at a better time\?/,
+    /We help prepare the short-sale paperwork and follow up with the lender\./,
   );
   assert.doesNotMatch(busyNoiseBranch, /I'm {{assistantName}} with Crisp Short Sales/);
-  assert.match(busyNoiseBranch, /paperwork and lender calls/);
+  assert.match(busyNoiseBranch, /Do not promise to be quick/);
   assert.match(busyNoiseBranch, /call `callback_requested`/);
 });
 
 test("prompt uses the per-call assistant name instead of hard-coding Emmy in spoken lines", () => {
   const prompt = readPrompt();
 
-  assert.match(prompt, /You are {{assistantName}}, a warm/);
+  assert.match(prompt, /You are {{assistantName}}, an AI calling assistant/);
   assert.match(prompt, /this is {{assistantName}} with Crisp Short Sales/);
   assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
   assert.doesNotMatch(prompt, /I'm Emmy with Crisp Short Sales/i);
