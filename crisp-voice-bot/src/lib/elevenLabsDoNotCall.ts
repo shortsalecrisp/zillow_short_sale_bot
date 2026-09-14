@@ -10,7 +10,10 @@ export function looksLikeDoNotCall(value: string): boolean {
     // caller out. Check each occurrence so a separate caller opt-out still wins.
     const namedCallee = target.match(/^\s+(?:yoni(?:\s+kutler)?|kutler)\b/);
     if (namedCallee) {
-      return /^(?:\s+(?:now|right now|today|yet))?\s+(?:or|and)\s+(?:me|us)\b/.test(target.slice(namedCallee[0].length));
+      const recipientClause = target.slice(namedCallee[0].length).split(/[.!?;]/, 1)[0];
+      return /(?:,\s*(?:(?:or|and)\s+)?|\b(?:or|and)\s+)(?:me|us|(?:this|my|our)\s+(?:phone\s+)?number)\b/.test(
+        recipientClause,
+      );
     }
     return !/^\s+(?:that|this|it)\s+a\s+commitment(?=\s*(?:[.!?;,]|$))/.test(target);
   });

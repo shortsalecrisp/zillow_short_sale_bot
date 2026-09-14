@@ -2,7 +2,12 @@ export const VOICE_CONVERSATION_POLICY_VERSION = "listening-clarification-202609
 
 type AgentPolicy = {
   conversation_config: {
-    agent: { first_message?: string; disable_first_message_interruptions?: boolean; [key: string]: unknown };
+    agent: {
+      first_message?: string;
+      disable_first_message_interruptions?: boolean;
+      prompt?: { built_in_tools?: Record<string, { description?: string; [key: string]: unknown } | null>; [key: string]: unknown };
+      [key: string]: unknown;
+    };
     turn: { transcribe_on_disabled_interruptions?: boolean; [key: string]: unknown };
     conversation: { client_events?: string[]; [key: string]: unknown };
     [key: string]: unknown;
@@ -34,6 +39,51 @@ export function applyConversationListeningPolicy<T extends AgentPolicy>(agent: T
   main.conversation_config.conversation ??= {};
   const mainEvents = main.conversation_config.conversation.client_events ?? events;
   main.conversation_config.conversation.client_events = [...new Set([...mainEvents, "interruption"])];
+  return updated;
+}
+
+export function applyConversationToolPolicy<T extends AgentPolicy>(agent: T): T {
+  const updated = structuredClone(agent);
+  const builtins = updated.conversation_config.agent.prompt?.built_in_tools;
+  if (!builtins?.end_call || !builtins.skip_turn) throw new Error("Verified end-call and skip-turn tools are required");
+  builtins.end_call.description = [
+    "End the current call after a NEW clear live-caller goodbye, rejection, or request to stop or end, following the base contact-preference policy; also use the existing completed-voicemail ending.",
+    "A callback_requested or information_requested tool success is not permission to end. After its brief receipt acknowledgment, wait for a NEW caller turn.",
+    "Thanks, okay, sounds good, a repeated callback time, an email-only preference, a correction, a question, or silence alone is not a farewell. Never end over an unanswered question or changed preference.",
+    "Honor explicit opt-outs and current-call stop requests promptly. Do not prolong the pitch. Use a brief neutral goodbye without promising future contact or claiming suppression was saved unless confirmed.",
+  ].join(" ");
+  builtins.skip_turn.description = [
+    "Wait silently instead of speaking for placeholder silence, background noise, static, breathing, a recording still playing, or an explicit instruction to hold or stay on the line while the phone reaches a person.",
+    "Spoken automated hold or connecting words are still a reason to wait. Do not treat them as a live greeting or pitch over them. Continue waiting until a new live person answers or a clear voicemail greeting begins.",
+    "Do not use this instead of answering an automated screener's name-and-reason request: speak the exact base-prompt screener sentence first, then wait.",
+    "Do not skip a live person's question, correction, request to stop, or completed greeting. Follow the base prompt for that turn.",
+  ].join(" ");
+  return updated;
+}
+
+export function applyContactToolDescriptions<T extends {
+  name: string;
+  type: string;
+  description?: string;
+  parameters?: any;
+  api_schema?: { request_body_schema?: any; [key: string]: unknown };
+}>(tool: T): T {
+  const updated = structuredClone(tool);
+  const schema = updated.type === "client" ? updated.parameters : updated.type === "webhook" ? updated.api_schema?.request_body_schema : null;
+  if (!schema?.properties || !["callback_requested", "not_interested"].includes(updated.name)) {
+    throw new Error("Verified callback or contact-outcome tool schema is required");
+  }
+  if (updated.name === "callback_requested") {
+    if (!schema.properties.callbackTime) throw new Error("Callback time schema is required");
+    updated.description = "Record a callback request only when a live caller explicitly asks Yoni to call them, or clearly accepts a single callback offer. Busy, unavailable, a question, email-only, silence, or the caller planning to call us is not callback consent. Capture requested timing without inventing it. This records a request, not a booked appointment.";
+    schema.description = "Record the live caller's explicitly requested callback using dynamic call metadata; do not schedule or guarantee an appointment.";
+    schema.properties.callbackTime.description = "Preserve the caller's requested day, time and time zone as spoken. Ask once about a missing AM/PM; if unresolved, preserve the time with AM/PM unconfirmed. Use ASAP only when the caller actually requested or agreed to that timing. Yoni being unavailable is never permission to infer ASAP or create a callback.";
+  } else {
+    if (!schema.properties.conversationSummary) throw new Error("Contact summary schema is required");
+    updated.description = "Record a live caller's clear rejection, future-contact opt-out, or request to end only the current call using the base prompt's distinct outcome markers. Do not use for a recording, temporary busyness, self-handling alone, email-only, a question or unclear speech. The backend determines the outcome from attributable caller evidence; a tool call is not proof of a saved opt-out.";
+    schema.description = "Submit the caller's actual contact preference for classification. Ending only this call is not automatically rejection or future-contact suppression.";
+    schema.properties.conversationSummary.description = "Preserve the live caller's actual words and distinguish current-call-only ending, clear rejection and future-contact opt-out. For current-call-only ending use the base prompt CALL ENDED BY REQUEST marker. Do not invent intent or erase prior genuine interest.";
+  }
   return updated;
 }
 

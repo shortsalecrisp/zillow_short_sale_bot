@@ -118,6 +118,8 @@ test("a named Yoni refusal or use of call as a label is not the caller's future 
   for (const value of [
     "Email me information only. Do not call Yoni now.",
     "Do not call Yoni now and just email me.",
+    "Do not call Yoni, and just email me.",
+    "Do not call Yoni. Is the email for him or me?",
     "Don't call Yoni Kutler right now.",
     "Don't call that a commitment.",
   ]) {
@@ -133,6 +135,23 @@ test("a named Yoni refusal or use of call as a label is not the caller's future 
     "Remove me from your list.",
   ]) {
     assert.equal(looksLikeDoNotCall(value), true, value);
+  }
+});
+
+test("coordinated caller recipients remain protected after a named Yoni refusal", async () => {
+  const lib = await load();
+  for (const value of [
+    "Do not call Yoni, or me.",
+    "Do not call Yoni or this number again.",
+    "Do not call Yoni and my number.",
+    "Don't call Yoni right now, or our phone number.",
+    "Do not call Yoni, me, or this number.",
+    "Do not call Yoni, the bank, or this number again.",
+  ]) {
+    const call = conversation([value], "The caller declined a live handoff.");
+    assert.equal(looksLikeDoNotCall(value), true, value);
+    assert.equal(lib.getVoiceContactRequestResult(call), "do_not_call", value);
+    assert.equal(lib.buildVoiceContactOutcomeUpdates("do_not_call", call).leadStatusCode, "R", value);
   }
 });
 

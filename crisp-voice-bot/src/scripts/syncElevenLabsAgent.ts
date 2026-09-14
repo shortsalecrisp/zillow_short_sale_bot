@@ -5,8 +5,10 @@ import path from "node:path";
 import {
   applyConversationConsentPolicy,
   applyConversationListeningPolicy,
+  applyConversationToolPolicy,
   VOICE_CONVERSATION_POLICY_VERSION,
 } from "../lib/elevenLabsConversationPolicy";
+import { replaceContactToolBindings, verifyContactToolMap } from "./prepareElevenLabsContactTools";
 
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -46,11 +48,11 @@ export function extractPromptSection(markdown: string): string {
   return parts[1].trim();
 }
 
-export function buildConversationRelease(current: any, prompt: string, listenFirst: boolean) {
+export function buildConversationRelease(current: any, prompt: string, listenFirst: boolean, contactToolReplacements?: Record<string, string>) {
   // Start from the owning provider, never a stale reconstructed model/tool config.
-  const body = applyConversationConsentPolicy(applyConversationListeningPolicy(writableBody(current), { listenFirst }));
+  const body = applyConversationToolPolicy(applyConversationConsentPolicy(applyConversationListeningPolicy(writableBody(current), { listenFirst })));
   body.conversation_config.agent.prompt.prompt = prompt;
-  return body;
+  return contactToolReplacements ? replaceContactToolBindings(body, contactToolReplacements) : body;
 }
 
 async function main(): Promise<void> {
@@ -62,6 +64,8 @@ async function main(): Promise<void> {
   const expectedVersion = value("expected-version");
   const expectedPrompt = value("expected-prompt-sha");
   const expectedCandidate = value("expected-candidate-sha");
+  const contactToolMapPath = value("contact-tool-map");
+  const expectedContactToolMap = value("expected-contact-tool-map-sha");
   const listenFirst = process.argv.includes("--listen-first");
   const receiptDir = path.resolve(value("receipt-dir") ?? "tmp/voice-conversation-release");
   if (apply && (!expectedVersion || !expectedPrompt || !expectedCandidate)) {
@@ -69,6 +73,9 @@ async function main(): Promise<void> {
   }
   if (apply && Number(listenFirst) + Number(process.argv.includes("--keep-first-message")) !== 1) {
     throw new Error("Apply requires exactly one reviewed startup choice");
+  }
+  if ((expectedContactToolMap && !contactToolMapPath) || (apply && contactToolMapPath && !expectedContactToolMap)) {
+    throw new Error("Applying a contact-tool map requires its exact reviewed map SHA256");
   }
   const client = axios.create({
     baseURL: config.elevenLabs.baseUrl, timeout: 45_000,
@@ -83,8 +90,11 @@ async function main(): Promise<void> {
   const beforePrompt = current.conversation_config.agent.prompt.prompt;
   if (expectedVersion && current.version_id !== expectedVersion) throw new Error("Live agent version drifted; review again");
   if (expectedPrompt && digest(beforePrompt) !== expectedPrompt) throw new Error("Live prompt drifted; review again");
+  const contactToolMap = contactToolMapPath ? JSON.parse(await readFile(path.resolve(contactToolMapPath), "utf8")) : undefined;
+  const contactToolReplacements = contactToolMap
+    ? await verifyContactToolMap(client, contactToolMap, current, expectedContactToolMap) : undefined;
   const prompt = extractPromptSection(await readFile(PROMPT_PATH, "utf8"));
-  const body = buildConversationRelease(current, prompt, listenFirst);
+  const body = buildConversationRelease(current, prompt, listenFirst, contactToolReplacements);
   if (expectedCandidate && bodyDigest(body) !== expectedCandidate) throw new Error("Candidate changed since review; nothing applied");
   await mkdir(receiptDir, { recursive: true });
   const receipt = {
@@ -92,6 +102,8 @@ async function main(): Promise<void> {
     before_version: current.version_id, before_prompt_sha256: digest(beforePrompt),
     candidate_prompt_sha256: digest(prompt), policy: VOICE_CONVERSATION_POLICY_VERSION,
     candidate_body_sha256: bodyDigest(body),
+    contact_tool_map_sha256: contactToolMap?.map_sha256 ?? null,
+    contact_tool_replacements: contactToolReplacements ?? null,
     listen_first: listenFirst, applied: false, status: "prepared_not_applied",
   };
   await writeFile(path.join(receiptDir, "before.json"), JSON.stringify(safeReceipt(writableBody(current)), null, 2));
@@ -105,6 +117,7 @@ async function main(): Promise<void> {
     throw new Error("Agent changed after candidate creation; nothing applied");
   }
   verifyReleaseReadback(current, writableBody(current), check);
+  if (contactToolMap) await verifyContactToolMap(client, contactToolMap, check, expectedContactToolMap);
   await writeFile(path.join(receiptDir, "receipt.json"), JSON.stringify({ ...receipt, status: "patch_attempted_readback_required" }, null, 2));
   await client.patch(endpoint, body, { params: { ...params, enable_versioning_if_not_enabled: true } });
   const { data: after } = await client.get(endpoint, { params });
@@ -114,6 +127,7 @@ async function main(): Promise<void> {
   const { data: effective } = await client.get(endpoint);
   if (effective.version_id !== after.version_id || effective.branch_id !== branchId) throw new Error("Default published version differs from branch readback");
   verifyReleaseReadback(current, body, effective);
+  if (contactToolMap) await verifyContactToolMap(client, contactToolMap, current, expectedContactToolMap);
   const finalReceipt = { ...receipt, applied: true, status: "live_config_verified", after_version: after.version_id, verified_at: new Date().toISOString() };
   await writeFile(path.join(receiptDir, "receipt.json"), JSON.stringify(finalReceipt, null, 2));
   console.log(JSON.stringify(finalReceipt));

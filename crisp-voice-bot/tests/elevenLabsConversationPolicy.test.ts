@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  applyConversationConsentPolicy, applyConversationListeningPolicy,
+  applyConversationConsentPolicy, applyConversationListeningPolicy, applyConversationToolPolicy, applyContactToolDescriptions,
 } from "../src/lib/elevenLabsConversationPolicy";
 import {
   buildConversationRelease, bodyDigest, safeReceipt, verifyReleaseReadback, writableBody,
@@ -12,7 +12,11 @@ function baseline(): any {
     conversation_config: {
       agent: { first_message: "Original intro", disable_first_message_interruptions: true,
         prompt: { prompt: "Current prompt", llm: "unchanged-model", tool_ids: ["live-tool"],
-          built_in_tools: { skip_turn: { name: "skip_turn" } },
+          built_in_tools: {
+            skip_turn: { name: "skip_turn", description: "old skip", disable_interruptions: true },
+            end_call: { name: "end_call", description: "old end", params: { system_tool_type: "end_call" } },
+            voicemail_detection: { name: "voicemail_detection", description: "existing voicemail" },
+          },
           tools: [{ request_headers: { Authorization: "test-secret" } }] } },
       turn: { initial_wait_time: 1.6, turn_timeout: 1.5, silence_end_call_timeout: 45,
         transcribe_on_disabled_interruptions: false },
@@ -59,6 +63,49 @@ test("paired startup arms differ only in first_message", () => {
   assert.deepEqual(fixed, listen);
 });
 
+test("tool descriptions follow listening and request rules without changing tool behavior", () => {
+  const before = baseline(), copy = structuredClone(before), after = applyConversationToolPolicy(before);
+  assert.deepEqual(before, copy);
+  const tools = after.conversation_config.agent.prompt.built_in_tools;
+  assert.match(tools.end_call.description, /tool success is not permission to end/);
+  assert.match(tools.end_call.description, /Never end over an unanswered question/);
+  assert.match(tools.skip_turn.description, /Spoken automated hold or connecting words are still a reason to wait/);
+  assert.match(tools.skip_turn.description, /speak the exact base-prompt screener sentence first/);
+  tools.end_call.description = before.conversation_config.agent.prompt.built_in_tools.end_call.description;
+  tools.skip_turn.description = before.conversation_config.agent.prompt.built_in_tools.skip_turn.description;
+  assert.deepEqual(after, before);
+  delete before.conversation_config.agent.prompt.built_in_tools.end_call;
+  assert.throws(() => applyConversationToolPolicy(before), /required/);
+});
+
+test("contact tool metadata changes only descriptions for webhook and client schemas", () => {
+  for (const type of ["client", "webhook"]) {
+    for (const name of ["callback_requested", "not_interested"]) {
+      const schema = { type: "object", description: "old schema", required: ["rowNumber"], properties: {
+        rowNumber: { type: "integer", dynamic_variable: "rowNumber" },
+        callbackTime: { type: "string", description: "old timing" },
+        conversationSummary: { type: "string", description: "old summary" },
+      } };
+      const tool: any = { type, name, description: "old description", response_timeout_secs: 20,
+        ...(type === "client" ? { parameters: schema, expects_response: true } : {
+          api_schema: { url: "https://test.invalid/tool", method: "POST", request_headers: { Authorization: "test-only" }, request_body_schema: schema },
+        }) };
+      const before = structuredClone(tool), after: any = applyContactToolDescriptions(tool);
+      assert.deepEqual(tool, before);
+      const actual = type === "client" ? after.parameters : after.api_schema.request_body_schema;
+      assert.match(after.description, name === "callback_requested" ? /not a booked appointment/ : /end only the current call/);
+      if (name === "callback_requested") assert.match(actual.properties.callbackTime.description, /never permission to infer ASAP/);
+      else assert.match(actual.properties.conversationSummary.description, /CALL ENDED BY REQUEST/);
+      after.description = before.description;
+      actual.description = schema.description;
+      const changedProperty = name === "callback_requested" ? "callbackTime" : "conversationSummary";
+      actual.properties[changedProperty].description = schema.properties[changedProperty].description;
+      assert.deepEqual(after, before);
+    }
+  }
+  assert.throws(() => applyContactToolDescriptions({ name: "other", type: "client" }), /required/);
+});
+
 test("HTTP tool success returns to business-result validation, not directly to a phone patch", () => {
   const after = applyConversationConsentPolicy(baseline());
   assert.equal(after.workflow.edges.transfer_check_to_patch.target, "transfer_result_review");
@@ -87,7 +134,8 @@ test("release preserves tool IDs and removes expanded credential-bearing GET sch
   const before = baseline(), body = buildConversationRelease(before, "Candidate", true);
   assert.equal(body.conversation_config.agent.prompt.tools, undefined);
   assert.deepEqual(body.conversation_config.agent.prompt.tool_ids, ["live-tool"]);
-  assert.deepEqual(body.conversation_config.agent.prompt.built_in_tools, before.conversation_config.agent.prompt.built_in_tools);
+  assert.deepEqual(body.conversation_config.agent.prompt.built_in_tools,
+    applyConversationToolPolicy(before).conversation_config.agent.prompt.built_in_tools);
   assert.ok(!JSON.stringify(safeReceipt(before)).includes("test-secret"));
   assert.ok(!JSON.stringify(writableBody(before)).includes("test-secret"));
 });

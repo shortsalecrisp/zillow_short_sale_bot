@@ -15,6 +15,9 @@ calling-window, voice-rotation, billing-tier or historical CRM changes.
   New questions and changed preferences take priority over a stale approval.
 - Treat callback and information tools as requests, not confirmed appointments or
   delivered messages unless the tool explicitly confirms that fact.
+- Keep the same policy in model-facing tool descriptions. Callback success is not
+  permission to hang up, spoken hold messages are a reason to wait, and Yoni being
+  unavailable is not permission to invent an ASAP callback.
 - Preserve buyer-paid-fee disclosure, truthful AI identity, recording gates,
   voicemail behavior, opt-out protection and approved business facts.
 
@@ -46,12 +49,16 @@ historical CRM records or prove every unrelated callback route is consent-gated.
 
 `syncElevenLabsAgent.ts` starts from the current provider configuration. It changes
 only the prompt and the narrowly defined conversation policies. It does not
-reconstruct model, TTS, tool definitions, phone bindings or platform settings.
+reconstruct model, TTS, phone bindings or platform settings. The end-call and
+skip-turn descriptions are aligned with the prompt without changing their tool
+parameters. Two newly cloned callback/contact-outcome tools replace only conflicting
+descriptions; the existing shared resources and webhook transport remain unchanged.
 
 Default execution is a dry run. An apply requires all of:
 
 - Reviewed current main-branch version and prompt SHA.
 - Exact reviewed candidate body SHA from the dry run.
+- A reviewed, freshly verified replacement map if cloned contact tools are used.
 - Explicit `--listen-first` or `--keep-first-message` selection.
 - A fresh pre-write reread and exact post-write branch/default readbacks.
 
@@ -71,3 +78,10 @@ email delivery or conversion improvement. Keep those claims separate.
 Startup selection must follow the private paired comparison. Both arms use the
 same revised script, voice and settings; only `first_message` differs. No production
 configuration change is justified merely because the candidate can be created.
+
+The first 18 sessions are retained unchanged, including failures. The addendum
+uses the original audio fixtures and a separately frozen revised package. It tests
+the combined script, tool-description and acknowledgment changes, not each change
+as an isolated causal effect. Its cap includes the original usage; any unrun cell
+at the remaining-headroom gate stays unobserved. Audio tests use Eryn at the existing
+0.95 speed and do not establish a preferred voice or calling time.
