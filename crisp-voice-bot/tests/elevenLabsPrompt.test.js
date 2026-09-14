@@ -35,23 +35,23 @@ test("priority considers the whole turn and hearing precedes questions and actio
 });
 test("intro is its own entire turn and exposes no dynamic continuation script", () => {
   const s = section("Intro only");
-  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. I'm calling about your short sale listing\."/);
-  assert.match(s, /Stop after "listing\." Wait for a NEW live-caller turn/);
+  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. We help with short-sale paperwork and lender calls\. Would that help with your listing\?"/);
+  assert.match(s, /Stop after the question\. Wait for a NEW live-caller turn/);
   assert.match(s, /occurred before the introduction and does not count as a response/);
-  assert.match(s, /Do not append a qualification question, service pitch, Yoni offer, or callback question/);
+  assert.match(s, /Do not append a second qualification question, Yoni offer, or callback question/);
+  assert.match(s, /A placeholder "\.\.\." is not that new turn: use skip_turn, without saying "Are you there\?"/);
   assert.doesNotMatch(s, /{{openerScript}}|Are you handling the short sale paperwork|Are you looking for help with that/);
   assert.doesNotMatch(prompt, /{{openerScript}}/);
 });
-test("post-intro choices remain literal and conditional on a new caller turn", () => {
+test("post-intro handles an answer to the new opener without repeating the pitch", () => {
   const s = section("Post-intro conversation");
   assert.match(s, /Enter only when a NEW live-caller turn/);
   assert.match(s, /contained no question, correction, hearing issue or requested next step when it arrived/);
   assert.match(s, /A further caller turn is required before qualification/);
-  assert.match(s, /For {{openerVariant}} equal to benefit_hook/);
-  assert.match(s, /We help agents with the short sale paperwork and lender calls\. Are you looking for help with that\?/);
-  assert.match(s, /For direct_reason or an unspecified variant/);
-  assert.match(s, /Are you handling the short sale paperwork and lender calls yourself\?/);
-  assert.match(s, /These are post-intro alternatives, never part of the introduction/);
+  assert.match(s, /openerVariant continuation is retired; do not speak a second opener/);
+  assert.match(s, /A clear yes indicates interest, not consent to a transfer or callback/);
+  assert.match(s, /A clear no to that help question is a scoped decline of help, not a future-contact opt-out/);
+  assert.match(s, /For a neutral acknowledgment or an unclear answer, ask at most once/);
 });
 test("a question keeps the entire response answer-only even after it is answered", () => {
   const s = section("Shared turn priority");
@@ -79,10 +79,12 @@ test("repeated purpose repair and hearing restoration cannot become qualificatio
   const s = section("Listening and repair");
   assert.match(s, /Repeated purpose question: explain differently once with "We organize the documents the bank needs and follow up on its review\."/);
   assert.match(s, /Do not loop through the original explanation/);
-  assert.match(s, /Hearing complaint: say only "Sorry, can you hear me now\?" and wait/);
+  assert.match(s, /For an audio problem say only "Sorry, can you hear me now\?" and wait/);
   assert.match(s, /hearing-restoration answer[^\n]+is not qualification consent/);
   assert.match(s, /repeat only the missed short sentence, then wait again/);
   assert.match(s, /Do not claim the connection or volume was fixed/);
+  assert.match(s, /"What\?", "I don't understand", "Why are you calling\?", and "What do you want from me\?" need the relevant short clarification/);
+  assert.match(s, /Never respond to these with "How can I help you today\?"/);
 });
 test("bounded repair preserves understood fragments and never guesses consent", () => {
   const s = section("Listening and repair");
