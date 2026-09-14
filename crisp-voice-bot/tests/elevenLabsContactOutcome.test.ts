@@ -280,6 +280,68 @@ test("normal goodbye after callback and late questions without a stop retain the
   assert.equal(lib.shouldTreatAsCallEndedByRequest(question), false);
 });
 
+test("final direct-callback timing corrects model-added PM only from attributable caller words", async () => {
+  const lib = await load();
+  const call = { ...conversation([], "The caller requested a callback tomorrow at 2:00 PM Pacific."), transcript: [
+    { role: "user", message: "Have him call tomorrow at two Pacific." },
+    { role: "agent", tool_calls: [{ tool_name: "callback_requested", parameters: { callbackTime: "tomorrow at 2:00 PM Pacific" } }] },
+    { role: "agent", message: "I've noted your request for tomorrow at 2:00 PM Pacific." },
+    { role: "user", message: "Goodbye." },
+  ] };
+  assert.equal(lib.getExplicitCallbackConsent(call)?.callbackTime, "tomorrow at two Pacific");
+  const id = "test-direct-callback-time-correction";
+  conversations.set(id, call);
+  const before = receivedWrites.length;
+  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id), /Missing email alert config/);
+  assert.equal(receivedWrites.length, before + 1);
+  assert.equal(receivedWrites.at(-1)!.callResult, "callback_requested", "Final evidence repairs a missing live request write");
+  assert.equal(receivedWrites.at(-1)!.callbackRequested, "yes");
+  assert.equal(receivedWrites.at(-1)!.leadStatusCode, undefined, "Existing lead qualification is not downgraded");
+  assert.equal(receivedWrites.at(-1)!.callbackTime, "tomorrow at two Pacific");
+  assert.match(String(receivedWrites.at(-1)!.responseStatus), /tomorrow at two Pacific/);
+  assert.doesNotMatch(String(receivedWrites.at(-1)!.responseStatus), /PM/);
+});
+
+test("incidental showing or closing times do not replace requested callback timing", async () => {
+  const lib = await load();
+  for (const [index, comment] of [
+    "I have a showing at three. Goodbye.",
+    "I have a closing tomorrow afternoon. Goodbye.",
+    "Actually, I have a meeting at four tomorrow.",
+  ].entries()) {
+    const call = { ...conversation([], "The caller requested a callback."), transcript: [
+      { role: "user", message: "Have him call tomorrow at two Pacific." },
+      { role: "agent", tool_calls: [{ tool_name: "callback_requested" }] },
+      { role: "agent", message: "Thanks. I've received your callback request." },
+      { role: "user", message: comment },
+    ] };
+    assert.equal(lib.getExplicitCallbackConsent(call)?.callbackTime, "tomorrow at two Pacific", comment);
+    const id = `test-incidental-callback-time-${index}`;
+    conversations.set(id, call);
+    const before = receivedWrites.length;
+    await assert.rejects(lib.processPostCallOutcomeFromConversationId(id), /Missing email alert config/);
+    assert.equal(receivedWrites.length, before + 1);
+    assert.equal(receivedWrites.at(-1)!.callbackTime, "tomorrow at two Pacific", comment);
+  }
+});
+
+test("a final callback without attributable timing does not replace the earlier sheet time", async () => {
+  const lib = await load();
+  const call = { ...conversation([], "The callback was requested for 2 PM."), transcript: [
+    { role: "user", message: "Please call me back." },
+    { role: "agent", tool_calls: [{ tool_name: "callback_requested", parameters: { callbackTime: "2 PM" } }] },
+    { role: "user", message: "Goodbye." },
+  ] };
+  assert.equal(lib.getExplicitCallbackConsent(call)?.callbackTime, "unspecified");
+  const id = "test-direct-callback-no-time-evidence";
+  conversations.set(id, call);
+  const before = receivedWrites.length;
+  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id), /Missing email alert config/);
+  assert.equal(receivedWrites.length, before + 1);
+  assert.equal(receivedWrites.at(-1)!.callbackTime, undefined);
+  assert.equal(receivedWrites.at(-1)!.responseStatus, undefined);
+});
+
 test("a later scoped ending does not erase an already completed, explicitly accepted transfer", async () => {
   const lib = await load();
   const call = { ...conversation([], "Transfer completed before the caller ended the call."), transcript: [

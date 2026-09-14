@@ -14,20 +14,23 @@ test("entry routing separates screener response, silent hold and first live intr
   assert.match(s, /REQUIRES a spoken response, not silence/);
   assert.match(s, /AUTOMATED HOLD:[^\n]+is NOT a live greeting/);
   assert.match(s, /initial pickup greeting[^\n]+BEFORE your introduction/);
-  assert.match(s, /Never attach the handling question to this first introduction/);
+  assert.match(s, /your ENTIRE spoken turn is/);
+  assert.match(s, /Stop after "listing" and wait silently for a NEW live-caller turn/);
+  assert.match(s, /Never attach the handling question or {{openerScript}} to this first introduction/);
 });
 test("informational corrections need the answer without stock follow-up filler", () => {
   const s = section("Turn routing card.", "Clarification turn contract,");
-  assert.match(s, /No, I only asked who pays the fee/);
-  assert.match(s, /correction containing a question still needs its answer/);
+  assert.match(s, /PAYER CORRECTION:[^\n]+I only asked who pays/);
+  assert.match(s, /and has no other question or action request/);
+  assert.match(s, /If they also ask another question or request an action, use the matching rule below and preserve every part of their turn/);
+  assert.match(s, /your complete spoken answer is: "The buyer typically pays the flat fee, only if the deal closes\." Then wait/);
+  assert.match(s, /Give that answer, not just an acknowledgment, apology, or another question/);
   assert.match(s, /Never append "anything else", "feel free to ask"/);
   assert.match(s, /only if the deal closes/);
 });
 test("request receipt and preference correction do not authorize ending", () => {
   assert.match(prompt, /A tool result is not a caller turn and is never permission to end/);
   assert.match(prompt, /"callback only", "email only", or "not a callback" is a correction or preference/);
-  assert.match(prompt, /AM\/PM unconfirmed/);
-  assert.match(prompt, /Do not assume business hours prove PM/);
   assert.match(prompt, /Only if a NEW live-caller turn after your acknowledgment is a clear farewell/);
 });
 test("live identity remains truthful and dynamic", () => {
@@ -122,11 +125,37 @@ test("information-only and self-initiated contact stay out of callbacks", () => 
   assert.match(prompt, /This is not a request for Yoni or Crisp to call them/);
   assert.doesNotMatch(prompt, /callbackTime` set to `send info/);
 });
+test("email requests execute only with a confirmed or supplied address before a receipt claim", () => {
+  const s = section("Turn routing card.", "Clarification turn contract,");
+  assert.match(s, /REQUEST EXECUTION:[^\n]+Can you email me the information\?/);
+  assert.match(s, /caller-confirmed or clearly supplied[^\n]+BEFORE acknowledging receipt/);
+  assert.match(s, /A stored {{email}} alone is not confirmed: ask once/);
+  assert.match(s, /Do not ask them to repeat an address they just clearly supplied/);
+  assert.match(s, /address is missing or unclear, ask only for the address or missing part/);
+  assert.match(s, /result without `requestCaptured: true` cannot support a capture claim/);
+  assert.match(s, /Do not say "I've noted your request", "I'll ensure", or promise a send instead of executing the tool/);
+  assert.match(prompt, /Is {{email}} the best email for the information\?/);
+  assert.match(prompt, /Only after `information_requested` returns `requestCaptured: true`, say exactly: "Thanks\. I've received your request for information\."/);
+  assert.match(prompt, /Missing or failed results do not permit this acknowledgment/);
+  assert.match(prompt, /Do not claim the information was sent or delivered/);
+});
 test("callbacks require consent and do not promise a booked appointment", () => {
   assert.match(prompt, /Being busy, hesitant, or saying "not now" is not callback consent/);
   assert.match(prompt, /This is a callback request, not a confirmed appointment/);
   assert.match(prompt, /I couldn't confirm that request/);
   assert.doesNotMatch(prompt, /I set up the callback with Yoni|I will text him/);
+});
+test("callback capture preserves literal timing and keeps receipt acknowledgment time-free", () => {
+  const s = section("Callback flow:", "Voicemail and no-answer:");
+  assert.match(s, /have not supplied any timing, ask/);
+  assert.match(s, /Copy the caller's requested timing words verbatim into `callbackTime`/);
+  assert.match(s, /Do not convert words to digits, add an unspoken AM or PM, resolve a relative day into a date, or expand or substitute a time zone/);
+  assert.match(s, /note unresolved timing separately in `conversationSummary` for human review/);
+  assert.match(s, /copy their corrective words and preserve earlier supplied context/);
+  assert.match(s, /"Thanks\. I've received your callback request\."/);
+  assert.match(s, /Keep this acknowledgment time-free/);
+  assert.match(s, /Do not repeat or interpret the tool's `callbackTime` as independently verified caller wording/);
+  assert.doesNotMatch(s, /ask (?:only |once )?"Is that two|Two in the afternoon\?|AM\/PM unconfirmed|Yoni to call \[time\]/);
 });
 test("transfer consent can change and new questions must be handled", () => {
   assert.match(prompt, /While a transfer is being checked, consent can still change/);

@@ -4,7 +4,7 @@ import { mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 import { applyContactToolDescriptions, VOICE_CONVERSATION_POLICY_VERSION } from "../lib/elevenLabsConversationPolicy";
 
-export const CONTACT_TOOL_NAMES = ["callback_requested", "not_interested"] as const;
+export const CONTACT_TOOL_NAMES = ["callback_requested", "not_interested", "information_requested"] as const;
 type ToolName = typeof CONTACT_TOOL_NAMES[number];
 type ToolConfig = { name: string; type: string; [key: string]: any };
 type Identity = { agent_id: string; branch_id: string; main_branch_id: string; version_id: string };
@@ -50,11 +50,11 @@ function verifyIdentity(agent: any, expected: Identity): void {
 }
 
 export function contactToolBindings(agent: any, ids: string[]): Binding[] {
-  if (ids.length !== 2 || new Set(ids).size !== 2) throw new Error("Exactly two distinct contact tool IDs are required");
+  if (ids.length !== CONTACT_TOOL_NAMES.length || new Set(ids).size !== CONTACT_TOOL_NAMES.length) throw new Error("Exactly three distinct contact tool IDs are required");
   const globalIds = agent.conversation_config?.agent?.prompt?.tool_ids;
   if (!Array.isArray(globalIds) || new Set(globalIds).size !== globalIds.length ||
       ids.some(id => globalIds.filter(item => item === id).length !== 1)) {
-    throw new Error("Both reviewed contact tools must be attached exactly once globally");
+    throw new Error("All reviewed contact tools must be attached exactly once globally");
   }
   const bindings: Binding[] = [];
   function walk(value: any, at: Array<string | number>): void {
@@ -77,8 +77,8 @@ export function contactToolBindings(agent: any, ids: string[]): Binding[] {
 export function replaceContactToolBindings<T>(body: T, replacements: Record<string, string>): T {
   const oldIds = Object.keys(replacements);
   const newIds = Object.values(replacements);
-  if (oldIds.length !== 2 || new Set(newIds).size !== 2 || newIds.some(id => oldIds.includes(id))) {
-    throw new Error("The reviewed map must replace exactly two IDs with distinct new IDs");
+  if (oldIds.length !== CONTACT_TOOL_NAMES.length || new Set(newIds).size !== CONTACT_TOOL_NAMES.length || newIds.some(id => oldIds.includes(id))) {
+    throw new Error("The reviewed map must replace exactly three IDs with distinct new IDs");
   }
   [...oldIds, ...newIds].forEach(requireId);
   const globalIds = (body as any).conversation_config?.agent?.prompt?.tool_ids ?? [];
@@ -97,12 +97,13 @@ function descriptionPaths(name: ToolName): string[][] {
   return [
     ["description"], ["api_schema", "request_body_schema", "description"],
     ["api_schema", "request_body_schema", "properties", name === "callback_requested" ? "callbackTime" : "conversationSummary", "description"],
+    ...(name === "callback_requested" ? [["api_schema", "request_body_schema", "properties", "conversationSummary", "description"]] : []),
   ];
 }
 
 export function verifyContactDescriptionOnlyChange(before: ToolConfig, after: ToolConfig): string[][] {
   if (before.type !== "webhook" || !CONTACT_TOOL_NAMES.includes(before.name as ToolName)) {
-    throw new Error("Only the two reviewed webhook contact tools may be cloned");
+    throw new Error("Only the three reviewed webhook contact tools may be cloned");
   }
   const paths = descriptionPaths(before.name as ToolName);
   const stripped = [before, after].map(tool => {
@@ -208,8 +209,9 @@ export async function verifyContactToolMap(
   }
   verifyIdentity(current, map.plan.identity);
   if (contactAgentDigest(current) !== map.plan.agent_config_sha256) throw new Error("Production configuration changed since contact-tool review");
-  if (!Array.isArray(map.plan.tools) || map.plan.tools.length !== 2 || !Array.isArray(map.tools) || map.tools.length !== 2 ||
-      Object.keys(map.replacements ?? {}).length !== 2) throw new Error("Contact-tool map must contain exactly two reviewed replacements");
+  if (!Array.isArray(map.plan.tools) || map.plan.tools.length !== CONTACT_TOOL_NAMES.length ||
+      !Array.isArray(map.tools) || map.tools.length !== CONTACT_TOOL_NAMES.length ||
+      Object.keys(map.replacements ?? {}).length !== CONTACT_TOOL_NAMES.length) throw new Error("Contact-tool map must contain exactly three reviewed replacements");
   const ids = map.plan.tools.map((tool: any) => tool.old_id);
   if (contactToolDigest(contactToolBindings(current, ids)) !== contactToolDigest(map.plan.bindings)) throw new Error("Reviewed contact-tool bindings drifted");
   const newIds = new Set<string>();
@@ -300,7 +302,8 @@ async function main(): Promise<void> {
     main_branch_id: value("expected-main-branch")!, version_id: value("expected-version")!,
   };
   Object.values(identity).forEach(requireId);
-  const toolIds = { callback_requested: value("callback-tool-id")!, not_interested: value("not-interested-tool-id")! };
+  const toolIds = { callback_requested: value("callback-tool-id")!, not_interested: value("not-interested-tool-id")!,
+    information_requested: value("information-tool-id")! };
   Object.values(toolIds).forEach(requireId);
   const create = process.argv.includes("--create");
   if (create) requireHash(value("expected-plan-sha"));

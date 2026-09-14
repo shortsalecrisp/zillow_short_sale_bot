@@ -29,20 +29,20 @@ function tool(name: string): any {
 async function fixture(t: any) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "contact-tool-clone-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const ids = { callback_requested: "tool_callback", not_interested: "tool_contact" };
+  const ids = { callback_requested: "tool_callback", not_interested: "tool_contact", information_requested: "tool_information" };
   const configs = new Map<string, any>(Object.entries(ids).map(([name, id]) => [id, tool(name)]));
   const agent: any = {
     agent_id: "agent_test", branch_id: "branch_main", main_branch_id: "branch_main", version_id: "version_reviewed",
     conversation_config: {
       agent: { first_message: "Unchanged opening", prompt: { prompt: "Current prompt", llm: "unchanged-model",
-        tool_ids: ["tool_other", ids.callback_requested, ids.not_interested],
+        tool_ids: ["tool_other", ids.callback_requested, ids.not_interested, ids.information_requested],
         tools: [...configs.values()].map(value => structuredClone(value)),
         built_in_tools: { end_call: { description: "old" }, skip_turn: { description: "old" } } } },
       tts: { voice_id: "voice_unchanged", speed: 0.95 }, turn: { turn_timeout: 1.5 },
       conversation: { client_events: ["audio", "user_transcript"] },
     },
     workflow: { nodes: {
-      main_conversation: { additional_tool_ids: [ids.callback_requested] },
+      main_conversation: { additional_tool_ids: [ids.callback_requested, ids.information_requested] },
       patch_transfer: { edge_order: ["patch_to_phone"], additional_prompt: "Old" },
       callback_after_unavailable: { additional_tool_ids: [ids.not_interested] },
       transfer_check: { tools: [{ tool_id: "tool_other" }, { tool_id: ids.callback_requested }] },
@@ -95,12 +95,12 @@ async function createFixture(t: any) {
   return { ...state, dry, result, map };
 }
 
-test("dry-run defaults to fresh identity and two exact tool reads; receipts contain no transport secrets", async t => {
+test("dry-run defaults to fresh identity and three exact tool reads; receipts contain no transport secrets", async t => {
   const state = await fixture(t);
   const result = await prepareContactTools(state.options, state.client);
   assert.equal(result.status, "prepared_not_created");
-  assert.deepEqual(state.calls.map(call => call.method), ["GET", "GET", "GET", "GET"]);
-  assert.deepEqual(state.calls.slice(2).map(call => call.endpoint), ["/v1/convai/tools/tool_callback", "/v1/convai/tools/tool_contact"]);
+  assert.deepEqual(state.calls.map(call => call.method), ["GET", "GET", "GET", "GET", "GET"]);
+  assert.deepEqual(state.calls.slice(2).map(call => call.endpoint), ["/v1/convai/tools/tool_callback", "/v1/convai/tools/tool_contact", "/v1/convai/tools/tool_information"]);
   assert.deepEqual(await readdir(state.dir), ["plan.json"]);
   const plan = await readFile(path.join(state.dir, "plan.json"), "utf8");
   assert.ok(!plan.includes(secret));
@@ -123,15 +123,20 @@ test("creation requires the exact reviewed plan and fresh expected main/version/
   assert.equal(state.calls.filter(call => call.method === "POST").length, 0);
 });
 
-test("description guard rejects every transport, auth, schema and behavior change outside the three allowed leaves", () => {
+test("description guard rejects transport, auth, schema and behavior changes outside the exact allowed leaves", () => {
   const before = tool("callback_requested");
   const desired = applyContactToolDescriptions(before);
-  assert.equal(verifyContactDescriptionOnlyChange(before, desired).length, 3);
+  assert.equal(verifyContactDescriptionOnlyChange(before, desired).length, 4);
+  for (const name of ["not_interested", "information_requested"]) {
+    const original = tool(name);
+    assert.equal(verifyContactDescriptionOnlyChange(original, applyContactToolDescriptions(original)).length, 3);
+  }
   for (const mutate of [
     (value: any) => { value.api_schema.url = "https://other.invalid"; },
     (value: any) => { value.api_schema.request_headers.Authorization = "different"; },
     (value: any) => { value.api_schema.request_body_schema.required.push("email"); },
     (value: any) => { value.api_schema.request_body_schema.properties.rowNumber.type = "string"; },
+    (value: any) => { value.api_schema.request_body_schema.properties.rowNumber.description = "Unreviewed metadata change"; },
     (value: any) => { value.response_timeout_secs = 90; },
     (value: any) => { value.disable_interruptions = false; },
     (value: any) => { value.name = "information_requested"; },
@@ -142,19 +147,19 @@ test("description guard rejects every transport, auth, schema and behavior chang
   assert.throws(() => verifyContactDescriptionOnlyChange({ ...before, type: "client" }, desired), /webhook/);
 });
 
-test("exactly two new clones preserve full config in memory and produce a durable secret-free candidate map", async t => {
+test("exactly three new clones preserve full config in memory and produce a durable secret-free candidate map", async t => {
   const state = await createFixture(t);
   const posts = state.calls.filter(call => call.method === "POST");
-  assert.equal(posts.length, 2);
-  for (const [index, name] of ["callback_requested", "not_interested"].entries()) {
+  assert.equal(posts.length, 3);
+  for (const [index, name] of ["callback_requested", "not_interested", "information_requested"].entries()) {
     assert.deepEqual(posts[index].body.tool_config, applyContactToolDescriptions(tool(name)));
     assert.deepEqual(state.configs.get(Object.values(state.ids)[index]), tool(name), "Shared source tool is unchanged");
   }
-  assert.deepEqual(state.result.replacements, { tool_callback: "tool_clone_1", tool_contact: "tool_clone_2" });
+  assert.deepEqual(state.result.replacements, { tool_callback: "tool_clone_1", tool_contact: "tool_clone_2", tool_information: "tool_clone_3" });
   assert.deepEqual(await verifyContactToolMap(state.client, state.map, state.agent, state.result.map_sha256), state.result.replacements);
   for (const file of await readdir(state.dir)) assert.ok(!(await readFile(path.join(state.dir, file), "utf8")).includes(secret), file);
   await assert.rejects(prepareContactTools({ ...state.options, create: true, expectedPlanHash: state.dry.plan_sha256 }, state.client), /already attempted/);
-  assert.equal(state.calls.filter(call => call.method === "POST").length, 2);
+  assert.equal(state.calls.filter(call => call.method === "POST").length, 3);
 });
 
 test("ambiguous creation is journaled once and cannot be retried automatically", async t => {
@@ -197,19 +202,20 @@ test("map verification rejects stale originals, clones, versions, bindings and r
   await assert.rejects(verifyContactToolMap(state.client, state.map, rebound), /configuration changed/);
   const partial = structuredClone(state.map); delete partial.replacements.tool_contact;
   const { map_sha256: _hash, ...payload } = partial; partial.map_sha256 = contactToolDigest(payload);
-  await assert.rejects(verifyContactToolMap(state.client, partial, state.agent), /exactly two/);
+  await assert.rejects(verifyContactToolMap(state.client, partial, state.agent), /exactly three/);
 });
 
-test("binding replacement changes only the two IDs at global and workflow binding paths", async t => {
+test("binding replacement changes only the three IDs at global and workflow binding paths", async t => {
   const state = await fixture(t);
   const before = structuredClone(state.agent);
-  const replacements = { tool_callback: "tool_clone_1", tool_contact: "tool_clone_2" };
+  const replacements = { tool_callback: "tool_clone_1", tool_contact: "tool_clone_2", tool_information: "tool_clone_3" };
   const remapped = replaceContactToolBindings(before, replacements);
-  assert.deepEqual(remapped.conversation_config.agent.prompt.tool_ids, ["tool_other", "tool_clone_1", "tool_clone_2"]);
+  assert.deepEqual(remapped.conversation_config.agent.prompt.tool_ids, ["tool_other", "tool_clone_1", "tool_clone_2", "tool_clone_3"]);
   assert.equal(remapped.workflow.nodes.transfer_check.tools[0].tool_id, "tool_other");
   assert.equal(remapped.workflow.nodes.transfer_check.tools[1].tool_id, "tool_clone_1");
   assert.deepEqual(remapped.workflow.nodes.callback_after_unavailable.additional_tool_ids, ["tool_clone_2"]);
-  assert.deepEqual(replaceContactToolBindings(remapped, { tool_clone_1: "tool_callback", tool_clone_2: "tool_contact" }), before);
+  assert.deepEqual(remapped.workflow.nodes.main_conversation.additional_tool_ids, ["tool_clone_1", "tool_clone_3"]);
+  assert.deepEqual(replaceContactToolBindings(remapped, { tool_clone_1: "tool_callback", tool_clone_2: "tool_contact", tool_clone_3: "tool_information" }), before);
   assert.deepEqual(state.agent, before);
   const unsupported = structuredClone(before); unsupported.workflow.nodes.main_conversation.unrecognized_reference = "tool_callback";
   assert.throws(() => replaceContactToolBindings(unsupported, replacements), /unsupported|outside a supported binding/);

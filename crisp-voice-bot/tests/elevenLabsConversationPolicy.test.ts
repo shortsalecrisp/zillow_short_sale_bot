@@ -80,9 +80,10 @@ test("tool descriptions follow listening and request rules without changing tool
 
 test("contact tool metadata changes only descriptions for webhook and client schemas", () => {
   for (const type of ["client", "webhook"]) {
-    for (const name of ["callback_requested", "not_interested"]) {
+    for (const name of ["callback_requested", "information_requested", "not_interested"]) {
       const schema = { type: "object", description: "old schema", required: ["rowNumber"], properties: {
         rowNumber: { type: "integer", dynamic_variable: "rowNumber" },
+        email: { type: "string", description: "existing email", dynamic_variable: "email" },
         callbackTime: { type: "string", description: "old timing" },
         conversationSummary: { type: "string", description: "old summary" },
       } };
@@ -93,17 +94,46 @@ test("contact tool metadata changes only descriptions for webhook and client sch
       const before = structuredClone(tool), after: any = applyContactToolDescriptions(tool);
       assert.deepEqual(tool, before);
       const actual = type === "client" ? after.parameters : after.api_schema.request_body_schema;
-      assert.match(after.description, name === "callback_requested" ? /not a booked appointment/ : /end only the current call/);
-      if (name === "callback_requested") assert.match(actual.properties.callbackTime.description, /never permission to infer ASAP/);
-      else assert.match(actual.properties.conversationSummary.description, /CALL ENDED BY REQUEST/);
+      if (name === "callback_requested") {
+        assert.match(after.description, /not a booked appointment/);
+        assert.match(actual.properties.callbackTime.description, /requested timing words verbatim/);
+        assert.match(actual.properties.callbackTime.description, /Do not convert words to digits, add an unspoken AM or PM/);
+        assert.match(actual.properties.callbackTime.description, /uncertainty separately in conversationSummary for human review/);
+        assert.match(actual.properties.callbackTime.description, /never permission to infer ASAP/);
+        assert.doesNotMatch(actual.properties.callbackTime.description, /Ask once|AM\/PM unconfirmed|two p\.m\./i);
+        assert.match(actual.properties.conversationSummary.description, /Retain earlier supplied day, time zone, person or number context when a correction is partial/);
+        assert.match(actual.properties.conversationSummary.description, /Note unresolved timing for human review/);
+        assert.match(actual.properties.conversationSummary.description, /Do not leave out supplied context or uncertainty to save time/);
+      } else if (name === "information_requested") {
+        assert.match(after.description, /caller-confirmed or clearly supplied/);
+        assert.match(after.description, /execute this tool before acknowledging receipt/);
+        assert.match(after.description, /Confirm a stored address with the caller once/);
+        assert.match(after.description, /do not repeat an address they just clearly supplied/);
+        assert.match(after.description, /Do not claim receipt without a successful requestCaptured result/);
+        assert.match(actual.description, /a stored address alone is not confirmation/);
+        assert.match(actual.description, /not a sent or delivered email/);
+        assert.match(actual.properties.conversationSummary.description, /actual request, email-only preference/);
+        assert.match(actual.properties.conversationSummary.description, /receipt from a tool that did not return confirmation/);
+      } else {
+        assert.match(after.description, /end only the current call/);
+        assert.match(actual.properties.conversationSummary.description, /CALL ENDED BY REQUEST/);
+      }
+      assert.deepEqual(actual.properties.email, schema.properties.email);
       after.description = before.description;
       actual.description = schema.description;
       const changedProperty = name === "callback_requested" ? "callbackTime" : "conversationSummary";
       actual.properties[changedProperty].description = schema.properties[changedProperty].description;
+      if (name === "callback_requested") actual.properties.conversationSummary.description = schema.properties.conversationSummary.description;
       assert.deepEqual(after, before);
     }
   }
   assert.throws(() => applyContactToolDescriptions({ name: "other", type: "client" }), /required/);
+  assert.throws(() => applyContactToolDescriptions({
+    name: "information_requested", type: "client", parameters: { properties: { email: { type: "string" } } },
+  }), /Information request summary schema is required/);
+  assert.throws(() => applyContactToolDescriptions({
+    name: "callback_requested", type: "client", parameters: { properties: { callbackTime: { type: "string" } } },
+  }), /Callback request summary schema is required/);
 });
 
 test("HTTP tool success returns to business-result validation, not directly to a phone patch", () => {

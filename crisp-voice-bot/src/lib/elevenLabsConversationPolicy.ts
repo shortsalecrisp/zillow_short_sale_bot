@@ -70,14 +70,21 @@ export function applyContactToolDescriptions<T extends {
 }>(tool: T): T {
   const updated = structuredClone(tool);
   const schema = updated.type === "client" ? updated.parameters : updated.type === "webhook" ? updated.api_schema?.request_body_schema : null;
-  if (!schema?.properties || !["callback_requested", "not_interested"].includes(updated.name)) {
-    throw new Error("Verified callback or contact-outcome tool schema is required");
+  if (!schema?.properties || !["callback_requested", "information_requested", "not_interested"].includes(updated.name)) {
+    throw new Error("Verified callback, information, or contact-outcome tool schema is required");
   }
   if (updated.name === "callback_requested") {
     if (!schema.properties.callbackTime) throw new Error("Callback time schema is required");
+    if (!schema.properties.conversationSummary) throw new Error("Callback request summary schema is required");
     updated.description = "Record a callback request only when a live caller explicitly asks Yoni to call them, or clearly accepts a single callback offer. Busy, unavailable, a question, email-only, silence, or the caller planning to call us is not callback consent. Capture requested timing without inventing it. This records a request, not a booked appointment.";
     schema.description = "Record the live caller's explicitly requested callback using dynamic call metadata; do not schedule or guarantee an appointment.";
-    schema.properties.callbackTime.description = "Preserve the caller's requested day, time and time zone as spoken. Ask once about a missing AM/PM; if unresolved, preserve the time with AM/PM unconfirmed. Use ASAP only when the caller actually requested or agreed to that timing. Yoni being unavailable is never permission to infer ASAP or create a callback.";
+    schema.properties.callbackTime.description = "Copy the caller's requested timing words verbatim. Do not convert words to digits, add an unspoken AM or PM, resolve a relative day into a date, or expand or substitute a time zone. Leave missing details missing and note uncertainty separately in conversationSummary for human review. For corrections, copy the corrective words and retain earlier supplied context in conversationSummary. Use ASAP only when the caller actually requested or agreed to that timing. Yoni being unavailable is never permission to infer ASAP or create a callback.";
+    schema.properties.conversationSummary.description = "Preserve the caller's actual callback request, supplied timing and latest corrective words. Retain earlier supplied day, time zone, person or number context when a correction is partial. Note unresolved timing for human review without adding an unspoken AM or PM, date or time zone. Do not leave out supplied context or uncertainty to save time, and do not claim an appointment or delivery is confirmed.";
+  } else if (updated.name === "information_requested") {
+    if (!schema.properties.conversationSummary) throw new Error("Information request summary schema is required");
+    updated.description = "Record a live caller's request for information by email. Once their address is caller-confirmed or clearly supplied, execute this tool before acknowledging receipt. Confirm a stored address with the caller once; do not repeat an address they just clearly supplied. If it is missing or unclear, ask only for the address or missing part first. A verbal reassurance is not execution. Do not claim receipt without a successful requestCaptured result or promise sending or delivery. Information-only is not callback or live-transfer consent.";
+    schema.description = "Submit the caller's information request with the caller-confirmed or clearly supplied email address; a stored address alone is not confirmation. This captures a request, not a sent or delivered email. Do not substitute a spoken promise for the tool call.";
+    schema.properties.conversationSummary.description = "Preserve the caller's actual request, email-only preference, supplied address and any corrections or unanswered questions. Do not invent callback consent, a scheduled action, sending, delivery, or a receipt from a tool that did not return confirmation.";
   } else {
     if (!schema.properties.conversationSummary) throw new Error("Contact summary schema is required");
     updated.description = "Record a live caller's clear rejection, future-contact opt-out, or request to end only the current call using the base prompt's distinct outcome markers. Do not use for a recording, temporary busyness, self-handling alone, email-only, a question or unclear speech. The backend determines the outcome from attributable caller evidence; a tool call is not proof of a saved opt-out.";

@@ -645,6 +645,23 @@ function retainPreviouslySuppliedCallbackDay(previous: string, correction: strin
   return day ? `${day}, ${correction}` : correction;
 }
 
+function isCallbackTimingClarification(value: string): boolean {
+  const words = normalizeText(value)
+    .replace(/^(?:(?:actually|sorry|no|yes|ok|okay|i mean|i meant|make that|correction)[,;: ]+)*/, "")
+    .replace(/(?:[.! ]+)(?:thanks|thank you|goodbye|bye)[.! ]*$/, "")
+    .replace(/[,;.! ]*(?:and )?use (?:this|the same) number[.! ]*$/, "")
+    .split(/[^a-z0-9']+/).filter(Boolean);
+  // A standalone time correction may refine an existing request. Incidental
+  // meetings, showings or closing times are not callback instructions.
+  const timeWords = new Set(("today tomorrow tonight monday tuesday wednesday thursday friday saturday sunday " +
+    "this next morning afternoon evening noon midnight week weeks month months minute minutes hour hours day days " +
+    "at on in after before around about from to until and or not now instead rather than the a an same time zone " +
+    "am pm a m p eastern central mountain pacific est edt cst cdt mst mdt pst pdt " +
+    "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen " +
+    "eighteen nineteen twenty thirty forty fifty sixty half quarter past o'clock").split(" "));
+  return words.length > 0 && words.every(word => /^\d+$/.test(word) || timeWords.has(word));
+}
+
 function directCallbackRequestClause(value: string): string | undefined {
   let request: string | undefined;
   for (const match of value.matchAll(/(?:^|[.!?;,])\s*([^.!?;,]+)/g)) {
@@ -695,7 +712,7 @@ export function getExplicitCallbackConsent(conversation: ElevenLabsConversation)
         callbackTime: timing ?? "unspecified",
         ...(timing ? { timingText: agreedWords, timingSource: directRequest ? "caller" as const : "accepted_offer" as const } : {}),
       };
-    } else if (consent && timingAnswer && !item.message.includes("?")) {
+    } else if (consent && timingAnswer && !item.message.includes("?") && isCallbackTimingClarification(item.message)) {
       consent = { ...consent, callbackTime: retainPreviouslySuppliedCallbackDay(consent.callbackTime, timingAnswer),
         timingText: item.message, timingSource: "caller" };
     }
@@ -2007,7 +2024,8 @@ async function processPostCallOutcomeForConversation(
 
   if (hasToolCall(conversation, "callback_requested") &&
     (!hasLiveTransferRequest(conversation) || getExplicitCallbackConsent(conversation))) {
-    const callbackTime = getExplicitCallbackConsent(conversation)?.callbackTime ??
+    const callbackConsent = getExplicitCallbackConsent(conversation);
+    const callbackTime = callbackConsent?.callbackTime ??
       (isLiveTransferFallback(conversation) ? "asap" : (extractCallbackTime(conversation) ?? "unspecified"));
     const handoffReady = shouldTreatAsHandoffReadyCallback(conversation);
     const outcome = buildCallbackResponseStatus(callbackTime, handoffReady);
@@ -2016,6 +2034,13 @@ async function processPostCallOutcomeForConversation(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       ...(hasLiveTransferRequest(conversation) ? {
+        callResult: "callback_requested",
+        responseStatus: outcome,
+        callbackRequested: "yes",
+        callbackTime,
+      } : callbackConsent?.timingSource === "caller" && callbackTime !== "unspecified" ? {
+        // Final caller evidence can correct a model-supplied live tool time.
+        // Missing evidence must not erase the earlier request's timing.
         callResult: "callback_requested",
         responseStatus: outcome,
         callbackRequested: "yes",

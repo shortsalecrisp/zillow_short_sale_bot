@@ -20,7 +20,8 @@ export function buildElevenLabsCallbackRequestResponse(callbackTime: string) {
     nextAction:
       "When no question or correction is pending, acknowledge once: Thanks. I've received your callback request. " +
       "Only if the caller asks whether it is booked or confirmed, explain that the request was received but no appointment is confirmed. " +
-      "If mentioning callbackTime, describe it only as the caller's requested timing. Preserve the supplied day, time, and time zone; do not infer AM/PM or a calendar date. " +
+      "Keep the acknowledgment time-free. Do not repeat, reinterpret, or complete callbackTime from this tool result; it is not independently verified caller wording. " +
+      "If the caller asks what timing you heard, quote their own words from the conversation without adding missing details. " +
       "ASAP is a timing request, not a promised response time. Do not say the callback is set up, booked, or scheduled, or promise that Yoni will call. " +
       requestContinuation,
   } as const;
@@ -37,6 +38,7 @@ export function buildElevenLabsInformationRequestResponse(email: string) {
     durablePersistenceConfirmed: false,
     emailSent: false,
     nextAction:
+      "A receipt acknowledgment requires information_requested to have returned requestCaptured: true for this request. Missing or failed tool results are not confirmation, and a verbal promise is not tool execution. " +
       "When no question or correction is pending, acknowledge once: Thanks. I've received your request for information. " +
       "Only if the caller asks whether it was sent, explain that the request was received but sending or delivery is not confirmed. " +
       "Do not promise that Yoni will send it, say it was sent, or imply delivery. An information request is not permission for a callback or transfer. " +

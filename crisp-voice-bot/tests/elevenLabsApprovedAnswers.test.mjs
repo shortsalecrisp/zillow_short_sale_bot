@@ -54,10 +54,11 @@ test('question-first policy removes mandatory repeated handoff pitches', () => {
 });
 
 test('reviewed conversation contracts retain exact protected section boundaries', () => {
-  // Transfer and opt-out sections were intentionally revised by the listening
-  // release. Voicemail and receptionist/screening section bytes remain unchanged.
+  // The callback repair changes only its own protected range. The separate
+  // transfer, opt-out, voicemail and receptionist guards retain their prior bytes.
   const guards = [
-    ['Transfer rule:', 'Voicemail and no-answer:', '988ec6d21cc9594d34a387527e62cf7304407bbd12b4184cae80d2a743770b24'],
+    ['Transfer rule:', 'Callback flow:', '0177996bc5a4bd602d0fbb3ade84b0485b5873127be63c527d5db98e6d9347c1'],
+    ['Callback flow:', 'Voicemail and no-answer:', 'd61293165ef5324f3ddfb284d44c2c34d3c473146e25ac99b9ee60a906e4a92b'],
     ['Voicemail and no-answer:', null, '7607352d5d23ef01dc8466497c49a1297a0e06a33c4ff502945aff90f8f9afd6'],
     ['If a receptionist, office assistant,', 'Main conversation:', '00a96ef89909b44e2696e0141480adc2f720bffafbf343bb8c023529436ec2a6'],
     ['If a live person says "do not call"', 'If they say they are not worried about it', '7a6069399dc217299ee89829278d7cb260eca1368e9b96b806f934ea98d5acee'],

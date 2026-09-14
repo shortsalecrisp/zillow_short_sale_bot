@@ -45,13 +45,24 @@ caller without callback permission can be retained as
 notification or authorizing an automated retry. These changes do not rewrite
 historical CRM records or prove every unrelated callback route is consent-gated.
 
+For an ordinary callback tool result, final attributable caller timing can now
+correct the earlier model-supplied Sheet time and its displayed outcome. The
+callback result and request flag are reconciled too; existing callback outcome
+handling clears automated retry eligibility, but does not book the requested call.
+Later incidental meeting, showing or closing times cannot replace the request.
+This does not convert words, infer AM/PM or resolve a date. Missing caller timing
+leaves the earlier value untouched; it is
+not evidence that the earlier value was independently verified. Active provider
+reads in the private tests were empty, so no reliable live-transcript validation
+of the initial callback tool argument is claimed.
+
 ## Configuration And Release Safety
 
 `syncElevenLabsAgent.ts` starts from the current provider configuration. It changes
 only the prompt and the narrowly defined conversation policies. It does not
 reconstruct model, TTS, phone bindings or platform settings. The end-call and
 skip-turn descriptions are aligned with the prompt without changing their tool
-parameters. Two newly cloned callback/contact-outcome tools replace only conflicting
+parameters. Three newly cloned callback/contact-outcome/information tools replace only conflicting
 descriptions; the existing shared resources and webhook transport remain unchanged.
 
 Default execution is a dry run. An apply requires all of:
@@ -85,3 +96,11 @@ the combined script, tool-description and acknowledgment changes, not each chang
 as an isolated causal effect. Its cap includes the original usage; any unrun cell
 at the remaining-headroom gate stays unobserved. Audio tests use Eryn at the existing
 0.95 speed and do not establish a preferred voice or calling time.
+
+The five executed addendum sessions were not approved for production. Callback
+timing gained an unconfirmed PM, and an email-only case claimed handling without
+calling its capture tool. A separate six-cell repair round retains these failures
+and archives the tested source before changes. Its own additional limits are
+15,000 included credits and 12 provider minutes, not a retroactive increase to the
+closed original-plus-addendum pool. Root selected these conservative numeric caps
+under the user's general authorization for additional private tests.

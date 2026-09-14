@@ -7,6 +7,7 @@ import {
 } from "../src/lib/elevenLabsRequestResponse";
 
 test("callback receipts preserve requested timing without confirming an appointment", () => {
+  const action = buildElevenLabsCallbackRequestResponse("").nextAction;
   for (const time of ["tomorrow at two Pacific", "tomorrow at two PM Central", "asap", "unspecified", ""]) {
     const response = buildElevenLabsCallbackRequestResponse(time);
     assert.equal(response.callbackTime, time);
@@ -17,9 +18,13 @@ test("callback receipts preserve requested timing without confirming an appointm
     assert.equal(response.appointmentConfirmed, false);
     assert.match(response.nextAction, /acknowledge once: Thanks\. I've received your callback request\. Only if the caller asks/);
     assert.match(response.nextAction, /request was received but no appointment is confirmed/);
-    assert.match(response.nextAction, /do not infer AM\/PM or a calendar date/);
+    assert.equal(response.nextAction, action, "Spoken instructions must not interpolate unverified tool timing");
+    assert.match(response.nextAction, /Keep the acknowledgment time-free/);
+    assert.match(response.nextAction, /Do not repeat, reinterpret, or complete callbackTime from this tool result/);
+    assert.match(response.nextAction, /not independently verified caller wording/);
+    assert.match(response.nextAction, /quote their own words from the conversation without adding missing details/);
     assert.match(response.nextAction, /ASAP is a timing request, not a promised response time/);
-    assert.doesNotMatch(response.nextAction, /I set (?:that|up)|I'll have (?:him|Yoni) (?:reach|call)/);
+    assert.doesNotMatch(response.nextAction, /I set (?:that|up)|I'll have (?:him|Yoni) (?:reach|call)|If mentioning callbackTime/);
   }
 });
 
@@ -31,6 +36,9 @@ test("information receipts preserve the address without claiming sending, delive
   assert.equal(response.persistenceStatus, "queued");
   assert.equal(response.durablePersistenceConfirmed, false);
   assert.equal(response.emailSent, false);
+  assert.match(response.nextAction, /requires information_requested to have returned requestCaptured: true for this request/);
+  assert.match(response.nextAction, /Missing or failed tool results are not confirmation/);
+  assert.match(response.nextAction, /a verbal promise is not tool execution/);
   assert.match(response.nextAction, /acknowledge once: Thanks\. I've received your request for information\. Only if the caller asks/);
   assert.match(response.nextAction, /request was received but sending or delivery is not confirmed/);
   assert.match(response.nextAction, /information request is not permission for a callback or transfer/);
