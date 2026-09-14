@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import axios from "axios";
 import { looksLikeCallEndingRequest, looksLikeDoNotCall } from "../src/lib/elevenLabsDoNotCall";
+import { buildElevenLabsContactOutcomeResponse } from "../src/lib/elevenLabsRequestResponse";
 
 process.env.BASE_URL = "https://example.com";
 process.env.TELNYX_API_KEY = "test";
@@ -14,6 +15,8 @@ process.env.GOOGLE_APPS_SCRIPT_TOKEN = "";
 process.env.GOOGLE_SHEETS_SPREADSHEET_ID = "synthetic-test-sheet";
 process.env.GOOGLE_SHEETS_TAB_NAME = "SyntheticTestLeads";
 process.env.ELEVENLABS_TOOL_SECRET = "";
+process.env.ELEVENLABS_API_KEY = "test";
+process.env.ELEVENLABS_BASE_URL = "https://elevenlabs.invalid/contact-outcome-test";
 process.env.CALL_TRANSCRIPT_EMAILS_ENABLED = "false";
 process.env.SMTP_HOST = "";
 process.env.SMTP_USER = "";
@@ -25,16 +28,17 @@ const conversations = new Map<string, unknown>();
 const receivedGets: Array<{ id: string; timeout: number | undefined }> = [];
 let receiptMode: "confirmed" | "unknown" | "failed" = "confirmed";
 let refillCount = 0;
+const unexpectedRequests: string[] = [];
 axios.defaults.adapter = async (request) => {
   let data: unknown;
-  if (request.method === "get") {
+  if (request.method === "get" && request.baseURL === "https://elevenlabs.invalid/contact-outcome-test"
+    && /^\/v1\/convai\/conversations\/[a-zA-Z0-9_-]+$/.test(request.url ?? "")) {
     const id = request.url!.split("/").pop()!;
     receivedGets.push({ id, timeout: request.timeout });
     if (id === "test-live-evidence-timeout") throw new Error("Synthetic evidence timeout");
     if (!conversations.has(id)) throw new Error("Local fixture has no conversation evidence");
     data = conversations.get(id);
-  } else {
-    assert.equal(request.url, "https://sheet.invalid/test", "Every outbound request must remain in the local adapter");
+  } else if (request.method === "post" && request.url === "https://sheet.invalid/test") {
     const body = JSON.parse(request.data);
     if (body.action === "process_voice_queue") {
       refillCount += 1;
@@ -49,9 +53,14 @@ axios.defaults.adapter = async (request) => {
           "AL:callbackRequested", "AM:callbackTime", "AJ:liveTransferRequested", "AK:liveTransferCompleted"],
       };
     }
+  } else {
+    const target = `${request.method} ${request.baseURL ?? ""}${request.url ?? ""}`;
+    unexpectedRequests.push(target);
+    throw new Error("Unexpected request blocked by local test adapter: " + target);
   }
   return { data, status: 200, statusText: "OK", headers: {}, config: request };
 };
+after(() => assert.deepEqual(unexpectedRequests, [], "A caught evidence failure must not hide an unexpected URL"));
 const load = () => import("../src/lib/elevenLabsPostCall");
 
 function conversation(messages: string[], summary = "The caller asked to stop calling and requested no more calls.") {
@@ -395,10 +404,13 @@ test("post-call stop writes terminal status before generic tool fallback and doe
 async function invokeNotInterested(body: Record<string, unknown>) {
   const { default: router } = await import("../src/routes/elevenLabs");
   const layer = router.stack.find((item: { route?: { path?: string } }) => item.route?.path === "/tool/not-interested");
+  assert.ok(layer?.route, "Expected actual not-interested route handler");
+  let status: number | undefined;
   let response: Record<string, unknown> | undefined;
   const req = { body, header: () => undefined };
-  const res = { status: () => res, json: (value: Record<string, unknown>) => { response = value; return res; } };
+  const res = { status: (value: number) => { status = value; return res; }, json: (value: Record<string, unknown>) => { response = value; return res; } };
   await layer.route.stack[0].handle(req, res, (error?: unknown) => { if (error) throw error; });
+  assert.equal(status, 200);
   return response!;
 }
 
@@ -408,20 +420,24 @@ test("not-interested route uses actual DNC first and never promises unconfirmed 
   const payload = { rowNumber: 123, callAttemptNumber: 1, agentName: "Test Caller", phone: "+12025550123",
     listingAddress: "123 Fictional Street", conversationId: id,
     conversationSummary: "DEFERRED CONTACT. CALL ENDED BY REQUEST: caller asked to end the current call only." };
-  receiptMode = "confirmed";
-  let response = await invokeNotInterested(payload);
-  assert.equal(response.intent, "do_not_call");
-  assert.equal(response.persistenceStatus, "confirmed");
-  assert.equal(receivedWrites.at(-1)!.callResult, response.intent);
-  assert.equal(receivedWrites.at(-1)!.leadStatusCode, "R");
-  assert.match(String(response.nextAction), /Understood\. Goodbye\./);
-  assert.doesNotMatch(String(response.nextAction), /won't call|will not call|removed you|you're removed/i);
-  receiptMode = "unknown";
-  response = await invokeNotInterested(payload);
-  assert.equal(response.ok, false);
-  assert.equal(response.requiresReview, true);
-  assert.equal(response.persistenceStatus, "unconfirmed");
-  receiptMode = "confirmed";
+  try {
+    for (const mode of ["confirmed", "unknown", "failed"] as const) {
+      receiptMode = mode;
+      const before = receivedWrites.length;
+      const response = await invokeNotInterested(payload);
+      assert.deepEqual(response, buildElevenLabsContactOutcomeResponse("do_not_call", mode === "confirmed" ? "confirmed" : "unconfirmed"));
+      assert.equal(receivedWrites.length, before + 1, "Unconfirmed or failed persistence must not retry");
+      assert.equal(receivedWrites.at(-1)!.callResult, response.intent);
+      assert.equal(receivedWrites.at(-1)!.leadStatusCode, "R");
+      assert.match(String(response.nextAction), /contact-outcome receipt, not permission to end the call/);
+      assert.match(String(response.nextAction), /question or correction is current, address it/);
+      assert.match(String(response.nextAction), /still current, use the guarded ending workflow; do not ask them to repeat it/);
+      assert.match(String(response.nextAction), /Do not manufacture a goodbye, call end_call directly, retry this tool/);
+      assert.doesNotMatch(String(response.nextAction), /won't call|will not call|removed you|you're removed|Say exactly: Understood\. Goodbye|Then immediately call end_call/i);
+    }
+  } finally {
+    receiptMode = "confirmed";
+  }
 });
 
 test("not-interested route ignores invented DNC tool summary and writes current-call result without lead rejection", async () => {
@@ -430,18 +446,28 @@ test("not-interested route ignores invented DNC tool summary and writes current-
   const response = await invokeNotInterested({ rowNumber: 123, callAttemptNumber: 1, conversationId: id,
     agentName: "Test Caller", phone: "+12025550123", listingAddress: "123 Fictional Street",
     conversationSummary: "The caller says do not call again." });
-  assert.equal(response.intent, "call_ended_by_request");
+  assert.deepEqual(response, buildElevenLabsContactOutcomeResponse("call_ended_by_request", "confirmed"));
   assert.equal(receivedWrites.at(-1)!.leadStatusCode, undefined);
   assert.match(String(receivedWrites.at(-1)!.voiceNotes), /^CALL ENDED BY REQUEST:/);
 });
 
 test("not-interested route with unavailable evidence records terminal review instead of trusting the summary", async () => {
-  const response = await invokeNotInterested({ rowNumber: 123, callAttemptNumber: 1, conversationId: "missing-evidence",
-    agentName: "Test Caller", phone: "+12025550123", listingAddress: "123 Fictional Street",
-    conversationSummary: "Do not call again." });
-  assert.equal(response.intent, "contact_request_review");
-  assert.equal(response.requiresReview, true);
-  assert.equal(receivedWrites.at(-1)!.leadStatusCode, undefined);
+  try {
+    for (const mode of ["confirmed", "unknown"] as const) {
+      receiptMode = mode;
+      const before = receivedWrites.length;
+      const response = await invokeNotInterested({ rowNumber: 123, callAttemptNumber: 1, conversationId: "missing-evidence",
+        agentName: "Test Caller", phone: "+12025550123", listingAddress: "123 Fictional Street",
+        conversationSummary: "Do not call again." });
+      assert.deepEqual(response, buildElevenLabsContactOutcomeResponse("contact_request_review", mode === "confirmed" ? "confirmed" : "unconfirmed"));
+      assert.equal(response.requiresReview, true, "Confirmed persistence does not resolve missing caller evidence");
+      assert.equal(receivedWrites.length, before + 1);
+      assert.equal(receivedWrites.at(-1)!.leadStatusCode, undefined);
+      assert.match(String(response.nextAction), /unconfirmed or review-needed disposition is not evidence that the caller declined the service/);
+    }
+  } finally {
+    receiptMode = "confirmed";
+  }
 });
 
 test("live evidence GET is bounded at 2500ms without retry; general post-call retrieval retains 15 seconds", async () => {

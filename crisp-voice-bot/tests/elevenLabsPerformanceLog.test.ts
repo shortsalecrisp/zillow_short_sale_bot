@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { CallMetadata } from "../src/types";
 
 process.env.BASE_URL = "https://example.com";
 process.env.TELNYX_API_KEY = "test";
@@ -8,7 +9,7 @@ process.env.TELNYX_CONNECTION_ID = "test";
 process.env.TELNYX_OUTBOUND_VOICE_PROFILE_ID = "test";
 process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 
-test("voice performance log stores codex-readable A/B metrics in one cell block", async () => {
+test("voice performance log stores codex-readable cohort metrics in one cell block", async () => {
   const { buildVoicePerformanceLog, VOICE_PERFORMANCE_LOG_MARKER } = await import(
     "../src/lib/elevenLabsPerformanceLog"
   );
@@ -34,10 +35,16 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
       openerVariant: "direct_reason",
       openerVariantLabel: "Plain handling question",
       openerScript: "Are you handling the short sale paperwork and lender calls yourself?",
+      initialOpeningPolicy: "listen_first_uniform_v1",
+      declaredConversationPolicyVersion: "declared-test-policy",
       scheduledWindow: "late_morning",
       agentTimeZone: "America/New_York",
     },
     conversation: {
+      conversation_id: "conv_test",
+      agent_id: "agent_actualtest",
+      version_id: "agtvrsn_actualtest",
+      branch_id: "agtbrch_actualtest",
       status: "done",
       metadata: {
         termination_reason: "Client disconnected: 1000",
@@ -77,6 +84,14 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   assert.equal(parsed.call.openerVariant, "direct_reason");
   assert.equal(parsed.call.openerVariantLabel, "Plain handling question");
   assert.match(parsed.call.openerScript, /short sale paperwork and lender calls/);
+  assert.equal(parsed.call.initialOpeningPolicy, "listen_first_uniform_v1");
+  assert.equal(parsed.call.declaredConversationPolicyVersion, "declared-test-policy");
+  assert.deepEqual(parsed.providerIdentity, {
+    source: "final_conversation_receipt",
+    agentId: "agent_actualtest",
+    versionId: "agtvrsn_actualtest",
+    branchId: "agtbrch_actualtest",
+  });
   assert.equal(parsed.call.scheduledWindow, "late_morning");
   assert.equal(parsed.call.agentTimeZone, "America/New_York");
   assert.equal(parsed.metrics.durationSecs, 18);
@@ -102,7 +117,96 @@ test("voice performance log stores codex-readable A/B metrics in one cell block"
   assert.match(parsed.codexInstructions, /previous single-voice Emmy calls/i);
   assert.match(parsed.codexInstructions, /Pro prove-it cohort/i);
   assert.match(parsed.codexInstructions, /transcript\/playback-verified handoff-ready leads/i);
+  assert.match(parsed.codexInstructions, /First stratify by call.initialOpeningPolicy, call.declaredConversationPolicyVersion/);
+  assert.match(parsed.codexInstructions, /providerIdentity.agentId, versionId and branchId/);
+  assert.match(parsed.codexInstructions, /post-intro continuation assignment, not proof of delivery/);
+  assert.match(parsed.codexInstructions, /uniform, not an initial-intro A\/B test/);
+  assert.match(parsed.codexInstructions, /default row-parity assignments pair Eryn\/direct_reason and Finch\/benefit_hook/);
+  assert.match(parsed.codexInstructions, /joint arms and do not attribute their differences independently/);
+  assert.match(parsed.abTestScope.analysisRule, /Missing or null historical values are unknown/);
+  assert.match(parsed.abTestScope.analysisRule, /not proof of audible delivery/);
   assert.match(parsed.transcript, /Are you a chatbot/);
+});
+
+async function measurementLog(input: { metadata?: Partial<CallMetadata>; conversation?: Record<string, unknown> } = {}) {
+  const { buildVoicePerformanceLog, VOICE_PERFORMANCE_LOG_MARKER } = await import("../src/lib/elevenLabsPerformanceLog");
+  return JSON.parse(buildVoicePerformanceLog({
+    conversationId: "conv_measurement",
+    outcome: "Synthetic measurement only",
+    summary: "No delivered continuation is asserted.",
+    transcript: "",
+    metadata: {
+      rowNumber: 123, fullName: "Synthetic Caller", callAttemptNumber: 1,
+      listingAddress: "123 Fictional Street", requestedPhone: "+12025550123", dialedPhone: "+12025550123",
+      testMode: true, ...input.metadata,
+    },
+    conversation: { conversation_id: "conv_measurement", status: "done", ...input.conversation },
+  }).replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""));
+}
+
+for (const status of ["done", "failed"]) {
+  test(`provider identity comes from a matching final ${status} receipt, separately from declarations`, async () => {
+    const parsed = await measurementLog({
+      metadata: { initialOpeningPolicy: "historical-opening-policy", declaredConversationPolicyVersion: "declared-code-label" },
+      conversation: {
+        status, agent_id: "agent_receipt", version_id: "agtvrsn_receipt", branch_id: "agtbrch_receipt",
+        conversation_initiation_client_data: { dynamic_variables: {
+          agent_id: "agent_not_the_receipt", version_id: "agtvrsn_not_the_receipt", branch_id: "agtbrch_not_the_receipt",
+        } },
+      },
+    });
+    assert.equal(parsed.call.declaredConversationPolicyVersion, "declared-code-label");
+    assert.equal(parsed.call.initialOpeningPolicy, "historical-opening-policy");
+    assert.deepEqual(parsed.providerIdentity, {
+      source: "final_conversation_receipt", agentId: "agent_receipt", versionId: "agtvrsn_receipt", branchId: "agtbrch_receipt",
+    });
+  });
+}
+
+test("provider identity stays unknown for an unfinished, missing or mismatched final receipt", async () => {
+  for (const receipt of [
+    { status: "processing" }, { status: undefined }, { conversation_id: undefined }, { conversation_id: "conv_other" },
+  ]) {
+    const parsed = await measurementLog({ conversation: {
+      agent_id: "agent_notfinal", version_id: "agtvrsn_notfinal", branch_id: "agtbrch_notfinal", ...receipt,
+    } });
+    assert.deepEqual(parsed.providerIdentity, { source: null, agentId: null, versionId: null, branchId: null });
+  }
+});
+
+test("historical missing declarations and provider versions remain unknown without current-policy backfill", async () => {
+  const parsed = await measurementLog({ conversation: { agent_id: "agent_legacy" } });
+  assert.equal(parsed.call.initialOpeningPolicy, null);
+  assert.equal(parsed.call.declaredConversationPolicyVersion, null);
+  assert.deepEqual(parsed.providerIdentity, {
+    source: "final_conversation_receipt", agentId: "agent_legacy", versionId: null, branchId: null,
+  });
+  for (const absent of [undefined, null, "", "   ", 7, {}, []]) {
+    const result = await measurementLog({ conversation: { agent_id: absent, version_id: absent, branch_id: absent } });
+    assert.equal(result.providerIdentity.agentId, null);
+    assert.equal(result.providerIdentity.versionId, null);
+    assert.equal(result.providerIdentity.branchId, null);
+  }
+  const blank = await measurementLog({ metadata: { initialOpeningPolicy: " ", declaredConversationPolicyVersion: "" } });
+  assert.equal(blank.call.initialOpeningPolicy, null);
+  assert.equal(blank.call.declaredConversationPolicyVersion, null);
+});
+
+test("post-intro assignment alone does not establish a delivered continuation", async () => {
+  for (const openerVariant of ["direct_reason", "benefit_hook"]) {
+    const parsed = await measurementLog({
+      metadata: { openerVariant, initialOpeningPolicy: "listen_first_uniform_v1" },
+      conversation: { transcript: [
+        { role: "user", message: "Hello.", time_in_call_secs: 0 },
+        { role: "agent", message: "Hi, this is Maya with Crisp Short Sales. I'm calling about your short sale listing.", time_in_call_secs: 1 },
+      ] },
+    });
+    assert.equal(parsed.call.openerVariant, openerVariant);
+    assert.equal(parsed.call.initialOpeningPolicy, "listen_first_uniform_v1");
+    assert.equal(parsed.flags.reasonDelivered, true);
+    assert.equal(parsed.flags.openingQuestionDelivered, false);
+    assert.equal(parsed.metrics.openingQuestionAtSecs, null);
+  }
 });
 
 test("voice performance log does not count confused live-transfer tool fire as clear consent", async () => {

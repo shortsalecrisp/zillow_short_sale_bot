@@ -42,21 +42,30 @@ export function applyConversationListeningPolicy<T extends AgentPolicy>(agent: T
   return updated;
 }
 
-export function applyConversationToolPolicy<T extends AgentPolicy>(agent: T): T {
+export function applyConversationToolPolicy<T extends AgentPolicy>(agent: T, options: { guardedEnding?: boolean } = {}): T {
   const updated = structuredClone(agent);
   const builtins = updated.conversation_config.agent.prompt?.built_in_tools;
-  if (!builtins?.end_call || !builtins.skip_turn) throw new Error("Verified end-call and skip-turn tools are required");
-  builtins.end_call.description = [
+  if (!builtins?.skip_turn || (!builtins.end_call && !options.guardedEnding)) throw new Error("Verified end-call and skip-turn tools are required");
+  if (builtins.end_call) builtins.end_call.description = [
     "End the current call after a NEW clear live-caller goodbye, rejection, or request to stop or end, following the base contact-preference policy; also use the existing completed-voicemail ending.",
     "A callback_requested or information_requested tool success is not permission to end. After its brief receipt acknowledgment, wait for a NEW caller turn.",
     "Thanks, okay, sounds good, a repeated callback time, an email-only preference, a correction, a question, or silence alone is not a farewell. Never end over an unanswered question or changed preference.",
     "Honor explicit opt-outs and current-call stop requests promptly. Do not prolong the pitch. Use a brief neutral goodbye without promising future contact or claiming suppression was saved unless confirmed.",
   ].join(" ");
+  if (options.guardedEnding) {
+    builtins.end_call = null;
+    builtins.transfer_to_number = null;
+  }
   builtins.skip_turn.description = [
     "Wait silently instead of speaking for placeholder silence, background noise, static, breathing, a recording still playing, or an explicit instruction to hold or stay on the line while the phone reaches a person.",
     "Spoken automated hold or connecting words are still a reason to wait. Do not treat them as a live greeting or pitch over them. Continue waiting until a new live person answers or a clear voicemail greeting begins.",
     "Do not use this instead of answering an automated screener's name-and-reason request: speak the exact base-prompt screener sentence first, then wait.",
-    "Do not skip a live person's question, correction, request to stop, or completed greeting. Follow the base prompt for that turn.",
+    "Do not skip a NEW or still-unanswered live person's question, correction, request to stop, or completed greeting. Follow the base prompt for that turn.",
+    ...(options.guardedEnding ? [
+      "Once the required brief answer or receipt acknowledgment has already been given, wait silently when no NEW or still-unanswered caller question, correction, or request remains.",
+      "After a denied or failed ending check, do not replay the already-handled ending request: handle any genuinely pending caller turn, otherwise wait silently. A tool result or placeholder is not a new caller turn.",
+      "Do not repeat an answer or acknowledgment, announce an ending-check failure, or invent a generic response while waiting. Handle any genuinely new unanswered caller turn before waiting again.",
+    ] : []),
   ].join(" ");
   return updated;
 }
@@ -176,8 +185,8 @@ export function applyConversationConsentPolicy<T extends AgentPolicy>(agent: T):
     "Only a clear yes to that callback offer allows asking their preferred time. Thanks, a question, silence, or a correction is not consent. Use callback_requested only after a clear callback request; do not assume asap.",
     "If they ask a question, answer it briefly and wait. Do not create a callback merely because you answered a question.",
     "Respect an email-only request, self-initiated future contact, rejection, opt-out, or current-call-only ending using the base prompt rules. Do not offer another live transfer.",
-    "After callback_requested confirms the request was recorded, say: \"I've noted your callback request. Thanks.\" Do not claim an appointment, delivery, or a guaranteed time. On an error or unconfirmed record, say you could not confirm the request.",
-    "Listen for corrections before ending. Never ask a question and call end_call in the same turn.",
+    "After callback_requested returns requestCaptured true for this request, say only: \"Thanks. I've received your callback request.\" A generic success or queued result is not a booked appointment or delivery. On an error or unconfirmed record, say you could not confirm the request.",
+    "Then wait for a NEW caller turn without an anything-else question. A repeated time, correction, callback-only preference, thanks or tool completion alone is not permission to end. Use the same guarded-ending rule as the main conversation.",
   ].join("\n");
   return updated;
 }

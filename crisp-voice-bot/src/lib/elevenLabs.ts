@@ -2,6 +2,7 @@ import axios, { AxiosError, type AxiosInstance } from "axios";
 import { randomUUID } from "node:crypto";
 import { config } from "./config";
 import { rememberElevenLabsCallContext } from "./elevenLabsCallContext";
+import { VOICE_CONVERSATION_POLICY_VERSION } from "./elevenLabsConversationPolicy";
 import { buildElevenLabsOpenerVariant } from "./elevenLabsOpenerVariant";
 import { scheduleElevenLabsPostCallFallback } from "./elevenLabsPostCall";
 import {
@@ -22,6 +23,7 @@ const elevenLabsClient = axios.create({
 });
 
 const CALL_START_RECEIPT_ATTEMPTS = 3;
+export const INITIAL_OPENING_POLICY = "listen_first_uniform_v1";
 const CALL_START_RECEIPT_DELAY_MS = 2_000;
 const CALL_START_RETRY_JITTER_MIN_MS = 1_500;
 const CALL_START_RETRY_JITTER_MAX_MS = 3_000;
@@ -412,6 +414,10 @@ export function buildElevenLabsOutboundCallBody(params: {
     openerVariant: openerVariant.key,
     openerVariantLabel: openerVariant.label,
     openerScript: openerVariant.script,
+    initialOpeningPolicy: params.metadata.initialOpeningPolicy ?? INITIAL_OPENING_POLICY,
+    declaredConversationPolicyVersion: params.metadata.declaredConversationPolicyVersion ?? VOICE_CONVERSATION_POLICY_VERSION,
+    terminal_permission: false,
+    terminal_decision: "reset",
     voicemailMessage: buildVoicemailMessage(streetAddress, params.metadata.callAttemptNumber, voiceVariant.assistantName),
     testMode: params.metadata.testMode,
     liveTransferNumber: config.liveTransferNumber,
@@ -447,6 +453,8 @@ export async function placeElevenLabsOutboundCall(params: {
     voiceVariant: voiceVariant.key,
     voiceName: voiceVariant.voiceName,
     voiceId: voiceVariant.voiceId,
+    initialOpeningPolicy: INITIAL_OPENING_POLICY,
+    declaredConversationPolicyVersion: VOICE_CONVERSATION_POLICY_VERSION,
   };
   const openerVariant = resolveElevenLabsOpener(metadata, voiceVariant.assistantName);
   metadata.openerVariant = openerVariant.key;

@@ -46,6 +46,10 @@ type ElevenLabsTranscriptItem = {
 };
 
 type ElevenLabsConversation = {
+  conversation_id?: unknown;
+  agent_id?: unknown;
+  version_id?: unknown;
+  branch_id?: unknown;
   status?: string;
   has_audio?: boolean;
   has_user_audio?: boolean;
@@ -1648,6 +1652,8 @@ function metadataFromConversation(conversation: ElevenLabsConversation): CallMet
     openerVariant: readDynamicString(dynamicVariables, "openerVariant"),
     openerVariantLabel: readDynamicString(dynamicVariables, "openerVariantLabel"),
     openerScript: readDynamicString(dynamicVariables, "openerScript"),
+    initialOpeningPolicy: readDynamicString(dynamicVariables, "initialOpeningPolicy"),
+    declaredConversationPolicyVersion: readDynamicString(dynamicVariables, "declaredConversationPolicyVersion"),
   };
 }
 

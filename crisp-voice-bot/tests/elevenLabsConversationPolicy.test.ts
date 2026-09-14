@@ -78,6 +78,23 @@ test("tool descriptions follow listening and request rules without changing tool
   assert.throws(() => applyConversationToolPolicy(before), /required/);
 });
 
+test("guarded waiting distinguishes new caller turns from already-handled turns and failed checks", () => {
+  const before = baseline(), copy = structuredClone(before);
+  const after = applyConversationToolPolicy(before, { guardedEnding: true });
+  const tools = after.conversation_config.agent.prompt.built_in_tools;
+  assert.deepEqual(before, copy);
+  assert.equal(tools.end_call, null);
+  assert.equal(tools.transfer_to_number, null);
+  assert.match(tools.skip_turn.description, /NEW or still-unanswered/);
+  assert.match(tools.skip_turn.description, /required brief answer or receipt acknowledgment has already been given/);
+  assert.match(tools.skip_turn.description, /denied or failed ending check/);
+  assert.match(tools.skip_turn.description, /handle any genuinely pending caller turn, otherwise wait silently/);
+  assert.match(tools.skip_turn.description, /A tool result or placeholder is not a new caller turn/);
+  assert.match(tools.skip_turn.description, /Do not repeat an answer or acknowledgment/);
+  assert.equal(tools.skip_turn.disable_interruptions, before.conversation_config.agent.prompt.built_in_tools.skip_turn.disable_interruptions);
+  assert.doesNotMatch(applyConversationToolPolicy(before).conversation_config.agent.prompt.built_in_tools.skip_turn.description, /denied or failed ending check/);
+});
+
 test("contact tool metadata changes only descriptions for webhook and client schemas", () => {
   for (const type of ["client", "webhook"]) {
     for (const name of ["callback_requested", "information_requested", "not_interested"]) {

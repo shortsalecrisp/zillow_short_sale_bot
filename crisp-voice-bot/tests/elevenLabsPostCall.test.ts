@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
+import axios from "axios";
 
 process.env.BASE_URL = "https://example.com";
 process.env.TELNYX_API_KEY = "test";
@@ -7,6 +8,46 @@ process.env.TELNYX_CALLER_ID = "+12175550100";
 process.env.TELNYX_CONNECTION_ID = "test";
 process.env.TELNYX_OUTBOUND_VOICE_PROFILE_ID = "test";
 process.env.TEST_DESTINATION_NUMBER = "+12175550101";
+process.env.ELEVENLABS_API_KEY = "synthetic-test-key";
+process.env.ELEVENLABS_BASE_URL = "https://elevenlabs.invalid/measurement-post-call-test";
+process.env.GOOGLE_APPS_SCRIPT_WEBHOOK_URL = "https://sheet.invalid/measurement-post-call-test";
+process.env.GOOGLE_APPS_SCRIPT_TOKEN = "";
+process.env.GOOGLE_SHEETS_SPREADSHEET_ID = "synthetic-measurement-sheet";
+process.env.GOOGLE_SHEETS_TAB_NAME = "SyntheticMeasurementLeads";
+process.env.CALL_TRANSCRIPT_EMAILS_ENABLED = "false";
+process.env.SMTP_HOST = "";
+process.env.SMTP_USER = "";
+process.env.SMTP_PASS = "";
+process.env.ALERT_EMAIL_TO = "";
+
+const originalAdapter = axios.defaults.adapter;
+const measurementConversations = new Map<string, Record<string, unknown>>();
+const measurementWrites: Array<Record<string, unknown>> = [];
+const unexpectedRequests: string[] = [];
+axios.defaults.adapter = async (request) => {
+  if (request.method === "get" && request.baseURL === "https://elevenlabs.invalid/measurement-post-call-test") {
+    const match = request.url?.match(/^\/v1\/convai\/conversations\/(conv_measurement_[a-z_]+)$/);
+    const conversation = match && measurementConversations.get(match[1]);
+    if (conversation) return { data: structuredClone(conversation), status: 200, statusText: "OK", headers: {}, config: request };
+  }
+  if (request.method === "post" && request.url === "https://sheet.invalid/measurement-post-call-test") {
+    const body = JSON.parse(request.data);
+    if (body.action === "process_voice_queue" || (body.rowNumber === 123 && body.callAttemptNumber === 1)) {
+      measurementWrites.push(body);
+      const data = body.action === "process_voice_queue" ? { ok: true } : {
+        ok: true, rowNumber: 123,
+        fieldsWritten: ["synthetic:callResult", "synthetic:call_eligible", "synthetic:call_time_bucket", "synthetic:call_scheduled_for"],
+      };
+      return { data, status: 200, statusText: "OK", headers: {}, config: request };
+    }
+  }
+  unexpectedRequests.push(`${request.method} ${request.baseURL ?? ""}${request.url ?? ""}`);
+  throw new Error("Unexpected network request in measurement post-call test");
+};
+after(() => {
+  axios.defaults.adapter = originalAdapter;
+  assert.deepEqual(unexpectedRequests, []);
+});
 
 const rodrigoConversation = {
   status: "done",
@@ -913,4 +954,85 @@ test("post-call transcript labels assistant turns with the selected assistant na
 
   assert.equal(transcriptForEmail(conversation, "Finch"), "Finch: Hey, is this Chris?\nAgent: This is Chris.");
   assert.equal(buildVoiceResponseStatus("call_received_agent_hung_up", undefined, "Finch"), "Call received but agent hung up on Finch");
+});
+
+for (const scenario of [
+  { name: "new", declarations: { initialOpeningPolicy: "listen_first_uniform_v1", declaredConversationPolicyVersion: "captured-code-version" },
+    expectedOpening: "listen_first_uniform_v1", expectedPolicy: "captured-code-version" },
+  { name: "historical", declarations: {}, expectedOpening: null, expectedPolicy: null },
+  { name: "malformed", declarations: { initialOpeningPolicy: 7, declaredConversationPolicyVersion: "   " },
+    expectedOpening: null, expectedPolicy: null },
+  { name: "partial", declarations: { initialOpeningPolicy: "  older-opening-policy  " },
+    expectedOpening: "older-opening-policy", expectedPolicy: null },
+]) {
+  test(`post-call metadata reconstruction keeps ${scenario.name} declarations separate from final provider identity`, async () => {
+    const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+    const { VOICE_PERFORMANCE_LOG_MARKER } = await import("../src/lib/elevenLabsPerformanceLog");
+    const conversationId = `conv_measurement_${scenario.name}`;
+    const conversation = {
+      conversation_id: conversationId, agent_id: "agent_receipt", version_id: "agtvrsn_receipt", branch_id: "agtbrch_receipt",
+      status: "done", metadata: { call_duration_secs: 5 },
+      conversation_initiation_client_data: { dynamic_variables: {
+        rowNumber: "123", callAttemptNumber: "1", agentName: "Synthetic Caller", listingAddress: "123 Fictional Street",
+        requestedPhone: "+12025550123", phone: "+12025550123", testMode: true,
+        assistantName: "Finn", voiceVariant: "finch", openerVariant: "benefit_hook",
+        openerVariantLabel: "Direct help question", openerScript: "Assigned continuation only",
+        scheduledWindow: "late_morning", agentTimeZone: "America/New_York",
+        agent_id: "agent_dynamic_not_receipt", version_id: "agtvrsn_dynamic_not_receipt", branch_id: "agtbrch_dynamic_not_receipt",
+        ...scenario.declarations,
+      } },
+      transcript: [{ role: "user", message: "Please end this call.", time_in_call_secs: 1 }],
+    };
+    const original = structuredClone(conversation), writesBefore = measurementWrites.length;
+    measurementConversations.set(conversationId, conversation);
+    try {
+      assert.equal(await processPostCallOutcomeFromConversationId(conversationId), true);
+      const writes = measurementWrites.slice(writesBefore);
+      assert.equal(writes.length, 2);
+      const update = writes.find(write => typeof write.voiceNotes === "string")!;
+      assert.equal(update.callResult, "call_ended_by_request");
+      assert.equal(writes.filter(write => write.action === "process_voice_queue").length, 1);
+      const metrics = JSON.parse(String(update.voiceNotes).replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""));
+      assert.equal(metrics.call.initialOpeningPolicy, scenario.expectedOpening);
+      assert.equal(metrics.call.declaredConversationPolicyVersion, scenario.expectedPolicy);
+      assert.equal(metrics.call.openerVariant, "benefit_hook");
+      assert.equal(metrics.call.openerScript, "Assigned continuation only");
+      assert.equal(metrics.call.voiceVariant, "finch");
+      assert.equal(metrics.call.scheduledWindow, "late_morning");
+      assert.equal(metrics.call.agentTimeZone, "America/New_York");
+      assert.deepEqual(metrics.providerIdentity, {
+        source: "final_conversation_receipt", agentId: "agent_receipt", versionId: "agtvrsn_receipt", branchId: "agtbrch_receipt",
+      });
+      assert.equal(metrics.flags.openingQuestionDelivered, false);
+      assert.deepEqual(conversation, original);
+    } finally {
+      measurementConversations.delete(conversationId);
+    }
+  });
+}
+
+test("post-call reconstruction does not manufacture historical provider versions from dynamic metadata", async () => {
+  const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+  const { VOICE_PERFORMANCE_LOG_MARKER } = await import("../src/lib/elevenLabsPerformanceLog");
+  const conversationId = "conv_measurement_legacy_receipt", writesBefore = measurementWrites.length;
+  measurementConversations.set(conversationId, {
+    conversation_id: conversationId, agent_id: "agent_legacy_receipt", status: "done",
+    conversation_initiation_client_data: { dynamic_variables: {
+      rowNumber: 123, callAttemptNumber: 1, agentName: "Synthetic Caller", listingAddress: "123 Fictional Street",
+      phone: "+12025550123", version_id: "agtvrsn_dynamic_only", branch_id: "agtbrch_dynamic_only",
+    } },
+    transcript: [{ role: "user", message: "Please end this call." }],
+  });
+  try {
+    assert.equal(await processPostCallOutcomeFromConversationId(conversationId), true);
+    const update = measurementWrites.slice(writesBefore).find(write => typeof write.voiceNotes === "string")!;
+    const metrics = JSON.parse(String(update.voiceNotes).replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""));
+    assert.equal(metrics.call.initialOpeningPolicy, null);
+    assert.equal(metrics.call.declaredConversationPolicyVersion, null);
+    assert.deepEqual(metrics.providerIdentity, {
+      source: "final_conversation_receipt", agentId: "agent_legacy_receipt", versionId: null, branchId: null,
+    });
+  } finally {
+    measurementConversations.delete(conversationId);
+  }
 });

@@ -17,8 +17,12 @@ const VOICE_PROVE_IT_COHORT_STARTED_AT = "2026-09-03T14:20:21Z";
 const VOICE_PROVE_IT_BASELINE_CONVERSATION_COUNT = 1063;
 const VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MIN = 300;
 const VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MAX = 400;
+const POLICY_STRATIFICATION_INSTRUCTIONS =
+  "First stratify by call.initialOpeningPolicy, call.declaredConversationPolicyVersion, and providerIdentity.agentId, versionId and branchId. Missing or null historical values are unknown; do not backfill them from current configuration or pool unknown and known policy/provider versions. Declared policy labels describe the call-start code's intended policy, not the provider version or proof that it ran. Provider identity comes only from a matching final conversation receipt. call.openerVariant is a post-intro continuation assignment, not proof of delivery. The listen_first_uniform_v1 initial introduction is uniform, not an initial-intro A/B test. When voice testing is enabled, the default row-parity assignments pair Eryn/direct_reason and Finch/benefit_hook; compare these as joint arms and do not attribute their differences independently to voice or continuation. Actual overrides must be evaluated from their recorded assignments. Existing delivery flags are transcript-derived heuristics, not proof of audible delivery; use transcript/playback evidence to establish which continuation was actually delivered.";
 const CODEX_ANALYSIS_INSTRUCTIONS =
-  "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. Compare voiceVariant on live answered calls separately from voicemail/no-answer, and compare scheduledWindow by agent local time bucket for answer-rate lift. For the current Eryn/Finch A/B test, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls and any call.voiceVariant other than eryn or finch. Current production rotates Eryn and Finch only when voice testing is enabled: Eryn uses the public Maya caller name and Finch uses the public Finn caller name. Also compare call.openerVariant for the opener test: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, repeatedIdentityStatement, liveYoniNowOfferDelivered, agentRespondedAfterLiveYoniNowOffer, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityStatement, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome. For the Pro prove-it cohort, evaluate calls after 2026-09-03T14:20:21Z against the 1063-conversation ElevenLabs baseline and trigger a decision review once 300-400 additional calls have accumulated. Count bot-labeled positives separately from transcript/playback-verified handoff-ready leads; continue only if the cohort produces at least 3 verified handoff-ready leads or 1 owner-confirmed serious file opportunity, otherwise recommend pausing or narrowing the test.";
+  "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. " +
+  POLICY_STRATIFICATION_INSTRUCTIONS + " " +
+  "Compare voiceVariant on live answered calls separately from voicemail/no-answer within those strata, and compare scheduledWindow by agent local time bucket without treating observational differences as causal lift. For the Eryn/Finch comparison, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls and any call.voiceVariant other than eryn or finch. The configured assignment rotates Eryn and Finch only when voice testing is enabled: Eryn uses the public Maya caller name and Finch uses the public Finn caller name. Also compare call.openerVariant as the post-intro continuation assignment within policy/provider and joint-arm strata: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, repeatedIdentityStatement, liveYoniNowOfferDelivered, agentRespondedAfterLiveYoniNowOffer, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityStatement, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome. For the Pro prove-it cohort, evaluate calls after 2026-09-03T14:20:21Z against the 1063-conversation ElevenLabs baseline with policy/provider strata kept separate, and trigger a decision review once 300-400 additional calls have accumulated. Count bot-labeled positives separately from transcript/playback-verified handoff-ready leads; continue only if the cohort produces at least 3 verified handoff-ready leads or 1 owner-confirmed serious file opportunity, otherwise recommend pausing or narrowing the test.";
 
 type TranscriptToolCall = {
   tool_name?: string;
@@ -46,6 +50,10 @@ type PerformanceTranscriptItem = {
 };
 
 type PerformanceConversation = {
+  conversation_id?: unknown;
+  agent_id?: unknown;
+  version_id?: unknown;
+  branch_id?: unknown;
   status?: string;
   metadata?: {
     termination_reason?: string | null;
@@ -75,6 +83,10 @@ function truncate(value: string, maxLength: number): string {
   }
 
   return `${value.slice(0, maxLength)}...[truncated ${value.length - maxLength} chars]`;
+}
+
+function optionalLabel(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function normalizeText(value: string): string {
@@ -255,6 +267,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
     /\b(?:this is|i'm)\s+\S+\s+with Crisp Short Sales\b/i.test(message),
   ).length;
   const aiSuspicion = /\b(?:ai|chatbot|robot|actual human|real person|human being)\b/i.test(agentText);
+  const finalReceiptMatched = input.conversation.conversation_id === input.conversationId &&
+    ["done", "failed"].includes(input.conversation.status ?? "");
 
   const payload = {
     schema: "voice_call_metrics_v1",
@@ -267,7 +281,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       excludeMissingVoiceVariant: true,
       excludePriorSingleVoiceEmmyCalls: true,
       analysisRule:
-        "Only include calls where call.voiceVariant is present and the call happened after the voice split started. Exclude all previous single-voice Emmy calls. Compare current voice variants and scheduledWindow buckets separately.",
+        "Only include calls where call.voiceVariant is present and the call happened after the voice split started. Exclude all previous single-voice Emmy calls. " +
+        POLICY_STRATIFICATION_INSTRUCTIONS,
     },
     proveItCohort: {
       startedAt: VOICE_PROVE_IT_COHORT_STARTED_AT,
@@ -293,6 +308,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       openerVariant: input.metadata.openerVariant ?? null,
       openerVariantLabel: input.metadata.openerVariantLabel ?? null,
       openerScript: input.metadata.openerScript ?? null,
+      initialOpeningPolicy: optionalLabel(input.metadata.initialOpeningPolicy),
+      declaredConversationPolicyVersion: optionalLabel(input.metadata.declaredConversationPolicyVersion),
       scheduledWindow: input.metadata.scheduledWindow ?? null,
       agentTimeZone: input.metadata.agentTimeZone ?? null,
       outcome: input.outcome,
@@ -300,6 +317,12 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       terminationReason,
       errorCode: input.conversation.metadata?.error?.code ?? null,
       errorReason: input.conversation.metadata?.error?.reason ?? null,
+    },
+    providerIdentity: {
+      source: finalReceiptMatched ? "final_conversation_receipt" : null,
+      agentId: finalReceiptMatched ? optionalLabel(input.conversation.agent_id) : null,
+      versionId: finalReceiptMatched ? optionalLabel(input.conversation.version_id) : null,
+      branchId: finalReceiptMatched ? optionalLabel(input.conversation.branch_id) : null,
     },
     metrics: {
       durationSecs,

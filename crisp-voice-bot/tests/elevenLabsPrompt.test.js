@@ -2,164 +2,241 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const prompt = fs.readFileSync(path.resolve(__dirname, "../docs/elevenlabs-agent-prompt.md"), "utf8");
-function section(start, end) {
-  const a = prompt.indexOf(start), b = prompt.indexOf(end, a + start.length);
-  assert.ok(a >= 0 && b > a, "Prompt section anchors exist");
-  return prompt.slice(a, b);
+const source = fs.readFileSync(path.resolve(__dirname, "../docs/elevenlabs-agent-prompt.md"), "utf8");
+const prompt = source.split("## Prompt\n")[1].trim();
+function section(heading) {
+  const start = prompt.indexOf("# " + heading + "\n");
+  assert.ok(start >= 0, "Missing prompt section: " + heading);
+  const end = prompt.indexOf("\n# ", start + 2);
+  return prompt.slice(start, end < 0 ? prompt.length : end);
 }
-// These are static contract checks, not evidence of provider adherence or audible behavior.
-test("entry routing separates screener response, silent hold and first live introduction", () => {
-  const s = section("Turn routing card.", "Clarification turn contract,");
-  assert.match(s, /REQUIRES a spoken response, not silence/);
-  assert.match(s, /AUTOMATED HOLD:[^\n]+is NOT a live greeting/);
-  assert.match(s, /initial pickup greeting[^\n]+BEFORE your introduction/);
-  assert.match(s, /your ENTIRE spoken turn is/);
-  assert.match(s, /Stop after "listing" and wait silently for a NEW live-caller turn/);
-  assert.match(s, /Never attach the handling question or {{openerScript}} to this first introduction/);
+// Static source contracts only. These do not prove model adherence, native gate
+// execution, audio delivery, or production deployment.
+test("prompt has one extractable body and distinct concise state sections", () => {
+  assert.equal(source.split("## Prompt\n").length, 2);
+  const headings = [...prompt.matchAll(/^# (.+)$/gm)].map(match => match[1]);
+  assert.equal(new Set(headings).size, headings.length);
+  for (const heading of ["Shared turn priority", "Listening and repair", "Intro only",
+    "Post-intro conversation", "Answer library", "Contact preferences and endings",
+    "Request records and receipts", "Callback request", "Information request",
+    "Live transfer request", "Live admins and wrong contacts", "Automated screening and hold",
+    "Voicemail and recorded exits"]) assert.ok(headings.includes(heading), heading);
+  assert.ok(prompt.split(/\s+/).length < 5500, "Consolidation must not reintroduce the duplicated 9,899-word body");
+  assert.match(source.split("## Prompt\n")[0], /not a verified deployment/);
 });
-test("informational corrections need the answer without stock follow-up filler", () => {
-  const s = section("Turn routing card.", "Clarification turn contract,");
-  assert.match(s, /PAYER CORRECTION:[^\n]+I only asked who pays/);
-  assert.match(s, /and has no other question or action request/);
-  assert.match(s, /If they also ask another question or request an action, use the matching rule below and preserve every part of their turn/);
-  assert.match(s, /your complete spoken answer is: "The buyer typically pays the flat fee, only if the deal closes\." Then wait/);
-  assert.match(s, /Give that answer, not just an acknowledgment, apology, or another question/);
-  assert.match(s, /Never append "anything else", "feel free to ask"/);
-  assert.match(s, /only if the deal closes/);
+test("priority considers the whole turn and hearing precedes questions and actions", () => {
+  const s = section("Shared turn priority");
+  assert.match(s, /Read the whole latest intelligible turn in context, including restrictions/);
+  assert.match(s, /not a first-match rule that discards additional questions or actions/);
+  assert.ok(s.indexOf("Honor explicit future opt-out") < s.indexOf("Resolve hearing difficulty"));
+  assert.ok(s.indexOf("Resolve hearing difficulty") < s.indexOf("Address corrections"));
+  assert.ok(s.indexOf("Address corrections") < s.indexOf("Follow the caller's explicitly chosen next step"));
+  assert.match(s, /Preserve an accompanying email\/callback request/);
 });
-test("request receipt and preference correction do not authorize ending", () => {
-  assert.match(prompt, /A tool result is not a caller turn and is never permission to end/);
-  assert.match(prompt, /"callback only", "email only", or "not a callback" is a correction or preference/);
-  assert.match(prompt, /Only if a NEW live-caller turn after your acknowledgment is a clear farewell/);
+test("intro is its own entire turn and exposes no dynamic continuation script", () => {
+  const s = section("Intro only");
+  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. I'm calling about your short sale listing\."/);
+  assert.match(s, /Stop after "listing\." Wait for a NEW live-caller turn/);
+  assert.match(s, /occurred before the introduction and does not count as a response/);
+  assert.match(s, /Do not append a qualification question, service pitch, Yoni offer, or callback question/);
+  assert.doesNotMatch(s, /{{openerScript}}|Are you handling the short sale paperwork|Are you looking for help with that/);
+  assert.doesNotMatch(prompt, /{{openerScript}}/);
 });
-test("live identity remains truthful and dynamic", () => {
+test("post-intro choices remain literal and conditional on a new caller turn", () => {
+  const s = section("Post-intro conversation");
+  assert.match(s, /Enter only after a NEW live-caller turn/);
+  assert.match(s, /For {{openerVariant}} equal to benefit_hook/);
+  assert.match(s, /We help agents with the short sale paperwork and lender calls\. Are you looking for help with that\?/);
+  assert.match(s, /For direct_reason or an unspecified variant/);
+  assert.match(s, /Are you handling the short sale paperwork and lender calls yourself\?/);
+  assert.match(s, /These are post-intro alternatives, never part of the introduction/);
+});
+test("live identity and first-turn questions do not restart the pitch", () => {
   assert.match(prompt, /You are {{assistantName}}, an AI calling assistant for Crisp Short Sales/);
-  assert.match(prompt, /Yes, I'm an AI assistant with Crisp Short Sales/);
+  const s = section("Intro only");
+  assert.match(s, /answer only those points from the answer library instead of delivering the full introduction/);
+  assert.match(s, /Do not repeat identity or purpose already answered/);
+  assert.match(s, /a different live listener gets their own short introduction/);
   assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
 });
-test("startup listens for a live greeting and separates intro from qualification", () => {
-  const s = section("Opening delivery rule,", "If the caller corrects the name");
-  assert.match(s, /Listen before introducing yourself/);
-  assert.match(s, /remain silent/);
-  assert.match(s, /Do not attach {{openerScript}} or a qualification question/);
-  assert.match(s, /If their first live turn asks a question or gives a correction, answer that before/);
-  assert.match(s, /do not ask for their identity again/i);
-  assert.match(s, /two-variant test/);
-  assert.match(s, /Do not repeat your name/);
+test("name corrections and authorized admins outrank the stored lead name", () => {
+  const s = section("Intro only");
+  assert.match(s, /use the corrected name if clear and treat them as the current contact/);
+  assert.match(s, /Do not ask for {{firstName}} or repeat an already answered handling question/);
+  assert.match(s, /Never guess a name/);
+  assert.match(section("Live admins and wrong contacts"), /If the admin can discuss the listing, speak with them instead of insisting on a transfer/);
 });
-test("clarification answers are bounded without an appended sales question", () => {
-  const s = section("Clarification turn contract,", "Core behavior:");
-  assert.match(s, /COMPLETE turn/);
-  assert.match(s, /Do not append {{openerScript}}/);
-  assert.match(s, /If the caller asks TWO questions, answer BOTH/);
-  assert.match(s, /organize the documents the bank needs/);
-  assert.match(s, /hearing-restoration response/);
-  assert.match(s, /NOT a general acknowledgment/);
+test("repeated purpose repair and hearing restoration cannot become qualification", () => {
+  const s = section("Listening and repair");
+  assert.match(s, /Repeated purpose question: explain differently once with "We organize the documents the bank needs and follow up on its review\."/);
+  assert.match(s, /Do not loop through the original explanation/);
+  assert.match(s, /Hearing complaint: say only "Sorry, can you hear me now\?" and wait/);
+  assert.match(s, /hearing-restoration answer[^\n]+is not qualification consent/);
+  assert.match(s, /repeat only the missed short sentence, then wait again/);
+  assert.match(s, /Do not claim the connection or volume was fixed/);
 });
-test("hearing repair does not claim technical repairs or infer consent", () => {
-  assert.match(prompt, /Sorry, can you hear me now/);
-  assert.match(prompt, /Do not combine[^\n]+or claim you fixed the audio or changed the volume/);
-  assert.match(prompt, /Difficulty alone is not callback consent, rejection, or transfer consent/);
-  assert.match(prompt, /An unclear yes to this choice is not consent/);
+test("bounded repair preserves understood fragments and never guesses consent", () => {
+  const s = section("Listening and repair");
+  assert.match(s, /retain that part and ask only for what was missing/);
+  assert.match(s, /If two short clarification attempts fail/);
+  assert.match(s, /Would you prefer a person, or should we stop here\?/);
+  assert.match(s, /An unclear yes to this choice is not consent/);
+  assert.match(s, /Difficulty alone is not rejection or permission for future contact/);
 });
-test("current-call end is distinct from suppression and rejection", () => {
-  const s = section("If a live person only asks to end THIS call", "If they say they are not worried");
-  assert.match(s, /CALL ENDED BY REQUEST: caller asked to end the current call only/);
-  assert.match(s, /not permission for another automated call/);
-  assert.match(s, /Do not erase earlier genuine interest/);
-  assert.match(s, /Understood. Goodbye/);
+test("noise and partial turns cannot create contact decisions", () => {
+  const s = section("Listening and repair");
+  assert.match(s, /If the latest caller message is exactly "\.\.\."/);
+  assert.match(s, /An intelligible question is not noise/);
+  assert.match(s, /Do not infer a name, yes, callback, rejection, or transfer from background speech/);
+  assert.match(s, /do not finish over the caller/);
+  assert.match(s, /A thinking pause is not an invitation to complete their sentence/);
 });
-test("explicit STOP and removal retain highest-priority opt-out handling", () => {
-  const s = section('If a live person says "do not call"', "If a live person only asks to end THIS call");
-  assert.match(s, /standalone "stop"/);
+test("payer corrections get the substantive answer while preserving other questions or requests", () => {
+  assert.match(section("Shared turn priority"), /A payer correction needs the payer answer, not just "Understood\."/);
+  assert.match(section("Answer library"), /The buyer typically pays the flat fee, only if the deal closes\." If another question or request accompanies it, address that too/);
+  assert.match(section("Answer library"), /Answer all questions asked, then wait/);
+});
+test("a short yes or no is scoped to the latest single permission question", () => {
+  const s = section("Shared turn priority");
+  assert.match(s, /latest single permission question/);
+  assert.match(s, /compound question, overlap, noise, or yes followed by a restriction is not clear permission/);
+  assert.match(s, /a mentioned time, or "not now" alone is not callback or transfer consent/);
+});
+test("the declined object is explicit and callback-only is not terminal", () => {
+  const s = section("Contact preferences and endings");
+  assert.match(s, /Determine what was declined, not just whether the sentence contains "no"/);
+  assert.match(s, /A declined transfer, time, channel, or appointment is not a rejection of all service/);
+  for (const phrase of ["No transfer now", "callback only", "email only", "not a callback",
+    "use this number", "That is the callback request"]) assert.ok(s.includes('"' + phrase + '"'), phrase);
+  assert.match(s, /preferences or corrections, not farewells/);
+  assert.match(s, /Thanks, okay, understood, silence, and tool completion alone do not/);
+});
+test("genuine service rejection can end promptly but questions and alternatives survive", () => {
+  const s = section("Contact preferences and endings");
+  assert.match(s, /Questions and alternate requested next steps must be handled before a service-decline closeout/);
+  assert.match(s, /may close the call without asking for another goodbye/);
+  assert.match(s, /clearly refers to all offered help, not a time, correction or transfer choice/);
+  assert.match(s, /Do not insist on another question or pitch/);
+  assert.doesNotMatch(prompt, /If they say no or not interested, call|After a clear rejection or request to end, give/);
+});
+test("current-call ending and future opt-out retain distinct recording markers", () => {
+  const s = section("Contact preferences and endings");
+  assert.match(s, /standalone "STOP" has priority over every pitch and action/);
   assert.match(s, /remove me from your list/);
-  assert.match(s, /DO NOT CALL: caller explicitly requested no further calls/);
-  assert.match(s, /priority over every pitch/);
+  assert.match(s, /DO NOT CALL: caller explicitly requested no further calls\./);
+  assert.match(s, /CALL ENDED BY REQUEST: caller asked to end the current call only\./);
+  assert.match(s, /Do not erase earlier genuine interest or a requested callback unless revoked/);
+  assert.match(s, /Ending is not permission for another automated call/);
   assert.doesNotMatch(s, /We won't call again/);
 });
-test("recordings cannot create human consent or outcomes", () => {
-  assert.match(prompt, /Recording\/automated-system gate, highest priority/);
-  assert.match(prompt, /Never call `callback_requested`, `information_requested`, `not_interested`, or `live_transfer_requested` from an automated/);
-  assert.match(prompt, /Canned fragments/);
+test("third-party restriction does not become caller opt-out and mixed opt-out is protected", () => {
+  const s = section("Contact preferences and endings");
+  assert.match(s, /"Do not call Yoni now" declines a third-party\/live-transfer action/);
+  assert.match(s, /not the caller's future opt-out unless they also reject calls to themselves/);
+  assert.match(s, /Honor a genuine mixed caller opt-out/);
 });
-test("screening answers once then waits for a new live person", () => {
-  assert.match(prompt, /This is {{assistantName}} calling from Crisp Short Sales about your listing at {{streetAddress}}/);
-  assert.match(prompt, /After you have spoken that sentence, stay quiet and keep the call open/);
-  assert.match(prompt, /Do not call `end_call` while you are being transferred/);
+test("live hangup is delegated to a fresh native gate rather than direct end_call", () => {
+  const s = section("Contact preferences and endings");
+  assert.match(s, /Request a live-call ending only through the guarded ending workflow/);
+  assert.match(s, /Do not call end_call directly from the main conversation/);
+  assert.match(s, /validate provider-bound raw history using validate_call_ending/);
+  assert.match(s, /never fabricate or rewrite caller history to obtain permission/);
+  assert.match(s, /Only permission: true from a successful validation of the latest observed user history/);
+  assert.match(s, /denied permission, missing result, or error is not authorization/);
+  assert.match(s, /history fingerprint does not guarantee that no newer speech has arrived/);
+  assert.match(s, /Do not announce goodbye before terminal permission is established/);
+  assert.match(s, /validator has no contact-action side effects/);
+  assert.equal((prompt.match(/end_call/g) || []).length, 1, "No alternative direct hangup instruction");
 });
-test("voicemail and wrong-person protections remain", () => {
-  assert.match(prompt, /Wrong-person or unrelated-business voicemail hard stop/);
-  assert.match(prompt, /do not call `voicemail_detection` while the mailbox greeting is still mid-sentence/);
-  assert.match(prompt, /do not leave the normal voicemail/);
-  assert.match(prompt, /{{callAttemptNumber}}/);
+test("request receipt is not completion or a new caller turn", () => {
+  const s = section("Request records and receipts");
+  assert.match(s, /requestCaptured: true permits a receipt acknowledgment/);
+  assert.match(s, /queued: true is receipt\/queueing, not proof of durable persistence or completion/);
+  assert.match(s, /I'm sorry, I couldn't confirm that request/);
+  assert.match(s, /Then wait for a NEW caller turn/);
+  assert.match(s, /A correction after a receipt does not upgrade a request to a promise/);
 });
-test("noise does not become a name, consent or a callback", () => {
-  assert.match(prompt, /Do not guess the speaker's name from the noisy turn/);
-  assert.match(prompt, /Do not treat a single yes, sure, or okay inside that noisy turn as consent/);
-  assert.match(prompt, /If the latest caller message is exactly "..."/);
-  assert.match(prompt, /Do not finish the sentence over them/);
+test("correction acknowledgments are time-free and cannot promise calls or sends", () => {
+  const s = section("Request records and receipts");
+  assert.match(s, /Thanks\. I've received your callback request/);
+  assert.match(s, /Thanks\. I've received your request for information/);
+  assert.match(s, /Keep acknowledgments time-free/);
+  assert.match(s, /Never say "I'll make sure Yoni calls", "Yoni will call"/);
+  assert.match(s, /"I'll ensure it is sent", or "sent" without explicit proof/);
+  assert.match(s, /Do not ask an anything-else question/);
+  assert.match(s, /If asked what timing you heard, quote the caller's words, not unverified tool arguments/);
+  assert.match(s, /A later cancellation supersedes earlier permission, including while a tool is pending/);
 });
-test("the active person's correction outranks the lead name", () => {
-  const s = section("If the caller corrects the name", "If they ask which listing");
-  assert.match(s, /Treat the current speaker as the agent/);
-  assert.match(s, /Do not ask to speak with `{{firstName}}`/);
-  assert.match(s, /Do not repeat a handling question they already answered/);
+test("classification prefixes cannot replace full context or imply later correction capture", () => {
+  const s = section("Request records and receipts");
+  assert.match(s, /Every conversationSummary must preserve actual caller wording, request, restrictions, corrections, unanswered questions and unresolved details/);
+  assert.match(s, /classification prefix, never as the entire summary/);
+  assert.match(s, /An earlier successful request is not proof a later correction was captured/);
 });
-test("cost is transparent and unsupported claims stay prohibited", () => {
-  assert.match(prompt, /There is no charge to you or the seller. The buyer typically pays a flat fee only if the deal closes/);
-  assert.match(prompt, /It can affect the buyer's total budget/);
-  assert.match(prompt, /Do not invent a fee amount, guaranteed approval or closing/);
-  assert.match(prompt, /I don't have a verified answer on that/);
-  assert.doesNotMatch(prompt, /\$5,?000/);
+test("callback timing is literal, uncertain details are retained, and consent is separate", () => {
+  const s = section("Callback request");
+  assert.match(s, /only after a live caller explicitly requests[^\n]+or clearly accepts a single callback offer/);
+  assert.match(s, /mere unavailability or a mentioned time does not qualify/);
+  assert.match(s, /Copy the caller's requested timing words verbatim into callbackTime/);
+  assert.match(s, /Do not convert words to digits, add an unspoken AM or PM, resolve a relative day into a date, or expand\/substitute a time zone/);
+  assert.match(s, /retain earlier context in conversationSummary/);
+  assert.match(s, /Do not ask for AM or PM solely to complete the field/);
+  assert.match(s, /Use ASAP only if the caller actually requested or agreed to that timing/);
+  assert.doesNotMatch(s, /What time should[^\n]+call|Is that two|Two in the afternoon/);
 });
-test("soft no and self-handling do not suppress new questions", () => {
-  assert.match(prompt, /Do not include "I'm handling it myself"/);
-  assert.match(prompt, /If they ask any question after this/);
-  assert.match(prompt, /answer it instead of calling `not_interested`/);
-  assert.match(prompt, /Curiosity, a polite acknowledgment, or understanding the explanation is not by itself a request/);
+test("email request must execute with caller-confirmed address before acknowledgment", () => {
+  const s = section("Information request");
+  assert.match(s, /is an action request, not just a question about capability/);
+  assert.match(s, /address the caller clearly supplied or already confirmed without asking them to repeat it/);
+  assert.match(s, /A stored {{email}} alone is not confirmation/);
+  assert.match(s, /Is {{email}} the best email for the information\?/);
+  assert.match(s, /call information_requested[^\n]+BEFORE acknowledging receipt/);
+  assert.match(s, /"I've noted it" or "I'll ensure" is not execution/);
+  assert.match(s, /Information-only is not callback or live-transfer permission/);
+  assert.match(s, /A repeated "email only" is not a second send request/);
 });
-test("information-only and self-initiated contact stay out of callbacks", () => {
-  assert.match(prompt, /call `information_requested`/);
-  assert.match(prompt, /DEFERRED CONTACT: caller said they will initiate future contact/);
-  assert.match(prompt, /This is not a request for Yoni or Crisp to call them/);
-  assert.doesNotMatch(prompt, /callbackTime` set to `send info/);
+test("self-initiated contact does not silently create future calls or an automatic hangup", () => {
+  const s = section("Contact preferences and endings");
+  assert.match(s, /DEFERRED CONTACT: caller said they will initiate future contact/);
+  assert.match(s, /Do not create a callback or transfer/);
+  assert.match(s, /future caller-initiated contact alone is not an automatic hangup/);
 });
-test("email requests execute only with a confirmed or supplied address before a receipt claim", () => {
-  const s = section("Turn routing card.", "Clarification turn contract,");
-  assert.match(s, /REQUEST EXECUTION:[^\n]+Can you email me the information\?/);
-  assert.match(s, /caller-confirmed or clearly supplied[^\n]+BEFORE acknowledging receipt/);
-  assert.match(s, /A stored {{email}} alone is not confirmed: ask once/);
-  assert.match(s, /Do not ask them to repeat an address they just clearly supplied/);
-  assert.match(s, /address is missing or unclear, ask only for the address or missing part/);
-  assert.match(s, /result without `requestCaptured: true` cannot support a capture claim/);
-  assert.match(s, /Do not say "I've noted your request", "I'll ensure", or promise a send instead of executing the tool/);
-  assert.match(prompt, /Is {{email}} the best email for the information\?/);
-  assert.match(prompt, /Only after `information_requested` returns `requestCaptured: true`, say exactly: "Thanks\. I've received your request for information\."/);
-  assert.match(prompt, /Missing or failed results do not permit this acknowledgment/);
-  assert.match(prompt, /Do not claim the information was sent or delivered/);
+test("live transfer consent, business approval, questions and revocation remain distinct", () => {
+  const s = section("Live transfer request");
+  assert.match(s, /onto this call right now\. Want me to try him\?/);
+  assert.match(s, /Qualification answers are not live-transfer consent/);
+  assert.match(s, /transferApproved: true and approvalStatus: accepted plus current caller consent/);
+  assert.match(s, /A new restriction or unanswered question blocks the handoff even after approval/);
+  assert.match(s, /Do not manually call transfer_to_number from the main conversation/);
+  assert.match(s, /Failed transfer alone authorizes neither callback nor ending/);
+  assert.match(s, /A question, thanks, silence, or correction is not callback permission/);
 });
-test("callbacks require consent and do not promise a booked appointment", () => {
-  assert.match(prompt, /Being busy, hesitant, or saying "not now" is not callback consent/);
-  assert.match(prompt, /This is a callback request, not a confirmed appointment/);
-  assert.match(prompt, /I couldn't confirm that request/);
-  assert.doesNotMatch(prompt, /I set up the callback with Yoni|I will text him/);
+test("admin callbacks use shared permission rules and the return number has correct ownership", () => {
+  const s = section("Live admins and wrong contacts");
+  assert.match(s, /Busy, out, unavailable, or a time mentioned alone does not authorize a callback/);
+  assert.match(s, /Yoni's direct number is 404-300-9526/);
+  assert.match(s, /a number to reach Yoni; do not promise he will call/);
+  assert.match(s, /A message-taking offer alone is not a goodbye/);
+  assert.doesNotMatch(prompt, /If they give a time, ask for a callback, or say Yoni can call later|Yoni can call back at 404/);
 });
-test("callback capture preserves literal timing and keeps receipt acknowledgment time-free", () => {
-  const s = section("Callback flow:", "Voicemail and no-answer:");
-  assert.match(s, /have not supplied any timing, ask/);
-  assert.match(s, /Copy the caller's requested timing words verbatim into `callbackTime`/);
-  assert.match(s, /Do not convert words to digits, add an unspoken AM or PM, resolve a relative day into a date, or expand or substitute a time zone/);
-  assert.match(s, /note unresolved timing separately in `conversationSummary` for human review/);
-  assert.match(s, /copy their corrective words and preserve earlier supplied context/);
-  assert.match(s, /"Thanks\. I've received your callback request\."/);
-  assert.match(s, /Keep this acknowledgment time-free/);
-  assert.match(s, /Do not repeat or interpret the tool's `callbackTime` as independently verified caller wording/);
-  assert.doesNotMatch(s, /ask (?:only |once )?"Is that two|Two in the afternoon\?|AM\/PM unconfirmed|Yoni to call \[time\]/);
+test("recordings and hold never create human contact outcomes", () => {
+  const s = section("Automated screening and hold");
+  assert.match(s, /never authorize callback_requested, information_requested, not_interested or live_transfer_requested/);
+  assert.match(s, /give this spoken response once/);
+  assert.match(s, /Do not use skip_turn instead of answering that request/);
+  assert.match(s, /For automated[^\n]+use skip_turn; do not pitch, qualify or end/);
+  assert.match(s, /Never treat canned hold text as a new live greeting/);
 });
-test("transfer consent can change and new questions must be handled", () => {
-  assert.match(prompt, /While a transfer is being checked, consent can still change/);
-  assert.match(prompt, /Do not proceed from a stale approval/);
-  assert.match(prompt, /A failed transfer alone is not an ending or callback instruction/);
-  assert.doesNotMatch(prompt, /decision is locked in|Do not answer new questions/);
+test("voicemail keeps attempt limits, live-admin distinction and safe mismatch handling", () => {
+  const s = section("Voicemail and recorded exits");
+  assert.match(s, /only to a recording, not a live admin/);
+  assert.match(s, /same\/similar first name, same last name/);
+  assert.match(s, /say nothing further, disclose no lead\/property\/Yoni details/);
+  assert.match(s, /Attempt 1:[^\n]+Let the greeting finish/);
+  assert.match(s, /do not call voicemail_detection mid-sentence without a clear pause/);
+  assert.match(s, /a beep is not required/);
+  assert.match(s, /Attempt 2: leave no second voicemail/);
+  assert.match(s, /For a matching voicemail greeting, use voicemail_detection after the greeting finishes/);
+  assert.match(s, /empty voicemailMessage so this path ends without a second message/);
+  assert.match(s, /Screening\/hold that is still trying to reach a person is not voicemail and is not an exit reason/);
 });

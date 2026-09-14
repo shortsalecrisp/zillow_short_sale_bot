@@ -41,6 +41,8 @@ export interface CallMetadata {
   openerVariant?: string;
   openerVariantLabel?: string;
   openerScript?: string;
+  initialOpeningPolicy?: string;
+  declaredConversationPolicyVersion?: string;
   providerProofCall?: boolean;
 }
 

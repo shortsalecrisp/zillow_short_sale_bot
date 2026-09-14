@@ -24,12 +24,16 @@ import {
 import {
   buildElevenLabsCallbackRequestResponse,
   buildElevenLabsInformationRequestResponse,
+  buildElevenLabsLiveTransferResponse,
+  buildElevenLabsContactOutcomeResponse,
 } from "../lib/elevenLabsRequestResponse";
 import { logger } from "../lib/logger";
 import { sendCallbackEmail } from "../lib/sendCallbackEmail";
 import { postSheetUpdate } from "../lib/sheetUpdateClient";
+import { createElevenLabsTerminalRouter } from "./elevenLabsTerminal";
 
 const router = Router();
+router.use("/conversation-control", createElevenLabsTerminalRouter(config.elevenLabs.toolSecret));
 
 class ElevenLabsValidationError extends Error {
   public readonly statusCode: number;
@@ -370,14 +374,7 @@ router.post("/tool/live-transfer-requested", async (req: Request, res: Response,
         liveTransferState,
       });
 
-      res.status(200).json({
-        ok: true,
-        intent: "live_transfer",
-        transferApproved: false,
-        approvalStatus: "in_progress",
-        nextAction:
-          "A live transfer attempt is already in progress. Do not call live_transfer_requested again. Do not fall back yet. Do not call callback_requested yet. If you absolutely need to say something while waiting, say exactly once: Hold on one minute, let me just try him one other place. Then stay quiet and wait for the original transfer result.",
-      });
+      res.status(200).json(buildElevenLabsLiveTransferResponse("pending"));
       return;
     }
 
@@ -389,12 +386,7 @@ router.post("/tool/live-transfer-requested", async (req: Request, res: Response,
         listingAddress: payload.listingAddress,
       });
 
-      res.status(200).json({
-        ok: true,
-        intent: "live_transfer",
-        transferApproved: true,
-        approvalStatus: "accepted",
-      });
+      res.status(200).json(buildElevenLabsLiveTransferResponse("accepted"));
       return;
     }
 
@@ -407,14 +399,7 @@ router.post("/tool/live-transfer-requested", async (req: Request, res: Response,
         liveTransferState,
       });
 
-      res.status(200).json({
-        ok: true,
-        intent: "live_transfer",
-        transferApproved: false,
-        approvalStatus: liveTransferState,
-        nextAction:
-          "Tell the caller exactly: Sorry, he was not available right now, but I will text him and ask him to call you back ASAP. Is that ok? Then wait for the caller to respond. If they say yes, sure, ok, sounds good, or anything similar, call callback_requested with callbackTime=asap. After that tool succeeds, say exactly: Ok, thanks, sounds good. Bye! Then immediately call end_call. Do not call transfer_to_number.",
-      });
+      res.status(200).json(buildElevenLabsLiveTransferResponse(liveTransferState));
       return;
     }
 
@@ -460,23 +445,11 @@ router.post("/tool/live-transfer-requested", async (req: Request, res: Response,
         approvalStatus: approval.status,
       });
 
-      res.status(409).json({
-        ok: false,
-        intent: "live_transfer",
-        transferApproved: false,
-        approvalStatus: approval.status,
-        nextAction:
-          "Tell the caller exactly: Sorry, he was not available right now, but I will text him and ask him to call you back ASAP. Is that ok? Then wait for the caller to respond. If they say yes, sure, ok, sounds good, or anything similar, call callback_requested with callbackTime=asap. After that tool succeeds, say exactly: Ok, thanks, sounds good. Bye! Then immediately call end_call. If they ask another question, answer briefly, then call callback_requested with callbackTime=asap and end the call. Do not call transfer_to_number.",
-      });
+      res.status(200).json(buildElevenLabsLiveTransferResponse(approval.status));
       return;
     }
 
-    res.status(200).json({
-      ok: true,
-      intent: "live_transfer",
-      transferApproved: true,
-      approvalStatus: approval.status,
-    });
+    res.status(200).json(buildElevenLabsLiveTransferResponse(approval.status));
   } catch (error) {
     completeElevenLabsLiveTransferAttempt("call_failed", liveTransferContextKey);
     next(error);
@@ -699,13 +672,7 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
       persistenceStatus,
     });
 
-    res.status(200).json({
-      ok: persistenceStatus === "confirmed",
-      intent: callResult,
-      persistenceStatus,
-      requiresReview: persistenceStatus !== "confirmed" || callResult === "contact_request_review",
-      nextAction: "Say exactly: Understood. Goodbye. Then immediately call end_call. Do not pitch, ask another question, promise future contact or suppression, request a callback or transfer, or retry this tool.",
-    });
+    res.status(200).json(buildElevenLabsContactOutcomeResponse(callResult, persistenceStatus));
   } catch (error) {
     next(error);
   }
