@@ -53,6 +53,8 @@ type SheetCellWrite = {
   value: string;
 };
 
+const pendingRowUpdates = new Map<number, Promise<void>>();
+
 function normalizeCallbackRequested(value: string | boolean | undefined): string | undefined {
   if (value === undefined) {
     return undefined;
@@ -159,6 +161,23 @@ export function buildVoiceLeadRowWrites(
   const providerD17Failure = updates.providerD17Failure || updates.callResult === "provider_d17_failure";
   const providerLlmFailure = updates.providerLlmFailure || updates.callResult === "provider_llm_failure";
 
+  const existingResults = [VOICE_BOT_COL_CALL_1_RESULT, VOICE_BOT_COL_CALL_2_RESULT]
+    .map((column) => String(rowValues[column - 1] ?? "").trim().toLowerCase());
+  const protectedContactOutcome = existingResults.some((result) =>
+    ["do_not_call", "call_ended_by_request", "contact_request_review", "interested_followup_review"].includes(result));
+  const wouldReplaceDoNotCall = existingResults.includes("do_not_call") && updates.callResult !== "do_not_call";
+  if (wouldReplaceDoNotCall || (protectedContactOutcome && (isRetryableVoiceBotResult(updates.callResult) ||
+    providerQuotaExceeded || providerD17Failure || providerLlmFailure))) {
+    // A delayed generic classifier cannot reopen contact after a terminal
+    // caller request. Keep any earlier callback/DNC fields, and close stale cadence.
+    clearWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible");
+    clearWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket");
+    clearWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "call_scheduled_for");
+    appendVoiceNotesWrite(writes, rowValues,
+      `Ignored stale outcome ${updates.callResult ?? "update"}; existing terminal contact outcome retained.${updates.voiceNotes ? ` ${updates.voiceNotes}` : ""}`);
+    return writes;
+  }
+
   if (providerQuotaExceeded || providerD17Failure || providerLlmFailure) {
     const retryAt = new Date(now.getTime() + VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES * 60_000);
     const reason = providerD17Failure ? "provider_d17" : providerQuotaExceeded ? "provider_quota" : "provider_llm";
@@ -205,13 +224,17 @@ function fieldsWritten(writes: SheetCellWrite[]): string[] {
   return writes.map((write) => `${columnToLetter(write.columnNumber)}:${write.field}`);
 }
 
-export async function updateVoiceLeadRow(rowNumber: number, updates: VoiceLeadRowUpdates): Promise<string[]> {
+async function writeVoiceLeadRow(
+  rowNumber: number,
+  updates: VoiceLeadRowUpdates,
+  getClient: () => Promise<sheets_v4.Sheets>,
+): Promise<string[]> {
   if (!Number.isInteger(rowNumber) || rowNumber < 2) {
     throw new Error(`rowNumber must be a sheet row number greater than 1. Received: ${rowNumber}`);
   }
 
   const now = new Date();
-  const sheets = await getGoogleSheetsClient();
+  const sheets = await getClient();
   const rowValues = await readVoiceLeadRow(sheets, rowNumber);
   const writes = buildVoiceLeadRowWrites(rowValues, updates, now);
   const written = fieldsWritten(writes);
@@ -251,4 +274,21 @@ export async function updateVoiceLeadRow(rowNumber: number, updates: VoiceLeadRo
   });
 
   return written;
+}
+
+export async function updateVoiceLeadRow(
+  rowNumber: number,
+  updates: VoiceLeadRowUpdates,
+  getClient: () => Promise<sheets_v4.Sheets> = getGoogleSheetsClient,
+): Promise<string[]> {
+  // Serialize this service's read/build/write operations for the same row so
+  // a concurrent fallback sees a terminal outcome written by the live tool.
+  const prior = pendingRowUpdates.get(rowNumber) ?? Promise.resolve();
+  const operation = prior.then(() => writeVoiceLeadRow(rowNumber, updates, getClient));
+  const settled = operation.then(() => undefined, () => undefined);
+  pendingRowUpdates.set(rowNumber, settled);
+  void settled.then(() => {
+    if (pendingRowUpdates.get(rowNumber) === settled) pendingRowUpdates.delete(rowNumber);
+  });
+  return operation;
 }

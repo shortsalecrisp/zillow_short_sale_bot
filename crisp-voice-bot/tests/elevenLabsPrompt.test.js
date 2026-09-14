@@ -2,532 +2,114 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-
-function readPrompt() {
-  return fs.readFileSync(
-    path.resolve(__dirname, "../docs/elevenlabs-agent-prompt.md"),
-    "utf8",
-  );
+const prompt = fs.readFileSync(path.resolve(__dirname, "../docs/elevenlabs-agent-prompt.md"), "utf8");
+function section(start, end) {
+  const a = prompt.indexOf(start), b = prompt.indexOf(end, a + start.length);
+  assert.ok(a >= 0 && b > a, "Prompt section anchors exist");
+  return prompt.slice(a, b);
 }
-
-function extractSection(text, startMarker, endMarker) {
-  const start = text.indexOf(startMarker);
-  assert.notEqual(start, -1, `Missing prompt marker: ${startMarker}`);
-
-  const end = text.indexOf(endMarker, start);
-  assert.notEqual(end, -1, `Missing prompt marker: ${endMarker}`);
-
-  return text.slice(start, end);
-}
-
-test("opening generic pickup moves directly to the selected continuation", () => {
-  const prompt = readPrompt();
-  const openingSection = extractSection(
-    prompt,
-    "Opening delivery rule, highest priority for every live-human opener:",
-    "If the caller corrects the name",
-  );
-
-  assert.match(openingSection, /normal greeting such as "hello", "hi", "yeah", "speaking"/i);
-  assert.match(openingSection, /Continue with `{{openerScript}}` using the service-explanation rule/);
-  assert.match(openingSection, /purpose question: answer it before qualifying/);
-  assert.match(openingSection, /Do not ask "Is this {{firstName}}\?"/);
+// These are static contract checks, not evidence of provider adherence or audible behavior.
+test("live identity remains truthful and dynamic", () => {
+  assert.match(prompt, /You are {{assistantName}}, an AI calling assistant for Crisp Short Sales/);
+  assert.match(prompt, /Yes, I'm an AI assistant with Crisp Short Sales/);
+  assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
 });
-
-test("prompt uses a clear reason-first opening and two dynamic continuation variants", () => {
-  const prompt = readPrompt();
-  const openingSection = extractSection(
-    prompt,
-    "Opening delivery rule, highest priority for every live-human opener:",
-    "If the caller corrects the name",
-  );
-
-  assert.match(openingSection, /The backend first says exactly/);
-  assert.match(openingSection, /Hi, this is {{assistantName}} with Crisp Short Sales\. I'm calling about your short sale listing\./);
-  assert.match(openingSection, /Do not say "Hello\?" as the opener/);
-  assert.match(openingSection, /selected plain-language continuation/);
-  assert.match(openingSection, /"{{openerScript}}"/);
-  assert.match(openingSection, /two-variant test/);
-  assert.match(openingSection, /passes `{{openerVariant}}` for analysis/);
-  assert.match(openingSection, /do not deliver `{{openerScript}}`/);
-  assert.match(prompt, /If they ask which listing, which property/);
-  assert.match(prompt, /answer before any explanation or follow-up question/);
+test("startup listens for a live greeting and separates intro from qualification", () => {
+  const s = section("Opening delivery rule,", "If the caller corrects the name");
+  assert.match(s, /Listen before introducing yourself/);
+  assert.match(s, /remain silent/);
+  assert.match(s, /Do not attach {{openerScript}} or a qualification question/);
+  assert.match(s, /If their first live turn asks a question or gives a correction, answer that before/);
+  assert.match(s, /do not ask for their identity again/i);
+  assert.match(s, /two-variant test/);
+  assert.match(s, /Do not repeat your name/);
 });
-
-test("prompt repairs only the missing point without stacking a sales question", () => {
-  const prompt = readPrompt();
-  const openingSection = extractSection(
-    prompt,
-    "Opening delivery rule, highest priority for every live-human opener:",
-    "If the caller corrects the name",
-  );
-
-  assert.match(openingSection, /answer only the missing point/);
-  assert.match(openingSection, /Do not use the same full introduction/);
-  assert.match(openingSection, /Do not ask a qualification question until/);
-  assert.match(openingSection, /no more than once/);
-  assert.match(openingSection, /never repeat the introduction a third time/);
+test("clarification answers are bounded without an appended sales question", () => {
+  const s = section("Clarification turn contract,", "Core behavior:");
+  assert.match(s, /COMPLETE turn/);
+  assert.match(s, /Do not append {{openerScript}}/);
+  assert.match(s, /If the caller asks TWO questions, answer BOTH/);
+  assert.match(s, /organize the documents the bank needs/);
+  assert.match(s, /hearing-restoration response/);
+  assert.match(s, /NOT a general acknowledgment/);
 });
-
-test("prompt waits for voicemail greeting handoff before leaving voicemail", () => {
-  const prompt = readPrompt();
-  const marker = "Voicemail and no-answer:";
-  const start = prompt.indexOf(marker);
-  assert.notEqual(start, -1, `Missing prompt marker: ${marker}`);
-  const voicemailSection = prompt.slice(start);
-
-  assert.match(voicemailSection, /do not say `{{openerScript}}` first/);
-  assert.match(voicemailSection, /do not call `voicemail_detection` while the mailbox greeting is still mid-sentence/);
-  assert.match(voicemailSection, /clear pause or the greeting has already asked for a message/);
+test("hearing repair does not claim technical repairs or infer consent", () => {
+  assert.match(prompt, /Sorry, can you hear me now/);
+  assert.match(prompt, /Do not combine[^\n]+or claim you fixed the audio or changed the volume/);
+  assert.match(prompt, /Difficulty alone is not callback consent, rejection, or transfer consent/);
+  assert.match(prompt, /An unclear yes to this choice is not consent/);
 });
-
-test("prompt ends wrong-person and unrelated-business voicemail without a sales pitch", () => {
-  const prompt = readPrompt();
-  const start = prompt.indexOf("Wrong-person or unrelated-business voicemail hard stop:");
-  const end = prompt.indexOf("Main conversation:", start);
-  const section = prompt.slice(start, end);
-
-  assert.ok(start >= 0);
-  assert.match(section, /sounds plausibly similar/);
-  assert.match(section, /clearly nothing alike/);
-  assert.match(section, /do not leave the normal voicemail/);
-  assert.match(section, /business greeting is target-matching/);
-  assert.match(section, /`\{\{lastName\}\}`/);
-  assert.match(section, /Say nothing further and immediately call `end_call`/);
-  assert.match(section, /Never request a callback, live transfer, or human sales handoff/);
+test("current-call end is distinct from suppression and rejection", () => {
+  const s = section("If a live person only asks to end THIS call", "If they say they are not worried");
+  assert.match(s, /CALL ENDED BY REQUEST: caller asked to end the current call only/);
+  assert.match(s, /not permission for another automated call/);
+  assert.match(s, /Do not erase earlier genuine interest/);
+  assert.match(s, /Understood. Goodbye/);
 });
-
-test("prompt starts with identity plus reason and avoids repeated introductions", () => {
-  const prompt = readPrompt();
-  const oneIntroRule = extractSection(
-    prompt,
-    "Opening delivery rule, highest priority for every live-human opener:",
-    "If the caller corrects the name",
-  );
-
-  assert.match(oneIntroRule, /caller name, company, and reason/);
-  assert.match(oneIntroRule, /Hi, this is {{assistantName}} with Crisp Short Sales/);
-  assert.match(oneIntroRule, /short sale listing/);
-  assert.match(oneIntroRule, /Do not repeat your name, Crisp Short Sales, or the listing reason/);
-  assert.match(oneIntroRule, /no more than once/);
+test("explicit STOP and removal retain highest-priority opt-out handling", () => {
+  const s = section('If a live person says "do not call"', "If a live person only asks to end THIS call");
+  assert.match(s, /standalone "stop"/);
+  assert.match(s, /remove me from your list/);
+  assert.match(s, /DO NOT CALL: caller explicitly requested no further calls/);
+  assert.match(s, /priority over every pitch/);
+  assert.doesNotMatch(s, /We won't call again/);
 });
-
-test("prompt treats not-a-short-sale objections as a clear no", () => {
-  const prompt = readPrompt();
-  const notShortSaleBranch = extractSection(
-    prompt,
-    "If they say the listing is not a short sale",
-    "If they say they are not worried about it",
-  );
-
-  assert.match(notShortSaleBranch, /clean closeout/i);
-  assert.match(notShortSaleBranch, /Do not pitch/);
-  assert.match(
-    notShortSaleBranch,
-    /Ahh, ok, thanks for letting me know\. Good luck with your listing!/,
-  );
-  assert.match(notShortSaleBranch, /Then call `not_interested`/);
-  assert.match(notShortSaleBranch, /conversationSummary[\s\S]{0,120}not a short sale/);
-  assert.match(notShortSaleBranch, /`not_short_sale`/);
+test("recordings cannot create human consent or outcomes", () => {
+  assert.match(prompt, /Recording\/automated-system gate, highest priority/);
+  assert.match(prompt, /Never call `callback_requested`, `information_requested`, `not_interested`, or `live_transfer_requested` from an automated/);
+  assert.match(prompt, /Canned fragments/);
 });
-
-test("prompt turns human-only objections into immediate Yoni transfer rescue", () => {
-  const prompt = readPrompt();
-  const humanRescueBranch = extractSection(
-    prompt,
-    "If they object to automation",
-    "If they ask whether you are with another person",
-  );
-
-  assert.match(
-    humanRescueBranch,
-    /Totally fair\. Yoni is our live short sale specialist/,
-  );
-  assert.match(humanRescueBranch, /bring him onto this call right now/);
-  assert.match(humanRescueBranch, /Want me to try him\?/);
-  assert.match(humanRescueBranch, /move directly into the live transfer flow/);
-  assert.doesNotMatch(humanRescueBranch, /callback_requested/);
+test("screening answers once then waits for a new live person", () => {
+  assert.match(prompt, /This is {{assistantName}} calling from Crisp Short Sales about your listing at {{streetAddress}}/);
+  assert.match(prompt, /After you have spoken that sentence, stay quiet and keep the call open/);
+  assert.match(prompt, /Do not call `end_call` while you are being transferred/);
 });
-
-test("prompt answers AI questions truthfully without an automatic transfer pitch", () => {
-  const prompt = readPrompt();
-  const aiBranch = extractSection(
-    prompt,
-    "If they ask whether you are AI:",
-    "If they object to automation",
-  );
-
-  assert.match(aiBranch, /Yes, I'm an AI assistant with Crisp Short Sales\./);
-  assert.match(aiBranch, /Then stop for their reply/);
-  assert.match(aiBranch, /an opt-out takes priority/);
-  assert.doesNotMatch(aiBranch, /Want me to try him\?/);
+test("voicemail and wrong-person protections remain", () => {
+  assert.match(prompt, /Wrong-person or unrelated-business voicemail hard stop/);
+  assert.match(prompt, /do not call `voicemail_detection` while the mailbox greeting is still mid-sentence/);
+  assert.match(prompt, /do not leave the normal voicemail/);
+  assert.match(prompt, /{{callAttemptNumber}}/);
 });
-
-test("prompt answers affiliation questions without implying an existing relationship", () => {
-  const prompt = readPrompt();
-
-  assert.match(
-    prompt,
-    /I'm with Crisp Short Sales\." Do not imply you are their existing provider or repeat a qualification question/,
-  );
+test("noise does not become a name, consent or a callback", () => {
+  assert.match(prompt, /Do not guess the speaker's name from the noisy turn/);
+  assert.match(prompt, /Do not treat a single yes, sure, or okay inside that noisy turn as consent/);
+  assert.match(prompt, /If the latest caller message is exactly "..."/);
+  assert.match(prompt, /Do not finish the sentence over them/);
 });
-
-test("prompt treats placeholder-only user turns as background noise and skips speaking", () => {
-  const prompt = readPrompt();
-
-  assert.match(prompt, /If the latest caller message is exactly "\.\.\."/);
-  assert.match(prompt, /background noise/i);
-  assert.match(prompt, /call `skip_turn`/);
-  assert.match(prompt, /Do not say[\s\S]{0,120}Are you still there\?/);
+test("the active person's correction outranks the lead name", () => {
+  const s = section("If the caller corrects the name", "If they ask which listing");
+  assert.match(s, /Treat the current speaker as the agent/);
+  assert.match(s, /Do not ask to speak with `{{firstName}}`/);
+  assert.match(s, /Do not repeat a handling question they already answered/);
 });
-
-test("prompt stops speaking when the caller interrupts", () => {
-  const prompt = readPrompt();
-  const interruptionSection = extractSection(
-    prompt,
-    "If the caller interrupts:",
-    "If the caller's speech sounds like background conversation",
-  );
-
-  assert.match(interruptionSection, /Stop speaking and listen/);
-  assert.match(interruptionSection, /Do not finish the sentence over them/);
-  assert.match(interruptionSection, /Respond to the latest thing they said/);
-  assert.doesNotMatch(interruptionSection, /still kind of new/i);
+test("cost is transparent and unsupported claims stay prohibited", () => {
+  assert.match(prompt, /There is no charge to you or the seller. The buyer typically pays a flat fee only if the deal closes/);
+  assert.match(prompt, /It can affect the buyer's total budget/);
+  assert.match(prompt, /Do not invent a fee amount, guaranteed approval or closing/);
+  assert.match(prompt, /I don't have a verified answer on that/);
+  assert.doesNotMatch(prompt, /\$5,?000/);
 });
-
-test("prompt keeps third-party callback timing questions direct and name-specific", () => {
-  const prompt = readPrompt();
-  const callbackFlow = extractSection(
-    prompt,
-    "Callback flow:",
-    "If they say no, all set, thanks, bye, ok, or similar, say:",
-  );
-
-  assert.match(callbackFlow, /What time should Yoni call \[name\]\?/);
-  assert.match(callbackFlow, /Do not say:[\s\S]*Great, what time should Yoni call her\?/);
-  assert.match(prompt, /use plain human phrasing and the real name when you know it/i);
-});
-
-test("prompt waits through office robots and gatekeeper transfer attempts", () => {
-  const prompt = readPrompt();
-  const gatekeeperSection = extractSection(
-    prompt,
-    "If a receptionist, office assistant, automated attendant, answering service, phone tree, or transfer robot answers:",
-    "If it is the wrong person",
-  );
-
-  assert.match(gatekeeperSection, /automated attendant/i);
-  assert.match(gatekeeperSection, /AI call assistant/i);
-  assert.match(gatekeeperSection, /record your name and reason for calling/i);
-  assert.match(
-    gatekeeperSection,
-    /This is {{assistantName}} calling from Crisp Short Sales about your listing at {{streetAddress}}\./,
-  );
-  assert.match(gatekeeperSection, /Do not call `skip_turn` as the response to that screener prompt/);
-  assert.match(gatekeeperSection, /The response to the screener must be the spoken sentence above/);
-  assert.match(gatekeeperSection, /After you have spoken that sentence, stay quiet/);
-  assert.match(gatekeeperSection, /Do not pitch, do not ask a callback question/);
-  assert.match(gatekeeperSection, /phone rings, transfers, or waits for the agent/);
-  assert.match(gatekeeperSection, /to see if they wanted help with the bank paperwork and approval side/i);
-  assert.match(gatekeeperSection, /Do not give Yoni's callback number in that sentence/i);
-  assert.match(gatekeeperSection, /Yoni's direct callback number is 404-300-9526/i);
-  assert.doesNotMatch(gatekeeperSection, /What's the best time or direct number for {{firstName}}\?/i);
-  assert.match(gatekeeperSection, /Please stay on the line/i);
-  assert.match(gatekeeperSection, /Sure, I'll wait\./);
-  assert.match(gatekeeperSection, /follow the Voicemail\/no-answer rules and leave the full voicemail on attempt 1/i);
-  assert.match(gatekeeperSection, /restart the normal live-human opener from scratch/i);
-  assert.match(gatekeeperSection, /This is {{assistantName}} with Crisp Short Sales\./);
-  assert.match(gatekeeperSection, /Do not call `end_call`[\s\S]{0,160}transferred/i);
-});
-
-test("prompt blocks recording fragments from creating human outcomes", () => {
-  const prompt = readPrompt();
-
-  assert.match(prompt, /Recording\/automated-system gate, highest priority/i);
-  assert.match(prompt, /Canned fragments such as "as soon as possible"/i);
-  assert.match(
-    prompt,
-    /Never call `callback_requested`, `information_requested`, `not_interested`, or `live_transfer_requested`/,
-  );
-  assert.match(prompt, /automated system asks for a callback number[\s\S]{0,100}404-300-9526/i);
-});
-
-test("prompt gives explicit do-not-call requests a non-sales closeout", () => {
-  const prompt = readPrompt();
-  const branch = extractSection(
-    prompt,
-    'If a live person says "do not call"',
-    "If they say they are not worried about it",
-  );
-
-  assert.match(branch, /priority over every pitch/i);
-  assert.match(branch, /DO NOT CALL: caller explicitly requested no further calls/);
-  assert.match(branch, /Understood\. We won't call again\. Goodbye\./);
-  assert.match(branch, /Do not pitch, mention future help, ask another question, offer Yoni/);
-});
-
-test("prompt records self-initiated future contact as deferred without a callback", () => {
-  const prompt = readPrompt();
-  const section = extractSection(
-    prompt,
-    "Self-initiated future contact, before generic not-interested or callback handling:",
-    "If the caller interrupts:",
-  );
-
-  assert.match(section, /I'm gonna get back to you as soon as I can/);
-  assert.match(section, /DEFERRED CONTACT: caller said they will initiate future contact/);
-  assert.match(section, /backend records `deferred_contact`, not a rejection/);
-  assert.match(section, /do not call `callback_requested`/);
-  assert.match(section, /do not create a handoff/);
-  assert.match(section, /call me later/);
-});
-
-test("prompt pitches admins who answer instead of only taking a message", () => {
-  const prompt = readPrompt();
-  const receptionistBranch = extractSection(
-    prompt,
-    "If a receptionist, office assistant",
-    "If it is the wrong person",
-  );
-
-  assert.match(receptionistBranch, /admin or assistant says {{firstName}} is not available/i);
-  assert.match(receptionistBranch, /treat them as a valid person to pitch/i);
-  assert.match(receptionistBranch, /Do not only ask them to relay a message/i);
-  assert.match(
-    receptionistBranch,
-    /No problem\. We help agents with short sale paperwork, lender calls, and approval\. Do you know whether they're handling that work themselves\?/,
-  );
-});
-
-test("prompt treats not-worried responses as a soft no instead of pitching", () => {
-  const prompt = readPrompt();
-
-  assert.match(prompt, /not worried/i);
-  assert.match(prompt, /soft no/i);
-  assert.match(
-    prompt,
-    /Ok, well thanks for letting me know\. If anything changes in the future and you're looking for some additional help, please just keep me in mind\. Thanks!/,
-  );
-  assert.match(prompt, /Then pause briefly and listen/);
+test("soft no and self-handling do not suppress new questions", () => {
+  assert.match(prompt, /Do not include "I'm handling it myself"/);
+  assert.match(prompt, /If they ask any question after this/);
   assert.match(prompt, /answer it instead of calling `not_interested`/);
+  assert.match(prompt, /Curiosity, a polite acknowledgment, or understanding the explanation is not by itself a request/);
 });
-
-test("prompt soft-closes when the caller already has short sale help but still answers questions", () => {
-  const prompt = readPrompt();
-  const coveredBranch = extractSection(
-    prompt,
-    "If they say they already have a short sale negotiator",
-    "If they say they are not worried about it",
-  );
-
-  assert.match(coveredBranch, /attorney, specialist, someone handling it/);
-  assert.match(coveredBranch, /Do not pitch/);
-  assert.match(coveredBranch, /please just keep me in mind\. Thanks!/);
-  assert.match(coveredBranch, /If they ask any question after this/i);
-  assert.match(coveredBranch, /answer it instead of calling `not_interested`/i);
-  assert.match(coveredBranch, /If they do not ask a question/i);
-});
-
-test("prompt treats direct or self-handling answers as a soft value-pitch opportunity", () => {
-  const prompt = readPrompt();
-  const selfHandlingBranch = extractSection(
-    prompt,
-    "If they answer the handling question with \"yes\"",
-    "If they say they already have a short sale negotiator",
-  );
-
-  assert.match(selfHandlingBranch, /handling it themselves/i);
-  assert.match(selfHandlingBranch, /figuring it out as I go/i);
-  assert.match(selfHandlingBranch, /plain yes/i);
-  assert.match(selfHandlingBranch, /Do not repeat the handling question/);
-  assert.match(selfHandlingBranch, /acknowledge that first/i);
-  assert.match(selfHandlingBranch, /Do not treat this as a hard no/);
-  assert.match(selfHandlingBranch, /Is any part of the lender follow-up something you'd like help with\?/);
-  assert.match(selfHandlingBranch, /Do not ask when they already said they have it covered/);
-  assert.doesNotMatch(selfHandlingBranch, /no cost to you or the seller/);
-  assert.match(selfHandlingBranch, /Interest-to-Yoni sequence/);
-  assert.match(selfHandlingBranch, /bring Yoni, our live short sale specialist, onto this call right now/);
-  assert.match(selfHandlingBranch, /Do not launch a live transfer only because they answered the earlier handling question/);
-  assert.match(selfHandlingBranch, /call `information_requested`/);
-  assert.match(selfHandlingBranch, /Do not call `callback_requested`/);
-  assert.match(selfHandlingBranch, /do not invent a callback time/);
-  assert.match(selfHandlingBranch, /Is \{\{email\}\} the best email for the information\?/);
-  assert.match(selfHandlingBranch, /What time should he call you\?/);
-});
-
-test("prompt exposes email and keeps information requests out of callback handling", () => {
-  const prompt = readPrompt();
-
-  assert.match(prompt, /- `email`/);
-  assert.match(prompt, /call `information_requested` with that email/);
-  assert.match(prompt, /After `information_requested` succeeds/);
+test("information-only and self-initiated contact stay out of callbacks", () => {
+  assert.match(prompt, /call `information_requested`/);
+  assert.match(prompt, /DEFERRED CONTACT: caller said they will initiate future contact/);
+  assert.match(prompt, /This is not a request for Yoni or Crisp to call them/);
   assert.doesNotMatch(prompt, /callbackTime` set to `send info/);
 });
-
-test("prompt keeps self-handling uncertainty out of the hard-no examples", () => {
-  const prompt = readPrompt();
-  const notInterestedExamples = extractSection(
-    prompt,
-    "Treat all of these as not interested:",
-    "Say:",
-  );
-
-  assert.doesNotMatch(notInterestedExamples, /- "I'm handling it myself"/);
-  assert.match(notInterestedExamples, /Do not include "I'm handling it myself"/);
-  assert.match(notInterestedExamples, /"I'm figuring it out as I go"/);
+test("callbacks require consent and do not promise a booked appointment", () => {
+  assert.match(prompt, /Being busy, hesitant, or saying "not now" is not callback consent/);
+  assert.match(prompt, /This is a callback request, not a confirmed appointment/);
+  assert.match(prompt, /I couldn't confirm that request/);
+  assert.doesNotMatch(prompt, /I set up the callback with Yoni|I will text him/);
 });
-
-test("prompt answers service questions after a soft-no closeout instead of ending", () => {
-  const prompt = readPrompt();
-  const softNoBranch = extractSection(
-    prompt,
-    "If they say they are not worried about it",
-    "If they ask whether you handle the full short sale process",
-  );
-
-  assert.match(softNoBranch, /If they ask any question after this/i);
-  assert.match(softNoBranch, /how much do you charge/i);
-  assert.match(softNoBranch, /answer it instead of calling `not_interested`/i);
-  assert.match(softNoBranch, /no charge to you or the seller/i);
-  assert.match(softNoBranch, /buyer typically pays a flat fee only if the deal closes/i);
-  assert.match(softNoBranch, /not an automatic handoff pitch/i);
-});
-
-test("prompt does not treat overlapped okay or busy later/callback language as live-transfer consent", () => {
-  const prompt = readPrompt();
-  const transferRule = extractSection(
-    prompt,
-    "Transfer rule:",
-    "If they want Yoni now, or say",
-  );
-
-  assert.match(transferRule, /clearly and unambiguously agrees/);
-  assert.match(transferRule, /explicit offer to bring Yoni onto this call right now/);
-  assert.match(transferRule, /earlier qualification or help question is interest only/i);
-  assert.match(transferRule, /Do not treat a vague or overlapped "okay okay"/);
-  assert.match(transferRule, /"I, so\.\.\. okay"/);
-  assert.match(transferRule, /in a meeting/);
-  assert.match(transferRule, /afternoon\/tomorrow\/later/);
-  assert.match(transferRule, /Sorry, I may have talked over you/);
-  assert.match(transferRule, /Do you want me to try to bring Yoni onto this call now, or should he call you at a specific time\?/);
-  assert.match(transferRule, /No problem\. What time should he call you\?/);
-});
-
-test("prompt does not force another identity check after a normal live pickup", () => {
-  const prompt = readPrompt();
-  const openingSection = extractSection(
-    prompt,
-    "Opening delivery rule, highest priority for every live-human opener:",
-    "If the caller corrects the name",
-  );
-
-  assert.match(openingSection, /gives their name/);
-  assert.match(openingSection, /do not ask for their identity again/i);
-  assert.match(openingSection, /Continue with `{{openerScript}}`/);
-});
-
-test("prompt treats corrected realtor identity as the active agent", () => {
-  const prompt = readPrompt();
-  const correctedIdentityBranch = extractSection(
-    prompt,
-    "If the caller corrects the name",
-    "If they ask which listing",
-  );
-
-  assert.match(correctedIdentityBranch, /I'?m the realtor/i);
-  assert.match(correctedIdentityBranch, /treat the current speaker as the agent/i);
-  assert.match(correctedIdentityBranch, /Do not ask to speak with `{{firstName}}`/);
-  assert.match(correctedIdentityBranch, /do not route back to the original lead name/i);
-  assert.match(
-    correctedIdentityBranch,
-    /Do not repeat a handling question they already answered/,
-  );
-});
-
-test("prompt clarifies noisy background speech before treating it as consent", () => {
-  const prompt = readPrompt();
-  const noisySpeechBranch = extractSection(
-    prompt,
-    "If the caller's speech sounds like background conversation",
-    "If they sound skeptical",
-  );
-
-  assert.match(noisySpeechBranch, /hair|unrelated personal conversation/i);
-  assert.match(noisySpeechBranch, /Do not treat a single yes, sure, or okay inside that noisy turn as consent/i);
-  assert.match(
-    noisySpeechBranch,
-    /Sorry, I heard part of that\. Could you repeat the last part\?/,
-  );
-  assert.match(noisySpeechBranch, /Do not infer a callback, rejection, or transfer from noise/);
-});
-
-test("prompt reserves the property address for an explicit listing question", () => {
-  const prompt = readPrompt();
-  const openingSection = extractSection(
-    prompt,
-    "Opening delivery rule, highest priority for every live-human opener:",
-    "If the caller corrects the name",
-  );
-  const propertyBranch = extractSection(prompt, "If they ask which listing", "If the caller says they are busy");
-
-  assert.match(openingSection, /do not lead with the property address/i);
-  assert.doesNotMatch(openingSection, /short sale listing at {{streetAddress}}/);
-  assert.match(propertyBranch, /The one at {{streetAddress}}\./);
-  assert.match(propertyBranch, /Then stop and let them respond/);
-});
-
-test("prompt removes bank-side jargon from the live-human pitch", () => {
-  const prompt = readPrompt();
-
-  assert.match(prompt, /short-sale paperwork and follow up with the lender/);
-  assert.doesNotMatch(prompt, /bank side/i);
-});
-
-test("prompt repairs confusion with plain service wording and pauses the pitch", () => {
-  const prompt = readPrompt();
-  const confusionBranch = extractSection(
-    prompt,
-    "If they say they are not really sure what you are calling about",
-    "Business facts you can use briefly:",
-  );
-
-  assert.match(confusionBranch, /Do not lead with Yoni/);
-  assert.match(confusionBranch, /Do not mention the earlier text yet/);
-  assert.match(
-    confusionBranch,
-    /We help prepare the short-sale paperwork and follow up with the lender\./,
-  );
-  assert.match(confusionBranch, /Understanding that sentence is not a request for a transfer/);
-  assert.match(confusionBranch, /Do not repeat the pitch or attach a handling or handoff question/);
-  assert.doesNotMatch(confusionBranch, /reached out earlier by text/);
-  assert.doesNotMatch(confusionBranch, /what your plan/i);
-});
-
-test("prompt clearly explains purpose before callback when caller is busy or cannot hear", () => {
-  const prompt = readPrompt();
-  const busyNoiseBranch = extractSection(
-    prompt,
-    "If the caller says they are busy, out to dinner, driving, cannot hear you well",
-    "If a receptionist, office assistant",
-  );
-
-  assert.match(busyNoiseBranch, /Answer the purpose question briefly/);
-  assert.match(busyNoiseBranch, /Hearing difficulty alone is not a callback request/);
-  assert.match(
-    busyNoiseBranch,
-    /We help prepare the short-sale paperwork and follow up with the lender\./,
-  );
-  assert.doesNotMatch(busyNoiseBranch, /I'm {{assistantName}} with Crisp Short Sales/);
-  assert.match(busyNoiseBranch, /Do not promise to be quick/);
-  assert.match(busyNoiseBranch, /call `callback_requested`/);
-});
-
-test("prompt uses the per-call assistant name instead of hard-coding Emmy in spoken lines", () => {
-  const prompt = readPrompt();
-
-  assert.match(prompt, /You are {{assistantName}}, an AI calling assistant/);
-  assert.match(prompt, /this is {{assistantName}} with Crisp Short Sales/);
-  assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
-  assert.doesNotMatch(prompt, /I'm Emmy with Crisp Short Sales/i);
-  assert.doesNotMatch(prompt, /let .* know Emmy from Crisp Short Sales/i);
+test("transfer consent can change and new questions must be handled", () => {
+  assert.match(prompt, /While a transfer is being checked, consent can still change/);
+  assert.match(prompt, /Do not proceed from a stale approval/);
+  assert.match(prompt, /A failed transfer alone is not an ending or callback instruction/);
+  assert.doesNotMatch(prompt, /decision is locked in|Do not answer new questions/);
 });

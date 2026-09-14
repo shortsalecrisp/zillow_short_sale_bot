@@ -8,8 +8,14 @@ import {
   getLatestElevenLabsCallContext,
 } from "../lib/elevenLabsCallContext";
 import { requestElevenLabsLiveTransferApproval } from "../lib/elevenLabsLiveTransferApproval";
-import { looksLikeDoNotCall } from "../lib/elevenLabsDoNotCall";
-import { processPostCallOutcomeFromConversationId } from "../lib/elevenLabsPostCall";
+import {
+  buildVoiceContactOutcomeUpdates,
+  classifyElevenLabsNotInterested,
+  getElevenLabsNotInterestedEvidence,
+  isElevenLabsContactEvidenceBound,
+  persistVoiceContactOutcome,
+  processPostCallOutcomeFromConversationId,
+} from "../lib/elevenLabsPostCall";
 import {
   assertValidElevenLabsConversationId,
   fetchElevenLabsConversationAudio,
@@ -676,70 +682,71 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
     verifyToolSecret(req);
     const payload = applyLatestCallContextIfNeeded(readLeadPayload(req.body));
 
-    queueElevenLabsBackgroundTask(
-      "ElevenLabs not interested sheet update",
-      {
-        rowNumber: payload.rowNumber,
-        agentName: payload.agentName,
-        callAttemptNumber: payload.callAttemptNumber,
-      },
-      () => {
-        const callResult = looksLikeDeferredContact(payload.conversationSummary)
-          ? "deferred_contact"
-          : looksLikeDoNotCall(payload.conversationSummary)
-          ? "do_not_call"
-          : looksLikeNotShortSale(payload.conversationSummary)
-          ? "not_short_sale"
-          : looksLikeAlreadyHasShortSaleHelp(payload.conversationSummary)
-            ? "already_working_with_negotiator"
-          : "answered_not_interested";
-
-        return postSheetUpdate({
+    const knownConversationId = getElevenLabsConversationIdByCallContext({
+      rowNumber: payload.rowNumber,
+      callAttemptNumber: payload.callAttemptNumber,
+    });
+    const conversationId = knownConversationId || payload.conversationId;
+    let conversation: Awaited<ReturnType<typeof getElevenLabsNotInterestedEvidence>> | undefined;
+    if (conversationId) {
+      try {
+        const evidence = await getElevenLabsNotInterestedEvidence(conversationId);
+        if (isElevenLabsContactEvidenceBound(evidence, {
           rowNumber: payload.rowNumber,
           callAttemptNumber: payload.callAttemptNumber,
-          callResult,
-          responseStatus: buildVoiceResponseStatus(callResult),
-          ...(callResult === "deferred_contact" ? {} : { leadStatusCode: "R" }),
-          ...(callResult === "deferred_contact"
-            ? {
-                callbackRequested: "",
-                callbackTime: "",
-                liveTransferRequested: "",
-                liveTransferCompleted: "",
-              }
-            : {}),
-          ...(callResult === "do_not_call"
-            ? {
-                callbackRequested: "",
-                callbackTime: "",
-                liveTransferRequested: "",
-                liveTransferCompleted: "",
-              }
-            : {}),
-          voiceNotes: payload.conversationSummary || "ElevenLabs: lead not interested",
+          matchesKnownCallContext: knownConversationId === conversationId,
+        })) {
+          conversation = evidence;
+        } else {
+          logger.warn("ElevenLabs not-interested evidence did not match this lead and attempt; terminal review required", {
+            rowNumber: payload.rowNumber,
+            callAttemptNumber: payload.callAttemptNumber,
+            conversationId,
+          });
+        }
+      } catch {
+        logger.warn("ElevenLabs not-interested caller evidence unavailable; terminal review required", {
+          rowNumber: payload.rowNumber,
+          conversationId,
         });
-      },
-    );
+      }
+    }
+    const callResult = classifyElevenLabsNotInterested(conversation);
+    let persistenceStatus: "confirmed" | "unconfirmed" = "unconfirmed";
+    try {
+      await persistVoiceContactOutcome({
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+        ...buildVoiceContactOutcomeUpdates(callResult, conversation),
+        voiceNotes: `${callResult === "call_ended_by_request"
+          ? "CALL ENDED BY REQUEST: caller asked to end the current call only. "
+          : ""}Tool-provided summary (not caller evidence): ${payload.conversationSummary}`,
+      });
+      persistenceStatus = "confirmed";
+    } catch {
+      logger.error("ElevenLabs terminal contact write unconfirmed; manual review required, no retry authorized", {
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+        conversationId,
+        callResult,
+      });
+    }
 
     logger.info("ElevenLabs not interested tool handled", {
       rowNumber: payload.rowNumber,
       agentName: payload.agentName,
       phone: payload.phone,
       listingAddress: payload.listingAddress,
+      callResult,
+      persistenceStatus,
     });
 
     res.status(200).json({
-      ok: true,
-      intent: looksLikeDeferredContact(payload.conversationSummary)
-        ? "deferred_contact"
-        : looksLikeDoNotCall(payload.conversationSummary)
-          ? "do_not_call"
-          : "not_interested",
-      nextAction: looksLikeDeferredContact(payload.conversationSummary)
-        ? "Say exactly: Sounds good. Feel free to reach out when you're ready. Thanks! Then immediately call end_call. Do not ask for a callback time."
-        : looksLikeDoNotCall(payload.conversationSummary)
-        ? "Say exactly: Understood. We won't call again. Goodbye. Then immediately call end_call. Do not pitch, ask another question, or wait for another caller response."
-        : "Say exactly: Ok, well thanks for letting me know. If anything changes in the future and you're looking for some additional help, please just keep me in mind. Thanks! Then immediately call end_call. Do not wait for another caller response. Do not pitch again. Do not reopen the conversation.",
+      ok: persistenceStatus === "confirmed",
+      intent: callResult,
+      persistenceStatus,
+      requiresReview: persistenceStatus !== "confirmed" || callResult === "contact_request_review",
+      nextAction: "Say exactly: Understood. Goodbye. Then immediately call end_call. Do not pitch, ask another question, promise future contact or suppression, request a callback or transfer, or retry this tool.",
     });
   } catch (error) {
     next(error);

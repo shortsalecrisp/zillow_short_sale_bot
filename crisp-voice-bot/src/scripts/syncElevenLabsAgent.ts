@@ -1,487 +1,127 @@
 import axios from "axios";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { config } from "../lib/config";
-import { logger } from "../lib/logger";
-
-type AgentResponse = {
-  agent_id: string;
-  conversation_config: {
-    turn: {
-      turn_timeout?: number;
-      initial_wait_time?: number;
-      turn_eagerness?: string;
-      speculative_turn?: boolean;
-      retranscribe_on_turn_timeout?: boolean;
-      soft_timeout_config?: {
-        timeout_seconds?: number;
-        message?: string;
-        use_llm_generated_message?: boolean;
-      };
-      [key: string]: unknown;
-    };
-    tts: {
-      optimize_streaming_latency?: number;
-      [key: string]: unknown;
-    };
-    conversation: {
-      client_events?: string[];
-      [key: string]: unknown;
-    };
-    agent: {
-      disable_first_message_interruptions?: boolean;
-      backup_llm_config?: {
-        preference?: string;
-        [key: string]: unknown;
-      };
-      cascade_timeout_seconds?: number | null;
-      prompt: {
-        prompt?: string;
-        llm?: string;
-        temperature?: number;
-        max_tokens?: number;
-        tool_ids?: string[];
-        built_in_tools?: Record<string, Record<string, unknown> | null>;
-        tools?: Array<Record<string, unknown>>;
-        [key: string]: unknown;
-      };
-      [key: string]: unknown;
-    };
-    [key: string]: unknown;
-  };
-  workflow?: Record<string, unknown>;
-  platform_settings?: {
-    overrides?: {
-      conversation_config_override?: {
-        tts?: Record<string, unknown>;
-        [key: string]: unknown;
-      };
-      [key: string]: unknown;
-    };
-    [key: string]: unknown;
-  };
-};
-
-type ToolResponse = {
-  id: string;
-  tool_config: {
-    name?: string;
-    [key: string]: unknown;
-  };
-};
-
+import {
+  applyConversationConsentPolicy,
+  applyConversationListeningPolicy,
+  VOICE_CONVERSATION_POLICY_VERSION,
+} from "../lib/elevenLabsConversationPolicy";
 
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
-const FIRST_MESSAGE =
-  "Hi, this is {{assistantName}} with Crisp Short Sales. I'm calling about your short sale listing.";
-const INITIAL_WAIT_TIME_SECONDS = 1.6;
-const TURN_TIMEOUT_SECONDS = 1.5;
-const TURN_EAGERNESS = "normal";
-const SPECULATIVE_TURN = false;
-const SOFT_TIMEOUT_SECONDS = -1;
-const RETRANSCRIBE_ON_TURN_TIMEOUT = true;
-const DISABLE_FIRST_MESSAGE_INTERRUPTION = true;
-const TEMPERATURE = 0.1;
-const MAX_TOKENS = 80;
-const TTS_SPEED = 0.95;
-const BACKUP_LLM_PREFERENCE = "disabled";
-const CASCADE_TIMEOUT_SECONDS: number | null = null;
-const VOICEMAIL_MESSAGE_TEMPLATE = "{{voicemailMessage}}";
+const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+export function canonical(value: any): any {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+  return value;
+}
+export const bodyDigest = (value: unknown) => digest(JSON.stringify(canonical(value)));
 
-function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value.filter((item): item is string => typeof item === "string");
+export function writableBody(agent: any) {
+  const body = structuredClone({ conversation_config: agent.conversation_config, workflow: agent.workflow });
+  // Expanded GET-only tool schemas can contain webhook credentials. Referenced IDs remain unchanged.
+  delete body.conversation_config.agent.prompt.tools;
+  return body;
 }
 
-
-function buildWarmTransferWorkflow(options: {
-  liveTransferToolId: string;
-  liveTransferNumber: string;
-  baseClientEvents: string[];
-}): Record<string, unknown> {
-  const noInterruptionClientEvents = options.baseClientEvents.filter((event) => event !== "interruption");
-
-  return {
-    edges: {
-      start_to_main: {
-        source: "start_node",
-        target: "main_conversation",
-        forward_condition: {
-          type: "unconditional",
-        },
-      },
-      main_to_patch_after_accepted_result: {
-        source: "main_conversation",
-        target: "patch_transfer",
-        forward_condition: {
-          type: "llm",
-          condition:
-            "Route to patch_transfer only when the most recent live_transfer_requested tool result clearly shows approvalStatus is accepted or transferApproved is true. Do not use this edge before a live_transfer_requested tool result exists.",
-        },
-      },
-      main_to_callback_after_unavailable_result: {
-        source: "main_conversation",
-        target: "callback_after_unavailable",
-        forward_condition: {
-          type: "llm",
-          condition:
-            "Route to callback_after_unavailable only when the most recent live_transfer_requested tool result clearly shows Yoni was not available, approvalStatus is anything other than accepted, or transferApproved is false. Do not use this edge before a live_transfer_requested tool result exists.",
-        },
-      },
-      main_to_transfer_check: {
-        source: "main_conversation",
-        target: "transfer_check",
-        forward_condition: {
-          type: "llm",
-          condition:
-            "Route to transfer_check only when the caller clearly and unambiguously wants to talk to Yoni right now, asks if he is available right now, or says yes after the explicit offer to bring Yoni onto this call right now. A yes to an earlier handling, qualification, or help question means interest only; stay in the main conversation and make the explicit live-Yoni-now offer first. Do not route on vague or overlapped replies like okay okay, yes yes, I so okay, broken English fragments, background speech, or any reply that also says the caller is busy, in a meeting, wants later/tomorrow, will call back, or did not understand. If unclear, stay in the main conversation and clarify callback versus trying Yoni now. Do not route when there is already a fresh live_transfer_requested tool result waiting to be handled for this same handoff moment.",
-        },
-      },
-      transfer_check_to_patch: {
-        source: "transfer_check",
-        target: "patch_transfer",
-        forward_condition: {
-          type: "result",
-          successful: true,
-        },
-      },
-      transfer_check_to_callback: {
-        source: "transfer_check",
-        target: "callback_after_unavailable",
-        forward_condition: {
-          type: "result",
-          successful: false,
-        },
-      },
-      patch_to_phone: {
-        source: "patch_transfer",
-        target: "phone_transfer",
-        forward_condition: {
-          type: "llm",
-          condition:
-            "Route to phone_transfer only after the assistant has already told the caller that Yoni is available and that it is patching him in now.",
-        },
-      },
-    },
-    nodes: {
-      start_node: {
-        type: "start",
-        label: "Start",
-        edge_order: ["start_to_main"],
-        position: { x: 0, y: 0 },
-      },
-      main_conversation: {
-        type: "override_agent",
-        label: "Main Conversation",
-        additional_prompt: "",
-        additional_tool_ids: [],
-        additional_knowledge_base: [],
-        conversation_config: {
-          conversation: {
-            client_events: noInterruptionClientEvents,
-          },
-        },
-        edge_order: [
-          "main_to_patch_after_accepted_result",
-          "main_to_callback_after_unavailable_result",
-          "main_to_transfer_check",
-        ],
-        position: { x: 280, y: 0 },
-      },
-      transfer_check: {
-        type: "tool",
-        edge_order: ["transfer_check_to_patch", "transfer_check_to_callback"],
-        position: { x: 560, y: 0 },
-        tools: [
-          {
-            tool_id: options.liveTransferToolId,
-          },
-        ],
-      },
-      patch_transfer: {
-        type: "override_agent",
-        label: "Patch Transfer",
-        additional_prompt: [
-          "You are in the live-transfer patching step.",
-          "Your one and only spoken line in this node is exactly:",
-          "\"Ok good news, I've got him. Patching him in now.\"",
-          "Do not answer interruptions, questions, filler, coughs, or acknowledgments.",
-          "Do not use any tools from this node.",
-          "Do not say anything before or after that exact line.",
-        ].join("\n"),
-        additional_tool_ids: [],
-        additional_knowledge_base: [],
-        conversation_config: {
-          conversation: {
-            client_events: noInterruptionClientEvents,
-          },
-        },
-        edge_order: ["patch_to_phone"],
-        position: { x: 840, y: -120 },
-      },
-      callback_after_unavailable: {
-        type: "override_agent",
-        label: "Callback Fallback",
-        additional_prompt: [
-          "You are in the live-transfer unavailable fallback step.",
-          "Immediately say exactly:",
-          "\"Sorry, he was not available right now, but I will text him and ask him to call you back ASAP. Is that ok?\"",
-          "Then wait for the caller to respond.",
-          "If they say yes, sure, ok, sounds good, or thanks, call callback_requested with callbackTime set to asap.",
-          "After that tool succeeds, say exactly: \"Ok, thanks, sounds good. Bye!\"",
-          "Then immediately call end_call.",
-          "If they ask one brief follow-up question, answer it briefly, then still call callback_requested with callbackTime asap and end the call.",
-          "Do not offer another live transfer from this node.",
-        ].join("\n"),
-        additional_tool_ids: [],
-        additional_knowledge_base: [],
-        conversation_config: {},
-        edge_order: [],
-        position: { x: 840, y: 120 },
-      },
-      phone_transfer: {
-        type: "phone_number",
-        edge_order: [],
-        position: { x: 1120, y: -120 },
-        transfer_destination: {
-          type: "phone",
-          phone_number: options.liveTransferNumber,
-        },
-        transfer_type: "conference",
-      },
-    },
-    prevent_subagent_loops: false,
-  };
+export function safeReceipt(value: any): any {
+  if (Array.isArray(value)) return value.map(safeReceipt);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+    /^(?:request_headers|authorization|api_key|xi-api-key|password|secret|shareable_token)$/i.test(key) ? "[redacted]" : safeReceipt(item)]));
+  return value;
 }
 
-function requireElevenLabsSyncConfig(): { apiKey: string; agentId: string; branchId: string } {
-  const missing: string[] = [];
-
-  if (!config.elevenLabs.apiKey) {
-    missing.push("ELEVENLABS_API_KEY");
+export function verifyReleaseReadback(before: any, candidate: any, after: any): void {
+  if (bodyDigest(candidate) !== bodyDigest(writableBody(after))) {
+    throw new Error("Conversation policy readback mismatch after write");
   }
-
-  if (!config.elevenLabs.agentId) {
-    missing.push("ELEVENLABS_AGENT_ID");
+  for (const key of ["platform_settings", "phone_numbers", "whatsapp_accounts", "procedures"]) {
+    if (bodyDigest(before[key] ?? null) !== bodyDigest(after[key] ?? null)) throw new Error(`Unrelated provider field drifted: ${key}`);
   }
-
-  if (!config.elevenLabs.branchId) {
-    missing.push("ELEVENLABS_BRANCH_ID");
-  }
-
-  if (missing.length > 0) {
-    throw new Error(`Missing ElevenLabs sync config: ${missing.join(", ")}`);
-  }
-
-  return {
-    apiKey: config.elevenLabs.apiKey as string,
-    agentId: config.elevenLabs.agentId as string,
-    branchId: config.elevenLabs.branchId as string,
-  };
 }
 
-function extractPromptSection(markdown: string): string {
-  const marker = "## Prompt";
-  const markerIndex = markdown.indexOf(marker);
-
-  if (markerIndex === -1) {
-    throw new Error(`Unable to find "${marker}" in ${PROMPT_PATH}`);
-  }
-
-  return markdown.slice(markerIndex + marker.length).trim();
+export function extractPromptSection(markdown: string): string {
+  const parts = markdown.split("## Prompt\n");
+  if (parts.length !== 2) throw new Error("Exactly one prompt section is required");
+  return parts[1].trim();
 }
 
-async function readPrompt(): Promise<string> {
-  const markdown = await readFile(PROMPT_PATH, "utf8");
-  return extractPromptSection(markdown);
+export function buildConversationRelease(current: any, prompt: string, listenFirst: boolean) {
+  // Start from the owning provider, never a stale reconstructed model/tool config.
+  const body = applyConversationConsentPolicy(applyConversationListeningPolicy(writableBody(current), { listenFirst }));
+  body.conversation_config.agent.prompt.prompt = prompt;
+  return body;
 }
 
 async function main(): Promise<void> {
-  const { apiKey, agentId, branchId } = requireElevenLabsSyncConfig();
-  const prompt = await readPrompt();
-
-  const client = axios.create({
-    baseURL: config.elevenLabs.baseUrl,
-    timeout: 45_000,
-    headers: {
-      "Content-Type": "application/json",
-      "xi-api-key": apiKey,
-    },
-  });
-
-  const { data: currentAgent } = await client.get<AgentResponse>(`/v1/convai/agents/${agentId}`, {
-    params: {
-      branch_id: branchId,
-    },
-  });
-
-  const toolIds = asStringArray(currentAgent.conversation_config.agent.prompt.tool_ids);
-  const toolResponses = await Promise.all(
-    toolIds.map(async (toolId) => {
-      const { data } = await client.get<ToolResponse>(`/v1/convai/tools/${toolId}`);
-      return data;
-    }),
-  );
-
-  const liveTransferTool = toolResponses.find((tool) => tool.tool_config.name === "live_transfer_requested");
-
-  if (!liveTransferTool) {
-    throw new Error("Unable to find live_transfer_requested tool for ElevenLabs workflow sync");
+  const { config } = await import("../lib/config");
+  const { apiKey, agentId, branchId } = config.elevenLabs;
+  if (!apiKey || !agentId || !branchId) throw new Error("ElevenLabs key, agent and branch configuration required");
+  const value = (name: string) => process.argv.find(arg => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
+  const apply = process.argv.includes("--apply");
+  const expectedVersion = value("expected-version");
+  const expectedPrompt = value("expected-prompt-sha");
+  const expectedCandidate = value("expected-candidate-sha");
+  const listenFirst = process.argv.includes("--listen-first");
+  const receiptDir = path.resolve(value("receipt-dir") ?? "tmp/voice-conversation-release");
+  if (apply && (!expectedVersion || !expectedPrompt || !expectedCandidate)) {
+    throw new Error("Apply requires the reviewed live version and prompt SHA guards");
   }
-
-  const currentOverrides = currentAgent.platform_settings?.overrides ?? {};
-  const currentConversationConfigOverrides = currentOverrides.conversation_config_override ?? {};
-  const currentTtsOverrides = currentConversationConfigOverrides.tts ?? {};
-  const updatedPlatformSettings = {
-    ...(currentAgent.platform_settings ?? {}),
-    overrides: {
-      ...currentOverrides,
-      conversation_config_override: {
-        ...currentConversationConfigOverrides,
-        tts: {
-          ...currentTtsOverrides,
-          voice_id: true,
-          speed: true,
-        },
-      },
-    },
-  };
-
-  const updatedTtsConfig = {
-    ...currentAgent.conversation_config.tts,
-    ...(config.elevenLabs.voiceId ? { voice_id: config.elevenLabs.voiceId } : {}),
-    ...(config.elevenLabs.ttsModel ? { model_id: config.elevenLabs.ttsModel } : {}),
-    speed: TTS_SPEED,
-    optimize_streaming_latency: 0,
-  };
-
-  const updatedConversationConfig = {
-    ...currentAgent.conversation_config,
-    turn: {
-      ...currentAgent.conversation_config.turn,
-      initial_wait_time: INITIAL_WAIT_TIME_SECONDS,
-      turn_timeout: TURN_TIMEOUT_SECONDS,
-      turn_eagerness: TURN_EAGERNESS,
-      speculative_turn: SPECULATIVE_TURN,
-      retranscribe_on_turn_timeout: RETRANSCRIBE_ON_TURN_TIMEOUT,
-      soft_timeout_config: {
-        ...currentAgent.conversation_config.turn.soft_timeout_config,
-        timeout_seconds: SOFT_TIMEOUT_SECONDS,
-        message: "One sec.",
-        use_llm_generated_message: false,
-      },
-    },
-    tts: updatedTtsConfig,
-    agent: {
-      ...currentAgent.conversation_config.agent,
-      first_message: FIRST_MESSAGE,
-      disable_first_message_interruptions: DISABLE_FIRST_MESSAGE_INTERRUPTION,
-      prompt: {
-        ...currentAgent.conversation_config.agent.prompt,
-        prompt,
-        llm: config.elevenLabs.primaryLlm,
-        temperature: TEMPERATURE,
-        max_tokens: MAX_TOKENS,
-        built_in_tools: {
-          ...(currentAgent.conversation_config.agent.prompt.built_in_tools ?? {}),
-          skip_turn: {
-            ...((currentAgent.conversation_config.agent.prompt.built_in_tools?.skip_turn as Record<string, unknown> | null) ?? {}),
-            type: "system",
-            name: "skip_turn",
-            description:
-              "Use this instead of speaking when the caller turn is only placeholder silence like ..., background noise, road noise, static, breathing, or another non-word sound. Do not use it when the caller spoke actual words. Do not use it as the response to an automated screener asking for your name and reason for calling; speak the exact screener sentence first.",
-            response_timeout_secs: 20,
-            disable_interruptions: true,
-            force_pre_tool_speech: false,
-            pre_tool_speech: "auto",
-            params: {
-              ...((((currentAgent.conversation_config.agent.prompt.built_in_tools?.skip_turn as Record<string, unknown> | null)?.params as Record<string, unknown> | undefined) ?? {})),
-              system_tool_type: "skip_turn",
-            },
-          },
-          voicemail_detection: {
-            ...((currentAgent.conversation_config.agent.prompt.built_in_tools?.voicemail_detection as Record<string, unknown> | null) ?? {}),
-            description:
-              "Use this when the first audio or later caller turn is clearly a voicemail greeting, mailbox, answering machine, recorded request to leave a message, or no-live-person voicemail scenario. Wait until the greeting reaches a leave-a-message request, beep, or first natural pause before using it so the voicemail message is not played over the mailbox greeting.",
-            params: {
-              ...((((currentAgent.conversation_config.agent.prompt.built_in_tools?.voicemail_detection as Record<string, unknown> | null)?.params as Record<string, unknown> | undefined) ?? {})),
-              system_tool_type: "voicemail_detection",
-              voicemail_message: VOICEMAIL_MESSAGE_TEMPLATE,
-            },
-          },
-        },
-        backup_llm_config: {
-          ...(currentAgent.conversation_config.agent.prompt.backup_llm_config ?? {}),
-          preference: BACKUP_LLM_PREFERENCE,
-        },
-        ...(CASCADE_TIMEOUT_SECONDS === null ? {} : { cascade_timeout_seconds: CASCADE_TIMEOUT_SECONDS }),
-      },
-    },
-  };
-
-  const workflow = buildWarmTransferWorkflow({
-    liveTransferToolId: liveTransferTool.id,
-    liveTransferNumber: config.liveTransferNumber,
-    baseClientEvents: asStringArray(currentAgent.conversation_config.conversation?.client_events),
+  if (apply && Number(listenFirst) + Number(process.argv.includes("--keep-first-message")) !== 1) {
+    throw new Error("Apply requires exactly one reviewed startup choice");
+  }
+  const client = axios.create({
+    baseURL: config.elevenLabs.baseUrl, timeout: 45_000,
+    headers: { "Content-Type": "application/json", "xi-api-key": apiKey },
   });
+  const endpoint = `/v1/convai/agents/${agentId}`;
+  const params = { branch_id: branchId };
+  const { data: current } = await client.get(endpoint, { params });
+  if (current.agent_id !== agentId || current.branch_id !== branchId || current.main_branch_id !== branchId) {
+    throw new Error("Expected the configured agent's effective main branch");
+  }
+  const beforePrompt = current.conversation_config.agent.prompt.prompt;
+  if (expectedVersion && current.version_id !== expectedVersion) throw new Error("Live agent version drifted; review again");
+  if (expectedPrompt && digest(beforePrompt) !== expectedPrompt) throw new Error("Live prompt drifted; review again");
+  const prompt = extractPromptSection(await readFile(PROMPT_PATH, "utf8"));
+  const body = buildConversationRelease(current, prompt, listenFirst);
+  if (expectedCandidate && bodyDigest(body) !== expectedCandidate) throw new Error("Candidate changed since review; nothing applied");
+  await mkdir(receiptDir, { recursive: true });
+  const receipt = {
+    checked_at: new Date().toISOString(), agent_id: agentId, branch_id: branchId,
+    before_version: current.version_id, before_prompt_sha256: digest(beforePrompt),
+    candidate_prompt_sha256: digest(prompt), policy: VOICE_CONVERSATION_POLICY_VERSION,
+    candidate_body_sha256: bodyDigest(body),
+    listen_first: listenFirst, applied: false, status: "prepared_not_applied",
+  };
+  await writeFile(path.join(receiptDir, "before.json"), JSON.stringify(safeReceipt(writableBody(current)), null, 2));
+  await writeFile(path.join(receiptDir, "candidate.json"), JSON.stringify(safeReceipt(body), null, 2));
+  await writeFile(path.join(receiptDir, "receipt.json"), JSON.stringify(receipt, null, 2));
+  if (!apply) { console.log(JSON.stringify({ ...receipt, dry_run: true })); return; }
 
-  delete updatedConversationConfig.agent.prompt.tools;
-
-  await client.patch(
-    `/v1/convai/agents/${agentId}`,
-    {
-      conversation_config: updatedConversationConfig,
-      platform_settings: updatedPlatformSettings,
-      workflow,
-    },
-    {
-      params: {
-        branch_id: branchId,
-        enable_versioning_if_not_enabled: true,
-      },
-    },
-  );
-
-  logger.info("Synced ElevenLabs agent from local prompt source", {
-    agentId,
-    branchId,
-    llm: config.elevenLabs.primaryLlm,
-    voiceId: config.elevenLabs.voiceId,
-    firstMessage: FIRST_MESSAGE,
-    initialWaitTime: INITIAL_WAIT_TIME_SECONDS,
-    turnTimeout: TURN_TIMEOUT_SECONDS,
-    turnEagerness: TURN_EAGERNESS,
-    speculativeTurn: SPECULATIVE_TURN,
-    retranscribeOnTurnTimeout: RETRANSCRIBE_ON_TURN_TIMEOUT,
-    disableFirstMessageInterruptions: DISABLE_FIRST_MESSAGE_INTERRUPTION,
-    backupLlmPreference: BACKUP_LLM_PREFERENCE,
-    cascadeTimeoutSeconds: CASCADE_TIMEOUT_SECONDS,
-    workflowEnabled: true,
-    liveTransferToolId: liveTransferTool.id,
-    softTimeoutSeconds: SOFT_TIMEOUT_SECONDS,
-    skipTurnEnabled: true,
-    temperature: TEMPERATURE,
-    maxTokens: MAX_TOKENS,
-    ttsSpeed: TTS_SPEED,
-    voicemailMessageTemplate: VOICEMAIL_MESSAGE_TEMPLATE,
-  });
+  // Recheck immediately before the versioned write; fail closed on concurrent edits.
+  const { data: check } = await client.get(endpoint, { params });
+  if (check.version_id !== current.version_id || digest(check.conversation_config.agent.prompt.prompt) !== digest(beforePrompt)) {
+    throw new Error("Agent changed after candidate creation; nothing applied");
+  }
+  verifyReleaseReadback(current, writableBody(current), check);
+  await writeFile(path.join(receiptDir, "receipt.json"), JSON.stringify({ ...receipt, status: "patch_attempted_readback_required" }, null, 2));
+  await client.patch(endpoint, body, { params: { ...params, enable_versioning_if_not_enabled: true } });
+  const { data: after } = await client.get(endpoint, { params });
+  await writeFile(path.join(receiptDir, "after.json"), JSON.stringify(safeReceipt(writableBody(after)), null, 2));
+  if (digest(after.conversation_config.agent.prompt.prompt) !== digest(prompt)) throw new Error("Prompt readback mismatch after write");
+  verifyReleaseReadback(current, body, after);
+  const { data: effective } = await client.get(endpoint);
+  if (effective.version_id !== after.version_id || effective.branch_id !== branchId) throw new Error("Default published version differs from branch readback");
+  verifyReleaseReadback(current, body, effective);
+  const finalReceipt = { ...receipt, applied: true, status: "live_config_verified", after_version: after.version_id, verified_at: new Date().toISOString() };
+  await writeFile(path.join(receiptDir, "receipt.json"), JSON.stringify(finalReceipt, null, 2));
+  console.log(JSON.stringify(finalReceipt));
 }
 
-void main().catch((error) => {
-  const axiosMessage =
-    axios.isAxiosError(error) && error.response
-      ? {
-          status: error.response.status,
-          statusText: error.response.statusText,
-          data: error.response.data,
-        }
-      : undefined;
-  logger.error("Unable to sync ElevenLabs agent", {
-    message: error instanceof Error ? error.message : String(error),
-    ...(axiosMessage ? { elevenLabs: axiosMessage } : {}),
-  });
+if (require.main === module) void main().catch(error => {
+  console.error(JSON.stringify({ error: axios.isAxiosError(error)
+    ? `ElevenLabs request failed (${error.response?.status ?? "network"})`
+    : error instanceof Error ? error.message : "Conversation sync failed" }));
   process.exitCode = 1;
 });

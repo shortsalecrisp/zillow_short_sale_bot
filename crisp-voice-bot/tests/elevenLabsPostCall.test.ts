@@ -403,28 +403,41 @@ test("post-call fallback classifies live gatekeeper hold summaries as agent unav
   assert.equal(shouldTreatAsAgentHungUp(parvanehLiveSummaryGatekeeperHoldConversation), false);
 });
 
-test("post-call fallback keeps ambiguous quick-call transfer misfires as interested callbacks", async () => {
+test("post-call fallback reviews an ambiguous call-or-info choice without inventing callback consent", async () => {
   const {
     shouldTreatAsAgentHungUp,
     shouldTreatAsCallback,
     shouldTreatAsMisfiredTransferInterestedCallback,
+    getUnconsentedTransferReviewResult,
   } = await import("../src/lib/elevenLabsPostCall");
 
   assert.equal(shouldTreatAsCallback(lorettaMisfiredTransferConversation), false);
-  assert.equal(shouldTreatAsMisfiredTransferInterestedCallback(lorettaMisfiredTransferConversation), true);
+  assert.equal(shouldTreatAsMisfiredTransferInterestedCallback(lorettaMisfiredTransferConversation), false);
+  assert.equal(getUnconsentedTransferReviewResult(lorettaMisfiredTransferConversation), "contact_request_review");
   assert.equal(shouldTreatAsAgentHungUp(lorettaMisfiredTransferConversation), false);
 });
 
-test("post-call fallback records an accepted transfer fallback as an ASAP callback instead of a hangup", async () => {
+test("post-call fallback preserves accepted-transfer interest without treating an unanswered callback offer as consent", async () => {
   const {
     shouldTreatAsAcceptedTransferCallback,
     shouldTreatAsAgentHungUp,
     shouldTreatAsMisfiredTransferInterestedCallback,
+    getUnconsentedTransferReviewResult,
   } = await import("../src/lib/elevenLabsPostCall");
 
-  assert.equal(shouldTreatAsAcceptedTransferCallback(pattyAcceptedTransferFallbackConversation), true);
+  assert.equal(shouldTreatAsAcceptedTransferCallback(pattyAcceptedTransferFallbackConversation), false);
+  assert.equal(getUnconsentedTransferReviewResult(pattyAcceptedTransferFallbackConversation), "interested_followup_review");
   assert.equal(shouldTreatAsMisfiredTransferInterestedCallback(pattyAcceptedTransferFallbackConversation), false);
   assert.equal(shouldTreatAsAgentHungUp(pattyAcceptedTransferFallbackConversation), false);
+});
+
+test("post-call fallback accepts a separate actual yes to the callback offer after a failed transfer", async () => {
+  const { shouldTreatAsAcceptedTransferCallback, getExplicitCallbackConsent } = await import("../src/lib/elevenLabsPostCall");
+  const withConsent = { ...pattyAcceptedTransferFallbackConversation,
+    transcript: [...pattyAcceptedTransferFallbackConversation.transcript, { role: "user", message: "Yes, that's fine." }],
+  };
+  assert.equal(shouldTreatAsAcceptedTransferCallback(withConsent), true);
+  assert.equal(getExplicitCallbackConsent(withConsent)?.callbackTime, "asap");
 });
 
 test("post-call fallback treats screening recordings and canned ASAP fragments as unavailable", async () => {
