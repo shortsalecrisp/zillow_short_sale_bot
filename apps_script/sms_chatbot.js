@@ -5895,10 +5895,21 @@ Full Convo:
 ${historyText}
 `.trim();
 
+  const eventIdentity = [
+    normalizePhone_(data.phone) || String(data.email || fullName).trim().toLowerCase(),
+    handoffType.trim().toLowerCase(),
+    normalizeWhitespace_(String(data.last_message || "")).toLowerCase()
+  ].join("|");
+  const eventKey = data.last_message
+    ? Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, eventIdentity)
+      .map(value => (value + 256).toString(16).slice(-2)).join("").slice(0, 32)
+    : "";
+
   return queueHandoffEmailV11_({
     to: toEmail,
     subject: subject,
-    body: body
+    body: body,
+    event_key: eventKey
   });
 }
 

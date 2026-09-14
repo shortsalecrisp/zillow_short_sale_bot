@@ -387,7 +387,8 @@ def test_scheduled_followup_uses_durable_outbox_and_marks_crm_only_on_tasker_rec
 
     send_sms_source = scheduler.split("def send_sms(", 1)[1].split("def _within_initial_hours", 1)[0]
     assert "TASKER_FOLLOWUP_OUTBOX_QUEUED" in send_sms_source
-    assert "mark_followup(row_idx, msg_txt)" in send_sms_source
+    assert "send_with_diagnostics" not in send_sms_source
+    assert "mark_followup(row_idx, msg_txt)" not in send_sms_source
 
     receipt_start = OUTBOX.index("function applyScheduledFollowupReceiptV13_")
     receipt_end = OUTBOX.index("function applyInitialSmsReceiptV13_", receipt_start)

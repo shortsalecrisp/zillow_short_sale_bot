@@ -200,6 +200,43 @@ def test_send_sms_followup_queues_tasker_outbox_before_direct_sender(monkeypatch
     assert body["request_id"].startswith("scheduler-followup-12-")
 
 
+def test_followup_enqueue_contention_retries_same_id_without_direct_send(monkeypatch):
+    posts = []
+
+    class _BusyResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"ok": False, "queued": False, "retryable": True, "error": "outbox busy"}
+
+    def _fake_post(_url, json, timeout):
+        posts.append(json)
+        return _BusyResponse()
+
+    class _NoDirectSender:
+        def send_with_diagnostics(self, *_args, **_kwargs):
+            raise AssertionError("contention must not fall back to an unconfirmed direct send")
+
+    monkeypatch.setattr(bot_min, "SMS_ENABLE", True)
+    monkeypatch.setattr(bot_min, "SMS_TEST_MODE", False)
+    monkeypatch.setattr(bot_min, "TASKER_TRANSPORT_HEALTH_URL", "https://script.example/exec")
+    monkeypatch.setattr(bot_min, "SMS_CHATBOT_ALLOWED_TOKEN", "token")
+    monkeypatch.setattr(bot_min, "SMS_SENDER", _NoDirectSender())
+    monkeypatch.setattr(bot_min.requests, "post", _fake_post)
+    monkeypatch.setattr(bot_min.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        bot_min, "mark_followup",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no receipt, no sheet mark")),
+    )
+
+    bot_min.send_sms(phone="555-111-2222", first="Alex", address="123 Main", row_idx=12, follow_up=True)
+
+    assert len(posts) == 2
+    assert posts[0]["message_id"] == posts[1]["message_id"]
+    assert posts[0]["request_id"] == posts[1]["request_id"]
+
+
 def test_follow_up_uses_latest_sheet_phone(monkeypatch):
     fake_service = _FakeSheetsService()
     sent = {}

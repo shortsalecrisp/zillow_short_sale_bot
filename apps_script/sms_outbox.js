@@ -22,11 +22,29 @@ var SMS_HANDOFF_EMAIL_HEADERS_ = [
   "last_error", "sent_at", "lease_token", "lease_until"
 ];
 
+var SMS_INBOUND_CONTENT_REPLAY_WINDOW_MS_ = 90 * 1000;
+var SMS_HANDOFF_EVENT_REPLAY_WINDOW_MS_ = 10 * 60 * 1000;
+
+function getHandoffEmailEventKeyV16_(row) {
+  try {
+    return String(JSON.parse(String(row[3] || "{}")).event_key || "");
+  } catch (_) {
+    return "";
+  }
+}
+
+function isRecentHandoffEmailEventV16_(row, eventKey, createdAt) {
+  var priorAt = new Date(row[0]).getTime();
+  return !!eventKey && !!priorAt && Math.abs(createdAt - priorAt) < SMS_HANDOFF_EVENT_REPLAY_WINDOW_MS_ &&
+    getHandoffEmailEventKeyV16_(row) === eventKey;
+}
+
 function queueHandoffEmailV11_(payload) {
   var message = payload || {};
   var to = String(message.to || "").trim();
   var subject = String(message.subject || "").trim();
   var body = String(message.body || "");
+  var eventKey = String(message.event_key || "").trim();
   if (!to || !subject || !body) throw new Error("Handoff email requires to, subject, and body");
 
   installSmsOutboxTriggers_();
@@ -46,7 +64,7 @@ function queueHandoffEmailV11_(payload) {
     // appendRow is atomic at the Sheet boundary. A duplicate row is safer
     // than losing a terminal handoff; the drain dedupes by deterministic ID.
     sheet.appendRow([
-      new Date(), "queued", emailId, JSON.stringify({ to: to, subject: subject, body: body }),
+      new Date(), "queued", emailId, JSON.stringify({ to: to, subject: subject, body: body, event_key: eventKey }),
       0, "Queued without dedupe lock after contention", "", "", ""
     ]);
     return { ok: true, queued: true, email_id: emailId, lock_fallback: true };
@@ -56,14 +74,18 @@ function queueHandoffEmailV11_(payload) {
       ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_HANDOFF_EMAIL_HEADERS_.length).getValues()
       : [];
     for (var i = rows.length - 1; i >= 0; i--) {
-      if (String(rows[i][2] || "") === emailId &&
+      if ((String(rows[i][2] || "") === emailId ||
+          isRecentHandoffEmailEventV16_(rows[i], eventKey, Date.now())) &&
           ["queued", "claimed", "reconciling", "sent", "uncertain"].indexOf(String(rows[i][1] || "")) !== -1) {
-        return { ok: true, queued: false, duplicate: true, email_id: emailId, status: String(rows[i][1] || "") };
+        return {
+          ok: true, queued: false, duplicate: true,
+          email_id: String(rows[i][2] || emailId), status: String(rows[i][1] || "")
+        };
       }
     }
 
     sheet.appendRow([
-      new Date(), "queued", emailId, JSON.stringify({ to: to, subject: subject, body: body }),
+      new Date(), "queued", emailId, JSON.stringify({ to: to, subject: subject, body: body, event_key: eventKey }),
       0, "", "", "", ""
     ]);
   } finally {
@@ -90,10 +112,14 @@ function drainHandoffEmailOutboxV11_() {
   try {
     var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_HANDOFF_EMAIL_HEADERS_.length).getValues();
     var activeIds = {};
+    var activeEvents = {};
     rows.forEach(function(row) {
       var rowStatus = String(row[1] || "");
       if (["claimed", "reconciling", "sent", "uncertain"].indexOf(rowStatus) !== -1) {
         activeIds[String(row[2] || "")] = true;
+        var eventKey = getHandoffEmailEventKeyV16_(row);
+        var createdAt = new Date(row[0]).getTime();
+        if (eventKey && createdAt) activeEvents[eventKey] = Math.max(activeEvents[eventKey] || 0, createdAt);
       }
     });
     for (var i = 0; i < rows.length; i++) {
@@ -116,7 +142,10 @@ function drainHandoffEmailOutboxV11_() {
       if (status !== "queued") continue;
       rowNumber = i + 2;
       var emailId = String(rows[i][2] || "");
-      if (activeIds[emailId]) {
+      var queuedEventKey = getHandoffEmailEventKeyV16_(rows[i]);
+      var queuedAt = new Date(rows[i][0]).getTime();
+      if (activeIds[emailId] || (queuedEventKey && activeEvents[queuedEventKey] &&
+          Math.abs(queuedAt - activeEvents[queuedEventKey]) < SMS_HANDOFF_EVENT_REPLAY_WINDOW_MS_)) {
         sheet.getRange(rowNumber, 2).setValue("duplicate");
         rowNumber = 0;
         continue;
@@ -139,6 +168,7 @@ function drainHandoffEmailOutboxV11_() {
       sheet.getRange(rowNumber, 1, 1, SMS_HANDOFF_EMAIL_HEADERS_.length)
         .setValues([claimedEmailRow]);
       activeIds[emailId] = true;
+      if (queuedEventKey && queuedAt) activeEvents[queuedEventKey] = queuedAt;
       break;
     }
   } finally {
@@ -633,10 +663,12 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
   var receivedAt = String(body && body.received_at || now.toISOString()).trim();
   var dedupeKey = buildSmsInboundDedupeKey_(phone, message, suppliedMessageId);
   var transportFingerprint = buildSmsInboundTransportFingerprint_(phone, message, receivedAt);
+  var contentFingerprint = buildSmsInboundContentFingerprint_(phone, message);
   var cache = CacheService.getScriptCache();
   var cacheKey = "sms_inbound_" + dedupeKey;
   var transportCacheKey = "sms_inbound_transport_" + transportFingerprint;
-  var cachedQueueId = cache.get(cacheKey) || cache.get(transportCacheKey);
+  var contentCacheKey = "sms_inbound_content_" + contentFingerprint;
+  var cachedQueueId = cache.get(cacheKey) || cache.get(transportCacheKey) || cache.get(contentCacheKey);
   if (cachedQueueId) {
     ensureSmsOutboxTriggersBestEffortV14_();
     return {
@@ -663,6 +695,7 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
     ]);
     cache.put(cacheKey, queueId, 600);
     cache.put(transportCacheKey, queueId, 600);
+    cache.put(contentCacheKey, queueId, 90);
     try {
       appendSmsDebugLog_("incoming_sms_enqueued_lock_fallback", {
         request_id: webhookRequestId || "",
@@ -692,9 +725,12 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
       var stableMessageIdMatch = !!suppliedMessageId && rowMessageId === suppliedMessageId;
       var recentFingerprintMatch = created && now.getTime() - created < 10 * 60 * 1000 &&
         (String(rows[i][3] || "") === dedupeKey || rowTransportFingerprint === transportFingerprint);
-      if (stableMessageIdMatch || recentFingerprintMatch) {
+      var recentContentMatch = created && now.getTime() - created < SMS_INBOUND_CONTENT_REPLAY_WINDOW_MS_ &&
+        buildSmsInboundContentFingerprint_(rows[i][5], rows[i][6]) === contentFingerprint;
+      if (stableMessageIdMatch || recentFingerprintMatch || recentContentMatch) {
         cache.put(cacheKey, String(rows[i][2] || ""), 600);
         cache.put(transportCacheKey, String(rows[i][2] || ""), 600);
+        cache.put(contentCacheKey, String(rows[i][2] || ""), 90);
         ensureSmsOutboxTriggersBestEffortV14_();
         return {
           ok: true,
@@ -713,6 +749,7 @@ function enqueueIncomingSmsV10_(body, webhookRequestId) {
     ]);
     cache.put(cacheKey, queueId, 600);
     cache.put(transportCacheKey, queueId, 600);
+    cache.put(contentCacheKey, queueId, 90);
   } finally {
     lock.releaseLock();
   }
@@ -781,6 +818,14 @@ function buildSmsInboundTransportFingerprint_(phone, message, receivedAt) {
     normalizePhone_(phone) + "|" +
       normalizeWhitespace_(String(message || "")).toLowerCase() + "|" +
       normalizedReceivedAt
+  );
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, "");
+}
+
+function buildSmsInboundContentFingerprint_(phone, message) {
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    normalizePhone_(phone) + "|" + normalizeWhitespace_(String(message || "")).toLowerCase()
   );
   return Utilities.base64EncodeWebSafe(digest).replace(/=+$/, "");
 }
@@ -1625,15 +1670,38 @@ function getPendingSmsStaleReason_(outboxRow) {
   }
   var messageId = String(outboxRow[3] || "");
   var isInitialOutreach = String(outboxRow[6] || "").indexOf("__initial_outreach__:") === 0;
+  var isScheduledFollowup = String(outboxRow[6] || "").indexOf("__scheduled_followup__:") === 0;
+  var scheduledCrmRow = 0;
+  if (isScheduledFollowup) {
+    try {
+      scheduledCrmRow = Number(JSON.parse(String(outboxRow[6]).replace(/^__scheduled_followup__:/, "")).crm_row);
+    } catch (_) {}
+    if (!Number.isInteger(scheduledCrmRow) || scheduledCrmRow < 2) return "Scheduled follow-up is missing its CRM row";
+  }
   var sheet = getSheet_();
   var data = getSheetData_(sheet);
   for (var i = 0; i < data.length; i++) {
     var rowObj = data[i].obj;
     if (normalizePhone_(rowObj[HEADERS.phone]) !== phone) continue;
+    if (isScheduledFollowup && data[i].row !== scheduledCrmRow) continue;
     var newHandoffReply = typeof isAuthorizedNewHandoffReply_ === "function" &&
       isAuthorizedNewHandoffReply_(phone, messageId, outboxRow[5], rowObj);
     if (!approvedOfferScopeReply && !newHandoffReply && String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
     if (isInitialOutreach) return "";
+    if (isScheduledFollowup) {
+      var leadStatus = String(rowObj[HEADERS.mailshake_status] || "").trim().toUpperCase();
+      if (["R", "Y", "G", "O"].indexOf(leadStatus) !== -1) return "CRM lead no longer qualifies for follow-up";
+      if (String(rowObj.followup_text_sent || rowObj[HEADERS.followup_text_sent] || "").trim().toLowerCase() === "x") {
+        return "Scheduled follow-up already recorded";
+      }
+      // A generated follow-up ID is not an inbound message ID. Only a real
+      // inbound recorded after scheduling should supersede this send.
+      if (String(rowObj[HEADERS.last_message_id] || "").trim() ||
+          String(rowObj[HEADERS.last_inbound_text] || "").trim()) {
+        return "A newer substantive inbound message exists";
+      }
+      return "";
+    }
     // Older ShortSaleLeads layouts do not have last_inbound_text. In that
     // layout, last_message_id remains the authoritative stale-reply guard.
     var hasInboundColumn = Object.prototype.hasOwnProperty.call(rowObj, HEADERS.last_inbound_text);

@@ -12823,10 +12823,6 @@ def send_sms(
     msg_txt = SMS_FU_TEMPLATE if follow_up else SMS_TEMPLATE.format(first=first, address=address)
     digits = _digits_only(phone)
     stable_id = str(stable_id or "").strip()
-    sms_type = "followup" if follow_up else "initial"
-    tasker_label_prefix = "TASKER_SEND_FOLLOWUP" if follow_up else "TASKER_SEND_INITIAL"
-    max_attempts = SMS_RETRY_ATTEMPTS
-
     if not follow_up:
         queued = _enqueue_tasker_sms_outbox(
             action="enqueue_initial_sms",
@@ -12858,113 +12854,44 @@ def send_sms(
         )
         return
 
-    queued = _enqueue_tasker_sms_outbox(
-        action="enqueue_followup_sms",
-        row_idx=row_idx,
-        phone_digits=digits,
-        message=msg_txt,
-        stable_id=stable_id,
-    )
-    if queued and queued.get("ok") is True:
-        LOG.info(
-            "TASKER_FOLLOWUP_OUTBOX_QUEUED row=%s phone=%s stable_id=%s request_id=%s message_id=%s pending_row=%s",
-            row_idx,
-            digits,
-            stable_id or "<blank>",
-            queued.get("request_id"),
-            queued.get("message_id"),
-            queued.get("pending_row"),
-        )
+    if len(digits) != 10 and not (len(digits) == 11 and digits.startswith("1")):
+        LOG.error("TASKER_FOLLOWUP_OUTBOX_INVALID_PHONE row=%s phone=%s; send not attempted", row_idx, _redact_phone(phone))
         return
-    if queued is None:
-        LOG.warning("TASKER_FOLLOWUP_OUTBOX_NOT_CONFIGURED row=%s phone=%s; falling back to direct send", row_idx, digits)
-    else:
-        LOG.error(
-            "TASKER_FOLLOWUP_OUTBOX_ENQUEUE_REJECTED row=%s phone=%s response=%s; falling back to direct send",
-            row_idx,
-            digits,
-            queued,
-        )
 
-    for attempt in range(1, max_attempts + 1):
-        LOG.info(
-            "%s_ATTEMPT row=%s phone=%s type=%s attempt=%s",
-            tasker_label_prefix,
-            row_idx,
-            digits,
-            sms_type,
-            attempt,
-        )
-        result = SMS_SENDER.send_with_diagnostics(
-            digits,
-            msg_txt,
-            sms_type=sms_type,
+    for attempt in range(1, 3):
+        queued = _enqueue_tasker_sms_outbox(
+            action="enqueue_followup_sms",
             row_idx=row_idx,
-            attempt=attempt,
+            phone_digits=digits,
+            message=msg_txt,
+            stable_id=stable_id,
         )
-
-        if result.success:
-            sheet_updated = mark_followup(row_idx, msg_txt)
-
-            if sheet_updated:
-                LOG.info(
-                    "SHEET_SENT_MARK_APPLIED row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s sheet_update_occurred=true",
-                    row_idx,
-                    digits,
-                    sms_type,
-                    attempt,
-                    result.status_code,
-                    result.response_text or "<empty>",
-                )
-            else:
-                LOG.error(
-                    "SHEET_SENT_MARK_SKIPPED row=%s phone=%s type=%s attempt=%s reason=sheet_update_failed http_status=%s response_body=%s sheet_update_occurred=false",
-                    row_idx,
-                    digits,
-                    sms_type,
-                    attempt,
-                    result.status_code,
-                    result.response_text or "<empty>",
-                )
-
+        if queued and queued.get("ok") is True:
             LOG.info(
-                "%s_SUCCESS row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s sheet_update_occurred=%s",
-                tasker_label_prefix,
+                "TASKER_FOLLOWUP_OUTBOX_QUEUED row=%s phone=%s stable_id=%s request_id=%s message_id=%s pending_row=%s",
                 row_idx,
                 digits,
-                sms_type,
-                attempt,
-                result.status_code,
-                result.response_text or "<empty>",
-                sheet_updated,
+                stable_id or "<blank>",
+                queued.get("request_id"),
+                queued.get("message_id"),
+                queued.get("pending_row"),
             )
             return
-
-        LOG.error(
-            "%s_FAILED row=%s phone=%s type=%s attempt=%s http_status=%s response_body=%s exception_type=%s exception_message=%s sheet_update_occurred=false",
-            tasker_label_prefix,
-            row_idx,
-            digits,
-            sms_type,
-            attempt,
-            result.status_code,
-            result.response_text or "<empty>",
-            result.exception_type or "",
-            result.exception_message or "",
+        response_payload = queued.get("response") if queued else None
+        retryable = bool(queued and queued.get("error")) or bool(
+            isinstance(response_payload, dict) and response_payload.get("retryable")
         )
-        LOG.info(
-            "SHEET_SENT_MARK_SKIPPED row=%s phone=%s type=%s attempt=%s reason=autoremote_send_failed http_status=%s response_body=%s sheet_update_occurred=false",
-            row_idx,
-            digits,
-            sms_type,
-            attempt,
-            result.status_code,
-            result.response_text or "<empty>",
-        )
-        if attempt < max_attempts:
+        if attempt == 1 and retryable:
             time.sleep(2)
+            continue
+        break
 
-    LOG.error("SMS failed after %s attempts to %s", max_attempts, digits)
+    LOG.error(
+        "TASKER_FOLLOWUP_OUTBOX_ENQUEUE_REJECTED row=%s phone=%s response=%s; sheet remains unsent for retry",
+        row_idx,
+        _redact_phone(phone),
+        queued,
+    )
 
 
 def _within_initial_hours(slot: datetime) -> bool:
