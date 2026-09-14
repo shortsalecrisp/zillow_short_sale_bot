@@ -35,7 +35,7 @@ test("priority considers the whole turn and hearing precedes questions and actio
 });
 test("intro is its own entire turn and exposes no dynamic continuation script", () => {
   const s = section("Intro only");
-  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. We help with short-sale paperwork and lender calls\. Would that help with your listing\?"/);
+  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. We help with short-sale paperwork and lender calls\. Would that help with your listing at \{\{streetAddress\}\}\?"/);
   assert.match(s, /Stop after the question\. Wait for a NEW live-caller turn/);
   assert.match(s, /occurred before the introduction and does not count as a response/);
   assert.match(s, /Do not append a second qualification question, Yoni offer, or callback question/);
