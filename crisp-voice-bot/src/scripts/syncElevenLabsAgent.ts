@@ -51,11 +51,34 @@ export function extractPromptSection(markdown: string): string {
   return parts[1].trim();
 }
 
+export type ConversationReleaseControl = {
+  resetToolId: string;
+  validateToolId: string;
+  contactToolId: string;
+  mainNodeId: string;
+};
+
+export function resolveVerifiedContactToolId(current: any, contactToolMap: any): string {
+  // The CLI calls this only after verifyContactToolMap validates the owning resources.
+  const planned = contactToolMap?.plan?.tools;
+  const matches = Array.isArray(planned) ? planned.filter((tool: any) => tool?.name === "not_interested") : [];
+  if (matches.length !== 1 || typeof matches[0].old_id !== "string" || !/^tool_[a-z0-9]+$/.test(matches[0].old_id)) {
+    throw new Error("Exactly one verified not_interested old tool ID is required");
+  }
+  const contactToolId = matches[0].old_id;
+  const globalIds = current.conversation_config?.agent?.prompt?.tool_ids;
+  if (!Array.isArray(globalIds) || globalIds.filter(id => id === contactToolId).length !== 1) {
+    throw new Error("Verified not_interested tool must be registered exactly once globally");
+  }
+  return contactToolId;
+}
+
 export function buildConversationRelease(current: any, prompt: string, listenFirst: boolean, contactToolReplacements?: Record<string, string>,
-  control?: { resetToolId: string; validateToolId: string; mainNodeId: string }) {
+  control?: ConversationReleaseControl) {
   // Start from the owning provider, never a stale reconstructed model/tool config.
   let body = applyConversationToolPolicy(applyConversationConsentPolicy(applyConversationListeningPolicy(writableBody(current), { listenFirst })), { guardedEnding: Boolean(control) });
   body.conversation_config.agent.prompt.prompt = prompt;
+  body.conversation_config.agent.prompt.llm = "gpt-4.1";
   if (control) {
     body = applyGuardedTerminalWorkflow(applyConversationOpeningWorkflow(body), control);
     // GET adds these neutral base slots; override prompts must retain inheritance.
@@ -96,6 +119,9 @@ async function main(): Promise<void> {
   if ((expectedControlMap && !controlMapPath) || (apply && (!controlMapPath || !expectedControlMap || !listenFirst))) {
     throw new Error("Applying the full candidate requires a reviewed conversation-control map and listen-first startup");
   }
+  if (controlMapPath && !contactToolMapPath) {
+    throw new Error("A full guarded release requires a verified contact-tool map");
+  }
   const client = axios.create({
     baseURL: config.elevenLabs.baseUrl, timeout: 45_000,
     headers: { "Content-Type": "application/json", "xi-api-key": apiKey },
@@ -114,7 +140,10 @@ async function main(): Promise<void> {
     ? await verifyContactToolMap(client, contactToolMap, current, expectedContactToolMap) : undefined;
   const prompt = extractPromptSection(await readFile(PROMPT_PATH, "utf8"));
   const controlMap = controlMapPath ? JSON.parse(await readFile(path.resolve(controlMapPath), "utf8")) : undefined;
-  const control = controlMap ? await verifyConversationControlMap(client, controlMap, current, config.elevenLabs.toolSecret, expectedControlMap) : undefined;
+  const control = controlMap ? {
+    ...await verifyConversationControlMap(client, controlMap, current, config.elevenLabs.toolSecret, expectedControlMap),
+    contactToolId: resolveVerifiedContactToolId(current, contactToolMap),
+  } : undefined;
   const body = buildConversationRelease(current, prompt, listenFirst, contactToolReplacements, control);
   if (expectedCandidate && bodyDigest(body) !== expectedCandidate) throw new Error("Candidate changed since review; nothing applied");
   await mkdir(receiptDir, { recursive: true });

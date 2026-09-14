@@ -133,7 +133,17 @@ test("contact tool metadata changes only descriptions for webhook and client sch
         assert.match(actual.properties.conversationSummary.description, /receipt from a tool that did not return confirmation/);
       } else {
         assert.match(after.description, /end only the current call/);
+        assert.match(after.description, /choice to initiate future contact themselves/);
+        assert.match(after.description, /correction that this is not a short sale/);
+        assert.match(after.description, /A question alone is not a contact outcome/);
+        assert.match(after.description, /preserve any question accompanying a genuine contact preference or listing correction/);
+        assert.match(after.description, /not automatically rejection or permission to end/);
+        assert.match(actual.description, /Recording alone never authorizes ending/);
         assert.match(actual.properties.conversationSummary.description, /CALL ENDED BY REQUEST/);
+        assert.match(actual.properties.conversationSummary.description, /DO NOT CALL or DEFERRED CONTACT/);
+        assert.match(actual.properties.conversationSummary.description, /actual words, unanswered questions, restrictions and earlier genuine interest/);
+        assert.match(actual.properties.conversationSummary.description, /only for the matching actual intent/);
+        assert.match(actual.properties.conversationSummary.description, /convert caller-initiated future contact into callback consent/);
       }
       assert.deepEqual(actual.properties.email, schema.properties.email);
       after.description = before.description;

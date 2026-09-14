@@ -44,12 +44,21 @@ test("intro is its own entire turn and exposes no dynamic continuation script", 
 });
 test("post-intro choices remain literal and conditional on a new caller turn", () => {
   const s = section("Post-intro conversation");
-  assert.match(s, /Enter only after a NEW live-caller turn/);
+  assert.match(s, /Enter only when a NEW live-caller turn/);
+  assert.match(s, /contained no question, correction, hearing issue or requested next step when it arrived/);
+  assert.match(s, /A further caller turn is required before qualification/);
   assert.match(s, /For {{openerVariant}} equal to benefit_hook/);
   assert.match(s, /We help agents with the short sale paperwork and lender calls\. Are you looking for help with that\?/);
   assert.match(s, /For direct_reason or an unspecified variant/);
   assert.match(s, /Are you handling the short sale paperwork and lender calls yourself\?/);
   assert.match(s, /These are post-intro alternatives, never part of the introduction/);
+});
+test("a question keeps the entire response answer-only even after it is answered", () => {
+  const s = section("Shared turn priority");
+  assert.match(s, /Choose the response mode from the caller's entire turn AS RECEIVED/);
+  assert.match(s, /remains answer-only for your whole response/);
+  assert.match(s, /Answering it does not make qualification eligible later in that same response/);
+  assert.match(s, /only an explicitly requested contact action may follow; otherwise stop and wait/);
 });
 test("live identity and first-turn questions do not restart the pitch", () => {
   assert.match(prompt, /You are {{assistantName}}, an AI calling assistant for Crisp Short Sales/);
@@ -90,6 +99,11 @@ test("noise and partial turns cannot create contact decisions", () => {
   assert.match(s, /Do not infer a name, yes, callback, rejection, or transfer from background speech/);
   assert.match(s, /do not finish over the caller/);
   assert.match(s, /A thinking pause is not an invitation to complete their sentence/);
+});
+test("processed stops and denied ending checks do not trigger presence questions", () => {
+  const s = section("Listening and repair");
+  assert.match(s, /After a processed stop, opt-out, refusal, receipt or ending-check failure, do not ask whether they are still there/);
+  assert.match(s, /Wait silently unless a new intelligible caller turn needs an answer/);
 });
 test("payer corrections get the substantive answer while preserving other questions or requests", () => {
   assert.match(section("Shared turn priority"), /A payer correction needs the payer answer, not just "Understood\."/);
@@ -148,6 +162,15 @@ test("live hangup is delegated to a fresh native gate rather than direct end_cal
   assert.match(s, /validator has no contact-action side effects/);
   assert.equal((prompt.match(/end_call/g) || []).length, 1, "No alternative direct hangup instruction");
 });
+test("new contact preferences use the native recording path before ending checks", () => {
+  const s = section("Contact preferences and endings");
+  assert.match(s, /Contact recording, permission reset and validation are native workflow steps, not separate model-selected tools/);
+  assert.match(s, /must take the contact-recording path before the generic goodbye path/);
+  assert.match(s, /Recording completion or failure flows directly into reset and current-history validation/);
+  assert.match(s, /A genuine goodbye without a contact preference uses the generic guarded-ending path/);
+  assert.match(s, /Do not repeat a recording or failed\/denied check for the same caller turn/);
+  assert.match(s, /do not make a separate recording-tool call or add closing speech/);
+});
 test("request receipt is not completion or a new caller turn", () => {
   const s = section("Request records and receipts");
   assert.match(s, /requestCaptured: true permits a receipt acknowledgment/);
@@ -199,7 +222,7 @@ test("self-initiated contact does not silently create future calls or an automat
   const s = section("Contact preferences and endings");
   assert.match(s, /DEFERRED CONTACT: caller said they will initiate future contact/);
   assert.match(s, /Do not create a callback or transfer/);
-  assert.match(s, /future caller-initiated contact alone is not an automatic hangup/);
+  assert.match(s, /This preference alone does not authorize ending; after recording, wait for a new turn unless a pending question needs an answer/);
 });
 test("live transfer consent, business approval, questions and revocation remain distinct", () => {
   const s = section("Live transfer request");
