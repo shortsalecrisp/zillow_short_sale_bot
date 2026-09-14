@@ -114,6 +114,56 @@ test("actual future opt-out wins over deferred/current-ending markers and a beni
   assert.equal(lib.buildVoiceContactOutcomeUpdates("do_not_call", call).leadStatusCode, "R");
 });
 
+test("a named Yoni refusal or use of call as a label is not the caller's future opt-out", () => {
+  for (const value of [
+    "Email me information only. Do not call Yoni now.",
+    "Do not call Yoni now and just email me.",
+    "Don't call Yoni Kutler right now.",
+    "Don't call that a commitment.",
+  ]) {
+    assert.equal(looksLikeDoNotCall(value), false, value);
+  }
+  for (const value of [
+    "Do not call me.", "Don't call us.", "Do not call.", "Stop calling me.", "STOP",
+    "Do not call Yoni now; stop calling me.",
+    "Do not call Yoni now. And do not call me again.",
+    "Do not call Yoni now and do not call me again.",
+    "Do not call Yoni or me.",
+    "Don't call that a commitment. No more calls.",
+    "Remove me from your list.",
+  ]) {
+    assert.equal(looksLikeDoNotCall(value), true, value);
+  }
+});
+
+test("M6 full observed transcript remains information-only without inventing DNC or callback consent", async () => {
+  const lib = await load();
+  const call = { ...conversation([], "The user requested information to be sent via email to \"morgan@example.invalide\" and explicitly stated not to call Yoni or schedule any callbacks. The agent confirmed the email address and acknowledged the request, then ended the call."), transcript: [
+    { role: "user", message: "Email me information only. Do not call Yoni now." },
+    { role: "agent", message: "Could you please confirm the best email address for receiving the information?" },
+    { role: "user", message: "Send it to morgan@example.invalide." },
+    { role: "agent", tool_calls: [{ tool_name: "information_requested" }] },
+    { role: "agent", message: "I've noted your request for information. Thanks. Can I help you with anything else?" },
+    { role: "user", message: "Do not schedule a callback. Email only." },
+    { role: "agent", message: "Ok, thanks. Talk to you soon." },
+    { role: "agent", tool_calls: [{ tool_name: "end_call" }] },
+  ] };
+  assert.equal(lib.shouldTreatAsDoNotCall(call), false);
+  assert.equal(lib.getVoiceContactRequestResult(call), undefined);
+  assert.equal(lib.getExplicitCallbackConsent(call), undefined);
+  const id = "test-m6-information-only";
+  conversations.set(id, call);
+  const before = receivedWrites.length;
+  // Email is deliberately unconfigured. Assert only the preceding local mock
+  // outcome write; no send or completed post-call processing is claimed.
+  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id), /Missing email alert config/);
+  assert.equal(receivedWrites.length, before + 1);
+  assert.equal(receivedWrites.at(-1)!.callResult, "information_requested");
+  assert.equal(receivedWrites.at(-1)!.leadStatusCode, "G");
+  assert.equal(receivedWrites.at(-1)!.callbackRequested, "");
+  assert.equal(receivedWrites.at(-1)!.callbackTime, "");
+});
+
 test("summary-only and missing evidence are review, never evidence of consent or opt-out", async () => {
   const lib = await load();
   assert.equal(lib.classifyElevenLabsNotInterested(), "contact_request_review");

@@ -21,6 +21,10 @@ import {
   fetchElevenLabsConversationAudio,
   verifyElevenLabsPlaybackSignature,
 } from "../lib/elevenLabsPlayback";
+import {
+  buildElevenLabsCallbackRequestResponse,
+  buildElevenLabsInformationRequestResponse,
+} from "../lib/elevenLabsRequestResponse";
 import { logger } from "../lib/logger";
 import { sendCallbackEmail } from "../lib/sendCallbackEmail";
 import { postSheetUpdate } from "../lib/sheetUpdateClient";
@@ -264,37 +268,6 @@ function looksLikeAlreadyHasShortSaleHelp(value: string): boolean {
 
 function looksLikeDeferredContact(value: string): boolean {
   return normalizedText(value).startsWith("deferred contact:");
-}
-
-function formatCallbackConfirmationTime(callbackTime: string): string {
-  const trimmed = callbackTime.trim();
-  const normalized = trimmed.toLowerCase();
-
-  if (!trimmed) {
-    return "later";
-  }
-
-  if (normalized === "asap") {
-    return "ASAP";
-  }
-
-  if (normalized === "in an hour" || normalized === "within an hour") {
-    return "in about an hour";
-  }
-
-  if (normalized === "later_today" || normalized === "later today") {
-    return "later today";
-  }
-
-  if (normalized === "tomorrow") {
-    return "tomorrow";
-  }
-
-  if (normalized.startsWith("in ")) {
-    return trimmed;
-  }
-
-  return `at ${trimmed}`;
 }
 
 function readLeadPayload(body: unknown): {
@@ -582,17 +555,7 @@ router.post("/tool/callback-requested", async (req: Request, res: Response, next
       handoffReady,
     });
 
-    res.status(200).json({
-      ok: true,
-      intent: "callback_requested",
-      callbackTime: payload.callbackTime,
-      nextAction:
-        payload.callbackTime.toLowerCase() === "asap"
-          ? "Say exactly: Ok, I set that up and I'll have Yoni reach out to you ASAP. Before I let you go, is there anything else you need from me? Then wait for the caller's answer. If they say no, all set, thanks, bye, or anything similar, say exactly: Ok thanks, bye. Then immediately call end_call."
-          : `Say exactly: Ok, I set up the callback with Yoni and I'll have him reach out to you ${formatCallbackConfirmationTime(
-              payload.callbackTime,
-            )}. Before I let you go, is there anything else you need from me? Then wait for the caller's answer. If they say no, all set, thanks, bye, or anything similar, say exactly: Ok thanks, bye. Then immediately call end_call.`,
-    });
+    res.status(200).json(buildElevenLabsCallbackRequestResponse(payload.callbackTime));
   } catch (error) {
     next(error);
   }
@@ -666,12 +629,7 @@ router.post("/tool/information-requested", async (req: Request, res: Response, n
       conversationId,
     });
 
-    res.status(200).json({
-      ok: true,
-      intent: "information_requested",
-      email: payload.email,
-      nextAction: "Say exactly: Ok, I'll have Yoni send the information. Thanks. Then immediately call end_call.",
-    });
+    res.status(200).json(buildElevenLabsInformationRequestResponse(payload.email));
   } catch (error) {
     next(error);
   }

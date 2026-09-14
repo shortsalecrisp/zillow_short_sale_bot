@@ -9,6 +9,27 @@ function section(start, end) {
   return prompt.slice(a, b);
 }
 // These are static contract checks, not evidence of provider adherence or audible behavior.
+test("entry routing separates screener response, silent hold and first live introduction", () => {
+  const s = section("Turn routing card.", "Clarification turn contract,");
+  assert.match(s, /REQUIRES a spoken response, not silence/);
+  assert.match(s, /AUTOMATED HOLD:[^\n]+is NOT a live greeting/);
+  assert.match(s, /initial pickup greeting[^\n]+BEFORE your introduction/);
+  assert.match(s, /Never attach the handling question to this first introduction/);
+});
+test("informational corrections need the answer without stock follow-up filler", () => {
+  const s = section("Turn routing card.", "Clarification turn contract,");
+  assert.match(s, /No, I only asked who pays the fee/);
+  assert.match(s, /correction containing a question still needs its answer/);
+  assert.match(s, /Never append "anything else", "feel free to ask"/);
+  assert.match(s, /only if the deal closes/);
+});
+test("request receipt and preference correction do not authorize ending", () => {
+  assert.match(prompt, /A tool result is not a caller turn and is never permission to end/);
+  assert.match(prompt, /"callback only", "email only", or "not a callback" is a correction or preference/);
+  assert.match(prompt, /AM\/PM unconfirmed/);
+  assert.match(prompt, /Do not assume business hours prove PM/);
+  assert.match(prompt, /Only if a NEW live-caller turn after your acknowledgment is a clear farewell/);
+});
 test("live identity remains truthful and dynamic", () => {
   assert.match(prompt, /You are {{assistantName}}, an AI calling assistant for Crisp Short Sales/);
   assert.match(prompt, /Yes, I'm an AI assistant with Crisp Short Sales/);
