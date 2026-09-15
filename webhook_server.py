@@ -4557,6 +4557,7 @@ def _sms_is_final_courtesy(value: Any) -> bool:
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     text = _sms_normalize_whitespace(text)
     return text in {
+        "thx",
         "thanks",
         "thank you",
         "thankyou",
@@ -4585,6 +4586,10 @@ def _sms_is_final_courtesy(value: Any) -> bool:
         "makes sense",
         "that makes sense",
     }
+
+
+def _sms_is_exact_thx_courtesy(value: Any) -> bool:
+    return bool(re.fullmatch(r"\s*thx[\s.!?]*", str(value or ""), re.IGNORECASE))
 
 
 def _sms_is_substantive_followup(value: Any) -> bool:
@@ -5507,6 +5512,23 @@ def _sms_is_self_initiated_deferred_contact(value: Any) -> bool:
     return ((currently_unavailable and self_initiated_followup) or self_initiated_call) and not explicit_inbound_callback
 
 
+def _sms_is_untimed_explicit_callback(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if (
+        not text
+        or _sms_is_conditional_call(text)
+        or _sms_extract_scheduled_callback_reference(text)
+        or _sms_extract_same_day_callback_reference(text)
+    ):
+        return False
+    if re.search(r"\bif\b.{0,90}\b(?:need|want|decide|choose|consider)\b.{0,60}\b(?:call|phone)\s+me\b", text):
+        return False
+    return bool(
+        re.search(r"\b(?:please\s+)?(?:call|phone)\s+me\b", text)
+        or re.search(r"\b(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:call|phone)\s+me\b", text)
+    )
+
+
 def _sms_is_offer_submission_request(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(
@@ -6219,6 +6241,14 @@ def _sms_fast_decision(
             reason="Courtesy acknowledgment of information; no response needed",
         )
 
+    if _sms_is_exact_thx_courtesy(t):
+        return _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "Y"),
+            block_reply=True,
+            preserve_existing_state=True,
+            reason="Exact Thx courtesy acknowledgment; no response or handoff needed",
+        )
+
     if _sms_is_automated_routing_notice(t):
         return _sms_decision(
             lead_status=str(row_obj.get("mailshake_status") or "Y"),
@@ -6541,6 +6571,18 @@ def _sms_fast_decision(
             call_booking_status="interested_no_call",
             handoff_type="DEFERRED HOT LEAD",
             reason="Agent will initiate contact later; no owner reply or callback is requested now",
+        )
+
+    if _sms_is_untimed_explicit_callback(t):
+        return _sms_decision(
+            reply_text="Perfect, thanks.",
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=False,
+            reason="Agent explicitly requested an untimed callback; acknowledged and handed off",
+            call_booking_status="call_now",
+            handoff_type="CALL REQUESTED",
+            send_reply_before_handoff=True,
         )
 
     if _sms_is_unavailable_until_callback_reference(t):
@@ -7280,9 +7322,9 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         "human_override": "TRUE" if terminal_handoff else "FALSE",
     }
     callback_time = str(decision.get("callback_time") or "")
-    if not preserve_existing_state and updates["call_booking_status"] == "scheduled_callback":
+    if not preserve_existing_state and updates["call_booking_status"] in {"scheduled_callback", "call_now"}:
         updates["callback_requested"] = "yes"
-        updates["callback_time"] = callback_time
+        updates["callback_time"] = callback_time if updates["call_booking_status"] == "scheduled_callback" else ""
     if not preserve_existing_state and decision.get("clear_callback"):
         updates["callback_requested"] = "no"
         updates["callback_time"] = ""

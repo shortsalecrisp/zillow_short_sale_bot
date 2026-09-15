@@ -1276,9 +1276,14 @@ function handleIncomingSmsCore_(body) {
       } else if (decision.lead_status === "R") {
         updates[HEADERS.call_booking_status] = "closed_no_interest";
       }
+      if (decision.callback_requested) {
+        updates[HEADERS.callback_requested] = decision.callback_requested;
+      }
       if (decision.callback_time) {
         updates[HEADERS.callback_requested] = decision.callback_requested || "yes";
         updates[HEADERS.callback_time] = decision.callback_time;
+      } else if (String(decision.call_booking_status || "").toLowerCase() === "call_now") {
+        updates[HEADERS.callback_time] = "";
       }
     }
 
@@ -1472,9 +1477,14 @@ function handleIncomingSmsCore_(body) {
     } else if (decision.lead_status === "R") {
       updates[HEADERS.call_booking_status] = "closed_no_interest";
     }
+    if (decision.callback_requested) {
+      updates[HEADERS.callback_requested] = decision.callback_requested;
+    }
     if (decision.callback_time) {
       updates[HEADERS.callback_requested] = decision.callback_requested || "yes";
       updates[HEADERS.callback_time] = decision.callback_time;
+    } else if (String(decision.call_booking_status || "").toLowerCase() === "call_now") {
+      updates[HEADERS.callback_time] = "";
     }
   }
 
@@ -2538,6 +2548,20 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  if (isExactThxCourtesyReply_(t)) {
+    return {
+      matched: true,
+      reply_text: "",
+      lead_status: String(rowObj && rowObj[HEADERS.mailshake_status] || "Y"),
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: true,
+      preserve_existing_state: true,
+      reason: "Exact Thx courtesy acknowledgment; no response or handoff needed"
+    };
+  }
+
   const terminal = buildTerminalCoverageDecisionV4_(t, rowObj);
   if (terminal) return terminal;
   if (isShortSaleSourceQuestion_(t)) return buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound, receivedAt);
@@ -2887,7 +2911,8 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
-  if (isImmediateCallSignal_(t) || isOpenCallWindowSignal_(t)) {
+  const explicitUntimedCallback = isUntimedExplicitCallbackSignal_(t);
+  if (explicitUntimedCallback || isImmediateCallSignal_(t) || isOpenCallWindowSignal_(t)) {
     return {
       matched: true,
       reply_text: "Perfect, thanks.",
@@ -2897,8 +2922,12 @@ function applyFastRules_(text, rowObj, receivedAt) {
       needs_review: false,
       block_reply: false,
       call_booking_status: "call_now",
-      handoff_type: "CALL WINDOW OPEN",
-      reason: "Agent is available for a call; acknowledged and handed off"
+      callback_requested: "yes",
+      send_reply_before_handoff: true,
+      handoff_type: explicitUntimedCallback ? "CALL REQUESTED" : "CALL WINDOW OPEN",
+      reason: explicitUntimedCallback
+        ? "Agent explicitly requested an untimed callback; acknowledged and handed off"
+        : "Agent is available for a call; acknowledged and handed off"
     };
   }
 
@@ -3741,6 +3770,7 @@ function isFinalCourtesyReply_(text) {
     .trim();
 
   const patterns = [
+    /^thx$/,
     /^thanks$/,
     /^thank you$/,
     /^thankyou$/,
@@ -3779,6 +3809,10 @@ function isFinalCourtesyReply_(text) {
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isExactThxCourtesyReply_(text) {
+  return /^\s*thx[\s.!?]*$/i.test(String(text || ""));
 }
 
 function isSubstantiveFollowupSignal_(text) {
@@ -4497,6 +4531,19 @@ function isImmediateCallSignal_(text) {
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isUntimedExplicitCallbackSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || isConditionalCallSignal_(t) ||
+      extractScheduledCallbackReference_(t) || extractSameDayCallbackReference_(t)) {
+    return false;
+  }
+  if (/\bif\b.{0,90}\b(?:need|want|decide|choose|consider)\b.{0,60}\b(?:call|phone)\s+me\b/.test(t)) {
+    return false;
+  }
+  return /\b(?:please\s+)?(?:call|phone)\s+me\b/.test(t) ||
+    /\b(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:call|phone)\s+me\b/.test(t);
 }
 
 function extractScheduledCallbackReference_(text, referenceAt) {

@@ -7,6 +7,36 @@ const answer = (text, row = {}, options = {}) => {
   return {h, r: h.incoming(text)};
 };
 
+test('exact Thx is a terminal courtesy without reply or handoff', () => {
+  const h = smsHarness();
+  const r = h.incoming('Thx!');
+  assert.equal(r.should_reply, false);
+  assert.equal(r.handoff_needed, false);
+  assert.equal(h.state.human_override, 'FALSE');
+  assert.equal(h.effects.length, 0);
+  assert.equal(h.evaluate('isFinalCourtesyReply_("Thx")'), true);
+  assert.equal(h.evaluate('isExactThxCourtesyReply_("Thx, can you call me?")'), false);
+});
+
+test('untimed explicit callback is acknowledged and persisted without inventing a time', () => {
+  const h = smsHarness();
+  const r = h.incoming('Hello can you call me at 9109653013');
+  assert.equal(r.should_reply, true);
+  assert.equal(r.reply_text, 'Perfect, thanks.');
+  assert.equal(r.handoff_needed, true);
+  assert.equal(h.state.call_booking_status, 'call_now');
+  assert.equal(h.state.callback_requested, 'yes');
+  assert.equal(h.state.callback_time, '');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'CALL REQUESTED'}]);
+});
+
+test('untimed callback rule does not steal scheduled, conditional, or caller-initiated contact', () => {
+  const h = smsHarness();
+  assert.equal(h.evaluate('isUntimedExplicitCallbackSignal_("Can you call me tomorrow at 3 PM?")'), false);
+  assert.equal(h.evaluate('isUntimedExplicitCallbackSignal_("If I need help, can you call me?")'), false);
+  assert.equal(h.evaluate('isUntimedExplicitCallbackSignal_("I will call you")'), false);
+});
+
 test('neutral self-handling gets one transparent value response, then closes', () => {
   const h = smsHarness();
   const first = h.incoming("I'm handling it myself thank you");

@@ -1817,9 +1817,41 @@ def test_sms_exact_final_courtesy_does_not_reopen_closed_conversation(monkeypatc
 
     assert module._sms_is_final_courtesy("Will do. Thanks for reaching out.") is True
     assert module._sms_is_final_courtesy("Will do, and thank you!") is True
+    assert module._sms_is_final_courtesy("Thx!") is True
+    assert module._sms_is_exact_thx_courtesy("Thx!") is True
+    assert module._sms_is_exact_thx_courtesy("Thx, can you call me?") is False
     assert module._sms_is_substantive_followup("Will do. Thanks for reaching out.") is False
     assert module._sms_is_final_courtesy("Will do. Thanks for reaching out. Can you send your website?") is False
     assert module._sms_is_final_courtesy("Will do, and can you send the website?") is False
+
+
+def test_sms_exact_thx_is_suppressed_without_takeover(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    decision = module._sms_fast_decision({}, "Thx!")
+    assert decision["block_reply"] is True
+    assert decision["handoff_needed"] is False
+    assert decision["preserve_existing_state"] is True
+
+
+def test_sms_untimed_explicit_callback_is_call_now_without_invented_time(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    decision = module._sms_fast_decision({}, "Hello can you call me at 9109653013")
+    assert decision["reply_text"] == "Perfect, thanks."
+    assert decision["handoff_needed"] is True
+    assert decision["call_booking_status"] == "call_now"
+    assert decision["callback_time"] == ""
+    assert decision["handoff_type"] == "CALL REQUESTED"
+    assert module._sms_is_untimed_explicit_callback("Can you call me tomorrow at 3 PM?") is False
+    assert module._sms_is_untimed_explicit_callback("If I need help, can you call me?") is False
+    assert module._sms_is_untimed_explicit_callback("I will call you") is False
 
 
 @pytest.mark.parametrize(
