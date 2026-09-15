@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   applyConversationConsentPolicy, applyConversationListeningPolicy, applyConversationToolPolicy, applyContactToolDescriptions,
@@ -214,4 +215,12 @@ test("unknown workflow layouts fail closed", () => {
   assert.throws(() => applyConversationListeningPolicy(b, { listenFirst: true }), /required/);
   delete b.workflow.edges.transfer_check_to_patch;
   assert.throws(() => applyConversationConsentPolicy(b), /required/);
+});
+
+test("prompt uses the approved purpose repair and narrow repeated-confusion exit", () => {
+  const prompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8");
+  assert.match(prompt, /I'm calling because \{\{streetAddress\}\} is listed as a short sale\. We take lender paperwork and calls off the listing agent\. Would you like me to explain\?/);
+  assert.match(prompt, /I'm sorry I wasn't clear\. I'll let you go\. Goodbye\./);
+  assert.match(prompt, /exact property-specific clarification was given between two live caller purpose-confusion turns/);
+  assert.doesNotMatch(prompt, /Would you prefer a person/);
 });
