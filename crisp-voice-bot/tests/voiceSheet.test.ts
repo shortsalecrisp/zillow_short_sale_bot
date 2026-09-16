@@ -12,7 +12,9 @@ import {
 test("replacement voice sheet helpers preserve the active call windows", () => {
   assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T13:30:00Z"), "America/New_York"), "morning_probe");
   assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T17:00:00Z"), "America/New_York"), "");
+  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T18:00:00Z"), "America/New_York"), "mid_afternoon");
   assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T18:45:00Z"), "America/New_York"), "mid_afternoon");
+  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T19:59:00Z"), "America/New_York"), "mid_afternoon");
   assert.equal(
     getVoiceBotPreferredCallWindowName(new Date("2026-05-04T20:15:00Z"), "America/New_York"),
     "",
@@ -26,7 +28,7 @@ test("replacement voice sheet helpers retry provider start failures once", () =>
 test("replacement voice sheet helpers preserve first and second attempt scheduling", () => {
   assert.equal(
     getNextVoiceBotFirstAttemptWindowStart(new Date("2026-05-04T16:00:00Z"), "America/New_York").toISOString(),
-    "2026-05-04T18:30:00.000Z",
+    "2026-05-04T18:00:00.000Z",
   );
   assert.equal(
     getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-04T20:45:00Z"), "America/New_York").toISOString(),

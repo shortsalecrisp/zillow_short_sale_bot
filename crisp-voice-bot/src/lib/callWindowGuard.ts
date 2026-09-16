@@ -6,8 +6,8 @@ export const CALL_WINDOWS: Record<string, { startMinutes: number; endMinutes: nu
     endMinutes: 10 * 60,
   },
   mid_afternoon: {
-    startMinutes: 14 * 60 + 30,
-    endMinutes: 15 * 60 + 30,
+    startMinutes: 14 * 60,
+    endMinutes: 16 * 60,
   },
 };
 

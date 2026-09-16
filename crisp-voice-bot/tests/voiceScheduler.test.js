@@ -110,7 +110,7 @@ test("weekday calls are eligible only during morning and mid-afternoon local tes
   const midAfternoon = runSchedulerExpression(
     'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T18:45:00Z"), "America/New_York")',
   );
-  const beforeWindow = runSchedulerExpression(
+  const nearEndOfWindow = runSchedulerExpression(
     'getVoiceBotPreferredCallWindowName_(new Date("2026-05-04T19:45:00Z"), "America/New_York")',
   );
   const lateAfternoonControl = runSchedulerExpression(
@@ -123,7 +123,7 @@ test("weekday calls are eligible only during morning and mid-afternoon local tes
   assert.equal(morning, "morning_probe");
   assert.equal(earlyAfternoon, "");
   assert.equal(midAfternoon, "mid_afternoon");
-  assert.equal(beforeWindow, "");
+  assert.equal(nearEndOfWindow, "mid_afternoon");
   assert.equal(lateAfternoonControl, "");
   assert.equal(afterWindow, "");
 });
@@ -512,11 +512,11 @@ test("first voice call uses the next local time-test window after follow-up text
 
   assert.equal(beforeLateMorning, "2026-05-04T13:00:00.000Z");
   assert.equal(duringLateMorning, "2026-05-04T13:30:00.000Z");
-  assert.equal(betweenMorningAndAfternoon, "2026-05-04T18:30:00.000Z");
-  assert.equal(betweenAfternoonWindows, "2026-05-05T13:00:00.000Z");
+  assert.equal(betweenMorningAndAfternoon, "2026-05-04T18:00:00.000Z");
+  assert.equal(betweenAfternoonWindows, "2026-05-04T19:45:00.000Z");
   assert.equal(duringLateAfternoon, "2026-05-05T13:00:00.000Z");
   assert.equal(afterFridayWindow, "2026-05-09T13:00:00.000Z");
-  assert.equal(beforeSaturdayWindow, "2026-05-09T18:30:00.000Z");
+  assert.equal(beforeSaturdayWindow, "2026-05-09T18:00:00.000Z");
   assert.equal(duringSaturdayWindow, "2026-05-10T13:00:00.000Z");
   assert.equal(afterSundayWindow, "2026-05-11T13:00:00.000Z");
 });
@@ -542,7 +542,7 @@ test("second voice call rotates into the next local time-test bucket on the next
   );
 
   assert.equal(nextDayAfterLateAfternoon, "2026-05-05T13:00:00.000Z");
-  assert.equal(nextDayAfterMorning, "2026-05-05T18:30:00.000Z");
+  assert.equal(nextDayAfterMorning, "2026-05-05T18:00:00.000Z");
   assert.equal(nextDayAfterEarlyAfternoon, "2026-05-05T13:00:00.000Z");
   assert.equal(saturdayAfterFriday, "2026-05-09T13:00:00.000Z");
   assert.equal(sundayAfterSaturday, "2026-05-10T13:00:00.000Z");

@@ -64,8 +64,8 @@ const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
   },
   {
     name: 'mid_afternoon',
-    startMinutes: 14 * 60 + 30,
-    endMinutes: 15 * 60 + 30
+    startMinutes: 14 * 60,
+    endMinutes: 16 * 60
   }
 ];
 const VOICE_BOT_WEEKEND_CALL_WINDOWS = [
@@ -76,8 +76,8 @@ const VOICE_BOT_WEEKEND_CALL_WINDOWS = [
   },
   {
     name: 'mid_afternoon',
-    startMinutes: 14 * 60 + 30,
-    endMinutes: 15 * 60 + 30
+    startMinutes: 14 * 60,
+    endMinutes: 16 * 60
   }
 ];
 

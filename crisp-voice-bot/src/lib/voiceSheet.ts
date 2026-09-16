@@ -49,12 +49,12 @@ export type VoiceCallWindow = {
 
 const WEEKDAY_CALL_WINDOWS: VoiceCallWindow[] = [
   { name: "morning_probe", startMinutes: 9 * 60, endMinutes: 10 * 60 },
-  { name: "mid_afternoon", startMinutes: 14 * 60 + 30, endMinutes: 15 * 60 + 30 },
+  { name: "mid_afternoon", startMinutes: 14 * 60, endMinutes: 16 * 60 },
 ];
 
 const WEEKEND_CALL_WINDOWS: VoiceCallWindow[] = [
   { name: "morning_probe", startMinutes: 9 * 60, endMinutes: 10 * 60 },
-  { name: "mid_afternoon", startMinutes: 14 * 60 + 30, endMinutes: 15 * 60 + 30 },
+  { name: "mid_afternoon", startMinutes: 14 * 60, endMinutes: 16 * 60 },
 ];
 
 const STATE_TIMEZONES: Record<string, string> = {
