@@ -381,6 +381,15 @@ def permanent_baseline_states(states: list[str], run_date: dt.date) -> list[str]
     return [ordered_states[(start + offset) % len(ordered_states)] for offset in range(daily_count)]
 
 
+def rotating_recovery_states(states: list[str], run_date: dt.date, budget: int) -> set[str]:
+    ordered = list(dict.fromkeys(state.upper() for state in states))
+    if not ordered or budget <= 0:
+        return set()
+    anchor = parse_run_date(DEFAULT_ROTATION_ANCHOR_DATE)
+    start = ((run_date - anchor).days * budget) % len(ordered)
+    return {ordered[(start + offset) % len(ordered)] for offset in range(min(budget, len(ordered)))}
+
+
 def configured_search_plan(
     states: list[str],
     run_date: dt.date,
@@ -618,6 +627,13 @@ HEADLESS_DOMAINS = {
     for domain in os.getenv("FREE_SOURCE_PILOT_HEADLESS_DOMAINS", "*").split(",")
     if domain.strip()
 }
+BLOCKED_RECOVERY_ENABLED = os.getenv("FREE_SOURCE_PILOT_BLOCKED_RECOVERY_ENABLED", "true").lower() == "true"
+BLOCKED_RECOVERY_SEARCH_BUDGET = max(
+    0, int(os.getenv("FREE_SOURCE_PILOT_BLOCKED_RECOVERY_SEARCH_BUDGET", "10"))
+)
+BLOCKED_RECOVERY_RESULTS = max(
+    1, min(5, int(os.getenv("FREE_SOURCE_PILOT_BLOCKED_RECOVERY_RESULTS", "3")))
+)
 _headless_used_total = 0
 _headless_used_by_domain: dict[str, int] = {}
 _site_chrome_prewrite_seen: set[str] = set()
@@ -2148,6 +2164,8 @@ def source_result_allowed(result: SearchResult) -> tuple[bool, str]:
             return True, ""
         return False, "not_homes_detail"
     if result.source in {"idx_broker_pages", "idx_broker_remarks"}:
+        if host == "facebook.com" or host.endswith(".facebook.com"):
+            return False, "not_idx_listing_detail"
         if re.search(r"/(?:search|blog|buying|selling|guides?|resources?|category|tag)(?:/|$)", path):
             return False, "not_idx_listing_detail"
         if re.search(r"\b(?:\d+\+\s+listings|homes?\s+for\s+sale|search\s+homes|buying\s+a|tips)\b", title, re.I):
@@ -3574,6 +3592,98 @@ def infer_fields(result: SearchResult, markup: str) -> Candidate:
     return candidate
 
 
+def blocked_recovery_expected(result: SearchResult, requested_state: str) -> dict[str, str]:
+    expected = expected_listing_fields(result)
+    address = expected.get("listing_address", "")
+    state = expected.get("state", "")
+    if not looks_like_listing_address(address):
+        return {}
+    if state and normalize_state_key(state) != normalize_state_key(requested_state):
+        return {}
+    expected["state"] = requested_state.upper()
+    return expected
+
+
+def recovery_listing_matches_expected(
+    fields: dict[str, str], expected: dict[str, str], requested_state: str
+) -> bool:
+    state = fields.get("state") or requested_state
+    if canonical_listing_address_key(fields.get("listing_address", ""), state) != \
+            canonical_listing_address_key(expected["listing_address"], requested_state):
+        return False
+    for key in ("city", "zip"):
+        if fields.get(key) and expected.get(key) and normalize_key(fields[key]) != normalize_key(expected[key]):
+            return False
+    return True
+
+
+def recover_blocked_listing(
+    result: SearchResult,
+    requested_state: str,
+    expected: dict[str, str],
+    stats: dict[str, Any],
+) -> tuple[SearchResult, Candidate] | None:
+    """Try a bounded alternate source; never qualify from a search snippet alone."""
+    address = expected["listing_address"]
+    city = expected.get("city", "")
+    original_domain = registered_domain(result.url)
+    query = normalize_space(
+        " ".join(
+            part for part in (
+                f'"{address}"', f'"{city}"' if city else "",
+                f'"{requested_state}"', '"short sale"', f"-site:{original_domain}",
+            ) if part
+        )
+    )
+    stats["blocked_recovery_searches"] += 1
+    try:
+        alternatives = ddg_search(query, result.source, BLOCKED_RECOVERY_RESULTS)
+    except Exception as exc:  # noqa: BLE001
+        log_event("pilot_blocked_recovery_search_failed", url=result.url, error=str(exc)[:220])
+        return None
+
+    for alternate in alternatives:
+        if (
+            result_url_identity(alternate.url) == result_url_identity(result.url)
+            or registered_domain(alternate.url) == original_domain
+            or is_ad_or_tracking_url(alternate.url)
+            or not source_result_allowed(alternate)[0]
+        ):
+            continue
+        alternate_expected = expected_listing_fields(alternate)
+        if alternate_expected.get("listing_address"):
+            likely_same_listing = recovery_listing_matches_expected(
+                alternate_expected, expected, requested_state
+            )
+        else:
+            likely_same_listing = listing_url_matches_address(alternate.url, address)
+        if not likely_same_listing:
+            continue
+        stats["fetch_operations"] += 1
+        stats["blocked_recovery_page_fetches"] += 1
+        try:
+            markup = fetch_url(alternate.url, allow_headless=False)
+        except Exception as exc:  # noqa: BLE001
+            log_event("pilot_blocked_recovery_page_failed", url=alternate.url, error=str(exc)[:220])
+            continue
+        stats["fetched"] += 1
+        candidate = infer_fields(alternate, markup)
+        if (
+            candidate_matches_requested_state(candidate, requested_state)
+            and recovery_listing_matches_expected(candidate.fields, expected, requested_state)
+            and qualification_for_candidate(candidate).status == "qualified"
+        ):
+            log_event(
+                "pilot_blocked_recovery_resolved",
+                blocked_url=result.url,
+                alternate_url=alternate.url,
+                address=address,
+                state=requested_state,
+            )
+            return alternate, candidate
+    return None
+
+
 def direct_monitor_active(run_date: dt.date) -> bool:
     if not DIRECT_MONITOR_ENABLED:
         return False
@@ -4447,6 +4557,9 @@ def source_scorecard_detail(stats: dict[str, Any]) -> str:
         "failed": int(stats.get("search_failed", 0)),
         "fetched": int(stats.get("fetched", 0)),
         "fetch_failed": int(stats.get("fetch_failed", 0)),
+        "recovery_searches": int(stats.get("blocked_recovery_searches", 0)),
+        "recovery_resolved": int(stats.get("blocked_recovery_resolved", 0)),
+        "recovery_unresolved": int(stats.get("blocked_recovery_unresolved", 0)),
         "evidence_failed": int(stats.get("source_evidence_failed", 0)),
         "rows": int(stats.get("rows_written", 0)),
     }
@@ -4523,6 +4636,8 @@ def load_source_scorecard(
             round(rolling_fetch_failed * 10_000 / rolling_fetch_total)
             if rolling_fetch_total else 0
         ),
+        "blocked_recovery_unresolved": int(today.get("recovery_unresolved", 0)),
+        "blocked_recovery_resolved": int(today.get("recovery_resolved", 0)),
     }
 
 
@@ -4551,6 +4666,8 @@ def audit_scorecard_detail(stats: dict[str, Any]) -> str:
         f"daily_fetch_fail_bps={int(stats.get('daily_fetch_failure_rate_bps', 0))},"
         f"rolling_days={int(stats.get('rolling_fetch_scorecard_days', 0))},"
         f"rolling_fetch_fail_bps={int(stats.get('rolling_fetch_failure_rate_bps', 0))},"
+        f"recovery_resolved={int(stats.get('blocked_recovery_resolved', 0))},"
+        f"recovery_unresolved={int(stats.get('blocked_recovery_unresolved', 0))},"
         f"bounded_evidence_pending={int(stats.get('bounded_experiment_evidence_pending', 0))}"
     ]
     parts.extend(row_groups)
@@ -6197,6 +6314,12 @@ def run_linkage_and_suffix_audits(
             stats["rolling_fetch_scorecard_days"] >= 7
             and stats["rolling_fetch_failure_rate_bps"] > 5_000
         )
+        stats["blocked_recovery_resolved"] = int(
+            source_scorecard.get("blocked_recovery_resolved", 0)
+        )
+        stats["blocked_recovery_unresolved"] = int(
+            source_scorecard.get("blocked_recovery_unresolved", 0)
+        )
     pilot_rows = promoted_rows
     stats["pilot_rows"] = len(pilot_rows)
     log_event(
@@ -7563,12 +7686,22 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
         "rejected": 0,
         "fetch_failed": 0,
         "fetch_failure_reasons": {},
+        "blocked_recovery_eligible": 0,
+        "blocked_recovery_searches": 0,
+        "blocked_recovery_page_fetches": 0,
+        "blocked_recovery_resolved": 0,
+        "blocked_recovery_unresolved": 0,
+        "blocked_recovery_skipped_budget": 0,
         "rejection_reasons": {},
         "rows_written": 0,
         "source_evidence_persisted": 0,
         "source_evidence_failed": 0,
     }
     context["stats"] = stats
+    recovery_states = rotating_recovery_states(
+        getattr(args, "states", []), run_date, BLOCKED_RECOVERY_SEARCH_BUDGET
+    )
+    attempted_recovery_states: set[str] = set()
     experiment_baselines = {
         source_query.source: query_exclusion_baseline_states(args.states, source_query.source)
         for source_query in source_queries
@@ -7612,6 +7745,9 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
         search_engine=SEARCH_ENGINE,
         ddg_fallback_allowed=ALLOW_DDG_FALLBACK,
         cse_configured=bool(CSE_API_KEY and CSE_CX),
+        blocked_recovery_enabled=BLOCKED_RECOVERY_ENABLED,
+        blocked_recovery_search_budget=BLOCKED_RECOVERY_SEARCH_BUDGET,
+        blocked_recovery_states=sorted(recovery_states),
         shadow_mode=SHADOW_MODE,
         shadow_review_target=SHADOW_REVIEW_TARGET,
         shadow_review_days=SHADOW_REVIEW_DAYS,
@@ -7919,6 +8055,7 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                 stats["unique_listing_urls"] = len(unique_listing_urls)
                 stats["allowed_listing_result_occurrences"] += 1
                 stats["fetch_operations"] += 1
+                candidate = None
                 try:
                     markup = fetch_url(result.url)
                     stats["fetched"] += 1
@@ -7931,8 +8068,60 @@ def run(args: argparse.Namespace, *, run_context: dict[str, Any] | None = None) 
                     query_stats["fetch_failed"] += 1
                     increment_reason(stats, "fetch_failure_reasons", source_failure_reason(exc))
                     log_event("pilot_fetch_failed", state=state, source=source, url=result.url, error=str(exc))
-                    continue
-                candidate = infer_fields(result, markup)
+                    if isinstance(exc, urllib.error.HTTPError) and exc.code in {403, 429, 451}:
+                        try:
+                            expected = blocked_recovery_expected(result, state)
+                        except Exception as recovery_exc:  # noqa: BLE001
+                            expected = {}
+                            log_event(
+                                "pilot_blocked_recovery_internal_failed",
+                                state=state, url=result.url, error=str(recovery_exc)[:220],
+                            )
+                        if expected:
+                            stats["blocked_recovery_eligible"] += 1
+                            recovery_reason = "alternate_not_verified"
+                            if not BLOCKED_RECOVERY_ENABLED:
+                                recovery_reason = "recovery_disabled"
+                            elif state not in recovery_states:
+                                recovery_reason = "state_outside_rotation"
+                            elif state in attempted_recovery_states:
+                                recovery_reason = "state_already_attempted"
+                            elif stats["blocked_recovery_searches"] >= BLOCKED_RECOVERY_SEARCH_BUDGET:
+                                stats["blocked_recovery_skipped_budget"] += 1
+                                recovery_reason = "budget_exhausted"
+                            else:
+                                attempted_recovery_states.add(state)
+                                try:
+                                    recovered = recover_blocked_listing(result, state, expected, stats)
+                                except Exception as recovery_exc:  # noqa: BLE001
+                                    recovered = None
+                                    log_event(
+                                        "pilot_blocked_recovery_internal_failed",
+                                        state=state, url=result.url, error=str(recovery_exc)[:220],
+                                    )
+                                if recovered:
+                                    result, candidate = recovered
+                                    result_source_ref = safe_source_reference(result.url)
+                                    listing_url_key = result_url_identity(result.url)
+                                    if listing_url_key:
+                                        unique_fetched_urls.add(listing_url_key)
+                                    stats["unique_listing_pages_fetched"] = len(unique_fetched_urls)
+                                    stats["blocked_recovery_resolved"] += 1
+                                    query_stats["fetched"] += 1
+                            if candidate is None:
+                                stats["blocked_recovery_unresolved"] += 1
+                                log_event(
+                                    "pilot_blocked_recovery_unresolved",
+                                    state=state,
+                                    source=source,
+                                    url=result.url,
+                                    address=expected["listing_address"],
+                                    reason=recovery_reason,
+                                )
+                    if candidate is None:
+                        continue
+                if candidate is None:
+                    candidate = infer_fields(result, markup)
                 log_agent_shadow(candidate)
                 scoped_description = normalize_space(candidate.fields.get("listing_description", ""))
                 short_sale_without_navigation = SITE_CHROME_SHORT_SALE_NAVIGATION_RE.sub(

@@ -1407,6 +1407,135 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(pilot.source_result_allowed(collection), (False, "not_idx_listing_detail"))
         self.assertEqual(pilot.source_result_allowed(detail), (True, ""))
 
+    def test_idx_result_rejects_facebook_without_changing_broker_listing_admission(self):
+        social = pilot.SearchResult(
+            "idx_broker_remarks", "query", "https://www.facebook.com/posts/123",
+            "123 Main Street short sale", "",
+        )
+        broker = pilot.SearchResult(
+            "idx_broker_remarks", "query", "https://broker.example/listing/123",
+            "123 Main Street short sale", "",
+        )
+
+        self.assertEqual(pilot.source_result_allowed(social), (False, "not_idx_listing_detail"))
+        self.assertEqual(pilot.source_result_allowed(broker), (True, ""))
+
+    def test_blocked_recovery_only_uses_exact_address_and_full_listing_evidence(self):
+        blocked = pilot.SearchResult(
+            "idx_broker_remarks", "query", "https://blocked.example/listing/123",
+            "123 Main Street, Atlanta, GA 30303", "Short sale listing",
+        )
+        wrong = pilot.SearchResult(
+            "idx_broker_remarks", "alternate", "https://other.example/listing/999",
+            "999 Main Street, Atlanta, GA 30303", "Short sale listing",
+        )
+        alternate = pilot.SearchResult(
+            "idx_broker_remarks", "alternate", "https://other.example/listing/123",
+            "123 Main Street, Atlanta, GA 30303", "Short sale listing",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product","name":"123 Main Street, Atlanta, GA 30303",
+           "address":{"streetAddress":"123 Main Street","addressLocality":"Atlanta",
+                      "addressRegion":"GA","postalCode":"30303"},
+           "description":"This home is an active short sale subject to lender approval.",
+           "offers":{"availability":"https://schema.org/InStock"}}
+        </script>
+        <body>123 Main Street, Atlanta, GA 30303</body>
+        """
+        stats = {
+            "blocked_recovery_searches": 0,
+            "blocked_recovery_page_fetches": 0,
+            "fetch_operations": 0,
+            "fetched": 0,
+        }
+        expected = pilot.blocked_recovery_expected(blocked, "GA")
+        with mock.patch.object(pilot, "ddg_search", return_value=[wrong, alternate]), \
+             mock.patch.object(pilot, "cse_search", side_effect=AssertionError("CSE quota must be reserved")), \
+             mock.patch.object(pilot, "fetch_url", return_value=markup) as fetch:
+            recovered = pilot.recover_blocked_listing(blocked, "GA", expected, stats)
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered[0].url, alternate.url)
+        self.assertEqual(fetch.call_args_list, [mock.call(alternate.url, allow_headless=False)])
+        self.assertEqual(stats["blocked_recovery_searches"], 1)
+        self.assertEqual(stats["blocked_recovery_page_fetches"], 1)
+        self.assertEqual(stats["fetched"], 1)
+
+    def test_blocked_recovery_rejects_snippet_only_short_sale_and_wrong_state(self):
+        blocked = pilot.SearchResult(
+            "idx_broker_remarks", "query", "https://blocked.example/listing/123",
+            "123 Main Street, Atlanta, GA 30303", "Short sale listing",
+        )
+        alternate = pilot.SearchResult(
+            "idx_broker_remarks", "alternate", "https://other.example/listing/123",
+            "123 Main Street, Atlanta, GA 30303", "Short sale listing",
+        )
+        stats = {
+            "blocked_recovery_searches": 0,
+            "blocked_recovery_page_fetches": 0,
+            "fetch_operations": 0,
+            "fetched": 0,
+        }
+        self.assertEqual(pilot.blocked_recovery_expected(blocked, "FL"), {})
+        with mock.patch.object(pilot, "ddg_search", return_value=[alternate]), \
+             mock.patch.object(pilot, "fetch_url", return_value="<body>123 Main Street, Atlanta, GA 30303</body>"):
+            recovered = pilot.recover_blocked_listing(
+                blocked, "GA", pilot.blocked_recovery_expected(blocked, "GA"), stats
+            )
+        self.assertIsNone(recovered)
+
+    def test_blocked_recovery_can_check_address_url_when_result_title_is_generic(self):
+        blocked = pilot.SearchResult(
+            "idx_broker_remarks", "query", "https://blocked.example/listing/123",
+            "123 Main Street, Atlanta, GA 30303", "Short sale listing",
+        )
+        alternate = pilot.SearchResult(
+            "idx_broker_remarks", "alternate", "https://other.example/listing/123-main-street",
+            "Property details", "Short sale listing",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product","name":"123 Main Street, Atlanta, GA 30303",
+           "address":{"streetAddress":"123 Main Street","addressLocality":"Atlanta",
+                      "addressRegion":"GA","postalCode":"30303"},
+           "description":"This is an active short sale subject to lender approval.",
+           "offers":{"availability":"https://schema.org/InStock"}}
+        </script>
+        """
+        stats = {"blocked_recovery_searches": 0, "blocked_recovery_page_fetches": 0,
+                 "fetch_operations": 0, "fetched": 0}
+        with mock.patch.object(pilot, "ddg_search", return_value=[alternate]), \
+             mock.patch.object(pilot, "fetch_url", return_value=markup):
+            recovered = pilot.recover_blocked_listing(
+                blocked, "GA", pilot.blocked_recovery_expected(blocked, "GA"), stats
+            )
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered[0].url, alternate.url)
+
+    def test_blocked_recovery_rotates_ten_states_without_replacing_source_searches(self):
+        states = list(pilot.STATE_QUERY_TERMS)
+        anchor = dt.date.fromisoformat(pilot.DEFAULT_ROTATION_ANCHOR_DATE)
+        daily = [pilot.rotating_recovery_states(states, anchor + dt.timedelta(days=day), 10)
+                 for day in range(5)]
+
+        self.assertEqual([len(group) for group in daily], [10] * 5)
+        self.assertEqual(set.union(*daily), set(states))
+        self.assertEqual(pilot.rotating_recovery_states(["AK"], anchor, 10), {"AK"})
+
+    def test_blocked_recovery_counts_survive_the_source_scorecard(self):
+        detail = pilot.source_scorecard_detail({
+            "blocked_recovery_searches": 10,
+            "blocked_recovery_resolved": 2,
+            "blocked_recovery_unresolved": 30,
+        })
+
+        parsed = pilot.parse_source_scorecard_detail(detail)
+        self.assertEqual(parsed["recovery_searches"], 10)
+        self.assertEqual(parsed["recovery_resolved"], 2)
+        self.assertEqual(parsed["recovery_unresolved"], 30)
+
     def test_listing_address_and_state_guards_reject_search_page_noise(self):
         self.assertFalse(pilot.looks_like_listing_address("Buying A Short Sale vs Foreclosure"))
         self.assertFalse(pilot.looks_like_listing_address("Alabama fixer-upper homes page 4"))
@@ -5322,6 +5451,63 @@ class FreeShortSaleSourcePilotTest(unittest.TestCase):
         self.assertEqual(done["stats"]["unique_listing_pages_fetched"], 1)
         self.assertEqual(done["stats"]["rows_written"], 0)
         self.assertEqual(done["stats"]["rejected"], 1)
+
+    def test_run_recovers_blocked_listing_without_changing_source_search(self):
+        args = types.SimpleNamespace(
+            service_account="{}", spreadsheet_id="sheet-id", main_tab="Sheet1",
+            pilot_tab="Lead Source Pilot", run_date="2026-08-21", audit_links_only=False,
+            audit_phase="post_verifier", force_review_experiments=False,
+            states=["GA"], results_per_query=10, sleep_seconds=0, include_rejected=False,
+            dry_run=True, promote_ready=False, promotion_daily_cap=10,
+            promotion_dry_run=False, scheduled_run=False, run_receipt_id="recovery-test",
+        )
+        blocked = pilot.SearchResult(
+            "idx_broker_remarks", "query", "https://blocked.example/listing/123",
+            "123 Main Street, Atlanta, GA 30303", "Short sale listing",
+        )
+        alternate = pilot.SearchResult(
+            "idx_broker_remarks", "alternate", "https://other.example/listing/123",
+            "123 Main Street, Atlanta, GA 30303", "Short sale listing",
+        )
+        markup = """
+        <script type="application/ld+json">
+          {"@type":"Product","name":"123 Main Street, Atlanta, GA 30303",
+           "address":{"streetAddress":"123 Main Street","addressLocality":"Atlanta",
+                      "addressRegion":"GA","postalCode":"30303"},
+           "description":"This active listing is a short sale subject to lender approval.",
+           "offers":{"availability":"https://schema.org/InStock"}}
+        </script>
+        """
+        def fetch(url, **kwargs):
+            if url == blocked.url:
+                raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+            self.assertEqual(url, alternate.url)
+            return markup
+
+        events = []
+        with mock.patch.object(pilot, "load_service_account_info", return_value={}), \
+             mock.patch.object(pilot, "sheets_client", return_value="token"), \
+             mock.patch.object(pilot, "ensure_tab"), \
+             mock.patch.object(pilot, "source_durability_audit_active", return_value=False), \
+             mock.patch.object(pilot, "configured_source_queries", return_value=[
+                 pilot.SourceQuery("idx_broker_remarks", '"short sale" {state}', "w1")
+             ]), \
+             mock.patch.object(pilot, "get_values", side_effect=[[[]], [pilot.PILOT_HEADERS]]), \
+             mock.patch.object(pilot, "search_web", return_value=("cse", [blocked])) as source_search, \
+             mock.patch.object(pilot, "ddg_search", return_value=[alternate]) as recovery_search, \
+             mock.patch.object(pilot, "fetch_url", side_effect=fetch), \
+             mock.patch.object(pilot, "required_review_field_failure", return_value=""), \
+             mock.patch.object(pilot, "run_direct_monitor", return_value={"complete": True}), \
+             mock.patch.object(pilot, "log_event", side_effect=lambda event, **details: events.append((event, details))):
+            pilot.run(args)
+
+        done = next(details for event, details in events if event == "pilot_run_done")
+        self.assertEqual(source_search.call_count, 1)
+        self.assertEqual(recovery_search.call_count, 1)
+        self.assertEqual(done["stats"]["blocked_recovery_resolved"], 1)
+        self.assertEqual(done["stats"]["qualified"], 1)
+        self.assertEqual(done["stats"]["fetch_failed"], 1)
+        self.assertTrue(done["pipeline_complete"])
 
     def test_terminal_receipt_covers_auth_system_exit_with_same_run_id(self):
         args = types.SimpleNamespace(
