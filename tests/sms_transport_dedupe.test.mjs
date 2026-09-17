@@ -15,6 +15,7 @@ function harness() {
       getRange: (start, _column, count) => ({
         getValues: () => rows.slice(start - 1, start - 1 + count),
         setValue: value => { rows[start - 1][1] = value; },
+        setValues: values => { values.forEach((value, offset) => { rows[start - 1 + offset] = value; }); },
       }),
     };
     sheets.set(name, sheet);
@@ -92,4 +93,22 @@ test('same handoff event with changed history is emailed only once', () => {
   assert.equal(second.queued, false);
   assert.equal(second.duplicate, true);
   assert.equal(h.sheets.get('sms_handoff_email_outbox').rows.length, 2);
+});
+
+test('human-owned updates coalesce into one delayed latest-context owner alert', () => {
+  const h = harness();
+  h.context.first = {to: 'owner@example.com', subject: 'HUMAN HANDOFF UPDATE', body: 'Thursday at 11 AM', event_key: 'date', coalesce_key: '7025550101'};
+  h.context.second = {to: 'owner@example.com', subject: 'HUMAN HANDOFF UPDATE', body: 'Video; invite to two addresses', event_key: 'video', coalesce_key: '7025550101'};
+  const first = h.run('queueCoalescedHandoffEmailV18_(first)');
+  const duplicate = h.run('queueCoalescedHandoffEmailV18_(first)');
+  const second = h.run('queueCoalescedHandoffEmailV18_(second)');
+  const replay = h.run('queueCoalescedHandoffEmailV18_(first)');
+  assert.equal(first.queued, true);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(second.coalesced, true);
+  assert.equal(replay.duplicate, true);
+  const rows = h.sheets.get('sms_handoff_email_outbox').rows;
+  assert.equal(rows.length, 2);
+  assert.equal(JSON.parse(rows[1][3]).body, 'Video; invite to two addresses');
+  assert.ok(new Date(rows[1][8]).getTime() > Date.now());
 });

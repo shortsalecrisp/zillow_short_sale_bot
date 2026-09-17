@@ -24,6 +24,7 @@ var SMS_HANDOFF_EMAIL_HEADERS_ = [
 
 var SMS_INBOUND_CONTENT_REPLAY_WINDOW_MS_ = 90 * 1000;
 var SMS_HANDOFF_EVENT_REPLAY_WINDOW_MS_ = 10 * 60 * 1000;
+var SMS_HANDOFF_UPDATE_DEBOUNCE_MS_ = 20 * 60 * 1000;
 
 function getHandoffEmailEventKeyV16_(row) {
   try {
@@ -97,6 +98,63 @@ function queueHandoffEmailV11_(payload) {
   return { ok: true, queued: true, email_id: emailId };
 }
 
+// Keep one latest-context owner alert pending while a human-owned thread is
+// receiving related updates. Existing terminal handoff alerts remain immediate.
+function queueCoalescedHandoffEmailV18_(payload) {
+  var message = payload || {};
+  var coalesceKey = String(message.coalesce_key || "").trim();
+  if (!message.to || !message.subject || !message.body || !coalesceKey) {
+    throw new Error("Handoff update requires recipient, content, and coalesce key");
+  }
+  message.seen_event_keys = [String(message.event_key || "")];
+  installSmsOutboxTriggers_();
+  var now = Date.now();
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    [String(message.to).toLowerCase(), message.subject, message.body].join("\n---\n")
+  );
+  var emailId = digest.map(function(value) { return (value + 256).toString(16).slice(-2); }).join("").slice(0, 32);
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_handoff_email_outbox") || ss.insertSheet("sms_handoff_email_outbox");
+  ensureSmsSheetHeaders_(sheet, SMS_HANDOFF_EMAIL_HEADERS_);
+  var lock = LockService.getScriptLock();
+  // A failed lock must retry upstream, never append a second competing update.
+  if (!lock.tryLock(5000)) throw new Error("Handoff update outbox is busy");
+  try {
+    var rows = sheet.getLastRow() > 1
+      ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_HANDOFF_EMAIL_HEADERS_.length).getValues()
+      : [];
+    for (var i = rows.length - 1; i >= 0; i--) {
+      var prior;
+      try { prior = JSON.parse(String(rows[i][3] || "{}")); } catch (_) { continue; }
+      if (String(prior.coalesce_key || "") !== coalesceKey) continue;
+      var status = String(rows[i][1] || "");
+      var sameEvent = String(prior.event_key || "") === String(message.event_key || "") ||
+        (prior.seen_event_keys || []).indexOf(String(message.event_key || "")) !== -1;
+      var recent = now - new Date(rows[i][0]).getTime() < SMS_HANDOFF_EVENT_REPLAY_WINDOW_MS_;
+      if (sameEvent && recent && ["queued", "claimed", "reconciling", "sent", "uncertain"].indexOf(status) !== -1) {
+        return { ok: true, queued: false, duplicate: true, email_id: String(rows[i][2] || emailId), status: status };
+      }
+      if (status === "queued") {
+        message.seen_event_keys = (prior.seen_event_keys || [String(prior.event_key || "")])
+          .concat(message.seen_event_keys).filter(function(key, index, all) { return !!key && all.indexOf(key) === index; });
+        sheet.getRange(i + 2, 1, 1, SMS_HANDOFF_EMAIL_HEADERS_.length).setValues([[
+          new Date(now), "queued", emailId, JSON.stringify(message), 0, "", "", "",
+          new Date(now + SMS_HANDOFF_UPDATE_DEBOUNCE_MS_)
+        ]]);
+        return { ok: true, queued: true, coalesced: true, email_id: emailId };
+      }
+    }
+    sheet.appendRow([
+      new Date(now), "queued", emailId, JSON.stringify(message), 0, "", "", "",
+      new Date(now + SMS_HANDOFF_UPDATE_DEBOUNCE_MS_)
+    ]);
+    return { ok: true, queued: true, coalesced: false, email_id: emailId };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function drainHandoffEmailOutboxV11_() {
   reconcileUncertainHandoffEmailV11_();
   var ss = getSmsSpreadsheet_();
@@ -140,6 +198,9 @@ function drainHandoffEmailOutboxV11_() {
         continue;
       }
       if (status !== "queued") continue;
+      // Queued update rows use lease_until as a not-before time. Ordinary
+      // terminal alerts have a blank value and remain immediately eligible.
+      if (leaseUntil && leaseUntil > Date.now()) continue;
       rowNumber = i + 2;
       var emailId = String(rows[i][2] || "");
       var queuedEventKey = getHandoffEmailEventKeyV16_(rows[i]);

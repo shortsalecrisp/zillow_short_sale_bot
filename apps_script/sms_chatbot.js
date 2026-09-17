@@ -667,15 +667,18 @@ function handleIncomingSmsCore_(body) {
     };
   }
   if (isPostHandoffCallbackUpdate_(currentRowObj, inboundText)) {
+    const existingCallback = String(currentRowObj[HEADERS.callback_requested] || "").toLowerCase() === "yes" ||
+      String(currentRowObj[HEADERS.call_booking_status] || "").toLowerCase() === "scheduled_callback" ||
+      isExplicitDayOrDateCallbackSignal_(inboundText);
     const callbackTime = extractCompleteCallbackTiming_(inboundText, receivedAt);
     const priorCallbackTime = normalizeCallbackTime_(currentRowObj[HEADERS.callback_time]);
     const changed = normalizeCallbackTime_(callbackTime) !== priorCallbackTime;
     const preservedLeadStatus = String(currentRowObj[HEADERS.mailshake_status] || "Y");
 
-    if (changed) {
+    if (changed && (existingCallback || isSubstantivePostHandoffUpdate_(inboundText))) {
       const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
       sendHandoffEmail_({
-        handoff_type: "CALLBACK UPDATE",
+        handoff_type: existingCallback ? "CALLBACK UPDATE" : "HUMAN HANDOFF UPDATE",
         agent_name: currentRowObj[HEADERS.agent_name] || "",
         last_name: currentRowObj[HEADERS.last_name] || "",
         initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
@@ -690,16 +693,21 @@ function handleIncomingSmsCore_(body) {
       });
     }
 
-    updateRowFields_(sheet, row, {
+    const updateFields = {
       [HEADERS.response_status]: inboundText,
-      [HEADERS.conversation_summary]: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff",
+      [HEADERS.conversation_summary]: existingCallback
+        ? (changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff")
+        : "Scheduling detail received after human handoff",
       [HEADERS.ai_state]: "handoff",
-      [HEADERS.call_booking_status]: "scheduled_callback",
-      [HEADERS.callback_requested]: "yes",
-      [HEADERS.callback_time]: callbackTime,
       [HEADERS.handoff_flag]: "TRUE",
       [HEADERS.human_override]: "TRUE"
-    });
+    };
+    if (existingCallback) {
+      updateFields[HEADERS.call_booking_status] = "scheduled_callback";
+      updateFields[HEADERS.callback_requested] = "yes";
+      updateFields[HEADERS.callback_time] = callbackTime;
+    }
+    updateRowFields_(sheet, row, updateFields);
 
     return {
       ok: true,
@@ -709,10 +717,12 @@ function handleIncomingSmsCore_(body) {
       conversation_done: false,
       handoff_needed: true,
       needs_review: false,
-      callback_updated: changed,
-      alert_needed: changed,
-      handoff_type: changed ? "CALLBACK UPDATE" : "",
-      reason: changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff"
+      callback_updated: existingCallback && changed,
+      alert_needed: changed && (existingCallback || isSubstantivePostHandoffUpdate_(inboundText)),
+      handoff_type: changed ? (existingCallback ? "CALLBACK UPDATE" : "HUMAN HANDOFF UPDATE") : "",
+      reason: existingCallback
+        ? (changed ? "Callback updated after human handoff" : "Callback timing repeated after human handoff")
+        : "Scheduling detail received after human handoff"
     };
   }
 
@@ -774,6 +784,23 @@ function handleIncomingSmsCore_(body) {
   }
 
   if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") {
+    if (isSubstantivePostHandoffUpdate_(inboundText)) {
+      const history = getHistoryArray_(currentRowObj[HEADERS.history_json]);
+      sendHandoffEmail_({
+        handoff_type: "HUMAN HANDOFF UPDATE",
+        agent_name: currentRowObj[HEADERS.agent_name] || "",
+        last_name: currentRowObj[HEADERS.last_name] || "",
+        initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
+        phone: phoneRaw,
+        email: currentRowObj[HEADERS.email] || "",
+        listing_address: currentRowObj[HEADERS.listing_address] || "",
+        city: currentRowObj[HEADERS.city] || "",
+        state: currentRowObj[HEADERS.state] || "",
+        zip: currentRowObj[HEADERS.zip] || "",
+        last_message: inboundText,
+        history: history
+      });
+    }
     return {
       ok: true,
       should_reply: false,
@@ -1521,6 +1548,15 @@ function handleIncomingSmsCore_(body) {
     alert_needed: !!decision.alert_needed,
     reason: decision.reason || ""
   };
+}
+
+function isSubstantivePostHandoffUpdate_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || isFinalCourtesyReply_(t)) return false;
+  return /\b(?:video|zoom|google meet|teams meeting|calendar invite|meeting link|send (?:the |an? )?invite|invite (?:to|at)|switch (?:to|it to)|reschedule|meeting (?:at|on|for)|appointment (?:at|on|for))\b/.test(t) ||
+    /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|next week|sept(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?)\b.{0,60}\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|morning|afternoon|evening)\b/.test(t) ||
+    /\b(?:attached|attachment|upload(?:ed)?|sent|received|revised|updated|signed)\b.{0,45}\b(?:document|docs?|files?|pdf|contract|agreement|offer|authorization|statement|letter)\b/.test(t) ||
+    /\b(?:document|docs?|files?|pdf|contract|agreement|offer|authorization|statement|letter)\b.{0,45}\b(?:attached|uploaded|signed|revised|updated|sent|received)\b/.test(t);
 }
 
 function normalizeTaskerPayload_(obj) {
@@ -5920,9 +5956,13 @@ function sendHandoffEmail_(data) {
   const formattedAddress = formatPropertyAddressForEmail_(data);
   const historyText = formatConversationHistory_(data.history || []);
 
-  const subject = `NEW LEAD 🔥 - ${handoffType} - ${fullName}`;
+  const subject = rawHandoffType === "HUMAN HANDOFF UPDATE"
+    ? `LEAD UPDATE 🔔 - ${fullName}`
+    : `NEW LEAD 🔥 - ${handoffType} - ${fullName}`;
 
-  const actionLine = isDeferredHotLead
+  const actionLine = rawHandoffType === "HUMAN HANDOFF UPDATE"
+    ? "A human-owned conversation has new scheduling or file details. Review the latest message and continue the manual follow-up; the bot did not reply."
+    : isDeferredHotLead
     ? "The agent said they will initiate contact. No reply or callback is requested now; keep this lead visible and wait for re-engagement."
     : "We have a new lead interested in your services, and a manual follow-up is now needed.";
 
@@ -5952,12 +5992,17 @@ ${historyText}
       .map(value => (value + 256).toString(16).slice(-2)).join("").slice(0, 32)
     : "";
 
-  return queueHandoffEmailV11_({
+  const payload = {
     to: toEmail,
     subject: subject,
     body: body,
     event_key: eventKey
-  });
+  };
+  if (rawHandoffType === "HUMAN HANDOFF UPDATE") {
+    payload.coalesce_key = normalizePhone_(data.phone) || String(data.email || fullName).trim().toLowerCase();
+    return queueCoalescedHandoffEmailV18_(payload);
+  }
+  return queueHandoffEmailV11_(payload);
 }
 
 function shouldSendInfoEmail_(ruleResult, decision) {
