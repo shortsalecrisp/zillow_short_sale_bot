@@ -1010,6 +1010,8 @@ function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
     text.includes("voicemail") ||
     text.includes("voice mail") ||
     text.includes("answering machine") ||
+    /\bmailbox is full\b/.test(text) ||
+    /\bmailbox (?:cannot|can't) accept (?:any )?messages\b/.test(text) ||
     text.includes("leave a message") ||
     text.includes("left a message") ||
     text.includes("after the tone") ||

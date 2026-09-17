@@ -19,7 +19,14 @@ function isAutomatedMessage(message: string): boolean {
     /\b(?:please\s+)?stay on the line\b/.test(text) ||
     /\bone moment while\b/.test(text) ||
     /\bi(?:'|’)ll see if (?:this person|they|he|she) is available\b/.test(text)
+    || /\bcall assist by google\b/.test(text)
   );
+}
+
+function isGoogleCallAssistContinuation(message: string): boolean {
+  const text = normalizeText(message);
+  return /\bchecking with the person you called\b/.test(text) ||
+    /\bcan you tell me more about the details\b/.test(text);
 }
 
 function isCannedFragment(message: string): boolean {
@@ -49,6 +56,7 @@ export function isRecordingOrScreeningArtifact(
     .map((item) => item.message!.trim())
     .filter(Boolean);
   const combined = normalizeText(`${summary} ${messages.join(" ")}`);
+  const hasGoogleCallAssist = /\bcall assist by google\b/.test(combined);
   const hasAutomationSignal =
     messages.some(isAutomatedMessage) ||
     /\b(?:automated (?:system|attendant)|recording|pre-?recorded|call screening|screening service|phone tree|ivr|virtual assistant)\b/.test(
@@ -66,6 +74,8 @@ export function isRecordingOrScreeningArtifact(
       break;
     }
   }
-  const humanAfterAutomation = messages.slice(lastAutomationIndex + 1).some(isLikelyHumanMessage);
+  const humanAfterAutomation = messages.slice(lastAutomationIndex + 1).some((message) =>
+    isLikelyHumanMessage(message) && !(hasGoogleCallAssist && isGoogleCallAssistContinuation(message)),
+  );
   return !humanAfterAutomation;
 }

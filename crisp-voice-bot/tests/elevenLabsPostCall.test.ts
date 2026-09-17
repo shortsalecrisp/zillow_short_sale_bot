@@ -508,6 +508,41 @@ test("post-call fallback treats screening recordings and canned ASAP fragments a
   assert.equal(shouldTreatAsCallback(conversation), false);
 });
 
+test("full-mailbox recording is voicemail, not a human hangup", async () => {
+  const { shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "client disconnected" },
+    analysis: { transcript_summary: "The mailbox is full and cannot accept any messages at this time." },
+    transcript: [
+      { role: "assistant", message: "Hi, is this Jelenia?" },
+      { role: "user", message: "The mailbox is full and cannot accept any messages at this time. Goodbye." },
+    ],
+  };
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+  assert.equal(shouldTreatAsAgentUnavailable(conversation), false);
+});
+
+test("Google Call Assist follow-up prompts remain screening, with real human reply preserved", async () => {
+  const { shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import("../src/lib/elevenLabsPostCall");
+  const transcript = [
+    { role: "user", message: "Hi, I'm Call Assist by Google, recording this call." },
+    { role: "assistant", message: "I'm calling about the listing." },
+    { role: "user", message: "One sec. Checking with the person you called." },
+    { role: "user", message: "Thanks. Can you tell me more about the details?" },
+  ];
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "client disconnected" },
+    analysis: { transcript_summary: "Google Call Assist screened the call." },
+    transcript,
+  };
+  assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+  const withHuman = { ...conversation, transcript: [...transcript, { role: "user", message: "This is Queeneth. What is this about?" }] };
+  assert.equal(shouldTreatAsAgentUnavailable(withHuman), false);
+});
+
 test("post-call fallback identifies wrong-person and unrelated-business voicemail", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsIdentityMismatchVoicemail } = await import(
     "../src/lib/elevenLabsPostCall"
