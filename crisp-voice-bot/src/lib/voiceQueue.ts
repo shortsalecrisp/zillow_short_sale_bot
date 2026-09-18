@@ -310,7 +310,11 @@ export function getVoiceBotCallCandidatesFromRows(
     .slice(0, limit);
 }
 
-function getVoiceBotStartableCallCandidatesFromRows(
+function getVoiceBotWindowStartLimit(callWindow: string | undefined, activeLimit: number): number {
+  return callWindow === "morning_probe" ? 1 : activeLimit;
+}
+
+export function getVoiceBotStartableCallCandidatesFromRows(
   rows: Array<{ rowNumber: number; values: unknown[] }>,
   now: Date,
   maxCandidates: number,
@@ -318,7 +322,11 @@ function getVoiceBotStartableCallCandidatesFromRows(
 ): VoiceQueueCandidate[] {
   const activeCallCount = countActiveVoiceBotCalls(rows, now);
   const activeLimit = Math.max(1, Number(maxActiveCalls) || 1);
-  const availableSlots = Math.max(0, activeLimit - activeCallCount);
+  const currentCallWindow = rows
+    .map((row) => getVoiceBotCallCandidateFromRowValues(row.rowNumber, row.values, now)?.callWindow)
+    .find(Boolean);
+  const windowStartLimit = getVoiceBotWindowStartLimit(currentCallWindow, activeLimit);
+  const availableSlots = Math.max(0, Math.min(activeLimit, windowStartLimit) - activeCallCount);
 
   if (availableSlots <= 0) {
     return [];
@@ -474,13 +482,14 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   const sheets = await getGoogleSheetsClient();
   const rows = await getVoiceBotRows(sheets);
   const activeCallCount = countActiveVoiceBotCalls(rows, now);
-  const availableSlots = Math.max(0, VOICE_BOT_MAX_ACTIVE_CALLS - activeCallCount);
   const candidates = getVoiceBotStartableCallCandidatesFromRows(
     rows,
     now,
     VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
     VOICE_BOT_MAX_ACTIVE_CALLS,
   );
+  const windowStartLimit = getVoiceBotWindowStartLimit(candidates[0]?.callWindow, VOICE_BOT_MAX_ACTIVE_CALLS);
+  const availableSlots = Math.max(0, Math.min(VOICE_BOT_MAX_ACTIVE_CALLS, windowStartLimit) - activeCallCount);
 
   if (options.dryRun) {
     return {

@@ -33,8 +33,8 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
       assistantName: "Maya",
       voiceId: "voice_eryn",
       openerVariant: "direct_reason",
-      openerVariantLabel: "Plain handling question",
-      openerScript: "Are you handling the short sale paperwork and lender calls yourself?",
+      openerVariantLabel: "Permission-first handling check",
+      openerScript: "I was calling about the short-sale paperwork and lender calls. Is it okay if I ask one quick question about that?",
       initialOpeningPolicy: "listen_first_uniform_v1",
       declaredConversationPolicyVersion: "declared-test-policy",
       scheduledWindow: "late_morning",
@@ -82,8 +82,8 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
   assert.equal(parsed.call.voiceVariant, "eryn");
   assert.equal(parsed.call.assistantName, "Maya");
   assert.equal(parsed.call.openerVariant, "direct_reason");
-  assert.equal(parsed.call.openerVariantLabel, "Plain handling question");
-  assert.match(parsed.call.openerScript, /short sale paperwork and lender calls/);
+  assert.equal(parsed.call.openerVariantLabel, "Permission-first handling check");
+  assert.match(parsed.call.openerScript, /short-sale paperwork and lender calls/);
   assert.equal(parsed.call.initialOpeningPolicy, "listen_first_uniform_v1");
   assert.equal(parsed.call.declaredConversationPolicyVersion, "declared-test-policy");
   assert.deepEqual(parsed.providerIdentity, {
@@ -120,9 +120,9 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
   assert.match(parsed.codexInstructions, /First stratify by call.initialOpeningPolicy, call.declaredConversationPolicyVersion/);
   assert.match(parsed.codexInstructions, /providerIdentity.agentId, versionId and branchId/);
   assert.match(parsed.codexInstructions, /post-intro continuation assignment, not proof of delivery/);
-  assert.match(parsed.codexInstructions, /uniform, not an initial-intro A\/B test/);
-  assert.match(parsed.codexInstructions, /default row-parity assignments pair Eryn\/direct_reason and Finch\/benefit_hook/);
-  assert.match(parsed.codexInstructions, /joint arms and do not attribute their differences independently/);
+  assert.match(parsed.codexInstructions, /initial introduction is uniform and permission-first/);
+  assert.match(parsed.codexInstructions, /Before that policy, row-parity assignments paired Eryn\/direct_reason and Finch\/benefit_hook/);
+  assert.match(parsed.codexInstructions, /Starting with permission-screener-20260918, voiceVariant and openerVariant rotate independently/);
   assert.match(parsed.abTestScope.analysisRule, /Missing or null historical values are unknown/);
   assert.match(parsed.abTestScope.analysisRule, /not proof of audible delivery/);
   assert.match(parsed.transcript, /Are you a chatbot/);

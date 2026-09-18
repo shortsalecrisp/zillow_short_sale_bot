@@ -1025,7 +1025,7 @@ for (const scenario of [
         rowNumber: "123", callAttemptNumber: "1", agentName: "Synthetic Caller", listingAddress: "123 Fictional Street",
         requestedPhone: "+12025550123", phone: "+12025550123", testMode: true,
         assistantName: "Finn", voiceVariant: "finch", openerVariant: "benefit_hook",
-        openerVariantLabel: "Direct help question", openerScript: "Assigned continuation only",
+        openerVariantLabel: "Permission-first help check", openerScript: "Assigned continuation only",
         scheduledWindow: "late_morning", agentTimeZone: "America/New_York",
         agent_id: "agent_dynamic_not_receipt", version_id: "agtvrsn_dynamic_not_receipt", branch_id: "agtbrch_dynamic_not_receipt",
         ...scenario.declarations,

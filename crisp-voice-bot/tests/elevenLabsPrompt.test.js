@@ -35,7 +35,7 @@ test("priority considers the whole turn and hearing precedes questions and actio
 });
 test("intro is its own entire turn and exposes no dynamic continuation script", () => {
   const s = section("Intro only");
-  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. We help with short-sale paperwork and lender calls\. Would that help with your listing at \{\{streetAddress\}\}\?"/);
+  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. I was calling about the short-sale paperwork and lender calls for your listing at \{\{streetAddress\}\}\. Is it okay if I ask one quick question about that\?"/);
   assert.match(s, /Stop after the question\. Wait for a NEW live-caller turn/);
   assert.match(s, /occurred before the introduction and does not count as a response/);
   assert.match(s, /Do not append a second qualification question, Yoni offer, or callback question/);
@@ -49,8 +49,8 @@ test("post-intro handles an answer to the new opener without repeating the pitch
   assert.match(s, /contained no question, correction, hearing issue or requested next step when it arrived/);
   assert.match(s, /A further caller turn is required before qualification/);
   assert.match(s, /openerVariant continuation is retired; do not speak a second opener/);
-  assert.match(s, /A clear yes indicates interest, not consent to a transfer or callback/);
-  assert.match(s, /A clear no to that help question is a scoped decline of help, not a future-contact opt-out/);
+  assert.match(s, /A clear yes permits one short qualification question, not a transfer or callback/);
+  assert.match(s, /A clear no to the quick-question permission is a scoped decline of the question, not a future-contact opt-out/);
   assert.match(s, /For a neutral acknowledgment or an unclear answer, ask at most once/);
 });
 test("a question keeps the entire response answer-only even after it is answered", () => {
@@ -77,22 +77,21 @@ test("name corrections and authorized admins outrank the stored lead name", () =
 });
 test("repeated purpose repair and hearing restoration cannot become qualification", () => {
   const s = section("Listening and repair");
-  assert.match(s, /Repeated purpose question: explain differently once with "We organize the documents the bank needs and follow up on its review\."/);
-  assert.match(s, /Do not loop through the original explanation/);
+  assert.match(s, /On the first purpose challenge[^]+Would you like me to explain\?/);
+  assert.match(s, /If the caller's next intelligible turn still asks the same purpose/);
+  assert.match(s, /I'm sorry I wasn't clear\. I'll let you go\. Goodbye\./);
   assert.match(s, /For an audio problem say only "Sorry, can you hear me now\?" and wait/);
   assert.match(s, /hearing-restoration answer[^\n]+is not qualification consent/);
   assert.match(s, /repeat only the missed short sentence, then wait again/);
   assert.match(s, /Do not claim the connection or volume was fixed/);
-  assert.match(s, /"What\?", "I don't understand", "Why are you calling\?", and "What do you want from me\?" need the relevant short clarification/);
-  assert.match(s, /Never respond to these with "How can I help you today\?"/);
+  assert.match(s, /including "What\?", "I don't understand", "Why are you calling\?", or "What do you want from me\?"/);
+  assert.match(s, /Never respond with "How can I help you today\?"/);
 });
 test("bounded repair preserves understood fragments and never guesses consent", () => {
   const s = section("Listening and repair");
   assert.match(s, /retain that part and ask only for what was missing/);
-  assert.match(s, /If two short clarification attempts fail/);
-  assert.match(s, /Would you prefer a person, or should we stop here\?/);
-  assert.match(s, /An unclear yes to this choice is not consent/);
-  assert.match(s, /Difficulty alone is not rejection or permission for future contact/);
+  assert.match(s, /Do not repeat the pitch, offer a person, callback or transfer/);
+  assert.match(s, /This narrow repeated-purpose exit is not permission for future contact/);
 });
 test("noise and partial turns cannot create contact decisions", () => {
   const s = section("Listening and repair");

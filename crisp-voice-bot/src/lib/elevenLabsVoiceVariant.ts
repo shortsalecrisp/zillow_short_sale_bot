@@ -40,7 +40,9 @@ export function getElevenLabsVoiceExperimentStatus() {
 
   return {
     enabled: config.elevenLabs.voiceAbTestEnabled,
-    selectionRule: config.elevenLabs.voiceAbTestEnabled ? "abs(rowNumber) % voiceCount" : "fixed_primary_voice",
+    selectionRule: config.elevenLabs.voiceAbTestEnabled
+      ? "abs(rowNumber) % voiceCount; opener rotates independently by floor(abs(rowNumber) % 4 / voiceCount)"
+      : "fixed_primary_voice",
     publicAssistantName: "Maya/Finn",
     variants: variants.map((variant) => ({
       key: variant.key,

@@ -76,12 +76,12 @@ test("ElevenLabs post-intro assignment preserves two deterministic plain-languag
 
   assert.deepEqual(buildElevenLabsOpenerVariant({ rowNumber: 3700, firstName: "Karimah", assistantName: "Maya" }), {
     key: "direct_reason",
-    label: "Plain handling question",
-    script: "Are you handling the short sale paperwork and lender calls yourself?",
+    label: "Permission-first handling check",
+    script: "I was calling about the short-sale paperwork and lender calls. Is it okay if I ask one quick question about that?",
   });
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3701, firstName: "Norma", assistantName: "Maya" }).key,
-    "benefit_hook",
+    "direct_reason",
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3708, firstName: "Miriam", assistantName: "Maya" }).key,
@@ -89,15 +89,15 @@ test("ElevenLabs post-intro assignment preserves two deterministic plain-languag
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3708, firstName: "Miriam", assistantName: "Maya" }).script,
-    "Are you handling the short sale paperwork and lender calls yourself?",
+    "I was calling about the short-sale paperwork and lender calls. Is it okay if I ask one quick question about that?",
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3709, firstName: "Marta", assistantName: "Maya" }).key,
-    "benefit_hook",
+    "direct_reason",
   );
   assert.equal(
     buildElevenLabsOpenerVariant({ rowNumber: 3703, firstName: "Miriam", assistantName: "Maya" }).script,
-    "We help agents with the short sale paperwork and lender calls. Are you looking for help with that?",
+    "We help agents with short-sale paperwork and lender calls. Is it worth a quick minute to see if that would be useful on this one?",
   );
 
   for (let rowNumber = 3700; rowNumber < 3710; rowNumber += 1) {
@@ -134,7 +134,7 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "finch");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Finch");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariant, "benefit_hook");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Direct help question");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Permission-first help check");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.initialOpeningPolicy, INITIAL_OPENING_POLICY);
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.declaredConversationPolicyVersion, VOICE_CONVERSATION_POLICY_VERSION);
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.terminal_permission, false);
@@ -144,7 +144,7 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.email, "tina@example.com");
   assert.equal(
     body.conversation_initiation_client_data.dynamic_variables.openerScript,
-    "We help agents with the short sale paperwork and lender calls. Are you looking for help with that?",
+    "We help agents with short-sale paperwork and lender calls. Is it worth a quick minute to see if that would be useful on this one?",
   );
   assert.equal(
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,
@@ -157,10 +157,15 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   );
 });
 
-test("both existing voice and post-intro arms declare the same uniform initial opening", async () => {
+test("voice and post-intro arms rotate independently in a 2x2 assignment", async () => {
   const { buildElevenLabsOutboundCallBody } = await import("../src/lib/elevenLabs");
   const { VOICE_CONVERSATION_POLICY_VERSION } = await import("../src/lib/elevenLabsConversationPolicy");
-  for (const [rowNumber, voiceVariant, openerVariant] of [[3480, "eryn", "direct_reason"], [3481, "finch", "benefit_hook"]] as const) {
+  for (const [rowNumber, voiceVariant, openerVariant] of [
+    [3480, "eryn", "direct_reason"],
+    [3481, "finch", "direct_reason"],
+    [3482, "eryn", "benefit_hook"],
+    [3483, "finch", "benefit_hook"],
+  ] as const) {
     const body = buildElevenLabsOutboundCallBody({
       agentId: "agent_syntheticmeasurement", agentPhoneNumberId: "phone_syntheticmeasurement", to: "+12025550123",
       metadata: { rowNumber, fullName: "Synthetic Caller", callAttemptNumber: 1, listingAddress: "123 Fictional Street",

@@ -32,7 +32,7 @@ test("a current question routes to main, while an old pickup cannot trigger qual
   assert.match(condition, /NEW live caller turn arrived AFTER/);
   assert.match(condition, /A greeting before the introduction does not qualify/);
   assert.match(OPENING_LISTENER_PROMPT, /Never qualify the listing, add to the exact opening question/);
-  assert.match(OPENING_LISTENER_PROMPT, /We help with short-sale paperwork and lender calls\. Would that help with your listing at \{\{streetAddress\}\}\?/);
+  assert.match(OPENING_LISTENER_PROMPT, /I was calling about the short-sale paperwork and lender calls for your listing at \{\{streetAddress\}\}\. Is it okay if I ask one quick question about that\?/);
   assert.match(OPENING_LISTENER_PROMPT, /If the only new transcript is "\.\.\."/);
   assert.match(OPENING_LISTENER_PROMPT, /never say "Are you there\?"/);
   assert.doesNotMatch(OPENING_LISTENER_PROMPT, /\{\{openerScript\}\}/);
@@ -40,7 +40,7 @@ test("a current question routes to main, while an old pickup cannot trigger qual
 
 test("the live opener is identical in the listener and main prompts", () => {
   const mainPrompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8");
-  const opener = "Hi, this is {{assistantName}} with Crisp Short Sales. We help with short-sale paperwork and lender calls. Would that help with your listing at {{streetAddress}}?";
+  const opener = "Hi, this is {{assistantName}} with Crisp Short Sales. I was calling about the short-sale paperwork and lender calls for your listing at {{streetAddress}}. Is it okay if I ask one quick question about that?";
   assert.ok(OPENING_LISTENER_PROMPT.includes(`"${opener}"`));
   assert.ok(mainPrompt.includes(`"${opener}"`));
   assert.match(OPENING_LISTENER_PROMPT, /Do not speak before the recipient finishes their pickup/);

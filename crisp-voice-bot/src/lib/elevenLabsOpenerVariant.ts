@@ -17,7 +17,8 @@ type BuildOpenerVariantInput = {
 };
 
 function weightedVariantForRow(rowNumber: number): ElevenLabsOpenerVariantKey {
-  return Math.abs(rowNumber) % 2 === 0 ? "direct_reason" : "benefit_hook";
+  const cellIndex = Math.abs(rowNumber) % 4;
+  return Math.floor(cellIndex / 2) === 0 ? "direct_reason" : "benefit_hook";
 }
 
 export function buildElevenLabsOpenerVariant(input: BuildOpenerVariantInput): ElevenLabsOpenerVariant {
@@ -41,15 +42,15 @@ export function buildElevenLabsOpenerVariant(input: BuildOpenerVariantInput): El
     case "benefit_hook":
       return {
         key,
-        label: "Direct help question",
-        script: "We help agents with the short sale paperwork and lender calls. Are you looking for help with that?",
+        label: "Permission-first help check",
+        script: "We help agents with short-sale paperwork and lender calls. Is it worth a quick minute to see if that would be useful on this one?",
       };
     case "direct_reason":
     default:
       return {
         key: "direct_reason",
-        label: "Plain handling question",
-        script: "Are you handling the short sale paperwork and lender calls yourself?",
+        label: "Permission-first handling check",
+        script: "I was calling about the short-sale paperwork and lender calls. Is it okay if I ask one quick question about that?",
       };
   }
 }

@@ -46,3 +46,23 @@ test("Render queue prioritizes first calls, then oldest due time", async () => {
   assert.equal(candidates[0].dueAt.toISOString(), "2026-08-24T13:00:00.000Z");
   assert.equal(candidates[1].dueAt.toISOString(), "2026-08-24T13:30:00.000Z");
 });
+
+test("Render queue starts one morning call but keeps two mid-afternoon slots available", async () => {
+  const { getVoiceBotStartableCallCandidatesFromRows } = await import("../src/lib/voiceQueue");
+  const rows = [
+    { rowNumber: 6101, values: row("2026-08-23T13:14:00-04:00") },
+    { rowNumber: 6102, values: row("2026-08-23T13:15:00-04:00") },
+    { rowNumber: 6103, values: row("2026-08-23T13:16:00-04:00") },
+  ];
+
+  assert.deepEqual(
+    getVoiceBotStartableCallCandidatesFromRows(rows, new Date("2026-08-24T13:45:00Z"), 10, 2)
+      .map((candidate) => candidate.rowNumber),
+    [6101],
+  );
+  assert.deepEqual(
+    getVoiceBotStartableCallCandidatesFromRows(rows, new Date("2026-08-24T18:45:00Z"), 10, 2)
+      .map((candidate) => candidate.rowNumber),
+    [6101, 6102],
+  );
+});
