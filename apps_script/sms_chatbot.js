@@ -6021,8 +6021,7 @@ function shouldSendInfoEmail_(ruleResult, decision) {
 }
 
 function getInfoEmailAcknowledgementReply_(email) {
-  const target = normalizeEmailAddress_(email);
-  return "Absolutely. I'll send an overview of what I handle and how the fee works" + (target ? " to " + target : "") + ".";
+  return "Thanks — I’ve noted that and will have Yoni review the request.";
 }
 
 function isInfoEmailApprovalRequired_() {

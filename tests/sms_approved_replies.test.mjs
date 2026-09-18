@@ -133,7 +133,7 @@ test('supported multi-question answer covers location, fee, scope, and tenure', 
 test('email before deciding on call follows approval workflow without call consent', () => {
   const {h, r} = answer('Email me the details at taylor@example.com before I decide whether to schedule a call.');
   assert.equal(r.should_reply, true);
-  assert.match(r.reply_text, /I'll send an overview/);
+  assert.match(r.reply_text, /noted that and will have Yoni review/);
   assert.match(r.reply_text, /taylor@example.com/);
   assert.doesNotMatch(r.reply_text, /shortly|already sent|Thanks for sending/);
   assert.equal(r.handoff_needed, false);
