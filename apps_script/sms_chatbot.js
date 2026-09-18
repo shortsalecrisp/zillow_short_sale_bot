@@ -1556,7 +1556,9 @@ function isSubstantivePostHandoffUpdate_(text) {
   return /\b(?:video|zoom|google meet|teams meeting|calendar invite|meeting link|send (?:the |an? )?invite|invite (?:to|at)|switch (?:to|it to)|reschedule|meeting (?:at|on|for)|appointment (?:at|on|for))\b/.test(t) ||
     /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|next week|sept(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?)\b.{0,60}\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|morning|afternoon|evening)\b/.test(t) ||
     /\b(?:attached|attachment|upload(?:ed)?|sent|received|revised|updated|signed)\b.{0,45}\b(?:document|docs?|files?|pdf|contract|agreement|offer|authorization|statement|letter)\b/.test(t) ||
-    /\b(?:document|docs?|files?|pdf|contract|agreement|offer|authorization|statement|letter)\b.{0,45}\b(?:attached|uploaded|signed|revised|updated|sent|received)\b/.test(t);
+    /\b(?:document|docs?|files?|pdf|contract|agreement|offer|authorization|statement|letter)\b.{0,45}\b(?:attached|uploaded|signed|revised|updated|sent|received)\b/.test(t) ||
+    /\b(?:my|our)\s+client\b|\bclient(?:'s| is| name)?\b|\b(?:take|taking)\s+(?:the\s+)?listing\b|\b(?:lender|mortgage|paperwork|hardship|foreclosure|behind|short sale)\b/.test(t) ||
+    /\?/.test(t);
 }
 
 function normalizeTaskerPayload_(obj) {
@@ -3771,7 +3773,8 @@ function extractCoalescedSmsReactionTargets_(text) {
   const raw = normalizeWhitespace_(
     String(text || "").replace(/[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]/g, " ")
   );
-  const match = raw.match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+["“](.+?)["”]\s+to\s+["“](.+?)["”]$/i);
+  const match = raw.match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+["“](.+?)["”]\s+to\s+["“](.+?)["”]$/i) ||
+    raw.match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+(.+)\s+(?:thank you|thanks?)\s+to\s+(.+)$/i);
   if (!match) return null;
   return {
     first: normalizeSmsReactionText_(match[2]),

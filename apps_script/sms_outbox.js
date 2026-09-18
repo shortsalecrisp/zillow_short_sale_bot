@@ -1077,6 +1077,14 @@ function coalesceSmsInboundFragmentTextsV10_(fragmentTexts) {
       var continuationTarget = normalizeSmsInboundFragmentTargetV10_(continuationMatch[1]);
       if (explicitTarget && explicitTarget === continuationTarget) return fragments[0];
     }
+
+    // Tasker may flatten the same reaction into one prose bubble, for example
+    // `Loved Thanks ... thank you to Thanks ...`. Collapse only when both
+    // sides are the same after removing the courtesy separator.
+    var proseMatch = fragments[0].match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+(.+)\s+(?:thank you|thanks?)\s+to\s+(.+)$/i);
+    if (proseMatch && normalizeSmsInboundFragmentTargetV10_(proseMatch[2]) === normalizeSmsInboundFragmentTargetV10_(proseMatch[3])) {
+      return fragments[0];
+    }
   }
 
   return fragments.join(" ");

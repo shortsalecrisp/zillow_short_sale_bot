@@ -4523,6 +4523,10 @@ def _sms_extract_coalesced_reaction_targets(value: Any) -> tuple[str, str] | Non
         r"^(liked|loved|emphasized|disliked|laughed at|questioned)\s+[\"“](.+?)[\"”]\s+to\s+[\"“](.+?)[\"”]$",
         text,
         re.IGNORECASE,
+    ) or re.match(
+        r"^(liked|loved|emphasized|disliked|laughed at|questioned)\s+(.+)\s+(?:thank you|thanks?)\s+to\s+(.+)$",
+        text,
+        re.IGNORECASE,
     )
     if match:
         return (

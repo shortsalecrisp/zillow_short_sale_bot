@@ -1500,6 +1500,23 @@ def test_sms_coalesced_reaction_fragments_are_suppressed(monkeypatch):
     assert sheet.rows[2][17] == "[]"
 
 
+def test_sms_flattened_loved_courtesy_reaction_is_suppressed(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    outbound = "Thanks, I appreciate it. Feel free to reach out if a short sale comes up."
+    inbound = f"Loved {outbound} thank you to {outbound}"
+    assert module._sms_is_reaction_to_last_outbound(
+        inbound,
+        {"last_outbound_text": outbound},
+    ) is True
+    assert module._sms_is_reaction_to_last_outbound(
+        f"Loved {outbound} thank you to Can you call me tomorrow?",
+        {"last_outbound_text": outbound},
+    ) is False
+
+
 def test_sms_compound_opt_outs_are_suppressed_without_false_positive(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
