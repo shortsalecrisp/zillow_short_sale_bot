@@ -1541,6 +1541,26 @@ export function shouldTreatAsAgentUnavailable(
   );
 }
 
+/** A live human can answer for a completely different business. Treat that
+ * as target unavailable so it is not reported as an agent hanging up. */
+export function shouldTreatAsUnrelatedLiveBusiness(
+  conversation: ElevenLabsConversation,
+  expectedFirstName = "",
+): boolean {
+  if (
+    shouldTreatAsRecordingArtifact(conversation) ||
+    shouldTreatAsVoicemail(conversation) ||
+    shouldTreatAsNoAnswer(conversation)
+  ) {
+    return false;
+  }
+  const text = normalizeText(userMessages(conversation).join(" "));
+  if (!text || !hasMeaningfulUserInteraction(conversation)) return false;
+  const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  if (expected && new RegExp(`\\b${expected}\\b`).test(text)) return false;
+  return /(?:\b(?:this is|welcome to|thank you for calling)\b.{0,80}\b(?:thermostats?|heating|cooling|hvac|plumbing|roofing|restaurant|hotel|clinic|dental|insurance|title company|customer service|service department|sales department|realty|real estate)\b|\b(?:thermostats?|heating|cooling|hvac|plumbing|roofing|restaurant|hotel|clinic|dental|insurance|title company|customer service|service department|sales department|realty|real estate)\b.{0,80}\bthis is\b)/.test(text);
+}
+
 export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): boolean {
   if (
     shouldTreatAsRecordingArtifact(conversation) ||
@@ -1551,6 +1571,7 @@ export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): 
     shouldTreatAsNoAnswer(conversation) ||
     shouldTreatAsCallback(conversation) ||
     shouldTreatAsAgentUnavailable(conversation) ||
+    shouldTreatAsUnrelatedLiveBusiness(conversation) ||
     shouldTreatAsAcceptedTransferCallback(conversation) ||
     shouldTreatAsMisfiredTransferInterestedCallback(conversation) ||
     shouldTreatAsNotShortSale(conversation) ||
@@ -1910,7 +1931,7 @@ async function processPostCallOutcomeForConversation(
     return true;
   }
 
-  if (shouldTreatAsAgentUnavailable(conversation, expectedFirstName)) {
+  if (shouldTreatAsAgentUnavailable(conversation, expectedFirstName) || shouldTreatAsUnrelatedLiveBusiness(conversation, expectedFirstName)) {
     const outcome = buildVoiceResponseStatus("agent_not_available");
 
     await postSheetUpdate({

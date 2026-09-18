@@ -991,6 +991,20 @@ test("post-call transcript labels assistant turns with the selected assistant na
   assert.equal(buildVoiceResponseStatus("call_received_agent_hung_up", undefined, "Finch"), "Call received but agent hung up on Finch");
 });
 
+test("a live answer from an unrelated business is unavailable, not an agent hangup", async () => {
+  const { shouldTreatAsUnrelatedLiveBusiness, shouldTreatAsAgentHungUp } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "client disconnected" },
+    transcript: [
+      { role: "assistant", message: "Hi, is this Michael?" },
+      { role: "user", message: "AWU Thermostats, this is Kenzie." },
+    ],
+  };
+  assert.equal(shouldTreatAsUnrelatedLiveBusiness(conversation, "Michael"), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+});
+
 for (const scenario of [
   { name: "new", declarations: { initialOpeningPolicy: "listen_first_uniform_v1", declaredConversationPolicyVersion: "captured-code-version" },
     expectedOpening: "listen_first_uniform_v1", expectedPolicy: "captured-code-version" },
