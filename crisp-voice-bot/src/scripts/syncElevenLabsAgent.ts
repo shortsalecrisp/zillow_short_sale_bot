@@ -3,11 +3,13 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  applyContactToolDescriptions,
   applyConversationConsentPolicy,
   applyConversationListeningPolicy,
   applyConversationToolPolicy,
   VOICE_CONVERSATION_POLICY_VERSION,
 } from "../lib/elevenLabsConversationPolicy";
+import { contactToolDigest } from "./prepareElevenLabsContactTools";
 import { replaceContactToolBindings, verifyContactToolMap } from "./prepareElevenLabsContactTools";
 import { applyConversationOpeningWorkflow } from "../lib/elevenLabsOpeningWorkflow";
 import { applyGuardedTerminalWorkflow } from "../lib/elevenLabsTerminalWorkflow";
@@ -73,6 +75,23 @@ export function resolveVerifiedContactToolId(current: any, contactToolMap: any):
   return contactToolId;
 }
 
+async function resolveExistingContactToolId(client: any, current: any, contactToolId: string | undefined): Promise<string | undefined> {
+  if (!contactToolId) return undefined;
+  if (!/^tool_[a-z0-9]+$/.test(contactToolId)) throw new Error("Exact existing not_interested tool ID is required");
+  const globalIds = current.conversation_config?.agent?.prompt?.tool_ids;
+  if (!Array.isArray(globalIds) || globalIds.filter(id => id === contactToolId).length !== 1) {
+    throw new Error("Existing not_interested tool must be registered exactly once globally");
+  }
+  const { data } = await client.get(`/v1/convai/tools/${contactToolId}`);
+  if (data?.id !== contactToolId || data.tool_config?.type !== "webhook" || data.tool_config?.name !== "not_interested") {
+    throw new Error("Existing contact tool identity/type does not match not_interested");
+  }
+  if (contactToolDigest(applyContactToolDescriptions(data.tool_config)) !== contactToolDigest(data.tool_config)) {
+    throw new Error("Existing not_interested tool is not on the reviewed contact-description policy");
+  }
+  return contactToolId;
+}
+
 export function buildConversationRelease(current: any, prompt: string, listenFirst: boolean, contactToolReplacements?: Record<string, string>,
   control?: ConversationReleaseControl) {
   // Start from the owning provider, never a stale reconstructed model/tool config.
@@ -102,6 +121,7 @@ async function main(): Promise<void> {
   const expectedPrompt = value("expected-prompt-sha");
   const expectedCandidate = value("expected-candidate-sha");
   const contactToolMapPath = value("contact-tool-map");
+  const existingContactToolId = value("contact-tool-id");
   const expectedContactToolMap = value("expected-contact-tool-map-sha");
   const controlMapPath = value("conversation-control-map");
   const expectedControlMap = value("expected-conversation-control-map-sha");
@@ -119,8 +139,8 @@ async function main(): Promise<void> {
   if ((expectedControlMap && !controlMapPath) || (apply && (!controlMapPath || !expectedControlMap || !listenFirst))) {
     throw new Error("Applying the full candidate requires a reviewed conversation-control map and listen-first startup");
   }
-  if (controlMapPath && !contactToolMapPath) {
-    throw new Error("A full guarded release requires a verified contact-tool map");
+  if (controlMapPath && !contactToolMapPath && !existingContactToolId) {
+    throw new Error("A full guarded release requires a verified contact-tool map or exact existing not_interested tool ID");
   }
   const client = axios.create({
     baseURL: config.elevenLabs.baseUrl, timeout: 45_000,
@@ -138,11 +158,14 @@ async function main(): Promise<void> {
   const contactToolMap = contactToolMapPath ? JSON.parse(await readFile(path.resolve(contactToolMapPath), "utf8")) : undefined;
   const contactToolReplacements = contactToolMap
     ? await verifyContactToolMap(client, contactToolMap, current, expectedContactToolMap) : undefined;
+  const contactToolId = contactToolMap
+    ? resolveVerifiedContactToolId(current, contactToolMap)
+    : await resolveExistingContactToolId(client, current, existingContactToolId);
   const prompt = extractPromptSection(await readFile(PROMPT_PATH, "utf8"));
   const controlMap = controlMapPath ? JSON.parse(await readFile(path.resolve(controlMapPath), "utf8")) : undefined;
   const control = controlMap ? {
     ...await verifyConversationControlMap(client, controlMap, current, config.elevenLabs.toolSecret, expectedControlMap),
-    contactToolId: resolveVerifiedContactToolId(current, contactToolMap),
+    contactToolId: contactToolId!,
   } : undefined;
   const body = buildConversationRelease(current, prompt, listenFirst, contactToolReplacements, control);
   if (expectedCandidate && bodyDigest(body) !== expectedCandidate) throw new Error("Candidate changed since review; nothing applied");
@@ -153,6 +176,7 @@ async function main(): Promise<void> {
     candidate_prompt_sha256: digest(prompt), policy: VOICE_CONVERSATION_POLICY_VERSION,
     candidate_body_sha256: bodyDigest(body),
     contact_tool_map_sha256: contactToolMap?.map_sha256 ?? null,
+    existing_contact_tool_id: contactToolMap ? null : contactToolId ?? null,
     contact_tool_replacements: contactToolReplacements ?? null,
     conversation_control_map_sha256: controlMap?.map_sha256 ?? null,
     listen_first: listenFirst, applied: false, status: "prepared_not_applied",
@@ -169,6 +193,7 @@ async function main(): Promise<void> {
   }
   verifyReleaseReadback(current, writableBody(current), check);
   if (contactToolMap) await verifyContactToolMap(client, contactToolMap, check, expectedContactToolMap);
+  if (existingContactToolId) await resolveExistingContactToolId(client, check, existingContactToolId);
   if (controlMap) await verifyConversationControlMap(client, controlMap, check, config.elevenLabs.toolSecret, expectedControlMap);
   await writeFile(path.join(receiptDir, "receipt.json"), JSON.stringify({ ...receipt, status: "patch_attempted_readback_required" }, null, 2));
   await client.patch(endpoint, body, { params: { ...params, enable_versioning_if_not_enabled: true } });
@@ -180,6 +205,7 @@ async function main(): Promise<void> {
   if (effective.version_id !== after.version_id || effective.branch_id !== branchId) throw new Error("Default published version differs from branch readback");
   verifyReleaseReadback(current, body, effective);
   if (contactToolMap) await verifyContactToolMap(client, contactToolMap, current, expectedContactToolMap);
+  if (existingContactToolId) await resolveExistingContactToolId(client, effective, existingContactToolId);
   if (controlMap) await verifyConversationControlMap(client, controlMap, effective, config.elevenLabs.toolSecret, expectedControlMap);
   const finalReceipt = { ...receipt, applied: true, status: "live_config_verified", after_version: after.version_id, verified_at: new Date().toISOString() };
   await writeFile(path.join(receiptDir, "receipt.json"), JSON.stringify(finalReceipt, null, 2));

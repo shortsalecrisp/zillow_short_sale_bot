@@ -228,8 +228,10 @@ test("binding replacement changes only the three IDs at global and workflow bind
 test("sync retains body/version guards and verifies the reviewed map before and after PATCH", async () => {
   const source = await readFile(path.resolve(__dirname, "../src/scripts/syncElevenLabsAgent.ts"), "utf8");
   assert.match(source, /value\("contact-tool-map"\)/);
+  assert.match(source, /value\("contact-tool-id"\)/);
   assert.match(source, /value\("expected-contact-tool-map-sha"\)/);
-  assert.match(source, /Applying a contact-tool map requires its exact reviewed map SHA256/);
+  assert.match(source, /verified contact-tool map or exact existing not_interested tool ID/);
+  assert.match(source, /Existing not_interested tool must be registered exactly once globally/);
   assert.match(source, /verifyContactToolMap\(client, contactToolMap, check, expectedContactToolMap\)/);
   assert.match(source, /Candidate changed since review; nothing applied/);
   assert.match(source, /enable_versioning_if_not_enabled: true/);

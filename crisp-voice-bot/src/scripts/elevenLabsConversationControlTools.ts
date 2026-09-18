@@ -38,7 +38,7 @@ export function normalizeControlToolReadback(expected: any, readback: any): any 
   defaults(result, expected, { disable_interruptions: false, force_pre_tool_speech: false, tool_call_sound: null,
     tool_call_sound_behavior: "auto", tool_error_handling_mode: "auto" });
   defaults(result.api_schema, expected.api_schema, { kind: "webhook", response_body_schema: null, response_filter: null,
-    content_type: "application/json", auth_resolved_params: [], auth_connection: null });
+    content_type: "application/json", auth_resolved_params: [], auth_connection: null, mtls_auth_connection: null });
   const schema = result.api_schema.request_body_schema, wanted = expected.api_schema.request_body_schema;
   defaults(schema, wanted, { description: "", dynamic_variable: "", is_omitted: false });
   for (const [name, property] of Object.entries(wanted.properties)) {
@@ -62,8 +62,8 @@ export async function verifyConversationControlMap(client: { get: (url: string) 
     if (!/^tool_[a-z0-9]+$/.test(id ?? "") || ids.includes(id)) throw new Error("Distinct verified control tool IDs required");
     ids.push(id);
     const { data } = await client.get("/v1/convai/tools/" + id);
-    if (data.id !== id || contactToolDigest(data.tool_config) !== entry.config_sha256) throw new Error("Conversation-control tool changed");
-    normalizeControlToolReadback(expected[kind], data.tool_config);
+    const normalized = normalizeControlToolReadback(expected[kind], data.tool_config);
+    if (data.id !== id || contactToolDigest(normalized) !== entry.config_sha256) throw new Error("Conversation-control tool changed");
   }
   return { resetToolId: ids[0], validateToolId: ids[1], mainNodeId: "main_conversation" };
 }
