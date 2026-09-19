@@ -983,8 +983,31 @@ function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boole
   }
 
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+  const messages = conversation.transcript ?? [];
+  const completedHelpDecline = messages.some((item, index) => {
+    if (item.role !== "assistant" || typeof item.message !== "string") {
+      return false;
+    }
+    const question = normalizeText(item.message);
+    if (
+      !/\b(?:would you like|do you want|do you need|anything else i can assist|specific questions|something you'd like|any part)\b/.test(
+        question,
+      ) ||
+      !/\b(?:help|assist|details|questions|services?)\b/.test(question)
+    ) {
+      return false;
+    }
+    const answer = messages.slice(index + 1).find(
+      (next) => next.role === "user" && typeof next.message === "string" && hasMeaningfulSpokenContent(next.message),
+    );
+    return Boolean(
+      answer?.message &&
+        /^(?:uh+[, ]*)?(?:no|not right now|no thanks|nothing right now)[.!?]*$/i.test(answer.message.trim()),
+    );
+  });
   return (
     shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
+    completedHelpDecline ||
     text.includes("not interested") ||
     text.includes("has it handled") ||
     text.includes("have it handled") ||
@@ -1080,6 +1103,9 @@ function hasDeliveredVoicemailMessage(conversation: ElevenLabsConversation): boo
 }
 
 function shouldTreatAsNoAnswer(conversation: ElevenLabsConversation): boolean {
+  if (hasLiveHumanAssistantExchange(conversation)) {
+    return false;
+  }
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   return (
     text.includes("no answer") ||
@@ -1209,6 +1235,35 @@ function hasMeaningfulUserInteraction(conversation: ElevenLabsConversation): boo
 
 function meaningfulUserMessages(conversation: ElevenLabsConversation): string[] {
   return userMessages(conversation).filter(hasMeaningfulSpokenContent);
+}
+
+function hasLiveHumanAssistantExchange(conversation: ElevenLabsConversation): boolean {
+  if (
+    conversation.has_user_audio === false ||
+    shouldTreatAsVoicemail(conversation) ||
+    hasDeliveredVoicemailMessage(conversation) ||
+    isRecordingOrScreeningArtifact(conversation.transcript ?? [], conversation.analysis?.transcript_summary ?? "")
+  ) {
+    return false;
+  }
+
+  const messages = conversation.transcript ?? [];
+  return messages.some((item, index) => {
+    if (
+      item.role !== "user" ||
+      typeof item.message !== "string" ||
+      !hasMeaningfulSpokenContent(item.message) ||
+      /^\s*\[?(?:inaudible|unintelligible|silence|noise)\]?\s*$/i.test(item.message)
+    ) {
+      return false;
+    }
+    return messages.slice(index + 1).some(
+      (next) =>
+        next.role === "assistant" &&
+        typeof next.message === "string" &&
+        hasMeaningfulSpokenContent(next.message),
+    );
+  });
 }
 
 function nameSoundsSimilar(actualName: string, expectedName: string): boolean {
@@ -1589,7 +1644,7 @@ export function shouldTreatAsAgentHungUp(conversation: ElevenLabsConversation): 
     return false;
   }
 
-  return hasMeaningfulUserInteraction(conversation);
+  return hasMeaningfulUserInteraction(conversation) || hasLiveHumanAssistantExchange(conversation);
 }
 
 async function fetchConversation(conversationId: string, timeoutMs?: number): Promise<ElevenLabsConversation> {

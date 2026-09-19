@@ -1006,6 +1006,95 @@ test("a live answer from an unrelated business is unavailable, not an agent hang
 });
 
 for (const scenario of [
+  {
+    name: "paola_completed_self_handling_decline",
+    expectedCallResult: "answered_not_interested",
+    expectedResponseStatus: "Not interested",
+    terminationReason: "Client disconnected: 1000",
+    summary: "The agent confirmed she is handling the short-sale work herself and declined assistance at this time.",
+    transcript: [
+      { role: "user", message: "Good afternoon. Can I help you?" },
+      { role: "assistant", message: "Is it okay if I ask one quick question about the short-sale paperwork?" },
+      { role: "user", message: "Yes." },
+      { role: "assistant", message: "Are you handling the short-sale paperwork and lender calls yourself?" },
+      { role: "user", message: "Yes." },
+      { role: "assistant", message: "Is any part of the lender follow-up something you'd like help with?" },
+      { role: "user", message: "Not right now." },
+      { role: "assistant", message: "No problem. If you ever need help, just let us know." },
+      { role: "user", message: "Okay." },
+    ],
+  },
+  {
+    name: "parul_live_answer_before_disconnect",
+    expectedCallResult: "call_received_agent_hung_up",
+    expectedResponseStatus: "Call received but agent hung up on Maya",
+    terminationReason: "Client disconnected: 1000",
+    summary: "A person answered hello and heard Maya begin the listing-specific reason for calling.",
+    transcript: [
+      { role: "user", message: "..." },
+      { role: "user", message: "Hello?" },
+      { role: "assistant", message: "Hi, this is Maya with Crisp Short Sales. I was calling about the listing at..." },
+    ],
+  },
+  {
+    name: "feng_completed_role_question_decline",
+    expectedCallResult: "answered_not_interested",
+    expectedResponseStatus: "Not interested",
+    terminationReason: "Ending conversation after 45 seconds of silence.",
+    summary: "The user asked whether Crisp was part of the bank, declined further details, and concluded politely.",
+    transcript: [
+      { role: "user", message: "Hello?" },
+      { role: "assistant", message: "Is it okay if I ask one quick question about that?" },
+      { role: "user", message: "Yes." },
+      { role: "assistant", message: "Has the seller completed all of the required short-sale paperwork?" },
+      { role: "user", message: "I believe everything is good as of now." },
+      { role: "assistant", message: "Is there anything else I can assist you with regarding this listing?" },
+      { role: "user", message: "Wait, so you are part of the bank?" },
+      { role: "assistant", message: "No. Crisp supports agents. Would you like more details about our role?" },
+      { role: "user", message: "Yeah." },
+      { role: "assistant", message: "Do you have any specific questions about our services?" },
+      { role: "user", message: "..." },
+      { role: "user", message: "Uh, no." },
+      { role: "assistant", message: "Alright, thank you for your time. Have a great day!" },
+      { role: "user", message: "Sounds good. Thank you." },
+    ],
+  },
+]) {
+  test(`post-call fallback preserves the live human outcome for ${scenario.name}`, async () => {
+    const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+    const conversationId = `conv_measurement_${scenario.name}`;
+    const writesBefore = measurementWrites.length;
+    measurementConversations.set(conversationId, {
+      conversation_id: conversationId,
+      status: "done",
+      metadata: { termination_reason: scenario.terminationReason, call_duration_secs: 47 },
+      analysis: { transcript_summary: scenario.summary },
+      conversation_initiation_client_data: {
+        dynamic_variables: {
+          rowNumber: 123,
+          callAttemptNumber: 1,
+          agentName: "Synthetic Agent",
+          listingAddress: "123 Fictional Street",
+          requestedPhone: "+12025550123",
+          phone: "+12025550123",
+          assistantName: "Maya",
+          testMode: true,
+        },
+      },
+      transcript: scenario.transcript,
+    });
+    try {
+      assert.equal(await processPostCallOutcomeFromConversationId(conversationId), true);
+      const update = measurementWrites.slice(writesBefore).find((write) => typeof write.voiceNotes === "string")!;
+      assert.equal(update.callResult, scenario.expectedCallResult);
+      assert.equal(update.responseStatus, scenario.expectedResponseStatus);
+    } finally {
+      measurementConversations.delete(conversationId);
+    }
+  });
+}
+
+for (const scenario of [
   { name: "new", declarations: { initialOpeningPolicy: "listen_first_uniform_v1", declaredConversationPolicyVersion: "captured-code-version" },
     expectedOpening: "listen_first_uniform_v1", expectedPolicy: "captured-code-version" },
   { name: "historical", declarations: {}, expectedOpening: null, expectedPolicy: null },
