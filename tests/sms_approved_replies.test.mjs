@@ -190,6 +190,34 @@ test('callback keeps the date, timing qualifier, and timezone', () => {
   assert.match(h.state.callback_time, /Tomorrow after 2\s*pm Eastern/i);
 });
 
+test('compact same-day callback outranks the auto-reply cap and persists timing', () => {
+  const {h, r} = answer('can we talk at 430pm?', {auto_reply_count: 3});
+  assert.equal(r.should_reply, false);
+  assert.equal(r.reply_text, '');
+  assert.equal(r.handoff_needed, true);
+  assert.equal(r.reason, 'Scheduled callback timing captured before handoff');
+  assert.equal(h.state.call_booking_status, 'scheduled_callback');
+  assert.equal(h.state.callback_requested, 'yes');
+  assert.equal(h.state.callback_time, '4:30 pm');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'SCHEDULED CALLBACK'}]);
+});
+
+test('compact clock parser rejects impossible times and phone-number suffixes', () => {
+  const h = smsHarness();
+  assert.equal(h.evaluate('extractSameDayCallbackReference_("can we talk at 1360pm?")'), '');
+  assert.equal(h.evaluate('isSchedulingSignal_("can we talk at 1360pm?")'), false);
+  assert.equal(h.evaluate('extractSameDayCallbackReference_("call me at 9109653013")'), '');
+});
+
+test('unquoted doubled reaction is suppressed only for exact outbound copies', () => {
+  const outbound = 'Thank you for getting back to me. If you ever need short sale help, please keep me in mind.';
+  const h = smsHarness({last_outbound_text: outbound});
+  const doubled = `Liked ${outbound} to ${outbound}`;
+  assert.equal(h.evaluate(`isSmsReactionToLastOutbound_(${JSON.stringify(doubled)}, ${JSON.stringify({last_outbound_text: outbound})})`), true);
+  assert.equal(h.incoming(doubled).should_reply, false);
+  assert.equal(h.evaluate(`isSmsReactionToLastOutbound_(${JSON.stringify(`Liked ${outbound} to Can you call me tomorrow?`)}, ${JSON.stringify({last_outbound_text: outbound})})`), false);
+});
+
 test('amount plus buyer concern answers both questions', () => {
   const {r} = answer('What is your fee, and what if the buyer cannot afford it?');
   assert.equal(r.should_reply, true);

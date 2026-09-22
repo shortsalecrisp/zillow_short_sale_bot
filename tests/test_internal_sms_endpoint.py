@@ -1517,6 +1517,55 @@ def test_sms_flattened_loved_courtesy_reaction_is_suppressed(monkeypatch):
     ) is False
 
 
+def test_sms_unquoted_doubled_liked_reaction_is_suppressed_without_hiding_novel_text(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    outbound = "Thank you for getting back to me. If you ever need short sale help, please keep me in mind."
+    assert module._sms_is_reaction_to_last_outbound(
+        f"Liked {outbound} to {outbound}",
+        {"last_outbound_text": outbound},
+    ) is True
+    assert module._sms_is_reaction_to_last_outbound(
+        f"Liked {outbound} to Can you call me tomorrow?",
+        {"last_outbound_text": outbound},
+    ) is False
+
+
+def test_sms_compact_same_day_callback_is_persisted_before_reply_cap(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][18] = "3"
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "can we talk at 430pm?",
+            "message_id": "compact-callback-at-cap-1",
+            "received_at": "2026-09-20T12:24:00-04:00",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reason"] == "Scheduled callback timing captured before handoff"
+    assert body["should_reply"] is False
+    assert body["reply_text"] == ""
+    assert body["handoff_needed"] is True
+    assert body["call_booking_status"] == "scheduled_callback"
+    assert body["callback_time"] == "4:30 pm"
+    assert sheet.rows[2][37] == "yes"
+    assert sheet.rows[2][38] == "4:30 pm"
+    assert sender.calls == []
+    assert module._sms_extract_same_day_callback_reference("can we talk at 1360pm?") == ""
+    assert module._sms_is_scheduled_callback("can we talk at 1360pm?") is False
+    assert module._sms_extract_same_day_callback_reference("call me at 9109653013") == ""
+
+
 def test_sms_compound_opt_outs_are_suppressed_without_false_positive(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

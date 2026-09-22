@@ -4540,7 +4540,22 @@ def _sms_is_reaction_to_last_outbound(inbound_text: Any, row_obj: Dict[str, str]
     target = _sms_extract_reaction_target(inbound_text)
     target = _sms_normalize_reaction_comparison_text(target)
     last_outbound = _sms_normalize_reaction_comparison_text(row_obj.get("last_outbound_text"))
-    return bool(target and last_outbound and target == last_outbound)
+    if not last_outbound:
+        return False
+    if target and target == last_outbound:
+        return True
+    raw = _sms_normalize_whitespace(
+        re.sub(r"[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]", " ", str(inbound_text or ""))
+    )
+    flattened = re.match(
+        r"^(liked|loved|emphasized|disliked|laughed at|questioned)\s+(.+)$",
+        raw,
+        re.IGNORECASE,
+    )
+    if not flattened:
+        return False
+    payload = _sms_normalize_reaction_comparison_text(flattened.group(2))
+    return payload in {last_outbound, f"{last_outbound} to {last_outbound}"}
 
 
 def _sms_is_yoni_name_and_number_request(value: Any) -> bool:
@@ -5420,7 +5435,8 @@ def _sms_extract_same_day_callback_reference(value: Any) -> str:
         return ""
     match = re.search(
         r"\b(?P<prefix>around|about|approximately|at|after|before|by)?\s*"
-        r"(?P<time>\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p)?)\b"
+        r"(?P<time>(?:\d{3,4}\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p))|"
+        r"(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p)?))\b"
         r"(?:\s*(?P<suffix>today|this afternoon|this morning|tonight))?",
         lower,
     )
@@ -5429,8 +5445,14 @@ def _sms_extract_same_day_callback_reference(value: Any) -> str:
     raw_time = _sms_normalize_whitespace(match.group("time"))
     if not raw_time:
         return ""
-    raw_time = re.sub(r"\b([ap])\b", lambda m: f"{m.group(1)}m", raw_time)
-    raw_time = re.sub(r"\b([ap])\.m\.\b", lambda m: f"{m.group(1)}m", raw_time)
+    compact_candidate = bool(re.fullmatch(
+        r"\d{3,4}\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p)",
+        raw_time,
+        flags=re.IGNORECASE,
+    ))
+    raw_time = _sms_normalize_callback_clock(raw_time) if compact_candidate else raw_time
+    if not raw_time:
+        return ""
     prefix = _sms_normalize_whitespace(match.group("prefix") or "")
     suffix = _sms_normalize_whitespace(match.group("suffix") or "")
     pieces = []
@@ -5442,12 +5464,30 @@ def _sms_extract_same_day_callback_reference(value: Any) -> str:
     return _sms_normalize_whitespace(" ".join(pieces)).title()
 
 
+def _sms_normalize_callback_clock(value: Any) -> str:
+    raw = _sms_normalize_whitespace(value).lower().replace(".", "")
+    match = re.fullmatch(r"(\d{1,4})(?::(\d{2}))?\s*([ap])m?", raw)
+    if not match:
+        return ""
+    hour_digits = match.group(1)
+    minutes = match.group(2) or ""
+    if not match.group(2) and len(hour_digits) >= 3:
+        minutes = hour_digits[-2:]
+        hour_digits = hour_digits[:-2]
+    hour = int(hour_digits)
+    minute = int(minutes or "0")
+    if not 1 <= hour <= 12 or not 0 <= minute <= 59:
+        return ""
+    minute_text = f":{minute:02d}" if minutes else ""
+    return f"{hour}{minute_text} {match.group(3).lower()}m"
+
+
 def _sms_complete_callback_reference(value: Any, reference_at: Any = None) -> str:
     text = _sms_normalize_whitespace(value)
     date = _sms_extract_scheduled_callback_reference(text, reference_at)
     time = re.search(
         r"\b(?:(?:at|after|before|around|about)\s+)?"
-        r"(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|noon|midnight)\b"
+        r"(?:(?:\d{3,4}|\d{1,2}(?::\d{2})?)\s*(?:a\.?m\.?|p\.?m\.?)|noon|midnight)\b"
         r"|\b(?:at|after|before|around|about)\s+\d{1,2}(?::\d{2})?\b(?![/-])",
         text,
         re.IGNORECASE,
@@ -5462,9 +5502,29 @@ def _sms_complete_callback_reference(value: Any, reference_at: Any = None) -> st
     pieces = [date or (same_day.group(0).title() if same_day else "")]
     if time:
         clock_text = time.group(0)
-        if not date and same_day and not re.search(r"[ap]\.?m", clock_text, re.IGNORECASE):
-            clock_text = clock_text.title()
-        pieces.append(clock_text)
+        qualifier_match = re.match(r"^(at|after|before|around|about)\s+", clock_text, flags=re.IGNORECASE)
+        clock_body = re.sub(r"^(?:at|after|before|around|about)\s+", "", clock_text, flags=re.IGNORECASE)
+        compact_candidate = bool(re.fullmatch(
+            r"\d{3,4}\s*(?:a\.?m\.?|p\.?m\.?)",
+            clock_body,
+            flags=re.IGNORECASE,
+        ))
+        compact_clock = (
+            _sms_normalize_callback_clock(clock_body)
+            if compact_candidate
+            else ""
+        )
+        if compact_candidate:
+            qualifier = qualifier_match.group(1) if qualifier_match else ""
+            clock_text = (
+                f"{qualifier} {compact_clock}"
+                if compact_clock and qualifier and qualifier.lower() != "at"
+                else compact_clock
+            )
+        if clock_text:
+            if not date and same_day and not re.search(r"[ap]\.?m", clock_text, re.IGNORECASE):
+                clock_text = clock_text.title()
+            pieces.append(clock_text)
     if zone and (date or time):
         pieces.append(zone.group(0))
     return _sms_normalize_whitespace(" ".join(pieces))
@@ -5582,8 +5642,10 @@ def _sms_is_post_handoff_callback_update(row_obj: Dict[str, str], inbound_text: 
 
 def _sms_is_scheduled_callback(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
+    compact_clock = re.search(r"\b\d{3,4}\s*(?:am|pm)\b", text, flags=re.IGNORECASE)
     if (
         not text
+        or (compact_clock and not _sms_normalize_callback_clock(compact_clock.group(0)))
         or _sms_is_conditional_call(text)
         or _sms_is_information_delivery_request(text)
         or _sms_is_self_initiated_deferred_contact(text)
@@ -6606,7 +6668,7 @@ def _sms_fast_decision(
             lead_status="Y",
             handoff_needed=True,
             block_reply=False,
-            reason="Scheduled callback timing",
+            reason="Scheduled callback timing captured before handoff",
             call_booking_status="scheduled_callback",
             callback_time=_sms_complete_callback_reference(inbound_text, received_at),
             handoff_type="SCHEDULED CALLBACK",

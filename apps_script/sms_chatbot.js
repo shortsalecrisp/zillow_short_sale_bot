@@ -2999,7 +2999,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
       callback_requested: "yes",
       callback_time: callbackTime,
       handoff_type: "SCHEDULED CALLBACK",
-      reason: "Agent proposed callback timing; acknowledged and handed off"
+      reason: "Scheduled callback timing captured before handoff"
     };
   }
 
@@ -3792,13 +3792,26 @@ function canonicalizeSmsInboundDedupeMessage_(text) {
 
 function isSmsReactionToLastOutbound_(text, rowObj) {
   const reaction = extractSmsReactionTarget_(text);
-  if (!reaction || !reaction.target) return false;
-
-  const reactionTarget = normalizeSmsReactionComparisonText_(reaction.target);
   const lastOutbound = normalizeSmsReactionComparisonText_(
     rowObj && rowObj[HEADERS.last_outbound_text]
   );
-  return Boolean(lastOutbound && reactionTarget === lastOutbound);
+  if (!lastOutbound) return false;
+
+  if (reaction && reaction.target) {
+    const reactionTarget = normalizeSmsReactionComparisonText_(reaction.target);
+    if (reactionTarget === lastOutbound) return true;
+  }
+
+  // Some Android/Tasker transports flatten the quoted reaction payload into
+  // `Liked <outbound> to <outbound>`. Accept only one or two exact normalized
+  // copies of the latest outbound so novel caller text is never discarded.
+  const raw = normalizeWhitespace_(
+    String(text || "").replace(/[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]/g, " ")
+  );
+  const flattened = raw.match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+(.+)$/i);
+  if (!flattened) return false;
+  const payload = normalizeSmsReactionComparisonText_(flattened[2]);
+  return payload === lastOutbound || payload === lastOutbound + " to " + lastOutbound;
 }
 
 function isFinalCourtesyReply_(text) {
@@ -4637,11 +4650,15 @@ function extractSameDayCallbackReference_(text) {
   if (!/\b(?:call|text|contact|reach out|follow up|get in touch|connect|talk|speak|chat|works?|work|fine|ok|okay|available|free|today|this afternoon|this morning|tonight)\b/.test(lower)) {
     return "";
   }
-  const match = lower.match(/\b(?:(around|about|approximately|at|after|before|by)\s+)?(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p)?)\b(?:\s*(today|this afternoon|this morning|tonight))?/i);
+  const match = lower.match(/\b(?:(around|about|approximately|at|after|before|by)\s+)?((?:\d{3,4}\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p))|(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p)?))\b(?:\s*(today|this afternoon|this morning|tonight))?/i);
   if (!match) return "";
-  const time = normalizeWhitespace_(match[2])
-    .replace(/\b([ap])\b/ig, "$1m")
-    .replace(/\b([ap])\.m\.\b/ig, "$1m");
+  const compactCandidate = /^\d{3,4}\s*(?:a\.?m\.?|p\.?m\.?|am|pm|a|p)$/i.test(match[2]);
+  const time = compactCandidate
+    ? normalizeCallbackClockText_(match[2])
+    : normalizeWhitespace_(match[2])
+      .replace(/\b([ap])\b/ig, "$1m")
+      .replace(/\b([ap])\.m\.\b/ig, "$1m");
+  if (!time) return "";
   const prefix = normalizeWhitespace_(match[1] || "");
   const suffix = normalizeWhitespace_(match[3] || "");
   const pieces = [];
@@ -4651,6 +4668,22 @@ function extractSameDayCallbackReference_(text) {
   return normalizeWhitespace_(pieces.join(" ")).replace(/\b[a-z]/g, function(letter) {
     return letter.toUpperCase();
   });
+}
+
+function normalizeCallbackClockText_(value) {
+  const raw = normalizeWhitespace_(String(value || "").toLowerCase()).replace(/\./g, "");
+  const match = raw.match(/^(\d{1,4})(?::(\d{2}))?\s*([ap])m?$/i);
+  if (!match) return "";
+  let hourDigits = match[1];
+  let minutes = match[2] || "";
+  if (!match[2] && hourDigits.length >= 3) {
+    minutes = hourDigits.slice(-2);
+    hourDigits = hourDigits.slice(0, -2);
+  }
+  const hour = Number(hourDigits);
+  const minute = minutes ? Number(minutes) : 0;
+  if (hour < 1 || hour > 12 || minute < 0 || minute > 59) return "";
+  return String(hour) + (minutes ? ":" + String(minute).padStart(2, "0") : "") + " " + match[3].toLowerCase() + "m";
 }
 
 function isUnavailableUntilCallbackReferenceSignal_(text) {
@@ -4728,6 +4761,8 @@ function isSchedulingSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
 
   if (isConditionalCallSignal_(t) || /\b(?:do not|don['\u2019]?t|dont)\s+call\b/.test(t)) return false;
+  const compactClock = t.match(/\b\d{3,4}\s*(?:am|pm)\b/i);
+  if (compactClock && !normalizeCallbackClockText_(compactClock[0])) return false;
   const callContext = /\b(?:call|text|phone|talk|speak|chat|reach out|contact|available|free|works for me|open house)\b/.test(t);
   if (/\b(?:auction|foreclosure|sale date|closing date|deadline)\b/.test(t) &&
       !/\b(?:call|text|phone|talk|speak|chat)\b/.test(t)) return false;
@@ -4759,7 +4794,8 @@ function isSchedulingSignal_(text) {
     /\byou can reach out after\b/,
     /\bopen house today till\b/,
     /\b\d{1,2}:\d{2}\b/,
-    /\b\d{1,2}\s?(?:a|am|p|pm)\b/
+    /\b\d{1,2}\s?(?:a|am|p|pm)\b/,
+    /\b\d{3,4}\s?(?:am|pm)\b/
   ];
 
   return patterns.some(pattern => pattern.test(t));
@@ -4774,8 +4810,19 @@ function isConditionalCallSignal_(text) {
 
 function extractCompleteCallbackTiming_(text, referenceAt) {
   const date = extractScheduledCallbackReference_(text, referenceAt);
-  const clock = String(text || "").match(/\b(?:(?:at|after|before|around|about)\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|noon|midnight)\b|\b(?:at|after|before|around|about)\s+\d{1,2}(?::\d{2})?\b(?![/-])/i);
-  const time = clock ? normalizeTimePhrase_(clock[0]) : "";
+  const clock = String(text || "").match(/\b(?:(?:at|after|before|around|about)\s+)?(?:(?:\d{3,4}|\d{1,2}(?::\d{2})?)\s*(?:a\.?m\.?|p\.?m\.?)|noon|midnight)\b|\b(?:at|after|before|around|about)\s+\d{1,2}(?::\d{2})?\b(?![/-])/i);
+  let time = "";
+  if (clock) {
+    const qualifier = (clock[0].match(/^(at|after|before|around|about)\s+/i) || [])[1] || "";
+    const clockBody = clock[0].replace(/^(?:at|after|before|around|about)\s+/i, "");
+    const compactCandidate = /^\d{3,4}\s*(?:a\.?m\.?|p\.?m\.?)$/i.test(clockBody);
+    const compact = compactCandidate
+      ? normalizeCallbackClockText_(clockBody)
+      : "";
+    time = compactCandidate
+      ? (compact ? (qualifier && qualifier.toLowerCase() !== "at" ? qualifier + " " + compact : compact) : "")
+      : normalizeTimePhrase_(clock[0]);
+  }
   const zone = String(text || "").match(/\b(?:[ECMP][DS]?T|Eastern|Central|Mountain|Pacific)(?:\s+(?:standard|daylight))?(?:\s+time)?\b/i);
   return normalizeWhitespace_([date, time, zone && zone[0]].filter(Boolean).join(" ")) ||
     extractSameDayCallbackReference_(text) || normalizeWhitespace_(String(text || ""));
