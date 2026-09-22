@@ -509,18 +509,89 @@ test("post-call fallback treats screening recordings and canned ASAP fragments a
 });
 
 test("full-mailbox recording is voicemail, not a human hangup", async () => {
-  const { shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import("../src/lib/elevenLabsPostCall");
+  const {
+    buildVoiceResponseStatus,
+    getVoicemailOrNoAnswerCallResult,
+    shouldTreatAsAgentHungUp,
+    shouldTreatAsAgentUnavailable,
+    shouldTreatAsVoicemail,
+  } = await import("../src/lib/elevenLabsPostCall");
   const conversation = {
     status: "done",
     metadata: { termination_reason: "client disconnected" },
-    analysis: { transcript_summary: "The mailbox is full and cannot accept any messages at this time." },
+    analysis: { transcript_summary: "A personal voicemail greeting played, followed by a full-mailbox recording." },
     transcript: [
-      { role: "assistant", message: "Hi, is this Jelenia?" },
+      { role: "user", message: "Hi, you've reached Shane Riley. Leave me a name and number and I'll return your call." },
+      { role: "assistant", message: "Hi, this is Finn with Crisp Short Sales calling about the short-sale listing." },
       { role: "user", message: "The mailbox is full and cannot accept any messages at this time. Goodbye." },
     ],
   };
+  assert.equal(shouldTreatAsVoicemail(conversation), true);
+  assert.equal(getVoicemailOrNoAnswerCallResult(conversation, 1), "voicemail_reached");
+  assert.equal(buildVoiceResponseStatus("voicemail_reached"), "Voicemail reached - message not confirmed");
   assert.equal(shouldTreatAsAgentHungUp(conversation), false);
   assert.equal(shouldTreatAsAgentUnavailable(conversation), false);
+});
+
+test("AI screener hold and unavailable message outrank generic hangup", async () => {
+  const { shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    analysis: { transcript_summary: "An AI assistant screened the call, asked Finn to hold, and said the intended recipient was busy." },
+    transcript: [
+      { role: "user", message: "Hi. I'm an AI assistant recording this call for the person you're trying to reach." },
+      { role: "assistant", message: "This is Finn calling from Crisp Short Sales about a short-sale listing." },
+      { role: "user", message: "Please hold while I connect you. The person you're calling is busy now. I'll let them know you called." },
+    ],
+  };
+  assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+});
+
+test("explicit assistance refusal and opening no-thanks outrank generic hangup", async () => {
+  const { shouldTreatAsAgentHungUp, shouldTreatAsNotInterested } = await import("../src/lib/elevenLabsPostCall");
+  const lonnie = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "Hi, this is Lonnie." },
+      { role: "assistant", message: "Would you like more details about how we assist with the short-sale process?" },
+      { role: "user", message: "Actually, I don't believe we need any assistance. We have a pretty clear-cut plan to get this done." },
+    ],
+  };
+  const kathie = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "Hello, this is Kathy." },
+      { role: "assistant", message: "I'm calling about the short-sale paperwork. Is it okay if I ask one quick question about that?" },
+      { role: "user", message: "No, thanks." },
+    ],
+  };
+  for (const conversation of [lonnie, kathie]) {
+    assert.equal(shouldTreatAsNotInterested(conversation), true);
+    assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+  }
+});
+
+test("live office redirection to call the named agent directly is unavailable", async () => {
+  const { hasLiveHumanGatekeeperEvidence, shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "Good afternoon. Leslie Wells Realty. It's Lisa. May I help you?" },
+      { role: "assistant", message: "I'm calling about Leslie's short-sale listing. Is Leslie available?" },
+      { role: "user", message: "No, you'll have to call her directly." },
+      { role: "assistant", message: "Understood, thanks for letting me know. Goodbye." },
+    ],
+  };
+  assert.equal(hasLiveHumanGatekeeperEvidence(conversation, "Leslie"), true);
+  assert.equal(shouldTreatAsAgentUnavailable(conversation, "Leslie"), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
 });
 
 test("Google Call Assist follow-up prompts remain screening, with real human reply preserved", async () => {

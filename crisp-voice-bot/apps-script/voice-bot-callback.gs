@@ -1185,6 +1185,7 @@ function isRetryableVoiceBotResult_(callResult) {
   const normalized = normalizeString_(callResult).toLowerCase();
 
   return normalized === 'voicemail_left' ||
+    normalized === 'voicemail_reached' ||
     normalized === 'no_answer_first_attempt' ||
     normalized === 'agent_not_available' ||
     normalized === 'call_start_failed';

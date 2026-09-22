@@ -159,7 +159,7 @@ test("late retryable or provider-failure writes cannot downgrade protected conta
   const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
   for (const existing of ["do_not_call", "call_ended_by_request", "contact_request_review", "interested_followup_review"]) {
     for (const existingColumn of [VOICE_BOT_COL_CALL_1_RESULT, VOICE_BOT_COL_CALL_2_RESULT]) {
-      for (const incoming of ["no_answer_first_attempt", "agent_not_available", "voicemail_left", "call_start_failed",
+      for (const incoming of ["no_answer_first_attempt", "agent_not_available", "voicemail_left", "voicemail_reached", "call_start_failed",
         "provider_llm_failure", "provider_quota_exceeded", "provider_d17_failure"]) {
         const row = Array.from({ length: 42 }, () => "");
         row[existingColumn - 1] = existing;

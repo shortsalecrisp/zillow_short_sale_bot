@@ -267,6 +267,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Left Vm";
   }
 
+  if (callResult === "voicemail_reached") {
+    return "Voicemail reached - message not confirmed";
+  }
+
   if (callResult === "no_answer_first_attempt") {
     return "No answer on first call";
   }
@@ -972,7 +976,7 @@ export async function persistVoiceContactOutcome(payload: SheetUpdateRequest): P
   }
 }
 
-function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
+export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
   if (
     shouldTreatAsRecordingArtifact(conversation) ||
     shouldTreatAsDoNotCall(conversation) ||
@@ -984,6 +988,13 @@ function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boole
 
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   const messages = conversation.transcript ?? [];
+  const directServiceRefusal = liveContactMessages(conversation).some((message) => {
+    const callerText = normalizeText(message);
+    return (
+      /\b(?:i|we)\s+(?:do not|don't|dont)\s+(?:believe|think)?\s*(?:i|we)?\s*(?:need|want)\s+(?:any\s+)?(?:help|assistance|services?)\b/.test(callerText) ||
+      /\b(?:i|we)\s+(?:have|got)\s+(?:a\s+)?(?:pretty\s+)?clear\s+(?:cut\s+)?plan\b/.test(callerText)
+    );
+  });
   const completedHelpDecline = messages.some((item, index) => {
     if (item.role !== "assistant" || typeof item.message !== "string") {
       return false;
@@ -1002,12 +1013,27 @@ function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boole
     );
     return Boolean(
       answer?.message &&
-        /^(?:uh+[, ]*)?(?:no|not right now|no thanks|nothing right now)[.!?]*$/i.test(answer.message.trim()),
+        /^(?:uh+[, ]*)?(?:no|not right now|no[, ]+thanks|nothing right now)[.!?]*$/i.test(answer.message.trim()),
     );
+  });
+  const declinedOpeningPermission = messages.some((item, index) => {
+    if ((item.role !== "assistant" && item.role !== "agent") || typeof item.message !== "string") {
+      return false;
+    }
+    const question = normalizeText(item.message);
+    if (!/\b(?:is it okay if i ask|may i ask|can i ask|got a quick second)\b/.test(question)) {
+      return false;
+    }
+    const answer = messages.slice(index + 1).find(
+      (next) => next.role === "user" && typeof next.message === "string" && hasMeaningfulSpokenContent(next.message),
+    );
+    return Boolean(answer?.message && /^(?:uh+[, ]*)?(?:no|no[, ]+thanks|not interested)[.!?]*$/i.test(answer.message.trim()));
   });
   return (
     shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
+    directServiceRefusal ||
     completedHelpDecline ||
+    declinedOpeningPermission ||
     text.includes("not interested") ||
     text.includes("has it handled") ||
     text.includes("have it handled") ||
@@ -1023,7 +1049,7 @@ function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boole
   );
 }
 
-function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
+export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
   if (usedVoicemailDetectionTool(conversation)) {
     return true;
   }
@@ -1040,6 +1066,23 @@ function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): boolean {
     text.includes("after the tone") ||
     text.includes("at the beep")
   );
+}
+
+export function getVoicemailOrNoAnswerCallResult(
+  conversation: ElevenLabsConversation,
+  callAttemptNumber: number,
+): "voicemail_left" | "voicemail_reached" | "no_answer_first_attempt" | "no_response_second_attempt" | undefined {
+  const voicemailDetected = shouldTreatAsVoicemail(conversation);
+  if (!voicemailDetected && !shouldTreatAsNoAnswer(conversation)) {
+    return undefined;
+  }
+  if (callAttemptNumber > 1) {
+    return "no_response_second_attempt";
+  }
+  if (!voicemailDetected) {
+    return "no_answer_first_attempt";
+  }
+  return hasDeliveredVoicemailMessage(conversation) ? "voicemail_left" : "voicemail_reached";
 }
 
 function getVoicemailDetectionMessage(conversation: ElevenLabsConversation): string {
@@ -1400,6 +1443,9 @@ export function hasLiveHumanGatekeeperEvidence(
       contextualText,
     ) ||
     /\b(?:take|leave|send|give)\b.{0,35}\bmessage\b/.test(contextualText) ||
+    /\b(?:you(?:'ll| will)\s+have\s+to|please|need\s+to)\s+call\s+(?:him|her|them|the agent)\s+directly\b/.test(
+      contextualText,
+    ) ||
     /\b(?:hold|one moment|stay on the line|transfer you|see if (?:he|she|they) (?:is|are) available)\b/.test(
       contextualText,
     );
@@ -2532,15 +2578,14 @@ async function processPostCallOutcomeForConversation(
     return true;
   }
 
-  if (conversation.status === "failed" && (shouldTreatAsVoicemail(conversation) || shouldTreatAsNoAnswer(conversation))) {
+  const failedVoicemailOrNoAnswer = conversation.status === "failed"
+    ? getVoicemailOrNoAnswerCallResult(conversation, metadata.callAttemptNumber)
+    : undefined;
+  if (failedVoicemailOrNoAnswer) {
     const isFirstAttempt = metadata.callAttemptNumber <= 1;
     const voicemailDetected = shouldTreatAsVoicemail(conversation);
     const voicemailLeft = voicemailDetected && hasDeliveredVoicemailMessage(conversation);
-    const callResult = isFirstAttempt
-      ? voicemailLeft
-        ? "voicemail_left"
-        : "no_answer_first_attempt"
-      : "no_response_second_attempt";
+    const callResult = failedVoicemailOrNoAnswer;
     const outcome = buildVoiceResponseStatus(callResult);
 
     await postSheetUpdate({
@@ -2788,15 +2833,12 @@ async function processPostCallOutcomeForConversation(
     return true;
   }
 
-  if (shouldTreatAsVoicemail(conversation) || shouldTreatAsNoAnswer(conversation)) {
+  const voicemailOrNoAnswer = getVoicemailOrNoAnswerCallResult(conversation, metadata.callAttemptNumber);
+  if (voicemailOrNoAnswer) {
     const isFirstAttempt = metadata.callAttemptNumber <= 1;
     const voicemailDetected = shouldTreatAsVoicemail(conversation);
     const voicemailLeft = voicemailDetected && hasDeliveredVoicemailMessage(conversation);
-    const callResult = isFirstAttempt
-      ? voicemailLeft
-        ? "voicemail_left"
-        : "no_answer_first_attempt"
-      : "no_response_second_attempt";
+    const callResult = voicemailOrNoAnswer;
     const outcome = buildVoiceResponseStatus(callResult);
 
     await postSheetUpdate({

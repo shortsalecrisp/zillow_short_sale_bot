@@ -23,6 +23,7 @@ test("replacement voice sheet helpers preserve the active call windows", () => {
 
 test("replacement voice sheet helpers retry provider start failures once", () => {
   assert.equal(isRetryableVoiceBotResult("call_start_failed"), true);
+  assert.equal(isRetryableVoiceBotResult("voicemail_reached"), true);
 });
 
 test("replacement voice sheet helpers preserve first and second attempt scheduling", () => {
