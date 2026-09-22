@@ -20,6 +20,9 @@ const HEADERS = {
   call_booking_status: "call_booking_status",
   callback_requested: "callback_requested",
   callback_time: "callback_time",
+  call_eligible: "call_eligible",
+  call_time_bucket: "call_time_bucket",
+  call_scheduled_for: "call_scheduled_for",
   handoff_flag: "handoff_flag",
   history_json: "history_json",
   auto_reply_count: "auto_reply_count",
@@ -1312,6 +1315,11 @@ function handleIncomingSmsCore_(body) {
       } else if (String(decision.call_booking_status || "").toLowerCase() === "call_now") {
         updates[HEADERS.callback_time] = "";
       }
+      if (String(decision.call_booking_status || "").toLowerCase() === "scheduled_callback") {
+        updates[HEADERS.call_eligible] = "";
+        updates[HEADERS.call_time_bucket] = "";
+        updates[HEADERS.call_scheduled_for] = "";
+      }
     }
 
     // A terminal alert must be durably queued before the CRM is locked. If
@@ -1512,6 +1520,11 @@ function handleIncomingSmsCore_(body) {
       updates[HEADERS.callback_time] = decision.callback_time;
     } else if (String(decision.call_booking_status || "").toLowerCase() === "call_now") {
       updates[HEADERS.callback_time] = "";
+    }
+    if (String(decision.call_booking_status || "").toLowerCase() === "scheduled_callback") {
+      updates[HEADERS.call_eligible] = "";
+      updates[HEADERS.call_time_bucket] = "";
+      updates[HEADERS.call_scheduled_for] = "";
     }
   }
 

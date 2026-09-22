@@ -233,6 +233,9 @@ CHATBOT_HEADERS = [
 ] + [f"extra_{idx}" for idx in range(21, 45)]
 CHATBOT_HEADERS[37] = "callback_requested"
 CHATBOT_HEADERS[38] = "callback_time"
+CHATBOT_HEADERS[29] = "call_eligible"
+CHATBOT_HEADERS[30] = "call_time_bucket"
+CHATBOT_HEADERS[31] = "call_scheduled_for"
 CHATBOT_HEADERS[43] = "last_inbound_text"
 CHATBOT_HEADERS[44] = "last_inbound_at"
 
@@ -1539,6 +1542,9 @@ def test_sms_compact_same_day_callback_is_persisted_before_reply_cap(monkeypatch
         sender_result=FakeSendResult(success=True),
     )
     sheet.rows[2][18] = "3"
+    sheet.rows[2][29] = "yes"
+    sheet.rows[2][30] = "voice_call_2_due"
+    sheet.rows[2][31] = "2026-09-22T13:00:00Z"
     response = TestClient(module.app).post(
         "/sms-chatbot",
         data={
@@ -1560,6 +1566,9 @@ def test_sms_compact_same_day_callback_is_persisted_before_reply_cap(monkeypatch
     assert body["callback_time"] == "4:30 pm"
     assert sheet.rows[2][37] == "yes"
     assert sheet.rows[2][38] == "4:30 pm"
+    assert sheet.rows[2][29] == ""
+    assert sheet.rows[2][30] == ""
+    assert sheet.rows[2][31] == ""
     assert sender.calls == []
     assert module._sms_extract_same_day_callback_reference("can we talk at 1360pm?") == ""
     assert module._sms_is_scheduled_callback("can we talk at 1360pm?") is False

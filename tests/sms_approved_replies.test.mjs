@@ -190,8 +190,13 @@ test('callback keeps the date, timing qualifier, and timezone', () => {
   assert.match(h.state.callback_time, /Tomorrow after 2\s*pm Eastern/i);
 });
 
-test('compact same-day callback outranks the auto-reply cap and persists timing', () => {
-  const {h, r} = answer('can we talk at 430pm?', {auto_reply_count: 3});
+test('compact same-day callback outranks the auto-reply cap, persists timing, and cancels a queued voice retry', () => {
+  const {h, r} = answer('can we talk at 430pm?', {
+    auto_reply_count: 3,
+    call_eligible: 'yes',
+    call_time_bucket: 'voice_call_2_due',
+    call_scheduled_for: '2026-09-22T13:00:00Z',
+  });
   assert.equal(r.should_reply, false);
   assert.equal(r.reply_text, '');
   assert.equal(r.handoff_needed, true);
@@ -199,6 +204,9 @@ test('compact same-day callback outranks the auto-reply cap and persists timing'
   assert.equal(h.state.call_booking_status, 'scheduled_callback');
   assert.equal(h.state.callback_requested, 'yes');
   assert.equal(h.state.callback_time, '4:30 pm');
+  assert.equal(h.state.call_eligible, '');
+  assert.equal(h.state.call_time_bucket, '');
+  assert.equal(h.state.call_scheduled_for, '');
   assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'SCHEDULED CALLBACK'}]);
 });
 

@@ -7391,6 +7391,10 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     if not preserve_existing_state and updates["call_booking_status"] in {"scheduled_callback", "call_now"}:
         updates["callback_requested"] = "yes"
         updates["callback_time"] = callback_time if updates["call_booking_status"] == "scheduled_callback" else ""
+    if not preserve_existing_state and updates["call_booking_status"] == "scheduled_callback":
+        updates["call_eligible"] = ""
+        updates["call_time_bucket"] = ""
+        updates["call_scheduled_for"] = ""
     if not preserve_existing_state and decision.get("clear_callback"):
         updates["callback_requested"] = "no"
         updates["callback_time"] = ""
