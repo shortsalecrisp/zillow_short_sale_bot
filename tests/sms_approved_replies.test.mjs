@@ -226,6 +226,19 @@ test('unquoted doubled reaction is suppressed only for exact outbound copies', (
   assert.equal(h.evaluate(`isSmsReactionToLastOutbound_(${JSON.stringify(`Liked ${outbound} to Can you call me tomorrow?`)}, ${JSON.stringify({last_outbound_text: outbound})})`), false);
 });
 
+test('self-duplicated reaction is silent under human takeover without last outbound evidence', () => {
+  const artifact = 'Loved Yes I can do that. Ill update the invite to Yes I can do that. Ill update the invite';
+  const h = smsHarness({
+    last_outbound_text: '', human_override: 'TRUE', handoff_flag: 'TRUE', ai_state: 'handoff'
+  });
+  const r = h.incoming(artifact);
+  assert.equal(h.evaluate(`isSelfDuplicateSmsReactionArtifact_(${JSON.stringify(artifact)})`), true);
+  assert.equal(h.evaluate(`isSelfDuplicateSmsReactionArtifact_(${JSON.stringify('Loved Yes I can do that to Please call me tomorrow')})`), false);
+  assert.equal(r.should_reply, false);
+  assert.equal(r.handoff_needed, false);
+  assert.equal(h.effects.length, 0);
+});
+
 test('amount plus buyer concern answers both questions', () => {
   const {r} = answer('What is your fee, and what if the buyer cannot afford it?');
   assert.equal(r.should_reply, true);
@@ -278,6 +291,25 @@ test('opt out remains silent and immediate', () => {
   const {r} = answer('Please remove me from your database');
   assert.equal(r.should_reply, false);
   assert.equal(r.lead_status, 'R');
+});
+
+test('clear renewed interest after opt-out alerts owner once while bot stays silent and opt-out stays authoritative', () => {
+  const h = smsHarness({
+    mailshake_status: 'R', human_override: 'TRUE', ai_state: 'done',
+    handoff_flag: 'FALSE', call_booking_status: 'closed_no_interest',
+    response_status: 'STOP', conversation_summary: 'Opt-out / stop request'
+  });
+  const first = h.incoming("Shoot me the info and I'll review");
+  assert.equal(first.should_reply, false);
+  assert.equal(first.handoff_needed, true);
+  assert.equal(h.state.mailshake_status, 'R');
+  assert.equal(h.state.ai_state, 'done');
+  assert.equal(h.state.call_booking_status, 'closed_no_interest');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'POST-OPT-OUT RENEWED INTEREST'}]);
+  const second = h.incoming('Please send me the information');
+  assert.equal(second.should_reply, false);
+  assert.equal(second.handoff_needed, false);
+  assert.equal(h.effects.length, 1);
 });
 
 test('new-handoff answer survives outbox checks only for that exact inbound and destination', () => {

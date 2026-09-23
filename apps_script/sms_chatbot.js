@@ -152,6 +152,29 @@ function isIntentionalNoReplyDisposition_(rowObj, inboundText) {
     isFinalCourtesyReply_(inboundText);
 }
 
+function isPriorOptOutConversation_(rowObj) {
+  const summary = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.conversation_summary] || "")).toLowerCase();
+  const responseStatus = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.response_status] || ""));
+  return String(rowObj && rowObj[HEADERS.mailshake_status] || "").toUpperCase() === "R" &&
+    String(rowObj && rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE" &&
+    (summary.indexOf("opt-out") !== -1 || summary.indexOf("stop request") !== -1 || isOptOutSignal_(responseStatus));
+}
+
+function isClearPostOptOutInterestSignal_(text) {
+  const normalized = normalizeWhitespace_(String(text || "")).toLowerCase();
+  return isEmailRequestSignal_(text) ||
+    /\b(?:shoot|send|share|text|email)\s+(?:me|us)\s+(?:the\s+|some\s+|more\s+|your\s+)?(?:info|information|details)\b/.test(normalized) ||
+    isDirectHelpRequestSignal_(text) ||
+    isPhoneCallInterestSignal_(text) ||
+    isPresentServiceInterestSignal_(text) ||
+    isSchedulingSignal_(text);
+}
+
+function hasPostOptOutInterestAlert_(rowObj) {
+  return normalizeWhitespace_(String(rowObj && rowObj[HEADERS.conversation_summary] || ""))
+    .toLowerCase().indexOf("post-opt-out renewed interest owner alert recorded") !== -1;
+}
+
 function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
   const priorText = canonicalizeRepeatedCompleteInboundForDedupe_(rowObj && rowObj[HEADERS.last_inbound_text]);
   const currentText = canonicalizeRepeatedCompleteInboundForDedupe_(inboundText);
@@ -159,6 +182,11 @@ function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
   const postHandoffCallbackUpdate = typeof isPostHandoffCallbackUpdate_ === "function" &&
     isPostHandoffCallbackUpdate_(rowObj, inboundText);
   if (isSchedulingSignal_(inboundText) || postHandoffCallbackUpdate) return false;
+  if (isPriorOptOutConversation_(rowObj) &&
+      hasPostOptOutInterestAlert_(rowObj) &&
+      isClearPostOptOutInterestSignal_(inboundText)) {
+    return true;
+  }
   // A repeated substantive question can be intentional (for example, asking
   // the exact fee again after a generic payment explanation). Never let
   // text-only replay protection hide that follow-up.
@@ -481,7 +509,7 @@ function handleIncomingSmsCore_(body) {
       };
     }
 
-    if (isSmsReactionToLastOutbound_(inboundText, rowObj)) {
+    if (isSmsReactionToLastOutbound_(inboundText, rowObj) || isSelfDuplicateSmsReactionArtifact_(inboundText)) {
       updateRowFields_(sheet, row, {
         [HEADERS.last_inbound_text]: normalizeHandledInboundText_(inboundText),
         [HEADERS.last_inbound_at]: receivedAt,
@@ -492,7 +520,7 @@ function handleIncomingSmsCore_(body) {
       appendSmsDebugLog_("incoming_sms_reaction_suppressed", {
         phone: phoneRaw,
         message: inboundText,
-        reason: "Reaction to the last outbound message suppressed before response selection",
+        reason: "Reaction-only artifact suppressed before response selection",
         message_id: messageId
       });
 
@@ -503,7 +531,7 @@ function handleIncomingSmsCore_(body) {
         reply_text: "",
         handoff_needed: false,
         needs_review: false,
-        reason: "Reaction to the last outbound message; no reply needed"
+        reason: "Reaction-only artifact; no reply or owner alert needed"
       };
     }
 
@@ -586,6 +614,44 @@ function handleIncomingSmsCore_(body) {
       handoff_needed: false,
       needs_review: false,
       reason: "Opt-out / stop request"
+    };
+  }
+
+  if (isPriorOptOutConversation_(currentRowObj) && isClearPostOptOutInterestSignal_(inboundText)) {
+    const alreadyAlerted = hasPostOptOutInterestAlert_(currentRowObj);
+    if (!alreadyAlerted) {
+      sendHandoffEmail_({
+        handoff_type: "POST-OPT-OUT RENEWED INTEREST",
+        agent_name: currentRowObj[HEADERS.agent_name] || "",
+        last_name: currentRowObj[HEADERS.last_name] || "",
+        initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
+        phone: phoneRaw,
+        email: currentRowObj[HEADERS.email] || "",
+        listing_address: currentRowObj[HEADERS.listing_address] || "",
+        city: currentRowObj[HEADERS.city] || "",
+        state: currentRowObj[HEADERS.state] || "",
+        zip: currentRowObj[HEADERS.zip] || "",
+        last_message: inboundText,
+        history: getHistoryArray_(currentRowObj[HEADERS.history_json])
+      });
+      updateRowFields_(sheet, row, {
+        [HEADERS.response_status]: inboundText,
+        [HEADERS.conversation_summary]: "Opt-out retained; post-opt-out renewed interest owner alert recorded"
+      });
+    }
+    return {
+      ok: true,
+      should_reply: false,
+      reply_text: "",
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: !alreadyAlerted,
+      needs_review: false,
+      alert_needed: !alreadyAlerted,
+      handoff_type: alreadyAlerted ? "" : "POST-OPT-OUT RENEWED INTEREST",
+      reason: alreadyAlerted
+        ? "Opt-out retained; renewed-interest owner alert already recorded"
+        : "Opt-out retained; renewed-interest owner alert recorded"
     };
   }
 
@@ -3825,6 +3891,26 @@ function isSmsReactionToLastOutbound_(text, rowObj) {
   if (!flattened) return false;
   const payload = normalizeSmsReactionComparisonText_(flattened[2]);
   return payload === lastOutbound || payload === lastOutbound + " to " + lastOutbound;
+}
+
+function isSelfDuplicateSmsReactionArtifact_(text) {
+  const raw = normalizeWhitespace_(
+    String(text || "").replace(/[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]/g, " ")
+  );
+  const match = raw.match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+(.+)$/i);
+  if (!match) return false;
+  const payload = normalizeSmsReactionComparisonText_(match[2]);
+  const separators = [];
+  let cursor = payload.indexOf(" to ");
+  while (cursor !== -1) {
+    separators.push(cursor);
+    cursor = payload.indexOf(" to ", cursor + 4);
+  }
+  return separators.some(index => {
+    const first = payload.slice(0, index).trim();
+    const second = payload.slice(index + 4).trim();
+    return first.length >= 12 && first.split(/\s+/).length >= 3 && first === second;
+  });
 }
 
 function isFinalCourtesyReply_(text) {

@@ -4558,6 +4558,26 @@ def _sms_is_reaction_to_last_outbound(inbound_text: Any, row_obj: Dict[str, str]
     return payload in {last_outbound, f"{last_outbound} to {last_outbound}"}
 
 
+def _sms_is_self_duplicate_reaction_artifact(value: Any) -> bool:
+    raw = _sms_normalize_whitespace(
+        re.sub(r"[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]", " ", str(value or ""))
+    )
+    match = re.match(
+        r"^(liked|loved|emphasized|disliked|laughed at|questioned)\s+(.+)$",
+        raw,
+        re.IGNORECASE,
+    )
+    if not match:
+        return False
+    payload = _sms_normalize_reaction_comparison_text(match.group(2))
+    for separator in re.finditer(r"\s+to\s+", payload):
+        first = payload[:separator.start()].strip()
+        second = payload[separator.end():].strip()
+        if len(first) >= 12 and len(first.split()) >= 3 and first == second:
+            return True
+    return False
+
+
 def _sms_is_yoni_name_and_number_request(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     patterns = [
@@ -5319,6 +5339,40 @@ def _sms_is_opt_out(value: Any) -> bool:
         r"\bwrong number\b",
     ]
     return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_is_prior_opt_out_conversation(row_obj: Dict[str, str]) -> bool:
+    summary = _sms_normalize_whitespace(row_obj.get("conversation_summary") or "").lower()
+    response_status = _sms_normalize_whitespace(row_obj.get("response_status") or "")
+    return (
+        str(row_obj.get("mailshake_status") or "").upper() == "R"
+        and str(row_obj.get("human_override") or "").upper() == "TRUE"
+        and ("opt-out" in summary or "stop request" in summary or _sms_is_opt_out(response_status))
+    )
+
+
+def _sms_is_clear_post_opt_out_interest(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return (
+        _sms_is_information_delivery_request(value)
+        or bool(re.search(
+            r"\b(?:shoot|send|share|text|email)\s+(?:me|us)\s+(?:the\s+|some\s+|more\s+|your\s+)?(?:info|information|details)\b",
+            text,
+        ))
+        or _sms_is_phone_call_interest(value)
+        or _sms_is_present_service_interest(value)
+        or _sms_is_scheduled_callback(value)
+        or bool(re.search(
+            r"\b(?:need|want|would like|could use)\b.{0,50}\b(?:help|assistance)\b",
+            text,
+        ))
+    )
+
+
+def _sms_has_post_opt_out_interest_alert(row_obj: Dict[str, str]) -> bool:
+    return "post-opt-out renewed interest owner alert recorded" in _sms_normalize_whitespace(
+        row_obj.get("conversation_summary") or ""
+    ).lower()
 
 
 def _sms_is_client_consultation_interest(value: Any) -> bool:
@@ -7241,13 +7295,13 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     ws, headers, rows = _sms_read_leads_sheet()
     row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
 
-    if _sms_is_reaction_to_last_outbound(inbound_text, row_obj):
+    if _sms_is_reaction_to_last_outbound(inbound_text, row_obj) or _sms_is_self_duplicate_reaction_artifact(inbound_text):
         result = _sms_normalize_tasker_payload(
             {
                 "ok": True,
                 "reaction": True,
                 "should_reply": False,
-                "reason": "Reaction to latest confirmed outbound SMS ignored",
+                "reason": "Reaction-only artifact ignored",
             }
         )
         _sms_append_debug(
@@ -7316,6 +7370,36 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         }
     )
     _sms_append_history(ws, row_idx, headers, row_obj, {"role": "agent", "text": inbound_text, "ts": received_at})
+
+    if _sms_is_prior_opt_out_conversation(row_obj) and _sms_is_clear_post_opt_out_interest(inbound_text):
+        already_alerted = _sms_has_post_opt_out_interest_alert(row_obj)
+        if not already_alerted:
+            _sms_update_row_fields(
+                ws,
+                row_idx,
+                headers,
+                {
+                    "response_status": inbound_text,
+                    "conversation_summary": "Opt-out retained; post-opt-out renewed interest owner alert recorded",
+                },
+            )
+        return _sms_normalize_tasker_payload({
+            "ok": True,
+            "should_reply": False,
+            "reply_text": "",
+            "lead_status": "R",
+            "conversation_done": True,
+            "handoff_needed": not already_alerted,
+            "needs_review": False,
+            "alert_needed": not already_alerted,
+            "handoff_type": "" if already_alerted else "POST-OPT-OUT RENEWED INTEREST",
+            "reason": (
+                "Opt-out retained; renewed-interest owner alert already recorded"
+                if already_alerted
+                else "Opt-out retained; renewed-interest owner alert recorded"
+            ),
+            "row": row_idx,
+        })
 
     auto_count = _sms_count(row_obj)
     classified_decision = _sms_build_decision(row_obj, inbound_text, received_at)

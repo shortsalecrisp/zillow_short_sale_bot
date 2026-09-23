@@ -1536,6 +1536,81 @@ def test_sms_unquoted_doubled_liked_reaction_is_suppressed_without_hiding_novel_
     ) is False
 
 
+def test_sms_self_duplicate_reaction_without_last_outbound_is_suppressed(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][11] = ""
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    inbound = "Loved Yes I can do that. Ill update the invite to Yes I can do that. Ill update the invite"
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": inbound,
+            "message_id": "reaction-self-duplicate-1",
+        },
+    )
+    body = response.json()
+    assert body["reaction"] is True
+    assert body["should_reply"] is False
+    assert module._sms_is_self_duplicate_reaction_artifact(inbound) is True
+    assert module._sms_is_self_duplicate_reaction_artifact(
+        "Loved Yes I can do that to Please call me tomorrow"
+    ) is False
+    assert sender.calls == []
+
+
+def test_sms_post_opt_out_interest_alerts_once_without_reply_or_reopening(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][9] = "STOP"
+    sheet.rows[2][10] = "R"
+    sheet.rows[2][12] = "Opt-out / stop request"
+    sheet.rows[2][13] = "done"
+    sheet.rows[2][15] = "closed_no_interest"
+    sheet.rows[2][16] = "FALSE"
+    sheet.rows[2][19] = "TRUE"
+    client = TestClient(module.app)
+    first = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "Shoot me the info and I'll review",
+            "message_id": "post-opt-out-interest-1",
+        },
+    ).json()
+    assert first["should_reply"] is False
+    assert first["handoff_needed"] is True
+    assert first["handoff_type"] == "POST-OPT-OUT RENEWED INTEREST"
+    assert sheet.rows[2][10] == "R"
+    assert sheet.rows[2][13] == "done"
+    assert sheet.rows[2][15] == "closed_no_interest"
+    assert sheet.rows[2][19] == "TRUE"
+    second = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "Please send the information",
+            "message_id": "post-opt-out-interest-2",
+        },
+    ).json()
+    assert second["should_reply"] is False
+    assert second["handoff_needed"] is False
+    assert sender.calls == []
+
+
 def test_sms_compact_same_day_callback_is_persisted_before_reply_cap(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
