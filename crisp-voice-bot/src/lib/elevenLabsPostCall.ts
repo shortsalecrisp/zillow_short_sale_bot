@@ -144,7 +144,7 @@ export function transcriptForEmail(conversation: ElevenLabsConversation, assista
 
 function assistantMessages(conversation: ElevenLabsConversation): string[] {
   return (conversation.transcript ?? [])
-    .filter((item) => item.role === "assistant" && typeof item.message === "string" && item.message.trim() !== "")
+    .filter((item) => (item.role === "assistant" || item.role === "agent") && typeof item.message === "string" && item.message.trim() !== "")
     .map((item) => item.message!.trim());
 }
 
@@ -269,6 +269,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
 
   if (callResult === "voicemail_reached") {
     return "Voicemail reached - message not confirmed";
+  }
+
+  if (callResult === "voicemail_reached_final_attempt") {
+    return "Voicemail reached on final attempt - message not confirmed";
   }
 
   if (callResult === "no_answer_first_attempt") {
@@ -778,7 +782,8 @@ export function shouldTreatAsAlreadyHasShortSaleHelp(conversation: ElevenLabsCon
     ) ||
     /\b(?:negotiator|attorney|lawyer|specialist)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text) ||
     /\b(?:already\s+)?(?:have|has|got)\s+(?:someone|somebody)\s+handling\b/.test(text) ||
-    /\b(?:someone|somebody)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text)
+    /\b(?:someone|somebody)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text) ||
+    /\b(?:i|we)\s+(?:already\s+)?have\s+(?:that|the)\s+(?:short sale\s+)?service\s+(?:taken care of|covered|handled)\b/.test(text)
   );
 }
 
@@ -1071,13 +1076,13 @@ export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): bo
 export function getVoicemailOrNoAnswerCallResult(
   conversation: ElevenLabsConversation,
   callAttemptNumber: number,
-): "voicemail_left" | "voicemail_reached" | "no_answer_first_attempt" | "no_response_second_attempt" | undefined {
+): "voicemail_left" | "voicemail_reached" | "voicemail_reached_final_attempt" | "no_answer_first_attempt" | "no_response_second_attempt" | undefined {
   const voicemailDetected = shouldTreatAsVoicemail(conversation);
   if (!voicemailDetected && !shouldTreatAsNoAnswer(conversation)) {
     return undefined;
   }
   if (callAttemptNumber > 1) {
-    return "no_response_second_attempt";
+    return voicemailDetected ? "voicemail_reached_final_attempt" : "no_response_second_attempt";
   }
   if (!voicemailDetected) {
     return "no_answer_first_attempt";
@@ -1302,7 +1307,7 @@ function hasLiveHumanAssistantExchange(conversation: ElevenLabsConversation): bo
     }
     return messages.slice(index + 1).some(
       (next) =>
-        next.role === "assistant" &&
+        (next.role === "assistant" || next.role === "agent") &&
         typeof next.message === "string" &&
         hasMeaningfulSpokenContent(next.message),
     );

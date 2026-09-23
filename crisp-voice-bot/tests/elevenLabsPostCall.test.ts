@@ -528,9 +528,44 @@ test("full-mailbox recording is voicemail, not a human hangup", async () => {
   };
   assert.equal(shouldTreatAsVoicemail(conversation), true);
   assert.equal(getVoicemailOrNoAnswerCallResult(conversation, 1), "voicemail_reached");
+  assert.equal(getVoicemailOrNoAnswerCallResult(conversation, 2), "voicemail_reached_final_attempt");
   assert.equal(buildVoiceResponseStatus("voicemail_reached"), "Voicemail reached - message not confirmed");
+  assert.equal(
+    buildVoiceResponseStatus("voicemail_reached_final_attempt"),
+    "Voicemail reached on final attempt - message not confirmed",
+  );
   assert.equal(shouldTreatAsAgentHungUp(conversation), false);
   assert.equal(shouldTreatAsAgentUnavailable(conversation), false);
+});
+
+test("live greeting followed by provider agent turn is a human early hangup, not no response", async () => {
+  const { getVoicemailOrNoAnswerCallResult, shouldTreatAsAgentHungUp } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    has_user_audio: true,
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "Hello?" },
+      { role: "agent", message: "Hi, this is Finn with Crisp Short Sales. Is this Rachael?" },
+    ],
+  };
+  assert.equal(getVoicemailOrNoAnswerCallResult(conversation, 2), undefined);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), true);
+});
+
+test("explicit current service coverage outranks generic hangup", async () => {
+  const { shouldTreatAsAlreadyHasShortSaleHelp, shouldTreatAsAgentHungUp } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    has_user_audio: true,
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "I already have that service taken care of." },
+      { role: "agent", message: "Understood. Thanks for letting me know." },
+    ],
+  };
+  assert.equal(shouldTreatAsAlreadyHasShortSaleHelp(conversation), true);
+  assert.equal(shouldTreatAsAgentHungUp(conversation), false);
 });
 
 test("AI screener hold and unavailable message outrank generic hangup", async () => {
