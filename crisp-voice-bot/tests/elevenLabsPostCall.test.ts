@@ -604,7 +604,17 @@ test("explicit assistance refusal and opening no-thanks outrank generic hangup",
       { role: "user", message: "No, thanks." },
     ],
   };
-  for (const conversation of [lonnie, kathie]) {
+  const kelly = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "That would be me." },
+      { role: "assistant", message: "Are there any specific lender requirements or documents you need help coordinating for this short sale at this time?" },
+      { role: "user", message: "No." },
+      { role: "user", message: "Um, no." },
+    ],
+  };
+  for (const conversation of [lonnie, kathie, kelly]) {
     assert.equal(shouldTreatAsNotInterested(conversation), true);
     assert.equal(shouldTreatAsAgentHungUp(conversation), false);
   }
@@ -1140,6 +1150,19 @@ for (const scenario of [
       { role: "user", message: "..." },
       { role: "user", message: "Hello?" },
       { role: "assistant", message: "Hi, this is Maya with Crisp Short Sales. I was calling about the listing at..." },
+    ],
+  },
+  {
+    name: "kelly_context_bound_help_decline",
+    expectedCallResult: "answered_not_interested",
+    expectedResponseStatus: "Not interested",
+    terminationReason: "Client disconnected: 1000",
+    summary: "Kelly identified herself as the bank point of contact and declined help coordinating lender requirements or documents.",
+    transcript: [
+      { role: "user", message: "That would be me." },
+      { role: "assistant", message: "Are there any specific lender requirements or documents you need help coordinating for this short sale at this time?" },
+      { role: "user", message: "No." },
+      { role: "user", message: "Um, no." },
     ],
   },
   {

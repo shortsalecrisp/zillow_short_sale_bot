@@ -52,6 +52,9 @@ test("post-intro handles an answer to the new opener without repeating the pitch
   assert.match(s, /A clear yes permits one short qualification question, not a transfer or callback/);
   assert.match(s, /A clear no to the quick-question permission is a scoped decline of the question, not a future-contact opt-out/);
   assert.match(s, /For a neutral acknowledgment or an unclear answer, ask at most once/);
+  assert.match(s, /You keep the listing and client relationship; Crisp can take the lender paperwork and follow-up off your plate/);
+  assert.match(s, /Would that help on this file\?/);
+  assert.match(s, /Do not ask another diagnostic question or repeat this value statement/);
 });
 test("a question keeps the entire response answer-only even after it is answered", () => {
   const s = section("Shared turn priority");

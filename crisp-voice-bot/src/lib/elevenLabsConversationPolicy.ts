@@ -1,4 +1,4 @@
-export const VOICE_CONVERSATION_POLICY_VERSION = "permission-screener-20260918";
+export const VOICE_CONVERSATION_POLICY_VERSION = "permission-screener-self-handler-20260923";
 
 type AgentPolicy = {
   conversation_config: {
