@@ -37,14 +37,15 @@ export function findElevenLabsVoiceVariant(key: string): ElevenLabsVoiceVariant 
 
 export function getElevenLabsVoiceExperimentStatus() {
   const variants = buildVoiceVariants();
+  const activeVariants = config.elevenLabs.voiceAbTestEnabled ? variants : variants.slice(0, 1);
 
   return {
     enabled: config.elevenLabs.voiceAbTestEnabled,
     selectionRule: config.elevenLabs.voiceAbTestEnabled
       ? "abs(rowNumber) % voiceCount; opener rotates independently by floor(abs(rowNumber) % 4 / voiceCount)"
       : "fixed_primary_voice",
-    publicAssistantName: "Maya/Finn",
-    variants: variants.map((variant) => ({
+    publicAssistantName: config.elevenLabs.voiceAbTestEnabled ? "Maya/Finn" : "Maya",
+    variants: activeVariants.map((variant) => ({
       key: variant.key,
       voiceName: variant.voiceName,
       assistantName: variant.assistantName,

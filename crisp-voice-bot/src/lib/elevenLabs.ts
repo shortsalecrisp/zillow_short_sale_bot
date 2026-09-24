@@ -346,6 +346,10 @@ export function getStreetAddress(listingAddress: string): string {
 }
 
 function resolveElevenLabsVoiceVariant(metadata: CallMetadata): ElevenLabsVoiceVariant {
+  if (!config.elevenLabs.voiceAbTestEnabled) {
+    return selectElevenLabsVoiceVariant({ rowNumber: metadata.rowNumber });
+  }
+
   if (metadata.voiceVariant && metadata.assistantName && metadata.voiceName && metadata.voiceId) {
     const configuredVariant = findElevenLabsVoiceVariant(metadata.voiceVariant);
 
