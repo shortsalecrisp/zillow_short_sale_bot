@@ -28,6 +28,7 @@ import {
   buildElevenLabsContactOutcomeResponse,
 } from "../lib/elevenLabsRequestResponse";
 import { logger } from "../lib/logger";
+import { requestInfoEmailApproval } from "../lib/requestInfoEmailApproval";
 import { sendCallbackEmail } from "../lib/sendCallbackEmail";
 import { postSheetUpdate } from "../lib/sheetUpdateClient";
 import { createElevenLabsTerminalRouter } from "./elevenLabsTerminal";
@@ -576,21 +577,17 @@ router.post("/tool/information-requested", async (req: Request, res: Response, n
       });
     } else {
       queueElevenLabsBackgroundTask(
-        "ElevenLabs information request email",
+        "ElevenLabs information email approval",
         {
           rowNumber: payload.rowNumber,
           agentName: payload.agentName,
         },
         () =>
-          sendCallbackEmail({
-            agentName: payload.agentName,
+          requestInfoEmailApproval({
+            rowNumber: payload.rowNumber,
             phone: payload.phone,
             email: payload.email,
-            listingAddress: payload.listingAddress,
-            rowNumber: payload.rowNumber,
-            subject: `NEW LEAD 🔥 - INFORMATION REQUEST - ${payload.agentName}`,
-            handoffType: "Information Request",
-            conversationDescription: payload.conversationSummary,
+            conversationSummary: payload.conversationSummary,
           }),
       );
     }

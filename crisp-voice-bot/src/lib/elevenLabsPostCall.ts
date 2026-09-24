@@ -15,6 +15,7 @@ import { buildVoicePerformanceLog } from "./elevenLabsPerformanceLog";
 import { hasClearLiveTransferConsent, isMisfiredLiveTransferRequest } from "./elevenLabsTransferConsent";
 import { looksLikeCallEndingRequest, looksLikeDoNotCall } from "./elevenLabsDoNotCall";
 import { isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
+import { requestInfoEmailApproval } from "./requestInfoEmailApproval";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
 import type { CallMetadata, SheetUpdateRequest } from "../types";
@@ -152,6 +153,41 @@ function hasToolCall(conversation: ElevenLabsConversation, toolName: string): bo
   return (conversation.transcript ?? []).some((item) =>
     (item.tool_calls ?? []).some((toolCall) => toolCall.tool_name === toolName || toolCall.name === toolName),
   );
+}
+
+function readToolCallParameters(toolCall: Record<string, unknown>): Record<string, unknown> {
+  for (const key of ["params_as_json", "parameters", "arguments", "params"]) {
+    const value = toolCall[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    if (typeof value === "string" && value.trim()) {
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Ignore malformed provider metadata and fall back to the sheet email.
+      }
+    }
+  }
+  return {};
+}
+
+export function extractInformationRequestEmail(conversation: ElevenLabsConversation): string {
+  for (const item of conversation.transcript ?? []) {
+    for (const toolCall of item.tool_calls ?? []) {
+      if (toolCall.tool_name !== "information_requested" && toolCall.name !== "information_requested") {
+        continue;
+      }
+      const email = String(readToolCallParameters(toolCall).email ?? "").trim().toLowerCase();
+      if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return email;
+      }
+    }
+  }
+  return "";
 }
 
 function hasSuccessfulTransfer(conversation: ElevenLabsConversation): boolean {
@@ -2125,21 +2161,35 @@ async function processPostCallOutcomeForConversation(
       voiceNotes: buildPerformanceNotes(outcome),
     });
 
-    await sendCallbackEmail({
-      agentName: metadata.fullName,
-      phone: metadata.dialedPhone,
-      email: metadata.email,
-      listingAddress: metadata.listingAddress,
-      rowNumber: metadata.rowNumber,
-      subject: `NEW LEAD 🔥 - INFORMATION REQUEST - ${metadata.fullName}`,
-      handoffType: "Information Request",
-      action: "Send the requested information to this lead",
-      conversationDescription: summary,
-      conversationTranscript: fullTranscript,
-      conversationId,
-      details:
-        "The information-request tool fired during the live call. This post-call email includes the completed transcript and playback link.",
-    });
+    try {
+      await requestInfoEmailApproval({
+        rowNumber: metadata.rowNumber,
+        phone: metadata.dialedPhone,
+        email: extractInformationRequestEmail(conversation) || metadata.email,
+        conversationId,
+        conversationSummary: summary,
+        conversationTranscript: fullTranscript,
+      });
+    } catch (error) {
+      logger.error("Information email approval could not be created; sending manual-action alert", {
+        conversationId,
+        rowNumber: metadata.rowNumber,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      await sendCallbackEmail({
+        agentName: metadata.fullName,
+        phone: metadata.dialedPhone,
+        email: extractInformationRequestEmail(conversation) || metadata.email,
+        listingAddress: metadata.listingAddress,
+        rowNumber: metadata.rowNumber,
+        subject: `ACTION REQUIRED - INFORMATION EMAIL APPROVAL FAILED - ${metadata.fullName}`,
+        handoffType: "Information Request",
+        conversationDescription: summary,
+        conversationTranscript: fullTranscript,
+        conversationId,
+        details: "The approval draft could not be created automatically. Review this request and send the information manually.",
+      });
+    }
 
     await sendTranscriptEmailIfEnabled({
       conversationId,
