@@ -226,6 +226,39 @@ test('unquoted doubled reaction is suppressed only for exact outbound copies', (
   assert.equal(h.evaluate(`isSmsReactionToLastOutbound_(${JSON.stringify(`Liked ${outbound} to Can you call me tomorrow?`)}, ${JSON.stringify({last_outbound_text: outbound})})`), false);
 });
 
+test('leading to plus the exact latest outbound is a silent transport artifact', () => {
+  const outbound = "I don't provide general transaction coordination. I handle the lender-side short-sale paperwork, calls, follow-up, and negotiations through approval.";
+  const h = smsHarness({last_outbound_text: outbound});
+  const r = h.incoming(`to ${outbound}`);
+  assert.equal(r.should_reply, false);
+  assert.equal(r.handoff_needed, false);
+  assert.equal(h.effects.length, 0);
+  assert.equal(h.evaluate(`isSmsReactionToLastOutbound_(${JSON.stringify(`to ${outbound}`)}, ${JSON.stringify({last_outbound_text: outbound})})`), true);
+  assert.equal(h.evaluate(`isSmsReactionToLastOutbound_(${JSON.stringify(`to ${outbound} Please call me`)}, ${JSON.stringify({last_outbound_text: outbound})})`), false);
+});
+
+test('lender or agent questions get one plain-English bank-side role explanation', () => {
+  for (const message of ['Are you a lender?', 'Are you a lender or an agent?', 'Are you a real estate agent?']) {
+    const {r} = answer(message);
+    assert.equal(r.should_reply, true);
+    assert.equal(r.handoff_needed, false);
+    assert.match(r.reply_text, /neither the lender nor the listing agent/);
+    assert.match(r.reply_text, /third-party short-sale negotiator/);
+    assert.match(r.reply_text, /work with the bank/);
+    assert.match(r.reply_text, /buyer pays my fee at closing/);
+  }
+});
+
+test('explicit confusion after the old role answer is rephrased instead of repeated', () => {
+  const {r} = answer('Not sure I understand', {
+    last_outbound_text: "No, I'm not a lender. I handle the lender-side short-sale work: the paperwork, calls, follow-up, and negotiations through approval and closing."
+  });
+  assert.equal(r.should_reply, true);
+  assert.equal(r.handoff_needed, false);
+  assert.match(r.reply_text, /neither the lender nor the listing agent/);
+  assert.match(r.reply_text, /you keep the listing and client relationship/);
+});
+
 test('self-duplicated reaction is silent under human takeover without last outbound evidence', () => {
   const artifact = 'Loved Yes I can do that. Ill update the invite to Yes I can do that. Ill update the invite';
   const h = smsHarness({

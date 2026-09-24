@@ -2461,6 +2461,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
     timeline: isShortSaleTimelineQuestionSignal_(t),
     number: isCurrentTextingNumberQuestionSignal_(t),
     credential: isCredentialQuestionSignal_(t),
+    role_identity: isLenderOrAgentRoleQuestionSignal_(t),
     negotiator: isNegotiatorRoleQuestionSignal_(t),
     buyer_provision: isBuyerProvisionQuestionSignal_(t),
     language: isSpanishLanguageSignal_(t),
@@ -2585,6 +2586,11 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
       reason: "Answered attorney or legal-advice question"
     };
+    if (flags.role_identity) return {
+      matched: true, reply_text: buildPlainRoleIdentityReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Explained Crisp's lender, agent, and bank-side role in plain language"
+    };
     if (flags.negotiator) return {
       matched: true, reply_text: buildNegotiatorRoleQuestionReply_(), lead_status: leadStatus,
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
@@ -2624,6 +2630,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
   if (flags.contact_info) answers.push("Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.");
   if (flags.number) answers.push("Yes, this number is great - call or text anytime.");
   if (flags.credential) answers.push("I'm not an attorney; I handle the lender-side short-sale process and negotiations.");
+  if (flags.role_identity) answers.push(buildPlainRoleIdentityReply_());
   if (flags.negotiator) answers.push("Yes, essentially; I handle the short-sale process and lender negotiations through approval.");
   if (flags.buyer_provision) answers.push(buildBuyerProvisionClarificationReply_());
   if (flags.language) answers.push("I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.");
@@ -2740,6 +2747,19 @@ function applyFastRules_(text, rowObj, receivedAt) {
       needs_review: false,
       block_reply: false,
       reason: "Clarified that Crisp's lender-side role is separate from the title company"
+    };
+  }
+
+  if (isRoleIdentityClarificationFollowup_(t, rowObj)) {
+    return {
+      matched: true,
+      reply_text: buildPlainRoleIdentityReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Rephrased Crisp's lender and agent role after explicit confusion"
     };
   }
 
@@ -3415,6 +3435,31 @@ function isCompanyIdentityQuestionSignal_(text) {
     /\bwith what company\b/
   ];
   return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function isLenderOrAgentRoleQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+  return /\b(?:are|r)\s+(?:you|u)\s+(?:an?\s+|the\s+)?(?:lender|loan officer|mortgage broker|mortgage company|listing agent|real estate agent|realtor)\b/.test(t) ||
+    (/\b(?:lender|agent)\s+or\s+(?:agent|lender)\b/.test(t) && /\b(?:are|r)\s+(?:you|u)\b/.test(t));
+}
+
+function buildPlainRoleIdentityReply_() {
+  return "I'm neither the lender nor the listing agent. Crisp is a third-party short-sale negotiator: I work with the bank on the lender paperwork, calls, and negotiations while you keep the listing and client relationship. The buyer pays my fee at closing. Are you looking for help with the bank side of this file?";
+}
+
+function lastOutboundWasRoleIdentityExplanation_(rowObj) {
+  const t = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || "").toLowerCase());
+  if (!t) return false;
+  return t.indexOf("not a lender") !== -1 ||
+    t.indexOf("neither the lender nor the listing agent") !== -1 ||
+    (t.indexOf("lender-side") !== -1 && (t.indexOf("listing agent") !== -1 || t.indexOf("short-sale") !== -1));
+}
+
+function isRoleIdentityClarificationFollowup_(text, rowObj) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!lastOutboundWasRoleIdentityExplanation_(rowObj)) return false;
+  return /^(?:i(?:'m| am)?\s+)?(?:not sure i understand|i (?:still )?(?:do not|don't|dont) understand|still confused|what do you mean|can you explain that)[.!?]*$/.test(t);
 }
 
 function buildCompanyIdentityReply_() {
