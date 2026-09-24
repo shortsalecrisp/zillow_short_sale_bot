@@ -5860,6 +5860,13 @@ def _sms_is_company_identity_question(value: Any) -> bool:
 
 
 def _sms_is_closed_marketing_conversation(row_obj: Dict[str, str]) -> bool:
+    if (
+        str(row_obj.get("ai_state") or "").lower() == "active"
+        and str(row_obj.get("conversation_summary") or "").startswith(
+            "Agent is handling the short sale themselves; gave one"
+        )
+    ):
+        return False
     return (
         str(row_obj.get("ai_state") or "").lower() == "done"
         or str(row_obj.get("call_booking_status") or "").lower() == "closed_no_interest"
@@ -5994,8 +6001,9 @@ def _sms_has_decline_or_not_short_sale_clause(value: Any) -> bool:
 def _sms_is_self_handling_opportunity(value: Any) -> bool:
     text = _sms_rejection_text(value).replace("my self", "myself")
     self_handling = bool(
-        re.search(r"\b(?:handling|handle) (?:that part |it )?myself\b", text)
-        or re.search(r"\b(?:doing|do) it myself\b", text)
+        re.search(r"\b(?:handling|handle) (?:that part |it |this |the (?:bank|lender) side )?(?:myself|ourselves)\b", text)
+        or re.search(r"\b(?:doing|do) (?:it |this )?(?:myself|ourselves)\b", text)
+        or re.search(r"\b(?:handle|handling) (?:short sales?|these files) (?:myself|ourselves)\b", text)
         or re.search(r"\b(?:trying|attempting) to handle it\b", text)
         or re.search(r"\b(?:communicating|working|dealing|talking) (?:directly )?with (?:the )?(?:bank|lender)\b", text)
     )
@@ -6833,8 +6841,9 @@ def _sms_fast_decision(
         return _sms_decision(
             reply_text=SMS_SELF_HANDLING_REPLY,
             response_id="self_handling_value",
-            lead_status="Y",
-            reason="Agent is handling the short sale themselves; gave one brief value response",
+            lead_status="R",
+            call_booking_status="closed_no_interest",
+            reason="Agent is handling the short sale themselves; gave one brief value response without expressed interest",
         )
 
     if _sms_is_already_approved_closeout(t):

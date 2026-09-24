@@ -96,8 +96,37 @@ def test_neutral_self_handling_is_exact_one_value_reply(chatbot):
     assert result["should_reply"] is True
     assert result["reply_text"] == SELF_REPLY
     assert result["response_id"] == "self_handling_value"
+    assert result["lead_status"] == "R"
+    assert result["conversation_done"] is False
+    assert chatbot.row()["mailshake_status"] == "R"
+    assert chatbot.row()["ai_state"] == "active"
+    assert chatbot.row()["call_booking_status"] == "closed_no_interest"
     assert chatbot.row()["human_override"] == "FALSE"
     assert all(entry["role"] != "assistant" for entry in chatbot.history())
+
+
+@pytest.mark.parametrize("message", [
+    "Handling it myself",
+    "I am handling this myself",
+    "We handle short sales ourselves",
+    "I handle the lender side myself",
+])
+def test_self_handling_variants_remain_r_until_agent_shows_interest(chatbot, message):
+    result = chatbot.receive(message)
+    assert result["reply_text"] == SELF_REPLY
+    assert result["lead_status"] == "R"
+    assert chatbot.row()["mailshake_status"] == "R"
+
+
+def test_fee_question_after_self_handling_promotes_to_y(chatbot):
+    first = chatbot.receive("Handling it myself")
+    chatbot.deliver(first["reply_text"])
+    second = chatbot.receive("What is your fee?")
+    assert second["should_reply"] is True
+    assert second["reply_text"] == FEE_REPLY
+    assert second["lead_status"] == "Y"
+    assert chatbot.row()["mailshake_status"] == "Y"
+    assert chatbot.row()["call_booking_status"] == "interested_no_call"
 
 
 @pytest.mark.parametrize("legacy", [False, True])
