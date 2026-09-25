@@ -139,13 +139,20 @@ test("genuine service rejection can end promptly but questions and alternatives 
 });
 test("current-call ending and future opt-out retain distinct recording markers", () => {
   const s = section("Contact preferences and endings");
-  assert.match(s, /standalone "STOP" has priority over every pitch and action/);
+  assert.match(s, /standalone "STOP," or "I already asked you not to contact/);
+  assert.match(s, /has priority over every pitch and action/);
+  assert.match(s, /I already asked you not to contact\/reach out\/call\/text\/email me/);
   assert.match(s, /remove me from your list/);
   assert.match(s, /DO NOT CALL: caller explicitly requested no further calls\./);
   assert.match(s, /CALL ENDED BY REQUEST: caller asked to end the current call only\./);
   assert.match(s, /Do not erase earlier genuine interest or a requested callback unless revoked/);
   assert.match(s, /Ending is not permission for another automated call/);
   assert.doesNotMatch(s, /We won't call again/);
+});
+test("AI suspicion with prior no-contact objection closes without repitching", () => {
+  assert.match(section("Answer library"), /already asked Crisp\/Yoni\/you not to contact them/);
+  assert.match(section("Skepticism and human-only requests"), /already asked not to be contacted/);
+  assert.match(section("Skepticism and human-only requests"), /Do not ask another qualifying question, offer Yoni, or re-explain the service/);
 });
 test("third-party restriction does not become caller opt-out and mixed opt-out is protected", () => {
   const s = section("Contact preferences and endings");

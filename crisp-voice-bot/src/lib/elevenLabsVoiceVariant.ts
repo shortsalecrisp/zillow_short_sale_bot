@@ -4,14 +4,13 @@ export type ElevenLabsVoiceVariantKey = "eryn" | "finch";
 
 export type ElevenLabsVoiceVariant = {
   key: ElevenLabsVoiceVariantKey;
-  assistantName: "Maya" | "Finn";
-  voiceName: "Eryn" | "Finch";
+  assistantName: "Maya";
+  voiceName: "Eryn";
   voiceId: string;
   ttsSpeed?: number;
 };
 
 const ERYN_ASSISTANT_NAME = "Maya";
-const FINCH_ASSISTANT_NAME = "Finn";
 
 function buildVoiceVariants(): ElevenLabsVoiceVariant[] {
   return [
@@ -20,13 +19,6 @@ function buildVoiceVariants(): ElevenLabsVoiceVariant[] {
       assistantName: ERYN_ASSISTANT_NAME,
       voiceName: "Eryn",
       voiceId: config.elevenLabs.voiceId ?? config.elevenLabs.erynVoiceId,
-    },
-    {
-      key: "finch",
-      assistantName: FINCH_ASSISTANT_NAME,
-      voiceName: "Finch",
-      voiceId: config.elevenLabs.finchVoiceId,
-      ttsSpeed: config.elevenLabs.finchTtsSpeed,
     },
   ];
 }
@@ -37,15 +29,14 @@ export function findElevenLabsVoiceVariant(key: string): ElevenLabsVoiceVariant 
 
 export function getElevenLabsVoiceExperimentStatus() {
   const variants = buildVoiceVariants();
-  const activeVariants = config.elevenLabs.voiceAbTestEnabled ? variants : variants.slice(0, 1);
 
   return {
     enabled: config.elevenLabs.voiceAbTestEnabled,
     selectionRule: config.elevenLabs.voiceAbTestEnabled
-      ? "abs(rowNumber) % voiceCount; opener rotates independently by floor(abs(rowNumber) % 4 / voiceCount)"
+      ? "fixed_primary_voice; Finch removed by owner approval"
       : "fixed_primary_voice",
-    publicAssistantName: config.elevenLabs.voiceAbTestEnabled ? "Maya/Finn" : "Maya",
-    variants: activeVariants.map((variant) => ({
+    publicAssistantName: "Maya",
+    variants: variants.map((variant) => ({
       key: variant.key,
       voiceName: variant.voiceName,
       assistantName: variant.assistantName,
@@ -58,9 +49,6 @@ export function getElevenLabsVoiceExperimentStatus() {
 export function selectElevenLabsVoiceVariant(input: { rowNumber: number }): ElevenLabsVoiceVariant {
   const variants = buildVoiceVariants();
 
-  if (!config.elevenLabs.voiceAbTestEnabled) {
-    return variants[0];
-  }
-
-  return variants[Math.abs(input.rowNumber) % variants.length];
+  void input;
+  return variants[0];
 }

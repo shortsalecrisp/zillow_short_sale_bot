@@ -346,18 +346,17 @@ export function getStreetAddress(listingAddress: string): string {
 }
 
 function resolveElevenLabsVoiceVariant(metadata: CallMetadata): ElevenLabsVoiceVariant {
-  if (!config.elevenLabs.voiceAbTestEnabled) {
-    return selectElevenLabsVoiceVariant({ rowNumber: metadata.rowNumber });
-  }
-
   if (metadata.voiceVariant && metadata.assistantName && metadata.voiceName && metadata.voiceId) {
     const configuredVariant = findElevenLabsVoiceVariant(metadata.voiceVariant);
+    if (!configuredVariant) {
+      return selectElevenLabsVoiceVariant({ rowNumber: metadata.rowNumber });
+    }
 
     return {
-      key: metadata.voiceVariant as ElevenLabsVoiceVariant["key"],
-      assistantName: metadata.assistantName as ElevenLabsVoiceVariant["assistantName"],
-      voiceName: metadata.voiceName as ElevenLabsVoiceVariant["voiceName"],
-      voiceId: metadata.voiceId,
+      key: configuredVariant.key,
+      assistantName: configuredVariant.assistantName,
+      voiceName: configuredVariant.voiceName,
+      voiceId: configuredVariant.voiceId,
       ttsSpeed: configuredVariant?.ttsSpeed,
     };
   }

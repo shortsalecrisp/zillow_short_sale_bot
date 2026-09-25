@@ -40,35 +40,17 @@ after(() => {
   assert.deepEqual(unexpectedRequests, []);
 });
 
-test("ElevenLabs calls rotate deterministically across Eryn and Finch by row", async () => {
+test("ElevenLabs calls stay on Eryn/Maya even when the old AB flag is enabled", async () => {
   const { selectElevenLabsVoiceVariant } = await import("../src/lib/elevenLabsVoiceVariant");
 
-  assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3480 }), {
-    key: "eryn",
-    assistantName: "Maya",
-    voiceName: "Eryn",
-    voiceId: "eryn-voice-id",
-  });
-  assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3481 }), {
-    key: "finch",
-    assistantName: "Finn",
-    voiceName: "Finch",
-    voiceId: "finch-voice-id",
-    ttsSpeed: 0.93,
-  });
-  assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3482 }), {
-    key: "eryn",
-    assistantName: "Maya",
-    voiceName: "Eryn",
-    voiceId: "eryn-voice-id",
-  });
-  assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber: 3483 }), {
-    key: "finch",
-    assistantName: "Finn",
-    voiceName: "Finch",
-    voiceId: "finch-voice-id",
-    ttsSpeed: 0.93,
-  });
+  for (const rowNumber of [3480, 3481, 3482, 3483]) {
+    assert.deepEqual(selectElevenLabsVoiceVariant({ rowNumber }), {
+      key: "eryn",
+      assistantName: "Maya",
+      voiceName: "Eryn",
+      voiceId: "eryn-voice-id",
+    });
+  }
 });
 
 test("ElevenLabs post-intro assignment preserves two deterministic plain-language variants", async () => {
@@ -106,7 +88,7 @@ test("ElevenLabs post-intro assignment preserves two deterministic plain-languag
   }
 });
 
-test("ElevenLabs outbound payload overrides the voice and assistant name per call", async () => {
+test("ElevenLabs outbound payload uses Eryn/Maya while preserving opener assignment", async () => {
   const { buildElevenLabsOutboundCallBody, INITIAL_OPENING_POLICY } = await import("../src/lib/elevenLabs");
   const { VOICE_CONVERSATION_POLICY_VERSION } = await import("../src/lib/elevenLabsConversationPolicy");
 
@@ -130,9 +112,9 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
     },
   });
 
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.assistantName, "Finn");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "finch");
-  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Finch");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.assistantName, "Maya");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceVariant, "eryn");
+  assert.equal(body.conversation_initiation_client_data.dynamic_variables.voiceName, "Eryn");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariant, "benefit_hook");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.openerVariantLabel, "Permission-first help check");
   assert.equal(body.conversation_initiation_client_data.dynamic_variables.initialOpeningPolicy, INITIAL_OPENING_POLICY);
@@ -148,23 +130,23 @@ test("ElevenLabs outbound payload overrides the voice and assistant name per cal
   );
   assert.equal(
     body.conversation_initiation_client_data.conversation_config_override.tts.voice_id,
-    "finch-voice-id",
+    "eryn-voice-id",
   );
-  assert.equal(body.conversation_initiation_client_data.conversation_config_override.tts.speed, 0.93);
+  assert.equal("speed" in body.conversation_initiation_client_data.conversation_config_override.tts, false);
   assert.match(
     body.conversation_initiation_client_data.dynamic_variables.voicemailMessage,
-    /^Hi, this is Finn with Crisp Short Sales/,
+    /^Hi, this is Maya with Crisp Short Sales/,
   );
 });
 
-test("voice and post-intro arms rotate independently in a 2x2 assignment", async () => {
+test("opener arms rotate while voice remains fixed to Eryn/Maya", async () => {
   const { buildElevenLabsOutboundCallBody } = await import("../src/lib/elevenLabs");
   const { VOICE_CONVERSATION_POLICY_VERSION } = await import("../src/lib/elevenLabsConversationPolicy");
-  for (const [rowNumber, voiceVariant, openerVariant] of [
-    [3480, "eryn", "direct_reason"],
-    [3481, "finch", "direct_reason"],
-    [3482, "eryn", "benefit_hook"],
-    [3483, "finch", "benefit_hook"],
+  for (const [rowNumber, openerVariant] of [
+    [3480, "direct_reason"],
+    [3481, "direct_reason"],
+    [3482, "benefit_hook"],
+    [3483, "benefit_hook"],
   ] as const) {
     const body = buildElevenLabsOutboundCallBody({
       agentId: "agent_syntheticmeasurement", agentPhoneNumberId: "phone_syntheticmeasurement", to: "+12025550123",
@@ -173,7 +155,8 @@ test("voice and post-intro arms rotate independently in a 2x2 assignment", async
         scheduledWindow: "late_morning", agentTimeZone: "America/New_York" },
     });
     const variables = body.conversation_initiation_client_data.dynamic_variables;
-    assert.equal(variables.voiceVariant, voiceVariant);
+    assert.equal(variables.voiceVariant, "eryn");
+    assert.equal(variables.assistantName, "Maya");
     assert.equal(variables.openerVariant, openerVariant);
     assert.equal(variables.initialOpeningPolicy, "listen_first_uniform_v1");
     assert.equal(variables.declaredConversationPolicyVersion, VOICE_CONVERSATION_POLICY_VERSION);
@@ -208,7 +191,7 @@ test("new-call declarations are captured with outbound metadata without mutating
       assert.equal(value.initialOpeningPolicy, "listen_first_uniform_v1");
       assert.equal(value.declaredConversationPolicyVersion, VOICE_CONVERSATION_POLICY_VERSION);
       assert.equal(value.openerVariant, "benefit_hook");
-      assert.equal(value.voiceVariant, "finch");
+      assert.equal(value.voiceVariant, "eryn");
       assert.equal(value.scheduledWindow, "late_morning");
       assert.equal(value.agentTimeZone, "America/New_York");
       assert.equal("providerIdentity" in value, false);

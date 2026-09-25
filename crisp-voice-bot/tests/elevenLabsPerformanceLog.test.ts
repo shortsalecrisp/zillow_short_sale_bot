@@ -113,7 +113,7 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
   assert.match(parsed.codexInstructions, /scheduledWindow by agent local time bucket/i);
   assert.match(parsed.codexInstructions, /openerVariant/i);
   assert.match(parsed.codexInstructions, /hangupBeforeReason/i);
-  assert.match(parsed.codexInstructions, /rotates Eryn and Finch only/i);
+  assert.match(parsed.codexInstructions, /Current calls under eryn-self-handler-ai-optout-20260925 should show Eryn\/Maya only/i);
   assert.match(parsed.codexInstructions, /previous single-voice Emmy calls/i);
   assert.match(parsed.codexInstructions, /Pro prove-it cohort/i);
   assert.match(parsed.codexInstructions, /transcript\/playback-verified handoff-ready leads/i);
@@ -122,7 +122,8 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
   assert.match(parsed.codexInstructions, /post-intro continuation assignment, not proof of delivery/);
   assert.match(parsed.codexInstructions, /initial introduction is uniform and permission-first/);
   assert.match(parsed.codexInstructions, /Before that policy, row-parity assignments paired Eryn\/direct_reason and Finch\/benefit_hook/);
-  assert.match(parsed.codexInstructions, /Starting with permission-screener-20260918, voiceVariant and openerVariant rotate independently/);
+  assert.match(parsed.codexInstructions, /Starting with permission-screener-20260918, voiceVariant and openerVariant rotated independently/);
+  assert.match(parsed.codexInstructions, /Starting with eryn-self-handler-ai-optout-20260925, voice is owner-fixed to Eryn\/Maya/);
   assert.match(parsed.abTestScope.analysisRule, /Missing or null historical values are unknown/);
   assert.match(parsed.abTestScope.analysisRule, /not proof of audible delivery/);
   assert.match(parsed.transcript, /Are you a chatbot/);

@@ -1,4 +1,4 @@
-export const VOICE_CONVERSATION_POLICY_VERSION = "permission-screener-self-handler-20260923";
+export const VOICE_CONVERSATION_POLICY_VERSION = "eryn-self-handler-ai-optout-20260925";
 
 type AgentPolicy = {
   conversation_config: {
