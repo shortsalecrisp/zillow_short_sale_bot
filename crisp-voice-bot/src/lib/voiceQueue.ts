@@ -167,6 +167,10 @@ function isVoiceBotRowActivelyCalling(rowValues: unknown[], now: Date): boolean 
   );
 }
 
+function getDueAtCallWindowName(dueAt: Date, agentTimeZone: string): string {
+  return getVoiceBotPreferredCallWindowName(dueAt, agentTimeZone);
+}
+
 function countActiveVoiceBotCalls(rows: Array<{ values: unknown[] }>, now: Date): number {
   return rows.filter((row) => isVoiceBotRowActivelyCalling(row.values, now)).length;
 }
@@ -250,9 +254,14 @@ export function getVoiceBotCallCandidateFromRowValues(
       return undefined;
     }
 
-    const dueAt = getNextVoiceBotFirstAttemptWindowStart(followupSentAt, agentTimeZone);
+    const dueAt = getNextVoiceBotFirstAttemptWindowStart(followupSentAt, agentTimeZone, rowNumber);
     const candidateDueAt = scheduledFor && scheduledFor > dueAt ? scheduledFor : dueAt;
     if (candidateDueAt < config.voiceQueue.minCandidateDueAt) {
+      return undefined;
+    }
+
+    const candidateWindow = getDueAtCallWindowName(candidateDueAt, agentTimeZone);
+    if (!candidateWindow || currentWindow !== candidateWindow) {
       return undefined;
     }
 
@@ -260,7 +269,7 @@ export function getVoiceBotCallCandidateFromRowValues(
       return undefined;
     }
 
-    return buildVoiceBotCandidate(rowNumber, rowValues, 1, candidateDueAt, currentWindow, agentTimeZone);
+    return buildVoiceBotCandidate(rowNumber, rowValues, 1, candidateDueAt, candidateWindow, agentTimeZone);
   }
 
   if (secondAttemptSentAt || !isRetryableVoiceBotResult(firstAttemptResult)) {
@@ -273,11 +282,16 @@ export function getVoiceBotCallCandidateFromRowValues(
     return undefined;
   }
 
+  const candidateWindow = getDueAtCallWindowName(candidateDueAt, agentTimeZone);
+  if (!candidateWindow || currentWindow !== candidateWindow) {
+    return undefined;
+  }
+
   if (now < nextAttemptAt) {
     return undefined;
   }
 
-  return buildVoiceBotCandidate(rowNumber, rowValues, 2, candidateDueAt, currentWindow, agentTimeZone);
+  return buildVoiceBotCandidate(rowNumber, rowValues, 2, candidateDueAt, candidateWindow, agentTimeZone);
 }
 
 export function getVoiceBotCallCandidatesFromRows(

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   appendVoiceNotesValue,
+  getVoiceBotFirstAttemptWindowName,
   getNextVoiceBotFirstAttemptWindowStart,
   getNextVoiceBotFollowupAttemptWindowStart,
   getVoiceBotPreferredCallWindowName,
@@ -27,14 +28,24 @@ test("replacement voice sheet helpers retry provider start failures once", () =>
   assert.equal(isRetryableVoiceBotResult("voicemail_reached_final_attempt"), false);
 });
 
-test("replacement voice sheet helpers preserve first and second attempt scheduling", () => {
+test("replacement voice sheet helpers bias first attempts toward afternoon and alternate second attempts", () => {
+  assert.equal(getVoiceBotFirstAttemptWindowName(6001), "mid_afternoon");
+  assert.equal(getVoiceBotFirstAttemptWindowName(6003), "morning_probe");
   assert.equal(
-    getNextVoiceBotFirstAttemptWindowStart(new Date("2026-05-04T16:00:00Z"), "America/New_York").toISOString(),
+    getNextVoiceBotFirstAttemptWindowStart(new Date("2026-05-04T16:00:00Z"), "America/New_York", 6001).toISOString(),
     "2026-05-04T18:00:00.000Z",
+  );
+  assert.equal(
+    getNextVoiceBotFirstAttemptWindowStart(new Date("2026-05-04T16:00:00Z"), "America/New_York", 6003).toISOString(),
+    "2026-05-05T13:00:00.000Z",
   );
   assert.equal(
     getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-04T20:45:00Z"), "America/New_York").toISOString(),
     "2026-05-05T13:00:00.000Z",
+  );
+  assert.equal(
+    getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-04T13:15:00Z"), "America/New_York").toISOString(),
+    "2026-05-05T18:00:00.000Z",
   );
 });
 

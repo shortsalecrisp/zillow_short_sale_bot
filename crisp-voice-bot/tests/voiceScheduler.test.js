@@ -481,44 +481,52 @@ test("terminal first-attempt failures clear stale retry markers in Apps Script",
   ]);
 });
 
-test("first voice call uses the next local time-test window after follow-up text", () => {
+test("first voice call uses deterministic 60/40 afternoon-biased timing assignment", () => {
   const beforeLateMorning = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T12:30:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T12:30:00Z"), "America/New_York", 6001).toISOString()',
   );
   const duringLateMorning = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T13:30:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T13:30:00Z"), "America/New_York", 6001).toISOString()',
   );
   const betweenMorningAndAfternoon = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T16:00:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T16:00:00Z"), "America/New_York", 6001).toISOString()',
   );
   const betweenAfternoonWindows = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T19:45:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T19:45:00Z"), "America/New_York", 6001).toISOString()',
   );
   const duringLateAfternoon = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T20:30:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T20:30:00Z"), "America/New_York", 6001).toISOString()',
   );
   const afterFridayWindow = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-08T22:15:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-08T22:15:00Z"), "America/New_York", 6001).toISOString()',
   );
   const beforeSaturdayWindow = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-09T18:00:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-09T18:00:00Z"), "America/New_York", 6001).toISOString()',
   );
   const duringSaturdayWindow = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-09T20:30:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-09T20:30:00Z"), "America/New_York", 6001).toISOString()',
   );
   const afterSundayWindow = runSchedulerExpression(
-    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-10T22:30:00Z"), "America/New_York").toISOString()',
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-10T22:30:00Z"), "America/New_York", 6001).toISOString()',
+  );
+  const morningAssignedBeforeMorning = runSchedulerExpression(
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T12:30:00Z"), "America/New_York", 6003).toISOString()',
+  );
+  const morningAssignedAfterMorning = runSchedulerExpression(
+    'getNextVoiceBotFirstAttemptWindowStart_(new Date("2026-05-04T16:00:00Z"), "America/New_York", 6003).toISOString()',
   );
 
-  assert.equal(beforeLateMorning, "2026-05-04T13:00:00.000Z");
-  assert.equal(duringLateMorning, "2026-05-04T13:30:00.000Z");
+  assert.equal(beforeLateMorning, "2026-05-04T18:00:00.000Z");
+  assert.equal(duringLateMorning, "2026-05-04T18:00:00.000Z");
   assert.equal(betweenMorningAndAfternoon, "2026-05-04T18:00:00.000Z");
   assert.equal(betweenAfternoonWindows, "2026-05-04T19:45:00.000Z");
-  assert.equal(duringLateAfternoon, "2026-05-05T13:00:00.000Z");
-  assert.equal(afterFridayWindow, "2026-05-09T13:00:00.000Z");
+  assert.equal(duringLateAfternoon, "2026-05-05T18:00:00.000Z");
+  assert.equal(afterFridayWindow, "2026-05-09T18:00:00.000Z");
   assert.equal(beforeSaturdayWindow, "2026-05-09T18:00:00.000Z");
-  assert.equal(duringSaturdayWindow, "2026-05-10T13:00:00.000Z");
-  assert.equal(afterSundayWindow, "2026-05-11T13:00:00.000Z");
+  assert.equal(duringSaturdayWindow, "2026-05-10T18:00:00.000Z");
+  assert.equal(afterSundayWindow, "2026-05-11T18:00:00.000Z");
+  assert.equal(morningAssignedBeforeMorning, "2026-05-04T13:00:00.000Z");
+  assert.equal(morningAssignedAfterMorning, "2026-05-05T13:00:00.000Z");
 });
 
 test("second voice call rotates into the next local time-test bucket on the next calendar day", () => {
@@ -574,10 +582,10 @@ test("queue scan can return multiple eligible rows in the same local call window
     });
   `));
 
-  assert.deepEqual(rowNumbers, [3366, 3367, 3369]);
+  assert.deepEqual(rowNumbers, [3366, 3367]);
 });
 
-test("queue scan resumes from today due times and skips rows already staged for Mailshake", () => {
+test("queue scan starts only rows due in the current assigned bucket and skips rows already staged for Mailshake", () => {
   const rowNumbers = Array.from(runSchedulerScript(`
     function row(first, last, state, followupSentAt, options) {
       const values = Array(42).fill("");
@@ -598,14 +606,15 @@ test("queue scan resumes from today due times and skips rows already staged for 
     getVoiceBotCallCandidatesFromRows_([
       { rowNumber: 5001, values: row("Old", "Followup", "NH", "2026-08-01T18:45:00Z") },
       { rowNumber: 5002, values: row("Mailshake", "Ready", "NJ", "2026-08-23T13:30:00Z", { mailshakeStatus: "N" }) },
-      { rowNumber: 5003, values: row("Fresh", "Today", "FL", "2026-08-23T13:30:00Z") },
-      { rowNumber: 5004, values: row("Due", "Today", "FL", "2026-08-22T22:45:00Z") },
+      { rowNumber: 5003, values: row("Morning", "Assigned", "FL", "2026-08-23T13:30:00Z") },
+      { rowNumber: 5005, values: row("Afternoon", "Fresh", "FL", "2026-08-23T13:30:00Z") },
+      { rowNumber: 5006, values: row("Afternoon", "Due", "FL", "2026-08-22T22:45:00Z") },
     ], new Date("2026-08-23T18:45:00Z"), 10).map(function(candidate) {
       return candidate.rowNumber;
     });
   `));
 
-  assert.deepEqual(rowNumbers, [5004, 5003]);
+  assert.deepEqual(rowNumbers, [5005, 5006]);
 });
 
 test("queue prioritizes overdue first calls before retries, then orders by due time", () => {
@@ -648,10 +657,10 @@ test("queue prioritizes overdue first calls before retries, then orders by due t
     }));
   `));
 
-  assert.deepEqual(candidates.map((candidate) => candidate.rowNumber), [6003, 6002, 6001]);
-  assert.deepEqual(candidates.map((candidate) => candidate.callAttemptNumber), [1, 1, 2]);
-  assert.equal(candidates[0].dueAt, "2026-08-24T13:00:00.000Z");
-  assert.equal(candidates[1].dueAt, "2026-08-24T13:30:00.000Z");
+  assert.deepEqual(candidates.map((candidate) => candidate.rowNumber), [6002, 6001]);
+  assert.deepEqual(candidates.map((candidate) => candidate.callAttemptNumber), [1, 2]);
+  assert.equal(candidates[0].dueAt, "2026-08-24T18:00:00.000Z");
+  assert.equal(candidates[1].dueAt, "2026-08-24T18:00:00.000Z");
 });
 
 test("queue retains a later explicit scheduled time as the candidate due time", () => {

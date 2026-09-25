@@ -80,6 +80,10 @@ const VOICE_BOT_WEEKEND_CALL_WINDOWS = [
     endMinutes: 16 * 60
   }
 ];
+const VOICE_BOT_MORNING_WINDOW_NAME = 'morning_probe';
+const VOICE_BOT_MID_AFTERNOON_WINDOW_NAME = 'mid_afternoon';
+const VOICE_BOT_FIRST_ATTEMPT_ROTATION_SIZE = 5;
+const VOICE_BOT_FIRST_ATTEMPT_MID_AFTERNOON_SLOTS = 3;
 
 const VOICE_BOT_STATE_TIMEZONES = {
   AL: 'America/Chicago',
@@ -681,6 +685,10 @@ function isVoiceBotAttemptActivelyCalling_(sentAtValue, resultValue, now) {
   return ageMinutes >= 0 && ageMinutes <= VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES;
 }
 
+function getDueAtCallWindowName_(dueAt, agentTimeZone) {
+  return getVoiceBotPreferredCallWindowName_(dueAt, agentTimeZone);
+}
+
 function getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates) {
   const candidates = [];
   const limit = Math.max(1, Number(maxCandidates) || 1);
@@ -742,9 +750,14 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
       return null;
     }
 
-    const dueAt = getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, agentTimeZone);
+    const dueAt = getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, agentTimeZone, rowNumber);
     const candidateDueAt = scheduledFor && scheduledFor > dueAt ? scheduledFor : dueAt;
     if (isBeforeVoiceBotMinQueueDueAt_(candidateDueAt)) {
+      return null;
+    }
+
+    const candidateWindow = getDueAtCallWindowName_(candidateDueAt, agentTimeZone);
+    if (!candidateWindow || currentWindow !== candidateWindow) {
       return null;
     }
 
@@ -752,7 +765,7 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
       return null;
     }
 
-    return buildVoiceBotCandidate_(rowNumber, rowValues, 1, candidateDueAt, currentWindow, agentTimeZone);
+    return buildVoiceBotCandidate_(rowNumber, rowValues, 1, candidateDueAt, candidateWindow, agentTimeZone);
   }
 
   if (secondAttemptSentAt) {
@@ -769,11 +782,16 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
     return null;
   }
 
+  const candidateWindow = getDueAtCallWindowName_(candidateDueAt, agentTimeZone);
+  if (!candidateWindow || currentWindow !== candidateWindow) {
+    return null;
+  }
+
   if (now < nextAttemptAt) {
     return null;
   }
 
-  return buildVoiceBotCandidate_(rowNumber, rowValues, 2, candidateDueAt, currentWindow, agentTimeZone);
+  return buildVoiceBotCandidate_(rowNumber, rowValues, 2, candidateDueAt, candidateWindow, agentTimeZone);
 }
 
 function buildVoiceBotCandidate_(rowNumber, rowValues, callAttemptNumber, dueAt, callWindow, agentTimeZone) {
@@ -1261,6 +1279,19 @@ function getVoiceBotCallWindowForDateKey_(dateKey, timeZone) {
   return callWindows.length ? callWindows[0] : null;
 }
 
+function getVoiceBotCallWindowByNameForDateKey_(dateKey, timeZone, windowName) {
+  const probeDate = buildVoiceBotDateInTimeZone_(dateKey, 12 * 60, timeZone);
+  const day = Number(Utilities.formatDate(probeDate, timeZone, 'u'));
+  const callWindows = getVoiceBotCallWindowsForDay_(day);
+  for (var i = 0; i < callWindows.length; i++) {
+    if (callWindows[i].name === windowName) {
+      return callWindows[i];
+    }
+  }
+
+  return null;
+}
+
 function getVoiceBotCallWindowIndexByName_(callWindows, windowName) {
   for (var i = 0; i < callWindows.length; i++) {
     if (callWindows[i].name === windowName) {
@@ -1281,44 +1312,75 @@ function getVoiceBotLocalDateKey_(date, timeZone) {
   return Utilities.formatDate(date, timeZone, 'yyyy-MM-dd');
 }
 
-function getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, timeZone) {
-  const followupDateKey = getVoiceBotLocalDateKey_(followupSentAt, timeZone);
-  const followupDay = Number(Utilities.formatDate(followupSentAt, timeZone, 'u'));
-  const followupMinutes = getVoiceBotLocalMinutes_(followupSentAt, timeZone);
-  const followupCallWindows = getVoiceBotCallWindowsForDay_(followupDay);
-
-  for (var i = 0; i < followupCallWindows.length; i++) {
-    const followupCallWindow = followupCallWindows[i];
-    if (followupMinutes < followupCallWindow.startMinutes) {
-      return buildVoiceBotDateInTimeZone_(followupDateKey, followupCallWindow.startMinutes, timeZone);
-    }
-
-    if (followupMinutes < followupCallWindow.endMinutes) {
-      return new Date(followupSentAt.getTime());
-    }
+function getVoiceBotFirstAttemptRotationSlot_(rowNumber) {
+  const numericRowNumber = Number(rowNumber);
+  if (!isFinite(numericRowNumber)) {
+    return 0;
   }
 
-  const nextCallDateKey = getNextVoiceBotCallDateKey_(followupDateKey, timeZone);
-  const nextCallWindow = getVoiceBotCallWindowForDateKey_(nextCallDateKey, timeZone);
+  return Math.abs(Math.trunc(numericRowNumber)) % VOICE_BOT_FIRST_ATTEMPT_ROTATION_SIZE;
+}
 
-  return buildVoiceBotDateInTimeZone_(
-    nextCallDateKey,
-    nextCallWindow.startMinutes,
-    timeZone
-  );
+function getVoiceBotFirstAttemptWindowName_(rowNumber) {
+  return getVoiceBotFirstAttemptRotationSlot_(rowNumber) < VOICE_BOT_FIRST_ATTEMPT_MID_AFTERNOON_SLOTS
+    ? VOICE_BOT_MID_AFTERNOON_WINDOW_NAME
+    : VOICE_BOT_MORNING_WINDOW_NAME;
+}
+
+function getOppositeVoiceBotCallWindowName_(windowName) {
+  if (windowName === VOICE_BOT_MORNING_WINDOW_NAME) {
+    return VOICE_BOT_MID_AFTERNOON_WINDOW_NAME;
+  }
+
+  if (windowName === VOICE_BOT_MID_AFTERNOON_WINDOW_NAME) {
+    return VOICE_BOT_MORNING_WINDOW_NAME;
+  }
+
+  return '';
+}
+
+function getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, timeZone, rowNumber) {
+  const followupDateKey = getVoiceBotLocalDateKey_(followupSentAt, timeZone);
+  const followupMinutes = getVoiceBotLocalMinutes_(followupSentAt, timeZone);
+  const firstAttemptWindowName = getVoiceBotFirstAttemptWindowName_(rowNumber);
+  var cursorDateKey = followupDateKey;
+
+  while (true) {
+    const callWindow = getVoiceBotCallWindowByNameForDateKey_(cursorDateKey, timeZone, firstAttemptWindowName);
+
+    if (callWindow) {
+      if (cursorDateKey !== followupDateKey) {
+        return buildVoiceBotDateInTimeZone_(cursorDateKey, callWindow.startMinutes, timeZone);
+      }
+
+      if (followupMinutes < callWindow.startMinutes) {
+        return buildVoiceBotDateInTimeZone_(cursorDateKey, callWindow.startMinutes, timeZone);
+      }
+
+      if (followupMinutes < callWindow.endMinutes) {
+        return new Date(followupSentAt.getTime());
+      }
+    }
+
+    cursorDateKey = shiftVoiceBotDateKey_(cursorDateKey, 1);
+  }
 }
 
 function getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, timeZone) {
   const nextCallDateKey = getNextVoiceBotCallDateKey_(getVoiceBotLocalDateKey_(firstAttemptSentAt, timeZone), timeZone);
   const firstAttemptWindowName = getVoiceBotPreferredCallWindowName_(firstAttemptSentAt, timeZone);
+  const oppositeWindowName = getOppositeVoiceBotCallWindowName_(firstAttemptWindowName);
   const nextCallProbeDate = buildVoiceBotDateInTimeZone_(nextCallDateKey, 12 * 60, timeZone);
   const nextCallDay = Number(Utilities.formatDate(nextCallProbeDate, timeZone, 'u'));
   const nextCallWindows = getVoiceBotCallWindowsForDay_(nextCallDay);
+  const oppositeWindow = oppositeWindowName
+    ? getVoiceBotCallWindowByNameForDateKey_(nextCallDateKey, timeZone, oppositeWindowName)
+    : null;
   const firstAttemptWindowIndexInNextDay = getVoiceBotCallWindowIndexByName_(nextCallWindows, firstAttemptWindowName);
   const nextCallWindowIndex = firstAttemptWindowIndexInNextDay >= 0
     ? (firstAttemptWindowIndexInNextDay + 1) % nextCallWindows.length
     : 0;
-  const nextCallWindow = nextCallWindows[nextCallWindowIndex] || getVoiceBotCallWindowForDateKey_(nextCallDateKey, timeZone);
+  const nextCallWindow = oppositeWindow || nextCallWindows[nextCallWindowIndex] || getVoiceBotCallWindowForDateKey_(nextCallDateKey, timeZone);
 
   return buildVoiceBotDateInTimeZone_(
     nextCallDateKey,

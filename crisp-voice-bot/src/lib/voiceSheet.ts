@@ -57,6 +57,11 @@ const WEEKEND_CALL_WINDOWS: VoiceCallWindow[] = [
   { name: "mid_afternoon", startMinutes: 14 * 60, endMinutes: 16 * 60 },
 ];
 
+const VOICE_BOT_MORNING_WINDOW_NAME = "morning_probe";
+const VOICE_BOT_MID_AFTERNOON_WINDOW_NAME = "mid_afternoon";
+const VOICE_BOT_FIRST_ATTEMPT_ROTATION_SIZE = 5;
+const VOICE_BOT_FIRST_ATTEMPT_MID_AFTERNOON_SLOTS = 3;
+
 const STATE_TIMEZONES: Record<string, string> = {
   AL: "America/Chicago",
   AK: "America/Anchorage",
@@ -311,6 +316,16 @@ function getVoiceBotCallWindowForDateKey(dateKey: string, timeZone: string): Voi
   return windows[0];
 }
 
+function getVoiceBotCallWindowByNameForDateKey(
+  dateKey: string,
+  timeZone: string,
+  windowName: string,
+): VoiceCallWindow | undefined {
+  const probeDate = buildVoiceBotDateInTimeZone(dateKey, 12 * 60, timeZone);
+  const windows = getVoiceBotCallWindowsForDay(weekdayNumber(probeDate, timeZone));
+  return windows.find((callWindow) => callWindow.name === windowName);
+}
+
 function getVoiceBotCallWindowIndexByName(callWindows: VoiceCallWindow[], windowName: string): number {
   return callWindows.findIndex((callWindow) => callWindow.name === windowName);
 }
@@ -336,6 +351,33 @@ function getNextVoiceBotCallDateKey(dateKey: string, timeZone: string): string {
   }
 }
 
+function getVoiceBotFirstAttemptRotationSlot(rowNumber: number | undefined): number {
+  const numericRowNumber = Number(rowNumber);
+  if (!Number.isFinite(numericRowNumber)) {
+    return 0;
+  }
+
+  return Math.abs(Math.trunc(numericRowNumber)) % VOICE_BOT_FIRST_ATTEMPT_ROTATION_SIZE;
+}
+
+export function getVoiceBotFirstAttemptWindowName(rowNumber?: number): string {
+  return getVoiceBotFirstAttemptRotationSlot(rowNumber) < VOICE_BOT_FIRST_ATTEMPT_MID_AFTERNOON_SLOTS
+    ? VOICE_BOT_MID_AFTERNOON_WINDOW_NAME
+    : VOICE_BOT_MORNING_WINDOW_NAME;
+}
+
+function getOppositeVoiceBotCallWindowName(windowName: string): string {
+  if (windowName === VOICE_BOT_MORNING_WINDOW_NAME) {
+    return VOICE_BOT_MID_AFTERNOON_WINDOW_NAME;
+  }
+
+  if (windowName === VOICE_BOT_MID_AFTERNOON_WINDOW_NAME) {
+    return VOICE_BOT_MORNING_WINDOW_NAME;
+  }
+
+  return "";
+}
+
 export function buildVoiceBotDateInTimeZone(dateKey: string, localMinutes: number, timeZone: string): Date {
   const hour = Math.floor(localMinutes / 60);
   const minute = localMinutes % 60;
@@ -347,41 +389,51 @@ export function buildVoiceBotDateInTimeZone(dateKey: string, localMinutes: numbe
   return new Date(`${dateKey}T${localTime}${offsetWithColon}`);
 }
 
-export function getNextVoiceBotFirstAttemptWindowStart(followupSentAt: Date, timeZone: string): Date {
+export function getNextVoiceBotFirstAttemptWindowStart(
+  followupSentAt: Date,
+  timeZone: string,
+  rowNumber?: number,
+): Date {
   const followupDateKey = getVoiceBotLocalDateKey(followupSentAt, timeZone);
-  const followupDay = weekdayNumber(followupSentAt, timeZone);
   const followupMinutes = getVoiceBotLocalMinutes(followupSentAt, timeZone);
-  const followupCallWindows = getVoiceBotCallWindowsForDay(followupDay);
+  const firstAttemptWindowName = getVoiceBotFirstAttemptWindowName(rowNumber);
+  let cursorDateKey = followupDateKey;
 
-  for (const followupCallWindow of followupCallWindows) {
-    if (followupMinutes < followupCallWindow.startMinutes) {
-      return buildVoiceBotDateInTimeZone(followupDateKey, followupCallWindow.startMinutes, timeZone);
+  while (true) {
+    const callWindow = getVoiceBotCallWindowByNameForDateKey(cursorDateKey, timeZone, firstAttemptWindowName);
+
+    if (callWindow) {
+      if (cursorDateKey !== followupDateKey) {
+        return buildVoiceBotDateInTimeZone(cursorDateKey, callWindow.startMinutes, timeZone);
+      }
+
+      if (followupMinutes < callWindow.startMinutes) {
+        return buildVoiceBotDateInTimeZone(cursorDateKey, callWindow.startMinutes, timeZone);
+      }
+
+      if (followupMinutes < callWindow.endMinutes) {
+        return new Date(followupSentAt.getTime());
+      }
     }
 
-    if (followupMinutes < followupCallWindow.endMinutes) {
-      return new Date(followupSentAt.getTime());
-    }
+    cursorDateKey = shiftVoiceBotDateKey(cursorDateKey, 1);
   }
-
-  const nextCallDateKey = getNextVoiceBotCallDateKey(followupDateKey, timeZone);
-  const nextCallWindow = getVoiceBotCallWindowForDateKey(nextCallDateKey, timeZone);
-
-  if (!nextCallWindow) {
-    throw new Error(`No voice call window found for ${nextCallDateKey} in ${timeZone}`);
-  }
-
-  return buildVoiceBotDateInTimeZone(nextCallDateKey, nextCallWindow.startMinutes, timeZone);
 }
 
 export function getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt: Date, timeZone: string): Date {
   const nextCallDateKey = getNextVoiceBotCallDateKey(getVoiceBotLocalDateKey(firstAttemptSentAt, timeZone), timeZone);
   const firstAttemptWindowName = getVoiceBotPreferredCallWindowName(firstAttemptSentAt, timeZone);
+  const oppositeWindowName = getOppositeVoiceBotCallWindowName(firstAttemptWindowName);
   const nextCallProbeDate = buildVoiceBotDateInTimeZone(nextCallDateKey, 12 * 60, timeZone);
   const nextCallWindows = getVoiceBotCallWindowsForDay(weekdayNumber(nextCallProbeDate, timeZone));
+  const oppositeWindow = oppositeWindowName
+    ? getVoiceBotCallWindowByNameForDateKey(nextCallDateKey, timeZone, oppositeWindowName)
+    : undefined;
   const firstAttemptWindowIndexInNextDay = getVoiceBotCallWindowIndexByName(nextCallWindows, firstAttemptWindowName);
   const nextCallWindowIndex =
     firstAttemptWindowIndexInNextDay >= 0 ? (firstAttemptWindowIndexInNextDay + 1) % nextCallWindows.length : 0;
-  const nextCallWindow = nextCallWindows[nextCallWindowIndex] ?? getVoiceBotCallWindowForDateKey(nextCallDateKey, timeZone);
+  const nextCallWindow =
+    oppositeWindow ?? nextCallWindows[nextCallWindowIndex] ?? getVoiceBotCallWindowForDateKey(nextCallDateKey, timeZone);
 
   if (!nextCallWindow) {
     throw new Error(`No voice call window found for ${nextCallDateKey} in ${timeZone}`);
