@@ -26,6 +26,19 @@ test('all meaningful approved identity, purpose and property answers survive con
   ];
   for (const text of expected) assert.ok(library.includes(text), text);
 });
+
+test('ambiguous listing answers defer disposition and latest confirmation restores the handling question', () => {
+  assert.match(prompt, /An isolated "yes" or "no" after a compound property or identity question is ambiguous\./);
+  assert.match(prompt, /Do you have the listing at \{\{streetAddress\}\}\?/);
+  assert.match(prompt, /If a later caller turn clearly confirms they have the listing, that latest confirmation overrides the earlier ambiguous answer or wrong-listing inference\./);
+  assert.match(prompt, /If the caller clearly confirms they have the listing and asks "What is the question\?" or equivalent/);
+  assert.match(prompt, /Their confirmed listing ownership cancels an earlier ambiguous "no" or wrong-listing inference/);
+});
+
+test('explicit no-contact wording has priority over earlier callback or transfer intent', () => {
+  assert.match(prompt, /"do not contact me," "do not reach out to me,"/);
+  assert.match(prompt, /has priority over every pitch and action, including an earlier callback or transfer request/);
+});
 test('fee answers preserve the payer, closing contingency and unknown economics', () => {
   for (const text of [
     "There is no charge to you or the seller. The buyer typically pays a flat fee only if the deal closes.",

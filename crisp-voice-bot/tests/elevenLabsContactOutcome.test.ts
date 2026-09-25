@@ -145,6 +145,31 @@ test("a named Yoni refusal or use of call as a label is not the caller's future 
   ]) {
     assert.equal(looksLikeDoNotCall(value), true, value);
   }
+
+  for (const value of [
+    "I have responded to the correspondence asking for you guys to not continue to reach out to me.",
+    "Do not contact us again.",
+    "Please stop reaching out to me.",
+  ]) {
+    assert.equal(looksLikeDoNotCall(value), true, value);
+  }
+});
+
+test("explicit no-contact language overrides callback-shaped reach-out words", async () => {
+  const lib = await load();
+  const conversation = {
+    status: "done",
+    has_user_audio: true,
+    transcript: [
+      { role: "user", message: "I asked for you guys to not continue to reach out to me." },
+      { role: "agent", tool_calls: [{ tool_name: "callback_requested" }] },
+    ],
+  };
+
+  assert.equal(lib.shouldTreatAsDoNotCall(conversation), true);
+  assert.equal(lib.shouldTreatAsCallback(conversation), false);
+  assert.equal(lib.getExplicitCallbackConsent(conversation), undefined);
+  assert.equal(lib.getVoiceContactRequestResult(conversation), "do_not_call");
 });
 
 test("coordinated caller recipients remain protected after a named Yoni refusal", async () => {

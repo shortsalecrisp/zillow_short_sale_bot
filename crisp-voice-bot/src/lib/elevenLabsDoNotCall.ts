@@ -24,6 +24,8 @@ export function looksLikeDoNotCall(value: string): boolean {
     ) ||
     hasCallerOptOut ||
     /\bstop\s+calling\b/.test(text) ||
+    /\b(?:do not|don't|dont|not(?:\s+to)?)\s+(?:continue\s+to\s+)?(?:contact|reach out to)\s+(?:me|us)\b/.test(text) ||
+    /\bstop\s+(?:contacting|reaching out to)\s+(?:me|us)\b/.test(text) ||
     /\bnever\s+call(?:\s+me)?\s+again\b/.test(text) ||
     /\bno\s+more\s+calls?\b/.test(text) ||
     /\b(?:take|remove)\s+me\s+(?:off|from)\s+(?:your\s+|the\s+)?(?:call(?:ing)?\s+)?list\b/.test(text)
