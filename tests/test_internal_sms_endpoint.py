@@ -1465,6 +1465,45 @@ def test_sms_reaction_matches_when_transport_drops_internal_apostrophe(monkeypat
     ) is False
 
 
+def test_sms_delayed_reaction_fragment_matches_prior_bot_reply(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    prior_reply = (
+        "I don't provide general transaction coordination. "
+        "I handle the lender-side short-sale paperwork, calls, follow-up, "
+        "and negotiations through approval."
+    )
+    sheet.rows[2][11] = "Ok, no problem. Please keep me in mind."
+    sheet.rows[2][17] = json.dumps([{"role": "assistant", "text": prior_reply}])
+    row_obj = {
+        "last_outbound_text": sheet.rows[2][11],
+        "history_json": sheet.rows[2][17],
+    }
+
+    assert module._sms_is_reaction_to_last_outbound(f"to {prior_reply}", row_obj) is True
+    assert module._sms_is_reaction_to_last_outbound(
+        f"to {prior_reply} Can you call me?", row_obj
+    ) is False
+
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": f"to {prior_reply}",
+            "message_id": "reaction-delayed-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reaction"] is True
+    assert response.json()["should_reply"] is False
+    assert sender.calls == []
+
+
 def test_sms_coalesced_reaction_fragments_are_suppressed(monkeypatch):
     module, sheet, _sender = _import_webhook_server(
         monkeypatch,

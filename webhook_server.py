@@ -4540,9 +4540,14 @@ def _sms_is_reaction_to_last_outbound(inbound_text: Any, row_obj: Dict[str, str]
     target = _sms_extract_reaction_target(inbound_text)
     target = _sms_normalize_reaction_comparison_text(target)
     last_outbound = _sms_normalize_reaction_comparison_text(row_obj.get("last_outbound_text"))
-    if not last_outbound:
-        return False
     if target and target == last_outbound:
+        return True
+    if target and any(
+        isinstance(entry, dict)
+        and entry.get("role") == "assistant"
+        and _sms_normalize_reaction_comparison_text(entry.get("text")) == target
+        for entry in _sms_history_array(row_obj.get("history_json"))
+    ):
         return True
     raw = _sms_normalize_whitespace(
         re.sub(r"[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]", " ", str(inbound_text or ""))
@@ -4552,7 +4557,7 @@ def _sms_is_reaction_to_last_outbound(inbound_text: Any, row_obj: Dict[str, str]
         raw,
         re.IGNORECASE,
     )
-    if not flattened:
+    if not flattened or not last_outbound:
         return False
     payload = _sms_normalize_reaction_comparison_text(flattened.group(2))
     return payload in {last_outbound, f"{last_outbound} to {last_outbound}"}
