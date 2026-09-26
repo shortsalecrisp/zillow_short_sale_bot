@@ -3919,11 +3919,13 @@ function isSmsReactionToLastOutbound_(text, rowObj) {
   const lastOutbound = normalizeSmsReactionComparisonText_(
     rowObj && rowObj[HEADERS.last_outbound_text]
   );
-  if (!lastOutbound) return false;
 
   if (reaction && reaction.target) {
     const reactionTarget = normalizeSmsReactionComparisonText_(reaction.target);
     if (reactionTarget === lastOutbound) return true;
+    const history = getHistoryArray_(rowObj && rowObj[HEADERS.history_json]);
+    if (history.some(entry => entry && entry.role === "assistant" &&
+        normalizeSmsReactionComparisonText_(entry.text) === reactionTarget)) return true;
   }
 
   // Some Android/Tasker transports flatten the quoted reaction payload into
@@ -3933,7 +3935,7 @@ function isSmsReactionToLastOutbound_(text, rowObj) {
     String(text || "").replace(/[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]/g, " ")
   );
   const flattened = raw.match(/^(liked|loved|emphasized|disliked|laughed at|questioned)\s+(.+)$/i);
-  if (!flattened) return false;
+  if (!flattened || !lastOutbound) return false;
   const payload = normalizeSmsReactionComparisonText_(flattened[2]);
   return payload === lastOutbound || payload === lastOutbound + " to " + lastOutbound;
 }
@@ -7694,6 +7696,18 @@ function testApprovedLeadIntelligenceRules_() {
   const apostropheLossReaction = "to \u201cOk, no problem. If anything changes, Ill be glad to help.\u201d";
   if (!isSmsReactionToLastOutbound_(apostropheLossReaction, { [HEADERS.last_outbound_text]: apostropheOutbound })) {
     throw new Error("Reaction apostrophe-loss suppression regression");
+  }
+  const olderReply = "I handle the lender-side short-sale paperwork, calls, follow-up, and negotiations through approval.";
+  const newerReply = "Ok, no problem. Please keep me in mind.";
+  const delayedReactionRow = {
+    [HEADERS.last_outbound_text]: newerReply,
+    [HEADERS.history_json]: JSON.stringify([{ role: "assistant", text: olderReply }])
+  };
+  if (!isSmsReactionToLastOutbound_("to \u201c" + olderReply + "\u201d", delayedReactionRow)) {
+    throw new Error("Delayed reaction to an exact older outbound must be suppressed");
+  }
+  if (isSmsReactionToLastOutbound_("to \u201c" + olderReply + " Can you call me?\u201d", delayedReactionRow)) {
+    throw new Error("Novel text appended to an older outbound must remain actionable");
   }
 
   const clientConsultationText = "Let me chat with my client because I think it's best that somebody handled that on her behalf I will get back to you.";

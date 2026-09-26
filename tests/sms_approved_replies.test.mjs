@@ -7,6 +7,29 @@ const answer = (text, row = {}, options = {}) => {
   return {h, r: h.incoming(text)};
 };
 
+test('an exact delayed reaction to an older bot reply is suppressed before human handoff', () => {
+  const olderReply = 'I handle the lender-side short-sale paperwork, calls, follow-up, and negotiations through approval.';
+  const h = smsHarness({
+    last_outbound_text: 'Ok, no problem. Please keep me in mind.',
+    history_json: JSON.stringify([{role: 'assistant', text: olderReply, receipt_id: 'older-receipt'}]),
+    human_override: 'TRUE',
+    ai_state: 'handoff',
+    handoff_flag: 'TRUE',
+  });
+
+  const suppressed = h.incoming(`to “${olderReply}”`, {deliver: false});
+  assert.equal(suppressed.reaction, true);
+  assert.equal(suppressed.should_reply, false);
+  assert.equal(suppressed.handoff_needed, false);
+  assert.equal(h.effects.length, 0);
+
+  const novel = smsHarness({
+    last_outbound_text: 'Ok, no problem. Please keep me in mind.',
+    history_json: JSON.stringify([{role: 'assistant', text: olderReply, receipt_id: 'older-receipt'}]),
+  }).incoming(`to “${olderReply} Can you call me?”`, {deliver: false});
+  assert.notEqual(novel.reaction, true);
+});
+
 test('exact Thx is a terminal courtesy without reply or handoff', () => {
   const h = smsHarness();
   const r = h.incoming('Thx!');
