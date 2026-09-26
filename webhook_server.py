@@ -4167,6 +4167,10 @@ SMS_BUYER_COST_CONCERN_REPLY = (
     "The buyer does need to consider that cost with their offer, so we discuss the fee and disclosure up front. "
     "I'm happy to walk through how that would work on this listing before you decide anything."
 )
+SMS_BUYER_FEE_DISCLOSURE_REPLY = (
+    "You'll want to disclose the fee to the buyer up front in the listing, so they can take that extra cost "
+    "into account when deciding their offer price."
+)
 SMS_FAILED_PROVIDER_REPLY = (
     "I understand why you'd be cautious after that. I handle the lender paperwork, calls, follow-up, and "
     "negotiations while you focus on the listing and your client. We can go through exactly what I'd handle "
@@ -4357,6 +4361,7 @@ def _sms_response_id_for_text(value: Any) -> str:
         "self_handling_value": SMS_SELF_HANDLING_REPLY,
         "fee_specific": SMS_SPECIFIC_FEE_REPLY,
         "buyer_cost_concern": SMS_BUYER_COST_CONCERN_REPLY,
+        "buyer_fee_disclosure": SMS_BUYER_FEE_DISCLOSURE_REPLY,
         "failed_provider": SMS_FAILED_PROVIDER_REPLY,
         "experience": SMS_EXPERIENCE_REPLY,
     }
@@ -5247,6 +5252,11 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
         "A negated refusal such as 'not saying I am not interested' is not a rejection. "
         "Conditional calls or requests to email first are not call consent. "
         "Never claim to have buyers. Document collection and process explanations are allowed. "
+        "Never claim to market, advertise, promote, or sell the property, manage MLS marketing, "
+        "or have a private investor network or targeted buyer outreach. The agent handles property marketing. "
+        "How to market, present, explain, or disclose our fee is a buyer-fee disclosure question, not property marketing. "
+        "'How would you market that' immediately after a fee answer refers to that fee. "
+        f"For that question, answer: {SMS_BUYER_FEE_DISCLOSURE_REPLY} "
         "Do not offer unsolicited materials, or claim email is sent or will be sent without a durable approval request. "
         "Keep any reply under 500 characters and casual."
     )
@@ -6044,6 +6054,30 @@ def _sms_is_fee_question(value: Any) -> bool:
     )
 
 
+def _sms_is_buyer_fee_disclosure_question(value: Any, last_outbound: Any) -> bool:
+    text = _sms_rejection_text(value)
+    action = (
+        re.search(r"\b(?:market(?:ed|ing)?|advertis(?:e|ed|ing)|present(?:ed|ing)?|disclos(?:e|ed|ing|ure)|communicate|word(?:ed|ing)?|position|sell)\b", text)
+        or (re.search(r"\bexplain(?:ed|ing)?\b", text) and re.search(r"\b(?:how|buyers?|listing)\b", text))
+        or (re.search(r"\b(?:mention(?:ed)?|show(?:n)?|include(?:d)?|put|list(?:ed)?)\b", text)
+            and re.search(r"\b(?:buyers?|listing|mls|remarks|offer|up front|upfront)\b", text))
+    )
+    question = re.search(r"\b(?:how|where|what|should|can|could|would|need to know)\b|\?", text)
+    if not action or not question:
+        return False
+    # An elliptical fee question needs immediate fee context, not old history.
+    if re.search(r"\b(?:market|advertise|promote|sell)\s+(?:(?:my|our|the|this|your|her|his|a)\s+)?(?:property|listing|home|house)\b", text):
+        return False
+    if re.search(r"\b(?:fees?|costs?|charges?|compensation|surcharge)\b|\$\s*5,?000\b", text):
+        return True
+    previous = _sms_rejection_text(last_outbound)
+    return bool(
+        re.search(r"\b(?:that|this|it)\b", text)
+        and re.search(r"\bbuyer\b", previous)
+        and re.search(r"\b(?:fee|cost|charge|paid|pays)\b", previous)
+    )
+
+
 def _sms_is_spanish_language_question(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(
@@ -6243,9 +6277,10 @@ def _sms_question_priority_decision(
         )
 
     buyer_concern = _sms_is_buyer_cost_concern(text)
+    fee_disclosure = _sms_is_buyer_fee_disclosure_question(text, row_obj.get("last_outbound_text"))
     flags = {
         "speed": _sms_is_speed_question(text),
-        "fee": _sms_is_fee_question(text) and (not buyer_concern or _sms_is_fee_amount_question(text)),
+        "fee": _sms_is_fee_question(text) and (not (buyer_concern or fee_disclosure) or _sms_is_fee_amount_question(text)),
         "documents": bool(re.search(
             r"\bwho\s+(?:collects?|gathers?|gets?|organizes?|handles?)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b"
             r"|\b(?:do|will|would|can|could)\s+you\s+(?:collect|gather|get|organize|handle)\b.{0,80}\b(?:documents?|docs?|paperwork|package)\b"
@@ -6274,7 +6309,8 @@ def _sms_question_priority_decision(
         "language": _sms_is_spanish_language_question(text),
         "different": _sms_is_differentiation_question(text),
         "buyer_provision": bool(re.search(r"\b(?:you\s+(?:bring|provide|find|supply)|you\s+(?:bringing|providing|finding|supplying))\s+(?:the|a)\s+buyer\b", text)),
-        "buyer_concern": buyer_concern,
+        "buyer_concern": buyer_concern and not fee_disclosure,
+        "fee_disclosure": fee_disclosure,
         "failed_provider": _sms_is_failed_provider_experience(text),
         "equator": bool(re.search(r"\bequator\b", text)),
     }
@@ -6310,6 +6346,7 @@ def _sms_question_priority_decision(
         "different": "I focus exclusively on the lender-side short-sale work and keep you updated throughout the process. If that sounds useful, I'm happy to talk through your listing.",
         "buyer_provision": SMS_BUYER_PROVISION_REPLY,
         "buyer_concern": SMS_BUYER_COST_CONCERN_REPLY,
+        "fee_disclosure": SMS_BUYER_FEE_DISCLOSURE_REPLY,
         "failed_provider": SMS_FAILED_PROVIDER_REPLY,
         "equator": EQUATOR_PORTAL_REPLY,
         "fee": str((fee_decision or {}).get("reply_text") or ""),

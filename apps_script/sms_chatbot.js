@@ -2149,6 +2149,27 @@ function buildBuyerCostConcernReply_() {
   return "The buyer does need to consider that cost with their offer, so we discuss the fee and disclosure up front. I'm happy to walk through how that would work on this listing before you decide anything.";
 }
 
+function buildBuyerFeeDisclosureReply_() {
+  return "You'll want to disclose the fee to the buyer up front in the listing, so they can take that extra cost into account when deciding their offer price.";
+}
+
+function isBuyerFeeDisclosureQuestion_(text, lastOutbound) {
+  const t = normalizeLanguageSignalText_(text);
+  const action = /\b(?:market(?:ed|ing)?|advertis(?:e|ed|ing)|present(?:ed|ing)?|disclos(?:e|ed|ing|ure)|communicate|word(?:ed|ing)?|position|sell)\b/.test(t) ||
+    (/\bexplain(?:ed|ing)?\b/.test(t) && /\b(?:how|buyers?|listing)\b/.test(t)) ||
+    (/\b(?:mention(?:ed)?|show(?:n)?|include(?:d)?|put|list(?:ed)?)\b/.test(t) && /\b(?:buyers?|listing|mls|remarks|offer|up front|upfront)\b/.test(t));
+  const question = /\b(?:how|where|what|should|can|could|would|need to know)\b/.test(t) || /\?/.test(t);
+  if (!action || !question) return false;
+  // Resolve "market that" only against the immediately preceding fee answer,
+  // never against a stale price discussion or an explicit property request.
+  if (/\b(?:market|advertise|promote|sell)\s+(?:(?:my|our|the|this|your|her|his|a)\s+)?(?:property|listing|home|house)\b/.test(t)) return false;
+  const explicitFee = /\b(?:fees?|costs?|charges?|compensation|surcharge)\b/.test(t) || /\$\s*5,?000\b/.test(t);
+  if (explicitFee) return true;
+  const previous = normalizeLanguageSignalText_(lastOutbound);
+  return /\b(?:that|this|it)\b/.test(t) && /\bbuyer\b/.test(previous) &&
+    /\b(?:fee|cost|charge|paid|pays)\b/.test(previous);
+}
+
 function isBuyerCostConcernSignal_(text) {
   const t = normalizeLanguageSignalText_(text);
   return /\bbuyer(?:s|'s)?\b/.test(t) && /\b(?:fee|cost|pays?|paying|offer|price|afford|cash|financ(?:e|ing))\b/.test(t) &&
@@ -2179,6 +2200,7 @@ function getDeliveredResponseId_(text) {
   if (t === buildSelfHandlingValueReply_() || isSelfHandlingValueReplyText_(t)) return "self_handling_value";
   if (isInitialFeeReplyText_(t)) return "fee_initial";
   if (t === buildBuyerCostConcernReply_()) return "buyer_cost_concern";
+  if (t === buildBuyerFeeDisclosureReply_()) return "buyer_fee_disclosure";
   if (t === buildFailedProviderReply_()) return "failed_provider";
   if (t === buildExperienceTrackRecordReply_()) return "experience";
   return "";
@@ -2467,12 +2489,17 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
     language: isSpanishLanguageSignal_(t),
     differentiation: isDifferentiationQuestionSignal_(t),
     buyer_cost_concern: isBuyerCostConcernSignal_(t),
+    fee_disclosure: isBuyerFeeDisclosureQuestion_(t, lastOutbound),
     failed_provider: isFailedProviderSignal_(t)
   };
 
   // A speed mechanism is more specific than the overlapping service question.
   if (speedQuestion) flags.help = false;
   if (flags.buyer_cost_concern && !isExplicitFeeAmountQuestion_(t)) flags.fee = false;
+  if (flags.fee_disclosure) {
+    if (!isExplicitFeeAmountQuestion_(t)) flags.fee = false;
+    flags.buyer_cost_concern = false;
+  }
   if (flags.failed_provider) flags.differentiation = false;
   const matchedKeys = Object.keys(flags).filter(function(key) { return flags[key]; });
   if (!matchedKeys.length) return null;
@@ -2500,6 +2527,11 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
   const done = leadStatus === "O";
 
   if (matchedKeys.length === 1) {
+    if (flags.fee_disclosure) return withNewCallHandoff_({
+      matched: true, reply_text: buildBuyerFeeDisclosureReply_(), lead_status: leadStatus,
+      conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
+      reason: "Explained upfront buyer-fee disclosure, not property marketing"
+    }, t, receivedAt);
     if (flags.equator) return {
       matched: true, reply_text: buildEquatorPortalReply_(), lead_status: leadStatus,
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
@@ -2635,6 +2667,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
   if (flags.buyer_provision) answers.push(buildBuyerProvisionClarificationReply_());
   if (flags.language) answers.push("I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.");
   if (flags.buyer_cost_concern) answers.push(buildBuyerCostConcernReply_());
+  if (flags.fee_disclosure) answers.push(buildBuyerFeeDisclosureReply_());
   if (flags.failed_provider) answers.push(buildFailedProviderReply_());
   if (flags.differentiation) answers.push(buildDifferentiationQuestionReply_());
   if (flags.exact_count) answers.push("I don't have a verified closed count to quote here; I'll need to confirm that number.");
@@ -5563,6 +5596,8 @@ IMPORTANT BEHAVIOR:
 - If they say they missed the call, the call did not come through, or they share an alternate callback number, do not keep texting promises about the call - set handoff_needed = true, block_reply = true, and let ${yourName} take over
 - Do not offer to send a short-sale packet, packet, docs, documents, materials, overview, deck, PDF, summary, email summary, text summary, or written explanation unless the agent specifically asks for your info by email
 - Never offer to send buyers, buyer leads, potential buyers, or anyone interested in the property
+- Never claim that I market, advertise, promote, or sell the property, manage MLS marketing, or have a private investor network or targeted buyer outreach. The agent keeps property marketing; I handle the lender side only.
+- A question about how to market, present, explain, or disclose my fee is about buyer-fee disclosure, not marketing the property. "How would you market that" immediately after a fee answer refers to that fee. Reply: "${buildBuyerFeeDisclosureReply_()}" Do not promise buyers will accept the fee.
 - If they mention buyers but they already have help in place, ignore the buyer comment and just close out politely
 - Do not ask for their email address and do not offer to email or text materials unless they specifically ask for your info by email and no email address is available yet
 - If a front desk person or gatekeeper replies, say: "Thanks, I appreciate it. Please have the agent text me here if they'd like to talk."

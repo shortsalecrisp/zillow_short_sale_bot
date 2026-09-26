@@ -31,6 +31,10 @@ EXPERIENCE_REPLY = (
     "the process. I'd be happy to talk through your listing and explain how I can help."
 )
 EMAIL_REQUEST_REPLY = "Absolutely. What's the best email for an overview of what I handle and how the fee works?"
+DISCLOSURE_REPLY = (
+    "You'll want to disclose the fee to the buyer up front in the listing, so they can take that extra cost "
+    "into account when deciding their offer price."
+)
 COUNT_ADMISSION = "I don't have a verified closed count to quote here; I'll need to confirm that number."
 
 
@@ -103,6 +107,60 @@ def test_neutral_self_handling_is_exact_one_value_reply(chatbot):
     assert chatbot.row()["call_booking_status"] == "closed_no_interest"
     assert chatbot.row()["human_override"] == "FALSE"
     assert all(entry["role"] != "assistant" for entry in chatbot.history())
+
+
+@pytest.mark.parametrize("message", [
+    "I need to know how you would market that",
+    "How do we market your fee?",
+    "How should I present that to buyers?",
+    "How do I explain your fee to a buyer?",
+    "Where should the fee be disclosed?",
+    "Should I include your fee in the listing?",
+    "How would you advertise the extra cost?",
+    "How do I market the $5,000?",
+])
+def test_buyer_fee_disclosure_after_amount_uses_approved_answer(chatbot, message):
+    first = chatbot.receive("Im handling the lender side How much is your fee?")
+    assert first["reply_text"] == FEE_REPLY
+    chatbot.deliver(first["reply_text"])
+    result = chatbot.receive(message)
+    assert result["should_reply"] is True
+    assert result["reply_text"] == DISCLOSURE_REPLY
+    assert result["response_id"] == "buyer_fee_disclosure"
+    assert result["handoff_needed"] is False
+    assert result["lead_status"] == "Y"
+
+
+def test_explicit_fee_disclosure_does_not_need_prior_fee_context(chatbot):
+    result = chatbot.receive("How should I disclose your fee to buyers?")
+    assert result["reply_text"] == DISCLOSURE_REPLY
+
+
+@pytest.mark.parametrize("message,previous", [
+    ("How would you market that?", "I handle lender paperwork."),
+    ("Can you market my property?", FEE_REPLY),
+    ("How do you market the listing?", FEE_REPLY),
+    ("How do you get paid?", FEE_REPLY),
+    ("How can you help me?", FEE_REPLY),
+    ("What does your fee include?", FEE_REPLY),
+    ("Can you explain your fee?", FEE_REPLY),
+    ("Can you market my property for that fee?", FEE_REPLY),
+])
+def test_fee_disclosure_does_not_absorb_unrelated_questions(chatbot, message, previous):
+    assert chatbot.module._sms_is_buyer_fee_disclosure_question(message, previous) is False
+
+
+def test_fee_disclosure_preserves_call_handoff(chatbot):
+    chatbot.set(last_outbound_text=FEE_REPLY)
+    result = chatbot.receive("How do we market your fee? Can we talk tomorrow?")
+    assert DISCLOSURE_REPLY in result["reply_text"]
+    assert result["handoff_needed"] is True
+
+
+def test_fee_discount_still_requires_owner_review(chatbot):
+    result = chatbot.receive("How should I disclose your fee, and can you discount it?")
+    assert result["handoff_needed"] is True
+    assert result["should_reply"] is False
 
 
 @pytest.mark.parametrize("message", [
