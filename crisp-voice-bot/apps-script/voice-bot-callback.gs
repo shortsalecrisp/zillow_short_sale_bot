@@ -701,6 +701,11 @@ function getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates) {
   }
 
   candidates.sort(function(left, right) {
+    const recoveryOrder = Number(Boolean(right.overdueNoStartRecovery)) - Number(Boolean(left.overdueNoStartRecovery));
+    if (recoveryOrder !== 0) {
+      return recoveryOrder;
+    }
+
     const attemptOrder = left.callAttemptNumber - right.callAttemptNumber;
     if (attemptOrder !== 0) {
       return attemptOrder;
@@ -735,6 +740,9 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
   const scheduledFor = parseVoiceBotDate_(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
   const agentTimeZone = getVoiceBotAgentTimeZone_(rowValues);
   const currentWindow = getVoiceBotPreferredCallWindowName_(now, agentTimeZone);
+  const overdueNoStartRecovery = Boolean(
+    scheduledFor && now.getTime() - scheduledFor.getTime() >= 12 * 60 * 60 * 1000
+  );
 
   if (!currentWindow) {
     return null;
@@ -765,7 +773,7 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
       return null;
     }
 
-    return buildVoiceBotCandidate_(rowNumber, rowValues, 1, candidateDueAt, candidateWindow, agentTimeZone);
+    return buildVoiceBotCandidate_(rowNumber, rowValues, 1, candidateDueAt, candidateWindow, agentTimeZone, overdueNoStartRecovery);
   }
 
   if (secondAttemptSentAt) {
@@ -791,10 +799,10 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
     return null;
   }
 
-  return buildVoiceBotCandidate_(rowNumber, rowValues, 2, candidateDueAt, candidateWindow, agentTimeZone);
+  return buildVoiceBotCandidate_(rowNumber, rowValues, 2, candidateDueAt, candidateWindow, agentTimeZone, overdueNoStartRecovery);
 }
 
-function buildVoiceBotCandidate_(rowNumber, rowValues, callAttemptNumber, dueAt, callWindow, agentTimeZone) {
+function buildVoiceBotCandidate_(rowNumber, rowValues, callAttemptNumber, dueAt, callWindow, agentTimeZone, overdueNoStartRecovery) {
   const firstName = normalizeString_(rowValues[VOICE_BOT_COL_FIRST_NAME - 1]);
   const lastName = normalizeString_(rowValues[VOICE_BOT_COL_LAST_NAME - 1]);
   const phone = normalizePhoneToE164_(rowValues[VOICE_BOT_COL_PHONE - 1]);
@@ -826,7 +834,8 @@ function buildVoiceBotCandidate_(rowNumber, rowValues, callAttemptNumber, dueAt,
     voiceNotes: normalizeString_(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1]),
     dueAt: dueAt,
     callWindow: callWindow,
-    agentTimeZone: agentTimeZone
+    agentTimeZone: agentTimeZone,
+    overdueNoStartRecovery: Boolean(overdueNoStartRecovery)
   };
 }
 
@@ -894,6 +903,9 @@ function markVoiceBotAttemptStartFailed_(sheet, candidate, now, err) {
     formatVoiceBotDateEt_(now) +
     ': ' +
     truncateVoiceBotStartFailureMessage_(errorMessage);
+  const recoveryAt = candidate.callAttemptNumber === 1
+    ? getNextVoiceBotFollowupAttemptWindowStart_(now, candidate.agentTimeZone)
+    : null;
 
   sheet.getRange(candidate.rowNumber, sentColumn).setValue(now);
   fieldsWritten.push(columnToLetter_(sentColumn) + ':voice_call_' + candidate.callAttemptNumber + '_sent');
@@ -904,9 +916,19 @@ function markVoiceBotAttemptStartFailed_(sheet, candidate, now, err) {
   sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_RESPONSE_STATUS).setValue('Call start failed before connecting');
   fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_RESPONSE_STATUS) + ':response_status');
 
-  clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE, fieldsWritten, 'call_eligible');
-  clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET, fieldsWritten, 'call_time_bucket');
-  clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR, fieldsWritten, 'call_scheduled_for');
+  if (recoveryAt) {
+    clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_LEAD_STATUS_CODE, fieldsWritten, 'leadStatusCode_retry_cleared');
+    sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE).setValue('yes');
+    fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_CALL_ELIGIBLE) + ':call_eligible');
+    sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET).setValue('voice_call_2_due');
+    fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_CALL_TIME_BUCKET) + ':call_time_bucket');
+    sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR).setValue(recoveryAt);
+    fieldsWritten.push(columnToLetter_(VOICE_BOT_COL_CALL_SCHEDULED_FOR) + ':call_scheduled_for');
+  } else {
+    clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE, fieldsWritten, 'call_eligible');
+    clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET, fieldsWritten, 'call_time_bucket');
+    clearVoiceBotCellIfNeeded_(sheet, candidate.rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR, fieldsWritten, 'call_scheduled_for');
+  }
 
   appendVoiceBotFieldIfPresent_(
     sheet,

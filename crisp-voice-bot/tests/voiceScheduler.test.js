@@ -682,6 +682,48 @@ test("queue retains a later explicit scheduled time as the candidate due time", 
   assert.equal(dueAt, "2026-08-24T18:40:00.000Z");
 });
 
+test("an overdue scheduled no-start is recovered ahead of new work exactly until its attempt starts", () => {
+  const candidates = JSON.parse(runSchedulerScript(`
+    function row(first, followupSentAt, options) {
+      const values = Array(42).fill("");
+      values[VOICE_BOT_COL_FIRST_NAME - 1] = first;
+      values[VOICE_BOT_COL_LAST_NAME - 1] = "Agent";
+      values[VOICE_BOT_COL_PHONE - 1] = "603-325-5909";
+      values[VOICE_BOT_COL_LISTING_ADDRESS - 1] = "20 Pearl Street";
+      values[VOICE_BOT_COL_CITY - 1] = "Hillsboro";
+      values[VOICE_BOT_COL_STATE - 1] = "NH";
+      values[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1] = "x";
+      values[VOICE_BOT_COL_FOLLOWUP_SENT_AT_PROXY - 1] = followupSentAt;
+      if (options && options.call1SentAt) values[VOICE_BOT_COL_CALL_1_SENT - 1] = options.call1SentAt;
+      if (options && options.call1Result) values[VOICE_BOT_COL_CALL_1_RESULT - 1] = options.call1Result;
+      if (options && options.scheduledFor) values[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1] = options.scheduledFor;
+      if (options && options.call2SentAt) values[VOICE_BOT_COL_CALL_2_SENT - 1] = options.call2SentAt;
+      return values;
+    }
+    JSON.stringify(getVoiceBotCallCandidatesFromRows_([
+      { rowNumber: 5850, values: row("Recovery", "", {
+        call1SentAt: "2026-09-24T13:11:43.726Z",
+        call1Result: "voicemail_left",
+        scheduledFor: "2026-09-25T18:00:00.000Z"
+      }) },
+      { rowNumber: 5900, values: row("Fresh", "2026-09-25T22:45:00.000Z") },
+      { rowNumber: 5901, values: row("AlreadyStarted", "", {
+        call1SentAt: "2026-09-24T13:11:43.726Z",
+        call1Result: "voicemail_left",
+        scheduledFor: "2026-09-25T18:00:00.000Z",
+        call2SentAt: "2026-09-26T18:05:00.000Z"
+      }) }
+    ], new Date("2026-09-26T18:45:00.000Z"), 10).map(function(candidate) {
+      return { rowNumber: candidate.rowNumber, recovery: candidate.overdueNoStartRecovery };
+    }));
+  `));
+
+  assert.deepEqual(candidates, [
+    { rowNumber: 5850, recovery: true },
+    { rowNumber: 5900, recovery: false },
+  ]);
+});
+
 test("a provider start failure remains eligible for one later call attempt", () => {
   assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("call_start_failed")'), true);
 });
@@ -779,7 +821,7 @@ test("stale unfinished call rows do not block new calls forever", () => {
   assert.deepEqual(rowNumbers, [3401, 3402]);
 });
 
-test("start-call failures are marked so one provider timeout cannot monopolize the queue", () => {
+test("a first start-call failure schedules exactly one later recovery attempt", () => {
   const result = JSON.parse(runSchedulerScript(`
     const cells = {};
     cells[VOICE_BOT_COL_CALL_ELIGIBLE] = "queued";
@@ -831,9 +873,9 @@ test("start-call failures are marked so one provider timeout cannot monopolize t
   assert.equal(result.call1Sent, "2026-06-22T20:56:15.000Z");
   assert.equal(result.call1Result, "call_start_failed");
   assert.equal(result.responseStatus, "Call start failed before connecting");
-  assert.equal(result.callEligible, "");
-  assert.equal(result.callTimeBucket, "");
-  assert.equal(result.callScheduledFor, "");
+  assert.equal(result.callEligible, "yes");
+  assert.equal(result.callTimeBucket, "voice_call_2_due");
+  assert.equal(result.callScheduledFor, "2026-06-23T13:00:00.000Z");
   assert.match(result.voiceNotes, /Voice call start failed before connecting/);
   assert.match(result.voiceNotes, /timeout of 45000ms exceeded/);
   assert.deepEqual(result.fieldsWritten, [
@@ -845,6 +887,42 @@ test("start-call failures are marked so one provider timeout cannot monopolize t
     "AF:call_scheduled_for",
     "AP:voiceNotes_appended",
   ]);
+});
+
+test("a second start-call failure closes the recovery lane without a third attempt", () => {
+  const result = JSON.parse(runSchedulerScript(`
+    const cells = {};
+    cells[VOICE_BOT_COL_CALL_ELIGIBLE] = "queued";
+    cells[VOICE_BOT_COL_CALL_TIME_BUCKET] = "voice_call_2_due";
+    cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR] = "2026-06-23T13:00:00Z";
+    const sheet = {
+      getRange(rowNumber, columnNumber) {
+        return {
+          getValue() { return cells[columnNumber] || ""; },
+          setValue(value) { cells[columnNumber] = value instanceof Date ? value.toISOString() : value; },
+          clearContent() { cells[columnNumber] = ""; }
+        };
+      }
+    };
+    markVoiceBotAttemptStartFailed_(sheet, {
+      rowNumber: 3721,
+      callAttemptNumber: 2,
+      dueAt: new Date("2026-06-23T13:00:00Z"),
+      callWindow: "morning_probe",
+      agentTimeZone: "America/New_York"
+    }, new Date("2026-06-23T13:15:00Z"), new Error("HTTP 502"));
+    JSON.stringify({
+      call2Result: cells[VOICE_BOT_COL_CALL_2_RESULT],
+      callEligible: cells[VOICE_BOT_COL_CALL_ELIGIBLE],
+      callTimeBucket: cells[VOICE_BOT_COL_CALL_TIME_BUCKET],
+      callScheduledFor: cells[VOICE_BOT_COL_CALL_SCHEDULED_FOR]
+    });
+  `));
+
+  assert.equal(result.call2Result, "call_start_failed");
+  assert.equal(result.callEligible, "");
+  assert.equal(result.callTimeBucket, "");
+  assert.equal(result.callScheduledFor, "");
 });
 
 test("live-transfer-requested rows still count against active call slots", () => {

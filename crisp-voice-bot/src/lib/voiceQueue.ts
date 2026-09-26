@@ -62,6 +62,7 @@ export type VoiceQueueCandidate = {
   dueAt: Date;
   callWindow: string;
   agentTimeZone: string;
+  overdueNoStartRecovery: boolean;
 };
 
 export type VoiceQueueResult = {
@@ -182,6 +183,7 @@ function buildVoiceBotCandidate(
   dueAt: Date,
   callWindow: string,
   agentTimeZone: string,
+  overdueNoStartRecovery: boolean,
 ): VoiceQueueCandidate | undefined {
   const firstName = normalizeString(rowValues[VOICE_BOT_COL_FIRST_NAME - 1]);
   const lastName = normalizeString(rowValues[VOICE_BOT_COL_LAST_NAME - 1]);
@@ -217,6 +219,7 @@ function buildVoiceBotCandidate(
     dueAt,
     callWindow,
     agentTimeZone,
+    overdueNoStartRecovery,
   };
 }
 
@@ -239,6 +242,9 @@ export function getVoiceBotCallCandidateFromRowValues(
   const scheduledFor = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
   const agentTimeZone = getVoiceBotAgentTimeZone(rowValues);
   const currentWindow = getVoiceBotPreferredCallWindowName(now, agentTimeZone);
+  const overdueNoStartRecovery = Boolean(
+    scheduledFor && now.getTime() - scheduledFor.getTime() >= 12 * 60 * 60 * 1000,
+  );
 
   if (!currentWindow) {
     return undefined;
@@ -269,7 +275,15 @@ export function getVoiceBotCallCandidateFromRowValues(
       return undefined;
     }
 
-    return buildVoiceBotCandidate(rowNumber, rowValues, 1, candidateDueAt, candidateWindow, agentTimeZone);
+    return buildVoiceBotCandidate(
+      rowNumber,
+      rowValues,
+      1,
+      candidateDueAt,
+      candidateWindow,
+      agentTimeZone,
+      overdueNoStartRecovery,
+    );
   }
 
   if (secondAttemptSentAt || !isRetryableVoiceBotResult(firstAttemptResult)) {
@@ -291,7 +305,15 @@ export function getVoiceBotCallCandidateFromRowValues(
     return undefined;
   }
 
-  return buildVoiceBotCandidate(rowNumber, rowValues, 2, candidateDueAt, candidateWindow, agentTimeZone);
+  return buildVoiceBotCandidate(
+    rowNumber,
+    rowValues,
+    2,
+    candidateDueAt,
+    candidateWindow,
+    agentTimeZone,
+    overdueNoStartRecovery,
+  );
 }
 
 export function getVoiceBotCallCandidatesFromRows(
@@ -313,6 +335,11 @@ export function getVoiceBotCallCandidatesFromRows(
 
   return candidates
     .sort((left, right) => {
+      const recoveryOrder = Number(right.overdueNoStartRecovery) - Number(left.overdueNoStartRecovery);
+      if (recoveryOrder !== 0) {
+        return recoveryOrder;
+      }
+
       const attemptOrder = left.callAttemptNumber - right.callAttemptNumber;
       if (attemptOrder !== 0) {
         return attemptOrder;
@@ -411,13 +438,17 @@ async function markVoiceBotAttemptStartFailed(
   const voiceNotes =
     `Voice call start failed before connecting at ${formatVoiceBotDateEt(now)}: ` +
     normalizeString(errorMessage).slice(0, 500);
+  const recoveryAt = candidate.callAttemptNumber === 1
+    ? getNextVoiceBotFollowupAttemptWindowStart(now, candidate.agentTimeZone)
+    : undefined;
   const writes = [
     { columnNumber: sentColumn, value: now.toISOString(), label: `voice_call_${candidate.callAttemptNumber}_sent` },
     { columnNumber: resultColumn, value: "call_start_failed", label: `voice_call_${candidate.callAttemptNumber}_result` },
     { columnNumber: VOICE_BOT_COL_RESPONSE_STATUS, value: "Call start failed before connecting", label: "response_status" },
-    { columnNumber: VOICE_BOT_COL_CALL_ELIGIBLE, value: "", label: "call_eligible" },
-    { columnNumber: VOICE_BOT_COL_CALL_TIME_BUCKET, value: "", label: "call_time_bucket" },
-    { columnNumber: VOICE_BOT_COL_CALL_SCHEDULED_FOR, value: "", label: "call_scheduled_for" },
+    { columnNumber: VOICE_BOT_COL_LEAD_STATUS_CODE, value: "", label: "leadStatusCode_retry_cleared" },
+    { columnNumber: VOICE_BOT_COL_CALL_ELIGIBLE, value: recoveryAt ? "yes" : "", label: "call_eligible" },
+    { columnNumber: VOICE_BOT_COL_CALL_TIME_BUCKET, value: recoveryAt ? "voice_call_2_due" : "", label: "call_time_bucket" },
+    { columnNumber: VOICE_BOT_COL_CALL_SCHEDULED_FOR, value: recoveryAt ? recoveryAt.toISOString() : "", label: "call_scheduled_for" },
     {
       columnNumber: VOICE_BOT_COL_VOICE_NOTES,
       value: appendVoiceNotesValue(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1], voiceNotes),

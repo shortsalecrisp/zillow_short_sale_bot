@@ -23,6 +23,16 @@ function row(followupSentAt: string, options: { call1SentAt?: string; call1Resul
   return values;
 }
 
+function scheduledRow(
+  followupSentAt: string,
+  options: { call1SentAt?: string; call1Result?: string; scheduledFor?: string; call2SentAt?: string } = {},
+): unknown[] {
+  const values = row(followupSentAt, options);
+  values[31] = options.scheduledFor ?? "";
+  values[39] = options.call2SentAt ?? "";
+  return values;
+}
+
 test("Render queue prioritizes first calls, then oldest due time", async () => {
   const { getVoiceBotCallCandidatesFromRows } = await import("../src/lib/voiceQueue");
   const candidates = getVoiceBotCallCandidatesFromRows(
@@ -65,4 +75,37 @@ test("Render queue starts one morning call but keeps two mid-afternoon slots ava
       .map((candidate) => candidate.rowNumber),
     [6101, 6102],
   );
+});
+
+test("Render queue prioritizes an overdue scheduled no-start until the attempt is marked started", async () => {
+  const { getVoiceBotCallCandidatesFromRows } = await import("../src/lib/voiceQueue");
+  const candidates = getVoiceBotCallCandidatesFromRows(
+    [
+      {
+        rowNumber: 5850,
+        values: scheduledRow("", {
+          call1SentAt: "2026-09-24T13:11:43.726Z",
+          call1Result: "voicemail_left",
+          scheduledFor: "2026-09-25T18:00:00.000Z",
+        }),
+      },
+      { rowNumber: 5900, values: row("2026-09-25T22:45:00.000Z") },
+      {
+        rowNumber: 5901,
+        values: scheduledRow("", {
+          call1SentAt: "2026-09-24T13:11:43.726Z",
+          call1Result: "voicemail_left",
+          scheduledFor: "2026-09-25T18:00:00.000Z",
+          call2SentAt: "2026-09-26T18:05:00.000Z",
+        }),
+      },
+    ],
+    new Date("2026-09-26T18:45:00.000Z"),
+    10,
+  );
+
+  assert.deepEqual(candidates.map((candidate) => [candidate.rowNumber, candidate.overdueNoStartRecovery]), [
+    [5850, true],
+    [5900, false],
+  ]);
 });
