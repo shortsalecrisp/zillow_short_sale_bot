@@ -3064,6 +3064,25 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  if (isFutureCallbackWhileUnavailableNowSignal_(t)) {
+    const callbackReference = resolveFutureCallbackReference_(t, receivedAt);
+    return {
+      matched: true,
+      reply_text: "No problem. What time " + callbackReference + " works best for a quick call?",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: true,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "scheduled_callback",
+      callback_requested: "yes",
+      callback_time: callbackReference,
+      send_reply_before_handoff: true,
+      handoff_type: "SCHEDULED CALLBACK",
+      reason: "Future callback request outranked an unavailable-right-now phrase"
+    };
+  }
+
   if (isSelfInitiatedDeferredContactSignal_(t)) {
     return {
       matched: true,
@@ -3586,6 +3605,35 @@ function isOpenCallWindowSignal_(text) {
   const mentionsWindow = callbackWindowPatterns.some(pattern => pattern.test(t));
 
   return mentionsImmediateAvailability || (mentionsWindow && /\bcall\b/.test(t));
+}
+
+function isFutureCallbackWhileUnavailableNowSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || !isExplicitDayOrDateCallbackSignal_(t)) return false;
+  return /\b(?:i(?:['’]?m|\s+am)\s+)?(?:out|away|busy|unavailable)(?:\s+\w+){0,3}\s+(?:right\s+)?now\b/.test(t) ||
+    /\b(?:i|we)\s+(?:can(?:not|'?t)|won['’]?t)\s+(?:talk|speak|chat|call)\s+(?:right\s+)?now\b/.test(t);
+}
+
+function resolveFutureCallbackReference_(text, referenceAt) {
+  const reference = extractScheduledCallbackReference_(text, referenceAt);
+  if (!/^tomorrow$/i.test(reference)) return extractCompleteCallbackTiming_(text, referenceAt) || reference;
+  const raw = String(referenceAt || "").trim();
+  let parsed = null;
+  const isoDate = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const taskerDate = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})(?:\s|$)/);
+  if (isoDate) {
+    parsed = new Date(Date.UTC(Number(isoDate[1]), Number(isoDate[2]) - 1, Number(isoDate[3]), 12));
+  } else if (taskerDate) {
+    let year = Number(taskerDate[3]);
+    if (year < 100) year += 2000;
+    parsed = new Date(Date.UTC(year, Number(taskerDate[1]) - 1, Number(taskerDate[2]), 12));
+  } else if (raw) {
+    parsed = new Date(raw);
+  }
+  if (!parsed || isNaN(parsed.getTime())) return reference;
+  parsed.setUTCDate(parsed.getUTCDate() + 1);
+  const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  return months[parsed.getUTCMonth()] + " " + parsed.getUTCDate() + ", " + parsed.getUTCFullYear();
 }
 
 function isAiOrAutomationQuestionSignal_(text) {

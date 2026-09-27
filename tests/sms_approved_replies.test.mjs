@@ -240,6 +240,22 @@ test('compact clock parser rejects impossible times and phone-number suffixes', 
   assert.equal(h.evaluate('extractSameDayCallbackReference_("call me at 9109653013")'), '');
 });
 
+test('future callback outranks unavailable-right-now language', () => {
+  const h = smsHarness();
+  const decision = h.incoming('Lets talk tomorrow im out right now with family', {
+    receivedAt: '9-26-26 18.55'
+  });
+
+  assert.equal(h.state.call_booking_status, 'scheduled_callback');
+  assert.equal(h.state.callback_time, 'September 27, 2026');
+  assert.equal(decision.handoff_needed, true);
+  assert.equal(decision.reply_text, 'No problem. What time September 27, 2026 works best for a quick call?');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'SCHEDULED CALLBACK'}]);
+  assert.equal(h.evaluate('isFutureCallbackWhileUnavailableNowSignal_("I am free right now")'), false);
+  assert.equal(h.evaluate('isFutureCallbackWhileUnavailableNowSignal_("Call me now")'), false);
+  assert.equal(h.evaluate('isImmediateCallSignal_("Call me now")'), true);
+});
+
 test('unquoted doubled reaction is suppressed only for exact outbound copies', () => {
   const outbound = 'Thank you for getting back to me. If you ever need short sale help, please keep me in mind.';
   const h = smsHarness({last_outbound_text: outbound});

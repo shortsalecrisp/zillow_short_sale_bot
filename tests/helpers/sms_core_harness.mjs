@@ -41,9 +41,9 @@ export function smsHarness(overrides = {}, options = {}) {
   let sequence = 0;
   return {state, effects, props,
     evaluate(code) { return vm.runInContext(code, context, {timeout: 3000}); },
-    incoming(message, {deliver = true, messageId} = {}) {
+    incoming(message, {deliver = true, messageId, receivedAt} = {}) {
       context.body = {phone: state.phone, message, message_id: messageId || `offline-${++sequence}`,
-        received_at: new Date(Date.now() + sequence * 120000).toISOString()};
+        received_at: receivedAt || new Date(Date.now() + sequence * 120000).toISOString()};
       const result = vm.runInContext('handleIncomingSmsCore_(body)', context, {timeout: 3000});
       if (deliver && result.should_reply && result.reply_text) {
         context.receiptText = result.reply_text;

@@ -5077,7 +5077,15 @@ def _sms_parse_inbound_timestamp(value: Any) -> Optional[datetime]:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        return None
+        parsed = None
+        for date_format in ("%m-%d-%y %H.%M", "%m/%d/%y %H.%M", "%m-%d-%Y %H.%M", "%m/%d/%Y %H.%M"):
+            try:
+                parsed = datetime.strptime(text, date_format)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
@@ -5643,6 +5651,33 @@ def _sms_is_self_initiated_deferred_contact(value: Any) -> bool:
         or re.search(r"\b(?:can|could|would|will)\s+you\s+(?:call|text|contact)\b", text)
     )
     return ((currently_unavailable and self_initiated_followup) or self_initiated_call) and not explicit_inbound_callback
+
+
+def _sms_is_future_callback_while_unavailable_now(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or not _sms_is_scheduled_callback(text):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:i(?:['’]?m|\s+am)\s+)?(?:out|away|busy|unavailable)(?:\s+\w+){0,3}\s+(?:right\s+)?now\b",
+            text,
+        )
+        or re.search(
+            r"\b(?:i|we)\s+(?:can(?:not|'?t)|won['’]?t)\s+(?:talk|speak|chat|call)\s+(?:right\s+)?now\b",
+            text,
+        )
+    )
+
+
+def _sms_resolve_future_callback_reference(value: Any, reference_at: Any = None) -> str:
+    reference = _sms_extract_scheduled_callback_reference(value, reference_at)
+    if reference.lower() != "tomorrow":
+        return _sms_complete_callback_reference(value, reference_at) or reference
+    parsed = _sms_parse_inbound_timestamp(reference_at)
+    if not parsed:
+        return reference
+    due = parsed + timedelta(days=1)
+    return f"{due.strftime('%B')} {due.day}, {due.year}"
 
 
 def _sms_is_untimed_explicit_callback(value: Any) -> bool:
@@ -6730,6 +6765,20 @@ def _sms_fast_decision(
             handoff_needed=True,
             block_reply=True,
             reason="Agent asked whether this is AI/a bot; manual follow-up needed",
+        )
+
+    if _sms_is_future_callback_while_unavailable_now(t):
+        callback_reference = _sms_resolve_future_callback_reference(inbound_text, received_at)
+        return _sms_decision(
+            reply_text=f"No problem. What time {callback_reference} works best for a quick call?",
+            lead_status="Y",
+            handoff_needed=True,
+            block_reply=False,
+            reason="Future callback request outranked an unavailable-right-now phrase",
+            call_booking_status="scheduled_callback",
+            callback_time=callback_reference,
+            handoff_type="SCHEDULED CALLBACK",
+            send_reply_before_handoff=True,
         )
 
     if _sms_is_self_initiated_deferred_contact(t):

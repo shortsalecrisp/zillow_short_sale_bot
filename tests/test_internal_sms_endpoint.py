@@ -2220,6 +2220,25 @@ def test_sms_natural_tomorrow_callback_and_third_party_negative(monkeypatch):
     assert module._sms_is_scheduled_callback("Let's talk to the lender tomorrow") is False
 
 
+def test_sms_future_callback_outranks_unavailable_right_now(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Lets talk tomorrow im out right now with family"
+
+    decision = module._sms_fast_decision({}, inbound, "9-26-26 18.55")
+
+    assert module._sms_is_future_callback_while_unavailable_now(inbound) is True
+    assert decision["call_booking_status"] == "scheduled_callback"
+    assert decision["callback_time"] == "September 27, 2026"
+    assert decision["handoff_needed"] is True
+    assert decision["handoff_type"] == "SCHEDULED CALLBACK"
+    assert decision["reply_text"] == "No problem. What time September 27, 2026 works best for a quick call?"
+    assert module._sms_is_future_callback_while_unavailable_now("I'm free right now") is False
+    assert module._sms_is_future_callback_while_unavailable_now("Call me now") is False
+
+
 def test_sms_call_interest_reopens_closed_conversation_for_handoff(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
