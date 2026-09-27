@@ -1,0 +1,78 @@
+{
+  "property_requests": [
+    "They aren't answering so not sure they are home. They have to let you in as there's no lock box",
+    "You can reschedule through Showing Time, thx",
+    "The lockbox code is 1234. Can you get in?",
+    "Do you need access to the home for the appraisal?",
+    "Are you the appraiser?",
+    "Is this the inspector?",
+    "What time are you coming to the property?",
+    "Can you come by tomorrow at 2?",
+    "Can you schedule the appraisal for tomorrow?",
+    "Please reschedule the showing",
+    "When is your inspection?",
+    "Can you show the house to my client?",
+    "Will you be appraising it?",
+    "The owner will let you in at noon",
+    "Here is the access code",
+    "Do you do appraisals?",
+    "You're the appraiser, right?"
+  ],
+  "context_followups": [
+    "No you'll have to reschedule",
+    "They mustn't be home as they aren't responding. Choose another day/time and I'll try again",
+    "Seller said either time works, they just aren't home now",
+    "Tomorrow at 2 works",
+    "Can we pick another time?"
+  ],
+  "buyers": [
+    "Do you have buyers?",
+    "Do you have a buyer?",
+    "Do you have any cash buyers?",
+    "So you bring the buyer?!",
+    "Can you find us a qualified buyer?",
+    "Please send me some buyers",
+    "Are you bringing a buyer?",
+    "Do you provide potential buyers?"
+  ],
+  "in_scope": [
+    "Who orders the lender appraisal during a short sale?",
+    "Does the lender schedule the appraisal?",
+    "Can you help with appraisal paperwork for the lender?",
+    "What happens if the lender valuation is too high?",
+    "Does the buyer pay your fee?",
+    "How should I disclose your fee to buyers?",
+    "Can you collect the lender's required documents?",
+    "How much do you charge?",
+    "I have a showing tomorrow. Can you call me in the morning?",
+    "Can we reschedule our phone call to tomorrow?",
+    "The lender isn't responding, what do you do?",
+    "I'm the appraiser, who are you?",
+    "The seller will let you handle the lender paperwork",
+    "Do you complete the appraisal paperwork for the lender?",
+    "Can you review our appraisal report?",
+    "How do you dispute the appraisal?",
+    "Do you need an access code for Equator?",
+    "Can we arrange lender portal access?"
+  ],
+  "unsafe_replies": [
+    "Got it. No lockbox and no answer makes access tricky. Want me to try contacting the sellers to arrange access?",
+    "I can schedule the appraisal for tomorrow at 2.",
+    "Your showing is confirmed for Thursday.",
+    "I'll come to the house at noon.",
+    "I'm the appraiser. What is the lockbox code?",
+    "I have a cash buyer for your property.",
+    "I don't bring buyers, but I can arrange property access.",
+    "What is the lockbox code?"
+  ],
+  "safe_replies": [
+    "I handle the lender paperwork, calls, follow-up, and negotiations.",
+    "The lender may require an appraisal as part of its review.",
+    "I don't conduct appraisals or schedule showings.",
+    "Would a brief phone call be helpful?",
+    "You would coordinate access with the lender's appraiser, not with me.",
+    "I handle appraisal paperwork and lender follow-up.",
+    "I can handle Equator access and document submissions.",
+    "I can review the appraisal report and follow up with the lender."
+  ]
+}

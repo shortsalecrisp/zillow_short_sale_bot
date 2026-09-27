@@ -81,7 +81,7 @@ test('buyer requests do not promise a buyer-finding service', () => {
     const r = smsHarness().incoming(text);
     assert.equal(r.should_reply, true);
     assert.match(r.reply_text, /don't bring the buyer/);
-    assert.match(r.reply_text, /processing with the bank/);
+    assert.match(r.reply_text, /short-sale processing, handling the lender paperwork/);
     assert.doesNotMatch(r.reply_text, /help you find|necessarily|expedite/);
   }
 });

@@ -4184,7 +4184,14 @@ SMS_EXPERIENCE_REPLY = (
 )
 SMS_CLOSED_COUNT_REPLY = "I don't have a verified closed count to quote here; I'll need to confirm that number."
 SMS_EMAIL_ADDRESS_REQUEST_REPLY = "Absolutely. What's the best email for an overview of what I handle and how the fee works?"
-SMS_BUYER_PROVISION_REPLY = "No, I don't bring the buyer. I handle the lender-side short-sale processing and negotiations."
+SMS_BUYER_PROVISION_REPLY = (
+    "No, I don't bring the buyer. I specialize in short-sale processing, handling the lender paperwork, "
+    "calls, follow-up, and negotiations so you can focus on your client and the listing."
+)
+SMS_SERVICE_SCOPE_REPLY = (
+    "Sorry for the mix-up. I specialize in short-sale processing, managing the lender paperwork, calls, "
+    "follow-up, and negotiations. I don't conduct appraisals, arrange property access, or schedule showings."
+)
 SMS_STANDARD_CLOSEOUT_REPLY = (
     "Ok, no problem. If anything ever changes in the future and you're looking for some additional help "
     "with these files, please just keep me in mind. Thanks!"
@@ -5262,6 +5269,15 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
         "A negated refusal such as 'not saying I am not interested' is not a rejection. "
         "Conditional calls or requests to email first are not call consent. "
         "Never claim to have buyers. Document collection and process explanations are allowed. "
+        "SERVICE BOUNDARY: Offer short-sale processing only: lender paperwork, calls, follow-up, and negotiations. "
+        "You are not a buyer, buyer's agent, appraiser, inspector, showing agent, contractor, or property-access coordinator. "
+        "Never ask for lockbox codes, arrange seller access, propose property-visit times, or schedule/reschedule "
+        "showings, inspections or appraisal visits, even if an earlier bot reply did so. "
+        f"Correct a mistaken role or request for those services with: {SMS_SERVICE_SCOPE_REPLY} "
+        f"For buyer requests, answer: {SMS_BUYER_PROVISION_REPLY} "
+        "'Reschedule', 'either time works', or 'choose another day' in a property-access thread refers to that visit, "
+        "not a phone callback. General lender valuation, appraisal paperwork, processing and cost questions remain in scope. "
+        "Genuine requests to discuss our service by phone keep the normal call workflow. "
         "Never claim to market, advertise, promote, or sell the property, manage MLS marketing, "
         "or have a private investor network or targeted buyer outreach. The agent handles property marketing. "
         "How to market, present, explain, or disclose our fee is a buyer-fee disclosure question, not property marketing. "
@@ -5729,6 +5745,8 @@ def _sms_is_callback_update_timing(value: Any) -> bool:
 
 
 def _sms_is_post_handoff_callback_update(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    if _sms_is_property_logistics_request(inbound_text, row_obj):
+        return False
     if str(row_obj.get("human_override") or "").upper() != "TRUE":
         return False
     if (
@@ -6253,6 +6271,101 @@ def _sms_speed_question_reply() -> str:
     )
 
 
+def _sms_is_buyer_provision_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return any(re.search(pattern, text) for pattern in [
+        r"\b(?:you|u)\s+(?:have|bring|provide|find|supply|bringing|providing|finding|supplying)\s+(?:(?:me|us)\s+)?(?:(?:the|a|any|some|cash|qualified|interested|potential)\s+)*buyers?\b",
+        r"\b(?:bring|send|find)\s+(?:me|us)\s+(?:(?:a|some|any|cash|qualified)\s+)*buyers?\b",
+        r"\b(?:are\s+you|you(?:'re|\s+are))\s+(?:bringing|providing|finding|supplying)\s+(?:(?:the|a|any|some)\s+)*buyers?\b",
+    ])
+
+
+def _sms_property_scope_signal_text(value: Any) -> str:
+    # Paperwork and lender-portal access are processing tasks, not physical visits.
+    text = _sms_normalize_whitespace(value).lower().replace("\u2018", "'").replace("\u2019", "'")
+    text = re.sub(r"\b(?:appraisal|valuation|inspection)\s+(?:paperwork|documents?|reports?|rebuttals?|appeals?|disputes?|reviews?|process|fees?|costs?)\b", "lender documentation", text)
+    text = re.sub(r"\b(?:equator|lender|bank|portal|account)(?:\s+portal)?\s+access(?:\s+codes?)?\b", "lender portal", text)
+    return re.sub(r"\baccess(?:\s+codes?)?\s+(?:to|for)\s+(?:the\s+)?(?:equator|lender|bank|portal|account)\b", "lender portal", text)
+
+
+def _sms_is_direct_property_logistics_request(value: Any) -> bool:
+    text = _sms_property_scope_signal_text(value)
+    return any(re.search(pattern, text) for pattern in [
+        r"\b(?:lock\s*box|key\s*safe|supra|showing\s*time|gate code|access code)\b",
+        r"\b(?:let|letting)\s+(?:you|u)\s+in\b",
+        r"\b(?:access|entry|keys?)\s+(?:to|for|at)\s+(?:(?:the|this|my|our|your)\s+)?(?:home|house|property|listing)\b",
+        r"\b(?:are you|is this|you(?:'re| are))\s+(?:the|an?)\s+(?:appraiser|inspector|showing agent|buyer(?:'s)? agent)\b",
+        r"\b(?:your|our)\s+(?:showings?|viewings?|inspections?|appraisals?|property visits?)\b",
+        r"\b(?:you|u)\b.{0,45}\b(?:conduct|perform|do|doing|complete|completing|schedule|reschedule|arrange|book)\b.{0,30}\b(?:appraisals?|inspections?|showings?|viewings?|property visits?)\b",
+        r"^(?:please\s+)?(?:schedule|reschedule|arrange|book|confirm|cancel)\s+(?:(?:the|a|an|your|our)\s+)?(?:appraisal|inspection|showing|viewing|property visit)\b",
+        r"\b(?:you|u)\b.{0,40}\b(?:come|coming|arrive|stop by|meet|show|see|view|visit)\b.{0,30}\b(?:house|home|property|listing)\b",
+        r"\b(?:can|will|are)\s+you\b.{0,25}\b(?:come|coming|stop)\s+(?:by|out|over)\b",
+        r"\b(?:the\s+)?(?:seller|owner)\b.{0,30}\bmeet\s+you\b(?!\s+(?:by|on|over)\s+(?:the\s+)?phone)",
+        r"\byou\b.{0,30}\b(?:appraising|inspecting)\b",
+    ])
+
+
+def _sms_is_property_logistics_request(value: Any, row_obj: Dict[str, str]) -> bool:
+    text = _sms_normalize_whitespace(value).lower().replace("\u2018", "'").replace("\u2019", "'")
+    if _sms_is_direct_property_logistics_request(text):
+        return True
+    # Vague follow-ups inherit the property topic, not consent to a phone call.
+    reset_topic = r"\b(?:call|phone|talk|speak|fee|cost|paperwork|processing|lender|bank)\b"
+    if re.search(reset_topic, text):
+        return False
+    if not re.search(
+        r"\b(?:reschedule|another (?:day|time)|either time|choose|pick|works?|available|not home|aren't home|mustn't be home|"
+        r"not responding|aren't responding|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b", text,
+    ):
+        return False
+    for entry in reversed(_sms_history_array(row_obj.get("history_json"))[-8:]):
+        if not isinstance(entry, dict) or str(entry.get("role") or "").lower() != "agent":
+            continue
+        previous = _sms_normalize_whitespace(entry.get("text")).lower()
+        if previous == text:
+            continue
+        if _sms_is_direct_property_logistics_request(previous):
+            return True
+        if re.search(reset_topic, previous):
+            return False
+    outbound = str(row_obj.get("last_outbound_text") or "")
+    return outbound == SMS_SERVICE_SCOPE_REPLY or _sms_is_unsupported_property_service_promise(outbound)
+
+
+def _sms_service_scope_decision(row_obj: Dict[str, str]) -> Dict[str, Any]:
+    return _sms_decision(
+        reply_text=SMS_SERVICE_SCOPE_REPLY,
+        lead_status=str(row_obj.get("mailshake_status") or "Y"),
+        preserve_existing_state=True,
+        reason="Clarified short-sale-only service scope; no appraisal, property access or showing appointment",
+    )
+
+
+def _sms_is_unsupported_property_service_promise(value: Any) -> bool:
+    text = _sms_property_scope_signal_text(value)
+    return any(re.search(pattern, text) for pattern in [
+        r"\b(?:i|we)(?:'ll| will| can| could| would| am able to)?\s+(?:also\s+)?(?:have|bring|find|supply|send|provide)\s+(?:(?:you|a|the|some|any|cash|qualified)\s+)*buyers?\b",
+        r"\b(?:i|we)(?:'ll| will| can| could| would)?\s+(?:also\s+)?(?:handle|conduct|perform|do|schedule|reschedule|arrange|book|confirm|attend)\b[^.!?]{0,90}\b(?:appraisals?|inspections?|showings?|viewings?|property (?:access|visits?)|access|lock\s*box)\b",
+        r"\b(?:want me to|let me|happy to)\b[^.!?]{0,100}\b(?:access|lock\s*box|showings?|viewings?|appraisals?|inspections?|property visits?)\b",
+        r"\b(?:i|we)(?:'ll| will| can| could| would| am| are|'m|'re)?\s+(?:come|coming|arrive|stop by|meet you|show you)\b[^.!?]{0,60}\b(?:house|home|property|listing)\b",
+        r"\b(?:i'm|i am|we are|we're)\s+(?:the|an?|your)\s+(?:appraiser|inspector|buyer(?:'s)? agent)\b",
+        r"\b(?:showing|viewing|property visit|appraisal appointment)\s+(?:is|has been)\s+(?:booked|confirmed|scheduled)\b",
+        r"\b(?:what(?:'s| is)|send me|give me|need|have)\b[^.!?]{0,30}\b(?:lock\s*box|gate)\s+code\b",
+    ])
+
+
+def _sms_enforce_service_scope(decision: Dict[str, Any], row_obj: Dict[str, str]) -> Dict[str, Any]:
+    if not _sms_is_unsupported_property_service_promise(decision.get("reply_text")):
+        return decision
+    if decision.get("block_reply") or decision.get("handoff_needed") or decision.get("needs_review"):
+        return {
+            **decision, "reply_text": "", "call_booking_status": "", "callback_time": "",
+            "callback_requested": "", "preserve_existing_state": True,
+            "reason": "Unsupported property-service promise blocked; existing reply restrictions preserved",
+        }
+    return _sms_service_scope_decision(row_obj)
+
+
 def _sms_question_priority_decision(
     row_obj: Dict[str, str], inbound_text: str, received_at: Any = None
 ) -> Optional[Dict[str, Any]]:
@@ -6345,7 +6458,7 @@ def _sms_question_priority_decision(
         "negotiator": bool(re.search(r"\b(?:are you|so you are|so a|r u)\s+(?:an?\s+)?(?:short sale\s+)?negotiator\b", text)),
         "language": _sms_is_spanish_language_question(text),
         "different": _sms_is_differentiation_question(text),
-        "buyer_provision": bool(re.search(r"\b(?:you\s+(?:bring|provide|find|supply)|you\s+(?:bringing|providing|finding|supplying))\s+(?:the|a)\s+buyer\b", text)),
+        "buyer_provision": _sms_is_buyer_provision_question(text),
         "buyer_concern": buyer_concern and not fee_disclosure,
         "fee_disclosure": fee_disclosure,
         "failed_provider": _sms_is_failed_provider_experience(text),
@@ -6624,6 +6737,9 @@ def _sms_fast_decision(
             lead_status="Y",
             reason="Clarified that Crisp's lender-side role is separate from the title company",
         )
+
+    if _sms_is_property_logistics_request(t, row_obj):
+        return _sms_service_scope_decision(row_obj)
 
     priority_question = _sms_question_priority_decision(row_obj, inbound_text, received_at)
     if priority_question is not None:
@@ -7122,6 +7238,7 @@ def _sms_build_decision(
 ) -> Dict[str, Any]:
     fast = _sms_fast_decision(row_obj, inbound_text, received_at)
     decision = fast if fast is not None else _sms_openai_decision(row_obj, inbound_text)
+    decision = _sms_enforce_service_scope(decision, row_obj)
     decision = _sms_sanitize_unsolicited_material_promise(decision, inbound_text)
     decision = _sms_enforce_durable_followup_promise(decision, inbound_text)
     decision = _sms_ensure_question_disposition(decision, inbound_text)

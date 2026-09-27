@@ -21,7 +21,9 @@ export function smsHarness(overrides = {}, options = {}) {
     CacheService: {getScriptCache: () => ({get: () => null, put() {}})}};
   vm.createContext(context);
   for (const file of ['sms_chatbot.js', 'sms_outbox.js']) {
-    vm.runInContext(fs.readFileSync(new URL(`../../apps_script/${file}`, import.meta.url), 'utf8'), context);
+    const sourcePath = file === 'sms_chatbot.js' && process.env.SMS_CHATBOT_SOURCE_PATH
+      ? process.env.SMS_CHATBOT_SOURCE_PATH : new URL(`../../apps_script/${file}`, import.meta.url);
+    vm.runInContext(fs.readFileSync(sourcePath, 'utf8'), context);
   }
   vm.runInContext(`
     getSheet_=()=>({});

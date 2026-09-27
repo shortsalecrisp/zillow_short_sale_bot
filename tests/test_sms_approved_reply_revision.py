@@ -536,7 +536,7 @@ def test_auction_update_after_manual_handoff_does_not_create_callback(chatbot):
 
 def test_buyer_provision_does_not_assume_acceptance(chatbot):
     result = chatbot.receive("Do you bring the buyer?")
-    assert result["reply_text"] == "No, I don't bring the buyer. I handle the lender-side short-sale processing and negotiations."
+    assert result["reply_text"] == chatbot.module.SMS_BUYER_PROVISION_REPLY
     assert "never any issue" not in result["reply_text"]
 
 

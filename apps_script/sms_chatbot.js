@@ -2723,6 +2723,8 @@ function applyFastRules_(text, rowObj, receivedAt) {
   if (terminal) return terminal;
   if (isShortSaleSourceQuestion_(t)) return buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound, receivedAt);
 
+  if (isPropertyLogisticsRequest_(t, rowObj)) return buildServiceScopeClarificationDecision_(rowObj);
+
   // An information request is not consent to a hypothetical future call.
   const infoRequest = buildInfoRequestDecisionV4_(t, rowObj);
   if (infoRequest && !isCompoundServiceRequestSignal_(t) &&
@@ -3864,13 +3866,84 @@ function isOfferSubmissionConfusionSignal_(text) {
 
 function isBuyerProvisionQuestionSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  return /\b(?:so\s+)?you\s+(?:bring|provide|find|supply)\s+(?:the|a)\s+buyer\b/.test(t) ||
-    /\b(?:do|can|will|would)\s+you\s+(?:bring|provide|find|supply)\s+(?:the|a)\s+buyer\b/.test(t) ||
-    /\b(?:are\s+you|you(?:'re|\s+are))\s+(?:bringing|providing|finding|supplying)\s+(?:the|a)\s+buyer\b/.test(t);
+  return /\b(?:you|u)\s+(?:have|bring|provide|find|supply|bringing|providing|finding|supplying)\s+(?:(?:me|us)\s+)?(?:(?:the|a|any|some|cash|qualified|interested|potential)\s+)*buyers?\b/.test(t) ||
+    /\b(?:bring|send|find)\s+(?:me|us)\s+(?:(?:a|some|any|cash|qualified)\s+)*buyers?\b/.test(t) ||
+    /\b(?:are\s+you|you(?:'re|\s+are))\s+(?:bringing|providing|finding|supplying)\s+(?:(?:the|a|any|some)\s+)*buyers?\b/.test(t);
 }
 
 function buildBuyerProvisionClarificationReply_() {
-  return "No, I don't bring the buyer. I handle the processing with the bank. The fee should be disclosed to the buyer up front in the listing so they can consider it when making their offer.";
+  return "No, I don't bring the buyer. I specialize in short-sale processing, handling the lender paperwork, calls, follow-up, and negotiations so you can focus on your client and the listing.";
+}
+
+function buildServiceScopeClarificationReply_() {
+  return "Sorry for the mix-up. I specialize in short-sale processing, managing the lender paperwork, calls, follow-up, and negotiations. I don't conduct appraisals, arrange property access, or schedule showings.";
+}
+
+function propertyScopeSignalText_(text) {
+  // Paperwork and lender-portal access are processing tasks, not physical visits.
+  return normalizeWhitespace_(String(text || "").toLowerCase()).replace(/[\u2018\u2019]/g, "'")
+    .replace(/\b(?:appraisal|valuation|inspection)\s+(?:paperwork|documents?|reports?|rebuttals?|appeals?|disputes?|reviews?|process|fees?|costs?)\b/g, "lender documentation")
+    .replace(/\b(?:equator|lender|bank|portal|account)(?:\s+portal)?\s+access(?:\s+codes?)?\b/g, "lender portal")
+    .replace(/\baccess(?:\s+codes?)?\s+(?:to|for)\s+(?:the\s+)?(?:equator|lender|bank|portal|account)\b/g, "lender portal");
+}
+
+function isDirectPropertyLogisticsRequest_(text) {
+  const t = propertyScopeSignalText_(text);
+  return [
+    /\b(?:lock\s*box|key\s*safe|supra|showing\s*time|gate code|access code)\b/,
+    /\b(?:let|letting)\s+(?:you|u)\s+in\b/,
+    /\b(?:access|entry|keys?)\s+(?:to|for|at)\s+(?:(?:the|this|my|our|your)\s+)?(?:home|house|property|listing)\b/,
+    /\b(?:are you|is this|you(?:'re| are))\s+(?:the|an?)\s+(?:appraiser|inspector|showing agent|buyer(?:'s)? agent)\b/,
+    /\b(?:your|our)\s+(?:showings?|viewings?|inspections?|appraisals?|property visits?)\b/,
+    /\b(?:you|u)\b.{0,45}\b(?:conduct|perform|do|doing|complete|completing|schedule|reschedule|arrange|book)\b.{0,30}\b(?:appraisals?|inspections?|showings?|viewings?|property visits?)\b/,
+    /^(?:please\s+)?(?:schedule|reschedule|arrange|book|confirm|cancel)\s+(?:(?:the|a|an|your|our)\s+)?(?:appraisal|inspection|showing|viewing|property visit)\b/,
+    /\b(?:you|u)\b.{0,40}\b(?:come|coming|arrive|stop by|meet|show|see|view|visit)\b.{0,30}\b(?:house|home|property|listing)\b/,
+    /\b(?:can|will|are)\s+you\b.{0,25}\b(?:come|coming|stop)\s+(?:by|out|over)\b/,
+    /\b(?:the\s+)?(?:seller|owner)\b.{0,30}\bmeet\s+you\b(?!\s+(?:by|on|over)\s+(?:the\s+)?phone)/,
+    /\byou\b.{0,30}\b(?:appraising|inspecting)\b/
+  ].some(pattern => pattern.test(t));
+}
+
+function isPropertyLogisticsRequest_(text, rowObj) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase()).replace(/[\u2018\u2019]/g, "'");
+  if (isDirectPropertyLogisticsRequest_(t)) return true;
+  // Vague follow-ups inherit the property topic, not consent to a phone call.
+  if (/\b(?:call|phone|talk|speak|fee|cost|paperwork|processing|lender|bank)\b/.test(t)) return false;
+  if (!/\b(?:reschedule|another (?:day|time)|either time|choose|pick|works?|available|not home|aren't home|mustn't be home|not responding|aren't responding|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/.test(t)) return false;
+  const history = getHistoryArray_(rowObj && rowObj[HEADERS.history_json]).slice(-8);
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i] || {};
+    if (String(entry.role || "").toLowerCase() !== "agent") continue;
+    const prior = normalizeWhitespace_(String(entry.text || "").toLowerCase());
+    if (prior === t) continue;
+    if (isDirectPropertyLogisticsRequest_(prior)) return true;
+    if (/\b(?:call|phone|talk|speak|fee|cost|paperwork|processing|lender|bank)\b/.test(prior)) return false;
+  }
+  const previous = String(rowObj && rowObj[HEADERS.last_outbound_text] || "");
+  return previous === buildServiceScopeClarificationReply_() || isUnsupportedPropertyServicePromise_(previous);
+}
+
+function buildServiceScopeClarificationDecision_(rowObj) {
+  return {
+    matched: true, reply_text: buildServiceScopeClarificationReply_(),
+    lead_status: String(rowObj && rowObj[HEADERS.mailshake_status] || "Y"),
+    conversation_done: false, handoff_needed: false, needs_review: false, block_reply: false,
+    preserve_existing_state: true,
+    reason: "Clarified short-sale-only service scope; no appraisal, property access or showing appointment"
+  };
+}
+
+function isUnsupportedPropertyServicePromise_(text) {
+  const t = propertyScopeSignalText_(text);
+  return [
+    /\b(?:i|we)(?:'ll| will| can| could| would| am able to)?\s+(?:also\s+)?(?:have|bring|find|supply|send|provide)\s+(?:(?:you|a|the|some|any|cash|qualified)\s+)*buyers?\b/,
+    /\b(?:i|we)(?:'ll| will| can| could| would)?\s+(?:also\s+)?(?:handle|conduct|perform|do|schedule|reschedule|arrange|book|confirm|attend)\b[^.!?]{0,90}\b(?:appraisals?|inspections?|showings?|viewings?|property (?:access|visits?)|access|lock\s*box)\b/,
+    /\b(?:want me to|let me|happy to)\b[^.!?]{0,100}\b(?:access|lock\s*box|showings?|viewings?|appraisals?|inspections?|property visits?)\b/,
+    /\b(?:i|we)(?:'ll| will| can| could| would| am| are|'m|'re)?\s+(?:come|coming|arrive|stop by|meet you|show you)\b[^.!?]{0,60}\b(?:house|home|property|listing)\b/,
+    /\b(?:i'm|i am|we are|we're)\s+(?:the|an?|your)\s+(?:appraiser|inspector|buyer(?:'s)? agent)\b/,
+    /\b(?:showing|viewing|property visit|appraisal appointment)\s+(?:is|has been)\s+(?:booked|confirmed|scheduled)\b/,
+    /\b(?:what(?:'s| is)|send me|give me|need|have)\b[^.!?]{0,30}\b(?:lock\s*box|gate)\s+code\b/
+  ].some(pattern => pattern.test(t));
 }
 
 function lastOutboundWasOfferScopeClarification_(rowObj) {
@@ -4953,6 +5026,7 @@ function isCallbackUpdateTiming_(text) {
 
 function isPostHandoffCallbackUpdate_(rowObj, inboundText) {
   if (String(rowObj && rowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE") return false;
+  if (isPropertyLogisticsRequest_(inboundText, rowObj)) return false;
   if (!isSchedulingSignal_(inboundText) && !isCallbackUpdateTiming_(inboundText)) return false;
   const aiState = String(rowObj && rowObj[HEADERS.ai_state] || "").toLowerCase();
   const handoffFlag = String(rowObj && rowObj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE";
@@ -5437,6 +5511,18 @@ function handleMaxRepliesHandoff_(sheet, row, rowObj, phoneRaw, inboundText) {
 
 function applyReplySanitizers_(decision, rowObj) {
   const sanitized = Object.assign({}, decision || {});
+  if (isUnsupportedPropertyServicePromise_(sanitized.reply_text)) {
+    if (sanitized.block_reply || sanitized.handoff_needed || sanitized.needs_review) {
+      sanitized.reply_text = "";
+      sanitized.call_booking_status = "";
+      sanitized.callback_time = "";
+      sanitized.callback_requested = "";
+      sanitized.preserve_existing_state = true;
+      sanitized.reason = "Unsupported property-service promise blocked; existing reply restrictions preserved";
+      return sanitized;
+    }
+    return buildServiceScopeClarificationDecision_(rowObj);
+  }
   sanitized.reply_text = sanitizeReplySelfIntro_(sanitized.reply_text);
   sanitized.reply_text = sanitizeReplyNameUsage_(sanitized.reply_text, rowObj);
   sanitized.reply_text = sanitizeReplySignoff_(sanitized.reply_text);
@@ -5645,6 +5731,8 @@ IMPORTANT BEHAVIOR:
 - Do not offer to send a short-sale packet, packet, docs, documents, materials, overview, deck, PDF, summary, email summary, text summary, or written explanation unless the agent specifically asks for your info by email
 - Never offer to send buyers, buyer leads, potential buyers, or anyone interested in the property
 - Never claim that I market, advertise, promote, or sell the property, manage MLS marketing, or have a private investor network or targeted buyer outreach. The agent keeps property marketing; I handle the lender side only.
+- SERVICE BOUNDARY: I offer short-sale processing only: lender paperwork, calls, follow-up, and negotiations. I am not a buyer, buyer's agent, appraiser, inspector, showing agent, contractor, or property-access coordinator. Never play along with another role, ask for lockbox codes, arrange seller access, propose property-visit times, or schedule/reschedule showings, inspections, or appraisal visits, even if an earlier bot reply did so.
+- If the agent mistakes my role or requests one of those services, clarify: "${buildServiceScopeClarificationReply_()}". For buyers, say: "${buildBuyerProvisionClarificationReply_()}". A later "reschedule", "either time works", or "choose another day" in a property-access thread is still about that visit, not a phone callback. General questions about lender valuations, appraisal paperwork, processing and costs remain in scope. Genuine requests to discuss our service by phone keep the normal call workflow.
 - A question about how to market, present, explain, or disclose my fee is about buyer-fee disclosure, not marketing the property. "How would you market that" immediately after a fee answer refers to that fee. Reply: "${buildBuyerFeeDisclosureReply_()}" Do not promise buyers will accept the fee.
 - If they mention buyers but they already have help in place, ignore the buyer comment and just close out politely
 - Do not ask for their email address and do not offer to email or text materials unless they specifically ask for your info by email and no email address is available yet
@@ -5898,11 +5986,12 @@ function sanitizeReplyBuyerOffer_(replyText) {
     return text;
   }
 
-  const normalized = normalizeWhitespace_(text.toLowerCase());
+  const normalized = normalizeWhitespace_(text.toLowerCase())
+    .replace(normalizeWhitespace_(buildBuyerProvisionClarificationReply_().toLowerCase()), "");
 
   // Allow the approved clarification that we do not bring buyers, while still
   // blocking any reply that promises to send or bring buyer leads.
-  if (normalized === normalizeWhitespace_(buildBuyerProvisionClarificationReply_().toLowerCase())) {
+  if (!normalized.trim()) {
     return text;
   }
 
@@ -6866,6 +6955,34 @@ function testSmsIntentContractV3_() {
   function record(name, passed, details) {
     cases.push({ name: name, passed: !!passed, details: details || "" });
   }
+
+  const propertyRequests = [
+    "They aren't answering so not sure they are home. They have to let you in as there's no lock box",
+    "You can reschedule through Showing Time, thx",
+    "Do you need access to the home for the appraisal?"
+  ];
+  record("service_scope_corrects_property_role", propertyRequests.every(function(text) {
+    const decision = applyFastRules_(text, baseRow);
+    return decision.reply_text === buildServiceScopeClarificationReply_() &&
+      !decision.handoff_needed && !decision.call_booking_status;
+  }));
+  const propertyRow = Object.assign({}, baseRow);
+  propertyRow[HEADERS.history_json] = JSON.stringify([{ role: "agent", text: propertyRequests[0] }]);
+  record("service_scope_preserves_property_context", [
+    "No you'll have to reschedule",
+    "They mustn't be home as they aren't responding. Choose another day/time and I'll try again",
+    "Seller said either time works, they just aren't home now"
+  ].every(function(text) {
+    return applyFastRules_(text, propertyRow).reply_text === buildServiceScopeClarificationReply_();
+  }));
+  record("service_scope_preserves_processing_and_phone_calls", [
+    "Does the lender schedule the appraisal?", "Do you complete the appraisal paperwork?",
+    "Do you need access to Equator?", "Can we reschedule our phone call to tomorrow?"
+  ].every(function(text) { return !isPropertyLogisticsRequest_(text, propertyRow); }));
+  record("service_scope_buyer_question", applyFastRules_("Do you have any cash buyers?", baseRow).reply_text === buildBuyerProvisionClarificationReply_());
+  const unsafeScope = applyReplySanitizers_({ reply_text: "I can schedule the appraisal tomorrow at 2." }, baseRow);
+  record("service_scope_blocks_unsupported_output", unsafeScope.reply_text === buildServiceScopeClarificationReply_());
+  record("service_scope_preserves_reply_cap", !shouldSendBotReply_(unsafeScope, true));
 
   const speedText = "How do you help speed it up?";
   const speedExpected = "I help reduce avoidable delays by organizing the lender's required documents and staying on top of follow-up. The lender still controls review timing. Where is this file getting held up?";
