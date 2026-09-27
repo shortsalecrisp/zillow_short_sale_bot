@@ -50,6 +50,7 @@ from sheet_safety import (
     sanitize_payload_for_sheet_json,
 )
 from sms_providers import get_sender
+from sms_takeover import create_takeover_router
 
 # ──────────────────────────────────────────────────────────────────────
 # Configuration & logging
@@ -137,6 +138,7 @@ if not SMS_API_KEY:
 
 # FastAPI app
 app            = FastAPI()
+app.include_router(create_takeover_router(TASKER_TRANSPORT_HEALTH_URL))
 
 
 def _recover_stale_queue_for_scheduled_window() -> int:
