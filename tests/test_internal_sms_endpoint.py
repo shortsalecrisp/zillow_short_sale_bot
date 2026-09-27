@@ -2410,6 +2410,73 @@ def test_sms_structured_autoresponder_precedes_ai_human_check(monkeypatch):
     assert human_question["block_reply"] is True
 
 
+def test_sms_automated_fundraising_loop_is_silent_and_does_not_create_lead(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    inbound = (
+        ": 3 things just happened: A new poll showed us 4845 after a 6-point swing. "
+        "I launched a Rapid Response Fund to get our response ads on the air immediately. "
+        "You chipped in $1 to the Fund to save Georgia wait, you didnt yet! , ? $ ? "
+        "txt.keishaforgovernor.com/p91973 Thank you, Keisha Stop2End"
+    )
+    before = {index: list(row) for index, row in sheet.rows.items()}
+    for attempt in range(3):
+        response = TestClient(module.app).post(
+            "/sms-chatbot",
+            data={"token": "secret-token", "action": "incoming_sms", "phone": "7706280547",
+                  "message": inbound, "message_id": f"campaign-repeat-{attempt}"},
+        )
+        assert response.status_code == 200
+        result = response.json()
+        assert result["should_reply"] is False
+        assert result["handoff_needed"] is False
+        assert result["needs_review"] is False
+    assert sheet.rows == before
+    assert sender.calls == []
+    assert not module._sms_is_automated_promotional_sms("Are you a bot or a real person?")
+    assert not module._sms_is_automated_promotional_sms(
+        "What is your short sale fee? I saw a campaign link with Stop2End"
+    )
+
+
+def test_sms_answered_repeated_question_handoffs_once_and_keeps_new_questions(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    question = "What is your fee?"
+    sheet.rows[2][17] = json.dumps([
+        {"role": "agent", "text": question},
+        {"role": "assistant", "text": "The buyer pays my flat fee at closing.", "receipt_id": "confirmed"},
+    ])
+    client = TestClient(module.app)
+    def ask(message, message_id):
+        return client.post(
+            "/sms-chatbot",
+            data={"token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+                  "message": message, "message_id": message_id},
+        ).json()
+
+    first = ask(question, "answered-repeat-1")
+    assert first["should_reply"] is False
+    assert first["handoff_type"] == "REPEATED ANSWERED MESSAGE REVIEW"
+    assert first["alert_needed"] is True
+    assert sheet.rows[2][13] == "handoff"
+    assert sheet.rows[2][19] == "TRUE"
+    second = ask(question, "answered-repeat-2")
+    assert second["should_reply"] is False
+    assert second["handoff_needed"] is False
+    assert second.get("alert_needed", False) is False
+    assert second["reason"] == "Repeated question already routed for manual review"
+    novel = ask("Can you email me the fee details?", "answered-repeat-new-question")
+    assert novel["should_reply"] is False
+    assert novel["reason"] != "Repeated question already routed for manual review"
+    assert sender.calls == []
+    assert not module._sms_is_answered_repeated_inbound_question(
+        {"history_json": json.dumps([{"role": "agent", "text": question}])}, question
+    )
+
+
 def test_sms_automated_alternate_number_notice_preserves_existing_handoff_state(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,

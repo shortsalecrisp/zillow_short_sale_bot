@@ -5114,6 +5114,41 @@ def _sms_is_recent_duplicate_inbound(row_obj: Dict[str, str], inbound_text: str,
     return abs((current_at - prior_at).total_seconds()) <= 5 * 60
 
 
+def _sms_is_answered_repeated_inbound_question(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    if (
+        not _sms_is_substantive_followup(inbound_text)
+        or _sms_is_scheduled_callback(inbound_text)
+        or _sms_is_post_handoff_callback_update(row_obj, inbound_text)
+    ):
+        return False
+    current = _sms_canonicalize_repeated_complete_inbound_for_dedupe(inbound_text)
+    if not current:
+        return False
+    history = _sms_history_array(row_obj.get("history_json"))
+    for index, entry in enumerate(history[:-1]):
+        if not isinstance(entry, dict) or str(entry.get("role") or "").lower() != "agent":
+            continue
+        if _sms_canonicalize_repeated_complete_inbound_for_dedupe(entry.get("text")) != current:
+            continue
+        for later in history[index + 1 :]:
+            if not isinstance(later, dict):
+                continue
+            role = str(later.get("role") or "").lower()
+            if role == "agent":
+                break
+            if role == "assistant" and later.get("receipt_id") and _sms_normalize_whitespace(later.get("text")):
+                return True
+    return False
+
+
+def _sms_is_already_reviewed_repeated_question(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    return (
+        str(row_obj.get("conversation_summary") or "") == "Repeated answered message awaiting manual review"
+        and _sms_canonicalize_repeated_complete_inbound_for_dedupe(row_obj.get("response_status"))
+        == _sms_canonicalize_repeated_complete_inbound_for_dedupe(inbound_text)
+    )
+
+
 def _sms_append_history(ws, row_idx: int, headers: List[str], row_obj: Dict[str, str], entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     history = _sms_history_array(row_obj.get("history_json"))
     history.append(entry)
@@ -5203,6 +5238,19 @@ def _sms_is_automated_routing_notice(text: str) -> bool:
         r"\byou(?:'|’)ve reached\b.*\b(?:different|another|alternate) number (?:for|to) text(?:ing)?\b.*\bwe(?:'|’)ll send you (?:a )?message from that number\b",
     ]
     return any(re.search(pattern, t) for pattern in patterns) or _sms_is_structured_automated_response(t)
+
+
+def _sms_is_automated_promotional_sms(text: str) -> bool:
+    t = _sms_normalize_whitespace(text).lower()
+    if not t or re.search(r"\b(?:short[ -]?sale|lender|listing|property|seller|buyer)\b", t):
+        return False
+    has_link = re.search(r"\b(?:https?://|www\.|[a-z0-9-]+(?:\.[a-z0-9-]+)+/(?:[a-z0-9/?=&%-]+))", t)
+    has_campaign_appeal = re.search(
+        r"\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|chipped in)\b",
+        t,
+    )
+    has_bulk_footer = re.search(r"\b(?:stop\s*2\s*end|reply\s+stop\s+to\s+(?:end|unsubscribe|opt\s*out))\b", t)
+    return bool(has_campaign_appeal and has_link and has_bulk_footer)
 
 
 def _sms_is_structured_automated_response(value: Any) -> bool:
@@ -6593,6 +6641,35 @@ def _sms_fast_decision(
             reason="Automated STOP instruction / non-agent responder",
         )
 
+    if _sms_is_automated_promotional_sms(t):
+        return _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "N"),
+            block_reply=True,
+            preserve_existing_state=True,
+            reason="High-confidence automated promotion ignored",
+        )
+
+    if _sms_is_answered_repeated_inbound_question(row_obj, inbound_text):
+        if (
+            str(row_obj.get("human_override") or "").upper() == "TRUE"
+            or str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
+            or str(row_obj.get("ai_state") or "").lower() == "handoff"
+        ):
+            return _sms_decision(
+                lead_status=str(row_obj.get("mailshake_status") or "Y"),
+                block_reply=True,
+                preserve_existing_state=True,
+                reason="Answered repeat in a human-owned conversation; no new alert",
+            )
+        return _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "Y"),
+            handoff_needed=True,
+            alert_needed=True,
+            block_reply=True,
+            handoff_type="REPEATED ANSWERED MESSAGE REVIEW",
+            reason="Answered question repeated without new information; manual review alerted once",
+        )
+
     if _sms_is_post_closeout_not_short_sale_continuation(t, row_obj):
         return _sms_decision(
             lead_status=str(row_obj.get("mailshake_status") or "R"),
@@ -7511,6 +7588,18 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     if not phone_raw or not inbound_text:
         return {"ok": False, "error": "Missing phone or message", "should_reply": False}
 
+    if _sms_is_automated_promotional_sms(inbound_text):
+        _sms_append_debug(
+            "incoming_sms_automated_promotion_ignored",
+            {"request_id": request_id, "phone": phone_raw, "message_id": message_id,
+             "reason": "High-confidence automated promotion; no reply or owner alert"},
+        )
+        return _sms_normalize_tasker_payload({
+            "ok": True, "should_reply": False, "reply_text": "", "block_reply": True,
+            "handoff_needed": False, "needs_review": False,
+            "reason": "High-confidence automated promotion ignored",
+        })
+
     ws, headers, rows = _sms_read_leads_sheet()
     row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
 
@@ -7566,6 +7655,19 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         _sms_append_debug(
             "incoming_sms_duplicate_suppressed",
             {"request_id": request_id, "phone": phone_raw, "message": inbound_text, "reason": result["reason"]},
+        )
+        return result
+
+    if _sms_is_already_reviewed_repeated_question(row_obj, inbound_text):
+        result = _sms_normalize_tasker_payload({
+            "ok": True, "should_reply": False, "reply_text": "", "block_reply": True,
+            "handoff_needed": False, "needs_review": False,
+            "reason": "Repeated question already routed for manual review",
+        })
+        _sms_append_debug(
+            "incoming_sms_answered_repeat_suppressed",
+            {"request_id": request_id, "phone": phone_raw, "message_id": message_id,
+             "reason": result["reason"]},
         )
         return result
 
@@ -7680,7 +7782,11 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     updates = {} if preserve_existing_state else {
         "response_status": inbound_text,
         "mailshake_status": lead_status,
-        "conversation_summary": reason,
+        "conversation_summary": (
+            "Repeated answered message awaiting manual review"
+            if decision.get("handoff_type") == "REPEATED ANSWERED MESSAGE REVIEW"
+            else reason
+        ),
         "ai_state": "handoff" if terminal_handoff else ("done" if conversation_done else "active"),
         "call_booking_status": str(decision.get("call_booking_status") or "") or (
             "closed_no_interest"

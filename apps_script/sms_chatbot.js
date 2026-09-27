@@ -233,6 +233,34 @@ function isRecentDuplicateInboundText_(rowObj, inboundText, receivedAt) {
   if (Number.isNaN(lastContactTs) || Number.isNaN(receivedTs)) return false;
   return Math.abs(receivedTs - lastContactTs) <= 5 * 60 * 1000;
 }
+
+function isAnsweredRepeatedInboundQuestion_(rowObj, inboundText) {
+  if (!isSubstantiveFollowupSignal_(inboundText) || isSchedulingSignal_(inboundText) ||
+      isPostHandoffCallbackUpdate_(rowObj, inboundText)) return false;
+  const current = canonicalizeRepeatedCompleteInboundForDedupe_(inboundText);
+  if (!current) return false;
+  const history = getHistoryArray_(rowObj && rowObj[HEADERS.history_json]);
+  for (let i = 0; i < history.length - 1; i += 1) {
+    const entry = history[i] || {};
+    if (String(entry.role || "").toLowerCase() !== "agent" ||
+        canonicalizeRepeatedCompleteInboundForDedupe_(entry.text) !== current) continue;
+    for (let j = i + 1; j < history.length; j += 1) {
+      const later = history[j] || {};
+      const role = String(later.role || "").toLowerCase();
+      if (role === "agent") break;
+      if (role === "assistant" && later.receipt_id && normalizeWhitespace_(later.text)) return true;
+    }
+  }
+  return false;
+}
+
+function isAlreadyReviewedRepeatedQuestion_(rowObj, inboundText) {
+  return String(rowObj && rowObj[HEADERS.conversation_summary] || "") ===
+      "Repeated answered message awaiting manual review" &&
+    canonicalizeRepeatedCompleteInboundForDedupe_(rowObj && rowObj[HEADERS.response_status]) ===
+      canonicalizeRepeatedCompleteInboundForDedupe_(inboundText);
+}
+
 function parseIncomingRequest_(e) {
   const raw = e && e.postData && typeof e.postData.contents === "string"
     ? e.postData.contents
@@ -441,6 +469,19 @@ function handleIncomingSmsCore_(body) {
     throw new Error("Missing phone or message");
   }
 
+  if (isAutomatedPromotionalSmsSignal_(inboundText)) {
+    appendSmsDebugLog_("incoming_sms_automated_promotion_ignored", {
+      phone: phoneRaw,
+      message_id: messageId,
+      reason: "High-confidence automated promotion; no reply or owner alert"
+    });
+    return {
+      ok: true, should_reply: false, reply_text: "", block_reply: true,
+      handoff_needed: false, needs_review: false,
+      reason: "High-confidence automated promotion ignored"
+    };
+  }
+
   let sheet;
   let rowInfo;
   let row;
@@ -506,6 +547,18 @@ function handleIncomingSmsCore_(body) {
         duplicate: true,
         should_reply: false,
         reason: "Durably handled inbound replay ignored"
+      };
+    }
+
+    if (!recoveringSameMessage && isAlreadyReviewedRepeatedQuestion_(rowObj, inboundText)) {
+      appendSmsDebugLog_("incoming_sms_answered_repeat_suppressed", {
+        phone: phoneRaw, message_id: messageId,
+        reason: "Repeated question already routed for manual review"
+      });
+      return {
+        ok: true, should_reply: false, reply_text: "", block_reply: true,
+        handoff_needed: false, needs_review: false,
+        reason: "Repeated question already routed for manual review"
       };
     }
 
@@ -673,6 +726,44 @@ function handleIncomingSmsCore_(body) {
       handoff_needed: false,
       needs_review: false,
       reason: "Automated STOP instruction / non-agent responder"
+    };
+  }
+
+  if (isAnsweredRepeatedInboundQuestion_(currentRowObj, inboundText)) {
+    if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE" ||
+        isManualFollowupLocked_(currentRowObj)) {
+      return {
+        ok: true, should_reply: false, reply_text: "", block_reply: true,
+        handoff_needed: false, needs_review: false,
+        reason: "Answered repeat in a human-owned conversation; no new alert"
+      };
+    }
+    sendHandoffEmail_({
+      handoff_type: "REPEATED ANSWERED MESSAGE REVIEW",
+      agent_name: currentRowObj[HEADERS.agent_name] || "",
+      last_name: currentRowObj[HEADERS.last_name] || "",
+      initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
+      phone: phoneRaw,
+      email: currentRowObj[HEADERS.email] || "",
+      listing_address: currentRowObj[HEADERS.listing_address] || "",
+      city: currentRowObj[HEADERS.city] || "",
+      state: currentRowObj[HEADERS.state] || "",
+      zip: currentRowObj[HEADERS.zip] || "",
+      last_message: inboundText,
+      history: getHistoryArray_(currentRowObj[HEADERS.history_json])
+    });
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.conversation_summary]: "Repeated answered message awaiting manual review",
+      [HEADERS.ai_state]: "handoff",
+      [HEADERS.handoff_flag]: "TRUE",
+      [HEADERS.human_override]: "TRUE"
+    });
+    return {
+      ok: true, should_reply: false, reply_text: "", block_reply: true,
+      handoff_needed: true, needs_review: false, alert_needed: true,
+      handoff_type: "REPEATED ANSWERED MESSAGE REVIEW",
+      reason: "Answered question repeated without new information; manual review alerted once"
     };
   }
 
@@ -3540,6 +3631,15 @@ function isAutomatedRoutingNoticeSignal_(text) {
   return patterns.some(function(pattern) { return pattern.test(t); }) || isStructuredAutomatedResponseSignal_(t);
 }
 
+function isAutomatedPromotionalSmsSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || /\b(?:short[ -]?sale|lender|listing|property|seller|buyer)\b/.test(t)) return false;
+  const hasLink = /\b(?:https?:\/\/|www\.|[a-z0-9-]+(?:\.[a-z0-9-]+)+\/(?:[a-z0-9/?=&%-]+))/.test(t);
+  const hasCampaignAppeal = /\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|chipped in)\b/.test(t);
+  const hasBulkFooter = /\b(?:stop\s*2\s*end|reply\s+stop\s+to\s+(?:end|unsubscribe|opt\s*out))\b/.test(t);
+  return hasCampaignAppeal && hasLink && hasBulkFooter;
+}
+
 function isStructuredAutomatedResponseSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return false;
@@ -6319,6 +6419,7 @@ function sendHandoffEmail_(data) {
   const fullName = getHandoffDisplayName_(data);
   const rawHandoffType = data.handoff_type || "MANUAL FOLLOW-UP";
   const isDeferredHotLead = rawHandoffType === "DEFERRED HOT LEAD";
+  const isRepeatedAnswerReview = rawHandoffType === "REPEATED ANSWERED MESSAGE REVIEW";
   const handoffType = isDeferredHotLead ? "DEFERRED HOT LEAD - NO ACTION NOW" : rawHandoffType;
   const formattedPhone = formatPhoneForEmail_(data.phone);
   const formattedAddress = formatPropertyAddressForEmail_(data);
@@ -6326,10 +6427,14 @@ function sendHandoffEmail_(data) {
 
   const subject = rawHandoffType === "HUMAN HANDOFF UPDATE"
     ? `LEAD UPDATE 🔔 - ${fullName}`
+    : isRepeatedAnswerReview
+    ? `SMS REVIEW - Repeated answered question - ${fullName}`
     : `NEW LEAD 🔥 - ${handoffType} - ${fullName}`;
 
   const actionLine = rawHandoffType === "HUMAN HANDOFF UPDATE"
     ? "A human-owned conversation has new scheduling or file details. Review the latest message and continue the manual follow-up; the bot did not reply."
+    : isRepeatedAnswerReview
+    ? "The same question arrived again after a confirmed bot answer. The bot paused this conversation and did not send another reply. Please review the answer and follow up if needed; identical repeats will not send more alerts."
     : isDeferredHotLead
     ? "The agent said they will initiate contact. No reply or callback is requested now; keep this lead visible and wait for re-engagement."
     : "We have a new lead interested in your services, and a manual follow-up is now needed.";
@@ -6955,6 +7060,29 @@ function testSmsIntentContractV3_() {
   function record(name, passed, details) {
     cases.push({ name: name, passed: !!passed, details: details || "" });
   }
+
+  const campaignText = "A new poll showed a swing. Our Rapid Response Fund needs your donation. " +
+    "txt.examplecampaign.com/p91973 Thank you, Campaign Stop2End ?";
+  record("automated_promotion_ignored_before_reply", isAutomatedPromotionalSmsSignal_(campaignText) &&
+    !isAutomatedPromotionalSmsSignal_("What is your short sale fee? I saw a campaign link with Stop2End"));
+  const loopQuestion = "What is your fee?";
+  const answeredRow = Object.assign({}, baseRow);
+  answeredRow[HEADERS.history_json] = JSON.stringify([
+    { role: "agent", text: loopQuestion },
+    { role: "assistant", text: "The buyer pays at closing.", receipt_id: "confirmed" },
+    { role: "agent", text: loopQuestion }
+  ]);
+  record("answered_repeat_requires_confirmed_receipt", isAnsweredRepeatedInboundQuestion_(answeredRow, loopQuestion) &&
+    !isAnsweredRepeatedInboundQuestion_(Object.assign({}, answeredRow, {
+      [HEADERS.history_json]: JSON.stringify([{ role: "agent", text: loopQuestion }])
+    }), loopQuestion));
+  const reviewedRow = Object.assign({}, answeredRow);
+  reviewedRow[HEADERS.conversation_summary] = "Repeated answered message awaiting manual review";
+  reviewedRow[HEADERS.response_status] = loopQuestion;
+  record("answered_repeat_alerted_once_but_new_question_allowed",
+    isAlreadyReviewedRepeatedQuestion_(reviewedRow, loopQuestion) &&
+    !isAlreadyReviewedRepeatedQuestion_(reviewedRow, "Can you email me the fee details?") &&
+    !isAnsweredRepeatedInboundQuestion_(answeredRow, "Can you email me the fee details?"));
 
   const propertyRequests = [
     "They aren't answering so not sure they are home. They have to let you in as there's no lock box",
