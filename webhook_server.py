@@ -5055,13 +5055,36 @@ def _sms_is_intentional_no_reply_disposition(row_obj: Dict[str, str], inbound_te
     )
 
 
+def _sms_history_has_exact_agent_inbound(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    current_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(inbound_text)
+    if not current_text:
+        return False
+    return any(
+        isinstance(entry, dict)
+        and str(entry.get("role") or "").lower() == "agent"
+        and _sms_canonicalize_repeated_complete_inbound_for_dedupe(entry.get("text")) == current_text
+        for entry in _sms_history_array(row_obj.get("history_json"))
+    )
+
+
+def _sms_is_durably_handled_scheduling_replay(row_obj: Dict[str, str], inbound_text: str) -> bool:
+    if not (_sms_is_scheduled_callback(inbound_text) or _sms_is_post_handoff_callback_update(row_obj, inbound_text)):
+        return False
+    callback_requested = str(row_obj.get("callback_requested") or "").lower() == "yes"
+    scheduled_callback = str(row_obj.get("call_booking_status") or "").lower() == "scheduled_callback"
+    return bool(
+        (callback_requested or scheduled_callback)
+        and _sms_history_has_exact_agent_inbound(row_obj, inbound_text)
+    )
+
+
 def _sms_is_durable_handled_duplicate(row_obj: Dict[str, str], inbound_text: str) -> bool:
     prior_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(row_obj.get("last_inbound_text"))
     current_text = _sms_canonicalize_repeated_complete_inbound_for_dedupe(inbound_text)
     if not prior_text or prior_text != current_text:
         return False
     if _sms_is_scheduled_callback(inbound_text) or _sms_is_post_handoff_callback_update(row_obj, inbound_text):
-        return False
+        return _sms_is_durably_handled_scheduling_replay(row_obj, inbound_text)
     if (
         "?" in str(inbound_text or "")
         or _sms_is_substantive_followup(inbound_text)

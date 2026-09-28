@@ -1269,7 +1269,7 @@ def test_sms_unconfirmed_old_duplicate_is_reprocessed(monkeypatch):
     assert sheet.rows[2][44] == "2026-08-12T10:18:00-04:00"
 
 
-def test_sms_callback_repeat_bypasses_durable_duplicate_guard(monkeypatch):
+def test_sms_callback_repeat_is_durably_suppressed(monkeypatch):
     module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
     inbound = "Afternoon on Monday would work better"
     sheet.rows[2][9] = inbound
@@ -1302,11 +1302,29 @@ def test_sms_callback_repeat_bypasses_durable_duplicate_guard(monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
-    assert body.get("duplicate") is not True
-    assert body["reason"] == "Callback timing repeated after human handoff"
-    assert body["alert_needed"] is False
-    assert sheet.rows[2][20] == "second-message-id"
+    assert body.get("duplicate") is True
+    assert body["should_reply"] is False
+    assert body["reason"] == "Durably handled inbound replay ignored"
     assert sender.calls == []
+    assert sheet.rows[2][38] == "Monday Afternoon"
+    assert sheet.rows[2][20] == "first-message-id"
+
+
+def test_sms_new_callback_wording_remains_actionable(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    prior = "Afternoon on Monday would work better"
+    row = {
+        "last_inbound_text": prior,
+        "ai_state": "handoff",
+        "call_booking_status": "scheduled_callback",
+        "callback_requested": "yes",
+        "handoff_flag": "TRUE",
+        "human_override": "TRUE",
+        "history_json": json.dumps([{"role": "agent", "text": prior}]),
+    }
+
+    assert module._sms_is_durable_handled_duplicate(row, prior) is True
+    assert module._sms_is_durable_handled_duplicate(row, "Monday at 3:00 PM would work better") is False
 
 
 def test_sms_post_handoff_non_scheduling_day_reference_stays_under_human_override(monkeypatch):

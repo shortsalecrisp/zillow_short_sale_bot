@@ -175,13 +175,40 @@ function hasPostOptOutInterestAlert_(rowObj) {
     .toLowerCase().indexOf("post-opt-out renewed interest owner alert recorded") !== -1;
 }
 
+function historyHasExactAgentInbound_(rowObj, inboundText) {
+  const currentText = canonicalizeRepeatedCompleteInboundForDedupe_(inboundText);
+  if (!currentText) return false;
+  return getHistoryArray_(rowObj && rowObj[HEADERS.history_json]).some(function(entry) {
+    return entry && String(entry.role || "").toLowerCase() === "agent" &&
+      canonicalizeRepeatedCompleteInboundForDedupe_(entry.text) === currentText;
+  });
+}
+
+function isDurablyHandledSchedulingReplay_(rowObj, inboundText) {
+  const isScheduling = isSchedulingSignal_(inboundText);
+  const isPostHandoffUpdate = typeof isPostHandoffCallbackUpdate_ === "function" &&
+    isPostHandoffCallbackUpdate_(rowObj, inboundText);
+  if (!isScheduling && !isPostHandoffUpdate) return false;
+
+  // A real callback update must remain actionable. Suppress only an exact
+  // replay whose earlier agent turn is already in history and whose callback
+  // disposition was durably recorded. This keeps relative phrases such as
+  // "tomorrow" from being reinterpreted on a later ingestion date.
+  const callbackRequested = String(rowObj && rowObj[HEADERS.callback_requested] || "").toLowerCase() === "yes";
+  const scheduledCallback = String(rowObj && rowObj[HEADERS.call_booking_status] || "").toLowerCase() ===
+    "scheduled_callback";
+  return (callbackRequested || scheduledCallback) && historyHasExactAgentInbound_(rowObj, inboundText);
+}
+
 function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
   const priorText = canonicalizeRepeatedCompleteInboundForDedupe_(rowObj && rowObj[HEADERS.last_inbound_text]);
   const currentText = canonicalizeRepeatedCompleteInboundForDedupe_(inboundText);
   if (!priorText || !currentText || priorText !== currentText) return false;
   const postHandoffCallbackUpdate = typeof isPostHandoffCallbackUpdate_ === "function" &&
     isPostHandoffCallbackUpdate_(rowObj, inboundText);
-  if (isSchedulingSignal_(inboundText) || postHandoffCallbackUpdate) return false;
+  if (isSchedulingSignal_(inboundText) || postHandoffCallbackUpdate) {
+    return isDurablyHandledSchedulingReplay_(rowObj, inboundText);
+  }
   if (isPriorOptOutConversation_(rowObj) &&
       hasPostOptOutInterestAlert_(rowObj) &&
       isClearPostOptOutInterestSignal_(inboundText)) {
@@ -7978,13 +8005,16 @@ function testApprovedLeadIntelligenceRules_() {
   const callbackDuplicateRow = Object.assign({}, postHandoffCallbackRow, {
     [HEADERS.last_inbound_text]: callbackDuplicateText,
     [HEADERS.response_status]: callbackDuplicateText,
+    [HEADERS.callback_requested]: "yes",
+    [HEADERS.call_booking_status]: "scheduled_callback",
     [HEADERS.history_json]: JSON.stringify([
       { role: "agent", text: callbackDuplicateText, ts: "2026-08-12T10:05:00-04:00" },
       { role: "assistant", text: "Monday afternoon works.", ts: "2026-08-12T10:06:00-04:00" }
     ])
   });
-  if (isDurableHandledDuplicateInbound_(callbackDuplicateRow, callbackDuplicateText)) {
-    throw new Error("Callback updates must bypass durable duplicate suppression");
+  if (!isDurableHandledDuplicateInbound_(callbackDuplicateRow, callbackDuplicateText) ||
+      isDurableHandledDuplicateInbound_(callbackDuplicateRow, "Monday at 3:00 PM would work better")) {
+    throw new Error("Handled callback replay suppression regression");
   }
   if (!isClearNoSignal_("Thank you I think I have an under control")) {
     throw new Error("Under-control voice typo must be recognized as a clear closeout");

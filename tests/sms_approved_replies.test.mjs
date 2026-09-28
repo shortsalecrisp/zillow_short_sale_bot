@@ -60,6 +60,28 @@ test('untimed callback rule does not steal scheduled, conditional, or caller-ini
   assert.equal(h.evaluate('isUntimedExplicitCallbackSignal_("I will call you")'), false);
 });
 
+test('an exact recorded callback replay preserves the original schedule without a second handoff', () => {
+  const inbound = "Let's talk tomorrow. I am actually out of office right now.";
+  const h = smsHarness({
+    last_inbound_text: inbound,
+    ai_state: 'handoff',
+    call_booking_status: 'scheduled_callback',
+    callback_requested: 'yes',
+    callback_time: 'September 27, 2026',
+    handoff_flag: 'TRUE',
+    human_override: 'TRUE',
+    history_json: JSON.stringify([{role: 'agent', text: inbound, ts: '2026-09-26T17:38:00-04:00'}]),
+  });
+
+  const replay = h.incoming(inbound, {receivedAt: '2026-09-27T17:38:00-04:00'});
+  assert.equal(replay.duplicate, true);
+  assert.equal(replay.should_reply, false);
+  assert.equal(h.state.callback_time, 'September 27, 2026');
+  assert.equal(h.effects.length, 0);
+  assert.equal(h.evaluate(`isDurableHandledDuplicateInbound_(state, ${JSON.stringify(inbound)})`), true);
+  assert.equal(h.evaluate('isDurableHandledDuplicateInbound_(state, "Monday at 3:00 PM works instead")'), false);
+});
+
 test('neutral self-handling gets one transparent value response, then closes', () => {
   const h = smsHarness();
   const first = h.incoming("I'm handling it myself thank you");
