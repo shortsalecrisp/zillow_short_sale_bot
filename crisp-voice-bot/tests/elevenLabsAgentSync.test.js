@@ -80,6 +80,8 @@ test("candidate sets only the selected base model and preserves other model and 
     assert.equal(result.conversation_config.agent.prompt[key], current.conversation_config.agent.prompt[key]);
   }
   assert.deepEqual(result.conversation_config.tts, current.conversation_config.tts);
+  assert.equal(result.conversation_config.turn.turn_model, "turn_v3");
+  assert.equal(result.conversation_config.turn.turn_timeout, current.conversation_config.turn.turn_timeout);
   assert.deepEqual(result.conversation_config.agent.prompt.tool_ids, current.conversation_config.agent.prompt.tool_ids);
   assert.equal(result.conversation_config.agent.prompt.tools, undefined);
 });

@@ -4,6 +4,14 @@ import {
   hasClearLiveTransferConsent,
   isMisfiredLiveTransferRequest,
 } from "./elevenLabsTransferConsent";
+import {
+  ELEVENLABS_TTS_CONTROL_BRANCH_ID,
+  ELEVENLABS_TTS_CONTROL_MODEL,
+  ELEVENLABS_TTS_EXPERIMENT_STARTED_AT,
+  ELEVENLABS_TTS_TEST_BRANCH_ID,
+  ELEVENLABS_TTS_TEST_MODEL,
+  ELEVENLABS_TURN_MODEL,
+} from "./elevenLabsRuntimeExperiment";
 
 export const VOICE_PERFORMANCE_LOG_MARKER = "CODEX_VOICE_CALL_METRICS_V1";
 
@@ -18,7 +26,7 @@ const VOICE_PROVE_IT_BASELINE_CONVERSATION_COUNT = 1063;
 const VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MIN = 300;
 const VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MAX = 400;
 const POLICY_STRATIFICATION_INSTRUCTIONS =
-  "First stratify by call.initialOpeningPolicy, call.declaredConversationPolicyVersion, and providerIdentity.agentId, versionId and branchId. Missing or null historical values are unknown; do not backfill them from current configuration or pool unknown and known policy/provider versions. Declared policy labels describe the call-start code's intended policy, not the provider version or proof that it ran. Provider identity comes only from a matching final conversation receipt. call.openerVariant is a post-intro continuation assignment, not proof of delivery. The permission-screener-20260918 initial introduction is uniform and permission-first. Before that policy, row-parity assignments paired Eryn/direct_reason and Finch/benefit_hook, so compare those older calls as joint arms. Starting with permission-screener-20260918, voiceVariant and openerVariant rotated independently as a 2x2 design; evaluate voice and opener within that stratum separately while still checking transcript/playback evidence for what was actually delivered. Starting with eryn-self-handler-ai-optout-20260925, voice is owner-fixed to Eryn/Maya and Finch is historical only; continue opener and timing analysis without treating voice as an active experiment. Actual overrides must be evaluated from their recorded assignments. Existing delivery flags are transcript-derived heuristics, not proof of audible delivery; use transcript/playback evidence to establish which continuation was actually delivered.";
+  "First stratify by call.initialOpeningPolicy, call.declaredConversationPolicyVersion, and providerIdentity.agentId, versionId and branchId. Missing or null historical values are unknown; do not backfill them from current configuration or pool unknown and known policy/provider versions. Declared policy labels describe the call-start code's intended policy, not the provider version or proof that it ran. Provider identity comes only from a matching final conversation receipt. call.openerVariant is a post-intro continuation assignment, not proof of delivery. The permission-screener-20260918 initial introduction is uniform and permission-first. Before that policy, row-parity assignments paired Eryn/direct_reason and Finch/benefit_hook, so compare those older calls as joint arms. Starting with permission-screener-20260918, voiceVariant and openerVariant rotated independently as a 2x2 design; evaluate voice and opener within that stratum separately while still checking transcript/playback evidence for what was actually delivered. Starting with eryn-self-handler-ai-optout-20260925, voice is owner-fixed to Eryn/Maya and Finch is historical only; continue opener and timing analysis without treating voice as an active experiment. Starting with the 2026-09-28 runtime experiment, compare TTS only from matching final provider branch receipts: the main branch is Flash v2 control and the experiment branch is v4 Turbo; both use turn_v3. Do not infer a TTS arm from row number, current configuration, or a missing branch receipt. Actual overrides must be evaluated from their recorded assignments. Existing delivery flags are transcript-derived heuristics, not proof of audible delivery; use transcript/playback evidence to establish which continuation was actually delivered.";
 const CODEX_ANALYSIS_INSTRUCTIONS =
   "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. " +
   POLICY_STRATIFICATION_INSTRUCTIONS + " " +
@@ -291,6 +299,25 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       targetAdditionalCallsMax: VOICE_PROVE_IT_TARGET_ADDITIONAL_CALLS_MAX,
       decisionRule:
         "Analyze calls after startedAt once 300-400 additional calls have accumulated. Continue scaling only if there are at least 3 transcript/playback-verified handoff-ready leads or 1 owner-confirmed serious file opportunity.",
+    },
+    ttsModelExperiment: {
+      startedAt: ELEVENLABS_TTS_EXPERIMENT_STARTED_AT,
+      commonTurnModel: ELEVENLABS_TURN_MODEL,
+      commonVoice: "Eryn as Maya",
+      arms: {
+        [ELEVENLABS_TTS_CONTROL_BRANCH_ID]: {
+          key: "flash_v2_control",
+          ttsModel: ELEVENLABS_TTS_CONTROL_MODEL,
+          trafficPercent: 50,
+        },
+        [ELEVENLABS_TTS_TEST_BRANCH_ID]: {
+          key: "v4_turbo_test",
+          ttsModel: ELEVENLABS_TTS_TEST_MODEL,
+          trafficPercent: 50,
+        },
+      },
+      analysisRule:
+        "Use providerIdentity.branchId only from a matching final conversation receipt. Compare live answered calls separately from voicemail/no-answer and hold opener, time bucket, and policy strata constant.",
     },
     call: {
       conversationId: input.conversationId,

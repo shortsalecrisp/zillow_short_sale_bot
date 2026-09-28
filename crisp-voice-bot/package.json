@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test:sheets": "tsx src/scripts/testSheetWrite.ts",
-    "sync:elevenlabs-agent": "tsx src/scripts/syncElevenLabsAgent.ts"
+    "sync:elevenlabs-agent": "tsx src/scripts/syncElevenLabsAgent.ts",
+    "rollout:elevenlabs-runtime": "tsx src/scripts/rolloutElevenLabsRuntimeExperiment.ts"
   },
   "keywords": [
     "telnyx",

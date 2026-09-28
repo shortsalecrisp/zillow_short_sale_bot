@@ -2,6 +2,7 @@ import express, { type ErrorRequestHandler, type NextFunction, type Request, typ
 import { getConfiguredCallWindows } from "./lib/callWindowGuard";
 import { config } from "./lib/config";
 import { getElevenLabsVoiceExperimentStatus } from "./lib/elevenLabsVoiceVariant";
+import { getElevenLabsRuntimeExperimentStatus } from "./lib/elevenLabsRuntimeExperiment";
 import { getProviderCircuitStatus } from "./lib/providerCircuitBreaker";
 import { startGmailImportSchedulers } from "./lib/gmailImporters";
 import { logger } from "./lib/logger";
@@ -39,6 +40,7 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
     testMode: config.testMode,
     commit: process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? null,
     voiceExperiment: getElevenLabsVoiceExperimentStatus(),
+    runtimeExperiment: getElevenLabsRuntimeExperimentStatus(),
     ownerControl: {
       outboundEnabled: config.outboundVoice.enabled,
       paused: !config.outboundVoice.enabled,

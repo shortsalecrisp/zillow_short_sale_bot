@@ -79,6 +79,12 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
   assert.equal(parsed.proveItCohort.baselineConversationCount, 1063);
   assert.equal(parsed.proveItCohort.targetAdditionalCallsMin, 300);
   assert.equal(parsed.proveItCohort.targetAdditionalCallsMax, 400);
+  assert.equal(parsed.ttsModelExperiment.startedAt, "2026-09-28T22:30:50.974Z");
+  assert.equal(parsed.ttsModelExperiment.commonTurnModel, "turn_v3");
+  assert.deepEqual(
+    Object.values(parsed.ttsModelExperiment.arms).map((arm: any) => arm.ttsModel),
+    ["eleven_flash_v2", "eleven_v4_turbo"],
+  );
   assert.equal(parsed.call.voiceVariant, "eryn");
   assert.equal(parsed.call.assistantName, "Maya");
   assert.equal(parsed.call.openerVariant, "direct_reason");
@@ -124,6 +130,7 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
   assert.match(parsed.codexInstructions, /Before that policy, row-parity assignments paired Eryn\/direct_reason and Finch\/benefit_hook/);
   assert.match(parsed.codexInstructions, /Starting with permission-screener-20260918, voiceVariant and openerVariant rotated independently/);
   assert.match(parsed.codexInstructions, /Starting with eryn-self-handler-ai-optout-20260925, voice is owner-fixed to Eryn\/Maya/);
+  assert.match(parsed.codexInstructions, /main branch is Flash v2 control and the experiment branch is v4 Turbo/);
   assert.match(parsed.abTestScope.analysisRule, /Missing or null historical values are unknown/);
   assert.match(parsed.abTestScope.analysisRule, /not proof of audible delivery/);
   assert.match(parsed.transcript, /Are you a chatbot/);

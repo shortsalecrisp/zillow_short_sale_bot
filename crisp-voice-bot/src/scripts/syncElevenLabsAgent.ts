@@ -14,6 +14,7 @@ import { replaceContactToolBindings, verifyContactToolMap } from "./prepareEleve
 import { applyConversationOpeningWorkflow } from "../lib/elevenLabsOpeningWorkflow";
 import { applyGuardedTerminalWorkflow } from "../lib/elevenLabsTerminalWorkflow";
 import { verifyConversationControlMap } from "./elevenLabsConversationControlTools";
+import { ELEVENLABS_TURN_MODEL } from "../lib/elevenLabsRuntimeExperiment";
 
 const PROMPT_PATH = path.resolve(__dirname, "../../docs/elevenlabs-agent-prompt.md");
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -96,6 +97,10 @@ export function buildConversationRelease(current: any, prompt: string, listenFir
   control?: ConversationReleaseControl) {
   // Start from the owning provider, never a stale reconstructed model/tool config.
   let body = applyConversationToolPolicy(applyConversationConsentPolicy(applyConversationListeningPolicy(writableBody(current), { listenFirst })), { guardedEnding: Boolean(control) });
+  body.conversation_config.turn = {
+    ...(body.conversation_config.turn ?? {}),
+    turn_model: ELEVENLABS_TURN_MODEL,
+  };
   body.conversation_config.agent.prompt.prompt = prompt;
   body.conversation_config.agent.prompt.llm = "gpt-4.1";
   if (control) {
