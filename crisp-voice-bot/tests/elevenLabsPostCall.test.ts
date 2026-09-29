@@ -748,6 +748,7 @@ test("post-call fallback gives live office gatekeeper evidence precedence over i
     shouldTreatAsAgentHungUp,
     shouldTreatAsAgentUnavailable,
     shouldTreatAsIdentityMismatchVoicemail,
+    shouldTreatAsGatekeeperAdminEarlyExit,
   } = await import("../src/lib/elevenLabsPostCall");
   const conversation = {
     status: "done",
@@ -766,10 +767,12 @@ test("post-call fallback gives live office gatekeeper evidence precedence over i
   };
 
   assert.equal(hasLiveHumanGatekeeperEvidence(conversation), true);
+  assert.equal(shouldTreatAsGatekeeperAdminEarlyExit(conversation), true);
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(conversation, "Clay", "Byrne"), false);
   assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
   assert.equal(shouldTreatAsAgentHungUp(conversation), false);
   assert.equal(buildVoiceResponseStatus("agent_not_available"), "Agent was not available");
+  assert.equal(buildVoiceResponseStatus("gatekeeper_admin_early_exit"), "Gatekeeper or office admin answered; target agent was not reached");
 });
 
 test("post-call fallback treats a different person answering for the target's realty team as unavailable", async () => {

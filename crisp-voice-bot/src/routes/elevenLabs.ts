@@ -569,28 +569,25 @@ router.post("/tool/information-requested", async (req: Request, res: Response, n
         }),
     );
 
-    if (conversationId) {
-      logger.info("ElevenLabs information request email deferred until post-call transcript is available", {
+    // Create the owner approval as soon as the caller's request is captured.
+    // The Apps Script endpoint is idempotent by conversation id, so the
+    // transcript-rich post-call pass safely enriches/reuses the same receipt.
+    queueElevenLabsBackgroundTask(
+      "ElevenLabs information email approval",
+      {
         rowNumber: payload.rowNumber,
         agentName: payload.agentName,
         conversationId,
-      });
-    } else {
-      queueElevenLabsBackgroundTask(
-        "ElevenLabs information email approval",
-        {
+      },
+      () =>
+        requestInfoEmailApproval({
           rowNumber: payload.rowNumber,
-          agentName: payload.agentName,
-        },
-        () =>
-          requestInfoEmailApproval({
-            rowNumber: payload.rowNumber,
-            phone: payload.phone,
-            email: payload.email,
-            conversationSummary: payload.conversationSummary,
-          }),
-      );
-    }
+          phone: payload.phone,
+          email: payload.email,
+          conversationId,
+          conversationSummary: payload.conversationSummary,
+        }),
+    );
 
     logger.info("ElevenLabs information requested tool handled", {
       rowNumber: payload.rowNumber,

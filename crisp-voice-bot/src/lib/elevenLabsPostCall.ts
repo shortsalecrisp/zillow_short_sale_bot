@@ -323,6 +323,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Agent was not available";
   }
 
+  if (callResult === "gatekeeper_admin_early_exit") {
+    return "Gatekeeper or office admin answered; target agent was not reached";
+  }
+
   if (callResult === "agent_reached_self_handling_disconnected") {
     return "Agent reached; handling bank side; call disconnected";
   }
@@ -1683,6 +1687,13 @@ export function shouldTreatAsAgentUnavailable(
   );
 }
 
+export function shouldTreatAsGatekeeperAdminEarlyExit(
+  conversation: ElevenLabsConversation,
+  expectedFirstName = "",
+): boolean {
+  return hasLiveHumanGatekeeperEvidence(conversation, expectedFirstName);
+}
+
 /** A live human can answer for a completely different business. Treat that
  * as target unavailable so it is not reported as an agent hanging up. */
 export function shouldTreatAsUnrelatedLiveBusiness(
@@ -2073,13 +2084,15 @@ async function processPostCallOutcomeForConversation(
     return true;
   }
 
-  if (shouldTreatAsAgentUnavailable(conversation, expectedFirstName) || shouldTreatAsUnrelatedLiveBusiness(conversation, expectedFirstName)) {
-    const outcome = buildVoiceResponseStatus("agent_not_available");
+  const gatekeeperAdminEarlyExit = shouldTreatAsGatekeeperAdminEarlyExit(conversation, expectedFirstName);
+  if (gatekeeperAdminEarlyExit || shouldTreatAsAgentUnavailable(conversation, expectedFirstName) || shouldTreatAsUnrelatedLiveBusiness(conversation, expectedFirstName)) {
+    const callResult = gatekeeperAdminEarlyExit ? "gatekeeper_admin_early_exit" : "agent_not_available";
+    const outcome = buildVoiceResponseStatus(callResult);
 
     await postSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
-      callResult: "agent_not_available",
+      callResult,
       responseStatus: outcome,
       ...(metadata.callAttemptNumber > 1 ? { leadStatusCode: "N" } : {}),
       callbackRequested: "",
@@ -2103,6 +2116,7 @@ async function processPostCallOutcomeForConversation(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       summary,
+      callResult,
     });
     return true;
   }

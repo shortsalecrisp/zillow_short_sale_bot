@@ -149,6 +149,17 @@ function isVoiceBotAttemptActivelyCalling(sentAtValue: unknown, resultValue: unk
   return ageMinutes >= 0 && ageMinutes <= VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES;
 }
 
+export function isStaleVoiceBotStartWithoutReceipt(
+  sentAtValue: unknown,
+  resultValue: unknown,
+  now: Date,
+): boolean {
+  const sentAt = parseVoiceBotDate(sentAtValue);
+  if (!sentAt || normalizeString(resultValue)) return false;
+  const ageMinutes = (now.getTime() - sentAt.getTime()) / 60_000;
+  return ageMinutes > VOICE_BOT_ACTIVE_CALL_STALE_AFTER_MINUTES;
+}
+
 function isVoiceBotRowActivelyCalling(rowValues: unknown[], now: Date): boolean {
   if (normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1])) {
     return false;
@@ -239,6 +250,11 @@ export function getVoiceBotCallCandidateFromRowValues(
   const firstAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_1_SENT - 1]);
   const secondAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_2_SENT - 1]);
   const firstAttemptResult = normalizeString(rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1]);
+  const firstAttemptStartReceiptMissing = isStaleVoiceBotStartWithoutReceipt(
+    rowValues[VOICE_BOT_COL_CALL_1_SENT - 1],
+    rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1],
+    now,
+  );
   const scheduledFor = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
   const agentTimeZone = getVoiceBotAgentTimeZone(rowValues);
   const currentWindow = getVoiceBotPreferredCallWindowName(now, agentTimeZone);
@@ -286,7 +302,7 @@ export function getVoiceBotCallCandidateFromRowValues(
     );
   }
 
-  if (secondAttemptSentAt || !isRetryableVoiceBotResult(firstAttemptResult)) {
+  if (secondAttemptSentAt || (!isRetryableVoiceBotResult(firstAttemptResult) && !firstAttemptStartReceiptMissing)) {
     return undefined;
   }
 
@@ -411,18 +427,40 @@ async function writeCells(sheets: sheets_v4.Sheets, rowNumber: number, writes: S
 
 async function markVoiceBotAttemptStarted(
   sheets: sheets_v4.Sheets,
+  rowValues: unknown[],
   candidate: VoiceQueueCandidate,
   now: Date,
 ): Promise<void> {
   const sentColumn = candidate.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
   const timeBucket = candidate.callAttemptNumber === 2 ? "voice_call_2_due" : "voice_call_1_due";
 
-  await writeCells(sheets, candidate.rowNumber, [
+  const writes: SheetCellWrite[] = [
     { columnNumber: sentColumn, value: now.toISOString() },
     { columnNumber: VOICE_BOT_COL_CALL_ELIGIBLE, value: "queued" },
     { columnNumber: VOICE_BOT_COL_CALL_TIME_BUCKET, value: timeBucket },
     { columnNumber: VOICE_BOT_COL_CALL_SCHEDULED_FOR, value: candidate.dueAt.toISOString() },
-  ]);
+  ];
+  if (
+    candidate.callAttemptNumber === 2 &&
+    isStaleVoiceBotStartWithoutReceipt(
+      rowValues[VOICE_BOT_COL_CALL_1_SENT - 1],
+      rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1],
+      now,
+    )
+  ) {
+    writes.push(
+      { columnNumber: VOICE_BOT_COL_CALL_1_RESULT, value: "call_start_receipt_missing" },
+      { columnNumber: VOICE_BOT_COL_RESPONSE_STATUS, value: "Prior call start had no final receipt; one bounded retry started" },
+      {
+        columnNumber: VOICE_BOT_COL_VOICE_NOTES,
+        value: appendVoiceNotesValue(
+          rowValues[VOICE_BOT_COL_VOICE_NOTES - 1],
+          `Prior call start became stale without a final provider or transcript receipt; bounded retry started at ${formatVoiceBotDateEt(now)}.`,
+        ),
+      },
+    );
+  }
+  await writeCells(sheets, candidate.rowNumber, writes);
 }
 
 async function markVoiceBotAttemptStartFailed(
@@ -586,7 +624,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
 
     try {
       const startCallResult = await postStartCall(refreshedCandidate);
-      await markVoiceBotAttemptStarted(sheets, refreshedCandidate, now);
+      await markVoiceBotAttemptStarted(sheets, refreshedValues, refreshedCandidate, now);
       queuedCalls.push(candidateSummary(refreshedCandidate));
       logger.info("Voice queue call started", {
         ...candidateSummary(refreshedCandidate),

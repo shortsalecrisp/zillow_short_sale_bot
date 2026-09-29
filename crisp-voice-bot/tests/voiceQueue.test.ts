@@ -109,3 +109,16 @@ test("Render queue prioritizes an overdue scheduled no-start until the attempt i
     [5900, false],
   ]);
 });
+
+test("a stale first-attempt timestamp with no result receives exactly one bounded second-attempt candidate", async () => {
+  const { getVoiceBotCallCandidateFromRowValues, isStaleVoiceBotStartWithoutReceipt } = await import("../src/lib/voiceQueue");
+  const values = scheduledRow("", {
+    call1SentAt: "2026-09-27T18:15:00.000Z",
+    scheduledFor: "2026-09-27T18:00:00.000Z",
+  });
+  const now = new Date("2026-09-28T13:45:00.000Z");
+  assert.equal(isStaleVoiceBotStartWithoutReceipt(values[32], values[33], now), true);
+  assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now)?.callAttemptNumber, 2);
+  values[39] = "2026-09-28T18:46:00.000Z";
+  assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now), undefined);
+});

@@ -191,7 +191,7 @@ export function parseVoiceBotDate(value: unknown): Date | undefined {
 
 export function isRetryableVoiceBotResult(callResult: unknown): boolean {
   const normalized = normalizeString(callResult).toLowerCase();
-  return ["voicemail_left", "voicemail_reached", "no_answer_first_attempt", "agent_not_available", "call_start_failed"].includes(normalized);
+  return ["voicemail_left", "voicemail_reached", "no_answer_first_attempt", "agent_not_available", "call_start_failed", "call_start_receipt_missing"].includes(normalized);
 }
 
 export function buildVoiceBotListingAddress(rowValues: unknown[]): string {

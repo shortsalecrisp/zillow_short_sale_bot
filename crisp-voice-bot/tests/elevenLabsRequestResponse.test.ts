@@ -162,6 +162,7 @@ process.env.GOOGLE_APPS_SCRIPT_TOKEN = "";
 process.env.GOOGLE_SHEETS_SPREADSHEET_ID = "synthetic-request-response-sheet";
 process.env.GOOGLE_SHEETS_TAB_NAME = "SyntheticRequestResponseLeads";
 process.env.ELEVENLABS_TOOL_SECRET = "";
+process.env.ELEVENLABS_API_KEY = "synthetic-playback-signing-key";
 process.env.CALL_TRANSCRIPT_EMAILS_ENABLED = "false";
 process.env.SMTP_HOST = "";
 process.env.SMTP_USER = "";
@@ -181,7 +182,9 @@ axios.defaults.adapter = async (request) => {
       pendingWrites.push({
         body,
         finish: (fail = false) => fail ? reject(new Error("Synthetic pending write failure")) :
-          resolve({ data: { ok: true }, status: 200, statusText: "OK", headers: {}, config: request }),
+          resolve({ data: body.action === "request_info_email_approval"
+            ? { ok: true, approval_id: "synthetic-approval", agent_email: body.email }
+            : { ok: true }, status: 200, statusText: "OK", headers: {}, config: request }),
       });
     });
   }
@@ -223,7 +226,7 @@ async function invokeRequestTool(path: string, fields: Record<string, unknown>) 
   const req = { body: {
     rowNumber: 123, callAttemptNumber: 1, agentName: "Synthetic Caller", phone: "+12025550123",
     email: "morgan@example.invalid", listingAddress: "123 Fictional Street",
-    conversationId: "synthetic-request-response-conversation", conversationSummary: "Synthetic caller request.",
+    conversationId: "conv_1234567890abcdefghijklmnopqr", conversationSummary: "Synthetic caller request.",
     ...fields,
   }, header: () => undefined };
   const res = {
@@ -240,7 +243,7 @@ function rememberTransferContext() {
   resetElevenLabsCallContextsForTest();
   rememberElevenLabsCallContext({ rowNumber: 123, callAttemptNumber: 1, fullName: "Synthetic Caller",
     listingAddress: "123 Fictional Street", requestedPhone: "+12025550123", dialedPhone: "+12025550123", testMode: true },
-  "synthetic-request-response-conversation");
+  "conv_1234567890abcdefghijklmnopqr");
 }
 
 async function finishTransferTest(writeIndex: number) {
@@ -360,18 +363,21 @@ for (const callbackTime of ["tomorrow at two Pacific", "asap"]) {
   });
 }
 
-test("information HTTP response uses the shared unsent receipt without changing its queued update", async () => {
+test("information HTTP response queues both the sheet write and an idempotent owner approval", async () => {
   const before = pendingWrites.length;
   try {
     const response = await invokeRequestTool("/tool/information-requested", {});
     assert.deepEqual(response, buildElevenLabsInformationRequestResponse("morgan@example.invalid"));
-    assert.equal(pendingWrites.length, before + 1, "Only the existing sheet update is queued; email remains deferred to post-call");
-    assert.deepEqual(pendingWrites.at(-1)!.body, {
+    assert.equal(pendingWrites.length, before + 2);
+    const queued = pendingWrites.slice(before).map((write) => write.body);
+    assert.deepEqual(queued.find((body) => body.callResult === "information_requested"), {
       rowNumber: 123, callAttemptNumber: 1, callResult: "information_requested", responseStatus: "Information requested - handoff ready",
       leadStatusCode: "G", callbackRequested: "", callbackTime: "", liveTransferRequested: "", liveTransferCompleted: "",
       voiceNotes: "Synthetic caller request.",
     });
-    pendingWrites.at(-1)!.finish(true);
+    assert.equal(queued.find((body) => body.action === "request_info_email_approval")?.conversation_id,
+      "conv_1234567890abcdefghijklmnopqr");
+    pendingWrites.slice(before).forEach((write) => write.finish());
     await new Promise(setImmediate);
     assert.equal(response.persistenceStatus, "queued", "The initial receipt represents queueing, not its later outcome");
     assert.equal(response.durablePersistenceConfirmed, false, "A background failure cannot become a confirmed receipt");
