@@ -2163,6 +2163,7 @@ function isPaymentOrFeeQuestionSignal_(text) {
   if (!t) return false;
   if (isSpanishFeeQuestionSignal_(t)) return true;
   if (/^(?:how much|fees?|cost|price|pricing)[?!.]*$/.test(t)) return true;
+  if (/\bhow much (?:does|do|will|would|should|must) (?:the )?(?:buyer|seller|agent|we|i|they) (?:need to |have to )?pay\b/.test(t)) return true;
   if (/\b(?:does|do|will)\s+(?:i|we|you|(?:the\s+)?(?:seller|agent|buyer))\s+pay\b/.test(t)) return true;
   if (/\b(?:do|does|will|would|can)\b.{0,45}\b(?:take|charge|split|share)\b.{0,35}\bcommission\b/.test(t)) return true;
 
@@ -2250,6 +2251,7 @@ function isSpecificFeeReplyText_(text) {
 function isExplicitFeeAmountQuestion_(text) {
   const t = normalizeLanguageSignalText_(text);
   return /\b(?:how much|what(?:'s| is| are| would be) (?:your |the |a |my |buyer(?:'s)? |service )?(?:flat )?(?:fees?|costs?|price|pricing|rate|charges?)|what (?:do|would|will) you charge|dollar amount)\b/.test(t) ||
+    /\bhow much (?:does|do|will|would|should|must) (?:the )?(?:buyer|seller|agent|we|i|they) (?:need to |have to )?pay\b/.test(t) ||
     /\bwhat does (?:it|this|that|your service) cost\b/.test(t) ||
     /^(?:(?:and|your|the)\s+)*(?:fee|cost|price|rate|charge)\s*\??$/.test(t) ||
     /\b(?:cuanto|cual)\b.{0,40}\b(?:tarifa|costo|cobras)\b/.test(t);
@@ -6611,6 +6613,21 @@ function requestInfoEmailApprovalForRow_(body) {
     throw new Error("Missing valid agent email for info-email approval recovery");
   }
 
+  const conversationId = String(body && body.conversation_id || "").trim();
+  const receiptKey = conversationId ? buildInfoEmailApprovalReceiptKey_(conversationId) : "";
+  const props = PropertiesService.getScriptProperties();
+  if (receiptKey) {
+    const existing = props.getProperty(receiptKey);
+    if (existing) {
+      try {
+        const parsed = JSON.parse(existing);
+        if (parsed && parsed.approval_id) {
+          return Object.assign({ ok: true, row: item.row, agent_email: targetEmail, duplicate: true }, parsed);
+        }
+      } catch (_) {}
+    }
+  }
+
   const result = sendInfoEmailApprovalRequest_({
     to: targetEmail,
     first_name: getCanonicalFirstName_(rowObj),
@@ -6621,10 +6638,43 @@ function requestInfoEmailApprovalForRow_(body) {
     state: rowObj[HEADERS.state] || "",
     zip: rowObj[HEADERS.zip] || "",
     phone: rowObj[HEADERS.phone] || body.phone || "",
-    last_message: rowObj[HEADERS.last_inbound_text] || rowObj[HEADERS.response_status] || ""
+    last_message: rowObj[HEADERS.last_inbound_text] || rowObj[HEADERS.response_status] || "",
+    conversation_id: conversationId,
+    playback_url: body && body.playback_url || "",
+    conversation_summary: body && body.conversation_summary || "",
+    conversation_transcript: body && body.conversation_transcript || ""
   });
 
+  if (receiptKey && result && result.approval_id) {
+    const receipt = {
+      approval_id: result.approval_id,
+      subject: result.subject || "",
+      created_at: new Date().toISOString(),
+      conversation_id: conversationId
+    };
+    props.setProperty(receiptKey, JSON.stringify(receipt));
+    try {
+      appendSmsDebugLog_("info_email_approval_receipt", {
+        phone: rowObj[HEADERS.phone] || body.phone || "",
+        message: targetEmail,
+        reason: conversationId,
+        result: result.approval_id
+      });
+    } catch (_) {}
+  }
+
   return Object.assign({ ok: true, row: item.row, agent_email: targetEmail }, result || {});
+}
+
+function buildInfoEmailApprovalReceiptKey_(conversationId) {
+  const normalized = String(conversationId || "").trim().toLowerCase();
+  if (!normalized) return "";
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, normalized);
+  const hex = digest.map(function(value) {
+    const unsigned = value < 0 ? value + 256 : value;
+    return ("0" + unsigned.toString(16)).slice(-2);
+  }).join("");
+  return "INFO_EMAIL_APPROVAL_RECEIPT_" + hex.slice(0, 32);
 }
 
 function sendAgentInfoEmail_(data) {

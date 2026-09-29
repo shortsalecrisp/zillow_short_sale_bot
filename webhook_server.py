@@ -4415,6 +4415,7 @@ def _sms_is_fee_amount_question(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(re.search(
         r"\b(?:how much|dollar amount|exact (?:fee|cost|price)|what do you charge|what would you charge)\b"
+        r"|\bhow much (?:does|do|will|would|should|must) (?:the )?(?:buyer|seller|agent|we|i|they) (?:need to |have to )?pay\b"
         r"|\b(?:what(?:'s| is| are)|how much is)\s+(?:the|your|a|buyer(?:'s)?|service)?\s*"
         r"(?:fee|fees|cost|costs|charge|charges|price|pricing|rate)\b"
         r"|\bwhat does (?:it|this|that|your service) cost\b"

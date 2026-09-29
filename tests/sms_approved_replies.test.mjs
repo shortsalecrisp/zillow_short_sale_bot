@@ -95,7 +95,7 @@ test('neutral self-handling gets one transparent value response, then closes', (
   assert.match(second.reply_text, /^Ok, no problem/);
 });
 
-for (const text of ["What's the cost?", 'How much?', 'How much is your fee?', 'What do you charge?', 'What does your service cost?', 'What work would you take off my plate and how much is the flat fee?']) {
+for (const text of ["What's the cost?", 'How much?', 'How much is your fee?', 'What do you charge?', 'What does your service cost?', 'How much does the Buyer need to pay?', 'What work would you take off my plate and how much is the flat fee?']) {
   test(`amount question answered directly: ${text}`, () => {
     const {r} = answer(text);
     assert.equal(r.should_reply, true);
