@@ -167,7 +167,9 @@ burst quotas. Transient rate limits and service timeouts are requeued only after
 the worker proves that the requested mutation did not land; if the mutation did
 land, it records a recovered completion instead of replaying it. Processing rows
 older than ten minutes receive the same state-aware recovery, while ambiguous
-state fails closed for manual review.
+state fails closed for manual review. If the exact owner append landed but the
+Pilot pointer write was interrupted, recovery verifies that owner and completes
+only the guarded Pilot link; it never appends the owner a second time.
 
 The authenticated `POST /internal/pilot-verifier-queue/process` route provides
 an immediate drain for verification and recovery. The background Render worker

@@ -415,6 +415,41 @@ def _request_effect_state(
             "sends": 0,
             "queue_recovered": True,
         }
+    if (
+        expected_matches
+        and row.get("status") == "qualified"
+        and row.get("promotion_status") == "verifier_held"
+        and row.get("import_ready") == "verify"
+        and linked.get("outcome") == "linked"
+        and contract.owner_matches(linked.get("main_row", {}), row, owner)
+    ):
+        owner_row = str(linked.get("matched_main_row", ""))
+        repair_payload = {
+            "action": "update",
+            "automation_id": payload.get("automation_id"),
+            "expected": {
+                key: row.get(key, "")
+                for key in (
+                    "synthetic_zpid", "listing_address", "city", "state",
+                    "status", "promotion_status", "import_ready",
+                )
+            },
+            "fields": {
+                "promotion_status": "promoted",
+                "import_ready": "promoted",
+                "matched_main_row": owner_row,
+            },
+            "adjudication_reason": (
+                "queue recovery linked the exact owner after an interrupted "
+                "promotion; original adjudication: "
+                + pilot.normalize_space(payload.get("adjudication_reason", ""))
+            ),
+        }
+        return "repair_owner_link", {
+            "repair_payload": repair_payload,
+            "pilot_row": number,
+            "owner_row": owner_row,
+        }
     if expected_matches and linked.get("outcome") == "missing":
         return "replay_safe", None
     return "ambiguous", None
@@ -440,6 +475,31 @@ def _recover_interrupted_request(
             status=COMPLETED,
             completed_at=_timestamp(_utc_now()),
             result=result,
+        )
+        return COMPLETED
+    if state == "repair_owner_link":
+        from pilot_verifier_contract import handle
+
+        repair_result = handle(
+            token,
+            spreadsheet_id,
+            result["repair_payload"],
+        )
+        recovered = {
+            **repair_result,
+            "owner_row": result["owner_row"],
+            "sheet1_writes": 1,
+            "sends": 0,
+            "queue_recovered": True,
+            "recovery_kind": "completed_owner_link",
+        }
+        _finish_request(
+            token,
+            spreadsheet_id,
+            row_number,
+            status=COMPLETED,
+            completed_at=_timestamp(_utc_now()),
+            result=recovered,
         )
         return COMPLETED
     if state == "replay_safe":

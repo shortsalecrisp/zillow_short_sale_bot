@@ -154,6 +154,51 @@ class PilotVerifierQueueTest(unittest.TestCase):
         self.assertEqual(result["pilot_row"], 1200)
         self.assertTrue(result["queue_recovered"])
 
+    def test_partial_owner_append_is_repaired_without_replaying_append(self):
+        expected = {
+            "synthetic_zpid": "free-1234567890abcdef",
+            "listing_address": "123 Main Street",
+            "city": "Atlanta",
+            "state": "GA",
+            "status": "qualified",
+            "promotion_status": "verifier_held",
+            "import_ready": "verify",
+        }
+        owner = {
+            "agent_name": "Jane",
+            "last_name": "Smith",
+            "phone": "555-222-3333",
+            "email": "jane@example.test",
+            "phone_confidence": "verified_direct_mobile",
+            "contact_verification_note": "Exact listing and agent profile agree",
+            "email_confidence": "verified_agent_specific_email",
+        }
+        payload = {
+            "action": "promote_owner",
+            "automation_id": "lead-verifier-8-am",
+            "expected": expected,
+            "owner": owner,
+            "adjudication_reason": "current explicit short sale and exact owner",
+        }
+        linked = {"outcome": "linked", "matched_main_row": 5936, "main_row": {}}
+        with mock.patch(
+            "pilot_verifier_contract.snapshot",
+            return_value=([], [(1200, expected)], [(5936, {})], [], []),
+        ), mock.patch.object(queue.pilot, "reconcile_pilot_link", return_value=linked), \
+             mock.patch("pilot_verifier_contract.owner_matches", return_value=True):
+            state, result = queue._request_effect_state("token", "sheet", payload)
+        self.assertEqual(state, "repair_owner_link")
+        self.assertEqual(result["owner_row"], "5936")
+        self.assertEqual(result["repair_payload"]["action"], "update")
+        self.assertEqual(
+            result["repair_payload"]["fields"],
+            {
+                "promotion_status": "promoted",
+                "import_ready": "promoted",
+                "matched_main_row": "5936",
+            },
+        )
+
     def test_stale_processing_detection_uses_claim_age(self):
         stale = dict(self.row, status="processing", claimed_at="2026-09-29T16:40:00+00:00")
         fresh = dict(self.row, status="processing", claimed_at="2026-09-29T16:59:00+00:00")
