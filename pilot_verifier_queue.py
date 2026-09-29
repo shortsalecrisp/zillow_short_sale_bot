@@ -11,11 +11,13 @@ import datetime as dt
 import json
 import os
 import threading
+import time
+import urllib.error
 from typing import Any
 
 from scripts import free_short_sale_source_pilot as pilot
 
-VERSION = "pilot_verifier_queue_v1"
+VERSION = "pilot_verifier_queue_v2"
 QUEUE_TAB = os.getenv("PILOT_VERIFIER_QUEUE_TAB", "Pilot Verifier Queue")
 QUEUE_HEADERS = [
     "request_id",
@@ -33,6 +35,10 @@ PROCESSING = "processing"
 COMPLETED = "completed"
 FAILED = "failed"
 MAX_CELL_CHARS = 45_000
+PROCESSING_STALE_SECONDS = max(
+    120, int(os.getenv("PILOT_VERIFIER_QUEUE_STALE_SECONDS", "600"))
+)
+BOOKKEEPING_RETRY_DELAYS = (2, 5, 15, 30)
 
 _PROCESS_LOCK = threading.Lock()
 _STATE_LOCK = threading.Lock()
@@ -51,6 +57,44 @@ def _utc_now() -> dt.datetime:
 
 def _timestamp(value: dt.datetime) -> str:
     return value.astimezone(dt.timezone.utc).isoformat()
+
+
+def _parse_timestamp(value: str) -> dt.datetime | None:
+    try:
+        parsed = dt.datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(dt.timezone.utc) if parsed.tzinfo else None
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in {429, 500, 502, 503, 504}
+    if isinstance(exc, (TimeoutError, urllib.error.URLError)):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in (
+        "too many requests", "timed out", "timeout", "temporarily unavailable",
+        "http error 429", "http error 500", "http error 502",
+        "http error 503", "http error 504",
+    ))
+
+
+def _bookkeeping_call(callback):
+    """Retry queue bookkeeping; the contract itself remains state guarded."""
+    for attempt in range(len(BOOKKEEPING_RETRY_DELAYS) + 1):
+        try:
+            return callback()
+        except Exception as exc:
+            if not _is_transient_error(exc) or attempt >= len(BOOKKEEPING_RETRY_DELAYS):
+                raise
+            delay = BOOKKEEPING_RETRY_DELAYS[attempt]
+            if isinstance(exc, urllib.error.HTTPError) and exc.headers:
+                try:
+                    delay = max(delay, min(60, int(exc.headers.get("Retry-After", delay))))
+                except (TypeError, ValueError):
+                    pass
+            time.sleep(delay)
 
 
 def _quoted_tab() -> str:
@@ -195,15 +239,19 @@ def _claim_request(
     request_id: str,
     claimed_at: str,
 ) -> bool:
-    pilot.batch_update_values(
-        token,
-        spreadsheet_id,
-        _mapped_updates(
-            row_number,
-            {"status": PROCESSING, "claimed_at": claimed_at, "error": ""},
-        ),
+    _bookkeeping_call(
+        lambda: pilot.batch_update_values(
+            token,
+            spreadsheet_id,
+            _mapped_updates(
+                row_number,
+                {"status": PROCESSING, "claimed_at": claimed_at, "error": ""},
+            ),
+        )
     )
-    reread = _read_exact_row(token, spreadsheet_id, row_number)
+    reread = _bookkeeping_call(
+        lambda: _read_exact_row(token, spreadsheet_id, row_number)
+    )
     return (
         reread.get("request_id") == request_id
         and reread.get("status") == PROCESSING
@@ -224,22 +272,56 @@ def _finish_request(
     if status not in {COMPLETED, FAILED}:
         raise ValueError("invalid_queue_terminal_status")
     result_json = json.dumps(result or {}, sort_keys=True, separators=(",", ":"))
-    pilot.batch_update_values(
-        token,
-        spreadsheet_id,
-        _mapped_updates(
-            row_number,
-            {
-                "status": status,
-                "completed_at": completed_at,
-                "result_json": result_json[:MAX_CELL_CHARS],
-                "error": str(error)[:MAX_CELL_CHARS],
-            },
-        ),
+    _bookkeeping_call(
+        lambda: pilot.batch_update_values(
+            token,
+            spreadsheet_id,
+            _mapped_updates(
+                row_number,
+                {
+                    "status": status,
+                    "completed_at": completed_at,
+                    "result_json": result_json[:MAX_CELL_CHARS],
+                    "error": str(error)[:MAX_CELL_CHARS],
+                },
+            ),
+        )
     )
-    reread = _read_exact_row(token, spreadsheet_id, row_number)
+    reread = _bookkeeping_call(
+        lambda: _read_exact_row(token, spreadsheet_id, row_number)
+    )
     if reread.get("status") != status or reread.get("completed_at") != completed_at:
         raise RuntimeError("pilot_verifier_queue_terminal_readback_failed")
+
+
+def _requeue_request(
+    token: str,
+    spreadsheet_id: str,
+    row_number: int,
+    *,
+    error: str,
+) -> None:
+    _bookkeeping_call(
+        lambda: pilot.batch_update_values(
+            token,
+            spreadsheet_id,
+            _mapped_updates(
+                row_number,
+                {
+                    "status": PENDING,
+                    "claimed_at": "",
+                    "completed_at": "",
+                    "result_json": "",
+                    "error": str(error)[:MAX_CELL_CHARS],
+                },
+            ),
+        )
+    )
+    reread = _bookkeeping_call(
+        lambda: _read_exact_row(token, spreadsheet_id, row_number)
+    )
+    if reread.get("status") != PENDING or reread.get("completed_at"):
+        raise RuntimeError("pilot_verifier_queue_requeue_readback_failed")
 
 
 def _validated_payload(row: dict[str, str]) -> dict[str, Any]:
@@ -256,6 +338,144 @@ def _validated_payload(row: dict[str, str]) -> dict[str, Any]:
     if not automation_id or payload.get("automation_id") != automation_id:
         raise ValueError("queue_automation_mismatch")
     return payload
+
+
+def _resolved_pilot_row(contract, rows, expected: dict[str, Any]):
+    matches = [
+        (number, row)
+        for number, row in rows
+        if contract.identity(row) == contract.identity(expected)
+    ]
+    return matches[0] if len(matches) == 1 and all(contract.identity(expected)) else None
+
+
+def _request_effect_state(
+    token: str,
+    spreadsheet_id: str,
+    payload: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    """Classify an interrupted request without repeating a possible mutation."""
+    import pilot_verifier_contract as contract
+
+    action = payload.get("action")
+    if action in {"preview", "owner_write_preview", "receipt", "reconcile_pilot_duplicate", "relocate_legacy_owner"}:
+        return "replay_safe", None
+    if action not in {"update", "promote_owner"}:
+        return "ambiguous", None
+
+    _, rows, main_rows, _, _ = contract.snapshot(token, spreadsheet_id)
+    expected = payload.get("expected", {})
+    resolved = _resolved_pilot_row(contract, rows, expected)
+    if not resolved:
+        return "ambiguous", None
+    number, row = resolved
+    expected_matches = all(row.get(key, "") == str(value) for key, value in expected.items())
+
+    if action == "update":
+        fields = payload.get("fields", {})
+        reason = pilot.normalize_space(payload.get("adjudication_reason", ""))
+        note = pilot.normalize_key(row.get("promotion_notes", ""))
+        reason_written = bool(
+            reason
+            and pilot.normalize_key(reason) in note
+            and f"verifier reviewed by {pilot.normalize_key(payload.get('automation_id', ''))}" in note
+        )
+        applied = bool(fields) and all(
+            row.get(key, "") == str(value) for key, value in fields.items()
+        ) and reason_written
+        if applied:
+            return "applied", {
+                "ok": True,
+                "contract": contract.VERSION,
+                "pilot_row": number,
+                "owner_row": row.get("matched_main_row", ""),
+                "readback": True,
+                "sheet1_writes": 0,
+                "sends": 0,
+                "queue_recovered": True,
+            }
+        return ("replay_safe", None) if expected_matches else ("ambiguous", None)
+
+    owner = contract.validate_owner_payload(payload.get("owner"))
+    linked = pilot.reconcile_pilot_link(number, row, main_rows)
+    if (
+        row.get("status") == "qualified"
+        and row.get("promotion_status") == "promoted"
+        and row.get("import_ready") == "promoted"
+        and linked.get("outcome") == "linked"
+        and contract.owner_matches(linked.get("main_row", {}), row, owner)
+    ):
+        return "applied", {
+            "ok": True,
+            "contract": contract.VERSION,
+            "pilot_row": number,
+            "owner_row": linked.get("matched_main_row"),
+            "readback": True,
+            "sheet1_writes": 1,
+            "sends": 0,
+            "queue_recovered": True,
+        }
+    if expected_matches and linked.get("outcome") == "missing":
+        return "replay_safe", None
+    return "ambiguous", None
+
+
+def _recover_interrupted_request(
+    token: str,
+    spreadsheet_id: str,
+    row_number: int,
+    row: dict[str, str],
+    *,
+    error: str,
+) -> str:
+    payload = _validated_payload(row)
+    state, result = _bookkeeping_call(
+        lambda: _request_effect_state(token, spreadsheet_id, payload)
+    )
+    if state == "applied":
+        _finish_request(
+            token,
+            spreadsheet_id,
+            row_number,
+            status=COMPLETED,
+            completed_at=_timestamp(_utc_now()),
+            result=result,
+        )
+        return COMPLETED
+    if state == "replay_safe":
+        _requeue_request(
+            token,
+            spreadsheet_id,
+            row_number,
+            error=f"transient_retry: {error}",
+        )
+        return PENDING
+    _finish_request(
+        token,
+        spreadsheet_id,
+        row_number,
+        status=FAILED,
+        completed_at=_timestamp(_utc_now()),
+        error=f"interrupted_state_ambiguous: {error}",
+    )
+    return FAILED
+
+
+def _stale_processing_rows(
+    rows: list[tuple[int, dict[str, str]]],
+    observed_at: dt.datetime,
+) -> list[tuple[int, dict[str, str]]]:
+    cutoff = observed_at.astimezone(dt.timezone.utc) - dt.timedelta(
+        seconds=PROCESSING_STALE_SECONDS
+    )
+    stale = []
+    for number, row in rows:
+        if row.get("status", "").strip().lower() != PROCESSING:
+            continue
+        claimed_at = _parse_timestamp(row.get("claimed_at", ""))
+        if claimed_at is None or claimed_at <= cutoff:
+            stale.append((number, row))
+    return stale
 
 
 def _record_state(*, now: dt.datetime, stats: dict[str, int], error: str = "") -> None:
@@ -291,6 +511,19 @@ def process_pending(
     try:
         ensure_queue_tab(token, spreadsheet_id)
         rows = read_queue(token, spreadsheet_id)
+        for row_number, row in _stale_processing_rows(rows, observed_at):
+            outcome = _recover_interrupted_request(
+                token,
+                spreadsheet_id,
+                row_number,
+                row,
+                error="stale_processing_recovery",
+            )
+            stats["recovered"] = stats.get("recovered", 0) + int(outcome == COMPLETED)
+            stats["requeued"] = stats.get("requeued", 0) + int(outcome == PENDING)
+            stats["failed"] += int(outcome == FAILED)
+        if any(key in stats for key in ("recovered", "requeued")):
+            rows = read_queue(token, spreadsheet_id)
         pending = [(number, row) for number, row in rows if row.get("status", "").strip().lower() == PENDING]
         stats["pending"] = len(pending)
         from pilot_verifier_contract import handle
@@ -314,14 +547,33 @@ def process_pending(
                     result=result,
                 )
                 stats["completed"] += 1
-            except Exception as exc:  # noqa: BLE001 - persist exact terminal failure
+            except Exception as exc:  # noqa: BLE001 - persist or safely retry
+                error = f"{type(exc).__name__}: {exc}"
+                if _is_transient_error(exc):
+                    try:
+                        outcome = _recover_interrupted_request(
+                            token,
+                            spreadsheet_id,
+                            row_number,
+                            row,
+                            error=error,
+                        )
+                    except Exception as recovery_exc:  # leave claimed for stale recovery
+                        if not _is_transient_error(recovery_exc):
+                            raise
+                        stats["deferred"] = stats.get("deferred", 0) + 1
+                        continue
+                    stats["completed"] += int(outcome == COMPLETED)
+                    stats["requeued"] = stats.get("requeued", 0) + int(outcome == PENDING)
+                    stats["failed"] += int(outcome == FAILED)
+                    continue
                 _finish_request(
                     token,
                     spreadsheet_id,
                     row_number,
                     status=FAILED,
                     completed_at=_timestamp(_utc_now()),
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=error,
                 )
                 stats["failed"] += 1
         _record_state(now=observed_at, stats=stats)

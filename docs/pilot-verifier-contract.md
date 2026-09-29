@@ -162,6 +162,13 @@ and `result_json` has `ok=true`; `failed`, a nonempty `error`, or stale
 adjudication rows completed successfully. The 10:05 audit continues to require
 the ordinary green receipt and does not treat queue acceptance as completion.
 
+The worker processes at most three requests per poll to stay below Google Sheets
+burst quotas. Transient rate limits and service timeouts are requeued only after
+the worker proves that the requested mutation did not land; if the mutation did
+land, it records a recovered completion instead of replaying it. Processing rows
+older than ten minutes receive the same state-aware recovery, while ambiguous
+state fails closed for manual review.
+
 The authenticated `POST /internal/pilot-verifier-queue/process` route provides
 an immediate drain for verification and recovery. The background Render worker
 is the durable path and does not depend on that route being called.

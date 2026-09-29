@@ -127,7 +127,9 @@ services:
       - key: PILOT_VERIFIER_QUEUE_POLL_SECONDS
         value: "60"
       - key: PILOT_VERIFIER_QUEUE_BATCH_SIZE
-        value: "25"
+        value: "3"
+      - key: PILOT_VERIFIER_QUEUE_STALE_SECONDS
+        value: "600"
       - key: FREE_SOURCE_PILOT_FORCE_ALL_STATES
         value: "true"
       - key: FREE_SOURCE_PILOT_EXCLUDED_STATES

@@ -135,7 +135,8 @@ Configuration:
 * `PILOT_VERIFIER_QUEUE_ENABLED=true`
 * `PILOT_VERIFIER_QUEUE_TAB=Pilot Verifier Queue`
 * `PILOT_VERIFIER_QUEUE_POLL_SECONDS=60`
-* `PILOT_VERIFIER_QUEUE_BATCH_SIZE=25`
+* `PILOT_VERIFIER_QUEUE_BATCH_SIZE=3`
+* `PILOT_VERIFIER_QUEUE_STALE_SECONDS=600`
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main

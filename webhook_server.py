@@ -333,7 +333,7 @@ PILOT_VERIFIER_QUEUE_POLL_SECONDS = max(
 )
 PILOT_VERIFIER_QUEUE_BATCH_SIZE = max(
     1,
-    min(100, int(os.getenv("PILOT_VERIFIER_QUEUE_BATCH_SIZE", "25"))),
+    min(100, int(os.getenv("PILOT_VERIFIER_QUEUE_BATCH_SIZE", "3"))),
 )
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
 _STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1}
