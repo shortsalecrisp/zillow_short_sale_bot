@@ -187,6 +187,9 @@ _free_source_pilot_scheduler_start_lock = threading.Lock()
 _free_source_pilot_audit_scheduler_thread: Optional[threading.Thread] = None
 _free_source_pilot_audit_scheduler_stop: Optional[threading.Event] = None
 _free_source_pilot_audit_scheduler_start_lock = threading.Lock()
+_pilot_verifier_queue_thread: Optional[threading.Thread] = None
+_pilot_verifier_queue_stop: Optional[threading.Event] = None
+_pilot_verifier_queue_start_lock = threading.Lock()
 _deferred_rows_lock = threading.Lock()
 _deferred_rows: List[Dict[str, Any]] = []
 _deferred_zpids: set[str] = set()
@@ -319,6 +322,18 @@ FREE_SOURCE_PILOT_POST_VERIFIER_AUDIT_MINUTE = int(
 )
 FREE_SOURCE_PILOT_POST_SOURCE_AUDIT_GRACE_MINUTES = int(
     os.getenv("FREE_SOURCE_PILOT_POST_SOURCE_AUDIT_GRACE_MINUTES", "30")
+)
+PILOT_VERIFIER_QUEUE_ENABLED = (
+    os.getenv("PILOT_VERIFIER_QUEUE_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+PILOT_VERIFIER_QUEUE_POLL_SECONDS = max(
+    15,
+    int(os.getenv("PILOT_VERIFIER_QUEUE_POLL_SECONDS", "60")),
+)
+PILOT_VERIFIER_QUEUE_BATCH_SIZE = max(
+    1,
+    min(100, int(os.getenv("PILOT_VERIFIER_QUEUE_BATCH_SIZE", "25"))),
 )
 _SENSITIVE_QUERY_PARAMS = {"token", "apikey", "api_key", "access_token", "authorization"}
 _STATE_SEARCH_SOURCE_PRIORITY = {"ak": 0, "hi": 1}
@@ -1882,6 +1897,55 @@ def _ensure_free_source_pilot_scheduler_thread() -> None:
         _free_source_pilot_scheduler_thread.start()
 
 
+def _process_pilot_verifier_queue_once() -> Dict[str, int]:
+    """Drain verifier contract requests inside Render; this path never sends SMS."""
+    from pilot_verifier_queue import process_pending
+    from scripts.free_short_sale_source_pilot import sheets_client
+
+    stats = process_pending(
+        sheets_client(SC_JSON),
+        GSHEET_ID,
+        limit=PILOT_VERIFIER_QUEUE_BATCH_SIZE,
+    )
+    logger.info("pilot-verifier-queue: poll stats=%s", json.dumps(stats, sort_keys=True))
+    return stats
+
+
+def _ensure_pilot_verifier_queue_thread() -> None:
+    global _pilot_verifier_queue_thread, _pilot_verifier_queue_stop
+    if not PILOT_VERIFIER_QUEUE_ENABLED:
+        logger.info("pilot-verifier-queue: disabled")
+        return
+    with _pilot_verifier_queue_start_lock:
+        if _pilot_verifier_queue_thread and _pilot_verifier_queue_thread.is_alive():
+            logger.info("pilot-verifier-queue: worker already started")
+            return
+        stop_event = threading.Event()
+        _pilot_verifier_queue_stop = stop_event
+
+        def _loop() -> None:
+            logger.info(
+                "pilot-verifier-queue: worker starting poll_seconds=%d batch_size=%d",
+                PILOT_VERIFIER_QUEUE_POLL_SECONDS,
+                PILOT_VERIFIER_QUEUE_BATCH_SIZE,
+            )
+            while not stop_event.is_set():
+                try:
+                    _process_pilot_verifier_queue_once()
+                except Exception:
+                    logger.exception("pilot-verifier-queue: poll failed")
+                if stop_event.wait(timeout=PILOT_VERIFIER_QUEUE_POLL_SECONDS):
+                    break
+            logger.info("pilot-verifier-queue: worker stopped")
+
+        _pilot_verifier_queue_thread = threading.Thread(
+            target=_loop,
+            name="pilot-verifier-queue",
+            daemon=True,
+        )
+        _pilot_verifier_queue_thread.start()
+
+
 def _start_extra_state_rows(payload: Dict[str, Any]) -> None:
     if not APIFY_STATE_SEARCH_BACKGROUND:
         _enqueue_extra_state_rows(payload)
@@ -2903,6 +2967,7 @@ async def _start_scheduler() -> None:
     else:
         logger.info("RENDER_APIFY_TRIGGER_DISABLED=false")
         logger.info("Apify trigger enabled; new listings will be fetched via Apify.")
+    _ensure_pilot_verifier_queue_thread()
     if DISABLE_APIFY_SCHEDULER:
         logger.info("DISABLE_APIFY_SCHEDULER enabled; skipping scheduler thread")
         return
@@ -2957,6 +3022,14 @@ async def _stop_scheduler() -> None:
     with _free_source_pilot_audit_scheduler_start_lock:
         _free_source_pilot_audit_scheduler_thread = None
         _free_source_pilot_audit_scheduler_stop = None
+    global _pilot_verifier_queue_thread, _pilot_verifier_queue_stop
+    if _pilot_verifier_queue_stop:
+        _pilot_verifier_queue_stop.set()
+    if _pilot_verifier_queue_thread and _pilot_verifier_queue_thread.is_alive():
+        _pilot_verifier_queue_thread.join(timeout=5)
+    with _pilot_verifier_queue_start_lock:
+        _pilot_verifier_queue_thread = None
+        _pilot_verifier_queue_stop = None
     global _keepalive_thread, _keepalive_stop
     if _keepalive_stop:
         _keepalive_stop.set()
@@ -7987,6 +8060,33 @@ async def internal_pilot_verifier_contract(request: Request):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.post("/internal/pilot-verifier-queue/process")
+async def internal_pilot_verifier_queue_process(request: Request):
+    """Authenticated immediate drain; the background worker remains authoritative."""
+    _auth_internal_request(request)
+    try:
+        stats = await asyncio.to_thread(_process_pilot_verifier_queue_once)
+        return {"ok": True, "stats": stats, "sends": 0}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/internal/pilot-verifier-queue/status")
+async def internal_pilot_verifier_queue_status(request: Request):
+    _auth_internal_request(request)
+    from pilot_verifier_queue import status_snapshot
+
+    return {
+        "ok": True,
+        "enabled": PILOT_VERIFIER_QUEUE_ENABLED,
+        "worker_alive": bool(
+            _pilot_verifier_queue_thread and _pilot_verifier_queue_thread.is_alive()
+        ),
+        "queue": status_snapshot(),
+        "sends": 0,
+    }
+
+
 @app.post("/internal/send-initial-sms")
 async def internal_send_initial_sms(request: Request):
     """Send an initial SMS from the production bot using Render-side credentials."""
@@ -8497,4 +8597,19 @@ async def sms_reply(request: Request):
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok"}
+    from pilot_verifier_queue import status_snapshot
+
+    queue = status_snapshot()
+    return {
+        "status": "ok",
+        "pilot_verifier_queue": {
+            "enabled": PILOT_VERIFIER_QUEUE_ENABLED,
+            "worker_alive": bool(
+                _pilot_verifier_queue_thread and _pilot_verifier_queue_thread.is_alive()
+            ),
+            "last_poll_at": queue.get("last_poll_at", ""),
+            "last_success_at": queue.get("last_success_at", ""),
+            "last_stats": queue.get("last_stats", {}),
+            "healthy": not bool(queue.get("last_error")),
+        },
+    }

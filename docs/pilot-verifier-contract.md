@@ -139,10 +139,37 @@ whether that row is empty, and returns the exact A:G and Y:AB ranges with
 `writes=0` and `sends=0`. It never creates or promotes an owner and is likewise
 not organic behavioral proof.
 
+## Durable queue fallback
+
+When the scheduled verifier cannot reach the authenticated Render endpoint, it
+must enqueue the exact same contract request in the hidden `Pilot Verifier Queue`
+tab instead of writing Pilot or Sheet1 directly. The queue columns are:
+
+`request_id`, `submitted_at`, `automation_id`, `payload_json`, `status`,
+`claimed_at`, `completed_at`, `result_json`, and `error`.
+
+Append one row per action in execution order. Use a stable unique request ID,
+the actual timezone-aware submission time, the saved automation ID, compact JSON
+for the complete endpoint payload, and `pending`; leave the remaining cells
+blank. Reread the appended row. Never place bearer tokens in the queue.
+
+Render polls the queue every minute, claims pending rows, and calls this contract
+locally with production Google credentials. The contract still performs every
+identity, evidence, duplicate, owner-row, and readback check. The queue cannot
+send SMS. A request is complete only after the same queue row reads `completed`
+and `result_json` has `ok=true`; `failed`, a nonempty `error`, or stale
+`processing` is a blocker. Enqueue the terminal receipt only after all earlier
+adjudication rows completed successfully. The 10:05 audit continues to require
+the ordinary green receipt and does not treat queue acceptance as completion.
+
+The authenticated `POST /internal/pilot-verifier-queue/process` route provides
+an immediate drain for verification and recovery. The background Render worker
+is the durable path and does not depend on that route being called.
+
 ## Release checks
 
 Run `python3 -m unittest tests.test_pilot_verifier_contract
-tests.test_free_short_sale_source_pilot`. Deploy with source/audit startup catch-up
+tests.test_pilot_verifier_queue tests.test_free_short_sale_source_pilot`. Deploy with source/audit startup catch-up
 temporarily suppressed; restore its saved configuration afterward without a
 second deployment. Keep normal schedules unchanged. Verify the live commit,
 health, authenticated preview, unchanged receipt history and Sheet1 owners, and

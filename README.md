@@ -132,6 +132,10 @@ Configuration:
 * `FREE_SOURCE_PILOT_PROMOTION_ENABLED=true`
 * `FREE_SOURCE_PILOT_PROMOTION_DAILY_CAP=10`
 * `FREE_SOURCE_PILOT_PROMOTION_DRY_RUN=false`
+* `PILOT_VERIFIER_QUEUE_ENABLED=true`
+* `PILOT_VERIFIER_QUEUE_TAB=Pilot Verifier Queue`
+* `PILOT_VERIFIER_QUEUE_POLL_SECONDS=60`
+* `PILOT_VERIFIER_QUEUE_BATCH_SIZE=25`
 
 If your deployment does **not** run `webhook_server.py` (for example, it only calls
 `bot_min.process_rows` directly), run `python scheduler_worker.py` alongside the main
