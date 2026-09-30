@@ -2250,7 +2250,7 @@ function isSpecificFeeReplyText_(text) {
 
 function isExplicitFeeAmountQuestion_(text) {
   const t = normalizeLanguageSignalText_(text);
-  return /\b(?:how much|what(?:'s| is| are| would be) (?:your |the |a |my |buyer(?:'s)? |service )?(?:flat )?(?:fees?|costs?|price|pricing|rate|charges?)|what (?:do|would|will) you charge|dollar amount)\b/.test(t) ||
+  return /\b(?:how much|what(?:'s| is| are| would be) (?:your |the |a |my |buyer(?:'s)? |service )?(?:flat )?(?:buyer[- ]paid )?(?:fees?|costs?|price|pricing|rate|charges?)|what (?:do|would|will) you charge|dollar amount)\b/.test(t) ||
     /\bhow much (?:does|do|will|would|should|must) (?:the )?(?:buyer|seller|agent|we|i|they) (?:need to |have to )?pay\b/.test(t) ||
     /\bwhat does (?:it|this|that|your service) cost\b/.test(t) ||
     /^(?:(?:and|your|the)\s+)*(?:fee|cost|price|rate|charge)\s*\??$/.test(t) ||
@@ -2772,6 +2772,9 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
     const feeDecision = buildFeeQuestionDecision_(rowObj, lastOutbound, t);
     if (feeDecision.handoff_needed) return feeDecision;
     answers.push(feeDecision.reply_text);
+    if (flags.timeline && isExplicitFeeAmountQuestion_(t)) {
+      answers.push("The fee does not increase if the short-sale negotiation takes longer.");
+    }
     feeCapBypass = feeDecision.bypass_reply_cap ||
       shouldBypassReplyCapForFirstFeeAnswerAfterCloseout_(feeDecision, leadStatus, done);
   }
@@ -3222,6 +3225,28 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  // A named future day/date outranks generic present-tense wording such as
+  // "right now" in a sentence that requests a later conversation.
+  if (isSchedulingSignal_(t)) {
+    const hasSpecificTime = !!extractSchedulingTimePhrase_(t);
+    const callbackTime = extractCompleteCallbackTiming_(t, receivedAt);
+    return {
+      matched: true,
+      reply_text: hasSpecificTime ? "Perfect, thanks." : "Sounds good. What time works best for you?",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: true,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "scheduled_callback",
+      callback_requested: "yes",
+      callback_time: callbackTime,
+      send_reply_before_handoff: true,
+      handoff_type: "SCHEDULED CALLBACK",
+      reason: "Scheduled callback timing captured before handoff"
+    };
+  }
+
   const explicitUntimedCallback = isUntimedExplicitCallbackSignal_(t);
   if (explicitUntimedCallback || isImmediateCallSignal_(t) || isOpenCallWindowSignal_(t)) {
     return {
@@ -3254,25 +3279,6 @@ function applyFastRules_(text, rowObj, receivedAt) {
       block_reply: false,
       call_booking_status: "interested_no_call",
       reason: "Agent is unavailable until a future day; asked for a time instead of promising an unscheduled follow-up"
-    };
-  }
-
-  if (isSchedulingSignal_(t)) {
-    const hasSpecificTime = !!extractSchedulingTimePhrase_(t);
-    const callbackTime = extractCompleteCallbackTiming_(t, receivedAt);
-    return {
-      matched: true,
-      reply_text: hasSpecificTime ? "Perfect, thanks." : "Sounds good. What time works best for you?",
-      lead_status: "Y",
-      conversation_done: false,
-      handoff_needed: true,
-      needs_review: false,
-      block_reply: false,
-      call_booking_status: "scheduled_callback",
-      callback_requested: "yes",
-      callback_time: callbackTime,
-      handoff_type: "SCHEDULED CALLBACK",
-      reason: "Scheduled callback timing captured before handoff"
     };
   }
 

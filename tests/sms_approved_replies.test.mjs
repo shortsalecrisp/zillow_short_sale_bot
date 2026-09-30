@@ -95,7 +95,7 @@ test('neutral self-handling gets one transparent value response, then closes', (
   assert.match(second.reply_text, /^Ok, no problem/);
 });
 
-for (const text of ["What's the cost?", 'How much?', 'How much is your fee?', 'What do you charge?', 'What does your service cost?', 'How much does the Buyer need to pay?', 'What work would you take off my plate and how much is the flat fee?']) {
+for (const text of ["What's the cost?", 'How much?', 'How much is your fee?', 'What is your flat buyer-paid fee?', 'What do you charge?', 'What does your service cost?', 'How much does the Buyer need to pay?', 'What work would you take off my plate and how much is the flat fee?']) {
   test(`amount question answered directly: ${text}`, () => {
     const {r} = answer(text);
     assert.equal(r.should_reply, true);
@@ -104,6 +104,13 @@ for (const text of ["What's the cost?", 'How much?', 'How much is your fee?', 'W
     assert.equal(r.handoff_needed, false);
   });
 }
+
+test('compound buyer-paid fee and timing question answers amount, duration invariance, and timing', () => {
+  const {r} = answer('What is your flat buyer-paid fee, and is that the total fee regardless of how long the short-sale negotiation takes?');
+  assert.match(r.reply_text, /\$5,000/);
+  assert.match(r.reply_text, /does not increase/);
+  assert.match(r.reply_text, /60-90 days/);
+});
 
 test('payer, amount, and buyer concern are distinct questions, not a loop', () => {
   const h = smsHarness();
@@ -276,6 +283,17 @@ test('future callback outranks unavailable-right-now language', () => {
   assert.equal(h.evaluate('isFutureCallbackWhileUnavailableNowSignal_("I am free right now")'), false);
   assert.equal(h.evaluate('isFutureCallbackWhileUnavailableNowSignal_("Call me now")'), false);
   assert.equal(h.evaluate('isImmediateCallSignal_("Call me now")'), true);
+});
+
+test('named future day outranks generic right-now phrase from Karla case', () => {
+  const h = smsHarness();
+  const decision = h.incoming("I'm in class right now but tomorrow we can talk", {
+    receivedAt: '9-29-26 17.23'
+  });
+  assert.equal(h.state.call_booking_status, 'scheduled_callback');
+  assert.equal(h.state.callback_time, 'Tomorrow');
+  assert.equal(decision.reply_text, 'Sounds good. What time works best for you?');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'SCHEDULED CALLBACK'}]);
 });
 
 test('unquoted doubled reaction is suppressed only for exact outbound copies', () => {

@@ -4490,7 +4490,7 @@ def _sms_is_fee_amount_question(value: Any) -> bool:
         r"\b(?:how much|dollar amount|exact (?:fee|cost|price)|what do you charge|what would you charge)\b"
         r"|\bhow much (?:does|do|will|would|should|must) (?:the )?(?:buyer|seller|agent|we|i|they) (?:need to |have to )?pay\b"
         r"|\b(?:what(?:'s| is| are)|how much is)\s+(?:the|your|a|buyer(?:'s)?|service)?\s*"
-        r"(?:fee|fees|cost|costs|charge|charges|price|pricing|rate)\b"
+        r"(?:flat\s+)?(?:buyer[- ]paid\s+)?(?:fee|fees|cost|costs|charge|charges|price|pricing|rate)\b"
         r"|\bwhat does (?:it|this|that|your service) cost\b"
         r"|^(?:cost|price|pricing|fee|fees)[?!.]*$"
         r"|\b(?:cual|cul|cuanto|que)\b.{0,40}\b(?:tarifa|costo|costaria|cobra|cobran|precio)\b",
@@ -6653,6 +6653,10 @@ def _sms_question_priority_decision(
         if flags["experience"] and flags["closed_count"]:
             replies["experience"] = SMS_EXPERIENCE_REPLY.split(" I'd be happy")[0]
     answers = [replies[key] for key in matched if key != "closed_count" and replies.get(key)]
+    if flags["fee"] and flags["timeline"] and _sms_is_fee_amount_question(inbound_text):
+        fee_index = next((index for index, answer in enumerate(answers) if answer == replies["fee"]), -1)
+        if fee_index >= 0:
+            answers.insert(fee_index + 1, "The fee does not increase if the short-sale negotiation takes longer.")
     if flags["closed_count"]:
         answers.append(SMS_CLOSED_COUNT_REPLY)
     handoff = flags["closed_count"] or requests_call or call_now or flags["different"] or (flags["fee"] and interested)

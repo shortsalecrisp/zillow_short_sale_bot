@@ -2257,6 +2257,27 @@ def test_sms_future_callback_outranks_unavailable_right_now(monkeypatch):
     assert module._sms_is_future_callback_while_unavailable_now("Call me now") is False
 
 
+def test_sms_karla_future_day_and_lisa_compound_fee_regressions(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    callback = module._sms_fast_decision(
+        {}, "I'm in class right now but tomorrow we can talk", "9-29-26 17.23"
+    )
+    assert callback["call_booking_status"] == "scheduled_callback"
+    assert callback["callback_time"] == "September 30, 2026"
+
+    fee = module._sms_question_priority_decision(
+        {},
+        "What is your flat buyer-paid fee, and is that the total fee regardless of how long the short-sale negotiation takes?",
+    )
+    assert "$5,000" in fee["reply_text"]
+    assert "does not increase" in fee["reply_text"]
+    assert "60-90 days" in fee["reply_text"]
+
+
 def test_sms_call_interest_reopens_closed_conversation_for_handoff(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
