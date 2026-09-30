@@ -4147,7 +4147,10 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_crm_followup_sms_status(request_id: str) -> Dict[str, Any]:
-    if not re.fullmatch(r"render-crm-followup-[0-9a-f]{24}", request_id):
+    if not (
+        re.fullmatch(r"render-crm-followup-[0-9a-f]{24}", request_id)
+        or re.fullmatch(r"render-followup-[0-9]+-[0-9a-f]{16}", request_id)
+    ):
         raise HTTPException(status_code=400, detail="invalid_request_id")
     if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
         raise HTTPException(status_code=503, detail="tasker_outbox_not_configured")

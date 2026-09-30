@@ -12,6 +12,7 @@ const extract = (name, nextName) => source.slice(
 
 function harness() {
   const rows = [];
+  const leadRows = [];
   const sheet = {
     getLastRow: () => rows.length + 1,
     getRange: (_row, _col, count) => ({ getValues: () => rows.slice(0, count) }),
@@ -32,14 +33,21 @@ function harness() {
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
     Utilities: { getUuid: () => "generated-id" },
     getSheet_: () => ({}),
-    getSheetData_: () => [],
-    HEADERS: { phone: "phone" },
+    getSheetData_: () => leadRows,
+    HEADERS: {
+      phone: "phone",
+      human_override: "human_override",
+      mailshake_status: "mailshake_status",
+      followup_text_sent: "followup_text_sent",
+      last_message_id: "last_message_id",
+      last_inbound_text: "last_inbound_text",
+    },
   };
   vm.createContext(context);
   vm.runInContext(extract("getCrmFollowupSmsStatusV18_", "enqueueFollowupSmsV13_"), context);
   vm.runInContext(extract("enqueueFollowupSmsV13_", "resolveInitialSmsReceiptRowV14_"), context);
   vm.runInContext(extract("getPendingSmsStaleReason_", "findSmsCrmRowByPhone_"), context);
-  return { context, rows };
+  return { context, rows, leadRows };
 }
 
 const identity = {
@@ -78,4 +86,29 @@ test("CRM-only outbox stops uncertain duplicates and expired sends", () => {
 
   rows[0][0] = new Date(Date.now() - 31 * 60 * 1000);
   assert.equal(context.getPendingSmsStaleReason_(rows[0]), "CRM follow-up expired before handset send");
+});
+
+test("owner-approved sheet follow-up is not mistaken for the scheduled follow-up", () => {
+  const { context, rows, leadRows } = harness();
+  const requestId = "render-followup-5890-e8df1acc217bc4f4";
+  const queued = context.enqueueFollowupSmsV13_({
+    row: 5890,
+    phone: "4057723241",
+    message: "Owner-approved package follow-up",
+    message_id: "followup-5890-e8df1acc217bc4f4",
+    request_id: requestId,
+  }, "webhook-id");
+  assert.equal(queued.status, "queued");
+  leadRows.push({ row: 5890, obj: {
+    phone: "4057723241",
+    mailshake_status: "N",
+    followup_text_sent: "x",
+  } });
+  assert.equal(context.getPendingSmsStaleReason_(rows[0]), "");
+  rows[0][1] = "sent";
+  rows[0][14] = new Date("2026-09-30T18:39:12Z");
+  assert.equal(context.getCrmFollowupSmsStatusV18_({ request_id: requestId }).status, "sent");
+
+  rows[0][2] = "scheduler-followup-5890-e8df1acc217bc4f4";
+  assert.equal(context.getPendingSmsStaleReason_(rows[0]), "Scheduled follow-up already recorded");
 });

@@ -424,7 +424,9 @@ function enqueueInitialSmsV13_(body, webhookRequestId) {
 
 function getCrmFollowupSmsStatusV18_(body) {
   var requestId = String(body && body.request_id || "").trim();
-  if (!/^render-crm-followup-[0-9a-f]{24}$/.test(requestId)) {
+  var crmOnly = /^render-crm-followup-[0-9a-f]{24}$/.test(requestId);
+  var sheetBacked = /^render-followup-[0-9]+-[0-9a-f]{16}$/.test(requestId);
+  if (!crmOnly && !sheetBacked) {
     return { ok: false, error: "Invalid CRM follow-up request ID" };
   }
   var sheet = getSmsSpreadsheet_().getSheetByName("sms_pending_sends");
@@ -433,7 +435,9 @@ function getCrmFollowupSmsStatusV18_(body) {
   var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
   for (var i = rows.length - 1; i >= 0; i--) {
     if (String(rows[i][2] || "") !== requestId) continue;
-    if (String(rows[i][6] || "").indexOf("__crm_followup__:") !== 0) break;
+    var metadata = String(rows[i][6] || "");
+    if (crmOnly && metadata.indexOf("__crm_followup__:") !== 0) break;
+    if (sheetBacked && metadata.indexOf("__scheduled_followup__:") !== 0) break;
     return {
       ok: true,
       status: String(rows[i][1] || "unknown"),
@@ -643,12 +647,17 @@ function applyScheduledFollowupReceiptV13_(body, correlation) {
     ? new Date(Number(sentAtRaw))
     : new Date(sentAtRaw || new Date());
   if (isNaN(sentAt.getTime())) sentAt = new Date();
+  var ownerApproved = /^render-followup-[0-9]+-[0-9a-f]{16}$/.test(String(body && body.request_id || ""));
   var updates = [
-    { range: "I" + crmRow, value: "x" },
-    { range: "X" + crmRow, value: sentAt },
     { range: "L" + crmRow, value: message },
     { range: "O" + crmRow, value: sentAt }
   ];
+  if (!ownerApproved) {
+    updates.push(
+      { range: "I" + crmRow, value: "x" },
+      { range: "X" + crmRow, value: sentAt }
+    );
+  }
   var transportAlert = String(sheet.getRange(crmRow, 13).getValue() || "").trim();
   if (/^(SMS OUTBOX NOT CLAIMED|SMS SEND RESULT UNCERTAIN|SMS SEND NOT CONFIRMED)$/i.test(transportAlert)) {
     updates.push(
@@ -662,6 +671,7 @@ function applyScheduledFollowupReceiptV13_(body, correlation) {
   return {
     ok: true,
     scheduled_followup: true,
+    owner_approved_followup: ownerApproved,
     row: crmRow,
     original_row: originalCrmRow,
     row_resolution: resolvedRow.mode,
@@ -1770,6 +1780,8 @@ function getPendingSmsStaleReason_(outboxRow) {
   var messageId = String(outboxRow[3] || "");
   var isInitialOutreach = String(outboxRow[6] || "").indexOf("__initial_outreach__:") === 0;
   var isScheduledFollowup = String(outboxRow[6] || "").indexOf("__scheduled_followup__:") === 0;
+  var isOwnerApprovedFollowup = isScheduledFollowup &&
+    /^render-followup-[0-9]+-[0-9a-f]{16}$/.test(String(outboxRow[2] || ""));
   var isCrmFollowup = String(outboxRow[6] || "").indexOf("__crm_followup__:") === 0;
   var scheduledCrmRow = 0;
   if (isScheduledFollowup) {
@@ -1800,6 +1812,24 @@ function getPendingSmsStaleReason_(outboxRow) {
     if (!approvedOfferScopeReply && !newHandoffReply && String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
     if (isInitialOutreach) return "";
     if (isScheduledFollowup) {
+      if (isOwnerApprovedFollowup) {
+        if (String(rowObj[HEADERS.mailshake_status] || "").trim().toUpperCase() === "R") {
+          return "CRM lead is suppressed from outreach";
+        }
+        var queuedAt = new Date(outboxRow[0]).getTime();
+        if (!queuedAt || Date.now() - queuedAt > 30 * 60 * 1000) return "Owner-approved follow-up expired before handset send";
+        var inboundQueue = getSmsSpreadsheet_().getSheetByName("sms_inbound_queue");
+        if (inboundQueue && inboundQueue.getLastRow() > 1) {
+          var inboundRows = inboundQueue.getRange(2, 1, inboundQueue.getLastRow() - 1, 8).getValues();
+          for (var inboundIndex = inboundRows.length - 1; inboundIndex >= 0; inboundIndex--) {
+            if (normalizePhone_(inboundRows[inboundIndex][5]) === phone &&
+                new Date(inboundRows[inboundIndex][7] || inboundRows[inboundIndex][0]).getTime() > queuedAt) {
+              return "A newer inbound text exists for the owner-approved follow-up";
+            }
+          }
+        }
+        return "";
+      }
       var leadStatus = String(rowObj[HEADERS.mailshake_status] || "").trim().toUpperCase();
       if (["R", "Y", "G", "O"].indexOf(leadStatus) !== -1) return "CRM lead no longer qualifies for follow-up";
       if (String(rowObj.followup_text_sent || rowObj[HEADERS.followup_text_sent] || "").trim().toLowerCase() === "x") {

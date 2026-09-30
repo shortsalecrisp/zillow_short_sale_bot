@@ -967,6 +967,13 @@ def test_internal_crm_followup_status_reads_receipt_without_sending(monkeypatch)
     assert response.status_code == 200
     assert response.json() == {"status": "sent", "sent_at": "2026-09-30T13:00:00Z", "error": ""}
     assert seen[0]["body"]["action"] == "get_crm_followup_sms_status"
+    sheet_response = TestClient(module.app).post(
+        "/internal/followup-sms-status",
+        headers={"authorization": "Bearer secret-token"},
+        json={"request_id": "render-followup-5890-e8df1acc217bc4f4"},
+    )
+    assert sheet_response.status_code == 200
+    assert sheet_response.json()["status"] == "sent"
     assert sender.calls == []
 
 
