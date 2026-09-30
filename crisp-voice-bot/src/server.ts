@@ -4,6 +4,7 @@ import { config } from "./lib/config";
 import { getElevenLabsVoiceExperimentStatus } from "./lib/elevenLabsVoiceVariant";
 import { getElevenLabsRuntimeExperimentStatus } from "./lib/elevenLabsRuntimeExperiment";
 import { getProviderCircuitStatus } from "./lib/providerCircuitBreaker";
+import { FINAL_RECEIPT_CIRCUIT_THRESHOLD, FINAL_RECEIPT_STALE_AFTER_MINUTES, INBOUND_QUIET_PERIOD_MS } from "./lib/voiceSafety";
 import { startGmailImportSchedulers } from "./lib/gmailImporters";
 import { logger } from "./lib/logger";
 import { startMailshakeSyncScheduler } from "./lib/mailshakeSync";
@@ -63,6 +64,16 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
       alertSentAt: providerCircuit.alertSentAt,
       resetAt: providerCircuit.resetAt,
       resetReason: providerCircuit.resetReason,
+    },
+    finalReceiptCircuit: {
+      enforced: true,
+      threshold: FINAL_RECEIPT_CIRCUIT_THRESHOLD,
+      staleAfterMinutes: FINAL_RECEIPT_STALE_AFTER_MINUTES,
+    },
+    inboundQuietGate: {
+      enforced: true,
+      quietPeriodSeconds: INBOUND_QUIET_PERIOD_MS / 1000,
+      blocksUnprocessedInbound: true,
     },
     timestamp: new Date().toISOString(),
   });

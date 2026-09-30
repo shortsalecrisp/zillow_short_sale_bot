@@ -7,6 +7,11 @@ import { getOutboundCallPause } from "./outboundCallPause";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
 import { getProviderCircuitStatus } from "./providerCircuitBreaker";
 import {
+  ensureFinalReceiptCircuitAlert,
+  evaluateFinalReceiptCircuit,
+  getInboundQuietGate,
+} from "./voiceSafety";
+import {
   appendVoiceNotesValue,
   buildVoiceBotListingAddress,
   cellRange,
@@ -564,6 +569,18 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
 
   const sheets = await getGoogleSheetsClient();
   const rows = await getVoiceBotRows(sheets);
+  const finalReceiptCircuit = evaluateFinalReceiptCircuit(rows, now);
+  if (finalReceiptCircuit.open) {
+    await ensureFinalReceiptCircuitAlert(finalReceiptCircuit);
+    logger.error("Voice queue paused by final-receipt circuit", finalReceiptCircuit);
+    return {
+      ok: true,
+      queued: false,
+      reason: "final_receipt_circuit_open",
+      nowEt: formatVoiceBotDateEt(now),
+      pauseReason: `${finalReceiptCircuit.evidence.length} calls exceeded ${finalReceiptCircuit.staleAfterMinutes} minutes without final receipts`,
+    };
+  }
   const activeCallCount = countActiveVoiceBotCalls(rows, now);
   const candidates = getVoiceBotStartableCallCandidatesFromRows(
     rows,
@@ -618,6 +635,15 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
     if (!refreshedCandidate) {
       logger.info("Voice queue candidate no longer eligible", {
         rowNumber: candidate.rowNumber,
+      });
+      continue;
+    }
+
+    const inboundQuietGate = await getInboundQuietGate(sheets, refreshedCandidate.phone, now);
+    if (inboundQuietGate.blocked) {
+      logger.info("Voice queue candidate blocked by final inbound quiet gate", {
+        ...candidateSummary(refreshedCandidate),
+        ...inboundQuietGate,
       });
       continue;
     }
