@@ -3774,15 +3774,25 @@ def _enqueue_initial_sms_via_tasker_outbox(
 
 def _enqueue_followup_sms_via_tasker_outbox(
     *,
-    row_idx: int,
+    row_idx: Optional[int],
     phone: str,
     message: str,
     stable_id: str = "",
+    prospect_id: str = "",
+    recommendation_key: str = "",
 ) -> Dict[str, Any]:
     if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
         raise HTTPException(status_code=503, detail="tasker_outbox_not_configured")
     message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
-    message_id = f"followup-{row_idx}-{message_hash}"
+    if row_idx is None:
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", prospect_id) or not recommendation_key:
+            raise HTTPException(status_code=400, detail="crm_followup_identity_required")
+        identity_hash = hashlib.sha256(
+            f"{prospect_id}:{recommendation_key}:{message_hash}".encode("utf-8")
+        ).hexdigest()[:24]
+        message_id = f"crm-followup-{identity_hash}"
+    else:
+        message_id = f"followup-{row_idx}-{message_hash}"
     stable_id = str(stable_id or "").strip()
     try:
         response = requests.post(
@@ -3790,8 +3800,9 @@ def _enqueue_followup_sms_via_tasker_outbox(
             json={
                 "token": SMS_CHATBOT_ALLOWED_TOKEN,
                 "action": "enqueue_followup_sms",
-                "row": row_idx,
-                "crm_row": row_idx,
+                **({"row": row_idx, "crm_row": row_idx} if row_idx is not None else {
+                    "crm_prospect_id": prospect_id,
+                }),
                 "phone": phone,
                 "message": message,
                 "reply_text": message,
@@ -4094,105 +4105,71 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             or _row_value(row, 27)
             or ""
         ).strip()
-        queued = _enqueue_followup_sms_via_tasker_outbox(
-            row_idx=row_idx,
-            phone=digits,
-            message=message,
-            stable_id=stable_id,
-        )
-        logger.info(
-            "INTERNAL_FOLLOWUP_SMS_QUEUED row=%s phone=%s stable_id=%s request_id=%s message_id=%s pending_row=%s",
-            row_idx,
-            digits,
-            stable_id or "<blank>",
-            queued.get("request_id"),
-            queued.get("message_id"),
-            queued.get("pending_row"),
-        )
-        return {
-            "status": "queued",
-            "row": row_idx,
-            "phone": digits,
-            "request_id": queued.get("request_id"),
-            "message_id": queued.get("message_id"),
-            "stable_id": stable_id,
-            "pending_row": queued.get("pending_row"),
-            "duplicate": bool(queued.get("duplicate")),
-            "outbound_persisted": False,
-        }
+        prospect_id = ""
+        recommendation_key = ""
+    else:
+        prospect_id = str(payload.get("prospect_id") or "").strip()
+        recommendation_key = str(payload.get("recommendation_key") or "").strip()
+        if not re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+            prospect_id,
+        ) or not (1 <= len(recommendation_key) <= 240):
+            raise HTTPException(status_code=400, detail="crm_followup_identity_required")
+        stable_id = ""
 
-    final_result = None
-    for attempt in range(1, INITIAL_SMS_RETRY_ATTEMPTS + 1):
-        final_result = SMS_SENDER.send_with_diagnostics(
-            digits,
-            message,
-            sms_type="followup",
-            row_idx=row_idx,
-            attempt=attempt,
-        )
-        if final_result.success:
-            break
-        if attempt < INITIAL_SMS_RETRY_ATTEMPTS:
-            time.sleep(2)
-
-    if not final_result or not final_result.success:
-        logger.error(
-            "INTERNAL_FOLLOWUP_SMS_FAILED row=%s phone=%s http_status=%s response_body=%s exception_type=%s exception_message=%s",
-            row_idx,
-            digits,
-            getattr(final_result, "status_code", None),
-            getattr(final_result, "response_text", "") or "<empty>",
-            getattr(final_result, "exception_type", ""),
-            getattr(final_result, "exception_message", ""),
-        )
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "status": "gateway_failed",
-                "gateway_status": getattr(final_result, "status_code", None),
-                "gateway_response": getattr(final_result, "response_text", ""),
-            },
-        )
-
-    sent_at = datetime.now(tz=TZ).isoformat()
-    outbound_persisted = False
-    if row_idx is not None:
-        ws = _get_leads_ws()
-        row = _retry_gspread_call("read follow-up leads row", lambda: ws.row_values(row_idx))
-        current_phone = fmt_phone(_row_value(row, 2))
-        if current_phone and _digits_only(current_phone) == digits:
-            _retry_gspread_call(
-                "persist internal follow-up SMS",
-                lambda: ws.batch_update(
-                    [
-                        {"range": f"L{row_idx}", "values": [[message]]},
-                        {"range": f"O{row_idx}", "values": [[sent_at]]},
-                    ],
-                    value_input_option="RAW",
-                ),
-            )
-            outbound_persisted = True
-        else:
-            logger.error(
-                "INTERNAL_FOLLOWUP_SMS_OUTBOUND_NOT_PERSISTED row=%s phone=%s reason=row_phone_mismatch_after_send",
-                row_idx,
-                digits,
-            )
+    queued = _enqueue_followup_sms_via_tasker_outbox(
+        row_idx=row_idx,
+        phone=digits,
+        message=message,
+        stable_id=stable_id,
+        prospect_id=prospect_id,
+        recommendation_key=recommendation_key,
+    )
     logger.info(
-        "INTERNAL_FOLLOWUP_SMS_SENT row=%s phone=%s http_status=%s response_body=%s",
+        "INTERNAL_FOLLOWUP_SMS_QUEUED row=%s prospect_id=%s phone=%s request_id=%s message_id=%s pending_row=%s",
         row_idx,
+        prospect_id or "<sheet-row>",
         digits,
-        final_result.status_code,
-        final_result.response_text or "<empty>",
+        queued.get("request_id"),
+        queued.get("message_id"),
+        queued.get("pending_row"),
     )
     return {
-        "status": "sent",
+        "status": "sent" if queued.get("status") == "sent" else "queued",
         "row": row_idx,
         "phone": digits,
-        "sent_at": sent_at,
-        "gateway_status": final_result.status_code,
-        "gateway_response": final_result.response_text,
-        "outbound_persisted": outbound_persisted,
+        "request_id": queued.get("request_id"),
+        "message_id": queued.get("message_id"),
+        "pending_row": queued.get("pending_row"),
+        "duplicate": bool(queued.get("duplicate")),
+        "outbound_persisted": False,
+    }
+
+
+def _get_crm_followup_sms_status(request_id: str) -> Dict[str, Any]:
+    if not re.fullmatch(r"render-crm-followup-[0-9a-f]{24}", request_id):
+        raise HTTPException(status_code=400, detail="invalid_request_id")
+    if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
+        raise HTTPException(status_code=503, detail="tasker_outbox_not_configured")
+    try:
+        response = requests.post(
+            TASKER_TRANSPORT_HEALTH_URL,
+            json={
+                "token": SMS_CHATBOT_ALLOWED_TOKEN,
+                "action": "get_crm_followup_sms_status",
+                "request_id": request_id,
+            },
+            timeout=20,
+        )
+        result = response.json() if response.status_code == 200 else {}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"sms_status_lookup_failed:{type(exc).__name__}")
+    if response.status_code != 200 or result.get("ok") is not True:
+        raise HTTPException(status_code=502, detail="sms_status_lookup_failed")
+    return {
+        "status": result.get("status") or "unknown",
+        "sent_at": result.get("sent_at"),
+        "error": result.get("error") or "",
     }
 
 
@@ -8117,6 +8094,18 @@ async def internal_send_followup_sms(request: Request):
         raise HTTPException(status_code=400, detail="invalid_payload")
 
     return await asyncio.to_thread(_send_followup_sms_from_payload, payload)
+
+
+@app.post("/internal/followup-sms-status")
+async def internal_followup_sms_status(request: Request):
+    _auth_internal_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+    return await asyncio.to_thread(_get_crm_followup_sms_status, str(payload.get("request_id") or ""))
 
 
 _RELATIVE_TIME_RE = re.compile(

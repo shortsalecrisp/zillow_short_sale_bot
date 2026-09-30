@@ -362,7 +362,7 @@ def _import_webhook_server(monkeypatch, *, sender_result):
             "pending_row": 10 + row_idx,
         }
     module._enqueue_initial_sms_via_tasker_outbox = fake_enqueue_initial_sms
-    def fake_enqueue_followup_sms(*, row_idx, phone, message, stable_id=""):
+    def fake_enqueue_followup_sms(*, row_idx, phone, message, stable_id="", prospect_id="", recommendation_key=""):
         call = {
             "to": phone,
             "message": message,
@@ -372,6 +372,9 @@ def _import_webhook_server(monkeypatch, *, sender_result):
         }
         if stable_id:
             call["stable_id"] = stable_id
+        if prospect_id:
+            call["prospect_id"] = prospect_id
+            call["recommendation_key"] = recommendation_key
         fake_sender.calls.append(call)
         if not fake_sender.result.success:
             raise module.HTTPException(status_code=502, detail="tasker_outbox_enqueue_failed")
@@ -380,7 +383,7 @@ def _import_webhook_server(monkeypatch, *, sender_result):
             "queued": True,
             "request_id": f"render-followup-{row_idx}",
             "message_id": f"followup-{row_idx}-test",
-            "pending_row": 20 + row_idx,
+            "pending_row": 20 + (row_idx or 0),
         }
     module._enqueue_followup_sms_via_tasker_outbox = fake_enqueue_followup_sms
     return module, sheet1, fake_sender
@@ -893,6 +896,78 @@ def test_internal_followup_sms_queues_outbox_without_marking_until_receipt(monke
     assert sheet.rows[12][14] == ""
     assert sheet.rows[12][22] == ""
     assert sheet.rows[12][42] == ""
+
+
+def test_internal_followup_sms_for_form_lead_queues_outbox_without_gateway_send(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True, status_code=200, response_text="OK"),
+    )
+    client = TestClient(module.app)
+    response = client.post(
+        "/internal/send-followup-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={
+            "prospect_id": "e1f3e796-ff41-4c8c-8991-da6ca179d988",
+            "recommendation_key": "followup:v1:form-lead:1",
+            "phone": "555-111-2212",
+            "message": "Approved follow-up",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert sender.calls == [{
+        "to": "15551112212",
+        "message": "Approved follow-up",
+        "sms_type": "followup_queued",
+        "row_idx": None,
+        "attempt": 1,
+        "prospect_id": "e1f3e796-ff41-4c8c-8991-da6ca179d988",
+        "recommendation_key": "followup:v1:form-lead:1",
+    }]
+
+
+def test_internal_followup_sms_for_form_lead_requires_stable_identity(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    client = TestClient(module.app)
+    response = client.post(
+        "/internal/send-followup-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={"phone": "555-111-2212", "message": "Approved follow-up"},
+    )
+    assert response.status_code == 400
+    assert sender.calls == []
+
+
+def test_internal_crm_followup_status_reads_receipt_without_sending(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    seen = []
+    class StatusResponse:
+        status_code = 200
+        def json(self):
+            return {"ok": True, "status": "sent", "sent_at": "2026-09-30T13:00:00Z"}
+    def fake_post(url, json, timeout):
+        seen.append({"url": url, "body": json, "timeout": timeout})
+        return StatusResponse()
+    monkeypatch.setattr(module.requests, "post", fake_post)
+    module.TASKER_TRANSPORT_HEALTH_URL = "https://script.example.test/exec"
+    module.SMS_CHATBOT_ALLOWED_TOKEN = "test-transport-token"
+    response = TestClient(module.app).post(
+        "/internal/followup-sms-status",
+        headers={"authorization": "Bearer secret-token"},
+        json={"request_id": "render-crm-followup-0123456789abcdef01234567"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "sent", "sent_at": "2026-09-30T13:00:00Z", "error": ""}
+    assert seen[0]["body"]["action"] == "get_crm_followup_sms_status"
+    assert sender.calls == []
 
 
 def test_internal_followup_sms_rejects_empty_message(monkeypatch):

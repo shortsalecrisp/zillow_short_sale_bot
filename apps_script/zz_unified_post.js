@@ -15,6 +15,7 @@ function isUnifiedSmsAction_(action) {
     enqueue_incoming_sms: true,
     enqueue_initial_sms: true,
     enqueue_followup_sms: true,
+    get_crm_followup_sms_status: true,
     claim_pending_send: true,
     send_started: true,
     install_outbox_triggers: true,
@@ -216,6 +217,10 @@ function handleUnifiedSmsPost_(e) {
       return jsonOutput_(enqueueFollowupSmsV13_(body, requestId));
     }
 
+    if (action === "get_crm_followup_sms_status") {
+      return jsonOutput_(getCrmFollowupSmsStatusV18_(body));
+    }
+
     if (action === "claim_pending_send") {
       recordTaskerTransportActivityV12_("claim", body);
       var claimInboundSnapshot = enqueueTaskerInboundSnapshotBestEffortV17_(
@@ -310,11 +315,16 @@ function handleUnifiedSmsPost_(e) {
         replySentResult = applyInitialSmsReceiptV13_(canonicalReceiptBody, receiptCorrelation);
       } else if (receiptCorrelation.send_kind === "scheduled_followup") {
         replySentResult = applyScheduledFollowupReceiptV13_(canonicalReceiptBody, receiptCorrelation);
+      } else if (receiptCorrelation.send_kind === "crm_followup") {
+        replySentResult = { ok: true, crm_followup: true, request_id: canonicalReceiptBody.request_id };
       } else {
         replySentResult = handleReplySent_(canonicalReceiptBody);
       }
       if (typeof markPendingSmsSendComplete_ === "function") {
-        markPendingSmsSendComplete_(canonicalReceiptBody);
+        var completedReceipt = markPendingSmsSendComplete_(canonicalReceiptBody);
+        if (receiptCorrelation.send_kind === "crm_followup" && !completedReceipt.ok) {
+          throw new Error(completedReceipt.reason || "Could not confirm the handset send receipt");
+        }
       }
       try {
         if (typeof appendSmsDebugLog_ === "function") {
@@ -777,6 +787,8 @@ function validatePendingSmsSendReceipt_(body) {
       ? "initial_outreach"
       : sendMetadata.indexOf("__scheduled_followup__:") === 0
       ? "scheduled_followup"
+      : sendMetadata.indexOf("__crm_followup__:") === 0
+      ? "crm_followup"
       : "bot_reply",
     crm_row: Number(rows[matchIndex][17] || 0),
     send_metadata: sendMetadata,
