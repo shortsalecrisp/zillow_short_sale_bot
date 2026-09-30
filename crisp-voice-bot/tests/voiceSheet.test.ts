@@ -53,3 +53,9 @@ test("replacement voice sheet helpers normalize phones and append AP notes", () 
   assert.equal(normalizePhoneToE164("(954) 205-3205"), "+19542053205");
   assert.equal(appendVoiceNotesValue("first", "second"), "first\n\n---\n\nsecond");
 });
+
+test("replacement voice sheet helpers do not duplicate an identical AP receipt", () => {
+  const receipt = "--- CODEX_VOICE_CALL_METRICS_V1 ---\n{\"call\":{\"conversationId\":\"conv_123\"}}";
+  assert.equal(appendVoiceNotesValue(receipt, receipt), receipt);
+  assert.equal(appendVoiceNotesValue(`older\n\n---\n\n${receipt}`, receipt), `older\n\n---\n\n${receipt}`);
+});

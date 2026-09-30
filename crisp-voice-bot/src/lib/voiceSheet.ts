@@ -444,6 +444,9 @@ export function getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt: Da
 
 export function appendVoiceNotesValue(previous: unknown, next: string): string {
   const previousText = previous === undefined || previous === null ? "" : String(previous);
+  if (previousText.split(VOICE_BOT_VOICE_NOTES_SEPARATOR).includes(next)) {
+    return previousText;
+  }
   const combined = previousText ? `${previousText}${VOICE_BOT_VOICE_NOTES_SEPARATOR}${next}` : next;
   return trimVoiceBotVoiceNotes(combined);
 }

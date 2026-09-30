@@ -5,6 +5,25 @@ import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
 import { processVoiceQueue } from "./voiceQueue";
 import type { SheetUpdateRequest } from "../types";
 
+type AppsScriptPost = (
+  url: string,
+  body: Record<string, unknown>,
+  options: {
+    timeout: number;
+    headers: Record<string, string>;
+  },
+) => Promise<{ data?: unknown }>;
+
+type DirectSheetUpdate = (
+  rowNumber: number,
+  payload: SheetUpdateRequest,
+) => Promise<string[]>;
+
+type SheetUpdateDependencies = {
+  appsScriptPost?: AppsScriptPost;
+  directSheetUpdate?: DirectSheetUpdate;
+};
+
 export function buildVoiceQueueRefillPayload(): Record<string, string> {
   return {
     ...(config.googleAppsScript.token ? { token: config.googleAppsScript.token } : {}),
@@ -21,6 +40,76 @@ function redactLargeSheetFields(payload: Record<string, unknown>): Record<string
     ...payload,
     voiceNotes: `[redacted ${payload.voiceNotes.length} chars]`,
   };
+}
+
+function parseAppsScriptResponse(data: unknown): Record<string, unknown> | undefined {
+  if (typeof data === "string") {
+    try {
+      const parsed = JSON.parse(data) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  return data && typeof data === "object" && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : undefined;
+}
+
+export function isAppsScriptSheetUpdateAccepted(data: unknown): boolean {
+  return parseAppsScriptResponse(data)?.ok === true;
+}
+
+function summarizeAppsScriptResponse(data: unknown): Record<string, unknown> {
+  const parsed = parseAppsScriptResponse(data);
+  if (!parsed) {
+    return { responseType: typeof data };
+  }
+
+  return {
+    ok: parsed.ok,
+    code: parsed.code,
+    error: parsed.error,
+    fieldsWritten: parsed.fieldsWritten,
+  };
+}
+
+async function persistDirectSheetFallback(
+  payload: SheetUpdateRequest,
+  directSheetUpdate: DirectSheetUpdate,
+  reason: string,
+): Promise<void> {
+  if (!Number.isInteger(payload.rowNumber) || Number(payload.rowNumber) < 2) {
+    logger.error("Direct sheet fallback skipped because rowNumber is invalid", {
+      rowNumber: payload.rowNumber,
+      callAttemptNumber: payload.callAttemptNumber,
+      callResult: payload.callResult,
+      reason,
+    });
+    return;
+  }
+
+  try {
+    const fieldsWritten = await directSheetUpdate(Number(payload.rowNumber), payload);
+    logger.info("Direct sheet fallback accepted", {
+      rowNumber: payload.rowNumber,
+      callAttemptNumber: payload.callAttemptNumber,
+      callResult: payload.callResult,
+      reason,
+      fieldsWritten,
+    });
+  } catch (error) {
+    logger.error("Direct sheet fallback failed", {
+      rowNumber: payload.rowNumber,
+      callAttemptNumber: payload.callAttemptNumber,
+      callResult: payload.callResult,
+      reason,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 export async function requestVoiceQueueRefill(context: {
@@ -74,8 +163,13 @@ export async function requestVoiceQueueRefill(context: {
   }
 }
 
-export async function postSheetUpdate(payload: SheetUpdateRequest): Promise<void> {
+export async function postSheetUpdate(
+  payload: SheetUpdateRequest,
+  dependencies: SheetUpdateDependencies = {},
+): Promise<void> {
   const useAppsScript = Boolean(config.googleAppsScript.webhookUrl);
+  const directSheetUpdate = dependencies.directSheetUpdate ?? updateVoiceLeadRow;
+  const appsScriptPost = dependencies.appsScriptPost ?? ((url, body, options) => axios.post(url, body, options));
 
   if (!useAppsScript) {
     if (!Number.isInteger(payload.rowNumber) || Number(payload.rowNumber) < 2) {
@@ -100,7 +194,7 @@ export async function postSheetUpdate(payload: SheetUpdateRequest): Promise<void
     });
 
     try {
-      const fieldsWritten = await updateVoiceLeadRow(Number(payload.rowNumber), payload);
+      const fieldsWritten = await directSheetUpdate(Number(payload.rowNumber), payload);
       logger.info("Direct sheet update accepted", {
         mode: "direct_google_sheets",
         rowNumber: payload.rowNumber,
@@ -146,13 +240,25 @@ export async function postSheetUpdate(payload: SheetUpdateRequest): Promise<void
   });
 
   try {
-    await axios.post(url, body, {
+    const response = await appsScriptPost(url, body, {
       timeout: 10_000,
       headers: {
         "Content-Type": "application/json",
         ...(config.googleAppsScript.token ? { "X-Crisp-Token": config.googleAppsScript.token } : {}),
       },
     });
+
+    if (!isAppsScriptSheetUpdateAccepted(response.data)) {
+      logger.error("Sheet update rejected by Apps Script", {
+        mode: "google_apps_script",
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+        callResult: payload.callResult,
+        response: summarizeAppsScriptResponse(response.data),
+      });
+      await persistDirectSheetFallback(payload, directSheetUpdate, "apps_script_rejected");
+      return;
+    }
 
     logger.info("Sheet update accepted", {
       mode: useAppsScript ? "google_apps_script" : "local_stub",
@@ -170,6 +276,7 @@ export async function postSheetUpdate(payload: SheetUpdateRequest): Promise<void
         data: error.response?.data,
         message: error.message,
       });
+      await persistDirectSheetFallback(payload, directSheetUpdate, "apps_script_http_failure");
       return;
     }
 
@@ -179,5 +286,6 @@ export async function postSheetUpdate(payload: SheetUpdateRequest): Promise<void
         callAttemptNumber: payload.callAttemptNumber,
         message: error instanceof Error ? error.message : String(error),
     });
+    await persistDirectSheetFallback(payload, directSheetUpdate, "apps_script_transport_failure");
   }
 }
