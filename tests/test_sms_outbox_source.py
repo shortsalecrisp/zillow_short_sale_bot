@@ -381,9 +381,9 @@ def test_scheduled_followup_uses_durable_outbox_and_marks_crm_only_on_tasker_rec
 
     send_source = server.split("def _send_followup_sms_from_payload", 1)[1].split("SMS_DEBUG_HEADERS", 1)[0]
     assert "_enqueue_followup_sms_via_tasker_outbox" in send_source
-    assert "send_with_diagnostics" in send_source
+    assert "send_with_diagnostics" not in send_source
     assert 'if row_idx is not None:' in send_source
-    assert "row_phone_mismatch" in send_source
+    assert "prospect_id" in send_source
 
     send_sms_source = scheduler.split("def send_sms(", 1)[1].split("def _within_initial_hours", 1)[0]
     assert "TASKER_FOLLOWUP_OUTBOX_QUEUED" in send_sms_source
@@ -399,6 +399,15 @@ def test_scheduled_followup_uses_durable_outbox_and_marks_crm_only_on_tasker_rec
     assert 'range: "O" + crmRow, value: sentAt' in receipt_source
     assert 'range: "H" + crmRow' not in receipt_source
     assert 'range: "AQ" + crmRow' not in receipt_source
+
+
+def test_crm_only_followup_uses_existing_tasker_outbox_with_a_handset_receipt():
+    assert '"__crm_followup__:"' in OUTBOX
+    assert 'isCrmFollowup' in OUTBOX
+    assert 'send_kind === "crm_followup"' in UNIFIED
+    assert 'sendMetadata.indexOf("__crm_followup__:")' in UNIFIED
+    assert "A newer inbound text exists for the CRM prospect" in OUTBOX
+    assert "CRM follow-up expired before handset send" in OUTBOX
 
 
 def test_initial_receipt_for_replaced_crm_phone_is_terminal_without_mutating_new_contact():

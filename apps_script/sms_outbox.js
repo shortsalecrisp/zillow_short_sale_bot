@@ -422,24 +422,51 @@ function enqueueInitialSmsV13_(body, webhookRequestId) {
   }
 }
 
+function getCrmFollowupSmsStatusV18_(body) {
+  var requestId = String(body && body.request_id || "").trim();
+  if (!/^render-crm-followup-[0-9a-f]{24}$/.test(requestId)) {
+    return { ok: false, error: "Invalid CRM follow-up request ID" };
+  }
+  var sheet = getSmsSpreadsheet_().getSheetByName("sms_pending_sends");
+  if (!sheet || sheet.getLastRow() < 2) return { ok: false, error: "SMS outbox record not found" };
+  ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
+  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (String(rows[i][2] || "") !== requestId) continue;
+    if (String(rows[i][6] || "").indexOf("__crm_followup__:") !== 0) break;
+    return {
+      ok: true,
+      status: String(rows[i][1] || "unknown"),
+      sent_at: rows[i][14] ? new Date(rows[i][14]).toISOString() : null,
+      error: String(rows[i][15] || ""),
+    };
+  }
+  return { ok: false, error: "SMS outbox record not found" };
+}
+
 function enqueueFollowupSmsV13_(body, webhookRequestId) {
   var phone = normalizePhone_(body && body.phone || "");
   var replyText = normalizeWhitespace_(String(body && (body.reply_text || body.message) || ""));
   var crmRow = Number(body && body.crm_row || body && body.row || 0);
+  var crmProspectId = String(body && body.crm_prospect_id || "").trim();
   var messageId = String(body && body.message_id || "").trim();
   var requestId = String(body && body.request_id || webhookRequestId || Utilities.getUuid()).trim();
-  if (phone.length !== 10 || !replyText || !Number.isInteger(crmRow) || crmRow < 2 || !messageId) {
-    return { ok: false, queued: false, error: "Follow-up SMS requires phone, message, CRM row, and message ID" };
+  var hasSheetRow = Number.isInteger(crmRow) && crmRow >= 2;
+  var hasCrmProspect = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(crmProspectId);
+  if (phone.length !== 10 || !replyText || !messageId || hasSheetRow === hasCrmProspect) {
+    return { ok: false, queued: false, error: "Follow-up SMS requires phone, message, message ID, and exactly one CRM identity" };
   }
 
   installSmsOutboxTriggers_();
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_pending_sends") || ss.insertSheet("sms_pending_sends");
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
-  var metadata = "__scheduled_followup__:" + JSON.stringify({
-    crm_row: crmRow,
-    stable_id: String(body && (body.stable_id || body.zpid || body.listing_id) || "").trim()
-  });
+  var metadata = hasSheetRow
+    ? "__scheduled_followup__:" + JSON.stringify({
+      crm_row: crmRow,
+      stable_id: String(body && (body.stable_id || body.zpid || body.listing_id) || "").trim()
+    })
+    : "__crm_followup__:" + JSON.stringify({ crm_prospect_id: crmProspectId, phone: phone });
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) {
     return { ok: false, queued: false, retryable: true, error: "Follow-up SMS outbox is temporarily busy" };
@@ -451,12 +478,15 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
     for (var i = rows.length - 1; i >= 0; i--) {
       if (String(rows[i][3] || "") !== messageId) continue;
       var existingStatus = String(rows[i][1] || "");
-      if (["queued", "claimed", "send_started", "sent"].indexOf(existingStatus) !== -1) {
+      var terminalOrUncertainCrmSend = hasCrmProspect &&
+        ["receipt_pending", "uncertain", "failed", "superseded"].indexOf(existingStatus) !== -1;
+      if (["queued", "claimed", "send_started", "sent"].indexOf(existingStatus) !== -1 || terminalOrUncertainCrmSend) {
         return {
-          ok: true,
+          ok: !terminalOrUncertainCrmSend,
           queued: existingStatus !== "sent",
           duplicate: true,
           status: existingStatus,
+          error: terminalOrUncertainCrmSend ? "Prior CRM SMS needs review before another send" : "",
           request_id: String(rows[i][2] || ""),
           message_id: messageId,
           pending_row: i + 2
@@ -1740,6 +1770,7 @@ function getPendingSmsStaleReason_(outboxRow) {
   var messageId = String(outboxRow[3] || "");
   var isInitialOutreach = String(outboxRow[6] || "").indexOf("__initial_outreach__:") === 0;
   var isScheduledFollowup = String(outboxRow[6] || "").indexOf("__scheduled_followup__:") === 0;
+  var isCrmFollowup = String(outboxRow[6] || "").indexOf("__crm_followup__:") === 0;
   var scheduledCrmRow = 0;
   if (isScheduledFollowup) {
     try {
@@ -1747,11 +1778,22 @@ function getPendingSmsStaleReason_(outboxRow) {
     } catch (_) {}
     if (!Number.isInteger(scheduledCrmRow) || scheduledCrmRow < 2) return "Scheduled follow-up is missing its CRM row";
   }
+  if (isCrmFollowup) {
+    var crmMetadata = {};
+    try {
+      crmMetadata = JSON.parse(String(outboxRow[6]).replace(/^__crm_followup__:/, ""));
+    } catch (_) {}
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(crmMetadata.crm_prospect_id || "")) ||
+        normalizePhone_(crmMetadata.phone) !== phone) return "CRM follow-up identity is invalid";
+    var queuedAt = new Date(outboxRow[0]).getTime();
+    if (!queuedAt || Date.now() - queuedAt > 30 * 60 * 1000) return "CRM follow-up expired before handset send";
+  }
   var sheet = getSheet_();
   var data = getSheetData_(sheet);
   for (var i = 0; i < data.length; i++) {
     var rowObj = data[i].obj;
     if (normalizePhone_(rowObj[HEADERS.phone]) !== phone) continue;
+    if (isCrmFollowup) return "CRM-only phone also has a spreadsheet row; review before sending";
     if (isScheduledFollowup && data[i].row !== scheduledCrmRow) continue;
     var newHandoffReply = typeof isAuthorizedNewHandoffReply_ === "function" &&
       isAuthorizedNewHandoffReply_(phone, messageId, outboxRow[5], rowObj);
@@ -1792,6 +1834,19 @@ function getPendingSmsStaleReason_(outboxRow) {
     if (inboundText && currentInboundText && currentInboundText !== inboundText &&
         !newerInboundIsCourtesy && !carryOutstandingSpecificFee) {
       return "Latest inbound text changed";
+    }
+    return "";
+  }
+  if (isCrmFollowup) {
+    var inboundQueue = getSmsSpreadsheet_().getSheetByName("sms_inbound_queue");
+    if (inboundQueue && inboundQueue.getLastRow() > 1) {
+      var inboundRows = inboundQueue.getRange(2, 1, inboundQueue.getLastRow() - 1, 8).getValues();
+      for (var inboundIndex = inboundRows.length - 1; inboundIndex >= 0; inboundIndex--) {
+        if (normalizePhone_(inboundRows[inboundIndex][5]) === phone &&
+            new Date(inboundRows[inboundIndex][7] || inboundRows[inboundIndex][0]).getTime() > queuedAt) {
+          return "A newer inbound text exists for the CRM prospect";
+        }
+      }
     }
     return "";
   }
