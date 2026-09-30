@@ -144,6 +144,9 @@ export const config = {
     minCandidateDueAt:
       readOptionalDate("VOICE_QUEUE_MIN_CANDIDATE_DUE_AT_ISO") ??
       new Date("2026-08-23T04:00:00.000Z"),
+    finalReceiptMonitorStartedAt:
+      readOptionalDate("VOICE_FINAL_RECEIPT_MONITOR_STARTED_AT_ISO") ??
+      new Date("2026-09-30T09:46:05.445Z"),
   },
   mailshakeSync: {
     apiKey: readOptionalEnv("MAILSHAKE_API_KEY"),

@@ -569,7 +569,11 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
 
   const sheets = await getGoogleSheetsClient();
   const rows = await getVoiceBotRows(sheets);
-  const finalReceiptCircuit = evaluateFinalReceiptCircuit(rows, now);
+  const finalReceiptCircuit = evaluateFinalReceiptCircuit(
+    rows,
+    now,
+    config.voiceQueue.finalReceiptMonitorStartedAt,
+  );
   if (finalReceiptCircuit.open) {
     await ensureFinalReceiptCircuitAlert(finalReceiptCircuit);
     logger.error("Voice queue paused by final-receipt circuit", finalReceiptCircuit);

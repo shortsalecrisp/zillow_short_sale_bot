@@ -69,6 +69,7 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
       enforced: true,
       threshold: FINAL_RECEIPT_CIRCUIT_THRESHOLD,
       staleAfterMinutes: FINAL_RECEIPT_STALE_AFTER_MINUTES,
+      monitorStartedAt: config.voiceQueue.finalReceiptMonitorStartedAt.toISOString(),
     },
     inboundQuietGate: {
       enforced: true,

@@ -24,14 +24,17 @@ export type FinalReceiptCircuitStatus = {
   open: boolean;
   threshold: number;
   staleAfterMinutes: number;
+  monitorStartedAt: string;
   evidence: FinalReceiptEvidence[];
 };
 
 export function evaluateFinalReceiptCircuit(
   rows: Array<{ rowNumber: number; values: unknown[] }>,
   now = new Date(),
+  monitorStartedAt = new Date(0),
 ): FinalReceiptCircuitStatus {
   const staleBefore = now.getTime() - FINAL_RECEIPT_STALE_AFTER_MINUTES * 60_000;
+  const monitorStartedAtMs = monitorStartedAt.getTime();
   const attempts: FinalReceiptEvidence[] = [];
 
   for (const row of rows) {
@@ -40,7 +43,12 @@ export function evaluateFinalReceiptCircuit(
       const resultColumn = attempt === 1 ? VOICE_BOT_COL_CALL_1_RESULT : VOICE_BOT_COL_CALL_2_RESULT;
       const sentAt = parseVoiceBotDate(row.values[sentColumn - 1]);
       const result = normalizeString(row.values[resultColumn - 1]);
-      if (sentAt && sentAt.getTime() <= staleBefore && !result) {
+      if (
+        sentAt &&
+        sentAt.getTime() >= monitorStartedAtMs &&
+        sentAt.getTime() <= staleBefore &&
+        !result
+      ) {
         attempts.push({ rowNumber: row.rowNumber, attempt, startedAt: sentAt.toISOString() });
       }
     }
@@ -52,6 +60,7 @@ export function evaluateFinalReceiptCircuit(
     open: evidence.length >= FINAL_RECEIPT_CIRCUIT_THRESHOLD,
     threshold: FINAL_RECEIPT_CIRCUIT_THRESHOLD,
     staleAfterMinutes: FINAL_RECEIPT_STALE_AFTER_MINUTES,
+    monitorStartedAt: monitorStartedAt.toISOString(),
     evidence,
   };
 }
