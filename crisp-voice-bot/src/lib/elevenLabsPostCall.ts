@@ -988,36 +988,79 @@ export function buildVoiceContactOutcomeUpdates(
   return updates;
 }
 
-export async function persistVoiceContactOutcome(payload: SheetUpdateRequest): Promise<void> {
+type PersistVoiceContactOutcomeDependencies = {
+  directSheetUpdate?: typeof updateVoiceLeadRow;
+  appsScriptPost?: typeof axios.post;
+};
+
+async function persistDirectVoiceContactOutcome(
+  payload: SheetUpdateRequest,
+  directSheetUpdate: typeof updateVoiceLeadRow,
+): Promise<void> {
+  const fields = await directSheetUpdate(Number(payload.rowNumber), payload);
+  if (!fields.some((field) => field.endsWith(":callResult"))) {
+    throw new Error("Direct terminal voice outcome write was not acknowledged");
+  }
+}
+
+export async function persistVoiceContactOutcome(
+  payload: SheetUpdateRequest,
+  dependencies: PersistVoiceContactOutcomeDependencies = {},
+): Promise<void> {
   if (!Number.isInteger(payload.rowNumber) || Number(payload.rowNumber) < 2) {
     throw new Error("A valid lead row is required for a terminal voice outcome");
   }
+  const directSheetUpdate = dependencies.directSheetUpdate ?? updateVoiceLeadRow;
+  const appsScriptPost = dependencies.appsScriptPost ?? axios.post;
+
   if (!config.googleAppsScript.webhookUrl) {
-    const fields = await updateVoiceLeadRow(Number(payload.rowNumber), payload);
-    if (!fields.some((field) => field.endsWith(":callResult"))) {
-      throw new Error("Terminal voice outcome write was not acknowledged");
-    }
+    await persistDirectVoiceContactOutcome(payload, directSheetUpdate);
     return;
   }
 
   // Preserve the configured transport, but do not mistake a relay's HTTP 200
   // (or the shared client's void return) for a confirmed terminal write.
-  const response = await axios.post(config.googleAppsScript.webhookUrl, {
-    ...(config.googleAppsScript.token ? { token: config.googleAppsScript.token } : {}),
-    ...payload,
-  }, {
-    timeout: 10_000,
-    headers: {
-      "Content-Type": "application/json",
-      ...(config.googleAppsScript.token ? { "X-Crisp-Token": config.googleAppsScript.token } : {}),
-    },
-  });
-  const receipt = response.data as { ok?: boolean; rowNumber?: number; fieldsWritten?: unknown } | undefined;
-  const fields = receipt?.fieldsWritten;
-  const required = [":callResult", ":call_eligible", ":call_time_bucket", ":call_scheduled_for"];
-  if (receipt?.ok !== true || receipt.rowNumber !== payload.rowNumber || !Array.isArray(fields) ||
-    !required.every((suffix) => fields.some((field) => typeof field === "string" && field.endsWith(suffix)))) {
-    throw new Error("Terminal voice outcome relay receipt is unconfirmed; manual review required");
+  let relayError: unknown;
+  try {
+    const response = await appsScriptPost(config.googleAppsScript.webhookUrl, {
+      ...(config.googleAppsScript.token ? { token: config.googleAppsScript.token } : {}),
+      ...payload,
+    }, {
+      timeout: 10_000,
+      headers: {
+        "Content-Type": "application/json",
+        ...(config.googleAppsScript.token ? { "X-Crisp-Token": config.googleAppsScript.token } : {}),
+      },
+    });
+    const receipt = response.data as { ok?: boolean; rowNumber?: number; fieldsWritten?: unknown } | undefined;
+    const fields = receipt?.fieldsWritten;
+    const required = [":callResult", ":call_eligible", ":call_time_bucket", ":call_scheduled_for"];
+    if (receipt?.ok !== true || receipt.rowNumber !== payload.rowNumber || !Array.isArray(fields) ||
+      !required.every((suffix) => fields.some((field) => typeof field === "string" && field.endsWith(suffix)))) {
+      throw new Error("Terminal voice outcome relay receipt is unconfirmed");
+    }
+    return;
+  } catch (error) {
+    relayError = error;
+    logger.error("Terminal voice outcome relay failed; trying direct Sheets fallback", {
+      rowNumber: payload.rowNumber,
+      callAttemptNumber: payload.callAttemptNumber,
+      callResult: payload.callResult,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  try {
+    await persistDirectVoiceContactOutcome(payload, directSheetUpdate);
+    logger.info("Terminal voice outcome persisted by direct Sheets fallback", {
+      rowNumber: payload.rowNumber,
+      callAttemptNumber: payload.callAttemptNumber,
+      callResult: payload.callResult,
+    });
+  } catch (directError) {
+    const relayMessage = relayError instanceof Error ? relayError.message : String(relayError);
+    const directMessage = directError instanceof Error ? directError.message : String(directError);
+    throw new Error(`Terminal voice outcome persistence failed after relay failure (${relayMessage}): ${directMessage}`);
   }
 }
 

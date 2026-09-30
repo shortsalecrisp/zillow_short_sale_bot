@@ -19,6 +19,38 @@ test("voice queue refill payload uses the shared Apps Script token", async () =>
   });
 });
 
+test("rejected Apps Script queue refill runs the direct queue", async () => {
+  const { requestVoiceQueueRefill } = await import("../src/lib/sheetUpdateClient");
+  let directQueueRuns = 0;
+
+  await requestVoiceQueueRefill({ rowNumber: 5890, callAttemptNumber: 2 }, {
+    appsScriptPost: async () => ({
+      data: { ok: false, code: "unauthorized", error: "Missing or invalid voice bot token" },
+    }),
+    processQueue: async () => {
+      directQueueRuns += 1;
+      return { ok: true, queued: false };
+    },
+  });
+
+  assert.equal(directQueueRuns, 1);
+});
+
+test("accepted Apps Script queue refill does not run the direct queue", async () => {
+  const { requestVoiceQueueRefill } = await import("../src/lib/sheetUpdateClient");
+  let directQueueRuns = 0;
+
+  await requestVoiceQueueRefill({ rowNumber: 5891, callAttemptNumber: 1 }, {
+    appsScriptPost: async () => ({ data: { ok: true, queued: false } }),
+    processQueue: async () => {
+      directQueueRuns += 1;
+      return { ok: true, queued: false };
+    },
+  });
+
+  assert.equal(directQueueRuns, 0);
+});
+
 test("Apps Script sheet response requires an explicit ok result", async () => {
   const { isAppsScriptSheetUpdateAccepted } = await import("../src/lib/sheetUpdateClient");
 

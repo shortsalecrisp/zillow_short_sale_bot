@@ -392,15 +392,31 @@ test("a later scoped ending does not erase an already completed, explicitly acce
   assert.equal(update.callResult, "call_ended_by_request");
 });
 
-test("strict terminal write rejects HTTP-only acceptance and real transport failures", async () => {
+test("strict terminal write falls back to direct Sheets and still fails closed if both transports fail", async () => {
   const { persistVoiceContactOutcome } = await load();
   const update = { rowNumber: 123, callAttemptNumber: 1, callResult: "call_ended_by_request" };
+  let directWrites = 0;
+  const directSheetUpdate = async () => {
+    directWrites += 1;
+    return ["AH:callResult", "AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for"];
+  };
   receiptMode = "unknown";
-  await assert.rejects(persistVoiceContactOutcome(update), /unconfirmed/);
+  await persistVoiceContactOutcome(update, { directSheetUpdate });
   receiptMode = "failed";
-  await assert.rejects(persistVoiceContactOutcome(update), /Synthetic write failure/);
+  await persistVoiceContactOutcome(update, { directSheetUpdate });
+  assert.equal(directWrites, 2);
   receiptMode = "confirmed";
-  await persistVoiceContactOutcome(update);
+  await persistVoiceContactOutcome(update, {
+    directSheetUpdate: async () => {
+      throw new Error("Direct fallback should not run after a confirmed relay receipt");
+    },
+  });
+  receiptMode = "failed";
+  await assert.rejects(persistVoiceContactOutcome(update, {
+    directSheetUpdate: async () => {
+      throw new Error("Synthetic direct write failure");
+    },
+  }), /Synthetic write failure.*Synthetic direct write failure/);
 });
 
 test("post-call stop writes terminal status before generic tool fallback and does not mark a failed write processed", async () => {

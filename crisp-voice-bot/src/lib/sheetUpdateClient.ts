@@ -24,6 +24,11 @@ type SheetUpdateDependencies = {
   directSheetUpdate?: DirectSheetUpdate;
 };
 
+type VoiceQueueRefillDependencies = {
+  appsScriptPost?: AppsScriptPost;
+  processQueue?: () => Promise<unknown>;
+};
+
 export function buildVoiceQueueRefillPayload(): Record<string, string> {
   return {
     ...(config.googleAppsScript.token ? { token: config.googleAppsScript.token } : {}),
@@ -116,10 +121,13 @@ export async function requestVoiceQueueRefill(context: {
   conversationId?: string;
   rowNumber?: number;
   callAttemptNumber?: number;
-} = {}): Promise<void> {
+} = {}, dependencies: VoiceQueueRefillDependencies = {}): Promise<void> {
+  const processQueue = dependencies.processQueue ?? (() => processVoiceQueue());
+  const appsScriptPost = dependencies.appsScriptPost ?? ((url, body, options) => axios.post(url, body, options));
+
   if (!config.googleAppsScript.webhookUrl) {
     logger.info("Requesting direct voice queue refill", context);
-    await processVoiceQueue();
+    await processQueue();
     return;
   }
 
@@ -136,13 +144,23 @@ export async function requestVoiceQueueRefill(context: {
   });
 
   try {
-    await axios.post(config.googleAppsScript.webhookUrl, payload, {
+    const response = await appsScriptPost(config.googleAppsScript.webhookUrl, payload, {
       timeout: 10_000,
       headers: {
         "Content-Type": "application/json",
         ...(config.googleAppsScript.token ? { "X-Crisp-Token": config.googleAppsScript.token } : {}),
       },
     });
+
+    if (!isAppsScriptSheetUpdateAccepted(response.data)) {
+      logger.error("Voice queue refill rejected by Apps Script", {
+        ...context,
+        response: summarizeAppsScriptResponse(response.data),
+      });
+      await processQueue();
+      logger.info("Direct voice queue refill accepted after Apps Script rejection", context);
+      return;
+    }
 
     logger.info("Voice queue refill accepted", context);
   } catch (error) {
@@ -153,6 +171,8 @@ export async function requestVoiceQueueRefill(context: {
         data: error.response?.data,
         message: error.message,
       });
+      await processQueue();
+      logger.info("Direct voice queue refill accepted after Apps Script HTTP failure", context);
       return;
     }
 
@@ -160,6 +180,8 @@ export async function requestVoiceQueueRefill(context: {
       ...context,
       message: error instanceof Error ? error.message : String(error),
     });
+    await processQueue();
+    logger.info("Direct voice queue refill accepted after Apps Script transport failure", context);
   }
 }
 
