@@ -1142,6 +1142,10 @@ export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): bo
     return true;
   }
 
+  if (hasUnavailableVoicemailMailbox(conversation)) {
+    return true;
+  }
+
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   return (
     text.includes("voicemail") ||
@@ -1153,6 +1157,16 @@ export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): bo
     text.includes("left a message") ||
     text.includes("after the tone") ||
     text.includes("at the beep")
+  );
+}
+
+function hasUnavailableVoicemailMailbox(conversation: ElevenLabsConversation): boolean {
+  const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+  const mailbox = String.raw`(?:voicemail box|voice mail box|mailbox)`;
+  return (
+    new RegExp(String.raw`\b${mailbox} (?:has not|hasn't) been (?:set up|initialized)\b`).test(text) ||
+    new RegExp(String.raw`\b${mailbox} (?:is not|isn't) (?:set up|initialized)\b`).test(text) ||
+    new RegExp(String.raw`\b${mailbox} (?:is )?(?:currently )?unavailable to receive (?:any )?messages\b`).test(text)
   );
 }
 
@@ -1219,6 +1233,13 @@ function usedVoicemailDetectionTool(conversation: ElevenLabsConversation): boole
 }
 
 function hasDeliveredVoicemailMessage(conversation: ElevenLabsConversation): boolean {
+  // Provider transcripts can contain the assistant's intended voicemail pitch
+  // even when the carrier immediately reports that the mailbox cannot accept it.
+  // The carrier recording is the authoritative delivery evidence.
+  if (hasUnavailableVoicemailMailbox(conversation)) {
+    return false;
+  }
+
   if (getVoicemailDetectionMessage(conversation)) {
     return true;
   }

@@ -538,6 +538,42 @@ test("full-mailbox recording is voicemail, not a human hangup", async () => {
   assert.equal(shouldTreatAsAgentUnavailable(conversation), false);
 });
 
+test("unconfigured voicemail overrides an assistant pitch that was not delivered", async () => {
+  const { getVoicemailOrNoAnswerCallResult, shouldTreatAsVoicemail } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    metadata: {
+      termination_reason: "voicemail_detection tool was called.",
+      features_usage: { voicemail_detection: { used: true } },
+    },
+    analysis: {
+      transcript_summary: "The voicemail box has not been set up yet, so it could not receive a message.",
+    },
+    transcript: [
+      {
+        role: "user",
+        message: "The person you are trying to reach has a voicemail box that has not been set up yet. Please try again later. Goodbye.",
+      },
+      {
+        role: "assistant",
+        message:
+          "Hi, this is Maya with Crisp Short Sales calling about your short-sale listing. Give Yoni a call back at 404-300-9526 when you get a chance. Thanks.",
+        tool_calls: [{ tool_name: "voicemail_detection" }],
+        tool_results: [
+          {
+            tool_name: "voicemail_detection",
+            result: { voicemail_message: "Hi, this is Maya with Crisp Short Sales. Call back at 404-300-9526." },
+          },
+        ],
+      },
+    ],
+  };
+
+  assert.equal(shouldTreatAsVoicemail(conversation), true);
+  assert.equal(getVoicemailOrNoAnswerCallResult(conversation, 1), "voicemail_reached");
+  assert.equal(getVoicemailOrNoAnswerCallResult(conversation, 2), "voicemail_reached_final_attempt");
+});
+
 test("live greeting followed by provider agent turn is a human early hangup, not no response", async () => {
   const { getVoicemailOrNoAnswerCallResult, shouldTreatAsAgentHungUp } = await import("../src/lib/elevenLabsPostCall");
   const conversation = {
