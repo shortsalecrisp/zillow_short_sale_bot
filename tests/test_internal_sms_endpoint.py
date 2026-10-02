@@ -239,6 +239,18 @@ CHATBOT_HEADERS[31] = "call_scheduled_for"
 CHATBOT_HEADERS[43] = "last_inbound_text"
 CHATBOT_HEADERS[44] = "last_inbound_at"
 
+INITIAL_SMS_QUEUE_HEADERS = [
+    "request_id",
+    "submitted_at",
+    "automation_id",
+    "payload_json",
+    "status",
+    "claimed_at",
+    "completed_at",
+    "result_json",
+    "error",
+]
+
 
 def _chatbot_row(
     *,
@@ -290,6 +302,7 @@ def _import_webhook_server(monkeypatch, *, sender_result):
             "sms_debug_log": FakeWorksheet(),
             "sms_send_guard": FakeWorksheet(),
             "PendingQueue": FakeWorksheet(),
+            "Initial SMS Queue": FakeWorksheet({1: INITIAL_SMS_QUEUE_HEADERS}),
         }
     )
 
@@ -842,6 +855,79 @@ def test_internal_initial_sms_deletes_later_duplicate_suppression_marker(monkeyp
     assert sheet.rows[12][7] == ""
     assert sheet.rows[12][42] == ""
     assert 17 not in sheet.rows
+
+
+def test_initial_sms_queue_processes_pending_request_through_internal_send(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True, status_code=200, response_text="OK"),
+    )
+    queue = module._get_initial_sms_queue_ws()
+    queue.rows[2] = [
+        "lead-verifier-11-am-5971",
+        "2026-10-02T15:31:00+00:00",
+        "lead-verifier-11-am",
+        json.dumps(
+            {
+                "row": 12,
+                "phone": "555-111-2212",
+                "first": "Alex",
+                "address": "123 Main",
+                "mark_codex_verified": True,
+            },
+            separators=(",", ":"),
+        ),
+        "pending",
+        "",
+        "",
+        "",
+        "",
+    ]
+
+    processed = module._process_initial_sms_queue(ignore_initial_hours=True)
+
+    assert processed == 1
+    assert sender.calls == [
+        {
+            "to": "15551112212",
+            "message": APPROVED_OPENER.format(first="Alex", address="123 Main"),
+            "sms_type": "initial",
+            "row_idx": 12,
+            "attempt": 1,
+        }
+    ]
+    assert queue.rows[2][4] == "completed"
+    result = json.loads(queue.rows[2][7])
+    assert result["status"] == "queued"
+    assert result["row"] == 12
+    assert result["pending_row"] == 22
+    assert queue.rows[2][8] == ""
+
+
+def test_initial_sms_queue_records_failed_guard_without_sending(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    queue = module._get_initial_sms_queue_ws()
+    queue.rows[2] = [
+        "lead-verifier-11-am-bad-phone",
+        "2026-10-02T15:31:00+00:00",
+        "lead-verifier-11-am",
+        json.dumps({"row": 12, "phone": "555-333-4444"}, separators=(",", ":")),
+        "pending",
+        "",
+        "",
+        "",
+        "",
+    ]
+
+    processed = module._process_initial_sms_queue(ignore_initial_hours=True)
+
+    assert processed == 1
+    assert sender.calls == []
+    assert queue.rows[2][4] == "failed"
+    assert queue.rows[2][8] == "row_phone_mismatch"
 
 
 def test_internal_followup_sms_requires_token(monkeypatch):

@@ -195,6 +195,8 @@ _deferred_rows: List[Dict[str, Any]] = []
 _deferred_zpids: set[str] = set()
 _queue_lock = threading.Lock()
 _queue_worker_lock = threading.Lock()
+_initial_sms_queue_lock = threading.Lock()
+_initial_sms_queue_worker_lock = threading.Lock()
 _state_search_worker_lock = threading.Lock()
 _apify_backstop_worker_lock = threading.Lock()
 _free_source_pilot_worker_lock = threading.Lock()
@@ -224,6 +226,8 @@ APIFY_STATE_DETAIL_TASK_ID = os.getenv("APIFY_STATE_DETAIL_TASK_ID", "VI5izq8RGA
 APIFY_STATE_DETAIL_TIMEOUT_SECONDS = float(os.getenv("APIFY_STATE_DETAIL_TIMEOUT_SECONDS", "240"))
 PENDING_QUEUE_TAB = os.getenv("PENDING_QUEUE_TAB", "PendingQueue")
 PENDING_QUEUE_STALE_MINUTES = int(os.getenv("PENDING_QUEUE_STALE_MINUTES", "30"))
+INITIAL_SMS_QUEUE_TAB = os.getenv("INITIAL_SMS_QUEUE_TAB", "Initial SMS Queue")
+INITIAL_SMS_QUEUE_STALE_MINUTES = int(os.getenv("INITIAL_SMS_QUEUE_STALE_MINUTES", "15"))
 APIFY_BACKSTOP_ENABLED = os.getenv("APIFY_BACKSTOP_ENABLED", "true").lower() == "true"
 APIFY_BACKSTOP_HOUR = int(os.getenv("APIFY_BACKSTOP_HOUR", "18"))
 APIFY_BACKSTOP_MAIN_FETCH_LIMIT = int(os.getenv("APIFY_BACKSTOP_MAIN_FETCH_LIMIT", "100"))
@@ -2052,6 +2056,14 @@ def _process_pending_rows_callback(run_time: datetime) -> None:
         logger.info("queue: scheduler processed count=%d", processed)
 
 
+def _process_initial_sms_queue_callback(run_time: datetime) -> None:
+    if not _within_initial_hours(run_time):
+        return
+    processed = _process_initial_sms_queue()
+    if processed:
+        logger.info("initial-sms-queue: scheduler processed count=%d", processed)
+
+
 def _ensure_scheduler_thread(
     hourly_callbacks: Optional[List] = None,
     *,
@@ -2974,6 +2986,7 @@ async def _start_scheduler() -> None:
     hourly_callbacks = [
         _process_deferred_rows,
         _process_pending_rows_callback,
+        _process_initial_sms_queue_callback,
         _process_apify_coverage_backstop_callback,
     ]
     logger.info(
@@ -3105,6 +3118,17 @@ QUEUE_HEADERS = [
     "result",
     "error",
     "listing_json",
+]
+INITIAL_SMS_QUEUE_HEADERS = [
+    "request_id",
+    "submitted_at",
+    "automation_id",
+    "payload_json",
+    "status",
+    "claimed_at",
+    "completed_at",
+    "result_json",
+    "error",
 ]
 GOOGLE_SHEETS_MAX_CELL_CHARS = 50_000
 QUEUE_CELL_SAFE_LIMIT = GOOGLE_SHEETS_MAX_CELL_CHARS - 100
@@ -3616,6 +3640,178 @@ def _process_pending_queue(*, startup: bool = False) -> int:
     finally:
         _queue_worker_lock.release()
     return processed
+
+
+def _initial_sms_queue_row_values(record: Dict[str, Any]) -> List[str]:
+    values: List[str] = []
+    for col in INITIAL_SMS_QUEUE_HEADERS:
+        raw_value = sanitize_external_links_for_sheet(record.get(col, "") or "")
+        if len(raw_value) > QUEUE_CELL_SAFE_LIMIT:
+            raw_value = raw_value[:QUEUE_CELL_SAFE_LIMIT]
+        values.append(raw_value)
+    return values
+
+
+def _get_initial_sms_queue_ws():
+    workbook = _retry_gspread_call("open workbook", lambda: gclient.open_by_key(GSHEET_ID))
+    try:
+        ws = _retry_gspread_call(
+            "open initial SMS queue worksheet",
+            lambda: workbook.worksheet(INITIAL_SMS_QUEUE_TAB),
+        )
+    except gspread.WorksheetNotFound:
+        ws = _retry_gspread_call(
+            "create initial SMS queue worksheet",
+            lambda: workbook.add_worksheet(
+                title=INITIAL_SMS_QUEUE_TAB,
+                rows="2000",
+                cols=str(len(INITIAL_SMS_QUEUE_HEADERS)),
+            ),
+        )
+        _retry_gspread_call(
+            "seed initial SMS queue header",
+            lambda: ws.append_row(INITIAL_SMS_QUEUE_HEADERS),
+        )
+        return ws
+
+    values = _retry_gspread_call(
+        "read initial SMS queue header",
+        lambda: ws.row_values(1),
+    )
+    if values[: len(INITIAL_SMS_QUEUE_HEADERS)] != INITIAL_SMS_QUEUE_HEADERS:
+        _retry_gspread_call(
+            "repair initial SMS queue header",
+            lambda: ws.update(
+                f"A1:{_sms_column_letter(len(INITIAL_SMS_QUEUE_HEADERS))}1",
+                [INITIAL_SMS_QUEUE_HEADERS],
+                value_input_option="RAW",
+            ),
+        )
+    return ws
+
+
+def _load_initial_sms_queue_records(ws) -> List[Dict[str, Any]]:
+    values = _retry_gspread_call("read initial SMS queue rows", ws.get_all_values)
+    if not values:
+        return []
+    header = list(values[0])
+    if len(header) < len(INITIAL_SMS_QUEUE_HEADERS):
+        header += INITIAL_SMS_QUEUE_HEADERS[len(header):]
+    records: List[Dict[str, Any]] = []
+    for row_num, row_vals in enumerate(values[1:], start=2):
+        row = list(row_vals)
+        if len(row) < len(header):
+            row += [""] * (len(header) - len(row))
+        record = {header[idx]: row[idx] for idx in range(len(header))}
+        record["_row_num"] = row_num
+        records.append(record)
+    return records
+
+
+def _update_initial_sms_queue_row(ws, row_num: int, record: Dict[str, Any]) -> None:
+    values = _initial_sms_queue_row_values(record)
+    _retry_gspread_call(
+        "update initial SMS queue row",
+        lambda: ws.update(
+            f"A{row_num}:{_sms_column_letter(len(INITIAL_SMS_QUEUE_HEADERS))}{row_num}",
+            [values],
+            value_input_option="RAW",
+        ),
+    )
+
+
+def _claim_next_initial_sms_queue_item(ws) -> Optional[Dict[str, Any]]:
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(INITIAL_SMS_QUEUE_STALE_MINUTES, 1))
+    with _initial_sms_queue_lock:
+        records = _load_initial_sms_queue_records(ws)
+        for rec in records:
+            status = str(rec.get("status", "")).strip().lower()
+            if status == "claimed":
+                claimed_at = _parse_iso_timestamp(str(rec.get("claimed_at", "")))
+                if claimed_at and claimed_at > stale_cutoff:
+                    continue
+            elif status != "pending":
+                continue
+            request_id = str(rec.get("request_id", "")).strip()
+            if not request_id:
+                continue
+            rec["status"] = "claimed"
+            rec["claimed_at"] = _utcnow_iso()
+            rec["completed_at"] = ""
+            rec["result_json"] = ""
+            rec["error"] = ""
+            _update_initial_sms_queue_row(ws, int(rec["_row_num"]), rec)
+            logger.info("initial-sms-queue: claimed request_id=%s", request_id)
+            return rec
+    return None
+
+
+def _complete_initial_sms_queue_item(
+    ws,
+    item: Dict[str, Any],
+    *,
+    status: str,
+    result: Optional[Dict[str, Any]] = None,
+    error: str = "",
+) -> None:
+    item["status"] = status
+    item["completed_at"] = _utcnow_iso()
+    item["result_json"] = json.dumps(result or {}, separators=(",", ":"), ensure_ascii=False)
+    item["error"] = str(error or "")[:2000]
+    with _initial_sms_queue_lock:
+        _update_initial_sms_queue_row(ws, int(item["_row_num"]), item)
+    logger.info(
+        "initial-sms-queue: completed request_id=%s status=%s",
+        str(item.get("request_id", "")).strip(),
+        status,
+    )
+
+
+def _process_initial_sms_queue_item(ws, item: Dict[str, Any]) -> None:
+    request_id = str(item.get("request_id", "")).strip()
+    raw_payload = str(item.get("payload_json", "")).strip()
+    try:
+        payload = json.loads(raw_payload)
+    except ValueError as exc:
+        _complete_initial_sms_queue_item(ws, item, status="failed", error=f"invalid_payload_json:{exc}")
+        return
+    if not isinstance(payload, dict):
+        _complete_initial_sms_queue_item(ws, item, status="failed", error="invalid_payload_json:not_object")
+        return
+    payload.setdefault("mark_codex_verified", True)
+    try:
+        result = _send_initial_sms_from_payload(payload)
+    except HTTPException as exc:
+        detail = exc.detail
+        error = detail if isinstance(detail, str) else json.dumps(detail, separators=(",", ":"), ensure_ascii=False)
+        _complete_initial_sms_queue_item(ws, item, status="failed", error=error)
+        return
+    except Exception as exc:
+        logger.exception("initial-sms-queue: failed request_id=%s", request_id)
+        _complete_initial_sms_queue_item(ws, item, status="failed", error=str(exc))
+        return
+    _complete_initial_sms_queue_item(ws, item, status="completed", result=result)
+
+
+def _process_initial_sms_queue(*, max_items: int = 20, ignore_initial_hours: bool = False) -> int:
+    if not ignore_initial_hours and not _within_initial_hours(datetime.now(tz=SCHEDULER_TZ)):
+        logger.info("initial-sms-queue: skipped outside approved initial SMS hours")
+        return 0
+    if not _initial_sms_queue_worker_lock.acquire(blocking=False):
+        return 0
+    processed = 0
+    try:
+        ws = _get_initial_sms_queue_ws()
+        while processed < max(1, max_items):
+            item = _claim_next_initial_sms_queue_item(ws)
+            if not item:
+                break
+            _process_initial_sms_queue_item(ws, item)
+            processed += 1
+    finally:
+        _initial_sms_queue_worker_lock.release()
+    return processed
+
 
 def _digits_only(num: str) -> str:
     """Keep digits, prefix 1 if US local (10 digits)."""
@@ -8122,6 +8318,28 @@ async def internal_send_initial_sms(request: Request):
         raise HTTPException(status_code=400, detail="invalid_payload")
 
     return await asyncio.to_thread(_send_initial_sms_from_payload, payload)
+
+
+@app.post("/internal/process-initial-sms-queue")
+async def internal_process_initial_sms_queue(request: Request):
+    """Drain verifier fallback rows from the Sheet-backed initial SMS queue."""
+    _auth_internal_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+    max_items = int(payload.get("max_items") or 20)
+    ignore_initial_hours = bool(payload.get("ignore_initial_hours"))
+    processed = await asyncio.to_thread(
+        _process_initial_sms_queue,
+        max_items=max_items,
+        ignore_initial_hours=ignore_initial_hours,
+    )
+    return {"status": "processed", "processed": processed}
 
 
 @app.post("/internal/send-followup-sms")
