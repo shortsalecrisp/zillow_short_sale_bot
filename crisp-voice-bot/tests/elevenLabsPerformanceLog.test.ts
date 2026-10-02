@@ -130,6 +130,8 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
   assert.match(parsed.codexInstructions, /Before that policy, row-parity assignments paired Eryn\/direct_reason and Finch\/benefit_hook/);
   assert.match(parsed.codexInstructions, /Starting with permission-screener-20260918, voiceVariant and openerVariant rotated independently/);
   assert.match(parsed.codexInstructions, /Starting with eryn-self-handler-ai-optout-20260925, voice is owner-fixed to Eryn\/Maya/);
+  assert.match(parsed.codexInstructions, /Starting with maya-short-opener-ai-closeout-20261002 and listen_first_listing_agent_v2/);
+  assert.match(parsed.codexInstructions, /do not pool this stratum with the earlier permission-first opening/);
   assert.match(parsed.codexInstructions, /main branch is Flash v2 control and the experiment branch is v4 Turbo/);
   assert.match(parsed.abTestScope.analysisRule, /Missing or null historical values are unknown/);
   assert.match(parsed.abTestScope.analysisRule, /not proof of audible delivery/);
@@ -215,6 +217,43 @@ test("post-intro assignment alone does not establish a delivered continuation", 
     assert.equal(parsed.flags.openingQuestionDelivered, false);
     assert.equal(parsed.metrics.openingQuestionAtSecs, null);
   }
+});
+
+test("listing-agent opening keeps identity response separate from the service reason", async () => {
+  const parsed = await measurementLog({
+    metadata: {
+      initialOpeningPolicy: "listen_first_listing_agent_v2",
+      declaredConversationPolicyVersion: "maya-short-opener-ai-closeout-20261002",
+    },
+    conversation: { transcript: [
+      { role: "user", message: "Hello.", time_in_call_secs: 0 },
+      { role: "agent", message: "Hi, this is Maya with Crisp Short Sales. Are you the listing agent for the short sale at 123 Main Street?", time_in_call_secs: 1 },
+      { role: "user", message: "Yes.", time_in_call_secs: 4 },
+      { role: "agent", message: "We help with lender paperwork and calls. Are you handling those yourself?", time_in_call_secs: 5 },
+      { role: "user", message: "I am.", time_in_call_secs: 8 },
+    ] },
+  });
+  assert.equal(parsed.flags.openingQuestionDelivered, true);
+  assert.equal(parsed.flags.agentRespondedAfterOpeningQuestion, true);
+  assert.equal(parsed.metrics.openingQuestionAtSecs, 1);
+  assert.equal(parsed.flags.reasonDelivered, true);
+  assert.equal(parsed.flags.agentRespondedAfterReason, true);
+  assert.equal(parsed.metrics.reasonMentionedAtSecs, 5);
+});
+
+test("listing-agent opening does not count the address check as the service reason", async () => {
+  const parsed = await measurementLog({
+    metadata: { initialOpeningPolicy: "listen_first_listing_agent_v2" },
+    conversation: { metadata: { call_duration_secs: 10, termination_reason: "Client disconnected: 1000" }, transcript: [
+      { role: "user", message: "Hello.", time_in_call_secs: 0 },
+      { role: "agent", message: "Hi, this is Maya with Crisp Short Sales. Are you the listing agent for the short sale at 123 Main Street?", time_in_call_secs: 1 },
+      { role: "user", message: "This is she.", time_in_call_secs: 4 },
+    ] },
+  });
+  assert.equal(parsed.flags.openingQuestionDelivered, true);
+  assert.equal(parsed.flags.agentRespondedAfterOpeningQuestion, true);
+  assert.equal(parsed.flags.reasonDelivered, false);
+  assert.equal(parsed.flags.hangupBeforeReason, true);
 });
 
 test("voice performance log does not count confused live-transfer tool fire as clear consent", async () => {

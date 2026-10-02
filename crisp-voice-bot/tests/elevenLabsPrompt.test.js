@@ -35,7 +35,7 @@ test("priority considers the whole turn and hearing precedes questions and actio
 });
 test("intro is its own entire turn and exposes no dynamic continuation script", () => {
   const s = section("Intro only");
-  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. I was calling about the short-sale paperwork and lender calls for your listing at \{\{streetAddress\}\}\. Is it okay if I ask one quick question about that\?"/);
+  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. Are you the listing agent for the short sale at \{\{streetAddress\}\}\?"/);
   assert.match(s, /Stop after the question\. Wait for a NEW live-caller turn/);
   assert.match(s, /occurred before the introduction and does not count as a response/);
   assert.match(s, /Do not append a second qualification question, Yoni offer, or callback question/);
@@ -49,9 +49,10 @@ test("post-intro handles an answer to the new opener without repeating the pitch
   assert.match(s, /contained no question, correction, hearing issue or requested next step when it arrived/);
   assert.match(s, /A further caller turn is required before qualification/);
   assert.match(s, /openerVariant continuation is retired; do not speak a second opener/);
-  assert.match(s, /A clear yes permits one short qualification question, not a transfer or callback/);
-  assert.match(s, /A clear no to the quick-question permission is a scoped decline of the question, not a future-contact opt-out/);
-  assert.match(s, /For a neutral acknowledgment or an unclear answer, ask at most once/);
+  assert.match(s, /A clear yes permits one short purpose-and-handling question, not a transfer or callback/);
+  assert.match(s, /We help with lender paperwork and calls\. Are you handling those yourself\?/);
+  assert.match(s, /A clear no means the listing-agent check failed, not that the caller rejected all service or opted out/);
+  assert.match(s, /For a neutral acknowledgment or unclear answer, ask one precise clarification/);
   assert.match(s, /You keep the listing and client relationship; Crisp can take the lender paperwork and follow-up off your plate/);
   assert.match(s, /Would that help on this file\?/);
   assert.match(s, /Do not ask another diagnostic question or repeat this value statement/);
@@ -68,11 +69,13 @@ test("live identity and first-turn questions do not restart the pitch", () => {
   const s = section("Intro only");
   assert.match(s, /answer only those points from the answer library instead of delivering the full introduction/);
   assert.match(s, /Do not repeat identity or purpose already answered/);
-  assert.match(s, /a different live listener gets their own short introduction/);
+  assert.match(s, /treat a different live listener as a fresh pickup/);
+  assert.match(s, /without repeating the screener response or adding another identity statement first/);
   assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
 });
 test("name corrections and authorized admins outrank the stored lead name", () => {
   const s = section("Intro only");
+  assert.match(s, /A plain "yes" to the single live listing-agent check clearly confirms/);
   assert.match(s, /use the corrected name if clear and treat them as the current contact/);
   assert.match(s, /Do not ask for {{firstName}} or repeat an already answered handling question/);
   assert.match(s, /Never guess a name/);
@@ -149,10 +152,11 @@ test("current-call ending and future opt-out retain distinct recording markers",
   assert.match(s, /Ending is not permission for another automated call/);
   assert.doesNotMatch(s, /We won't call again/);
 });
-test("AI suspicion with prior no-contact objection closes without repitching", () => {
+test("AI suspicion with rejection or prior no-contact closes without repitching", () => {
   assert.match(section("Answer library"), /already asked Crisp\/Yoni\/you not to contact them/);
-  assert.match(section("Skepticism and human-only requests"), /already asked not to be contacted/);
-  assert.match(section("Skepticism and human-only requests"), /Do not ask another qualifying question, offer Yoni, or re-explain the service/);
+  assert.match(section("Answer library"), /pairs AI\/robot\/computer suspicion with "no thanks," "not interested,"/);
+  assert.match(section("Skepticism and human-only requests"), /pairs AI\/robot\/computer suspicion with a clear rejection/);
+  assert.match(section("Skepticism and human-only requests"), /Do not explain the automation, defend the use of AI, offer Yoni, offer to take a note/);
 });
 test("third-party restriction does not become caller opt-out and mixed opt-out is protected", () => {
   const s = section("Contact preferences and endings");

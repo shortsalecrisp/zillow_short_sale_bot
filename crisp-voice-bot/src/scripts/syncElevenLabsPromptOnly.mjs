@@ -28,15 +28,17 @@ export function protectedHashes(agent) {
   };
 }
 
-export function assertExpected(agent, { agentId, expectedVersion, expectedPromptHash }) {
+export function assertExpected(agent, { agentId, branchId, expectedVersion, expectedPromptHash }) {
   if (agent.agent_id !== agentId || agent.version_id !== expectedVersion
     || sha256(agent.conversation_config.agent.prompt.prompt) !== expectedPromptHash) {
     throw new Error('Live agent drifted from the reviewed version; no update is authorized by this receipt');
   }
-  if (!agent.branch_id || agent.branch_id !== agent.main_branch_id) throw new Error('Expected the effective main branch');
+  if (!agent.branch_id || (branchId ? agent.branch_id !== branchId : agent.branch_id !== agent.main_branch_id)) {
+    throw new Error(branchId ? 'Expected the exact reviewed branch' : 'Expected the effective main branch');
+  }
 }
 
-export async function syncPromptOnly({ apiKey, agentId, expectedVersion, expectedPromptHash,
+export async function syncPromptOnly({ apiKey, agentId, branchId, expectedVersion, expectedPromptHash,
   promptPath, receiptDir, apply = false }, fetcher = fetch) {
   if (!apiKey || !/^agent_[a-z0-9]+$/.test(agentId ?? '') || !expectedVersion
     || !/^[a-f0-9]{64}$/.test(expectedPromptHash ?? '') || !receiptDir) {
@@ -44,6 +46,7 @@ export async function syncPromptOnly({ apiKey, agentId, expectedVersion, expecte
   }
   const prompt = extractPrompt(await readFile(promptPath, 'utf8'));
   const endpoint = `https://api.elevenlabs.io/v1/convai/agents/${agentId}`;
+  const readEndpoint = branchId ? `${endpoint}?branch_id=${encodeURIComponent(branchId)}` : endpoint;
   async function call(url, method = 'GET', body) {
     const response = await fetcher(url, {
       method, headers: { 'xi-api-key': apiKey, ...(body ? { 'Content-Type': 'application/json' } : {}) },
@@ -52,8 +55,8 @@ export async function syncPromptOnly({ apiKey, agentId, expectedVersion, expecte
     if (!response.ok) throw new Error(`ElevenLabs ${method} failed with HTTP ${response.status}; inspect readback before retrying`);
     return response.json();
   }
-  const before = await call(endpoint);
-  assertExpected(before, { agentId, expectedVersion, expectedPromptHash });
+  const before = await call(readEndpoint);
+  assertExpected(before, { agentId, branchId, expectedVersion, expectedPromptHash });
   const protectedBefore = protectedHashes(before);
   const receipt = {
     checked_at: new Date().toISOString(), agent_id: agentId, branch_id: before.branch_id,
@@ -70,8 +73,8 @@ export async function syncPromptOnly({ apiKey, agentId, expectedVersion, expecte
   if (receipt.proposed_prompt_sha256 === expectedPromptHash) throw new Error('Prompt is unchanged');
 
   // A second read narrows the race with dashboard edits; never overwrite unrelated settings.
-  const fresh = await call(endpoint);
-  assertExpected(fresh, { agentId, expectedVersion, expectedPromptHash });
+  const fresh = await call(readEndpoint);
+  assertExpected(fresh, { agentId, branchId, expectedVersion, expectedPromptHash });
   if (JSON.stringify(protectedHashes(fresh)) !== JSON.stringify(protectedBefore)) throw new Error('Protected configuration changed');
   receipt.status = 'patch_attempted_readback_required';
   await save();
@@ -79,7 +82,7 @@ export async function syncPromptOnly({ apiKey, agentId, expectedVersion, expecte
     await call(`${endpoint}?branch_id=${encodeURIComponent(before.branch_id)}&enable_versioning_if_not_enabled=true`, 'PATCH', {
       conversation_config: { agent: { prompt: { prompt } } },
     });
-    const after = await call(endpoint);
+    const after = await call(readEndpoint);
     receipt.after_version = after.version_id;
     receipt.after_prompt_sha256 = sha256(after.conversation_config.agent.prompt.prompt);
     receipt.protected_after = protectedHashes(after);
@@ -104,9 +107,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const value = name => args[args.indexOf(name) + 1];
   const required = ['--agent-id', '--expected-version', '--expected-prompt-sha256', '--receipt-dir'];
   if (required.some(name => !args.includes(name))) {
-    throw new Error('Usage: --agent-id ID --expected-version ID --expected-prompt-sha256 HASH --receipt-dir PATH [--apply]');
+    throw new Error('Usage: --agent-id ID [--branch-id ID] --expected-version ID --expected-prompt-sha256 HASH --receipt-dir PATH [--apply]');
   }
   syncPromptOnly({ apiKey: process.env.ELEVENLABS_API_KEY, agentId: value('--agent-id'),
+    branchId: args.includes('--branch-id') ? value('--branch-id') : undefined,
     expectedVersion: value('--expected-version'), expectedPromptHash: value('--expected-prompt-sha256'),
     promptPath: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../docs/elevenlabs-agent-prompt.md'),
     receiptDir: path.resolve(value('--receipt-dir')), apply: args.includes('--apply'),

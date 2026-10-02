@@ -31,8 +31,8 @@ test("a current question routes to main, while an old pickup cannot trigger qual
   assert.match(condition, /LIVE person/);
   assert.match(condition, /NEW live caller turn arrived AFTER/);
   assert.match(condition, /A greeting before the introduction does not qualify/);
-  assert.match(OPENING_LISTENER_PROMPT, /Never qualify the listing, add to the exact opening question/);
-  assert.match(OPENING_LISTENER_PROMPT, /I was calling about the short-sale paperwork and lender calls for your listing at \{\{streetAddress\}\}\. Is it okay if I ask one quick question about that\?/);
+  assert.match(OPENING_LISTENER_PROMPT, /Never qualify the listing, add to the exact listing-agent check/);
+  assert.match(OPENING_LISTENER_PROMPT, /Are you the listing agent for the short sale at \{\{streetAddress\}\}\?/);
   assert.match(OPENING_LISTENER_PROMPT, /If the only new transcript is "\.\.\."/);
   assert.match(OPENING_LISTENER_PROMPT, /never say "Are you there\?"/);
   assert.doesNotMatch(OPENING_LISTENER_PROMPT, /\{\{openerScript\}\}/);
@@ -40,7 +40,7 @@ test("a current question routes to main, while an old pickup cannot trigger qual
 
 test("the live opener is identical in the listener and main prompts", () => {
   const mainPrompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8");
-  const opener = "Hi, this is {{assistantName}} with Crisp Short Sales. I was calling about the short-sale paperwork and lender calls for your listing at {{streetAddress}}. Is it okay if I ask one quick question about that?";
+  const opener = "Hi, this is {{assistantName}} with Crisp Short Sales. Are you the listing agent for the short sale at {{streetAddress}}?";
   assert.ok(OPENING_LISTENER_PROMPT.includes(`"${opener}"`));
   assert.ok(mainPrompt.includes(`"${opener}"`));
   assert.match(OPENING_LISTENER_PROMPT, /Do not speak before the recipient finishes their pickup/);
@@ -48,6 +48,9 @@ test("the live opener is identical in the listener and main prompts", () => {
 
 test("screening, voicemail and unrelated recording exit remain separate", () => {
   const result = applyConversationOpeningWorkflow(base());
+  assert.match(OPENING_LISTENER_PROMPT, /\{\{assistantName\}\} with Crisp Short Sales, about the short-sale listing at \{\{streetAddress\}\}/);
+  assert.match(OPENING_LISTENER_PROMPT, /fresh pickup: say the live listing-agent check once/);
+  assert.doesNotMatch(OPENING_LISTENER_PROMPT, /We help listing agents with lender paperwork and follow-up/);
   assert.match(OPENING_LISTENER_PROMPT, /For recorded please-stay-on-the-line, ringing or hold announcements use skip_turn/);
   assert.match(OPENING_LISTENER_PROMPT, /attempt two has no second message/);
   assert.equal(result.workflow.nodes.unrelated_recording_exit.type, "end");

@@ -1,4 +1,4 @@
-export const VOICE_CONVERSATION_POLICY_VERSION = "eryn-self-handler-ai-optout-20260925";
+export const VOICE_CONVERSATION_POLICY_VERSION = "maya-short-opener-ai-closeout-20261002";
 
 type AgentPolicy = {
   conversation_config: {

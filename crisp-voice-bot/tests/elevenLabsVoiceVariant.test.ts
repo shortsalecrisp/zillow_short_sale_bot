@@ -158,7 +158,7 @@ test("opener arms rotate while voice remains fixed to Eryn/Maya", async () => {
     assert.equal(variables.voiceVariant, "eryn");
     assert.equal(variables.assistantName, "Maya");
     assert.equal(variables.openerVariant, openerVariant);
-    assert.equal(variables.initialOpeningPolicy, "listen_first_uniform_v1");
+    assert.equal(variables.initialOpeningPolicy, "listen_first_listing_agent_v2");
     assert.equal(variables.declaredConversationPolicyVersion, VOICE_CONVERSATION_POLICY_VERSION);
     assert.equal(variables.terminal_permission, false);
     assert.equal(variables.terminal_decision, "reset");
@@ -188,7 +188,7 @@ test("new-call declarations are captured with outbound metadata without mutating
     assert.equal(variables.terminal_permission, false);
     assert.equal(variables.terminal_decision, "reset");
     for (const value of [captured, variables]) {
-      assert.equal(value.initialOpeningPolicy, "listen_first_uniform_v1");
+      assert.equal(value.initialOpeningPolicy, "listen_first_listing_agent_v2");
       assert.equal(value.declaredConversationPolicyVersion, VOICE_CONVERSATION_POLICY_VERSION);
       assert.equal(value.openerVariant, "benefit_hook");
       assert.equal(value.voiceVariant, "eryn");

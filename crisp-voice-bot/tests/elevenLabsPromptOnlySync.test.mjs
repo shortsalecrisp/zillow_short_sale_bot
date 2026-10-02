@@ -46,6 +46,25 @@ test('only approved prompt leaf changes and effective readback is required', asy
   assert.deepEqual(result.protected_before, result.protected_after);
 });
 
+test('an exact experiment branch can receive the same prompt-only release', async t => {
+  const { current, options, nextPrompt } = await setup(t); const urls = [];
+  current.branch_id = 'experiment';
+  const result = await syncPromptOnly({ ...options, branchId: 'experiment', apply: true }, async (url, init) => {
+    urls.push(url);
+    if (init.method === 'PATCH') {
+      const body = JSON.parse(init.body);
+      assert.deepEqual(body, { conversation_config: { agent: { prompt: { prompt: nextPrompt.trim() } } } });
+      current.conversation_config.agent.prompt.prompt = body.conversation_config.agent.prompt.prompt;
+      current.version_id = 'experiment_version_after';
+    }
+    return response(current);
+  });
+  assert.equal(result.branch_id, 'experiment');
+  assert.equal(result.status, 'live_prompt_verified_audio_behavior_not_tested');
+  assert.equal(urls.filter(url => url.includes('branch_id=experiment')).length, 4);
+  assert.deepEqual(result.protected_before, result.protected_after);
+});
+
 test('version drift blocks update', async t => {
   const { current, options } = await setup(t); current.version_id = 'unexpected'; const methods = [];
   await assert.rejects(syncPromptOnly({ ...options, apply: true }, async (url, init) => { methods.push(init.method); return response(current); }), /drifted/);

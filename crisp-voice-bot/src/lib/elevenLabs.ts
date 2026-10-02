@@ -23,7 +23,7 @@ const elevenLabsClient = axios.create({
 });
 
 const CALL_START_RECEIPT_ATTEMPTS = 3;
-export const INITIAL_OPENING_POLICY = "listen_first_uniform_v1";
+export const INITIAL_OPENING_POLICY = "listen_first_listing_agent_v2";
 const CALL_START_RECEIPT_DELAY_MS = 2_000;
 const CALL_START_RETRY_JITTER_MIN_MS = 1_500;
 const CALL_START_RETRY_JITTER_MAX_MS = 3_000;

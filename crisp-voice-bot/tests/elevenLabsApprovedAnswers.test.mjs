@@ -27,11 +27,13 @@ test('all meaningful approved identity, purpose and property answers survive con
   for (const text of expected) assert.ok(library.includes(text), text);
 });
 
-test('ambiguous listing answers defer disposition and latest confirmation restores the handling question', () => {
-  assert.match(prompt, /An isolated "yes" or "no" after a compound property or identity question is ambiguous\./);
+test('the single listing-agent check is answerable while other compound answers defer disposition', () => {
+  assert.match(prompt, /A plain "yes" to the single live listing-agent check clearly confirms they are the listing agent/);
+  assert.match(prompt, /A yes or no after any other compound property or identity question is ambiguous\./);
   assert.match(prompt, /Do you have the listing at \{\{streetAddress\}\}\?/);
   assert.match(prompt, /If a later caller turn clearly confirms they have the listing, that latest confirmation overrides the earlier ambiguous answer or wrong-listing inference\./);
-  assert.match(prompt, /If the caller clearly confirms they have the listing and asks "What is the question\?" or equivalent/);
+  assert.match(prompt, /If the caller clearly confirms they have the listing and asks what you want or what the call is about/);
+  assert.match(prompt, /We help with lender paperwork and calls\. Are you handling those yourself\?/);
   assert.match(prompt, /Their confirmed listing ownership cancels an earlier ambiguous "no" or wrong-listing inference/);
 });
 
