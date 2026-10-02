@@ -5321,13 +5321,42 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
     t = _sms_normalize_whitespace(text).lower()
     if not t or re.search(r"\b(?:short[ -]?sale|lender|listing|property|seller|buyer)\b", t):
         return False
+    subscription_confirmation = re.search(
+        r"\b(?:you(?:'|’)ve|you have|you are|you(?:'|’)re)\s+(?:now\s+)?(?:been\s+)?"
+        r"(?:successfully\s+)?unsubscribed\b|\byou will no longer receive (?:text|sms|mobile) messages\b|"
+        r"\breply\s+start\s+to\s+(?:resubscribe|re-?subscribe|receive messages again)\b",
+        t,
+    )
+    if subscription_confirmation:
+        return True
     has_link = re.search(r"\b(?:https?://|www\.|[a-z0-9-]+(?:\.[a-z0-9-]+)+/(?:[a-z0-9/?=&%-]+))", t)
     has_campaign_appeal = re.search(
-        r"\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|chipped in)\b",
+        r"\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|"
+        r"voter registration|register(?:ed)? to vote|volunteer|chipped in|election|ballot)\b",
         t,
     )
     has_bulk_footer = re.search(r"\b(?:stop\s*2\s*end|reply\s+stop\s+to\s+(?:end|unsubscribe|opt\s*out))\b", t)
-    return bool(has_campaign_appeal and has_link and has_bulk_footer)
+    has_known_civic_automation = re.search(
+        r"\b(?:fair fight|peachvote(?:\.com)?|mvp\.sos\.ga\.gov|voter registration portal)\b",
+        t,
+    )
+    return bool(
+        (has_campaign_appeal and has_link and has_bulk_footer)
+        or (has_known_civic_automation and (has_link or has_bulk_footer or has_campaign_appeal))
+    )
+
+
+def _sms_is_substantive_post_handoff_update(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if (
+        not text
+        or _sms_is_final_courtesy(text)
+        or _sms_is_courtesy_information_acknowledgment(text)
+        or _sms_is_unmistakable_terminal_rejection(text)
+    ):
+        return False
+    words = re.findall(r"[a-z0-9@.'+-]+", text)
+    return "?" in text or len(words) >= 3 or len(text) >= 18
 
 
 def _sms_is_structured_automated_response(value: Any) -> bool:
@@ -6802,6 +6831,16 @@ def _sms_fast_decision(
         or str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
         or str(row_obj.get("ai_state") or "").lower() == "handoff"
     ):
+        if _sms_is_substantive_post_handoff_update(t):
+            return _sms_decision(
+                lead_status=str(row_obj.get("mailshake_status") or "Y"),
+                handoff_needed=True,
+                alert_needed=True,
+                block_reply=True,
+                preserve_existing_state=True,
+                handoff_type="HUMAN HANDOFF UPDATE",
+                reason="Substantive update received after human handoff",
+            )
         return _sms_decision(
             lead_status=str(row_obj.get("mailshake_status") or "Y"),
             block_reply=True,

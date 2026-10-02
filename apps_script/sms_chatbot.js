@@ -1749,13 +1749,10 @@ function handleIncomingSmsCore_(body) {
 
 function isSubstantivePostHandoffUpdate_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  if (!t || isFinalCourtesyReply_(t)) return false;
-  return /\b(?:video|zoom|google meet|teams meeting|calendar invite|meeting link|send (?:the |an? )?invite|invite (?:to|at)|switch (?:to|it to)|reschedule|meeting (?:at|on|for)|appointment (?:at|on|for))\b/.test(t) ||
-    /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|next week|sept(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?)\b.{0,60}\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|morning|afternoon|evening)\b/.test(t) ||
-    /\b(?:attached|attachment|upload(?:ed)?|sent|received|revised|updated|signed)\b.{0,45}\b(?:document|docs?|files?|pdf|contract|agreement|offer|authorization|statement|letter)\b/.test(t) ||
-    /\b(?:document|docs?|files?|pdf|contract|agreement|offer|authorization|statement|letter)\b.{0,45}\b(?:attached|uploaded|signed|revised|updated|sent|received)\b/.test(t) ||
-    /\b(?:my|our)\s+client\b|\bclient(?:'s| is| name)?\b|\b(?:take|taking)\s+(?:the\s+)?listing\b|\b(?:lender|mortgage|paperwork|hardship|foreclosure|behind|short sale)\b/.test(t) ||
-    /\?/.test(t);
+  if (!t || isFinalCourtesyReply_(t) || isCourtesyInformationAcknowledgmentSignal_(t) ||
+      isUnmistakableTerminalRejectionSignal_(t)) return false;
+  const words = t.match(/[a-z0-9@.'+-]+/g) || [];
+  return /\?/.test(t) || words.length >= 3 || t.length >= 18;
 }
 
 function normalizeTaskerPayload_(obj) {
@@ -3669,10 +3666,14 @@ function isAutomatedRoutingNoticeSignal_(text) {
 function isAutomatedPromotionalSmsSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t || /\b(?:short[ -]?sale|lender|listing|property|seller|buyer)\b/.test(t)) return false;
+  const subscriptionConfirmation = /\b(?:you(?:'|’)ve|you have|you are|you(?:'|’)re)\s+(?:now\s+)?(?:been\s+)?(?:successfully\s+)?unsubscribed\b|\byou will no longer receive (?:text|sms|mobile) messages\b|\breply\s+start\s+to\s+(?:resubscribe|re-?subscribe|receive messages again)\b/.test(t);
+  if (subscriptionConfirmation) return true;
   const hasLink = /\b(?:https?:\/\/|www\.|[a-z0-9-]+(?:\.[a-z0-9-]+)+\/(?:[a-z0-9/?=&%-]+))/.test(t);
-  const hasCampaignAppeal = /\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|chipped in)\b/.test(t);
+  const hasCampaignAppeal = /\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|voter registration|register(?:ed)? to vote|volunteer|chipped in|election|ballot)\b/.test(t);
   const hasBulkFooter = /\b(?:stop\s*2\s*end|reply\s+stop\s+to\s+(?:end|unsubscribe|opt\s*out))\b/.test(t);
-  return hasCampaignAppeal && hasLink && hasBulkFooter;
+  const hasKnownCivicAutomation = /\b(?:fair fight|peachvote(?:\.com)?|mvp\.sos\.ga\.gov|voter registration portal)\b/.test(t);
+  return (hasCampaignAppeal && hasLink && hasBulkFooter) ||
+    (hasKnownCivicAutomation && (hasLink || hasBulkFooter || hasCampaignAppeal));
 }
 
 function isStructuredAutomatedResponseSignal_(text) {

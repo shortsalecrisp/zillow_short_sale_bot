@@ -9,12 +9,14 @@ test('human-owned scheduling and file updates alert the owner without a bot repl
     'Switch to video please.',
     'Please send the invite to bekabernard@gmail.com and simplyvegasnelsonteam@gmail.com.',
     'I uploaded the signed contract PDF.',
+    'The company also wants our financials.',
+    'Said the call was today.',
   ]) {
     const result = h.incoming(message);
     assert.equal(result.should_reply, false);
   }
-  assert.equal(h.effects.filter(effect => effect.type === 'handoff' && effect.reason === 'HUMAN HANDOFF UPDATE').length, 4);
+  assert.equal(h.effects.filter(effect => effect.type === 'handoff' && effect.reason === 'HUMAN HANDOFF UPDATE').length, 6);
   const courtesy = h.incoming('Thank you!');
   assert.equal(courtesy.should_reply, false);
-  assert.equal(h.effects.filter(effect => effect.type === 'handoff' && effect.reason === 'HUMAN HANDOFF UPDATE').length, 4);
+  assert.equal(h.effects.filter(effect => effect.type === 'handoff' && effect.reason === 'HUMAN HANDOFF UPDATE').length, 6);
 });

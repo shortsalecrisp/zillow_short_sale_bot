@@ -19,6 +19,15 @@ assert.equal(promotion.state.mailshake_status, 'N');
 assert.equal(promotion.state.auto_reply_count, 0);
 assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("How much is the fee for the short sale? I also got a campaign text with a link and Stop2End")`), false);
 assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("Are you a bot or a real person?")`), false);
+for (const automated of [
+  'Fair Fight: Check your voter registration at mvp.sos.ga.gov. Reply STOP to unsubscribe.',
+  'You have successfully been unsubscribed. Reply START to resubscribe.',
+]) {
+  const result = promotion.incoming(automated);
+  assert.equal(result.should_reply, false);
+  assert.equal(result.handoff_needed, false);
+}
+assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("I am registered to vote and have a short-sale listing question")`), false);
 
 const repeated = smsHarness();
 const question = 'What is your fee?';

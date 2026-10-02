@@ -1409,7 +1409,7 @@ def test_sms_new_callback_wording_remains_actionable(monkeypatch):
     assert module._sms_is_durable_handled_duplicate(row, "Monday at 3:00 PM would work better") is False
 
 
-def test_sms_post_handoff_non_scheduling_day_reference_stays_under_human_override(monkeypatch):
+def test_sms_post_handoff_non_scheduling_context_alerts_owner_without_bot_reply(monkeypatch):
     module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
     sheet.rows[2][13] = "handoff"
     sheet.rows[2][15] = "interested_no_call"
@@ -1430,13 +1430,48 @@ def test_sms_post_handoff_non_scheduling_day_reference_stays_under_human_overrid
     assert response.status_code == 200
     body = response.json()
     assert body["should_reply"] is False
-    assert body["reason"] == "Human override enabled - inbound recorded only"
+    assert body["reason"] == "Substantive update received after human handoff"
     assert body["callback_updated"] is False
-    assert body["alert_needed"] is False
-    assert body["handoff_type"] == ""
+    assert body["alert_needed"] is True
+    assert body["handoff_type"] == "HUMAN HANDOFF UPDATE"
     assert sheet.rows[2][37] == ""
     assert sheet.rows[2][38] == ""
     assert sender.calls == []
+
+
+def test_sms_post_handoff_substantive_updates_request_one_owner_alert(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    row = {
+        "human_override": "TRUE",
+        "handoff_flag": "TRUE",
+        "ai_state": "handoff",
+        "mailshake_status": "Y",
+    }
+
+    for inbound in ["The company also wants our financials.", "Said the call was today."]:
+        decision = module._sms_fast_decision(row, inbound)
+        assert decision["block_reply"] is True
+        assert decision["handoff_needed"] is True
+        assert decision["alert_needed"] is True
+        assert decision["handoff_type"] == "HUMAN HANDOFF UPDATE"
+
+    courtesy = module._sms_fast_decision(row, "Thank you!")
+    assert courtesy["handoff_needed"] is False
+    assert courtesy["alert_needed"] is False
+
+
+def test_sms_automated_civic_and_unsubscribe_confirmations_are_suppressed(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+
+    assert module._sms_is_automated_promotional_sms(
+        "Fair Fight: Check your voter registration at mvp.sos.ga.gov. Reply STOP to unsubscribe."
+    ) is True
+    assert module._sms_is_automated_promotional_sms(
+        "You have successfully been unsubscribed. Reply START to resubscribe."
+    ) is True
+    assert module._sms_is_automated_promotional_sms(
+        "I am registered to vote and have a short-sale listing question"
+    ) is False
 
 
 def test_sms_courtesy_information_acknowledgment_is_not_a_contact_request(monkeypatch):
@@ -2360,7 +2395,7 @@ def test_sms_karla_future_day_and_lisa_compound_fee_regressions(monkeypatch):
     assert "60-90 days" in fee["reply_text"]
 
 
-def test_sms_call_interest_reopens_closed_conversation_for_handoff(monkeypatch):
+def test_sms_call_interest_after_takeover_alerts_owner_without_bot_reply(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -2378,9 +2413,10 @@ def test_sms_call_interest_reopens_closed_conversation_for_handoff(monkeypatch):
     assert module._sms_is_phone_call_interest(inbound) is True
     assert decision["lead_status"] == "R"
     assert decision["conversation_done"] is False
-    assert decision["handoff_needed"] is False
+    assert decision["handoff_needed"] is True
+    assert decision["alert_needed"] is True
     assert decision["block_reply"] is True
-    assert decision["reason"] == "Human override enabled - inbound recorded only"
+    assert decision["reason"] == "Substantive update received after human handoff"
 
     service_interest = module._sms_fast_decision(
         row,
@@ -2389,9 +2425,10 @@ def test_sms_call_interest_reopens_closed_conversation_for_handoff(monkeypatch):
     assert module._sms_is_present_service_interest(
         "I am interested in your services and would like to learn more."
     ) is True
-    assert service_interest["handoff_needed"] is False
+    assert service_interest["handoff_needed"] is True
+    assert service_interest["alert_needed"] is True
     assert service_interest["block_reply"] is True
-    assert service_interest["reason"] == "Human override enabled - inbound recorded only"
+    assert service_interest["reason"] == "Substantive update received after human handoff"
     assert module._sms_is_present_service_interest(
         "No thanks, but I will keep your information in mind for the future."
     ) is False
@@ -2932,7 +2969,7 @@ def test_sms_contract_fee_amount_is_first_and_delivered_history_controls_followu
     assert pending_question["response_id"] == "fee_initial"
 
 
-def test_sms_exact_fee_does_not_reopen_reply_cap_handoff(monkeypatch):
+def test_sms_exact_fee_after_reply_cap_alerts_owner_without_bot_reply(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -2959,14 +2996,16 @@ def test_sms_exact_fee_does_not_reopen_reply_cap_handoff(monkeypatch):
 
     assert body["should_reply"] is False
     assert body["reply_text"] == ""
-    assert body["handoff_needed"] is False
+    assert body["handoff_needed"] is True
+    assert body["alert_needed"] is True
+    assert body["handoff_type"] == "HUMAN HANDOFF UPDATE"
     assert sheet.rows[2][13] == "handoff"
     assert sheet.rows[2][16] == "TRUE"
     assert sheet.rows[2][19] == "TRUE"
     assert sender.calls == []
 
 
-def test_sms_exact_fee_does_not_override_manual_takeover(monkeypatch):
+def test_sms_exact_fee_under_manual_takeover_alerts_owner_without_bot_reply(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -2986,7 +3025,9 @@ def test_sms_exact_fee_does_not_override_manual_takeover(monkeypatch):
     )
 
     assert decision["block_reply"] is True
-    assert decision["reason"] == "Human override enabled - inbound recorded only"
+    assert decision["handoff_needed"] is True
+    assert decision["alert_needed"] is True
+    assert decision["reason"] == "Substantive update received after human handoff"
 
 
 def test_sms_already_approved_is_a_closeout_unless_it_contains_a_live_request(monkeypatch):
