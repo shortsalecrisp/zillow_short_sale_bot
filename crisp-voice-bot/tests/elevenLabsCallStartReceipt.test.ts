@@ -109,3 +109,18 @@ test("outbound body carries the unique receipt key and timeout detection is narr
   assert.equal(isElevenLabsCallStartTimeout(new AxiosError("Request failed with status code 500", "ERR_BAD_RESPONSE")), false);
   assert.equal(isElevenLabsCallStartTimeout(new Error("timeout")), false);
 });
+
+test("uncertain call-start errors preserve the durable delayed-reconciliation identity", async () => {
+  const { ElevenLabsCallStartUncertainError, isElevenLabsCallStartUncertainError } = await import("../src/lib/elevenLabs");
+  const error = new ElevenLabsCallStartUncertainError({
+    ...metadata,
+    fullName: "David Test",
+    listingAddress: "100 Main St",
+    requestedPhone: "+12025550123",
+    testMode: false,
+  }, 1_788_450_000);
+
+  assert.equal(isElevenLabsCallStartUncertainError(error), true);
+  assert.equal(error.callStartRequestId, "5590-1-request-a");
+  assert.equal(error.requestStartedAtUnixSecs, 1_788_450_000);
+});

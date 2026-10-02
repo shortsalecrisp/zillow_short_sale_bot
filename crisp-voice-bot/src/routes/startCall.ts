@@ -2,7 +2,10 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { saveInitialCallState } from "../lib/callState";
 import { getStartCallWindowBlockReason } from "../lib/callWindowGuard";
 import { config } from "../lib/config";
-import { placeElevenLabsOutboundCall } from "../lib/elevenLabs";
+import {
+  isElevenLabsCallStartUncertainError,
+  placeElevenLabsOutboundCall,
+} from "../lib/elevenLabs";
 import { logger } from "../lib/logger";
 import { getOutboundCallPause } from "../lib/outboundCallPause";
 import { getProviderCircuitStatus } from "../lib/providerCircuitBreaker";
@@ -282,6 +285,14 @@ router.post("/", async (req: Request, res: Response, next: NextFunction) => {
           provider: "elevenlabs",
           error: "ElevenLabs outbound call failed",
           message: error instanceof Error ? error.message : String(error),
+          ...(isElevenLabsCallStartUncertainError(error)
+            ? {
+                callStartUncertain: true,
+                callStartRequestId: error.callStartRequestId,
+                requestStartedAtUnixSecs: error.requestStartedAtUnixSecs,
+                callAttemptNumber: error.callAttemptNumber,
+              }
+            : {}),
         });
         return;
       }

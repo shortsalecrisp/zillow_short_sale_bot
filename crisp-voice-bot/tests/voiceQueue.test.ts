@@ -122,3 +122,30 @@ test("a stale first-attempt timestamp with no result receives exactly one bounde
   values[39] = "2026-09-28T18:46:00.000Z";
   assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now), undefined);
 });
+
+test("uncertain call starts remain paused and carry a durable provider receipt key", async () => {
+  const {
+    formatVoiceCallStartUncertainMarker,
+    getVoiceBotCallCandidateFromRowValues,
+    parseVoiceCallStartUncertainMarker,
+  } = await import("../src/lib/voiceQueue");
+  const marker = {
+    rowNumber: 5939,
+    callAttemptNumber: 1 as const,
+    callStartRequestId: "5939-1-request-safe",
+    requestStartedAtUnixSecs: 1_790_866_846,
+    scheduledWindow: "mid_afternoon",
+    agentTimeZone: "America/New_York",
+  };
+  const values = scheduledRow("2026-10-01T14:00:00.000Z", {
+    call1SentAt: "2026-10-01T15:00:46.110Z",
+    call1Result: "call_start_uncertain",
+  });
+  values[29] = "";
+  values[30] = "";
+  values[31] = "";
+  values[41] = `Earlier note\n\n---\n\n${formatVoiceCallStartUncertainMarker(marker)}`;
+
+  assert.deepEqual(parseVoiceCallStartUncertainMarker(values[41]), marker);
+  assert.equal(getVoiceBotCallCandidateFromRowValues(5939, values, new Date("2026-10-02T15:00:00Z")), undefined);
+});

@@ -1,6 +1,10 @@
 import axios, { AxiosError } from "axios";
 import type { sheets_v4 } from "googleapis";
 import { config } from "./config";
+import {
+  reconcilePendingElevenLabsCallStart,
+  recoverAcceptedElevenLabsCallStart,
+} from "./elevenLabs";
 import { getGoogleSheetsClient } from "./googleSheets";
 import { logger } from "./logger";
 import { getOutboundCallPause } from "./outboundCallPause";
@@ -104,7 +108,62 @@ export type VoiceQueueResult = {
 type SheetCellWrite = {
   columnNumber: number;
   value: string;
+  label?: string;
 };
+
+const CALL_START_UNCERTAIN_MARKER = "CODEX_VOICE_CALL_START_UNCERTAIN_V1";
+const CALL_START_UNCERTAIN_GRACE_MS = 15 * 60_000;
+
+export type VoiceCallStartUncertainMarker = {
+  rowNumber: number;
+  callAttemptNumber: 1 | 2;
+  callStartRequestId: string;
+  requestStartedAtUnixSecs: number;
+  scheduledWindow?: string;
+  agentTimeZone?: string;
+};
+
+export function formatVoiceCallStartUncertainMarker(marker: VoiceCallStartUncertainMarker): string {
+  return `${CALL_START_UNCERTAIN_MARKER} ${JSON.stringify(marker)}`;
+}
+
+export function parseVoiceCallStartUncertainMarker(value: unknown): VoiceCallStartUncertainMarker | undefined {
+  const notes = normalizeString(value);
+  const lines = notes.split(/\r?\n/).filter((line) => line.includes(CALL_START_UNCERTAIN_MARKER));
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const jsonText = lines[index].slice(lines[index].indexOf(CALL_START_UNCERTAIN_MARKER) + CALL_START_UNCERTAIN_MARKER.length).trim();
+    try {
+      const parsed = JSON.parse(jsonText) as Partial<VoiceCallStartUncertainMarker>;
+      if (
+        Number.isInteger(parsed.rowNumber) &&
+        (parsed.callAttemptNumber === 1 || parsed.callAttemptNumber === 2) &&
+        typeof parsed.callStartRequestId === "string" && parsed.callStartRequestId &&
+        typeof parsed.requestStartedAtUnixSecs === "number" && Number.isFinite(parsed.requestStartedAtUnixSecs)
+      ) {
+        return parsed as VoiceCallStartUncertainMarker;
+      }
+    } catch (_) {}
+  }
+  return undefined;
+}
+
+function getCallStartUncertainPayload(error: unknown): Omit<VoiceCallStartUncertainMarker, "rowNumber" | "scheduledWindow" | "agentTimeZone"> | undefined {
+  if (!(error instanceof AxiosError)) return undefined;
+  const data = error.response?.data as Record<string, unknown> | undefined;
+  if (
+    data?.callStartUncertain !== true ||
+    typeof data.callStartRequestId !== "string" || !data.callStartRequestId ||
+    typeof data.requestStartedAtUnixSecs !== "number" || !Number.isFinite(data.requestStartedAtUnixSecs) ||
+    (data.callAttemptNumber !== 1 && data.callAttemptNumber !== 2)
+  ) {
+    return undefined;
+  }
+  return {
+    callStartRequestId: data.callStartRequestId,
+    requestStartedAtUnixSecs: data.requestStartedAtUnixSecs,
+    callAttemptNumber: data.callAttemptNumber,
+  };
+}
 
 let activeQueueRun: Promise<VoiceQueueResult> | undefined;
 let schedulerTimer: NodeJS.Timeout | undefined;
@@ -503,6 +562,133 @@ async function markVoiceBotAttemptStartFailed(
   return writes.map((write) => `${columnToLetter(write.columnNumber)}:${write.label}`);
 }
 
+async function markVoiceBotAttemptStartUncertain(
+  sheets: sheets_v4.Sheets,
+  rowValues: unknown[],
+  candidate: VoiceQueueCandidate,
+  now: Date,
+  marker: VoiceCallStartUncertainMarker,
+): Promise<string[]> {
+  const sentColumn = candidate.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
+  const resultColumn = candidate.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
+  const writes = [
+    { columnNumber: sentColumn, value: now.toISOString(), label: `voice_call_${candidate.callAttemptNumber}_sent` },
+    { columnNumber: resultColumn, value: "call_start_uncertain", label: `voice_call_${candidate.callAttemptNumber}_result` },
+    { columnNumber: VOICE_BOT_COL_RESPONSE_STATUS, value: "Call start delivery uncertain; provider receipt reconciliation pending", label: "response_status" },
+    { columnNumber: VOICE_BOT_COL_LEAD_STATUS_CODE, value: "", label: "leadStatusCode_retry_cleared" },
+    { columnNumber: VOICE_BOT_COL_CALL_ELIGIBLE, value: "", label: "call_eligible_paused" },
+    { columnNumber: VOICE_BOT_COL_CALL_TIME_BUCKET, value: "", label: "call_time_bucket_paused" },
+    { columnNumber: VOICE_BOT_COL_CALL_SCHEDULED_FOR, value: "", label: "call_scheduled_for_paused" },
+    {
+      columnNumber: VOICE_BOT_COL_VOICE_NOTES,
+      value: appendVoiceNotesValue(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1], formatVoiceCallStartUncertainMarker(marker)),
+      label: "voiceNotes_uncertain_marker_appended",
+    },
+  ];
+  await writeCells(sheets, candidate.rowNumber, writes);
+  return writes.map((write) => `${columnToLetter(write.columnNumber)}:${write.label}`);
+}
+
+function buildRecoveredCallMetadata(
+  rowNumber: number,
+  rowValues: unknown[],
+  marker: VoiceCallStartUncertainMarker,
+) {
+  const firstName = normalizeString(rowValues[VOICE_BOT_COL_FIRST_NAME - 1]);
+  const lastName = normalizeString(rowValues[VOICE_BOT_COL_LAST_NAME - 1]);
+  const phone = normalizePhoneToE164(rowValues[VOICE_BOT_COL_PHONE - 1]);
+  return {
+    rowNumber,
+    firstName: firstName || undefined,
+    lastName: lastName || undefined,
+    fullName: [firstName, lastName].filter(Boolean).join(" "),
+    email: normalizeString(rowValues[VOICE_BOT_COL_EMAIL - 1]) || undefined,
+    callAttemptNumber: marker.callAttemptNumber,
+    listingAddress: buildVoiceBotListingAddress(rowValues),
+    sheetName: config.googleSheets.tabName,
+    scheduledWindow: marker.scheduledWindow,
+    agentTimeZone: marker.agentTimeZone || getVoiceBotAgentTimeZone(rowValues),
+    requestedPhone: phone,
+    dialedPhone: phone,
+    testMode: config.testMode,
+    callStartRequestId: marker.callStartRequestId,
+  };
+}
+
+async function reconcileUncertainVoiceCallStarts(
+  sheets: sheets_v4.Sheets,
+  rows: Array<{ rowNumber: number; values: unknown[] }>,
+  now: Date,
+): Promise<number> {
+  let reconciled = 0;
+  for (const row of rows) {
+    const firstResult = normalizeString(row.values[VOICE_BOT_COL_CALL_1_RESULT - 1]).toLowerCase();
+    const secondResult = normalizeString(row.values[VOICE_BOT_COL_CALL_2_RESULT - 1]).toLowerCase();
+    const uncertainAttempt = firstResult === "call_start_uncertain" ? 1 : secondResult === "call_start_uncertain" ? 2 : undefined;
+    if (!uncertainAttempt) continue;
+    const marker = parseVoiceCallStartUncertainMarker(row.values[VOICE_BOT_COL_VOICE_NOTES - 1]);
+    if (!marker || marker.rowNumber !== row.rowNumber || marker.callAttemptNumber !== uncertainAttempt) {
+      logger.error("Uncertain call start is missing its durable reconciliation marker", { rowNumber: row.rowNumber, uncertainAttempt });
+      continue;
+    }
+    if (now.getTime() - marker.requestStartedAtUnixSecs * 1000 < CALL_START_UNCERTAIN_GRACE_MS) continue;
+
+    const metadata = buildRecoveredCallMetadata(row.rowNumber, row.values, marker);
+    try {
+      const receipt = await reconcilePendingElevenLabsCallStart({
+        metadata,
+        requestStartedAtUnixSecs: marker.requestStartedAtUnixSecs,
+      });
+      const resultColumn = uncertainAttempt === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
+      if (receipt?.status === "accepted") {
+        recoverAcceptedElevenLabsCallStart(receipt, metadata);
+        await writeCells(sheets, row.rowNumber, [
+          { columnNumber: resultColumn, value: "call_start_reconciled", label: "call_start_reconciled" },
+          { columnNumber: VOICE_BOT_COL_RESPONSE_STATUS, value: "Provider receipt recovered; final call outcome pending", label: "response_status" },
+          {
+            columnNumber: VOICE_BOT_COL_VOICE_NOTES,
+            value: appendVoiceNotesValue(row.values[VOICE_BOT_COL_VOICE_NOTES - 1], `Recovered accepted provider receipt ${receipt.conversationId} for ${marker.callStartRequestId}.`),
+            label: "voiceNotes_receipt_recovered",
+          },
+        ]);
+      } else {
+        const sentColumn = uncertainAttempt === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
+        const agentTimeZone = marker.agentTimeZone || getVoiceBotAgentTimeZone(row.values);
+        const replacementAt = getNextVoiceBotFirstAttemptWindowStart(
+          new Date(now.getTime() + 5 * 60_000),
+          agentTimeZone,
+          row.rowNumber,
+        );
+        const proof = receipt?.status === "definitive_failure"
+          ? `Provider receipt ${receipt.conversationId} proves the call failed before acceptance.`
+          : "Provider conversation reconciliation completed after the grace period with no matching receipt.";
+        await writeCells(sheets, row.rowNumber, [
+          { columnNumber: sentColumn, value: "", label: `voice_call_${uncertainAttempt}_sent_released` },
+          { columnNumber: resultColumn, value: "", label: `voice_call_${uncertainAttempt}_result_released` },
+          { columnNumber: VOICE_BOT_COL_RESPONSE_STATUS, value: "No accepted provider receipt; replacement attempt safely scheduled", label: "response_status" },
+          { columnNumber: VOICE_BOT_COL_CALL_ELIGIBLE, value: "yes", label: "call_eligible" },
+          { columnNumber: VOICE_BOT_COL_CALL_TIME_BUCKET, value: `voice_call_${uncertainAttempt}_due`, label: "call_time_bucket" },
+          { columnNumber: VOICE_BOT_COL_CALL_SCHEDULED_FOR, value: replacementAt.toISOString(), label: "call_scheduled_for" },
+          {
+            columnNumber: VOICE_BOT_COL_VOICE_NOTES,
+            value: appendVoiceNotesValue(row.values[VOICE_BOT_COL_VOICE_NOTES - 1], `${proof} Safe replacement for attempt ${uncertainAttempt} scheduled for ${formatVoiceBotDateEt(replacementAt)}.`),
+            label: "voiceNotes_absence_proved",
+          },
+        ]);
+      }
+      reconciled += 1;
+    } catch (error) {
+      logger.warn("Delayed call-start receipt reconciliation failed; row remains paused", {
+        rowNumber: row.rowNumber,
+        callAttemptNumber: uncertainAttempt,
+        callStartRequestId: marker.callStartRequestId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return reconciled;
+}
+
 async function postStartCall(candidate: VoiceQueueCandidate): Promise<unknown> {
   const url = `${config.baseUrl}/start-call`;
   const response = await axios.post(url, buildStartCallPayload(candidate), {
@@ -532,6 +718,15 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       nowEt: formatVoiceBotDateEt(now),
       pauseReason: config.outboundVoice.pauseReason,
     };
+  }
+
+  // Receipt reconciliation is a safety operation, not a new outbound call.
+  // Run it even while starts are paused or outside the dialing window so an
+  // uncertain attempt cannot be mistaken for a confirmed failure.
+  const sheets = await getGoogleSheetsClient();
+  const rows = await getVoiceBotRows(sheets);
+  if (!options.dryRun) {
+    await reconcileUncertainVoiceCallStarts(sheets, rows, now);
   }
 
   if (outboundPause || providerCircuit.open) {
@@ -567,8 +762,6 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
     };
   }
 
-  const sheets = await getGoogleSheetsClient();
-  const rows = await getVoiceBotRows(sheets);
   const finalReceiptCircuit = evaluateFinalReceiptCircuit(
     rows,
     now,
@@ -661,7 +854,17 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
         startCallResult,
       });
     } catch (error) {
-      const fieldsWritten = await markVoiceBotAttemptStartFailed(sheets, refreshedValues, refreshedCandidate, now, error);
+      const uncertainPayload = getCallStartUncertainPayload(error);
+      const fieldsWritten = uncertainPayload
+        ? await markVoiceBotAttemptStartUncertain(sheets, refreshedValues, refreshedCandidate, now, {
+            rowNumber: refreshedCandidate.rowNumber,
+            callAttemptNumber: refreshedCandidate.callAttemptNumber,
+            callStartRequestId: uncertainPayload.callStartRequestId,
+            requestStartedAtUnixSecs: uncertainPayload.requestStartedAtUnixSecs,
+            scheduledWindow: refreshedCandidate.callWindow,
+            agentTimeZone: refreshedCandidate.agentTimeZone,
+          })
+        : await markVoiceBotAttemptStartFailed(sheets, refreshedValues, refreshedCandidate, now, error);
       logger.error("Voice queue call start failed", {
         ...candidateSummary(refreshedCandidate),
         fieldsWritten,

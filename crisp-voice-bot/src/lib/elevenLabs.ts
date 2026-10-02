@@ -27,7 +27,7 @@ export const INITIAL_OPENING_POLICY = "listen_first_uniform_v1";
 const CALL_START_RECEIPT_DELAY_MS = 2_000;
 const CALL_START_RETRY_JITTER_MIN_MS = 1_500;
 const CALL_START_RETRY_JITTER_MAX_MS = 3_000;
-const MAX_CALL_START_RECEIPT_CANDIDATES = 12;
+const MAX_CALL_START_RECEIPT_CANDIDATES = 100;
 
 type ElevenLabsConversationSummary = {
   conversation_id?: string;
@@ -60,6 +60,24 @@ export type ElevenLabsCallStartReceipt = {
   conversationId: string;
   conversation: ElevenLabsConversationDetails;
 };
+
+export class ElevenLabsCallStartUncertainError extends Error {
+  public readonly callStartRequestId: string;
+  public readonly requestStartedAtUnixSecs: number;
+  public readonly callAttemptNumber: number;
+
+  constructor(metadata: CallMetadata, requestStartedAtUnixSecs: number) {
+    super("ElevenLabs call start delivery is uncertain after timeout; no automatic retry was performed");
+    this.name = "ElevenLabsCallStartUncertainError";
+    this.callStartRequestId = metadata.callStartRequestId ?? "";
+    this.requestStartedAtUnixSecs = requestStartedAtUnixSecs;
+    this.callAttemptNumber = metadata.callAttemptNumber;
+  }
+}
+
+export function isElevenLabsCallStartUncertainError(error: unknown): error is ElevenLabsCallStartUncertainError {
+  return error instanceof ElevenLabsCallStartUncertainError;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -134,11 +152,13 @@ async function findElevenLabsCallStartReceipt(params: {
   agentId: string;
   metadata: CallMetadata;
   requestStartedAtUnixSecs: number;
+  strictDetails?: boolean;
 }): Promise<ElevenLabsCallStartReceipt | undefined> {
   const response = await params.client.get<ElevenLabsConversationListResponse>("/v1/convai/conversations", {
     params: {
       agent_id: params.agentId,
       call_start_after_unix: params.requestStartedAtUnixSecs - 10,
+      call_start_before_unix: params.requestStartedAtUnixSecs + 10 * 60,
       page_size: MAX_CALL_START_RECEIPT_CANDIDATES,
       sort_direction: "desc",
     },
@@ -169,10 +189,38 @@ async function findElevenLabsCallStartReceipt(params: {
         callAttemptNumber: params.metadata.callAttemptNumber,
         ...getElevenLabsError(error),
       });
+      if (params.strictDetails) {
+        throw error;
+      }
     }
   }
 
   return undefined;
+}
+
+export async function reconcilePendingElevenLabsCallStart(params: {
+  metadata: CallMetadata;
+  requestStartedAtUnixSecs: number;
+}): Promise<ElevenLabsCallStartReceipt | undefined> {
+  const { agentId } = requireElevenLabsOutboundConfig();
+  return findElevenLabsCallStartReceipt({
+    client: elevenLabsClient,
+    agentId,
+    metadata: params.metadata,
+    requestStartedAtUnixSecs: params.requestStartedAtUnixSecs,
+    strictDetails: true,
+  });
+}
+
+export function recoverAcceptedElevenLabsCallStart(
+  receipt: ElevenLabsCallStartReceipt,
+  metadata: CallMetadata,
+): void {
+  if (receipt.status !== "accepted") return;
+  const dynamicVariables = receipt.conversation.conversation_initiation_client_data?.dynamic_variables ?? {};
+  const recoveredMetadata = { ...metadata, ...dynamicVariables, conversationId: receipt.conversationId } as CallMetadata;
+  rememberElevenLabsCallContext(recoveredMetadata, receipt.conversationId);
+  scheduleElevenLabsPostCallFallback({ conversationId: receipt.conversationId, metadata: recoveredMetadata });
 }
 
 async function reconcileElevenLabsCallStartTimeout(params: {
@@ -587,7 +635,9 @@ export async function placeElevenLabsOutboundCall(params: {
       const message = receipt
         ? "ElevenLabs call start definitively failed after the single receipt-safe retry"
         : "ElevenLabs call start delivery is uncertain after timeout; no automatic retry was performed";
-      const recoveryError = new Error(message);
+      const recoveryError = receipt
+        ? new Error(message)
+        : new ElevenLabsCallStartUncertainError(attemptMetadata, requestStartedAtUnixSecs);
       logger.error(message, {
         rowNumber: params.metadata.rowNumber,
         callAttemptNumber: params.metadata.callAttemptNumber,
