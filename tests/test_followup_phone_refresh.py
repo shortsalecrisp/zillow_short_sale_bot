@@ -331,6 +331,85 @@ def test_parse_sheet_datetime_accepts_google_formatted_value():
     assert parsed.isoformat() == "2026-08-20T18:14:17-04:00"
 
 
+def test_date_only_timestamp_requires_exact_sent_receipt(monkeypatch):
+    sent_at = bot_min.SCHEDULER_TZ.localize(datetime(2026, 9, 30, 11, 27, 52))
+    sent_serial = (sent_at.replace(tzinfo=None) - datetime(1899, 12, 30)).total_seconds() / 86400
+
+    class ReceiptValuesAPI:
+        def batchGet(self, spreadsheetId, ranges, majorDimension, valueRenderOption):
+            assert valueRenderOption == "UNFORMATTED_VALUE"
+            if ranges == ["Sheet1!C2", "Sheet1!W2"]:
+                return _FakeRequest({"valueRanges": [
+                    {"values": [["202-569-4246"]]},
+                    {"values": [["9/30/2026"]]},
+                ]})
+            assert ranges == [
+                "sms_pending_sends!B2:B", "sms_pending_sends!E2:E",
+                "sms_pending_sends!G2:G", "sms_pending_sends!O2:O",
+                "sms_pending_sends!R2:R",
+            ]
+            assert majorDimension == "COLUMNS"
+            return _FakeRequest({"valueRanges": [
+                {"values": [["sent", "sent", "queued", "sent"]]},
+                {"values": [[9999999999, 2025694246, 2025694246, 2025694246]]},
+                {"values": [["__initial_outreach__:{}"] * 4]},
+                {"values": [[sent_serial, sent_serial, sent_serial, sent_serial + 1]]},
+                {"values": [[2, 2, 2, 2]]},
+            ]})
+
+    monkeypatch.setattr(
+        bot_min,
+        "sheets_service",
+        types.SimpleNamespace(spreadsheets=lambda: types.SimpleNamespace(
+            values=lambda: ReceiptValuesAPI()
+        )),
+    )
+
+    now = bot_min.SCHEDULER_TZ.localize(datetime(2026, 10, 2, 12, 0))
+    recovered = bot_min._recover_initial_sent_at_from_receipts({2: "9/30/2026"}, now=now)
+
+    assert recovered[2].isoformat() == "2026-09-30T11:27:52-04:00"
+    assert bot_min._recover_initial_sent_at_from_receipts(
+        {2: "9/30/2026"}, now=now + timedelta(days=8)
+    ) == {}
+    assert bot_min._recover_initial_sent_at_from_receipts({2: "invalid"}) == {}
+
+
+def test_follow_up_recovers_date_only_timestamp_before_eligibility(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_INIT_TS] = "9/30/2026"
+    service = _ConfiguredFollowupSheetsService(row)
+    sent = []
+    recovered_at = bot_min.SCHEDULER_TZ.localize(datetime(2026, 9, 30, 11, 27, 52))
+
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "_recover_initial_sent_at_from_receipts", lambda rows: {2: recovered_at})
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *args, **kwargs: bot_min.FU_HOURS)
+    monkeypatch.setattr(bot_min, "send_sms", lambda **kwargs: sent.append(kwargs))
+
+    bot_min._follow_up_pass()
+
+    assert len(sent) == 1
+    assert sent[0]["row_idx"] == 2
+
+
+def test_follow_up_does_not_guess_time_without_receipt(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_INIT_TS] = "9/30/2026"
+    sent = []
+
+    monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "_recover_initial_sent_at_from_receipts", lambda rows: {})
+    monkeypatch.setattr(bot_min, "send_sms", lambda **kwargs: sent.append(kwargs))
+
+    bot_min._follow_up_pass()
+
+    assert sent == []
+
+
 def test_follow_up_accepts_google_formatted_initial_timestamp(monkeypatch):
     row = _followup_test_row()
     row[bot_min.COL_INIT_TS] = "8/20/2026 18:14:17"

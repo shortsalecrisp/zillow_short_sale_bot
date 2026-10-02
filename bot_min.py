@@ -483,6 +483,10 @@ FOLLOWUP_DUE_GRACE_MINUTES = max(
     0.0,
     float(os.getenv("FOLLOWUP_DUE_GRACE_MINUTES", "2")),
 )
+FOLLOWUP_DATE_ONLY_RECOVERY_MAX_AGE_DAYS = max(
+    1,
+    int(os.getenv("FOLLOWUP_DATE_ONLY_RECOVERY_MAX_AGE_DAYS", "7")),
+)
 FOLLOWUP_MIN_LOOKBACK_ROWS = int(os.getenv("FOLLOWUP_MIN_LOOKBACK_ROWS", "500"))
 FU_LOOKBACK_ROWS = max(int(os.getenv("FU_LOOKBACK_ROWS", "50")), FOLLOWUP_MIN_LOOKBACK_ROWS)
 MAILSHAKE_AFTER_FOLLOWUP_HOURS = float(os.getenv("MAILSHAKE_AFTER_FOLLOWUP_HOURS", "2"))
@@ -13031,6 +13035,94 @@ def _parse_sheet_datetime(raw: Any) -> Optional[datetime]:
     return dt.astimezone(SCHEDULER_TZ)
 
 
+def _recover_initial_sent_at_from_receipts(
+    invalid_rows: Dict[int, str],
+    now: Optional[datetime] = None,
+) -> Dict[int, datetime]:
+    """Resolve date-only CRM markers to exact, same-row/same-phone send receipts."""
+
+    now = (now or datetime.now(tz=SCHEDULER_TZ)).astimezone(SCHEDULER_TZ)
+    date_only_rows = {}
+    for row_idx, raw in invalid_rows.items():
+        try:
+            date_only_rows[row_idx] = datetime.strptime(raw, "%m/%d/%Y").date()
+        except ValueError:
+            continue
+    if not date_only_rows:
+        return {}
+
+    row_indices = sorted(date_only_rows)
+    row_ranges = [
+        sheet_range
+        for row_idx in row_indices
+        for sheet_range in (f"{GSHEET_TAB}!C{row_idx}", f"{GSHEET_TAB}!W{row_idx}")
+    ]
+    try:
+        row_data = sheets_service.spreadsheets().values().batchGet(
+            spreadsheetId=GSHEET_ID,
+            ranges=row_ranges,
+            majorDimension="ROWS",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("valueRanges", [])
+        current_phones = {}
+        for i, row_idx in enumerate(row_indices):
+            phone_values = row_data[2 * i].get("values") or []
+            timestamp_values = row_data[2 * i + 1].get("values") or []
+            phone = _digits_only(str(phone_values[0][0])) if phone_values and phone_values[0] else ""
+            current_timestamp = (
+                str(timestamp_values[0][0]).strip()
+                if timestamp_values and timestamp_values[0]
+                else ""
+            )
+            if phone and current_timestamp == invalid_rows[row_idx]:
+                current_phones[row_idx] = phone
+        if not current_phones:
+            return {}
+
+        outbox_columns = ["B", "E", "G", "O", "R"]
+        outbox_data = sheets_service.spreadsheets().values().batchGet(
+            spreadsheetId=GSHEET_ID,
+            ranges=[f"sms_pending_sends!{col}2:{col}" for col in outbox_columns],
+            majorDimension="COLUMNS",
+            valueRenderOption="UNFORMATTED_VALUE",
+        ).execute().get("valueRanges", [])
+    except Exception:
+        LOG.exception("Unable to recover date-only initial timestamps from SMS receipts")
+        return {}
+
+    columns = [
+        (item.get("values") or [[]])[0]
+        for item in outbox_data
+    ]
+    if len(columns) != len(outbox_columns):
+        LOG.error("SMS receipt lookup returned incomplete columns; skipping date-only rows")
+        return {}
+
+    recovered: Dict[int, datetime] = {}
+    for i in range(max(map(len, columns), default=0)):
+        status, phone, metadata, sent_raw, crm_row = (
+            column[i] if i < len(column) else "" for column in columns
+        )
+        if str(status).strip().lower() != "sent":
+            continue
+        if not str(metadata).startswith("__initial_outreach__:"):
+            continue
+        try:
+            row_idx = int(crm_row)
+        except (TypeError, ValueError):
+            continue
+        if row_idx not in current_phones or _digits_only(str(phone)) != current_phones[row_idx]:
+            continue
+        sent_at = _parse_sheet_datetime(sent_raw)
+        if sent_at is None or sent_at.date() != date_only_rows[row_idx]:
+            continue
+        if sent_at < now - timedelta(days=FOLLOWUP_DATE_ONLY_RECOVERY_MAX_AGE_DAYS):
+            continue
+        if row_idx not in recovered or sent_at > recovered[row_idx]:
+            recovered[row_idx] = sent_at
+    return recovered
+
+
 def _get_reply_records(force_refresh: bool = False) -> List[Tuple[str, Optional[datetime]]]:
     now_monotonic = time.monotonic()
     with _reply_records_lock:
@@ -13608,6 +13700,7 @@ def _follow_up_pass():
     init_rows: List[Tuple[int, datetime]] = []
     bad_init_ts_rows = 0
     missing_init_ts_rows = 0
+    invalid_init_timestamps: Dict[int, str] = {}
     for idx in range(max(len(init_values), len(reply_values))):
         sheet_row = idx + 2
         init_raw = str(init_values[idx]).strip() if idx < len(init_values) else ""
@@ -13622,8 +13715,19 @@ def _follow_up_pass():
         ts = _parse_sheet_datetime(init_raw)
         if ts is None:
             bad_init_ts_rows += 1
+            invalid_init_timestamps[sheet_row] = init_raw
             continue
         init_rows.append((sheet_row, ts))
+
+    recovered_timestamps = _recover_initial_sent_at_from_receipts(invalid_init_timestamps)
+    init_rows.extend(recovered_timestamps.items())
+    if invalid_init_timestamps:
+        LOG.warning(
+            "Follow-up timestamp recovery: invalid=%s receipt_matched=%s unresolved=%s",
+            bad_init_ts_rows,
+            len(recovered_timestamps),
+            bad_init_ts_rows - len(recovered_timestamps),
+        )
 
     if not init_rows:
         return
