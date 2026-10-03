@@ -2624,7 +2624,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
   if (flags.differentiation && matchedKeys.length === 1) {
     return {
       matched: true,
-      reply_text: buildDifferentiationQuestionReply_(),
+      reply_text: buildDifferentiationQuestionReply_(t),
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
@@ -2789,17 +2789,19 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
   if (flags.buyer_cost_concern) answers.push(buildBuyerCostConcernReply_());
   if (flags.fee_disclosure) answers.push(buildBuyerFeeDisclosureReply_());
   if (flags.failed_provider) answers.push(buildFailedProviderReply_());
-  if (flags.differentiation) answers.push(buildDifferentiationQuestionReply_());
+  if (flags.differentiation) answers.push(buildDifferentiationQuestionReply_(t));
   if (flags.exact_count) answers.push("I don't have a verified closed count to quote here; I'll need to confirm that number.");
 
   return withNewCallHandoff_({
     matched: true,
     reply_text: answers.join(" "),
-    lead_status: leadStatus,
-    conversation_done: done,
+    lead_status: flags.differentiation ? "Y" : leadStatus,
+    conversation_done: flags.differentiation ? false : done,
     handoff_needed: !!flags.exact_count,
-    send_reply_before_handoff: !!flags.exact_count,
-    handoff_type: flags.exact_count ? "STATS QUESTION" : "",
+    alert_needed: !!flags.differentiation,
+    send_reply_before_handoff: !!flags.exact_count || !!flags.differentiation,
+    handoff_type: flags.exact_count ? "STATS QUESTION" :
+      (flags.differentiation ? "HOT LEAD - DIFFERENTIATION QUESTION" : ""),
     bypass_reply_cap: !flags.exact_count && (flags.equator || feeCapBypass),
     needs_review: false,
     block_reply: false,
@@ -3377,7 +3379,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
   if (isDifferentiationQuestionSignal_(t)) {
     return {
       matched: true,
-      reply_text: buildDifferentiationQuestionReply_(),
+      reply_text: buildDifferentiationQuestionReply_(t),
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
@@ -3701,13 +3703,19 @@ function isDifferentiationQuestionSignal_(text) {
     return false;
   }
   const difference = /\b(?:how|what|why)\b.{0,80}\b(?:different|differs?|better|compare|compares?)\b/.test(t) ||
-    /\b(?:different|differs?|better)\b.{0,80}\b(?:than|from|with)\b/.test(t);
+    /\b(?:different|differs?|better)\b.{0,80}\b(?:than|then|from|with)\b/.test(t);
+  const attorneyComparison = /\b(?:different|differs?|better|compare|compares?)\b.{0,80}\b(?:than|then|from|with)\b.{0,40}\b(?:attorney|lawyer|law firm)\b/.test(t) ||
+    /\b(?:how|what|why)\b.{0,80}\b(?:different|differs?|better|compare|compares?)\b.{0,80}\b(?:attorney|lawyer|law firm)\b/.test(t);
   const communication = /\b(?:communication|communicat(?:e|ion|ing)|documentation|documents?|paperwork|updates?)\b/.test(t);
   const existingHelp = isAlreadyHandledSignal_(t) || /\b(?:theirs?|them|their|my current|our current)\b/.test(t);
-  return (difference && existingHelp) || (difference && communication) || (communication && existingHelp);
+  return attorneyComparison || (difference && existingHelp) || (difference && communication) || (communication && existingHelp);
 }
 
-function buildDifferentiationQuestionReply_() {
+function buildDifferentiationQuestionReply_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (/\b(?:attorney|lawyer|law firm)\b/.test(t)) {
+    return "I'm not an attorney and I don't provide legal advice. I focus on the lender-side short-sale paperwork, calls, follow-up, and negotiations through approval, and keep you updated throughout the process.";
+  }
   return "I focus exclusively on the lender-side short-sale work and keep you updated throughout the process. If that sounds useful, I'm happy to talk through your listing.";
 }
 

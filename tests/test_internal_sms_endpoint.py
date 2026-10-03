@@ -2594,6 +2594,34 @@ def test_sms_differentiation_question_gets_deterministic_reply(monkeypatch):
     assert module._sms_should_reply(decision, 3) is False
 
 
+def test_sms_attorney_comparison_typo_gets_boundary_answer_and_hot_lead_handoff(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Do you have a website ? What do you do different then attorney ?"
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_differentiation_question(inbound) is True
+    assert decision["lead_status"] == "Y"
+    assert decision["handoff_needed"] is True
+    assert decision["alert_needed"] is True
+    assert decision["handoff_type"] == "HOT LEAD - DIFFERENTIATION QUESTION"
+    assert "https://www.crispshortsales.com" in decision["reply_text"]
+    assert "I'm not an attorney and I don't provide legal advice" in decision["reply_text"]
+    assert "lender-side short-sale paperwork, calls, follow-up, and negotiations" in decision["reply_text"]
+
+
+def test_sms_existing_attorney_statement_is_not_a_differentiation_question(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    assert module._sms_is_differentiation_question("Seller has attorney") is False
+
+
 def test_sms_testimonials_request_uses_reviews_reply_without_email_prompt(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

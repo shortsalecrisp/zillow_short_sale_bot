@@ -5575,12 +5575,32 @@ def _sms_is_differentiation_question(text: str) -> bool:
     if not t or not re.search(r"\b(?:how|what|why|different|differs?|compare|compares?|communication|documentation|updates?)\b", t):
         return False
     difference = re.search(r"\b(?:how|what|why)\b.{0,80}\b(?:different|differs?|better|compare|compares?)\b", t) or re.search(
-        r"\b(?:different|differs?|better)\b.{0,80}\b(?:than|from|with)\b",
+        r"\b(?:different|differs?|better)\b.{0,80}\b(?:than|then|from|with)\b",
+        t,
+    )
+    attorney_comparison = re.search(
+        r"\b(?:different|differs?|better|compare|compares?)\b.{0,80}\b(?:than|then|from|with)\b.{0,40}\b(?:attorney|lawyer|law firm)\b",
+        t,
+    ) or re.search(
+        r"\b(?:how|what|why)\b.{0,80}\b(?:different|differs?|better|compare|compares?)\b.{0,80}\b(?:attorney|lawyer|law firm)\b",
         t,
     )
     communication = re.search(r"\b(?:communication|communicat(?:e|ion|ing)|documentation|documents?|paperwork|updates?)\b", t)
     existing_help = _sms_has_existing_coverage(t) or re.search(r"\b(?:theirs?|them|their|my current|our current)\b", t)
-    return bool((difference and existing_help) or (difference and communication) or (communication and existing_help))
+    return bool(attorney_comparison or (difference and existing_help) or (difference and communication) or (communication and existing_help))
+
+
+def _sms_differentiation_question_reply(text: str) -> str:
+    t = _sms_normalize_whitespace(text).lower()
+    if re.search(r"\b(?:attorney|lawyer|law firm)\b", t):
+        return (
+            "I'm not an attorney and I don't provide legal advice. I focus on the lender-side short-sale paperwork, "
+            "calls, follow-up, and negotiations through approval, and keep you updated throughout the process."
+        )
+    return (
+        "I focus exclusively on the lender-side short-sale work and keep you updated throughout the process. "
+        "If that sounds useful, I'm happy to talk through your listing."
+    )
 
 
 def _sms_extract_openai_text(payload: Dict[str, Any]) -> str:
@@ -6843,7 +6863,7 @@ def _sms_question_priority_decision(
         "credential": "No, I'm not an attorney. I handle short-sale processing and lender negotiations; I don't provide legal advice.",
         "negotiator": "Yes, in essence. I handle the short-sale process and lender negotiations. Happy to answer any questions on a quick call.",
         "language": "No, I'm sorry, I don't speak Spanish, but I'd still be happy to help in English.",
-        "different": "I focus exclusively on the lender-side short-sale work and keep you updated throughout the process. If that sounds useful, I'm happy to talk through your listing.",
+        "different": _sms_differentiation_question_reply(text),
         "buyer_provision": SMS_BUYER_PROVISION_REPLY,
         "buyer_concern": SMS_BUYER_COST_CONCERN_REPLY,
         "fee_disclosure": SMS_BUYER_FEE_DISCLOSURE_REPLY,
@@ -6868,7 +6888,7 @@ def _sms_question_priority_decision(
     callback = _sms_complete_callback_reference(inbound_text, received_at) if requests_call else ""
     result = _sms_decision(
         reply_text=" ".join(answers),
-        lead_status="Y" if requests_call or call_now else status,
+        lead_status="Y" if requests_call or call_now or flags["different"] else status,
         conversation_done=status == "O" and not handoff,
         handoff_needed=handoff,
         send_reply_before_handoff=handoff,
@@ -7382,11 +7402,7 @@ def _sms_fast_decision(
 
     if _sms_is_differentiation_question(t):
         return _sms_decision(
-            reply_text=(
-                "Well I pride myself in my communication and will keep you posted throughout the process. I’ll handle everything with the bank and we only get paid if/when the deal closes, so nothing is paid upfront and there’s nothing in it for us if we don’t get it done.\n\n"
-                "I built a whole system around giving agents and homeowners access to our notes so you can see everything that’s going on day to day with the file, I send weekly updates every Friday, and you can always reach my phone/text/email anytime.\n\n"
-                "Want to find some time tomorrow to talk over the phone and we can go over your listing and see if I’m the right fit to help? I’m sure we can get the job done!"
-            ),
+            reply_text=_sms_differentiation_question_reply(t),
             lead_status="Y",
             alert_needed=True,
             handoff_type="HOT LEAD - DIFFERENTIATION QUESTION",

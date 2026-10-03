@@ -498,6 +498,15 @@ def test_differentiation_answer_survives_only_new_handoff_within_cap(chatbot, co
         assert "I focus exclusively on the lender-side short-sale work" in result["reply_text"]
 
 
+def test_attorney_comparison_typo_answers_boundary_and_routes_hot_lead(chatbot):
+    result = chatbot.receive("Do you have a website ? What do you do different then attorney ?")
+    assert result["handoff_needed"] is True
+    assert result["alert_needed"] is True
+    assert result["handoff_type"] == "HOT LEAD - DIFFERENTIATION QUESTION"
+    assert "https://www.crispshortsales.com" in result["reply_text"]
+    assert "I'm not an attorney and I don't provide legal advice" in result["reply_text"]
+
+
 @pytest.mark.parametrize("message", ["Can you help on Equator?", "What's the fee in Equator?"])
 def test_existing_active_equator_cap_exception_is_preserved(chatbot, message):
     chatbot.set(auto_reply_count="3")
