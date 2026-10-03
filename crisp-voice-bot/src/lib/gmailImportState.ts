@@ -57,18 +57,22 @@ async function readStateRows(): Promise<string[][]> {
   return (response.data.values ?? []) as string[][];
 }
 
-export async function readGmailImportState<T>(key: string, fallback: T): Promise<T> {
+export function parseGmailImportState<T>(serialized: string, fallback: T, strict = false): T {
+  try {
+    return JSON.parse(serialized) as T;
+  } catch {
+    if (strict) throw new Error("Invalid persisted BotState JSON; manual review required");
+    return fallback;
+  }
+}
+
+export async function readGmailImportState<T>(key: string, fallback: T, strict = false): Promise<T> {
   const rows = await readStateRows();
   const row = rows.find((candidate) => candidate[0] === key);
-  if (!row?.[1]) {
+  if (!row) {
     return fallback;
   }
-
-  try {
-    return JSON.parse(row[1]) as T;
-  } catch {
-    return fallback;
-  }
+  return parseGmailImportState(row[1] ?? "", fallback, strict);
 }
 
 export async function writeGmailImportState(key: string, value: unknown): Promise<void> {

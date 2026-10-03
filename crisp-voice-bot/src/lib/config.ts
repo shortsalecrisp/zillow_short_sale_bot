@@ -223,6 +223,12 @@ export const config = {
     messagingProfileId: readOptionalEnv("TELNYX_MESSAGING_PROFILE_ID"),
     alertFromNumber: readOptionalEnv("TELNYX_ALERT_FROM_NUMBER") ?? telnyxCallerId,
   },
+  returnCalls: {
+    enabled: readBoolean("RETURN_CALLS_ENABLED", false),
+    publicKey: readOptionalEnv("TELNYX_PUBLIC_KEY"),
+    applicationId: readOptionalEnv("RETURN_CALLS_APPLICATION_ID"),
+    signingSecret: readOptionalEnv("RETURN_CALLS_SIGNING_SECRET"),
+  },
   testDestinationNumber: readEnv("TEST_DESTINATION_NUMBER"),
 };
 

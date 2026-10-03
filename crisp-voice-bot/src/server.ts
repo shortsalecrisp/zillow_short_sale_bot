@@ -20,9 +20,11 @@ import startCallRouter from "./routes/startCall";
 import sheetUpdateRouter from "./routes/sheetUpdate";
 import telnyxWebhookRouter from "./routes/telnyxWebhook";
 import voiceQueueRouter from "./routes/voiceQueue";
+import returnCallsRouter, { returnCallsReady } from "./routes/returnCalls";
 
 const app = express();
 
+app.use("/return-calls", returnCallsRouter);
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req: Request, res: Response) => {
@@ -45,6 +47,12 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
     voiceExperiment: getElevenLabsVoiceExperimentStatus(),
     runtimeExperiment: getElevenLabsRuntimeExperimentStatus(),
     conversationPolicyVersion: VOICE_CONVERSATION_POLICY_VERSION,
+    returnCalls: {
+      ready: returnCallsReady({ ...config.returnCalls, baseUrl: config.baseUrl }),
+      officeAcceptance: "private_announcement_press_1",
+      unansweredFallback: "dedicated_voicemail",
+      recordOfficeConversation: false,
+    },
     coldOutreachSchedule: {
       version: "listing-local-reach-v1",
       timeBasis: "listing_city_state",
