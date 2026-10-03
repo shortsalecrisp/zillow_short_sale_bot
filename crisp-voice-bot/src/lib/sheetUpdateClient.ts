@@ -68,6 +68,21 @@ export function isAppsScriptSheetUpdateAccepted(data: unknown): boolean {
   return parseAppsScriptResponse(data)?.ok === true;
 }
 
+function needsCallFailureSchedulingReconciliation(payload: SheetUpdateRequest, data: unknown): boolean {
+  if (payload.callResult !== "call_failed_before_completion") {
+    return false;
+  }
+
+  const fieldsWritten = parseAppsScriptResponse(data)?.fieldsWritten;
+  if (!Array.isArray(fieldsWritten)) {
+    return true;
+  }
+
+  const written = new Set(fieldsWritten.filter((field): field is string => typeof field === "string"));
+  return ["AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for"]
+    .some((field) => !written.has(field));
+}
+
 function summarizeAppsScriptResponse(data: unknown): Record<string, unknown> {
   const parsed = parseAppsScriptResponse(data);
   if (!parsed) {
@@ -288,6 +303,17 @@ export async function postSheetUpdate(
       callAttemptNumber: payload.callAttemptNumber,
       callResult: payload.callResult,
     });
+
+    // Some older Apps Script deployments acknowledge the terminal result but
+    // do not clear stale scheduling cells. Reconcile only this terminal
+    // failure through the direct writer when the receipt lacks AD:AF proof.
+    if (needsCallFailureSchedulingReconciliation(payload, response.data)) {
+      await persistDirectSheetFallback({
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+        callResult: payload.callResult,
+      }, directSheetUpdate, "apps_script_missing_terminal_scheduling_cleanup");
+    }
   } catch (error) {
     if (error instanceof AxiosError) {
       logger.error("Sheet update failed", {

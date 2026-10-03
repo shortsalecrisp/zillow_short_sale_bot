@@ -1205,6 +1205,20 @@ for (const scenario of [
     ],
   },
   {
+    name: "sandy_exact_help_decline",
+    expectedCallResult: "answered_not_interested",
+    expectedResponseStatus: "Not interested",
+    terminationReason: "Client disconnected: 1000",
+    summary: "Sandy confirmed the paperwork was complete and declined lender-process help.",
+    transcript: [
+      { role: "user", message: "This Sandy." },
+      { role: "assistant", message: "Has the seller completed all of the required short-sale paperwork?" },
+      { role: "user", message: "Yes." },
+      { role: "assistant", message: "Is there anything about the lender process or paperwork that you need help with?" },
+      { role: "user", message: "No." },
+    ],
+  },
+  {
     name: "feng_completed_role_question_decline",
     expectedCallResult: "answered_not_interested",
     expectedResponseStatus: "Not interested",

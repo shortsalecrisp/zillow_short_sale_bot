@@ -125,3 +125,49 @@ test("successful Apps Script sheet update does not invoke the fallback", async (
 
   assert.equal(directCallCount, 0);
 });
+
+test("accepted terminal call failure is reconciled directly when Apps Script omits scheduling cleanup proof", async () => {
+  const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
+  const directCalls: Array<{ rowNumber: number; callResult?: string; responseStatus?: string }> = [];
+
+  await postSheetUpdate({
+    rowNumber: 5965,
+    callAttemptNumber: 1,
+    callResult: "call_failed_before_completion",
+    responseStatus: "Call failed before completion",
+    voiceNotes: "provider details",
+  }, {
+    appsScriptPost: async () => ({ data: { ok: true, fieldsWritten: ["AH:callResult", "J:responseStatus"] } }),
+    directSheetUpdate: async (rowNumber, payload) => {
+      directCalls.push({ rowNumber, callResult: payload.callResult, responseStatus: payload.responseStatus });
+      return ["AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for"];
+    },
+  });
+
+  assert.deepEqual(directCalls, [{
+    rowNumber: 5965,
+    callResult: "call_failed_before_completion",
+    responseStatus: undefined,
+  }]);
+});
+
+test("accepted terminal call failure with complete scheduling proof does not run direct reconciliation", async () => {
+  const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
+  let directCallCount = 0;
+
+  await postSheetUpdate({
+    rowNumber: 5965,
+    callAttemptNumber: 1,
+    callResult: "call_failed_before_completion",
+  }, {
+    appsScriptPost: async () => ({ data: { ok: true, fieldsWritten: [
+      "AH:callResult", "AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for",
+    ] } }),
+    directSheetUpdate: async () => {
+      directCallCount += 1;
+      return [];
+    },
+  });
+
+  assert.equal(directCallCount, 0);
+});

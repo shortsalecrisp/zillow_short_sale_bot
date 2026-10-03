@@ -1089,7 +1089,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     }
     const question = normalizeText(item.message);
     if (
-      !/\b(?:would you like|do you want|do you need|anything else i can assist|specific questions|something you'd like|any part|you need)\b/.test(
+      !/\b(?:would you like|do you want|do you need|anything else i can assist|specific questions|something you'd like|any part|you need|need help)\b/.test(
         question,
       ) ||
       !/\b(?:help|assist|details|questions|services?)\b/.test(question)
