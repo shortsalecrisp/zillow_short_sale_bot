@@ -3920,6 +3920,12 @@ def _mark_initial_sms_sent(
     return ts
 
 
+def _initial_sms_message_id(row_idx: int, message: str, phone: str, *, force_resend: bool) -> str:
+    identity = f"{message}|{phone}" if force_resend else message
+    message_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"initial-{row_idx}-{message_hash}"
+
+
 def _enqueue_initial_sms_via_tasker_outbox(
     *,
     row_idx: int,
@@ -3927,11 +3933,11 @@ def _enqueue_initial_sms_via_tasker_outbox(
     message: str,
     mark_codex_verified: bool,
     stable_id: str = "",
+    force_resend: bool = False,
 ) -> Dict[str, Any]:
     if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
         raise HTTPException(status_code=503, detail="tasker_outbox_not_configured")
-    message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
-    message_id = f"initial-{row_idx}-{message_hash}"
+    message_id = _initial_sms_message_id(row_idx, message, phone, force_resend=force_resend)
     stable_id = str(stable_id or "").strip()
     try:
         response = requests.post(
@@ -4241,6 +4247,7 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         message=message,
         mark_codex_verified=mark_codex_verified,
         stable_id=stable_id,
+        force_resend=force_resend,
     )
     logger.info(
         "INTERNAL_INITIAL_SMS_QUEUED row=%s phone=%s stable_id=%s request_id=%s message_id=%s codex_verified=%s",

@@ -78,6 +78,7 @@ class FakeSender:
     def __init__(self, result):
         self.result = result
         self.calls = []
+        self.force_resends = []
 
     def send_with_diagnostics(self, to, message, sms_type, row_idx=None, attempt=None):
         self.calls.append(
@@ -354,7 +355,8 @@ def _import_webhook_server(monkeypatch, *, sender_result):
 
     sys.modules.pop("webhook_server", None)
     module = importlib.import_module("webhook_server")
-    def fake_enqueue_initial_sms(*, row_idx, phone, message, mark_codex_verified, stable_id=""):
+    def fake_enqueue_initial_sms(*, row_idx, phone, message, mark_codex_verified, stable_id="", force_resend=False):
+        fake_sender.force_resends.append(force_resend)
         call = {
             "to": phone,
             "message": message,
@@ -573,8 +575,34 @@ def test_internal_initial_sms_force_resend_allows_already_sent_row(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "queued"
     assert sender.calls[0]["row_idx"] == 14
+    assert sender.force_resends == [True]
     assert sheet.rows[14][7] == "x"
     assert sheet.rows[14][42] == ""
+
+
+def test_force_resend_message_id_is_distinct_per_phone(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    message = APPROVED_OPENER.format(first="Alex", address="123 Main")
+    old_phone = "15551112212"
+    corrected_phone = "15552223333"
+
+    original_id = module._initial_sms_message_id(12, message, old_phone, force_resend=False)
+    assert original_id == module._initial_sms_message_id(
+        12, message, corrected_phone, force_resend=False
+    )
+    corrected_id = module._initial_sms_message_id(
+        12, message, corrected_phone, force_resend=True
+    )
+    assert corrected_id != original_id
+    assert corrected_id != module._initial_sms_message_id(
+        12, message, old_phone, force_resend=True
+    )
+    assert corrected_id == module._initial_sms_message_id(
+        12, message, corrected_phone, force_resend=True
+    )
 
 
 def test_internal_initial_sms_returns_already_verified_without_sending(monkeypatch):
