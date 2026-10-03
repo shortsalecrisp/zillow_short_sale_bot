@@ -28,11 +28,12 @@ def _source_sms_template(name):
 APPROVED_OPENER = json.loads((ROOT / "tests/fixtures/sms_approved_opener.json").read_text())["template"]
 
 
-def test_final_opener_is_exact_and_followup_is_unchanged():
+def test_final_opener_is_exact_and_followup_preannounces_maya_truthfully():
     assert _source_sms_template("SMS_TEMPLATE") == APPROVED_OPENER
     assert _source_sms_template("SMS_FU_TEMPLATE") == (
-        "Hey, just wanted to follow up on my message from earlier. "
-        "Let me know if I can help with anything\u2014happy to connect whenever works for you!"
+        "Following up on {address}: I can help with short-sale lender paperwork. "
+        "Maya, my automated assistant, may call from 217-634-1017. "
+        "Prefer email or a call with Yoni? For a call, send a day, time and time zone."
     )
 
 

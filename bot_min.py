@@ -547,9 +547,11 @@ SMS_TEMPLATE      = (
     "yourself, or do you already have help?"
 )
 SMS_FU_TEMPLATE   = (
-    "Hey, just wanted to follow up on my message from earlier. "
-    "Let me know if I can help with anything—happy to connect whenever works for you!"
+    "Following up on {address}: I can help with short-sale lender paperwork. "
+    "Maya, my automated assistant, may call from 217-634-1017. "
+    "Prefer email or a call with Yoni? For a call, send a day, time and time zone."
 )
+SMS_FU_POLICY_VERSION = "maya-caller-recognition-human-choice-20261003"
 SMS_RETRY_ATTEMPTS = 3  # initial attempt + up to 2 retries for AutoRemote reliability
 # A due follow-up pass can contain dozens of rows. AutoRemote accepts those
 # pushes faster than Tasker can execute them, which can fill Tasker's run queue
@@ -12824,7 +12826,12 @@ def send_sms(
         return
     if SMS_TEST_MODE and SMS_TEST_NUMBER:
         phone = SMS_TEST_NUMBER
-    msg_txt = SMS_FU_TEMPLATE if follow_up else SMS_TEMPLATE.format(first=first, address=address)
+    msg_txt = (
+        SMS_FU_TEMPLATE.format(address=address or "your listing")
+        if follow_up else SMS_TEMPLATE.format(first=first, address=address)
+    )
+    if follow_up:
+        LOG.info("FOLLOWUP_SMS_POLICY row=%s version=%s", row_idx, SMS_FU_POLICY_VERSION)
     digits = _digits_only(phone)
     stable_id = str(stable_id or "").strip()
     if not follow_up:

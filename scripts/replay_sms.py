@@ -107,7 +107,7 @@ def _send_sms(phone: str, message: str, *, dry_run: bool, sms_type: str) -> None
 
 def _format_message(kind: str, first: str, address: str) -> str:
     if kind == "follow_up":
-        return SMS_FU_TEMPLATE
+        return SMS_FU_TEMPLATE.format(address=address or "your listing")
     return SMS_TEMPLATE.format(first=first, address=address)
 
 
