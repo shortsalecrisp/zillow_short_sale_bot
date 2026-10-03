@@ -1,0 +1,67 @@
+--- a/apps_script/sms_chatbot.js
++++ b/apps_script/sms_chatbot.js
+@@ -2854,9 +2854,64 @@
+   }, t, receivedAt);
+ }
+ 
++function buildVoiceFollowupChoiceDecisionV1_(text, rowObj, receivedAt) {
++  const outbound = String(rowObj && rowObj[HEADERS.last_outbound_text] || "");
++  if (outbound.indexOf("Maya, my automated assistant, may call from 217-634-1017.") === -1 ||
++      outbound.indexOf("Prefer email or a call with Yoni?") === -1) return null;
++  const t = normalizeWhitespace_(String(text || "")).toLowerCase();
++  const base = {matched: true, lead_status: "Y", conversation_done: false,
++    handoff_needed: false, needs_review: false, block_reply: false,
++    callback_requested: "no", call_booking_status: "interested_no_call"};
++  if (/^(?:please\s+)?(?:stop|unsubscribe|remove me)[.!?]*$/.test(t)) {
++    return Object.assign({}, base, {reply_text: "Understood. I won't contact you again.",
++      lead_status: "R", conversation_done: true, call_booking_status: "closed_no_interest",
++      reason: "Opt-out after voice follow-up invitation"});
++  }
++  if (/^(?:please\s+)?(?:e-?mail)(?:\s+(?:please|only|me|instead|is (?:best|better)))?[.!?]*$/.test(t) ||
++      isEmailRequestSignal_(t) || extractEmailAddress_(t)) {
++    return Object.assign({}, base, buildInfoRequestDecisionV4_("email me " + text, rowObj), {
++      callback_requested: "no", call_booking_status: "interested_no_call"});
++  }
++  const humanRequested = /\b(?:yoni|human|real person)\b/.test(t) &&
++    /\b(?:call|speak|talk|prefer|rather|instead|monday|tuesday|wednesday|thursday|friday|tomorrow|today)\b/.test(t);
++  const noCalls = /\b(?:no|not|don't|dont|do not)\b.{0,25}\b(?:calls?|calling|bots?|robots?|automated|maya)\b/.test(t);
++  if ((noCalls && !humanRequested) || /\b(?:text|sms)(?:ing)?\s+only\b/.test(t)) {
++    return Object.assign({}, base, {reply_text: "Understood, no automated calls. We can continue by text or email.",
++      reason: "Agent declined automated calls after invitation; preserve written-only contact"});
++  }
++  // Keep substantive questions on their existing answer-plus-handoff path.
++  if (isPaymentOrFeeQuestionSignal_(t) || /\?/.test(t) &&
++      !/\b(?:who is maya|is maya)\b/.test(t)) return null;
++  const onlyTiming = /^(?:(?:please|yoni|call(?: me)?|on|at|after|around|about)\s+)*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|next week|\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)|\d{1,2}:\d{2})\b/.test(t);
++  const callbackChoice = humanRequested || onlyTiming || /^(?:a\s+)?(?:phone\s+)?call(?:\s+(?:please|me|with yoni))?[.!?]*$/.test(t);
++  if (callbackChoice && !/\b(?:if|maybe|not sure|don't|do not|cant|can't|cannot)\b/.test(t)) {
++    const hasTiming = /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|next week|\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm))\b/.test(t);
++    return Object.assign({}, base, {
++      reply_text: hasTiming ? "Thanks. I've passed your preferred time to Yoni to confirm." :
++        "Sure. What day, time and time zone work for a call with Yoni?",
++      callback_requested: "yes", callback_time: hasTiming ? normalizeWhitespace_(String(text)) : "",
++      call_booking_status: hasTiming ? "scheduled_callback" : "interested_no_call",
++      handoff_needed: true, send_reply_before_handoff: true,
++      handoff_type: "REQUESTED HUMAN CALLBACK - CONFIRM AVAILABILITY",
++      reason: "Agent chose a human call after Maya invitation; Yoni must confirm timing, not an automated appointment"
++    });
++  }
++  if (/\bwho\b.{0,20}\bmaya\b/.test(t) || /\bis maya\b.{0,25}\b(?:bot|ai|automated)\b/.test(t)) {
++    return Object.assign({}, base, {reply_text: "Maya is our automated phone assistant for short-sale questions. You can request a call with Yoni instead, or keep this to text or email.",
++      reason: "Truthfully explained Maya and preserved channel choice without booking a call"});
++  }
++  if (/^(?:yes|sure|ok|okay)[.!?]*$/.test(t)) {
++    return Object.assign({}, base, {reply_text: "Do you prefer email, or a call with Yoni?",
++      reason: "Vague agreement after channel invitation needs a preference, not assumed callback consent"});
++  }
++  return null;
++}
++
+ function applyFastRules_(text, rowObj, receivedAt) {
+   const t = normalizeWhitespace_(String(text || "").toLowerCase());
+   const lastOutbound = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || ""));
++  const voiceChoice = buildVoiceFollowupChoiceDecisionV1_(text, rowObj, receivedAt);
++  if (voiceChoice) return voiceChoice;
+ 
+   if (isCourtesyInformationAcknowledgmentSignal_(t)) {
+     return {
