@@ -16,6 +16,7 @@ const LISTING_TIME_ZONE_DATA = listingTimeZoneData as {
   zones: string[];
   cities: Record<string, number>;
   zips: Record<string, string[]>;
+  aliases: Record<string, string>;
 };
 
 const LISTING_STATE_NAMES: Record<string, string> = {
@@ -64,6 +65,11 @@ function listingTimeZoneUnresolved(reason: string): ListingTimeZoneResolution {
   return { timeZone: "", reason, source: "unresolved" };
 }
 
+function listingCanonicalCityKey(state: string, city: string): string {
+  const key = state + "|" + city;
+  return LISTING_TIME_ZONE_DATA.aliases[key] || key;
+}
+
 function findListingCitySuffix(addressPrefix: string, state: string): string {
   const tokens = normalizeListingCity(addressPrefix).split(" ");
   for (let length = Math.min(8, tokens.length); length >= 1; length -= 1) {
@@ -96,13 +102,16 @@ export function resolveListingTimeZone(input: ListingTimeZoneInput): ListingTime
   // A known city suffix supports full addresses in E without mistaking the street for a city.
   if (suffix && addressState && state) {
     const addressCity = findListingCitySuffix(address.slice(0, suffix.index), state);
-    if (city && addressCity && city !== addressCity) return listingTimeZoneUnresolved("listing_city_conflict");
+    if (city && addressCity && listingCanonicalCityKey(state, city) !== listingCanonicalCityKey(state, addressCity)) {
+      return listingTimeZoneUnresolved("listing_city_conflict");
+    }
     city = city || addressCity;
   }
 
   let source: ListingTimeZoneResolution["source"] = "city_consensus";
   if (zipCities) {
-    const matching = zipCities.filter((key) => (!state || key.startsWith(state + "|")) && (!city || key.split("|")[1] === city));
+    const matching = zipCities.filter((key) => (!state || key.startsWith(state + "|")) &&
+      (!city || (state ? key === listingCanonicalCityKey(state, city) : key.split("|")[1] === city)));
     if (!matching.length) return listingTimeZoneUnresolved("listing_zip_conflict");
     if (!city || !state) {
       if (matching.length !== 1) return listingTimeZoneUnresolved("ambiguous_listing_zip_city");

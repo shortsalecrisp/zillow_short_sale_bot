@@ -69,6 +69,12 @@ for (const [key, entry] of [...cities].sort(([a], [b]) => a.localeCompare(b, "en
   const found = [...entry.zones];
   cityOutput[key] = !entry.hasAccuratePoint ? -2 : found.length === 1 && allowedZones.has(found[0]) ? zones.indexOf(found[0]) : -1;
 }
+// Vetted postal alias absent from GeoNames; see provenance for official geographic evidence.
+const aliases = { "FL|POINCIANA": "FL|KISSIMMEE" };
+for (const [alias, canonical] of Object.entries(aliases)) {
+  if (!(cityOutput[canonical] >= 0)) throw new Error("Vetted alias target no longer has unanimous timezone evidence: " + canonical);
+  cityOutput[alias] = cityOutput[canonical];
+}
 const output = {
   metadata: {
     schemaVersion: 1,
@@ -80,11 +86,12 @@ const output = {
     boundarySampleKm: [5, 15],
     acceptedCoordinateAccuracy: "At least one >=4; all finite point coordinates and boundary samples must agree",
     rows,
-    cityCount: cities.size,
+    cityCount: Object.keys(cityOutput).length,
     resolvedCityCount: Object.values(cityOutput).filter((value) => value >= 0).length,
     licenses: ["GeoNames CC BY 4.0", "geo-tz MIT", "timezone-boundary-builder ODbL 1.0"],
   },
   zones,
+  aliases,
   cities: cityOutput,
   zips: Object.fromEntries([...zips].sort(([a], [b]) => a.localeCompare(b, "en")).map(([zip, keys]) => [zip, [...keys].sort()])),
 };

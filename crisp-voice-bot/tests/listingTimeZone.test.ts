@@ -10,6 +10,7 @@ const cases: [string, string, string][] = [
   ["Pensacola", "FL", "America/Chicago"], ["Orlando", "FL", "America/New_York"],
   ["Miami", "FL", "America/New_York"], ["Indianapolis", "IN", "America/New_York"],
   ["Fort Worth", "TX", "America/Chicago"],
+  ["Poinciana", "FL", "America/New_York"],
   ["Nashville", "TN", "America/Chicago"], ["Knoxville", "TN", "America/New_York"],
   ["El Paso", "TX", "America/Denver"], ["Dallas", "TX", "America/Chicago"],
   ["Boise", "ID", "America/Denver"], ["Coeur d'Alene", "ID", "America/Los_Angeles"],
@@ -53,6 +54,16 @@ test("ZIP identifies a consensus city, never overrides a boundary or uncertain c
   assert.equal(resolveListingTimeZone({ city: "Tuba City", state: "AZ", streetAddress: "123 Main St AZ 86045" }).timeZone, "");
   assert.equal(resolveListingTimeZone({ city: "West Wendover", state: "NV" }).reason, "ambiguous_listing_city_timezone");
   assert.equal(resolveListingTimeZone({ city: "Adak", state: "AK" }).reason, "insufficient_listing_city_coordinates");
+});
+
+test("vetted Poinciana postal alias resolves the exact held listing without a state fallback", () => {
+  for (const streetAddress of ["326 Bowfin Court", "326 Bowfin Court, Poinciana, FL 34759", "326 Bowfin Court, Kissimmee, FL 34759"]) {
+    assert.deepEqual(resolveListingTimeZone({ streetAddress, city: "Poinciana", state: "FL" }), {
+      timeZone: "America/New_York", reason: "", source: "city_consensus",
+    });
+  }
+  assert.equal(resolveListingTimeZone({ streetAddress: "326 Bowfin Court FL 32501", city: "Poinciana", state: "FL" }).reason, "listing_zip_conflict");
+  assert.equal(resolveListingTimeZone({ state: "FL" }).timeZone, "");
 });
 
 test("missing, conflicting, invalid, and unknown split-state evidence fails closed", () => {

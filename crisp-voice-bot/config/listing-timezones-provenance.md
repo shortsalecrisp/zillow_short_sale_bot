@@ -53,6 +53,26 @@ estimated coordinates, same-named cities, reservation boundaries, and changed
 time-zone rules remain limitations. Treat this as bounded postal-city consensus;
 hold/confirm the actual listing location whenever contrary evidence is known.
 
+## Vetted Postal Alias: Poinciana
+
+Verified 2026-10-03: `FL|POINCIANA` aliases the already resolved postal city
+`FL|KISSIMMEE`. This is a named-city alias, not a Florida-wide fallback.
+The exact pending listing was verified offline as 326 Bowfin Court, Poinciana FL.
+The current public listing confirms ZIP 34759 and Polk County:
+https://www.coldwellbankerhomes.com/fl/poinciana/326-bowfin-ct/pid_74056652/
+Florida Department of State identifies Poinciana in Polk and Osceola counties:
+https://dos.fl.gov/library-archives/research/florida-information/government/local-resources/citycounty-list/
+The official Poinciana Community Development District confirms its Polk County
+location and Poinciana FL 34759 address: https://poincianacdd.org/
+FDOT's 2026 airport directory, printed page 161, shows this peninsula area in
+Eastern time, well away from the panhandle Central/Eastern boundary:
+https://fdotwww.blob.core.windows.net/sitefinity/docs/default-source/aviation/2026_fl_airport_directory.pdf
+GeoNames stores both 34758 and 34759 as Kissimmee with accuracy-4 coordinates;
+all Kissimmee points and boundary samples agree on America/New_York. The
+generator refuses the alias if that canonical-city consensus becomes unresolved.
+Explicit contradictory ZIP or state evidence still fails closed. No CRM data
+was changed, and no exact property address is added to the runtime database.
+
 ## Rebuild
 
 Download and retain the public US.zip source, extract US.txt, and install
