@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { applyConversationOpeningWorkflow, OPENING_LISTENER_PROMPT } from "../src/lib/elevenLabsOpeningWorkflow";
+import { applyConversationOpeningWorkflow, buildOpeningListenerPrompt, OPENING_LISTENER_PROMPT } from "../src/lib/elevenLabsOpeningWorkflow";
+import { OPENING_HANDOFF_POLICY, VOICE_NEEDS_QUESTION, VOICE_OPENING_SCRIPT, VOICE_SCREENING_SCRIPT } from "../src/lib/elevenLabsConversationPolicy";
 
 const base = () => ({ conversation_config: { agent: { first_message: "", prompt: { prompt: "Sales context" } },
   tts: { voice_id: "unchanged", speed: 0.95 } }, workflow: { nodes: {
@@ -15,7 +16,7 @@ test("opening gets a separate wait-first prompt without changing the sales promp
   assert.deepEqual(before, copy);
   assert.equal(after.workflow.edges.start_to_main.target, "opening_listener");
   assert.equal(after.workflow.nodes.opening_listener.entry_behavior, "wait_for_user");
-  assert.equal(after.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt, OPENING_LISTENER_PROMPT);
+  assert.equal(after.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt, buildOpeningListenerPrompt("Sales context"));
   assert.equal(after.conversation_config.agent.prompt.prompt, "Sales context");
   assert.deepEqual(after.conversation_config.tts, before.conversation_config.tts);
   assert.equal(after.workflow.nodes.main_conversation.entry_behavior, "generate_immediately");
@@ -31,8 +32,10 @@ test("a current question routes to main, while an old pickup cannot trigger qual
   assert.match(condition, /LIVE person/);
   assert.match(condition, /NEW live caller turn arrived AFTER/);
   assert.match(condition, /A greeting before the introduction does not qualify/);
-  assert.match(OPENING_LISTENER_PROMPT, /Never qualify the listing, add to the exact listing-agent check/);
-  assert.match(OPENING_LISTENER_PROMPT, /Are you the listing agent for the short sale at \{\{streetAddress\}\}\?/);
+  assert.match(OPENING_LISTENER_PROMPT, /During the initial greeting, before a NEW live caller reply after the introduction, do not qualify the listing/);
+  assert.match(OPENING_LISTENER_PROMPT, /Once that new reply arrives, the shared business policy and opening handoff contract govern the next response even if this node remains active/);
+  assert.doesNotMatch(OPENING_LISTENER_PROMPT, /Never qualify[^\n]+in this stage/);
+  assert.match(OPENING_LISTENER_PROMPT, /We help with short-sale lender paperwork\. Is \{\{streetAddress\}\} your listing\?/);
   assert.match(OPENING_LISTENER_PROMPT, /If the only new transcript is "\.\.\."/);
   assert.match(OPENING_LISTENER_PROMPT, /never say "Are you there\?"/);
   assert.doesNotMatch(OPENING_LISTENER_PROMPT, /\{\{openerScript\}\}/);
@@ -40,9 +43,10 @@ test("a current question routes to main, while an old pickup cannot trigger qual
 
 test("the live opener is identical in the listener and main prompts", () => {
   const mainPrompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8");
-  const opener = "Hi, this is {{assistantName}} with Crisp Short Sales. Are you the listing agent for the short sale at {{streetAddress}}?";
-  assert.ok(OPENING_LISTENER_PROMPT.includes(`"${opener}"`));
-  assert.ok(mainPrompt.includes(`"${opener}"`));
+  assert.ok(OPENING_LISTENER_PROMPT.includes(`"${VOICE_OPENING_SCRIPT}"`));
+  assert.ok(mainPrompt.includes(`"${VOICE_OPENING_SCRIPT}"`));
+  assert.ok(mainPrompt.includes(`"${VOICE_NEEDS_QUESTION}"`));
+  assert.ok(mainPrompt.includes(`"${VOICE_SCREENING_SCRIPT}"`));
   assert.match(OPENING_LISTENER_PROMPT, /Do not speak before the recipient finishes their pickup/);
 });
 
@@ -68,5 +72,49 @@ test("opening application is idempotent and refuses a fixed greeting or unknown 
   const fixed = base(); fixed.conversation_config.agent.first_message = "Premature intro";
   assert.throws(() => applyConversationOpeningWorkflow(fixed), /Listen-first/);
   assert.throws(() => applyConversationOpeningWorkflow({}), /Verified start/);
+  assert.throws(() => buildOpeningListenerPrompt(""), /Full main conversation prompt/);
   assert.throws(() => applyConversationOpeningWorkflow({ ...base(), workflow: { ...base().workflow, subgraphs: { nested: {} } } }), /Nested workflow/);
+});
+
+test("the executed start node retains the full business policy if its model-selected transition is late", () => {
+  const mainPrompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8").split("## Prompt\n")[1].trim();
+  const input = base(); input.conversation_config.agent.prompt.prompt = mainPrompt;
+  const after = applyConversationOpeningWorkflow(input);
+  const node = after.workflow.nodes[after.workflow.edges.start_to_main.target];
+  const effectivePrompt = node.conversation_config.agent.prompt.prompt;
+  assert.ok(effectivePrompt.startsWith(mainPrompt + "\n\n"), "First node must have every current business rule, not a stranded intro-only override");
+  assert.ok(effectivePrompt.includes(OPENING_HANDOFF_POLICY));
+  assert.ok(effectivePrompt.includes(VOICE_NEEDS_QUESTION));
+  assert.match(effectivePrompt, /if routing is delayed, apply that same policy here/);
+  assert.match(effectivePrompt, /listing ownership only, not interest in help, a callback, or a live transfer/);
+  assert.doesNotMatch(effectivePrompt, /Has the seller already completed|Is it okay if I ask one quick question/);
+  for (const heading of ["Listening and repair", "Live admins and wrong contacts", "Information request", "Live transfer request", "Contact preferences and endings"]) {
+    assert.ok(effectivePrompt.includes("# " + heading), heading);
+  }
+  // These are resolved runtime configuration contracts, not simulated LLM turns.
+  assert.equal(node.entry_behavior, "wait_for_user");
+  assert.equal(after.workflow.nodes.main_conversation.entry_behavior, "generate_immediately");
+});
+
+test("updating an existing opening preserves terminal guards and tool bindings", () => {
+  const before: any = applyConversationOpeningWorkflow(base());
+  before.workflow.nodes.opening_listener.edge_order.unshift("terminal_contact_from_opening_listener", "terminal_guard_from_opening_listener");
+  before.workflow.edges.terminal_contact_from_opening_listener = { source: "opening_listener", target: "terminal_contact", forward_condition: { condition: "Explicit opt-out first" } };
+  before.workflow.edges.terminal_guard_from_opening_listener = { source: "opening_listener", target: "terminal_guard", forward_condition: { condition: "Validate ending" } };
+  const agent = before.workflow.nodes.opening_listener.conversation_config.agent;
+  agent.prompt.tool_ids = ["verified-contact-tool"];
+  agent.prompt.prompt = "STALE LONG OPENING";
+  agent.prompt.built_in_tools.skip_turn = { name: "skip_turn", params: { wait_timeout_secs: -1 } };
+  before.workflow.nodes.main_conversation.additional_prompt = "Existing terminal pending-question recovery.";
+  const copy = structuredClone(before), after = applyConversationOpeningWorkflow(before);
+  assert.deepEqual(before, copy);
+  assert.deepEqual(after.workflow.nodes.opening_listener.edge_order.slice(0, 2), ["terminal_contact_from_opening_listener", "terminal_guard_from_opening_listener"]);
+  assert.deepEqual(after.workflow.edges.terminal_contact_from_opening_listener, before.workflow.edges.terminal_contact_from_opening_listener);
+  assert.deepEqual(after.workflow.edges.terminal_guard_from_opening_listener, before.workflow.edges.terminal_guard_from_opening_listener);
+  assert.deepEqual(after.workflow.nodes.opening_listener.conversation_config.agent.prompt.tool_ids, ["verified-contact-tool"]);
+  assert.deepEqual(after.workflow.nodes.opening_listener.conversation_config.agent.prompt.built_in_tools.skip_turn, agent.prompt.built_in_tools.skip_turn);
+  assert.equal(after.workflow.nodes.opening_listener.conversation_config.agent.prompt.built_in_tools.end_call, null);
+  assert.match(after.workflow.nodes.main_conversation.additional_prompt, /^Existing terminal pending-question recovery\./);
+  assert.doesNotMatch(after.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt, /STALE LONG OPENING/);
+  assert.deepEqual(applyConversationOpeningWorkflow(after), after);
 });

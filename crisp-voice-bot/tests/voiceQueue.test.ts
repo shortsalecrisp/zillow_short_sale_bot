@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getVoiceBotFirstAttemptWindowName } from "../src/lib/voiceSheet";
 
 process.env.BASE_URL = "https://example.com";
 process.env.TELNYX_API_KEY = "test";
@@ -8,11 +9,18 @@ process.env.TELNYX_CONNECTION_ID = "test";
 process.env.TELNYX_OUTBOUND_VOICE_PROFILE_ID = "test";
 process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 
+let nextFixturePhone = 21_755_50200;
+function fixturePhone(window = "reach_afternoon_v1") {
+  let phone: string;
+  do { phone = `+1${nextFixturePhone++}`; } while (getVoiceBotFirstAttemptWindowName(phone) !== window);
+  return phone;
+}
+
 function row(followupSentAt: string, options: { call1SentAt?: string; call1Result?: string } = {}): unknown[] {
   const values = Array(42).fill("");
   values[0] = "Test";
   values[1] = "Agent";
-  values[2] = "603-325-5909";
+  values[2] = fixturePhone();
   values[4] = "20 Pearl Street";
   values[5] = "Hillsboro";
   values[6] = "NH";
@@ -40,21 +48,21 @@ test("Render queue prioritizes first calls, then oldest due time", async () => {
       {
         rowNumber: 6001,
         values: row("", {
-          call1SentAt: "2026-08-23T13:15:00Z",
+          call1SentAt: "2026-08-20T13:15:00Z",
           call1Result: "agent_not_available",
         }),
       },
-      { rowNumber: 6002, values: row("2026-08-24T13:30:00Z") },
+      { rowNumber: 6002, values: row("2026-08-24T19:05:00Z") },
       { rowNumber: 6003, values: row("2026-08-23T22:45:00Z") },
     ],
-    new Date("2026-08-24T18:45:00Z"),
+    new Date("2026-08-24T19:30:00Z"),
     10,
   );
 
   assert.deepEqual(candidates.map((candidate) => candidate.rowNumber), [6003, 6002, 6001]);
   assert.deepEqual(candidates.map((candidate) => candidate.callAttemptNumber), [1, 1, 2]);
-  assert.equal(candidates[0].dueAt.toISOString(), "2026-08-24T13:00:00.000Z");
-  assert.equal(candidates[1].dueAt.toISOString(), "2026-08-24T13:30:00.000Z");
+  assert.equal(candidates[0].dueAt.toISOString(), "2026-08-24T19:00:00.000Z");
+  assert.equal(candidates[1].dueAt.toISOString(), "2026-08-24T19:05:00.000Z");
 });
 
 test("Render queue starts one morning call but keeps two mid-afternoon slots available", async () => {
@@ -64,14 +72,16 @@ test("Render queue starts one morning call but keeps two mid-afternoon slots ava
     { rowNumber: 6102, values: row("2026-08-23T13:15:00-04:00") },
     { rowNumber: 6103, values: row("2026-08-23T13:16:00-04:00") },
   ];
+  for (const item of rows) item.values[2] = fixturePhone("reach_morning_v1");
 
   assert.deepEqual(
-    getVoiceBotStartableCallCandidatesFromRows(rows, new Date("2026-08-24T13:45:00Z"), 10, 2)
+    getVoiceBotStartableCallCandidatesFromRows(rows, new Date("2026-08-24T13:30:00Z"), 10, 2)
       .map((candidate) => candidate.rowNumber),
     [6101],
   );
+  for (const item of rows) item.values[2] = fixturePhone();
   assert.deepEqual(
-    getVoiceBotStartableCallCandidatesFromRows(rows, new Date("2026-08-24T18:45:00Z"), 10, 2)
+    getVoiceBotStartableCallCandidatesFromRows(rows, new Date("2026-08-24T19:30:00Z"), 10, 2)
       .map((candidate) => candidate.rowNumber),
     [6101, 6102],
   );
@@ -100,7 +110,7 @@ test("Render queue prioritizes an overdue scheduled no-start until the attempt i
         }),
       },
     ],
-    new Date("2026-09-26T18:45:00.000Z"),
+    new Date("2026-09-28T19:15:00.000Z"),
     10,
   );
 
@@ -116,7 +126,7 @@ test("a stale first-attempt timestamp with no result receives exactly one bounde
     call1SentAt: "2026-09-27T18:15:00.000Z",
     scheduledFor: "2026-09-27T18:00:00.000Z",
   });
-  const now = new Date("2026-09-28T13:45:00.000Z");
+  const now = new Date("2026-09-28T13:30:00.000Z");
   assert.equal(isStaleVoiceBotStartWithoutReceipt(values[32], values[33], now), true);
   assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now)?.callAttemptNumber, 2);
   values[39] = "2026-09-28T18:46:00.000Z";
@@ -148,4 +158,35 @@ test("uncertain call starts remain paused and carry a durable provider receipt k
 
   assert.deepEqual(parseVoiceCallStartUncertainMarker(values[41]), marker);
   assert.equal(getVoiceBotCallCandidateFromRowValues(5939, values, new Date("2026-10-02T15:00:00Z")), undefined);
+});
+
+test("phone-scoped guards preserve no-call preferences and prevent duplicate-listing resets", async () => {
+  const { getVoiceBotCallCandidatesFromRows } = await import("../src/lib/voiceQueue");
+  const now = new Date("2026-10-05T19:15:00Z");
+  const first = row("2026-10-02T21:00:00Z");
+  const duplicate = row("2026-10-02T21:00:00Z");
+  duplicate[2] = first[2];
+  const rows = [{ rowNumber: 6001, values: first }, { rowNumber: 6002, values: duplicate }];
+  assert.deepEqual(getVoiceBotCallCandidatesFromRows(rows, now, 10).map((item) => item.rowNumber), [6001]);
+  duplicate[10] = "Y";
+  assert.equal(getVoiceBotCallCandidatesFromRows(rows, now, 10).length, 0);
+  duplicate[10] = "";
+  duplicate[33] = "contact_request_review";
+  assert.equal(getVoiceBotCallCandidatesFromRows(rows, now, 10).length, 0);
+  duplicate[33] = "voicemail_left";
+  duplicate[32] = "2026-10-01T13:30:00Z";
+  assert.deepEqual(getVoiceBotCallCandidatesFromRows(rows, now, 10).map((item) => [item.rowNumber, item.callAttemptNumber]), [[6002, 2]]);
+  duplicate[39] = "2026-10-05T19:10:00Z";
+  duplicate[40] = "voicemail_left";
+  assert.equal(getVoiceBotCallCandidatesFromRows(rows, now, 10).length, 0);
+});
+
+test("unknown listing timezone fails closed and legacy AF is realigned", async () => {
+  const { getVoiceBotCallCandidateFromRowValues } = await import("../src/lib/voiceQueue");
+  const values = scheduledRow("2026-10-05T13:00:00Z", { scheduledFor: "2026-10-05T18:00:00Z" });
+  assert.equal(getVoiceBotCallCandidateFromRowValues(6001, values, new Date("2026-10-05T18:15:00Z")), undefined);
+  assert.equal(getVoiceBotCallCandidateFromRowValues(6001, values, new Date("2026-10-05T19:15:00Z"))?.dueAt.toISOString(), "2026-10-05T19:00:00.000Z");
+  values[5] = "Unknown";
+  values[6] = "FL";
+  assert.equal(getVoiceBotCallCandidateFromRowValues(6001, values, new Date("2026-10-05T19:15:00Z")), undefined);
 });

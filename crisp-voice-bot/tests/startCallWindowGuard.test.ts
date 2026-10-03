@@ -14,7 +14,7 @@ test("blocks unknown queue windows before dialing", () => {
 
   assert.equal(
     reason,
-    "scheduledWindow must be one of morning_probe, mid_afternoon",
+    "scheduledWindow must be one of morning_probe, mid_afternoon, reach_morning_v1, reach_afternoon_v1",
   );
 });
 
@@ -27,7 +27,7 @@ test("blocks removed late-afternoon control window before dialing", () => {
     new Date("2026-06-23T19:30:00Z"),
   );
 
-  assert.equal(reason, "scheduledWindow must be one of morning_probe, mid_afternoon");
+  assert.equal(reason, "scheduledWindow must be one of morning_probe, mid_afternoon, reach_morning_v1, reach_afternoon_v1");
 });
 
 test("allows 9-10 a.m. and 2-4 p.m. listing-local calls, but blocks the boundaries", () => {
@@ -64,7 +64,7 @@ test("allows 9-10 a.m. and 2-4 p.m. listing-local calls, but blocks the boundari
       },
       new Date("2026-06-23T18:00:00Z"),
     ),
-    "scheduledWindow must be one of morning_probe, mid_afternoon",
+    "scheduledWindow must be one of morning_probe, mid_afternoon, reach_morning_v1, reach_afternoon_v1",
   );
   assert.equal(
     getStartCallWindowBlockReason(

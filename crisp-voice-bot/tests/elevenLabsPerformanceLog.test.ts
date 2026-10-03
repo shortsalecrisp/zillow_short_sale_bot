@@ -395,3 +395,207 @@ test("voice performance log excludes punctuation-only silence from engagement", 
   assert.equal(parsed.flags.liveAnswered, false);
   assert.equal(parsed.flags.agentRespondedAfterOpeningQuestion, false);
 });
+
+for (const recording of [
+  "Your call has been forwarded to voicemail. Please leave a message after the tone.",
+  "Hello, you've reached Morgan. Leave your name and number and I will call back.",
+  "The mailbox is full and cannot accept messages.",
+  "The voicemail box has not been set up.",
+  "The voice mail box is not initialized.",
+  "Hello, this is Morgan at Example Realty. Please leave your name, phone number, and I'll call back.",
+  "Hi. Sorry I missed your call. If you'll leave me your name and your number, I'll call back.",
+  "Leave a brief message with your name, phone number, and how I can help, and I'll return your call.",
+  "Your voicemail is being transcribed by YouMail.",
+  "Please record your message. When you have finished recording, you may hang up.",
+]) {
+  test(`recorded endpoint is not human contact: ${recording}`, async () => {
+    const result = await measurementLog({ conversation: {
+      metadata: { call_duration_secs: 15, termination_reason: "Client disconnected: 1000" },
+      transcript: [
+        { role: "user", message: recording, time_in_call_secs: 0 },
+        { role: "agent", message: "I'm calling about your short sale listing. Call back when you can.", time_in_call_secs: 8 },
+        { role: "user", message: "Thank you. Goodbye.", time_in_call_secs: 12 },
+      ],
+    } });
+    assert.equal(result.measurementRevision, "contact-evidence-v2");
+    assert.equal(result.rawSignals.hasMeaningfulUserTranscript, true);
+    assert.equal(result.rawSignals.userTurns, 2);
+    assert.equal(result.contactEvidence.category, "voicemail");
+    assert.equal(result.flags.liveAnswered, false);
+    assert.equal(result.flags.humanAnswered, false);
+    assert.equal(result.flags.targetAgentAnswered, false);
+    assert.equal(result.metrics.agentTurns, 0);
+    assert.equal(result.flags.reasonDelivered, false);
+    assert.equal(result.flags.agentRespondedAfterReason, false);
+    assert.equal(result.flags.callbackOrLaterSignal, false);
+    assert.equal(result.flags.earlyHangupUnder20Secs, false);
+    assert.equal(result.flags.hangupBeforeReason, false);
+    assert.equal(result.metrics.avgAgentToAssistantDelaySecs, null);
+  });
+}
+
+test("greeting split across a voicemail recording cannot create human or target identity evidence", async () => {
+  const result = await measurementLog({ conversation: { transcript: [
+    { role: "user", message: "Hello. This is Synthetic Caller." },
+    { role: "user", message: "I can't get to the phone. Please leave a message." },
+  ] } });
+  assert.equal(result.contactEvidence.category, "voicemail");
+  assert.equal(result.flags.humanAnswered, false);
+  assert.equal(result.flags.targetAgentAnswered, false);
+});
+
+test("screening then voicemail and canned thanks never establish engagement", async () => {
+  const result = await measurementLog({ conversation: { transcript: [
+    { role: "user", message: "Record your name and reason for calling. I'll see if this person is available." },
+    { role: "agent", message: "Maya with Crisp Short Sales about the short sale listing." },
+    { role: "user", message: "Thanks. Please stay on the line." },
+    { role: "user", message: "Please leave a message after the beep." },
+  ] } });
+  assert.deepEqual(result.contactEvidence.automatedStages, ["screening", "voicemail"]);
+  assert.equal(result.flags.humanAnswered, false);
+  assert.equal(result.flags.agentRespondedAfterReason, false);
+  assert.equal(result.metrics.agentTurns, 0);
+});
+
+test("Google screening detail questions remain automation until a human pickup", async () => {
+  const result = await measurementLog({ conversation: { transcript: [
+    { role: "user", message: "This is Call Assist by Google. May I ask who's calling?" },
+    { role: "agent", message: "Maya with Crisp Short Sales about the short sale listing." },
+    { role: "user", message: "Can you tell me more about the details?" },
+    { role: "agent", message: "We help with lender paperwork and calls." },
+    { role: "user", message: "I'm checking with the person you called." },
+    { role: "user", message: "Thank you." },
+  ] } });
+  assert.equal(result.contactEvidence.category, "screening");
+  assert.equal(result.flags.humanAnswered, false);
+  assert.equal(result.flags.agentRespondedAfterReason, false);
+});
+
+test("clipped screen announcements and mailbox digits do not become human responses", async () => {
+  for (const tail of ["Thanks, Maya. Please stay on the", "Thanks, Maya. Please-", "I'm sorry, this per-"]) {
+    const result = await measurementLog({ conversation: { transcript: [
+      { role: "agent", message: "Hi, I'm calling about your short sale listing." },
+      { role: "user", message: "... is available." },
+      { role: "agent", message: "Are you handling the short sale paperwork yourself?" },
+      { role: "user", message: "Thanks. Please stay on the line." },
+      { role: "user", message: tail },
+    ] } });
+    assert.equal(result.flags.humanAnswered, false);
+    assert.equal(result.flags.agentRespondedAfterOpeningQuestion, false);
+  }
+  const mailbox = await measurementLog({ conversation: { transcript: [
+    { role: "agent", message: "Hi, I'm calling about your short sale listing." },
+    { role: "user", message: "2025550123." },
+    { role: "user", message: "Nothing has been recorded. Record your message after the tone." },
+  ] } });
+  assert.equal(mailbox.flags.humanAnswered, false);
+  assert.equal(mailbox.metrics.agentTurns, 0);
+});
+
+test("IVR menus and explicit AI receptionists are not human agents", async () => {
+  for (const message of [
+    "Thank you for calling. Press one for sales or two for the directory.",
+    "I'm Morgan's AI assistant. How may I help?",
+  ]) {
+    const result = await measurementLog({ conversation: { transcript: [{ role: "user", message }] } });
+    assert.equal(result.flags.humanAnswered, false);
+    assert.equal(result.flags.liveAnswered, false);
+    assert.notEqual(result.contactEvidence.category, "apparent_human");
+  }
+});
+
+test("greeting-only pickup is apparent human without invented target identity or engagement", async () => {
+  const result = await measurementLog({ conversation: { transcript: [
+    { role: "user", message: "Hello?" },
+    { role: "agent", message: "Hi, I'm calling about your short sale listing." },
+  ] } });
+  assert.equal(result.contactEvidence.category, "apparent_human");
+  assert.equal(result.contactEvidence.greetingOnly, true);
+  assert.equal(result.flags.humanAnswered, true);
+  assert.equal(result.flags.targetAgentAnswered, null);
+  assert.equal(result.flags.agentRespondedAfterReason, false);
+});
+
+test("missing transcript and unresolved speech remain unknown even when provider reports success", async () => {
+  for (const transcript of [undefined, [], [{ role: "user", message: "..." }], [{ role: "user", message: "Mm." }]]) {
+    const result = await measurementLog({ conversation: { analysis: { call_successful: "success" }, transcript } });
+    assert.equal(result.flags.liveAnswered, false);
+    assert.equal(result.flags.humanAnswered, null);
+    assert.equal(result.flags.targetAgentAnswered, null);
+    assert.equal(result.contactEvidence.humanRespondedAfterReason, null);
+    assert.equal(result.rawSignals.providerCallSuccessful, "success");
+    if (transcript === undefined) {
+      assert.equal(result.rawSignals.hasMeaningfulUserTranscript, null);
+      assert.equal(result.metrics.agentTurns, null);
+    }
+  }
+});
+
+test("screener followed by human counts only the human exchange", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Morgan Example" }, conversation: { transcript: [
+    { role: "user", message: "Record your name and reason for calling." },
+    { role: "agent", message: "Maya with Crisp Short Sales about the short sale listing." },
+    { role: "user", message: "Thanks. Please stay on the line." },
+    { role: "user", message: "Hello, this is Morgan." },
+    { role: "agent", message: "Are you handling the short sale paperwork yourself?" },
+    { role: "user", message: "Yes, I am." },
+  ] } });
+  assert.equal(result.contactEvidence.category, "target_agent");
+  assert.equal(result.flags.humanAnswered, true);
+  assert.equal(result.flags.targetAgentAnswered, true);
+  assert.equal(result.metrics.agentTurns, 2);
+  assert.deepEqual(result.contactEvidence.humanTurnIndexes, [3, 5]);
+  assert.equal(result.flags.agentRespondedAfterOpeningQuestion, true);
+});
+
+test("admin contact and subsequent target pickup are tracked separately", async () => {
+  const transcript = [
+    { role: "user", message: "Hello, this is her admin. How can I help?" },
+    { role: "agent", message: "I'm calling about the short sale listing." },
+    { role: "user", message: "Could you repeat the number?" },
+  ];
+  const admin = await measurementLog({ conversation: { transcript } });
+  assert.equal(admin.contactEvidence.category, "human_gatekeeper");
+  assert.equal(admin.flags.humanAnswered, true);
+  assert.equal(admin.flags.humanGatekeeperAnswered, true);
+  assert.equal(admin.flags.targetAgentAnswered, false);
+  const target = await measurementLog({ conversation: { transcript: [
+    ...transcript,
+    { role: "user", message: "I'm the listing agent." },
+  ] } });
+  assert.equal(target.contactEvidence.category, "target_agent");
+  assert.equal(target.flags.humanGatekeeperAnswered, true);
+  assert.equal(target.flags.targetAgentAnswered, true);
+});
+
+test("a different named office responder is not silently counted as the target agent", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Morgan Example" }, conversation: { transcript: [
+    { role: "user", message: "Good morning, thank you for calling Example Realty. This is Alex. How can I help?" },
+    { role: "agent", message: "Maya with Crisp Short Sales about a short sale." },
+    { role: "user", message: "May I take a number?" },
+  ] } });
+  assert.equal(result.contactEvidence.category, "human_gatekeeper");
+  assert.equal(result.flags.targetAgentAnswered, false);
+});
+
+test("a named pickup after a business name is human but its target role remains unknown", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Morgan Example" }, conversation: { transcript: [
+    { role: "user", message: "Example Services, this is Alex speaking. Hello?" },
+    { role: "agent", message: "Maya with Crisp Short Sales about a short sale." },
+  ] } });
+  assert.equal(result.contactEvidence.category, "apparent_human");
+  assert.equal(result.flags.targetAgentAnswered, null);
+});
+
+test("service-first opener measures service and listing question while yes only confirms the listing", async () => {
+  const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: "maya-service-first-recovery-20261003" }, conversation: { transcript: [
+    { role: "user", message: "Hello." },
+    { role: "agent", message: "Hi, this is Maya with Crisp Short Sales. We help with short-sale lender paperwork. Is 123 Fictional Street your listing?" },
+    { role: "user", message: "Yes." },
+  ] } });
+  assert.equal(result.flags.reasonDelivered, true);
+  assert.equal(result.flags.openingQuestionDelivered, true);
+  assert.equal(result.flags.targetAgentAnswered, true);
+  assert.equal(result.flags.clearLiveTransferConsent, false);
+  assert.equal(result.flags.callbackRequested, false);
+});

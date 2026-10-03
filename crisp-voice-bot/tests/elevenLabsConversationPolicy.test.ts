@@ -217,10 +217,12 @@ test("unknown workflow layouts fail closed", () => {
   assert.throws(() => applyConversationConsentPolicy(b), /required/);
 });
 
-test("prompt uses the approved purpose repair and narrow repeated-confusion exit", () => {
+test("purpose repair answers the question without a count-triggered ending", () => {
   const prompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8");
-  assert.match(prompt, /I'm calling because \{\{streetAddress\}\} is listed as a short sale\. We take lender paperwork and calls off the listing agent\. Would you like me to explain\?/);
-  assert.match(prompt, /I'm sorry I wasn't clear\. I'll let you go\. Goodbye\./);
-  assert.match(prompt, /exact property-specific clarification was given between two live caller purpose-confusion turns/);
+  assert.match(prompt, /We help listing agents with short-sale lender paperwork and calls/);
+  assert.match(prompt, /I'm calling about the short-sale listing at \{\{streetAddress\}\}/);
+  assert.match(prompt, /A second clarification alone is never permission to say goodbye/);
+  assert.match(prompt, /Actual opt-outs, service refusals, current-call stops and genuine goodbyes retain their priority/);
+  assert.doesNotMatch(prompt, /I'll let you go\. Goodbye\./);
   assert.doesNotMatch(prompt, /Would you prefer a person/);
 });

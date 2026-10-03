@@ -61,7 +61,7 @@ test("sync defaults to dry run and guards writes with reviewed live identifiers"
   assert.match(source, /Apply requires the reviewed live version and prompt SHA guards/);
   assert.match(source, /Agent changed after candidate creation; nothing applied/);
   assert.match(source, /enable_versioning_if_not_enabled: true/);
-  assert.match(source, /if \(controlMapPath && !contactToolMapPath\)/);
+  assert.match(source, /if \(controlMapPath && !contactToolMapPath && !existingContactToolId\)/);
   assert.match(source, /A full guarded release requires a verified contact-tool map/);
 });
 test("sync saves rollback and candidate receipts and verifies readback", () => {
@@ -118,8 +118,9 @@ test("contact identity must occur exactly once in the owning global registry", (
 
 test("CLI resolves the old contact identity only after owning map verification", () => {
   const verification = source.indexOf("await verifyContactToolMap(client, contactToolMap, current, expectedContactToolMap)");
-  const resolution = source.indexOf("contactToolId: resolveVerifiedContactToolId(current, contactToolMap)");
+  const resolution = source.indexOf("? resolveVerifiedContactToolId(current, contactToolMap)");
   assert.ok(verification >= 0 && resolution > verification);
+  assert.match(source, /await resolveExistingContactToolId\(client, current, existingContactToolId\)/);
   assert.match(source, /contactToolId: string;/);
   assert.match(source, /control\?: ConversationReleaseControl/);
 });

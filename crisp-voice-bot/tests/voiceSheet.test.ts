@@ -8,14 +8,16 @@ import {
   getVoiceBotPreferredCallWindowName,
   isRetryableVoiceBotResult,
   normalizePhoneToE164,
+  getVoiceBotAgentTimeZone,
 } from "../src/lib/voiceSheet";
 
-test("replacement voice sheet helpers preserve the active call windows", () => {
-  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T13:30:00Z"), "America/New_York"), "morning_probe");
+test("cold outreach stays in the new weekday experiment windows", () => {
+  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T13:30:00Z"), "America/New_York"), "reach_morning_v1");
   assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T17:00:00Z"), "America/New_York"), "");
-  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T18:00:00Z"), "America/New_York"), "mid_afternoon");
-  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T18:45:00Z"), "America/New_York"), "mid_afternoon");
-  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T19:59:00Z"), "America/New_York"), "mid_afternoon");
+  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T18:00:00Z"), "America/New_York"), "");
+  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T19:00:00Z"), "America/New_York"), "reach_afternoon_v1");
+  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-04T19:45:00Z"), "America/New_York"), "");
+  assert.equal(getVoiceBotPreferredCallWindowName(new Date("2026-05-09T13:30:00Z"), "America/New_York"), "");
   assert.equal(
     getVoiceBotPreferredCallWindowName(new Date("2026-05-04T20:15:00Z"), "America/New_York"),
     "",
@@ -28,25 +30,31 @@ test("replacement voice sheet helpers retry provider start failures once", () =>
   assert.equal(isRetryableVoiceBotResult("voicemail_reached_final_attempt"), false);
 });
 
-test("replacement voice sheet helpers bias first attempts toward afternoon and alternate second attempts", () => {
-  assert.equal(getVoiceBotFirstAttemptWindowName(6001), "mid_afternoon");
-  assert.equal(getVoiceBotFirstAttemptWindowName(6003), "morning_probe");
+test("stable phone assignment is balanced and retries alternate after two business days", () => {
+  const firstPhone = "+12175550100";
+  const otherPhone = "+12175550101";
+  assert.equal(getVoiceBotFirstAttemptWindowName(firstPhone), "reach_afternoon_v1");
+  assert.equal(getVoiceBotFirstAttemptWindowName(otherPhone), "reach_morning_v1");
+  assert.equal(getVoiceBotFirstAttemptWindowName("(217) 555-0100"), getVoiceBotFirstAttemptWindowName(firstPhone));
   assert.equal(
-    getNextVoiceBotFirstAttemptWindowStart(new Date("2026-05-04T16:00:00Z"), "America/New_York", 6001).toISOString(),
-    "2026-05-04T18:00:00.000Z",
+    getNextVoiceBotFirstAttemptWindowStart(new Date("2026-05-04T16:00:00Z"), "America/New_York", firstPhone).toISOString(),
+    "2026-05-04T19:00:00.000Z",
   );
   assert.equal(
-    getNextVoiceBotFirstAttemptWindowStart(new Date("2026-05-04T16:00:00Z"), "America/New_York", 6003).toISOString(),
-    "2026-05-05T13:00:00.000Z",
+    getNextVoiceBotFirstAttemptWindowStart(new Date("2026-05-04T16:00:00Z"), "America/New_York", otherPhone).toISOString(),
+    "2026-05-05T13:15:00.000Z",
   );
   assert.equal(
     getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-04T20:45:00Z"), "America/New_York").toISOString(),
-    "2026-05-05T13:00:00.000Z",
+    "2026-05-06T13:15:00.000Z",
   );
   assert.equal(
     getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-04T13:15:00Z"), "America/New_York").toISOString(),
-    "2026-05-05T18:00:00.000Z",
+    "2026-05-06T19:00:00.000Z",
   );
+  assert.equal(getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-08T19:15:00Z"), "America/New_York").toISOString(), "2026-05-12T13:15:00.000Z");
+  assert.equal(getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-08T19:15:00Z"), "America/New_York", 1).toISOString(), "2026-05-11T13:15:00.000Z");
+  assert.equal(getVoiceBotAgentTimeZone(Array(42).fill("")), "");
 });
 
 test("replacement voice sheet helpers normalize phones and append AP notes", () => {

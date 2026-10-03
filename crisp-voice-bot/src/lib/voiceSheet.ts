@@ -1,3 +1,5 @@
+import { resolveListingTimeZone } from "./listingTimeZone";
+
 export const VOICE_BOT_SHEET_NAME = "Sheet1";
 export const VOICE_BOT_TIMEZONE = "America/New_York";
 
@@ -48,73 +50,15 @@ export type VoiceCallWindow = {
 };
 
 const WEEKDAY_CALL_WINDOWS: VoiceCallWindow[] = [
-  { name: "morning_probe", startMinutes: 9 * 60, endMinutes: 10 * 60 },
-  { name: "mid_afternoon", startMinutes: 14 * 60, endMinutes: 16 * 60 },
+  { name: "reach_morning_v1", startMinutes: 9 * 60 + 15, endMinutes: 9 * 60 + 45 },
+  { name: "reach_afternoon_v1", startMinutes: 15 * 60, endMinutes: 15 * 60 + 45 },
 ];
 
-const WEEKEND_CALL_WINDOWS: VoiceCallWindow[] = [
-  { name: "morning_probe", startMinutes: 9 * 60, endMinutes: 10 * 60 },
-  { name: "mid_afternoon", startMinutes: 14 * 60, endMinutes: 16 * 60 },
-];
+const WEEKEND_CALL_WINDOWS: VoiceCallWindow[] = [];
 
-const VOICE_BOT_MORNING_WINDOW_NAME = "morning_probe";
-const VOICE_BOT_MID_AFTERNOON_WINDOW_NAME = "mid_afternoon";
-const VOICE_BOT_FIRST_ATTEMPT_ROTATION_SIZE = 5;
-const VOICE_BOT_FIRST_ATTEMPT_MID_AFTERNOON_SLOTS = 3;
+const VOICE_BOT_MORNING_WINDOW_NAME = "reach_morning_v1";
+const VOICE_BOT_MID_AFTERNOON_WINDOW_NAME = "reach_afternoon_v1";
 
-const STATE_TIMEZONES: Record<string, string> = {
-  AL: "America/Chicago",
-  AK: "America/Anchorage",
-  AR: "America/Chicago",
-  AZ: "America/Phoenix",
-  CA: "America/Los_Angeles",
-  CO: "America/Denver",
-  CT: "America/New_York",
-  DC: "America/New_York",
-  DE: "America/New_York",
-  FL: "America/New_York",
-  GA: "America/New_York",
-  HI: "Pacific/Honolulu",
-  IA: "America/Chicago",
-  ID: "America/Denver",
-  IL: "America/Chicago",
-  IN: "America/New_York",
-  KS: "America/Chicago",
-  KY: "America/Chicago",
-  LA: "America/Chicago",
-  MA: "America/New_York",
-  MD: "America/New_York",
-  ME: "America/New_York",
-  MI: "America/New_York",
-  MN: "America/Chicago",
-  MO: "America/Chicago",
-  MS: "America/Chicago",
-  MT: "America/Denver",
-  NC: "America/New_York",
-  ND: "America/Chicago",
-  NE: "America/Chicago",
-  NH: "America/New_York",
-  NJ: "America/New_York",
-  NM: "America/Denver",
-  NV: "America/Los_Angeles",
-  NY: "America/New_York",
-  OH: "America/New_York",
-  OK: "America/Chicago",
-  OR: "America/Los_Angeles",
-  PA: "America/New_York",
-  RI: "America/New_York",
-  SC: "America/New_York",
-  SD: "America/Chicago",
-  TN: "America/Chicago",
-  TX: "America/Chicago",
-  UT: "America/Denver",
-  VA: "America/New_York",
-  VT: "America/New_York",
-  WA: "America/Los_Angeles",
-  WI: "America/Chicago",
-  WV: "America/New_York",
-  WY: "America/Denver",
-};
 
 export function columnToLetter(columnNumber: number): string {
   let letter = "";
@@ -205,8 +149,15 @@ export function buildVoiceBotListingAddress(rowValues: unknown[]): string {
 }
 
 export function getVoiceBotAgentTimeZone(rowValues: unknown[]): string {
-  const state = normalizeString(rowValues[VOICE_BOT_COL_STATE - 1]).toUpperCase();
-  return STATE_TIMEZONES[state] || VOICE_BOT_TIMEZONE;
+  return getVoiceBotTimeZoneResolution(rowValues).timeZone;
+}
+
+export function getVoiceBotTimeZoneResolution(rowValues: unknown[]) {
+  return resolveListingTimeZone({
+    streetAddress: normalizeString(rowValues[VOICE_BOT_COL_LISTING_ADDRESS - 1]),
+    city: normalizeString(rowValues[VOICE_BOT_COL_CITY - 1]),
+    state: normalizeString(rowValues[VOICE_BOT_COL_STATE - 1]),
+  });
 }
 
 type LocalParts = {
@@ -298,6 +249,7 @@ export function getVoiceBotCallWindowsForDay(day: number): VoiceCallWindow[] {
 }
 
 export function getVoiceBotPreferredCallWindowName(date: Date, timeZone: string): string {
+  if (!timeZone) return "";
   const callWindows = getVoiceBotCallWindowsForDay(weekdayNumber(date, timeZone));
   const localMinutes = getVoiceBotLocalMinutes(date, timeZone);
 
@@ -351,19 +303,13 @@ function getNextVoiceBotCallDateKey(dateKey: string, timeZone: string): string {
   }
 }
 
-function getVoiceBotFirstAttemptRotationSlot(rowNumber: number | undefined): number {
-  const numericRowNumber = Number(rowNumber);
-  if (!Number.isFinite(numericRowNumber)) {
-    return 0;
-  }
-
-  return Math.abs(Math.trunc(numericRowNumber)) % VOICE_BOT_FIRST_ATTEMPT_ROTATION_SIZE;
-}
-
-export function getVoiceBotFirstAttemptWindowName(rowNumber?: number): string {
-  return getVoiceBotFirstAttemptRotationSlot(rowNumber) < VOICE_BOT_FIRST_ATTEMPT_MID_AFTERNOON_SLOTS
-    ? VOICE_BOT_MID_AFTERNOON_WINDOW_NAME
-    : VOICE_BOT_MORNING_WINDOW_NAME;
+export function getVoiceBotFirstAttemptWindowName(phone: unknown): string {
+  const normalizedPhone = normalizePhoneToE164(phone);
+  if (!normalizedPhone) return "";
+  // Stable across row moves and duplicate listings; parity gives equal assignment probability.
+  let hash = 2166136261;
+  for (const char of normalizedPhone) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
+  return hash % 2 === 0 ? VOICE_BOT_MORNING_WINDOW_NAME : VOICE_BOT_MID_AFTERNOON_WINDOW_NAME;
 }
 
 function getOppositeVoiceBotCallWindowName(windowName: string): string {
@@ -392,11 +338,16 @@ export function buildVoiceBotDateInTimeZone(dateKey: string, localMinutes: numbe
 export function getNextVoiceBotFirstAttemptWindowStart(
   followupSentAt: Date,
   timeZone: string,
-  rowNumber?: number,
+  phone: unknown,
+  windowName?: string,
 ): Date {
+  if (!timeZone) throw new Error("Listing time zone must be resolved before scheduling");
   const followupDateKey = getVoiceBotLocalDateKey(followupSentAt, timeZone);
   const followupMinutes = getVoiceBotLocalMinutes(followupSentAt, timeZone);
-  const firstAttemptWindowName = getVoiceBotFirstAttemptWindowName(rowNumber);
+  const firstAttemptWindowName = windowName || getVoiceBotFirstAttemptWindowName(phone);
+  if (!WEEKDAY_CALL_WINDOWS.some((window) => window.name === firstAttemptWindowName)) {
+    throw new Error("Valid phone-scoped call window is required before scheduling");
+  }
   let cursorDateKey = followupDateKey;
 
   while (true) {
@@ -420,9 +371,13 @@ export function getNextVoiceBotFirstAttemptWindowStart(
   }
 }
 
-export function getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt: Date, timeZone: string): Date {
-  const nextCallDateKey = getNextVoiceBotCallDateKey(getVoiceBotLocalDateKey(firstAttemptSentAt, timeZone), timeZone);
-  const firstAttemptWindowName = getVoiceBotPreferredCallWindowName(firstAttemptSentAt, timeZone);
+export function getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt: Date, timeZone: string, businessDays = 2): Date {
+  if (!timeZone) throw new Error("Listing time zone must be resolved before scheduling");
+  let nextCallDateKey = getVoiceBotLocalDateKey(firstAttemptSentAt, timeZone);
+  for (let day = 0; day < businessDays; day++) nextCallDateKey = getNextVoiceBotCallDateKey(nextCallDateKey, timeZone);
+  // Legacy first calls may have occurred outside the new narrow experiment slots.
+  const firstAttemptWindowName = getVoiceBotLocalMinutes(firstAttemptSentAt, timeZone) < 12 * 60
+    ? VOICE_BOT_MORNING_WINDOW_NAME : VOICE_BOT_MID_AFTERNOON_WINDOW_NAME;
   const oppositeWindowName = getOppositeVoiceBotCallWindowName(firstAttemptWindowName);
   const nextCallProbeDate = buildVoiceBotDateInTimeZone(nextCallDateKey, 12 * 60, timeZone);
   const nextCallWindows = getVoiceBotCallWindowsForDay(weekdayNumber(nextCallProbeDate, timeZone));

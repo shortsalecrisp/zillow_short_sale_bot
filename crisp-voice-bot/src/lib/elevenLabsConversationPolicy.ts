@@ -1,4 +1,20 @@
-export const VOICE_CONVERSATION_POLICY_VERSION = "maya-short-opener-ai-closeout-20261002";
+export const VOICE_CONVERSATION_POLICY_VERSION = "maya-service-first-recovery-20261003";
+
+export const VOICE_OPENING_SCRIPT = "Hi, this is {{assistantName}} with Crisp Short Sales. We help with short-sale lender paperwork. Is {{streetAddress}} your listing?";
+export const VOICE_NEEDS_QUESTION = "Would help with lender paperwork or calls be useful for this listing?";
+export const VOICE_SCREENING_SCRIPT = "{{assistantName}} with Crisp Short Sales, about the short-sale listing at {{streetAddress}}.";
+export const VOICE_RETURN_NUMBER_SPOKEN = "four zero four, three zero zero, nine five two six";
+
+export const OPENING_HANDOFF_POLICY = [
+  "[CRISP_OPENING_HANDOFF_POLICY]",
+  `The normal live opening is exactly: "${VOICE_OPENING_SCRIPT}"`,
+  "A new clear yes to that single listing question confirms listing ownership only, not interest in help, a callback, or a live transfer.",
+  `If that new reply contains no question, correction, hearing issue or requested next step, say exactly: "${VOICE_NEEDS_QUESTION}" Then wait.`,
+  "Do not substitute a seller-package status question, an arbitrary qualification question, an earlier openerScript, or another introduction. Do not repeat a needs question already answered.",
+  "Questions, corrections, repeated hello and hearing difficulties route to the main conversation for a short targeted reply before further qualification. Answer the actual affiliation or purpose question; do not finish an interrupted pitch.",
+  "A hearing-restoration acknowledgment is not a yes to the listing question. A second clarification alone never authorizes goodbye; answer a specific unanswered question, while preserving explicit opt-out, service-refusal and current-call-ending priority.",
+  "[END_CRISP_OPENING_HANDOFF_POLICY]",
+].join("\n");
 
 type AgentPolicy = {
   conversation_config: {

@@ -8,7 +8,7 @@ const MAX_MESSAGE_LENGTH = 12000;
 type HistoryEntry = { role: "user" | "agent" | "tool"; message?: string };
 type EndDecision = "invalid_input" | "no_caller_words" | "recording_or_hold" | "explicit_stop"
   | "pending_question_or_correction" | "caller_goodbye" | "service_declined"
-  | "repeated_purpose_confusion" | "no_ending_request";
+  | "no_ending_request";
 
 export type TerminalPermission = {
   ok: boolean;
@@ -143,22 +143,6 @@ function isPurposeConfusion(text: string): boolean {
     || /^(?:are you (?:a computer|ai|an ai|a bot)[? ]*)?(?:what do you want(?: from me)?|why are you calling)$/.test(cleaned);
 }
 
-function hasApprovedRepeatedPurposeExit(entries: HistoryEntry[], latest: string): boolean {
-  if (!isPurposeConfusion(latest)) return false;
-  const userIndexes = entries.map((entry, index) => entry.role === "user" ? index : -1).filter((index) => index >= 0);
-  if (userIndexes.length < 2) return false;
-  const latestIndex = userIndexes.at(-1)!;
-  const priorIndex = userIndexes.at(-2)!;
-  if (!isPurposeConfusion(normalize(entries[priorIndex].message ?? ""))) return false;
-  const clarification = entries.slice(priorIndex + 1, latestIndex)
-    .filter((entry) => entry.role === "agent")
-    .map((entry) => normalize(entry.message ?? ""))
-    .join(" ");
-  return /i'm calling because .+ is listed as a short sale/.test(clarification)
-    && /we take lender paperwork and calls off the listing agent/.test(clarification)
-    && /would you like me to explain/.test(clarification);
-}
-
 // Only a system-bound, authenticated history may reach this function in production.
 // The hash identifies the latest observed user history; it is not an atomic hang-up lock.
 export function assessElevenLabsTerminalPermission(input: unknown, requestId = randomUUID()): TerminalPermission {
@@ -187,10 +171,8 @@ export function assessElevenLabsTerminalPermission(input: unknown, requestId = r
     }
     return { ...response, permission: true, decision: "explicit_stop" };
   }
-  if (hasApprovedRepeatedPurposeExit(entries, latest)) {
-    return { ...response, permission: true, decision: "repeated_purpose_confusion" };
-  }
-  if (hasPendingQuestionOrCorrection(latest)) return { ...response, decision: "pending_question_or_correction" };
+  // Repeated confusion is a request for repair, not the caller's permission to hang up.
+  if (isPurposeConfusion(latest) || hasPendingQuestionOrCorrection(latest)) return { ...response, decision: "pending_question_or_correction" };
   if (isGoodbye(clauses)) return { ...response, permission: true, decision: "caller_goodbye" };
   if (isServiceDeclined(latest) && !declinesOnlyOfferedAction(entries, latest)) return { ...response, permission: true, decision: "service_declined" };
   return { ...response, decision: "no_ending_request" };

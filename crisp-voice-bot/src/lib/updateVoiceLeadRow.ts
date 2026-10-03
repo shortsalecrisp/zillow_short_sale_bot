@@ -129,7 +129,14 @@ function addSchedulingWrites(
 
   if (retryableFirstAttempt) {
     const firstAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_1_SENT - 1]) ?? now;
-    const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, getVoiceBotAgentTimeZone(rowValues));
+    const timeZone = getVoiceBotAgentTimeZone(rowValues);
+    if (!timeZone) {
+      clearWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible");
+      clearWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "call_scheduled_for");
+      addWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket", "listing_timezone_review_required");
+      return;
+    }
+    const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, timeZone, callResult === "call_start_failed" ? 1 : 2);
 
     // A retryable first attempt must remain queue-eligible. Clear any stale
     // terminal status left by an earlier or partial classifier write so K

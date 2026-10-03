@@ -3,6 +3,8 @@ import { getConfiguredCallWindows } from "./lib/callWindowGuard";
 import { config } from "./lib/config";
 import { getElevenLabsVoiceExperimentStatus } from "./lib/elevenLabsVoiceVariant";
 import { getElevenLabsRuntimeExperimentStatus } from "./lib/elevenLabsRuntimeExperiment";
+import { VOICE_CONVERSATION_POLICY_VERSION } from "./lib/elevenLabsConversationPolicy";
+import { getVoiceBotCallWindowsForDay } from "./lib/voiceSheet";
 import { getProviderCircuitStatus } from "./lib/providerCircuitBreaker";
 import { FINAL_RECEIPT_CIRCUIT_THRESHOLD, FINAL_RECEIPT_STALE_AFTER_MINUTES, INBOUND_QUIET_PERIOD_MS } from "./lib/voiceSafety";
 import { startGmailImportSchedulers } from "./lib/gmailImporters";
@@ -42,6 +44,16 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
     commit: process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? null,
     voiceExperiment: getElevenLabsVoiceExperimentStatus(),
     runtimeExperiment: getElevenLabsRuntimeExperimentStatus(),
+    conversationPolicyVersion: VOICE_CONVERSATION_POLICY_VERSION,
+    coldOutreachSchedule: {
+      version: "listing-local-reach-v1",
+      timeBasis: "listing_city_state",
+      weekdaysOnly: true,
+      firstAttemptAssignment: "stable_normalized_phone_50_50",
+      windows: getVoiceBotCallWindowsForDay(1),
+      coldRetryBusinessDays: 2,
+      unresolvedTimeZone: "hold_for_review",
+    },
     ownerControl: {
       outboundEnabled: config.outboundVoice.enabled,
       paused: !config.outboundVoice.enabled,

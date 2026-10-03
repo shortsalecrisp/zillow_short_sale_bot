@@ -29,6 +29,7 @@ const POLICY_STRATIFICATION_INSTRUCTIONS =
   "First stratify by call.initialOpeningPolicy, call.declaredConversationPolicyVersion, and providerIdentity.agentId, versionId and branchId. Missing or null historical values are unknown; do not backfill them from current configuration or pool unknown and known policy/provider versions. Declared policy labels describe the call-start code's intended policy, not the provider version or proof that it ran. Provider identity comes only from a matching final conversation receipt. call.openerVariant is a post-intro continuation assignment, not proof of delivery. The permission-screener-20260918 initial introduction is uniform and permission-first. Before that policy, row-parity assignments paired Eryn/direct_reason and Finch/benefit_hook, so compare those older calls as joint arms. Starting with permission-screener-20260918, voiceVariant and openerVariant rotated independently as a 2x2 design; evaluate voice and opener within that stratum separately while still checking transcript/playback evidence for what was actually delivered. Starting with eryn-self-handler-ai-optout-20260925, voice is owner-fixed to Eryn/Maya and Finch is historical only; continue opener and timing analysis without treating voice as an active experiment. Starting with maya-short-opener-ai-closeout-20261002 and listen_first_listing_agent_v2, the live opening is a short listing-agent check and AI-plus-rejection uses a hard closeout; do not pool this stratum with the earlier permission-first opening. Starting with the 2026-09-28 runtime experiment, compare TTS only from matching final provider branch receipts: the main branch is Flash v2 control and the experiment branch is v4 Turbo; both use turn_v3. Do not infer a TTS arm from row number, current configuration, or a missing branch receipt. Actual overrides must be evaluated from their recorded assignments. Existing delivery flags are transcript-derived heuristics, not proof of audible delivery; use transcript/playback evidence to establish which continuation was actually delivered.";
 const CODEX_ANALYSIS_INSTRUCTIONS =
   "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. " +
+  "For contact-evidence-v2 blocks, use contactEvidence instead of provider call status or rawSignals.hasMeaningfulUserTranscript to count human contact. The legacy flags.liveAnswered now means apparent human speech, including separately labeled gatekeepers; targetAgentAnswered requires transcript identity/role evidence. Null means unknown, never zero. Greeting-only contact is apparent, not authenticated. Older blocks without contactEvidence require transcript reclassification; do not pool their inflated liveAnswered flag. Automated replies never count as agent engagement. Latency fields are transcript turn-start differences, not acoustic response gaps. " +
   POLICY_STRATIFICATION_INSTRUCTIONS + " " +
   "Compare voiceVariant on live answered calls separately from voicemail/no-answer within historical voice-test strata, and compare scheduledWindow by agent local time bucket without treating observational differences as causal lift. For the historical Eryn/Finch comparison, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls and any call.voiceVariant other than eryn or finch. Current calls under eryn-self-handler-ai-optout-20260925 should show Eryn/Maya only; if Finch appears after that policy, flag it as a production configuration issue instead of an experiment result. Also compare call.openerVariant as the post-intro continuation assignment within policy/provider and joint-arm strata: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, repeatedIdentityStatement, liveYoniNowOfferDelivered, agentRespondedAfterLiveYoniNowOffer, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityStatement, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome. For the Pro prove-it cohort, evaluate calls after 2026-09-03T14:20:21Z against the 1063-conversation ElevenLabs baseline with policy/provider strata kept separate, and trigger a decision review once 300-400 additional calls have accumulated. Count bot-labeled positives separately from transcript/playback-verified handoff-ready leads; continue only if the cohort produces at least 3 verified handoff-ready leads or 1 owner-confirmed serious file opportunity, otherwise recommend pausing or narrowing the test.";
 
@@ -63,6 +64,11 @@ type PerformanceConversation = {
   version_id?: unknown;
   branch_id?: unknown;
   status?: string;
+  analysis?: {
+    call_successful?: unknown;
+    transcript_summary?: string;
+    call_summary_title?: string;
+  };
   metadata?: {
     termination_reason?: string | null;
     call_duration_secs?: number | null;
@@ -98,7 +104,120 @@ function optionalLabel(value: unknown): string | null {
 }
 
 function normalizeText(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
+  return value.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
+}
+
+type AutomatedContact = "voicemail" | "screening" | "ivr";
+
+function automatedContactType(message: string): AutomatedContact | null {
+  const text = normalizeText(message);
+  if (/\b(?:your call has been forwarded|after (?:the )?(?:tone|beep)|at the (?:tone|beep)|leave (?:me |us )?(?:a |your )?(?:(?:brief|detailed|short|voice) )?(?:message|name)|record (?:a |your )?message|you(?:'ve| have) reached|you (?:have )?reached (?:the )?(?:voice ?mail|mailbox)|welcome to (?:the )?voice ?mail|(?:sorry,? )?i missed your call|your voicemail is being transcribed)\b/.test(text) ||
+      /\b(?:message with your name|message or send me a text|call is very important to me)\b/.test(text) ||
+      /\b(?:mailbox|voice ?mail(?: box)?)\b.{0,60}\b(?:full|not (?:been )?set up|hasn't been set up|not initialized|cannot accept|can't accept|unavailable|not accepting)\b/.test(text)) {
+    return "voicemail";
+  }
+  if (/\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
+      /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|(?:i am|i'm|this is)\b.{0,35}\b(?:ai|virtual|automated) (?:assistant|receptionist)|please stay on the(?: line)?|please hold while|one moment while|i'll (?:see if (?:this person|they|he|she) is available|try to connect you)|checking with the person you called|please say who you are and why|this person is (?:not )?available)\b/.test(text) ||
+      /^\.{2,}\s*(?:person )?is available/.test(text) || /\bthis call is being recorded for quality assurance\b/.test(text)) {
+    return "screening";
+  }
+  if (/\b(?:press|dial) (?:one|two|three|four|five|six|seven|eight|nine|zero|[0-9])\b/.test(text) ||
+      /\b(?:call cannot be completed|number (?:you (?:have )?dialed )?is (?:not in service|disconnected)|all (?:of our )?(?:representatives|agents) are busy)\b/.test(text)) {
+    return "ivr";
+  }
+  return null;
+}
+
+function classifyContact(transcript: PerformanceTranscriptItem[], fullName: string) {
+  const humanIndexes = new Set<number>();
+  const automatedIndexes = new Set<number>();
+  const automation = new Set<AutomatedContact>();
+  const expectedFirstName = normalizeText(fullName).split(/\s+/)[0]?.replace(/[^\p{L}\p{N}'-]/gu, "");
+  let pending: number[] = [];
+  let hasContextualHumanTurn = false;
+  let inAutomation = false;
+  const gatekeeperIndexes = new Set<number>();
+  const targetIndexes = new Set<number>();
+  let lastAssistantMessage = "";
+  let hasSpokenUserContent = false;
+
+  const flush = (beforeAutomation: boolean) => {
+    // A greeting split from the rest of a recording is not a human pickup.
+    if (!beforeAutomation || hasContextualHumanTurn) pending.forEach((index) => humanIndexes.add(index));
+    pending = [];
+    hasContextualHumanTurn = false;
+  };
+
+  for (let index = 0; index < transcript.length; index += 1) {
+    const item = transcript[index];
+    if (isAssistantRole(item.role) && typeof item.message === "string" && hasMeaningfulSpokenContent(item.message)) {
+      lastAssistantMessage = normalizeText(item.message);
+      continue;
+    }
+    if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) continue;
+    hasSpokenUserContent = true;
+    const text = normalizeText(item.message);
+    const automatedType = automatedContactType(text);
+    if (automatedType) {
+      flush(true);
+      automatedIndexes.add(index);
+      automation.add(automatedType);
+      inAutomation = true;
+      lastAssistantMessage = "";
+      continue;
+    }
+
+    const bareText = text.replace(/[.!?,]+/g, " ").replace(/\s+/g, " ").trim();
+    const canned = /^(?:(?:thank you|thanks|goodbye|please hold|not available|as soon as possible|one moment)\s*)+$/.test(bareText) ||
+      /^(?:thank you|thanks)(?:[,. ]+(?:and )?have a (?:great|good|wonderful) day|[, ]+maya[.! ]*(?:please[-.]*)?)?[.!]*$/.test(text);
+    const greeting = /^(?:(?:hi|hello|hey|good (?:morning|afternoon|evening))\b|(?:this is|it's|it is)\s+[\p{L}'-]+\b|(?:thank you|thanks) for calling\b)/u.test(text);
+    const identity = text.match(/\b(?:this is|it is|it's|i am|i'm)\s+([\p{L}'-]+)\b/u)?.[1];
+    const namedPickup = Boolean(identity) && /\b(?:this is|it is|it's) [\p{L}'-]+(?: speaking)?(?:[.!?]|$)/u.test(text);
+    const nameOnly = bareText === normalizeText(fullName) || bareText === expectedFirstName;
+    const targetIdentity = Boolean(expectedFirstName && (identity === expectedFirstName || nameOnly));
+    const explicitRole = /\bi(?: am|'m) (?:the )?(?:listing agent|agent of record)\b/.test(text);
+    const explicitAdmin = /\b(?:i(?: am|'m)|this is) (?:his |her |their |the |an? )?(?:admin(?:istrative)?(?: assistant)?|assistant|receptionist|transaction coordinator)\b/.test(text) ||
+      /\bthis is [\p{L}'-]+[, ]+[^.!?]{0,35}'s (?:assistant|admin|receptionist)\b/u.test(text);
+    const officeGreeting = Boolean(identity) && /\b(?:real estate|realty|brokerage|office|group|team)\b/.test(text);
+    const differentOfficeSpeaker = Boolean(officeGreeting && identity && expectedFirstName && identity !== expectedFirstName);
+    const lastQuestion = lastAssistantMessage.match(/(?:^|[.!?])\s*([^.!?]+\?)\s*$/)?.[1] ?? lastAssistantMessage;
+    const simpleIdentityQuestion = /\b(?:is this|am i speaking (?:with|to))\b/.test(lastQuestion) ||
+      /\bare you the listing agent\b/.test(lastQuestion) || /\bis .{1,120} your listing\?/.test(lastQuestion);
+    const identityAnswer = /^(?:yes|yeah|yep|speaking|this is (?:he|she)|i am)[.!?]*$/.test(text) &&
+      simpleIdentityQuestion && !/\band\b|\b(?:handling|want|help|may i|can i)\b/.test(lastQuestion);
+    const directHumanQuestion = /\b(?:who is this|why are you calling|what (?:is this|are you calling) about|can you hear me|i can't hear you)\b/.test(text);
+    const newLiveIdentity = greeting || namedPickup || explicitRole || explicitAdmin || identityAnswer || nameOnly || officeGreeting || directHumanQuestion;
+    const automationContinuation = inAutomation && !newLiveIdentity && (
+      canned || /^(?:yes|no|okay|ok|sure)[.!?]*$/.test(text) ||
+      /\b(?:can you tell me more about the details|person (?:you called|you're calling|you are calling) (?:is|was)|leave an additional message)\b/.test(text)
+    );
+    if (automationContinuation || (canned && pending.length === 0)) {
+      automatedIndexes.add(index);
+      continue;
+    }
+
+    // Unknown fragments without dialogue context do not establish a person.
+    const contextual = Boolean(lastAssistantMessage) && !canned && !greeting &&
+      !/^\.{2,}|^[\d\s()+.-]+$|^(?:phone rings|ringing)$/i.test(text);
+    if (!newLiveIdentity && !contextual && pending.length === 0) continue;
+    if (inAutomation && !newLiveIdentity) continue;
+    pending.push(index);
+    hasContextualHumanTurn ||= contextual || explicitRole || explicitAdmin || (officeGreeting && /\bhow (?:can|may) (?:i|we) help\b/.test(text));
+    if (newLiveIdentity || contextual) inAutomation = false;
+    if (explicitAdmin || differentOfficeSpeaker) gatekeeperIndexes.add(index);
+    if (explicitRole || identityAnswer || targetIdentity) targetIndexes.add(index);
+  }
+  flush(false);
+
+  const gatekeeper = [...gatekeeperIndexes].some((index) => humanIndexes.has(index));
+  const targetConfirmed = [...targetIndexes].some((index) => humanIndexes.has(index));
+  const humanAnswered = humanIndexes.size > 0 ? true : automation.size > 0 ? false : null;
+  const targetAgentAnswered = humanAnswered === false ? false : humanAnswered === null ? null :
+    targetConfirmed ? true : gatekeeper ? false : null;
+  const category = humanAnswered ? targetConfirmed ? "target_agent" : gatekeeper ? "human_gatekeeper" : "apparent_human" :
+    automation.has("voicemail") ? "voicemail" : automation.has("ivr") ? "ivr" : automation.has("screening") ? "screening" : "unknown";
+  return { humanIndexes, automatedIndexes, hasSpokenUserContent, humanAnswered, targetAgentAnswered, category,
+    gatekeeper: humanAnswered === true && gatekeeper, automation: [...automation] };
 }
 
 function hasMeaningfulSpokenContent(value: string): boolean {
@@ -160,7 +279,7 @@ function getAgentToAssistantLatencies(transcript: PerformanceTranscriptItem[]): 
       continue;
     }
 
-    if (isAssistantRole(role) && latestAgentTime !== null) {
+    if (isAssistantRole(role) && typeof item.message === "string" && hasMeaningfulSpokenContent(item.message) && latestAgentTime !== null) {
       const latency = roundOne(timeSecs - latestAgentTime);
       if (latency >= 0 && latency <= 60) {
         latencies.push(latency);
@@ -230,10 +349,20 @@ function getMessageTimeAtIndex(transcript: PerformanceTranscriptItem[], index: n
 
 export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): string {
   const transcript = input.conversation.transcript ?? [];
+  const contact = classifyContact(transcript, input.metadata.fullName);
+  const humanTranscript = transcript.map((item, index) => item.role === "user" && !contact.humanIndexes.has(index)
+    ? { ...item, message: undefined }
+    : item);
+  const firstHumanIndex = [...contact.humanIndexes][0] ?? -1;
+  const automationBeforeHuman = [...contact.automatedIndexes].some((index) => index < firstHumanIndex);
+  const liveSpeechTranscript = humanTranscript.map((item, index) =>
+    contact.humanAnswered !== true || (automationBeforeHuman && index < firstHumanIndex)
+      ? { ...item, message: undefined }
+      : item);
   const assistantMessages = transcript
     .filter((item) => isAssistantRole(item.role) && typeof item.message === "string" && item.message.trim() !== "")
     .map((item) => item.message!.trim());
-  const agentMessages = transcript
+  const rawUserMessages = transcript
     .filter(
       (item) =>
         item.role === "user" &&
@@ -241,34 +370,39 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
         hasMeaningfulSpokenContent(item.message),
     )
     .map((item) => item.message!.trim());
+  const agentMessages = [...contact.humanIndexes].map((index) => transcript[index].message!.trim());
   const assistantText = normalizeText(assistantMessages.join(" "));
   const agentText = normalizeText(agentMessages.join(" "));
   const combinedText = normalizeText(`${input.outcome} ${input.summary} ${input.transcript}`);
   const toolCallNames = getToolCallNames(transcript);
-  const agentToAssistantLatencies = getAgentToAssistantLatencies(transcript);
+  const agentToAssistantLatencies = getAgentToAssistantLatencies(humanTranscript);
   const liveTransferToolFired = toolCallNames.includes("live_transfer_requested");
-  const clearLiveTransferConsent = hasClearLiveTransferConsent(transcript, input.summary);
-  const misfiredLiveTransferRequest = isMisfiredLiveTransferRequest(transcript, input.summary);
-  const callbackOrLaterSignal = hasCallbackOrLaterSignal(transcript, input.summary);
+  const clearLiveTransferConsent = contact.humanAnswered === true && hasClearLiveTransferConsent(humanTranscript, "");
+  const misfiredLiveTransferRequest = isMisfiredLiveTransferRequest(humanTranscript, "");
+  const callbackOrLaterSignal = contact.humanAnswered === true && hasCallbackOrLaterSignal(humanTranscript, "");
+  const usesServiceFirstOpening = input.metadata.declaredConversationPolicyVersion === "maya-service-first-recovery-20261003";
   const usesListingAgentOpening = input.metadata.initialOpeningPolicy === "listen_first_listing_agent_v2";
   const reasonMessageIndex = firstAssistantMessageIndexMatching(
-    transcript,
-    usesListingAgentOpening ? /\bwe help with lender paperwork and calls\b/i : /\bshort sale\b/i,
+    liveSpeechTranscript,
+    usesServiceFirstOpening ? /\bwe help with short-sale lender paperwork\b/i :
+      usesListingAgentOpening ? /\bwe help with lender paperwork and calls\b/i : /\bshort sale\b/i,
   );
   const openingQuestionIndex = firstAssistantMessageIndexMatching(
-    transcript,
-    usesListingAgentOpening
+    liveSpeechTranscript,
+    usesServiceFirstOpening
+      ? /\bis .{1,120} your listing\?/i
+      : usesListingAgentOpening
       ? /\bare you the listing agent for the short sale at\b/i
       : /\b(?:handling the bank side|handling that one|handling the short sale paperwork|short sale paperwork and lender calls|looking for help with that|looking for help with this)\b/i,
   );
   const liveYoniNowOfferIndex = firstAssistantMessageIndexMatching(
-    transcript,
+    liveSpeechTranscript,
     /\b(?:bring Yoni|get Yoni|Yoni.*onto (?:this|the) call|Yoni.*on the phone|try him (?:right )?now|available (?:right )?now)\b/i,
   );
   const reasonDelivered = reasonMessageIndex !== -1;
   const openingQuestionDelivered = openingQuestionIndex !== -1;
-  const agentRespondedAfterReason = hasUserMessageAfter(transcript, reasonMessageIndex);
-  const agentRespondedAfterOpeningQuestion = hasUserMessageAfter(transcript, openingQuestionIndex);
+  const agentRespondedAfterReason = hasUserMessageAfter(humanTranscript, reasonMessageIndex);
+  const agentRespondedAfterOpeningQuestion = hasUserMessageAfter(humanTranscript, openingQuestionIndex);
   const durationSecs =
     typeof input.conversation.metadata?.call_duration_secs === "number"
       ? input.conversation.metadata.call_duration_secs
@@ -286,6 +420,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
 
   const payload = {
     schema: "voice_call_metrics_v1",
+    measurementRevision: "contact-evidence-v2",
     codexInstructions: CODEX_ANALYSIS_INSTRUCTIONS,
     abTestScope: {
       cohort: VOICE_AB_TEST_COHORT,
@@ -357,17 +492,44 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       versionId: finalReceiptMatched ? optionalLabel(input.conversation.version_id) : null,
       branchId: finalReceiptMatched ? optionalLabel(input.conversation.branch_id) : null,
     },
+    rawSignals: {
+      // This preserves the old liveAnswered heuristic, not a provider human verdict.
+      hasMeaningfulUserTranscript: Array.isArray(input.conversation.transcript) ? rawUserMessages.length > 0 : null,
+      userTurns: Array.isArray(input.conversation.transcript) ? rawUserMessages.length : null,
+      userWords: Array.isArray(input.conversation.transcript) ? words(rawUserMessages.join(" ")).length : null,
+      providerStatus: input.conversation.status ?? null,
+      providerCallSuccessful: input.conversation.analysis?.call_successful ?? null,
+      providerVoicemailDetectionUsed: input.conversation.metadata?.features_usage &&
+        typeof input.conversation.metadata.features_usage === "object"
+        ? (input.conversation.metadata.features_usage as { voicemail_detection?: { used?: boolean } }).voicemail_detection?.used ?? null
+        : null,
+    },
+    contactEvidence: {
+      source: "transcript_heuristic",
+      category: contact.category,
+      humanAnswered: contact.humanAnswered,
+      targetAgentAnswered: contact.targetAgentAnswered,
+      gatekeeper: contact.gatekeeper,
+      automatedStages: contact.automation,
+      greetingOnly: contact.humanAnswered === true && agentMessages.every((message) =>
+        /^(?:(?:hi|hello|hey|good (?:morning|afternoon|evening))\b|(?:this is|it's|it is)\s+)/i.test(message)),
+      humanTurnIndexes: [...contact.humanIndexes],
+      humanRespondedAfterReason: contact.humanAnswered === null ? null : agentRespondedAfterReason,
+      humanRespondedAfterOpeningQuestion: contact.humanAnswered === null ? null : agentRespondedAfterOpeningQuestion,
+      interpretation: "Apparent human speech is not authenticated identity. Target contact requires a spoken name/role confirmation; admins are separate. Null is unknown. Review playback for audio delivery and disputed classifications.",
+    },
     metrics: {
       durationSecs,
-      agentTurns: agentMessages.length,
-      assistantTurns: assistantMessages.length,
-      agentWords: words(agentMessages.join(" ")).length,
-      assistantWords: words(assistantMessages.join(" ")).length,
+      agentTurns: Array.isArray(input.conversation.transcript) ? agentMessages.length : null,
+      assistantTurns: Array.isArray(input.conversation.transcript) ? assistantMessages.length : null,
+      agentWords: Array.isArray(input.conversation.transcript) ? words(agentMessages.join(" ")).length : null,
+      assistantWords: Array.isArray(input.conversation.transcript) ? words(assistantMessages.join(" ")).length : null,
       firstAgentToAssistantDelaySecs: agentToAssistantLatencies[0] ?? null,
       avgAgentToAssistantDelaySecs: average(agentToAssistantLatencies),
       maxAgentToAssistantDelaySecs: agentToAssistantLatencies.length
         ? Math.max(...agentToAssistantLatencies)
         : null,
+      latencyMeasurement: "transcript_turn_start_to_start_not_audible_response_gap",
       reasonMentionedAtSecs: getMessageTimeAtIndex(transcript, reasonMessageIndex),
       openingQuestionAtSecs: getMessageTimeAtIndex(transcript, openingQuestionIndex),
       liveYoniNowOfferAtSecs: getMessageTimeAtIndex(transcript, liveYoniNowOfferIndex),
@@ -380,9 +542,12 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
         .length,
     },
     flags: {
-      liveAnswered: agentMessages.length > 0,
+      liveAnswered: contact.humanAnswered === true,
+      humanAnswered: contact.humanAnswered,
+      targetAgentAnswered: contact.targetAgentAnswered,
+      humanGatekeeperAnswered: contact.gatekeeper,
       earlyHangupUnder20Secs:
-        durationSecs !== null && durationSecs < 20 && normalizeText(terminationReason ?? "").includes("client disconnected"),
+        contact.humanAnswered === true && durationSecs !== null && durationSecs < 20 && normalizeText(terminationReason ?? "").includes("client disconnected"),
       reasonDelivered,
       openingQuestionDelivered,
       agentRespondedAfterReason,
@@ -400,10 +565,10 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       repeatedIdentityAsk: identityAskCount > 1,
       repeatedIdentityStatement: identityStatementCount > 1,
       liveYoniNowOfferDelivered: liveYoniNowOfferIndex !== -1,
-      agentRespondedAfterLiveYoniNowOffer: hasUserMessageAfter(transcript, liveYoniNowOfferIndex),
+      agentRespondedAfterLiveYoniNowOffer: hasUserMessageAfter(humanTranscript, liveYoniNowOfferIndex),
       aiSuspicion,
       audioConfusion: /\b(?:can'?t hear|can you hear|going in and out|breaking up|static|hello\?)\b/i.test(agentText),
-      callbackRequested: toolCallNames.includes("callback_requested") || /requested callback/i.test(input.outcome),
+      callbackRequested: contact.humanAnswered === true && (toolCallNames.includes("callback_requested") || /requested callback/i.test(input.outcome)),
       liveTransferToolFired,
       liveTransferRequested: clearLiveTransferConsent,
       clearLiveTransferConsent,
@@ -411,7 +576,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       callbackOrLaterSignal,
       transferCompleted:
         clearLiveTransferConsent && (hasSuccessfulTransferResult(transcript) || /warm transfer accepted/i.test(input.outcome)),
-      voicemailDetected: combinedText.includes("voicemail") || combinedText.includes("voice mail"),
+      voicemailDetected: contact.automation.includes("voicemail"),
       noAnswer: combinedText.includes("no answer") || combinedText.includes("no response after second call"),
       notInterested: /not interested/i.test(input.outcome),
       notShortSale: /not a short sale/i.test(input.outcome),

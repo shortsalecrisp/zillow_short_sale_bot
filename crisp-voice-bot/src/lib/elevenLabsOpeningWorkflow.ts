@@ -1,20 +1,31 @@
-export const OPENING_LISTENER_PROMPT = `You are {{assistantName}}, an AI calling assistant with Crisp Short Sales. This is the pickup and introduction stage, not the sales conversation.
+import { OPENING_HANDOFF_POLICY, VOICE_OPENING_SCRIPT, VOICE_RETURN_NUMBER_SPOKEN, VOICE_SCREENING_SCRIPT } from "./elevenLabsConversationPolicy";
 
-Listen first. Do not speak before the recipient finishes their pickup. Do not treat noise, side conversations, ringing or placeholder ... as a live answer; use skip_turn and wait. Never qualify the listing, add to the exact listing-agent check below, or offer a transfer in this stage.
+export const OPENING_LISTENER_PROMPT = `# Opening listener entry
+
+Start with the pickup and introduction rules. This node shares the complete business policy above. Its label does not freeze the conversation at introduction: after a new caller turn use the shared post-intro, repair, admin, consent and ending rules even if the workflow has not yet transitioned to main_conversation. Never improvise a different qualification question because this node is still active.
+
+Listen first. Do not speak before the recipient finishes their pickup. Do not treat noise, side conversations, ringing or placeholder ... as a live answer; use skip_turn and wait. During the initial greeting, before a NEW live caller reply after the introduction, do not qualify the listing, add to the exact listing-agent check below, or offer a transfer. Once that new reply arrives, the shared business policy and opening handoff contract govern the next response even if this node remains active.
 
 For a new live listener who only says hello, identifies themselves as the agent, or says they are here, say exactly this entire turn:
-"Hi, this is {{assistantName}} with Crisp Short Sales. Are you the listing agent for the short sale at {{streetAddress}}?"
+"${VOICE_OPENING_SCRIPT}"
 Stop after the question. Do not add anything. Wait for a NEW live caller turn. Their pickup before the introduction is not a response to it. Do not repeat the introduction to the same listener because of silence. If the only new transcript is "...", noise or silence, call skip_turn and wait; never say "Are you there?" or restart the introduction.
 
-A live question, correction, hearing difficulty, contact preference or request belongs in the main conversation before another introductory sentence. The workflow routes it there. Do not guess an answer or continue an interrupted introduction. Never fabricate consent or promise a callback, email or completed action.
+A live question, correction, hearing difficulty, contact preference or request belongs under the shared main conversation policy before another introductory sentence. The workflow normally routes it there; if routing is delayed, apply that same policy here rather than guessing, staying silent over the question or repeating the introduction. An intelligible repeated "Hello?" is not noise. A business greeting with "How can I help?" uses the live-admin path, not the normal listing-owner opening. Do not continue an interrupted introduction. Never fabricate consent or promise a callback, email or completed action. A yes confirms the listing only, never interest or transfer permission; use the matched needs question instead of inventing a seller-paperwork question.
+
+Speak the supplied street number and street clearly. Do not add city, state or ZIP unless asked, omit the street number, or guess a different address from unclear speech.
 
 Automated screening is not a human conversation. If a system asks for name and reason, say exactly once:
-"{{assistantName}} with Crisp Short Sales, about the short-sale listing at {{streetAddress}}."
-Then stop. For recorded please-stay-on-the-line, ringing or hold announcements use skip_turn and wait for the person. If a system asks for a return number, give 404-300-9526 once, then wait. When the system connects a live listener, treat that as a fresh pickup: say the live listing-agent check once, without repeating the screener response or adding another identity statement first.
+"${VOICE_SCREENING_SCRIPT}"
+Then stop. For recorded please-stay-on-the-line, ringing or hold announcements use skip_turn and wait for the person. If a system asks for a return number, say "${VOICE_RETURN_NUMBER_SPOKEN}" once, with a short pause between groups, then wait. Never pronounce 300 as three hundred. When the system connects a live listener, treat that as a fresh pickup: say the live listing-agent check once, without repeating the screener response or adding another identity statement first.
 
 Actual voicemail is different from screening or hold. Let the recorded greeting finish. Use voicemail_detection at its invitation to leave a message or the first natural pause after it, not mid-sentence. The backend supplies the approved first-attempt message; attempt two has no second message. Do not speak a live introduction over a recording. A clearly unrelated person's recorded greeting must use the separate silent recording exit, without disclosing the property or leaving a message. A live admin, matching surname or plausible name match is not an unrelated recording.
 
 A live stop request is not a recording. Do not pitch again; the main conversation and guarded ending workflow handle the actual request. Recorded goodbyes and canned thanks never establish human consent. Never invent a caller turn or say goodbye to manufacture ending permission. When validation identifies a pending question or correction, the main conversation answers that current turn. Other denied endings or tool failures wait silently for the next caller turn. Sound concise, clear and warm; keep the selected voice, language and business facts unchanged.`;
+
+export function buildOpeningListenerPrompt(mainPrompt: string): string {
+  if (!mainPrompt?.trim()) throw new Error("Full main conversation prompt is required for the opening listener");
+  return [mainPrompt.trim(), OPENING_HANDOFF_POLICY, OPENING_LISTENER_PROMPT].join("\n\n");
+}
 
 export function applyConversationOpeningWorkflow<T extends Record<string, any>>(agent: T): T {
   const updated = structuredClone(agent);
@@ -26,16 +37,23 @@ export function applyConversationOpeningWorkflow<T extends Record<string, any>>(
   if (updated.conversation_config?.agent?.first_message !== "") {
     throw new Error("Listen-first configuration is required before adding the opening workflow");
   }
+  const listenerPrompt = buildOpeningListenerPrompt(updated.conversation_config.agent.prompt?.prompt);
   if (Object.keys(workflow.subgraphs ?? {}).length || Object.values(workflow.nodes).some((node: any) => node.parent_subgraph_id != null)) {
     throw new Error("Nested workflow endings require a separate review");
   }
   workflow.subgraphs ??= {};
+  const priorOpening = workflow.nodes.opening_listener ?? {};
+  const priorOpeningConfig = priorOpening.conversation_config ?? {};
+  const priorOpeningAgent = priorOpeningConfig.agent ?? {};
+  const priorOpeningPrompt = priorOpeningAgent.prompt ?? {};
   workflow.nodes.opening_listener = {
+    ...priorOpening,
     type: "override_agent", label: "Listen And Introduce", position: { x: -320, y: -220 },
     parent_subgraph_id: null, forced_tool_name: null,
-    edge_order: ["opening_to_unrelated_recording_exit", "opening_to_main"],
-    conversation_config: { agent: { first_message: "", disable_first_message_interruptions: false,
-      prompt: { prompt: OPENING_LISTENER_PROMPT, built_in_tools: { end_call: null, transfer_to_number: null } } } },
+    edge_order: [...(priorOpening.edge_order ?? []).filter((id: string) => !["opening_to_unrelated_recording_exit", "opening_to_main"].includes(id)), "opening_to_unrelated_recording_exit", "opening_to_main"],
+    conversation_config: { ...priorOpeningConfig, agent: { ...priorOpeningAgent, first_message: "", disable_first_message_interruptions: false,
+      prompt: { ...priorOpeningPrompt, prompt: listenerPrompt,
+        built_in_tools: { ...priorOpeningPrompt.built_in_tools, end_call: null, transfer_to_number: null } } } },
     additional_prompt: "", additional_knowledge_base: [], additional_tool_ids: [], entry_behavior: "wait_for_user",
   };
   workflow.nodes.unrelated_recording_exit = {
@@ -49,6 +67,8 @@ export function applyConversationOpeningWorkflow<T extends Record<string, any>>(
       "(1) it contains a question, correction, hearing problem, contact preference, request to stop, or another substantive request; or",
       "(2) the assistant already finished the short live introduction to THIS listener and a NEW live caller turn arrived AFTER that introduction.",
       "Route before speaking so the main conversation can answer the current turn. A greeting before the introduction does not qualify for (2).",
+      "A business greeting asking how to help, a live admin, or an intelligible repeated hello also needs the main conversation's targeted reply. Do not keep such a turn in the opening listener or substitute the normal opener.",
+      "A clear yes after the exact listing question confirms only that listing. Route to main for the matched needs question; it is not a handoff, callback or transfer request. Do not route on a recorded yes or a hearing-restoration acknowledgment as if it confirmed the listing.",
       "Do not route just because the assistant finished speaking, a tool returned, the line is silent, or a recording said thank you.",
     ].join(" ") },
   };
@@ -62,5 +82,8 @@ export function applyConversationOpeningWorkflow<T extends Record<string, any>>(
     ].join(" ") },
   };
   workflow.nodes.main_conversation.entry_behavior = "generate_immediately";
+  const previousMainPrompt = workflow.nodes.main_conversation.additional_prompt ?? "";
+  const retainedMainPrompt = previousMainPrompt.replace(/\[CRISP_OPENING_HANDOFF_POLICY\][\s\S]*?\[END_CRISP_OPENING_HANDOFF_POLICY\]/g, "").trim();
+  workflow.nodes.main_conversation.additional_prompt = [retainedMainPrompt, OPENING_HANDOFF_POLICY].filter(Boolean).join("\n\n");
   return updated;
 }

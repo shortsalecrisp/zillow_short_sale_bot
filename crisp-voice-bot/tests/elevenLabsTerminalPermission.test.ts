@@ -129,7 +129,7 @@ test("a generic no after a transfer offer preserves the caller's other interest"
   assert.equal(check().permission, true);
 });
 
-test("a second purpose-confusion turn after the approved property clarification permits the narrow exit", () => {
+test("a second purpose-confusion turn still requires repair, not a forced goodbye", () => {
   const result = assessElevenLabsTerminalPermission({ conversation_id, history: JSON.stringify({
     "x-elevenlabs-history": true,
     entries: [
@@ -138,11 +138,11 @@ test("a second purpose-confusion turn after the approved property clarification 
       { role: "user", message: "I still don't understand." },
     ],
   }) });
-  assert.equal(result.permission, true);
-  assert.equal(result.decision, "repeated_purpose_confusion");
+  assert.equal(result.permission, false);
+  assert.equal(result.decision, "pending_question_or_correction");
 });
 
-test("purpose exit fails closed without two matching live turns and the exact approved clarification", () => {
+test("purpose confusion never authorizes ending regardless of the preceding script", () => {
   const candidateHistories = [
     [
       { role: "user", message: "What do you want from me?" },

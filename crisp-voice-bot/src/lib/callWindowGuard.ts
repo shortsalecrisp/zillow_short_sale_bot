@@ -9,6 +9,8 @@ export const CALL_WINDOWS: Record<string, { startMinutes: number; endMinutes: nu
     startMinutes: 14 * 60,
     endMinutes: 16 * 60,
   },
+  reach_morning_v1: { startMinutes: 9 * 60 + 15, endMinutes: 9 * 60 + 45 },
+  reach_afternoon_v1: { startMinutes: 15 * 60, endMinutes: 15 * 60 + 45 },
 };
 
 export function getConfiguredCallWindows() {
@@ -53,6 +55,10 @@ export function getStartCallWindowBlockReason(
   let localMinutes: number;
   try {
     localMinutes = getLocalCallMinutes(now, payload.agentTimeZone);
+    if (payload.scheduledWindow?.startsWith("reach_")) {
+      const day = new Intl.DateTimeFormat("en-US", { timeZone: payload.agentTimeZone, weekday: "short" }).format(now);
+      if (day === "Sat" || day === "Sun") return "Cold outreach is restricted to listing-local weekdays";
+    }
   } catch (error) {
     if (error instanceof RangeError) {
       return "agentTimeZone must be a valid IANA time zone";

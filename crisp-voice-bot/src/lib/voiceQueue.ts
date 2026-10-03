@@ -24,6 +24,7 @@ import {
   getNextVoiceBotFirstAttemptWindowStart,
   getNextVoiceBotFollowupAttemptWindowStart,
   getVoiceBotAgentTimeZone,
+  getVoiceBotTimeZoneResolution,
   getVoiceBotPreferredCallWindowName,
   isRetryableVoiceBotResult,
   isWithinVoiceBotQueueRunWindow,
@@ -84,6 +85,7 @@ export type VoiceQueueResult = {
   activeCallCountBeforeRun?: number;
   availableSlots?: number;
   candidateCount?: number;
+  timeZoneReviewRequired?: Array<{ rowNumber: number; reason: string }>;
   maxCallsPerRun?: number;
   maxActiveCalls?: number;
   nowEt?: string;
@@ -321,6 +323,8 @@ export function getVoiceBotCallCandidateFromRowValues(
   );
   const scheduledFor = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
   const agentTimeZone = getVoiceBotAgentTimeZone(rowValues);
+  const normalizedPhone = normalizePhoneToE164(rowValues[VOICE_BOT_COL_PHONE - 1]);
+  if (!agentTimeZone || !normalizedPhone) return undefined;
   const currentWindow = getVoiceBotPreferredCallWindowName(now, agentTimeZone);
   const overdueNoStartRecovery = Boolean(
     scheduledFor && now.getTime() - scheduledFor.getTime() >= 12 * 60 * 60 * 1000,
@@ -340,8 +344,10 @@ export function getVoiceBotCallCandidateFromRowValues(
       return undefined;
     }
 
-    const dueAt = getNextVoiceBotFirstAttemptWindowStart(followupSentAt, agentTimeZone, rowNumber);
-    const candidateDueAt = scheduledFor && scheduledFor > dueAt ? scheduledFor : dueAt;
+    const dueAt = getNextVoiceBotFirstAttemptWindowStart(followupSentAt, agentTimeZone, normalizedPhone);
+    const candidateDueAt = getNextVoiceBotFirstAttemptWindowStart(
+      scheduledFor && scheduledFor > dueAt ? scheduledFor : dueAt, agentTimeZone, normalizedPhone,
+    );
     if (candidateDueAt < config.voiceQueue.minCandidateDueAt) {
       return undefined;
     }
@@ -370,8 +376,12 @@ export function getVoiceBotCallCandidateFromRowValues(
     return undefined;
   }
 
-  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, agentTimeZone);
-  const candidateDueAt = scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt;
+  const recoveryDays = ["call_start_failed", "call_start_receipt_missing"].includes(firstAttemptResult) || firstAttemptStartReceiptMissing ? 1 : 2;
+  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, agentTimeZone, recoveryDays);
+  const candidateDueAt = getNextVoiceBotFirstAttemptWindowStart(
+    scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt,
+    agentTimeZone, normalizedPhone, getDueAtCallWindowName(nextAttemptAt, agentTimeZone),
+  );
   if (candidateDueAt < config.voiceQueue.minCandidateDueAt) {
     return undefined;
   }
@@ -406,13 +416,14 @@ export function getVoiceBotCallCandidatesFromRows(
 
   for (const row of rows) {
     const candidate = getVoiceBotCallCandidateFromRowValues(row.rowNumber, row.values, now);
-    if (!candidate) {
+    if (!candidate || isVoiceBotPhoneBlocked(candidate, rows, now)) {
       continue;
     }
 
     candidates.push(candidate);
   }
 
+  const seenPhones = new Set<string>();
   return candidates
     .sort((left, right) => {
       const recoveryOrder = Number(right.overdueNoStartRecovery) - Number(left.overdueNoStartRecovery);
@@ -428,11 +439,41 @@ export function getVoiceBotCallCandidatesFromRows(
       const dueOrder = left.dueAt.getTime() - right.dueAt.getTime();
       return dueOrder !== 0 ? dueOrder : left.rowNumber - right.rowNumber;
     })
+    .filter((candidate) => {
+      if (seenPhones.has(candidate.phone)) return false;
+      seenPhones.add(candidate.phone);
+      return true;
+    })
     .slice(0, limit);
 }
 
+export function isVoiceBotPhoneBlocked(
+  candidate: VoiceQueueCandidate,
+  rows: Array<{ rowNumber: number; values: unknown[] }>,
+  now: Date,
+): boolean {
+  let acceptedAttempts = 0;
+  for (const row of rows) {
+    if (normalizePhoneToE164(row.values[VOICE_BOT_COL_PHONE - 1]) !== candidate.phone) continue;
+    if (normalizeString(row.values[VOICE_BOT_COL_LEAD_STATUS_CODE - 1])) return true;
+    if (isVoiceBotRowActivelyCalling(row.values, now)) return true;
+    for (const [sentColumn, resultColumn] of [
+      [VOICE_BOT_COL_CALL_1_SENT, VOICE_BOT_COL_CALL_1_RESULT],
+      [VOICE_BOT_COL_CALL_2_SENT, VOICE_BOT_COL_CALL_2_RESULT],
+    ]) {
+      const result = normalizeString(row.values[resultColumn - 1]).toLowerCase();
+      if (result && !isRetryableVoiceBotResult(result)) return true;
+      if (!parseVoiceBotDate(row.values[sentColumn - 1])) continue;
+      // Another listing must not restart a phone's already-established cadence.
+      if (row.rowNumber !== candidate.rowNumber) return true;
+      if (result !== "call_start_failed" && result !== "call_start_receipt_missing") acceptedAttempts += 1;
+    }
+  }
+  return acceptedAttempts >= 2;
+}
+
 function getVoiceBotWindowStartLimit(callWindow: string | undefined, activeLimit: number): number {
-  return callWindow === "morning_probe" ? 1 : activeLimit;
+  return callWindow === "morning_probe" || callWindow === "reach_morning_v1" ? 1 : activeLimit;
 }
 
 export function getVoiceBotStartableCallCandidatesFromRows(
@@ -541,7 +582,7 @@ async function markVoiceBotAttemptStartFailed(
     `Voice call start failed before connecting at ${formatVoiceBotDateEt(now)}: ` +
     normalizeString(errorMessage).slice(0, 500);
   const recoveryAt = candidate.callAttemptNumber === 1
-    ? getNextVoiceBotFollowupAttemptWindowStart(now, candidate.agentTimeZone)
+    ? getNextVoiceBotFollowupAttemptWindowStart(now, candidate.agentTimeZone, 1)
     : undefined;
   const writes = [
     { columnNumber: sentColumn, value: now.toISOString(), label: `voice_call_${candidate.callAttemptNumber}_sent` },
@@ -654,10 +695,11 @@ async function reconcileUncertainVoiceCallStarts(
       } else {
         const sentColumn = uncertainAttempt === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
         const agentTimeZone = marker.agentTimeZone || getVoiceBotAgentTimeZone(row.values);
+        if (!agentTimeZone) continue;
         const replacementAt = getNextVoiceBotFirstAttemptWindowStart(
           new Date(now.getTime() + 5 * 60_000),
           agentTimeZone,
-          row.rowNumber,
+          metadata.requestedPhone,
         );
         const proof = receipt?.status === "definitive_failure"
           ? `Provider receipt ${receipt.conversationId} proves the call failed before acceptance.`
@@ -789,10 +831,18 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   const availableSlots = Math.max(0, Math.min(VOICE_BOT_MAX_ACTIVE_CALLS, windowStartLimit) - activeCallCount);
 
   if (options.dryRun) {
+    const timeZoneReviewRequired = rows
+      .filter((row) => !normalizeString(row.values[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]) &&
+        normalizeMarker(row.values[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1]) === "x" &&
+        !parseVoiceBotDate(row.values[VOICE_BOT_COL_CALL_2_SENT - 1]))
+      .map((row) => ({ rowNumber: row.rowNumber, resolution: getVoiceBotTimeZoneResolution(row.values) }))
+      .filter(({ resolution }) => !resolution.timeZone)
+      .map(({ rowNumber, resolution }) => ({ rowNumber, reason: resolution.reason }));
     return {
       ok: true,
       queued: false,
       dryRun: true,
+      timeZoneReviewRequired,
       activeCallCount,
       availableSlots,
       maxCallsPerRun: VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
@@ -826,10 +876,11 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   const queuedCalls: VoiceQueueResult["calls"] = [];
 
   for (const candidate of candidates) {
-    const refreshedValues = await getVoiceBotRowByNumber(sheets, candidate.rowNumber);
+    const refreshedRows = await getVoiceBotRows(sheets);
+    const refreshedValues = refreshedRows.find((row) => row.rowNumber === candidate.rowNumber)?.values ?? [];
     const refreshedCandidate = getVoiceBotCallCandidateFromRowValues(candidate.rowNumber, refreshedValues, now);
 
-    if (!refreshedCandidate) {
+    if (!refreshedCandidate || isVoiceBotPhoneBlocked(refreshedCandidate, refreshedRows, now)) {
       logger.info("Voice queue candidate no longer eligible", {
         rowNumber: candidate.rowNumber,
       });

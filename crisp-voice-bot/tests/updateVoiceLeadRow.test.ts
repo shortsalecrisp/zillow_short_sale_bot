@@ -98,6 +98,7 @@ test("terminal first-attempt failures persist an outcome and clear stale schedul
 test("retryable first attempts clear stale terminal lead status before scheduling call two", async () => {
   const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
   const row = Array.from({ length: 42 }, () => "");
+  row[6] = "NJ";
   row[VOICE_BOT_COL_CALL_1_SENT - 1] = "2026-09-09T13:03:44.000Z";
   row[VOICE_BOT_COL_LEAD_STATUS_CODE - 1] = "N";
 
@@ -115,7 +116,7 @@ test("retryable first attempts clear stale terminal lead status before schedulin
   assert.equal(byColumn.get(VOICE_BOT_COL_LEAD_STATUS_CODE), "");
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_ELIGIBLE), "yes");
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_TIME_BUCKET), "voice_call_2_due");
-  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "2026-09-10T18:30:00.000Z");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "2026-09-11T19:00:00.000Z");
 });
 
 test("current-call ending and contact review clear cadence without changing lead K or erasing existing history", async () => {

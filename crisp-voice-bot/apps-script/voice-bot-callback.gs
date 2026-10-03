@@ -58,86 +58,20 @@ const VOICE_BOT_PAUSE_REASON = 'Paused until ElevenLabs billing cycle refreshes 
 const VOICE_BOT_MIN_QUEUE_DUE_AT_ISO = '2026-08-23T04:00:00.000Z';
 const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
   {
-    name: 'morning_probe',
-    startMinutes: 9 * 60,
-    endMinutes: 10 * 60
+    name: 'reach_morning_v1',
+    startMinutes: 9 * 60 + 15,
+    endMinutes: 9 * 60 + 45
   },
   {
-    name: 'mid_afternoon',
-    startMinutes: 14 * 60,
-    endMinutes: 16 * 60
+    name: 'reach_afternoon_v1',
+    startMinutes: 15 * 60,
+    endMinutes: 15 * 60 + 45
   }
 ];
-const VOICE_BOT_WEEKEND_CALL_WINDOWS = [
-  {
-    name: 'morning_probe',
-    startMinutes: 9 * 60,
-    endMinutes: 10 * 60
-  },
-  {
-    name: 'mid_afternoon',
-    startMinutes: 14 * 60,
-    endMinutes: 16 * 60
-  }
-];
-const VOICE_BOT_MORNING_WINDOW_NAME = 'morning_probe';
-const VOICE_BOT_MID_AFTERNOON_WINDOW_NAME = 'mid_afternoon';
-const VOICE_BOT_FIRST_ATTEMPT_ROTATION_SIZE = 5;
-const VOICE_BOT_FIRST_ATTEMPT_MID_AFTERNOON_SLOTS = 3;
+const VOICE_BOT_WEEKEND_CALL_WINDOWS = [];
+const VOICE_BOT_MORNING_WINDOW_NAME = 'reach_morning_v1';
+const VOICE_BOT_MID_AFTERNOON_WINDOW_NAME = 'reach_afternoon_v1';
 
-const VOICE_BOT_STATE_TIMEZONES = {
-  AL: 'America/Chicago',
-  AK: 'America/Anchorage',
-  AR: 'America/Chicago',
-  AZ: 'America/Phoenix',
-  CA: 'America/Los_Angeles',
-  CO: 'America/Denver',
-  CT: 'America/New_York',
-  DC: 'America/New_York',
-  DE: 'America/New_York',
-  FL: 'America/New_York',
-  GA: 'America/New_York',
-  HI: 'Pacific/Honolulu',
-  IA: 'America/Chicago',
-  ID: 'America/Denver',
-  IL: 'America/Chicago',
-  IN: 'America/New_York',
-  KS: 'America/Chicago',
-  KY: 'America/Chicago',
-  LA: 'America/Chicago',
-  MA: 'America/New_York',
-  MD: 'America/New_York',
-  ME: 'America/New_York',
-  MI: 'America/New_York',
-  MN: 'America/Chicago',
-  MO: 'America/Chicago',
-  MS: 'America/Chicago',
-  MT: 'America/Denver',
-  NC: 'America/New_York',
-  ND: 'America/Chicago',
-  NE: 'America/Chicago',
-  NH: 'America/New_York',
-  NJ: 'America/New_York',
-  NM: 'America/Denver',
-  NV: 'America/Los_Angeles',
-  NY: 'America/New_York',
-  OH: 'America/New_York',
-  OK: 'America/Chicago',
-  OR: 'America/Los_Angeles',
-  PA: 'America/New_York',
-  RI: 'America/New_York',
-  SC: 'America/New_York',
-  SD: 'America/Chicago',
-  TN: 'America/Chicago',
-  TX: 'America/Chicago',
-  UT: 'America/Denver',
-  VA: 'America/New_York',
-  VT: 'America/New_York',
-  WA: 'America/Los_Angeles',
-  WI: 'America/Chicago',
-  WV: 'America/New_York',
-  WY: 'America/Denver'
-};
 
 const VOICE_BOT_COL_FIRST_NAME = 1; // A = agent_name
 const VOICE_BOT_COL_LAST_NAME = 2; // B = last_name
@@ -342,7 +276,14 @@ function updateVoiceBotSchedulingCells_(sheet, rowNumber, payload, callAttemptNu
     const firstAttemptSentAt = parseVoiceBotDate_(sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_1_SENT).getValue());
     if (firstAttemptSentAt) {
       const rowValues = sheet.getRange(rowNumber, 1, 1, VOICE_BOT_COL_VOICE_NOTES).getValues()[0];
-      const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, getVoiceBotAgentTimeZone_(rowValues));
+      const timeZone = getVoiceBotAgentTimeZone_(rowValues);
+      if (!timeZone) {
+        clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE, fieldsWritten, 'call_eligible');
+        clearVoiceBotCellIfNeeded_(sheet, rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR, fieldsWritten, 'call_scheduled_for');
+        sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET).setValue('listing_timezone_review_required');
+        return;
+      }
+      const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, timeZone, callResult === 'call_start_failed' ? 1 : 2);
       sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR).setValue(nextAttemptAt);
       sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE).setValue('yes');
       sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET).setValue('voice_call_2_due');
@@ -695,7 +636,7 @@ function getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates) {
 
   for (var i = 0; i < rows.length; i++) {
     const candidate = getVoiceBotCallCandidateFromRowValues_(rows[i].rowNumber, rows[i].values, now);
-    if (candidate) {
+    if (candidate && !isVoiceBotPhoneBlocked_(candidate, rows, now)) {
       candidates.push(candidate);
     }
   }
@@ -715,12 +656,38 @@ function getVoiceBotCallCandidatesFromRows_(rows, now, maxCandidates) {
     return dueOrder !== 0 ? dueOrder : left.rowNumber - right.rowNumber;
   });
 
-  return candidates.slice(0, limit);
+  const seenPhones = {};
+  return candidates.filter(function(candidate) {
+    if (seenPhones[candidate.phone]) return false;
+    seenPhones[candidate.phone] = true;
+    return true;
+  }).slice(0, limit);
+}
+
+function isVoiceBotPhoneBlocked_(candidate, rows, now) {
+  var acceptedAttempts = 0;
+  for (var i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (normalizePhoneToE164_(row.values[VOICE_BOT_COL_PHONE - 1]) !== candidate.phone) continue;
+    if (normalizeString_(row.values[VOICE_BOT_COL_LEAD_STATUS_CODE - 1])) return true;
+    if (isVoiceBotRowActivelyCalling_(row.values, now)) return true;
+    const attempts = [[VOICE_BOT_COL_CALL_1_SENT, VOICE_BOT_COL_CALL_1_RESULT], [VOICE_BOT_COL_CALL_2_SENT, VOICE_BOT_COL_CALL_2_RESULT]];
+    for (var j = 0; j < attempts.length; j++) {
+      const result = normalizeString_(row.values[attempts[j][1] - 1]).toLowerCase();
+      if (result && !isRetryableVoiceBotResult_(result)) return true;
+      if (!parseVoiceBotDate_(row.values[attempts[j][0] - 1])) continue;
+      if (row.rowNumber !== candidate.rowNumber) return true;
+      if (result !== 'call_start_failed' && result !== 'call_start_receipt_missing') acceptedAttempts++;
+    }
+  }
+  return acceptedAttempts >= 2;
 }
 
 function getVoiceBotCallCandidateByRow_(sheet, rowNumber, now) {
-  const values = sheet.getRange(rowNumber, 1, 1, VOICE_BOT_COL_VOICE_NOTES).getValues()[0];
-  return getVoiceBotCallCandidateFromRowValues_(rowNumber, values, now);
+  const rows = getVoiceBotRows_(sheet);
+  const row = rows.find(function(item) { return item.rowNumber === rowNumber; });
+  const candidate = row ? getVoiceBotCallCandidateFromRowValues_(rowNumber, row.values, now) : null;
+  return candidate && !isVoiceBotPhoneBlocked_(candidate, rows, now) ? candidate : null;
 }
 
 function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
@@ -739,6 +706,8 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
   const firstAttemptResult = normalizeString_(rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1]);
   const scheduledFor = parseVoiceBotDate_(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
   const agentTimeZone = getVoiceBotAgentTimeZone_(rowValues);
+  const normalizedPhone = normalizePhoneToE164_(rowValues[VOICE_BOT_COL_PHONE - 1]);
+  if (!agentTimeZone || !normalizedPhone) return null;
   const currentWindow = getVoiceBotPreferredCallWindowName_(now, agentTimeZone);
   const overdueNoStartRecovery = Boolean(
     scheduledFor && now.getTime() - scheduledFor.getTime() >= 12 * 60 * 60 * 1000
@@ -758,8 +727,8 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
       return null;
     }
 
-    const dueAt = getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, agentTimeZone, rowNumber);
-    const candidateDueAt = scheduledFor && scheduledFor > dueAt ? scheduledFor : dueAt;
+    const dueAt = getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, agentTimeZone, normalizedPhone);
+    const candidateDueAt = getNextVoiceBotFirstAttemptWindowStart_(scheduledFor && scheduledFor > dueAt ? scheduledFor : dueAt, agentTimeZone, normalizedPhone);
     if (isBeforeVoiceBotMinQueueDueAt_(candidateDueAt)) {
       return null;
     }
@@ -784,8 +753,8 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
     return null;
   }
 
-  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, agentTimeZone);
-  const candidateDueAt = scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt;
+  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, agentTimeZone, firstAttemptResult === 'call_start_failed' ? 1 : 2);
+  const candidateDueAt = getNextVoiceBotFirstAttemptWindowStart_(scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt, agentTimeZone, normalizedPhone, getDueAtCallWindowName_(nextAttemptAt, agentTimeZone));
   if (isBeforeVoiceBotMinQueueDueAt_(candidateDueAt)) {
     return null;
   }
@@ -904,7 +873,7 @@ function markVoiceBotAttemptStartFailed_(sheet, candidate, now, err) {
     ': ' +
     truncateVoiceBotStartFailureMessage_(errorMessage);
   const recoveryAt = candidate.callAttemptNumber === 1
-    ? getNextVoiceBotFollowupAttemptWindowStart_(now, candidate.agentTimeZone)
+    ? getNextVoiceBotFollowupAttemptWindowStart_(now, candidate.agentTimeZone, 1)
     : null;
 
   sheet.getRange(candidate.rowNumber, sentColumn).setValue(now);
@@ -1264,11 +1233,15 @@ function isBeforeVoiceBotMinQueueDueAt_(date) {
 }
 
 function getVoiceBotAgentTimeZone_(rowValues) {
-  const state = normalizeString_(rowValues[VOICE_BOT_COL_STATE - 1]).toUpperCase();
-  return VOICE_BOT_STATE_TIMEZONES[state] || VOICE_BOT_TIMEZONE;
+  return resolveListingTimeZone_({
+    streetAddress: normalizeString_(rowValues[VOICE_BOT_COL_LISTING_ADDRESS - 1]),
+    city: normalizeString_(rowValues[VOICE_BOT_COL_CITY - 1]),
+    state: normalizeString_(rowValues[VOICE_BOT_COL_STATE - 1])
+  }).timeZone;
 }
 
 function getVoiceBotPreferredCallWindowName_(date, timeZone) {
+  if (!timeZone) return '';
   const day = Number(Utilities.formatDate(date, timeZone, 'u'));
   const callWindows = getVoiceBotCallWindowsForDay_(day);
   const localMinutes = getVoiceBotLocalMinutes_(date, timeZone);
@@ -1334,19 +1307,12 @@ function getVoiceBotLocalDateKey_(date, timeZone) {
   return Utilities.formatDate(date, timeZone, 'yyyy-MM-dd');
 }
 
-function getVoiceBotFirstAttemptRotationSlot_(rowNumber) {
-  const numericRowNumber = Number(rowNumber);
-  if (!isFinite(numericRowNumber)) {
-    return 0;
-  }
-
-  return Math.abs(Math.trunc(numericRowNumber)) % VOICE_BOT_FIRST_ATTEMPT_ROTATION_SIZE;
-}
-
-function getVoiceBotFirstAttemptWindowName_(rowNumber) {
-  return getVoiceBotFirstAttemptRotationSlot_(rowNumber) < VOICE_BOT_FIRST_ATTEMPT_MID_AFTERNOON_SLOTS
-    ? VOICE_BOT_MID_AFTERNOON_WINDOW_NAME
-    : VOICE_BOT_MORNING_WINDOW_NAME;
+function getVoiceBotFirstAttemptWindowName_(phone) {
+  const normalizedPhone = normalizePhoneToE164_(phone);
+  if (!normalizedPhone) return '';
+  var hash = 2166136261;
+  for (var i = 0; i < normalizedPhone.length; i++) hash = Math.imul(hash ^ normalizedPhone.charCodeAt(i), 16777619) >>> 0;
+  return hash % 2 === 0 ? VOICE_BOT_MORNING_WINDOW_NAME : VOICE_BOT_MID_AFTERNOON_WINDOW_NAME;
 }
 
 function getOppositeVoiceBotCallWindowName_(windowName) {
@@ -1361,10 +1327,12 @@ function getOppositeVoiceBotCallWindowName_(windowName) {
   return '';
 }
 
-function getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, timeZone, rowNumber) {
+function getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, timeZone, phone, windowName) {
+  if (!timeZone) throw new Error('Listing time zone must be resolved before scheduling');
   const followupDateKey = getVoiceBotLocalDateKey_(followupSentAt, timeZone);
   const followupMinutes = getVoiceBotLocalMinutes_(followupSentAt, timeZone);
-  const firstAttemptWindowName = getVoiceBotFirstAttemptWindowName_(rowNumber);
+  const firstAttemptWindowName = windowName || getVoiceBotFirstAttemptWindowName_(phone);
+  if (firstAttemptWindowName !== VOICE_BOT_MORNING_WINDOW_NAME && firstAttemptWindowName !== VOICE_BOT_MID_AFTERNOON_WINDOW_NAME) throw new Error('Valid phone-scoped call window is required before scheduling');
   var cursorDateKey = followupDateKey;
 
   while (true) {
@@ -1388,9 +1356,12 @@ function getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, timeZone, rowNu
   }
 }
 
-function getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, timeZone) {
-  const nextCallDateKey = getNextVoiceBotCallDateKey_(getVoiceBotLocalDateKey_(firstAttemptSentAt, timeZone), timeZone);
-  const firstAttemptWindowName = getVoiceBotPreferredCallWindowName_(firstAttemptSentAt, timeZone);
+function getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, timeZone, businessDays) {
+  if (!timeZone) throw new Error('Listing time zone must be resolved before scheduling');
+  var nextCallDateKey = getVoiceBotLocalDateKey_(firstAttemptSentAt, timeZone);
+  const days = businessDays === undefined ? 2 : businessDays;
+  for (var day = 0; day < days; day++) nextCallDateKey = getNextVoiceBotCallDateKey_(nextCallDateKey, timeZone);
+  const firstAttemptWindowName = getVoiceBotLocalMinutes_(firstAttemptSentAt, timeZone) < 12 * 60 ? VOICE_BOT_MORNING_WINDOW_NAME : VOICE_BOT_MID_AFTERNOON_WINDOW_NAME;
   const oppositeWindowName = getOppositeVoiceBotCallWindowName_(firstAttemptWindowName);
   const nextCallProbeDate = buildVoiceBotDateInTimeZone_(nextCallDateKey, 12 * 60, timeZone);
   const nextCallDay = Number(Utilities.formatDate(nextCallProbeDate, timeZone, 'u'));

@@ -21,7 +21,7 @@ test("prompt has one extractable body and distinct concise state sections", () =
     "Request records and receipts", "Callback request", "Information request",
     "Live transfer request", "Live admins and wrong contacts", "Automated screening and hold",
     "Voicemail and recorded exits"]) assert.ok(headings.includes(heading), heading);
-  assert.ok(prompt.split(/\s+/).length < 5500, "Consolidation must not reintroduce the duplicated 9,899-word body");
+  assert.ok(prompt.split(/\s+/).length < 6000, "Targeted recovery rules must not reintroduce the duplicated 9,899-word body");
   assert.match(source.split("## Prompt\n")[0], /not a verified deployment/);
 });
 test("priority considers the whole turn and hearing precedes questions and actions", () => {
@@ -35,7 +35,7 @@ test("priority considers the whole turn and hearing precedes questions and actio
 });
 test("intro is its own entire turn and exposes no dynamic continuation script", () => {
   const s = section("Intro only");
-  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. Are you the listing agent for the short sale at \{\{streetAddress\}\}\?"/);
+  assert.match(s, /your entire spoken turn is:\n"Hi, this is {{assistantName}} with Crisp Short Sales\. We help with short-sale lender paperwork\. Is \{\{streetAddress\}\} your listing\?"/);
   assert.match(s, /Stop after the question\. Wait for a NEW live-caller turn/);
   assert.match(s, /occurred before the introduction and does not count as a response/);
   assert.match(s, /Do not append a second qualification question, Yoni offer, or callback question/);
@@ -49,8 +49,10 @@ test("post-intro handles an answer to the new opener without repeating the pitch
   assert.match(s, /contained no question, correction, hearing issue or requested next step when it arrived/);
   assert.match(s, /A further caller turn is required before qualification/);
   assert.match(s, /openerVariant continuation is retired; do not speak a second opener/);
-  assert.match(s, /A clear yes permits one short purpose-and-handling question, not a transfer or callback/);
-  assert.match(s, /We help with lender paperwork and calls\. Are you handling those yourself\?/);
+  assert.match(s, /A clear yes confirms listing ownership only, not interest in help, a transfer or callback/);
+  assert.match(s, /Would help with lender paperwork or calls be useful for this listing\?/);
+  assert.match(s, /Do not substitute a seller-package status question or an arbitrary qualification question/);
+  assert.match(s, /A clear yes to the needs question indicates interest in help, not live-transfer consent/);
   assert.match(s, /A clear no means the listing-agent check failed, not that the caller rejected all service or opted out/);
   assert.match(s, /For a neutral acknowledgment or unclear answer, ask one precise clarification/);
   assert.match(s, /You keep the listing and client relationship; Crisp can take the lender paperwork and follow-up off your plate/);
@@ -81,23 +83,43 @@ test("name corrections and authorized admins outrank the stored lead name", () =
   assert.match(s, /Never guess a name/);
   assert.match(section("Live admins and wrong contacts"), /If the admin can discuss the listing, speak with them instead of insisting on a transfer/);
 });
-test("repeated purpose repair and hearing restoration cannot become qualification", () => {
+test("specific purpose, ambiguous what and hearing restoration have distinct bounded repairs", () => {
   const s = section("Listening and repair");
-  assert.match(s, /On the first purpose challenge[^]+Would you like me to explain\?/);
-  assert.match(s, /If the caller's next intelligible turn still asks the same purpose/);
-  assert.match(s, /I'm sorry I wasn't clear\. I'll let you go\. Goodbye\./);
+  assert.match(s, /For a clear purpose question/);
+  assert.match(s, /We help listing agents with short-sale lender paperwork and calls/);
+  assert.match(s, /A bare "What\?", "Huh\?" or "I don't understand" does not establish hearing loss, rejection or a particular missing fact/);
+  assert.match(s, /Did you miss who I am, or what we help with\?/);
+  assert.match(s, /A second clarification alone is never permission to say goodbye/);
+  assert.doesNotMatch(s, /I'll let you go\. Goodbye\./);
   assert.match(s, /For an audio problem say only "Sorry, can you hear me now\?" and wait/);
   assert.match(s, /hearing-restoration answer[^\n]+is not qualification consent/);
   assert.match(s, /repeat only the missed short sentence, then wait again/);
   assert.match(s, /Do not claim the connection or volume was fixed/);
-  assert.match(s, /including "What\?", "I don't understand", "Why are you calling\?", or "What do you want from me\?"/);
   assert.match(s, /Never respond with "How can I help you today\?"/);
 });
 test("bounded repair preserves understood fragments and never guesses consent", () => {
   const s = section("Listening and repair");
   assert.match(s, /retain that part and ask only for what was missing/);
-  assert.match(s, /Do not repeat the pitch, offer a person, callback or transfer/);
-  assert.match(s, /This narrow repeated-purpose exit is not permission for future contact/);
+  assert.match(s, /Do not repeat the full opening or guess the answer/);
+  assert.match(s, /do not keep pitching or invent consent to another channel/);
+  assert.match(s, /Honor an actual refusal, stop request or opt-out promptly/);
+  assert.match(s, /Repeated intelligible "Hello\?" is a live turn, not placeholder noise/);
+});
+
+test("a confirmed listing plus a purpose question remains answer-only", () => {
+  const s = section("Post-intro conversation");
+  assert.match(s, /confirms they have the listing and asks what the call is about, answer only the purpose/);
+  assert.match(s, /Do not attach the needs question to that answer/);
+  assert.match(section("Contact preferences and endings"), /Do not enter the ending workflow or announce goodbye merely because a clarification count was reached/);
+});
+
+test("affiliation, property and number corrections answer the specific missing point", () => {
+  assert.match(section("Answer library"), /Are you my lender \/ with the bank: "No, we're a separate short-sale processing service/);
+  assert.match(section("Intro only"), /Use the supplied street number and street/);
+  assert.match(section("Intro only"), /do not omit the number, guess a different address, or add city, state or ZIP/);
+  assert.match(section("Listening and repair"), /four zero four, three zero zero, nine five two six/);
+  assert.match(section("Listening and repair"), /repeat only the requested group if clear; do not add a sales explanation/);
+  assert.match(section("Live admins and wrong contacts"), /Do not call it the admin's listing/);
 });
 test("noise and partial turns cannot create contact decisions", () => {
   const s = section("Listening and repair");
