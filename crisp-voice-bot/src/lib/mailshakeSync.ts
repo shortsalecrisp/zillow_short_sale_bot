@@ -29,7 +29,7 @@ type MailshakeRecipient = {
 };
 
 export type MailshakeSyncResult = {
-  ok: true;
+  ok: boolean;
   dryRun?: boolean;
   scanned: {
     anchor: number;
@@ -40,6 +40,13 @@ export type MailshakeSyncResult = {
   batchesSummary: Record<string, number>;
   pushedRows: number[];
   invalidEmailRows: number[];
+  blockedBatches: Array<{
+    campaignId: string;
+    rows: number[];
+    reason: "campaign_archived" | "campaign_paused" | "campaign_missing" | "campaign_unverified" | "recipient_push_failed";
+    status?: number;
+    providerCode?: string;
+  }>;
   skipped: {
     already: number;
     noStatus: number;
@@ -52,6 +59,42 @@ export type MailshakeSyncResult = {
 
 let activeMailshakeSync: Promise<MailshakeSyncResult> | undefined;
 let schedulerTimer: NodeJS.Timeout | undefined;
+
+type CampaignBlock = Omit<MailshakeSyncResult["blockedBatches"][number], "campaignId" | "rows">;
+
+function providerError(error: unknown): { status?: number; providerCode?: string } {
+  if (!(error instanceof AxiosError)) return {};
+  const code = error.response?.data?.code;
+  return {
+    status: error.response?.status,
+    providerCode: typeof code === "string" && /^[a-z0-9_\-]{1,80}$/i.test(code) ? code : undefined,
+  };
+}
+
+export async function getMailshakeCampaignBlock(campaignId: string): Promise<CampaignBlock | undefined> {
+  if (!config.mailshakeSync.apiKey) return { reason: "campaign_unverified" };
+  try {
+    const response = await axios.get("https://api.mailshake.com/2017-04-01/campaigns/get", {
+      params: { campaignID: campaignId },
+      timeout: 30_000,
+      auth: { username: config.mailshakeSync.apiKey, password: "" },
+    });
+    const campaign = response.data;
+    if (campaign?.isArchived === true) return { reason: "campaign_archived" };
+    if (campaign?.isPaused === true) return { reason: "campaign_paused" };
+    // Missing or incomplete status is not permission to start an email campaign.
+    if (String(campaign?.id) !== campaignId || campaign?.isArchived !== false || campaign?.isPaused !== false) {
+      return { reason: "campaign_unverified" };
+    }
+    return undefined;
+  } catch (error) {
+    const details = providerError(error);
+    return {
+      reason: details.status === 404 || details.providerCode === "not_found" ? "campaign_missing" : "campaign_unverified",
+      ...details,
+    };
+  }
+}
 
 function extractEmail(raw: unknown): string {
   let text = normalizeString(raw);
@@ -236,6 +279,7 @@ async function runMailshakeSyncUnlocked(options: { dryRun?: boolean } = {}): Pro
       batchesSummary: {},
       pushedRows: [],
       invalidEmailRows: [],
+      blockedBatches: [],
       skipped: { already: 0, noStatus: 0, badStatus: 0, statusR: 0, noEmail: 0, invalid: 0 },
     };
   }
@@ -247,43 +291,55 @@ async function runMailshakeSyncUnlocked(options: { dryRun?: boolean } = {}): Pro
   const { batches, invalidEmailRows, skipped } = classifyRows(rows, startRow);
   const batchesSummary = Object.fromEntries(Object.entries(batches).map(([campaignId, recipients]) => [campaignId, recipients.length]));
   const pushedRows: number[] = [];
+  const blockedBatches: MailshakeSyncResult["blockedBatches"] = [];
 
   if (!options.dryRun) {
     await markRows(sheets, invalidEmailRows, "invalid_email");
+  }
 
-    for (const [campaignId, recipients] of Object.entries(batches)) {
-      if (recipients.length === 0) {
+  for (const [campaignId, recipients] of Object.entries(batches)) {
+    if (recipients.length === 0) {
+      continue;
+    }
+
+    try {
+      const block = await getMailshakeCampaignBlock(campaignId);
+      if (block) {
+        const blocked = { campaignId, rows: recipients.map((recipient) => recipient.row), ...block };
+        blockedBatches.push(blocked);
+        logger.warn("Mailshake campaign blocked; recipients remain pending", blocked);
         continue;
       }
-
-      try {
-        await pushCampaignRecipients(campaignId, recipients);
-        const rowsToMark = recipients.map((recipient) => recipient.row);
-        await markRows(sheets, rowsToMark, "sent");
-        pushedRows.push(...rowsToMark);
-        logger.info("Mailshake recipients pushed", {
-          campaignId,
-          count: recipients.length,
-          rows: rowsToMark,
-        });
-      } catch (error) {
-        logger.error("Mailshake recipient push failed", {
-          campaignId,
-          count: recipients.length,
-          status: error instanceof AxiosError ? error.response?.status : undefined,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
+      if (options.dryRun) continue;
+      await pushCampaignRecipients(campaignId, recipients);
+      const rowsToMark = recipients.map((recipient) => recipient.row);
+      await markRows(sheets, rowsToMark, "sent");
+      pushedRows.push(...rowsToMark);
+      logger.info("Mailshake recipients pushed", {
+        campaignId,
+        count: recipients.length,
+        rows: rowsToMark,
+      });
+    } catch (error) {
+      const details = providerError(error);
+      blockedBatches.push({ campaignId, rows: recipients.map((recipient) => recipient.row), reason: "recipient_push_failed", ...details });
+      logger.error("Mailshake recipient push failed", {
+        campaignId,
+        count: recipients.length,
+        ...details,
+        message: "Sync incomplete; reconcile provider and Sheet state before retry",
+      });
     }
   }
 
   return {
-    ok: true,
+    ok: blockedBatches.length === 0,
     dryRun: options.dryRun,
     scanned: { anchor, startRow, endRow, count },
     batchesSummary,
     pushedRows,
     invalidEmailRows,
+    blockedBatches,
     skipped,
   };
 }

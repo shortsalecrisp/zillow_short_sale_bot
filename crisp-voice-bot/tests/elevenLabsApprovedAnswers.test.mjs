@@ -8,6 +8,8 @@ const from = prompt.indexOf('# Answer library\n');
 const to = prompt.indexOf('\n# Contact preferences and endings', from);
 assert.ok(from >= 0 && to > from);
 const library = prompt.slice(from, to);
+const repair = prompt.split('# Listening and repair\n')[1].split('\n# Intro only')[0];
+const postIntro = prompt.split('# Post-intro conversation\n')[1].split('\n# Answer library')[0];
 
 // Consolidation changes structure, not approved facts. These static checks
 // preserve the answer inventory; they are not provider or human-listening tests.
@@ -17,14 +19,16 @@ test('all meaningful approved identity, purpose and property answers survive con
     "Yes, I'm an AI assistant with Crisp Short Sales.",
     "I'm with Crisp Short Sales. I work with Yoni Kutler, our short sale specialist.",
     "We help prepare the short-sale paperwork and follow up with the lender.",
-    "I'm asking whether help with the short-sale paperwork and lender calls would be useful on your listing.",
-    "Sorry. This is {{assistantName}} with Crisp Short Sales. We help with short-sale paperwork and lender calls on your listing.",
-    "Yes, I'm an AI assistant with Crisp Short Sales. I'm calling to see whether help with the short-sale paperwork and lender calls would be useful on your listing.",
+    "No, we're a separate short-sale processing service.",
     "The one at {{streetAddress}}.",
     "Yes. We help prepare the short-sale paperwork and follow up with the lender.",
     "We can help with paperwork, lender follow-up, document collection, and title coordination through the short-sale approval process.",
   ];
   for (const text of expected) assert.ok(library.includes(text), text);
+  assert.match(library, /Why are you calling \/ what do you want from me: use the specific purpose answer in Listening and repair, then wait/);
+  assert.match(library, /AI identity plus purpose[\s\S]*?identify yourself as AI, then answer the purpose\. Answer both points, then wait/);
+  assert.ok(repair.includes("We help listing agents with short-sale lender paperwork and calls."));
+  assert.ok(repair.includes("I'm calling about the short-sale listing at {{streetAddress}}."));
 });
 
 test('the single listing-agent check is answerable while other compound answers defer disposition', () => {
@@ -32,8 +36,11 @@ test('the single listing-agent check is answerable while other compound answers 
   assert.match(prompt, /A yes or no after any other compound property or identity question is ambiguous\./);
   assert.match(prompt, /Do you have the listing at \{\{streetAddress\}\}\?/);
   assert.match(prompt, /If a later caller turn clearly confirms they have the listing, that latest confirmation overrides the earlier ambiguous answer or wrong-listing inference\./);
-  assert.match(prompt, /If the caller clearly confirms they have the listing and asks what you want or what the call is about/);
-  assert.match(prompt, /We help with lender paperwork and calls\. Are you handling those yourself\?/);
+  assert.match(postIntro, /A clear yes confirms listing ownership only, not interest in help, a transfer or callback/);
+  assert.match(postIntro, /Would help with lender paperwork or calls be useful for this listing\?/);
+  assert.match(postIntro, /If the caller confirms they have the listing and asks what the call is about, answer only the purpose from the answer library and wait/);
+  assert.match(postIntro, /Do not attach the needs question to that answer/);
+  assert.doesNotMatch(postIntro, /Are you handling those yourself\?/);
   assert.match(prompt, /Their confirmed listing ownership cancels an earlier ambiguous "no" or wrong-listing inference/);
 });
 
@@ -82,8 +89,13 @@ test('answer and repair contracts retain complete questions without repeated han
   assert.match(library, /A clarification answer is a complete turn/);
   assert.match(library, /Answer all questions asked, then wait/);
   assert.match(library, /Do not attach a qualification, anything-else question, or transfer pitch/);
-  assert.match(prompt, /We organize the documents the bank needs and follow up on its review/);
-  assert.match(prompt, /Sorry, can you hear me now\?/);
+  assert.ok(repair.includes("I'm {{assistantName}} with Crisp Short Sales. We help listing agents with short-sale lender paperwork."));
+  assert.match(repair, /Answer the specific missing point, then wait; do not append permission, qualification or a handoff offer/);
+  assert.match(repair, /If the next turn specifies a missing point, answer only that point/);
+  assert.match(repair, /Did you miss who I am, or what we help with\?/);
+  assert.match(repair, /A second clarification alone is never permission to say goodbye/);
+  assert.match(repair, /For an audio problem say only "Sorry, can you hear me now\?" and wait/);
+  assert.match(repair, /Do not claim the connection or volume was fixed/);
   assert.match(prompt, /not automatically the service or current conversation|not necessarily the service or current conversation/);
   assert.doesNotMatch(prompt, /then pivot to Yoni|Then pivot back to Yoni|Treat that as re-engagement and offer Yoni once/);
 });
@@ -94,7 +106,7 @@ test('explicit opt-out and current-call ending markers remain verbatim', () => {
     'DEFERRED CONTACT: caller said they will initiate future contact.',
   ]) assert.ok(prompt.includes(marker), marker);
   assert.match(prompt, /remove me from your list/);
-  assert.match(prompt, /standalone "STOP"/);
+  assert.match(prompt, /standalone "STOP,?"/);
   assert.match(prompt, /A declined transfer, time, channel, or appointment is not a rejection of all service/);
   assert.match(prompt, /I don't have a verified reason for that label. Thanks for correcting it/);
 });
