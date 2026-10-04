@@ -3661,10 +3661,7 @@ def test_sms_contract_title_company_doing_it_is_terminal_rejection(monkeypatch):
     assert decision["handoff_needed"] is False
     assert decision["block_reply"] is False
     assert decision["call_booking_status"] == "closed_no_interest"
-    assert decision["reply_text"] == (
-        "Ok, no problem. If anything ever changes in the future and you're looking for some additional help with these files, "
-        "please just keep me in mind. Thanks!"
-    )
+    assert decision["reply_text"] == module.SMS_ALREADY_HAS_HELP_REPLY
 
 
 def test_sms_contract_service_info_request_is_answered_before_email_followup(monkeypatch):

@@ -2501,7 +2501,7 @@ function buildTerminalCoverageDecisionV4_(text, rowObj) {
   const covered = !isSelfHandlingOpportunitySignal_(t) && isAlreadyHandledSignal_(t);
   if (!notShortSale && !covered && !isClearNoSignal_(t)) return null;
   return {matched: true,
-    reply_text: notShortSale ? "Ahh, ok... thanks for letting me know. Good luck with your listing!" : getStandardNoCloseoutReply_(),
+    reply_text: notShortSale ? "Ahh, ok... thanks for letting me know. Good luck with your listing!" : getProviderAwareCloseoutReply_(t),
     lead_status: "R", conversation_done: true, handoff_needed: false, needs_review: false, block_reply: false,
     call_booking_status: "closed_no_interest",
     reason: notShortSale ? "Listing is not a short sale; closed out" : "Explicit refusal or current provider coverage; closed out"};
@@ -2843,6 +2843,12 @@ function applyFastRules_(text, rowObj, receivedAt) {
 
   const terminal = buildTerminalCoverageDecisionV4_(t, rowObj);
   if (terminal) return terminal;
+  if (isFirstFileCreditQuestionSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Agent asked about a first-file credit or referral compensation; terms require personal review",
+      "FIRST-FILE CREDIT REVIEW"
+    );
+  }
   if (isShortSaleSourceQuestion_(t)) return buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound, receivedAt);
 
   if (isPropertyLogisticsRequest_(t, rowObj)) return buildServiceScopeClarificationDecision_(rowObj);
@@ -2883,7 +2889,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
   if (isTitleCompanyCoverageRejectionSignal_(t)) {
     return {
       matched: true,
-      reply_text: getStandardNoCloseoutReply_(),
+      reply_text: getProviderAwareCloseoutReply_(t),
       lead_status: "R",
       conversation_done: true,
       handoff_needed: false,
@@ -4884,6 +4890,22 @@ function getStandardNoCloseoutReply_() {
   return "Ok, no problem. If anything ever changes in the future and you're looking for some additional help with these files, please just keep me in mind. Thanks!";
 }
 
+function getProviderAwareCloseoutReply_(text) {
+  if (!isClearNoSignal_(text) &&
+      (isAlreadyHandledSignal_(text) || isTitleCompanyCoverageRejectionSignal_(text))) {
+    return "Totally understand. Glad you already have help on it. If anything changes or the file stalls, please keep me in mind. I'm happy to be backup.";
+  }
+  return getStandardNoCloseoutReply_();
+}
+
+function isFirstFileCreditQuestionSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /\$\s*1,?000\b/.test(t) ||
+    /\bfirst[- ]file\b.{0,40}\b(?:credit|bonus|incentive)\b/.test(t) ||
+    /\b(?:who|can i|can we|pay|paid|receive|gets?|apply|applied|split)\b.{0,60}\b(?:credit|referral fee|referral payment|bonus|incentive)\b/.test(t) ||
+    /\b(?:credit|referral fee|referral payment|bonus|incentive)\b.{0,60}\b(?:who|agent|broker|seller|buyer|pay|paid|gets?|apply|applied|split|legal|lawful)\b/.test(t);
+}
+
 function isNotShortSaleSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
 
@@ -5836,7 +5858,7 @@ IMPORTANT BEHAVIOR:
 - For a clear no, your final closeout should be something like:
   "Ok, no problem. If anything changes in the future and you're looking for additional help with these files, please just keep me in mind. Thanks"
 - Treat clear polite declines like "I'm fine" and "we're all set" as "no thanks". A courtesy greeting or "thank you for reaching out" is not a rejection when followed by questions or interest. "I'm not saying I'm not interested" is not a rejection.
-- If they say they already have a negotiator, processor, lawyer, or someone handling it, treat that as a no and use the normal closeout
+- If they say they already have a negotiator, processor, lawyer, or someone handling it, close respectfully with: "${getProviderAwareCloseoutReply_("I already have a negotiator")}". An explicit refusal still uses the normal no closeout. Do not promise credits, referral payments, or compensation; route payment negotiations for personal review.
 - If they ask whether I am a negotiator, confirm that I handle the short sale process and lender negotiations, then invite a phone call. That is a clarification question, not a statement that they already have help.
 - If they ask whether this is the best or correct number to reach me, reply exactly: "Yes, this number is great - call or text anytime. Thanks!" Never include or repeat any numeric phone number because the phone in agent_context belongs to the agent, not me.
 - After a clear no closeout, if they later only say "thank you", "ok", "sounds good", thumbs up, or something similar, do not respond

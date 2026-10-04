@@ -4452,6 +4452,10 @@ SMS_STANDARD_CLOSEOUT_REPLY = (
     "Ok, no problem. If anything ever changes in the future and you're looking for some additional help "
     "with these files, please just keep me in mind. Thanks!"
 )
+SMS_ALREADY_HAS_HELP_REPLY = (
+    "Totally understand. Glad you already have help on it. If anything changes or the file stalls, "
+    "please keep me in mind. I'm happy to be backup."
+)
 EQUATOR_PORTAL_REPLY = (
     "I'm familiar with Equator and can help manage the lender-side tasks and communication."
 )
@@ -6338,6 +6342,25 @@ def _sms_has_existing_coverage(value: Any) -> bool:
     )
 
 
+def _sms_provider_aware_closeout_reply(value: Any) -> str:
+    if not _sms_has_decline_or_not_short_sale_clause(value) and (
+        _sms_has_existing_coverage(value) or _sms_is_title_company_coverage_rejection(value)
+    ):
+        return SMS_ALREADY_HAS_HELP_REPLY
+    return SMS_STANDARD_CLOSEOUT_REPLY
+
+
+def _sms_is_first_file_credit_question(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(re.search(
+        r"\$\s*1,?000\b"
+        r"|\bfirst[- ]file\b.{0,40}\b(?:credit|bonus|incentive)\b"
+        r"|\b(?:who|can i|can we|pay|paid|receive|gets?|apply|applied|split)\b.{0,60}\b(?:credit|referral fee|referral payment|bonus|incentive)\b"
+        r"|\b(?:credit|referral fee|referral payment|bonus|incentive)\b.{0,60}\b(?:who|agent|broker|seller|buyer|pay|paid|gets?|apply|applied|split|legal|lawful)\b",
+        text,
+    ))
+
+
 def _sms_is_title_company_role_confusion(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     if "title company" not in text:
@@ -7092,10 +7115,17 @@ def _sms_fast_decision(
     ):
         not_short_sale = bool(re.search(r"\b(?:not a short sale|no short sale|isn't a short sale)\b", t))
         return _sms_decision(
-            reply_text="Ahh, ok... thanks for letting me know. Good luck with your listing!" if not_short_sale else SMS_STANDARD_CLOSEOUT_REPLY,
+            reply_text="Ahh, ok... thanks for letting me know. Good luck with your listing!" if not_short_sale else _sms_provider_aware_closeout_reply(t),
             lead_status="R", conversation_done=True, clear_callback=True,
             reason="Agent declined or confirmed existing coverage before a portal keyword",
             call_booking_status="closed_no_interest",
+        )
+
+    if _sms_is_first_file_credit_question(t):
+        return _sms_decision(
+            lead_status="Y", handoff_needed=True, block_reply=True,
+            handoff_type="FIRST-FILE CREDIT REVIEW",
+            reason="Agent asked about a first-file credit or referral compensation; terms require personal review",
         )
 
     if _sms_is_urgent_sale_review(t):
@@ -7139,10 +7169,7 @@ def _sms_fast_decision(
 
     if _sms_is_title_company_coverage_rejection(t):
         return _sms_decision(
-            reply_text=(
-                "Ok, no problem. If anything ever changes in the future and you're looking for some additional help with these files, "
-                "please just keep me in mind. Thanks!"
-            ),
+            reply_text=_sms_provider_aware_closeout_reply(t),
             lead_status="R",
             conversation_done=True,
             handoff_needed=False,
@@ -7487,10 +7514,7 @@ def _sms_fast_decision(
         t,
     ):
         return _sms_decision(
-            reply_text=(
-                "Ok, no problem. If anything ever changes in the future and you're looking for some additional help with these files, "
-                "please just keep me in mind. Thanks!"
-            ),
+            reply_text=_sms_provider_aware_closeout_reply(t),
             lead_status="R",
             conversation_done=True,
             reason="Agent declined, is already represented, or says this is not a short sale",
