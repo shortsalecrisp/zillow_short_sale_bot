@@ -547,11 +547,10 @@ SMS_TEMPLATE      = (
     "yourself, or do you already have help?"
 )
 SMS_FU_TEMPLATE   = (
-    "Following up on {address}: I can help with short-sale lender paperwork. "
-    "Maya, my automated assistant, may call from 217-634-1017. "
-    "Prefer email or a call with Yoni? For a call, send a day, time and time zone."
+    "Hey, just wanted to follow up on my message from earlier. "
+    "Let me know if I can help with anything—happy to connect whenever works for you!"
 )
-SMS_FU_POLICY_VERSION = "maya-caller-recognition-human-choice-20261003"
+SMS_FU_POLICY_VERSION = "original-followup-restored-20261005"
 SMS_RETRY_ATTEMPTS = 3  # initial attempt + up to 2 retries for AutoRemote reliability
 # A due follow-up pass can contain dozens of rows. AutoRemote accepts those
 # pushes faster than Tasker can execute them, which can fill Tasker's run queue
