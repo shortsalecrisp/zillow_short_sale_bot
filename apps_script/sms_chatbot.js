@@ -133,6 +133,7 @@ function historyHasConfirmedReplyAfterInbound_(rowObj, inboundText) {
     for (let j = i + 1; j < history.length; j += 1) {
       const later = history[j] || {};
       if (String(later.role || "").toLowerCase() === "assistant" &&
+          later.receipt_id &&
           normalizeWhitespace_(String(later.text || ""))) {
         return true;
       }
@@ -212,6 +213,14 @@ function isDurableHandledDuplicateInbound_(rowObj, inboundText) {
   if (isPriorOptOutConversation_(rowObj) &&
       hasPostOptOutInterestAlert_(rowObj) &&
       isClearPostOptOutInterestSignal_(inboundText)) {
+    return true;
+  }
+  // Exact replays that already have a durable receipt or a durable human-owned
+  // disposition must stop here, even when the text contains a substantive
+  // question. This is the cross-path guard against delayed provider replays.
+  if (historyHasConfirmedReplyAfterInbound_(rowObj, inboundText) ||
+      (historyHasExactAgentInbound_(rowObj, inboundText) &&
+       isIntentionalNoReplyDisposition_(rowObj, inboundText))) {
     return true;
   }
   // A repeated substantive question can be intentional (for example, asking
@@ -2287,6 +2296,56 @@ function isBuyerFeeDisclosureQuestion_(text, lastOutbound) {
     /\b(?:fee|cost|charge|paid|pays)\b/.test(previous);
 }
 
+function isBuyerFeeWordingRequestSignal_(text) {
+  const t = normalizeLanguageSignalText_(text);
+  const asksForWords = /\b(?:what (?:verbiage|wording|language)|how should (?:i|we) word|what should (?:i|we) (?:put|say|write)|send (?:me|us) (?:the )?(?:verbiage|wording|language))\b/.test(t);
+  const feeContext = /\b(?:fees?|costs?|charges?|listing|mls|agent remarks?|contract|purchase contract|offer)\b/.test(t);
+  return asksForWords && feeContext;
+}
+
+function buildBuyerFeeWordingReviewDecision_() {
+  return {
+    matched: true,
+    reply_text: "My fee is $5,000, paid by the buyer at closing only if the deal closes. I'll have Yoni provide the exact contract or listing wording so you can use the right language.",
+    lead_status: "Y",
+    conversation_done: false,
+    handoff_needed: true,
+    needs_review: false,
+    block_reply: false,
+    alert_needed: true,
+    send_reply_before_handoff: true,
+    handoff_type: "FEE DISCLOSURE WORDING REVIEW",
+    call_booking_status: "interested_no_call",
+    reason: "Answered supported fee facts and routed exact contract or listing wording to Yoni"
+  };
+}
+
+function isReferralCompanyInfoRequestSignal_(text) {
+  const t = normalizeLanguageSignalText_(text);
+  const referralContext = /\b(?:colleague|coworker|co-worker|friend|another agent|someone|somebody|referr?al|refer)\b/.test(t);
+  const companyInfoRequest = /\b(?:send|share|text|give)\b.{0,50}\b(?:company (?:info|information|details)|information about (?:your|the) company|website|link|details)\b/.test(t) ||
+    /\b(?:company (?:info|information|details)|information about (?:your|the) company|website|link)\b.{0,50}\b(?:send|share|text|give)\b/.test(t);
+  const seekingHelp = /\b(?:looking|searching|needs?|wants?)\b.{0,50}\b(?:short sale|short sales|help|processor|negotiator|company)\b/.test(t);
+  return referralContext && companyInfoRequest && seekingHelp;
+}
+
+function buildReferralCompanyInfoDecision_() {
+  return {
+    matched: true,
+    reply_text: buildCompanyIdentityReply_() + " " + buildWebsiteReviewsReply_(),
+    lead_status: "Y",
+    conversation_done: false,
+    handoff_needed: true,
+    needs_review: false,
+    block_reply: false,
+    alert_needed: true,
+    send_reply_before_handoff: true,
+    handoff_type: "REFERRAL / COMPANY INFO",
+    call_booking_status: "interested_no_call",
+    reason: "Answered a referral company-information request and routed the opportunity to Yoni"
+  };
+}
+
 function isBuyerCostConcernSignal_(text) {
   const t = normalizeLanguageSignalText_(text);
   return /\bbuyer(?:s|'s)?\b/.test(t) && /\b(?:fee|cost|pays?|paying|offer|price|afford|cash|financ(?:e|ing))\b/.test(t) &&
@@ -2537,6 +2596,9 @@ function withNewCallHandoff_(decision, text, receivedAt) {
 function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   if (!t) return null;
+
+  if (isBuyerFeeWordingRequestSignal_(t)) return buildBuyerFeeWordingReviewDecision_();
+  if (isReferralCompanyInfoRequestSignal_(t)) return buildReferralCompanyInfoDecision_();
 
   // Treat a source challenge as a correction of the short-sale premise even
   // when the same message also contains another request.
@@ -2849,6 +2911,8 @@ function applyFastRules_(text, rowObj, receivedAt) {
       "FIRST-FILE CREDIT REVIEW"
     );
   }
+  if (isBuyerFeeWordingRequestSignal_(t)) return buildBuyerFeeWordingReviewDecision_();
+  if (isReferralCompanyInfoRequestSignal_(t)) return buildReferralCompanyInfoDecision_();
   if (isShortSaleSourceQuestion_(t)) return buildPriorityQuestionDecisionV3_(t, rowObj, lastOutbound, receivedAt);
 
   if (isPropertyLogisticsRequest_(t, rowObj)) return buildServiceScopeClarificationDecision_(rowObj);

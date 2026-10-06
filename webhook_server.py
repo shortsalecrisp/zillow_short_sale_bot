@@ -5297,6 +5297,7 @@ def _sms_history_has_confirmed_reply_after_inbound(row_obj: Dict[str, str], inbo
         return any(
             isinstance(later, dict)
             and str(later.get("role") or "").lower() == "assistant"
+            and bool(later.get("receipt_id"))
             and bool(_sms_normalize_whitespace(later.get("text")))
             for later in history[index + 1 :]
         )
@@ -5346,6 +5347,11 @@ def _sms_is_durable_handled_duplicate(row_obj: Dict[str, str], inbound_text: str
         return False
     if _sms_is_scheduled_callback(inbound_text) or _sms_is_post_handoff_callback_update(row_obj, inbound_text):
         return _sms_is_durably_handled_scheduling_replay(row_obj, inbound_text)
+    if _sms_history_has_confirmed_reply_after_inbound(row_obj, inbound_text) or (
+        _sms_history_has_exact_agent_inbound(row_obj, inbound_text)
+        and _sms_is_intentional_no_reply_disposition(row_obj, inbound_text)
+    ):
+        return True
     if (
         "?" in str(inbound_text or "")
         or _sms_is_substantive_followup(inbound_text)
@@ -6533,6 +6539,77 @@ def _sms_is_buyer_fee_disclosure_question(value: Any, last_outbound: Any) -> boo
     )
 
 
+def _sms_is_buyer_fee_wording_request(value: Any) -> bool:
+    text = _sms_rejection_text(value)
+    asks_for_words = bool(re.search(
+        r"\b(?:what (?:verbiage|wording|language)|how should (?:i|we) word|"
+        r"what should (?:i|we) (?:put|say|write)|send (?:me|us) (?:the )?(?:verbiage|wording|language))\b",
+        text,
+    ))
+    fee_context = bool(re.search(
+        r"\b(?:fees?|costs?|charges?|listing|mls|agent remarks?|contract|purchase contract|offer)\b",
+        text,
+    ))
+    return asks_for_words and fee_context
+
+
+def _sms_buyer_fee_wording_decision() -> Dict[str, Any]:
+    return _sms_decision(
+        reply_text=(
+            "My fee is $5,000, paid by the buyer at closing only if the deal closes. "
+            "I'll have Yoni provide the exact contract or listing wording so you can use the right language."
+        ),
+        lead_status="Y",
+        handoff_needed=True,
+        alert_needed=True,
+        send_reply_before_handoff=True,
+        handoff_type="FEE DISCLOSURE WORDING REVIEW",
+        call_booking_status="interested_no_call",
+        reason="Answered supported fee facts and routed exact contract or listing wording to Yoni",
+    )
+
+
+def _sms_is_referral_company_info_request(value: Any) -> bool:
+    text = _sms_rejection_text(value)
+    referral_context = bool(re.search(
+        r"\b(?:colleague|coworker|co-worker|friend|another agent|someone|somebody|referr?al|refer)\b",
+        text,
+    ))
+    company_info_request = bool(
+        re.search(
+            r"\b(?:send|share|text|give)\b.{0,50}\b(?:company (?:info|information|details)|"
+            r"information about (?:your|the) company|website|link|details)\b",
+            text,
+        )
+        or re.search(
+            r"\b(?:company (?:info|information|details)|information about (?:your|the) company|website|link)\b"
+            r".{0,50}\b(?:send|share|text|give)\b",
+            text,
+        )
+    )
+    seeking_help = bool(re.search(
+        r"\b(?:looking|searching|needs?|wants?)\b.{0,50}\b(?:short sale|short sales|help|processor|negotiator|company)\b",
+        text,
+    ))
+    return referral_context and company_info_request and seeking_help
+
+
+def _sms_referral_company_info_decision() -> Dict[str, Any]:
+    return _sms_decision(
+        reply_text=(
+            f"{_sms_company_identity_reply()} https://www.crispshortsales.com\n"
+            "You can also find reviews from agents and homeowners on Google."
+        ),
+        lead_status="Y",
+        handoff_needed=True,
+        alert_needed=True,
+        send_reply_before_handoff=True,
+        handoff_type="REFERRAL / COMPANY INFO",
+        call_booking_status="interested_no_call",
+        reason="Answered a referral company-information request and routed the opportunity to Yoni",
+    )
+
+
 def _sms_is_spanish_language_question(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(
@@ -6770,6 +6847,10 @@ def _sms_question_priority_decision(
     row_obj: Dict[str, str], inbound_text: str, received_at: Any = None
 ) -> Optional[Dict[str, Any]]:
     text = _sms_rejection_text(inbound_text)
+    if _sms_is_buyer_fee_wording_request(text):
+        return _sms_buyer_fee_wording_decision()
+    if _sms_is_referral_company_info_request(text):
+        return _sms_referral_company_info_decision()
     if _sms_is_short_sale_source_question(text):
         return _sms_decision(
             reply_text=_sms_source_challenge_reply(row_obj),
@@ -6953,6 +7034,11 @@ def _sms_fast_decision(
     row_obj: Dict[str, str], inbound_text: str, received_at: Any = None
 ) -> Optional[Dict[str, Any]]:
     t = _sms_rejection_text(inbound_text)
+
+    if _sms_is_buyer_fee_wording_request(t):
+        return _sms_buyer_fee_wording_decision()
+    if _sms_is_referral_company_info_request(t):
+        return _sms_referral_company_info_decision()
 
     if re.search(r"\berror\s+invalid\s+number\b", t) and "valid 10 digit" in t:
         return _sms_decision(reason="Carrier invalid-number notice ignored", block_reply=True)
