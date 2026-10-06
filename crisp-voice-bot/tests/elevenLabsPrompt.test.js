@@ -103,7 +103,9 @@ test("bounded repair preserves understood fragments and never guesses consent", 
   assert.match(s, /Do not repeat the full opening or guess the answer/);
   assert.match(s, /do not keep pitching or invent consent to another channel/);
   assert.match(s, /Honor an actual refusal, stop request or opt-out promptly/);
-  assert.match(s, /Repeated intelligible "Hello\?" is a live turn, not placeholder noise/);
+  assert.match(s, /Repeated intelligible "Hello\?" after any partial or complete introduction is a live interruption/);
+  assert.match(s, /Never restart the introduction/);
+  assert.match(s, /I can hear you\. This is \{\{assistantName\}\} with Crisp Short Sales, calling about the short-sale listing/);
 });
 
 test("a confirmed listing plus a purpose question remains answer-only", () => {

@@ -710,18 +710,18 @@ test("an overdue scheduled no-start is recovered ahead of new work exactly until
     }
     JSON.stringify(getVoiceBotCallCandidatesFromRows_([
       { rowNumber: 5850, values: row("Recovery", "", {
-        call1SentAt: "2026-09-24T13:11:43.726Z",
+        call1SentAt: "2026-10-06T13:11:43.726Z",
         call1Result: "voicemail_left",
-        scheduledFor: "2026-09-25T18:00:00.000Z"
+        scheduledFor: "2026-10-07T18:00:00.000Z"
       }) },
-      { rowNumber: 5900, values: row("Fresh", "2026-09-25T22:45:00.000Z") },
+      { rowNumber: 5900, values: row("Fresh", "2026-10-07T22:45:00.000Z") },
       { rowNumber: 5901, values: row("AlreadyStarted", "", {
-        call1SentAt: "2026-09-24T13:11:43.726Z",
+        call1SentAt: "2026-10-06T13:11:43.726Z",
         call1Result: "voicemail_left",
-        scheduledFor: "2026-09-25T18:00:00.000Z",
-        call2SentAt: "2026-09-26T18:05:00.000Z"
+        scheduledFor: "2026-10-07T18:00:00.000Z",
+        call2SentAt: "2026-10-08T18:05:00.000Z"
       }) }
-    ], new Date("2026-09-28T19:15:00.000Z"), 10).map(function(candidate) {
+    ], new Date("2026-10-08T19:15:00.000Z"), 10).map(function(candidate) {
       return { rowNumber: candidate.rowNumber, recovery: candidate.overdueNoStartRecovery };
     }));
   `));
@@ -732,8 +732,27 @@ test("an overdue scheduled no-start is recovered ahead of new work exactly until
   ]);
 });
 
+test("pre-monitor overdue no-start rows stay frozen in Apps Script", () => {
+  assert.equal(runSchedulerScript(`
+    const values = Array(42).fill("");
+    values[VOICE_BOT_COL_FIRST_NAME - 1] = "Chelsea";
+    values[VOICE_BOT_COL_PHONE - 1] = fixturePhone_();
+    values[VOICE_BOT_COL_LISTING_ADDRESS - 1] = "20 Pearl Street";
+    values[VOICE_BOT_COL_CITY - 1] = "Hillsboro";
+    values[VOICE_BOT_COL_STATE - 1] = "NH";
+    values[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1] = "x";
+    values[VOICE_BOT_COL_CALL_1_SENT - 1] = "2026-09-24T13:11:43.726Z";
+    values[VOICE_BOT_COL_CALL_1_RESULT - 1] = "human_answered_no_response_first_attempt";
+    values[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1] = "2026-09-25T18:00:00.000Z";
+    JSON.stringify(getVoiceBotCallCandidateFromRowValues_(5953, values, new Date("2026-10-06T19:15:00.000Z")));
+  `), 'null');
+});
+
 test("a provider start failure remains eligible for one later call attempt", () => {
   assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("call_start_failed")'), true);
+  assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("call_start_receipt_missing")'), true);
+  assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("human_answered_no_response_first_attempt")'), true);
+  assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("human_answered_no_bot_response")'), true);
 });
 
 test("second attempts are only queued when the retry is due after the resume cutoff", () => {

@@ -589,6 +589,25 @@ test("live greeting followed by provider agent turn is a human early hangup, not
   assert.equal(shouldTreatAsAgentHungUp(conversation), true);
 });
 
+test("live greeting with no assistant turn is not pure no-answer", async () => {
+  const {
+    getVoicemailOrNoAnswerCallResult,
+    shouldTreatAsHumanAnsweredNoBotResponse,
+  } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    has_user_audio: true,
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    analysis: { transcript_summary: "The call was marked no answer." },
+    transcript: [
+      { role: "user", message: "Hello?" },
+      { role: "user", message: "Yeah." },
+    ],
+  };
+  assert.equal(shouldTreatAsHumanAnsweredNoBotResponse(conversation), true);
+  assert.equal(getVoicemailOrNoAnswerCallResult(conversation, 1), undefined);
+});
+
 test("explicit current service coverage outranks generic hangup", async () => {
   const { shouldTreatAsAlreadyHasShortSaleHelp, shouldTreatAsAgentHungUp } = await import("../src/lib/elevenLabsPostCall");
   const conversation = {
@@ -1161,6 +1180,17 @@ test("a live answer from an unrelated business is unavailable, not an agent hang
 });
 
 for (const scenario of [
+  {
+    name: "elda_live_answer_no_bot_response",
+    expectedCallResult: "human_answered_no_bot_response",
+    expectedResponseStatus: "Human answered; bot did not respond",
+    terminationReason: "Client disconnected: 1000",
+    summary: "A person answered with a greeting, but the assistant produced no response.",
+    transcript: [
+      { role: "user", message: "Hello?" },
+      { role: "user", message: "Yeah." },
+    ],
+  },
   {
     name: "paola_completed_self_handling_decline",
     expectedCallResult: "answered_not_interested",

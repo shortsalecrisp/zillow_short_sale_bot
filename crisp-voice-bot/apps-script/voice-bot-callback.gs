@@ -56,6 +56,8 @@ const VOICE_BOT_PROVIDER_QUOTA_RETRY_DELAY_MINUTES = 240;
 const VOICE_BOT_PAUSED_UNTIL_ET = '2026-07-22T09:00:00-04:00';
 const VOICE_BOT_PAUSE_REASON = 'Paused until ElevenLabs billing cycle refreshes on July 22';
 const VOICE_BOT_MIN_QUEUE_DUE_AT_ISO = '2026-08-23T04:00:00.000Z';
+const VOICE_BOT_SCHEDULED_NO_START_MONITOR_STARTED_AT_ISO = '2026-10-06T12:49:11.000Z';
+const VOICE_BOT_SCHEDULED_NO_START_MARKER = 'CODEX_VOICE_SCHEDULED_NO_START_V1';
 const VOICE_BOT_WEEKDAY_CALL_WINDOWS = [
   {
     name: 'reach_morning_v1',
@@ -406,6 +408,8 @@ function processVoiceBotCallQueue() {
         continue;
       }
 
+      markVoiceBotScheduledNoStartRecovery_(sheet, refreshedCandidate, now);
+
       const payload = buildVoiceBotStartCallPayload_(refreshedCandidate);
 
       try {
@@ -712,6 +716,13 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
   const overdueNoStartRecovery = Boolean(
     scheduledFor && now.getTime() - scheduledFor.getTime() >= 12 * 60 * 60 * 1000
   );
+  const scheduledNoStartMonitorStartedAt = new Date(VOICE_BOT_SCHEDULED_NO_START_MONITOR_STARTED_AT_ISO);
+  const wasAlreadyOverdueBeforeMonitor = Boolean(
+    scheduledFor && scheduledNoStartMonitorStartedAt.getTime() - scheduledFor.getTime() >= 12 * 60 * 60 * 1000
+  );
+  if (overdueNoStartRecovery && wasAlreadyOverdueBeforeMonitor) {
+    return null;
+  }
 
   if (!currentWindow) {
     return null;
@@ -860,6 +871,24 @@ function markVoiceBotAttemptStarted_(sheet, candidate, now) {
   sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE).setValue('queued');
   sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET).setValue(timeBucket);
   sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR).setValue(candidate.dueAt);
+}
+
+function markVoiceBotScheduledNoStartRecovery_(sheet, candidate, now) {
+  if (!candidate.overdueNoStartRecovery) return;
+  const notesCell = sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_VOICE_NOTES);
+  const priorNotes = normalizeString_(notesCell.getValue());
+  if (priorNotes.indexOf(VOICE_BOT_SCHEDULED_NO_START_MARKER) !== -1) return;
+  const marker = VOICE_BOT_SCHEDULED_NO_START_MARKER + ' ' + JSON.stringify({
+    rowNumber: candidate.rowNumber,
+    callAttemptNumber: candidate.callAttemptNumber,
+    detectedAt: now.toISOString(),
+    candidateDueAt: candidate.dueAt.toISOString()
+  });
+  sheet.getRange(candidate.rowNumber, VOICE_BOT_COL_RESPONSE_STATUS)
+    .setValue('Scheduled call start was missed; bounded carry-forward pending');
+  notesCell.setValue(trimVoiceBotVoiceNotes_(
+    priorNotes ? priorNotes + VOICE_BOT_VOICE_NOTES_SEPARATOR + marker : marker
+  ));
 }
 
 function markVoiceBotAttemptStartFailed_(sheet, candidate, now, err) {
@@ -1196,8 +1225,11 @@ function isRetryableVoiceBotResult_(callResult) {
   return normalized === 'voicemail_left' ||
     normalized === 'voicemail_reached' ||
     normalized === 'no_answer_first_attempt' ||
+    normalized === 'human_answered_no_response_first_attempt' ||
+    normalized === 'human_answered_no_bot_response' ||
     normalized === 'agent_not_available' ||
-    normalized === 'call_start_failed';
+    normalized === 'call_start_failed' ||
+    normalized === 'call_start_receipt_missing';
 }
 
 function isWithinBusinessHours_(date) {

@@ -315,6 +315,14 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "No answer on first call";
   }
 
+  if (callResult === "human_answered_no_bot_response") {
+    return "Human answered; bot did not respond";
+  }
+
+  if (callResult === "human_answered_no_bot_response_final_attempt") {
+    return "Human answered; bot did not respond on final attempt";
+  }
+
   if (callResult === "no_response_second_attempt") {
     return "No response after second call";
   }
@@ -1255,7 +1263,7 @@ function hasDeliveredVoicemailMessage(conversation: ElevenLabsConversation): boo
 }
 
 function shouldTreatAsNoAnswer(conversation: ElevenLabsConversation): boolean {
-  if (hasLiveHumanAssistantExchange(conversation)) {
+  if (hasLiveHumanAssistantExchange(conversation) || liveContactMessages(conversation).length > 0) {
     return false;
   }
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
@@ -1266,6 +1274,25 @@ function shouldTreatAsNoAnswer(conversation: ElevenLabsConversation): boolean {
     text.includes("could not reach") ||
     text.includes("didn't pick up") ||
     text.includes("did not pick up")
+  );
+}
+
+export function shouldTreatAsHumanAnsweredNoBotResponse(conversation: ElevenLabsConversation): boolean {
+  const liveMessages = liveContactMessages(conversation).map(normalizeText);
+  const hasPickupGreeting = liveMessages.some((message) =>
+    /^(?:hello|hi|hey|good morning|good afternoon|good evening)\b/.test(message),
+  );
+  const containsOnlyPickupSpeech = liveMessages.every((message) =>
+    /^(?:(?:hello|hi|hey|good morning|good afternoon|good evening|yes|yeah|yep|uh huh|mm hmm|anyone there)[\s,.!?-]*)+$/.test(message),
+  );
+  return (
+    conversation.has_user_audio !== false &&
+    !shouldTreatAsVoicemail(conversation) &&
+    !shouldTreatAsRecordingArtifact(conversation) &&
+    liveMessages.length > 0 &&
+    hasPickupGreeting &&
+    containsOnlyPickupSpeech &&
+    assistantMessages(conversation).length === 0
   );
 }
 
@@ -2219,6 +2246,39 @@ async function processPostCallOutcomeForConversation(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult,
+    });
+    return true;
+  }
+
+  if (shouldTreatAsHumanAnsweredNoBotResponse(conversation)) {
+    const isFirstAttempt = metadata.callAttemptNumber <= 1;
+    const callResult = isFirstAttempt
+      ? "human_answered_no_bot_response"
+      : "human_answered_no_bot_response_final_attempt";
+    const outcome = buildVoiceResponseStatus(callResult);
+
+    await postSheetUpdate({
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult,
+      responseStatus: outcome,
+      ...(isFirstAttempt ? {} : { leadStatusCode: "N" }),
+      callbackRequested: "",
+      callbackTime: "",
+      liveTransferRequested: "",
+      liveTransferCompleted: "",
+      voiceNotes: buildPerformanceNotes(
+        outcome,
+        `A live human greeting was captured, but the provider transcript contains no assistant turn. ${summary}`.trim(),
+      ),
+    });
+
+    await sendTranscriptEmailIfEnabled({ conversationId, metadata, outcome, summary, transcript: fullTranscript });
+    processedConversationIds.add(conversationId);
+    logger.error("ElevenLabs post-call fallback recorded live answer with no bot response", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
     });
     return true;
   }

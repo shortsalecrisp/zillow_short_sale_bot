@@ -147,6 +147,9 @@ export const config = {
     finalReceiptMonitorStartedAt:
       readOptionalDate("VOICE_FINAL_RECEIPT_MONITOR_STARTED_AT_ISO") ??
       new Date("2026-09-30T09:46:05.445Z"),
+    scheduledNoStartMonitorStartedAt:
+      readOptionalDate("VOICE_SCHEDULED_NO_START_MONITOR_STARTED_AT_ISO") ??
+      new Date("2026-10-06T12:49:11.000Z"),
   },
   mailshakeSync: {
     apiKey: readOptionalEnv("MAILSHAKE_API_KEY"),

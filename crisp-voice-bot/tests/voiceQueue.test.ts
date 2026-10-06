@@ -94,23 +94,23 @@ test("Render queue prioritizes an overdue scheduled no-start until the attempt i
       {
         rowNumber: 5850,
         values: scheduledRow("", {
-          call1SentAt: "2026-09-24T13:11:43.726Z",
+          call1SentAt: "2026-10-06T13:11:43.726Z",
           call1Result: "voicemail_left",
-          scheduledFor: "2026-09-25T18:00:00.000Z",
+          scheduledFor: "2026-10-07T18:00:00.000Z",
         }),
       },
-      { rowNumber: 5900, values: row("2026-09-25T22:45:00.000Z") },
+      { rowNumber: 5900, values: row("2026-10-07T22:45:00.000Z") },
       {
         rowNumber: 5901,
         values: scheduledRow("", {
-          call1SentAt: "2026-09-24T13:11:43.726Z",
+          call1SentAt: "2026-10-06T13:11:43.726Z",
           call1Result: "voicemail_left",
-          scheduledFor: "2026-09-25T18:00:00.000Z",
-          call2SentAt: "2026-09-26T18:05:00.000Z",
+          scheduledFor: "2026-10-07T18:00:00.000Z",
+          call2SentAt: "2026-10-08T18:05:00.000Z",
         }),
       },
     ],
-    new Date("2026-09-28T19:15:00.000Z"),
+    new Date("2026-10-08T19:15:00.000Z"),
     10,
   );
 
@@ -120,16 +120,39 @@ test("Render queue prioritizes an overdue scheduled no-start until the attempt i
   ]);
 });
 
+test("pre-monitor overdue scheduled no-start rows stay frozen without a candidate", async () => {
+  const { getVoiceBotCallCandidateFromRowValues } = await import("../src/lib/voiceQueue");
+  const values = scheduledRow("", {
+    call1SentAt: "2026-09-24T13:11:43.726Z",
+    call1Result: "voicemail_left",
+    scheduledFor: "2026-09-25T18:00:00.000Z",
+  });
+  assert.equal(getVoiceBotCallCandidateFromRowValues(5953, values, new Date("2026-10-06T19:15:00.000Z")), undefined);
+});
+
+test("scheduled no-start marker is durable and parseable", async () => {
+  const { formatVoiceScheduledNoStartMarker, parseVoiceScheduledNoStartMarker } = await import("../src/lib/voiceQueue");
+  const marker = {
+    rowNumber: 6005,
+    callAttemptNumber: 2 as const,
+    detectedAt: "2026-10-08T19:15:00.000Z",
+    candidateDueAt: "2026-10-07T18:00:00.000Z",
+  };
+  const formatted = formatVoiceScheduledNoStartMarker(marker);
+  assert.match(formatted, /CODEX_VOICE_SCHEDULED_NO_START_V1/);
+  assert.deepEqual(parseVoiceScheduledNoStartMarker(`older\n\n---\n\n${formatted}`), marker);
+});
+
 test("a stale first-attempt timestamp with no result receives exactly one bounded second-attempt candidate", async () => {
   const { getVoiceBotCallCandidateFromRowValues, isStaleVoiceBotStartWithoutReceipt } = await import("../src/lib/voiceQueue");
   const values = scheduledRow("", {
-    call1SentAt: "2026-09-27T18:15:00.000Z",
-    scheduledFor: "2026-09-27T18:00:00.000Z",
+    call1SentAt: "2026-10-07T18:15:00.000Z",
+    scheduledFor: "2026-10-07T18:00:00.000Z",
   });
-  const now = new Date("2026-09-28T13:30:00.000Z");
+  const now = new Date("2026-10-08T13:30:00.000Z");
   assert.equal(isStaleVoiceBotStartWithoutReceipt(values[32], values[33], now), true);
   assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now)?.callAttemptNumber, 2);
-  values[39] = "2026-09-28T18:46:00.000Z";
+  values[39] = "2026-10-08T13:26:00.000Z";
   assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now), undefined);
 });
 

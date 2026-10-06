@@ -91,6 +91,12 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
       staleAfterMinutes: FINAL_RECEIPT_STALE_AFTER_MINUTES,
       monitorStartedAt: config.voiceQueue.finalReceiptMonitorStartedAt.toISOString(),
     },
+    scheduledNoStartRecovery: {
+      enforced: true,
+      monitorStartedAt: config.voiceQueue.scheduledNoStartMonitorStartedAt.toISOString(),
+      preMonitorOverdueRows: "frozen_pending_separate_approval",
+      durableMarker: "CODEX_VOICE_SCHEDULED_NO_START_V1",
+    },
     inboundQuietGate: {
       enforced: true,
       quietPeriodSeconds: INBOUND_QUIET_PERIOD_MS / 1000,

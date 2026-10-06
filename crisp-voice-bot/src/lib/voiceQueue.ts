@@ -115,6 +115,39 @@ type SheetCellWrite = {
 
 const CALL_START_UNCERTAIN_MARKER = "CODEX_VOICE_CALL_START_UNCERTAIN_V1";
 const CALL_START_UNCERTAIN_GRACE_MS = 15 * 60_000;
+const SCHEDULED_NO_START_MARKER = "CODEX_VOICE_SCHEDULED_NO_START_V1";
+const SCHEDULED_NO_START_OVERDUE_MS = 12 * 60 * 60_000;
+
+export type VoiceScheduledNoStartMarker = {
+  rowNumber: number;
+  callAttemptNumber: 1 | 2;
+  detectedAt: string;
+  candidateDueAt: string;
+};
+
+export function formatVoiceScheduledNoStartMarker(marker: VoiceScheduledNoStartMarker): string {
+  return `${SCHEDULED_NO_START_MARKER} ${JSON.stringify(marker)}`;
+}
+
+export function parseVoiceScheduledNoStartMarker(value: unknown): VoiceScheduledNoStartMarker | undefined {
+  const notes = normalizeString(value);
+  const lines = notes.split(/\r?\n/).filter((line) => line.includes(SCHEDULED_NO_START_MARKER));
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const jsonText = lines[index].slice(lines[index].indexOf(SCHEDULED_NO_START_MARKER) + SCHEDULED_NO_START_MARKER.length).trim();
+    try {
+      const parsed = JSON.parse(jsonText) as Partial<VoiceScheduledNoStartMarker>;
+      if (
+        Number.isInteger(parsed.rowNumber) &&
+        (parsed.callAttemptNumber === 1 || parsed.callAttemptNumber === 2) &&
+        typeof parsed.detectedAt === "string" && !Number.isNaN(Date.parse(parsed.detectedAt)) &&
+        typeof parsed.candidateDueAt === "string" && !Number.isNaN(Date.parse(parsed.candidateDueAt))
+      ) {
+        return parsed as VoiceScheduledNoStartMarker;
+      }
+    } catch (_) {}
+  }
+  return undefined;
+}
 
 export type VoiceCallStartUncertainMarker = {
   rowNumber: number;
@@ -327,8 +360,16 @@ export function getVoiceBotCallCandidateFromRowValues(
   if (!agentTimeZone || !normalizedPhone) return undefined;
   const currentWindow = getVoiceBotPreferredCallWindowName(now, agentTimeZone);
   const overdueNoStartRecovery = Boolean(
-    scheduledFor && now.getTime() - scheduledFor.getTime() >= 12 * 60 * 60 * 1000,
+    scheduledFor && now.getTime() - scheduledFor.getTime() >= SCHEDULED_NO_START_OVERDUE_MS,
   );
+  const wasAlreadyOverdueBeforeMonitor = Boolean(
+    scheduledFor &&
+    config.voiceQueue.scheduledNoStartMonitorStartedAt.getTime() - scheduledFor.getTime() >= SCHEDULED_NO_START_OVERDUE_MS,
+  );
+
+  if (overdueNoStartRecovery && wasAlreadyOverdueBeforeMonitor) {
+    return undefined;
+  }
 
   if (!currentWindow) {
     return undefined;
@@ -566,6 +607,35 @@ async function markVoiceBotAttemptStarted(
     );
   }
   await writeCells(sheets, candidate.rowNumber, writes);
+}
+
+async function markScheduledNoStartRecoveryDetected(
+  sheets: sheets_v4.Sheets,
+  rowValues: unknown[],
+  candidate: VoiceQueueCandidate,
+  now: Date,
+): Promise<void> {
+  if (!candidate.overdueNoStartRecovery || parseVoiceScheduledNoStartMarker(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1])) {
+    return;
+  }
+  const marker = formatVoiceScheduledNoStartMarker({
+    rowNumber: candidate.rowNumber,
+    callAttemptNumber: candidate.callAttemptNumber,
+    detectedAt: now.toISOString(),
+    candidateDueAt: candidate.dueAt.toISOString(),
+  });
+  await writeCells(sheets, candidate.rowNumber, [
+    {
+      columnNumber: VOICE_BOT_COL_RESPONSE_STATUS,
+      value: "Scheduled call start was missed; bounded carry-forward pending",
+      label: "scheduled_no_start_response_status",
+    },
+    {
+      columnNumber: VOICE_BOT_COL_VOICE_NOTES,
+      value: appendVoiceNotesValue(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1], marker),
+      label: "scheduled_no_start_marker",
+    },
+  ]);
 }
 
 async function markVoiceBotAttemptStartFailed(
@@ -886,6 +956,8 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       });
       continue;
     }
+
+    await markScheduledNoStartRecoveryDetected(sheets, refreshedValues, refreshedCandidate, now);
 
     const inboundQuietGate = await getInboundQuietGate(sheets, refreshedCandidate.phone, now);
     if (inboundQuietGate.blocked) {
