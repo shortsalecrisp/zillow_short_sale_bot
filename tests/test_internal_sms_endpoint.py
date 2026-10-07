@@ -932,6 +932,48 @@ def test_initial_sms_queue_processes_pending_request_through_internal_send(monke
     assert queue.rows[2][8] == ""
 
 
+def test_initial_sms_queue_marks_stale_pending_visible_without_dequeue(monkeypatch):
+    monkeypatch.setenv("INITIAL_SMS_QUEUE_PENDING_ALERT_MINUTES", "5")
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    queue = module._get_initial_sms_queue_ws()
+    queue.rows[2] = [
+        "lead-verifier-2-pm-2026-10-07-row-6047-initial-sms",
+        "2026-10-07T18:10:00+00:00",
+        "lead-verifier-2-pm",
+        json.dumps(
+            {
+                "row": 6047,
+                "phone": "803-238-9572",
+                "first": "Scarlett",
+                "address": "318 Water Hickory Way",
+                "mark_codex_verified": True,
+                "force_resend": True,
+            },
+            separators=(",", ":"),
+        ),
+        "pending",
+        "",
+        "",
+        "",
+        "",
+    ]
+
+    alerted = module._mark_stale_initial_sms_queue_items(
+        queue,
+        now=datetime(2026, 10, 7, 18, 20, tzinfo=module.timezone.utc),
+    )
+
+    assert alerted == 1
+    assert sender.calls == []
+    assert queue.rows[2][4] == "pending"
+    assert queue.rows[2][8].startswith("stale_pending_alerted:")
+    assert "row=6047" in queue.rows[2][8]
+    assert "phone=18032389572" in queue.rows[2][8]
+
+
 def test_initial_sms_queue_records_failed_guard_without_sending(monkeypatch):
     module, _sheet, sender = _import_webhook_server(
         monkeypatch,

@@ -228,6 +228,7 @@ PENDING_QUEUE_TAB = os.getenv("PENDING_QUEUE_TAB", "PendingQueue")
 PENDING_QUEUE_STALE_MINUTES = int(os.getenv("PENDING_QUEUE_STALE_MINUTES", "30"))
 INITIAL_SMS_QUEUE_TAB = os.getenv("INITIAL_SMS_QUEUE_TAB", "Initial SMS Queue")
 INITIAL_SMS_QUEUE_STALE_MINUTES = int(os.getenv("INITIAL_SMS_QUEUE_STALE_MINUTES", "15"))
+INITIAL_SMS_QUEUE_PENDING_ALERT_MINUTES = int(os.getenv("INITIAL_SMS_QUEUE_PENDING_ALERT_MINUTES", "70"))
 APIFY_BACKSTOP_ENABLED = os.getenv("APIFY_BACKSTOP_ENABLED", "true").lower() == "true"
 APIFY_BACKSTOP_HOUR = int(os.getenv("APIFY_BACKSTOP_HOUR", "18"))
 APIFY_BACKSTOP_MAIN_FETCH_LIMIT = int(os.getenv("APIFY_BACKSTOP_MAIN_FETCH_LIMIT", "100"))
@@ -2058,6 +2059,7 @@ def _process_pending_rows_callback(run_time: datetime) -> None:
 
 def _process_initial_sms_queue_callback(run_time: datetime) -> None:
     if not _within_initial_hours(run_time):
+        _alert_stale_initial_sms_queue_items()
         return
     processed = _process_initial_sms_queue()
     if processed:
@@ -3720,6 +3722,71 @@ def _update_initial_sms_queue_row(ws, row_num: int, record: Dict[str, Any]) -> N
     )
 
 
+def _initial_sms_queue_payload_summary(record: Dict[str, Any]) -> Tuple[str, str]:
+    raw_payload = str(record.get("payload_json", "") or "").strip()
+    try:
+        payload = json.loads(raw_payload)
+    except ValueError:
+        return "", ""
+    if not isinstance(payload, dict):
+        return "", ""
+    row = str(payload.get("row") or "").strip()
+    phone = _digits_only(str(payload.get("phone") or ""))
+    return row, phone
+
+
+def _mark_stale_initial_sms_queue_items(ws, *, now: Optional[datetime] = None) -> int:
+    alert_minutes = max(INITIAL_SMS_QUEUE_PENDING_ALERT_MINUTES, 0)
+    if alert_minutes <= 0:
+        return 0
+    observed_at = now or datetime.now(timezone.utc)
+    cutoff = observed_at - timedelta(minutes=alert_minutes)
+    alerted = 0
+    with _initial_sms_queue_lock:
+        records = _load_initial_sms_queue_records(ws)
+        for rec in records:
+            status = str(rec.get("status", "")).strip().lower()
+            if status not in {"pending", "claimed"}:
+                continue
+            submitted_at = _parse_iso_timestamp(str(rec.get("submitted_at", "")))
+            claimed_at = _parse_iso_timestamp(str(rec.get("claimed_at", "")))
+            anchor = claimed_at if status == "claimed" and claimed_at else submitted_at
+            if not anchor or anchor > cutoff:
+                continue
+            existing_error = str(rec.get("error", "") or "")
+            if existing_error.startswith("stale_pending_alerted:"):
+                continue
+            row, phone = _initial_sms_queue_payload_summary(rec)
+            rec["error"] = (
+                f"stale_pending_alerted:{observed_at.isoformat()}:"
+                f"pending_after_processor_window row={row or 'unknown'} phone={phone or 'unknown'}"
+            )[:2000]
+            _update_initial_sms_queue_row(ws, int(rec["_row_num"]), rec)
+            alerted += 1
+            logger.warning(
+                "initial-sms-queue: stale %s request_id=%s row=%s phone=%s submitted_at=%s claimed_at=%s",
+                status,
+                str(rec.get("request_id", "")).strip(),
+                row or "<unknown>",
+                phone or "<unknown>",
+                str(rec.get("submitted_at", "")).strip() or "<blank>",
+                str(rec.get("claimed_at", "")).strip() or "<blank>",
+            )
+    return alerted
+
+
+def _alert_stale_initial_sms_queue_items() -> int:
+    try:
+        ws = _get_initial_sms_queue_ws()
+        alerted = _mark_stale_initial_sms_queue_items(ws)
+        if alerted:
+            logger.warning("initial-sms-queue: stale pending alert count=%d", alerted)
+        return alerted
+    except Exception:
+        logger.exception("initial-sms-queue: stale pending alert scan failed")
+        return 0
+
+
 def _claim_next_initial_sms_queue_item(ws) -> Optional[Dict[str, Any]]:
     stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(INITIAL_SMS_QUEUE_STALE_MINUTES, 1))
     with _initial_sms_queue_lock:
@@ -3796,6 +3863,7 @@ def _process_initial_sms_queue_item(ws, item: Dict[str, Any]) -> None:
 def _process_initial_sms_queue(*, max_items: int = 20, ignore_initial_hours: bool = False) -> int:
     if not ignore_initial_hours and not _within_initial_hours(datetime.now(tz=SCHEDULER_TZ)):
         logger.info("initial-sms-queue: skipped outside approved initial SMS hours")
+        _alert_stale_initial_sms_queue_items()
         return 0
     if not _initial_sms_queue_worker_lock.acquire(blocking=False):
         return 0
@@ -3808,6 +3876,7 @@ def _process_initial_sms_queue(*, max_items: int = 20, ignore_initial_hours: boo
                 break
             _process_initial_sms_queue_item(ws, item)
             processed += 1
+        _mark_stale_initial_sms_queue_items(ws)
     finally:
         _initial_sms_queue_worker_lock.release()
     return processed
