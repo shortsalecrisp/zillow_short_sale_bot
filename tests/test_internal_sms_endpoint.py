@@ -2247,6 +2247,52 @@ def test_sms_covered_but_relationship_open_closes_as_non_hot_without_handoff(mon
     ) is False
 
 
+def test_sms_historical_experience_does_not_close_undecided_current_file(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = (
+        "So I've not decided which direction I'm gonna go on this. I have handled them on many "
+        "occasions though that was during the great recession so I have not decided which direction "
+        "but I'll keep your information"
+    )
+    decision = module._sms_fast_decision({}, inbound)
+    assert module._sms_is_current_file_decision_undecided(inbound) is True
+    assert decision["lead_status"] == "Y"
+    assert decision["conversation_done"] is False
+    assert decision["handoff_needed"] is False
+    assert "lender paperwork, follow-up, and negotiations on this file" in decision["reply_text"]
+    assert "Would it help to see what I'd need to get started?" in decision["reply_text"]
+
+    covered_text = (
+        "I already have an attorney handling this file, but I haven't decided whether I should keep your information."
+    )
+    covered = module._sms_fast_decision({}, covered_text)
+    assert module._sms_is_current_file_decision_undecided(covered_text) is False
+    assert covered["lead_status"] == "O"
+    assert covered["conversation_done"] is True
+
+
+def test_sms_numbered_web_survey_is_suppressed_without_human_false_positive(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    automated = (
+        "Hi, I am Eva with Web Surveys. We are polling GA residents. "
+        "Can you answer a quick poll? 1) Yes 2) No (or QUIT)"
+    )
+    decision = module._sms_fast_decision({}, automated)
+    assert module._sms_is_automated_promotional_sms(automated) is True
+    assert decision["block_reply"] is True
+    assert decision["handoff_needed"] is False
+    assert decision["preserve_existing_state"] is True
+    assert module._sms_is_automated_promotional_sms(
+        "I am surveying the property. 1) Vacant 2) Occupied"
+    ) is False
+
+
 def test_sms_exact_final_courtesy_does_not_reopen_closed_conversation(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

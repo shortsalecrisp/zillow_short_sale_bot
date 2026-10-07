@@ -4972,6 +4972,53 @@ def _sms_has_previously_covered_context(row_obj: Dict[str, str]) -> bool:
     )
 
 
+def _sms_is_current_file_decision_undecided(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text:
+        return False
+    explicit_current_coverage = bool(
+        re.search(r"\b(?:already|currently)\s+(?:have|has|working\s+with|represented\s+by)\b", text)
+        or re.search(
+            r"\b(?:have|has)\s+(?:an?\s+|my\s+|our\s+)?(?:negotiator|processor|attorney|lawyer|team|someone|somebody|help)\b",
+            text,
+        )
+        or re.search(
+            r"\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+(?:currently\s+)?(?:handling|working\s+on)\s+(?:it|this|the\s+file|the\s+short\s+sale)\b",
+            text,
+        )
+        or re.search(r"\b(?:have|has)\s+(?:this|the)\s+(?:one|file|short\s+sale)\s+handled\b", text)
+    )
+    if explicit_current_coverage:
+        return False
+    undecided = bool(
+        re.search(
+            r"\b(?:i|we)\s+(?:have\s+not|haven['\u2019]?t|had\s+not|hadn['\u2019]?t|still\s+have\s+not|still\s+haven['\u2019]?t|not\s+yet)\s+decided\b",
+            text,
+        )
+        or re.search(
+            r"\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+still\s+(?:deciding|considering)\b",
+            text,
+        )
+    )
+    current_decision = bool(
+        re.search(r"\b(?:which|what)\s+direction\b", text)
+        or re.search(r"\bwhat\s+(?:i|we)\s+(?:am|are|should|will|would)\s+(?:going\s+to\s+)?do\b", text)
+        or re.search(r"\bhow\s+(?:i|we)\s+(?:am|are|should|will|would)\s+(?:going\s+to\s+)?handle\b", text)
+        or re.search(
+            r"\bwhether\s+(?:i|we)\s+should\s+(?:handle|manage|proceed|move\s+forward|seek\s+help|get\s+help|use\s+help|work\s+with)\b",
+            text,
+        )
+    )
+    return undecided and current_decision
+
+
+def _sms_current_file_undecided_reply() -> str:
+    return (
+        "Understood. Crisp can handle the lender paperwork, follow-up, and negotiations on this file "
+        "while you keep the listing and client relationship. Would it help to see what I'd need to get started?"
+    )
+
+
 def _sms_is_relationship_only_after_existing_coverage(value: Any, row_obj: Dict[str, str]) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     current_coverage = bool(
@@ -5553,9 +5600,17 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
         r"\b(?:fair fight|peachvote(?:\.com)?|mvp\.sos\.ga\.gov|voter registration portal)\b",
         t,
     )
+    has_survey_identity = re.search(r"\b(?:web\s+)?surveys?\b", t) and re.search(
+        r"\b(?:i\s+am|i['\u2019]?m|this\s+is|we\s+are|we['\u2019]?re|with)\b", t
+    )
+    has_poll_invitation = re.search(r"\b(?:poll(?:ing)?|survey(?:ing)?)\b", t) and re.search(
+        r"\b(?:can|could|would|will)\s+you\b|\banswer\s+(?:a|this|our)\b", t
+    )
+    has_numbered_choices = re.search(r"\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]", t)
     return bool(
         (has_campaign_appeal and has_link and has_bulk_footer)
         or (has_known_civic_automation and (has_link or has_bulk_footer or has_campaign_appeal))
+        or (has_survey_identity and has_poll_invitation and has_numbered_choices)
     )
 
 
@@ -7365,6 +7420,15 @@ def _sms_fast_decision(
             reply_text=_sms_client_consultation_reply(),
             lead_status="Y",
             reason="Agent will discuss short-sale help with their client and get back to Yoni",
+        )
+
+    if _sms_is_current_file_decision_undecided(t):
+        return _sms_decision(
+            reply_text=_sms_current_file_undecided_reply(),
+            lead_status="Y",
+            conversation_done=False,
+            handoff_needed=False,
+            reason="Current-file direction remains undecided; answered with one concise value statement",
         )
 
     if _sms_is_future_buyer_recontact(t):

@@ -95,6 +95,25 @@ test('neutral self-handling gets one transparent value response, then closes', (
   assert.match(second.reply_text, /^Ok, no problem/);
 });
 
+test('historical experience does not close an undecided current file', () => {
+  const text = "So I've not decided which direction I'm gonna go on this. I have handled them on many occasions though that was during the great recession so I have not decided which direction but I'll keep your information";
+  const {h, r} = answer(text);
+  assert.equal(r.should_reply, true);
+  assert.equal(r.lead_status, 'Y');
+  assert.equal(r.conversation_done, false);
+  assert.equal(r.handoff_needed, false);
+  assert.match(r.reply_text, /lender paperwork, follow-up, and negotiations on this file/);
+  assert.match(r.reply_text, /Would it help to see what I'd need to get started\?/);
+  assert.equal(h.state.call_booking_status, 'interested_no_call');
+  assert.equal(h.evaluate(`isCurrentFileDecisionUndecidedSignal_(${JSON.stringify(text)})`), true);
+});
+
+test('an explicit current provider still closes despite undecided wording', () => {
+  const {r} = answer("I already have an attorney handling this file, but I haven't decided whether I should keep your information.");
+  assert.equal(r.lead_status, 'O');
+  assert.equal(r.conversation_done, true);
+});
+
 for (const text of ["What's the cost?", 'How much?', 'How much is your fee?', 'What is your flat buyer-paid fee?', 'What do you charge?', 'What does your service cost?', 'How much does the Buyer need to pay?', 'What work would you take off my plate and how much is the flat fee?']) {
   test(`amount question answered directly: ${text}`, () => {
     const {r} = answer(text);

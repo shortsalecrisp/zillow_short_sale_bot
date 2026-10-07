@@ -22,12 +22,14 @@ assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("Are you a bot
 for (const automated of [
   'Fair Fight: Check your voter registration at mvp.sos.ga.gov. Reply STOP to unsubscribe.',
   'You have successfully been unsubscribed. Reply START to resubscribe.',
+  'Hi, I am Eva with Web Surveys. We are polling GA residents. Can you answer a quick poll? 1) Yes 2) No (or QUIT)',
 ]) {
   const result = promotion.incoming(automated);
   assert.equal(result.should_reply, false);
   assert.equal(result.handoff_needed, false);
 }
 assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("I am registered to vote and have a short-sale listing question")`), false);
+assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("I am surveying the property. 1) Vacant 2) Occupied")`), false);
 
 const repeated = smsHarness();
 const question = 'What is your fee?';

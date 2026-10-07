@@ -3076,6 +3076,19 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  if (isCurrentFileDecisionUndecidedSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildCurrentFileUndecidedReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Current-file direction remains undecided; answered with one concise value statement"
+    };
+  }
+
   if (isFutureNegotiationInterestSignal_(t)) {
     return {
       matched: true,
@@ -3744,8 +3757,14 @@ function isAutomatedPromotionalSmsSignal_(text) {
   const hasCampaignAppeal = /\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|voter registration|register(?:ed)? to vote|volunteer|chipped in|election|ballot)\b/.test(t);
   const hasBulkFooter = /\b(?:stop\s*2\s*end|reply\s+stop\s+to\s+(?:end|unsubscribe|opt\s*out))\b/.test(t);
   const hasKnownCivicAutomation = /\b(?:fair fight|peachvote(?:\.com)?|mvp\.sos\.ga\.gov|voter registration portal)\b/.test(t);
+  const hasSurveyIdentity = /\b(?:web\s+)?surveys?\b/.test(t) &&
+    /\b(?:i\s+am|i['\u2019]?m|this\s+is|we\s+are|we['\u2019]?re|with)\b/.test(t);
+  const hasPollInvitation = /\b(?:poll(?:ing)?|survey(?:ing)?)\b/.test(t) &&
+    /\b(?:can|could|would|will)\s+you\b|\banswer\s+(?:a|this|our)\b/.test(t);
+  const hasNumberedChoices = /\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]/.test(t);
   return (hasCampaignAppeal && hasLink && hasBulkFooter) ||
-    (hasKnownCivicAutomation && (hasLink || hasBulkFooter || hasCampaignAppeal));
+    (hasKnownCivicAutomation && (hasLink || hasBulkFooter || hasCampaignAppeal)) ||
+    (hasSurveyIdentity && hasPollInvitation && hasNumberedChoices);
 }
 
 function isStructuredAutomatedResponseSignal_(text) {
@@ -4433,6 +4452,27 @@ function hasPreviouslyCoveredContext_(rowObj) {
   const combined = normalizeWhitespace_(String(parts.filter(Boolean).join(" ")).toLowerCase());
   return /\b(?:already (?:have|has|working with|represented)|have (?:an? |my |our )?(?:negotiator|processor|attorney|lawyer|team|someone|help)|handled|handling (?:it|this|the file)|covered)\b/.test(combined) ||
     /\balready represented\b|\balready handled\b/.test(combined);
+}
+
+function isCurrentFileDecisionUndecidedSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+  const explicitCurrentCoverage = /\b(?:already|currently)\s+(?:have|has|working\s+with|represented\s+by)\b/.test(t) ||
+    /\b(?:have|has)\s+(?:an?\s+|my\s+|our\s+)?(?:negotiator|processor|attorney|lawyer|team|someone|somebody|help)\b/.test(t) ||
+    /\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+(?:currently\s+)?(?:handling|working\s+on)\s+(?:it|this|the\s+file|the\s+short\s+sale)\b/.test(t) ||
+    /\b(?:have|has)\s+(?:this|the)\s+(?:one|file|short\s+sale)\s+handled\b/.test(t);
+  if (explicitCurrentCoverage) return false;
+  const undecided = /\b(?:i|we)\s+(?:have\s+not|haven['\u2019]?t|had\s+not|hadn['\u2019]?t|still\s+have\s+not|still\s+haven['\u2019]?t|not\s+yet)\s+decided\b/.test(t) ||
+    /\b(?:i|we)(?:['\u2019]?m|\s+am|['\u2019]?re|\s+are)\s+still\s+(?:deciding|considering)\b/.test(t);
+  const currentDecision = /\b(?:which|what)\s+direction\b/.test(t) ||
+    /\bwhat\s+(?:i|we)\s+(?:am|are|should|will|would)\s+(?:going\s+to\s+)?do\b/.test(t) ||
+    /\bhow\s+(?:i|we)\s+(?:am|are|should|will|would)\s+(?:going\s+to\s+)?handle\b/.test(t) ||
+    /\bwhether\s+(?:i|we)\s+should\s+(?:handle|manage|proceed|move\s+forward|seek\s+help|get\s+help|use\s+help|work\s+with)\b/.test(t);
+  return undecided && currentDecision;
+}
+
+function buildCurrentFileUndecidedReply_() {
+  return "Understood. Crisp can handle the lender paperwork, follow-up, and negotiations on this file while you keep the listing and client relationship. Would it help to see what I'd need to get started?";
 }
 
 function isRelationshipOnlyAfterExistingCoverageSignal_(text, rowObj) {
