@@ -60,7 +60,14 @@ export function applyGuardedTerminalWorkflow<T extends WorkflowBody>(body: T, op
   if (!nodes[mainNodeId].additional_prompt?.includes(currentTurnInstruction)) {
     nodes[mainNodeId].additional_prompt = [nodes[mainNodeId].additional_prompt, currentTurnInstruction].filter(Boolean).join("\n\n");
   }
-  const dialogueIds = new Set([mainNodeId, "callback_after_unavailable", "patch_transfer", "opening_listener"]);
+  const dialogueIds = new Set([
+    mainNodeId,
+    "callback_after_unavailable",
+    "patch_transfer",
+    "opening_listener",
+    "short_listing_recovery",
+    "callback_receipt_wait",
+  ]);
   const routeOnly = nodes.transfer_result_review;
   if (routeOnly) {
     const outgoing = Object.values(edges).filter((value: any) => value.source === "transfer_result_review");

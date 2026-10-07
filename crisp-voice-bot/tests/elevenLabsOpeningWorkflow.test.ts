@@ -1,8 +1,22 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { applyConversationOpeningWorkflow, buildOpeningListenerPrompt, OPENING_LISTENER_PROMPT } from "../src/lib/elevenLabsOpeningWorkflow";
-import { OPENING_HANDOFF_POLICY, VOICE_NEEDS_QUESTION, VOICE_OPENING_SCRIPT, VOICE_SCREENING_SCRIPT } from "../src/lib/elevenLabsConversationPolicy";
+import {
+  applyConversationOpeningWorkflow,
+  buildOpeningListenerPrompt,
+  CALLBACK_RECEIPT_WAIT_PROMPT,
+  OPENING_LISTENER_PROMPT,
+  SHORT_LISTING_RECOVERY_PROMPT,
+  VOICE_STATE_TRANSITION_NODES,
+} from "../src/lib/elevenLabsOpeningWorkflow";
+import {
+  OPENING_HANDOFF_POLICY,
+  VOICE_CALLBACK_RECEIPT_ACK,
+  VOICE_NEEDS_QUESTION,
+  VOICE_OPENING_SCRIPT,
+  VOICE_SCREENING_SCRIPT,
+  VOICE_SHORT_LISTING_RECOVERY,
+} from "../src/lib/elevenLabsConversationPolicy";
 
 const base = () => ({ conversation_config: { agent: { first_message: "", prompt: { prompt: "Sales context" } },
   tts: { voice_id: "unchanged", speed: 0.95 } }, workflow: { nodes: {
@@ -24,6 +38,25 @@ test("opening gets a separate wait-first prompt without changing the sales promp
   assert.equal(after.workflow.nodes.opening_listener.forced_tool_name, null);
   assert.equal(Object.hasOwn(after.workflow.nodes.opening_listener, "system_tool"), false);
   assert.deepEqual(after.workflow.subgraphs, {});
+  assert.equal(after.workflow.nodes[VOICE_STATE_TRANSITION_NODES.shortListingRecovery].entry_behavior, "generate_immediately");
+  assert.equal(after.workflow.nodes[VOICE_STATE_TRANSITION_NODES.callbackReceiptWait].entry_behavior, "generate_immediately");
+  assert.match(SHORT_LISTING_RECOVERY_PROMPT, new RegExp(VOICE_SHORT_LISTING_RECOVERY.replace(/[?{}]/g, "\\$&")));
+  assert.ok(CALLBACK_RECEIPT_WAIT_PROMPT.includes(VOICE_CALLBACK_RECEIPT_ACK));
+});
+
+test("screening, repeated greetings and callback receipts have dedicated workflow states", () => {
+  const after = applyConversationOpeningWorkflow(base());
+  const n = VOICE_STATE_TRANSITION_NODES;
+  assert.equal(after.workflow.edges.opening_to_short_listing_recovery.target, n.shortListingRecovery);
+  assert.match(after.workflow.edges.opening_to_short_listing_recovery.forward_condition.condition, /automated screening, connecting audio or a hold state/);
+  assert.equal(after.workflow.edges.main_to_short_listing_recovery.target, n.shortListingRecovery);
+  assert.match(after.workflow.edges.main_to_short_listing_recovery.forward_condition.condition, /only an intelligible repeated hello or presence check/);
+  assert.match(after.workflow.edges.main_to_short_listing_recovery.backward_condition.condition, /NEW complete live-caller answer/);
+  assert.equal(after.workflow.edges.main_to_callback_receipt_wait.target, n.callbackReceiptWait);
+  assert.match(after.workflow.edges.main_to_callback_receipt_wait.forward_condition.condition, /requestCaptured true/);
+  assert.match(after.workflow.edges.main_to_callback_receipt_wait.backward_condition.condition, /incomplete fragment/);
+  assert.equal(after.workflow.nodes[n.shortListingRecovery].conversation_config.agent.prompt.tool_ids.length, 0);
+  assert.equal(after.workflow.nodes[n.callbackReceiptWait].conversation_config.agent.prompt.tool_ids.length, 0);
 });
 
 test("a current question routes to main, while an old pickup cannot trigger qualification", () => {

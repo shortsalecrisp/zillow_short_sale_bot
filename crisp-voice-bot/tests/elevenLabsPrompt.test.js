@@ -71,8 +71,8 @@ test("live identity and first-turn questions do not restart the pitch", () => {
   const s = section("Intro only");
   assert.match(s, /answer only those points from the answer library instead of delivering the full introduction/);
   assert.match(s, /Do not repeat identity or purpose already answered/);
-  assert.match(s, /treat a different live listener as a fresh pickup/);
-  assert.match(s, /without repeating the screener response or adding another identity statement first/);
+  assert.match(s, /After screening or hold, a new live listener's greeting enters the native short-check state/);
+  assert.match(s, /Do not repeat the screener response or add another identity statement first/);
   assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
 });
 test("name corrections and authorized admins outrank the stored lead name", () => {
@@ -103,9 +103,9 @@ test("bounded repair preserves understood fragments and never guesses consent", 
   assert.match(s, /Do not repeat the full opening or guess the answer/);
   assert.match(s, /do not keep pitching or invent consent to another channel/);
   assert.match(s, /Honor an actual refusal, stop request or opt-out promptly/);
-  assert.match(s, /Repeated intelligible "Hello\?" after any partial or complete introduction is a live interruption/);
-  assert.match(s, /Never restart the introduction/);
-  assert.match(s, /I can hear you\. This is \{\{assistantName\}\} with Crisp Short Sales, calling about the short-sale listing/);
+  assert.match(s, /Repeated intelligible "Hello\?" after the listing-agent introduction or check is a live interruption/);
+  assert.match(s, /Never restart the introduction, repeat identity, or add another question/);
+  assert.match(s, /native recovery state says only: "Is \{\{streetAddress\}\} your listing\?"/);
 });
 
 test("a confirmed listing plus a purpose question remains answer-only", () => {
@@ -215,8 +215,10 @@ test("request receipt is not completion or a new caller turn", () => {
   assert.match(s, /requestCaptured: true permits a receipt acknowledgment/);
   assert.match(s, /queued: true is receipt\/queueing, not proof of durable persistence or completion/);
   assert.match(s, /I'm sorry, I couldn't confirm that request/);
-  assert.match(s, /Then wait for a NEW caller turn/);
+  assert.match(s, /Only a NEW complete question, correction, cancellation, stop request or contact preference returns to the main conversation/);
   assert.match(s, /A correction after a receipt does not upgrade a request to a promise/);
+  assert.match(s, /native callback-receipt wait state/);
+  assert.match(s, /incomplete fragment such as "Is it, or\.\.\. Okay" gets skip_turn/);
 });
 test("correction acknowledgments are time-free and cannot promise calls or sends", () => {
   const s = section("Request records and receipts");

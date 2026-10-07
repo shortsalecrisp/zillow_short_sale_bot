@@ -1,4 +1,32 @@
-import { OPENING_HANDOFF_POLICY, VOICE_OPENING_SCRIPT, VOICE_RETURN_NUMBER_SPOKEN, VOICE_SCREENING_SCRIPT } from "./elevenLabsConversationPolicy";
+import {
+  OPENING_HANDOFF_POLICY,
+  VOICE_CALLBACK_RECEIPT_ACK,
+  VOICE_OPENING_SCRIPT,
+  VOICE_RETURN_NUMBER_SPOKEN,
+  VOICE_SCREENING_SCRIPT,
+  VOICE_SHORT_LISTING_RECOVERY,
+} from "./elevenLabsConversationPolicy";
+
+export const VOICE_STATE_TRANSITION_NODES = Object.freeze({
+  shortListingRecovery: "short_listing_recovery",
+  callbackReceiptWait: "callback_receipt_wait",
+});
+
+export const SHORT_LISTING_RECOVERY_PROMPT = `# Short listing-check recovery state
+
+On first entry, say exactly this entire turn:
+"${VOICE_SHORT_LISTING_RECOVERY}"
+Then stop. Do not repeat an identity, company description, screening response, full introduction or sales explanation. Do not ask another question.
+
+After that one line, wait silently. Use skip_turn for silence, noise, placeholder ..., another bare hello, or an incomplete fragment. A NEW complete live-caller answer, question, correction, stop request or contact preference routes to the main conversation before speech. Never repeat the recovery line.`;
+
+export const CALLBACK_RECEIPT_WAIT_PROMPT = `# Callback receipt and wait state
+
+On first entry after a fresh successful callback_requested result, say exactly this entire turn:
+"${VOICE_CALLBACK_RECEIPT_ACK}"
+Then stop. Do not repeat the callback time, say scheduled or booked, ask an anything-else question, restart qualification or add a generic closing.
+
+After that one acknowledgment, wait silently. Use skip_turn for silence, noise, placeholder ..., thanks, okay, repeated timing, self-talk or an incomplete fragment such as "Is it, or... Okay." A NEW complete live-caller question, correction, cancellation, stop request or contact preference routes to the main conversation before speech. Never repeat the receipt acknowledgment.`;
 
 export const OPENING_LISTENER_PROMPT = `# Opening listener entry
 
@@ -59,7 +87,69 @@ export function applyConversationOpeningWorkflow<T extends Record<string, any>>(
   workflow.nodes.unrelated_recording_exit = {
     type: "end", position: { x: -540, y: 0 }, parent_subgraph_id: null, return_when_nested: true, edge_order: [],
   };
+  const n = VOICE_STATE_TRANSITION_NODES;
+  const skipTurn = structuredClone(updated.conversation_config.agent.prompt?.built_in_tools?.skip_turn ?? null);
+  const transitionNode = (label: string, position: { x: number; y: number }, prompt: string, edgeOrder: string[]) => ({
+    type: "override_agent", label, position, parent_subgraph_id: null, forced_tool_name: null,
+    conversation_config: { agent: { first_message: "", prompt: {
+      prompt, tool_ids: [], tools: [], knowledge_base: [],
+      built_in_tools: {
+        end_call: null, transfer_to_number: null, transfer_to_agent: null, voicemail_detection: null,
+        language_detection: null, play_keypad_touch_tone: null,
+        skip_turn: skipTurn ? { ...skipTurn, description: "Wait silently until a new complete live-caller turn needs routing." } : null,
+      },
+    } } },
+    additional_prompt: "", additional_knowledge_base: [], additional_tool_ids: [],
+    entry_behavior: "generate_immediately", edge_order: edgeOrder,
+  });
+  workflow.nodes[n.shortListingRecovery] = transitionNode(
+    "Short Listing Check Recovery",
+    { x: 80, y: -420 },
+    SHORT_LISTING_RECOVERY_PROMPT,
+    ["main_to_short_listing_recovery"],
+  );
+  workflow.nodes[n.callbackReceiptWait] = transitionNode(
+    "Acknowledge Callback And Wait",
+    { x: 320, y: 420 },
+    CALLBACK_RECEIPT_WAIT_PROMPT,
+    ["main_to_callback_receipt_wait"],
+  );
   workflow.edges.start_to_main.target = "opening_listener";
+  workflow.edges.opening_to_short_listing_recovery = {
+    source: "opening_listener", target: n.shortListingRecovery, backward_condition: null,
+    forward_condition: { type: "llm", label: null, condition: [
+      "The call has just passed through automated screening, connecting audio or a hold state, and the latest NEW turn is a live person who only greets, identifies themselves, or says they are on the line.",
+      "Route before speaking so the short recovery node asks the one-line listing check.",
+      "Do not route on canned hold text, a recording, voicemail, silence, noise, placeholder ..., a substantive question, a correction, or a stop/contact preference.",
+      "Do not use this for the initial pickup before any screening or hold; that remains the normal live introduction.",
+    ].join(" ") },
+  };
+  workflow.edges.main_to_short_listing_recovery = {
+    source: "main_conversation", target: n.shortListingRecovery,
+    forward_condition: { type: "llm", label: null, condition: [
+      "The assistant's immediately preceding spoken turn was the live listing-agent introduction or listing check, and the latest NEW live-caller turn is only an intelligible repeated hello or presence check with no question, correction, stop request or contact preference.",
+      "Route before speaking so the short recovery node asks only the one-line listing check.",
+      "Do not route on silence, noise, placeholder ..., a substantive answer, or a greeting that occurred before the introduction.",
+    ].join(" ") },
+    backward_condition: { type: "llm", label: null, condition: [
+      "The short recovery node already spoke its one listing check and a NEW complete live-caller answer, question, correction, stop request or contact preference arrived after it.",
+      "Return to main before speaking so it handles that actual turn.",
+      "Do not return on silence, noise, placeholder ..., another bare hello, or an incomplete fragment.",
+    ].join(" ") },
+  };
+  workflow.edges.main_to_callback_receipt_wait = {
+    source: "main_conversation", target: n.callbackReceiptWait,
+    forward_condition: { type: "llm", label: null, condition: [
+      "A fresh callback_requested result for the current request returned requestCaptured true, and the exact receipt acknowledgment has not yet been spoken for that result.",
+      "Route before speaking so the callback receipt node gives the one allowed acknowledgment.",
+      "Do not route on an old or already acknowledged result, an error, a missing confirmation, another tool result, or a newer caller cancellation, stop request, question or correction.",
+    ].join(" ") },
+    backward_condition: { type: "llm", label: null, condition: [
+      "The callback receipt node already spoke its one acknowledgment and a NEW complete live-caller question, correction, cancellation, stop request or contact preference arrived after it.",
+      "Return to main before speaking so it handles that actual turn.",
+      "Do not return on the tool result, silence, noise, placeholder ..., thanks, okay, repeated timing, self-talk or an incomplete fragment.",
+    ].join(" ") },
+  };
   workflow.edges.opening_to_main = {
     source: "opening_listener", target: "main_conversation", backward_condition: null,
     forward_condition: { type: "llm", label: null, condition: [
@@ -82,6 +172,19 @@ export function applyConversationOpeningWorkflow<T extends Record<string, any>>(
     ].join(" ") },
   };
   workflow.nodes.main_conversation.entry_behavior = "generate_immediately";
+  workflow.nodes.main_conversation.edge_order = [
+    "main_to_callback_receipt_wait",
+    "main_to_short_listing_recovery",
+    ...(workflow.nodes.main_conversation.edge_order ?? []).filter((id: string) =>
+      id !== "main_to_callback_receipt_wait" && id !== "main_to_short_listing_recovery"),
+  ];
+  workflow.nodes.opening_listener.edge_order = [
+    ...(workflow.nodes.opening_listener.edge_order ?? []).filter((id: string) =>
+      !["opening_to_short_listing_recovery", "opening_to_unrelated_recording_exit", "opening_to_main"].includes(id)),
+    "opening_to_short_listing_recovery",
+    "opening_to_unrelated_recording_exit",
+    "opening_to_main",
+  ];
   const previousMainPrompt = workflow.nodes.main_conversation.additional_prompt ?? "";
   const retainedMainPrompt = previousMainPrompt.replace(/\[CRISP_OPENING_HANDOFF_POLICY\][\s\S]*?\[END_CRISP_OPENING_HANDOFF_POLICY\]/g, "").trim();
   workflow.nodes.main_conversation.additional_prompt = [retainedMainPrompt, OPENING_HANDOFF_POLICY].filter(Boolean).join("\n\n");

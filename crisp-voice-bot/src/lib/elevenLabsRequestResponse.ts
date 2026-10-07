@@ -1,4 +1,5 @@
 import type { VoiceContactResult } from "./elevenLabsPostCall";
+import { VOICE_CALLBACK_RECEIPT_ACK } from "./elevenLabsConversationPolicy";
 
 const requestContinuation =
   "If the latest caller turn contains an unanswered question or correction, address it first instead of giving a closing acknowledgment. " +
@@ -73,7 +74,7 @@ export function buildElevenLabsCallbackRequestResponse(callbackTime: string) {
     durablePersistenceConfirmed: false,
     appointmentConfirmed: false,
     nextAction:
-      "When no question or correction is pending, acknowledge once: Thanks. I've received your callback request. " +
+      `When no question or correction is pending, acknowledge once: ${VOICE_CALLBACK_RECEIPT_ACK} ` +
       "Only if the caller asks whether it is booked or confirmed, explain that the request was received but no appointment is confirmed. " +
       "Keep the acknowledgment time-free. Do not repeat, reinterpret, or complete callbackTime from this tool result; it is not independently verified caller wording. " +
       "If the caller asks what timing you heard, quote their own words from the conversation without adding missing details. " +

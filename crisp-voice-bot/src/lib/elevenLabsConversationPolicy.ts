@@ -1,9 +1,11 @@
-export const VOICE_CONVERSATION_POLICY_VERSION = "maya-service-first-recovery-20261003";
+export const VOICE_CONVERSATION_POLICY_VERSION = "maya-state-transition-guards-20261007";
 
 export const VOICE_OPENING_SCRIPT = "Hi, this is {{assistantName}} with Crisp Short Sales. We help with short-sale lender paperwork. Is {{streetAddress}} your listing?";
+export const VOICE_SHORT_LISTING_RECOVERY = "Is {{streetAddress}} your listing?";
 export const VOICE_NEEDS_QUESTION = "Would help with lender paperwork or calls be useful for this listing?";
 export const VOICE_SCREENING_SCRIPT = "{{assistantName}} with Crisp Short Sales, about the short-sale listing at {{streetAddress}}.";
 export const VOICE_RETURN_NUMBER_SPOKEN = "four zero four, three zero zero, nine five two six";
+export const VOICE_CALLBACK_RECEIPT_ACK = "Thanks. I've received your callback request.";
 
 export const OPENING_HANDOFF_POLICY = [
   "[CRISP_OPENING_HANDOFF_POLICY]",
