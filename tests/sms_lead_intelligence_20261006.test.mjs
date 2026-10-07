@@ -58,11 +58,11 @@ test('referral company-info request gets canonical facts and a named owner hando
   assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'REFERRAL / COMPANY INFO'}]);
 });
 
-test('fee wording request answers only supported facts and routes exact language to Yoni', () => {
+test('fee wording request answers only supported facts and routes exact language for review', () => {
   const h = smsHarness();
   const result = h.incoming('What is your fee and what verbiage should I put in the listing and purchase contract?');
   assert.match(result.reply_text, /\$5,000/);
-  assert.match(result.reply_text, /Yoni provide the exact contract or listing wording/);
+  assert.match(result.reply_text, /I can go over the exact listing or contract wording with you after I review/);
   assert.doesNotMatch(result.reply_text, /MLS remarks should say|purchase contract must say/);
   assert.equal(result.handoff_needed, true);
   assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'handoff', reason: 'FEE DISCLOSURE WORDING REVIEW'}]);

@@ -1130,9 +1130,25 @@ def test_sms_name_and_number_request_gets_public_contact_without_handoff(monkeyp
     assert response.status_code == 200
     body = response.json()
     assert body["should_reply"] is True
-    assert body["reply_text"] == "Yoni Kutler - 404-300-9526. You can call or text anytime."
+    assert body["reply_text"] == "My name is Yoni Kutler. You can call or text me at 404-300-9526 anytime."
     assert body["handoff_needed"] is False
     assert body["needs_review"] is False
+
+
+def test_sms_third_person_self_reference_fails_closed(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch, sender_result={"ok": True}
+    )
+    guarded = module._sms_enforce_first_person({
+        "reply_text": "I'll have Yoni review your file.",
+        "block_reply": False,
+    })
+    assert guarded["reply_text"] == ""
+    assert guarded["block_reply"] is True
+    assert guarded["handoff_needed"] is True
+    assert guarded["handoff_type"] == "SPEAKER PERSPECTIVE REVIEW"
+    assert module._sms_has_third_person_self_reference("My name is Yoni Kutler.") is False
+    assert module._sms_has_third_person_self_reference("Email me at yoni@crispshortsales.com.") is False
 
 
 def test_sms_name_and_number_rule_does_not_match_agent_sending_buyer_contact(monkeypatch):

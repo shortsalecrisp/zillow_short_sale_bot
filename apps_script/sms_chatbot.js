@@ -1768,6 +1768,14 @@ function normalizeTaskerPayload_(obj) {
   const out = Object.assign({}, obj || {});
 
   out.reply_text = typeof out.reply_text === "string" ? out.reply_text : "";
+  if (out.should_reply === true && hasThirdPersonSelfReference_(out.reply_text)) {
+    out.should_reply = false;
+    out.reply_text = "";
+    out.handoff_needed = true;
+    out.needs_review = true;
+    out.speaker_perspective_blocked = true;
+    out.reason = "Third-person self-reference blocked before SMS outbox registration";
+  }
   out.reason = typeof out.reason === "string" ? out.reason : "";
   out.delay_seconds = String(out.delay_seconds || 15);
   out.should_reply_text = out.should_reply === true ? "true" : "false";
@@ -2306,7 +2314,7 @@ function isBuyerFeeWordingRequestSignal_(text) {
 function buildBuyerFeeWordingReviewDecision_() {
   return {
     matched: true,
-    reply_text: "My fee is $5,000, paid by the buyer at closing only if the deal closes. I'll have Yoni provide the exact contract or listing wording so you can use the right language.",
+    reply_text: "My fee is $5,000, paid by the buyer at closing only if the deal closes. I can go over the exact listing or contract wording with you after I review the details.",
     lead_status: "Y",
     conversation_done: false,
     handoff_needed: true,
@@ -2773,7 +2781,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
       reason: "Agent asked for a business card"
     };
     if (flags.contact_info) return {
-      matched: true, reply_text: "Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.", lead_status: leadStatus,
+      matched: true, reply_text: buildYoniContactInfoReply_(), lead_status: leadStatus,
       conversation_done: done, handoff_needed: false, needs_review: false, block_reply: false,
       reason: "Agent asked for Yoni's contact information"
     };
@@ -2841,7 +2849,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
   if (flags.timeline) answers.push("A complete package and offer often takes about 60-90 days for a lender decision, though timing varies.");
   if (flags.website) answers.push("My website is https://www.crispshortsales.com.");
   if (flags.contact_card) answers.push("What's the best email for you?");
-  if (flags.contact_info) answers.push("Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.");
+  if (flags.contact_info) answers.push(buildYoniContactInfoReply_());
   if (flags.number) answers.push("Yes, this number is great - call or text anytime.");
   if (flags.credential) answers.push("I'm not an attorney; I handle the lender-side short-sale process and negotiations.");
   if (flags.role_identity) answers.push(buildPlainRoleIdentityReply_());
@@ -4776,12 +4784,17 @@ function isYoniNameAndNumberRequestSignal_(text) {
 }
 
 function buildYoniNameAndNumberReply_() {
-  return "Yoni Kutler - 404-300-9526. You can call or text anytime.";
+  return "My name is Yoni Kutler. You can call or text me at 404-300-9526 anytime.";
+}
+
+function buildYoniContactInfoReply_() {
+  return "My name is Yoni Kutler. You can call or text me at 404-300-9526, or email me at yoni@crispshortsales.com.";
 }
 
 function lastOutboundWasYoniNameAndNumberReply_(rowObj) {
-  return normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || "")) ===
-    buildYoniNameAndNumberReply_();
+  const lastOutbound = normalizeWhitespace_(String(rowObj && rowObj[HEADERS.last_outbound_text] || ""));
+  return lastOutbound === buildYoniNameAndNumberReply_() ||
+    lastOutbound === "Yoni Kutler - 404-300-9526. You can call or text anytime.";
 }
 
 function buildLocalQuestionReply_(rowObj) {
@@ -5118,8 +5131,8 @@ function buildCompoundServiceRequestReply_(text) {
   if (flags.deadline) actions.push("review any foreclosure deadline before anyone promises timing or a postponement");
   if (flags.compliance) actions.push("answer the licensing or compliance question directly");
   if (actions.length) {
-    parts.push("Yoni needs to " + actions.join("; ") + ".");
-    parts.push("I've flagged those items for his follow-up.");
+    parts.push("I need to " + actions.join("; ") + ".");
+    parts.push("I've flagged those items for my review.");
   }
   return parts.join(" ");
 }
@@ -5801,7 +5814,26 @@ function applyReplySanitizers_(decision, rowObj) {
   sanitized.reply_text = sanitizeReplyBuyerOffer_(sanitized.reply_text);
   sanitized.reply_text = sanitizeReplyPhoneOnlyCta_(sanitized.reply_text);
   sanitized.reply_text = sanitizeReplyFileCta_(sanitized.reply_text);
+  if (hasThirdPersonSelfReference_(sanitized.reply_text)) {
+    sanitized.reply_text = "";
+    sanitized.block_reply = true;
+    sanitized.handoff_needed = true;
+    sanitized.needs_review = true;
+    sanitized.alert_needed = true;
+    sanitized.send_reply_before_handoff = false;
+    sanitized.conversation_done = false;
+    sanitized.handoff_type = "SPEAKER PERSPECTIVE REVIEW";
+    sanitized.reason = "Third-person self-reference blocked; manual review required";
+  }
   return sanitized;
+}
+
+function hasThirdPersonSelfReference_(replyText) {
+  const text = String(replyText || "")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "")
+    .replace(/\bmy name is Yoni Kutler\b/gi, "")
+    .replace(/\bthis is Yoni Kutler with Crisp Short Sales\b/gi, "");
+  return /\bYoni\b/i.test(text);
 }
 
 function isDeliveryFollowupSignal_(text) {
@@ -5928,7 +5960,7 @@ function buildSystemPrompt_(rowObj) {
   return `
 You are texting as ${yourName}, who helps agents with short sale processing, lender negotiations, approvals, and getting deals to closing.
 
-Write in Yoni's voice, but never claim that a physical action, call, email, location, language ability, or completed task happened unless the system context proves it.
+Write as the same person who sent the opening text; never claim that a physical action, call, email, location, language ability, or completed task happened unless the system context proves it.
 
 STYLE:
 - Match the tone of the agent
@@ -5937,7 +5969,8 @@ STYLE:
 - Never sound salesy or pushy
 - Never over-explain unless necessary
 - Always write in first person as ${yourName} using "I", "me", and "my"
-- Never refer to ${yourName} in the third person
+- Never refer to yourself as "Yoni", "he", "him", "the owner", or a separate teammate. Say "I", "me", or "my" instead.
+- Only use your name when the agent explicitly asks for it or when quoting the original introduction. Then say "My name is Yoni Kutler", not "Yoni will" or "I'll have Yoni".
 - Never use emojis
 - Never use bullet points
 - Never use em dashes
@@ -5970,7 +6003,7 @@ IMPORTANT BEHAVIOR:
 - If you use their name, use only that exact first name
 - Never switch to a middle name, last name, nickname, or any other inferred name from context or history
 - If you are not completely sure about using the name, do not use their name at all
-- Never begin a reply with "Yoni here", "I'm Yoni", or "This is Yoni"
+- Never begin a routine reply with "Yoni here", "I'm Yoni", or "This is Yoni"; a direct name request may begin "My name is Yoni Kutler"
 - Do not sign normal text replies with your name
 - Never end a reply with "${yourName}", "- ${yourName}", "— ${yourName}", "Yoni", "- Yoni", or any similar signature
 - If a message ends with thanks, just end it with "Thanks" or "Thanks!" and not "Thanks, ${yourName}"
@@ -5984,8 +6017,8 @@ IMPORTANT BEHAVIOR:
 - If they say the offer was accepted and ask what you do or how you help, congratulate them briefly, ask whether the short sale still needs lender approval, explain that I can handle the approval and closing work, and end with: \"Let me know if you want to find a time to talk it over.\"
 - Never say \"Want me to take the file?\" or ask whether I should take the file; that is not how \${yourName} talks
 - If they ask "How do you help?" or anything similar, explain only that you handle the lender-side paperwork, calls, follow-up, and negotiations through approval. Do not discuss payment unless they also ask about it.
-- The goal of the conversation is always to move toward a phone conversation with ${yourName} when appropriate
-- If a conversation needs manual follow-up from ${yourName}, do not send a text reply to the agent
+- The goal of the conversation is always to move toward a phone conversation with me when appropriate
+- If a conversation needs manual follow-up, do not send a text reply to the agent
 - In any manual handoff situation, leave reply_text empty, set block_reply = true, and let ${yourName} take over
 - If they ask whether this is AI, a bot, automated, actually your phone, or whether they are texting a real person, do not reply
 - In that situation, set handoff_needed = true, block_reply = true, leave reply_text empty, and let ${yourName} respond personally
@@ -6291,7 +6324,7 @@ function sanitizeReplyPhoneOnlyCta_(replyText) {
 
   // Approved info-email requests must keep the canonical acknowledgement so
   // the downstream approval workflow can recognize and queue the email.
-  if (normalizeWhitespace_(text) === normalizeWhitespace_(getInfoEmailAcknowledgementReply_()) ||
+  if (/^Thanks, I have (?:your email|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\. I'll review this and send you some information about my services\.$/i.test(text) ||
       /^Absolutely\. I'll send an overview of what I handle and how the fee works to [^\s@]+@[^\s@]+\.[^\s@]+\.$/.test(text)) {
     return text;
   }
@@ -6661,7 +6694,8 @@ function shouldSendInfoEmail_(ruleResult, decision) {
 }
 
 function getInfoEmailAcknowledgementReply_(email) {
-  return "Thanks — I’ve noted that and will have Yoni review the request.";
+  const destination = isValidEmailAddress_(email) ? email : "your email";
+  return "Thanks, I have " + destination + ". I'll review this and send you some information about my services.";
 }
 
 function isInfoEmailApprovalRequired_() {
@@ -7883,7 +7917,7 @@ function testApprovedLeadIntelligenceRules_() {
   const nameAndNumberDecision = applyFastRules_("Can you send me your name and number?", {});
   if (!isYoniNameAndNumberRequestSignal_("Can you send me your name and number?") ||
       !nameAndNumberDecision.matched ||
-      nameAndNumberDecision.reply_text !== "Yoni Kutler - 404-300-9526. You can call or text anytime." ||
+      nameAndNumberDecision.reply_text !== buildYoniNameAndNumberReply_() ||
       nameAndNumberDecision.lead_status !== "Y" ||
       nameAndNumberDecision.conversation_done ||
       nameAndNumberDecision.handoff_needed ||

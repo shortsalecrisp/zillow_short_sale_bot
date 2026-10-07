@@ -204,12 +204,55 @@ test('supported multi-question answer covers location, fee, scope, and tenure', 
 test('email before deciding on call follows approval workflow without call consent', () => {
   const {h, r} = answer('Email me the details at taylor@example.com before I decide whether to schedule a call.');
   assert.equal(r.should_reply, true);
-  assert.match(r.reply_text, /noted that and will have Yoni review/);
+  assert.match(r.reply_text, /I have taylor@example.com\. I'll review this and send/);
   assert.match(r.reply_text, /taylor@example.com/);
   assert.doesNotMatch(r.reply_text, /shortly|already sent|Thanks for sending/);
   assert.equal(r.handoff_needed, false);
   assert.deepEqual(JSON.parse(JSON.stringify(h.effects)), [{type: 'email_approval', to: 'taylor@example.com'}]);
   assert.notEqual(h.state.call_booking_status, 'scheduled_callback');
+});
+
+test('information email acknowledgement speaks as the sender and preserves approval', () => {
+  const {h, r} = answer(
+    'I already have a company doing that but what is your fee for future deals. Also email me any information on your business ricardo@capitalrea.net'
+  );
+  assert.equal(r.should_reply, true);
+  assert.equal(r.lead_status, 'O');
+  assert.equal(r.reply_text,
+    "Thanks, I have ricardo@capitalrea.net. I'll review this and send you some information about my services.");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.effects)),
+    [{type: 'email_approval', to: 'ricardo@capitalrea.net'}]);
+});
+
+test('name requests use a first-person introduction without breaking prior courtesy detection', () => {
+  const h = smsHarness();
+  const r = h.incoming('What is your name and number?', {deliver: false});
+  assert.equal(r.reply_text, 'My name is Yoni Kutler. You can call or text me at 404-300-9526 anytime.');
+  assert.equal(h.evaluate('hasThirdPersonSelfReference_(' + JSON.stringify(r.reply_text) + ')'), false);
+  const legacy = smsHarness({
+    last_outbound_text: 'Yoni Kutler - 404-300-9526. You can call or text anytime.'
+  });
+  assert.equal(legacy.evaluate('lastOutboundWasYoniNameAndNumberReply_({...state})'), true);
+});
+
+test('third-person self-reference is blocked at both reply and outbox boundaries', () => {
+  const h = smsHarness();
+  const draft = "I'll have Yoni review your file.";
+  const guarded = h.evaluate('JSON.stringify(applyReplySanitizers_({reply_text:' +
+    JSON.stringify(draft) + ', block_reply:false}, {...state}))');
+  const decision = JSON.parse(guarded);
+  assert.equal(decision.reply_text, '');
+  assert.equal(decision.block_reply, true);
+  assert.equal(decision.handoff_needed, true);
+  assert.equal(decision.handoff_type, 'SPEAKER PERSPECTIVE REVIEW');
+
+  const outbox = JSON.parse(h.evaluate('JSON.stringify(normalizeTaskerPayload_({should_reply:true, reply_text:' +
+    JSON.stringify(draft) + '}))'));
+  assert.equal(outbox.should_reply, false);
+  assert.equal(outbox.speaker_perspective_blocked, true);
+  assert.equal(outbox.reply_text, '');
+  assert.equal(h.evaluate('hasThirdPersonSelfReference_("My name is Yoni Kutler.")'), false);
+  assert.equal(h.evaluate('hasThirdPersonSelfReference_("Email me at yoni@crispshortsales.com.")'), false);
 });
 
 test('email missing collects address; future info with provider remains O', () => {

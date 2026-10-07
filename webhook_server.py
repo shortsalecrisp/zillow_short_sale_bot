@@ -4411,7 +4411,34 @@ def _sms_normalize_whitespace(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-YONI_PUBLIC_CONTACT_REPLY = "Yoni Kutler - 404-300-9526. You can call or text anytime."
+def _sms_has_third_person_self_reference(value: Any) -> bool:
+    text = str(value or "")
+    text = re.sub(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bmy name is Yoni Kutler\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bthis is Yoni Kutler with Crisp Short Sales\b", "", text, flags=re.IGNORECASE)
+    return bool(re.search(r"\bYoni\b", text, flags=re.IGNORECASE))
+
+
+def _sms_enforce_first_person(decision: Dict[str, Any]) -> Dict[str, Any]:
+    guarded = dict(decision)
+    if not _sms_has_third_person_self_reference(guarded.get("reply_text")):
+        return guarded
+    guarded.update({
+        "reply_text": "",
+        "block_reply": True,
+        "handoff_needed": True,
+        "needs_review": True,
+        "alert_needed": True,
+        "send_reply_before_handoff": False,
+        "conversation_done": False,
+        "handoff_type": "SPEAKER PERSPECTIVE REVIEW",
+        "reason": "Third-person self-reference blocked; manual review required",
+    })
+    return guarded
+
+
+YONI_PUBLIC_CONTACT_REPLY = "My name is Yoni Kutler. You can call or text me at 404-300-9526 anytime."
+LEGACY_YONI_PUBLIC_CONTACT_REPLY = "Yoni Kutler - 404-300-9526. You can call or text anytime."
 SMS_SELF_HANDLING_REPLY = (
     "That makes sense. You keep the listing and client relationship; I can take the lender paperwork, calls, "
     "and follow-up off your plate. There's no fee to you or the seller and no commission split; the buyer "
@@ -4532,8 +4559,8 @@ def _sms_compound_service_request_reply(value: Any) -> str:
     if flags["compliance"]:
         actions.append("answer the licensing or compliance question directly")
     if actions:
-        parts.append("Yoni needs to " + "; ".join(actions) + ".")
-        parts.append("I've flagged those items for his follow-up.")
+        parts.append("I need to " + "; ".join(actions) + ".")
+        parts.append("I've flagged those items for my review.")
     return " ".join(parts)
 
 
@@ -6500,7 +6527,7 @@ def _sms_has_service_info_request_context(row_obj: Dict[str, str], inbound_text:
 def _sms_service_info_email_acknowledgement(has_email: bool = True, email: str = "") -> str:
     if not has_email or not email:
         return SMS_EMAIL_ADDRESS_REQUEST_REPLY
-    return "Thanks — I’ve noted that and will have Yoni review the request."
+    return f"Thanks, I have {email}. I'll review this and send you some information about my services."
 
 
 def _sms_has_no_current_short_sale_help(value: Any) -> bool:
@@ -6612,7 +6639,7 @@ def _sms_buyer_fee_wording_decision() -> Dict[str, Any]:
     return _sms_decision(
         reply_text=(
             "My fee is $5,000, paid by the buyer at closing only if the deal closes. "
-            "I'll have Yoni provide the exact contract or listing wording so you can use the right language."
+            "I can go over the exact listing or contract wording with you after I review the details."
         ),
         lead_status="Y",
         handoff_needed=True,
@@ -7021,7 +7048,10 @@ def _sms_question_priority_decision(
         "company": _sms_company_identity_reply(),
         "website": "https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.",
         "contact_card": "Sure. What's the best email?",
-        "contact_info": "Yoni Kutler, 404-300-9526, yoni@crispshortsales.com.",
+        "contact_info": (
+            "My name is Yoni Kutler. You can call or text me at 404-300-9526, "
+            "or email me at yoni@crispshortsales.com."
+        ),
         "experience": SMS_EXPERIENCE_REPLY,
         "closed_count": SMS_CLOSED_COUNT_REPLY,
         "timeline": SHORT_SALE_TIMELINE_REPLY,
@@ -7466,7 +7496,8 @@ def _sms_fast_decision(
         )
 
     if (
-        _sms_normalize_whitespace(row_obj.get("last_outbound_text")) == YONI_PUBLIC_CONTACT_REPLY
+        _sms_normalize_whitespace(row_obj.get("last_outbound_text"))
+        in {YONI_PUBLIC_CONTACT_REPLY, LEGACY_YONI_PUBLIC_CONTACT_REPLY}
         and _sms_is_final_courtesy(t)
     ):
         return _sms_decision(
@@ -8277,6 +8308,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         )
     else:
         decision = classified_decision
+    decision = _sms_enforce_first_person(decision)
     should_reply = _sms_should_reply(decision, auto_count)
     if should_reply and decision.get("preserve_reply_formatting"):
         reply_text = str(decision.get("reply_text") or "").strip()

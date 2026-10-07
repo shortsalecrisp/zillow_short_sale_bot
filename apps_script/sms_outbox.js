@@ -956,6 +956,15 @@ function processSmsInboundQueue_() {
         normalized.reply_to_phone = claim.phone;
         saveSmsInboundDecisionSnapshotV10_(claim.queue_id, normalized);
       }
+      normalized = normalizeTaskerPayload_(normalized);
+      if (normalized.speaker_perspective_blocked) {
+        sendHandoffEmail_({
+          handoff_type: "SPEAKER PERSPECTIVE REVIEW",
+          phone: claim.phone,
+          last_message: claim.message,
+          history: []
+        });
+      }
       if (normalized.should_reply === true) {
         pendingRegistration = registerPendingSmsSendV10_({
           phone: claim.phone,

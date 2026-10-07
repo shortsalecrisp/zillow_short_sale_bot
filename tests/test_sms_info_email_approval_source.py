@@ -10,7 +10,7 @@ def test_information_request_uses_approval_gated_acknowledgement():
     assert "sendInfoEmailApprovalRequest_(infoEmailData)" in CHATBOT
     assert "INFO_EMAIL_APPROVAL_REQUIRED" in CHATBOT
     assert "An agent requested the short-sale info email. Approval is required before sending." in CHATBOT
-    assert "noted that and will have Yoni review" in CHATBOT
+    assert "I'll review this and send you some information about my services" in CHATBOT
     assert "more information shortly" not in CHATBOT
 
 
@@ -71,10 +71,7 @@ def test_info_email_greeting_does_not_fall_back_to_hi_there():
 
 
 def test_info_email_acknowledgement_bypasses_phone_only_sanitizer():
-    assert (
-        "normalizeWhitespace_(text) === normalizeWhitespace_(getInfoEmailAcknowledgementReply_())"
-        in CHATBOT
-    )
+    assert "^Thanks, I have (?:your email|[A-Z0-9._%+-]+@" in CHATBOT
     assert "the downstream approval workflow can recognize and queue the email" in CHATBOT
 
 
