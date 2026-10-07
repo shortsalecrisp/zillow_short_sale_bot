@@ -59,7 +59,12 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
       weekdaysOnly: true,
       firstAttemptAssignment: "stable_normalized_phone_50_50",
       windows: getVoiceBotCallWindowsForDay(1),
-      coldRetryBusinessDays: 2,
+      coldRetryPolicy: "next_eligible_call_slot",
+      coldRetryBusinessDays: null,
+      coldRetryMorning: "same_weekday_afternoon",
+      coldRetryAfternoon: "next_weekday_morning",
+      coldRetryMaxAttempts: 2,
+      providerStartRecoveryBusinessDays: 1,
       unresolvedTimeZone: "hold_for_review",
     },
     ownerControl: {

@@ -40,6 +40,10 @@ import {
   VOICE_BOT_COL_CALL_ELIGIBLE,
   VOICE_BOT_COL_CALL_SCHEDULED_FOR,
   VOICE_BOT_COL_CALL_TIME_BUCKET,
+  VOICE_BOT_COL_CALLBACK_REQUESTED,
+  VOICE_BOT_COL_CALLBACK_TIME,
+  VOICE_BOT_COL_LIVE_TRANSFER_REQUESTED,
+  VOICE_BOT_COL_LIVE_TRANSFER_COMPLETED,
   VOICE_BOT_COL_CITY,
   VOICE_BOT_COL_CREATED_AT,
   VOICE_BOT_COL_EMAIL,
@@ -355,6 +359,20 @@ export function getVoiceBotCallCandidateFromRowValues(
     now,
   );
   const scheduledFor = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
+  const providerStartRecovery = ["call_start_failed", "call_start_receipt_missing"].includes(firstAttemptResult) || firstAttemptStartReceiptMissing;
+  const hasHandoff = [VOICE_BOT_COL_CALLBACK_REQUESTED, VOICE_BOT_COL_CALLBACK_TIME,
+    VOICE_BOT_COL_LIVE_TRANSFER_REQUESTED, VOICE_BOT_COL_LIVE_TRANSFER_COMPLETED]
+    .some((column) => {
+      const value = normalizeMarker(rowValues[column - 1]);
+      return Boolean(value) && value !== "no" && value !== "false";
+    });
+  if (firstAttemptSentAt && hasHandoff) return undefined;
+  // Only replace an automatically generated cold retry date. Explicit dates
+  // outside this lane and the historical no-start freeze remain authoritative.
+  const automaticColdRetry = Boolean(firstAttemptSentAt && !providerStartRecovery &&
+    normalizeString(rowValues[VOICE_BOT_COL_CALL_TIME_BUCKET - 1]) === "voice_call_2_due" &&
+    normalizeMarker(rowValues[VOICE_BOT_COL_CALL_ELIGIBLE - 1]) === "yes" &&
+    isRetryableVoiceBotResult(firstAttemptResult));
   const agentTimeZone = getVoiceBotAgentTimeZone(rowValues);
   const normalizedPhone = normalizePhoneToE164(rowValues[VOICE_BOT_COL_PHONE - 1]);
   if (!agentTimeZone || !normalizedPhone) return undefined;
@@ -375,7 +393,7 @@ export function getVoiceBotCallCandidateFromRowValues(
     return undefined;
   }
 
-  if (scheduledFor && now < scheduledFor) {
+  if (scheduledFor && now < scheduledFor && !automaticColdRetry) {
     return undefined;
   }
 
@@ -417,10 +435,10 @@ export function getVoiceBotCallCandidateFromRowValues(
     return undefined;
   }
 
-  const recoveryDays = ["call_start_failed", "call_start_receipt_missing"].includes(firstAttemptResult) || firstAttemptStartReceiptMissing ? 1 : 2;
+  const recoveryDays = providerStartRecovery ? 1 : 0;
   const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, agentTimeZone, recoveryDays);
   const candidateDueAt = getNextVoiceBotFirstAttemptWindowStart(
-    scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt,
+    !automaticColdRetry && scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt,
     agentTimeZone, normalizedPhone, getDueAtCallWindowName(nextAttemptAt, agentTimeZone),
   );
   if (candidateDueAt < config.voiceQueue.minCandidateDueAt) {

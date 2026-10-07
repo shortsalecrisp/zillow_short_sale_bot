@@ -25,6 +25,29 @@ process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 process.env.GOOGLE_SHEETS_SPREADSHEET_ID = "synthetic-test-sheet";
 process.env.GOOGLE_SHEETS_TAB_NAME = "SyntheticTestLeads";
 
+test("voicemail writeback and dispatch agree on the next-slot retry", async () => {
+  const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
+  const { getVoiceBotCallCandidateFromRowValues } = await import("../src/lib/voiceQueue");
+  for (const [first, next, due] of [
+    ["2026-10-07T13:30:00Z", "2026-10-07T19:15:00Z", "2026-10-07T19:00:00.000Z"],
+    ["2026-10-07T19:30:00Z", "2026-10-08T13:30:00Z", "2026-10-08T13:15:00.000Z"],
+    ["2026-10-09T19:30:00Z", "2026-10-12T13:30:00Z", "2026-10-12T13:15:00.000Z"],
+  ]) {
+    const row = Array.from({ length: 42 }, () => "");
+    row[0] = "Test";
+    row[2] = "+12175550100";
+    row[4] = "20 Test Street";
+    row[6] = "NJ";
+    row[8] = "x";
+    row[VOICE_BOT_COL_CALL_1_SENT - 1] = first;
+    for (const write of buildVoiceLeadRowWrites(row, {
+      callAttemptNumber: 1, callResult: "voicemail_left",
+    }, new Date(first))) row[write.columnNumber - 1] = write.value;
+    assert.equal(row[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1], due);
+    assert.equal(getVoiceBotCallCandidateFromRowValues(6001, row, new Date(next))?.dueAt.toISOString(), due);
+  }
+});
+
 test("D17 provider failures clear the attempt and preserve the row for retry", async () => {
   const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
   const row = Array.from({ length: 42 }, () => "");
@@ -116,7 +139,7 @@ test("retryable first attempts clear stale terminal lead status before schedulin
   assert.equal(byColumn.get(VOICE_BOT_COL_LEAD_STATUS_CODE), "");
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_ELIGIBLE), "yes");
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_TIME_BUCKET), "voice_call_2_due");
-  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "2026-09-11T19:00:00.000Z");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "2026-09-09T19:00:00.000Z");
 });
 
 test("current-call ending and contact review clear cadence without changing lead K or erasing existing history", async () => {

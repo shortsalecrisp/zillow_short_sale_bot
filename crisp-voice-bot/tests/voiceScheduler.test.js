@@ -437,7 +437,7 @@ test("agent-not-available first attempts are retryable in the next local call wi
 
   assert.equal(result.callEligible, "yes");
   assert.equal(result.callTimeBucket, "voice_call_2_due");
-  assert.equal(result.callScheduledFor, "2026-07-03T16:15:00.000Z");
+  assert.equal(result.callScheduledFor, "2026-07-02T16:15:00.000Z");
   assert.deepEqual(result.fields, [
     "AF:call_scheduled_for",
     "AD:call_eligible",
@@ -537,7 +537,7 @@ test("first voice call uses stable phone-scoped weekday timing assignment", () =
   assert.equal(morningAssignedAfterMorning, "2026-05-05T13:15:00.000Z");
 });
 
-test("second cold voice call uses the opposite arm after two business days", () => {
+test("second cold voice call uses the next opposite weekday slot", () => {
   const nextDayAfterLateAfternoon = runSchedulerExpression(
     'getNextVoiceBotFollowupAttemptWindowStart_(new Date("2026-05-04T20:45:00Z"), "America/New_York").toISOString()',
   );
@@ -557,12 +557,12 @@ test("second cold voice call uses the opposite arm after two business days", () 
     'getNextVoiceBotFollowupAttemptWindowStart_(new Date("2026-05-10T20:15:00Z"), "America/New_York").toISOString()',
   );
 
-  assert.equal(nextDayAfterLateAfternoon, "2026-05-06T13:15:00.000Z");
-  assert.equal(nextDayAfterMorning, "2026-05-06T19:00:00.000Z");
-  assert.equal(nextDayAfterEarlyAfternoon, "2026-05-06T13:15:00.000Z");
-  assert.equal(saturdayAfterFriday, "2026-05-12T13:15:00.000Z");
-  assert.equal(sundayAfterSaturday, "2026-05-12T13:15:00.000Z");
-  assert.equal(mondayAfterSunday, "2026-05-12T13:15:00.000Z");
+  assert.equal(nextDayAfterLateAfternoon, "2026-05-05T13:15:00.000Z");
+  assert.equal(nextDayAfterMorning, "2026-05-04T19:00:00.000Z");
+  assert.equal(nextDayAfterEarlyAfternoon, "2026-05-05T13:15:00.000Z");
+  assert.equal(saturdayAfterFriday, "2026-05-11T13:15:00.000Z");
+  assert.equal(sundayAfterSaturday, "2026-05-11T13:15:00.000Z");
+  assert.equal(mondayAfterSunday, "2026-05-11T13:15:00.000Z");
 });
 
 test("queue scan can return multiple eligible rows in the same local call window", () => {
@@ -650,7 +650,7 @@ test("queue prioritizes overdue first calls before retries, then orders by due t
       {
         rowNumber: 6001,
         values: row("Retry", "", {
-          call1SentAt: "2026-08-20T13:15:00Z",
+          call1SentAt: "2026-08-24T13:15:00Z",
           call1Result: "agent_not_available"
         })
       },
@@ -773,7 +773,7 @@ test("second attempts are only queued when the retry is due after the resume cut
 
     getVoiceBotCallCandidatesFromRows_([
       { rowNumber: 5010, values: row("Old", "Attempt", "NH", "2026-08-01T13:15:00Z") },
-      { rowNumber: 5011, values: row("Fresh", "Attempt", "NH", "2026-08-20T13:15:00Z") },
+      { rowNumber: 5011, values: row("Fresh", "Attempt", "NH", "2026-08-24T13:15:00Z") },
     ], new Date("2026-08-24T19:30:00Z"), 10).map(function(candidate) {
       return candidate.rowNumber;
     });

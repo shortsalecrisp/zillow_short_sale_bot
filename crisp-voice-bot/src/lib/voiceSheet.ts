@@ -380,7 +380,7 @@ export function getNextVoiceBotFirstAttemptWindowStart(
   }
 }
 
-export function getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt: Date, timeZone: string, businessDays = 2): Date {
+export function getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt: Date, timeZone: string, businessDays = 0): Date {
   if (!timeZone) throw new Error("Listing time zone must be resolved before scheduling");
   let nextCallDateKey = getVoiceBotLocalDateKey(firstAttemptSentAt, timeZone);
   for (let day = 0; day < businessDays; day++) nextCallDateKey = getNextVoiceBotCallDateKey(nextCallDateKey, timeZone);
@@ -388,6 +388,14 @@ export function getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt: Da
   const firstAttemptWindowName = getVoiceBotLocalMinutes(firstAttemptSentAt, timeZone) < 12 * 60
     ? VOICE_BOT_MORNING_WINDOW_NAME : VOICE_BOT_MID_AFTERNOON_WINDOW_NAME;
   const oppositeWindowName = getOppositeVoiceBotCallWindowName(firstAttemptWindowName);
+  // Normal retries alternate slots immediately; provider-start recovery can
+  // still request a separate business-day delay explicitly.
+  if (businessDays === 0 && (
+    firstAttemptWindowName === VOICE_BOT_MID_AFTERNOON_WINDOW_NAME ||
+    !getVoiceBotCallWindowByNameForDateKey(nextCallDateKey, timeZone, oppositeWindowName)
+  )) {
+    nextCallDateKey = getNextVoiceBotCallDateKey(nextCallDateKey, timeZone);
+  }
   const nextCallProbeDate = buildVoiceBotDateInTimeZone(nextCallDateKey, 12 * 60, timeZone);
   const nextCallWindows = getVoiceBotCallWindowsForDay(weekdayNumber(nextCallProbeDate, timeZone));
   const oppositeWindow = oppositeWindowName

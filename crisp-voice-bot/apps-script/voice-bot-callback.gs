@@ -285,7 +285,7 @@ function updateVoiceBotSchedulingCells_(sheet, rowNumber, payload, callAttemptNu
         sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET).setValue('listing_timezone_review_required');
         return;
       }
-      const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, timeZone, callResult === 'call_start_failed' ? 1 : 2);
+      const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, timeZone, callResult === 'call_start_failed' ? 1 : 0);
       sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_SCHEDULED_FOR).setValue(nextAttemptAt);
       sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_ELIGIBLE).setValue('yes');
       sheet.getRange(rowNumber, VOICE_BOT_COL_CALL_TIME_BUCKET).setValue('voice_call_2_due');
@@ -709,6 +709,16 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
   const secondAttemptSentAt = parseVoiceBotDate_(rowValues[VOICE_BOT_COL_CALL_2_SENT - 1]);
   const firstAttemptResult = normalizeString_(rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1]);
   const scheduledFor = parseVoiceBotDate_(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
+  const hasHandoff = [VOICE_BOT_COL_CALLBACK_REQUESTED, VOICE_BOT_COL_CALLBACK_TIME,
+    VOICE_BOT_COL_LIVE_TRANSFER_REQUESTED, VOICE_BOT_COL_LIVE_TRANSFER_COMPLETED].some(function(column) {
+      const value = normalizeMarker_(rowValues[column - 1]);
+      return Boolean(value) && value !== 'no' && value !== 'false';
+    });
+  if (firstAttemptSentAt && hasHandoff) return null;
+  const automaticColdRetry = Boolean(firstAttemptSentAt && firstAttemptResult !== 'call_start_failed' &&
+    normalizeString_(rowValues[VOICE_BOT_COL_CALL_TIME_BUCKET - 1]) === 'voice_call_2_due' &&
+    normalizeMarker_(rowValues[VOICE_BOT_COL_CALL_ELIGIBLE - 1]) === 'yes' &&
+    isRetryableVoiceBotResult_(firstAttemptResult));
   const agentTimeZone = getVoiceBotAgentTimeZone_(rowValues);
   const normalizedPhone = normalizePhoneToE164_(rowValues[VOICE_BOT_COL_PHONE - 1]);
   if (!agentTimeZone || !normalizedPhone) return null;
@@ -728,7 +738,7 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
     return null;
   }
 
-  if (scheduledFor && now < scheduledFor) {
+  if (scheduledFor && now < scheduledFor && !automaticColdRetry) {
     return null;
   }
 
@@ -764,8 +774,8 @@ function getVoiceBotCallCandidateFromRowValues_(rowNumber, rowValues, now) {
     return null;
   }
 
-  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, agentTimeZone, firstAttemptResult === 'call_start_failed' ? 1 : 2);
-  const candidateDueAt = getNextVoiceBotFirstAttemptWindowStart_(scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt, agentTimeZone, normalizedPhone, getDueAtCallWindowName_(nextAttemptAt, agentTimeZone));
+  const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, agentTimeZone, firstAttemptResult === 'call_start_failed' ? 1 : 0);
+  const candidateDueAt = getNextVoiceBotFirstAttemptWindowStart_(!automaticColdRetry && scheduledFor && scheduledFor > nextAttemptAt ? scheduledFor : nextAttemptAt, agentTimeZone, normalizedPhone, getDueAtCallWindowName_(nextAttemptAt, agentTimeZone));
   if (isBeforeVoiceBotMinQueueDueAt_(candidateDueAt)) {
     return null;
   }
@@ -1391,10 +1401,14 @@ function getNextVoiceBotFirstAttemptWindowStart_(followupSentAt, timeZone, phone
 function getNextVoiceBotFollowupAttemptWindowStart_(firstAttemptSentAt, timeZone, businessDays) {
   if (!timeZone) throw new Error('Listing time zone must be resolved before scheduling');
   var nextCallDateKey = getVoiceBotLocalDateKey_(firstAttemptSentAt, timeZone);
-  const days = businessDays === undefined ? 2 : businessDays;
+  const days = businessDays === undefined ? 0 : businessDays;
   for (var day = 0; day < days; day++) nextCallDateKey = getNextVoiceBotCallDateKey_(nextCallDateKey, timeZone);
   const firstAttemptWindowName = getVoiceBotLocalMinutes_(firstAttemptSentAt, timeZone) < 12 * 60 ? VOICE_BOT_MORNING_WINDOW_NAME : VOICE_BOT_MID_AFTERNOON_WINDOW_NAME;
   const oppositeWindowName = getOppositeVoiceBotCallWindowName_(firstAttemptWindowName);
+  if (days === 0 && (firstAttemptWindowName === VOICE_BOT_MID_AFTERNOON_WINDOW_NAME ||
+    !getVoiceBotCallWindowByNameForDateKey_(nextCallDateKey, timeZone, oppositeWindowName))) {
+    nextCallDateKey = getNextVoiceBotCallDateKey_(nextCallDateKey, timeZone);
+  }
   const nextCallProbeDate = buildVoiceBotDateInTimeZone_(nextCallDateKey, 12 * 60, timeZone);
   const nextCallDay = Number(Utilities.formatDate(nextCallProbeDate, timeZone, 'u'));
   const nextCallWindows = getVoiceBotCallWindowsForDay_(nextCallDay);

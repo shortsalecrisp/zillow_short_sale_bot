@@ -136,7 +136,7 @@ function addSchedulingWrites(
       addWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket", "listing_timezone_review_required");
       return;
     }
-    const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, timeZone, callResult === "call_start_failed" ? 1 : 2);
+    const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, timeZone, callResult === "call_start_failed" ? 1 : 0);
 
     // A retryable first attempt must remain queue-eligible. Clear any stale
     // terminal status left by an earlier or partial classifier write so K

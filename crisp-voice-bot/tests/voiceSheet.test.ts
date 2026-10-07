@@ -32,7 +32,7 @@ test("replacement voice sheet helpers retry provider start failures once", () =>
   assert.equal(isRetryableVoiceBotResult("voicemail_reached_final_attempt"), false);
 });
 
-test("stable phone assignment is balanced and retries alternate after two business days", () => {
+test("stable phone assignment is balanced and retries use the next opposite local slot", () => {
   const firstPhone = "+12175550100";
   const otherPhone = "+12175550101";
   assert.equal(getVoiceBotFirstAttemptWindowName(firstPhone), "reach_afternoon_v1");
@@ -48,15 +48,32 @@ test("stable phone assignment is balanced and retries alternate after two busine
   );
   assert.equal(
     getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-04T20:45:00Z"), "America/New_York").toISOString(),
-    "2026-05-06T13:15:00.000Z",
+    "2026-05-05T13:15:00.000Z",
   );
   assert.equal(
     getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-04T13:15:00Z"), "America/New_York").toISOString(),
-    "2026-05-06T19:00:00.000Z",
+    "2026-05-04T19:00:00.000Z",
   );
-  assert.equal(getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-08T19:15:00Z"), "America/New_York").toISOString(), "2026-05-12T13:15:00.000Z");
+  assert.equal(getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-08T19:15:00Z"), "America/New_York").toISOString(), "2026-05-11T13:15:00.000Z");
   assert.equal(getNextVoiceBotFollowupAttemptWindowStart(new Date("2026-05-08T19:15:00Z"), "America/New_York", 1).toISOString(), "2026-05-11T13:15:00.000Z");
   assert.equal(getVoiceBotAgentTimeZone(Array(42).fill("")), "");
+});
+
+test("next-slot retries preserve local time across timezones, weekends and DST", () => {
+  const cases = [
+    ["2026-10-07T13:30:00Z", "America/New_York", "2026-10-07T19:00:00.000Z"],
+    ["2026-10-07T19:30:00Z", "America/New_York", "2026-10-08T13:15:00.000Z"],
+    ["2026-10-09T13:30:00Z", "America/New_York", "2026-10-09T19:00:00.000Z"],
+    ["2026-10-09T22:30:00Z", "America/Los_Angeles", "2026-10-12T16:15:00.000Z"],
+    ["2026-10-07T16:30:00Z", "America/Phoenix", "2026-10-07T22:00:00.000Z"],
+    ["2026-10-07T22:30:00Z", "America/Phoenix", "2026-10-08T16:15:00.000Z"],
+    ["2026-10-30T19:30:00Z", "America/New_York", "2026-11-02T14:15:00.000Z"],
+    ["2026-03-06T20:30:00Z", "America/New_York", "2026-03-09T13:15:00.000Z"],
+  ];
+  for (const [firstAttemptAt, timeZone, expected] of cases) {
+    assert.equal(getNextVoiceBotFollowupAttemptWindowStart(new Date(firstAttemptAt), timeZone).toISOString(), expected);
+  }
+  assert.throws(() => getNextVoiceBotFollowupAttemptWindowStart(new Date(), ""), /time zone/);
 });
 
 test("replacement voice sheet helpers normalize phones and append AP notes", () => {

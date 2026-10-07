@@ -41,6 +41,44 @@ function scheduledRow(
   return values;
 }
 
+test("automatic voicemail retries advance to the next local slot despite old two-day AF dates", async () => {
+  const { getVoiceBotCallCandidateFromRowValues } = await import("../src/lib/voiceQueue");
+  for (const fixture of [
+    { first: "2026-10-07T13:30:00Z", oldDate: "2026-10-09T19:00:00Z", before: "2026-10-07T13:35:00Z", next: "2026-10-07T19:15:00Z", due: "2026-10-07T19:00:00.000Z" },
+    { first: "2026-10-07T19:30:00Z", oldDate: "2026-10-09T13:15:00Z", before: "2026-10-07T19:35:00Z", next: "2026-10-08T13:30:00Z", due: "2026-10-08T13:15:00.000Z" },
+  ]) {
+    const values = scheduledRow("", { call1SentAt: fixture.first, call1Result: "voicemail_left", scheduledFor: fixture.oldDate });
+    values[29] = "yes";
+    values[30] = "voice_call_2_due";
+    assert.equal(getVoiceBotCallCandidateFromRowValues(6001, values, new Date(fixture.before)), undefined);
+    const candidate = getVoiceBotCallCandidateFromRowValues(6001, values, new Date(fixture.next));
+    assert.equal(candidate?.callAttemptNumber, 2);
+    assert.equal(candidate?.dueAt.toISOString(), fixture.due);
+    assert.equal(values[31], fixture.oldDate, "eligibility evaluation must not rewrite CRM cells");
+    values[39] = fixture.next;
+    assert.equal(getVoiceBotCallCandidateFromRowValues(6001, values, new Date(fixture.next)), undefined);
+  }
+});
+
+test("next-slot retry keeps explicit schedules, handoffs, Mailshake and historical freezes protected", async () => {
+  const { getVoiceBotCallCandidateFromRowValues } = await import("../src/lib/voiceQueue");
+  const now = new Date("2026-10-07T19:15:00Z");
+  const values = scheduledRow("", {
+    call1SentAt: "2026-10-07T13:30:00Z", call1Result: "voicemail_left", scheduledFor: "2026-10-09T19:00:00Z",
+  });
+  assert.equal(getVoiceBotCallCandidateFromRowValues(6001, values, now), undefined, "an explicit non-cadence date must be honored");
+  values[29] = "yes";
+  values[30] = "voice_call_2_due";
+  for (const columnIndex of [10, 35, 36, 37, 38]) {
+    values[columnIndex] = columnIndex === 10 ? "N" : "yes";
+    assert.equal(getVoiceBotCallCandidateFromRowValues(6001, values, now), undefined);
+    values[columnIndex] = "";
+  }
+  values[32] = "2026-09-24T13:30:00Z";
+  values[31] = "2026-09-28T19:00:00Z";
+  assert.equal(getVoiceBotCallCandidateFromRowValues(6001, values, now), undefined);
+});
+
 test("Render queue prioritizes first calls, then oldest due time", async () => {
   const { getVoiceBotCallCandidatesFromRows } = await import("../src/lib/voiceQueue");
   const candidates = getVoiceBotCallCandidatesFromRows(
@@ -48,7 +86,7 @@ test("Render queue prioritizes first calls, then oldest due time", async () => {
       {
         rowNumber: 6001,
         values: row("", {
-          call1SentAt: "2026-08-20T13:15:00Z",
+          call1SentAt: "2026-08-24T13:15:00Z",
           call1Result: "agent_not_available",
         }),
       },
