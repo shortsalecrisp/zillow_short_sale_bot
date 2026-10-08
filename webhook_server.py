@@ -6220,6 +6220,10 @@ def _sms_is_future_callback_while_unavailable_now(value: Any) -> bool:
             text,
         )
         or re.search(
+            r"\b(?:i(?:['’]?m|\s+am)\s+)?in\s+(?:class|a\s+class|a\s+meeting|meetings)(?:\s+\w+){0,3}\s+(?:right\s+)?now\b",
+            text,
+        )
+        or re.search(
             r"\b(?:i|we)\s+(?:can(?:not|'?t)|won['’]?t)\s+(?:talk|speak|chat|call)\s+(?:right\s+)?now\b",
             text,
         )
@@ -6709,7 +6713,7 @@ def _sms_buyer_fee_wording_decision() -> Dict[str, Any]:
     return _sms_decision(
         reply_text=(
             "My fee is $5,000, paid by the buyer at closing only if the deal closes. "
-            "I can go over the exact listing or contract wording with you after I review the details."
+            "I'll have Yoni provide the exact contract or listing wording after I review the details."
         ),
         lead_status="Y",
         handoff_needed=True,
@@ -7256,7 +7260,7 @@ def _sms_fast_decision(
                 lead_status=str(row_obj.get("mailshake_status") or "Y"),
                 block_reply=True,
                 preserve_existing_state=True,
-                reason="Answered repeat in a human-owned conversation; no new alert",
+                reason="Repeated question already routed for manual review",
             )
         return _sms_decision(
             lead_status=str(row_obj.get("mailshake_status") or "Y"),
@@ -8257,6 +8261,19 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         )
         return result
 
+    if _sms_is_already_reviewed_repeated_question(row_obj, inbound_text):
+        result = _sms_normalize_tasker_payload({
+            "ok": True, "should_reply": False, "reply_text": "", "block_reply": True,
+            "handoff_needed": False, "needs_review": False,
+            "reason": "Repeated question already routed for manual review",
+        })
+        _sms_append_debug(
+            "incoming_sms_answered_repeat_suppressed",
+            {"request_id": request_id, "phone": phone_raw, "message_id": message_id,
+             "reason": result["reason"]},
+        )
+        return result
+
     if _sms_is_durable_handled_duplicate(row_obj, inbound_text):
         result = _sms_normalize_tasker_payload(
             {
@@ -8269,19 +8286,6 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         _sms_append_debug(
             "incoming_sms_duplicate_suppressed",
             {"request_id": request_id, "phone": phone_raw, "message": inbound_text, "reason": result["reason"]},
-        )
-        return result
-
-    if _sms_is_already_reviewed_repeated_question(row_obj, inbound_text):
-        result = _sms_normalize_tasker_payload({
-            "ok": True, "should_reply": False, "reply_text": "", "block_reply": True,
-            "handoff_needed": False, "needs_review": False,
-            "reason": "Repeated question already routed for manual review",
-        })
-        _sms_append_debug(
-            "incoming_sms_answered_repeat_suppressed",
-            {"request_id": request_id, "phone": phone_raw, "message_id": message_id,
-             "reason": result["reason"]},
         )
         return result
 
