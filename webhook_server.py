@@ -6390,6 +6390,8 @@ def _sms_is_existing_crisp_relationship(value: Any) -> bool:
         r"\b(?:already|currently)\s+(?:an?\s+)?crisp(?: short sales?)?\s+(?:client|customer)\b",
         r"\b(?:already|currently)\s+(?:an?\s+)?(?:client|customer)\s+(?:of|with)\s+crisp(?: short sales?)?\b",
         r"\b(?:i|we)\s+(?:already|currently)?\s*(?:have|use)\s+(?:yoni|crisp(?: short sales?)?)\s+(?:handling|helping|assisting|working\s+on)\b",
+        r"\byou(?:['\u2019]re| are)\s+(?:already\s+|currently\s+)?(?:handling|working\s+on|processing|negotiating)\s+(?:this|the|my|our)\s+(?:file|short sale|listing)\b",
+        r"\b(?:this|that|it)\s+(?:is|['\u2019]s)\s+your\s+(?:file|short sale|listing)\b",
         r"\b(?:included|copied|looped)\s+(?:you|yoni)\s+(?:in|on)\b",
     ]
     return any(re.search(pattern, text) for pattern in patterns)

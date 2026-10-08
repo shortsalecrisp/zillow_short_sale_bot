@@ -4622,6 +4622,8 @@ function isExistingCrispRelationshipSignal_(text) {
     /\b(?:already|currently)\s+(?:an?\s+)?crisp(?: short sales?)?\s+(?:client|customer)\b/,
     /\b(?:already|currently)\s+(?:an?\s+)?(?:client|customer)\s+(?:of|with)\s+crisp(?: short sales?)?\b/,
     /\b(?:i|we)\s+(?:already|currently)?\s*(?:have|use)\s+(?:yoni|crisp(?: short sales?)?)\s+(?:handling|helping|assisting|working\s+on)\b/,
+    /\byou(?:['\u2019]re| are)\s+(?:already\s+|currently\s+)?(?:handling|working\s+on|processing|negotiating)\s+(?:this|the|my|our)\s+(?:file|short sale|listing)\b/,
+    /\b(?:this|that|it)\s+(?:is|['\u2019]s)\s+your\s+(?:file|short sale|listing)\b/,
     /\b(?:included|copied|looped)\s+(?:you|yoni)\s+(?:in|on)\b/
   ];
 

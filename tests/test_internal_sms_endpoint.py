@@ -2207,6 +2207,18 @@ def test_sms_existing_crisp_client_exits_marketing_for_handoff(monkeypatch):
         "Hi Yoni, I am currently working with you on this short sale."
     ) is True
 
+    for correction in (
+        "Hi Yoni, you are handling this file already :)",
+        "Hi Yoni... this is Samantha Taravella... this is your file...",
+    ):
+        corrected = module._sms_fast_decision({}, correction)
+        assert module._sms_is_existing_crisp_relationship(correction) is True
+        assert corrected["lead_status"] == "R"
+        assert corrected["handoff_needed"] is True
+        assert corrected["block_reply"] is True
+        assert corrected["reply_text"] == ""
+        assert corrected["handoff_type"] == "EXISTING CRISP CLIENT"
+
 
 def test_sms_not_short_sale_closeout_suppresses_same_topic_continuations(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
