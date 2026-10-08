@@ -28,6 +28,21 @@ By default the webhook server launches the hourly Apify scheduler. Deployments t
 
 * `DISABLE_APIFY_SCHEDULER=true`
 
+## Webhook queue recovery
+
+Webhook processing writes selected listings to `PendingQueue` before returning a
+successful response. A queue write failure returns HTTP 503 so the sender can
+retry. The synchronous listing and queue work runs in a worker thread, leaving
+the web server's event loop available for health checks.
+
+An interrupted `PendingQueue` claim older than `PENDING_QUEUE_STALE_MINUTES`
+is marked `review_required` with error `stale_claim_requires_reconciliation`.
+The row retains its claim time and result fields and is excluded from automatic
+drains and duplicate webhook enqueue. An operator must compare the lead sheet,
+outbox, and replies before setting a final status or deliberately returning it
+to `pending`. This prevents an already sent message from being replayed after
+a restart. Startup logs warn when a claim needs review.
+
 ## Additional AK/HI Apify state searches
 
 The bot can optionally run two extra Apify actor tasks directly from inside `webhook_server.py` and append their

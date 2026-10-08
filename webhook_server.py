@@ -2912,7 +2912,10 @@ def _process_incoming_rows(
             return {"status": "no new rows"}
 
     if not skip_enqueue:
-        _enqueue_pending_rows(db_filtered, source=source)
+        try:
+            _enqueue_pending_rows(db_filtered, source=source)
+        except Exception as exc:
+            raise QueuePersistenceError("pending queue write failed") from exc
 
     now = datetime.now(tz=SCHEDULER_TZ)
     if allow_deferred_drain and _within_initial_hours(now):
@@ -3164,6 +3167,10 @@ FINAL_QUEUE_STATUSES = {
     "completed_non_short_sale",
     "skipped_seen",
 }
+
+
+class QueuePersistenceError(Exception):
+    """The webhook cannot acknowledge rows that were not durably queued."""
 TERMINAL_QUEUE_RESULTS = {
     "skipped_already_contacted_agent",
     "skipped_agent_team",
@@ -3352,7 +3359,7 @@ def _serialize_queue_payload(payload: Dict[str, Any], zpid: str) -> str:
 
 
 def _pending_queue_state_skip_zpids() -> set[str]:
-    skip_statuses = FINAL_QUEUE_STATUSES | {"pending", "in_progress", "address_pending", "address_review"}
+    skip_statuses = FINAL_QUEUE_STATUSES | {"pending", "in_progress", "address_pending", "address_review", "review_required"}
     with _queue_lock:
         records = _load_pending_queue_records(PENDING_QUEUE_WS)
     skip: set[str] = set()
@@ -3521,14 +3528,13 @@ def _requeue_stale_in_progress_items(*, startup: bool = False) -> int:
             claimed_at = _parse_iso_timestamp(str(rec.get("claimed_at", "")))
             if not claimed_at or claimed_at > stale_cutoff:
                 continue
-            rec["status"] = "pending"
-            rec["claimed_at"] = ""
-            rec["processed_at"] = ""
-            rec["result"] = ""
-            rec["error"] = ""
+            # A crashed worker may have sent outreach before it could acknowledge
+            # completion. Never replay such a claim without checking its effects.
+            rec["status"] = "review_required"
+            rec["error"] = "stale_claim_requires_reconciliation"
             _update_pending_queue_row(ws, int(rec["_row_num"]), rec)
             requeued += 1
-            logger.info("queue: requeued stale item zpid=%s", str(rec.get("zpid", "")).strip())
+            logger.warning("queue: stale claim requires review zpid=%s", str(rec.get("zpid", "")).strip())
     if startup and requeued == 0:
         logger.info("queue: startup recovery found no stale in_progress items")
     return requeued
@@ -8981,7 +8987,7 @@ async def apify_hook(request: Request):
             prev_zpids,
         )
 
-        selection = _select_payload_listings(payload)
+        selection = await asyncio.to_thread(_select_payload_listings, payload)
         logger.info(
             "apify-hook: selection received=%s hard_skipped=%s already_seen=%s invalid=%s selected=%s",
             selection["received"],
@@ -8995,7 +9001,7 @@ async def apify_hook(request: Request):
         if selection.get("selected_addresses"):
             logger.info("apify-hook: selected addresses=%s", selection["selected_addresses"])
         row_source = "payload.listings"
-        rows = _enrich_rows_with_detail_task(selection["rows"], source=row_source)
+        rows = await asyncio.to_thread(_enrich_rows_with_detail_task, selection["rows"], source=row_source)
         _start_extra_state_rows(payload)
         _start_apify_coverage_backstop(datetime.now(tz=SCHEDULER_TZ))
 
@@ -9043,7 +9049,7 @@ async def apify_hook(request: Request):
                     return {"status": "rejected", "reason": "missing required fields"}
     if dataset_id and rows is not None and payload_listings is None:
         try:
-            fetched_rows = fetch_rows(dataset_id)
+            fetched_rows = await asyncio.to_thread(fetch_rows, dataset_id)
         except Exception:
             logger.exception("Failed to fetch dataset items for datasetId=%s", dataset_id)
             fetched_rows = []
@@ -9069,14 +9075,14 @@ async def apify_hook(request: Request):
         while attempt < fetch_attempts and datetime.utcnow() <= deadline:
             attempt += 1
             try:
-                rows = fetch_rows(dataset_id)
+                rows = await asyncio.to_thread(fetch_rows, dataset_id)
             except Exception:
                 logger.exception("Failed to fetch dataset items for datasetId=%s", dataset_id)
                 return {"status": "error", "reason": "fetch_rows_failed"}
             if rows:
                 break
             if run_id:
-                last_status = _get_apify_run_status(run_id)
+                last_status = await asyncio.to_thread(_get_apify_run_status, run_id)
                 if last_status in {"SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"}:
                     logger.info(
                         "apify-hook: run %s finished with status %s; dataset still empty",
@@ -9109,14 +9115,20 @@ async def apify_hook(request: Request):
         logger.info("apify-hook: 0 listings received; no Apify retries scheduled")
         return {"status": "no rows"}
 
-    return _process_incoming_rows(
-        rows,
-        source=row_source,
-        skip_seen_dedupe=payload_listings is not None,
-        skip_seen_append=False,
-        skip_enqueue=False,
-        require_listing_text_before_seen=payload_listings is not None,
-    )
+    # The synchronous pipeline persists each selected row before returning. Run
+    # it off the event loop so Sheets and outreach cannot block health checks.
+    try:
+        return await asyncio.to_thread(
+            _process_incoming_rows, rows,
+            source=row_source,
+            skip_seen_dedupe=payload_listings is not None,
+            skip_seen_append=False,
+            skip_enqueue=False,
+            require_listing_text_before_seen=payload_listings is not None,
+        )
+    except QueuePersistenceError as exc:
+        logger.exception("apify-hook: pending queue persistence failed")
+        raise HTTPException(status_code=503, detail="pending queue unavailable; retry webhook") from exc
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -209,6 +209,139 @@ def test_payload_webhook_enqueues_extra_state_rows(monkeypatch):
     assert "mi-1" in enqueued
 
 
+def test_webhook_keeps_event_loop_responsive_and_ack_follows_durable_enqueue(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    persisted = []
+    monkeypatch.setattr(webhook_server, "_select_payload_listings", lambda payload: {
+        "rows": [_listing("durable-1")], "received": 1, "hard_skipped": 0,
+        "already_seen": 0, "invalid_rows": 0, "selected": 1,
+        "selected_zpids": ["durable-1"], "selected_addresses": [],
+    })
+    monkeypatch.setattr(webhook_server, "_enrich_rows_with_detail_task", lambda rows, **kw: rows)
+    monkeypatch.setattr(webhook_server, "_start_extra_state_rows", lambda payload: None)
+    monkeypatch.setattr(webhook_server, "_start_apify_coverage_backstop", lambda now: None)
+    monkeypatch.setattr(webhook_server, "_process_incoming_rows", lambda rows, **kw: (
+        entered.set(), release.wait(5), persisted.append(rows[0]["zpid"]),
+        {"status": "processed", "rows": 1}
+    )[-1])
+
+    async def run():
+        task = asyncio.create_task(webhook_server.apify_hook(
+            _FakeRequest({"listings": [_listing("durable-1")]})
+        ))
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert webhook_server.root() == {"status": "ok"}
+        assert not task.done()
+        assert persisted == []
+        release.set()
+        assert (await task)["status"] == "processed"
+        assert persisted == ["durable-1"]
+
+    asyncio.run(run())
+
+
+def test_health_remains_responsive_during_slow_enrichment(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(webhook_server, "_select_payload_listings", lambda payload: {
+        "rows": [_listing("slow-detail")], "received": 1, "hard_skipped": 0,
+        "already_seen": 0, "invalid_rows": 0, "selected": 1,
+        "selected_zpids": ["slow-detail"], "selected_addresses": [],
+    })
+
+    def slow_enrichment(rows, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return rows
+
+    monkeypatch.setattr(webhook_server, "_enrich_rows_with_detail_task", slow_enrichment)
+    monkeypatch.setattr(webhook_server, "_start_extra_state_rows", lambda payload: None)
+    monkeypatch.setattr(webhook_server, "_start_apify_coverage_backstop", lambda now: None)
+    monkeypatch.setattr(webhook_server, "_process_incoming_rows", lambda rows, **kw: {"status": "processed"})
+
+    async def run():
+        task = asyncio.create_task(webhook_server.apify_hook(
+            _FakeRequest({"listings": [_listing("slow-detail")]})
+        ))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.2)
+            assert webhook_server.root() == {"status": "ok"}
+            assert not task.done()
+        finally:
+            release.set()
+        assert (await task)["status"] == "processed"
+
+    asyncio.run(run())
+
+
+def test_stale_claim_requires_review_and_is_not_replayed(monkeypatch):
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    records = [{"zpid": "already-sent", "status": "in_progress", "claimed_at": old,
+                "listing_json": json.dumps(_listing("already-sent")), "_row_num": 7411}]
+    updates = []
+    monkeypatch.setattr(webhook_server, "_load_pending_queue_records", lambda ws: records)
+    monkeypatch.setattr(webhook_server, "_update_pending_queue_row", lambda ws, num, rec: updates.append((num, dict(rec))))
+    monkeypatch.setattr(webhook_server, "process_rows", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("outreach must not replay")))
+    assert webhook_server._requeue_stale_in_progress_items() == 1
+    assert updates[0][0] == 7411
+    assert records[0]["status"] == "review_required"
+    assert records[0]["claimed_at"] == old
+    assert webhook_server._claim_next_pending_item() is None
+    assert webhook_server._process_pending_queue() == 0
+
+
+def test_queue_write_failure_returns_retryable_webhook_response(monkeypatch):
+    monkeypatch.setattr(webhook_server, "_select_payload_listings", lambda payload: {
+        "rows": [_listing("retry-1")], "received": 1, "hard_skipped": 0,
+        "already_seen": 0, "invalid_rows": 0, "selected": 1,
+        "selected_zpids": ["retry-1"], "selected_addresses": [],
+    })
+    monkeypatch.setattr(webhook_server, "_enrich_rows_with_detail_task", lambda rows, **kw: rows)
+    monkeypatch.setattr(webhook_server, "_start_extra_state_rows", lambda payload: None)
+    monkeypatch.setattr(webhook_server, "_start_apify_coverage_backstop", lambda now: None)
+    monkeypatch.setattr(webhook_server, "_enqueue_pending_rows", lambda *args, **kw: (_ for _ in ()).throw(OSError("write failed")))
+    monkeypatch.setattr(webhook_server, "_process_pending_queue", lambda: (_ for _ in ()).throw(AssertionError("must not drain")))
+    webhook_server.EXPORTED_ZPIDS.clear()
+    try:
+        asyncio.run(webhook_server.apify_hook(_FakeRequest({"listings": [_listing("retry-1")]})))
+    except webhook_server.HTTPException as exc:
+        assert exc.status_code == 503
+    else:
+        raise AssertionError("queue failure must not acknowledge webhook")
+
+
+def test_concurrent_queue_drains_claim_once(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    records = [{"zpid": "once-1", "status": "pending", "_row_num": 2,
+                "listing_json": json.dumps(_listing("once-1"))}]
+    monkeypatch.setattr(webhook_server, "_load_pending_queue_records", lambda ws: records)
+    monkeypatch.setattr(webhook_server, "_update_pending_queue_row", lambda ws, num, rec: None)
+    monkeypatch.setattr(webhook_server, "_row_has_listing_text", lambda row: True)
+
+    def fake_process_rows(*args, **kwargs):
+        calls.append("send")
+        entered.set()
+        assert release.wait(3)
+        return {"once-1": "completed_short_sale"}
+
+    monkeypatch.setattr(webhook_server, "process_rows", fake_process_rows)
+    first = threading.Thread(target=webhook_server._process_pending_queue)
+    first.start()
+    try:
+        assert entered.wait(2)
+        assert webhook_server._process_pending_queue() == 0
+    finally:
+        release.set()
+        first.join(3)
+    assert not first.is_alive()
+    assert calls == ["send"]
+    assert records[0]["status"] == "completed_short_sale"
+
+
 def test_startup_queue_recovery_is_backgrounded(monkeypatch):
     calls = []
     scheduled = []
