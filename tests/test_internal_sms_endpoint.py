@@ -3168,6 +3168,24 @@ def test_sms_chatbot_reply_and_reply_sent_writeback(monkeypatch):
     assert json.loads(sheet.rows[3][17])[-1]["receipt_id"]
 
 
+@pytest.mark.parametrize(
+    "inbound",
+    [
+        "What's your buyers fee?",
+        "What’s your buyer’s fee?",
+    ],
+)
+def test_sms_contract_recognizes_stacked_buyer_fee_wording(monkeypatch, inbound):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision({}, inbound)
+    assert decision["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+    assert decision["response_id"] == "fee_specific"
+    assert decision["handoff_needed"] is False
+
+
 def test_sms_contract_fee_amount_is_first_and_delivered_history_controls_followup(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

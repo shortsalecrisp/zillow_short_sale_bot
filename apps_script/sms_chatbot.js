@@ -2264,7 +2264,7 @@ function isSpecificFeeReplyText_(text) {
 
 function isExplicitFeeAmountQuestion_(text) {
   const t = normalizeLanguageSignalText_(text);
-  return /\b(?:how much|what(?:'s| is| are| would be) (?:your |the |a |my |buyer(?:'s)? |service )?(?:flat )?(?:buyer[- ]paid )?(?:fees?|costs?|price|pricing|rate|charges?)|what (?:do|would|will) you charge|dollar amount)\b/.test(t) ||
+  return /\b(?:how much|what(?:['’]s| is| are| would be) (?:(?:your|the|a|my|service) )?(?:buyer(?:s|['’]s)? )?(?:flat )?(?:buyer[- ]paid )?(?:fees?|costs?|price|pricing|rate|charges?)|what (?:do|would|will) you charge|dollar amount)\b/.test(t) ||
     /\bhow much (?:does|do|will|would|should|must) (?:the )?(?:buyer|seller|agent|we|i|they) (?:need to |have to )?pay\b/.test(t) ||
     /\bwhat does (?:it|this|that|your service) cost\b/.test(t) ||
     /^(?:(?:and|your|the)\s+)*(?:fee|cost|price|rate|charge)\s*\??$/.test(t) ||

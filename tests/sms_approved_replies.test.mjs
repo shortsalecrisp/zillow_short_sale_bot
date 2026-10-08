@@ -114,7 +114,7 @@ test('an explicit current provider still closes despite undecided wording', () =
   assert.equal(r.conversation_done, true);
 });
 
-for (const text of ["What's the cost?", 'How much?', 'How much is your fee?', 'What is your flat buyer-paid fee?', 'What do you charge?', 'What does your service cost?', 'How much does the Buyer need to pay?', 'What work would you take off my plate and how much is the flat fee?']) {
+for (const text of ["What's the cost?", 'How much?', 'How much is your fee?', "What's your buyers fee?", 'What’s your buyer’s fee?', 'What is your flat buyer-paid fee?', 'What do you charge?', 'What does your service cost?', 'How much does the Buyer need to pay?', 'What work would you take off my plate and how much is the flat fee?']) {
   test(`amount question answered directly: ${text}`, () => {
     const {r} = answer(text);
     assert.equal(r.should_reply, true);
