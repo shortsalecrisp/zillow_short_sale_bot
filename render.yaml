@@ -3,6 +3,7 @@ services:
     name: zillow-short-sale-bot
     env: python
     plan: standard
+    healthCheckPath: /healthz
     buildCommand: |
       pip install -r requirements.txt &&
       PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.playwright-browsers python -m playwright install chromium
@@ -106,6 +107,10 @@ services:
         value: "60"
       - key: DISABLE_APIFY_SCHEDULER
         value: "false"
+      - key: INITIAL_SMS_QUEUE_WORKER_ENABLED
+        value: "false"
+      - key: SERVICE_ROLE
+        value: web
       - key: ENABLE_STANDALONE_SCHEDULER
         value: "false"
       - key: ENABLE_SYNTH_EMAIL_FALLBACK
@@ -392,3 +397,102 @@ services:
         value: "20"
       - key: WORK_START_HOUR
         value: "8"
+
+  - type: worker
+    name: zillow-short-sale-sms-queue
+    env: python
+    plan: standard
+    buildCommand: pip install -r requirements.txt
+    startCommand: python sms_queue_worker.py
+    envVars:
+      - key: GSHEET_ID
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: GSHEET_ID
+      - key: GCP_SERVICE_ACCOUNT_JSON
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: GCP_SERVICE_ACCOUNT_JSON
+      - key: CS_API_KEY
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: CS_API_KEY
+      - key: CS_CX
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: CS_CX
+      - key: SMS_GATEWAY_API_KEY
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: SMS_GATEWAY_API_KEY
+      - key: SMS_API_KEY
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: SMS_API_KEY
+      - key: AUTOREMOTE_KEY
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: AUTOREMOTE_KEY
+      - key: SMS_PROVIDER
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: SMS_PROVIDER
+      - key: SMS_CHATBOT_ALLOWED_TOKEN
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: SMS_CHATBOT_ALLOWED_TOKEN
+      - key: GOOGLE_APPS_SCRIPT_TOKEN
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: GOOGLE_APPS_SCRIPT_TOKEN
+      - key: CODEX_AUTOMATION_TOKEN
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: CODEX_AUTOMATION_TOKEN
+      - key: TASKER_TRANSPORT_HEALTH_URL
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: TASKER_TRANSPORT_HEALTH_URL
+      - key: TASKER_TRANSPORT_HEALTH_REQUIRED
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: TASKER_TRANSPORT_HEALTH_REQUIRED
+      - key: AUTOREMOTE_ENDPOINT
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: AUTOREMOTE_ENDPOINT
+      - key: AUTOREMOTE_MIN_SEND_INTERVAL_SECONDS
+        fromService:
+          name: zillow-short-sale-bot
+          type: web
+          envVarKey: AUTOREMOTE_MIN_SEND_INTERVAL_SECONDS
+      - key: GSHEET_TAB
+        value: Sheet1
+      - key: INITIAL_SMS_QUEUE_TAB
+        value: Initial SMS Queue
+      - key: INITIAL_SMS_QUEUE_WORKER_ENABLED
+        value: "true"
+      - key: SMS_QUEUE_WORKER_POLL_SECONDS
+        value: "30"
+      - key: SMS_QUEUE_WORKER_BATCH_SIZE
+        value: "10"
+      - key: SERVICE_ROLE
+        value: sms-queue-worker
+      - key: WORK_START_HOUR
+        value: "8"
+      - key: WORK_END_HOUR
+        value: "20"

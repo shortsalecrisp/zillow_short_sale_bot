@@ -229,6 +229,17 @@ PENDING_QUEUE_STALE_MINUTES = int(os.getenv("PENDING_QUEUE_STALE_MINUTES", "30")
 INITIAL_SMS_QUEUE_TAB = os.getenv("INITIAL_SMS_QUEUE_TAB", "Initial SMS Queue")
 INITIAL_SMS_QUEUE_STALE_MINUTES = int(os.getenv("INITIAL_SMS_QUEUE_STALE_MINUTES", "15"))
 INITIAL_SMS_QUEUE_PENDING_ALERT_MINUTES = int(os.getenv("INITIAL_SMS_QUEUE_PENDING_ALERT_MINUTES", "70"))
+INITIAL_SMS_QUEUE_WORKER_ENABLED = (
+    os.getenv("INITIAL_SMS_QUEUE_WORKER_ENABLED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+SERVICE_ROLE = os.getenv("SERVICE_ROLE", "web")
+SERVICE_REVISION = (
+    os.getenv("RENDER_GIT_COMMIT")
+    or os.getenv("RENDER_GIT_COMMIT_SHA")
+    or os.getenv("SERVICE_REVISION")
+    or "unknown"
+).strip()
 APIFY_BACKSTOP_ENABLED = os.getenv("APIFY_BACKSTOP_ENABLED", "true").lower() == "true"
 APIFY_BACKSTOP_HOUR = int(os.getenv("APIFY_BACKSTOP_HOUR", "18"))
 APIFY_BACKSTOP_MAIN_FETCH_LIMIT = int(os.getenv("APIFY_BACKSTOP_MAIN_FETCH_LIMIT", "100"))
@@ -2058,6 +2069,8 @@ def _process_pending_rows_callback(run_time: datetime) -> None:
 
 
 def _process_initial_sms_queue_callback(run_time: datetime) -> None:
+    if not INITIAL_SMS_QUEUE_WORKER_ENABLED:
+        return
     if not _within_initial_hours(run_time):
         _alert_stale_initial_sms_queue_items()
         return
@@ -9158,6 +9171,10 @@ def healthz():
     queue = status_snapshot()
     return {
         "status": "ok",
+        "service_role": SERVICE_ROLE,
+        "service_revision": SERVICE_REVISION,
+        "initial_sms_queue_worker_enabled": INITIAL_SMS_QUEUE_WORKER_ENABLED,
+        "apify_scheduler_enabled": not DISABLE_APIFY_SCHEDULER,
         "pilot_verifier_queue": {
             "enabled": PILOT_VERIFIER_QUEUE_ENABLED,
             "worker_alive": bool(
