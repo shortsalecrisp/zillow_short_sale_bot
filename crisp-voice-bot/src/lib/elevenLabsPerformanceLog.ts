@@ -31,6 +31,7 @@ const CODEX_ANALYSIS_INSTRUCTIONS =
   "When asked how the voice bot performance is going, parse every CODEX_VOICE_CALL_METRICS_V1 block in AP/voice_notes. " +
   "For contact-evidence-v2 blocks, use contactEvidence instead of provider call status or rawSignals.hasMeaningfulUserTranscript to count human contact. The legacy flags.liveAnswered now means apparent human speech, including separately labeled gatekeepers; targetAgentAnswered requires transcript identity/role evidence. Null means unknown, never zero. Greeting-only contact is apparent, not authenticated. Older blocks without contactEvidence require transcript reclassification; do not pool their inflated liveAnswered flag. Automated replies never count as agent engagement. Latency fields are transcript turn-start differences, not acoustic response gaps. " +
   POLICY_STRATIFICATION_INSTRUCTIONS + " " +
+  "For handoff-evidence-v3 blocks, use handoffEvidence for requests, receipts and completion separately. callbackToolFired is an attempted tool action, not caller consent. callbackRequested requires actual caller consent; callbackRequestCaptured additionally requires requestCaptured true in a matching final receipt. callbackCompleted and positiveHandoffVerified remain unknown without owner completion evidence. Transfer completion requires clear live-now consent plus a successful transfer_to_number result in a matching final receipt; summary/outcome labels alone are insufficient. contactEvidence.reviewBucket separates target_live, human_gatekeeper, apparent_human, recorded_screener, voicemail, ivr and unknown. Exclude recorded_screener and human_gatekeeper from the per-arm true-live winner gate. " +
   "Compare voiceVariant on live answered calls separately from voicemail/no-answer within historical voice-test strata, and compare scheduledWindow by agent local time bucket without treating observational differences as causal lift. For the historical Eryn/Finch comparison, ignore any call before 2026-05-29T23:33:59Z or without call.voiceVariant. Exclude previous single-voice Emmy calls and any call.voiceVariant other than eryn or finch. Current calls under eryn-self-handler-ai-optout-20260925 should show Eryn/Maya only; if Finch appears after that policy, flag it as a production configuration issue instead of an experiment result. Also compare call.openerVariant as the post-intro continuation assignment within policy/provider and joint-arm strata: total calls, answered calls, hangupBeforeReason, hangupBeforeOpeningQuestion, reasonDelivered, openingQuestionDelivered, agentRespondedAfterReason, agentRespondedAfterOpeningQuestion, repeatedIdentityStatement, liveYoniNowOfferDelivered, agentRespondedAfterLiveYoniNowOffer, durationSecs, AI suspicion, callbacks, clear live-transfer consent, and completed transfers. Prioritize positiveOutcomeRate, earlyHangupRate, avgAgentToAssistantDelaySecs, durationSecs, aiSuspicion, audioConfusion, repeatedIdentityStatement, callback and transfer outcomes. For transfer rate, count flags.liveTransferRequested / flags.clearLiveTransferConsent only; flags.liveTransferToolFired means only the tool fired, not that the caller understood or requested transfer. Do not count a live_transfer_requested tool call alone as success, and treat flags.misfiredLiveTransferRequest as a negative/ambiguous outcome. For the Pro prove-it cohort, evaluate calls after 2026-09-03T14:20:21Z against the 1063-conversation ElevenLabs baseline with policy/provider strata kept separate, and trigger a decision review once 300-400 additional calls have accumulated. Count bot-labeled positives separately from transcript/playback-verified handoff-ready leads; continue only if the cohort produces at least 3 verified handoff-ready leads or 1 owner-confirmed serious file opportunity, otherwise recommend pausing or narrowing the test.";
 
 type TranscriptToolCall = {
@@ -89,6 +90,7 @@ type BuildVoicePerformanceLogInput = {
   outcome: string;
   summary: string;
   transcript: string;
+  callbackConsent?: { callbackTime: string } | null;
 };
 
 function truncate(value: string, maxLength: number): string {
@@ -111,6 +113,7 @@ type AutomatedContact = "voicemail" | "screening" | "ivr";
 
 function automatedContactType(message: string): AutomatedContact | null {
   const text = normalizeText(message);
+  if (/\b(?:call assist|google (?:call )?screening|automated (?:call )?screener)\b/.test(text)) return "screening";
   if (/\b(?:your call has been forwarded|after (?:the )?(?:tone|beep)|at the (?:tone|beep)|leave (?:me |us )?(?:a |your )?(?:(?:brief|detailed|short|voice) )?(?:message|name)|record (?:a |your )?message|you(?:'ve| have) reached|you (?:have )?reached (?:the )?(?:voice ?mail|mailbox)|welcome to (?:the )?voice ?mail|(?:sorry,? )?i missed your call|your voicemail is being transcribed)\b/.test(text) ||
       /\b(?:message with your name|message or send me a text|call is very important to me)\b/.test(text) ||
       /^(?:hi[, ]+)?(?:this is|you(?:'ve| have) reached) [\p{L}'-]+\b.{0,100}\b(?:away from (?:my )?phone|unable to (?:answer|take) (?:your )?call|can't (?:answer|come to) (?:the )?phone|cannot (?:answer|come to) (?:the )?phone)\b/u.test(text) ||
@@ -300,6 +303,23 @@ function getToolCallNames(transcript: PerformanceTranscriptItem[]): string[] {
   );
 }
 
+function readToolResult(toolResult: TranscriptToolResult): Record<string, unknown> | null {
+  if (toolResult.result && typeof toolResult.result === "object") return toolResult.result;
+  if (typeof toolResult.result_value !== "string") return null;
+  try {
+    const parsed: unknown = JSON.parse(toolResult.result_value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch { return null; }
+}
+
+function hasCapturedCallbackResult(transcript: PerformanceTranscriptItem[], requestedTime: string): boolean {
+  return transcript.some((item) => (item.tool_results ?? []).some((result) => {
+    const receipt = readToolResult(result);
+    return result.tool_name === "callback_requested" && receipt?.requestCaptured === true &&
+      typeof receipt.callbackTime === "string" && normalizeText(receipt.callbackTime) === normalizeText(requestedTime);
+  }));
+}
+
 function hasSuccessfulTransferResult(transcript: PerformanceTranscriptItem[]): boolean {
   return transcript.some((item) =>
     (item.tool_results ?? []).some((toolResult) => {
@@ -307,11 +327,7 @@ function hasSuccessfulTransferResult(transcript: PerformanceTranscriptItem[]): b
         return false;
       }
 
-      if (toolResult.result?.status === "success") {
-        return true;
-      }
-
-      return typeof toolResult.result_value === "string" && toolResult.result_value.includes('"status":"success"');
+      return readToolResult(toolResult)?.status === "success";
     }),
   );
 }
@@ -418,10 +434,14 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const aiSuspicion = /\b(?:ai|chatbot|robot|actual human|real person|human being)\b/i.test(agentText);
   const finalReceiptMatched = input.conversation.conversation_id === input.conversationId &&
     ["done", "failed"].includes(input.conversation.status ?? "");
+  const callbackConsent = contact.humanAnswered === true && Boolean(input.callbackConsent);
+  const callbackRequestCaptured = finalReceiptMatched && callbackConsent &&
+    hasCapturedCallbackResult(transcript, input.callbackConsent!.callbackTime);
+  const transferCompleted = finalReceiptMatched && clearLiveTransferConsent && hasSuccessfulTransferResult(transcript);
 
   const payload = {
     schema: "voice_call_metrics_v1",
-    measurementRevision: "contact-evidence-v2",
+    measurementRevision: "handoff-evidence-v3",
     codexInstructions: CODEX_ANALYSIS_INSTRUCTIONS,
     abTestScope: {
       cohort: VOICE_AB_TEST_COHORT,
@@ -508,6 +528,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
     contactEvidence: {
       source: "transcript_heuristic",
       category: contact.category,
+      reviewBucket: contact.category === "target_agent" ? "target_live" :
+        contact.category === "screening" ? "recorded_screener" : contact.category,
       humanAnswered: contact.humanAnswered,
       targetAgentAnswered: contact.targetAgentAnswered,
       gatekeeper: contact.gatekeeper,
@@ -518,6 +540,19 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       humanRespondedAfterReason: contact.humanAnswered === null ? null : agentRespondedAfterReason,
       humanRespondedAfterOpeningQuestion: contact.humanAnswered === null ? null : agentRespondedAfterOpeningQuestion,
       interpretation: "Apparent human speech is not authenticated identity. Target contact requires a spoken name/role confirmation; admins are separate. Null is unknown. Review playback for audio delivery and disputed classifications.",
+    },
+    handoffEvidence: {
+      source: "caller_transcript_and_matching_final_tool_receipt",
+      callbackToolFired: toolCallNames.includes("callback_requested"),
+      callbackRequested: input.callbackConsent === undefined ? null : callbackConsent,
+      callbackTime: callbackConsent ? input.callbackConsent!.callbackTime : null,
+      callbackRequestCaptured,
+      callbackCompleted: null,
+      clearLiveTransferConsent,
+      transferToolFired: liveTransferToolFired,
+      transferCompleted,
+      positiveHandoffVerified: null,
+      interpretation: "A request receipt is not a completed callback. A successful provider transfer result with consent is technical completion, not owner-confirmed business success. Missing owner completion evidence remains unknown.",
     },
     metrics: {
       durationSecs,
@@ -569,14 +604,15 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       agentRespondedAfterLiveYoniNowOffer: hasUserMessageAfter(humanTranscript, liveYoniNowOfferIndex),
       aiSuspicion,
       audioConfusion: /\b(?:can'?t hear|can you hear|going in and out|breaking up|static|hello\?)\b/i.test(agentText),
-      callbackRequested: contact.humanAnswered === true && (toolCallNames.includes("callback_requested") || /requested callback/i.test(input.outcome)),
+      callbackRequested: callbackConsent,
+      callbackToolFired: toolCallNames.includes("callback_requested"),
+      callbackRequestCaptured,
       liveTransferToolFired,
       liveTransferRequested: clearLiveTransferConsent,
       clearLiveTransferConsent,
       misfiredLiveTransferRequest,
       callbackOrLaterSignal,
-      transferCompleted:
-        clearLiveTransferConsent && (hasSuccessfulTransferResult(transcript) || /warm transfer accepted/i.test(input.outcome)),
+      transferCompleted,
       voicemailDetected: contact.automation.includes("voicemail"),
       noAnswer: combinedText.includes("no answer") || combinedText.includes("no response after second call"),
       notInterested: /not interested/i.test(input.outcome),

@@ -9,6 +9,7 @@ import { getGoogleSheetsClient } from "./googleSheets";
 import { logger } from "./logger";
 import { getOutboundCallPause } from "./outboundCallPause";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
+import { ensureProviderStartFailureAlert } from "./providerStartFailureAlert";
 import { getProviderCircuitStatus } from "./providerCircuitBreaker";
 import {
   ensureFinalReceiptCircuitAlert,
@@ -856,6 +857,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   const sheets = await getGoogleSheetsClient();
   const rows = await getVoiceBotRows(sheets);
   if (!options.dryRun) {
+    await ensureProviderStartFailureAlert(now);
     await reconcileUncertainVoiceCallStarts(sheets, rows, now);
   }
 

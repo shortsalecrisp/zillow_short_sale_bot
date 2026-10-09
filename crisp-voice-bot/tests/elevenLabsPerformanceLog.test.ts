@@ -138,13 +138,15 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
   assert.match(parsed.transcript, /Are you a chatbot/);
 });
 
-async function measurementLog(input: { metadata?: Partial<CallMetadata>; conversation?: Record<string, unknown> } = {}) {
+async function measurementLog(input: { metadata?: Partial<CallMetadata>; conversation?: Record<string, unknown>;
+  callbackConsent?: { callbackTime: string } | null } = {}) {
   const { buildVoicePerformanceLog, VOICE_PERFORMANCE_LOG_MARKER } = await import("../src/lib/elevenLabsPerformanceLog");
   return JSON.parse(buildVoicePerformanceLog({
     conversationId: "conv_measurement",
     outcome: "Synthetic measurement only",
     summary: "No delivered continuation is asserted.",
     transcript: "",
+    callbackConsent: input.callbackConsent,
     metadata: {
       rowNumber: 123, fullName: "Synthetic Caller", callAttemptNumber: 1,
       listingAddress: "123 Fictional Street", requestedPhone: "+12025550123", dialedPhone: "+12025550123",
@@ -331,6 +333,7 @@ test("voice performance log keeps transfer consent separate from later callback 
   ];
   const log = buildVoicePerformanceLog({
     conversationId: "conv_transfer_then_callback",
+    callbackConsent: { callbackTime: "asap" },
     outcome: "Requested callback ASAP",
     summary: "The caller agreed to a live transfer; it did not complete, so an ASAP callback was arranged.",
     transcript: "Agent explicitly consented to a live transfer and then accepted a callback fallback.",
@@ -418,7 +421,7 @@ for (const recording of [
         { role: "user", message: "Thank you. Goodbye.", time_in_call_secs: 12 },
       ],
     } });
-    assert.equal(result.measurementRevision, "contact-evidence-v2");
+    assert.equal(result.measurementRevision, "handoff-evidence-v3");
     assert.equal(result.rawSignals.hasMeaningfulUserTranscript, true);
     assert.equal(result.rawSignals.userTurns, 2);
     assert.equal(result.contactEvidence.category, "voicemail");
@@ -599,4 +602,60 @@ test("service-first opener measures service and listing question while yes only 
   assert.equal(result.flags.targetAgentAnswered, true);
   assert.equal(result.flags.clearLiveTransferConsent, false);
   assert.equal(result.flags.callbackRequested, false);
+});
+
+test("Call Assist recordings have their own review bucket without target-agent credit", async () => {
+  const result = await measurementLog({ conversation: { transcript: [
+    { role: "user", message: "This is Call Assist. Please say your name and reason." },
+    { role: "agent", message: "Maya with Crisp Short Sales about the listing." },
+    { role: "user", message: "Please remove this number from your mailing list." },
+    { role: "agent", tool_calls: [{ tool_name: "callback_requested" }] },
+  ] }, callbackConsent: null });
+  assert.equal(result.contactEvidence.reviewBucket, "recorded_screener");
+  assert.equal(result.flags.targetAgentAnswered, false);
+  assert.equal(result.handoffEvidence.callbackRequested, false);
+  assert.equal(result.handoffEvidence.callbackToolFired, true);
+  assert.equal(result.handoffEvidence.callbackRequestCaptured, false);
+});
+
+test("callback tool fire, caller request, capture receipt and completion are distinct", async () => {
+  const conversation = { transcript: [
+    { role: "user", message: "Hello, I'm the listing agent." },
+    { role: "agent", message: "Would help be useful?" },
+    { role: "user", message: "Have Yoni call me tomorrow at four." },
+    { role: "agent", tool_calls: [{ tool_name: "callback_requested" }] },
+    { role: "agent", tool_results: [{ tool_name: "callback_requested", result_value: '{"queued":true}' }] },
+  ] };
+  const unconsented = await measurementLog({ conversation, callbackConsent: null });
+  assert.equal(unconsented.flags.callbackRequested, false);
+  const requested = await measurementLog({ conversation, callbackConsent: { callbackTime: "tomorrow at four" } });
+  assert.equal(requested.handoffEvidence.callbackRequested, true);
+  assert.equal(requested.handoffEvidence.callbackRequestCaptured, false);
+  conversation.transcript[4].tool_results![0].result_value = '{"requestCaptured":true,"queued":true,"callbackTime":"tomorrow at four"}';
+  const captured = await measurementLog({ conversation, callbackConsent: { callbackTime: "tomorrow at four" } });
+  assert.equal(captured.handoffEvidence.callbackRequestCaptured, true);
+  assert.equal(captured.handoffEvidence.callbackTime, "tomorrow at four");
+  assert.equal(captured.handoffEvidence.callbackCompleted, null);
+  assert.equal(captured.handoffEvidence.positiveHandoffVerified, null);
+  const corrected = await measurementLog({ conversation, callbackConsent: { callbackTime: "tomorrow at five" } });
+  assert.equal(corrected.handoffEvidence.callbackRequestCaptured, false);
+  const unfinished = await measurementLog({ conversation: { ...conversation, status: "in-progress" },
+    callbackConsent: { callbackTime: "tomorrow at four" } });
+  assert.equal(unfinished.handoffEvidence.callbackRequestCaptured, false);
+});
+
+test("transfer completion requires consent and a parsed result from a matching final receipt", async () => {
+  const transcript = [
+    { role: "user", message: "I'm the listing agent." },
+    { role: "agent", message: "Want me to try to get Yoni on the phone now?" },
+    { role: "user", message: "Yes, go ahead." },
+    { role: "agent", tool_calls: [{ tool_name: "live_transfer_requested" }] },
+    { role: "agent", tool_results: [{ tool_name: "transfer_to_number", result_value: 'unparsed text "status":"success"' }] },
+  ];
+  assert.equal((await measurementLog({ conversation: { transcript } })).flags.transferCompleted, false);
+  transcript[4].tool_results![0].result_value = '{"status":"success"}';
+  assert.equal((await measurementLog({ conversation: { transcript } })).flags.transferCompleted, true);
+  assert.equal((await measurementLog({ conversation: { transcript, conversation_id: "other" } })).flags.transferCompleted, false);
+  transcript[2].message = "No, email only.";
+  assert.equal((await measurementLog({ conversation: { transcript } })).flags.transferCompleted, false);
 });

@@ -2,6 +2,7 @@ import axios, { AxiosError } from "axios";
 import { config } from "./config";
 import { logger } from "./logger";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
+import { ensureProviderStartFailureAlert, recordProviderStartFailure } from "./providerStartFailureAlert";
 import {
   recordElevenLabsLlmFailure,
   recordProviderQuotaFailure,
@@ -2044,6 +2045,7 @@ async function processPostCallOutcomeForConversation(
   const fullTranscript = transcriptForEmail(conversation, metadata.assistantName ?? "Emmy");
   const buildPerformanceNotes = (outcome: string, performanceSummary = summary): string =>
     buildVoicePerformanceLog({
+      callbackConsent: getExplicitCallbackConsent(conversation) ?? null,
       conversationId,
       metadata,
       conversation,
@@ -2870,6 +2872,17 @@ async function processPostCallOutcomeForConversation(
     if (conversation.status === "failed") {
       const failureReason = getFailedConversationReason(conversation);
       const invalidDestinationNumber = isInvalidDestinationNumberFailure(conversation);
+      if (!metadata.testMode && !metadata.providerProofCall && !invalidDestinationNumber &&
+        conversation.conversation_id === conversationId &&
+        conversation.metadata?.call_duration_secs === 0 &&
+        !(conversation.transcript ?? []).some((item) => item.message && hasMeaningfulSpokenContent(item.message))) {
+        const providerStart = conversation.metadata?.start_time_unix_secs;
+        recordProviderStartFailure({ conversationId, rowNumber: metadata.rowNumber,
+          callAttemptNumber: metadata.callAttemptNumber,
+          occurredAt: typeof providerStart === "number" && Number.isFinite(providerStart)
+            ? new Date(providerStart * 1000).toISOString() : new Date().toISOString(), reason: failureReason });
+        await ensureProviderStartFailureAlert();
+      }
       const outcome = getTerminalFailedConversationCallResult(conversation);
       const responseStatus = buildVoiceResponseStatus(outcome);
       const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();

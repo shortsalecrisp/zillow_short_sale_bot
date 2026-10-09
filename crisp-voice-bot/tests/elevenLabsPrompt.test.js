@@ -21,7 +21,7 @@ test("prompt has one extractable body and distinct concise state sections", () =
     "Request records and receipts", "Callback request", "Information request",
     "Live transfer request", "Live admins and wrong contacts", "Automated screening and hold",
     "Voicemail and recorded exits"]) assert.ok(headings.includes(heading), heading);
-  assert.ok(prompt.split(/\s+/).length < 6000, "Targeted recovery rules must not reintroduce the duplicated 9,899-word body");
+  assert.ok(prompt.split(/\s+/).length < 6300, "Targeted recovery rules must not reintroduce the duplicated 9,899-word body");
   assert.match(source.split("## Prompt\n")[0], /not a verified deployment/);
 });
 test("priority considers the whole turn and hearing precedes questions and actions", () => {

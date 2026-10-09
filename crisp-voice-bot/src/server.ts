@@ -6,6 +6,7 @@ import { getElevenLabsRuntimeExperimentStatus } from "./lib/elevenLabsRuntimeExp
 import { VOICE_CONVERSATION_POLICY_VERSION } from "./lib/elevenLabsConversationPolicy";
 import { getVoiceBotCallWindowsForDay } from "./lib/voiceSheet";
 import { getProviderCircuitStatus } from "./lib/providerCircuitBreaker";
+import { getProviderStartFailureStatus } from "./lib/providerStartFailureAlert";
 import { FINAL_RECEIPT_CIRCUIT_THRESHOLD, FINAL_RECEIPT_STALE_AFTER_MINUTES, INBOUND_QUIET_PERIOD_MS } from "./lib/voiceSafety";
 import { startGmailImportSchedulers } from "./lib/gmailImporters";
 import { logger } from "./lib/logger";
@@ -96,6 +97,7 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
       staleAfterMinutes: FINAL_RECEIPT_STALE_AFTER_MINUTES,
       monitorStartedAt: config.voiceQueue.finalReceiptMonitorStartedAt.toISOString(),
     },
+    providerStartFailures: getProviderStartFailureStatus(),
     scheduledNoStartRecovery: {
       enforced: true,
       monitorStartedAt: config.voiceQueue.scheduledNoStartMonitorStartedAt.toISOString(),
