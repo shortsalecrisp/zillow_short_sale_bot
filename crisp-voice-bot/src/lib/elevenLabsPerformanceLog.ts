@@ -419,6 +419,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
     liveSpeechTranscript,
     /\b(?:bring Yoni|get Yoni|Yoni.*onto (?:this|the) call|Yoni.*on the phone|try him (?:right )?now|available (?:right )?now)\b/i,
   );
+  const needsQuestionIndex = firstAssistantMessageIndexMatching(liveSpeechTranscript,
+    /\bwould help with lender paperwork or calls be useful for this listing\?/i);
   const reasonDelivered = reasonMessageIndex !== -1;
   const openingQuestionDelivered = openingQuestionIndex !== -1;
   const agentRespondedAfterReason = hasUserMessageAfter(humanTranscript, reasonMessageIndex);
@@ -469,7 +471,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       startedAt: ELEVENLABS_TTS_EXPERIMENT_STARTED_AT,
       uniformComparison: {
         ...ELEVENLABS_UNIFORM_COMPARISON,
-        eligibleArm: uniformComparisonArm({ finalReceiptMatched, testMode: input.metadata.testMode,
+        eligibleArm: uniformComparisonArm({ finalReceiptMatched, testMode: Boolean(input.metadata.testMode || input.metadata.providerProofCall),
           durationSecs, startTimeUnixSecs: input.conversation.metadata?.start_time_unix_secs,
           branchId: input.conversation.branch_id, versionId: input.conversation.version_id }),
       },
@@ -499,6 +501,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       requestedPhone: input.metadata.requestedPhone,
       dialedPhone: input.metadata.dialedPhone,
       testMode: input.metadata.testMode,
+      providerProofCall: input.metadata.providerProofCall ?? false,
       assistantName: input.metadata.assistantName ?? "Maya",
       voiceName: input.metadata.voiceName ?? null,
       voiceVariant: input.metadata.voiceVariant ?? null,
@@ -577,6 +580,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       latencyMeasurement: "transcript_turn_start_to_start_not_audible_response_gap",
       reasonMentionedAtSecs: getMessageTimeAtIndex(transcript, reasonMessageIndex),
       openingQuestionAtSecs: getMessageTimeAtIndex(transcript, openingQuestionIndex),
+      needsQuestionAtSecs: getMessageTimeAtIndex(transcript, needsQuestionIndex),
       liveYoniNowOfferAtSecs: getMessageTimeAtIndex(transcript, liveYoniNowOfferIndex),
       identityAskCount,
       identityStatementCount,
@@ -595,6 +599,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
         contact.humanAnswered === true && durationSecs !== null && durationSecs < 20 && normalizeText(terminationReason ?? "").includes("client disconnected"),
       reasonDelivered,
       openingQuestionDelivered,
+      needsQuestionDelivered: needsQuestionIndex !== -1,
+      agentRespondedAfterNeedsQuestion: hasUserMessageAfter(humanTranscript, needsQuestionIndex),
       agentRespondedAfterReason,
       agentRespondedAfterOpeningQuestion,
       hangupBeforeReason:

@@ -606,6 +606,19 @@ test(`${policy} measures service and listing question while yes only confirms th
 });
 }
 
+test("uniform conversion measures the needs question separately and excludes proof calls", async () => {
+  const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: "maya-uniform-lead-conversion-20261009", providerProofCall: true }, conversation: { transcript: [
+    { role: "user", message: "Hello, I am the listing agent." },
+    { role: "agent", message: "Would help with lender paperwork or calls be useful for this listing?" },
+    { role: "user", message: "Yes." },
+  ] } });
+  assert.equal(result.flags.needsQuestionDelivered, true);
+  assert.equal(result.flags.agentRespondedAfterNeedsQuestion, true);
+  assert.equal(result.flags.clearLiveTransferConsent, false);
+  assert.equal(result.call.providerProofCall, true);
+  assert.equal(result.ttsModelExperiment.uniformComparison.eligibleArm, null);
+});
+
 test("Call Assist recordings have their own review bucket without target-agent credit", async () => {
   const result = await measurementLog({ conversation: { transcript: [
     { role: "user", message: "This is Call Assist. Please say your name and reason." },
