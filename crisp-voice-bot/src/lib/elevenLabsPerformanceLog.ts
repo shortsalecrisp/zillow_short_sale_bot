@@ -11,6 +11,8 @@ import {
   ELEVENLABS_TTS_TEST_BRANCH_ID,
   ELEVENLABS_TTS_TEST_MODEL,
   ELEVENLABS_TURN_MODEL,
+  ELEVENLABS_UNIFORM_COMPARISON,
+  uniformComparisonArm,
 } from "./elevenLabsRuntimeExperiment";
 
 export const VOICE_PERFORMANCE_LOG_MARKER = "CODEX_VOICE_CALL_METRICS_V1";
@@ -397,7 +399,8 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const clearLiveTransferConsent = contact.humanAnswered === true && hasClearLiveTransferConsent(humanTranscript, "");
   const misfiredLiveTransferRequest = isMisfiredLiveTransferRequest(humanTranscript, "");
   const callbackOrLaterSignal = contact.humanAnswered === true && hasCallbackOrLaterSignal(humanTranscript, "");
-  const usesServiceFirstOpening = input.metadata.declaredConversationPolicyVersion === "maya-service-first-recovery-20261003";
+  const usesServiceFirstOpening = ["maya-service-first-recovery-20261003", "maya-uniform-lead-conversion-20261009"]
+    .includes(input.metadata.declaredConversationPolicyVersion ?? "");
   const usesListingAgentOpening = input.metadata.initialOpeningPolicy === "listen_first_listing_agent_v2";
   const reasonMessageIndex = firstAssistantMessageIndexMatching(
     liveSpeechTranscript,
@@ -464,6 +467,12 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
     },
     ttsModelExperiment: {
       startedAt: ELEVENLABS_TTS_EXPERIMENT_STARTED_AT,
+      uniformComparison: {
+        ...ELEVENLABS_UNIFORM_COMPARISON,
+        eligibleArm: uniformComparisonArm({ finalReceiptMatched, testMode: input.metadata.testMode,
+          durationSecs, startTimeUnixSecs: input.conversation.metadata?.start_time_unix_secs,
+          branchId: input.conversation.branch_id, versionId: input.conversation.version_id }),
+      },
       commonTurnModel: ELEVENLABS_TURN_MODEL,
       commonVoice: "Eryn as Maya",
       arms: {

@@ -591,8 +591,9 @@ test("a named pickup after a business name is human but its target role remains 
   assert.equal(result.flags.targetAgentAnswered, null);
 });
 
-test("service-first opener measures service and listing question while yes only confirms the listing", async () => {
-  const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: "maya-service-first-recovery-20261003" }, conversation: { transcript: [
+for (const policy of ["maya-service-first-recovery-20261003", "maya-uniform-lead-conversion-20261009"]) {
+test(`${policy} measures service and listing question while yes only confirms the listing`, async () => {
+  const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: policy }, conversation: { transcript: [
     { role: "user", message: "Hello." },
     { role: "agent", message: "Hi, this is Maya with Crisp Short Sales. We help with short-sale lender paperwork. Is 123 Fictional Street your listing?" },
     { role: "user", message: "Yes." },
@@ -603,6 +604,7 @@ test("service-first opener measures service and listing question while yes only 
   assert.equal(result.flags.clearLiveTransferConsent, false);
   assert.equal(result.flags.callbackRequested, false);
 });
+}
 
 test("Call Assist recordings have their own review bucket without target-agent credit", async () => {
   const result = await measurementLog({ conversation: { transcript: [

@@ -1,4 +1,4 @@
-export const VOICE_CONVERSATION_POLICY_VERSION = "maya-wrong-listing-and-handoff-evidence-20261009";
+export const VOICE_CONVERSATION_POLICY_VERSION = "maya-uniform-lead-conversion-20261009";
 
 export const VOICE_OPENING_SCRIPT = "Hi, this is {{assistantName}} with Crisp Short Sales. We help with short-sale lender paperwork. Is {{streetAddress}} your listing?";
 export const VOICE_SHORT_LISTING_RECOVERY = "Is {{streetAddress}} your listing?";
