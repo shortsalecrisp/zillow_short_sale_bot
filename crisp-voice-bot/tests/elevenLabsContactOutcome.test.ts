@@ -123,6 +123,40 @@ test("actual future opt-out wins over deferred/current-ending markers and a beni
   assert.equal(lib.buildVoiceContactOutcomeUpdates("do_not_call", call).leadStatusCode, "R");
 });
 
+test("Google Call Assist can relay a narrow explicit list-removal instruction", async () => {
+  const lib = await load();
+  const call = conversation([], "Google Call Assist screened the call.");
+  call.transcript = [
+    { role: "user", message: "This is Call Assist by Google. May I ask who's calling and why?" },
+    { role: "assistant", message: "Maya with Crisp Short Sales about the short-sale listing." },
+    { role: "user", message: "Please remove this number from your mailing list and contact list. Thanks, and bye." },
+  ];
+  assert.equal(lib.shouldTreatAsScreeningAssistedDoNotCall(call), true);
+  assert.equal(lib.getVoiceContactRequestResult(call), "do_not_call");
+  assert.equal(lib.buildVoiceContactOutcomeUpdates("do_not_call", call).leadStatusCode, "R");
+});
+
+test("a clear yes to the exact needs question survives a neutral polite close without inventing callback consent", async () => {
+  const lib = await load();
+  const call = conversation([], "The caller expressed interest, asked one question, and ended politely.");
+  call.transcript = [
+    { role: "assistant", message: "Would help with lender paperwork or calls be useful for this listing?" },
+    { role: "user", message: "Yes, it would." },
+    { role: "assistant", message: "We handle the paperwork and lender follow-up. What would you like to know?" },
+    { role: "user", message: "Are you the seller's lender?" },
+    { role: "assistant", message: "No, we're a separate short-sale processing service." },
+    { role: "user", message: "Okay, thank you. That's all I need to know." },
+  ];
+  assert.equal(lib.shouldTreatAsPositiveNeedsAnswer(call), true);
+  assert.equal(lib.getVoiceContactRequestResult(call), "interested_followup_review");
+  const updates = lib.buildVoiceContactOutcomeUpdates("interested_followup_review", call);
+  assert.equal(updates.leadStatusCode, "Y");
+  assert.equal(updates.callbackRequested, "");
+  assert.equal(updates.liveTransferRequested, "");
+  const declined = { ...call, transcript: [...call.transcript, { role: "user", message: "Actually, no thanks. I don't need help." }] };
+  assert.equal(lib.shouldTreatAsPositiveNeedsAnswer(declined), false);
+});
+
 test("a named Yoni refusal or use of call as a label is not the caller's future opt-out", () => {
   for (const value of [
     "Email me information only. Do not call Yoni now.",

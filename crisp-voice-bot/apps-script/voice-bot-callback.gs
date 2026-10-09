@@ -1239,7 +1239,8 @@ function isRetryableVoiceBotResult_(callResult) {
     normalized === 'human_answered_no_bot_response' ||
     normalized === 'agent_not_available' ||
     normalized === 'call_start_failed' ||
-    normalized === 'call_start_receipt_missing';
+    normalized === 'call_start_receipt_missing' ||
+    normalized === 'call_failed_before_completion_retryable';
 }
 
 function isWithinBusinessHours_(date) {

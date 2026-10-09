@@ -113,6 +113,7 @@ function automatedContactType(message: string): AutomatedContact | null {
   const text = normalizeText(message);
   if (/\b(?:your call has been forwarded|after (?:the )?(?:tone|beep)|at the (?:tone|beep)|leave (?:me |us )?(?:a |your )?(?:(?:brief|detailed|short|voice) )?(?:message|name)|record (?:a |your )?message|you(?:'ve| have) reached|you (?:have )?reached (?:the )?(?:voice ?mail|mailbox)|welcome to (?:the )?voice ?mail|(?:sorry,? )?i missed your call|your voicemail is being transcribed)\b/.test(text) ||
       /\b(?:message with your name|message or send me a text|call is very important to me)\b/.test(text) ||
+      /^(?:hi[, ]+)?(?:this is|you(?:'ve| have) reached) [\p{L}'-]+\b.{0,100}\b(?:away from (?:my )?phone|unable to (?:answer|take) (?:your )?call|can't (?:answer|come to) (?:the )?phone|cannot (?:answer|come to) (?:the )?phone)\b/u.test(text) ||
       /\b(?:mailbox|voice ?mail(?: box)?)\b.{0,60}\b(?:full|not (?:been )?set up|hasn't been set up|not initialized|cannot accept|can't accept|unavailable|not accepting)\b/.test(text)) {
     return "voicemail";
   }

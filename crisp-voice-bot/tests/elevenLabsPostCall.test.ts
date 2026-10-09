@@ -400,6 +400,30 @@ test("post-call fallback gives SIP 603 Network Blocked a durable terminal outcom
   assert.equal(buildVoiceResponseStatus(callResult), "Call failed before completion");
 });
 
+test("post-call fallback retries only verified zero-duration 1011 pre-connection failures", async () => {
+  const {
+    buildVoiceResponseStatus,
+    getTerminalFailedConversationCallResult,
+    shouldRetryFailedConversationBeforeConnection,
+  } = await import("../src/lib/elevenLabsPostCall");
+  const failure = {
+    status: "failed",
+    has_audio: false,
+    has_user_audio: false,
+    has_response_audio: false,
+    phone_call: { sip_call_id: "" },
+    metadata: { call_duration_secs: 0, error: { code: 1011, reason: "update room failed: could not connect after timeout" } },
+    transcript: [],
+  } as const;
+  assert.equal(shouldRetryFailedConversationBeforeConnection(failure), true);
+  assert.equal(getTerminalFailedConversationCallResult(failure), "call_failed_before_completion_retryable");
+  assert.equal(buildVoiceResponseStatus("call_failed_before_completion_retryable"),
+    "Call failed before completion - one retry scheduled");
+  assert.equal(shouldRetryFailedConversationBeforeConnection({ ...failure, phone_call: { sip_call_id: "sip-1" } }), false);
+  assert.equal(shouldRetryFailedConversationBeforeConnection({ ...failure, transcript: [{ role: "user", message: "Hello" }] }), false);
+  assert.equal(shouldRetryFailedConversationBeforeConnection(georgeNetworkBlockedConversation), false);
+});
+
 test("post-call fallback classifies an agent saying it is not a short sale as not_short_sale", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsAgentHungUp, shouldTreatAsNotShortSale } = await import(
     "../src/lib/elevenLabsPostCall"

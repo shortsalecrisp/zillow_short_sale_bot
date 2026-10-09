@@ -144,6 +144,7 @@ export function isRetryableVoiceBotResult(callResult: unknown): boolean {
     "agent_not_available",
     "call_start_failed",
     "call_start_receipt_missing",
+    "call_failed_before_completion_retryable",
   ].includes(normalized);
 }
 

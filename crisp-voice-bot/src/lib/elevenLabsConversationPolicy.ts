@@ -1,4 +1,4 @@
-export const VOICE_CONVERSATION_POLICY_VERSION = "maya-state-transition-guards-20261007";
+export const VOICE_CONVERSATION_POLICY_VERSION = "maya-positive-needs-and-endpoint-precedence-20261009";
 
 export const VOICE_OPENING_SCRIPT = "Hi, this is {{assistantName}} with Crisp Short Sales. We help with short-sale lender paperwork. Is {{streetAddress}} your listing?";
 export const VOICE_SHORT_LISTING_RECOVERY = "Is {{streetAddress}} your listing?";
@@ -12,6 +12,7 @@ export const OPENING_HANDOFF_POLICY = [
   `The normal live opening is exactly: "${VOICE_OPENING_SCRIPT}"`,
   "A new clear yes to that single listing question confirms listing ownership only, not interest in help, a callback, or a live transfer.",
   `If that new reply contains no question, correction, hearing issue or requested next step, say exactly: "${VOICE_NEEDS_QUESTION}" Then wait.`,
+  "A clear yes to that exact needs question is durable interest unless the caller later explicitly rejects help or opts out. Briefly explain what Crisp handles, then use the base prompt's single explicit live-Yoni-now offer and wait. Answer a caller's substantive question first and make the one offer only after that question is resolved.",
   "Do not substitute a seller-package status question, an arbitrary qualification question, an earlier openerScript, or another introduction. Do not repeat a needs question already answered.",
   "Questions, corrections, repeated hello and hearing difficulties route to the main conversation for a short targeted reply before further qualification. Answer the actual affiliation or purpose question; do not finish an interrupted pitch.",
   "A hearing-restoration acknowledgment is not a yes to the listing question. A second clarification alone never authorizes goodbye; answer a specific unanswered question, while preserving explicit opt-out, service-refusal and current-call-ending priority.",

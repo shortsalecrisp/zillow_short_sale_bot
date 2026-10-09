@@ -29,6 +29,8 @@ test("replacement voice sheet helpers retry provider start failures once", () =>
   assert.equal(isRetryableVoiceBotResult("voicemail_reached"), true);
   assert.equal(isRetryableVoiceBotResult("human_answered_no_response_first_attempt"), true);
   assert.equal(isRetryableVoiceBotResult("human_answered_no_bot_response"), true);
+  assert.equal(isRetryableVoiceBotResult("call_failed_before_completion_retryable"), true);
+  assert.equal(isRetryableVoiceBotResult("call_failed_before_completion"), false);
   assert.equal(isRetryableVoiceBotResult("voicemail_reached_final_attempt"), false);
 });
 

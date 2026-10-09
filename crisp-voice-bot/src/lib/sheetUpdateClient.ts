@@ -69,7 +69,7 @@ export function isAppsScriptSheetUpdateAccepted(data: unknown): boolean {
 }
 
 function needsCallFailureSchedulingReconciliation(payload: SheetUpdateRequest, data: unknown): boolean {
-  if (payload.callResult !== "call_failed_before_completion") {
+  if (!["call_failed_before_completion", "call_failed_before_completion_retryable"].includes(payload.callResult ?? "")) {
     return false;
   }
 

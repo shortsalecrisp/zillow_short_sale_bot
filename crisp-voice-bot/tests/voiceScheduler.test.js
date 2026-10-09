@@ -753,6 +753,8 @@ test("a provider start failure remains eligible for one later call attempt", () 
   assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("call_start_receipt_missing")'), true);
   assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("human_answered_no_response_first_attempt")'), true);
   assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("human_answered_no_bot_response")'), true);
+  assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("call_failed_before_completion_retryable")'), true);
+  assert.equal(runSchedulerExpression('isRetryableVoiceBotResult_("call_failed_before_completion")'), false);
 });
 
 test("second attempts are only queued when the retry is due after the resume cutoff", () => {

@@ -118,6 +118,36 @@ test("terminal first-attempt failures persist an outcome and clear stale schedul
   assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "");
 });
 
+test("verified pre-connection first-attempt failures schedule exactly one normal retry", async () => {
+  const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
+  const row = Array.from({ length: 42 }, () => "");
+  row[4] = "735 Sturdivant Dr";
+  row[5] = "Clarksville";
+  row[6] = "TN";
+  row[VOICE_BOT_COL_CALL_1_SENT - 1] = "2026-10-08T14:21:42.420Z";
+  const writes = buildVoiceLeadRowWrites(row, {
+    callAttemptNumber: 1,
+    callResult: "call_failed_before_completion_retryable",
+    responseStatus: "Call failed before completion - one retry scheduled",
+  }, new Date("2026-10-08T14:22:00.000Z"));
+  const byColumn = new Map(writes.map((write) => [write.columnNumber, write.value]));
+
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_1_RESULT), "call_failed_before_completion_retryable");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_ELIGIBLE), "yes");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_TIME_BUCKET), "voice_call_2_due");
+  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "2026-10-08T20:00:00.000Z");
+
+  const second = buildVoiceLeadRowWrites(row, {
+    callAttemptNumber: 2,
+    callResult: "call_failed_before_completion_retryable",
+  }, new Date("2026-10-08T19:01:00.000Z"));
+  const secondByColumn = new Map(second.map((write) => [write.columnNumber, write.value]));
+  assert.equal(secondByColumn.get(VOICE_BOT_COL_CALL_2_RESULT), "call_failed_before_completion_retryable");
+  assert.equal(secondByColumn.get(VOICE_BOT_COL_CALL_ELIGIBLE), "");
+  assert.equal(secondByColumn.get(VOICE_BOT_COL_CALL_TIME_BUCKET), "");
+  assert.equal(secondByColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "");
+});
+
 test("retryable first attempts clear stale terminal lead status before scheduling call two", async () => {
   const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
   const row = Array.from({ length: 42 }, () => "");

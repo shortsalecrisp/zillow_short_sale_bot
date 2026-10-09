@@ -171,3 +171,20 @@ test("accepted terminal call failure with complete scheduling proof does not run
 
   assert.equal(directCallCount, 0);
 });
+
+test("accepted retryable call failure also requires scheduling proof", async () => {
+  const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
+  let directCallCount = 0;
+  await postSheetUpdate({
+    rowNumber: 6044,
+    callAttemptNumber: 1,
+    callResult: "call_failed_before_completion_retryable",
+  }, {
+    appsScriptPost: async () => ({ data: { ok: true, fieldsWritten: ["AH:callResult"] } }),
+    directSheetUpdate: async () => {
+      directCallCount += 1;
+      return ["AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for"];
+    },
+  });
+  assert.equal(directCallCount, 1);
+});

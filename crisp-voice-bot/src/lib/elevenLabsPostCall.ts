@@ -57,6 +57,7 @@ type ElevenLabsConversation = {
   has_response_audio?: boolean;
   phone_call?: {
     external_number?: string | null;
+    sip_call_id?: string | null;
     [key: string]: unknown;
   };
   conversation_initiation_client_data?: {
@@ -355,6 +356,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Call failed before completion";
   }
 
+  if (callResult === "call_failed_before_completion_retryable") {
+    return "Call failed before completion - one retry scheduled";
+  }
+
   if (callResult === "provider_quota_exceeded") {
     return "ElevenLabs quota exceeded - call not counted";
   }
@@ -402,9 +407,26 @@ function isInvalidDestinationNumberFailure(conversation: ElevenLabsConversation)
 }
 
 export function getTerminalFailedConversationCallResult(conversation: ElevenLabsConversation): string {
-  return isInvalidDestinationNumberFailure(conversation)
-    ? "call_failed_invalid_number"
+  if (isInvalidDestinationNumberFailure(conversation)) return "call_failed_invalid_number";
+  return shouldRetryFailedConversationBeforeConnection(conversation)
+    ? "call_failed_before_completion_retryable"
     : "call_failed_before_completion";
+}
+
+export function shouldRetryFailedConversationBeforeConnection(conversation: ElevenLabsConversation): boolean {
+  if (conversation.status !== "failed") return false;
+  const reason = normalizeText(getFailedConversationReason(conversation));
+  const errorCode = conversation.metadata?.error?.code;
+  const duration = Number(conversation.metadata?.call_duration_secs ?? 0);
+  const sipCallId = typeof conversation.phone_call?.sip_call_id === "string"
+    ? conversation.phone_call.sip_call_id.trim()
+    : "";
+  const hasTranscript = (conversation.transcript ?? []).some((item) =>
+    typeof item.message === "string" && hasMeaningfulSpokenContent(item.message));
+  const connectionFailure = errorCode === 1011 &&
+    /\b(?:timed? out|timeout|could not connect|no response from servers?)\b/.test(reason);
+  return connectionFailure && duration === 0 && !sipCallId && !hasTranscript &&
+    conversation.has_audio !== true && conversation.has_user_audio !== true && conversation.has_response_audio !== true;
 }
 
 export function shouldTreatAsProviderQuotaExceeded(conversation: ElevenLabsConversation): boolean {
@@ -850,6 +872,34 @@ export function shouldTreatAsDoNotCall(conversation: ElevenLabsConversation): bo
   return liveContactMessages(conversation).some(looksLikeDoNotCall);
 }
 
+export function shouldTreatAsScreeningAssistedDoNotCall(conversation: ElevenLabsConversation): boolean {
+  const messages = userMessages(conversation);
+  const hasGoogleCallAssist = messages.some((message) => /\bcall assist by google\b/i.test(message));
+  if (!hasGoogleCallAssist) return false;
+  return messages.some((message) =>
+    (looksLikeDoNotCall(message) ||
+      /\b(?:remove|take) (?:this|the|my|our) (?:number|phone)(?: number)? (?:off|from) (?:your |the )?(?:mailing|contact|calling|call) list\b/i.test(message)) &&
+    /\b(?:mailing|contact|calling|call) list\b/i.test(message));
+}
+
+export function shouldTreatAsPositiveNeedsAnswer(conversation: ElevenLabsConversation): boolean {
+  if (shouldTreatAsDoNotCall(conversation) || shouldTreatAsScreeningAssistedDoNotCall(conversation)) return false;
+  const messages = conversation.transcript ?? [];
+  let positive = false;
+  for (let index = 0; index < messages.length; index += 1) {
+    const item = messages[index];
+    if ((item.role !== "assistant" && item.role !== "agent") || typeof item.message !== "string" ||
+      !/would help with lender paperwork or calls be useful for this listing\?/i.test(item.message)) continue;
+    const answer = messages.slice(index + 1).find((next) =>
+      next.role === "user" && typeof next.message === "string" && hasMeaningfulSpokenContent(next.message));
+    positive = Boolean(answer?.message &&
+      /^(?:yes|yeah|yep|sure|it would|yes[, ]+it would|that would|absolutely|definitely)[.!? ]*$/i.test(answer.message.trim()));
+  }
+  if (!positive) return false;
+  return !liveContactMessages(conversation).some((message) =>
+    /\b(?:not interested|do not need|don't need|dont need|no longer need|already (?:have|got) (?:it|that) (?:handled|covered)|no thanks)\b/i.test(message));
+}
+
 function liveContactMessages(conversation: ElevenLabsConversation): string[] {
   if (
     conversation.has_user_audio === false ||
@@ -880,8 +930,11 @@ export type VoiceContactResult =
   | "answered_not_interested";
 
 export function getVoiceContactRequestResult(conversation: ElevenLabsConversation): VoiceContactResult | undefined {
-  if (shouldTreatAsDoNotCall(conversation)) {
+  if (shouldTreatAsDoNotCall(conversation) || shouldTreatAsScreeningAssistedDoNotCall(conversation)) {
     return "do_not_call";
+  }
+  if (shouldTreatAsPositiveNeedsAnswer(conversation)) {
+    return "interested_followup_review";
   }
   if (shouldTreatAsCallEndedByRequest(conversation)) {
     return "call_ended_by_request";
@@ -1174,7 +1227,9 @@ function hasUnavailableVoicemailMailbox(conversation: ElevenLabsConversation): b
   return (
     new RegExp(String.raw`\b${mailbox} (?:has not|hasn't) been (?:set up|initialized)\b`).test(text) ||
     new RegExp(String.raw`\b${mailbox} (?:is not|isn't) (?:set up|initialized)\b`).test(text) ||
-    new RegExp(String.raw`\b${mailbox} (?:is )?(?:currently )?unavailable to receive (?:any )?messages\b`).test(text)
+    new RegExp(String.raw`\b${mailbox} (?:is )?(?:currently )?unavailable to receive (?:any )?messages\b`).test(text) ||
+    new RegExp(String.raw`\b${mailbox} (?:is )?(?:currently )?full\b`).test(text) ||
+    new RegExp(String.raw`\b${mailbox} (?:cannot|can't|isn't able to) accept (?:any )?messages\b`).test(text)
   );
 }
 
