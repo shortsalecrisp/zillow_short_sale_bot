@@ -9,7 +9,8 @@ test("includes only exact matching final versions after the uniform boundary", (
   assert.equal(uniformComparisonArm({ ...eligible(), branchId: ELEVENLABS_TTS_TEST_BRANCH_ID, versionId: cohort.testVersionId }), "v4_turbo_test");
   for (const changes of [{ finalReceiptMatched: false }, { testMode: true }, { durationSecs: 0 }, { durationSecs: null },
     { startTimeUnixSecs: undefined }, { startTimeUnixSecs: eligible().startTimeUnixSecs - 1 },
-    { versionId: "previous" }, { versionId: cohort.testVersionId }, { branchId: "unknown" }]) {
+    { versionId: "previous" }, { versionId: "agtvrsn_7201m4gvk2q2fx3bm45pft78zhqz" },
+    { versionId: "agtvrsn_3501m4gvk4hhf2gt2a26wbgw11e0" }, { versionId: cohort.testVersionId }, { branchId: "unknown" }]) {
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });

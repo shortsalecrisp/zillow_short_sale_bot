@@ -1,5 +1,23 @@
 # Uniform Conversion Comparison
 
+Current revision is r2, verified at 2026-10-09T18:06:32.077Z (2:06:32 PM New York). The original release below is historical and must not be pooled with r2. Both arms remain identical except for TTS model.
+
+## Approved Revision 2
+
+Yoni explicitly approved all three recommended refinements and requested immediate implementation:
+
+- For a genuinely new listener after screening or hold who has not heard the identity: "Hi, Maya with Crisp Short Sales. Is [street address] your listing?" For the same listener repeating hello, retain only "Is [street address] your listing?" The main prompt, inherited opening-listener prompt and native recovery prompt use the same distinction; no full pitch is repeated.
+- Live handoff offer: "Would you like me to see if Yoni, our short-sale specialist, can join this call now?" The human-only request path uses the same offer after "Totally fair." Explicit consent, current caller preferences and Yoni's acceptance remain required. No availability is implied.
+- Cost answer: "Under our usual arrangement, there is no fee to you or the seller; the buyer pays a flat fee at closing. Yoni can confirm the terms for this file." Exact fees remain file-specific. Timing answer: "Timing depends on the lender and the file. Yoni can assess where this one stands." Do not present an unreviewed file as having a 60-to-90-day estimate.
+
+Current control version: agtvrsn_6701m4gxgnk9esvs3rj67qxtzdnj.
+Current test version: agtvrsn_2301m4gxgraheq7s7dvby2rmwbya.
+Current shared writable-body hash excluding only TTS model: f9df6688ca48ec8f6fa1ef7316e883c4b94c5ace9e06b9c8e0788c9994bd31aa.
+
+Require the exact r2 final branch/version and provider start after the r2 boundary. The same 15-true-live-conversations-per-arm and preferred 100-genuine-call gates apply to r2 only. Previous uniform versions are historical, not automatic members of this cohort. Playback/model adherence and conversion improvement remain unproven until genuine calls are reviewed.
+
+## Original Uniform Release
+
 Yoni authorized uniform prompts and workflows on October 9, 2026 and delegated the conversion-oriented prompt decision. Both provider arms were verified identical except for the TTS model at 2026-10-09T17:32:52.487Z (1:32:52 PM New York).
 
 Flash v2 and v4 Turbo remain 50/50. Both use Eryn as Maya, gpt-4.1 and turn_v3. Scheduling, tools, phone routing and protected provider settings were retained. Finch/Finn remains retired.

@@ -71,8 +71,10 @@ test("live identity and first-turn questions do not restart the pitch", () => {
   const s = section("Intro only");
   assert.match(s, /answer only those points from the answer library instead of delivering the full introduction/);
   assert.match(s, /Do not repeat identity or purpose already answered/);
-  assert.match(s, /After screening or hold, a new live listener's greeting enters the native short-check state/);
-  assert.match(s, /Do not repeat the screener response or add another identity statement first/);
+  assert.match(s, /After screening or hold, a genuinely new live listener who has not heard your identity enters the native recovery state/);
+  assert.match(s, /Hi, \{\{assistantName\}\} with Crisp Short Sales\. Is \{\{streetAddress\}\} your listing\?/);
+  assert.match(s, /same listener who already heard your identity gets only/);
+  assert.match(s, /Do not repeat the screener response or full sales introduction/);
   assert.doesNotMatch(prompt, /this is Emmy with Crisp Short Sales/i);
 });
 test("name corrections and authorized admins outrank the stored lead name", () => {
@@ -140,6 +142,14 @@ test("payer corrections get the substantive answer while preserving other questi
   assert.match(section("Shared turn priority"), /A payer correction needs the payer answer, not just "Understood\."/);
   assert.match(section("Answer library"), /The buyer typically pays the flat fee, only if the deal closes\." If another question or request accompanies it, address that too/);
   assert.match(section("Answer library"), /Answer all questions asked, then wait/);
+});
+test("fees describe usual terms and timing is file-specific rather than an assessed estimate", () => {
+  const s = section("Answer library");
+  assert.match(s, /Under our usual arrangement, there is no fee to you or the seller; the buyer pays a flat fee at closing/);
+  assert.match(s, /Yoni can confirm the terms for this file/);
+  assert.match(s, /Timing depends on the lender and the file\. Yoni can assess where this one stands/);
+  assert.match(s, /Do not offer a 60-to-90-day estimate as though this file has been assessed/);
+  assert.doesNotMatch(s, /short sales usually take about 60 to 90 days/);
 });
 test("a short yes or no is scoped to the latest single permission question", () => {
   const s = section("Shared turn priority");
@@ -267,7 +277,7 @@ test("self-initiated contact does not silently create future calls or an automat
 });
 test("live transfer consent, business approval, questions and revocation remain distinct", () => {
   const s = section("Live transfer request");
-  assert.match(s, /onto this call right now\. Want me to try him\?/);
+  assert.match(s, /Would you like me to see if Yoni, our short-sale specialist, can join this call now\?/);
   assert.match(s, /Qualification answers are not live-transfer consent/);
   assert.match(s, /transferApproved: true and approvalStatus: accepted plus current caller consent/);
   assert.match(s, /A new restriction or unanswered question blocks the handoff even after approval/);

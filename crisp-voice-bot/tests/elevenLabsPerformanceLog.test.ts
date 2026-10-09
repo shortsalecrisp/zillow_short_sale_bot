@@ -591,7 +591,7 @@ test("a named pickup after a business name is human but its target role remains 
   assert.equal(result.flags.targetAgentAnswered, null);
 });
 
-for (const policy of ["maya-service-first-recovery-20261003", "maya-uniform-lead-conversion-20261009"]) {
+for (const policy of ["maya-service-first-recovery-20261003", "maya-uniform-lead-conversion-20261009", "maya-uniform-lead-conversion-20261009-r2"]) {
 test(`${policy} measures service and listing question while yes only confirms the listing`, async () => {
   const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: policy }, conversation: { transcript: [
     { role: "user", message: "Hello." },

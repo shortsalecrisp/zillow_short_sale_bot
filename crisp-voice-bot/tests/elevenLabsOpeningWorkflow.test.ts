@@ -13,6 +13,7 @@ import {
   OPENING_HANDOFF_POLICY,
   VOICE_CALLBACK_RECEIPT_ACK,
   VOICE_NEEDS_QUESTION,
+  VOICE_NEW_LISTENER_RECOVERY,
   VOICE_OPENING_SCRIPT,
   VOICE_SCREENING_SCRIPT,
   VOICE_SHORT_LISTING_RECOVERY,
@@ -41,6 +42,10 @@ test("opening gets a separate wait-first prompt without changing the sales promp
   assert.equal(after.workflow.nodes[VOICE_STATE_TRANSITION_NODES.shortListingRecovery].entry_behavior, "generate_immediately");
   assert.equal(after.workflow.nodes[VOICE_STATE_TRANSITION_NODES.callbackReceiptWait].entry_behavior, "generate_immediately");
   assert.match(SHORT_LISTING_RECOVERY_PROMPT, new RegExp(VOICE_SHORT_LISTING_RECOVERY.replace(/[?{}]/g, "\\$&")));
+  assert.ok(SHORT_LISTING_RECOVERY_PROMPT.includes(VOICE_NEW_LISTENER_RECOVERY));
+  assert.match(SHORT_LISTING_RECOVERY_PROMPT, /genuinely NEW live person.*has not heard your identity/);
+  assert.match(SHORT_LISTING_RECOVERY_PROMPT, /same listener who already heard your identity/);
+  assert.match(SHORT_LISTING_RECOVERY_PROMPT, /Never repeat the identity to the same listener/);
   assert.ok(CALLBACK_RECEIPT_WAIT_PROMPT.includes(VOICE_CALLBACK_RECEIPT_ACK));
 });
 
@@ -86,7 +91,8 @@ test("the live opener is identical in the listener and main prompts", () => {
 test("screening, voicemail and unrelated recording exit remain separate", () => {
   const result = applyConversationOpeningWorkflow(base());
   assert.match(OPENING_LISTENER_PROMPT, /\{\{assistantName\}\} with Crisp Short Sales, about the short-sale listing at \{\{streetAddress\}\}/);
-  assert.match(OPENING_LISTENER_PROMPT, /fresh pickup: say the live listing-agent check once/);
+  assert.ok(OPENING_LISTENER_PROMPT.includes(VOICE_NEW_LISTENER_RECOVERY));
+  assert.match(OPENING_LISTENER_PROMPT, /genuinely new live listener who has not heard your identity/);
   assert.doesNotMatch(OPENING_LISTENER_PROMPT, /We help listing agents with lender paperwork and follow-up/);
   assert.match(OPENING_LISTENER_PROMPT, /For recorded please-stay-on-the-line, ringing or hold announcements use skip_turn/);
   assert.match(OPENING_LISTENER_PROMPT, /attempt two has no second message/);

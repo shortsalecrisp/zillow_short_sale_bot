@@ -399,7 +399,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const clearLiveTransferConsent = contact.humanAnswered === true && hasClearLiveTransferConsent(humanTranscript, "");
   const misfiredLiveTransferRequest = isMisfiredLiveTransferRequest(humanTranscript, "");
   const callbackOrLaterSignal = contact.humanAnswered === true && hasCallbackOrLaterSignal(humanTranscript, "");
-  const usesServiceFirstOpening = ["maya-service-first-recovery-20261003", "maya-uniform-lead-conversion-20261009"]
+  const usesServiceFirstOpening = ["maya-service-first-recovery-20261003", "maya-uniform-lead-conversion-20261009", "maya-uniform-lead-conversion-20261009-r2"]
     .includes(input.metadata.declaredConversationPolicyVersion ?? "");
   const usesListingAgentOpening = input.metadata.initialOpeningPolicy === "listen_first_listing_agent_v2";
   const reasonMessageIndex = firstAssistantMessageIndexMatching(
@@ -417,7 +417,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   );
   const liveYoniNowOfferIndex = firstAssistantMessageIndexMatching(
     liveSpeechTranscript,
-    /\b(?:bring Yoni|get Yoni|Yoni.*onto (?:this|the) call|Yoni.*on the phone|try him (?:right )?now|available (?:right )?now)\b/i,
+    /\b(?:bring Yoni|get Yoni|Yoni.*onto (?:this|the) call|Yoni.*on the phone|Yoni.*join this call now|try him (?:right )?now|available (?:right )?now)\b/i,
   );
   const needsQuestionIndex = firstAssistantMessageIndexMatching(liveSpeechTranscript,
     /\bwould help with lender paperwork or calls be useful for this listing\?/i);

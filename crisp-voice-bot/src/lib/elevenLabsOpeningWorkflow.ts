@@ -1,6 +1,7 @@
 import {
   OPENING_HANDOFF_POLICY,
   VOICE_CALLBACK_RECEIPT_ACK,
+  VOICE_NEW_LISTENER_RECOVERY,
   VOICE_OPENING_SCRIPT,
   VOICE_RETURN_NUMBER_SPOKEN,
   VOICE_SCREENING_SCRIPT,
@@ -14,9 +15,12 @@ export const VOICE_STATE_TRANSITION_NODES = Object.freeze({
 
 export const SHORT_LISTING_RECOVERY_PROMPT = `# Short listing-check recovery state
 
-On first entry, say exactly this entire turn:
+On first entry, select exactly one entire turn from the actual listener context.
+Only when a genuinely NEW live person has just joined after automated screening or hold and has not heard your identity, say exactly:
+"${VOICE_NEW_LISTENER_RECOVERY}"
+If this is the same listener who already heard your identity and is only repeating hello or checking your presence, say exactly:
 "${VOICE_SHORT_LISTING_RECOVERY}"
-Then stop. Do not repeat an identity, company description, screening response, full introduction or sales explanation. Do not ask another question.
+Then stop. Never repeat the identity to the same listener. Do not add a company description, screening response, full introduction or sales explanation. Do not ask another question.
 
 After that one line, wait silently. Use skip_turn for silence, noise, placeholder ..., another bare hello, or an incomplete fragment. A NEW complete live-caller answer, question, correction, stop request or contact preference routes to the main conversation before speech. Never repeat the recovery line.`;
 
@@ -44,7 +48,7 @@ Speak the supplied street number and street clearly. Do not add city, state or Z
 
 Automated screening is not a human conversation. If a system asks for name and reason, say exactly once:
 "${VOICE_SCREENING_SCRIPT}"
-Then stop. For recorded please-stay-on-the-line, ringing or hold announcements use skip_turn and wait for the person. If a system asks for a return number, say "${VOICE_RETURN_NUMBER_SPOKEN}" once, with a short pause between groups, then wait. Never pronounce 300 as three hundred. When the system connects a live listener, treat that as a fresh pickup: say the live listing-agent check once, without repeating the screener response or adding another identity statement first.
+Then stop. For recorded please-stay-on-the-line, ringing or hold announcements use skip_turn and wait for the person. If a system asks for a return number, say "${VOICE_RETURN_NUMBER_SPOKEN}" once, with a short pause between groups, then wait. Never pronounce 300 as three hundred. When the system connects a genuinely new live listener who has not heard your identity, say "${VOICE_NEW_LISTENER_RECOVERY}" once. A repeated hello or presence check from the same listener who already heard your identity gets only "${VOICE_SHORT_LISTING_RECOVERY}". Never repeat the screener response or full sales introduction.
 
 Actual voicemail is different from screening or hold. Let the recorded greeting finish. Use voicemail_detection at its invitation to leave a message or the first natural pause after it, not mid-sentence. The backend supplies the approved first-attempt message; attempt two has no second message. Do not speak a live introduction over a recording. A clearly unrelated person's recorded greeting must use the separate silent recording exit, without disclosing the property or leaving a message. A live admin, matching surname or plausible name match is not an unrelated recording.
 

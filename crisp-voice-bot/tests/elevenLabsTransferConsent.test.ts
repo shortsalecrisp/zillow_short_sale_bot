@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test("approved concise offer preserves consent and rejects later or unclear answers", async () => {
+  const { hasClearLiveTransferConsent } = await import("../src/lib/elevenLabsTransferConsent");
+  const offer = "Would you like me to see if Yoni, our short-sale specialist, can join this call now?";
+  for (const [reply, expected] of [["Yes", true], ["Sure, go ahead.", true], ["Not now, call me tomorrow.", false], ["Huh?", false], ["Okay, okay...", false]] as const) {
+    assert.equal(hasClearLiveTransferConsent([
+      { role: "agent", message: offer }, { role: "user", message: reply },
+      { role: "agent", message: "Ok, hold on, let me see if he's available one second." },
+      { role: "agent", tool_calls: [{ tool_name: "live_transfer_requested" }] },
+    ]), expected);
+  }
+});
+
 test("transfer consent rejects overlapped okay plus meeting/callback-later signal", async () => {
   const {
     hasCallbackOrLaterSignal,
