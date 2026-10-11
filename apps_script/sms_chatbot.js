@@ -3763,14 +3763,19 @@ function isAutomatedPromotionalSmsSignal_(text) {
   if (subscriptionConfirmation) return true;
   const hasLink = /\b(?:https?:\/\/|www\.|[a-z0-9-]+(?:\.[a-z0-9-]+)+\/(?:[a-z0-9/?=&%-]+))/.test(t);
   const hasCampaignAppeal = /\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|voter registration|register(?:ed)? to vote|volunteer|chipped in|election|ballot)\b/.test(t);
-  const hasBulkFooter = /\b(?:stop\s*2\s*end|reply\s+stop\s+to\s+(?:end|unsubscribe|opt\s*out))\b/.test(t);
+  const hasBulkFooter = /\b(?:stop\s*2\s*end|(?:reply|text)\s+stop\s+to\s+(?:end|unsubscribe|opt\s*out|quit))\b/.test(t);
+  const hasEventInvitation = /\b(?:join us|join [a-z][a-z .'-]{2,70} (?:tomorrow|today|on )|you(?:'re| are) invited|please join us|hope to see you there)\b/.test(t) &&
+    /\b(?:grand opening|field office|campaign event|rally|fundraiser|election day|nominee|candidate|campaign headquarters)\b/.test(t);
+  const asksForCrispContact = /\b(?:call|text|contact|reach out to|follow up with) me\b/.test(t) ||
+    /\b(?:can|could|would|will) you (?:call|text|contact)\b/.test(t);
   const hasKnownCivicAutomation = /\b(?:fair fight|peachvote(?:\.com)?|mvp\.sos\.ga\.gov|voter registration portal)\b/.test(t);
   const hasSurveyIdentity = /\b(?:web\s+)?surveys?\b/.test(t) &&
     /\b(?:i\s+am|i['\u2019]?m|this\s+is|we\s+are|we['\u2019]?re|with)\b/.test(t);
   const hasPollInvitation = /\b(?:poll(?:ing)?|survey(?:ing)?)\b/.test(t) &&
     /\b(?:can|could|would|will)\s+you\b|\banswer\s+(?:a|this|our)\b/.test(t);
   const hasNumberedChoices = /\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]/.test(t);
-  return (hasCampaignAppeal && hasLink && hasBulkFooter) ||
+  return (hasEventInvitation && hasCampaignAppeal && !asksForCrispContact) ||
+    (hasCampaignAppeal && hasLink && hasBulkFooter) ||
     (hasKnownCivicAutomation && (hasLink || hasBulkFooter || hasCampaignAppeal)) ||
     (hasSurveyIdentity && hasPollInvitation && hasNumberedChoices);
 }
@@ -7317,6 +7322,12 @@ function testSmsIntentContractV3_() {
     "txt.examplecampaign.com/p91973 Thank you, Campaign Stop2End ?";
   record("automated_promotion_ignored_before_reply", isAutomatedPromotionalSmsSignal_(campaignText) &&
     !isAutomatedPromotionalSmsSignal_("What is your short sale fee? I saw a campaign link with Stop2End"));
+  const eventInvitation = "Join Keisha Lance Bottoms tomorrow, October 11, at 2:00 p.m. for the grand opening of our Atlanta Field Office. 2324 Cascade Rd Atlanta, GA Keisha is the Democratic Nominee for Governor of Georgia. With just three weeks left before Election Day, we hope to see you there as we work to make history together. See you soon! Text STOP to quit";
+  record("campaign_event_invitation_ignored_before_lead_lookup",
+    isAutomatedPromotionalSmsSignal_(eventInvitation) &&
+    !isOptOutSignal_(eventInvitation) &&
+    !isAutomatedPromotionalSmsSignal_("Please call me tomorrow at 2 PM about my short sale") &&
+    !isAutomatedPromotionalSmsSignal_("Join us at our campaign event tomorrow. Can you call me about my short sale?"));
   const loopQuestion = "What is your fee?";
   const answeredRow = Object.assign({}, baseRow);
   answeredRow[HEADERS.history_json] = JSON.stringify([
@@ -8041,6 +8052,11 @@ function testApprovedLeadIntelligenceRules_() {
     throw new Error("Substantive repeated-answer handoff regression: " + JSON.stringify(substantiveRepeatDecision));
   }
 
+  if (!isAutomatedPromotionalSmsSignal_("Join us tomorrow at 2 PM for our campaign event. Text STOP to quit") ||
+      isAutomatedPromotionalSmsSignal_("Please call me tomorrow at 2 PM about my short sale") ||
+      isAutomatedPromotionalSmsSignal_("STOP")) {
+    throw new Error("Event invitation filter must preserve callback and opt-out intent");
+  }
   const underControlText = "Thank you right now I have everything under control but will reach out to you if I need further assistance";
   const underControlDecision = applyFastRules_(underControlText, {});
   if (!underControlDecision.matched || underControlDecision.lead_status !== "R" || !underControlDecision.conversation_done || underControlDecision.handoff_needed || underControlDecision.block_reply) {
