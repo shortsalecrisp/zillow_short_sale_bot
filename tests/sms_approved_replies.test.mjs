@@ -467,6 +467,32 @@ test('opt out remains silent and immediate', () => {
   assert.equal(r.lead_status, 'R');
 });
 
+test('an unmonitored inbox phone-menu notice is silent and never becomes a lead handoff', () => {
+  const {h, r} = answer(
+    'This inbox is not monitored. Please call our office and select option 2 to leave a voicemail.',
+    {auto_reply_count: 3, call_booking_status: 'not_requested'}
+  );
+  assert.equal(r.should_reply, false);
+  assert.equal(r.handoff_needed, false);
+  assert.equal(h.state.call_booking_status, 'not_requested');
+  assert.equal(h.state.human_override, 'FALSE');
+  assert.equal(h.effects.length, 0);
+});
+
+test('a categorical buyer-fee rejection closes at the reply cap without owner takeover', () => {
+  const {h, r} = answer(
+    'No buyer will pay 5k to get someone else to do what their agent can do!',
+    {auto_reply_count: 3, call_booking_status: 'not_requested'}
+  );
+  assert.equal(r.lead_status, 'R');
+  assert.equal(r.conversation_done, true);
+  assert.equal(r.handoff_needed, false);
+  assert.equal(r.should_reply, false);
+  assert.equal(h.state.call_booking_status, 'closed_no_interest');
+  assert.equal(h.state.human_override, 'FALSE');
+  assert.equal(h.effects.length, 0);
+});
+
 test('clear renewed interest after opt-out alerts owner once while bot stays silent and opt-out stays authoritative', () => {
   const h = smsHarness({
     mailshake_status: 'R', human_override: 'TRUE', ai_state: 'done',

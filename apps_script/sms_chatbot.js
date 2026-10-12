@@ -2911,6 +2911,21 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  if (isCategoricalBuyerFeeRejectionSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: getStandardNoCloseoutReply_(),
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      call_booking_status: "closed_no_interest",
+      clear_callback: true,
+      reason: "Categorical buyer-fee rejection closed before reply-cap escalation"
+    };
+  }
+
   const terminal = buildTerminalCoverageDecisionV4_(t, rowObj);
   if (terminal) return terminal;
   if (isFirstFileCreditQuestionSignal_(t)) {
@@ -3751,7 +3766,8 @@ function isAutomatedRoutingNoticeSignal_(text) {
     /\b(?:please\s+)?(?:call|text|contact)\s+\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\s+instead\b/,
     /\bautomated\s+(?:message|notice|notification)\b.*\b(?:agent|broker|routing|forward)\b/,
     /\bredfin\b.*\b(?:premier\s+agent|passed\s+this\s+message|message\s+was\s+sent)\b/,
-    /\byou(?:'|’)ve reached\b.*\b(?:different|another|alternate) number (?:for|to) text(?:ing)?\b.*\bwe(?:'|’)ll send you (?:a )?message from that number\b/
+    /\byou(?:'|’)ve reached\b.*\b(?:different|another|alternate) number (?:for|to) text(?:ing)?\b.*\bwe(?:'|’)ll send you (?:a )?message from that number\b/,
+    /\bthis inbox is not monitored\b.*\b(?:call|select|press|option|voicemail|email)\b/
   ];
   return patterns.some(function(pattern) { return pattern.test(t); }) || isStructuredAutomatedResponseSignal_(t);
 }
@@ -4991,11 +5007,23 @@ function isUnmistakableTerminalRejectionSignal_(text) {
     /\b(?:i|we)\s+(?:do not|don['’]?t|dont)\s+need\s+(?:any\s+)?(?:help|assistance)\b/,
     /\b(?:we(?:'|’)re|we are)\s+all set\b/,
     /\bwe\s+(?:have|got)\s+it\s+covered\b/,
+    /\bno\s+(?:buyer|buyers)\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b/,
     /\b(?:i\s+just\s+)?(?:do not|don['’]?t|dont)\s+think\s+(?:a|the|any)?\s*buyer\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b/,
     /\b(?:they|a buyer|the buyer|buyers?)\s+(?:aren['’]?t|are not|won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?(?:pay|go for|accept|agree to)\b/,
     /\b(?:this|that)\s+(?:won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?work\b/
   ];
   return patterns.some(function(pattern) { return pattern.test(t); });
+}
+
+function isCategoricalBuyerFeeRejectionSignal_(text) {
+  const t = withoutNegatedRejection_(text);
+  if (!t || /\?/.test(t) || isSchedulingSignal_(t) || isPhoneCallInterestSignal_(t) ||
+      isPresentServiceInterestSignal_(t) || isDirectHelpRequestSignal_(t)) {
+    return false;
+  }
+  return /\bno\s+(?:buyer|buyers)\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b/.test(t) ||
+    /\b(?:i\s+just\s+)?(?:do not|don['’]?t|dont)\s+think\s+(?:a|the|any)?\s*buyer\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b/.test(t) ||
+    /\b(?:they|a buyer|the buyer|buyers?)\s+(?:aren['’]?t|are not|won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?(?:pay|go for|accept|agree to)\b/.test(t);
 }
 
 function isPunctuationCorrectionFragment_(text) {

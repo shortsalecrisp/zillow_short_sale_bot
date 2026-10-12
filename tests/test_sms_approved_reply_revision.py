@@ -557,6 +557,30 @@ def test_opt_out_overrides_fee_and_portal(chatbot):
     assert result["handoff_needed"] is False
 
 
+def test_unmonitored_inbox_phone_menu_is_silent_without_handoff(chatbot):
+    chatbot.set(auto_reply_count="3", call_booking_status="not_requested")
+    result = chatbot.receive(
+        "This inbox is not monitored. Please call our office and select option 2 to leave a voicemail."
+    )
+    assert result["should_reply"] is False
+    assert result["handoff_needed"] is False
+    assert chatbot.row()["call_booking_status"] == "not_requested"
+    assert chatbot.row()["human_override"] == "FALSE"
+
+
+def test_categorical_buyer_fee_rejection_closes_at_cap_without_handoff(chatbot):
+    chatbot.set(auto_reply_count="3", call_booking_status="not_requested")
+    result = chatbot.receive(
+        "No buyer will pay 5k to get someone else to do what their agent can do!"
+    )
+    assert result["lead_status"] == "R"
+    assert result["conversation_done"] is True
+    assert result["handoff_needed"] is False
+    assert result["should_reply"] is False
+    assert chatbot.row()["call_booking_status"] == "closed_no_interest"
+    assert chatbot.row()["human_override"] == "FALSE"
+
+
 def test_receipt_is_idempotent_and_only_delivery_adds_response_id(chatbot):
     result = chatbot.receive("How much?", message_id="offline-unique")
     assert all(entry["role"] != "assistant" for entry in chatbot.history())

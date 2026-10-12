@@ -5689,6 +5689,7 @@ def _sms_is_automated_routing_notice(text: str) -> bool:
         r"\bautomated\s+(?:message|notice|notification)\b.*\b(?:agent|broker|routing|forward)\b",
         r"\bredfin\b.*\b(?:premier\s+agent|passed\s+this\s+message|message\s+was\s+sent)\b",
         r"\byou(?:'|’)ve reached\b.*\b(?:different|another|alternate) number (?:for|to) text(?:ing)?\b.*\bwe(?:'|’)ll send you (?:a )?message from that number\b",
+        r"\bthis inbox is not monitored\b.*\b(?:call|select|press|option|voicemail|email)\b",
     ]
     return any(re.search(pattern, t) for pattern in patterns) or _sms_is_structured_automated_response(t)
 
@@ -6470,9 +6471,29 @@ def _sms_is_unmistakable_terminal_rejection(value: Any) -> bool:
         r"\b(?:i|we)\s+(?:do not|don['’]?t|dont)\s+need\s+(?:any\s+)?(?:help|assistance)\b",
         r"\b(?:we(?:'|’)re|we are)\s+all set\b",
         r"\bwe\s+(?:have|got)\s+it\s+covered\b",
+        r"\bno\s+(?:buyer|buyers)\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b",
         r"\b(?:i\s+just\s+)?(?:do not|don['’]?t|dont)\s+think\s+(?:a|the|any)?\s*buyer\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b",
         r"\b(?:they|a buyer|the buyer|buyers?)\s+(?:aren['’]?t|are not|won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?(?:pay|go for|accept|agree to)\b",
         r"\b(?:this|that)\s+(?:won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?work\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _sms_is_categorical_buyer_fee_rejection(value: Any) -> bool:
+    text = _sms_rejection_text(value)
+    if (
+        not text
+        or "?" in text
+        or _sms_is_scheduled_callback(text)
+        or _sms_is_phone_call_interest(text)
+        or _sms_is_present_service_interest(text)
+        or re.search(r"\b(?:i|we)\s+(?:need|want|would love|could use|can use)\s+(?:some\s+)?help\b", text)
+    ):
+        return False
+    patterns = [
+        r"\bno\s+(?:buyer|buyers)\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b",
+        r"\b(?:i\s+just\s+)?(?:do not|don['’]?t|dont)\s+think\s+(?:a|the|any)?\s*buyer\s+(?:will|would)\s+(?:go for|accept|agree to|pay)\b",
+        r"\b(?:they|a buyer|the buyer|buyers?)\s+(?:aren['’]?t|are not|won['’]?t|will not|isn['’]?t|is not)\s+(?:going to\s+)?(?:pay|go for|accept|agree to)\b",
     ]
     return any(re.search(pattern, text) for pattern in patterns)
 
@@ -7267,6 +7288,17 @@ def _sms_fast_decision(
             block_reply=True,
             preserve_existing_state=True,
             reason="High-confidence automated promotion ignored",
+        )
+
+    if _sms_is_categorical_buyer_fee_rejection(t):
+        return _sms_decision(
+            reply_text=SMS_STANDARD_CLOSEOUT_REPLY,
+            lead_status="R",
+            conversation_done=True,
+            handoff_needed=False,
+            call_booking_status="closed_no_interest",
+            clear_callback=True,
+            reason="Categorical buyer-fee rejection closed before reply-cap escalation",
         )
 
     if _sms_is_answered_repeated_inbound_question(row_obj, inbound_text):
