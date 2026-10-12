@@ -1309,6 +1309,7 @@ for (const scenario of [
 ]) {
   test(`post-call fallback preserves the live human outcome for ${scenario.name}`, async () => {
     const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+    const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
     const conversationId = `conv_measurement_${scenario.name}`;
     const writesBefore = measurementWrites.length;
     measurementConversations.set(conversationId, {
@@ -1331,7 +1332,17 @@ for (const scenario of [
       transcript: scenario.transcript,
     });
     try {
-      assert.equal(await processPostCallOutcomeFromConversationId(conversationId), true);
+      assert.equal(await processPostCallOutcomeFromConversationId(conversationId, {
+        postSheetUpdate: (payload) => postSheetUpdate(payload, {
+          directSheetUpdate: async () => [
+            "J:response_status",
+            "K:call_attempt_status",
+            "AD:call_eligible",
+            "AE:call_time_bucket",
+            "AF:call_scheduled_for",
+          ],
+        }),
+      }), true);
       const update = measurementWrites.slice(writesBefore).find((write) => typeof write.voiceNotes === "string")!;
       assert.equal(update.callResult, scenario.expectedCallResult);
       assert.equal(update.responseStatus, scenario.expectedResponseStatus);

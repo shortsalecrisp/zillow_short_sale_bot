@@ -27,6 +27,11 @@ const MAX_ATTEMPTS = 5;
 const CALL_CONNECT_RETRY_DELAY_MS = 30_000;
 const MAX_CALL_CONNECT_RETRIES = 1;
 
+type PostCallOptions = {
+  finalAttempt?: boolean;
+  postSheetUpdate?: (payload: SheetUpdateRequest) => Promise<void>;
+};
+
 type ElevenLabsTranscriptItem = {
   role?: string;
   message?: string;
@@ -2024,7 +2029,7 @@ async function sendTranscriptEmailIfEnabled(params: {
 async function processPostCallOutcome(
   conversationId: string,
   metadata: CallMetadata,
-  options: { finalAttempt?: boolean } = {},
+  options: PostCallOptions = {},
 ): Promise<boolean> {
   const conversation = await fetchConversation(conversationId);
   return processPostCallOutcomeForConversation(conversationId, metadata, conversation, options);
@@ -2034,7 +2039,7 @@ async function processPostCallOutcomeForConversation(
   conversationId: string,
   metadata: CallMetadata,
   conversation: ElevenLabsConversation,
-  options: { finalAttempt?: boolean } = {},
+  options: PostCallOptions = {},
 ): Promise<boolean> {
   if (processedConversationIds.has(conversationId)) {
     logger.info("Skipping already processed ElevenLabs post-call outcome", {
@@ -2056,6 +2061,7 @@ async function processPostCallOutcomeForConversation(
       summary: performanceSummary,
       transcript: fullTranscript,
     });
+  const persistSheetUpdate = options.postSheetUpdate ?? postSheetUpdate;
 
   const contactResult = getVoiceContactRequestResult(conversation);
   if (contactResult) {
@@ -2102,7 +2108,7 @@ async function processPostCallOutcomeForConversation(
       reason: failureReason,
     });
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "provider_d17_failure",
@@ -2138,7 +2144,7 @@ async function processPostCallOutcomeForConversation(
       reason: failureReason,
     });
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "provider_quota_exceeded",
@@ -2171,7 +2177,7 @@ async function processPostCallOutcomeForConversation(
       reason: failureReason,
     });
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "provider_llm_failure",
@@ -2205,7 +2211,7 @@ async function processPostCallOutcomeForConversation(
     const mismatchSummary =
       "The recorded greeting explicitly identified another person or an unrelated business; the target was not reached and no sales handoff was created.";
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "identity_mismatch_voicemail",
@@ -2240,7 +2246,7 @@ async function processPostCallOutcomeForConversation(
     const callResult = gatekeeperAdminEarlyExit ? "gatekeeper_admin_early_exit" : "agent_not_available";
     const outcome = buildVoiceResponseStatus(callResult);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult,
@@ -2279,7 +2285,7 @@ async function processPostCallOutcomeForConversation(
     const recordingSummary =
       "Automated recording, call-screening system, phone tree, or canned playback answered; no live agent intent was confirmed.";
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult,
@@ -2317,7 +2323,7 @@ async function processPostCallOutcomeForConversation(
       : "human_answered_no_bot_response_final_attempt";
     const outcome = buildVoiceResponseStatus(callResult);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult,
@@ -2346,7 +2352,7 @@ async function processPostCallOutcomeForConversation(
   if (hasToolCall(conversation, "information_requested")) {
     const outcome = buildVoiceResponseStatus("information_requested");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "information_requested",
@@ -2413,7 +2419,7 @@ async function processPostCallOutcomeForConversation(
     const handoffReady = shouldTreatAsHandoffReadyCallback(conversation);
     const outcome = buildCallbackResponseStatus(callbackTime, handoffReady);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       ...(hasLiveTransferRequest(conversation) ? {
@@ -2468,7 +2474,7 @@ async function processPostCallOutcomeForConversation(
   if (hasToolCall(conversation, "not_interested") && shouldTreatAsDeferredContact(conversation)) {
     const outcome = buildVoiceResponseStatus("deferred_contact");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "deferred_contact",
@@ -2527,7 +2533,7 @@ async function processPostCallOutcomeForConversation(
   if (hasSuccessfulTransfer(conversation)) {
     const outcome = buildVoiceResponseStatus("warm_transfer_completed");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "warm_transfer_completed",
@@ -2558,7 +2564,7 @@ async function processPostCallOutcomeForConversation(
   if (shouldTreatAsNotShortSale(conversation)) {
     const outcome = buildVoiceResponseStatus("not_short_sale");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "not_short_sale",
@@ -2587,7 +2593,7 @@ async function processPostCallOutcomeForConversation(
   if (shouldTreatAsAlreadyHasShortSaleHelp(conversation)) {
     const outcome = buildVoiceResponseStatus("already_working_with_negotiator");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "already_working_with_negotiator",
@@ -2617,7 +2623,7 @@ async function processPostCallOutcomeForConversation(
     const callbackTime = getExplicitCallbackConsent(conversation)!.callbackTime;
     const outcome = buildCallbackResponseStatus(callbackTime, true);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "callback_requested",
@@ -2670,7 +2676,7 @@ async function processPostCallOutcomeForConversation(
     const callbackTime = getExplicitCallbackConsent(conversation)!.callbackTime;
     const outcome = buildCallbackResponseStatus(callbackTime, true);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "callback_requested",
@@ -2722,7 +2728,7 @@ async function processPostCallOutcomeForConversation(
   if (shouldTreatAsTargetReachedSelfHandlingDisconnect(conversation, expectedFirstName)) {
     const outcome = buildVoiceResponseStatus("agent_reached_self_handling_disconnected");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "agent_reached_self_handling_disconnected",
@@ -2755,7 +2761,7 @@ async function processPostCallOutcomeForConversation(
   if (shouldTreatAsAgentHungUp(conversation)) {
     const outcome = buildVoiceResponseStatus("call_received_agent_hung_up", undefined, metadata.assistantName);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "call_received_agent_hung_up",
@@ -2786,7 +2792,7 @@ async function processPostCallOutcomeForConversation(
     const callbackTime = getExplicitCallbackConsent(conversation)!.callbackTime;
     const outcome = buildVoiceResponseStatus("callback_requested", callbackTime);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "callback_requested",
@@ -2841,7 +2847,7 @@ async function processPostCallOutcomeForConversation(
     const callResult = failedVoicemailOrNoAnswer;
     const outcome = buildVoiceResponseStatus(callResult);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult,
@@ -2891,7 +2897,7 @@ async function processPostCallOutcomeForConversation(
       const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();
 
       if (invalidDestinationNumber) {
-        await postSheetUpdate({
+        await persistSheetUpdate({
           rowNumber: metadata.rowNumber,
           callAttemptNumber: metadata.callAttemptNumber,
           callResult: outcome,
@@ -2900,7 +2906,7 @@ async function processPostCallOutcomeForConversation(
           voiceNotes: buildPerformanceNotes(responseStatus, outcomeSummary),
         });
       } else {
-        await postSheetUpdate({
+        await persistSheetUpdate({
           rowNumber: metadata.rowNumber,
           callAttemptNumber: metadata.callAttemptNumber,
           callResult: outcome,
@@ -2950,7 +2956,7 @@ async function processPostCallOutcomeForConversation(
       const noConnectSummary =
         "ElevenLabs accepted the outbound call request, but the call never connected and produced no audio or transcript.";
 
-      await postSheetUpdate({
+      await persistSheetUpdate({
         rowNumber: metadata.rowNumber,
         callAttemptNumber: metadata.callAttemptNumber,
         callResult,
@@ -2989,7 +2995,7 @@ async function processPostCallOutcomeForConversation(
   if (shouldTreatAsDeferredContact(conversation)) {
     const outcome = buildVoiceResponseStatus("deferred_contact");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "deferred_contact",
@@ -3024,7 +3030,7 @@ async function processPostCallOutcomeForConversation(
     const handoffReady = shouldTreatAsHandoffReadyCallback(conversation);
     const outcome = buildCallbackResponseStatus(callbackTime, handoffReady);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "callback_requested",
@@ -3071,7 +3077,7 @@ async function processPostCallOutcomeForConversation(
   if (shouldTreatAsNotInterested(conversation)) {
     const outcome = buildVoiceResponseStatus("answered_not_interested");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "answered_not_interested",
@@ -3105,7 +3111,7 @@ async function processPostCallOutcomeForConversation(
     const callResult = voicemailOrNoAnswer;
     const outcome = buildVoiceResponseStatus(callResult);
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult,
@@ -3139,7 +3145,7 @@ async function processPostCallOutcomeForConversation(
   if (metadata.callAttemptNumber <= 1) {
     const outcome = buildVoiceResponseStatus("no_answer_first_attempt");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "no_answer_first_attempt",
@@ -3168,7 +3174,7 @@ async function processPostCallOutcomeForConversation(
   if (metadata.callAttemptNumber > 1) {
     const outcome = buildVoiceResponseStatus("no_response_second_attempt");
 
-    await postSheetUpdate({
+    await persistSheetUpdate({
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
       callResult: "no_response_second_attempt",
@@ -3235,7 +3241,10 @@ export async function handleElevenLabsPostCallWebhook(conversationId: string): P
   return done;
 }
 
-export async function processPostCallOutcomeFromConversationId(conversationId: string): Promise<boolean> {
+export async function processPostCallOutcomeFromConversationId(
+  conversationId: string,
+  options: Pick<PostCallOptions, "postSheetUpdate"> = {},
+): Promise<boolean> {
   const conversation = await fetchConversation(conversationId);
   const metadata = metadataFromConversation(conversation);
 
@@ -3248,7 +3257,7 @@ export async function processPostCallOutcomeFromConversationId(conversationId: s
     return false;
   }
 
-  const done = await processPostCallOutcomeForConversation(conversationId, metadata, conversation);
+  const done = await processPostCallOutcomeForConversation(conversationId, metadata, conversation, options);
 
   if (done && shouldRequestQueueRefillAfterPostCall(conversationId)) {
     await requestVoiceQueueRefill({

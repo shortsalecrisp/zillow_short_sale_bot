@@ -1,6 +1,16 @@
 # Uniform Conversion Comparison
 
-Current revision is r2, verified at 2026-10-09T18:06:32.077Z (2:06:32 PM New York). The original release below is historical and must not be pooled with r2. Both arms remain identical except for TTS model.
+Current revision is r3, verified at 2026-10-12T00:03:23.606Z (8:03:23 PM New York on October 11). Earlier releases below are historical and must not be pooled with r3. Both arms remain identical except for TTS model.
+
+## Approved Revision 3
+
+Yoni approved the Lead Intelligence callback-direction and confirmed-state repair. Both provider arms now preserve an already-confirmed listing after a hearing problem and distinguish caller-initiated "Can I call you back?" from owner-directed "Can you call me back?" Prompt-only guarded writes preserved every protected provider setting and the 50/50 branch split.
+
+Current control version: agtvrsn_7501m4ppqfkhfs28xarn71t6hw23.
+Current test version: agtvrsn_7501m4ppqmhef29ttr75z3dbm6cq.
+Current shared writable-body hash excluding only TTS model: e74c45f09142028e12f027334ae0a706b33fc984fed5016f2064c05ffcb0ac89.
+
+Require the exact r3 final branch/version and provider start after the r3 boundary. The 15-true-live-conversations-per-arm and preferred 100-genuine-call gates restart for r3. Previous versions remain historical.
 
 ## Approved Revision 2
 
