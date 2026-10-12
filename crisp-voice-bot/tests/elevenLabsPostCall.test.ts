@@ -1126,6 +1126,15 @@ test("post-call fallback distinguishes self-initiated future contact from callba
     status: "done",
     transcript: [{ role: "user", message: "I'm not interested, but I'll call you if that changes." }],
   };
+  const melaneeCallerInitiated = {
+    status: "done",
+    transcript: [
+      { role: "assistant", message: "Would help with lender paperwork or calls be useful for this listing?" },
+      { role: "user", message: "Can I call you back? I'm in a restaurant and I can hardly hear you." },
+      { role: "assistant", tool_calls: [{ tool_name: "callback_requested" }] },
+      { role: "user", message: "It'll probably be about an hour." },
+    ],
+  };
 
   assert.equal(shouldTreatAsDeferredContact(eugeneConversation), true);
   assert.equal(shouldTreatAsCallback(eugeneConversation), false);
@@ -1133,6 +1142,8 @@ test("post-call fallback distinguishes self-initiated future contact from callba
   assert.equal(shouldTreatAsDeferredContact(requestedCallback), false);
   assert.equal(shouldTreatAsCallback(requestedCallback), true);
   assert.equal(shouldTreatAsDeferredContact(hardNo), false);
+  assert.equal(shouldTreatAsDeferredContact(melaneeCallerInitiated), true);
+  assert.equal(shouldTreatAsCallback(melaneeCallerInitiated), false);
 });
 
 test("post-call fallback gives Cinthia and Summer voicemail evidence precedence over automated callback wording", async () => {

@@ -307,7 +307,7 @@ test("same-row concurrent direct writes reread terminal intent before applying a
   assert.equal(sheet.reads(), 1, "the second write cannot read an obsolete pre-terminal row");
   release.resolve();
   await Promise.all([terminal, stale]);
-  assert.equal(sheet.reads(), 2);
+  assert.equal(sheet.reads(), 3, "the retry path rereads once for ordering and once for persisted scheduling proof");
   assert.equal(row[VOICE_BOT_COL_CALL_1_RESULT - 1], "do_not_call");
   assert.equal(row[VOICE_BOT_COL_LEAD_STATUS_CODE - 1], "R");
   assert.equal(row[VOICE_BOT_COL_CALL_ELIGIBLE - 1], "");
@@ -329,4 +329,27 @@ test("a failed same-row predecessor releases the queue for outcome reconciliatio
   assert.equal(results[1].status, "fulfilled");
   assert.equal(row[VOICE_BOT_COL_CALL_1_RESULT - 1], "call_ended_by_request");
   assert.equal(row[VOICE_BOT_COL_CALL_ELIGIBLE - 1], "");
+});
+
+test("retryable first-attempt writes verify the persisted next-slot schedule", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  const row = Array.from({ length: 42 }, () => "");
+  row[0] = "Artur";
+  row[4] = "192 W Fox Hill Dr";
+  row[5] = "Buffalo Grove";
+  row[6] = "IL";
+  row[VOICE_BOT_COL_CALL_1_SENT - 1] = "2026-10-09T14:17:33.225Z";
+  const sheet = fakeSheet(row);
+
+  await updateVoiceLeadRow(6055, {
+    callAttemptNumber: 1,
+    callResult: "human_answered_no_bot_response",
+  }, async () => sheet.client);
+
+  assert.equal(sheet.reads(), 2, "the write must be followed by an owner-surface reread");
+  assert.equal(row[VOICE_BOT_COL_CALL_1_RESULT - 1], "human_answered_no_bot_response");
+  assert.equal(row[VOICE_BOT_COL_LEAD_STATUS_CODE - 1], "");
+  assert.equal(row[VOICE_BOT_COL_CALL_ELIGIBLE - 1], "yes");
+  assert.equal(row[VOICE_BOT_COL_CALL_TIME_BUCKET - 1], "voice_call_2_due");
+  assert.match(row[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1], /^2026-10-/);
 });

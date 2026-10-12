@@ -273,6 +273,29 @@ async function writeVoiceLeadRow(
     },
   });
 
+  if (normalizeCallAttemptNumber(updates.callAttemptNumber) === 1 && isRetryableVoiceBotResult(updates.callResult)) {
+    const verifiedRow = await readVoiceLeadRow(sheets, rowNumber);
+    const proofColumns = new Set([
+      VOICE_BOT_COL_CALL_1_RESULT,
+      VOICE_BOT_COL_LEAD_STATUS_CODE,
+      VOICE_BOT_COL_CALL_ELIGIBLE,
+      VOICE_BOT_COL_CALL_TIME_BUCKET,
+      VOICE_BOT_COL_CALL_SCHEDULED_FOR,
+    ]);
+    const expectedProof = writes.filter((write) => proofColumns.has(write.columnNumber));
+    const mismatches = expectedProof.filter((write) =>
+      String(verifiedRow[write.columnNumber - 1] ?? "").trim() !== write.value.trim());
+    if (mismatches.length > 0) {
+      throw new Error(`Retry scheduling readback mismatch for row ${rowNumber}: ${fieldsWritten(mismatches).join(", ")}`);
+    }
+    logger.info("Google Sheets retry scheduling verified by readback", {
+      spreadsheetId: config.googleSheets.sheetId,
+      tabName: config.googleSheets.tabName,
+      rowNumber,
+      fields: fieldsWritten(expectedProof),
+    });
+  }
+
   logger.info("Google Sheets voice lead row updated", {
     spreadsheetId: config.googleSheets.sheetId,
     tabName: config.googleSheets.tabName,

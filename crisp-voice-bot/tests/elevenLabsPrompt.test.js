@@ -96,6 +96,7 @@ test("specific purpose, ambiguous what and hearing restoration have distinct bou
   assert.match(s, /For an audio problem say only "Sorry, can you hear me now\?" and wait/);
   assert.match(s, /hearing-restoration answer[^\n]+is not qualification consent/);
   assert.match(s, /repeat only the missed short sentence, then wait again/);
+  assert.match(s, /if they already confirmed the listing, never restart the listing check/);
   assert.match(s, /Do not claim the connection or volume was fixed/);
   assert.match(s, /Never respond with "How can I help you today\?"/);
 });
@@ -256,6 +257,7 @@ test("callback timing is literal, uncertain details are retained, and consent is
   assert.match(s, /retain earlier context in conversationSummary/);
   assert.match(s, /Do not ask for AM or PM solely to complete the field/);
   assert.match(s, /Use ASAP only if the caller actually requested or agreed to that timing/);
+  assert.match(s, /Never use callback_requested for caller-initiated contact such as "Can I call you back\?"/);
   assert.doesNotMatch(s, /What time should[^\n]+call|Is that two|Two in the afternoon/);
 });
 test("email request must execute with caller-confirmed address before acknowledgment", () => {
@@ -272,6 +274,8 @@ test("email request must execute with caller-confirmed address before acknowledg
 test("self-initiated contact does not silently create future calls or an automatic hangup", () => {
   const s = section("Contact preferences and endings");
   assert.match(s, /DEFERRED CONTACT: caller said they will initiate future contact/);
+  assert.match(s, /"Can I call you back\?" means the caller will initiate/);
+  assert.match(s, /"Can you call me back\?" requests an owner callback/);
   assert.match(s, /Do not create a callback or transfer/);
   assert.match(s, /This preference alone does not authorize ending; after recording, wait for a new turn unless a pending question needs an answer/);
 });

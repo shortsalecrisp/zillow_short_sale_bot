@@ -188,3 +188,35 @@ test("accepted retryable call failure also requires scheduling proof", async () 
   });
   assert.equal(directCallCount, 1);
 });
+
+test("accepted human-answer no-bot-response always gets direct scheduling readback", async () => {
+  const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
+  const directCalls: Array<{ rowNumber: number; callResult?: string }> = [];
+  await postSheetUpdate({
+    rowNumber: 6055,
+    callAttemptNumber: 1,
+    callResult: "human_answered_no_bot_response",
+    responseStatus: "Human answered; bot did not respond",
+  }, {
+    appsScriptPost: async () => ({ data: { ok: true, fieldsWritten: [
+      "AH:callResult", "AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for",
+    ] } }),
+    directSheetUpdate: async (rowNumber, payload) => {
+      directCalls.push({ rowNumber, callResult: payload.callResult });
+      return ["AH:callResult", "AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for"];
+    },
+  });
+  assert.deepEqual(directCalls, [{ rowNumber: 6055, callResult: "human_answered_no_bot_response" }]);
+});
+
+test("accepted retryable outcome fails closed when scheduling readback cannot be proved", async () => {
+  const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
+  await assert.rejects(postSheetUpdate({
+    rowNumber: 6055,
+    callAttemptNumber: 1,
+    callResult: "human_answered_no_bot_response",
+  }, {
+    appsScriptPost: async () => ({ data: { ok: true, fieldsWritten: ["AH:callResult"] } }),
+    directSheetUpdate: async () => { throw new Error("Synthetic readback mismatch"); },
+  }), /Synthetic readback mismatch/);
+});

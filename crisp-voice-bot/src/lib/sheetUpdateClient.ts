@@ -3,6 +3,7 @@ import { config } from "./config";
 import { logger } from "./logger";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
 import { processVoiceQueue } from "./voiceQueue";
+import { isRetryableVoiceBotResult } from "./voiceSheet";
 import type { SheetUpdateRequest } from "../types";
 
 type AppsScriptPost = (
@@ -13,6 +14,8 @@ type AppsScriptPost = (
     headers: Record<string, string>;
   },
 ) => Promise<{ data?: unknown }>;
+
+class RetrySchedulingReadbackError extends Error {}
 
 type DirectSheetUpdate = (
   rowNumber: number,
@@ -83,6 +86,10 @@ function needsCallFailureSchedulingReconciliation(payload: SheetUpdateRequest, d
     .some((field) => !written.has(field));
 }
 
+function needsRetrySchedulingReadback(payload: SheetUpdateRequest): boolean {
+  return Number(payload.callAttemptNumber) === 1 && isRetryableVoiceBotResult(payload.callResult);
+}
+
 function summarizeAppsScriptResponse(data: unknown): Record<string, unknown> {
   const parsed = parseAppsScriptResponse(data);
   if (!parsed) {
@@ -101,6 +108,7 @@ async function persistDirectSheetFallback(
   payload: SheetUpdateRequest,
   directSheetUpdate: DirectSheetUpdate,
   reason: string,
+  failClosed = false,
 ): Promise<void> {
   if (!Number.isInteger(payload.rowNumber) || Number(payload.rowNumber) < 2) {
     logger.error("Direct sheet fallback skipped because rowNumber is invalid", {
@@ -109,6 +117,7 @@ async function persistDirectSheetFallback(
       callResult: payload.callResult,
       reason,
     });
+    if (failClosed) throw new RetrySchedulingReadbackError("Direct sheet readback requires a valid row number");
     return;
   }
 
@@ -129,6 +138,9 @@ async function persistDirectSheetFallback(
       reason,
       message: error instanceof Error ? error.message : String(error),
     });
+    if (failClosed) {
+      throw new RetrySchedulingReadbackError(error instanceof Error ? error.message : String(error));
+    }
   }
 }
 
@@ -304,10 +316,17 @@ export async function postSheetUpdate(
       callResult: payload.callResult,
     });
 
-    // Some older Apps Script deployments acknowledge the terminal result but
-    // do not clear stale scheduling cells. Reconcile only this terminal
-    // failure through the direct writer when the receipt lacks AD:AF proof.
-    if (needsCallFailureSchedulingReconciliation(payload, response.data)) {
+    // Apps Script acceptance is not owner-surface proof that a retryable first
+    // attempt actually retained its next-slot schedule. The direct writer
+    // rereads the row, reapplies the idempotent scheduling fields and verifies
+    // their persisted values before returning.
+    if (needsRetrySchedulingReadback(payload)) {
+      await persistDirectSheetFallback({
+        rowNumber: payload.rowNumber,
+        callAttemptNumber: payload.callAttemptNumber,
+        callResult: payload.callResult,
+      }, directSheetUpdate, "apps_script_retry_scheduling_readback", true);
+    } else if (needsCallFailureSchedulingReconciliation(payload, response.data)) {
       await persistDirectSheetFallback({
         rowNumber: payload.rowNumber,
         callAttemptNumber: payload.callAttemptNumber,
@@ -315,6 +334,7 @@ export async function postSheetUpdate(
       }, directSheetUpdate, "apps_script_missing_terminal_scheduling_cleanup");
     }
   } catch (error) {
+    if (error instanceof RetrySchedulingReadbackError) throw error;
     if (error instanceof AxiosError) {
       logger.error("Sheet update failed", {
         mode: useAppsScript ? "google_apps_script" : "local_stub",

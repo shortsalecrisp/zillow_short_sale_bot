@@ -114,6 +114,7 @@ test("contact tool metadata changes only descriptions for webhook and client sch
       const actual = type === "client" ? after.parameters : after.api_schema.request_body_schema;
       if (name === "callback_requested") {
         assert.match(after.description, /not a booked appointment/);
+        assert.match(after.description, /"Can I call you back\?" means the caller will initiate/);
         assert.match(actual.properties.callbackTime.description, /requested timing words verbatim/);
         assert.match(actual.properties.callbackTime.description, /Do not convert words to digits, add an unspoken AM or PM/);
         assert.match(actual.properties.callbackTime.description, /uncertainty separately in conversationSummary for human review/);

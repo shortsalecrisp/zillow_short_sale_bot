@@ -563,6 +563,9 @@ export function shouldTreatAsDeferredContact(conversation: ElevenLabsConversatio
   }
 
   return (
+    /\b(?:can|could|may)\s+i\s+(?:call|contact|reach(?: back)? out to|follow up with)\s+(?:you|yoni|him|crisp)(?:\s+back)?\b/.test(
+      text,
+    ) ||
     /\b(?:i(?:'ll| will|'m going to| am going to|'m gonna| am gonna)|let me)\s+(?:get back to|call|contact|reach(?: back)? out to|follow up with)\s+(?:you|yoni|him|crisp)\b/.test(
       text,
     ) ||
@@ -775,7 +778,7 @@ export function getExplicitCallbackConsent(conversation: ElevenLabsConversation)
     const directRequest = directCallbackRequestClause(item.message);
     const scopedText = directRequest ? normalizeText(directRequest) : text;
     const timingAnswer = callbackTimingWords(directRequest ?? item.message, /\b(?:what|which) (?:day|time)\b|\bwhen\b.{0,50}\bcall\b/i.test(precedingAssistant));
-    if (/\b(?:cancel|never mind|nevermind|no thanks|not interested|do not|don't|dont|i(?:'ll| will) call you)\b/.test(scopedText) ||
+    if (/\b(?:cancel|never mind|nevermind|no thanks|not interested|do not|don't|dont|i(?:'ll| will) call you|(?:can|could|may) i call you(?: back)?)\b/.test(scopedText) ||
       (/\bnot now\b/.test(scopedText) && !timingAnswer) ||
       /^(?:no|nope|not today)[.! ]*$/.test(scopedText)) {
       consent = undefined;
@@ -2402,7 +2405,7 @@ async function processPostCallOutcomeForConversation(
     return true;
   }
 
-  if (hasToolCall(conversation, "callback_requested") &&
+  if (hasToolCall(conversation, "callback_requested") && !shouldTreatAsDeferredContact(conversation) &&
     (!hasLiveTransferRequest(conversation) || getExplicitCallbackConsent(conversation))) {
     const callbackConsent = getExplicitCallbackConsent(conversation);
     const callbackTime = callbackConsent?.callbackTime ??
