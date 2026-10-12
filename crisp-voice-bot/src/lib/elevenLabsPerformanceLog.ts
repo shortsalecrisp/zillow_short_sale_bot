@@ -399,7 +399,12 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const clearLiveTransferConsent = contact.humanAnswered === true && hasClearLiveTransferConsent(humanTranscript, "");
   const misfiredLiveTransferRequest = isMisfiredLiveTransferRequest(humanTranscript, "");
   const callbackOrLaterSignal = contact.humanAnswered === true && hasCallbackOrLaterSignal(humanTranscript, "");
-  const usesServiceFirstOpening = ["maya-service-first-recovery-20261003", "maya-uniform-lead-conversion-20261009", "maya-uniform-lead-conversion-20261009-r2"]
+  const usesServiceFirstOpening = [
+    "maya-service-first-recovery-20261003",
+    "maya-uniform-lead-conversion-20261009",
+    "maya-uniform-lead-conversion-20261009-r2",
+    "maya-uniform-lead-conversion-20261011-r3",
+  ]
     .includes(input.metadata.declaredConversationPolicyVersion ?? "");
   const usesListingAgentOpening = input.metadata.initialOpeningPolicy === "listen_first_listing_agent_v2";
   const reasonMessageIndex = firstAssistantMessageIndexMatching(
