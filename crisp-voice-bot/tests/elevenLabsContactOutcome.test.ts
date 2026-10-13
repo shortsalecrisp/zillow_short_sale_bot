@@ -157,6 +157,42 @@ test("a clear yes to the exact needs question survives a neutral polite close wi
   assert.equal(lib.shouldTreatAsPositiveNeedsAnswer(declined), false);
 });
 
+test("conditional self-contact overrides an earlier yes and closes as deferred without handoff", async () => {
+  const lib = await load();
+  const call = conversation([], "The caller initially said help could be useful, then deferred any contact.");
+  call.transcript = [
+    { role: "assistant", message: "Would help with lender paperwork or calls be useful for this listing?" },
+    { role: "user", message: "Yes." },
+    { role: "assistant", message: "Would you like to speak with Yoni?" },
+    { role: "user", message: "Not now. I'm still talking with the seller and the lender. If I need assistance, I'll give you a call." },
+  ];
+
+  assert.equal(lib.shouldTreatAsDeferredContact(call), true);
+  assert.equal(lib.shouldTreatAsPositiveNeedsAnswer(call), false);
+  assert.equal(lib.getVoiceContactRequestResult(call), "deferred_contact");
+  const update = lib.buildVoiceContactOutcomeUpdates("deferred_contact", call);
+  assert.equal(update.callResult, "deferred_contact");
+  assert.equal(update.leadStatusCode, undefined);
+  assert.equal(update.callbackRequested, "");
+  assert.equal(update.liveTransferRequested, "");
+});
+
+test("a first-person business voicemail greeting outranks apparent live speech", async () => {
+  const lib = await load();
+  const call = conversation([], "Linda's greeting asked the caller to leave contact details.");
+  call.transcript = [
+    {
+      role: "user",
+      message: "This is Linda Lykoff with Panhandle Plains Realty. I'm sorry I missed your call. Please leave your number and a detailed message and I'll get back to you at my earliest convenience.",
+    },
+    { role: "assistant", message: "I'm calling about your short-sale listing." },
+  ];
+
+  assert.equal(lib.shouldTreatAsVoicemail(call), true);
+  assert.equal(lib.getVoiceContactRequestResult(call), undefined);
+  assert.equal(lib.getVoicemailOrNoAnswerCallResult(call, 1), "voicemail_reached");
+});
+
 test("a named Yoni refusal or use of call as a label is not the caller's future opt-out", () => {
   for (const value of [
     "Email me information only. Do not call Yoni now.",

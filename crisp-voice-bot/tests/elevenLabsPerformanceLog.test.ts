@@ -411,6 +411,7 @@ for (const recording of [
   "Your voicemail is being transcribed by YouMail.",
   "Please record your message. When you have finished recording, you may hang up.",
   "Hi, this is Kevin. I'm away from my phone right now; please leave a message or send me a text.",
+  "This is Linda Lykoff with Panhandle Plains Realty. I'm sorry I missed your call. Please leave your number and a detailed message and I'll get back to you at my earliest convenience.",
 ]) {
   test(`recorded endpoint is not human contact: ${recording}`, async () => {
     const result = await measurementLog({ conversation: {

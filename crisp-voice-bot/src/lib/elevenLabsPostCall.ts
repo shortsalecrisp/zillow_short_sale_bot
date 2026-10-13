@@ -574,6 +574,9 @@ export function shouldTreatAsDeferredContact(conversation: ElevenLabsConversatio
     /\b(?:i(?:'ll| will|'m going to| am going to|'m gonna| am gonna)|let me)\s+(?:get back to|call|contact|reach(?: back)? out to|follow up with)\s+(?:you|yoni|him|crisp)\b/.test(
       text,
     ) ||
+    /\b(?:i(?:'ll| will|'m going to| am going to|'m gonna| am gonna)|let me)\s+give\s+(?:you|yoni|him|crisp)\s+a\s+call\b/.test(
+      text,
+    ) ||
     /\b(?:i(?:'ll| will|'m going to| am going to|'m gonna| am gonna)|let me)\s+(?:reach out|get back in touch|follow up)\b/.test(
       text,
     )
@@ -892,7 +895,8 @@ export function shouldTreatAsScreeningAssistedDoNotCall(conversation: ElevenLabs
 }
 
 export function shouldTreatAsPositiveNeedsAnswer(conversation: ElevenLabsConversation): boolean {
-  if (shouldTreatAsDoNotCall(conversation) || shouldTreatAsScreeningAssistedDoNotCall(conversation)) return false;
+  if (shouldTreatAsDoNotCall(conversation) || shouldTreatAsScreeningAssistedDoNotCall(conversation) ||
+    shouldTreatAsDeferredContact(conversation)) return false;
   const messages = conversation.transcript ?? [];
   let positive = false;
   for (let index = 0; index < messages.length; index += 1) {
@@ -941,6 +945,9 @@ export type VoiceContactResult =
 export function getVoiceContactRequestResult(conversation: ElevenLabsConversation): VoiceContactResult | undefined {
   if (shouldTreatAsDoNotCall(conversation) || shouldTreatAsScreeningAssistedDoNotCall(conversation)) {
     return "do_not_call";
+  }
+  if (shouldTreatAsDeferredContact(conversation)) {
+    return "deferred_contact";
   }
   if (shouldTreatAsPositiveNeedsAnswer(conversation)) {
     return "interested_followup_review";
@@ -1216,6 +1223,10 @@ export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): bo
     return true;
   }
 
+  if (hasFirstPersonVoicemailGreeting(conversation)) {
+    return true;
+  }
+
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   return (
     text.includes("voicemail") ||
@@ -1228,6 +1239,16 @@ export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): bo
     text.includes("after the tone") ||
     text.includes("at the beep")
   );
+}
+
+function hasFirstPersonVoicemailGreeting(conversation: ElevenLabsConversation): boolean {
+  return userMessages(conversation).some((message) => {
+    const text = normalizeText(message);
+    const firstPersonIntroduction = /^(?:(?:hi|hello|good (?:morning|afternoon|evening))[, ]+)?(?:this is|you(?:'ve| have) reached)\s+[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,3}\b/.test(text);
+    const leaveContactInstruction = /\b(?:please|kindly)?\s*leave\s+(?:me\s+)?(?:your\s+)?(?:name|number|phone number|contact information|details?|message)\b/.test(text);
+    const unavailableOrReturnCue = /\b(?:sorry i missed your call|can't (?:answer|take) (?:the |your )?call|cannot (?:answer|take) (?:the |your )?call|away from (?:my )?phone|not available|i(?:'ll| will) (?:call|get) (?:you )?back|return your call|get back to you)\b/.test(text);
+    return firstPersonIntroduction && leaveContactInstruction && unavailableOrReturnCue;
+  });
 }
 
 function hasUnavailableVoicemailMailbox(conversation: ElevenLabsConversation): boolean {
