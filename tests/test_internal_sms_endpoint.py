@@ -1633,7 +1633,7 @@ def test_sms_post_handoff_substantive_updates_request_one_owner_alert(monkeypatc
 
 
 def test_sms_automated_civic_and_unsubscribe_confirmations_are_suppressed(monkeypatch):
-    module, _sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    module, _sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
 
     assert module._sms_is_automated_promotional_sms(
         "Fair Fight: Check your voter registration at mvp.sos.ga.gov. Reply STOP to unsubscribe."
@@ -1644,6 +1644,28 @@ def test_sms_automated_civic_and_unsubscribe_confirmations_are_suppressed(monkey
     assert module._sms_is_automated_promotional_sms(
         "I am registered to vote and have a short-sale listing question"
     ) is False
+    assert module._sms_is_automated_promotional_sms(
+        "Keisha needs one more push before Election Day. Can you chip in $1? https://example.org/donate"
+    ) is True
+    assert module._sms_is_automated_promotional_sms(
+        "Ruth, Election Day is Nov 3. Confirm your voting record at https://didthey.vote -Did They Vote Stop to end"
+    ) is True
+
+    client = TestClient(module.app)
+    first = client.post("/sms-chatbot", data={
+        "token": "secret-token", "action": "incoming_sms", "phone": "+13074584077",
+        "message": "Ruth, Election Day is Nov 3. See who voted: https://didthey.vote Stop to end",
+        "message_id": "campaign-first",
+    })
+    followup = client.post("/sms-chatbot", data={
+        "token": "secret-token", "action": "incoming_sms", "phone": "+13074584077",
+        "message": "Thank you for your response. Have a good day.",
+        "message_id": "campaign-followup",
+    })
+    assert first.json()["should_reply"] is False
+    assert followup.json()["should_reply"] is False
+    assert followup.json()["handoff_needed"] is False
+    assert sender.calls == []
 
 
 def test_sms_courtesy_information_acknowledgment_is_not_a_contact_request(monkeypatch):
@@ -1770,6 +1792,26 @@ def test_sms_reaction_matches_when_transport_drops_internal_apostrophe(monkeypat
         "to schedule a call tomorrow",
         {"last_outbound_text": outbound},
     ) is False
+
+
+def test_sms_standalone_flattened_reaction_ignores_transport_punctuation_loss(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    outbound = "Sure, I'll call you Wednesday around 1. Thanks!"
+    row_obj = {
+        "last_outbound_text": outbound,
+        "human_override": "TRUE",
+        "ai_state": "handoff",
+        "handoff_flag": "TRUE",
+        "call_booking_status": "scheduled_callback",
+    }
+
+    assert module._sms_is_reaction_to_last_outbound(
+        "to Sure Ill call you Wednesday around 1 Thanks",
+        row_obj,
+    ) is True
 
 
 def test_sms_delayed_reaction_fragment_matches_prior_bot_reply(monkeypatch):
@@ -2668,6 +2710,30 @@ def test_sms_company_question_outranks_existing_coverage_closeout(monkeypatch):
     assert decision["handoff_needed"] is False
     assert decision["reply_text"].startswith("I'm with Crisp Short Sales.")
     assert decision["reason"] == "Answered company question before generic coverage language"
+
+
+def test_sms_seller_buyer_representation_is_not_processor_coverage(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = (
+        "Im handling both the Seller and Buyer side. You are more than welcome to submit offers. "
+        "The sooner this sells the better."
+    )
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_seller_buyer_representation_only(inbound) is True
+    assert module._sms_has_existing_coverage(inbound) is False
+    assert decision["lead_status"] == "Y"
+    assert decision["conversation_done"] is False
+    assert decision["handoff_needed"] is False
+    assert "don't represent a buyer or submit offers" in decision["reply_text"]
+
+    actual_coverage = "I represent the seller and buyer, and I already have a short sale negotiator handling the file."
+    assert module._sms_is_seller_buyer_representation_only(actual_coverage) is False
+    assert module._sms_has_existing_coverage(actual_coverage) is True
+    assert module._sms_fast_decision({}, actual_coverage)["conversation_done"] is True
 
 
 def test_sms_decline_or_not_short_sale_plus_question_is_warm_o(monkeypatch):

@@ -4879,7 +4879,8 @@ def _sms_normalize_reaction_text(value: Any) -> str:
 
 
 def _sms_normalize_reaction_comparison_text(value: Any) -> str:
-    return re.sub(r"['‘’]", "", _sms_normalize_reaction_text(value))
+    normalized = re.sub(r"['‘’]", "", _sms_normalize_reaction_text(value))
+    return _sms_normalize_whitespace(re.sub(r"[.,!?;:]+", " ", normalized))
 
 
 def _sms_extract_reaction_target(value: Any) -> str:
@@ -5712,9 +5713,15 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
         r"voter registration|register(?:ed)? to vote|volunteer|chipped in|election|ballot)\b",
         t,
     )
-    has_bulk_footer = re.search(r"\b(?:stop\s*2\s*end|reply\s+stop\s+to\s+(?:end|unsubscribe|opt\s*out))\b", t)
+    has_bulk_footer = re.search(
+        r"\b(?:stop\s*2\s*end|(?:reply\s+)?stop\s+to\s+(?:end|unsubscribe|cancel|opt\s*out))\b", t
+    )
     has_known_civic_automation = re.search(
-        r"\b(?:fair fight|peachvote(?:\.com)?|mvp\.sos\.ga\.gov|voter registration portal)\b",
+        r"\b(?:fair fight|peachvote(?:\.com)?|didthey\.vote|mvp\.sos\.ga\.gov|voter registration portal)\b",
+        t,
+    )
+    has_small_donation_ask = re.search(
+        r"(?:\$\s*(?:1|5|10|15|20|25|50)\b|\b(?:chip in|anything you can spare|small donation|just one dollar)\b)",
         t,
     )
     has_survey_identity = re.search(r"\b(?:web\s+)?surveys?\b", t) and re.search(
@@ -5725,10 +5732,37 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
     )
     has_numbered_choices = re.search(r"\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]", t)
     return bool(
-        (has_campaign_appeal and has_link and has_bulk_footer)
+        (has_campaign_appeal and has_link and (has_bulk_footer or has_small_donation_ask))
         or (has_known_civic_automation and (has_link or has_bulk_footer or has_campaign_appeal))
         or (has_survey_identity and has_poll_invitation and has_numbered_choices)
     )
+
+
+_sms_automated_promotional_senders: Dict[str, float] = {}
+
+
+def _sms_is_automated_promotional_followup(text: str) -> bool:
+    normalized = _sms_normalize_whitespace(text).lower()
+    return bool(re.fullmatch(
+        r"(?:thank you|thanks) for (?:your )?(?:response|support|participation)[.! ]*"
+        r"(?:have (?:a )?(?:good|great|nice) day[.! ]*)?",
+        normalized,
+    ))
+
+
+def _sms_remember_automated_promotional_sender(phone: str) -> None:
+    normalized = _sms_normalize_phone(phone)
+    if normalized:
+        _sms_automated_promotional_senders[normalized] = datetime.now(timezone.utc).timestamp()
+
+
+def _sms_is_recent_automated_promotional_sender(phone: str) -> bool:
+    normalized = _sms_normalize_phone(phone)
+    marked_at = _sms_automated_promotional_senders.get(normalized, 0.0)
+    recent = bool(marked_at and datetime.now(timezone.utc).timestamp() - marked_at <= 7 * 24 * 60 * 60)
+    if marked_at and not recent:
+        _sms_automated_promotional_senders.pop(normalized, None)
+    return recent
 
 
 def _sms_is_substantive_post_handoff_update(value: Any) -> bool:
@@ -6527,9 +6561,41 @@ def _sms_is_closed_marketing_conversation(row_obj: Dict[str, str]) -> bool:
     )
 
 
+def _sms_is_seller_buyer_representation_only(value: Any) -> bool:
+    text = _sms_rejection_text(value)
+    both_sides = bool(
+        re.search(
+            r"\b(?:handling|representing|working|acting)\b.{0,55}\b(?:both\s+)?(?:the\s+)?seller(?:'s)?(?:\s+side)?\b"
+            r".{0,30}\b(?:and|&)\b.{0,30}\b(?:the\s+)?buyer(?:'s)?(?:\s+side)?\b",
+            text,
+        )
+        or re.search(
+            r"\b(?:handling|representing|working|acting)\b.{0,55}\b(?:both\s+)?(?:the\s+)?buyer(?:'s)?(?:\s+side)?\b"
+            r".{0,30}\b(?:and|&)\b.{0,30}\b(?:the\s+)?seller(?:'s)?(?:\s+side)?\b",
+            text,
+        )
+    )
+    actual_processor_coverage = re.search(
+        r"\b(?:attorney|lawyer|negotiator|processor|short sale specialist|short sale company|someone helping|team handling)\b",
+        text,
+    )
+    return both_sides and not actual_processor_coverage
+
+
+def _sms_seller_buyer_representation_decision() -> Dict[str, Any]:
+    return _sms_decision(
+        reply_text=(
+            "Got it. I don't represent a buyer or submit offers. I handle the lender-side short-sale paperwork, "
+            "follow-up, and negotiations for the listing side. Would that help on this file?"
+        ),
+        lead_status="Y",
+        reason="Distinguished seller and buyer representation from lender-side processor coverage",
+    )
+
+
 def _sms_has_existing_coverage(value: Any) -> bool:
     text = _sms_rejection_text(value)
-    if _sms_is_failed_provider_experience(text):
+    if _sms_is_failed_provider_experience(text) or _sms_is_seller_buyer_representation_only(text):
         return False
     return bool(
         re.search(
@@ -7300,6 +7366,9 @@ def _sms_fast_decision(
             clear_callback=True,
             reason="Categorical buyer-fee rejection closed before reply-cap escalation",
         )
+
+    if _sms_is_seller_buyer_representation_only(t):
+        return _sms_seller_buyer_representation_decision()
 
     if _sms_is_answered_repeated_inbound_question(row_obj, inbound_text):
         if (
@@ -8257,7 +8326,13 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     if not phone_raw or not inbound_text:
         return {"ok": False, "error": "Missing phone or message", "should_reply": False}
 
-    if _sms_is_automated_promotional_sms(inbound_text):
+    direct_automated_promotion = _sms_is_automated_promotional_sms(inbound_text)
+    if direct_automated_promotion:
+        _sms_remember_automated_promotional_sender(phone_raw)
+    if direct_automated_promotion or (
+        _sms_is_recent_automated_promotional_sender(phone_raw)
+        and _sms_is_automated_promotional_followup(inbound_text)
+    ):
         _sms_append_debug(
             "incoming_sms_automated_promotion_ignored",
             {"request_id": request_id, "phone": phone_raw, "message_id": message_id,

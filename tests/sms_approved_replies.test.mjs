@@ -378,6 +378,39 @@ test('leading to plus the exact latest outbound is a silent transport artifact',
   assert.equal(h.evaluate(`isSmsReactionToLastOutbound_(${JSON.stringify(`to ${outbound} Please call me`)}, ${JSON.stringify({last_outbound_text: outbound})})`), false);
 });
 
+test('standalone flattened reaction tolerates transport punctuation loss before callback routing', () => {
+  const outbound = "Sure, I'll call you Wednesday around 1. Thanks!";
+  const h = smsHarness({
+    last_outbound_text: outbound,
+    human_override: 'TRUE',
+    ai_state: 'handoff',
+    handoff_flag: 'TRUE',
+    call_booking_status: 'scheduled_callback',
+    callback_time: 'Wednesday around 1',
+  });
+  const r = h.incoming('to Sure Ill call you Wednesday around 1 Thanks', {deliver: false});
+  assert.equal(r.reaction, true);
+  assert.equal(r.should_reply, false);
+  assert.equal(r.handoff_needed, false);
+  assert.equal(h.effects.length, 0);
+});
+
+test('seller and buyer representation is not lender-side processor coverage', () => {
+  const text = "I'm handling both the Seller and Buyer side. You are more than welcome to submit offers. The sooner this sells the better.";
+  const {h, r} = answer(text);
+  assert.equal(h.evaluate(`isSellerBuyerRepresentationOnlySignal_(${JSON.stringify(text)})`), true);
+  assert.equal(h.evaluate(`isAlreadyHandledSignal_(${JSON.stringify(text)})`), false);
+  assert.equal(r.lead_status, 'Y');
+  assert.equal(r.conversation_done, false);
+  assert.equal(r.handoff_needed, false);
+  assert.match(r.reply_text, /don't represent a buyer or submit offers/i);
+  assert.match(r.reply_text, /lender-side short-sale paperwork/i);
+
+  const covered = answer('I represent the seller and buyer, and I already have a short sale negotiator handling the file.').r;
+  assert.equal(covered.conversation_done, true);
+  assert.equal(covered.lead_status, 'R');
+});
+
 test('lender or agent questions get one plain-English bank-side role explanation', () => {
   for (const message of ['Are you a lender?', 'Are you a lender or an agent?', 'Are you a real estate agent?']) {
     const {r} = answer(message);

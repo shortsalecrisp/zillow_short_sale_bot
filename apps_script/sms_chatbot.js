@@ -505,7 +505,12 @@ function handleIncomingSmsCore_(body) {
     throw new Error("Missing phone or message");
   }
 
-  if (isAutomatedPromotionalSmsSignal_(inboundText)) {
+  const directAutomatedPromotion = isAutomatedPromotionalSmsSignal_(inboundText);
+  if (directAutomatedPromotion) {
+    rememberAutomatedPromotionalSender_(phoneRaw);
+  }
+  if (directAutomatedPromotion ||
+      (isRecentAutomatedPromotionalSender_(phoneRaw) && isAutomatedPromotionalFollowupSignal_(inboundText))) {
     appendSmsDebugLog_("incoming_sms_automated_promotion_ignored", {
       phone: phoneRaw,
       message_id: messageId,
@@ -2926,6 +2931,19 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  if (isSellerBuyerRepresentationOnlySignal_(t)) {
+    return {
+      matched: true,
+      reply_text: buildSellerBuyerRepresentationClarificationReply_(),
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: false,
+      reason: "Distinguished seller and buyer representation from lender-side processor coverage"
+    };
+  }
+
   const terminal = buildTerminalCoverageDecisionV4_(t, rowObj);
   if (terminal) return terminal;
   if (isFirstFileCreditQuestionSignal_(t)) {
@@ -3779,16 +3797,46 @@ function isAutomatedPromotionalSmsSignal_(text) {
   if (subscriptionConfirmation) return true;
   const hasLink = /\b(?:https?:\/\/|www\.|[a-z0-9-]+(?:\.[a-z0-9-]+)+\/(?:[a-z0-9/?=&%-]+))/.test(t);
   const hasCampaignAppeal = /\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|voter registration|register(?:ed)? to vote|volunteer|chipped in|election|ballot)\b/.test(t);
-  const hasBulkFooter = /\b(?:stop\s*2\s*end|reply\s+stop\s+to\s+(?:end|unsubscribe|opt\s*out))\b/.test(t);
-  const hasKnownCivicAutomation = /\b(?:fair fight|peachvote(?:\.com)?|mvp\.sos\.ga\.gov|voter registration portal)\b/.test(t);
+  const hasBulkFooter = /\b(?:stop\s*2\s*end|(?:reply\s+)?stop\s+to\s+(?:end|unsubscribe|cancel|opt\s*out))\b/.test(t);
+  const hasKnownCivicAutomation = /\b(?:fair fight|peachvote(?:\.com)?|didthey\.vote|mvp\.sos\.ga\.gov|voter registration portal)\b/.test(t);
+  const hasSmallDonationAsk = /(?:\$\s*(?:1|5|10|15|20|25|50)\b|\b(?:chip in|anything you can spare|small donation|just one dollar)\b)/.test(t);
   const hasSurveyIdentity = /\b(?:web\s+)?surveys?\b/.test(t) &&
     /\b(?:i\s+am|i['\u2019]?m|this\s+is|we\s+are|we['\u2019]?re|with)\b/.test(t);
   const hasPollInvitation = /\b(?:poll(?:ing)?|survey(?:ing)?)\b/.test(t) &&
     /\b(?:can|could|would|will)\s+you\b|\banswer\s+(?:a|this|our)\b/.test(t);
   const hasNumberedChoices = /\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]/.test(t);
-  return (hasCampaignAppeal && hasLink && hasBulkFooter) ||
+  return (hasCampaignAppeal && hasLink && (hasBulkFooter || hasSmallDonationAsk)) ||
     (hasKnownCivicAutomation && (hasLink || hasBulkFooter || hasCampaignAppeal)) ||
     (hasSurveyIdentity && hasPollInvitation && hasNumberedChoices);
+}
+
+function isAutomatedPromotionalFollowupSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /^(?:thank you|thanks) for (?:your )?(?:response|support|participation)[.! ]*(?:have (?:a )?(?:good|great|nice) day[.! ]*)?$/.test(t);
+}
+
+function automatedPromotionalSenderKey_(phone) {
+  return "SMS_AUTOMATED_PROMOTIONAL_SENDER_V1_" + normalizePhone_(phone);
+}
+
+function rememberAutomatedPromotionalSender_(phone) {
+  const normalized = normalizePhone_(phone);
+  if (!normalized) return;
+  PropertiesService.getScriptProperties().setProperty(
+    automatedPromotionalSenderKey_(normalized),
+    String(Date.now())
+  );
+}
+
+function isRecentAutomatedPromotionalSender_(phone) {
+  const normalized = normalizePhone_(phone);
+  if (!normalized) return false;
+  const props = PropertiesService.getScriptProperties();
+  const key = automatedPromotionalSenderKey_(normalized);
+  const markedAt = Number(props.getProperty(key) || 0);
+  const recent = markedAt > 0 && Date.now() - markedAt <= 7 * 24 * 60 * 60 * 1000;
+  if (!recent && markedAt) props.deleteProperty(key);
+  return recent;
 }
 
 function isStructuredAutomatedResponseSignal_(text) {
@@ -4264,7 +4312,11 @@ function normalizeSmsReactionText_(text) {
 }
 
 function normalizeSmsReactionComparisonText_(text) {
-  return normalizeSmsReactionText_(text).replace(/['\u2018\u2019]/g, "");
+  return normalizeSmsReactionText_(text)
+    .replace(/['\u2018\u2019]/g, "")
+    .replace(/[.,!?;:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function extractSmsReactionTarget_(text) {
@@ -4918,6 +4970,7 @@ function buildNegotiatorRoleQuestionReply_() {
 
 function isAlreadyHandledSignal_(text) {
   if (isNegotiatorRoleQuestionSignal_(text)) return false;
+  if (isSellerBuyerRepresentationOnlySignal_(text)) return false;
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   const patterns = [
     /\b(?:my|our|the)\s+(?:lawyer|attorney|negotiator|short sale negotiator)\b/,
@@ -4952,6 +5005,18 @@ function isAlreadyHandledSignal_(text) {
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isSellerBuyerRepresentationOnlySignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  const bothSides = /\b(?:handling|representing|working|acting)\b.{0,55}\b(?:both\s+)?(?:the\s+)?seller(?:'s)?(?:\s+side)?\b.{0,30}\b(?:and|&)\b.{0,30}\b(?:the\s+)?buyer(?:'s)?(?:\s+side)?\b/.test(t) ||
+    /\b(?:handling|representing|working|acting)\b.{0,55}\b(?:both\s+)?(?:the\s+)?buyer(?:'s)?(?:\s+side)?\b.{0,30}\b(?:and|&)\b.{0,30}\b(?:the\s+)?seller(?:'s)?(?:\s+side)?\b/.test(t);
+  const actualProcessorCoverage = /\b(?:attorney|lawyer|negotiator|processor|short sale specialist|short sale company|someone helping|team handling)\b/.test(t);
+  return bothSides && !actualProcessorCoverage;
+}
+
+function buildSellerBuyerRepresentationClarificationReply_() {
+  return "Got it. I don't represent a buyer or submit offers. I handle the lender-side short-sale paperwork, follow-up, and negotiations for the listing side. Would that help on this file?";
 }
 
 function isClearNoSignal_(text) {
