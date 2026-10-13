@@ -51,6 +51,9 @@ from sheet_safety import (
 )
 from sms_providers import get_sender
 from sms_takeover import create_takeover_router
+from video_followup import get_service as get_video_followup_service
+from video_followup_player import create_video_followup_router
+from video_followup_worker import start_worker as start_video_worker, stop_worker as stop_video_worker
 
 # ──────────────────────────────────────────────────────────────────────
 # Configuration & logging
@@ -139,6 +142,9 @@ if not SMS_API_KEY:
 # FastAPI app
 app            = FastAPI()
 app.include_router(create_takeover_router(TASKER_TRANSPORT_HEALTH_URL))
+app.include_router(create_video_followup_router(lambda: get_video_followup_service().store))
+app.add_event_handler("startup", start_video_worker)
+app.add_event_handler("shutdown", stop_video_worker)
 
 
 def _recover_stale_queue_for_scheduled_window() -> int:

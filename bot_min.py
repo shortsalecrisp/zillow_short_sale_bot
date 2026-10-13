@@ -12763,6 +12763,7 @@ def _enqueue_tasker_sms_outbox(
     stable_id: str = "",
     mark_codex_verified: bool = False,
     request_prefix: str = "scheduler",
+    followup_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
         return None
@@ -12770,6 +12771,8 @@ def _enqueue_tasker_sms_outbox(
     send_kind = "followup" if action == "enqueue_followup_sms" else "initial"
     message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
     message_id = f"{send_kind}-{row_idx}-{message_hash}"
+    if action == "enqueue_followup_sms" and followup_context:
+        message_id = followup_context["message_id"]
     stable_id = str(stable_id or "").strip()
     body: Dict[str, Any] = {
         "token": SMS_CHATBOT_ALLOWED_TOKEN,
@@ -12786,6 +12789,9 @@ def _enqueue_tasker_sms_outbox(
     }
     if action == "enqueue_initial_sms":
         body["mark_codex_verified"] = mark_codex_verified
+    elif followup_context:
+        for key in ("followup_key", "initial_sent_at", "video_variant", "video_job_id", "first_name"):
+            body[key] = followup_context[key]
 
     try:
         response = requests.post(TASKER_TRANSPORT_HEALTH_URL, json=body, timeout=20)
@@ -12815,6 +12821,7 @@ def send_sms(
     row_idx: int,
     follow_up: bool = False,
     stable_id: str = "",
+    initial_sent_at: str = "",
 ):
     if not SMS_ENABLE or not phone:
         LOG.info(
@@ -12868,6 +12875,19 @@ def send_sms(
         LOG.error("TASKER_FOLLOWUP_OUTBOX_INVALID_PHONE row=%s phone=%s; send not attempted", row_idx, _redact_phone(phone))
         return
 
+    followup_options = {}
+    if initial_sent_at and stable_id and not SMS_TEST_MODE:
+        from video_followup import select_for_followup
+        msg_txt, context = select_for_followup(
+            msg_txt, row=row_idx, stable_id=stable_id, phone=digits,
+            first_name=first, initial_sent_at=initial_sent_at,
+        )
+        if msg_txt is None:
+            LOG.info("VIDEO_FOLLOWUP_CANCELLED row=%s", row_idx)
+            return
+        if context:
+            followup_options["followup_context"] = context
+
     for attempt in range(1, 3):
         queued = _enqueue_tasker_sms_outbox(
             action="enqueue_followup_sms",
@@ -12875,6 +12895,7 @@ def send_sms(
             phone_digits=digits,
             message=msg_txt,
             stable_id=stable_id,
+            **followup_options,
         )
         if queued and queued.get("ok") is True:
             LOG.info(
@@ -13890,6 +13911,13 @@ def _follow_up_pass():
         effective_elapsed_hours = (
             elapsed_hours + FOLLOWUP_DUE_GRACE_MINUTES / 60.0
         )
+        video_enabled = os.getenv("VIDEO_FOLLOWUP_ENABLED", "false").lower() == "true"
+        if video_enabled and SMS_ENABLE and not SMS_TEST_MODE and effective_elapsed_hours < FU_HOURS:
+            from video_followup import prepare_for_followup
+            prepare_for_followup(
+                row=sheet_row, stable_id=row[27] if len(row) > 27 else "",
+                phone=row[COL_PHONE], first_name=row[COL_FIRST], initial_sent_at=ts,
+            )
         remaining_hours = max(0.0, FU_HOURS - effective_elapsed_hours)
         LOG.info(
             "FU-review row %s init_ts=%s elapsed_hours=%.2f grace_minutes=%.2f remaining_hours=%.2f qualify=%s phone=%s address=%s",
@@ -13934,6 +13962,7 @@ def _follow_up_pass():
 
         _pace_followup_sms_batch(eligible_count)
 
+        video_options = {"initial_sent_at": ts.isoformat()} if video_enabled else {}
         send_sms(
             phone=followup_phone,
             first=row[COL_FIRST],
@@ -13941,6 +13970,7 @@ def _follow_up_pass():
             row_idx=sheet_row,
             follow_up=True,
             stable_id=row[27] if len(row) > 27 else "",
+            **video_options,
         )
         eligible_count += 1
 

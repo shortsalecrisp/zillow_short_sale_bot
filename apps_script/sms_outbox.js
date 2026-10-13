@@ -460,12 +460,19 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
   if (phone.length !== 10 || !replyText || !messageId || hasSheetRow === hasCrmProspect) {
     return { ok: false, queued: false, error: "Follow-up SMS requires phone, message, message ID, and exactly one CRM identity" };
   }
+  var videoContext = null;
+  if (hasVideoFollowupContextV19_(body)) {
+    videoContext = validateVideoFollowupContextV19_(body, true);
+    if (!videoContext.ok) return { ok: false, queued: false, error: videoContext.reason };
+  }
 
   installSmsOutboxTriggers_();
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_pending_sends") || ss.insertSheet("sms_pending_sends");
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
-  var metadata = hasSheetRow
+  var metadata = videoContext
+    ? "__scheduled_followup__:" + JSON.stringify(videoContext.metadata)
+    : hasSheetRow
     ? "__scheduled_followup__:" + JSON.stringify({
       crm_row: crmRow,
       stable_id: String(body && (body.stable_id || body.zpid || body.listing_id) || "").trim()
@@ -479,6 +486,39 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
     var rows = sheet.getLastRow() > 1
       ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues()
       : [];
+    if (hasSheetRow && /^scheduler-/.test(requestId)) {
+      var crossover;
+      try {
+        crossover = findVideoFollowupCrossoverV19_(rows, body, videoContext && videoContext.metadata, phone);
+      } catch (_) {
+        return { ok: false, queued: false, retryable: true, error: "Existing follow-up identity could not be verified" };
+      }
+      if (crossover) return crossover;
+    }
+    if (videoContext) {
+      var frozen = findFrozenVideoFollowupV19_(rows, videoContext.metadata, phone, messageId);
+      if (frozen) {
+        if (frozen.ok && frozen.status !== "sent") {
+          var stored = rows[frozen.pending_row - 2];
+          var storedBody = Object.assign({}, parseVideoFollowupMetadataV19_(stored), {
+            phone: stored[4], message_id: stored[3], request_id: stored[2]
+          });
+          var stillEligible = checkVideoFollowupEligibilityV19_(storedBody, { pendingRows: rows, ignoreOwnKey: true });
+          if (!stillEligible.eligible) {
+            frozen.ok = false;
+            frozen.queued = false;
+            frozen.error = stillEligible.reason;
+            frozen.retryable = !!stillEligible.retryable;
+          }
+        }
+        return frozen;
+      }
+      var eligibility = checkVideoFollowupEligibilityV19_(body, { pendingRows: rows });
+      if (!eligibility.eligible) return { ok: false, queued: false, retryable: !!eligibility.retryable, error: eligibility.reason };
+      crmRow = eligibility.crm_row;
+      videoContext.metadata.crm_row = crmRow;
+      metadata = "__scheduled_followup__:" + JSON.stringify(videoContext.metadata);
+    }
     for (var i = rows.length - 1; i >= 0; i--) {
       if (String(rows[i][3] || "") !== messageId) continue;
       var existingStatus = String(rows[i][1] || "");
@@ -511,6 +551,237 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
     };
   } finally {
     lock.releaseLock();
+  }
+}
+
+function hasVideoFollowupContextV19_(body) {
+  return ["followup_key", "initial_sent_at", "video_variant", "video_job_id"]
+    .some(function(key) { return Object.prototype.hasOwnProperty.call(body || {}, key); }) ||
+    /^followup-video-/.test(String(body && body.message_id || ""));
+}
+
+function parseVideoFollowupMetadataV19_(row) {
+  if (String(row && row[6] || "").indexOf("__scheduled_followup__:") !== 0) return null;
+  try {
+    var metadata = JSON.parse(String(row[6]).replace(/^__scheduled_followup__:/, ""));
+    return hasVideoFollowupContextV19_(metadata) ? metadata : null;
+  } catch (_) { return null; }
+}
+
+function validateVideoFollowupContextV19_(body, requireJob) {
+  var key = String(body && body.followup_key || "");
+  var initial = String(body && body.initial_sent_at || "");
+  var initialMs = Date.parse(initial);
+  var row = Number(body && (body.crm_row || body.row) || 0);
+  var phone = normalizePhone_(body && body.phone || "");
+  var stableId = String(body && (body.stable_id || body.zpid || body.listing_id) || "").trim();
+  var variant = String(body && body.video_variant || "");
+  var job = String(body && body.video_job_id || "");
+  var firstName = normalizeWhitespace_(String(body && body.first_name || ""));
+  var messageId = "followup-video-" + key.slice(0, 24);
+  if (!/^[0-9a-f]{64}$/.test(key) || !Number.isInteger(row) || row < 2 ||
+      phone.length !== 10 || !stableId || body.crm_prospect_id ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(initial) ||
+      !isFinite(initialMs) || ["text", "video"].indexOf(variant) === -1 ||
+      String(body.message_id || "") !== messageId || String(body.request_id || "") !== "scheduler-" + messageId ||
+      (job && !/^[A-Za-z0-9_-]{1,200}$/.test(job)) ||
+      (variant === "video" && (!firstName || (requireJob && !job)))) {
+    return { ok: false, reason: "Invalid personalized follow-up identity" };
+  }
+  return { ok: true, metadata: {
+    crm_row: row, stable_id: stableId, followup_key: key,
+    initial_sent_at: new Date(initialMs).toISOString(), video_variant: variant,
+    video_job_id: job, first_name: firstName
+  } };
+}
+
+function findFrozenVideoFollowupV19_(rows, metadata, phone, messageId) {
+  for (var i = rows.length - 1; i >= 0; i--) {
+    var existing = parseVideoFollowupMetadataV19_(rows[i]);
+    if (String(rows[i][3] || "") !== messageId && (!existing || existing.followup_key !== metadata.followup_key)) continue;
+    if (!existing || existing.followup_key !== metadata.followup_key ||
+        existing.stable_id !== metadata.stable_id || normalizePhone_(rows[i][4]) !== phone ||
+        Date.parse(existing.initial_sent_at) !== Date.parse(metadata.initial_sent_at)) {
+      return { ok: false, queued: false, duplicate: true, error: "Personalized follow-up identity conflicts with an existing send" };
+    }
+    var status = String(rows[i][1] || "");
+    var accepted = ["queued", "claimed", "send_started", "sent"].indexOf(status) !== -1;
+    return {
+      ok: accepted, queued: accepted && status !== "sent", duplicate: true, payload_frozen: true,
+      status: status, request_id: String(rows[i][2] || ""), message_id: String(rows[i][3] || ""),
+      pending_row: i + 2, followup_key: existing.followup_key, video_variant: existing.video_variant,
+      video_job_id: existing.video_job_id || "",
+      error: accepted ? "" : "Prior personalized follow-up needs reconciliation before another send"
+    };
+  }
+  return null;
+}
+
+function findVideoFollowupCrossoverV19_(rows, body, incoming, phone) {
+  var stableId = String(body.stable_id || body.zpid || body.listing_id || "").trim();
+  for (var i = rows.length - 1; i >= 0; i--) {
+    var entry = rows[i];
+    if (normalizePhone_(entry[4]) !== phone || String(entry[6] || "").indexOf("__scheduled_followup__:") !== 0 ||
+        !/^scheduler-/.test(String(entry[2] || ""))) continue;
+    var existing = parseVideoFollowupMetadataV19_(entry);
+    if (Boolean(existing) === Boolean(incoming)) continue;
+    var feature = incoming || existing;
+    if (stableId && stableId !== feature.stable_id) continue;
+    var resolved = resolveVideoFollowupIdentityV19_(phone, feature, rows);
+    if (!resolved.ok) {
+      if (!incoming && resolved.newer_initial_confirmed) continue;
+      return {
+        ok: false, queued: false, duplicate: true, payload_frozen: true,
+        retryable: !!resolved.retryable, request_id: String(entry[2] || ""),
+        message_id: String(entry[3] || ""), pending_row: i + 2,
+        error: resolved.reason || "Existing personalized follow-up identity is unresolved"
+      };
+    }
+    if (incoming) {
+      var legacy;
+      try { legacy = JSON.parse(String(entry[6]).replace(/^__scheduled_followup__:/, "")); } catch (_) { continue; }
+      if (legacy.stable_id ? legacy.stable_id !== feature.stable_id : Number(legacy.crm_row) !== resolved.row) continue;
+      var createdMs = parseVideoFollowupTimestampV19_(entry[0], resolved.time_zone);
+      if (!isFinite(createdMs) || createdMs < resolved.initial_ms) continue;
+    } else if (Number(body.crm_row || body.row) !== resolved.row) {
+      continue;
+    }
+    var status = String(entry[1] || "");
+    var accepted = ["queued", "claimed", "send_started", "sent"].indexOf(status) !== -1;
+    return {
+      ok: accepted, queued: accepted && status !== "sent", duplicate: true, payload_frozen: true,
+      status: status, request_id: String(entry[2] || ""), message_id: String(entry[3] || ""),
+      pending_row: i + 2, followup_key: feature.followup_key,
+      video_variant: existing ? existing.video_variant : "text", video_job_id: existing ? existing.video_job_id || "" : "",
+      error: accepted ? "" : "Prior follow-up needs reconciliation before changing feature mode"
+    };
+  }
+  return null;
+}
+
+function parseVideoFollowupTimestampV19_(value, timeZone) {
+  if (Object.prototype.toString.call(value) === "[object Date]") return value.getTime();
+  var text = String(value == null ? "" : value).trim();
+  if (!text || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text)) return NaN;
+  if (/^\d{10,13}$/.test(text)) return Number(text) * (text.length === 10 ? 1000 : 1);
+  if (/^\d+(?:\.\d+)?$/.test(text)) {
+    var localDate = new Date((Number(text) - 25569) * 86400000);
+    return Utilities.parseDate(localDate.toISOString().slice(0, 23), timeZone, "yyyy-MM-dd'T'HH:mm:ss.SSS").getTime();
+  }
+  if (/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(text)) return Date.parse(text);
+  var patterns = ["M/d/yyyy H:mm:ss", "M/d/yyyy H:mm", "M/d/yyyy h:mm:ss a", "M/d/yyyy h:mm a"];
+  for (var i = 0; i < patterns.length; i++) {
+    try { return Utilities.parseDate(text, timeZone, patterns[i]).getTime(); } catch (_) {}
+  }
+  return NaN;
+}
+
+function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
+  if (!metadata || !/^[0-9a-f]{64}$/.test(String(metadata.followup_key || "")) ||
+      !String(metadata.stable_id || "").trim() || !isFinite(Date.parse(metadata.initial_sent_at))) {
+    return { ok: false, reason: "Personalized follow-up identity metadata is invalid" };
+  }
+  var sheet = getSheet_();
+  var values = sheet.getDataRange().getValues();
+  var matches = [];
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][27] || "").trim() === metadata.stable_id) matches.push(i);
+  }
+  if (matches.length !== 1 || normalizePhone_(values[matches[0]][2]) !== phone) {
+    return { ok: false, reason: "Personalized follow-up listing or phone changed or is ambiguous" };
+  }
+  var index = matches[0];
+  var current = values[index];
+  var timeZone = getSmsSpreadsheet_().getSpreadsheetTimeZone();
+  var initialMs = parseVideoFollowupTimestampV19_(current[22], timeZone);
+  var dateOnly = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(current[22] || "").trim());
+  var recoveryDate = dateOnly ? dateOnly[3] + "-" + ("0" + dateOnly[1]).slice(-2) + "-" + ("0" + dateOnly[2]).slice(-2) : "";
+  var latestReceipt = NaN;
+  var recoveryReceipt = NaN;
+  (pendingRows || []).forEach(function(row) {
+    if (String(row[1]) !== "sent" || normalizePhone_(row[4]) !== phone ||
+        String(row[6] || "").indexOf("__initial_outreach__:") !== 0) return;
+    var initialMetadata;
+    try { initialMetadata = JSON.parse(String(row[6]).replace(/^__initial_outreach__:/, "")); } catch (_) { return; }
+    var stableId = String(initialMetadata.stable_id || "").trim();
+    if (stableId ? stableId !== metadata.stable_id : Number(row[17]) !== index + 1) return;
+    var sentMs = parseVideoFollowupTimestampV19_(row[14], timeZone);
+    if (!isFinite(sentMs)) return;
+    if (!isFinite(latestReceipt) || sentMs > latestReceipt) latestReceipt = sentMs;
+    if (recoveryDate && Utilities.formatDate(new Date(sentMs), timeZone, "yyyy-MM-dd") === recoveryDate &&
+        (!isFinite(recoveryReceipt) || sentMs > recoveryReceipt)) recoveryReceipt = sentMs;
+  });
+  if (recoveryDate) initialMs = recoveryReceipt;
+  var expectedMs = Date.parse(metadata.initial_sent_at);
+  if (!isFinite(initialMs) || Math.abs(initialMs - expectedMs) >= 1000 ||
+      (isFinite(latestReceipt) && latestReceipt - expectedMs >= 1000)) {
+    return {
+      ok: false, retryable: !isFinite(initialMs),
+      newer_initial_confirmed: isFinite(initialMs) && initialMs - expectedMs >= 1000 &&
+        (!isFinite(latestReceipt) || latestReceipt - initialMs < 1000),
+      reason: "Personalized follow-up initial-send timestamp changed or is unconfirmed"
+    };
+  }
+  var obj = {};
+  values[0].forEach(function(header, column) { obj[header] = current[column]; });
+  return { ok: true, sheet: sheet, row: index + 1, values: current, obj: obj, initial_ms: initialMs, time_zone: timeZone };
+}
+
+function checkVideoFollowupEligibilityV19_(body, options) {
+  try {
+    var validation = validateVideoFollowupContextV19_(body, false);
+    if (!validation.ok) return { ok: false, eligible: false, reason: validation.reason };
+    var metadata = validation.metadata;
+    var phone = normalizePhone_(body.phone);
+    var ss = getSmsSpreadsheet_();
+    var outbox = ss.getSheetByName("sms_pending_sends");
+    if (!outbox) return { ok: false, eligible: false, retryable: true, reason: "SMS outbox is unavailable" };
+    var rows = options && options.pendingRows || (outbox.getLastRow() > 1
+      ? outbox.getRange(2, 1, outbox.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues() : []);
+    var resolved = resolveVideoFollowupIdentityV19_(phone, metadata, rows);
+    if (!resolved.ok) return { ok: !resolved.retryable, eligible: false, retryable: !!resolved.retryable, reason: resolved.reason };
+    var row = resolved.values;
+    var obj = resolved.obj;
+    var reason = "";
+    if (typeof hasPendingSmsTakeoverV11_ !== "function") throw new Error("Takeover guard is unavailable");
+    if (hasPendingSmsTakeoverV11_(phone) || String(obj[HEADERS.human_override] || "").toUpperCase() === "TRUE" ||
+        String(obj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE") reason = "Human takeover is active or pending";
+    if (["R", "Y", "G", "O"].indexOf(String(row[10] || "").trim().toUpperCase()) !== -1) reason = "CRM lead no longer qualifies for follow-up";
+    var previousFollowupMs = parseVideoFollowupTimestampV19_(row[23], resolved.time_zone);
+    var olderFollowup = isFinite(previousFollowupMs) && previousFollowupMs < resolved.initial_ms;
+    if ((String(row[8] || "").trim() || String(row[23] || "").trim()) && !olderFollowup) reason = "Scheduled follow-up already recorded or a reply exists";
+    var note = normalizeWhitespace_(String(row[9] || "")).toLowerCase();
+    var noResponseNotes = ["left vm", "left voicemail", "no answer on first call", "no response after second call", "call start failed before connecting", "call received but agent hung up on maya", "elevenlabs quota exceeded - call not counted"];
+    if (note && noResponseNotes.indexOf(note) === -1 && note.indexOf("no answer on ") !== 0) reason = "A manual conversation note exists";
+    var contact = String(row[24] || "").toLowerCase() + " " + String(row[25] || "").toLowerCase();
+    if (!/(phone conflict resolved|phone_conflict_resolved|sol_exception_resolved)/.test(contact) &&
+        /(phone_conflict|phone conflict|duplicate phone suppressed)/.test(contact)) reason = "A contact identity hold exists";
+    if (String(obj[HEADERS.last_message_id] || "").trim() || String(obj[HEADERS.last_inbound_text] || "").trim()) reason = "An inbound reply exists";
+    if (metadata.video_variant === "video" && normalizeWhitespace_(String(row[0] || "")).toLowerCase() !== metadata.first_name.toLowerCase()) reason = "Personalized first name changed";
+    var inbound = ss.getSheetByName("sms_inbound_queue");
+    if (!inbound) throw new Error("Inbound queue is unavailable");
+    var inboundRows = inbound.getLastRow() > 1 ? inbound.getRange(2, 1, inbound.getLastRow() - 1, 8).getValues() : [];
+    inboundRows.forEach(function(entry) {
+      if (normalizePhone_(entry[5]) !== phone) return;
+      var received = parseVideoFollowupTimestampV19_(entry[7], resolved.time_zone);
+      if (!isFinite(received)) received = parseVideoFollowupTimestampV19_(entry[0], resolved.time_zone);
+      if (!isFinite(received) || received >= resolved.initial_ms) reason = "An inbound reply exists since the initial send";
+    });
+    rows.forEach(function(entry) {
+      if (normalizePhone_(entry[4]) !== phone || String(entry[6] || "").indexOf("__scheduled_followup__:") !== 0) return;
+      var existing = parseVideoFollowupMetadataV19_(entry);
+      if (options && options.ignoreOwnKey && existing && existing.followup_key === metadata.followup_key) return;
+      var status = String(entry[1] || "");
+      var created = parseVideoFollowupTimestampV19_(entry[0], resolved.time_zone);
+      if ((existing && existing.followup_key === metadata.followup_key) ||
+          ["queued", "pending", "alerted", "claimed", "send_started", "receipt_pending", "uncertain"].indexOf(status) !== -1 ||
+          ((!isFinite(created) || created >= resolved.initial_ms) && ["sent", "failed"].indexOf(status) !== -1)) {
+        reason = "A follow-up attempt already exists and needs reconciliation";
+      }
+    });
+    return { ok: true, eligible: !reason, reason: reason, crm_row: resolved.row };
+  } catch (_) {
+    return { ok: false, eligible: false, retryable: true, reason: "Personalized follow-up eligibility could not be verified" };
   }
 }
 
@@ -625,7 +896,16 @@ function applyScheduledFollowupReceiptV13_(body, correlation) {
     metadata = JSON.parse(String(correlation.send_metadata || "").replace(/^__scheduled_followup__:/, ""));
   } catch (_) {}
   var sheet = getSheet_();
-  var resolvedRow = resolveInitialSmsReceiptRowV14_(sheet, crmRow, phone, metadata);
+  var resolvedRow;
+  if (hasVideoFollowupContextV19_(metadata)) {
+    var receiptOutbox = getSmsSpreadsheet_().getSheetByName("sms_pending_sends");
+    var receiptRows = receiptOutbox && receiptOutbox.getLastRow() > 1
+      ? receiptOutbox.getRange(2, 1, receiptOutbox.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues() : [];
+    resolvedRow = resolveVideoFollowupIdentityV19_(phone, metadata, receiptRows);
+    resolvedRow.mode = "video_followup_identity";
+  } else {
+    resolvedRow = resolveInitialSmsReceiptRowV14_(sheet, crmRow, phone, metadata);
+  }
   if (!resolvedRow.ok) {
     return {
       ok: true,
@@ -1410,6 +1690,7 @@ function claimPendingSmsSendV10_(body) {
     var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
     var now = Date.now();
     var workerId = String(body && body.worker_id || "pixel-v10").trim();
+    var retryableFeaturePending = false;
 
     // A lost HTTP response must return the same active lease to this worker,
     // never claim a second conversation.
@@ -1418,6 +1699,16 @@ function claimPendingSmsSendV10_(body) {
       var activeLeaseUntil = new Date(rows[activeIndex][11]).getTime();
       if (activeStatus !== "claimed" || String(rows[activeIndex][18] || "") !== workerId ||
           !activeLeaseUntil || activeLeaseUntil < now) continue;
+      if (parseVideoFollowupMetadataV19_(rows[activeIndex]) || /^followup-video-/.test(String(rows[activeIndex][3] || ""))) {
+        var activeStaleReason = getPendingSmsStaleReason_(rows[activeIndex]);
+        if (activeStaleReason === "Personalized follow-up eligibility temporarily unavailable") return busyPendingSmsClaim_();
+        if (activeStaleReason) {
+          sheet.getRange(activeIndex + 2, 2).setValue("superseded");
+          sheet.getRange(activeIndex + 2, 16).setValue(activeStaleReason);
+          rows[activeIndex][1] = "superseded";
+          continue;
+        }
+      }
       return buildPendingSmsClaimResponse_(rows[activeIndex], activeIndex + 2);
     }
 
@@ -1431,6 +1722,10 @@ function claimPendingSmsSendV10_(body) {
 
       var sheetRow = i + 2;
       var staleReason = getPendingSmsStaleReason_(rows[i]);
+      if (staleReason === "Personalized follow-up eligibility temporarily unavailable") {
+        retryableFeaturePending = true;
+        continue;
+      }
       if (staleReason) {
         sheet.getRange(sheetRow, 2).setValue("superseded");
         sheet.getRange(sheetRow, 16).setValue(staleReason);
@@ -1460,7 +1755,7 @@ function claimPendingSmsSendV10_(body) {
       rows[i] = claimedPendingRow;
       return buildPendingSmsClaimResponse_(claimedPendingRow, sheetRow);
     }
-    return noPendingSmsClaim_();
+    return retryableFeaturePending ? busyPendingSmsClaim_() : noPendingSmsClaim_();
   } finally {
     lock.releaseLock();
   }
@@ -1498,14 +1793,25 @@ function busyPendingSmsClaim_() {
 }
 
 function markPendingSmsSendStartedV10_(body) {
-  var match = findLeasedPendingSmsRow_(body, ["claimed", "send_started"]);
+  var match;
   var correlationMode = "exact_text";
-  if (!match.ok) {
-    match = findPendingSmsRowByExactLeaseIdentityV10_(body, ["claimed", "send_started"]);
-    correlationMode = "exact_lease_identity";
+  try {
+    match = findLeasedPendingSmsRow_(body, ["claimed", "send_started"]);
+    if (!match.ok) {
+      match = findPendingSmsRowByExactLeaseIdentityV10_(body, ["claimed", "send_started"]);
+      correlationMode = "exact_lease_identity";
+    }
+  } catch (err) {
+    if (/^followup-video-/.test(String(body && body.message_id || ""))) {
+      return { ok: false, should_send: false, retryable: true, reason: "Personalized follow-up lease could not be verified" };
+    }
+    throw err;
   }
   if (!match.ok) return match;
   var staleReason = getPendingSmsStaleReason_(match.values);
+  if (staleReason === "Personalized follow-up eligibility temporarily unavailable") {
+    return { ok: false, should_send: false, retryable: true, status: String(match.values[1] || ""), reason: staleReason };
+  }
   if (staleReason) {
     match.sheet.getRange(match.row, 2).setValue("superseded");
     match.sheet.getRange(match.row, 16).setValue(staleReason);
@@ -1779,6 +2085,17 @@ function getPendingSmsStaleReason_(outboxRow) {
   var phone = normalizePhone_(outboxRow[4]);
   var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);
   var replyText = normalizePendingSmsInboundText_(outboxRow[5]);
+  var messageId = String(outboxRow[3] || "");
+  var videoMetadata = parseVideoFollowupMetadataV19_(outboxRow);
+  if (videoMetadata || /^followup-video-/.test(messageId)) {
+    if (!videoMetadata) return "Personalized follow-up metadata is missing";
+    var videoBody = Object.assign({}, videoMetadata, {
+      phone: phone, message_id: messageId, request_id: String(outboxRow[2] || "")
+    });
+    var videoEligibility = checkVideoFollowupEligibilityV19_(videoBody, { ignoreOwnKey: true });
+    if (videoEligibility.retryable) return "Personalized follow-up eligibility temporarily unavailable";
+    return videoEligibility.eligible ? "" : videoEligibility.reason;
+  }
   var approvedOfferScopeReply =
     replyText === normalizePendingSmsInboundText_("I don't represent a buyer or submit offers. I handle the lender-side short-sale work for the listing agent.") &&
     typeof isOfferSubmissionConfusionSignal_ === "function" &&
@@ -1786,7 +2103,6 @@ function getPendingSmsStaleReason_(outboxRow) {
   if (!approvedOfferScopeReply && typeof hasPendingSmsTakeoverV11_ === "function" && hasPendingSmsTakeoverV11_(phone)) {
     return "Manual takeover is pending";
   }
-  var messageId = String(outboxRow[3] || "");
   var isInitialOutreach = String(outboxRow[6] || "").indexOf("__initial_outreach__:") === 0;
   var isScheduledFollowup = String(outboxRow[6] || "").indexOf("__scheduled_followup__:") === 0;
   var isOwnerApprovedFollowup = isScheduledFollowup &&
@@ -2041,6 +2357,8 @@ function smsOutboxWatchdog_() {
 
 function buildAutomaticSmsRetryRowV15_(row, now) {
   var source = Array.isArray(row) ? row.slice() : [];
+  // A missing receipt is not proof that the first personalized SMS failed.
+  if (/^followup-video-/.test(String(source[3] || ""))) return null;
   if (source.length < SMS_PENDING_SEND_HEADERS_.length || Number(source[9] || 0) >= 2) return null;
   var retryRow = source.slice();
   retryRow[1] = "queued";

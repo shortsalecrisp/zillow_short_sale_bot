@@ -15,3 +15,36 @@ profile for the monitored last SMS. This recovers an inbound SMS if Android
 updated Tasker's `%SMSR*` variables but Tasker's real-time profile task was
 rejected during a queue burst. Apps Script's phone/body dedupe makes the
 real-time and reconciliation paths safe to run together.
+
+## Personalized Scheduled Follow-up Contract
+
+Personalized video uses the existing `enqueue_followup_sms` action and Tasker
+text dispatcher, not the owner-approved `render-followup-*` exception. The
+scheduler retains its existing timing and selects one SMS body, either a hosted
+video link or the original text. No Tasker changes are required.
+
+Feature requests add `followup_key` (64 lowercase hex characters),
+`initial_sent_at` (an ISO timestamp with timezone), `video_variant` (`text` or
+`video`), and `video_job_id` (an opaque alphanumeric/dash/underscore ID). They
+require `crm_row`, `phone`, and a nonempty `stable_id`. IDs must be
+`message_id=followup-video-<first 24 key characters>` and
+`request_id=scheduler-<message_id>`. Video requests also require `first_name`
+matching the current canonical Sheet value and a nonempty `video_job_id`.
+
+Authenticated `check_video_followup_eligibility` accepts that same identity
+without a message body or a completed job ID. It performs no writes and returns
+`{ok, eligible, reason, crm_row}`. An unavailable read returns `ok=false`,
+`eligible=false`, and `retryable=true`; it is not permission to render or send.
+The read checks current initial-send identity, pending/processed inbound,
+takeover, conversation notes, suppression, contact holds, and prior attempts.
+The scheduler remains responsible for the due time and sending window.
+
+The first accepted payload is frozen across text/video retries and feature
+on/off transitions. A duplicate response names the authoritative existing
+`request_id`, `message_id`, `video_variant`, and `pending_row`. Uncertain or
+terminal failed attempts require reconciliation, not a fresh message. Feature
+claim/send-start checks retain work on transient read failures, but supersede
+known-ineligible sends. Missing handset receipts do not automatically resend a
+feature payload. Standard scheduled I/X markers are written only on the existing
+correlated receipt path and only while the original initial identity still
+matches. An inbound arriving after the final guard can still race the handset.

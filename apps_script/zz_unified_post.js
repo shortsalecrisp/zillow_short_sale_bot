@@ -15,6 +15,7 @@ function isUnifiedSmsAction_(action) {
     enqueue_incoming_sms: true,
     enqueue_initial_sms: true,
     enqueue_followup_sms: true,
+    check_video_followup_eligibility: true,
     get_crm_followup_sms_status: true,
     claim_pending_send: true,
     send_started: true,
@@ -95,6 +96,9 @@ function handleUnifiedSmsPost_(e) {
     validateToken_(body.token);
 
     var action = String(body.action || "incoming_sms").toLowerCase();
+    if (action === "check_video_followup_eligibility") {
+      return jsonOutput_(checkVideoFollowupEligibilityV19_(body));
+    }
     // Inbound messages write their own debug row only after the durable queue
     // append. Avoid all Spreadsheet and ScriptApp work before that boundary.
     if (action !== "incoming_sms" && action !== "enqueue_incoming_sms") {
