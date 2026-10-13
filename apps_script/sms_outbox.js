@@ -560,6 +560,134 @@ function hasVideoFollowupContextV19_(body) {
     /^followup-video-/.test(String(body && body.message_id || ""));
 }
 
+function isOwnerVideoProbeRowV20_(row) {
+  return String(row && row[6] || "").indexOf("__owner_video_probe__:") === 0 ||
+    /^owner-video-probe-/.test(String(row && row[3] || "")) ||
+    /^owner-video-probe-request-/.test(String(row && row[2] || ""));
+}
+
+function ownerVideoProbeInputV20_(body, statusOnly) {
+  var allowed = statusOnly ? ["action", "token", "phone", "probe_nonce"] :
+    ["action", "token", "phone", "probe_nonce", "video_url", "message"];
+  if (!body || Object.keys(body).some(function(key) { return allowed.indexOf(key) === -1; }) ||
+      !/^(?:\+?1)?9542053205$/.test(String(body.phone || "")) ||
+      !/^[0-9a-f]{32}$/.test(String(body.probe_nonce || ""))) {
+    return { ok: false, reason: "Exact owner phone and 32-character lowercase hex probe nonce are required" };
+  }
+  var videoUrl = String(body.video_url || "");
+  var message = "Owner video test: " + videoUrl;
+  if (!statusOnly && (!/^https:\/\/go\.crispshortsales\.com\/v\/[0-9a-f]{32}$/.test(videoUrl) ||
+      (Object.prototype.hasOwnProperty.call(body, "message") && body.message !== message))) {
+    return { ok: false, reason: "Owner probe requires the exact branded video URL and fixed test message" };
+  }
+  return { ok: true, phone: "9542053205", probe_nonce: body.probe_nonce, video_url: videoUrl,
+    message: message, request_id: "owner-video-probe-request-" + body.probe_nonce,
+    message_id: "owner-video-probe-" + body.probe_nonce };
+}
+
+function ownerVideoProbeStaleReasonV20_(row, allowExpired) {
+  if (String(row[6] || "").indexOf("__owner_video_probe__:") !== 0) return "Owner video probe metadata is invalid";
+  var metadata;
+  try { metadata = JSON.parse(String(row[6] || "").replace(/^__owner_video_probe__:/, "")); }
+  catch (_) { return "Owner video probe metadata is invalid"; }
+  if (!metadata || typeof metadata !== "object") return "Owner video probe metadata is invalid";
+  var input = ownerVideoProbeInputV20_({ phone: row[4], probe_nonce: metadata.probe_nonce,
+    video_url: metadata.video_url, message: row[5] }, false);
+  var created = new Date(row[0]).getTime();
+  var expires = new Date(metadata.expires_at).getTime();
+  if (!input.ok || row[2] !== input.request_id || row[3] !== input.message_id || row[16] || row[17] ||
+      !created || !expires || expires - created !== 30 * 60 * 1000 || created > Date.now() + 60000) {
+    return "Owner video probe identity is invalid";
+  }
+  return !allowExpired && Date.now() >= expires ? "Owner video probe expired before handset send" : "";
+}
+
+function ownerVideoProbeStatusV20_(row, rowNumber) {
+  return { ok: true, owner_video_probe: true, found: true, pending_row: rowNumber,
+    request_id: row[2], message_id: row[3], phone: row[4], message: row[5], status: row[1],
+    created_at: new Date(row[0]).toISOString(), sent_at: row[14] ? new Date(row[14]).toISOString() : "",
+    expires_at: new Date(new Date(row[0]).getTime() + 30 * 60 * 1000).toISOString() };
+}
+
+function getOwnerVideoProbeStatusV20_(body) {
+  var input = ownerVideoProbeInputV20_(body, true);
+  if (!input.ok) return input;
+  var sheet = getSmsSpreadsheet_().getSheetByName("sms_pending_sends");
+  if (!sheet || sheet.getLastRow() < 2) return { ok: true, found: false, owner_video_probe: true };
+  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (rows[i][2] !== input.request_id && rows[i][3] !== input.message_id) continue;
+    var invalid = ownerVideoProbeStaleReasonV20_(rows[i], true);
+    return invalid ? { ok: false, reason: invalid } : ownerVideoProbeStatusV20_(rows[i], i + 2);
+  }
+  return { ok: true, found: false, owner_video_probe: true };
+}
+
+function enqueueOwnerVideoProbeV20_(body) {
+  var input = ownerVideoProbeInputV20_(body, false);
+  if (!input.ok) return input;
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return { ok: false, retryable: true, reason: "Owner video probe outbox is busy" };
+  try {
+    var sheet = getSmsSpreadsheet_().getSheetByName("sms_pending_sends");
+    if (!sheet) return { ok: false, reason: "Existing SMS outbox is required" };
+    var rows = sheet.getLastRow() > 1
+      ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues() : [];
+    for (var i = rows.length - 1; i >= 0; i--) {
+      if (rows[i][2] !== input.request_id && rows[i][3] !== input.message_id) continue;
+      var invalid = ownerVideoProbeStaleReasonV20_(rows[i], true);
+      if (invalid) return { ok: false, reason: invalid };
+      // Every state freezes the first body and original expiry, including an unknown send outcome.
+      return Object.assign(ownerVideoProbeStatusV20_(rows[i], i + 2), { duplicate: true, payload_frozen: true });
+    }
+    var now = new Date();
+    var row = new Array(SMS_PENDING_SEND_HEADERS_.length).fill("");
+    row[0] = now; row[1] = "queued"; row[2] = input.request_id; row[3] = input.message_id;
+    row[4] = input.phone; row[5] = input.message; row[8] = now; row[9] = 0;
+    row[6] = "__owner_video_probe__:" + JSON.stringify({ probe_nonce: input.probe_nonce,
+      video_url: input.video_url, expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString() });
+    sheet.appendRow(row);
+    return Object.assign(ownerVideoProbeStatusV20_(row, sheet.getLastRow()), { queued: true });
+  } finally { lock.releaseLock(); }
+}
+
+function validateOwnerVideoProbeReceiptV20_(row, body, rowNumber) {
+  var invalid = ownerVideoProbeStaleReasonV20_(row, true);
+  var startedAt = new Date(row[13]).getTime();
+  var createdAt = new Date(row[0]).getTime();
+  if (invalid || ["send_started", "sent", "uncertain"].indexOf(String(row[1])) === -1 ||
+      !startedAt || startedAt < createdAt || startedAt >= createdAt + 30 * 60 * 1000 || !row[10] ||
+      String(body.request_id || body.sms_request_id || "") !== row[2] ||
+      String(body.message_id || "") !== row[3] || normalizePhone_(body.phone) !== "9542053205" ||
+      String(body.lease_token || "") !== row[10] || String(body.reply_text || "") !== row[5]) {
+    return { ok: false, owner_video_probe: true, reason: invalid || "Owner probe receipt requires the exact started send and lease" };
+  }
+  return { ok: true, send_kind: "owner_video_probe", pending_row: rowNumber,
+    already_sent: row[1] === "sent", canonical_phone: row[4], canonical_reply_text: row[5],
+    correlation_mode: "exact_owner_probe_lease", crm_row: 0, send_metadata: row[6] };
+}
+
+function completeOwnerVideoProbeV20_(body) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return { ok: false, retryable: true, owner_video_probe: true, reason: "Owner probe receipt is busy" };
+  try {
+    var sheet = getSmsSpreadsheet_().getSheetByName("sms_pending_sends");
+    if (!sheet || sheet.getLastRow() < 2) return { ok: false, reason: "Owner probe outbox is unavailable" };
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+    for (var i = rows.length - 1; i >= 0; i--) {
+      if (rows[i][2] !== String(body.request_id || body.sms_request_id || "")) continue;
+      var correlation = validateOwnerVideoProbeReceiptV20_(rows[i], body, i + 2);
+      if (!correlation.ok) return correlation;
+      if (correlation.already_sent) return Object.assign(ownerVideoProbeStatusV20_(rows[i], i + 2), { duplicate: true });
+      var sent = rows[i].slice();
+      sent[1] = "sent"; sent[7] = ""; sent[14] = new Date(); sent[15] = "";
+      sheet.getRange(i + 2, 1, 1, SMS_PENDING_SEND_HEADERS_.length).setValues([sent]);
+      return ownerVideoProbeStatusV20_(sent, i + 2);
+    }
+    return { ok: false, owner_video_probe: true, reason: "Owner probe receipt did not match" };
+  } finally { lock.releaseLock(); }
+}
+
 function parseVideoFollowupMetadataV19_(row) {
   if (String(row && row[6] || "").indexOf("__scheduled_followup__:") !== 0) return null;
   try {
@@ -1699,7 +1827,7 @@ function claimPendingSmsSendV10_(body) {
       var activeLeaseUntil = new Date(rows[activeIndex][11]).getTime();
       if (activeStatus !== "claimed" || String(rows[activeIndex][18] || "") !== workerId ||
           !activeLeaseUntil || activeLeaseUntil < now) continue;
-      if (parseVideoFollowupMetadataV19_(rows[activeIndex]) || /^followup-video-/.test(String(rows[activeIndex][3] || ""))) {
+      if (isOwnerVideoProbeRowV20_(rows[activeIndex]) || parseVideoFollowupMetadataV19_(rows[activeIndex]) || /^followup-video-/.test(String(rows[activeIndex][3] || ""))) {
         var activeStaleReason = getPendingSmsStaleReason_(rows[activeIndex]);
         if (activeStaleReason === "Personalized follow-up eligibility temporarily unavailable") return busyPendingSmsClaim_();
         if (activeStaleReason) {
@@ -1842,13 +1970,16 @@ function requeuePendingSmsSendAfterFailureV10_(body) {
   var match = findLeasedPendingSmsRow_(body, ["claimed", "send_started"]);
   if (!match.ok) return match;
   var attempts = Number(match.values[9] || 0);
-  var nextStatus = attempts >= 3 ? "failed" : "queued";
+  var ownerProbe = isOwnerVideoProbeRowV20_(match.values);
+  var nextStatus = ownerProbe || attempts >= 3 ? "failed" : "queued";
   match.sheet.getRange(match.row, 2).setValue(nextStatus);
   match.sheet.getRange(match.row, 9).setValue(new Date(Date.now() + 2 * 60 * 1000));
   match.sheet.getRange(match.row, 11, 1, 4).setValues([["", "", "", ""]]);
   match.sheet.getRange(match.row, 19).setValue("");
   match.sheet.getRange(match.row, 16).setValue(String(body && (body.error || body.reason) || "SMS Failure event"));
-  return { ok: true, status: nextStatus, pending_row: match.row, attempts: attempts };
+  var result = { ok: true, status: nextStatus, pending_row: match.row, attempts: attempts };
+  if (ownerProbe) result.owner_video_probe = true;
+  return result;
 }
 
 function findLeasedPendingSmsRow_(body, allowedStatuses) {
@@ -2082,6 +2213,7 @@ function shouldCarryOutstandingSpecificFeeReplyV15_(replyText, originalInboundTe
 }
 
 function getPendingSmsStaleReason_(outboxRow) {
+  if (isOwnerVideoProbeRowV20_(outboxRow)) return ownerVideoProbeStaleReasonV20_(outboxRow, false);
   var phone = normalizePhone_(outboxRow[4]);
   var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);
   var replyText = normalizePendingSmsInboundText_(outboxRow[5]);
@@ -2327,6 +2459,16 @@ function smsOutboxWatchdog_() {
     var created = new Date(row[0]).getTime();
     var leaseUntil = new Date(row[11]).getTime();
     var sendStarted = new Date(row[13]).getTime();
+    if (isOwnerVideoProbeRowV20_(row)) {
+      if (["queued", "claimed"].indexOf(status) !== -1 && ownerVideoProbeStaleReasonV20_(row, false)) {
+        sheet.getRange(sheetRow, 2).setValue("expired");
+        sheet.getRange(sheetRow, 16).setValue("Owner video probe expired or invalid; never automatically resend");
+      } else if (status === "send_started" && sendStarted && now - sendStarted >= 10 * 60 * 1000) {
+        sheet.getRange(sheetRow, 2).setValue("uncertain");
+        sheet.getRange(sheetRow, 16).setValue("Owner video probe receipt missing; never automatically resend");
+      }
+      return;
+    }
     if (status === "claimed" && leaseUntil && leaseUntil < now && !sendStarted) {
       sheet.getRange(sheetRow, 2).setValue("queued");
       sheet.getRange(sheetRow, 11, 1, 3).setValues([["", "", ""]]);
@@ -2357,6 +2499,7 @@ function smsOutboxWatchdog_() {
 
 function buildAutomaticSmsRetryRowV15_(row, now) {
   var source = Array.isArray(row) ? row.slice() : [];
+  if (isOwnerVideoProbeRowV20_(source)) return null;
   // A missing receipt is not proof that the first personalized SMS failed.
   if (/^followup-video-/.test(String(source[3] || ""))) return null;
   if (source.length < SMS_PENDING_SEND_HEADERS_.length || Number(source[9] || 0) >= 2) return null;
@@ -2437,6 +2580,7 @@ function recoverUncertainSmsSendV15_(body) {
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
       if (String(row[2] || "") !== requestId || normalizePhone_(row[4]) !== phone) continue;
+      if (isOwnerVideoProbeRowV20_(row)) return { ok: false, owner_video_probe: true, error: "Owner video probes are never retried" };
       if (String(row[1] || "") !== "uncertain") return { ok: false, error: "Matching send is not uncertain" };
       if (Number(row[9] || 0) >= 2) return { ok: false, exhausted: true, error: "Automatic retry limit reached" };
       var isInitial = String(row[6] || "").indexOf("__initial_outreach__:") === 0;
@@ -2532,6 +2676,7 @@ function testConfirmedSmsReplyReceiptRecovery_() {
 }
 
 function findConfirmedSmsReplyReceiptForPendingRow_(row) {
+  if (isOwnerVideoProbeRowV20_(row)) return { confirmed: false, sent_at: "" };
   var inboundText = String(row && row[6] || "");
   if (!inboundText || inboundText.indexOf("__initial_outreach__:") === 0) {
     return { confirmed: false, sent_at: "" };
@@ -2561,6 +2706,7 @@ function recordRecoveredSmsReplyReceipt_(sheet, sheetRow, receipt) {
 }
 
 function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
+  if (isOwnerVideoProbeRowV20_(row)) return false;
   // The Tasker receipt can reach the CRM while the outbox status write is
   // still uncertain. A same-phone, same-inbound, same-reply history receipt
   // is terminal proof; recover the ledger instead of locking the conversation.

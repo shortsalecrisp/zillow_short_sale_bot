@@ -160,6 +160,7 @@ unit tests. New tests block real network access or use explicit HTTP mocks.
 python -m pytest tests/test_video_followup.py tests/test_video_followup_provider.py tests/test_video_followup_player.py tests/test_video_followup_storage.py tests/test_video_followup_scheduler.py -q -p no:cacheprovider
 python -m pytest tests/test_followup_phone_refresh.py tests/test_voice_followup_template.py tests/test_sms_outbox_source.py -q -p no:cacheprovider
 node --test tests/video_followup_outbox.test.mjs tests/crm_followup_outbox.test.mjs
+node --test tests/owner_video_probe.test.mjs
 python scripts/video_followup_readiness.py
 git diff --check
 ```
@@ -199,3 +200,66 @@ Sources checked October 13, 2026:
 - https://developers.heygen.com/reference/get-video
 - https://help.heygen.com/en/articles/10060327-heygen-api-pricing-explained
 - https://docs.cloud.google.com/storage/docs/request-preconditions
+
+### Live connection preflight, October 13, 2026
+
+- User confirmed Render workspace `tea-d0jt5p7fte5s7385mieg` (Yoni's workspace).
+  Existing web service `srv-d0jtpfbuibrs7391jtu0` is Standard Python, running
+  `bash ./start.sh`; its live revision and remote `main` are both `e1b4a2a`.
+  The feature commit `5475de3` is not deployed. `main` auto-deploys on push.
+- The current Render environment visibly has `FOLLOW_UP_HOURS=6` and
+  `FOLLOWUP_INTERVAL_MIN=10`; preserve both. The second variable is legacy:
+  the deployed source does not read it, and `_next_scheduler_run` still selects
+  top-of-hour slots. Do not mistake its presence for a 10-minute effective poll
+  interval. Neither value was edited during verification.
+- Primary Apps Script deployment is currently immutable version 308. A fresh
+  read-only clone is `/private/tmp/crisp-video-live-v308-3LzLG0`. Historical v307
+  staging is not the release baseline. Preserve all ten live project files and
+  existing properties when merging the scoped patch.
+- `go.crispshortsales.com` is already verified on Vercel project
+  `prj_J0rNUQKJwckcQAfhRPhatuAScUsE`, team `team_LqDcECeX4vMkeIFF18LB4fCW`.
+  It has valid HTTPS and currently redirects the root to `/login`. Do not move
+  its DNS or replace the marketing application. Use a narrow, host-scoped
+  project rewrite for `/v/<32 lowercase hex>` and the three known asset paths
+  to the existing Render service, preserving all other application routes.
+  No project-level routes were present at preflight. No rewrite is live yet.
+- HeyGen's signed-in API onboarding requires a minimum $5 top-up before the
+  first key can be generated. User approved exactly $5 one-time, no auto-reload
+  or subscription. Checkout was opened but payment is NOT confirmed; Stripe
+  requires the user's verification. No API key is configured yet.
+- Google Cloud account `ygkutler@gmail.com`, project `zillowbot-459722`, has no
+  bucket and billing is disabled. Its only accessible billing account is closed.
+  User approved private storage setup with a $5/month operating budget, aware
+  usage billing is not a hard cap. Console reauthentication and billing setup
+  remain required. No bucket or IAM changes have been made.
+- The sole approved SMS test destination is `9542053205`. Do not use a real
+  agent CRM row as the test fixture. A receipt-backed owner-only probe must
+  update only its outbox record; it must not update agent I/X markers or trigger
+  chatbot handling. A transport probe is not proof of real-agent scheduling.
+- No live configuration, DNS, hosting routing, outreach activation, Tasker
+  restore, owner SMS, or agent SMS was changed by this preflight.
+
+### Isolated owner transport probe
+
+The local Apps Script patch adds authenticated `enqueue_owner_video_probe` and
+`get_owner_video_probe_status` actions. Use one new random 32-character lowercase
+hex `probe_nonce` per explicitly authorized test; preserve that nonce after an
+unknown HTTP outcome instead of creating another send. Enqueue accepts only
+`phone=9542053205` (or its exact country-code form) and a
+`video_url=https://go.crispshortsales.com/v/<32 lowercase hex>` URL. The server
+constructs `Owner video test: <video_url>`; arbitrary text and CRM identifiers
+are rejected. Status takes only action, token, phone and probe_nonce.
+
+The probe expires 30 minutes after its first enqueue and freezes that first
+payload/expiry in every state. It uses the unchanged Tasker claim, send-start
+and receipt protocol. Only an exact started send with matching lease,
+request/message IDs, destination and body marks the outbox sent, including a
+genuine late receipt after the outcome became uncertain. It never writes CRM,
+I/X, or bot conversation history, and never automatically resends. An uncertain
+receipt requires handset inspection, not a new nonce. Do not reply to the test
+SMS: inbound owner messages still follow ordinary inbound handling; confirm
+receipt and playback in this chat instead.
+
+This probe and its tests are local preparation, not deployed or sent. It proves
+handset transport/playback only after a real receipt and owner confirmation;
+the scheduler eligibility, cancellation and fallback tests are separate.

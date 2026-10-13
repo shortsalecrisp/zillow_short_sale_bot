@@ -15,6 +15,8 @@ function isUnifiedSmsAction_(action) {
     enqueue_incoming_sms: true,
     enqueue_initial_sms: true,
     enqueue_followup_sms: true,
+    enqueue_owner_video_probe: true,
+    get_owner_video_probe_status: true,
     check_video_followup_eligibility: true,
     get_crm_followup_sms_status: true,
     claim_pending_send: true,
@@ -96,6 +98,8 @@ function handleUnifiedSmsPost_(e) {
     validateToken_(body.token);
 
     var action = String(body.action || "incoming_sms").toLowerCase();
+    if (action === "enqueue_owner_video_probe") return jsonOutput_(enqueueOwnerVideoProbeV20_(body));
+    if (action === "get_owner_video_probe_status") return jsonOutput_(getOwnerVideoProbeStatusV20_(body));
     if (action === "check_video_followup_eligibility") {
       return jsonOutput_(checkVideoFollowupEligibilityV19_(body));
     }
@@ -295,7 +299,7 @@ function handleUnifiedSmsPost_(e) {
             reply_text: body.reply_text || "",
             reason: receiptCorrelation.reason || "No exact pending-send match"
           });
-          sendSystemAlertEmail_("SMS BOT RECEIPT REJECTED", safeJsonStringify_(receiptCorrelation));
+          if (!receiptCorrelation.owner_video_probe) sendSystemAlertEmail_("SMS BOT RECEIPT REJECTED", safeJsonStringify_(receiptCorrelation));
         } catch (_) {}
         return jsonOutput_({
           ok: false,
@@ -314,6 +318,9 @@ function handleUnifiedSmsPost_(e) {
         phone: receiptCorrelation.canonical_phone || body.phone || "",
         reply_text: receiptCorrelation.canonical_reply_text || body.reply_text || ""
       });
+      if (receiptCorrelation.send_kind === "owner_video_probe") {
+        return jsonOutput_(completeOwnerVideoProbeV20_(canonicalReceiptBody));
+      }
       var replySentResult;
       if (receiptCorrelation.send_kind === "initial_outreach") {
         replySentResult = applyInitialSmsReceiptV13_(canonicalReceiptBody, receiptCorrelation);
@@ -350,7 +357,7 @@ function handleUnifiedSmsPost_(e) {
       var failedResult = body.lease_token
         ? requeuePendingSmsSendAfterFailureV10_(body)
         : markPendingSmsSendFailed_(body);
-      if (!failedResult.ok || failedResult.status === "failed") {
+      if (!failedResult.owner_video_probe && (!failedResult.ok || failedResult.status === "failed")) {
         try {
           sendSystemAlertEmail_("SMS BOT SEND FAILED", safeJsonStringify_(failedResult));
         } catch (_) {}
@@ -762,6 +769,13 @@ function validatePendingSmsSendReceipt_(body) {
   var headers = typeof getPendingSmsHeaders_ === "function" ? getPendingSmsHeaders_() : ["created_at", "status", "request_id", "message_id", "phone", "reply_text", "inbound_text", "last_alert_at"];
   ensurePendingSmsHeaders_(sheet, headers);
   var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues();
+  // Probes require a real started lease, including a late receipt after an uncertain outcome.
+  for (var probeIndex = rows.length - 1; probeIndex >= 0; probeIndex--) {
+    if (typeof isOwnerVideoProbeRowV20_ !== "function" || !isOwnerVideoProbeRowV20_(rows[probeIndex])) continue;
+    if (String(body.request_id || body.sms_request_id || "") !== String(rows[probeIndex][2]) &&
+        String(body.message_id || "") !== String(rows[probeIndex][3])) continue;
+    return validateOwnerVideoProbeReceiptV20_(rows[probeIndex], body, probeIndex + 2);
+  }
   var matchIndex = findPendingSmsRow_(rows, body);
   var correlationMode = "exact_text";
   if (matchIndex === -2 && typeof findPendingSmsRowByExactLeaseIdentityV10_ === "function") {
@@ -781,6 +795,9 @@ function validatePendingSmsSendReceipt_(body) {
     return { ok: false, reason: "Receipt did not match an exact pending phone/reply or correlated request/message ID" };
   }
   var sendMetadata = String(rows[matchIndex][6] || "");
+  if (typeof isOwnerVideoProbeRowV20_ === "function" && isOwnerVideoProbeRowV20_(rows[matchIndex])) {
+    return validateOwnerVideoProbeReceiptV20_(rows[matchIndex], body, matchIndex + 2);
+  }
   return {
     ok: true,
     pending_row: matchIndex + 2,
@@ -849,6 +866,7 @@ function smsPendingSendWatchdog_() {
   var now = Date.now();
 
   rows.forEach(function(row, index) {
+    if (typeof isOwnerVideoProbeRowV20_ === "function" && isOwnerVideoProbeRowV20_(row)) return;
     if (String(row[1] || "") !== "pending") return;
     var created = new Date(row[0]).getTime();
     if (!created || now - created < 10 * 60 * 1000) return;
