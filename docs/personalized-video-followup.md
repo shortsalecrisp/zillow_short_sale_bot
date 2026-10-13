@@ -263,3 +263,33 @@ receipt and playback in this chat instead.
 This probe and its tests are local preparation, not deployed or sent. It proves
 handset transport/playback only after a real receipt and owner confirmation;
 the scheduler eligibility, cancellation and fallback tests are separate.
+
+### One owner render with production flags off
+
+`scripts/owner_video_sample.py` is a separate, one-step owner render tool. It
+requires all three video feature flags to remain false, uses only the approved
+Jim script/avatar/voice, and records owner `9542053205` without inventing a CRM
+row, listing identity, or initial-SMS timestamp. Run it only on the configured
+host so API credentials never need to be copied into commands or local files.
+
+```sh
+python scripts/owner_video_sample.py --check
+python scripts/owner_video_sample.py --nonce <persisted-32-character-lowercase-hex-nonce>
+```
+
+`--check` is offline configuration/dependency readiness, not API authentication,
+available credit, or storage-access proof. The nonce command advances once: it
+either submits once, inspects the saved provider ID, or prepares/publishes the
+same completed render. Repeat the same nonce to continue; never create a new
+nonce to recover an uncertain submission. A `submitting` or `uncertain` job
+without an exact saved provider receipt stops for manual reconciliation.
+
+The tool claims `jobs/owner-probe-<nonce>` with CAS before reserving through the
+shared persistent budget ledger. It never creates an `active/` worker index or
+sends SMS. Provider IDs are saved immediately in a mode-0600 local recovery
+receipt, then an immutable GCS receipt and the job. No API keys or signed media
+URLs are printed or saved in these receipts. Failed renders retain the
+conservative charge; uncertain submissions retain their reservation and cannot
+be automatically submitted again. Ready publication requires pointer and asset
+hash readback. Publishing makes the opaque player URL accessible even though
+production flags remain off; it does not enqueue the owner transport probe.

@@ -143,8 +143,16 @@ if not SMS_API_KEY:
 app            = FastAPI()
 app.include_router(create_takeover_router(TASKER_TRANSPORT_HEALTH_URL))
 app.include_router(create_video_followup_router(lambda: get_video_followup_service().store))
-app.add_event_handler("startup", start_video_worker)
-app.add_event_handler("shutdown", stop_video_worker)
+
+
+@app.on_event("startup")
+async def _start_video_preparation() -> None:
+    start_video_worker()
+
+
+@app.on_event("shutdown")
+async def _stop_video_preparation() -> None:
+    stop_video_worker()
 
 
 def _recover_stale_queue_for_scheduled_window() -> int:
