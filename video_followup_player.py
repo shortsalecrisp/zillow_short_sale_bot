@@ -22,6 +22,7 @@ class PublicVideoStore(Protocol):
 
 
 _OPAQUE_ID = re.compile(r"[0-9a-f]{32}\Z")
+_PUBLIC_ORIGIN = "https://go.crispshortsales.com"
 _READY_STATUSES = frozenset({"ready", "frozen_video"})
 _CONTENT_TYPES = {"video": "video/mp4", "poster": "image/jpeg", "captions": "text/vtt"}
 _STYLE = """
@@ -142,6 +143,8 @@ def _player_html(opaque_id: str, video: Mapping[str, Any]) -> bytes:
     name = html.escape(first_name.strip()[:80], quote=True) if isinstance(first_name, str) else ""
     heading = f"A quick hello, {name}." if name else "A quick hello."
     base = f"/v/{opaque_id}"
+    # Preview crawlers need absolute URLs. Never trust Host or query parameters.
+    public_url = _PUBLIC_ORIGIN + base
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -149,6 +152,22 @@ def _player_html(opaque_id: str, video: Mapping[str, Any]) -> bytes:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow, noarchive">
   <title>A quick hello | Crisp Short Sales</title>
+  <meta name="description" content="A short video from Yoni Kutler at Crisp Short Sales. Have a question? Just reply to my text.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Crisp Short Sales">
+  <meta property="og:title" content="A quick hello from Yoni">
+  <meta property="og:description" content="A short video to put a face to my text. Happy to help if you have questions.">
+  <meta property="og:url" content="{public_url}">
+  <meta property="og:image" content="{public_url}/poster.jpg">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="960">
+  <meta property="og:image:height" content="540">
+  <meta property="og:image:alt" content="Yoni Kutler speaking from his office.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="A quick hello from Yoni">
+  <meta name="twitter:description" content="A short video to put a face to my text. Happy to help if you have questions.">
+  <meta name="twitter:image" content="{public_url}/poster.jpg">
+  <meta name="twitter:image:alt" content="Yoni Kutler speaking from his office.">
   <style>{_STYLE}</style>
 </head>
 <body>

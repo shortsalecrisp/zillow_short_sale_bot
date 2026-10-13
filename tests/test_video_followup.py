@@ -309,12 +309,24 @@ class VideoFollowupTests(unittest.TestCase):
         ready = self.make_ready()
         message, meta = self.service.select(self.context, FALLBACK)
         self.assertEqual(meta["video_variant"], "video")
-        self.assertEqual(message, "Hey Jim, just putting a face to my text: "
-                         "https://go.crispshortsales.com/v/" + ready["id"]
-                         + " Happy to answer any questions here.")
+        self.assertEqual(message, "Hey Jim, it's Yoni Kutler with Crisp Short Sales. "
+                         "Here's a quick video to put a face to my text. Happy to help if you have questions.\n"
+                         "https://go.crispshortsales.com/v/" + ready["id"])
         self.assertEqual(self.service.select(self.context, "New fallback"), (message, meta))
         self.assertNotIn(PHONE, message)
         self.assertNotIn(self.context["stable_id"], message)
+
+    def test_existing_frozen_video_keeps_its_original_copy_and_identity(self):
+        ready = self.make_ready()
+        old_message = "Hey Jim, just putting a face to my text: https://go.crispshortsales.com/v/" + ready["id"]
+        self.store.mutate("jobs/" + self.context["followup_key"], lambda old: {
+            **old, "status": "frozen_video", "variant": "video", "message": old_message,
+            "frozen_at": old["created_at"],
+        })
+        message, meta = self.service.select(self.context, FALLBACK)
+        self.assertEqual(message, old_message)
+        self.assertEqual(meta["message_id"], self.context["message_id"])
+        self.assertEqual(meta["video_job_id"], ready["id"])
 
     def test_name_change_or_missing_origin_uses_text_even_when_media_is_ready(self):
         self.make_ready()

@@ -2,14 +2,16 @@
 
 ## Release state
 
-Implemented behind default-off flags. Not deployed, funded, or activated for
-agents. No Tasker files, initial outreach copy, response prompts, follow-up
-hours, scheduler cadence, or carrier transport were changed. Production API,
-bucket, domain, and handset behavior still require live verification.
+Deployed for owner-only testing on October 13, 2026. HeyGen API, private storage,
+branded playback, and the exact owner Tasker receipt were verified; Yoni confirmed
+the sample arrived and played. All three agent feature/generation/live flags
+remain false pending approval. No Tasker files, initial outreach copy, response
+prompts, follow-up hours, scheduler cadence, or carrier transport were changed.
 
 Yoni approved up to **$3/day and $75/month for generation**, with separate
-approval required before a credit purchase. There is no authorization to buy a
-subscription, create paid hosting resources, or bulk backfill earlier leads.
+approval required before another credit purchase. A one-time $5 API top-up and
+up to $5/month private storage budget were separately approved and connected.
+There is no authorization to buy a subscription or bulk backfill earlier leads.
 
 The preserved source scheduler is six **business** hours, with its existing
 weekday/window/grace/cadence rules. This is not a change to four hours or six
@@ -19,7 +21,8 @@ elapsed hours. Compare deployed environment settings with source before release.
 
 One existing scheduled follow-up SMS is replaced by:
 
-> Hey Jim, just putting a face to my text: [branded video link] Happy to answer any questions here.
+> Hey Jim, it's Yoni Kutler with Crisp Short Sales. Here's a quick video to put a face to my text. Happy to help if you have questions.
+> [branded video link]
 
 The video says:
 
@@ -35,6 +38,14 @@ captions, no login/form, and the disclosure: "Personalized with AI using my
 recorded likeness and voice." It asks the agent to reply to the original SMS.
 No automatic sound or external analytics. The link is a bearer link: anyone
 who receives it can view that first-name video. It contains no listing details.
+
+The player serves static Open Graph and Twitter image metadata using the public
+960x540 face poster. Preview metadata contains no agent identity or listing
+information, uses a fixed branded origin rather than request headers, and does
+not expose a video for automatic preview playback. Messaging apps decide whether
+to fetch/display a thumbnail; this is not an MMS attachment or a promise of a
+preview. The SMS explains the video even when the recipient sees only text.
+Already-frozen sends keep their original copy and identity.
 
 ## Architecture and safety
 

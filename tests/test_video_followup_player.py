@@ -2,6 +2,7 @@ import base64
 import hashlib
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -97,7 +98,7 @@ def test_factory_is_lazy_and_invalid_id_does_not_open_store():
         assert calls == [True]
 
 
-def test_player_is_local_accessible_disclosed_and_uses_no_extra_metadata(setup):
+def test_player_is_local_accessible_disclosed_and_uses_no_private_metadata(setup):
     client, _ = setup
     response = client.get(BASE + "?phone=query-secret&name=QueryName")
     assert response.status_code == 200
@@ -114,12 +115,51 @@ def test_player_is_local_accessible_disclosed_and_uses_no_extra_metadata(setup):
     assert f'poster="{BASE}/poster.jpg"' in content
     assert f'src="{BASE}/media.mp4"' in content
     assert f'src="{BASE}/captions.vtt"' in content
-    for forbidden in ("autoplay", "<script", "<form", "https://", "http://", "private-agent", "+15555550123", "123 Private Street", "query-secret", "QueryName"):
+    for forbidden in ("autoplay", "<script", "<form", "http://", "private-agent", "+15555550123", "123 Private Street", "query-secret", "QueryName"):
         assert forbidden not in content
     assert_security_headers(response)
     style = re.search(r"<style>(.*?)</style>", content, re.S).group(1)
     digest = base64.b64encode(hashlib.sha256(style.encode()).digest()).decode()
     assert f"'sha256-{digest}'" in response.headers["content-security-policy"]
+
+
+class MetadataParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tags = {}
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "meta" and "content" in values:
+            self.tags[values.get("property", values.get("name"))] = values["content"]
+
+
+@pytest.mark.parametrize("user_agent", ["Mozilla/5.0", "facebookexternalhit/1.1", "Twitterbot/1.0"])
+def test_preview_has_public_face_poster_without_exposing_recipient_or_trusting_host(setup, user_agent):
+    client, _ = setup
+    response = client.get(BASE + "?phone=query-secret&name=QueryName", headers={
+        "Host": "untrusted.example", "X-Forwarded-Host": "also-untrusted.example",
+        "User-Agent": user_agent,
+    })
+    parser = MetadataParser()
+    parser.feed(response.text)
+    metadata = parser.tags
+    public_url = "https://go.crispshortsales.com" + BASE
+    assert metadata["og:url"] == public_url
+    assert metadata["og:image"] == metadata["twitter:image"] == public_url + "/poster.jpg"
+    assert metadata["og:image:type"] == "image/jpeg"
+    assert metadata["og:image:width"] == "960"
+    assert metadata["og:image:height"] == "540"
+    assert metadata["og:title"] == metadata["twitter:title"] == "A quick hello from Yoni"
+    assert metadata["og:site_name"] == "Crisp Short Sales"
+    assert metadata["twitter:card"] == "summary_large_image"
+    for private in ("Jim", "QueryName", "query-secret", "untrusted", "15555550123", "Private Street"):
+        assert private not in repr(metadata)
+    assert "og:video" not in metadata  # Do not auto-download/play video in previews.
+    poster = client.get(BASE + "/poster.jpg", headers={"User-Agent": user_agent})
+    assert poster.status_code == 200
+    assert poster.headers["content-type"] == "image/jpeg"
+    assert poster.content == b"jpeg-data"
 
 
 def test_first_name_is_escaped_and_not_used_in_resource_urls(setup):
