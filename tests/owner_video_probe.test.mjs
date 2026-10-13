@@ -9,6 +9,9 @@ const sources = ["sms_outbox.js", "zz_unified_post.js"].map((name) =>
   fs.readFileSync(path.join(root, "apps_script", name), "utf8"));
 const nonce = "a".repeat(32);
 const videoUrl = "https://go.crispshortsales.com/v/" + "b".repeat(32);
+const introduction = "Hey Jim, it's Yoni Kutler with Crisp Short Sales. Here's a quick video to put a face to my text. Happy to help if you have questions.";
+const expectedMessage = introduction + "\n" + videoUrl;
+const legacyMessage = "Owner video test: " + videoUrl;
 const input = { phone: "9542053205", probe_nonce: nonce, video_url: videoUrl };
 
 function harness() {
@@ -80,11 +83,14 @@ test("owner probe queues and claims only the fixed branded message without CRM a
   const h = harness();
   const result = h.queue();
   assert.equal(result.queued, true);
-  assert.equal(result.message, "Owner video test: " + videoUrl);
+  assert.equal(result.message, expectedMessage);
+  assert.equal(result.message.charCodeAt(introduction.length), 10);
   assert.equal(result.message_id, "owner-video-probe-" + nonce);
   assert.equal(result.request_id, "owner-video-probe-request-" + nonce);
   assert.equal(h.rows[1][17], "");
-  assert.equal(h.started().phone, "9542053205");
+  const started = h.started();
+  assert.equal(started.phone, "9542053205");
+  assert.equal(started.reply_text, expectedMessage);
   assert.equal(h.counters().crmTouches, 0);
 });
 
@@ -97,6 +103,9 @@ test("owner probe rejects every other phone, unsafe URL, message and identity in
     { video_url: videoUrl.replace("go.", "evil.") }, { video_url: videoUrl.replace("/v/", "/v/../") },
     { video_url: videoUrl.replace("go.", "go.crispshortsales.com@evil.") },
     { message: "Different text " + videoUrl }, { reply_text: "Injected" },
+    { message: legacyMessage }, { message: expectedMessage.replace("\n", " ") },
+    { message: expectedMessage.replace("\n", "\r\n") }, { allowLegacyMessage: true },
+    { legacy_message: true },
     { crm_row: 2 }, { stable_id: "fake" }, { crm_prospect_id: "fake" },
     { request_id: "arbitrary" }, { message_id: "arbitrary" }, { initial_sent_at: "anything" },
   ];
@@ -138,6 +147,51 @@ test("nonce freezes original content and expiry across all queued and terminal s
     assert.equal(h.rows.length, 2);
     assert.deepEqual(h.counters(), before);
   }
+});
+
+test("legacy nonce retries and status keep the old body and expiry in every state", () => {
+  for (const status of ["queued", "claimed", "send_started", "sent", "uncertain", "failed", "expired", "superseded", "manual_sent"]) {
+    const h = harness();
+    const first = h.queue();
+    h.rows[1][5] = legacyMessage;
+    h.rows[1][1] = status;
+    h.advance(31 * 60 * 1000);
+    const before = h.counters();
+    for (const change of [{}, { message: legacyMessage }, { message: expectedMessage }, { video_url: videoUrl.replace(/b/g, "c") }]) {
+      const duplicate = h.queue(change);
+      assert.equal(duplicate.duplicate, true, status);
+      assert.equal(duplicate.payload_frozen, true);
+      assert.equal(duplicate.message, legacyMessage);
+      assert.equal(duplicate.expires_at, first.expires_at);
+    }
+    const readback = h.post("get_owner_video_probe_status", { phone: input.phone, probe_nonce: nonce });
+    assert.equal(readback.message, legacyMessage);
+    assert.equal(h.rows.length, 2);
+    assert.deepEqual(h.counters(), before);
+  }
+});
+
+test("an old-copy retry cannot downgrade a nonce already frozen to the new copy", () => {
+  const h = harness();
+  assert.equal(h.queue({ message: expectedMessage }).message, expectedMessage);
+  const before = h.counters();
+  const duplicate = h.queue({ message: legacyMessage });
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.message, expectedMessage);
+  assert.deepEqual(h.counters(), before);
+});
+
+test("legacy stored body remains claimable and only its exact late receipt succeeds", () => {
+  const h = harness(); h.queue(); h.rows[1][5] = legacyMessage;
+  const body = h.started();
+  assert.equal(body.reply_text, legacyMessage);
+  h.advance(31 * 60 * 1000);
+  h.context.smsOutboxWatchdog_();
+  assert.equal(h.rows[1][1], "uncertain");
+  assert.equal(h.post("reply_sent", { ...body, reply_text: expectedMessage }).ok, false);
+  assert.equal(h.post("reply_sent", body).status, "sent");
+  assert.equal(h.rows[1][5], legacyMessage);
+  assert.equal(h.counters().crmTouches, 0);
 });
 
 test("enqueue lock contention never appends or bypasses identity validation", () => {

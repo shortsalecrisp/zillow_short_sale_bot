@@ -566,7 +566,7 @@ function isOwnerVideoProbeRowV20_(row) {
     /^owner-video-probe-request-/.test(String(row && row[2] || ""));
 }
 
-function ownerVideoProbeInputV20_(body, statusOnly) {
+function ownerVideoProbeInputV20_(body, statusOnly, allowLegacyMessage) {
   var allowed = statusOnly ? ["action", "token", "phone", "probe_nonce"] :
     ["action", "token", "phone", "probe_nonce", "video_url", "message"];
   if (!body || Object.keys(body).some(function(key) { return allowed.indexOf(key) === -1; }) ||
@@ -575,13 +575,14 @@ function ownerVideoProbeInputV20_(body, statusOnly) {
     return { ok: false, reason: "Exact owner phone and 32-character lowercase hex probe nonce are required" };
   }
   var videoUrl = String(body.video_url || "");
-  var message = "Owner video test: " + videoUrl;
+  var message = "Hey Jim, it's Yoni Kutler with Crisp Short Sales. Here's a quick video to put a face to my text. Happy to help if you have questions.\n" + videoUrl;
+  var legacyMessage = !!allowLegacyMessage && body.message === "Owner video test: " + videoUrl;
   if (!statusOnly && (!/^https:\/\/go\.crispshortsales\.com\/v\/[0-9a-f]{32}$/.test(videoUrl) ||
-      (Object.prototype.hasOwnProperty.call(body, "message") && body.message !== message))) {
+      (Object.prototype.hasOwnProperty.call(body, "message") && body.message !== message && !legacyMessage))) {
     return { ok: false, reason: "Owner probe requires the exact branded video URL and fixed test message" };
   }
   return { ok: true, phone: "9542053205", probe_nonce: body.probe_nonce, video_url: videoUrl,
-    message: message, request_id: "owner-video-probe-request-" + body.probe_nonce,
+    message: message, legacy_message: legacyMessage, request_id: "owner-video-probe-request-" + body.probe_nonce,
     message_id: "owner-video-probe-" + body.probe_nonce };
 }
 
@@ -592,7 +593,7 @@ function ownerVideoProbeStaleReasonV20_(row, allowExpired) {
   catch (_) { return "Owner video probe metadata is invalid"; }
   if (!metadata || typeof metadata !== "object") return "Owner video probe metadata is invalid";
   var input = ownerVideoProbeInputV20_({ phone: row[4], probe_nonce: metadata.probe_nonce,
-    video_url: metadata.video_url, message: row[5] }, false);
+    video_url: metadata.video_url, message: row[5] }, false, true);
   var created = new Date(row[0]).getTime();
   var expires = new Date(metadata.expires_at).getTime();
   if (!input.ok || row[2] !== input.request_id || row[3] !== input.message_id || row[16] || row[17] ||
@@ -624,7 +625,7 @@ function getOwnerVideoProbeStatusV20_(body) {
 }
 
 function enqueueOwnerVideoProbeV20_(body) {
-  var input = ownerVideoProbeInputV20_(body, false);
+  var input = ownerVideoProbeInputV20_(body, false, true);
   if (!input.ok) return input;
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return { ok: false, retryable: true, reason: "Owner video probe outbox is busy" };
@@ -640,6 +641,8 @@ function enqueueOwnerVideoProbeV20_(body) {
       // Every state freezes the first body and original expiry, including an unknown send outcome.
       return Object.assign(ownerVideoProbeStatusV20_(rows[i], i + 2), { duplicate: true, payload_frozen: true });
     }
+    // Old request bodies may reconcile an existing nonce, never create a fresh old-copy SMS.
+    if (input.legacy_message) return { ok: false, reason: "Legacy owner probe text requires an existing nonce" };
     var now = new Date();
     var row = new Array(SMS_PENDING_SEND_HEADERS_.length).fill("");
     row[0] = now; row[1] = "queued"; row[2] = input.request_id; row[3] = input.message_id;
