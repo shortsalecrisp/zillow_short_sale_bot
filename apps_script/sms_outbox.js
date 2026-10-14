@@ -828,6 +828,15 @@ function parseVideoFollowupTimestampV19_(value, timeZone) {
   return NaN;
 }
 
+function hasUniqueVideoFollowupInitialReceiptIdsV19_(row, pendingRows) {
+  var requestId = String(row[2] || "").trim();
+  var messageId = String(row[3] || "").trim();
+  if (!requestId || !messageId) return false;
+  return (pendingRows || []).filter(function(candidate) {
+    return String(candidate[2] || "").trim() === requestId || String(candidate[3] || "").trim() === messageId;
+  }).length === 1;
+}
+
 function isSameVideoFollowupInitialAttemptV19_(entry, metadata, initialMs, timeZone, pendingRows) {
   var row = entry.row;
   var requestId = String(row[2] || "");
@@ -843,10 +852,7 @@ function isSameVideoFollowupInitialAttemptV19_(entry, metadata, initialMs, timeZ
   var startedMs = parseVideoFollowupTimestampV19_(row[13], timeZone);
   if (!isFinite(createdMs) || !isFinite(startedMs) ||
       createdMs > startedMs || startedMs > initialMs || initialMs > entry.sent_ms) return false;
-  var identityMatches = (pendingRows || []).filter(function(candidate) {
-    return String(candidate[2] || "") === requestId || String(candidate[3] || "") === messageId;
-  });
-  return identityMatches.length === 1;
+  return hasUniqueVideoFollowupInitialReceiptIdsV19_(row, pendingRows);
 }
 
 function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
@@ -873,15 +879,22 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
   var latestReceipt = NaN;
   var recoveryReceipt = NaN;
   var laterReceipts = [];
+  var exactEpisodeReceipts = 0;
+  var exactReceiptIdsUnique = true;
   (pendingRows || []).forEach(function(row) {
     if (String(row[1]) !== "sent" || normalizePhone_(row[4]) !== phone ||
         String(row[6] || "").indexOf("__initial_outreach__:") !== 0) return;
     var initialMetadata;
     try { initialMetadata = JSON.parse(String(row[6]).replace(/^__initial_outreach__:/, "")); } catch (_) { return; }
     var stableId = String(initialMetadata.stable_id || "").trim();
-    if (stableId ? stableId !== metadata.stable_id : Number(row[17]) !== index + 1) return;
+    if (stableId ? stableId !== metadata.stable_id :
+        Number(row[17]) !== index + 1 || Number(initialMetadata.crm_row) !== index + 1) return;
     var sentMs = parseVideoFollowupTimestampV19_(row[14], timeZone);
     if (!isFinite(sentMs)) return;
+    if (Math.abs(sentMs - expectedMs) < 1000) {
+      exactEpisodeReceipts++;
+      if (!hasUniqueVideoFollowupInitialReceiptIdsV19_(row, pendingRows)) exactReceiptIdsUnique = false;
+    }
     if (sentMs - expectedMs >= 1000) laterReceipts.push({ row: row, metadata: initialMetadata, sent_ms: sentMs });
     if (!isFinite(latestReceipt) || sentMs > latestReceipt) latestReceipt = sentMs;
     if (recoveryDate && Utilities.formatDate(new Date(sentMs), timeZone, "yyyy-MM-dd") === recoveryDate &&
@@ -900,6 +913,12 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
         (!isFinite(latestReceipt) || latestReceipt - initialMs < 1000),
       reason: "Personalized follow-up initial-send timestamp changed or is unconfirmed"
     };
+  }
+  // H/W can survive a corrected phone. Only this phone's confirmed current
+  // initial episode authorizes a reminder; older or ambiguous receipts do not.
+  if (!exactReceiptIdsUnique || (sameInitialAttempt ? 1 : 0) + exactEpisodeReceipts !== 1) {
+    return { ok: false, retryable: true,
+      reason: "Confirmed initial SMS for the current phone and episode is missing or ambiguous" };
   }
   var obj = {};
   values[0].forEach(function(header, column) { obj[header] = current[column]; });

@@ -51,7 +51,7 @@ function parseLocalFixtureDate(text, timeZone, pattern) {
   return new Date(wall + wall - rendered);
 }
 
-function harness() {
+function harness({ initialProof = true } = {}) {
   let writes = 0;
   let triggers = 0;
   let sequence = 0;
@@ -131,6 +131,7 @@ function harness() {
   vm.runInContext(postSource.slice(0, postSource.indexOf("function getUnifiedIgnoredInboundReason_(")), context);
   context.installSmsOutboxTriggers_ = () => { triggers++; };
   context.ensureSmsSheetHeaders_ = () => {};
+  if (initialProof) initialReceipt({ outbox }, initial);
   return {
     context, row, leads, outbox, inbound, sheets,
     counters: () => ({ writes, triggers }), setTakeover: (value) => { takeover = value; },
@@ -146,10 +147,12 @@ function inboundReply(h, received = "2026-10-13T14:00:00Z", created = received) 
 }
 
 function initialReceipt(h, sentAt, changes = {}) {
+  const messageId = `initial-2-${h.outbox.data.length.toString(16).padStart(16, "0")}`;
   const row = Array(19).fill("");
   Object.assign(row, {
-    0: new Date(sentAt), 1: "sent", 4: base.phone,
-    6: `__initial_outreach__:${JSON.stringify({ stable_id: base.stable_id })}`,
+    0: new Date(sentAt), 1: "sent", 2: `scheduler-${messageId}`, 3: messageId, 4: base.phone,
+    5: "Original initial outreach text",
+    6: `__initial_outreach__:${JSON.stringify({ crm_row: 2, stable_id: base.stable_id })}`,
     14: new Date(sentAt), 17: 2,
   }, changes);
   h.outbox.data.push(row);
@@ -172,6 +175,122 @@ function receipt(h, index = h.outbox.data.length - 1) {
   });
 }
 
+test("current-phone initial proof is required even when H and W are populated", () => {
+  for (const proof of ["none", "old_phone", "old_episode", "wrong_listing", "not_sent"]) {
+    const h = harness({ initialProof: false });
+    h.row[7] = "x";
+    if (proof === "old_phone") initialReceipt(h, initial, { 4: "9542053206" });
+    if (proof === "old_episode") initialReceipt(h, "2026-10-12T13:00:00Z");
+    if (proof === "wrong_listing") initialReceipt(h, initial, { 6: '__initial_outreach__:{"crm_row":2,"stable_id":"another"}' });
+    if (proof === "not_sent") initialReceipt(h, initial, { 1: "send_started" });
+    const before = h.counters();
+    const result = h.context.checkVideoFollowupEligibilityV19_(video());
+    assert.equal(result.eligible, false, proof);
+    assert.equal(result.retryable, true, proof);
+    assert.match(result.reason, /initial.*current phone.*episode/i);
+    assert.deepEqual(h.counters(), before);
+    assert.equal(enqueue(h, video()).ok, false, proof);
+  }
+});
+
+test("current-episode receipt cannot be replaced by an older receipt plus current H and W", () => {
+  const h = harness({ initialProof: false });
+  initialReceipt(h, "2026-10-12T13:00:00Z");
+  const result = h.context.checkVideoFollowupEligibilityV19_(base);
+  assert.equal(result.eligible, false);
+  assert.equal(result.retryable, true);
+});
+
+test("current-phone initial proof rejects duplicate current-episode receipts", () => {
+  const h = harness({ initialProof: false });
+  initialReceipt(h, initial);
+  initialReceipt(h, initial);
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(video()).eligible, false);
+});
+
+test("exact-time initial receipt identifiers must be unique across the entire outbox", () => {
+  const conflicts = [
+    { 1: "failed" }, { 4: "9542053206" }, { 14: new Date("2026-10-12T13:00:00Z") },
+    { 6: '__initial_outreach__:{"crm_row":2,"stable_id":"another"}' },
+  ];
+  for (const changes of conflicts) {
+    for (const shared of ["both", "request", "message"]) {
+      const h = harness();
+      const conflicting = Object.assign(h.outbox.data[1].slice(), changes);
+      if (shared === "request") conflicting[3] = "other-message";
+      if (shared === "message") conflicting[2] = "other-request";
+      h.outbox.data.push(conflicting);
+      const label = `${shared}: ${JSON.stringify(changes)}`;
+      const result = h.context.checkVideoFollowupEligibilityV19_(video());
+      assert.equal(result.eligible, false, label);
+      assert.equal(result.retryable, true, label);
+      assert.equal(enqueue(h, video()).ok, false, label);
+    }
+  }
+});
+
+test("exact-time initial receipts support legacy opaque IDs but require both identifiers", () => {
+  for (const identifiers of [
+    ["legacy-initial-request", "legacy-initial-message"],
+    ["", "legacy-initial-message"], ["legacy-initial-request", ""], ["", ""],
+  ]) {
+    const h = harness();
+    [h.outbox.data[1][2], h.outbox.data[1][3]] = identifiers;
+    const valid = identifiers.every(Boolean);
+    const result = h.context.checkVideoFollowupEligibilityV19_(video());
+    assert.equal(result.eligible, valid, JSON.stringify(identifiers));
+    if (!valid) assert.equal(result.retryable, true);
+    assert.equal(enqueue(h, video()).ok, valid);
+  }
+});
+
+test("a second valid exact-time receipt cannot hide an ambiguous initial receipt", () => {
+  for (const conflict of ["duplicate_id", "missing_ids"]) {
+    const h = harness();
+    if (conflict === "duplicate_id") {
+      h.outbox.data.push(Object.assign(h.outbox.data[1].slice(), { 1: "failed" }));
+      initialReceipt(h, initial);
+    } else {
+      initialReceipt(h, initial, { 2: "", 3: "" });
+    }
+    const result = h.context.checkVideoFollowupEligibilityV19_(video());
+    assert.equal(result.eligible, false, conflict);
+    assert.equal(result.retryable, true, conflict);
+    assert.equal(enqueue(h, video()).ok, false, conflict);
+  }
+});
+
+test("legacy exact-time receipts require the same current phone and agreeing CRM identity", () => {
+  for (const metadata of [{ crm_row: 2 }, { crm_row: 3 }, {}]) {
+    const h = harness({ initialProof: false });
+    initialReceipt(h, initial, { 6: `__initial_outreach__:${JSON.stringify(metadata)}` });
+    assert.equal(h.context.checkVideoFollowupEligibilityV19_(video()).eligible, metadata.crm_row === 2);
+  }
+});
+
+test("missing initial proof holds claims and send-start without consuming the follow-up", () => {
+  for (const phase of ["claim", "active_claim", "send_started"]) {
+    const h = harness();
+    enqueue(h, video());
+    const claim = phase === "claim" ? null : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    h.outbox.data.splice(1, 1);
+    const beforeStatus = h.outbox.data[1][1];
+    const result = phase === "send_started"
+      ? h.context.markPendingSmsSendStartedV10_(claim)
+      : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    assert.equal(result.should_send, false, phase);
+    assert.equal(result.retryable, true, phase);
+    assert.equal(h.outbox.data[1][1], beforeStatus, phase);
+  }
+});
+
+test("an actual matching initial receipt resolves the retryable proof hold", () => {
+  const h = harness({ initialProof: false });
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(video()).retryable, true);
+  delayedInitialReceipt(h);
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(video()).eligible, true);
+});
+
 test("first text/video choice is immutable under one logical key", () => {
   for (const first of [base, video()]) {
     const h = harness();
@@ -180,8 +299,8 @@ test("first text/video choice is immutable under one logical key", () => {
     assert.equal(duplicate.ok, true);
     assert.equal(duplicate.payload_frozen, true);
     assert.equal(duplicate.video_variant, first.video_variant);
-    assert.equal(h.outbox.data.length, 2);
-    assert.equal(h.outbox.data[1][5], first.message);
+    assert.equal(h.outbox.data.length, 3);
+    assert.equal(h.outbox.data[2][5], first.message);
   }
 });
 
@@ -189,12 +308,12 @@ test("terminal and uncertain attempts never create another payload", () => {
   for (const status of ["receipt_pending", "uncertain", "failed", "superseded", "manual_sent", "sent"]) {
     const h = harness();
     enqueue(h);
-    h.outbox.data[1][1] = status;
+    h.outbox.data[2][1] = status;
     const result = enqueue(h, video());
     assert.equal(result.duplicate, true, status);
     assert.equal(result.ok, status === "sent", status);
-    assert.equal(h.outbox.data.length, 2);
-    assert.equal(h.outbox.data[1][5], base.message);
+    assert.equal(h.outbox.data.length, 3);
+    assert.equal(h.outbox.data[2][5], base.message);
   }
 });
 
@@ -206,7 +325,7 @@ test("logical-key and truncated-ID identity conflicts fail closed", () => {
     const h = harness();
     enqueue(h);
     assert.equal(enqueue(h, { ...base, ...changes }).ok, false);
-    assert.equal(h.outbox.data.length, 2);
+    assert.equal(h.outbox.data.length, 3);
   }
 });
 
@@ -221,7 +340,7 @@ test("partial or malformed feature bodies cannot silently use the legacy lane", 
   ]) {
     const h = harness();
     assert.equal(enqueue(h, { ...base, ...changes }).ok, false, JSON.stringify(changes));
-    assert.equal(h.outbox.data.length, 1);
+    assert.equal(h.outbox.data.length, 2);
   }
 });
 
@@ -306,7 +425,7 @@ test("phone, stable listing, and ambiguous stable identities invalidate feature 
     const h = harness();
     mutate(h);
     assert.equal(enqueue(h).ok, false);
-    assert.equal(h.outbox.data.length, 1);
+    assert.equal(h.outbox.data.length, 2);
   }
 });
 
@@ -314,9 +433,9 @@ test("stable row shifts resolve before enqueue, claim, and standard I/X receipt"
   const h = harness();
   h.leads.data.splice(1, 0, Array(33).fill(""));
   assert.equal(enqueue(h, video()).ok, true);
-  assert.equal(h.outbox.data[1][17], 3);
+  assert.equal(h.outbox.data[2][17], 3);
   h.leads.data.splice(1, 0, Array(33).fill(""));
-  assert.equal(h.context.getPendingSmsStaleReason_(h.outbox.data[1]), "");
+  assert.equal(h.context.getPendingSmsStaleReason_(h.outbox.data[2]), "");
   const result = receipt(h);
   assert.equal(result.row, 4);
   assert.equal(result.owner_approved_followup, false);
@@ -330,7 +449,7 @@ test("a changed initial timestamp rejects enqueue, duplicate, claim, and late CR
   enqueue(h);
   h.row[22] = new Date("2026-10-13T14:00:00Z");
   assert.equal(enqueue(h).ok, false);
-  assert.match(h.context.getPendingSmsStaleReason_(h.outbox.data[1]), /initial-send timestamp/);
+  assert.match(h.context.getPendingSmsStaleReason_(h.outbox.data[2]), /initial-send timestamp/);
   assert.equal(receipt(h).crm_write_skipped, true);
   assert.equal(h.row[8], "");
   assert.equal(h.row[23], "");
@@ -339,16 +458,16 @@ test("a changed initial timestamp rejects enqueue, duplicate, claim, and late CR
 test("a receipt with incomplete feature identity never writes standard follow-up markers", () => {
   const h = harness();
   enqueue(h);
-  const metadata = JSON.parse(h.outbox.data[1][6].replace("__scheduled_followup__:", ""));
+  const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
   delete metadata.initial_sent_at;
-  h.outbox.data[1][6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+  h.outbox.data[2][6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
   assert.equal(receipt(h).crm_write_skipped, true);
   assert.equal(h.row[8], "");
   assert.equal(h.row[23], "");
 });
 
 test("date-only W uses latest exact-phone eligible initial receipt, not the first or wrong identity", () => {
-  const h = harness();
+  const h = harness({ initialProof: false });
   h.row[22] = "10/13/2026";
   initialReceipt(h, "2026-10-13T12:00:00Z");
   initialReceipt(h, initial);
@@ -361,7 +480,7 @@ test("date-only W uses latest exact-phone eligible initial receipt, not the firs
 });
 
 test("native W cannot hide a newer same-identity confirmed initial receipt", () => {
-  const h = harness();
+  const h = harness({ initialProof: false });
   initialReceipt(h, "2026-10-13T15:00:00Z");
   assert.equal(enqueue(h).ok, false);
 });
@@ -370,7 +489,7 @@ test("handset W and a later exact-attempt receipt allow video and text without c
   // Observed receipt-processing delays for the first 18 organic jobs.
   for (const delayMs of [8247, 5516, 3650, 4894, 7542, 6280, 3209, 5517, 4691, 6268, 5321, 4226, 4743, 5601, 6609, 6292, 4938, 4729]) {
     for (const body of [base, video()]) {
-      const h = harness();
+      const h = harness({ initialProof: false });
       delayedInitialReceipt(h, { 14: new Date(Date.parse(initial) + delayMs) });
       h.row[11] = "A newer outbound message must not be used as initial identity";
       const before = h.counters();
@@ -384,7 +503,7 @@ test("handset W and a later exact-attempt receipt allow video and text without c
 });
 
 test("delayed initial receipt also correlates render IDs after a CRM row shift", () => {
-  const h = harness();
+  const h = harness({ initialProof: false });
   delayedInitialReceipt(h, { 2: "render-initial-2-0123456789abcdef" });
   h.leads.data.splice(1, 0, Array(33).fill(""));
   assert.equal(enqueue(h, video()).ok, true);
@@ -394,11 +513,11 @@ test("delayed initial receipt also correlates render IDs after a CRM row shift",
 
 test("receipt processing delay is not a widened time tolerance", () => {
   for (const startedAt of ["2026-10-13T13:00:00.001Z", "2026-10-13T13:00:05Z"]) {
-    const h = harness();
+    const h = harness({ initialProof: false });
     delayedInitialReceipt(h, { 13: new Date(startedAt) });
     assert.equal(enqueue(h, video()).ok, false);
   }
-  const h = harness();
+  const h = harness({ initialProof: false });
   delayedInitialReceipt(h, { 14: new Date("2026-10-13T14:00:00Z") });
   assert.equal(h.context.checkVideoFollowupEligibilityV19_(video()).eligible, true);
 });
@@ -414,7 +533,7 @@ test("missing, malformed or inconsistent same-attempt evidence still fails close
     { 6: '__initial_outreach__:{"stable_id":"listing-123"}' },
     { 6: '__initial_outreach__:{"crm_row":3,"stable_id":"listing-123"}' },
   ]) {
-    const h = harness();
+    const h = harness({ initialProof: false });
     delayedInitialReceipt(h, changes);
     assert.equal(enqueue(h, video()).ok, false, JSON.stringify(changes));
     assert.equal(h.outbox.data.length, 2);
@@ -423,7 +542,7 @@ test("missing, malformed or inconsistent same-attempt evidence still fails close
 
 test("a matching first interval never hides a separate later or overlapping initial attempt", () => {
   for (const startedAt of ["2026-10-13T12:59:59Z", "2026-10-13T13:00:02Z"]) {
-    const h = harness();
+    const h = harness({ initialProof: false });
     delayedInitialReceipt(h);
     delayedInitialReceipt(h, {
       2: "render-initial-2-fedcba9876543210", 3: "initial-2-fedcba9876543210",
@@ -435,7 +554,7 @@ test("a matching first interval never hides a separate later or overlapping init
 
 test("duplicate or conflicting initial identifiers cannot prove a unique delayed receipt", () => {
   for (const changes of [{}, { 1: "failed" }, { 4: "9542053206" }, { 3: "initial-2-ffffffffffffffff" }, { 2: "render-initial-2-0123456789abcdef" }]) {
-    const h = harness();
+    const h = harness({ initialProof: false });
     delayedInitialReceipt(h);
     h.outbox.data.push(Object.assign(h.outbox.data[1].slice(), changes));
     assert.equal(enqueue(h, video()).ok, false, JSON.stringify(changes));
@@ -452,12 +571,12 @@ test("same-attempt exception leaves reply, takeover and existing follow-up guard
     (h) => { h.row[23] = new Date("2026-10-13T14:00:00Z"); },
     (h) => { h.row[10] = "R"; },
   ]) {
-    const h = harness();
+    const h = harness({ initialProof: false });
     delayedInitialReceipt(h);
     suppress(h);
     assert.equal(enqueue(h, video()).ok, false);
   }
-  const h = harness();
+  const h = harness({ initialProof: false });
   delayedInitialReceipt(h);
   enqueue(h, video());
   assert.equal(enqueue(h).duplicate, true);
@@ -465,7 +584,7 @@ test("same-attempt exception leaves reply, takeover and existing follow-up guard
 });
 
 test("date-only recovery cannot hide a newer initial receipt on a different day", () => {
-  const h = harness();
+  const h = harness({ initialProof: false });
   h.row[22] = "10/13/2026";
   initialReceipt(h, initial);
   initialReceipt(h, "2026-10-14T13:00:00Z");
@@ -477,7 +596,7 @@ test("raw queued replies during rendering suppress enqueue even before CRM proce
   const h = harness();
   inboundReply(h);
   assert.equal(enqueue(h, video()).ok, false);
-  assert.equal(h.outbox.data.length, 1);
+  assert.equal(h.outbox.data.length, 2);
 });
 
 test("malformed received timestamp falls back to created time and unknown times hold", () => {
@@ -502,7 +621,7 @@ test("reply after claim suppresses send_started and reclaimed active lease", () 
       ? h.context.markPendingSmsSendStartedV10_(claimed)
       : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
     assert.equal(result.should_send, false);
-    assert.equal(h.outbox.data[1][1], "superseded");
+    assert.equal(h.outbox.data[2][1], "superseded");
   }
 });
 
@@ -544,7 +663,7 @@ test("existing legacy follow-up attempts cannot overlap the new key", () => {
     });
     h.outbox.data.push(row);
     assert.equal(enqueue(h).ok, false, status);
-    assert.equal(h.outbox.data.length, 2);
+    assert.equal(h.outbox.data.length, 3);
   }
 });
 
@@ -552,15 +671,15 @@ test("feature off/on toggles return the already accepted feature attempt", () =>
   for (const status of ["queued", "claimed", "send_started", "sent", "receipt_pending", "uncertain", "failed", "superseded"]) {
     const h = harness();
     enqueue(h, video());
-    h.outbox.data[1][1] = status;
+    h.outbox.data[2][1] = status;
     const disabled = enqueue(h, legacy);
     assert.equal(disabled.duplicate, true, status);
     assert.equal(disabled.payload_frozen, true);
     assert.equal(disabled.message_id, base.message_id);
     assert.equal(disabled.ok, ["queued", "claimed", "send_started", "sent"].includes(status));
     enqueue(h, base);
-    assert.equal(h.outbox.data.length, 2);
-    assert.equal(h.outbox.data[1][5], video().message);
+    assert.equal(h.outbox.data.length, 3);
+    assert.equal(h.outbox.data[2][5], video().message);
   }
 });
 
@@ -568,29 +687,29 @@ test("feature activation freezes an already queued legacy payload for the same i
   for (const status of ["queued", "claimed", "send_started", "sent", "uncertain", "failed"]) {
     const h = harness();
     enqueue(h, legacy);
-    h.outbox.data[1][1] = status;
-    h.outbox.data[1][0] = new Date("2026-10-13T19:00:00Z");
+    h.outbox.data[2][1] = status;
+    h.outbox.data[2][0] = new Date("2026-10-13T19:00:00Z");
     const enabled = enqueue(h, video());
     assert.equal(enabled.duplicate, true, status);
     assert.equal(enabled.payload_frozen, true);
     assert.equal(enabled.message_id, legacy.message_id);
     assert.equal(enabled.video_variant, "text");
-    assert.equal(h.outbox.data.length, 2);
-    assert.equal(h.outbox.data[1][5], legacy.message);
+    assert.equal(h.outbox.data.length, 3);
+    assert.equal(h.outbox.data[2][5], legacy.message);
   }
 });
 
 test("cross-feature dedupe does not swallow a new initial episode or manual CRM exception", () => {
   const h = harness();
   enqueue(h, video());
-  h.outbox.data[1][1] = "sent";
+  h.outbox.data[2][1] = "sent";
   h.row[22] = new Date("2026-10-14T13:00:00Z");
   assert.equal(enqueue(h, legacy).duplicate, undefined);
-  assert.equal(h.outbox.data.length, 3);
+  assert.equal(h.outbox.data.length, 4);
   const other = harness();
   enqueue(other, video());
   assert.equal(enqueue(other, { ...legacy, request_id: "render-followup-2-0123456789abcdef" }).duplicate, undefined);
-  assert.equal(other.outbox.data.length, 3);
+  assert.equal(other.outbox.data.length, 4);
 });
 
 test("rollback cannot assume a new initial when existing feature identity is unreadable", () => {
@@ -601,10 +720,10 @@ test("rollback cannot assume a new initial when existing feature identity is unr
   ]) {
     const h = harness();
     enqueue(h, video());
-    h.outbox.data[1][1] = "sent";
+    h.outbox.data[2][1] = "sent";
     mutation(h);
     assert.equal(enqueue(h, legacy).ok, false);
-    assert.equal(h.outbox.data.length, 2);
+    assert.equal(h.outbox.data.length, 3);
   }
 });
 
@@ -620,7 +739,7 @@ test("temporary feature guard failure does not block an unrelated queued legacy 
   const claimed = h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
   assert.equal(claimed.should_send, true);
   assert.equal(claimed.phone, another[2]);
-  assert.equal(h.outbox.data[1][1], "queued");
+  assert.equal(h.outbox.data[2][1], "queued");
 });
 
 test("Sheets serial and localized timestamps resolve in the spreadsheet timezone", () => {
@@ -637,14 +756,14 @@ test("transient feature guard failures retain queued and claimed work for safe r
     const h = harness();
     enqueue(h);
     const claimed = phase === "claim" ? null : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
-    const originalStatus = h.outbox.data[1][1];
+    const originalStatus = h.outbox.data[2][1];
     delete h.sheets.sms_inbound_queue;
     const result = phase === "send_started"
       ? h.context.markPendingSmsSendStartedV10_(claimed)
       : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
     assert.equal(result.should_send, false, phase);
     assert.equal(result.retryable, true, phase);
-    assert.equal(h.outbox.data[1][1], originalStatus, phase);
+    assert.equal(h.outbox.data[2][1], originalStatus, phase);
   }
 });
 
@@ -653,7 +772,7 @@ test("takeover service and send-start ledger errors hold feature work without ca
   enqueue(h);
   h.context.hasPendingSmsTakeoverV11_ = () => { throw new Error("Temporary property service failure"); };
   assert.equal(h.context.claimPendingSmsSendV10_({}).retryable, true);
-  assert.equal(h.outbox.data[1][1], "queued");
+  assert.equal(h.outbox.data[2][1], "queued");
   h.context.findLeasedPendingSmsRow_ = () => { throw new Error("Temporary ledger read failure"); };
   const result = h.context.markPendingSmsSendStartedV10_({ message_id: base.message_id });
   assert.equal(result.retryable, true);
@@ -668,7 +787,7 @@ test("legacy first_name remains ordinary non-feature metadata", () => {
 test("missing receipt cannot automatically retry feature payload; legacy retry stays unchanged", () => {
   const h = harness();
   enqueue(h);
-  const row = h.outbox.data[1];
+  const row = h.outbox.data[2];
   row[1] = "send_started";
   row[9] = 1;
   assert.equal(h.context.buildAutomaticSmsRetryRowV15_(row, Date.now()), null);
