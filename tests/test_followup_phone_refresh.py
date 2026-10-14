@@ -344,6 +344,8 @@ def _video_followup_sheet_fixture(monkeypatch, *, elapsed_hours, already_followe
         return video_message, {
             **context, "followup_key": "a" * 64, "video_variant": "video",
             "video_job_id": "b" * 32, "message_id": "followup-video-" + "a" * 24,
+            "video_speech_proof": {"accepted": True, "video_job_id": "b" * 32,
+                                   "media_sha256": "c" * 64},
         }
 
     def post(url, json, timeout):
@@ -399,6 +401,8 @@ def test_due_video_selection_and_enqueue_keep_requested_sheet_stable_id(monkeypa
     assert body["message_id"] == "followup-video-" + "a" * 24
     assert body["request_id"] == "scheduler-" + body["message_id"]
     assert body["video_variant"] == "video"
+    assert body["video_speech_proof"] == {"accepted": True, "video_job_id": "b" * 32,
+                                          "media_sha256": "c" * 64}
     assert fixture.service.values_api.row_ranges == [f"{bot_min.GSHEET_TAB}!A2:AB2"]
 
 

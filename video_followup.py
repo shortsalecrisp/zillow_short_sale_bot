@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
+from video_followup_speech_guard import SpeechGuardError, validate_speech_proof
+
 LOG = logging.getLogger(__name__)
 SCRIPT_VERSION = "face-to-text-same-take-turbo-v3"
 MAX_MEDIA_BYTES = 30 * 1024 * 1024
@@ -216,13 +218,30 @@ class Store:
                 continue
         raise Conflict("Storage contention; retry later")
 
+    @staticmethod
+    def has_speech_proof(job):
+        proof = job.get("speech_proof")
+        return (isinstance(proof, dict) and isinstance(proof.get("media_sha256"), str)
+                and validate_speech_proof(proof, first_name=job.get("first_name"),
+                                          media_sha256=proof["media_sha256"]))
+
+    def verified_video(self, job):
+        if not self.has_speech_proof(job):
+            return False
+        content, _ = self.objects.read(f"assets/{job['id']}/video")
+        return (isinstance(content, bytes) and 0 < len(content) <= MAX_MEDIA_BYTES
+                and validate_speech_proof(job["speech_proof"], first_name=job.get("first_name"),
+                                          media_sha256=hashlib.sha256(content).hexdigest()))
+
     def prepare(self, context):
         context = {**context, "first_name": normalize_name(context["first_name"])}
         key = context["followup_key"]
         job = self.mutate("jobs/" + key, lambda old: None if old else {
             **context, "id": secrets.token_hex(16), "status": "prepared",
             "script_version": SCRIPT_VERSION, "created_at": iso(utcnow())})
-        if job["status"] in {"prepared", "submitted", "submitting", "processing"}:
+        if (job["status"] in {"prepared", "submitted", "submitting", "processing"}
+                or (job["status"] == "ready" and not job.get("variant") and not self.has_speech_proof(job))):
+            # Legacy ready jobs need only a free audit, never another render.
             self.mutate("active/" + key, lambda old: None if old else {"key": key})
         return job
 
@@ -282,7 +301,8 @@ class Store:
             if old.get("variant") or old["status"] == "cancelled":
                 return None
             ready = (old["status"] == "ready" and old.get("script_version") == SCRIPT_VERSION
-                     and old["first_name"] == context["first_name"] and valid_name(context["first_name"]))
+                     and old["first_name"] == context["first_name"] and valid_name(context["first_name"])
+                     and self.verified_video(old))
             variant = "video" if ready and origin else "text"
             payload = (f"Hey {context['first_name']}, it's Yoni Kutler with Crisp Short Sales. "
                        "Here's a quick video to put a face to my text. Happy to help if you have questions.\n"
@@ -302,6 +322,10 @@ class Store:
         job, _ = self.read("jobs/" + key)
         if not job or job["status"] not in {"submitted", "processing"} or job.get("provider_id") != provider_id:
             return False
+        proof = media.get("speech_proof")
+        if not validate_speech_proof(proof, first_name=job["first_name"],
+                                    media_sha256=hashlib.sha256(media["media_bytes"]).hexdigest()):
+            raise SpeechGuardError("speech_guard_output_invalid")
         for kind, value, mime in [("video", media["media_bytes"], "video/mp4"),
                                   ("poster", media["poster_bytes"], "image/jpeg"),
                                   ("captions", media["vtt_bytes"], "text/vtt; charset=utf-8")]:
@@ -310,12 +334,17 @@ class Store:
             try:
                 self.objects.write(f"assets/{job['id']}/{kind}", value, 0, mime)
             except Conflict:
-                pass
+                stored, _ = self.objects.read(f"assets/{job['id']}/{kind}")
+                if stored != value:
+                    raise SpeechGuardError("speech_guard_media_invalid") from None
+        if not self.verified_video({**job, "speech_proof": proof}):
+            raise SpeechGuardError("speech_guard_media_invalid")
         self.mutate("public/" + job["id"], lambda old: None if old else {"key": key})
         def ready(old):
             if old["status"] not in {"submitted", "processing"} or old.get("provider_id") != provider_id:
                 return None
-            return {**old, "status": "ready", "duration": media["duration"], "ready_at": iso(utcnow())}
+            return {**old, "status": "ready", "duration": media["duration"], "ready_at": iso(utcnow()),
+                    "speech_proof": proof}
         return self.mutate("jobs/" + key, ready)["status"] == "ready"
 
     def get_public_video(self, opaque_id):
@@ -392,6 +421,33 @@ class Worker:
             self.store.mutate("jobs/" + key, lambda old: {**old, "budget_settled": True}
                 if self._capacity_is_terminal(old) else None)
 
+    def audit_ready(self, key):
+        """Free, explicit audit for an unfrozen ready job, even with generation off."""
+        job, _ = self.store.read("jobs/" + key)
+        if (not job or job.get("status") != "ready" or job.get("variant")
+                or job.get("script_version") != SCRIPT_VERSION):
+            return False
+        if self.store.verified_video(job):
+            return True
+        if self.eligible(job) is not True:
+            return False
+        content, _ = self.store.objects.read(f"assets/{job['id']}/video")
+        try:
+            proof = self.provider.audit_media(job, content)
+        except SpeechGuardError:
+            self.store.mutate("jobs/" + key, lambda old: {**old, "status": "failed",
+                "reason": "Stored video failed spoken-name verification"}
+                if old and old.get("status") == "ready" and not old.get("variant")
+                and all(old.get(field) == job.get(field) for field in ("id", "provider_id", "first_name")) else None)
+            return False
+        if not self.store.verified_video({**job, "speech_proof": proof}):
+            return False
+        audited = self.store.mutate("jobs/" + key, lambda old: {**old, "speech_proof": proof}
+            if old and old.get("status") == "ready" and not old.get("variant")
+            and all(old.get(field) == job.get(field) for field in ("id", "provider_id", "first_name"))
+            and self.store.verified_video({**old, "speech_proof": proof}) else None)
+        return bool(audited and audited.get("status") == "ready" and self.store.verified_video(audited))
+
     def run_job(self, key):
         job, version = self.store.read("jobs/" + key)
         if not job:
@@ -414,7 +470,10 @@ class Worker:
                     self.store.settle(key, job["reserved_at"], status.get("billed_cents", status.get("cost_cents")), status.get("accounting_method"))
                     self.store.mutate("jobs/" + key, lambda old: {**old, "budget_settled": True})
             return
-        if job["status"] in {"frozen_video", "ready", "failed", "uncertain", "budget_blocked"}:
+        if job["status"] == "ready":
+            self.audit_ready(key)
+            return
+        if job["status"] in {"frozen_video", "failed", "uncertain", "budget_blocked"}:
             return
         if not self.config.accepts(job) or not self.config.generation_enabled:
             return
@@ -482,14 +541,25 @@ class Worker:
                 return
             job.update(status="processing", lease_at=iso(now), budget_settled=True)
             self.store.write("jobs/" + key, job, version)
-            media = self.provider.prepare_media(status, job["first_name"])
+            try:
+                media = self.provider.prepare_media(status, job["first_name"])
+            except SpeechGuardError:
+                self.store.mutate("jobs/" + key, lambda old: {**old, "status": "failed",
+                    "reason": "Final video failed spoken-name verification"}
+                    if old["status"] == "processing" and old.get("provider_id") == job["provider_id"] else None)
+                return
             eligible = self.eligible(job)
             if eligible is False:
                 self.store.cancel(key, "Recipient replied while video was rendering")
                 return
             if eligible is not True:
                 return
-            self.store.finish(key, job["provider_id"], media)
+            try:
+                self.store.finish(key, job["provider_id"], media)
+            except SpeechGuardError:
+                self.store.mutate("jobs/" + key, lambda old: {**old, "status": "failed",
+                    "reason": "Stored video failed spoken-name verification"}
+                    if old["status"] == "processing" and old.get("provider_id") == job["provider_id"] else None)
 
     def tick(self):
         if not self.config.enabled or not self.config.generation_enabled:
@@ -513,8 +583,8 @@ class Worker:
 
 
 class Service:
-    def __init__(self, config, store):
-        self.config, self.store = config, store
+    def __init__(self, config, store, audit_ready=None):
+        self.config, self.store, self.audit_ready = config, store, audit_ready
 
     def prepare(self, context):
         context = {**context, "first_name": normalize_name(context["first_name"])}
@@ -529,6 +599,13 @@ class Service:
         # Apps Script atomically freezes the first accepted variant under lock.
         metadata = {**context, "video_variant": "text", "video_job_id": ""}
         try:
+            job, _ = self.store.read("jobs/" + context["followup_key"])
+            if (self.audit_ready and job and job.get("status") == "ready" and not job.get("variant")
+                    and not self.store.verified_video(job)):
+                try:
+                    self.audit_ready(context["followup_key"])
+                except Exception as exc:
+                    LOG.warning("Free video audit unavailable; use text error_type=%s", type(exc).__name__)
             job = self.store.freeze(context, fallback, self.config.origin)
             if job is None:
                 return None, metadata
@@ -537,7 +614,14 @@ class Service:
                 # Never label old-name media with the corrected recipient name.
                 # The outbox still decides whether an earlier payload is frozen.
                 return fallback, metadata
+            if job["variant"] == "video" and not self.store.verified_video(job):
+                # Preserve any previously frozen payload. The outbox decides
+                # whether this same-key fallback can create a new text entry.
+                return fallback, metadata
             metadata.update(video_variant=job["variant"], video_job_id=job["id"])
+            if job["variant"] == "video":
+                metadata["video_speech_proof"] = {**job["speech_proof"], "video_job_id": job["id"],
+                    **{field: context[field] for field in ("followup_key", "phone", "initial_sent_at", "stable_id")}}
             return job["message"], metadata
         except Exception as exc:
             LOG.warning("Video unavailable; same-identity text fallback error_type=%s", type(exc).__name__)
@@ -550,8 +634,14 @@ def get_service():
         with _SERVICE_LOCK:
             if _SERVICE is None:
                 config = Config()
-                _SERVICE = Service(config, Store(GCSObjects(config.bucket)))
+                _SERVICE = Service(config, Store(GCSObjects(config.bucket)), audit_ready=_audit_ready_job)
     return _SERVICE
+
+
+def _audit_ready_job(key):
+    from video_followup_worker import create_worker
+    worker = create_worker()
+    return worker.audit_ready(key) if worker else False
 
 
 def prepare_for_followup(**kwargs):

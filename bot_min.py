@@ -12793,6 +12793,8 @@ def _enqueue_tasker_sms_outbox(
     elif followup_context:
         for key in ("followup_key", "initial_sent_at", "video_variant", "video_job_id", "first_name"):
             body[key] = followup_context[key]
+        if "video_speech_proof" in followup_context:
+            body["video_speech_proof"] = followup_context["video_speech_proof"]
 
     try:
         response = requests.post(TASKER_TRANSPORT_HEALTH_URL, json=body, timeout=20)

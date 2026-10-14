@@ -12,6 +12,7 @@ import requests
 
 import video_followup as core
 import video_followup_same_take as provider
+import video_followup_speech_guard as speech
 
 
 MASTER = b"approved second recording"
@@ -23,6 +24,17 @@ TTS_AUDIO = "https://v3b.fal.media/files/b/private/greeting.wav"
 FINAL_VIDEO = "https://v3.fal.media/files/private/video.mp4"
 INPUTS = {"video_bytes": b"same-take context", "audio_bytes": b"context PCM",
           "greeting_audio_bytes": b"greeting PCM"}
+
+
+def speech_proof(name, audio=INPUTS["greeting_audio_bytes"], media=None):
+    result = {"accepted": True, "policy_version": speech.POLICY_VERSION, "model_id": speech.MODEL_ID,
+        "model_revision": speech.MODEL_REVISION, "model_manifest_sha256": speech.MODEL_MANIFEST_SHA256,
+        "config_sha256": speech.CONFIG_SHA256, "source_audio_sha256": hashlib.sha256(audio).hexdigest(),
+        "expected_name": name, "normalized_transcript": "hey " + name.casefold(),
+        "confidence": [{"avg_logprob": -0.1, "no_speech_prob": 0.01}]}
+    if media is not None:
+        result.update(media_sha256=hashlib.sha256(media).hexdigest(), greeting_seconds=1.5)
+    return result
 
 
 class Objects:
@@ -69,7 +81,7 @@ class Response:
 
 def prepared(name):
     return {**INPUTS, "metadata": {"source_sha256": provider.MASTER_SHA256,
-        "first_name": name, "context_seconds": 2.1,
+        "first_name": name, "context_seconds": 2.1, "greeting_seconds": 1.5,
         **{kind + "_sha256": hashlib.sha256(INPUTS[key]).hexdigest()
            for kind, key in (("video", "video_bytes"), ("audio", "audio_bytes"),
                              ("greeting_audio", "greeting_audio_bytes"))}}}
@@ -88,6 +100,10 @@ def world(monkeypatch):
     monkeypatch.setattr(provider, "inspect_reference", Mock(return_value={"duration_seconds": 8.44}))
     monkeypatch.setattr(provider, "inspect_greeting", Mock(return_value={"duration_seconds": 1.5,
         "coarse_pitch_match": True, "identity_guaranteed": False}))
+    monkeypatch.setattr(provider, "preflight_speech_guard", Mock(return_value={"ready": True}))
+    monkeypatch.setattr(provider, "verify_greeting_words", Mock(side_effect=lambda audio, name: speech_proof(name, audio)))
+    monkeypatch.setattr(provider, "verify_video_greeting_words", Mock(side_effect=
+        lambda media, name, seconds: speech_proof(name, media=media)))
     objects = Objects()
     objects.write(MASTER_KEY, MASTER, 0)
     objects.write(provider.REFERENCE_KEY, REFERENCE, 0)
@@ -713,3 +729,94 @@ def test_even_small_increase_above_approved_rate_is_rejected(world, model, price
         else:
             world[0].inspect(identifier)
     assert not paid_calls(world, model)
+
+
+def test_speech_model_preflight_blocks_new_paid_tts_but_not_existing_request(world, monkeypatch):
+    monkeypatch.setattr(provider, "preflight_speech_guard", Mock(side_effect=
+        speech.SpeechGuardError("speech_guard_unavailable")))
+    with pytest.raises(speech.SpeechGuardError):
+        start(world)
+    assert not paid_calls(world)
+    monkeypatch.setattr(provider, "preflight_speech_guard", Mock(return_value={"ready": True}))
+    identifier = world[0].submit("Sue", "job")
+    monkeypatch.setattr(provider, "preflight_speech_guard", Mock(side_effect=
+        speech.SpeechGuardError("speech_guard_unavailable")))
+    assert world[0].submit("Sue", "job") == identifier
+    assert len(paid_calls(world)) == 1
+
+
+@pytest.mark.parametrize("code", ["speech_guard_name_mismatch", "speech_guard_low_confidence", "speech_guard_timeout"])
+def test_spoken_name_rejection_blocks_lipsync_and_remains_terminal(world, monkeypatch, code):
+    identifier = start(world, "Jamie")
+    monkeypatch.setattr(provider, "verify_greeting_words", Mock(side_effect=speech.SpeechGuardError(code)))
+    result = world[0].inspect(identifier)
+    assert result["status"] == "failed"
+    assert result["failure_stage"] == "raw_speech_screen"
+    assert result["underlying_code"] == code
+    assert world[0].submit("Jamie", "job") == identifier
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert len(paid_calls(world)) == 1
+    assert not paid_calls(world, provider.MODEL)
+
+
+def test_prepared_greeting_proof_binds_actual_audio_before_kling(world):
+    identifier = start(world)
+    assert world[0].inspect(identifier)["status"] == "processing"
+    assert [call.args for call in provider.verify_greeting_words.call_args_list] == [
+        (b"WAV audio", "Sue"), (INPUTS["greeting_audio_bytes"], "Sue")]
+    saved = state(world, identifier)
+    assert speech.validate_speech_proof(saved["raw_speech_proof"], first_name="Sue",
+        audio_sha256=hashlib.sha256(b"WAV audio").hexdigest())
+    assert speech.validate_speech_proof(saved["greeting_speech_proof"], first_name="Sue",
+        audio_sha256=hashlib.sha256(INPUTS["greeting_audio_bytes"]).hexdigest())
+    assert len(paid_calls(world, provider.MODEL)) == 1
+
+
+@pytest.mark.parametrize("tamper", ["name", "hash", "policy"])
+def test_invalid_greeting_proof_cannot_start_lipsync(world, monkeypatch, tamper):
+    identifier = start(world)
+    proof = speech_proof("Sue")
+    proof[{"name": "expected_name", "hash": "source_audio_sha256", "policy": "policy_version"}[tamper]] = "wrong"
+    monkeypatch.setattr(provider, "verify_greeting_words", Mock(side_effect=[speech_proof("Sue", b"WAV audio"), proof]))
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert not paid_calls(world, provider.MODEL)
+
+
+def test_legacy_completed_paid_result_is_audited_without_regeneration(world, monkeypatch):
+    identifier = start(world)
+    world[0].inspect(identifier)
+    snapshot = world[0].inspect(identifier)
+    world[1].mutate("same-take/" + identifier, lambda old: {key: value for key, value in old.items()
+        if key != "greeting_speech_proof"})
+    provider.verify_greeting_words.reset_mock()
+    monkeypatch.setattr(provider, "preflight_speech_guard", Mock(side_effect=AssertionError("No new TTS")))
+    media = world[0].prepare_media(snapshot, "Sue")
+    provider.verify_greeting_words.assert_called_once_with(INPUTS["greeting_audio_bytes"], "Sue")
+    provider.verify_video_greeting_words.assert_called_once_with(b"output", "Sue", 1.5)
+    assert speech.validate_speech_proof(media["speech_proof"], first_name="Sue",
+        media_sha256=hashlib.sha256(b"output").hexdigest())
+    assert len(paid_calls(world)) == 2
+
+
+def test_final_encoded_greeting_mismatch_never_returns_publishable_media(world, monkeypatch):
+    identifier = start(world)
+    world[0].inspect(identifier)
+    snapshot = world[0].inspect(identifier)
+    monkeypatch.setattr(provider, "verify_video_greeting_words", Mock(side_effect=
+        speech.SpeechGuardError("speech_guard_name_mismatch")))
+    with pytest.raises(speech.SpeechGuardError):
+        world[0].prepare_media(snapshot, "Sue")
+    assert "final_speech_proof" not in state(world, identifier)
+    assert len(paid_calls(world)) == 2
+
+
+def test_legacy_media_audit_only_verifies_exact_existing_bytes_and_name(world):
+    identifier = start(world)
+    world[0].inspect(identifier)
+    world[0].inspect(identifier)
+    job = {"provider_id": identifier, "first_name": "Sue", "followup_key": "job"}
+    proof = world[0].audit_media(job, b"existing final video")
+    assert proof["media_sha256"] == hashlib.sha256(b"existing final video").hexdigest()
+    with pytest.raises(speech.SpeechGuardError):
+        world[0].audit_media({**job, "first_name": "Christopher"}, b"existing final video")
+    assert len(paid_calls(world)) == 2

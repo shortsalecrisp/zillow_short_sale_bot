@@ -10,3 +10,4 @@ jina_cache.sqlite
 __pycache__/
 *.pyc
 tasker/*.private.xml
+.video-speech-guard/

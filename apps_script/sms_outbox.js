@@ -463,7 +463,7 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
   var videoContext = null;
   if (hasVideoFollowupContextV19_(body)) {
     videoContext = validateVideoFollowupContextV19_(body, true);
-    if (!videoContext.ok) return { ok: false, queued: false, error: videoContext.reason };
+    if (!videoContext.ok) return { ok: false, queued: false, retryable: !!videoContext.retryable, error: videoContext.reason };
   }
 
   installSmsOutboxTriggers_();
@@ -501,9 +501,11 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
         if (frozen.ok && frozen.status !== "sent") {
           var stored = rows[frozen.pending_row - 2];
           var storedBody = Object.assign({}, parseVideoFollowupMetadataV19_(stored), {
-            phone: stored[4], message_id: stored[3], request_id: stored[2]
+            phone: stored[4], message_id: stored[3], request_id: stored[2], reply_text: stored[5]
           });
-          var stillEligible = checkVideoFollowupEligibilityV19_(storedBody, { pendingRows: rows, ignoreOwnKey: true });
+          var stillEligible = hasValidVideoFollowupSpeechProofV21_(storedBody, storedBody)
+            ? checkVideoFollowupEligibilityV19_(storedBody, { pendingRows: rows, ignoreOwnKey: true })
+            : { eligible: false, retryable: true, reason: "Personalized video spoken-name proof is missing or invalid" };
           if (!stillEligible.eligible) {
             frozen.ok = false;
             frozen.queued = false;
@@ -555,7 +557,7 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
 }
 
 function hasVideoFollowupContextV19_(body) {
-  return ["followup_key", "initial_sent_at", "video_variant", "video_job_id"]
+  return ["followup_key", "initial_sent_at", "video_variant", "video_job_id", "video_speech_proof"]
     .some(function(key) { return Object.prototype.hasOwnProperty.call(body || {}, key); }) ||
     /^followup-video-/.test(String(body && body.message_id || ""));
 }
@@ -720,6 +722,42 @@ function normalizeVideoFollowupFirstNameV19_(value) {
   return String(value || "").normalize("NFKC").replace(/[\u2018\u2019\u02bc]/g, "'").trim();
 }
 
+function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
+  if (metadata.video_variant !== "video") return true;
+  var proof = metadata.video_speech_proof;
+  var name = normalizeVideoFollowupFirstNameV19_(metadata.first_name);
+  var foldedName = name.toLowerCase().replace(/\u00df/g, "ss").replace(/\u03c2/g, "\u03c3");
+  if (name.length < 2 || name.length > 32 || !/^\p{L}+(?:[-']\p{L}+){0,2}$/u.test(name) ||
+      ["agent", "unknown", "there", "test"].indexOf(foldedName) !== -1 ||
+      !proof || typeof proof !== "object" || Array.isArray(proof) || proof.accepted !== true ||
+      proof.policy_version !== "exact-greeting-tiny-en-v1" ||
+      proof.model_id !== "Systran/faster-whisper-tiny.en" ||
+      proof.model_revision !== "0d3d19a32d3338f10357c0889762bd8d64bbdeba" ||
+      proof.model_manifest_sha256 !== "9f995ad3147f0799b2babb9e84926a53bca82d888d5fb6558d925f38dd2b78ee" ||
+      proof.config_sha256 !== "f1a2b9866f0576c6500f760d0b58b7a29ed8acf9d337aacc0c66c134ad39e9ca" ||
+      proof.expected_name !== name || proof.normalized_transcript !== "hey " + foldedName ||
+      proof.video_job_id !== metadata.video_job_id || proof.followup_key !== metadata.followup_key ||
+      proof.stable_id !== metadata.stable_id || proof.phone !== normalizePhone_(body.phone) ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(String(proof.initial_sent_at || "")) ||
+      Date.parse(proof.initial_sent_at) !== Date.parse(metadata.initial_sent_at) ||
+      !/^[0-9a-f]{64}$/.test(String(proof.source_audio_sha256 || "")) ||
+      !/^[0-9a-f]{64}$/.test(String(proof.media_sha256 || "")) ||
+      typeof proof.greeting_seconds !== "number" || !isFinite(proof.greeting_seconds) ||
+      proof.greeting_seconds < 0.5 || proof.greeting_seconds > 2.5 ||
+      !Array.isArray(proof.confidence) || proof.confidence.length < 1 || proof.confidence.length > 8) return false;
+  if (!proof.confidence.every(function(segment) {
+    return segment && typeof segment.avg_logprob === "number" && isFinite(segment.avg_logprob) &&
+      segment.avg_logprob >= -1 && segment.avg_logprob <= 0 &&
+      typeof segment.no_speech_prob === "number" && isFinite(segment.no_speech_prob) &&
+      segment.no_speech_prob >= 0 && segment.no_speech_prob <= 0.6;
+  })) return false;
+  // The authenticated worker verifies immutable media bytes. Bind that proof to
+  // the exact recipient episode and the actual branded link frozen in the SMS.
+  var replyText = String(body.reply_text || body.message || "");
+  var urls = replyText.match(/https?:\/\/[^\s<>"']+/gi) || [];
+  return urls.length === 1 && urls[0] === "https://go.crispshortsales.com/v/" + metadata.video_job_id;
+}
+
 function validateVideoFollowupContextV19_(body, requireJob) {
   var key = String(body && body.followup_key || "");
   var initial = String(body && body.initial_sent_at || "");
@@ -740,11 +778,16 @@ function validateVideoFollowupContextV19_(body, requireJob) {
       (variant === "video" && (!firstName || (requireJob && !job)))) {
     return { ok: false, reason: "Invalid personalized follow-up identity" };
   }
-  return { ok: true, metadata: {
+  var metadata = {
     crm_row: row, stable_id: stableId, followup_key: key,
     initial_sent_at: new Date(initialMs).toISOString(), video_variant: variant,
     video_job_id: job, first_name: firstName
-  } };
+  };
+  if (variant === "video" && body.video_speech_proof !== undefined) metadata.video_speech_proof = body.video_speech_proof;
+  if (requireJob && !hasValidVideoFollowupSpeechProofV21_(body, metadata)) {
+    return { ok: false, retryable: true, reason: "Personalized video spoken-name proof is missing or invalid" };
+  }
+  return { ok: true, metadata: metadata };
 }
 
 function findFrozenVideoFollowupV19_(rows, metadata, phone, messageId) {
@@ -2292,8 +2335,9 @@ function getPendingSmsStaleReason_(outboxRow) {
   if (videoMetadata || /^followup-video-/.test(messageId)) {
     if (!videoMetadata) return "Personalized follow-up metadata is missing";
     var videoBody = Object.assign({}, videoMetadata, {
-      phone: phone, message_id: messageId, request_id: String(outboxRow[2] || "")
+      phone: phone, message_id: messageId, request_id: String(outboxRow[2] || ""), reply_text: String(outboxRow[5] || "")
     });
+    if (!hasValidVideoFollowupSpeechProofV21_(videoBody, videoMetadata)) return "Personalized follow-up eligibility temporarily unavailable";
     var videoEligibility = checkVideoFollowupEligibilityV19_(videoBody, { ignoreOwnKey: true });
     if (videoEligibility.retryable) return "Personalized follow-up eligibility temporarily unavailable";
     return videoEligibility.eligible ? "" : videoEligibility.reason;

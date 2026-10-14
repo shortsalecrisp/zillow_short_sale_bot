@@ -16,10 +16,26 @@ const base = {
   request_id: `scheduler-followup-video-${key.slice(0, 24)}`,
   message: "Original follow-up text",
 };
-const video = (changes = {}) => ({
-  ...base, video_variant: "video", video_job_id: "job_123", first_name: "Jim",
-  message: "Hey Jim, here's your video: https://example.test/v/opaque", ...changes,
-});
+const speechPolicy = {
+  accepted: true, policy_version: "exact-greeting-tiny-en-v1", model_id: "Systran/faster-whisper-tiny.en",
+  model_revision: "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+  model_manifest_sha256: "9f995ad3147f0799b2babb9e84926a53bca82d888d5fb6558d925f38dd2b78ee",
+  config_sha256: "f1a2b9866f0576c6500f760d0b58b7a29ed8acf9d337aacc0c66c134ad39e9ca",
+};
+const canonicalName = (name) => String(name).normalize("NFKC").replace(/[\u2018\u2019\u02bc]/g, "'").trim();
+const video = (changes = {}) => {
+  const body = { ...base, video_variant: "video", video_job_id: "job_123", first_name: "Jim", ...changes };
+  const name = canonicalName(body.first_name);
+  if (!Object.hasOwn(changes, "message")) body.message = `Hey ${name}, here's your video: https://go.crispshortsales.com/v/${body.video_job_id}`;
+  if (!Object.hasOwn(changes, "video_speech_proof")) body.video_speech_proof = {
+    ...speechPolicy, video_job_id: body.video_job_id, followup_key: body.followup_key,
+    phone: body.phone, initial_sent_at: body.initial_sent_at, stable_id: body.stable_id,
+    source_audio_sha256: "b".repeat(64), media_sha256: "c".repeat(64),
+    expected_name: name, normalized_transcript: `hey ${name.toLowerCase()}`,
+    greeting_seconds: 1.5, confidence: [{ avg_logprob: -0.1, no_speech_prob: 0.01 }],
+  };
+  return body;
+};
 const legacy = {
   crm_row: 2, stable_id: base.stable_id, phone: base.phone, message: "Original legacy text",
   message_id: "followup-2-oldhash", request_id: "scheduler-followup-2-oldhash",
@@ -365,6 +381,134 @@ test("authenticated eligibility route bypasses debug and mutation paths", () => 
   assert.equal(h.context.handleUnifiedSmsPost_({}).eligible, true);
   assert.equal(validated, true);
   assert.deepEqual(h.counters(), before);
+});
+
+test("actual videos persist their exact spoken-name proof without changing pre-render eligibility", () => {
+  const h = harness();
+  const before = h.counters();
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(video({
+    message: undefined, video_job_id: "", video_speech_proof: undefined,
+  })).eligible, true);
+  assert.deepEqual(h.counters(), before);
+  const body = video();
+  assert.equal(enqueue(h, body).ok, true);
+  const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
+  assert.deepEqual(metadata.video_speech_proof, body.video_speech_proof);
+  assert.equal(h.context.getPendingSmsStaleReason_(h.outbox.data[2]), "");
+});
+
+test("actual video enqueue rejects missing, stale or incorrectly bound speech proofs", () => {
+  const badProofs = [undefined, null, {}, [],
+    ...Object.keys(video().video_speech_proof).map((field) => ({ ...video().video_speech_proof, [field]: undefined })),
+    ...Object.entries({ accepted: "true", policy_version: "old", model_id: "other", model_revision: "other",
+      model_manifest_sha256: "a".repeat(64), config_sha256: "a".repeat(64), video_job_id: "other_job",
+      followup_key: "d".repeat(64), phone: "9542053206", initial_sent_at: "2026-10-12T13:00:00Z",
+      stable_id: "other", expected_name: "Joseph", normalized_transcript: "hey jimmy",
+      source_audio_sha256: "not-a-hash", media_sha256: "C".repeat(64), greeting_seconds: 3,
+      confidence: [{ avg_logprob: -1.1, no_speech_prob: 0.01 }],
+    }).map(([field, value]) => ({ ...video().video_speech_proof, [field]: value })),
+  ];
+  for (const proof of badProofs) {
+    const h = harness();
+    const body = video({ video_speech_proof: proof });
+    assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, true);
+    const result = enqueue(h, body);
+    assert.equal(result.ok, false, JSON.stringify(proof));
+    assert.equal(result.retryable, true);
+    assert.equal(h.outbox.data.length, 2);
+  }
+});
+
+test("speech proof binds the branded URL and exact job in the actual SMS body", () => {
+  for (const message of ["No video link", "https://other.test/v/job_123",
+    "https://go.crispshortsales.com/v/other_job", "https://go.crispshortsales.com/v/job_123?other=1",
+    "https://go.crispshortsales.com/v/job_123 https://other.test", "https://go.crispshortsales.com/v/job_123 HTTPS://other.test",
+    "https://go.crispshortsales.com/v/job_123-extra"]) {
+    const h = harness();
+    assert.equal(enqueue(h, video({ message })).ok, false, message);
+    assert.equal(h.outbox.data.length, 2);
+  }
+});
+
+test("speech proof rejects names outside the recognizer's supported first-name policy", () => {
+  for (const first_name of ["A", "agent", "Unknown", "There", "test", "Jim Smith", "Jim2", "J".repeat(33)]) {
+    const h = harness();
+    h.row[0] = first_name;
+    assert.equal(enqueue(h, video({ first_name })).ok, false, first_name);
+    assert.equal(h.outbox.data.length, 2);
+  }
+});
+
+test("speech proof rejects nonnumeric duration and invalid confidence evidence", () => {
+  for (const changes of [{ greeting_seconds: "1.5" }, { greeting_seconds: true }, { greeting_seconds: NaN },
+    { greeting_seconds: 0.49 }, { greeting_seconds: 2.51 }, { confidence: [] }, { confidence: [{}] },
+    { confidence: [{ avg_logprob: "-0.1", no_speech_prob: 0 }] },
+    { confidence: [{ avg_logprob: -0.1, no_speech_prob: 0.61 }] },
+    { confidence: [{ avg_logprob: 0.1, no_speech_prob: 0 }] },
+    { confidence: [{ avg_logprob: -0.1, no_speech_prob: NaN }] }]) {
+    const h = harness();
+    const proof = { ...video().video_speech_proof, ...changes };
+    assert.equal(enqueue(h, video({ video_speech_proof: proof })).ok, false, JSON.stringify(changes));
+  }
+});
+
+test("unverified frozen video work is held at claim, reclaim and send-start without replacement", () => {
+  for (const phase of ["claim", "active_claim", "send_started"]) {
+    const h = harness();
+    enqueue(h, video());
+    const claim = phase === "claim" ? null : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
+    delete metadata.video_speech_proof;
+    h.outbox.data[2][6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+    const before = h.outbox.data[2].slice();
+    const result = phase === "send_started" ? h.context.markPendingSmsSendStartedV10_(claim)
+      : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    assert.equal(result.should_send, false, phase);
+    assert.equal(result.retryable, true, phase);
+    assert.deepEqual(h.outbox.data[2], before, phase);
+    const duplicate = enqueue(h, base);
+    assert.equal(duplicate.ok, false, phase);
+    assert.equal(duplicate.retryable, true, phase);
+    assert.equal(duplicate.payload_frozen, true, phase);
+    assert.deepEqual(h.outbox.data[2], before, phase);
+    assert.equal(h.outbox.data.length, 3);
+  }
+});
+
+test("proof revalidation uses the stored payload and preserves started, uncertain and historical sent rows", () => {
+  for (const status of ["send_started", "receipt_pending", "uncertain", "sent"]) {
+    const h = harness();
+    enqueue(h, video());
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    h.outbox.data[2][1] = status;
+    const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
+    delete metadata.video_speech_proof;
+    h.outbox.data[2][6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+    const before = h.outbox.data[2].slice();
+    if (status === "send_started") {
+      const result = h.context.markPendingSmsSendStartedV10_(claim);
+      assert.equal(result.should_send, false);
+      assert.equal(result.retryable, true);
+    }
+    const result = enqueue(h, base);
+    assert.equal(result.ok, status === "sent", status);
+    assert.equal(result.payload_frozen, true);
+    assert.deepEqual(h.outbox.data[2], before);
+    assert.equal(h.outbox.data.length, 3);
+  }
+  const h = harness();
+  enqueue(h, video());
+  h.outbox.data[2][5] = "https://go.crispshortsales.com/v/different_job";
+  assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" }).should_send, false);
+  assert.equal(h.outbox.data[2][1], "queued");
+});
+
+test("text fallbacks do not require or inherit video speech proof", () => {
+  const h = harness();
+  assert.equal(enqueue(h, { ...base, video_speech_proof: { accepted: false } }).ok, true);
+  const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
+  assert.equal(metadata.video_speech_proof, undefined);
+  assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" }).should_send, true);
 });
 
 test("video checks canonical first name but original text does not depend on it", () => {

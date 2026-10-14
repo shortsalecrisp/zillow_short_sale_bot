@@ -6,7 +6,8 @@ services:
     healthCheckPath: /healthz
     buildCommand: |
       pip install -r requirements.txt &&
-      PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.playwright-browsers python -m playwright install chromium
+      PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.playwright-browsers python -m playwright install chromium &&
+      python scripts/provision_video_speech_guard.py
     startCommand: bash ./start.sh
     envVars:
       - key: NODE_VERSION

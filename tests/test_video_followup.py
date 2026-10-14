@@ -1,10 +1,13 @@
 import importlib.util
+import hashlib
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+import video_followup_speech_guard as speech
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +24,18 @@ MEDIA = {
     "vtt_bytes": b"WEBVTT\n\n00:00.000 --> 00:10.000\nHey, it is Yoni Kutler.\n",
     "duration": 10.0,
 }
+
+
+def speech_proof(name="Jim", media=MEDIA["media_bytes"]):
+    return {"accepted": True, "policy_version": speech.POLICY_VERSION, "model_id": speech.MODEL_ID,
+        "model_revision": speech.MODEL_REVISION, "model_manifest_sha256": speech.MODEL_MANIFEST_SHA256,
+        "config_sha256": speech.CONFIG_SHA256, "source_audio_sha256": hashlib.sha256(b"greeting").hexdigest(),
+        "media_sha256": hashlib.sha256(media).hexdigest(), "greeting_seconds": 1.5,
+        "expected_name": name, "normalized_transcript": "hey " + name.casefold(),
+        "confidence": [{"avg_logprob": -0.1, "no_speech_prob": 0.01}]}
+
+
+MEDIA["speech_proof"] = speech_proof()
 
 
 class MemoryObjects:
@@ -99,7 +114,10 @@ class FakeProvider:
             self.preparations.append((dict(status), first_name))
         if self.on_prepare:
             self.on_prepare()
-        return dict(MEDIA)
+        return {**MEDIA, "speech_proof": speech_proof(first_name)}
+
+    def audit_media(self, job, media_bytes):
+        return speech_proof(job["first_name"], media_bytes)
 
 
 class VideoFollowupTests(unittest.TestCase):
@@ -1035,6 +1053,108 @@ class VideoFollowupTests(unittest.TestCase):
                        "https://go.crispshortsales.com:443"):
             with self.subTest(origin=origin), self.assertRaises(ValueError):
                 self.make_config(VIDEO_FOLLOWUP_PUBLIC_ORIGIN=origin)
+
+    def test_unverified_legacy_ready_falls_back_under_same_identity(self):
+        ready = self.make_ready()
+        self.set_job(speech_proof=None)
+        self.assertIsNotNone(self.store.get_public_video(ready["id"]))
+        message, metadata = self.service.select(self.context, FALLBACK)
+        self.assertEqual(message, FALLBACK)
+        self.assertEqual(metadata["followup_key"], self.context["followup_key"])
+        self.assertEqual(metadata["video_variant"], "text")
+        self.assertEqual(self.job()["status"], "frozen_text")
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_selection_free_audit_can_reuse_legacy_ready_video(self):
+        self.make_ready()
+        self.set_job(speech_proof=None)
+        worker = self.worker()
+        self.service.audit_ready = worker.audit_ready
+        message, metadata = self.service.select(self.context, FALLBACK)
+        self.assertIn("https://go.crispshortsales.com/v/", message)
+        proof = metadata["video_speech_proof"]
+        for field in ("followup_key", "phone", "initial_sent_at", "stable_id"):
+            self.assertEqual(proof[field], self.context[field])
+        self.assertEqual(proof["video_job_id"], self.job()["id"])
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_audit_timeout_uses_text_without_changing_followup_identity(self):
+        self.make_ready()
+        self.set_job(speech_proof=None)
+        self.service.audit_ready = Mock(side_effect=speech.SpeechGuardError("speech_guard_timeout"))
+        message, metadata = self.service.select(self.context, FALLBACK)
+        self.assertEqual(message, FALLBACK)
+        self.assertEqual(metadata["message_id"], self.context["message_id"])
+        self.assertEqual(self.job()["status"], "frozen_text")
+
+    def test_legacy_ready_is_reindexed_and_audited_without_generation_enabled(self):
+        self.make_ready()
+        self.set_job(speech_proof=None)
+        path = "active/" + self.context["followup_key"]
+        _, version = self.objects.read(path)
+        self.objects.delete(path, version)
+        self.store.prepare(self.context)
+        self.assertIsNotNone(self.objects.read(path)[0])
+        self.config.generation_enabled = False
+        self.assertTrue(self.worker().audit_ready(self.context["followup_key"]))
+        self.assertTrue(self.store.verified_video(self.job()))
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_audit_never_overwrites_concurrent_freeze_or_cancellation(self):
+        for mode in ("frozen_text", "cancelled", "frozen_video"):
+            with self.subTest(mode=mode):
+                self.make_ready()
+                self.set_job(speech_proof=None, variant=None)
+                def audit(job, content):
+                    self.set_job(status=mode, variant=mode.removeprefix("frozen_"))
+                    return speech_proof(job["first_name"], content)
+                self.provider.audit_media = audit
+                self.assertFalse(self.worker().audit_ready(self.context["followup_key"]))
+                self.assertEqual(self.job()["status"], mode)
+                self.assertIsNone(self.job()["speech_proof"])
+
+    def test_unverified_frozen_video_returns_same_key_text_without_mutating_record(self):
+        self.make_ready()
+        self.service.select(self.context, FALLBACK)
+        self.set_job(speech_proof=None)
+        before = self.job()
+        message, metadata = self.service.select(self.context, FALLBACK)
+        self.assertEqual(message, FALLBACK)
+        self.assertEqual(metadata["followup_key"], self.context["followup_key"])
+        self.assertEqual(metadata["video_variant"], "text")
+        self.assertEqual(before, self.job())
+        self.assertIsNotNone(self.store.get_public_video(before["id"]))
+
+    def test_final_proof_must_match_actual_stored_media_on_conflict(self):
+        job = self.set_job(status="submitted", provider_id="render-ready")
+        self.objects.write(f"assets/{job['id']}/video", b"other video", 0, "video/mp4")
+        with self.assertRaises(speech.SpeechGuardError):
+            self.store.finish(self.context["followup_key"], "render-ready", MEDIA)
+        self.assertEqual(self.job()["status"], "submitted")
+        self.assertIsNone(self.store.get_public_video(job["id"]))
+
+    def test_changed_served_bytes_invalidate_proof_before_freeze(self):
+        job = self.make_ready()
+        path = f"assets/{job['id']}/video"
+        _, version = self.objects.read(path)
+        self.objects.write(path, b"changed after proof", version, "video/mp4")
+        message, metadata = self.service.select(self.context, FALLBACK)
+        self.assertEqual(message, FALLBACK)
+        self.assertEqual(metadata["video_variant"], "text")
+
+    def test_final_name_failure_is_terminal_without_local_or_paid_retry(self):
+        self.store.prepare(self.context)
+        worker = self.worker()
+        worker.tick()
+        self.provider.prepare_media = Mock(side_effect=speech.SpeechGuardError("speech_guard_name_mismatch"))
+        worker.tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.assertTrue(self.job()["budget_settled"])
+        worker.tick()
+        self.assertEqual(len(self.provider.submissions), 1)
+        self.provider.prepare_media.assert_called_once()
+        message, _ = self.service.select(self.context, FALLBACK)
+        self.assertEqual(message, FALLBACK)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,10 @@ from video_followup_provider import (
 )
 from video_followup_audio_guard import GUARD_VERSION, inspect_reference, inspect_greeting
 from video_followup_same_take_media import prepare_inputs, compose
+from video_followup_speech_guard import (
+    SpeechGuardError, preflight_speech_guard, verify_greeting_words,
+    verify_video_greeting_words, validate_speech_proof,
+)
 
 MASTER_SHA256 = "01efd28101e8b016d51d571cc87d38d13ea623389663bc7a88cf26cce39bd60b"
 MODEL = "fal-ai/kling-video/lipsync/audio-to-video"
@@ -57,20 +61,24 @@ _PREPARATION_FAILURE_CODES = frozenset({
     "noncanonical_first_name", "media_processing_failed", "invalid_video_frames", "invalid_source_frames",
     "invalid_audio", "silent_greeting", "invalid_source_audio", "invalid_context_timing",
     "input_budget_mismatch", "input_hash_mismatch", "asset_conflict",
+    "speech_guard_unavailable", "speech_guard_model_mismatch", "speech_guard_dependency_mismatch",
+    "speech_guard_busy", "speech_guard_timeout", "speech_guard_execution_failed",
+    "speech_guard_output_invalid", "speech_guard_audio_invalid", "speech_guard_name_invalid",
+    "speech_guard_name_mismatch", "speech_guard_low_confidence", "speech_guard_media_invalid",
 })
 _PREPARATION_FAILURE_STAGES = frozenset({
     "reference_read", "audio_download", "audio_screen", "audio_duration", "media_prepare",
-    "prepared_validation", "asset_storage", "asset_signing",
+    "prepared_validation", "raw_speech_screen", "speech_screen", "asset_storage", "asset_signing",
 })
 _DIAGNOSTIC_EXCEPTION_TYPES = frozenset({
     "VideoProviderError", "Conflict", "ValueError", "TypeError", "KeyError", "OSError",
     "RuntimeError", "TimeoutError", "MemoryError", "OverflowError", "HTTPError",
-    "ConnectionError", "ReadTimeout", "ConnectTimeout", "Timeout",
+    "ConnectionError", "ReadTimeout", "ConnectTimeout", "Timeout", "SpeechGuardError",
 })
 
 
 def _preparation_failure_diagnostics(exc, stage, audio_qa):
-    code = getattr(exc, "code", None) if isinstance(exc, VideoProviderError) else None
+    code = getattr(exc, "code", None) if isinstance(exc, (VideoProviderError, SpeechGuardError)) else None
     exception_type = type(exc).__name__
     details = {
         "failure_stage": stage if stage in _PREPARATION_FAILURE_STAGES else "unknown_preparation_stage",
@@ -270,6 +278,9 @@ class SameTakeVideoProvider:
             if old.get("first_name") != first_name or old.get("job_key") != job_id:
                 raise VideoProviderError("identity_changed", "Existing greeting belongs to a different name.")
             return pipeline_id
+        # Local verification policy is independent of the paid render identity.
+        # Existing requests above are reused; a missing verifier blocks new spend.
+        preflight_speech_guard()
         state = {"id": pipeline_id, "job_key": job_id, "first_name": first_name,
                  "source_sha256": MASTER_SHA256, "script_version": SCRIPT_VERSION,
                  "stage": "narration_submitting", "created_at": iso(utcnow()),
@@ -331,6 +342,11 @@ class SameTakeVideoProvider:
             duration = float(audio_qa["duration_seconds"])
             if not math.isfinite(duration) or not 0 < duration <= 3.0:
                 raise VideoProviderError("narration_exceeds_budget", "Narration duration is outside the approved limit.")
+            failure_stage = "raw_speech_screen"
+            raw_speech_proof = verify_greeting_words(audio_source, state["first_name"])
+            if not validate_speech_proof(raw_speech_proof, first_name=state["first_name"],
+                    audio_sha256=hashlib.sha256(audio_source).hexdigest()):
+                raise SpeechGuardError("speech_guard_output_invalid")
             failure_stage = "media_prepare"
             inputs = self.preparer(master, audio_source, first_name=state["first_name"])
             failure_stage = "prepared_validation"
@@ -344,6 +360,11 @@ class SameTakeVideoProvider:
                                       ("greeting_audio", "greeting_audio_bytes")):
                 if hashlib.sha256(inputs[content_key]).hexdigest() != metadata.get(kind + "_sha256"):
                     raise VideoProviderError("input_hash_mismatch", "Prepared input hash changed.")
+            failure_stage = "speech_screen"
+            speech_proof = verify_greeting_words(inputs["greeting_audio_bytes"], state["first_name"])
+            if not validate_speech_proof(speech_proof, first_name=state["first_name"],
+                    audio_sha256=metadata["greeting_audio_sha256"]):
+                raise SpeechGuardError("speech_guard_output_invalid")
             failure_stage = "asset_storage"
             video_key = self._asset(pipeline_id, "input.mp4", inputs["video_bytes"], "video/mp4")
             audio_key = self._asset(pipeline_id, "input.wav", inputs["audio_bytes"], "audio/wav")
@@ -364,7 +385,8 @@ class SameTakeVideoProvider:
         claimed = {**state, "stage": "fal_submitting", "metadata": metadata,
                    "greeting_key": greeting_key, "narration_duration": duration,
                    "estimated_cents": TTS_REQUEST_CENTS + LIPSYNC_REQUEST_CENTS,
-                   "audio_qa": audio_qa, "fal_attempt_at": iso(utcnow())}
+                   "audio_qa": audio_qa, "raw_speech_proof": raw_speech_proof,
+                   "greeting_speech_proof": speech_proof, "fal_attempt_at": iso(utcnow())}
         self.store.write("same-take/" + pipeline_id, claimed, version)
         self._price_before_payment(pipeline_id, "fal_submitting", MODEL, self.fal_key, "lipsync_price")
         if not self._active(claimed):
@@ -461,11 +483,38 @@ class SameTakeVideoProvider:
         if state["stage"] != "completed" or normalize_name(first_name) != state["first_name"]:
             raise VideoProviderError("completed_identity_mismatch", "Completed video does not match this agent name.")
         greeting, _ = self.store.objects.read(state["greeting_key"])
+        greeting_hash = hashlib.sha256(greeting).hexdigest()
+        if greeting_hash != state["metadata"].get("greeting_audio_sha256"):
+            raise SpeechGuardError("speech_guard_audio_invalid")
+        proof = state.get("greeting_speech_proof")
+        if not validate_speech_proof(proof, first_name=state["first_name"], audio_sha256=greeting_hash):
+            proof = verify_greeting_words(greeting, state["first_name"])
+            if not validate_speech_proof(proof, first_name=state["first_name"], audio_sha256=greeting_hash):
+                raise SpeechGuardError("speech_guard_output_invalid")
         result = self.compositor(self._master(), self._download_fal(state["media_url"]), greeting,
                                  state["metadata"], first_name=state["first_name"])
+        final_proof = verify_video_greeting_words(result["media_bytes"], state["first_name"],
+                                                   state["metadata"].get("greeting_seconds"))
+        if not validate_speech_proof(final_proof, first_name=state["first_name"],
+                media_sha256=hashlib.sha256(result["media_bytes"]).hexdigest()):
+            raise SpeechGuardError("speech_guard_output_invalid")
         result["qa"] = {**result["qa"], "narration_audio": state["audio_qa"],
                         "automated_screen_not_naturalness_guarantee": True}
-        self._update(state["id"], {"qa": result["qa"]})
+        self._update(state["id"], {"qa": result["qa"], "greeting_speech_proof": proof,
+                                  "final_speech_proof": final_proof}, "completed")
         return {"media_bytes": result["media_bytes"], "poster_bytes": result["poster_bytes"],
                 "vtt_bytes": result["captions_bytes"], "duration": result["duration_seconds"],
-                "width": 1024, "height": 576, "caption_source": "same_recording_timed", "qa": result["qa"]}
+                "width": 1024, "height": 576, "caption_source": "same_recording_timed", "qa": result["qa"],
+                "speech_proof": final_proof}
+
+    def audit_media(self, job, media_bytes):
+        state, _ = self._read(job.get("provider_id"))
+        if (state["stage"] != "completed" or state["first_name"] != job.get("first_name")
+                or state["job_key"] != job.get("followup_key")):
+            raise SpeechGuardError("speech_guard_name_mismatch")
+        proof = verify_video_greeting_words(media_bytes, state["first_name"],
+                                             state["metadata"].get("greeting_seconds"))
+        if not validate_speech_proof(proof, first_name=state["first_name"],
+                media_sha256=hashlib.sha256(media_bytes).hexdigest()):
+            raise SpeechGuardError("speech_guard_output_invalid")
+        return proof

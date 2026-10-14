@@ -30,5 +30,15 @@ else
   echo "STARTUP_HEADLESS_BROWSER_CHECK skipped"
 fi
 
+if python video_followup_speech_guard.py --self-test; then
+  echo "VIDEO_SPEECH_GUARD_READY offline=true"
+else
+  # Speech-check failures disable video selection, not the existing SMS service.
+  export VIDEO_FOLLOWUP_ENABLED=false
+  export VIDEO_FOLLOWUP_GENERATION_ENABLED=false
+  export VIDEO_FOLLOWUP_LIVE_APPROVED=false
+  echo "VIDEO_SPEECH_GUARD_UNAVAILABLE normal_text_fallback=true"
+fi
+
 echo "STARTUP_SERVICES starting webhook server"
 uvicorn webhook_server:app --host 0.0.0.0 --port "${PORT:-10000}"
