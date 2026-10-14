@@ -12,12 +12,13 @@ import os
 import re
 import secrets
 import threading
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 LOG = logging.getLogger(__name__)
-SCRIPT_VERSION = "face-to-text-v1"
+SCRIPT_VERSION = "face-to-text-same-take-v2"
 MAX_MEDIA_BYTES = 30 * 1024 * 1024
 _SERVICE = None
 _SERVICE_LOCK = threading.Lock()
@@ -47,8 +48,13 @@ def canonical_phone(value):
     return digits
 
 
+def normalize_name(value):
+    return unicodedata.normalize("NFKC", str(value or "")).translate(
+        str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'"})).strip()
+
+
 def valid_name(value):
-    value = str(value or "").strip()
+    value = normalize_name(value)
     return (bool(re.fullmatch(r"[^\W\d_]+(?:[-'][^\W\d_]+){0,2}", value, re.UNICODE))
             and 1 < len(value) <= 32 and value.casefold() not in {"unknown", "agent", "there", "test"})
 
@@ -62,7 +68,7 @@ def snapshot(*, row, stable_id, phone, first_name, initial_sent_at):
     # The row may move. Copy or script changes must not create a second follow-up.
     key = hashlib.sha256(json.dumps([stable_id, phone, initial], separators=(",", ":")).encode()).hexdigest()
     return dict(row=int(row), crm_row=int(row), stable_id=stable_id, phone=phone,
-                first_name=str(first_name or "").strip(), initial_sent_at=initial,
+                first_name=normalize_name(first_name), initial_sent_at=initial,
                 followup_key=key, message_id="followup-video-" + key[:24],
                 request_id="scheduler-followup-video-" + key[:24])
 
@@ -82,7 +88,7 @@ class Config:
         self.daily_cents = int(env.get("VIDEO_FOLLOWUP_DAILY_CENTS", "300"))
         self.monthly_cents = int(env.get("VIDEO_FOLLOWUP_MONTHLY_CENTS", "7500"))
         # Conservative per-render reservation, never released on uncertain calls.
-        self.reserve_cents = 50
+        self.reserve_cents = 10
         if self.daily_cents < 0 or self.monthly_cents < 0 or self.daily_cents > 300 or self.monthly_cents > 7500:
             raise ValueError("Video budget exceeds the approved $3/day or $75/month")
         if self.origin:
@@ -104,6 +110,7 @@ class GCSObjects:
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]", bucket):
             raise ValueError("A private video storage bucket must be configured")
         self.bucket = bucket
+        self._signing_credentials = None
         if session is None:
             from google.oauth2 import service_account
             from google.auth.transport.requests import AuthorizedSession
@@ -111,10 +118,35 @@ class GCSObjects:
             credentials = service_account.Credentials.from_service_account_info(
                 info, scopes=["https://www.googleapis.com/auth/devstorage.read_write"])
             session = AuthorizedSession(credentials)
+            self._signing_credentials = credentials
         self.session = session
 
     def url(self, key):
         return "https://storage.googleapis.com/storage/v1/b/" + self.bucket + "/o/" + quote("video-followup/" + key, safe="")
+
+    def signed_get_url(self, key, ttl_seconds=1800):
+        if (not isinstance(key, str) or not key.startswith("assets/") or ".." in key.split("/")
+                or "\\" in key or any(ord(char) < 32 for char in key)):
+            raise ValueError("Only video asset reads may be signed")
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= 3600:
+            raise ValueError("Asset read URL lifetime must be between 1 and 3600 seconds")
+        credentials = self._signing_credentials
+        if credentials is None:
+            raise ValueError("Video storage signing credentials are unavailable")
+        now = utcnow()
+        stamp = now.strftime("%Y%m%dT%H%M%SZ")
+        scope = now.strftime("%Y%m%d") + "/auto/storage/goog4_request"
+        uri = "/" + self.bucket + "/" + quote("video-followup/" + key, safe="/~")
+        query = {
+            "X-Goog-Algorithm": "GOOG4-RSA-SHA256",
+            "X-Goog-Credential": credentials.service_account_email + "/" + scope,
+            "X-Goog-Date": stamp, "X-Goog-Expires": str(ttl_seconds), "X-Goog-SignedHeaders": "host",
+        }
+        query_string = "&".join(quote(k, safe="") + "=" + quote(v, safe="") for k, v in sorted(query.items()))
+        canonical = "\n".join(("GET", uri, query_string, "host:storage.googleapis.com\n", "host", "UNSIGNED-PAYLOAD"))
+        to_sign = "\n".join(("GOOG4-RSA-SHA256", stamp, scope, hashlib.sha256(canonical.encode()).hexdigest()))
+        signature = credentials.sign_bytes(to_sign.encode()).hex()
+        return "https://storage.googleapis.com" + uri + "?" + query_string + "&X-Goog-Signature=" + signature
 
     def read(self, key):
         response = self.session.get(self.url(key), timeout=20)
@@ -185,6 +217,7 @@ class Store:
         raise Conflict("Storage contention; retry later")
 
     def prepare(self, context):
+        context = {**context, "first_name": normalize_name(context["first_name"])}
         key = context["followup_key"]
         job = self.mutate("jobs/" + key, lambda old: None if old else {
             **context, "id": secrets.token_hex(16), "status": "prepared",
@@ -224,27 +257,32 @@ class Store:
         self.mutate("budget/ledger", update)
         return accepted[0]
 
-    def settle(self, key, reserved_at, duration=None):
+    def settle(self, key, reserved_at, billed_cents=None, accounting_method=None):
+        verified = accounting_method in {"provider_verified", "provider_usage"}
+        if billed_cents is not None and verified:
+            if isinstance(billed_cents, bool) or not isinstance(billed_cents, (int, float)) or not math.isfinite(billed_cents) or billed_cents < 0:
+                raise ValueError("Invalid verified provider charge")
         def update(old):
             if not old or key not in old["reservations"]:
                 return None
             entry = old["reservations"][key]
-            # Verified Avatar III rate: 60 cents/minute, rounded up. Failed
-            # jobs retain the full reservation, rather than assuming a refund.
-            if duration is not None:
-                if not math.isfinite(float(duration)) or not 0 < float(duration) <= 30:
-                    raise ValueError("Provider duration outside the approved short-video bound")
-                entry["cents"] = math.ceil(float(duration))
+            # Full video duration is unrelated to the cost of replacing its
+            # greeting. Estimates/unknown failures retain the reserved amount.
+            if billed_cents is not None and verified:
+                entry["cents"] = math.ceil(billed_cents)
+                entry["accounting_method"] = accounting_method
             entry["inflight"] = False
             return old
         self.mutate("budget/ledger", update)
 
     def freeze(self, context, text, origin):
+        context = {**context, "first_name": normalize_name(context["first_name"])}
         job = self.prepare(context)
         def update(old):
             if old.get("variant") or old["status"] == "cancelled":
                 return None
-            ready = old["status"] == "ready" and old["first_name"] == context["first_name"]
+            ready = (old["status"] == "ready" and old.get("script_version") == SCRIPT_VERSION
+                     and old["first_name"] == context["first_name"] and valid_name(context["first_name"]))
             variant = "video" if ready and origin else "text"
             payload = (f"Hey {context['first_name']}, it's Yoni Kutler with Crisp Short Sales. "
                        "Here's a quick video to put a face to my text. Happy to help if you have questions.\n"
@@ -331,13 +369,22 @@ class Worker:
         job, version = self.store.read("jobs/" + key)
         if not job:
             return
+        if job.get("script_version") != SCRIPT_VERSION:
+            # Old provider IDs must never enter the new same-recording pipeline.
+            if job.get("reserved_at") and not job.get("budget_settled"):
+                self.store.settle(key, job["reserved_at"])
+            self.store.mutate("jobs/" + key, lambda old: {**old,
+                "status": "failed" if old["status"] in {"prepared", "submitting", "submitted", "processing"} else old["status"],
+                "reason": "Video source version retired; use normal text", "budget_settled": True}
+                if not old.get("budget_settled") or old["status"] in {"prepared", "submitting", "submitted", "processing"} else None)
+            return
         if job["status"] in {"cancelled", "frozen_text"}:
             # Finish accounting for a render already purchased, but never
             # publish it or send it after cancellation/the text deadline.
             if job.get("provider_id") and not job.get("budget_settled"):
-                status = self.provider.inspect(job["provider_id"])
+                status = self.provider.inspect(job["provider_id"], accounting_only=True)
                 if status["status"] in {"completed", "failed"}:
-                    self.store.settle(key, job["reserved_at"], status.get("duration") if status["status"] == "completed" else None)
+                    self.store.settle(key, job["reserved_at"], status.get("billed_cents", status.get("cost_cents")), status.get("accounting_method"))
                     self.store.mutate("jobs/" + key, lambda old: {**old, "budget_settled": True})
             return
         if job["status"] in {"frozen_video", "ready", "failed", "uncertain", "budget_blocked"}:
@@ -400,7 +447,12 @@ class Worker:
                 return
             if status["status"] != "completed":
                 return
-            self.store.settle(key, job["reserved_at"], status["duration"])
+            self.store.settle(key, job["reserved_at"], status.get("billed_cents", status.get("cost_cents")), status.get("accounting_method"))
+            verified_cost = status.get("billed_cents", status.get("cost_cents"))
+            if verified_cost is not None and status.get("accounting_method") in {"provider_verified", "provider_usage"} and verified_cost > self.config.reserve_cents:
+                self.store.mutate("jobs/" + key, lambda old: {**old, "status": "failed", "budget_settled": True,
+                    "reason": "Verified provider cost exceeded per-video ceiling"} if old["status"] == "submitted" else None)
+                return
             job.update(status="processing", lease_at=iso(now), budget_settled=True)
             self.store.write("jobs/" + key, job, version)
             media = self.provider.prepare_media(status, job["first_name"])
@@ -436,10 +488,12 @@ class Service:
         self.config, self.store = config, store
 
     def prepare(self, context):
+        context = {**context, "first_name": normalize_name(context["first_name"])}
         if self.config.accepts(context) and valid_name(context["first_name"]):
             return self.store.prepare(context)
 
     def select(self, context, fallback):
+        context = {**context, "first_name": normalize_name(context["first_name"])}
         if not self.config.accepts(context):
             return fallback, {}
         # If storage is unavailable, still use the same stable outbox identity.
@@ -449,7 +503,8 @@ class Service:
             job = self.store.freeze(context, fallback, self.config.origin)
             if job is None:
                 return None, metadata
-            if job["variant"] == "video" and job["first_name"] != context["first_name"]:
+            if job["variant"] == "video" and (job["first_name"] != context["first_name"]
+                    or job.get("script_version") != SCRIPT_VERSION or not valid_name(context["first_name"])):
                 # Never label old-name media with the corrected recipient name.
                 # The outbox still decides whether an earlier payload is frozen.
                 return fallback, metadata

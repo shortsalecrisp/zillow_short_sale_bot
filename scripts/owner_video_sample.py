@@ -1,10 +1,11 @@
-"""Advance one explicitly identified owner sample; never send SMS or enable workers."""
+"""Retired full-avatar sample command; read existing sample status only."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -168,8 +169,13 @@ def _attach_provider(store, job, provider_id):
 
 
 def _settle(store, job, duration=None):
+    if duration is not None and (isinstance(duration, bool) or not isinstance(duration, (int, float))
+                                 or not math.isfinite(duration) or not 0 < duration <= 30):
+        raise OwnerSampleError("invalid_completed_duration")
     if not job.get("budget_settled"):
-        store.settle(job["job_key"], job["reserved_at"], duration)
+        # Historical render duration is not verified billing evidence. Retain
+        # the reservation; only the new same-recording pipeline may generate.
+        store.settle(job["job_key"], job["reserved_at"])
         job = store.mutate("jobs/" + job["job_key"], lambda old: {**old, "budget_settled": True})
     return job
 
@@ -198,10 +204,12 @@ def _verified_result(store, job):
 
 
 def run_step(store, provider, config, nonce, *, now=utcnow, receipt_dir=None):
-    """One advancement only. Repeating a nonce can never initiate a second POST."""
+    """Archived orchestration test helper; the retired real provider is refused."""
     if not isinstance(nonce, str) or not _HEX.fullmatch(nonce):
         raise OwnerSampleError("explicit_32_hex_nonce_required")
     _require_off(config)
+    if isinstance(provider, provider_module.HeyGenVideoProvider):
+        raise OwnerSampleError("legacy_avatar_generation_retired")
     _approved_assets()
     key = "owner-probe-" + nonce
     job = None
@@ -317,24 +325,34 @@ def run_step(store, provider, config, nonce, *, now=utcnow, receipt_dir=None):
         return result
 
 
+def read_status(store, nonce):
+    if not isinstance(nonce, str) or not _HEX.fullmatch(nonce):
+        raise OwnerSampleError("explicit_32_hex_nonce_required")
+    job, _ = store.read("jobs/owner-probe-" + nonce)
+    if job is None:
+        return {"ok": False, "kind": "owner_sample_not_found", "read_only": True}
+    _validate_job(job, nonce)
+    result = _result(job, read_only=True, generation_retired=True)
+    if job["status"] == "ready":
+        result.update(_verify_publication(store, job))
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nonce", help="Persist and reuse one explicit 32-character lowercase hex nonce.")
-    parser.add_argument("--check", action="store_true", help="Offline readiness only; no API or storage request.")
+    parser.add_argument("--check", action="store_true", help="Report this generator as retired, without accessing credentials.")
+    parser.add_argument("--status", action="store_true", help="Read stored status only; never render, settle, or publish.")
     args = parser.parse_args(argv)
-    if not args.check and not args.nonce:
-        parser.error("--nonce is required for an owner sample step")
+    if args.status and (args.check or not args.nonce):
+        parser.error("--status requires --nonce and cannot be combined with --check")
+    if not args.status:
+        print(json.dumps({"ok": False, "kind": "legacy_avatar_generation_retired", "generation_enabled": False}, sort_keys=True))
+        return 2
     try:
         config = validate_preflight(os.environ)
-        provider_module._ffmpeg_executable()
-        if args.check:
-            result = {"ok": True, "kind": "offline_ready", "feature_flags": "all_false",
-                      "owner_phone": OWNER_PHONE, "first_name": FIRST_NAME, "api_auth_verified": False,
-                      "balance_verified": False, "storage_verified": False}
-        else:
-            store = Store(GCSObjects(config.bucket))
-            provider = provider_module.HeyGenVideoProvider(os.environ["HEYGEN_API_KEY"])
-            result = run_step(store, provider, config, args.nonce)
+        store = Store(GCSObjects(config.bucket))
+        result = read_status(store, args.nonce)
     except Exception as exc:
         result = {"ok": False, "kind": _error_kind(exc, "owner_step_unavailable")}
     print(json.dumps(result, sort_keys=True))

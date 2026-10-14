@@ -568,20 +568,27 @@ function isOwnerVideoProbeRowV20_(row) {
 
 function ownerVideoProbeInputV20_(body, statusOnly, allowLegacyMessage) {
   var allowed = statusOnly ? ["action", "token", "phone", "probe_nonce"] :
-    ["action", "token", "phone", "probe_nonce", "video_url", "message"];
+    ["action", "token", "phone", "probe_nonce", "video_url", "message", "first_name"];
   if (!body || Object.keys(body).some(function(key) { return allowed.indexOf(key) === -1; }) ||
       !/^(?:\+?1)?9542053205$/.test(String(body.phone || "")) ||
       !/^[0-9a-f]{32}$/.test(String(body.probe_nonce || ""))) {
     return { ok: false, reason: "Exact owner phone and 32-character lowercase hex probe nonce are required" };
   }
+  var hasName = Object.prototype.hasOwnProperty.call(body, "first_name");
+  var firstName = hasName ? body.first_name : "Jim";
+  if (!statusOnly && (typeof firstName !== "string" || firstName.length < 2 || firstName.length > 32 ||
+      !/^\p{L}+(?:['-]\p{L}+){0,2}$/u.test(firstName) ||
+      ["unknown", "agent", "there", "test"].indexOf(firstName.toLowerCase()) !== -1)) {
+    return { ok: false, reason: "Owner probe requires a valid single first name" };
+  }
   var videoUrl = String(body.video_url || "");
-  var message = "Hey Jim, it's Yoni Kutler with Crisp Short Sales. Here's a quick video to put a face to my text. Happy to help if you have questions.\n" + videoUrl;
+  var message = "Hey " + firstName + ", it's Yoni Kutler with Crisp Short Sales. Here's a quick video to put a face to my text. Happy to help if you have questions.\n" + videoUrl;
   var legacyMessage = !!allowLegacyMessage && body.message === "Owner video test: " + videoUrl;
   if (!statusOnly && (!/^https:\/\/go\.crispshortsales\.com\/v\/[0-9a-f]{32}$/.test(videoUrl) ||
       (Object.prototype.hasOwnProperty.call(body, "message") && body.message !== message && !legacyMessage))) {
     return { ok: false, reason: "Owner probe requires the exact branded video URL and fixed test message" };
   }
-  return { ok: true, phone: "9542053205", probe_nonce: body.probe_nonce, video_url: videoUrl,
+  return { ok: true, phone: "9542053205", probe_nonce: body.probe_nonce, video_url: videoUrl, first_name: firstName,
     message: message, legacy_message: legacyMessage, request_id: "owner-video-probe-request-" + body.probe_nonce,
     message_id: "owner-video-probe-" + body.probe_nonce };
 }
@@ -592,8 +599,10 @@ function ownerVideoProbeStaleReasonV20_(row, allowExpired) {
   try { metadata = JSON.parse(String(row[6] || "").replace(/^__owner_video_probe__:/, "")); }
   catch (_) { return "Owner video probe metadata is invalid"; }
   if (!metadata || typeof metadata !== "object") return "Owner video probe metadata is invalid";
-  var input = ownerVideoProbeInputV20_({ phone: row[4], probe_nonce: metadata.probe_nonce,
-    video_url: metadata.video_url, message: row[5] }, false, true);
+  var inputBody = { phone: row[4], probe_nonce: metadata.probe_nonce,
+    video_url: metadata.video_url, message: row[5] };
+  if (Object.prototype.hasOwnProperty.call(metadata, "first_name")) inputBody.first_name = metadata.first_name;
+  var input = ownerVideoProbeInputV20_(inputBody, false, true);
   var created = new Date(row[0]).getTime();
   var expires = new Date(metadata.expires_at).getTime();
   if (!input.ok || row[2] !== input.request_id || row[3] !== input.message_id || row[16] || row[17] ||
@@ -638,6 +647,12 @@ function enqueueOwnerVideoProbeV20_(body) {
       if (rows[i][2] !== input.request_id && rows[i][3] !== input.message_id) continue;
       var invalid = ownerVideoProbeStaleReasonV20_(rows[i], true);
       if (invalid) return { ok: false, reason: invalid };
+      var frozenMetadata = JSON.parse(String(rows[i][6]).replace(/^__owner_video_probe__:/, ""));
+      var frozenName = Object.prototype.hasOwnProperty.call(frozenMetadata, "first_name") ? frozenMetadata.first_name : "Jim";
+      if (Object.prototype.hasOwnProperty.call(body, "first_name") && input.first_name !== frozenName) {
+        return { ok: false, duplicate: true, payload_frozen: true,
+          reason: "Owner probe first name does not match the existing nonce" };
+      }
       // Every state freezes the first body and original expiry, including an unknown send outcome.
       return Object.assign(ownerVideoProbeStatusV20_(rows[i], i + 2), { duplicate: true, payload_frozen: true });
     }
@@ -648,7 +663,8 @@ function enqueueOwnerVideoProbeV20_(body) {
     row[0] = now; row[1] = "queued"; row[2] = input.request_id; row[3] = input.message_id;
     row[4] = input.phone; row[5] = input.message; row[8] = now; row[9] = 0;
     row[6] = "__owner_video_probe__:" + JSON.stringify({ probe_nonce: input.probe_nonce,
-      video_url: input.video_url, expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString() });
+      video_url: input.video_url, first_name: input.first_name,
+      expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString() });
     sheet.appendRow(row);
     return Object.assign(ownerVideoProbeStatusV20_(row, sheet.getLastRow()), { queued: true });
   } finally { lock.releaseLock(); }

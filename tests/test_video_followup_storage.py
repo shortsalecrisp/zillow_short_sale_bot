@@ -1,8 +1,11 @@
 import logging
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import types
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import requests
@@ -12,7 +15,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import video_followup as core
-import video_followup_provider as provider
 import video_followup_worker as bootstrap
 
 
@@ -34,7 +36,7 @@ class Response:
 def isolated_config(monkeypatch):
     for name in list(core.os.environ):
         if name.startswith("VIDEO_FOLLOWUP_") or name in {
-            "HEYGEN_API_KEY", "TASKER_TRANSPORT_HEALTH_URL", "SMS_CHATBOT_ALLOWED_TOKEN", "GCP_SERVICE_ACCOUNT_JSON"
+            "HEYGEN_API_KEY", "FAL_API_KEY", "TASKER_TRANSPORT_HEALTH_URL", "SMS_CHATBOT_ALLOWED_TOKEN", "GCP_SERVICE_ACCOUNT_JSON"
         }:
             monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(core, "_SERVICE", None)
@@ -62,6 +64,50 @@ def test_missing_object_404_does_not_fetch_media():
     session.get.return_value = Response(status=404)
     assert core.GCSObjects("crisp-video-private", session=session).read("jobs/missing") == (None, 0)
     assert session.get.call_count == 1
+
+
+def test_signed_asset_url_is_short_lived_read_only_and_offline(monkeypatch):
+    session, credentials = Mock(), Mock()
+    credentials.service_account_email = "video@example.iam.gserviceaccount.com"
+    credentials.sign_bytes.return_value = b"signed"
+    objects = core.GCSObjects("crisp-video-private", session=session)
+    objects._signing_credentials = credentials
+    monkeypatch.setattr(core, "utcnow", lambda: datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc))
+    result = urlsplit(objects.signed_get_url("assets/approved master/video.mp4"))
+    query = parse_qs(result.query)
+    assert result.scheme == "https" and result.netloc == "storage.googleapis.com"
+    assert result.path == "/crisp-video-private/video-followup/assets/approved%20master/video.mp4"
+    assert query["X-Goog-Date"] == ["20261014T120000Z"]
+    assert query["X-Goog-Expires"] == ["1800"]
+    assert query["X-Goog-Credential"] == [credentials.service_account_email + "/20261014/auto/storage/goog4_request"]
+    assert query["X-Goog-Signature"] == [b"signed".hex()]
+    raw_query = result.query.split("&X-Goog-Signature=")[0]
+    canonical = "\n".join(("GET", result.path, raw_query, "host:storage.googleapis.com\n", "host", "UNSIGNED-PAYLOAD"))
+    assert credentials.sign_bytes.call_args.args == (("GOOG4-RSA-SHA256\n20261014T120000Z\n20261014/auto/storage/goog4_request\n"
+                                                     + hashlib.sha256(canonical.encode()).hexdigest()).encode(),)
+    session.assert_not_called()
+    session.get.assert_not_called()
+    session.post.assert_not_called()
+
+
+@pytest.mark.parametrize("key", ["jobs/private", "assets/../jobs/private", "assets/a\\b", "assets/a\nb", None])
+def test_signed_url_refuses_non_media_or_unsafe_paths(key):
+    objects = core.GCSObjects("crisp-video-private", session=Mock())
+    with pytest.raises(ValueError, match="asset reads"):
+        objects.signed_get_url(key)
+
+
+@pytest.mark.parametrize("ttl", [0, -1, 3601, True, "1800", 1.5])
+def test_signed_url_refuses_long_or_invalid_lifetimes(ttl):
+    objects = core.GCSObjects("crisp-video-private", session=Mock())
+    with pytest.raises(ValueError, match="lifetime"):
+        objects.signed_get_url("assets/master/video", ttl)
+
+
+def test_signed_url_needs_existing_credentials():
+    objects = core.GCSObjects("crisp-video-private", session=Mock())
+    with pytest.raises(ValueError, match="credentials"):
+        objects.signed_get_url("assets/master/video")
 
 
 @pytest.mark.parametrize("key,size", [("jobs/large", 512 * 1024 + 1), ("assets/id/video", core.MAX_MEDIA_BYTES + 1)])
@@ -154,6 +200,7 @@ def configured_environment(monkeypatch):
         "VIDEO_FOLLOWUP_INITIALS_AFTER": "2026-10-13T15:00:00Z",
         "VIDEO_FOLLOWUP_TEST_PHONES": "9542053205",
         "HEYGEN_API_KEY": "test-provider-secret", "SMS_CHATBOT_ALLOWED_TOKEN": "test-token-secret",
+        "FAL_API_KEY": "test-fal-secret", "VIDEO_FOLLOWUP_SAME_TAKE_MASTER_KEY": "assets/approved-master/video",
         "TASKER_TRANSPORT_HEALTH_URL": "https://script.google.com/macros/s/test/exec",
     }
     for key, value in env.items():
@@ -167,7 +214,7 @@ def fake_constructors(monkeypatch):
     eligibility_constructor = Mock(return_value=object())
     worker_constructor = Mock(return_value=object())
     monkeypatch.setattr(bootstrap, "get_service", service)
-    monkeypatch.setattr(provider, "HeyGenVideoProvider", provider_constructor)
+    monkeypatch.setitem(sys.modules, "video_followup_same_take", types.SimpleNamespace(SameTakeVideoProvider=provider_constructor))
     monkeypatch.setattr(bootstrap, "Eligibility", eligibility_constructor)
     monkeypatch.setattr(bootstrap, "Worker", worker_constructor)
     return service, provider_constructor, eligibility_constructor, worker_constructor
@@ -176,6 +223,7 @@ def fake_constructors(monkeypatch):
 @pytest.mark.parametrize("missing", [
     "VIDEO_FOLLOWUP_STORAGE_BUCKET", "VIDEO_FOLLOWUP_PUBLIC_ORIGIN", "VIDEO_FOLLOWUP_INITIALS_AFTER",
     "VIDEO_FOLLOWUP_TEST_PHONES", "HEYGEN_API_KEY", "SMS_CHATBOT_ALLOWED_TOKEN", "TASKER_TRANSPORT_HEALTH_URL",
+    "FAL_API_KEY", "VIDEO_FOLLOWUP_SAME_TAKE_MASTER_KEY",
 ])
 def test_bootstrap_requires_complete_configuration_before_clients(monkeypatch, missing):
     configured_environment(monkeypatch)
@@ -214,12 +262,14 @@ def test_owner_only_bootstrap_uses_exact_phone_allowlist_and_private_storage(mon
     service, provider_constructor, eligibility_constructor, worker_constructor = fake_constructors(monkeypatch)
     result = bootstrap.create_worker()
     assert result is worker_constructor.return_value
-    provider_constructor.assert_called_once_with("test-provider-secret")
+    provider_constructor.assert_called_once_with("test-provider-secret", "test-fal-secret", service.return_value.store,
+                                               "assets/approved-master/video")
     eligibility_constructor.assert_called_once_with(env["TASKER_TRANSPORT_HEALTH_URL"], "test-token-secret")
     config = worker_constructor.call_args.args[2]
     assert config.allowlist == {"9542053205"}
     assert not config.live
     assert config.bucket == "crisp-video-private"
+    assert config.reserve_cents == 10
 
 
 def test_bootstrap_failure_logs_only_exception_type(monkeypatch, caplog):

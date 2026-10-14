@@ -2,7 +2,6 @@
 
 import importlib.util
 import json
-import math
 import re
 import sys
 import threading
@@ -256,7 +255,7 @@ def test_first_step_is_one_owner_submission_with_budget_and_cas_before_provider(
         assert record["status"] == "submitting"
         assert record["reserved_at"] and record["lease_at"]
         assert not record.get("provider_id")
-        assert reservation(harness)["cents"] == 50
+        assert reservation(harness)["cents"] == 10
         assert reservation(harness)["inflight"] is True
 
     harness.provider.on_submit = check_intent
@@ -301,7 +300,7 @@ def test_completed_render_is_settled_published_and_read_back_without_scheduler(h
     assert result["opaque_id"] == first["opaque_id"]
     assert harness.provider.submissions == [("Jim", JOB_KEY)]
     assert harness.provider.preparations == [(harness.provider.snapshot, "Jim")]
-    assert reservation(harness)["cents"] == math.ceil(MEDIA["duration"])
+    assert reservation(harness)["cents"] == 10
     assert reservation(harness)["inflight"] is False
     assert job(harness)["status"] == "ready"
     pointer, _ = harness.store.read("public/" + result["opaque_id"])
@@ -321,7 +320,7 @@ def test_confirmed_provider_failure_keeps_conservative_cost_and_never_retries(ha
     result = run(harness)
     assert result["status"] == "failed"
     assert_sanitized(result)
-    assert reservation(harness)["cents"] == 50
+    assert reservation(harness)["cents"] == 10
     assert reservation(harness)["inflight"] is False
     assert job(harness)["status"] == "failed"
     run(harness)
@@ -335,7 +334,7 @@ def test_uncertain_submission_holds_budget_and_is_never_repeated(harness, error)
     result = run(harness)
     assert_sanitized(result)
     assert job(harness)["status"] in {"submitting", "uncertain"}
-    assert reservation(harness)["cents"] == 50
+    assert reservation(harness)["cents"] == 10
     assert reservation(harness)["inflight"] is True
     harness.provider.submit_error = None
     run(harness)
@@ -349,7 +348,7 @@ def test_definite_rejection_settles_conservative_cost_without_retry(harness):
     result = run(harness)
     assert result["status"] == "failed"
     assert_sanitized(result)
-    assert reservation(harness)["cents"] == 50
+    assert reservation(harness)["cents"] == 10
     assert reservation(harness)["inflight"] is False
     run(harness)
     assert harness.provider.submissions == [("Jim", JOB_KEY)]
@@ -417,7 +416,7 @@ def test_media_processing_failure_does_not_publish_or_purchase_another_render(ha
     assert_sanitized(result)
     assert result["status"] != "ready"
     assert not harness.objects.list("public/")
-    assert reservation(harness)["cents"] == math.ceil(MEDIA["duration"])
+    assert reservation(harness)["cents"] == 10
     assert reservation(harness)["inflight"] is False
     assert harness.provider.submissions == [("Jim", JOB_KEY)]
 
@@ -584,3 +583,88 @@ def test_invalid_completed_duration_never_processes_or_publishes(harness, durati
     assert harness.provider.preparations == []
     assert not harness.objects.list("public/")
     assert reservation(harness)["inflight"] is True
+
+
+@pytest.mark.parametrize("arguments", [[], ["--check"], ["--nonce", NONCE]])
+def test_retired_cli_never_initializes_credentials_storage_or_provider(monkeypatch, capsys, arguments):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Retired generation must fail before any client is initialized")
+    monkeypatch.setattr(owner, "validate_preflight", forbidden)
+    monkeypatch.setattr(owner, "GCSObjects", forbidden)
+    monkeypatch.setattr(provider_module, "HeyGenVideoProvider", forbidden)
+    assert owner.main(arguments) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"ok": False, "kind": "legacy_avatar_generation_retired", "generation_enabled": False}
+
+
+def test_real_legacy_provider_is_refused_even_through_imported_helper(harness):
+    harness.provider = object.__new__(provider_module.HeyGenVideoProvider)
+    harness.objects.read_error = AssertionError("Legacy provider should be refused before storage")
+    with pytest.raises(owner.OwnerSampleError, match="legacy_avatar_generation_retired"):
+        run(harness)
+    assert harness.objects.writes == []
+
+
+def test_legacy_provider_subclass_cannot_reenable_retired_helper(harness):
+    class AlternateName(provider_module.HeyGenVideoProvider):
+        pass
+    harness.provider = object.__new__(AlternateName)
+    with pytest.raises(owner.OwnerSampleError, match="legacy_avatar_generation_retired"):
+        run(harness)
+    assert harness.objects.writes == []
+
+
+def test_status_reads_existing_job_without_advancing_it(harness):
+    run(harness)
+    before = list(harness.objects.writes)
+    result = owner.read_status(harness.store, NONCE)
+    assert result["status"] == "submitted"
+    assert result["read_only"] is True
+    assert result["generation_retired"] is True
+    assert harness.objects.writes == before
+    assert harness.provider.inspections == []
+    assert harness.provider.preparations == []
+
+
+def test_status_missing_job_does_not_create_one(harness):
+    assert owner.read_status(harness.store, NONCE) == {
+        "ok": False, "kind": "owner_sample_not_found", "read_only": True}
+    assert harness.objects.writes == []
+    assert harness.provider.submissions == []
+
+
+def test_status_verifies_publication_without_writes_or_provider_calls(harness):
+    run(harness)
+    complete(harness)
+    before = list(harness.objects.writes)
+    calls = (list(harness.provider.submissions), list(harness.provider.inspections), list(harness.provider.preparations))
+    result = owner.read_status(harness.store, NONCE)
+    assert result["publication_verified"] is True
+    assert result["read_only"] is True
+    assert harness.objects.writes == before
+    assert (harness.provider.submissions, harness.provider.inspections, harness.provider.preparations) == calls
+
+
+def test_read_only_status_reports_corruption_without_cancelling_or_overwriting(harness):
+    result = run(harness)
+    complete(harness)
+    asset_key = "assets/" + result["opaque_id"] + "/video"
+    _, version = harness.objects.read(asset_key)
+    harness.objects.write(asset_key, b"changed", version)
+    before = list(harness.objects.writes)
+    with pytest.raises(owner.OwnerSampleError, match="publication_readback_failed"):
+        owner.read_status(harness.store, NONCE)
+    assert harness.objects.writes == before
+    assert job(harness)["status"] == "ready"
+
+
+def test_cli_status_reads_storage_without_provider_initialization(harness, monkeypatch, capsys):
+    run(harness)
+    monkeypatch.setattr(owner, "validate_preflight", lambda env: harness.config)
+    monkeypatch.setattr(owner, "GCSObjects", lambda bucket: harness.objects)
+    monkeypatch.setattr(provider_module, "HeyGenVideoProvider", lambda *args, **kwargs: pytest.fail("Status must not initialize a provider"))
+    before = list(harness.objects.writes)
+    assert owner.main(["--status", "--nonce", NONCE]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "submitted" and result["read_only"] is True
+    assert harness.objects.writes == before

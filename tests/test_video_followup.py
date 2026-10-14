@@ -71,6 +71,7 @@ class FakeProvider:
         self._lock = threading.Lock()
         self.submissions = []
         self.inspections = []
+        self.accounting_inspections = []
         self.preparations = []
         self.submit_error = None
         self.on_submit = None
@@ -86,9 +87,11 @@ class FakeProvider:
             raise self.submit_error
         return "render-" + key[:12]
 
-    def inspect(self, provider_id):
+    def inspect(self, provider_id, *, accounting_only=False):
         with self._lock:
             self.inspections.append(provider_id)
+            if accounting_only:
+                self.accounting_inspections.append(provider_id)
         return dict(self.status)
 
     def prepare_media(self, status, first_name):
@@ -291,6 +294,39 @@ class VideoFollowupTests(unittest.TestCase):
         for name in ("Jim", "Anne-Marie", "O'Neil"):
             self.assertTrue(video.valid_name(name))
 
+    def test_names_normalize_before_storage_generation_and_metadata(self):
+        for raw, expected in ((" \uff2a\uff49\uff4d ", "Jim"), ("O\u2019Neil", "O'Neil"), ("Jose\u0301", "Jos\u00e9")):
+            with self.subTest(raw=raw):
+                context = self.make_context(stable_id="name-" + expected, first_name=raw)
+                self.assertEqual(context["first_name"], expected)
+                self.assertTrue(video.valid_name(raw))
+                self.assertEqual(self.store.prepare(context)["first_name"], expected)
+                _, metadata = self.service.select(context, FALLBACK)
+                self.assertEqual(metadata["first_name"], expected)
+        self.assertFalse(video.valid_name("Jim\u00a0Smith"))
+        self.assertFalse(video.valid_name("Mary Jane"))
+
+    def test_old_generation_versions_never_enter_new_provider(self):
+        for state in ("prepared", "submitted", "processing", "cancelled", "frozen_text"):
+            with self.subTest(state=state):
+                self.set_job(status=state, script_version="face-to-text-v1", provider_id="old-avatar-id",
+                             reserved_at=video.iso(NOW), lease_at=video.iso(NOW))
+                self.worker().run_job(self.context["followup_key"])
+        self.assertEqual(self.provider.submissions, [])
+        self.assertEqual(self.provider.inspections, [])
+        self.assertEqual(self.provider.preparations, [])
+
+    def test_old_ready_or_frozen_avatar_video_never_selected_for_new_followup(self):
+        self.make_ready()
+        self.store.mutate("jobs/" + self.context["followup_key"],
+                          lambda old: {**old, "script_version": "face-to-text-v1"})
+        message, metadata = self.service.select(self.context, FALLBACK)
+        self.assertEqual((message, metadata["video_variant"]), (FALLBACK, "text"))
+        self.store.mutate("jobs/" + self.context["followup_key"], lambda old: {
+            **old, "status": "frozen_video", "variant": "video", "message": "Old avatar URL"})
+        message, metadata = self.service.select(self.context, FALLBACK)
+        self.assertEqual((message, metadata["video_variant"]), (FALLBACK, "text"))
+
     def test_text_freeze_rejects_late_video_completion_and_reuses_payload(self):
         self.set_job(status="submitted", provider_id="render-late")
         first_message, first_meta = self.service.select(self.context, FALLBACK)
@@ -431,7 +467,7 @@ class VideoFollowupTests(unittest.TestCase):
                 get_service.assert_not_called()
 
     def test_concurrent_daily_budget_is_hard_capped_after_capacity_settles(self):
-        for batch in range(3):
+        for batch in range(15):
             accepted = self.concurrent(16, lambda index: self.store.reserve(
                 "batch-%d-%d" % (batch, index), self.config, NOW))
             self.assertEqual(sum(accepted), 2)
@@ -441,18 +477,18 @@ class VideoFollowupTests(unittest.TestCase):
         rejected = self.concurrent(16, lambda index: self.store.reserve("over-day-" + str(index), self.config, NOW))
         self.assertFalse(any(rejected))
         ledger, _ = self.store.read("budget/ledger")
-        self.assertEqual(len(ledger["reservations"]), 6)
+        self.assertEqual(len(ledger["reservations"]), 30)
         self.assertEqual(sum(item["cents"] for item in ledger["reservations"].values()), 300)
 
     def test_concurrent_monthly_budget_never_exceeds_approved_cap(self):
         first_day = NOW.replace(day=1)
         for day in range(24):
-            for slot in range(6):
+            for slot in range(30):
                 self.assertTrue(self.store.reserve("prior-%d-%d" % (day, slot), self.config,
                                                    first_day + timedelta(days=day)))
                 self.store.settle("prior-%d-%d" % (day, slot), video.iso(first_day + timedelta(days=day)))
-        for batch in range(3):
-            day = first_day + timedelta(days=24 + batch)
+        for batch in range(15):
+            day = first_day + timedelta(days=24)
             accepted = self.concurrent(18, lambda index: self.store.reserve(
                 "final-%d-%d" % (batch, index), self.config, day))
             self.assertEqual(sum(accepted), 2)
@@ -460,29 +496,31 @@ class VideoFollowupTests(unittest.TestCase):
                 if success:
                     self.store.settle("final-%d-%d" % (batch, index), video.iso(day))
         ledger, _ = self.store.read("budget/ledger")
-        self.assertEqual(len(ledger["reservations"]), 150)
+        self.assertEqual(len(ledger["reservations"]), 750)
         self.assertEqual(sum(item["cents"] for item in ledger["reservations"].values()), 7500)
         self.assertFalse(self.store.reserve("over-month", self.config, first_day + timedelta(days=30)))
         self.assertTrue(self.store.reserve("new-month", self.config, NOW.replace(month=11, day=1)))
 
-    def test_settlement_rounds_duration_up_and_preserves_failed_cost(self):
+    def test_settlement_uses_verified_cost_only_and_preserves_unknown_cost(self):
         self.assertTrue(self.store.reserve("complete", self.config, NOW))
         self.assertTrue(self.store.reserve("failed", self.config, NOW))
-        self.store.settle("complete", video.iso(NOW), 10.01)
+        self.store.settle("complete", video.iso(NOW), 7.01, "provider_verified")
         self.store.settle("failed", video.iso(NOW))
         ledger, _ = self.store.read("budget/ledger")
-        self.assertEqual(ledger["reservations"]["complete"]["cents"], 11)
-        self.assertEqual(ledger["reservations"]["failed"]["cents"], 50)
+        self.assertEqual(ledger["reservations"]["complete"]["cents"], 8)
+        self.assertEqual(ledger["reservations"]["failed"]["cents"], 10)
         self.assertFalse(any(entry["inflight"] for entry in ledger["reservations"].values()))
-        self.store.settle("complete", video.iso(NOW), 10.01)
+        self.store.settle("complete", video.iso(NOW), 7.01, "provider_verified")
         self.assertEqual(self.store.read("budget/ledger")[0], ledger)
-        for duration in (0, -1, 30.01, float("nan"), float("inf")):
-            with self.subTest(duration=duration), self.assertRaises(ValueError):
-                self.store.settle("complete", video.iso(NOW), duration)
+        self.store.settle("failed", video.iso(NOW), 1, "estimated")
+        self.assertEqual(self.store.read("budget/ledger")[0], ledger)
+        for cost in (-1, True, "7", float("nan"), float("inf")):
+            with self.subTest(cost=cost), self.assertRaises(ValueError):
+                self.store.settle("complete", video.iso(NOW), cost, "provider_verified")
         self.assertEqual(self.store.read("budget/ledger")[0], ledger)
 
     def test_daily_and_monthly_budget_boundaries_use_eastern_time(self):
-        config = self.make_config(VIDEO_FOLLOWUP_DAILY_CENTS="50")
+        config = self.make_config(VIDEO_FOLLOWUP_DAILY_CENTS="10")
         before = datetime(2026, 10, 14, 3, 59, tzinfo=timezone.utc)
         after = before + timedelta(minutes=1)
         self.assertTrue(self.store.reserve("before-midnight", config, before))
@@ -510,7 +548,7 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertFalse(self.store.reserve("november-extra", self.config, before + timedelta(minutes=1)))
 
     def test_orphan_reservation_cannot_bypass_next_day_exhausted_or_zero_budget(self):
-        config = self.make_config(VIDEO_FOLLOWUP_DAILY_CENTS="50")
+        config = self.make_config(VIDEO_FOLLOWUP_DAILY_CENTS="10")
         tomorrow = NOW + timedelta(days=1)
         self.assertTrue(self.store.reserve("orphan", config, NOW))
         self.assertTrue(self.store.reserve("tomorrow-spent", config, tomorrow))
@@ -532,11 +570,11 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertEqual(self.job()["reserved_at"], video.iso(tomorrow))
         ledger, _ = self.store.read("budget/ledger")
         self.assertEqual(ledger["reservations"], {
-            key: {"day": "2026-10-14", "cents": 50, "inflight": True},
+            key: {"day": "2026-10-14", "cents": 10, "inflight": True},
         })
 
     def test_orphan_reservation_revalidates_month_cap_before_moving_charge(self):
-        config = self.make_config(VIDEO_FOLLOWUP_MONTHLY_CENTS="50")
+        config = self.make_config(VIDEO_FOLLOWUP_MONTHLY_CENTS="10")
         october = datetime(2026, 11, 1, 3, 59, tzinfo=timezone.utc)
         november = october + timedelta(minutes=1)
         self.assertTrue(self.store.reserve("orphan", config, october))
@@ -545,23 +583,23 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertFalse(self.store.reserve("orphan", config, november))
         ledger, _ = self.store.read("budget/ledger")
         self.assertEqual(ledger["reservations"]["orphan"]["day"], "2026-10-31")
-        higher = self.make_config(VIDEO_FOLLOWUP_MONTHLY_CENTS="100")
+        higher = self.make_config(VIDEO_FOLLOWUP_MONTHLY_CENTS="20")
         self.assertTrue(self.store.reserve("orphan", higher, november))
         ledger, _ = self.store.read("budget/ledger")
         self.assertEqual(ledger["reservations"]["orphan"]["day"], "2026-11-01")
-        self.assertEqual(sum(entry["cents"] for entry in ledger["reservations"].values()), 100)
+        self.assertEqual(sum(entry["cents"] for entry in ledger["reservations"].values()), 20)
 
     def test_budget_caps_cannot_be_raised_and_reservation_is_fixed(self):
         self.assertEqual((self.config.daily_cents, self.config.monthly_cents, self.config.reserve_cents),
-                         (300, 7500, 50))
+                         (300, 7500, 10))
         for override in ({"VIDEO_FOLLOWUP_DAILY_CENTS": "301"},
                          {"VIDEO_FOLLOWUP_MONTHLY_CENTS": "7501"},
                          {"VIDEO_FOLLOWUP_DAILY_CENTS": "-1"},
                          {"VIDEO_FOLLOWUP_MONTHLY_CENTS": "-1"}):
             with self.subTest(override=override), self.assertRaises(ValueError):
                 self.make_config(**override)
-        lower = self.make_config(VIDEO_FOLLOWUP_DAILY_CENTS="49", VIDEO_FOLLOWUP_RESERVE_CENTS="1")
-        self.assertEqual(lower.reserve_cents, 50)
+        lower = self.make_config(VIDEO_FOLLOWUP_DAILY_CENTS="9", VIDEO_FOLLOWUP_RESERVE_CENTS="1")
+        self.assertEqual(lower.reserve_cents, 10)
         self.assertFalse(self.store.reserve("under-reservation", lower, NOW))
         zero = self.make_config(VIDEO_FOLLOWUP_DAILY_CENTS="0", VIDEO_FOLLOWUP_MONTHLY_CENTS="0")
         self.assertFalse(self.store.reserve("disabled-budget", zero, NOW))
@@ -588,7 +626,7 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertEqual(self.provider.submissions, [("Jim", self.context["followup_key"])])
         self.assertEqual(self.provider.inspections, [])
         ledger, _ = self.store.read("budget/ledger")
-        self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 50)
+        self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 10)
         self.assertEqual(self.objects.list("active/"), [])
 
     def test_concurrent_workers_submit_one_render_for_a_stable_identity(self):
@@ -599,7 +637,7 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertEqual(self.job()["status"], "submitted")
         ledger, _ = self.store.read("budget/ledger")
         self.assertEqual(len(ledger["reservations"]), 1)
-        self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 50)
+        self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 10)
 
     def test_fifty_waiting_jobs_do_not_starve_later_eligible_work(self):
         for index in range(52):
@@ -622,7 +660,7 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertEqual(self.job()["status"], "failed")
         ledger, _ = self.store.read("budget/ledger")
         entry = ledger["reservations"][self.context["followup_key"]]
-        self.assertEqual(entry["cents"], 50)
+        self.assertEqual(entry["cents"], 10)
         self.assertFalse(entry["inflight"])
         self.worker(now=NOW + timedelta(hours=1)).run_job(self.context["followup_key"])
         self.assertEqual(len(self.provider.submissions), 1)
@@ -635,8 +673,37 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertEqual(self.job()["status"], "failed")
         ledger, _ = self.store.read("budget/ledger")
         entry = ledger["reservations"][self.context["followup_key"]]
-        self.assertEqual(entry["cents"], 50)
+        self.assertEqual(entry["cents"], 10)
         self.assertFalse(entry["inflight"])
+        self.assertEqual(self.provider.preparations, [])
+        self.assertEqual(self.objects.list("assets/"), [])
+
+    def test_completed_video_duration_does_not_infer_replacement_cost(self):
+        self.set_job(status="submitted", provider_id="short-greeting-long-video")
+        self.provider.status = {"status": "completed", "duration": 18.0,
+                                "cost_cents": 8, "accounting_method": "provider_usage"}
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "ready")
+        ledger, _ = self.store.read("budget/ledger")
+        self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 8)
+
+    def test_unverified_estimated_cost_keeps_ten_cent_reservation(self):
+        self.set_job(status="submitted", provider_id="estimated-greeting")
+        self.provider.status = {"status": "completed", "duration": 8.5,
+                                "billed_cents": 1, "accounting_method": "estimated"}
+        self.worker().tick()
+        ledger, _ = self.store.read("budget/ledger")
+        self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 10)
+
+    def test_verified_over_ceiling_cost_is_recorded_and_never_published(self):
+        self.set_job(status="submitted", provider_id="unexpected-cost")
+        self.provider.status = {"status": "completed", "duration": 8.5,
+                                "billed_cents": 12, "accounting_method": "provider_verified"}
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.assertTrue(self.job()["budget_settled"])
+        ledger, _ = self.store.read("budget/ledger")
+        self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 12)
         self.assertEqual(self.provider.preparations, [])
         self.assertEqual(self.objects.list("assets/"), [])
 
@@ -738,7 +805,8 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertEqual(self.objects.list("assets/"), [])
         self.assertEqual(self.objects.list("active/"), [])
         ledger, _ = self.store.read("budget/ledger")
-        self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 11)
+        self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 10)
+        self.assertEqual(self.provider.accounting_inspections, ["cancelled-render", "cancelled-render"])
         self.assertFalse(ledger["reservations"][self.context["followup_key"]]["inflight"])
 
     def test_frozen_text_pending_render_settles_without_preparing_or_publishing(self):

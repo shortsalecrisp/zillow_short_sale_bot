@@ -20,12 +20,16 @@ def create_worker():
     if not config.live and not config.allowlist:
         raise ValueError("Owner-only generation requires the exact test phone allowlist")
     api_key = os.getenv("HEYGEN_API_KEY", "").strip()
+    fal_key = os.getenv("FAL_API_KEY", "").strip()
+    master_asset_key = os.getenv("VIDEO_FOLLOWUP_SAME_TAKE_MASTER_KEY", "").strip()
     url = os.getenv("TASKER_TRANSPORT_HEALTH_URL", "").strip()
     token = os.getenv("SMS_CHATBOT_ALLOWED_TOKEN", "").strip()
-    if not api_key or not url or not token:
+    if not api_key or not fal_key or not master_asset_key or not url or not token:
         raise ValueError("Video API access and eligibility checking must be configured")
-    from video_followup_provider import HeyGenVideoProvider
-    return Worker(get_service().store, HeyGenVideoProvider(api_key), config, Eligibility(url, token))
+    from video_followup_same_take import SameTakeVideoProvider
+    store = get_service().store
+    provider = SameTakeVideoProvider(api_key, fal_key, store, master_asset_key)
+    return Worker(store, provider, config, Eligibility(url, token))
 
 
 def start_worker():

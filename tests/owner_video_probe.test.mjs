@@ -94,6 +94,95 @@ test("owner probe queues and claims only the fixed branded message without CRM a
   assert.equal(h.counters().crmTouches, 0);
 });
 
+test("Sue and Christopher keep the exact name through queue, claim and receipt", () => {
+  for (const firstName of ["Sue", "Christopher"]) {
+    const h = harness();
+    const message = expectedMessage.replace("Hey Jim,", `Hey ${firstName},`);
+    const queued = h.queue({ first_name: firstName });
+    assert.equal(queued.queued, true, firstName);
+    assert.equal(queued.message, message);
+    const metadata = JSON.parse(h.rows[1][6].replace("__owner_video_probe__:", ""));
+    assert.equal(metadata.first_name, firstName);
+    assert.equal(Date.parse(metadata.expires_at) - Date.parse(queued.created_at), 30 * 60 * 1000);
+    const body = h.started();
+    assert.equal(body.phone, "9542053205");
+    assert.equal(body.reply_text, message);
+    assert.equal(h.post("reply_sent", { ...body, reply_text: expectedMessage }).ok, false);
+    assert.equal(h.post("reply_sent", body).status, "sent");
+    const readback = h.post("get_owner_video_probe_status", { phone: input.phone, probe_nonce: nonce });
+    assert.equal(readback.message, message);
+    assert.equal(readback.status, "sent");
+    assert.equal(h.counters().crmTouches, 0);
+  }
+});
+
+test("owner probe first names reject missing-value, multiline, template and full-name injection", () => {
+  for (const firstName of ["", " ", null, 1, [], {}, "S", "Sue Smith", " Sue", "Sue ", "Sue\n", "Sue\r\nInjected",
+    "Sue123", "<Sue>", "{{name}}", "Sue/Chris", "Sue\\Chris", "Sue--Ann", "A".repeat(33), "unknown", "Agent", "there", "TEST"]) {
+    const h = harness();
+    assert.equal(h.queue({ first_name: firstName }).ok, false, JSON.stringify(firstName));
+    assert.equal(h.rows.length, 1);
+    assert.deepEqual(h.counters(), { writes: 0, crmTouches: 0 });
+  }
+  for (const firstName of ["Anne-Marie", "D'Arcy", "Jose", "\u00c9lodie"]) {
+    const h = harness();
+    assert.equal(h.queue({ first_name: firstName }).queued, true, firstName);
+  }
+});
+
+test("a different name cannot reuse a frozen nonce in any state", () => {
+  for (const status of ["queued", "claimed", "send_started", "sent", "uncertain", "failed", "expired", "superseded", "manual_sent"]) {
+    const h = harness();
+    const first = h.queue({ first_name: "Sue" });
+    h.rows[1][1] = status;
+    h.advance(31 * 60 * 1000);
+    const before = h.counters();
+    const mismatch = h.queue({ first_name: "Christopher" });
+    assert.equal(mismatch.ok, false, status);
+    assert.equal(mismatch.duplicate, true);
+    assert.equal(mismatch.payload_frozen, true);
+    assert.match(mismatch.reason, /first name.*nonce/);
+    for (const change of [{ first_name: "Sue" }, {}]) {
+      const duplicate = h.queue(change);
+      assert.equal(duplicate.duplicate, true);
+      assert.equal(duplicate.message, first.message);
+      assert.equal(duplicate.expires_at, first.expires_at);
+    }
+    assert.equal(h.rows.length, 2);
+    assert.deepEqual(h.counters(), before);
+  }
+});
+
+test("old metadata without a first name remains Jim and cannot be rebound to a new name", () => {
+  const h = harness();
+  h.queue();
+  const metadata = JSON.parse(h.rows[1][6].replace("__owner_video_probe__:", ""));
+  delete metadata.first_name;
+  h.rows[1][6] = "__owner_video_probe__:" + JSON.stringify(metadata);
+  assert.equal(h.queue({ first_name: "Sue" }).ok, false);
+  assert.equal(h.queue({ first_name: "Jim" }).duplicate, true);
+  assert.equal(h.queue().message, expectedMessage);
+  const body = h.started();
+  assert.equal(body.reply_text, expectedMessage);
+  assert.equal(h.post("reply_sent", body).status, "sent");
+});
+
+test("name metadata and stored message must agree before claim and receipt", () => {
+  for (const firstName of ["Christopher", "", null, "Sue Smith"]) {
+    for (const stage of ["claim", "receipt"]) {
+      const h = harness();
+      h.queue({ first_name: "Sue" });
+      const body = stage === "receipt" ? h.started() : null;
+      const metadata = JSON.parse(h.rows[1][6].replace("__owner_video_probe__:", ""));
+      metadata.first_name = firstName;
+      h.rows[1][6] = "__owner_video_probe__:" + JSON.stringify(metadata);
+      if (stage === "claim") assert.notEqual(h.claim().should_send, true);
+      else assert.equal(h.post("reply_sent", body).ok, false);
+      assert.equal(h.counters().crmTouches, 0);
+    }
+  }
+});
+
 test("owner probe rejects every other phone, unsafe URL, message and identity injection", () => {
   const changes = [
     { phone: "9542053206" }, { phone: "evil9542053205" }, { phone: "" },

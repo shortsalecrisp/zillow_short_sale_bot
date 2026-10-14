@@ -5,6 +5,7 @@ uvicorn[standard]
 requests>=2.31.0
 python-dotenv==1.0.1
 imageio-ffmpeg==0.6.0       # opt-in video crop; includes platform ffmpeg binary
+numpy>=1.26,<3
 apscheduler==3.10.4          # ← new
 
 # parsing / scraping
