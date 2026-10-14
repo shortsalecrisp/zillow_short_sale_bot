@@ -1,9 +1,12 @@
 import importlib.machinery
 import os
+import re
 import sys
 import types
 from pathlib import Path
 from datetime import datetime, timedelta
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -269,6 +272,7 @@ class _ConfiguredFollowupValuesAPI:
             else init_scan_value
         )
         self.column_render_option = None
+        self.row_ranges = []
 
     def batchGet(self, spreadsheetId, ranges, majorDimension, valueRenderOption):
         init_col = bot_min._col_index_to_letter(bot_min.COL_INIT_TS)
@@ -287,7 +291,13 @@ class _ConfiguredFollowupValuesAPI:
                 ]
             })
         if ranges == [row_range]:
-            return _FakeRequest({"valueRanges": [{"values": [self.row]}]})
+            self.row_ranges.extend(ranges)
+            end_column = re.fullmatch(r"[^!]+!A2:([A-Z]+)2", row_range).group(1)
+            width = 0
+            for letter in end_column:
+                width = width * 26 + ord(letter) - ord("A") + 1
+            # Sheets cannot return AB when the caller only requested A:Z.
+            return _FakeRequest({"valueRanges": [{"values": [self.row[:width]]}]})
         raise AssertionError(f"Unexpected ranges: {ranges}")
 
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
@@ -314,6 +324,93 @@ def _followup_test_row():
     row[bot_min.COL_STREET] = "123 Main St"
     row[bot_min.COL_INIT_TS] = "2026-07-24T11:00:00-04:00"
     return row
+
+
+def _video_followup_sheet_fixture(monkeypatch, *, elapsed_hours, already_followed_up=False):
+    row = _followup_test_row()
+    row[bot_min.COL_INIT_TS] = "2026-10-13T15:18:24-04:00"
+    row[bot_min.COL_ZPID] = "461997112"
+    if already_followed_up:
+        row[bot_min.COL_REPLY_FLAG] = "x"
+        row[bot_min.COL_FU_TS] = "2026-10-14T10:01:00-04:00"
+    service = _ConfiguredFollowupSheetsService(row)
+    prepared, selected, posts = [], [], []
+    fallback = bot_min.SMS_FU_TEMPLATE.format(address=row[bot_min.COL_STREET])
+    video_message = "Hey Sam, here's a quick video. https://go.crispshortsales.com/v/" + "b" * 32
+
+    def select(fallback_text, **context):
+        selected.append(context)
+        assert fallback_text == fallback
+        return video_message, {
+            **context, "followup_key": "a" * 64, "video_variant": "video",
+            "video_job_id": "b" * 32, "message_id": "followup-video-" + "a" * 24,
+        }
+
+    def post(url, json, timeout):
+        assert url == "https://script.example.test/exec"
+        assert json["action"] == "enqueue_followup_sms"
+        posts.append(json)
+        return types.SimpleNamespace(status_code=200, text="", json=lambda: {"ok": True, "queued": True})
+
+    monkeypatch.setenv("VIDEO_FOLLOWUP_ENABLED", "true")
+    monkeypatch.setitem(sys.modules, "video_followup", types.SimpleNamespace(
+        prepare_for_followup=lambda **context: prepared.append(context),
+        select_for_followup=select,
+    ))
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "SMS_ENABLE", True)
+    monkeypatch.setattr(bot_min, "SMS_TEST_MODE", False)
+    monkeypatch.setattr(bot_min, "TASKER_TRANSPORT_HEALTH_URL", "https://script.example.test/exec")
+    monkeypatch.setattr(bot_min, "SMS_CHATBOT_ALLOWED_TOKEN", "unit-test-token")
+    monkeypatch.setattr(bot_min.requests, "post", post)
+    monkeypatch.setattr(bot_min, "check_reply", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda *_args, **_kwargs: elapsed_hours)
+    monkeypatch.setattr(bot_min, "_pace_followup_sms_batch", lambda _count: None)
+    return types.SimpleNamespace(row=row, service=service, prepared=prepared, selected=selected,
+                                 posts=posts, video_message=video_message)
+
+
+def test_video_preparation_reads_stable_id_from_actual_requested_sheet_range(monkeypatch):
+    fixture = _video_followup_sheet_fixture(monkeypatch, elapsed_hours=1)
+
+    bot_min._follow_up_pass()
+
+    assert len(fixture.prepared) == 1
+    assert fixture.prepared[0]["stable_id"] == fixture.row[bot_min.COL_ZPID]
+    assert fixture.prepared[0]["first_name"] == "Sam"
+    assert fixture.service.values_api.row_ranges == [f"{bot_min.GSHEET_TAB}!A2:AB2"]
+    assert fixture.selected == fixture.posts == []
+
+
+def test_due_video_selection_and_enqueue_keep_requested_sheet_stable_id(monkeypatch):
+    fixture = _video_followup_sheet_fixture(monkeypatch, elapsed_hours=bot_min.FU_HOURS)
+
+    bot_min._follow_up_pass()
+
+    assert fixture.prepared == []
+    assert len(fixture.selected) == len(fixture.posts) == 1
+    assert fixture.selected[0]["stable_id"] == fixture.row[bot_min.COL_ZPID]
+    assert fixture.selected[0]["initial_sent_at"] == fixture.row[bot_min.COL_INIT_TS]
+    body = fixture.posts[0]
+    assert body["stable_id"] == body["zpid"] == fixture.row[bot_min.COL_ZPID]
+    assert body["message"] == body["reply_text"] == fixture.video_message
+    assert body["first_name"] == "Sam"
+    assert body["message_id"] == "followup-video-" + "a" * 24
+    assert body["request_id"] == "scheduler-" + body["message_id"]
+    assert body["video_variant"] == "video"
+    assert fixture.service.values_api.row_ranges == [f"{bot_min.GSHEET_TAB}!A2:AB2"]
+
+
+@pytest.mark.parametrize("elapsed_hours", [1, 6])
+def test_video_range_expansion_does_not_repeat_existing_followup(monkeypatch, elapsed_hours):
+    fixture = _video_followup_sheet_fixture(
+        monkeypatch, elapsed_hours=elapsed_hours, already_followed_up=True,
+    )
+
+    bot_min._follow_up_pass()
+
+    assert fixture.prepared == fixture.selected == fixture.posts == []
 
 
 def test_parse_sheet_datetime_accepts_native_sheet_serial():
@@ -575,7 +672,7 @@ def test_follow_up_blocks_verifier_phone_conflict_hold(monkeypatch):
     bot_min._follow_up_pass()
 
     assert sent == []
-    assert bot_min.FOLLOWUP_READ_END_COL == "Z"
+    assert bot_min.FOLLOWUP_READ_END_COL == "AB"
 
 
 def test_follow_up_allows_routine_verified_no_initial_resend_note(monkeypatch):
