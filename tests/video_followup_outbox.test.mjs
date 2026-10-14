@@ -247,6 +247,46 @@ test("video checks canonical first name but original text does not depend on it"
   assert.equal(enqueue(other, video({ first_name: " jim " })).ok, true);
 });
 
+test("video first-name identity matches the worker's Unicode and apostrophe normalization", () => {
+  for (const [sheetName, canonicalName] of [
+    ["D\u2019Andre", "D'Andre"],
+    ["O\u2018Neil", "O'Neil"],
+    ["O\u02bcNeil", "O'Neil"],
+    ["Jose\u0301", "Jos\u00e9"],
+    [" \uff2dary ", "Mary"],
+  ]) {
+    const h = harness();
+    h.row[0] = sheetName;
+    const body = video({ first_name: canonicalName });
+    assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, true);
+    assert.equal(enqueue(h, body).ok, true);
+
+    const reverse = harness();
+    reverse.row[0] = canonicalName;
+    const rawBody = video({ first_name: sheetName });
+    assert.equal(reverse.context.validateVideoFollowupContextV19_(rawBody, true).metadata.first_name, canonicalName);
+    assert.equal(reverse.context.checkVideoFollowupEligibilityV19_(rawBody).eligible, true);
+  }
+});
+
+test("first-name normalization never equates different names, accents, or full names", () => {
+  for (const [sheetName, videoName] of [
+    ["D\u2019Andre", "D'Angelo"],
+    ["Jose", "Joseph"],
+    ["Jos\u00e9", "Jose"],
+    ["Mary Jane", "Mary"],
+    ["Jim Smith", "Jim"],
+  ]) {
+    const h = harness();
+    h.row[0] = sheetName;
+    const body = video({ first_name: videoName });
+    const result = h.context.checkVideoFollowupEligibilityV19_(body);
+    assert.equal(result.eligible, false);
+    assert.equal(result.reason, "Personalized first name changed");
+    assert.equal(enqueue(h, body).ok, false);
+  }
+});
+
 test("phone, stable listing, and ambiguous stable identities invalidate feature sends", () => {
   for (const mutate of [
     (h) => { h.row[2] = "9542053206"; },

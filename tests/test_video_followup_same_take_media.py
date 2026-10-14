@@ -119,6 +119,20 @@ def test_context_always_in_kling_two_to_five_second_price_block(frames, context)
     assert 2.0 < context / media.FPS < 5.0
 
 
+def test_only_two_unused_end_context_frames_may_be_missing():
+    minimum = media._minimum_provider_frames(63, 25)
+    assert minimum == 61
+    assert 60 < minimum
+    assert 25 < minimum
+    assert minimum >= 25 + 24
+    assert media._minimum_provider_frames(111, 75) == 109
+
+
+def test_minimum_context_guard_never_allows_missing_greeting_or_short_context():
+    assert media._minimum_provider_frames(26, 25) == 49
+    assert media._minimum_provider_frames(49, 25) == 49
+
+
 @pytest.mark.parametrize("frames", [True, "26", 26.0, 0, 14, 76, 500])
 def test_unvalidated_greeting_timing_rejected(frames):
     with pytest.raises(VideoProviderError):
@@ -230,16 +244,46 @@ def test_full_prepare_and_compose_with_two_name_lengths(tmp_path, monkeypatch):
         assert 2.0 < prepared["metadata"]["context_seconds"] <= 5.0
         # This is an offline structural test, not a lip-sync quality assertion.
         # The local context itself stands in for the provider output.
-        final = media.compose(master, prepared["video_bytes"], prepared["greeting_audio_bytes"],
+        provider_bytes = prepared["video_bytes"]
+        if name == "Sue":
+            context_path, shortened_path = tmp_path / "context.mp4", tmp_path / "shortened.mp4"
+            context_path.write_bytes(provider_bytes)
+            media._run([
+                ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(context_path), "-frames:v", str(prepared["metadata"]["context_frames"] - 2),
+                "-c:v", "libx264", "-threads", "1", "-crf", "17", str(shortened_path),
+            ])
+            provider_bytes = shortened_path.read_bytes()
+        final = media.compose(master, provider_bytes, prepared["greeting_audio_bytes"],
                               prepared["metadata"], first_name=name, ffmpeg=ffmpeg)
         assert final["qa"]["old_recording_frames"] == 0
         assert final["qa"]["original_body_frames"] == 227
         assert final["qa"]["nonmouth_pixels_exact_before_encoding"] is True
         assert final["qa"]["body_frames_exact_before_encoding"] is True
         assert final["qa"]["background_mae_max"] < 3
+        assert final["qa"]["provider_context_tail_frames_missing"] == (2 if name == "Sue" else 0)
         assert f"Hey {name},".encode() in final["captions_bytes"]
         assert final["media_bytes"] and final["poster_bytes"]
         durations.append(final["duration_seconds"])
+        if name == "Sue":
+            for remaining_frames in (prepared["metadata"]["context_frames"] - 3,
+                                     prepared["metadata"]["greeting_frames"] - 1):
+                media._run([
+                    ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(context_path), "-frames:v", str(remaining_frames),
+                    "-c:v", "libx264", "-threads", "1", "-crf", "17", str(shortened_path),
+                ])
+                # Even a container claiming the expected duration cannot hide
+                # missing decoded frames or an incomplete spoken greeting.
+                with monkeypatch.context() as patched:
+                    patched.setattr(media, "_probe", lambda *args: {
+                        "width": 1280, "height": 720,
+                        "duration": prepared["metadata"]["context_seconds"],
+                    })
+                    with pytest.raises(VideoProviderError) as error:
+                        media.compose(master, shortened_path.read_bytes(), prepared["greeting_audio_bytes"],
+                                      prepared["metadata"], first_name=name, ffmpeg=ffmpeg)
+                    assert error.value.code == "provider_timeline_changed"
     assert durations[1] - durations[0] == pytest.approx(0.6, abs=0.05)
 
 

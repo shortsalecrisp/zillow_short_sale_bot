@@ -288,6 +288,12 @@ def _context_frames(greeting_frames: int) -> int:
     return max(MIN_CONTEXT_FRAMES, greeting_frames + 36)
 
 
+def _minimum_provider_frames(context_frames: int, greeting_frames: int) -> int:
+    # Kling may round off two frames at the end of the context. None of those
+    # pixels are used: the greeting and ample subsequent context must survive.
+    return max(context_frames - 2, greeting_frames + 24)
+
+
 def prepare_inputs(master_bytes: bytes, narration_bytes: bytes, *, first_name: str, ffmpeg: str | None = None) -> dict:
     """Prepare a 2.1-3.7 second same-take context; narration images are never used."""
     _master(master_bytes)
@@ -415,6 +421,8 @@ def compose(master_bytes: bytes, kling_bytes: bytes, greeting_audio_bytes: bytes
         if abs(probe["duration"] - metadata["context_seconds"]) > MAX_PROVIDER_TIMELINE_DRIFT:
             _fail("provider_timeline_changed", "Lip-sync output changed the prepared clip duration.")
         mask, errors = _mouth_mask(), []
+        provider_timing = {"decoded_frames": 0}
+        minimum_provider_frames = _minimum_provider_frames(context_frames, greeting_frames)
 
         def edited():
             source_frames, generated_frames = _retimed_frames(master, greeting_frames, ffmpeg), _frames(model, ffmpeg, provider=True)
@@ -425,12 +433,15 @@ def compose(master_bytes: bytes, kling_bytes: bytes, greeting_audio_bytes: bytes
                         try:
                             generated = next(generated_frames)
                         except StopIteration:
-                            _fail("provider_timeline_changed", "Lip-sync output ended before its prepared context.")
-                        generated_count += 1
-                        error = _background_error(source, generated)
-                        errors.append(error)
-                        if error >= BACKGROUND_MAE_LIMIT:
-                            _fail("provider_geometry_changed", "Lip-sync output changed the shot or temporal alignment.")
+                            if index < minimum_provider_frames:
+                                _fail("provider_timeline_changed", "Lip-sync output ended before its required greeting and context.")
+                            generated = None
+                        if generated is not None:
+                            generated_count += 1
+                            error = _background_error(source, generated)
+                            errors.append(error)
+                            if error >= BACKGROUND_MAE_LIMIT:
+                                _fail("provider_geometry_changed", "Lip-sync output changed the shot or temporal alignment.")
                     if index < greeting_frames:
                         fade = min(1.0, (greeting_frames - index - 1) / 4.0)
                         yield _blend(source, generated, mask, fade)
@@ -439,8 +450,9 @@ def compose(master_bytes: bytes, kling_bytes: bytes, greeting_audio_bytes: bytes
                 # Do not accept clipped or substantially duplicated provider frames.
                 for _ in generated_frames:
                     generated_count += 1
-                if not context_frames <= generated_count <= context_frames + 2:
+                if not minimum_provider_frames <= generated_count <= context_frames + 2:
                     _fail("provider_timeline_changed", "Lip-sync output frame count changed.")
+                provider_timing["decoded_frames"] = generated_count
             finally:
                 source_frames.close()
                 generated_frames.close()
@@ -479,6 +491,8 @@ def compose(master_bytes: bytes, kling_bytes: bytes, greeting_audio_bytes: bytes
                 "greeting_frames": greeting_frames, "source_body_start_frame": SOURCE_GREETING_FRAMES,
                 "old_recording_frames": 0, "body_frames_exact_before_encoding": True,
                 "body_audio_exact_before_encoding": True, "nonmouth_pixels_exact_before_encoding": True,
+                "provider_frames": provider_timing["decoded_frames"],
+                "provider_context_tail_frames_missing": max(0, context_frames - provider_timing["decoded_frames"]),
                 "background_mae_max": max(errors), "quality_status": "requires_visual_and_name_pronunciation_review",
             },
         }

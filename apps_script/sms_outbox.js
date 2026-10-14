@@ -715,6 +715,11 @@ function parseVideoFollowupMetadataV19_(row) {
   } catch (_) { return null; }
 }
 
+function normalizeVideoFollowupFirstNameV19_(value) {
+  // Match the video worker's Unicode/apostrophe normalization without guessing names.
+  return String(value || "").normalize("NFKC").replace(/[\u2018\u2019\u02bc]/g, "'").trim();
+}
+
 function validateVideoFollowupContextV19_(body, requireJob) {
   var key = String(body && body.followup_key || "");
   var initial = String(body && body.initial_sent_at || "");
@@ -724,7 +729,7 @@ function validateVideoFollowupContextV19_(body, requireJob) {
   var stableId = String(body && (body.stable_id || body.zpid || body.listing_id) || "").trim();
   var variant = String(body && body.video_variant || "");
   var job = String(body && body.video_job_id || "");
-  var firstName = normalizeWhitespace_(String(body && body.first_name || ""));
+  var firstName = normalizeVideoFollowupFirstNameV19_(body && body.first_name);
   var messageId = "followup-video-" + key.slice(0, 24);
   if (!/^[0-9a-f]{64}$/.test(key) || !Number.isInteger(row) || row < 2 ||
       phone.length !== 10 || !stableId || body.crm_prospect_id ||
@@ -904,7 +909,7 @@ function checkVideoFollowupEligibilityV19_(body, options) {
     if (!/(phone conflict resolved|phone_conflict_resolved|sol_exception_resolved)/.test(contact) &&
         /(phone_conflict|phone conflict|duplicate phone suppressed)/.test(contact)) reason = "A contact identity hold exists";
     if (String(obj[HEADERS.last_message_id] || "").trim() || String(obj[HEADERS.last_inbound_text] || "").trim()) reason = "An inbound reply exists";
-    if (metadata.video_variant === "video" && normalizeWhitespace_(String(row[0] || "")).toLowerCase() !== metadata.first_name.toLowerCase()) reason = "Personalized first name changed";
+    if (metadata.video_variant === "video" && normalizeVideoFollowupFirstNameV19_(row[0]).toLowerCase() !== normalizeVideoFollowupFirstNameV19_(metadata.first_name).toLowerCase()) reason = "Personalized first name changed";
     var inbound = ss.getSheetByName("sms_inbound_queue");
     if (!inbound) throw new Error("Inbound queue is unavailable");
     var inboundRows = inbound.getLastRow() > 1 ? inbound.getRange(2, 1, inbound.getLastRow() - 1, 8).getValues() : [];
