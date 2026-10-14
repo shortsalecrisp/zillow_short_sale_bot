@@ -693,7 +693,17 @@ test("explicit assistance refusal and opening no-thanks outrank generic hangup",
       { role: "user", message: "Um, no." },
     ],
   };
-  for (const conversation of [lonnie, kathie, kelly]) {
+  const donnell = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "Yes, this is Donnell." },
+      { role: "assistant", message: "Would help with lender paperwork or calls be useful?" },
+      { role: "user", message: "Uh, no, not today." },
+      { role: "assistant", message: "Understood. Thanks for your time." },
+    ],
+  };
+  for (const conversation of [lonnie, kathie, kelly, donnell]) {
     assert.equal(shouldTreatAsNotInterested(conversation), true);
     assert.equal(shouldTreatAsAgentHungUp(conversation), false);
   }

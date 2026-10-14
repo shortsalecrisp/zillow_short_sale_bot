@@ -8,6 +8,7 @@ process.env.TELNYX_CALLER_ID = "+12175550100";
 process.env.TELNYX_CONNECTION_ID = "test";
 process.env.TELNYX_OUTBOUND_VOICE_PROFILE_ID = "test";
 process.env.TEST_DESTINATION_NUMBER = "+12175550101";
+process.env.GOOGLE_SHEETS_TAB_NAME = "Sheet1";
 
 let nextFixturePhone = 21_755_50200;
 function fixturePhone(window = "reach_afternoon_v1") {
@@ -219,6 +220,50 @@ test("uncertain call starts remain paused and carry a durable provider receipt k
 
   assert.deepEqual(parseVoiceCallStartUncertainMarker(values[41]), marker);
   assert.equal(getVoiceBotCallCandidateFromRowValues(5939, values, new Date("2026-10-02T15:00:00Z")), undefined);
+});
+
+test("safe uncertain-start replacement clears the blocking lead status and verifies K/AD/AE/AF", async () => {
+  const {
+    buildVoiceSafeReplacementWrites,
+    verifyVoiceSafeReplacementReadback,
+  } = await import("../src/lib/voiceQueue");
+  const replacementAt = new Date("2026-10-14T13:15:00.000Z");
+  const writes = buildVoiceSafeReplacementWrites(1, replacementAt, "Replacement proof");
+  assert.deepEqual(
+    writes.filter((write) => [11, 30, 31, 32].includes(write.columnNumber)).map((write) => [write.columnNumber, write.value]),
+    [[11, ""], [30, "yes"], [31, "voice_call_1_due"], [32, replacementAt.toISOString()]],
+  );
+
+  const requestedRanges: string[] = [];
+  const fakeSheets = {
+    spreadsheets: {
+      values: {
+        batchGet: async ({ ranges }: { ranges: string[] }) => {
+          requestedRanges.push(...ranges);
+          return {
+            data: {
+              valueRanges: [
+                {},
+                { values: [["yes"]] },
+                { values: [["voice_call_1_due"]] },
+                { values: [[replacementAt.toISOString()]] },
+              ],
+            },
+          };
+        },
+      },
+    },
+  };
+  assert.deepEqual(
+    await verifyVoiceSafeReplacementReadback(fakeSheets as never, 6130, 1, replacementAt),
+    {
+      leadStatusCode: "",
+      callEligible: "yes",
+      callTimeBucket: "voice_call_1_due",
+      callScheduledFor: replacementAt.toISOString(),
+    },
+  );
+  assert.deepEqual(requestedRanges, ["'Sheet1'!K6130", "'Sheet1'!AD6130", "'Sheet1'!AE6130", "'Sheet1'!AF6130"]);
 });
 
 test("phone-scoped guards preserve no-call preferences and prevent duplicate-listing resets", async () => {

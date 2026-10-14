@@ -1166,8 +1166,11 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     }
     const question = normalizeText(item.message);
     if (
-      !/\b(?:would you like|do you want|do you need|anything else i can assist|specific questions|something you'd like|any part|you need|need help)\b/.test(
-        question,
+      !(
+        /\b(?:would you like|do you want|do you need|anything else i can assist|specific questions|something you'd like|any part|you need|need help)\b/.test(
+          question,
+        ) ||
+        /\bwould help with\b.*\bbe useful\b/.test(question)
       ) ||
       !/\b(?:help|assist|details|questions|services?)\b/.test(question)
     ) {
@@ -1178,7 +1181,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     );
     return Boolean(
       answer?.message &&
-        /^(?:uh+[, ]*)?(?:no|not right now|no[, ]+thanks|nothing right now)[.!?]*$/i.test(answer.message.trim()),
+        /^(?:uh+[, ]*)?(?:no(?:[, ]+not today)?|not right now|no[, ]+thanks|nothing right now)[.!?]*$/i.test(answer.message.trim()),
     );
   });
   const declinedOpeningPermission = messages.some((item, index) => {

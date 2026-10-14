@@ -118,6 +118,13 @@ type SheetCellWrite = {
   label?: string;
 };
 
+export type VoiceSafeReplacementReadback = {
+  leadStatusCode: string;
+  callEligible: string;
+  callTimeBucket: string;
+  callScheduledFor: string;
+};
+
 const CALL_START_UNCERTAIN_MARKER = "CODEX_VOICE_CALL_START_UNCERTAIN_V1";
 const CALL_START_UNCERTAIN_GRACE_MS = 15 * 60_000;
 const SCHEDULED_NO_START_MARKER = "CODEX_VOICE_SCHEDULED_NO_START_V1";
@@ -590,6 +597,74 @@ async function writeCells(sheets: sheets_v4.Sheets, rowNumber: number, writes: S
   });
 }
 
+export function buildVoiceSafeReplacementWrites(
+  callAttemptNumber: 1 | 2,
+  replacementAt: Date,
+  voiceNotes: string,
+): SheetCellWrite[] {
+  return [
+    { columnNumber: callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT, value: "", label: `voice_call_${callAttemptNumber}_sent_released` },
+    { columnNumber: callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT, value: "", label: `voice_call_${callAttemptNumber}_result_released` },
+    { columnNumber: VOICE_BOT_COL_RESPONSE_STATUS, value: "No accepted provider receipt; replacement attempt safely scheduled", label: "response_status" },
+    { columnNumber: VOICE_BOT_COL_LEAD_STATUS_CODE, value: "", label: "leadStatusCode_replacement_cleared" },
+    { columnNumber: VOICE_BOT_COL_CALL_ELIGIBLE, value: "yes", label: "call_eligible" },
+    { columnNumber: VOICE_BOT_COL_CALL_TIME_BUCKET, value: `voice_call_${callAttemptNumber}_due`, label: "call_time_bucket" },
+    { columnNumber: VOICE_BOT_COL_CALL_SCHEDULED_FOR, value: replacementAt.toISOString(), label: "call_scheduled_for" },
+    {
+      columnNumber: VOICE_BOT_COL_VOICE_NOTES,
+      value: voiceNotes,
+      label: "voiceNotes_absence_proved",
+    },
+  ];
+}
+
+export async function readVoiceSafeReplacementState(
+  sheets: sheets_v4.Sheets,
+  rowNumber: number,
+): Promise<VoiceSafeReplacementReadback> {
+  const columns = [
+    VOICE_BOT_COL_LEAD_STATUS_CODE,
+    VOICE_BOT_COL_CALL_ELIGIBLE,
+    VOICE_BOT_COL_CALL_TIME_BUCKET,
+    VOICE_BOT_COL_CALL_SCHEDULED_FOR,
+  ];
+  const response = await sheets.spreadsheets.values.batchGet({
+    spreadsheetId: config.googleSheets.sheetId,
+    ranges: columns.map((columnNumber) =>
+      cellRange(config.googleSheets.tabName, columnToLetter(columnNumber), rowNumber),
+    ),
+    valueRenderOption: "UNFORMATTED_VALUE",
+  });
+  const values = (response.data.valueRanges ?? []).map((range) =>
+    normalizeString(range.values?.[0]?.[0]),
+  );
+  return {
+    leadStatusCode: values[0] ?? "",
+    callEligible: values[1] ?? "",
+    callTimeBucket: values[2] ?? "",
+    callScheduledFor: values[3] ?? "",
+  };
+}
+
+export async function verifyVoiceSafeReplacementReadback(
+  sheets: sheets_v4.Sheets,
+  rowNumber: number,
+  callAttemptNumber: 1 | 2,
+  replacementAt: Date,
+): Promise<VoiceSafeReplacementReadback> {
+  const actual = await readVoiceSafeReplacementState(sheets, rowNumber);
+  const expected: VoiceSafeReplacementReadback = {
+    leadStatusCode: "",
+    callEligible: "yes",
+    callTimeBucket: `voice_call_${callAttemptNumber}_due`,
+    callScheduledFor: replacementAt.toISOString(),
+  };
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(`Safe replacement readback mismatch for row ${rowNumber}: ${JSON.stringify({ expected, actual })}`);
+  }
+  return actual;
+}
+
 async function markVoiceBotAttemptStarted(
   sheets: sheets_v4.Sheets,
   rowValues: unknown[],
@@ -782,7 +857,6 @@ async function reconcileUncertainVoiceCallStarts(
           },
         ]);
       } else {
-        const sentColumn = uncertainAttempt === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
         const agentTimeZone = marker.agentTimeZone || getVoiceBotAgentTimeZone(row.values);
         if (!agentTimeZone) continue;
         const replacementAt = getNextVoiceBotFirstAttemptWindowStart(
@@ -793,19 +867,16 @@ async function reconcileUncertainVoiceCallStarts(
         const proof = receipt?.status === "definitive_failure"
           ? `Provider receipt ${receipt.conversationId} proves the call failed before acceptance.`
           : "Provider conversation reconciliation completed after the grace period with no matching receipt.";
-        await writeCells(sheets, row.rowNumber, [
-          { columnNumber: sentColumn, value: "", label: `voice_call_${uncertainAttempt}_sent_released` },
-          { columnNumber: resultColumn, value: "", label: `voice_call_${uncertainAttempt}_result_released` },
-          { columnNumber: VOICE_BOT_COL_RESPONSE_STATUS, value: "No accepted provider receipt; replacement attempt safely scheduled", label: "response_status" },
-          { columnNumber: VOICE_BOT_COL_CALL_ELIGIBLE, value: "yes", label: "call_eligible" },
-          { columnNumber: VOICE_BOT_COL_CALL_TIME_BUCKET, value: `voice_call_${uncertainAttempt}_due`, label: "call_time_bucket" },
-          { columnNumber: VOICE_BOT_COL_CALL_SCHEDULED_FOR, value: replacementAt.toISOString(), label: "call_scheduled_for" },
-          {
-            columnNumber: VOICE_BOT_COL_VOICE_NOTES,
-            value: appendVoiceNotesValue(row.values[VOICE_BOT_COL_VOICE_NOTES - 1], `${proof} Safe replacement for attempt ${uncertainAttempt} scheduled for ${formatVoiceBotDateEt(replacementAt)}.`),
-            label: "voiceNotes_absence_proved",
-          },
-        ]);
+        const replacementWrites = buildVoiceSafeReplacementWrites(
+          uncertainAttempt,
+          replacementAt,
+          appendVoiceNotesValue(
+            row.values[VOICE_BOT_COL_VOICE_NOTES - 1],
+            `${proof} Safe replacement for attempt ${uncertainAttempt} scheduled for ${formatVoiceBotDateEt(replacementAt)}.`,
+          ),
+        );
+        await writeCells(sheets, row.rowNumber, replacementWrites);
+        await verifyVoiceSafeReplacementReadback(sheets, row.rowNumber, uncertainAttempt, replacementAt);
       }
       reconciled += 1;
     } catch (error) {
