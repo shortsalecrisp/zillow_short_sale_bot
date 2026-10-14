@@ -828,6 +828,27 @@ function parseVideoFollowupTimestampV19_(value, timeZone) {
   return NaN;
 }
 
+function isSameVideoFollowupInitialAttemptV19_(entry, metadata, initialMs, timeZone, pendingRows) {
+  var row = entry.row;
+  var requestId = String(row[2] || "");
+  var messageId = String(row[3] || "");
+  var messageMatch = /^initial-([0-9]+)-[0-9a-f]{16}$/.exec(messageId);
+  var originalRow = Number(entry.metadata.crm_row);
+  if (entry.metadata.stable_id !== metadata.stable_id || !messageMatch ||
+      !Number.isInteger(originalRow) || originalRow < 2 || Number(row[17]) !== originalRow ||
+      Number(messageMatch[1]) !== originalRow ||
+      ["scheduler-" + messageId, "render-" + messageId].indexOf(requestId) === -1 ||
+      !String(row[5] || "").trim()) return false;
+  var createdMs = parseVideoFollowupTimestampV19_(row[0], timeZone);
+  var startedMs = parseVideoFollowupTimestampV19_(row[13], timeZone);
+  if (!isFinite(createdMs) || !isFinite(startedMs) ||
+      createdMs > startedMs || startedMs > initialMs || initialMs > entry.sent_ms) return false;
+  var identityMatches = (pendingRows || []).filter(function(candidate) {
+    return String(candidate[2] || "") === requestId || String(candidate[3] || "") === messageId;
+  });
+  return identityMatches.length === 1;
+}
+
 function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
   if (!metadata || !/^[0-9a-f]{64}$/.test(String(metadata.followup_key || "")) ||
       !String(metadata.stable_id || "").trim() || !isFinite(Date.parse(metadata.initial_sent_at))) {
@@ -848,8 +869,10 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
   var initialMs = parseVideoFollowupTimestampV19_(current[22], timeZone);
   var dateOnly = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(current[22] || "").trim());
   var recoveryDate = dateOnly ? dateOnly[3] + "-" + ("0" + dateOnly[1]).slice(-2) + "-" + ("0" + dateOnly[2]).slice(-2) : "";
+  var expectedMs = Date.parse(metadata.initial_sent_at);
   var latestReceipt = NaN;
   var recoveryReceipt = NaN;
+  var laterReceipts = [];
   (pendingRows || []).forEach(function(row) {
     if (String(row[1]) !== "sent" || normalizePhone_(row[4]) !== phone ||
         String(row[6] || "").indexOf("__initial_outreach__:") !== 0) return;
@@ -859,14 +882,18 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
     if (stableId ? stableId !== metadata.stable_id : Number(row[17]) !== index + 1) return;
     var sentMs = parseVideoFollowupTimestampV19_(row[14], timeZone);
     if (!isFinite(sentMs)) return;
+    if (sentMs - expectedMs >= 1000) laterReceipts.push({ row: row, metadata: initialMetadata, sent_ms: sentMs });
     if (!isFinite(latestReceipt) || sentMs > latestReceipt) latestReceipt = sentMs;
     if (recoveryDate && Utilities.formatDate(new Date(sentMs), timeZone, "yyyy-MM-dd") === recoveryDate &&
         (!isFinite(recoveryReceipt) || sentMs > recoveryReceipt)) recoveryReceipt = sentMs;
   });
   if (recoveryDate) initialMs = recoveryReceipt;
-  var expectedMs = Date.parse(metadata.initial_sent_at);
+  // W records the handset timestamp; outbox O records later receipt processing.
+  // Accept that difference only for one exact attempt enclosing W, never a later send.
+  var sameInitialAttempt = laterReceipts.length === 1 &&
+    isSameVideoFollowupInitialAttemptV19_(laterReceipts[0], metadata, expectedMs, timeZone, pendingRows);
   if (!isFinite(initialMs) || Math.abs(initialMs - expectedMs) >= 1000 ||
-      (isFinite(latestReceipt) && latestReceipt - expectedMs >= 1000)) {
+      (laterReceipts.length > 0 && !sameInitialAttempt)) {
     return {
       ok: false, retryable: !isFinite(initialMs),
       newer_initial_confirmed: isFinite(initialMs) && initialMs - expectedMs >= 1000 &&

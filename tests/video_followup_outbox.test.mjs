@@ -155,6 +155,16 @@ function initialReceipt(h, sentAt, changes = {}) {
   h.outbox.data.push(row);
 }
 
+function delayedInitialReceipt(h, changes = {}) {
+  initialReceipt(h, "2026-10-13T13:00:08.247Z", {
+    0: new Date("2026-10-13T12:59:00Z"),
+    2: "scheduler-initial-2-0123456789abcdef", 3: "initial-2-0123456789abcdef",
+    5: "Original initial outreach text",
+    6: `__initial_outreach__:${JSON.stringify({ crm_row: 2, stable_id: base.stable_id })}`,
+    13: new Date("2026-10-13T12:59:58Z"), ...changes,
+  });
+}
+
 function receipt(h, index = h.outbox.data.length - 1) {
   const queued = h.outbox.data[index];
   return h.context.applyScheduledFollowupReceiptV13_({ request_id: queued[2], sent_at: "2026-10-13T20:00:00Z" }, {
@@ -354,6 +364,104 @@ test("native W cannot hide a newer same-identity confirmed initial receipt", () 
   const h = harness();
   initialReceipt(h, "2026-10-13T15:00:00Z");
   assert.equal(enqueue(h).ok, false);
+});
+
+test("handset W and a later exact-attempt receipt allow video and text without changing W", () => {
+  // Observed receipt-processing delays for the first 18 organic jobs.
+  for (const delayMs of [8247, 5516, 3650, 4894, 7542, 6280, 3209, 5517, 4691, 6268, 5321, 4226, 4743, 5601, 6609, 6292, 4938, 4729]) {
+    for (const body of [base, video()]) {
+      const h = harness();
+      delayedInitialReceipt(h, { 14: new Date(Date.parse(initial) + delayMs) });
+      h.row[11] = "A newer outbound message must not be used as initial identity";
+      const before = h.counters();
+      assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, true, String(delayMs));
+      assert.deepEqual(h.counters(), before);
+      assert.equal(enqueue(h, body).ok, true);
+      assert.equal(h.row[22].toISOString(), initial);
+      assert.equal(h.context.getPendingSmsStaleReason_(h.outbox.data[2]), "");
+    }
+  }
+});
+
+test("delayed initial receipt also correlates render IDs after a CRM row shift", () => {
+  const h = harness();
+  delayedInitialReceipt(h, { 2: "render-initial-2-0123456789abcdef" });
+  h.leads.data.splice(1, 0, Array(33).fill(""));
+  assert.equal(enqueue(h, video()).ok, true);
+  assert.equal(h.outbox.data[2][17], 3);
+  assert.equal(h.context.getPendingSmsStaleReason_(h.outbox.data[2]), "");
+});
+
+test("receipt processing delay is not a widened time tolerance", () => {
+  for (const startedAt of ["2026-10-13T13:00:00.001Z", "2026-10-13T13:00:05Z"]) {
+    const h = harness();
+    delayedInitialReceipt(h, { 13: new Date(startedAt) });
+    assert.equal(enqueue(h, video()).ok, false);
+  }
+  const h = harness();
+  delayedInitialReceipt(h, { 14: new Date("2026-10-13T14:00:00Z") });
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(video()).eligible, true);
+});
+
+test("missing, malformed or inconsistent same-attempt evidence still fails closed", () => {
+  for (const changes of [
+    { 0: "" }, { 0: "invalid" }, { 0: new Date("2026-10-13T13:00:01Z") },
+    { 13: "" }, { 13: "invalid" },
+    { 2: "" }, { 2: "scheduler-initial-2-ffffffffffffffff" },
+    { 2: "other-initial-2-0123456789abcdef" },
+    { 3: "" }, { 3: "not-an-initial-id" }, { 5: "" }, { 17: 3 },
+    { 6: '__initial_outreach__:{"crm_row":2}' },
+    { 6: '__initial_outreach__:{"stable_id":"listing-123"}' },
+    { 6: '__initial_outreach__:{"crm_row":3,"stable_id":"listing-123"}' },
+  ]) {
+    const h = harness();
+    delayedInitialReceipt(h, changes);
+    assert.equal(enqueue(h, video()).ok, false, JSON.stringify(changes));
+    assert.equal(h.outbox.data.length, 2);
+  }
+});
+
+test("a matching first interval never hides a separate later or overlapping initial attempt", () => {
+  for (const startedAt of ["2026-10-13T12:59:59Z", "2026-10-13T13:00:02Z"]) {
+    const h = harness();
+    delayedInitialReceipt(h);
+    delayedInitialReceipt(h, {
+      2: "render-initial-2-fedcba9876543210", 3: "initial-2-fedcba9876543210",
+      13: new Date(startedAt), 14: new Date("2026-10-13T13:00:09Z"),
+    });
+    assert.equal(enqueue(h, video()).ok, false);
+  }
+});
+
+test("duplicate or conflicting initial identifiers cannot prove a unique delayed receipt", () => {
+  for (const changes of [{}, { 1: "failed" }, { 4: "9542053206" }, { 3: "initial-2-ffffffffffffffff" }, { 2: "render-initial-2-0123456789abcdef" }]) {
+    const h = harness();
+    delayedInitialReceipt(h);
+    h.outbox.data.push(Object.assign(h.outbox.data[1].slice(), changes));
+    assert.equal(enqueue(h, video()).ok, false, JSON.stringify(changes));
+  }
+});
+
+test("same-attempt exception leaves reply, takeover and existing follow-up guards intact", () => {
+  for (const suppress of [
+    (h) => inboundReply(h),
+    (h) => h.setTakeover(true),
+    (h) => { h.row[28] = "TRUE"; },
+    (h) => { h.row[31] = "TRUE"; },
+    (h) => { h.row[8] = "x"; },
+    (h) => { h.row[23] = new Date("2026-10-13T14:00:00Z"); },
+    (h) => { h.row[10] = "R"; },
+  ]) {
+    const h = harness();
+    delayedInitialReceipt(h);
+    suppress(h);
+    assert.equal(enqueue(h, video()).ok, false);
+  }
+  const h = harness();
+  delayedInitialReceipt(h);
+  enqueue(h, video());
+  assert.equal(enqueue(h).duplicate, true);
+  assert.equal(h.outbox.data.length, 3);
 });
 
 test("date-only recovery cannot hide a newer initial receipt on a different day", () => {
