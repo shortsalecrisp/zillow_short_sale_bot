@@ -44,6 +44,16 @@ class Objects:
     def signed_get_url(self, key, ttl_seconds=1800):
         return "https://storage.googleapis.com/private/" + key + "?signed=yes"
 
+    def list(self, prefix, limit=1000):
+        with self.lock:
+            return [key for key in self.values if key.startswith(prefix)][:limit]
+
+    def delete(self, key, version):
+        with self.lock:
+            if self.values.get(key, (None, 0))[1] != version:
+                raise core.Conflict()
+            self.values.pop(key, None)
+
 
 class Response:
     def __init__(self, value, status=200):
@@ -281,8 +291,7 @@ def test_decoded_not_reported_duration_blocks_lipsync(world, monkeypatch, durati
     identifier = start(world)
     world[4]["tts_result"]["duration"] = 1.0
     monkeypatch.setattr(provider, "inspect_greeting", Mock(return_value={"duration_seconds": duration}))
-    with pytest.raises(provider.VideoProviderError):
-        world[0].inspect(identifier)
+    assert world[0].inspect(identifier)["status"] == "failed"
     assert state(world, identifier)["stage"] == "failed"
     assert not paid_calls(world, provider.MODEL)
 
@@ -290,9 +299,166 @@ def test_decoded_not_reported_duration_blocks_lipsync(world, monkeypatch, durati
 def test_failed_audio_guard_stops_without_paid_retry(world, monkeypatch):
     identifier = start(world)
     monkeypatch.setattr(provider, "inspect_greeting", Mock(side_effect=provider.VideoProviderError("voice_anomaly", "Review audio")))
-    with pytest.raises(provider.VideoProviderError):
-        world[0].inspect(identifier)
     assert world[0].inspect(identifier)["status"] == "failed"
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert not paid_calls(world, provider.MODEL)
+
+
+@pytest.mark.parametrize("phase,code", [
+    ("audio_download", "fal_download_failed"),
+    ("audio_screen", "narration_pitch_outlier"),
+    ("media_prepare", "media_processing_failed"),
+])
+def test_preparation_failure_records_safe_stage_and_code_without_retry(world, monkeypatch, phase, code):
+    identifier = start(world)
+    sensitive = "https://private.example/media?token=never-store-this"
+    error = provider.VideoProviderError(code, sensitive)
+    if phase == "audio_download":
+        world[0]._download_fal.side_effect = error
+    elif phase == "audio_screen":
+        monkeypatch.setattr(provider, "inspect_greeting", Mock(side_effect=error))
+    else:
+        world[3].side_effect = error
+    result = world[0].inspect(identifier)
+    assert result == {"provider_id": identifier, "status": "failed",
+        "failure_code": "greeting_preparation_failed", "failure_stage": phase,
+        "underlying_code": code, "exception_type": "VideoProviderError"}
+    failed = state(world, identifier)
+    assert failed["stage"] == "failed"
+    assert failed["failure_code"] == "greeting_preparation_failed"
+    assert failed["failure_stage"] == phase
+    assert failed["underlying_code"] == code
+    assert failed["exception_type"] == "VideoProviderError"
+    assert sensitive not in json.dumps(failed)
+    if phase == "media_prepare":
+        assert failed["measured_audio_qa"] == {"duration_seconds": 1.5}
+    else:
+        assert "measured_audio_qa" not in failed
+    assert world[0].submit("Sue", "job") == identifier
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert len(paid_calls(world)) == 1
+    assert not paid_calls(world, provider.MODEL)
+
+
+def test_preparation_diagnostics_only_keep_bounded_numeric_completed_qa(world, monkeypatch):
+    identifier = start(world)
+    monkeypatch.setattr(provider, "inspect_greeting", Mock(return_value={
+        "duration_seconds": 1.2, "quality": {
+            "median_f0_hz": 212.0, "reference_median_f0_hz": 221.0,
+            "pitch_shift_semitones": -0.7, "clipped_sample_fraction": float("nan"),
+            "active_rms_dbfs": float("inf"), "prepared_greeting_seconds": True,
+            "media_url": "https://private.example/secret", "secret": "do-not-store",
+        },
+    }))
+    world[3].side_effect = RuntimeError("https://private.example/key=do-not-store")
+    assert world[0].inspect(identifier)["status"] == "failed"
+    failed = state(world, identifier)
+    assert failed["failure_stage"] == "media_prepare"
+    assert failed["underlying_code"] == "unclassified_preparation_failure"
+    assert failed["exception_type"] == "RuntimeError"
+    assert failed["measured_audio_qa"] == {
+        "duration_seconds": 1.2, "median_f0_hz": 212.0,
+        "reference_median_f0_hz": 221.0, "pitch_shift_semitones": -0.7,
+    }
+    assert "do-not-store" not in json.dumps(failed)
+    assert "private.example" not in json.dumps(failed)
+    assert len(paid_calls(world)) == 1
+
+
+def test_preparation_diagnostics_never_copy_untrusted_code_type_or_exception_fields(world, monkeypatch):
+    identifier = start(world)
+    error_type = type("secret_injected_exception_name", (provider.VideoProviderError,), {})
+    error = error_type("secret_token_that_looks_like_a_code", "private error details")
+    error.audio_qa = {"duration_seconds": 1.0}
+    monkeypatch.setattr(provider, "inspect_greeting", Mock(side_effect=error))
+    result = world[0].inspect(identifier)
+    assert result["status"] == "failed"
+    assert result["underlying_code"] == "unclassified_preparation_failure"
+    assert result["exception_type"] == "OtherException"
+    failed = state(world, identifier)
+    assert failed["underlying_code"] == "unclassified_preparation_failure"
+    assert failed["exception_type"] == "OtherException"
+    assert "measured_audio_qa" not in failed
+    assert "secret_" not in json.dumps(failed)
+    assert "private error" not in json.dumps(failed)
+    assert len(paid_calls(world)) == 1
+
+
+@pytest.mark.parametrize("stage,code", [
+    ("fal_submitting", None), ("fal_pending", None), ("completed", None),
+    ("failed", "provider_price_not_approved"),
+])
+def test_competing_transition_cannot_be_reported_as_preparation_failure(world, stage, code):
+    identifier = start(world)
+    def prepare(*args, **kwargs):
+        world[1].mutate("same-take/" + identifier, lambda old: {**old, "stage": stage,
+            "failure_code": code})
+        raise provider.VideoProviderError("media_processing_failed", "Concurrent preparation failed")
+    world[3].side_effect = prepare
+    with pytest.raises(provider.VideoProviderError, match="Concurrent preparation failed"):
+        world[0].inspect(identifier)
+    assert state(world, identifier)["stage"] == stage
+    assert state(world, identifier).get("failure_code") == code
+    assert len(paid_calls(world)) == 1
+    assert not paid_calls(world, provider.MODEL)
+
+
+@pytest.mark.parametrize("failure", [core.Conflict(), OSError("Storage unavailable")])
+def test_preparation_failure_write_uncertainty_propagates(world, monkeypatch, failure):
+    identifier = start(world)
+    world[3].side_effect = provider.VideoProviderError("media_processing_failed", "Preparation failed")
+    monkeypatch.setattr(world[0], "_update", Mock(side_effect=failure))
+    with pytest.raises(type(failure)):
+        world[0].inspect(identifier)
+    assert state(world, identifier)["stage"] == "narration_pending"
+    assert len(paid_calls(world)) == 1
+    assert not paid_calls(world, provider.MODEL)
+
+
+@pytest.mark.parametrize("read_failure", ["storage", "identity"])
+def test_preparation_failure_requires_fresh_identity_validated_readback(world, monkeypatch, read_failure):
+    identifier = start(world)
+    world[3].side_effect = provider.VideoProviderError("media_processing_failed", "Preparation failed")
+    update = world[0]._update
+    def update_then_break_read(*args, **kwargs):
+        value = update(*args, **kwargs)
+        if read_failure == "storage":
+            monkeypatch.setattr(world[0], "_read", Mock(side_effect=OSError("Readback unavailable")))
+        else:
+            world[1].mutate("same-take/" + identifier, lambda old: {**old, "first_name": "Christopher"})
+        return value
+    monkeypatch.setattr(world[0], "_update", update_then_break_read)
+    with pytest.raises(OSError if read_failure == "storage" else provider.VideoProviderError):
+        world[0].inspect(identifier)
+    assert state(world, identifier)["stage"] == "failed"
+    assert len(paid_calls(world)) == 1
+    assert not paid_calls(world, provider.MODEL)
+
+
+def test_worker_terminalizes_preparation_rejection_immediately_without_retry(world, monkeypatch, caplog):
+    service, store, *_ = world
+    context = core.snapshot(row=2, stable_id="listing", phone="9542053205", first_name="Sue",
+                            initial_sent_at="2026-10-14T12:00:00Z")
+    config = core.Config({"VIDEO_FOLLOWUP_ENABLED": "true", "VIDEO_FOLLOWUP_GENERATION_ENABLED": "true",
+        "VIDEO_FOLLOWUP_INITIALS_AFTER": "2026-10-14T00:00:00Z", "VIDEO_FOLLOWUP_TEST_PHONES": "9542053205"})
+    store.prepare(context)
+    key = context["followup_key"]
+    worker = core.Worker(store, service, config, lambda _: True)
+    worker.tick()
+    submitted, _ = store.read("jobs/" + key)
+    assert submitted["status"] == "submitted"
+    monkeypatch.setattr(provider, "inspect_greeting", Mock(side_effect=
+        provider.VideoProviderError("narration_pitch_outlier", "Pitch guard rejected audio")))
+    worker.tick()
+    failed, _ = store.read("jobs/" + key)
+    ledger, _ = store.read("budget/ledger")
+    assert failed["status"] == "failed"
+    assert ledger["reservations"][key]["inflight"] is False
+    assert ledger["reservations"][key]["cents"] == 10
+    assert store.objects.read("active/" + key)[0] is None
+    assert "will retry safely" not in caplog.text
+    worker.tick()
+    assert len(paid_calls(world)) == 1
     assert not paid_calls(world, provider.MODEL)
 
 
@@ -423,8 +589,7 @@ def test_prepared_input_identity_and_price_block_are_verified(world, field, valu
     inputs["metadata"][field] = value
     world[3].side_effect = None
     world[3].return_value = inputs
-    with pytest.raises(provider.VideoProviderError):
-        world[0].inspect(identifier)
+    assert world[0].inspect(identifier)["status"] == "failed"
     assert state(world, identifier)["stage"] == "failed"
     assert not paid_calls(world, provider.MODEL)
 
@@ -456,8 +621,11 @@ def test_changed_master_or_reference_between_stages_blocks_lipsync(world, key):
     identifier = start(world)
     _, version = world[1].objects.read(key)
     world[1].objects.write(key, b"changed after narration", version)
-    with pytest.raises(provider.VideoProviderError):
-        world[0].inspect(identifier)
+    if key == MASTER_KEY:
+        with pytest.raises(provider.VideoProviderError):
+            world[0].inspect(identifier)
+    else:
+        assert world[0].inspect(identifier)["status"] == "failed"
     assert not paid_calls(world, provider.MODEL)
 
 

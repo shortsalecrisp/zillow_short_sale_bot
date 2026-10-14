@@ -48,6 +48,62 @@ RENDER_CONFIG_SHA256 = hashlib.sha256(json.dumps(RENDER_CONFIG, sort_keys=True).
 MAX_BYTES = 25 * 1024 * 1024
 _REQUEST_ID = re.compile(r"[a-zA-Z0-9-]{16,64}")
 _PIPELINE_ID = re.compile(r"same-take-[a-f0-9]{32}")
+_PREPARATION_FAILURE_CODES = frozenset({
+    "reference_mismatch", "unapproved_voice_reference", "invalid_voice_reference_duration",
+    "unsafe_fal_media", "fal_download_failed", "fal_download_empty", "invalid_narration_audio",
+    "clipped_narration_audio", "silent_narration_audio", "quiet_narration_audio",
+    "uncertain_narration_pitch", "narration_pitch_outlier", "invalid_greeting_timing",
+    "greeting_too_long", "narration_exceeds_budget", "invalid_media_bytes", "unapproved_recording",
+    "noncanonical_first_name", "media_processing_failed", "invalid_video_frames", "invalid_source_frames",
+    "invalid_audio", "silent_greeting", "invalid_source_audio", "invalid_context_timing",
+    "input_budget_mismatch", "input_hash_mismatch", "asset_conflict",
+})
+_PREPARATION_FAILURE_STAGES = frozenset({
+    "reference_read", "audio_download", "audio_screen", "audio_duration", "media_prepare",
+    "prepared_validation", "asset_storage", "asset_signing",
+})
+_DIAGNOSTIC_EXCEPTION_TYPES = frozenset({
+    "VideoProviderError", "Conflict", "ValueError", "TypeError", "KeyError", "OSError",
+    "RuntimeError", "TimeoutError", "MemoryError", "OverflowError", "HTTPError",
+    "ConnectionError", "ReadTimeout", "ConnectTimeout", "Timeout",
+})
+
+
+def _preparation_failure_diagnostics(exc, stage, audio_qa):
+    code = getattr(exc, "code", None) if isinstance(exc, VideoProviderError) else None
+    exception_type = type(exc).__name__
+    details = {
+        "failure_stage": stage if stage in _PREPARATION_FAILURE_STAGES else "unknown_preparation_stage",
+        "underlying_code": code if isinstance(code, str) and code in _PREPARATION_FAILURE_CODES else "unclassified_preparation_failure",
+        "exception_type": exception_type if exception_type in _DIAGNOSTIC_EXCEPTION_TYPES else "OtherException",
+    }
+    if isinstance(audio_qa, dict):
+        quality = audio_qa.get("quality")
+        values = {**(quality if isinstance(quality, dict) else {}),
+                  "duration_seconds": audio_qa.get("duration_seconds")}
+        limits = {"duration_seconds": (0, 10), "clipped_sample_fraction": (0, 1),
+                  "active_rms_dbfs": (-160, 0), "median_f0_hz": (70, 400),
+                  "reference_median_f0_hz": (70, 400), "pitch_shift_semitones": (-12, 12),
+                  "prepared_greeting_seconds": (0.5, 2.5)}
+        measured = {name: values[name] for name, (low, high) in limits.items()
+                    if type(values.get(name)) in (int, float) and low <= values[name] <= high
+                    and math.isfinite(values[name])}
+        if measured:
+            details["measured_audio_qa"] = measured
+    return details
+
+
+def _failed_status(state):
+    result = {"provider_id": state["id"], "status": "failed",
+              "failure_code": state.get("failure_code", state["stage"])}
+    if result["failure_code"] == "greeting_preparation_failed":
+        for field, allowed, fallback in (
+                ("failure_stage", _PREPARATION_FAILURE_STAGES, "unknown_preparation_stage"),
+                ("underlying_code", _PREPARATION_FAILURE_CODES, "unclassified_preparation_failure"),
+                ("exception_type", _DIAGNOSTIC_EXCEPTION_TYPES, "OtherException")):
+            value = state.get(field)
+            result[field] = value if isinstance(value, str) and value in allowed else fallback
+    return result
 
 
 def fal_media_url(url, resolve=None):
@@ -264,14 +320,20 @@ class SameTakeVideoProvider:
         if not self._active(state):
             return self._update(pipeline_id, {"stage": "cancelled"}, "narration_pending")
         master = self._master()
+        failure_stage, audio_qa = "reference_read", None
         try:
             reference = self._reference()
+            failure_stage = "audio_download"
             audio_source = self._download_fal(narration["media_url"])
+            failure_stage = "audio_screen"
             audio_qa = inspect_greeting(audio_source, reference)
+            failure_stage = "audio_duration"
             duration = float(audio_qa["duration_seconds"])
             if not math.isfinite(duration) or not 0 < duration <= 3.0:
                 raise VideoProviderError("narration_exceeds_budget", "Narration duration is outside the approved limit.")
+            failure_stage = "media_prepare"
             inputs = self.preparer(master, audio_source, first_name=state["first_name"])
+            failure_stage = "prepared_validation"
             metadata = inputs["metadata"]
             if (metadata.get("source_sha256") != MASTER_SHA256
                     or metadata.get("first_name") != state["first_name"]
@@ -282,13 +344,21 @@ class SameTakeVideoProvider:
                                       ("greeting_audio", "greeting_audio_bytes")):
                 if hashlib.sha256(inputs[content_key]).hexdigest() != metadata.get(kind + "_sha256"):
                     raise VideoProviderError("input_hash_mismatch", "Prepared input hash changed.")
+            failure_stage = "asset_storage"
             video_key = self._asset(pipeline_id, "input.mp4", inputs["video_bytes"], "video/mp4")
             audio_key = self._asset(pipeline_id, "input.wav", inputs["audio_bytes"], "audio/wav")
             greeting_key = self._asset(pipeline_id, "greeting.wav", inputs["greeting_audio_bytes"], "audio/wav")
+            failure_stage = "asset_signing"
             video_url = self.store.objects.signed_get_url(video_key)
             audio_url = self.store.objects.signed_get_url(audio_key)
-        except Exception:
-            self._update(pipeline_id, {"stage": "failed", "failure_code": "greeting_preparation_failed"}, "narration_pending")
+        except Exception as exc:
+            self._update(pipeline_id, {"stage": "failed", "failure_code": "greeting_preparation_failed",
+                **_preparation_failure_diagnostics(exc, failure_stage, audio_qa)}, "narration_pending")
+            # Only durable, identity-checked failure is terminal. A failed write,
+            # unreadable state, or competing paid-stage transition still raises.
+            latest, _ = self._read(pipeline_id)
+            if latest["stage"] == "failed" and latest.get("failure_code") == "greeting_preparation_failed":
+                return latest
             raise
         # CAS is the paid-stage lease: competing polls cannot pay twice.
         claimed = {**state, "stage": "fal_submitting", "metadata": metadata,
@@ -322,7 +392,7 @@ class SameTakeVideoProvider:
             state = self._update(pipeline_id, {"stage": "uncertain", "failure_code": "paid_stage_lease_expired"}, stage)
             return {"provider_id": pipeline_id, "status": "failed" if state["stage"] == "uncertain" else "processing"}
         if stage in {"failed", "uncertain", "cancelled"}:
-            return {"provider_id": pipeline_id, "status": "failed", "failure_code": state.get("failure_code", stage)}
+            return _failed_status(state)
         if stage == "narration_pending":
             headers = {"Authorization": "Key " + self.tts_key}
             narration_status = self._json("GET", tts_request_url(state["narration_id"],
@@ -345,7 +415,8 @@ class SameTakeVideoProvider:
                 state = self._start_fal(state, version, narration)
             else:
                 return {"provider_id": pipeline_id, "status": "processing"}
-            return {"provider_id": pipeline_id, "status": "failed" if state["stage"] in {"failed", "cancelled"} else "processing"}
+            return (_failed_status(state) if state["stage"] in {"failed", "cancelled"}
+                    else {"provider_id": pipeline_id, "status": "processing"})
         if stage == "fal_pending":
             request_id = state["fal_request_id"]
             if not _REQUEST_ID.fullmatch(request_id):
