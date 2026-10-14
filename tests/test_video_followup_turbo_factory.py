@@ -7,6 +7,8 @@ import pytest
 import video_followup_same_take as provider
 import video_followup_worker as bootstrap
 
+REAL_PROVIDER = provider.SameTakeVideoProvider
+
 
 @pytest.fixture
 def configured(monkeypatch):
@@ -20,6 +22,7 @@ def configured(monkeypatch):
     monkeypatch.setenv("TASKER_TRANSPORT_HEALTH_URL", "https://script.google.com/approved")
     monkeypatch.setenv("SMS_CHATBOT_ALLOWED_TOKEN", "test-token")
     monkeypatch.delenv("HEYGEN_API_KEY", raising=False)
+    monkeypatch.delenv("VIDEO_FOLLOWUP_GENERATION_PROFILE", raising=False)
     store = object()
     service = Mock(return_value=SimpleNamespace(store=store))
     monkeypatch.setattr(bootstrap, "get_service", service)
@@ -34,7 +37,36 @@ def test_factory_does_not_require_or_use_heygen(configured):
     _, service, constructor, worker, store = configured
     assert bootstrap.create_worker() is worker.return_value
     service.assert_called_once()
-    constructor.assert_called_once_with("fal-test-key", store, "assets/master/video", tts_key="tts-test-key")
+    constructor.assert_called_once_with("fal-test-key", store, "assets/master/video", tts_key="tts-test-key",
+                                        generator_profile="legacy_v1")
+
+
+def test_factory_selects_explicit_clean_profile_without_changing_other_configuration(configured, monkeypatch):
+    monkeypatch.setenv("VIDEO_FOLLOWUP_GENERATION_PROFILE", "clean_body_v1")
+    _, _, constructor, _, store = configured
+    bootstrap.create_worker()
+    constructor.assert_called_once_with("fal-test-key", store, "assets/master/video", tts_key="tts-test-key",
+                                        generator_profile="clean_body_v1")
+
+
+@pytest.mark.parametrize("profile", ["legacy_v1", "clean_body_v1"])
+def test_factory_uses_real_provider_constructor_contract(configured, monkeypatch, profile):
+    monkeypatch.setenv("VIDEO_FOLLOWUP_GENERATION_PROFILE", profile)
+    monkeypatch.setattr(provider, "SameTakeVideoProvider", REAL_PROVIDER)
+    bootstrap.create_worker()
+    actual_provider = configured[3].call_args.args[1]
+    assert isinstance(actual_provider, REAL_PROVIDER)
+    assert actual_provider.generator_profile == profile
+    assert actual_provider.reference_key == provider.REFERENCE_KEY
+
+
+@pytest.mark.parametrize("profile", ["", "latest", "legacy_v2", "clean_body_v2"])
+def test_factory_rejects_unapproved_generator_before_storage(configured, monkeypatch, profile):
+    monkeypatch.setenv("VIDEO_FOLLOWUP_GENERATION_PROFILE", profile)
+    with pytest.raises(provider.VideoProviderError, match="profile is not approved"):
+        bootstrap.create_worker()
+    configured[1].assert_not_called()
+    configured[2].assert_not_called()
 
 
 @pytest.mark.parametrize("flag", ["enabled", "generation_enabled"])

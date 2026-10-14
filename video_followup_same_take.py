@@ -44,11 +44,16 @@ RESERVATION_CENTS = 10
 PRICING_ENDPOINT = "https://api.fal.ai/v1/models/pricing"
 APPROVED_RATES = {TTS_MODEL: ("1000 characters", Decimal("0.02")),
                   MODEL: ("units", Decimal("0.014"))}
+# Legacy paid jobs pin this exact shape/hash; new settings require a new profile.
 RENDER_CONFIG = {"tts_model": TTS_MODEL, "seed": TTS_SEED, "temperature": TTS_TEMPERATURE,
                  "reference_sha256": REFERENCE_SHA256, "lipsync_model": MODEL,
                  "greeting_pattern": "Hey {first_name}!", "audio_guard": GUARD_VERSION,
                  "tts_request_cents": TTS_REQUEST_CENTS, "lipsync_request_cents": LIPSYNC_REQUEST_CENTS}
 RENDER_CONFIG_SHA256 = hashlib.sha256(json.dumps(RENDER_CONFIG, sort_keys=True).encode()).hexdigest()
+LEGACY_GENERATOR_PROFILE = "legacy_v1"
+CLEAN_BODY_GENERATOR_PROFILE = "clean_body_v1"
+CLEAN_BODY_REFERENCE_SHA256 = "b6a19ab1886102f471aa06ccb2e0347120c22498321f852a46b8b49efd707e3d"
+CLEAN_BODY_REFERENCE_KEY = "assets/voice-references/" + CLEAN_BODY_REFERENCE_SHA256 + "/name-free-recording.wav"
 MAX_BYTES = 25 * 1024 * 1024
 _REQUEST_ID = re.compile(r"[a-zA-Z0-9-]{16,64}")
 _PIPELINE_ID = re.compile(r"same-take-[a-f0-9]{32}")
@@ -75,6 +80,43 @@ _DIAGNOSTIC_EXCEPTION_TYPES = frozenset({
     "RuntimeError", "TimeoutError", "MemoryError", "OverflowError", "HTTPError",
     "ConnectionError", "ReadTimeout", "ConnectTimeout", "Timeout", "SpeechGuardError",
 })
+
+
+def _generator_profile(name):
+    if name == LEGACY_GENERATOR_PROFILE:
+        return {"name": name, "config": dict(RENDER_CONFIG),
+                "render_config_sha256": RENDER_CONFIG_SHA256,
+                "reference_key": REFERENCE_KEY, "reference_sha256": REFERENCE_SHA256}
+    if name == CLEAN_BODY_GENERATOR_PROFILE:
+        config = {**RENDER_CONFIG, "generator_profile": CLEAN_BODY_GENERATOR_PROFILE,
+                  "reference_sha256": CLEAN_BODY_REFERENCE_SHA256,
+                  "acoustic_reference_sha256": REFERENCE_SHA256}
+        return {"name": name, "config": config,
+                "render_config_sha256": hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
+                "reference_key": CLEAN_BODY_REFERENCE_KEY, "reference_sha256": CLEAN_BODY_REFERENCE_SHA256}
+    raise VideoProviderError("generator_profile_invalid", "Greeting generator profile is not approved.")
+
+
+def _saved_generator_profile(state):
+    # Missing profile fields belong only to the original, exact legacy contract.
+    if "generator_profile" not in state:
+        if any(field in state for field in ("generator_config", "tts_reference_key", "tts_reference_sha256")):
+            raise VideoProviderError("pipeline_mismatch", "Legacy generator identity changed.")
+        profile = _generator_profile(LEGACY_GENERATOR_PROFILE)
+    else:
+        profile = _generator_profile(state["generator_profile"])
+        try:
+            config_hash = hashlib.sha256(json.dumps(state.get("generator_config"), sort_keys=True).encode()).hexdigest()
+        except (TypeError, ValueError):
+            raise VideoProviderError("pipeline_mismatch", "Saved generator configuration is invalid.") from None
+        if (state.get("generator_config") != profile["config"]
+                or config_hash != profile["render_config_sha256"]
+                or state.get("tts_reference_key") != profile["reference_key"]
+                or state.get("tts_reference_sha256") != profile["reference_sha256"]):
+            raise VideoProviderError("pipeline_mismatch", "Saved generator configuration changed.")
+    if state.get("render_config_sha256") != profile["render_config_sha256"]:
+        raise VideoProviderError("pipeline_mismatch", "Saved generator profile hash changed.")
+    return profile
 
 
 def _preparation_failure_diagnostics(exc, stage, audio_qa):
@@ -154,13 +196,15 @@ def tts_request_url(request_id, url=None, *, status=False):
 
 class SameTakeVideoProvider:
     def __init__(self, fal_key, store, master_asset_key, *, tts_key, reference_asset_key=REFERENCE_KEY, session=None,
-                 media_session=None, resolver=None, preparer=prepare_inputs, compositor=compose):
+                 media_session=None, resolver=None, preparer=prepare_inputs, compositor=compose,
+                 generator_profile=LEGACY_GENERATOR_PROFILE):
         if (not fal_key or not tts_key or not master_asset_key.startswith("assets/")
                 or reference_asset_key != REFERENCE_KEY
                 or TTS_REQUEST_CENTS + LIPSYNC_REQUEST_CENTS > RESERVATION_CENTS):
             raise VideoProviderError("same_take_unconfigured", "Same-recording integration is incomplete.")
         self.store, self.master_key = store, master_asset_key
         self.fal_key, self.tts_key, self.reference_key = fal_key, tts_key, reference_asset_key
+        self.generator_profile = _generator_profile(generator_profile)["name"]
         self.session, self.media_session = session or requests.Session(), media_session or requests.Session()
         if session is None:
             self.session.trust_env = False
@@ -182,6 +226,12 @@ class SameTakeVideoProvider:
         inspect_reference(content)
         return content
 
+    def _tts_reference(self, profile):
+        content, _ = self.store.objects.read(profile["reference_key"])
+        if not content or hashlib.sha256(content).hexdigest() != profile["reference_sha256"]:
+            raise VideoProviderError("reference_mismatch", "Approved narration conditioning reference did not match.")
+        return content
+
     def _read(self, pipeline_id):
         if not _PIPELINE_ID.fullmatch(str(pipeline_id)):
             raise VideoProviderError("invalid_pipeline", "Same-recording pipeline ID is invalid.")
@@ -194,15 +244,24 @@ class SameTakeVideoProvider:
                 or normalize_name(state["first_name"]) != state["first_name"]
                 or state.get("reserved_cents") != RESERVATION_CENTS
                 or state.get("reference_sha256") != REFERENCE_SHA256
-                or state.get("render_config_sha256") != RENDER_CONFIG_SHA256
                 or state.get("greeting_script") != "Hey " + state["first_name"] + "!"):
             raise VideoProviderError("pipeline_mismatch", "Pipeline identity or budget changed.")
+        _saved_generator_profile(state)
         return state, version
 
     def _update(self, pipeline_id, fields, expected_stage=None):
-        self._read(pipeline_id)
-        return self.store.mutate("same-take/" + pipeline_id, lambda old:
-            {**old, **fields} if expected_stage is None or old.get("stage") == expected_stage else None)
+        immutable = {"id", "job_key", "first_name", "source_sha256", "script_version",
+                "reference_sha256", "render_config_sha256", "reserved_cents", "greeting_script",
+                "generator_profile", "generator_config", "tts_reference_key", "tts_reference_sha256"}
+        if set(fields).intersection(immutable):
+            raise VideoProviderError("pipeline_mismatch", "Pipeline identity is immutable.")
+        saved, _ = self._read(pipeline_id)
+        def change(old):
+            if not old or any(old.get(field) != saved.get(field) for field in immutable):
+                raise VideoProviderError("pipeline_mismatch", "Pipeline identity changed during update.")
+            _saved_generator_profile(old)
+            return {**old, **fields} if expected_stage is None or old.get("stage") == expected_stage else None
+        return self.store.mutate("same-take/" + pipeline_id, change)
 
     def _active(self, state):
         job, _ = self.store.read("jobs/" + state["job_key"])
@@ -269,8 +328,6 @@ class SameTakeVideoProvider:
         first_name = normalize_name(first_name)
         if not valid_name(first_name) or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", job_id):
             raise VideoProviderError("invalid_identity", "Verified first name and job identity are required.")
-        self._master()
-        self._reference()
         pipeline_id = "same-take-" + hashlib.sha256((SCRIPT_VERSION + ":" + job_id).encode()).hexdigest()[:32]
         old, _ = self.store.read("same-take/" + pipeline_id)
         if old:
@@ -278,18 +335,24 @@ class SameTakeVideoProvider:
             if old.get("first_name") != first_name or old.get("job_key") != job_id:
                 raise VideoProviderError("identity_changed", "Existing greeting belongs to a different name.")
             return pipeline_id
+        profile = _generator_profile(self.generator_profile)
+        self._master()
+        self._reference()
+        self._tts_reference(profile)
         # Local verification policy is independent of the paid render identity.
         # Existing requests above are reused; a missing verifier blocks new spend.
         preflight_speech_guard()
         state = {"id": pipeline_id, "job_key": job_id, "first_name": first_name,
                  "source_sha256": MASTER_SHA256, "script_version": SCRIPT_VERSION,
                  "stage": "narration_submitting", "created_at": iso(utcnow()),
-                 "reference_sha256": REFERENCE_SHA256, "render_config_sha256": RENDER_CONFIG_SHA256,
+                 "reference_sha256": REFERENCE_SHA256, "render_config_sha256": profile["render_config_sha256"],
+                 "generator_profile": profile["name"], "generator_config": profile["config"],
+                 "tts_reference_key": profile["reference_key"], "tts_reference_sha256": profile["reference_sha256"],
                  "reserved_cents": RESERVATION_CENTS, "greeting_script": f"Hey {first_name}!"}
         # The observed minimum TTS billing block is 1,000 characters (2 cents).
         if len(state["greeting_script"]) > 1000:
             raise VideoProviderError("tts_exceeds_budget", "Greeting exceeds the approved narration billing block.")
-        reference_url = self.store.objects.signed_get_url(self.reference_key)
+        reference_url = self.store.objects.signed_get_url(profile["reference_key"])
         if not self._active(state):
             raise VideoProviderError("inactive_job", "Video job is no longer active.")
         self.store.write("same-take/" + pipeline_id, state, 0)
@@ -300,9 +363,9 @@ class SameTakeVideoProvider:
         try:
             result = self._json("POST", QUEUE + TTS_MODEL, paid=True,
                 headers={"Authorization": "Key " + self.tts_key, "X-Fal-No-Retry": "1",
-                         "X-Fal-Request-Start-Timeout": "600"},
+                         "x-app-fal-disable-fallback": "true", "X-Fal-Request-Start-Timeout": "600"},
                 payload={"text": state["greeting_script"], "audio_url": reference_url,
-                         "seed": TTS_SEED, "temperature": TTS_TEMPERATURE})
+                         "seed": profile["config"]["seed"], "temperature": profile["config"]["temperature"]})
             narration_id = result.get("request_id")
             if not isinstance(narration_id, str) or not _REQUEST_ID.fullmatch(narration_id):
                 raise SubmissionUncertain(pipeline_id)
@@ -394,7 +457,7 @@ class SameTakeVideoProvider:
         try:
             result = self._json("POST", QUEUE + MODEL, paid=True,
                 headers={"Authorization": "Key " + self.fal_key, "X-Fal-No-Retry": "1",
-                         "X-Fal-Request-Start-Timeout": "600"},
+                         "x-app-fal-disable-fallback": "true", "X-Fal-Request-Start-Timeout": "600"},
                 payload={"video_url": video_url, "audio_url": audio_url, "enable_safety_checker": True})
             request_id = result.get("request_id")
             if not isinstance(request_id, str) or not _REQUEST_ID.fullmatch(request_id):

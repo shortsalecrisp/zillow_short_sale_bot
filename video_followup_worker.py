@@ -26,9 +26,12 @@ def create_worker():
     token = os.getenv("SMS_CHATBOT_ALLOWED_TOKEN", "").strip()
     if not fal_key or not tts_key or not master_asset_key or not url or not token:
         raise ValueError("Video API access and eligibility checking must be configured")
-    from video_followup_same_take import SameTakeVideoProvider
+    from video_followup_same_take import SameTakeVideoProvider, _generator_profile
+    generation_profile = os.getenv("VIDEO_FOLLOWUP_GENERATION_PROFILE", "legacy_v1").strip()
+    _generator_profile(generation_profile)
     store = get_service().store
-    provider = SameTakeVideoProvider(fal_key, store, master_asset_key, tts_key=tts_key)
+    provider = SameTakeVideoProvider(fal_key, store, master_asset_key, tts_key=tts_key,
+                                    generator_profile=generation_profile)
     return Worker(store, provider, config, Eligibility(url, token))
 
 

@@ -215,7 +215,8 @@ def fake_constructors(monkeypatch):
     eligibility_constructor = Mock(return_value=object())
     worker_constructor = Mock(return_value=object())
     monkeypatch.setattr(bootstrap, "get_service", service)
-    monkeypatch.setitem(sys.modules, "video_followup_same_take", types.SimpleNamespace(SameTakeVideoProvider=provider_constructor))
+    monkeypatch.setitem(sys.modules, "video_followup_same_take", types.SimpleNamespace(
+        SameTakeVideoProvider=provider_constructor, _generator_profile=Mock()))
     monkeypatch.setattr(bootstrap, "Eligibility", eligibility_constructor)
     monkeypatch.setattr(bootstrap, "Worker", worker_constructor)
     return service, provider_constructor, eligibility_constructor, worker_constructor
@@ -264,7 +265,8 @@ def test_owner_only_bootstrap_uses_exact_phone_allowlist_and_private_storage(mon
     result = bootstrap.create_worker()
     assert result is worker_constructor.return_value
     provider_constructor.assert_called_once_with("test-fal-secret", service.return_value.store,
-                                               "assets/approved-master/video", tts_key="test-tts-secret")
+                                               "assets/approved-master/video", tts_key="test-tts-secret",
+                                               generator_profile="legacy_v1")
     eligibility_constructor.assert_called_once_with(env["TASKER_TRANSPORT_HEALTH_URL"], "test-token-secret")
     config = worker_constructor.call_args.args[2]
     assert config.allowlist == {"9542053205"}

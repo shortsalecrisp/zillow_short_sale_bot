@@ -820,3 +820,333 @@ def test_legacy_media_audit_only_verifies_exact_existing_bytes_and_name(world):
     with pytest.raises(speech.SpeechGuardError):
         world[0].audit_media({**job, "first_name": "Christopher"}, b"existing final video")
     assert len(paid_calls(world)) == 2
+
+
+PROFILE_FIELDS = ("generator_profile", "generator_config", "tts_reference_key", "tts_reference_sha256")
+CLEAN_REFERENCE = b"approved name-free section of the same recording"
+
+
+def profile_service(world, name):
+    original = world[0]
+    result = provider.SameTakeVideoProvider(original.fal_key, world[1], MASTER_KEY,
+        tts_key=original.tts_key, session=world[2], media_session=Mock(),
+        resolver=original.resolver, preparer=world[3], compositor=original.compositor,
+        generator_profile=name)
+    result._download_fal = original._download_fal
+    return result
+
+
+@pytest.fixture
+def clean_reference(world, monkeypatch):
+    monkeypatch.setattr(provider, "CLEAN_BODY_REFERENCE_SHA256", hashlib.sha256(CLEAN_REFERENCE).hexdigest())
+    world[1].objects.write(provider.CLEAN_BODY_REFERENCE_KEY, CLEAN_REFERENCE, 0)
+    return CLEAN_REFERENCE
+
+
+def remove_profile_fields(world, identifier):
+    return world[1].mutate("same-take/" + identifier, lambda old:
+        {key: value for key, value in old.items() if key not in PROFILE_FIELDS})
+
+
+def test_unpatched_approved_generator_hashes_are_fixed():
+    assert provider.RENDER_CONFIG_SHA256 == "45ec6161cfa049ac202c9c3012f76fd04fd0826371c3037258432ee29691b837"
+    assert provider._generator_profile("legacy_v1")["render_config_sha256"] == provider.RENDER_CONFIG_SHA256
+    assert provider._generator_profile("clean_body_v1")["render_config_sha256"] == (
+        "004e3565b1c42c4a477d448a1bdf4fe1b3ee0e4d656c29e227b6e48aef7e5a93")
+
+
+def test_generator_default_preserves_exact_historical_contract(world):
+    identifier = start(world)
+    saved = state(world, identifier)
+    assert world[0].generator_profile == provider.LEGACY_GENERATOR_PROFILE == "legacy_v1"
+    assert provider.RENDER_CONFIG_SHA256 == "45ec6161cfa049ac202c9c3012f76fd04fd0826371c3037258432ee29691b837"
+    assert saved["render_config_sha256"] == provider.RENDER_CONFIG_SHA256
+    assert saved["generator_config"] == provider.RENDER_CONFIG
+    assert saved["generator_profile"] == "legacy_v1"
+    assert saved["tts_reference_key"] == provider.REFERENCE_KEY
+    assert saved["tts_reference_sha256"] == saved["reference_sha256"] == provider.REFERENCE_SHA256
+    assert paid_calls(world)[0].kwargs["json"]["audio_url"] == world[1].objects.signed_get_url(provider.REFERENCE_KEY)
+
+
+def test_clean_profile_changes_only_conditioning_not_master_or_acoustic_baseline(world, clean_reference):
+    service = profile_service(world, provider.CLEAN_BODY_GENERATOR_PROFILE)
+    world[1].write("jobs/job", {"script_version": core.SCRIPT_VERSION, "status": "submitting", "first_name": "Sue"}, 0)
+    identifier = service.submit("Sue", "job")
+    saved = state(world, identifier)
+    profile = provider._generator_profile(provider.CLEAN_BODY_GENERATOR_PROFILE)
+    assert saved["generator_profile"] == "clean_body_v1"
+    assert saved["generator_config"] == profile["config"]
+    assert saved["render_config_sha256"] == profile["render_config_sha256"] != provider.RENDER_CONFIG_SHA256
+    assert saved["tts_reference_key"] == provider.CLEAN_BODY_REFERENCE_KEY
+    assert saved["tts_reference_sha256"] == hashlib.sha256(clean_reference).hexdigest()
+    assert saved["reference_sha256"] == provider.REFERENCE_SHA256
+    assert saved["source_sha256"] == provider.MASTER_SHA256
+    assert profile["config"] == {**provider.RENDER_CONFIG, "generator_profile": "clean_body_v1",
+        "reference_sha256": provider.CLEAN_BODY_REFERENCE_SHA256,
+        "acoustic_reference_sha256": provider.REFERENCE_SHA256}
+    assert paid_calls(world)[0].kwargs["json"] == {"text": "Hey Sue!", "seed": 4411,
+        "temperature": 0.5, "audio_url": world[1].objects.signed_get_url(provider.CLEAN_BODY_REFERENCE_KEY)}
+    assert service.inspect(identifier)["status"] == "processing"
+    provider.inspect_greeting.assert_called_once_with(b"WAV audio", REFERENCE)
+    world[3].assert_called_once_with(MASTER, b"WAV audio", first_name="Sue")
+    result = service.prepare_media(service.inspect(identifier), "Sue")
+    service.compositor.assert_called_once_with(MASTER, b"WAV audio", INPUTS["greeting_audio_bytes"],
+        prepared("Sue")["metadata"], first_name="Sue")
+    assert speech.validate_speech_proof(result["speech_proof"], first_name="Sue",
+        media_sha256=hashlib.sha256(b"output").hexdigest())
+    assert len(paid_calls(world)) == 2
+
+
+@pytest.mark.parametrize("stage", ["narration_submitting", "narration_pending", "fal_submitting",
+    "fal_pending", "failed", "uncertain", "cancelled", "completed"])
+def test_new_profile_reuses_every_old_job_before_assets_preflight_or_network(world, monkeypatch, stage):
+    identifier = start(world)
+    remove_profile_fields(world, identifier)
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, "stage": stage})
+    original = state(world, identifier)
+    service = profile_service(world, provider.CLEAN_BODY_GENERATOR_PROFILE)
+    for name in ("_master", "_reference", "_tts_reference"):
+        setattr(service, name, Mock(side_effect=AssertionError("Existing request must not fetch assets")))
+    monkeypatch.setattr(provider, "preflight_speech_guard", Mock(side_effect=AssertionError("No new speech preflight")))
+    world[2].request.reset_mock()
+    assert service.submit("Sue", "job") == identifier
+    assert state(world, identifier) == original
+    world[2].request.assert_not_called()
+    provider.preflight_speech_guard.assert_not_called()
+
+
+def test_pending_legacy_request_resumes_without_clean_reference_and_preserves_identity(world):
+    identifier = start(world)
+    remove_profile_fields(world, identifier)
+    service = profile_service(world, provider.CLEAN_BODY_GENERATOR_PROFILE)
+    assert service.submit("Sue", "job") == identifier
+    assert service.inspect(identifier)["status"] == "processing"
+    assert service.inspect(identifier)["status"] == "completed"
+    saved = state(world, identifier)
+    assert not set(PROFILE_FIELDS).intersection(saved)
+    assert saved["render_config_sha256"] == provider.RENDER_CONFIG_SHA256
+    provider.inspect_greeting.assert_called_once_with(b"WAV audio", REFERENCE)
+    assert len(paid_calls(world, provider.TTS_MODEL)) == 1
+    assert len(paid_calls(world, provider.MODEL)) == 1
+
+
+@pytest.mark.parametrize("stage", ["narration_pending", "fal_pending", "completed"])
+def test_legacy_accounting_read_never_spends_under_new_profile(world, stage):
+    identifier = start(world)
+    if stage != "narration_pending":
+        world[0].inspect(identifier)
+    if stage == "completed":
+        world[0].inspect(identifier)
+    remove_profile_fields(world, identifier)
+    before = len(paid_calls(world))
+    service = profile_service(world, provider.CLEAN_BODY_GENERATOR_PROFILE)
+    result = service.inspect(identifier, accounting_only=True)
+    assert result["status"] == ("failed" if stage == "narration_pending" else "completed")
+    assert len(paid_calls(world)) == before
+    assert not set(PROFILE_FIELDS).intersection(state(world, identifier))
+
+
+@pytest.mark.parametrize("field", PROFILE_FIELDS)
+def test_partial_explicit_profile_is_rejected_before_network(world, field):
+    identifier = start(world)
+    world[1].mutate("same-take/" + identifier, lambda old: {key: value for key, value in old.items() if key != field})
+    world[2].request.reset_mock()
+    with pytest.raises(provider.VideoProviderError):
+        world[0].submit("Sue", "job")
+    with pytest.raises(provider.VideoProviderError):
+        world[0].inspect(identifier)
+    world[2].request.assert_not_called()
+
+
+@pytest.mark.parametrize("field", PROFILE_FIELDS[1:])
+def test_orphan_profile_field_cannot_be_treated_as_legacy(world, field):
+    identifier = start(world)
+    original = state(world, identifier)[field]
+    remove_profile_fields(world, identifier)
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, field: original})
+    world[2].request.reset_mock()
+    with pytest.raises(provider.VideoProviderError):
+        world[0].submit("Sue", "job")
+    world[2].request.assert_not_called()
+
+
+@pytest.mark.parametrize("profile_name", ["legacy_v1", "clean_body_v1"])
+@pytest.mark.parametrize("field,value", [("generator_profile", "unapproved_v2"),
+    ("generator_config", {"seed": 123}), ("generator_config", None),
+    ("tts_reference_key", "assets/another-reference.wav"), ("tts_reference_sha256", "0" * 64),
+    ("render_config_sha256", "0" * 64)])
+def test_saved_generator_identity_tampering_blocks_even_read_only_polling(world, clean_reference, profile_name, field, value):
+    service = profile_service(world, profile_name)
+    world[1].write("jobs/job", {"script_version": core.SCRIPT_VERSION, "status": "submitting", "first_name": "Sue"}, 0)
+    identifier = service.submit("Sue", "job")
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, field: value})
+    world[2].request.reset_mock()
+    with pytest.raises(provider.VideoProviderError):
+        service.inspect(identifier, accounting_only=True)
+    with pytest.raises(provider.VideoProviderError):
+        service.submit("Sue", "job")
+    world[2].request.assert_not_called()
+
+
+def test_old_no_field_profile_requires_exact_historical_render_hash(world):
+    identifier = start(world)
+    remove_profile_fields(world, identifier)
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, "render_config_sha256": "0" * 64})
+    world[2].request.reset_mock()
+    with pytest.raises(provider.VideoProviderError):
+        profile_service(world, provider.CLEAN_BODY_GENERATOR_PROFILE).submit("Sue", "job")
+    world[2].request.assert_not_called()
+
+
+@pytest.mark.parametrize("profile_name", [None, "", "CLEAN_BODY_V1", "clean_body_v2", "legacy"])
+def test_unknown_profile_cannot_create_provider(world, profile_name):
+    with pytest.raises(provider.VideoProviderError) as error:
+        profile_service(world, profile_name)
+    assert error.value.code == "generator_profile_invalid"
+    world[2].request.assert_not_called()
+
+
+@pytest.mark.parametrize("content", [None, b"", b"another reference"])
+def test_new_clean_profile_requires_exact_reference_before_price_or_payment(world, content):
+    if content is not None:
+        world[1].objects.write(provider.CLEAN_BODY_REFERENCE_KEY, content, 0)
+    service = profile_service(world, provider.CLEAN_BODY_GENERATOR_PROFILE)
+    world[1].write("jobs/job", {"script_version": core.SCRIPT_VERSION, "status": "submitting", "first_name": "Sue"}, 0)
+    with pytest.raises(provider.VideoProviderError) as error:
+        service.submit("Sue", "job")
+    assert error.value.code == "reference_mismatch"
+    world[2].request.assert_not_called()
+    provider.preflight_speech_guard.assert_not_called()
+    assert world[1].objects.list("same-take/") == []
+
+
+@pytest.mark.parametrize("key", [MASTER_KEY, provider.REFERENCE_KEY])
+def test_clean_conditioning_still_requires_original_master_and_acoustic_reference(world, clean_reference, key):
+    _, version = world[1].objects.read(key)
+    world[1].objects.write(key, b"changed original recording", version)
+    service = profile_service(world, provider.CLEAN_BODY_GENERATOR_PROFILE)
+    world[1].write("jobs/job", {"script_version": core.SCRIPT_VERSION, "status": "submitting", "first_name": "Sue"}, 0)
+    with pytest.raises(provider.VideoProviderError):
+        service.submit("Sue", "job")
+    world[2].request.assert_not_called()
+
+
+def test_completed_old_profile_can_prepare_media_with_new_default_without_regeneration(world):
+    identifier = start(world)
+    world[0].inspect(identifier)
+    snapshot = world[0].inspect(identifier)
+    remove_profile_fields(world, identifier)
+    world[2].request.reset_mock()
+    service = profile_service(world, provider.CLEAN_BODY_GENERATOR_PROFILE)
+    result = service.prepare_media(snapshot, "Sue")
+    assert speech.validate_speech_proof(result["speech_proof"], first_name="Sue",
+        media_sha256=hashlib.sha256(b"output").hexdigest())
+    assert not set(PROFILE_FIELDS).intersection(state(world, identifier))
+    world[2].request.assert_not_called()
+
+
+@pytest.mark.parametrize("field", ["id", "job_key", "first_name", "source_sha256", "script_version",
+    "reference_sha256", "render_config_sha256", "reserved_cents", "greeting_script", *PROFILE_FIELDS])
+def test_update_cannot_rewrite_even_an_unchanged_identity_field(world, field):
+    identifier = start(world)
+    original = state(world, identifier)
+    world[2].request.reset_mock()
+    with pytest.raises(provider.VideoProviderError):
+        world[0]._update(identifier, {field: original[field]}, "narration_pending")
+    assert state(world, identifier) == original
+    world[2].request.assert_not_called()
+
+
+def test_competing_generator_choices_claim_one_paid_pipeline(world, clean_reference, monkeypatch):
+    store = world[1]
+    services = [world[0], profile_service(world, provider.CLEAN_BODY_GENERATOR_PROFILE)]
+    store.write("jobs/job", {"script_version": core.SCRIPT_VERSION, "status": "submitting", "first_name": "Sue"}, 0)
+    write = store.write
+    barrier = Barrier(2)
+    def competing_write(key, value, version):
+        if key.startswith("same-take/") and version == 0:
+            barrier.wait(timeout=5)
+        return write(key, value, version)
+    monkeypatch.setattr(store, "write", competing_write)
+    def submit(service):
+        try:
+            return service.submit("Sue", "job")
+        except core.Conflict:
+            return "conflict"
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(submit, services))
+    assert results.count("conflict") == 1
+    identifier = next(value for value in results if value != "conflict")
+    saved = state(world, identifier)
+    assert len(paid_calls(world)) == 1
+    assert paid_calls(world)[0].kwargs["json"]["audio_url"] == store.objects.signed_get_url(saved["tts_reference_key"])
+    for service in services:
+        assert service.submit("Sue", "job") == identifier
+    assert services[1].inspect(identifier)["status"] == "processing"
+    assert services[0].inspect(identifier)["status"] == "completed"
+    assert state(world, identifier)["generator_profile"] == saved["generator_profile"]
+    assert len(paid_calls(world, provider.TTS_MODEL)) == 1
+    assert len(paid_calls(world, provider.MODEL)) == 1
+
+
+def test_identity_swap_between_read_and_mutate_blocks_first_paid_request(world, clean_reference, monkeypatch):
+    store = world[1]
+    mutate = store.mutate
+    swapped = False
+    def swap_then_update(key, update):
+        nonlocal swapped
+        if key.startswith("same-take/") and not swapped:
+            swapped = True
+            profile = provider._generator_profile(provider.CLEAN_BODY_GENERATOR_PROFILE)
+            mutate(key, lambda old: {**old, "generator_profile": profile["name"],
+                "generator_config": profile["config"], "render_config_sha256": profile["render_config_sha256"],
+                "tts_reference_key": profile["reference_key"], "tts_reference_sha256": profile["reference_sha256"]})
+        return mutate(key, update)
+    monkeypatch.setattr(store, "mutate", swap_then_update)
+    with pytest.raises(provider.VideoProviderError) as error:
+        start(world)
+    assert error.value.code == "pipeline_mismatch"
+    assert swapped
+    assert not paid_calls(world)
+    pipeline_id = world[0].submit("Sue", "job")
+    assert state(world, pipeline_id)["stage"] != "narration_pending"
+    assert "narration_id" not in state(world, pipeline_id)
+
+
+def test_cas_retry_rechecks_immutable_profile_before_stage_advance(world, clean_reference, monkeypatch):
+    identifier = start(world)
+    world[2].request.reset_mock()
+    store = world[1]
+    write = store.write
+    swapped = False
+    def swap_during_write(key, value, version):
+        nonlocal swapped
+        if key == "same-take/" + identifier and not swapped:
+            swapped = True
+            old, latest_version = store.read(key)
+            profile = provider._generator_profile(provider.CLEAN_BODY_GENERATOR_PROFILE)
+            write(key, {**old, "generator_profile": profile["name"],
+                "generator_config": profile["config"], "render_config_sha256": profile["render_config_sha256"],
+                "tts_reference_key": profile["reference_key"], "tts_reference_sha256": profile["reference_sha256"]}, latest_version)
+            raise core.Conflict()
+        return write(key, value, version)
+    monkeypatch.setattr(store, "write", swap_during_write)
+    with pytest.raises(provider.VideoProviderError) as error:
+        world[0]._update(identifier, {"stage": "fal_submitting"}, "narration_pending")
+    assert error.value.code == "pipeline_mismatch"
+    assert swapped
+    assert state(world, identifier)["stage"] == "narration_pending"
+    world[2].request.assert_not_called()
+
+
+@pytest.mark.parametrize("profile_name", ["legacy_v1", "clean_body_v1"])
+def test_both_paid_stages_disable_provider_fallback_and_retries(world, clean_reference, profile_name):
+    service = profile_service(world, profile_name)
+    world[1].write("jobs/job", {"script_version": core.SCRIPT_VERSION, "status": "submitting", "first_name": "Sue"}, 0)
+    identifier = service.submit("Sue", "job")
+    service.inspect(identifier)
+    assert len(paid_calls(world)) == 2
+    for call in paid_calls(world):
+        assert call.kwargs["headers"]["x-app-fal-disable-fallback"] == "true"
+        assert call.kwargs["headers"]["X-Fal-No-Retry"] == "1"
+        assert call.kwargs["allow_redirects"] is False

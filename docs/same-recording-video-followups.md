@@ -38,6 +38,30 @@ Its SHA-256 must be
 The provider checks the reference and master hashes before narration and again
 before lip-sync. Missing or mismatched assets fail closed.
 
+### Greeting generator profiles
+
+`VIDEO_FOLLOWUP_GENERATION_PROFILE` selects an immutable profile only when a new
+paid pipeline is created. It defaults to `legacy_v1`; an unknown or empty value
+fails closed. Existing pipelines, including records created before profiles were
+introduced, retain their exact saved configuration and paid request IDs.
+
+The `clean_body_v1` candidate uses the same Turbo model, seed, temperature and
+two-word greeting. Its TTS-only conditioning WAV is the name-free 3.20-second to
+8.439667-second excerpt of the approved recording (5.239667 seconds total):
+
+`assets/voice-references/b6a19ab1886102f471aa06ccb2e0347120c22498321f852a46b8b49efd707e3d/name-free-recording.wav`
+
+The WAV hash must match its path. The original full reference above remains the
+unchanged acoustic comparison anchor, including its original greeting pitch.
+Neither name-check policy nor acoustic thresholds change with the profile.
+
+Deploy compatibility support with the legacy default, validate first-attempt
+greetings and final clips within the shared budget, then explicitly select a
+validated profile. A rollback switches the default to `legacy_v1` while keeping
+the profile-compatible code: reverting to an older binary would make new-profile
+paid pipelines unreadable. Never migrate/reset failed, frozen or sent jobs to
+try the new profile; their existing normal-text or video follow-up remains final.
+
 The existing Fal endpoint `fal-ai/kling-video/lipsync/audio-to-video` lip-syncs a
 short excerpt from that same recording. Local composition changes only its mouth
 region and preserves the entire original body. Longer greetings retime only the
@@ -68,7 +92,8 @@ not another paid generation attempt.
 
 The private pipeline record is created before narration submission. A second
 compare-and-swap claim precedes the Fal POST. Both uncertain outcomes are held,
-never resubmitted automatically; `X-Fal-No-Retry: 1` disables Fal retries.
+never resubmitted automatically; `X-Fal-No-Retry: 1` disables Fal retries and
+`x-app-fal-disable-fallback: true` prevents automatic model substitution.
 Unknown outcomes keep their original request identity and reservation; they are
 reconciled through safe status reads, not another paid submission. If no verified
 ready video exists at the follow-up deadline, normal text is used. Accounting-only
