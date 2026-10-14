@@ -1,426 +1,547 @@
+"""Same-take provider tests with Fal reference narration and no external calls."""
 import hashlib
 import json
-from pathlib import Path
-import sys
-from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from threading import Barrier, Lock
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import requests
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 import video_followup as core
 import video_followup_same_take as provider
 
 
-MASTER_KEY = "assets/approved-second-recording/video"
-MASTER = b"the approved complete second recording"
-NARRATION_ID = "a" * 32
+MASTER = b"approved second recording"
+REFERENCE = b"approved real voice reference"
+MASTER_KEY = "assets/master/video"
+TTS_ID = "01a13a1c-3763-7773-9576-f96095790e79"
 FAL_ID = "12345678-abcd-1234-abcd-123456789012"
-MEDIA_URL = "https://v3.fal.media/files/private/lipsync.mp4"
-INPUTS = {"video_bytes": b"same-source context", "audio_bytes": b"context audio",
-          "greeting_audio_bytes": b"new greeting audio"}
+TTS_AUDIO = "https://v3b.fal.media/files/b/private/greeting.wav"
+FINAL_VIDEO = "https://v3.fal.media/files/private/video.mp4"
+INPUTS = {"video_bytes": b"same-take context", "audio_bytes": b"context PCM",
+          "greeting_audio_bytes": b"greeting PCM"}
 
 
-def prepared_inputs(name="Sue"):
-    return {**INPUTS, "metadata": {"source_sha256": provider.MASTER_SHA256, "first_name": name,
-            "context_seconds": 2.0, "video_sha256": hashlib.sha256(INPUTS["video_bytes"]).hexdigest(),
-            "audio_sha256": hashlib.sha256(INPUTS["audio_bytes"]).hexdigest(),
-            "greeting_audio_sha256": hashlib.sha256(INPUTS["greeting_audio_bytes"]).hexdigest()}}
-
-
-class MemoryObjects:
+class Objects:
     def __init__(self):
-        self.lock = Lock()
-        self.data = {}
-        self.generation = 0
+        self.lock, self.values, self.version = Lock(), {}, 0
 
     def read(self, key):
         with self.lock:
-            value = self.data.get(key)
-            return (value[0], value[1]) if value else (None, 0)
+            return self.values.get(key, (None, 0))
 
-    def write(self, key, body, version, content_type="application/json"):
+    def write(self, key, value, version, content_type="application/json"):
         with self.lock:
-            old = self.data.get(key)
-            if (old[1] if old else 0) != version:
+            if self.values.get(key, (None, 0))[1] != version:
                 raise core.Conflict()
-            self.generation += 1
-            self.data[key] = (body, self.generation)
-            return self.generation
+            self.version += 1
+            self.values[key] = value, self.version
+            return self.version
 
     def signed_get_url(self, key, ttl_seconds=1800):
-        return "https://storage.googleapis.com/private/video-followup/" + key + "?signed=test"
+        return "https://storage.googleapis.com/private/" + key + "?signed=yes"
 
 
 class Response:
-    def __init__(self, payload, status=200):
-        self.payload, self.status_code = payload, status
-        self.content = json.dumps(payload).encode()
-        self.closed = False
+    def __init__(self, value, status=200):
+        self.value, self.status_code = value, status
+        self.content = json.dumps(value).encode()
 
     def json(self):
-        return self.payload
+        return self.value
 
     def close(self):
-        self.closed = True
+        pass
+
+
+def prepared(name):
+    return {**INPUTS, "metadata": {"source_sha256": provider.MASTER_SHA256,
+        "first_name": name, "context_seconds": 2.1,
+        **{kind + "_sha256": hashlib.sha256(INPUTS[key]).hexdigest()
+           for kind, key in (("video", "video_bytes"), ("audio", "audio_bytes"),
+                             ("greeting_audio", "greeting_audio_bytes"))}}}
 
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     for path in ("socket.socket.connect", "socket.socket.connect_ex", "socket.create_connection"):
-        monkeypatch.setattr(path, Mock(side_effect=AssertionError("No external network in provider tests")))
+        monkeypatch.setattr(path, Mock(side_effect=AssertionError("No network in staged candidate tests")))
 
 
 @pytest.fixture
 def world(monkeypatch):
     monkeypatch.setattr(provider, "MASTER_SHA256", hashlib.sha256(MASTER).hexdigest())
-    objects = MemoryObjects()
+    monkeypatch.setattr(provider, "REFERENCE_SHA256", hashlib.sha256(REFERENCE).hexdigest())
+    monkeypatch.setattr(provider, "inspect_reference", Mock(return_value={"duration_seconds": 8.44}))
+    monkeypatch.setattr(provider, "inspect_greeting", Mock(return_value={"duration_seconds": 1.5,
+        "coarse_pitch_match": True, "identity_guaranteed": False}))
+    objects = Objects()
     objects.write(MASTER_KEY, MASTER, 0)
-    store, session, media_session = core.Store(objects), Mock(), Mock()
-    session.request.side_effect = lambda method, url, **kwargs: Response(
-        {"data": {"video_id": NARRATION_ID}} if url.endswith("/videos") else
-        {"request_id": FAL_ID, "status_url": "https://evil.example/stolen", "response_url": "https://evil.example/also-stolen"})
-    prepare, compose = Mock(side_effect=lambda *args, first_name: prepared_inputs(first_name)), Mock(return_value={
-        "media_bytes": b"final same-take video", "poster_bytes": b"poster", "captions_bytes": b"WEBVTT",
-        "duration_seconds": 8.53, "qa": {"source_continuity": True}})
-    service = provider.SameTakeVideoProvider("heygen-test-secret", "fal-test-secret", store, MASTER_KEY,
-        session=session, media_session=media_session, resolver=lambda hostname: ["8.8.8.8"],
-        preparer=prepare, compositor=compose)
-    service.heygen = Mock()
-    service.heygen.inspect.return_value = {"status": "completed", "duration": 1.5,
-                                           "media_url": "https://resource.heygen.ai/audio-source.mp4"}
-    service.heygen._download.return_value = b"narration source"
-    return service, store, session, media_session, prepare, compose
+    objects.write(provider.REFERENCE_KEY, REFERENCE, 0)
+    store = core.Store(objects)
+    settings = {"tts_status": "COMPLETED", "tts_result": {"audio": {"url": TTS_AUDIO}},
+                "fal_status": "COMPLETED", "fal_result": {"video": {"url": FINAL_VIDEO}},
+                "failure": None, "pricing_failure": None,
+                "prices": {model: {"prices": [{"endpoint_id": model, "unit_price": float(maximum),
+                            "unit": unit, "currency": "USD"}], "has_more": False, "next_cursor": None}
+                           for model, (unit, maximum) in provider.APPROVED_RATES.items()}}
+    def request(method, url, **kwargs):
+        if method == "GET" and url.startswith(provider.PRICING_ENDPOINT + "?"):
+            model = parse_qs(urlsplit(url).query)["endpoint_id"][0]
+            if settings["pricing_failure"] == model:
+                raise requests.Timeout("pricing unavailable")
+            return Response(settings["prices"][model])
+        if method == "POST" and settings["failure"] == url:
+            raise requests.Timeout("uncertain provider outcome")
+        if (method, url) == ("POST", provider.QUEUE + provider.TTS_MODEL):
+            return Response({"request_id": TTS_ID,
+                "status_url": provider.TTS_REQUEST_BASE + TTS_ID + "/status",
+                "response_url": provider.TTS_REQUEST_BASE + TTS_ID})
+        if (method, url) == ("GET", provider.TTS_REQUEST_BASE + TTS_ID + "/status"):
+            return Response({"status": settings["tts_status"]})
+        if (method, url) == ("GET", provider.TTS_REQUEST_BASE + TTS_ID):
+            return Response(settings["tts_result"])
+        if (method, url) == ("POST", provider.QUEUE + provider.MODEL):
+            return Response({"request_id": FAL_ID})
+        if (method, url) == ("GET", provider.REQUEST_BASE + FAL_ID + "/status"):
+            return Response({"status": settings["fal_status"]})
+        if (method, url) == ("GET", provider.REQUEST_BASE + FAL_ID):
+            return Response(settings["fal_result"])
+        raise AssertionError((method, url))
+    session = Mock()
+    session.request.side_effect = request
+    preparer = Mock(side_effect=lambda *args, first_name: prepared(first_name))
+    service = provider.SameTakeVideoProvider("kling-only-test-secret", store, MASTER_KEY, tts_key="tts-only-test-secret",
+        session=session, media_session=Mock(), resolver=lambda _: ["8.8.8.8"], preparer=preparer,
+        compositor=Mock(return_value={"media_bytes": b"output", "poster_bytes": b"poster",
+            "captions_bytes": b"WEBVTT", "duration_seconds": 8.6, "qa": {"mouth_only": True}}))
+    service._download_fal = Mock(return_value=b"WAV audio")
+    return service, store, session, preparer, settings
 
 
-def active_job(store, first_name="Sue", job_id="test-job"):
-    store.write("jobs/" + job_id, {"script_version": core.SCRIPT_VERSION,
-                "status": "submitting", "first_name": first_name}, 0)
-    return job_id
-
-
-def pipeline(world, name="Sue"):
+def start(world, name="Sue", job_id="job"):
     service, store, *_ = world
-    job_id = active_job(store, name)
+    store.write("jobs/" + job_id, {"script_version": core.SCRIPT_VERSION,
+                "status": "submitting", "first_name": name}, 0)
     return service.submit(name, job_id)
 
 
-def state(world, pipeline_id):
-    return world[1].read("same-take/" + pipeline_id)[0]
+def state(world, identifier):
+    return world[1].read("same-take/" + identifier)[0]
 
 
-def test_approved_master_hash_pins_full_second_recording():
-    assert provider.MASTER_SHA256 == "01efd28101e8b016d51d571cc87d38d13ea623389663bc7a88cf26cce39bd60b"
+def paid_calls(world, model=None):
+    return [call for call in world[2].request.call_args_list if call.args[0] == "POST"
+            and (model is None or call.args[1] == provider.QUEUE + model)]
 
 
-def test_bad_or_missing_master_blocks_payment(world):
-    service, store, session, *_ = world
-    job_id = active_job(store)
-    _, version = store.objects.read(MASTER_KEY)
-    store.objects.write(MASTER_KEY, b"old avatar or different source", version)
-    with pytest.raises(provider.VideoProviderError, match="master"):
-        service.submit("Sue", job_id)
-    session.request.assert_not_called()
-    service.master_key = "assets/missing/video"
-    with pytest.raises(provider.VideoProviderError, match="master"):
-        service.submit("Sue", job_id)
-    session.request.assert_not_called()
-
-
-@pytest.mark.parametrize("name", ["Sue", "Christopher", "Anne-Marie", "O'Neil"])
-def test_full_verified_name_is_used_without_truncation(world, name):
-    service, _, session, *_ = world
-    pipeline_id = pipeline(world, name)
-    call = session.request.call_args
-    assert call.args == ("POST", provider.API_BASE + "/videos")
-    assert call.kwargs["json"]["script"] == "Hey " + name + "!"
-    assert call.kwargs["json"]["engine"] == {"type": "avatar_iii"}
-    assert call.kwargs["headers"]["Idempotency-Key"] == pipeline_id
+@pytest.mark.parametrize("name", ["Sue", "Christopher", "Jennifer", "Anne-Marie", "O'Neil"])
+def test_exact_name_and_real_reference_without_preset_or_heygen(world, name):
+    identifier = start(world, name)
+    call = paid_calls(world)[0]
+    assert call.args[1] == provider.QUEUE + provider.TTS_MODEL
+    assert call.kwargs["json"] == {"text": "Hey " + name + "!", "seed": 4411,
+        "temperature": 0.5, "audio_url": world[1].objects.signed_get_url(provider.REFERENCE_KEY)}
+    assert "voice" not in call.kwargs["json"]
+    assert call.kwargs["headers"]["X-Fal-No-Retry"] == "1"
     assert call.kwargs["allow_redirects"] is False
-    assert state(world, pipeline_id)["first_name"] == name
-    assert session.request.call_count == 1
+    assert not hasattr(world[0], "heygen")
+    assert state(world, identifier)["reference_sha256"] == provider.REFERENCE_SHA256
 
 
-@pytest.mark.parametrize("raw,canonical", [(" \uff33\uff55\uff45 ", "Sue"), ("O\u2019Neil", "O'Neil"), ("Jose\u0301", "Jos\u00e9")])
-def test_normalization_matches_job_and_provider_script(world, raw, canonical):
-    service, store, session, *_ = world
-    job_id = active_job(store, raw)
-    pipeline_id = service.submit(raw, job_id)
-    assert state(world, pipeline_id)["first_name"] == canonical
-    assert session.request.call_args.kwargs["json"]["script"] == "Hey " + canonical + "!"
+@pytest.mark.parametrize("raw,expected", [(" \uff33\uff55\uff45 ", "Sue"), ("O\u2019Neil", "O'Neil")])
+def test_normalized_name_is_exact_and_shared_with_metadata(world, raw, expected):
+    identifier = start(world, raw)
+    assert state(world, identifier)["first_name"] == expected
+    assert paid_calls(world)[0].kwargs["json"]["text"] == "Hey " + expected + "!"
 
 
-@pytest.mark.parametrize("name", ["Jim Smith", "Mary Jane", "Jim/Jane", "", "unknown", "J", "Jim2"])
-def test_uncertain_name_never_pays(world, name):
-    service, store, session, *_ = world
-    job_id = active_job(store, name)
+@pytest.mark.parametrize("name", ["Jim Smith", "Mary Jane", "", "unknown", "J", "Jim2"])
+def test_ambiguous_name_never_pays(world, name):
     with pytest.raises(provider.VideoProviderError):
-        service.submit(name, job_id)
-    session.request.assert_not_called()
+        start(world, name)
+    assert not paid_calls(world)
 
 
-def test_same_job_cannot_change_name(world):
-    service, store, session, *_ = world
-    pipeline_id = pipeline(world)
-    store.mutate("jobs/test-job", lambda old: {**old, "first_name": "Christopher"})
-    with pytest.raises(provider.VideoProviderError, match="different name"):
-        service.submit("Christopher", "test-job")
-    assert session.request.call_count == 1
-    assert state(world, pipeline_id)["first_name"] == "Sue"
+@pytest.mark.parametrize("key", [MASTER_KEY, provider.REFERENCE_KEY])
+def test_wrong_master_or_reference_blocks_all_payment(world, key):
+    _, version = world[1].objects.read(key)
+    world[1].objects.write(key, b"unapproved content", version)
+    with pytest.raises(provider.VideoProviderError):
+        start(world)
+    assert not paid_calls(world)
 
 
-def test_repeated_submit_never_repeats_narration_payment(world):
-    service, _, session, *_ = world
-    pipeline_id = pipeline(world)
-    assert service.submit("Sue", "test-job") == pipeline_id
-    assert service.submit("Sue", "test-job") == pipeline_id
-    assert session.request.call_count == 1
+def test_bad_reference_audio_blocks_payment(world, monkeypatch):
+    monkeypatch.setattr(provider, "inspect_reference", Mock(side_effect=provider.VideoProviderError("bad", "bad WAV")))
+    with pytest.raises(provider.VideoProviderError):
+        start(world)
+    assert not paid_calls(world)
 
 
-def test_concurrent_submissions_pay_for_narration_only_once(world):
-    service, store, session, *_ = world
-    job_id = active_job(store)
+def test_repeated_submit_and_status_never_repeat_paid_stages(world):
+    service = world[0]
+    identifier = start(world)
+    assert service.submit("Sue", "job") == identifier
+    assert service.inspect(identifier)["status"] == "processing"
+    assert service.inspect(identifier)["status"] == "completed"
+    assert service.inspect(identifier)["status"] == "completed"
+    assert service.submit("Sue", "job") == identifier
+    assert len(paid_calls(world, provider.TTS_MODEL)) == 1
+    assert len(paid_calls(world, provider.MODEL)) == 1
+    assert state(world, identifier)["estimated_cents"] == 9
+    assert state(world, identifier)["reserved_cents"] == 10
+    assert "billed_cents" not in service.inspect(identifier)
+
+
+def test_concurrent_submit_pays_tts_once(world):
+    service, store, *_ = world
+    store.write("jobs/job", {"script_version": core.SCRIPT_VERSION, "status": "submitting", "first_name": "Sue"}, 0)
     barrier = Barrier(8)
     def submit(_):
         barrier.wait(timeout=5)
         try:
-            return service.submit("Sue", job_id)
+            return service.submit("Sue", "job")
         except core.Conflict:
             return "conflict"
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(submit, range(8)))
-    ids = {result for result in results if result != "conflict"}
-    assert len(ids) == 1
-    assert session.request.call_count == 1
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        result = list(executor.map(submit, range(8)))
+    assert len({value for value in result if value != "conflict"}) == 1
+    assert len(paid_calls(world)) == 1
 
 
-@pytest.mark.parametrize("failure", [requests.Timeout("private provider details"), Response({}, 500), Response({"data": {}}, 200)])
-def test_unknown_narration_outcome_never_resubmits(world, failure):
-    service, store, session, *_ = world
-    job_id = active_job(store)
-    session.request.side_effect = failure if isinstance(failure, Exception) else lambda *args, **kwargs: failure
-    with pytest.raises(provider.SubmissionUncertain):
-        service.submit("Sue", job_id)
-    pipeline_id = service.submit("Sue", job_id)
-    assert service.inspect(pipeline_id)["status"] == "failed"
-    assert state(world, pipeline_id)["stage"] == "uncertain"
-    assert session.request.call_count == 1
-
-
-def test_unknown_fal_outcome_never_resubmits(world):
-    service, _, session, *_ = world
-    pipeline_id = pipeline(world)
-    session.request.side_effect = requests.Timeout("unknown queue outcome")
-    with pytest.raises(provider.SubmissionUncertain):
-        service.inspect(pipeline_id)
-    assert service.inspect(pipeline_id)["status"] == "failed"
-    assert service.submit("Sue", "test-job") == pipeline_id
-    assert state(world, pipeline_id)["stage"] == "uncertain"
-    assert session.request.call_count == 2
-
-
-@pytest.mark.parametrize("stage", ["narration_pending", "fal_pending"])
-def test_restart_resumes_only_known_provider_request(world, stage):
-    service, _, session, *_ = world
-    pipeline_id = pipeline(world)
-    if stage == "fal_pending":
-        service.inspect(pipeline_id)
-        session.request.side_effect = lambda *args, **kwargs: Response({"status": "IN_PROGRESS"})
-    else:
-        service.heygen.inspect.return_value = {"status": "processing"}
-    before = session.request.call_count
-    for _ in range(3):
-        assert service.inspect(pipeline_id)["status"] == "processing"
-    assert all(call.args[0] == "GET" for call in session.request.call_args_list[before:])
-
-
-def test_competing_polls_pay_for_fal_once(world):
-    service, _, session, _, prepare, _ = world
-    pipeline_id = pipeline(world)
+def test_competing_polls_pay_lipsync_once(world):
+    identifier = start(world)
     barrier = Barrier(2)
-    def inputs(*args, **kwargs):
+    def prepare(*args, first_name):
         barrier.wait(timeout=5)
-        return prepared_inputs()
-    prepare.side_effect = inputs
-    def poll():
+        return prepared(first_name)
+    world[3].side_effect = prepare
+    def poll(_):
         try:
-            return service.inspect(pipeline_id)
+            return world[0].inspect(identifier)
         except core.Conflict:
             return "conflict"
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: poll(), range(2)))
-    assert "conflict" in results
-    assert state(world, pipeline_id)["stage"] == "fal_pending"
-    assert len([call for call in session.request.call_args_list if call.args == ("POST", provider.QUEUE + provider.MODEL)]) == 1
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        result = list(executor.map(poll, range(2)))
+    assert "conflict" in result
+    assert len(paid_calls(world, provider.MODEL)) == 1
 
 
-def test_accounting_only_inspection_never_starts_fal(world):
-    service, _, session, _, prepare, _ = world
-    pipeline_id = pipeline(world)
-    assert service.inspect(pipeline_id, accounting_only=True)["status"] == "failed"
-    assert session.request.call_count == 1
-    prepare.assert_not_called()
-    service.heygen._download.assert_not_called()
+@pytest.mark.parametrize("model", [provider.TTS_MODEL, provider.MODEL])
+def test_uncertain_paid_stage_never_resubmits(world, model):
+    world[4]["failure"] = provider.QUEUE + model
+    if model == provider.TTS_MODEL:
+        with pytest.raises(provider.SubmissionUncertain):
+            start(world)
+        identifier = world[0].submit("Sue", "job")
+    else:
+        identifier = start(world)
+        with pytest.raises(provider.SubmissionUncertain):
+            world[0].inspect(identifier)
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert world[0].submit("Sue", "job") == identifier
+    assert len(paid_calls(world, model)) == 1
 
 
-@pytest.mark.parametrize("status", ["cancelled", "frozen_text", "ready"])
-def test_cancelled_or_no_longer_active_job_never_starts_fal(world, status):
-    service, store, session, _, prepare, _ = world
-    pipeline_id = pipeline(world)
-    store.mutate("jobs/test-job", lambda old: {**old, "status": status})
-    assert service.inspect(pipeline_id)["status"] == "failed"
-    assert session.request.call_count == 1
-    prepare.assert_not_called()
+@pytest.mark.parametrize("mode", ["cancelled", "frozen_text", "ready", "accounting_only"])
+def test_cancelled_or_accounting_only_never_starts_lipsync(world, mode):
+    identifier = start(world)
+    if mode != "accounting_only":
+        world[1].mutate("jobs/job", lambda old: {**old, "status": mode})
+    assert world[0].inspect(identifier, accounting_only=mode == "accounting_only")["status"] == "failed"
+    assert not paid_calls(world, provider.MODEL)
+    world[3].assert_not_called()
+    world[0]._download_fal.assert_not_called()
 
 
-def test_reply_during_input_preparation_cancels_before_fal_payment(world):
-    service, store, session, _, prepare, _ = world
-    pipeline_id = pipeline(world)
-    def cancel(*args, **kwargs):
-        store.mutate("jobs/test-job", lambda old: {**old, "status": "cancelled"})
-        return prepared_inputs()
-    prepare.side_effect = cancel
-    assert service.inspect(pipeline_id)["status"] == "failed"
-    assert session.request.call_count == 1
-    assert state(world, pipeline_id)["stage"] == "cancelled"
+def test_reply_during_preparation_cancels_before_lipsync_payment(world):
+    identifier = start(world)
+    def prepare(*args, first_name):
+        world[1].mutate("jobs/job", lambda old: {**old, "status": "cancelled"})
+        return prepared(first_name)
+    world[3].side_effect = prepare
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert not paid_calls(world, provider.MODEL)
 
 
-@pytest.mark.parametrize("duration", [0, -1, 3.01, float("inf"), float("nan")])
-def test_overlong_or_invalid_narration_blocks_fal_budget(world, duration):
-    service, _, session, _, prepare, _ = world
-    pipeline_id = pipeline(world, "Christopher")
-    service.heygen.inspect.return_value.update(duration=duration)
-    assert service.inspect(pipeline_id)["status"] == "failed"
-    assert state(world, pipeline_id)["failure_code"] == "narration_exceeds_budget"
-    assert session.request.call_count == 1
-    prepare.assert_not_called()
+def test_reply_after_narration_lease_cancels_before_tts_payment(world):
+    service = world[0]
+    service._active = Mock(side_effect=[True, False])
+    identifier = start(world)
+    assert state(world, identifier)["stage"] == "cancelled"
+    assert not paid_calls(world)
 
 
-def test_fal_uses_same_recording_inputs_and_only_canonical_authenticated_poll_urls(world):
-    service, _, session, _, prepare, _ = world
-    pipeline_id = pipeline(world)
-    service.inspect(pipeline_id)
-    call = session.request.call_args
-    assert call.args == ("POST", provider.QUEUE + provider.MODEL)
-    assert call.kwargs["headers"]["X-Fal-No-Retry"] == "1"
-    assert call.kwargs["json"]["video_url"].startswith("https://storage.googleapis.com/private/video-followup/assets/" + pipeline_id)
-    prepare.assert_called_once_with(MASTER, b"narration source", first_name="Sue")
-    session.request.side_effect = [Response({"status": "COMPLETED"}), Response({"video": {"url": MEDIA_URL}})]
-    completed = service.inspect(pipeline_id)
-    assert completed["status"] == "completed"
-    assert completed["accounting_method"] == "conservative_reservation"
-    assert "billed_cents" not in completed
-    calls = session.request.call_args_list[-2:]
-    assert [call.args for call in calls] == [
-        ("GET", provider.REQUEST_BASE + FAL_ID + "/status"), ("GET", provider.REQUEST_BASE + FAL_ID)]
-    assert all(call.kwargs["allow_redirects"] is False for call in calls)
-    assert all(call.kwargs["headers"] == {"Authorization": "Key fal-test-secret"} for call in calls)
-
-
-@pytest.mark.parametrize("url", ["http://v3.fal.media/files/a", "https://evil.example/files/a", "https://v3.fal.media.evil.example/files/a",
-    "https://user:pass@v3.fal.media/files/a", "https://v3.fal.media:444/files/a", "https://v3.fal.media/private/a",
-    "https://v3.fal.media/files/a#secret", "https://127.0.0.1/files/a", "https://v3.fal.media/files/a\\b", None])
-def test_fal_ssrf_urls_rejected_before_download(world, url):
-    service, _, _, media, *_ = world
+@pytest.mark.parametrize("duration", [0, -1, 3.01, float("nan"), float("inf")])
+def test_decoded_not_reported_duration_blocks_lipsync(world, monkeypatch, duration):
+    identifier = start(world)
+    world[4]["tts_result"]["duration"] = 1.0
+    monkeypatch.setattr(provider, "inspect_greeting", Mock(return_value={"duration_seconds": duration}))
     with pytest.raises(provider.VideoProviderError):
-        service._download_fal(url)
-    media.get.assert_not_called()
+        world[0].inspect(identifier)
+    assert state(world, identifier)["stage"] == "failed"
+    assert not paid_calls(world, provider.MODEL)
 
 
-@pytest.mark.parametrize("addresses", [["127.0.0.1"], ["10.0.0.2"], ["169.254.169.254"], ["::1"], ["8.8.8.8", "10.0.0.1"], []])
-def test_private_dns_answers_rejected_before_download(world, addresses):
-    service, _, _, media, *_ = world
-    service.resolver = lambda hostname: addresses
+def test_failed_audio_guard_stops_without_paid_retry(world, monkeypatch):
+    identifier = start(world)
+    monkeypatch.setattr(provider, "inspect_greeting", Mock(side_effect=provider.VideoProviderError("voice_anomaly", "Review audio")))
     with pytest.raises(provider.VideoProviderError):
-        service._download_fal(MEDIA_URL)
-    media.get.assert_not_called()
+        world[0].inspect(identifier)
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert not paid_calls(world, provider.MODEL)
 
 
-def test_media_name_must_match_and_original_master_remains_the_source(world):
-    service, _, session, _, _, compose = world
-    pipeline_id = pipeline(world)
-    service.inspect(pipeline_id)
-    session.request.side_effect = [Response({"status": "COMPLETED"}), Response({"video": {"url": MEDIA_URL}})]
-    completed = service.inspect(pipeline_id)
-    service._download_fal = Mock(return_value=b"same-source lip synced context")
+@pytest.mark.parametrize("audio", [TTS_AUDIO, {"url": TTS_AUDIO}])
+def test_tts_audio_output_shapes_both_use_guarded_download(world, audio):
+    identifier = start(world)
+    world[4]["tts_result"] = {"audio": audio}
+    world[0].inspect(identifier)
+    world[0]._download_fal.assert_called_once_with(TTS_AUDIO)
+    provider.inspect_greeting.assert_called_once_with(b"WAV audio", REFERENCE)
+
+
+@pytest.mark.parametrize("url", ["https://evil.example/steal", "http://queue.fal.run/fal-ai/chatterbox/requests/" + TTS_ID,
+    "https://queue.fal.run.evil.example/fal-ai/chatterbox/requests/" + TTS_ID,
+    "https://queue.fal.run/fal-ai/chatterbox/requests/other",
+    "https://queue.fal.run/fal-ai/chatterbox/requests/" + TTS_ID + "?forward=evil",
+    "https://secret@queue.fal.run/fal-ai/chatterbox/requests/" + TTS_ID])
+def test_authenticated_tts_request_urls_are_restricted(url):
     with pytest.raises(provider.VideoProviderError):
-        service.prepare_media(completed, "Christopher")
-    compose.assert_not_called()
-    result = service.prepare_media(completed, "Sue")
-    compose.assert_called_once_with(MASTER, b"same-source lip synced context", b"new greeting audio",
-                                    prepared_inputs()["metadata"], first_name="Sue")
-    assert result["media_bytes"] == b"final same-take video"
-    assert result["duration"] == 8.53
-    assert state(world, pipeline_id)["qa"] == {"source_continuity": True}
+        provider.tts_request_url(TTS_ID, url)
 
 
-def test_changed_source_after_narration_blocks_fal(world):
-    service, store, session, _, prepare, _ = world
-    pipeline_id = pipeline(world)
-    _, version = store.objects.read(MASTER_KEY)
-    store.objects.write(MASTER_KEY, b"replacement take", version)
+def test_documented_canonical_tts_paths_accept_only_matching_request():
+    base = provider.TTS_REQUEST_BASE
+    assert provider.tts_request_url(TTS_ID, base + TTS_ID) == base + TTS_ID
+    assert provider.tts_request_url(TTS_ID, base + TTS_ID + "/status", status=True) == base + TTS_ID + "/status"
+
+
+def test_full_model_tts_poll_path_is_not_the_canonical_queue_route():
     with pytest.raises(provider.VideoProviderError):
-        service.inspect(pipeline_id)
-    assert session.request.call_count == 1
-    prepare.assert_not_called()
+        provider.tts_request_url(TTS_ID, provider.QUEUE + provider.TTS_MODEL + "/requests/" + TTS_ID)
+
+
+def test_tampered_poll_url_is_rejected_before_authenticated_call(world):
+    identifier = start(world)
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, "narration_status_url": "https://evil.example/"})
+    before = world[2].request.call_count
+    with pytest.raises(provider.VideoProviderError):
+        world[0].inspect(identifier)
+    assert world[2].request.call_count == before
+
+
+@pytest.mark.parametrize("field,value", [("first_name", "Christopher"), ("reference_sha256", "0" * 64),
+    ("render_config_sha256", "0" * 64), ("reserved_cents", 11), ("script_version", "face-to-text-same-take-v2")])
+def test_pipeline_identity_or_price_change_blocks_processing(world, field, value):
+    identifier = start(world)
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, field: value})
+    with pytest.raises(provider.VideoProviderError):
+        world[0].inspect(identifier)
+    assert not paid_calls(world, provider.MODEL)
+
+
+def test_changed_name_cannot_be_reused_for_same_job(world):
+    start(world)
+    world[1].mutate("jobs/job", lambda old: {**old, "first_name": "Christopher"})
+    with pytest.raises(provider.VideoProviderError):
+        world[0].submit("Christopher", "job")
+    assert len(paid_calls(world)) == 1
+
+
+def test_rate_estimate_above_cap_blocks_configuration(world, monkeypatch):
+    monkeypatch.setattr(provider, "TTS_REQUEST_CENTS", 4)
+    with pytest.raises(provider.VideoProviderError):
+        provider.SameTakeVideoProvider("secret", world[1], MASTER_KEY, tts_key="tts-secret")
+
+
+def test_new_pipeline_version_quarantines_old_heygen_jobs(world):
+    assert core.SCRIPT_VERSION == "face-to-text-same-take-turbo-v3"
+    world[1].write("jobs/old", {"script_version": "face-to-text-same-take-v2",
+                              "status": "submitting", "first_name": "Sue"}, 0)
+    with pytest.raises(provider.VideoProviderError):
+        world[0].submit("Sue", "old")
+    assert not paid_calls(world)
+
+
+def test_tts_and_kling_credentials_are_routed_separately(world):
+    identifier = start(world)
+    world[0].inspect(identifier)
+    world[0].inspect(identifier)
+    for call in world[2].request.call_args_list:
+        expected = "tts-only-test-secret" if "chatterbox" in call.args[1] else "kling-only-test-secret"
+        assert call.kwargs["headers"]["Authorization"] == "Key " + expected
+
+
+def test_missing_tts_key_cannot_fall_back_to_kling_key(world):
+    with pytest.raises(provider.VideoProviderError):
+        provider.SameTakeVideoProvider("kling-key", world[1], MASTER_KEY, tts_key="")
+    assert not paid_calls(world)
+
+
+def test_full_path_uses_one_tts_one_lipsync_and_retains_original_master(world):
+    identifier = start(world, "Christopher")
+    world[0].inspect(identifier)
+    completed = world[0].inspect(identifier)
+    result = world[0].prepare_media(completed, "Christopher")
+    assert result["media_bytes"] == b"output"
+    assert world[0].compositor.call_args.args[0] == MASTER
+    assert world[0].compositor.call_args.kwargs["first_name"] == "Christopher"
+    assert len(paid_calls(world)) == 2
+
+
+@pytest.mark.parametrize("url", ["http://v3.fal.media/files/a", "https://evil.example/files/a",
+    "https://v3.fal.media.evil.example/files/a", "https://user:pass@v3.fal.media/files/a",
+    "https://v3.fal.media:444/files/a", "https://v3.fal.media/private/a",
+    "https://v3.fal.media/files/a#secret", "https://127.0.0.1/files/a",
+    "https://v3.fal.media/files/a\\b", None])
+def test_fal_media_ssrf_is_rejected_before_network(world, url):
+    with pytest.raises(provider.VideoProviderError):
+        provider.SameTakeVideoProvider._download_fal(world[0], url)
+    world[0].media_session.get.assert_not_called()
+
+
+@pytest.mark.parametrize("addresses", [["127.0.0.1"], ["10.0.0.2"], ["169.254.169.254"],
+    ["::1"], ["8.8.8.8", "10.0.0.1"], []])
+def test_private_dns_answers_block_all_fal_downloads(world, addresses):
+    world[0].resolver = lambda hostname: addresses
+    with pytest.raises(provider.VideoProviderError):
+        provider.SameTakeVideoProvider._download_fal(world[0], TTS_AUDIO)
+    world[0].media_session.get.assert_not_called()
 
 
 @pytest.mark.parametrize("field,value", [("source_sha256", "wrong-source"), ("first_name", "Christopher"),
     ("context_seconds", 5.01), ("context_seconds", 1.99), ("context_seconds", float("nan")),
     ("video_sha256", "changed"), ("audio_sha256", "changed"), ("greeting_audio_sha256", "changed")])
-def test_prepared_input_identity_and_budget_are_checked_before_fal(world, field, value):
-    service, _, session, _, prepare, _ = world
-    pipeline_id = pipeline(world)
-    payload = prepared_inputs()
-    payload["metadata"][field] = value
-    prepare.side_effect = None
-    prepare.return_value = payload
+def test_prepared_input_identity_and_price_block_are_verified(world, field, value):
+    identifier = start(world)
+    inputs = prepared("Sue")
+    inputs["metadata"][field] = value
+    world[3].side_effect = None
+    world[3].return_value = inputs
     with pytest.raises(provider.VideoProviderError):
-        service.inspect(pipeline_id)
-    assert session.request.call_count == 1
-    assert state(world, pipeline_id)["stage"] == "failed"
-
-
-@pytest.mark.parametrize("field,value", [("id", "same-take-" + "a" * 32), ("job_key", "other-job"),
-    ("reserved_cents", 50), ("script_version", "face-to-text-v1"), ("source_sha256", "old-source"),
-    ("first_name", "Sue Jones")])
-def test_tampered_pipeline_identity_never_polls_or_submits(world, field, value):
-    service, store, session, *_ = world
-    pipeline_id = pipeline(world)
-    store.mutate("same-take/" + pipeline_id, lambda old: {**old, field: value})
-    with pytest.raises(provider.VideoProviderError):
-        service.inspect(pipeline_id)
-    assert session.request.call_count == 1
-    service.heygen.inspect.assert_not_called()
+        world[0].inspect(identifier)
+    assert state(world, identifier)["stage"] == "failed"
+    assert not paid_calls(world, provider.MODEL)
 
 
 @pytest.mark.parametrize("stage", ["narration_submitting", "fal_submitting"])
-def test_pending_paid_stage_is_not_failed_early_or_retried_after_expiry(world, monkeypatch, stage):
-    service, store, session, *_ = world
-    pipeline_id = pipeline(world)
+def test_paid_lease_expiry_never_restarts_payment(world, monkeypatch, stage):
+    identifier = start(world)
     now = core.utcnow()
-    store.mutate("same-take/" + pipeline_id, lambda old: {**old, "stage": stage,
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, "stage": stage,
         "created_at": core.iso(now), "fal_attempt_at": core.iso(now)})
     monkeypatch.setattr(provider, "utcnow", lambda: now + timedelta(seconds=599))
-    assert service.inspect(pipeline_id)["status"] == "processing"
-    assert state(world, pipeline_id)["stage"] == stage
+    assert world[0].inspect(identifier)["status"] == "processing"
     monkeypatch.setattr(provider, "utcnow", lambda: now + timedelta(seconds=601))
-    assert service.inspect(pipeline_id)["status"] == "failed"
-    assert state(world, pipeline_id)["stage"] == "uncertain"
-    assert service.submit("Sue", "test-job") == pipeline_id
-    assert session.request.call_count == 1
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert state(world, identifier)["stage"] == "uncertain"
+    assert world[0].submit("Sue", "job") == identifier
+    assert len(paid_calls(world)) == 1
 
 
-def test_expected_stage_guard_does_not_revert_newer_completed_pipeline(world):
-    service, store, _, *_ = world
-    pipeline_id = pipeline(world)
-    store.mutate("same-take/" + pipeline_id, lambda old: {**old, "stage": "completed", "media_url": MEDIA_URL})
-    latest = service._update(pipeline_id, {"stage": "failed"}, "narration_pending")
+def test_expected_stage_guard_cannot_revert_newer_completed_pipeline(world):
+    identifier = start(world)
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, "stage": "completed", "media_url": FINAL_VIDEO})
+    latest = world[0]._update(identifier, {"stage": "failed"}, "narration_pending")
     assert latest["stage"] == "completed"
-    assert state(world, pipeline_id)["media_url"] == MEDIA_URL
+
+
+@pytest.mark.parametrize("key", [MASTER_KEY, provider.REFERENCE_KEY])
+def test_changed_master_or_reference_between_stages_blocks_lipsync(world, key):
+    identifier = start(world)
+    _, version = world[1].objects.read(key)
+    world[1].objects.write(key, b"changed after narration", version)
+    with pytest.raises(provider.VideoProviderError):
+        world[0].inspect(identifier)
+    assert not paid_calls(world, provider.MODEL)
+
+
+@pytest.mark.parametrize("model", [provider.TTS_MODEL, provider.MODEL])
+@pytest.mark.parametrize("field,value", [("unit_price", 0.03), ("unit_price", 0), ("unit_price", -1),
+    ("unit_price", "NaN"), ("unit_price", "Infinity"), ("unit_price", None), ("unit_price", True),
+    ("endpoint_id", "other-model"), ("currency", "EUR"), ("unit", "seconds")])
+def test_unapproved_live_rate_stops_before_that_paid_stage(world, model, field, value):
+    if model == provider.MODEL:
+        identifier = start(world)
+    world[4]["prices"][model]["prices"][0][field] = value
+    with pytest.raises(provider.VideoProviderError):
+        if model == provider.TTS_MODEL:
+            start(world)
+        else:
+            world[0].inspect(identifier)
+    assert not paid_calls(world, model)
+
+
+@pytest.mark.parametrize("model", [provider.TTS_MODEL, provider.MODEL])
+@pytest.mark.parametrize("payload", [{}, {"prices": []}, {"prices": None},
+    {"prices": [{"unit_price": 0.01}]}, {"has_more": True, "prices": []}])
+def test_missing_or_ambiguous_price_stops_before_payment(world, model, payload):
+    if model == provider.MODEL:
+        identifier = start(world)
+    world[4]["prices"][model] = payload
+    with pytest.raises(provider.VideoProviderError):
+        if model == provider.TTS_MODEL:
+            start(world)
+        else:
+            world[0].inspect(identifier)
+    assert not paid_calls(world, model)
+
+
+@pytest.mark.parametrize("model", [provider.TTS_MODEL, provider.MODEL])
+def test_pricing_downtime_fails_closed_without_paid_retry(world, model):
+    if model == provider.MODEL:
+        identifier = start(world)
+    world[4]["pricing_failure"] = model
+    with pytest.raises(provider.VideoProviderError):
+        if model == provider.TTS_MODEL:
+            start(world)
+        else:
+            world[0].inspect(identifier)
+    identifier = world[0].submit("Sue", "job")
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert not paid_calls(world, model)
+    assert state(world, identifier)["reserved_cents"] == 10
+
+
+def test_each_paid_stage_has_own_fresh_rate_readback_and_audit(world):
+    identifier = start(world)
+    world[0].inspect(identifier)
+    saved = state(world, identifier)
+    for field, model in (("tts_price", provider.TTS_MODEL), ("lipsync_price", provider.MODEL)):
+        assert saved[field]["endpoint_id"] == model
+        assert saved[field]["currency"] == "USD"
+        assert saved[field]["verified_at"]
+    calls = world[2].request.call_args_list
+    for position, call in enumerate(calls):
+        if call.args[0] == "POST":
+            assert calls[position - 1].args[0] == "GET"
+            assert calls[position - 1].args[1].startswith(provider.PRICING_ENDPOINT)
+            assert calls[position - 1].kwargs["headers"]["Cache-Control"] == "no-cache"
+
+
+def test_rate_verification_that_becomes_stale_before_payment_is_rejected(world):
+    service = world[0]
+    service._verified_price = Mock(return_value={"endpoint_id": provider.TTS_MODEL,
+        "unit_price": "0.02", "unit": "1000 characters", "currency": "USD",
+        "verified_at": core.iso(core.utcnow() - timedelta(seconds=61))})
+    with pytest.raises(provider.VideoProviderError):
+        start(world)
+    assert not paid_calls(world)
+
+
+@pytest.mark.parametrize("model,price", [(provider.TTS_MODEL, 0.020001), (provider.MODEL, 0.014001)])
+def test_even_small_increase_above_approved_rate_is_rejected(world, model, price):
+    if model == provider.MODEL:
+        identifier = start(world)
+    world[4]["prices"][model]["prices"][0]["unit_price"] = price
+    with pytest.raises(provider.VideoProviderError):
+        if model == provider.TTS_MODEL:
+            start(world)
+        else:
+            world[0].inspect(identifier)
+    assert not paid_calls(world, model)

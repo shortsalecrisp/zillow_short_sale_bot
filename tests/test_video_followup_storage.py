@@ -199,8 +199,9 @@ def configured_environment(monkeypatch):
         "VIDEO_FOLLOWUP_PUBLIC_ORIGIN": "https://go.crispshortsales.com",
         "VIDEO_FOLLOWUP_INITIALS_AFTER": "2026-10-13T15:00:00Z",
         "VIDEO_FOLLOWUP_TEST_PHONES": "9542053205",
-        "HEYGEN_API_KEY": "test-provider-secret", "SMS_CHATBOT_ALLOWED_TOKEN": "test-token-secret",
-        "FAL_API_KEY": "test-fal-secret", "VIDEO_FOLLOWUP_SAME_TAKE_MASTER_KEY": "assets/approved-master/video",
+        "SMS_CHATBOT_ALLOWED_TOKEN": "test-token-secret",
+        "FAL_API_KEY": "test-fal-secret", "FAL_TTS_API_KEY": "test-tts-secret",
+        "VIDEO_FOLLOWUP_SAME_TAKE_MASTER_KEY": "assets/approved-master/video",
         "TASKER_TRANSPORT_HEALTH_URL": "https://script.google.com/macros/s/test/exec",
     }
     for key, value in env.items():
@@ -222,8 +223,8 @@ def fake_constructors(monkeypatch):
 
 @pytest.mark.parametrize("missing", [
     "VIDEO_FOLLOWUP_STORAGE_BUCKET", "VIDEO_FOLLOWUP_PUBLIC_ORIGIN", "VIDEO_FOLLOWUP_INITIALS_AFTER",
-    "VIDEO_FOLLOWUP_TEST_PHONES", "HEYGEN_API_KEY", "SMS_CHATBOT_ALLOWED_TOKEN", "TASKER_TRANSPORT_HEALTH_URL",
-    "FAL_API_KEY", "VIDEO_FOLLOWUP_SAME_TAKE_MASTER_KEY",
+    "VIDEO_FOLLOWUP_TEST_PHONES", "SMS_CHATBOT_ALLOWED_TOKEN", "TASKER_TRANSPORT_HEALTH_URL",
+    "FAL_API_KEY", "FAL_TTS_API_KEY", "VIDEO_FOLLOWUP_SAME_TAKE_MASTER_KEY",
 ])
 def test_bootstrap_requires_complete_configuration_before_clients(monkeypatch, missing):
     configured_environment(monkeypatch)
@@ -262,8 +263,8 @@ def test_owner_only_bootstrap_uses_exact_phone_allowlist_and_private_storage(mon
     service, provider_constructor, eligibility_constructor, worker_constructor = fake_constructors(monkeypatch)
     result = bootstrap.create_worker()
     assert result is worker_constructor.return_value
-    provider_constructor.assert_called_once_with("test-provider-secret", "test-fal-secret", service.return_value.store,
-                                               "assets/approved-master/video")
+    provider_constructor.assert_called_once_with("test-fal-secret", service.return_value.store,
+                                               "assets/approved-master/video", tts_key="test-tts-secret")
     eligibility_constructor.assert_called_once_with(env["TASKER_TRANSPORT_HEALTH_URL"], "test-token-secret")
     config = worker_constructor.call_args.args[2]
     assert config.allowlist == {"9542053205"}

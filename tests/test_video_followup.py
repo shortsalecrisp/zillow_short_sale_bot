@@ -627,7 +627,145 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertEqual(self.provider.inspections, [])
         ledger, _ = self.store.read("budget/ledger")
         self.assertEqual(ledger["reservations"][self.context["followup_key"]]["cents"], 10)
+        self.assertFalse(ledger["reservations"][self.context["followup_key"]]["inflight"])
+        self.assertTrue(self.job()["budget_settled"])
         self.assertEqual(self.objects.list("active/"), [])
+
+    def test_two_unknown_submissions_do_not_permanently_block_new_video_jobs(self):
+        failed = [self.make_context(stable_id="unknown-" + str(index)) for index in range(2)]
+        self.provider.submit_error = TimeoutError("Unknown paid outcome")
+        for context in failed:
+            self.store.prepare(context)
+        self.worker().tick()
+        self.assertEqual(self.objects.list("active/"), [])
+        self.assertEqual(len(self.provider.submissions), 2)
+
+        self.provider.submit_error = None
+        recovered = self.make_context(stable_id="recovered")
+        self.store.prepare(recovered)
+        self.worker(now=NOW + timedelta(days=40)).tick()
+        self.assertEqual(self.job(recovered)["status"], "submitted")
+        self.assertEqual(len(self.provider.submissions), 3)
+        ledger, _ = self.store.read("budget/ledger")
+        for context in failed:
+            self.assertEqual(self.job(context)["status"], "uncertain")
+            self.assertTrue(self.job(context)["budget_settled"])
+            self.assertEqual(ledger["reservations"][context["followup_key"]],
+                             {"day": "2026-10-13", "cents": 10, "inflight": False})
+
+    def test_released_terminal_capacity_does_not_refund_daily_budget(self):
+        self.config = self.make_config(VIDEO_FOLLOWUP_DAILY_CENTS="20")
+        self.provider.submit_error = TimeoutError("Unknown provider outcome")
+        for index in range(2):
+            self.store.prepare(self.make_context(stable_id="unknown-" + str(index)))
+        self.worker().tick()
+        self.provider.submit_error = None
+        waiting = self.make_context(stable_id="waiting-for-budget")
+        self.store.prepare(waiting)
+        self.worker().tick()
+        self.assertEqual(self.job(waiting)["status"], "prepared")
+        self.assertEqual(len(self.provider.submissions), 2)
+        ledger, _ = self.store.read("budget/ledger")
+        self.assertEqual(sum(entry["cents"] for entry in ledger["reservations"].values()), 20)
+        self.assertFalse(any(entry["inflight"] for entry in ledger["reservations"].values()))
+        self.worker(now=NOW + timedelta(days=1)).tick()
+        self.assertEqual(self.job(waiting)["status"], "submitted")
+
+    def test_terminal_capacity_cleanup_does_not_release_active_paid_work(self):
+        active = [self.make_context(stable_id="active-" + str(index)) for index in range(2)]
+        self.provider.status = {"status": "processing"}
+        for context in active:
+            self.store.prepare(context)
+        self.worker().tick()
+        waiting = self.make_context(stable_id="waiting-for-capacity")
+        self.store.prepare(waiting)
+        self.worker(now=NOW + timedelta(days=1)).tick()
+        self.assertEqual(self.job(waiting)["status"], "prepared")
+        self.assertEqual(len(self.provider.submissions), 2)
+        ledger, _ = self.store.read("budget/ledger")
+        self.assertEqual(sum(entry["inflight"] for entry in ledger["reservations"].values()), 2)
+
+    def test_terminal_capacity_cleanup_retries_storage_failure_without_resubmitting(self):
+        self.provider.submit_error = TimeoutError("Unknown paid outcome")
+        self.store.prepare(self.context)
+        self.worker().tick()
+        self.objects.fail_writes = True
+        with self.assertRaises(OSError):
+            self.worker().tick()
+        self.objects.fail_writes = False
+        self.worker().tick()
+        self.assertEqual(len(self.provider.submissions), 1)
+        self.assertEqual(self.job()["status"], "uncertain")
+        entry = self.store.read("budget/ledger")[0]["reservations"][self.context["followup_key"]]
+        self.assertEqual(entry["cents"], 10)
+        self.assertFalse(entry["inflight"])
+
+    def test_cancelled_or_frozen_orphan_keeps_submit_lease_then_releases_capacity(self):
+        contexts = []
+        for status in ("cancelled", "frozen_text"):
+            context = self.make_context(stable_id=status)
+            contexts.append(context)
+            self.store.prepare(context)
+            self.store.reserve(context["followup_key"], self.config, NOW)
+            self.store.mutate("jobs/" + context["followup_key"], lambda old: {**old,
+                "status": status, "reserved_at": video.iso(NOW), "lease_at": video.iso(NOW)})
+        self.worker(now=NOW + timedelta(seconds=599)).tick()
+        ledger, _ = self.store.read("budget/ledger")
+        self.assertEqual(sum(entry["inflight"] for entry in ledger["reservations"].values()), 2)
+        self.assertEqual(self.objects.list("active/"), [])
+
+        self.worker(now=NOW + timedelta(seconds=600)).tick()
+        ledger, _ = self.store.read("budget/ledger")
+        for context in contexts:
+            self.assertTrue(self.job(context)["budget_settled"])
+            self.assertEqual(ledger["reservations"][context["followup_key"]],
+                             {"day": "2026-10-13", "cents": 10, "inflight": False})
+        self.assertEqual(self.provider.submissions, [])
+        self.assertEqual(self.provider.inspections, [])
+
+    def test_cancelled_known_request_keeps_capacity_until_accounting_completes(self):
+        self.set_job(status="submitted", provider_id="cancelled-render", lease_at=video.iso(NOW))
+        self.store.cancel(self.context["followup_key"], "Recipient replied")
+        self.provider.status = {"status": "processing"}
+        self.worker(now=NOW + timedelta(days=1)).tick()
+        entry = self.store.read("budget/ledger")[0]["reservations"][self.context["followup_key"]]
+        self.assertTrue(entry["inflight"])
+        self.assertEqual(self.provider.accounting_inspections, ["cancelled-render"])
+        self.assertFalse(self.job().get("budget_settled"))
+
+    def test_cancelled_or_frozen_prelease_orphan_uses_existing_ledger_without_refund(self):
+        contexts = []
+        for status in ("cancelled", "frozen_text"):
+            context = self.make_context(stable_id="prelease-" + status)
+            contexts.append(context)
+            self.store.prepare(context)
+            self.store.reserve(context["followup_key"], self.config, NOW)
+            self.store.mutate("jobs/" + context["followup_key"], lambda old: {**old, "status": status})
+            self.assertNotIn("reserved_at", self.job(context))
+        self.worker().tick()
+        ledger, _ = self.store.read("budget/ledger")
+        for context in contexts:
+            self.assertTrue(self.job(context)["budget_settled"])
+            self.assertEqual(ledger["reservations"][context["followup_key"]],
+                             {"day": "2026-10-13", "cents": 10, "inflight": False})
+        self.assertEqual(self.provider.submissions, [])
+        self.assertEqual(self.provider.inspections, [])
+
+    def test_concurrent_terminal_cleanup_preserves_debits_and_submits_new_job_once(self):
+        self.provider.submit_error = TimeoutError("Unknown provider outcome")
+        for index in range(2):
+            self.store.prepare(self.make_context(stable_id="unknown-" + str(index)))
+        self.worker().tick()
+        self.provider.submit_error = None
+        self.provider.status = {"status": "processing"}
+        recovered = self.make_context(stable_id="recovered")
+        self.store.prepare(recovered)
+        self.concurrent(12, lambda index: self.worker().tick())
+        ledger, _ = self.store.read("budget/ledger")
+        self.assertEqual(sum(entry["cents"] for entry in ledger["reservations"].values()), 30)
+        self.assertEqual(sum(entry["inflight"] for entry in ledger["reservations"].values()), 1)
+        self.assertEqual(self.provider.submissions.count(("Jim", recovered["followup_key"])), 1)
+        self.assertEqual(len(self.provider.submissions), 3)
 
     def test_concurrent_workers_submit_one_render_for_a_stable_identity(self):
         self.store.prepare(self.context)
@@ -717,6 +855,10 @@ class VideoFollowupTests(unittest.TestCase):
         self.worker(now=NOW + timedelta(days=1)).tick()
         self.assertEqual(self.provider.submissions, [])
         self.assertEqual(self.provider.inspections, [])
+        self.assertTrue(self.job()["budget_settled"])
+        entry = self.store.read("budget/ledger")[0]["reservations"][self.context["followup_key"]]
+        self.assertEqual(entry["cents"], 10)
+        self.assertFalse(entry["inflight"])
 
     def test_submitted_job_polling_resumes_without_new_submission(self):
         self.set_job(status="submitted", provider_id="existing-render")

@@ -18,7 +18,7 @@ from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 LOG = logging.getLogger(__name__)
-SCRIPT_VERSION = "face-to-text-same-take-v2"
+SCRIPT_VERSION = "face-to-text-same-take-turbo-v3"
 MAX_MEDIA_BYTES = 30 * 1024 * 1024
 _SERVICE = None
 _SERVICE_LOCK = threading.Lock()
@@ -365,6 +365,33 @@ class Worker:
     def __init__(self, store, provider, config, eligible, now=utcnow):
         self.store, self.provider, self.config, self.eligible, self.now = store, provider, config, eligible, now
 
+    def _capacity_is_terminal(self, job):
+        if not job:
+            return False
+        if job.get("status") in {"failed", "uncertain"}:
+            return True
+        if job.get("status") not in {"cancelled", "frozen_text"} or job.get("provider_id"):
+            return False
+        # A concurrent cancellation can precede the submit response. Preserve
+        # its existing lease before retiring an orphan with no request ID.
+        lease = job.get("lease_at")
+        return not lease or (self.now() - datetime.fromisoformat(lease.replace("Z", "+00:00"))).total_seconds() >= 600
+
+    def _release_terminal_capacity(self):
+        ledger, _ = self.store.read("budget/ledger")
+        for key, entry in (ledger or {}).get("reservations", {}).items():
+            if not entry.get("inflight"):
+                continue
+            job, _ = self.store.read("jobs/" + key)
+            if not self._capacity_is_terminal(job):
+                continue
+            # Terminal jobs are never submitted again. Keep their full debit,
+            # but do not let a lost response occupy worker capacity forever.
+            # The ledger also covers a crash before reserved_at reached the job.
+            self.store.settle(key, job.get("reserved_at"))
+            self.store.mutate("jobs/" + key, lambda old: {**old, "budget_settled": True}
+                if self._capacity_is_terminal(old) else None)
+
     def run_job(self, key):
         job, version = self.store.read("jobs/" + key)
         if not job:
@@ -467,6 +494,8 @@ class Worker:
     def tick(self):
         if not self.config.enabled or not self.config.generation_enabled:
             return
+        # Includes orphaned terminal jobs whose active index was already removed.
+        self._release_terminal_capacity()
         for path in self.store.objects.list("active/", limit=1000):
             key = path.split("/")[-1]
             try:

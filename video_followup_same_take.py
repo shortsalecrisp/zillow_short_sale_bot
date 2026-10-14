@@ -1,31 +1,50 @@
 """At-most-once audio greeting + same-recording lip-sync pipeline.
 
-HeyGen visuals are never used. Every paid stage is claimed in private storage
-before submission; an unknown outcome is held, never automatically resubmitted.
+Only the approved real recording supplies video and the voice reference. Every
+paid stage is claimed before submission; unknown outcomes are never resubmitted.
 """
 from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import math
 import re
 import time
 from datetime import datetime
-from urllib.parse import urlsplit
+from decimal import Decimal, InvalidOperation
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
 from video_followup import Conflict, SCRIPT_VERSION, iso, normalize_name, utcnow, valid_name
 from video_followup_provider import (
-    API_BASE, AVATAR_ID, VOICE_ID, MAX_API_BYTES, REQUEST_TIMEOUT,
-    HeyGenVideoProvider, SubmissionUncertain, VideoProviderError, _public_addresses,
+    MAX_API_BYTES, REQUEST_TIMEOUT, SubmissionUncertain, VideoProviderError, _public_addresses,
 )
+from video_followup_audio_guard import GUARD_VERSION, inspect_reference, inspect_greeting
 from video_followup_same_take_media import prepare_inputs, compose
 
 MASTER_SHA256 = "01efd28101e8b016d51d571cc87d38d13ea623389663bc7a88cf26cce39bd60b"
 MODEL = "fal-ai/kling-video/lipsync/audio-to-video"
 QUEUE = "https://queue.fal.run/"
 REQUEST_BASE = QUEUE + "fal-ai/kling-video/requests/"
+TTS_MODEL = "fal-ai/chatterbox/text-to-speech/turbo"
+TTS_REQUEST_BASE = QUEUE + "fal-ai/chatterbox/requests/"
+REFERENCE_SHA256 = "5fb066ad56f37021ce47d7ea5d182c2f9f097de4e1d21a3ffd22470f7a5f7387"
+REFERENCE_KEY = "assets/voice-references/" + REFERENCE_SHA256 + "/real-recording.wav"
+TTS_SEED = 4411
+TTS_TEMPERATURE = 0.5
+TTS_REQUEST_CENTS = 2
+LIPSYNC_REQUEST_CENTS = 7
+RESERVATION_CENTS = 10
+PRICING_ENDPOINT = "https://api.fal.ai/v1/models/pricing"
+APPROVED_RATES = {TTS_MODEL: ("1000 characters", Decimal("0.02")),
+                  MODEL: ("units", Decimal("0.014"))}
+RENDER_CONFIG = {"tts_model": TTS_MODEL, "seed": TTS_SEED, "temperature": TTS_TEMPERATURE,
+                 "reference_sha256": REFERENCE_SHA256, "lipsync_model": MODEL,
+                 "greeting_pattern": "Hey {first_name}!", "audio_guard": GUARD_VERSION,
+                 "tts_request_cents": TTS_REQUEST_CENTS, "lipsync_request_cents": LIPSYNC_REQUEST_CENTS}
+RENDER_CONFIG_SHA256 = hashlib.sha256(json.dumps(RENDER_CONFIG, sort_keys=True).encode()).hexdigest()
 MAX_BYTES = 25 * 1024 * 1024
 _REQUEST_ID = re.compile(r"[a-zA-Z0-9-]{16,64}")
 _PIPELINE_ID = re.compile(r"same-take-[a-f0-9]{32}")
@@ -49,27 +68,54 @@ def fal_media_url(url, resolve=None):
     return url
 
 
+def tts_request_url(request_id, url=None, *, status=False):
+    if not isinstance(request_id, str) or not _REQUEST_ID.fullmatch(request_id):
+        raise VideoProviderError("tts_request_mismatch", "Narration request ID did not match.")
+    suffix = "/status" if status else ""
+    canonical = TTS_REQUEST_BASE + request_id + suffix
+    if url is None:
+        return canonical
+    try:
+        p = urlsplit(url)
+        expected_path = "/fal-ai/chatterbox/requests/" + request_id + suffix
+        if not (p.scheme == "https" and p.hostname == "queue.fal.run"
+                and p.port in (None, 443) and not p.username and not p.password
+                and not p.query and not p.fragment and p.path == expected_path
+                and not any(ord(c) < 33 or c == "\\" for c in url)):
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise VideoProviderError("unsafe_tts_request", "Narration polling address is not permitted.") from None
+    return "https://queue.fal.run" + p.path
+
+
 class SameTakeVideoProvider:
-    def __init__(self, api_key, fal_key, store, master_asset_key, *, session=None,
+    def __init__(self, fal_key, store, master_asset_key, *, tts_key, reference_asset_key=REFERENCE_KEY, session=None,
                  media_session=None, resolver=None, preparer=prepare_inputs, compositor=compose):
-        if not api_key or not fal_key or not master_asset_key.startswith("assets/"):
+        if (not fal_key or not tts_key or not master_asset_key.startswith("assets/")
+                or reference_asset_key != REFERENCE_KEY
+                or TTS_REQUEST_CENTS + LIPSYNC_REQUEST_CENTS > RESERVATION_CENTS):
             raise VideoProviderError("same_take_unconfigured", "Same-recording integration is incomplete.")
         self.store, self.master_key = store, master_asset_key
-        self.api_key, self.fal_key = api_key, fal_key
+        self.fal_key, self.tts_key, self.reference_key = fal_key, tts_key, reference_asset_key
         self.session, self.media_session = session or requests.Session(), media_session or requests.Session()
         if session is None:
             self.session.trust_env = False
         if media_session is None:
             self.media_session.trust_env = False
         self.resolver = resolver or _public_addresses
-        self.heygen = HeyGenVideoProvider(api_key, session=self.session,
-                                        media_session=self.media_session, resolver=self.resolver)
         self.preparer, self.compositor = preparer, compositor
 
     def _master(self):
         content, _ = self.store.objects.read(self.master_key)
         if not content or hashlib.sha256(content).hexdigest() != MASTER_SHA256:
             raise VideoProviderError("master_mismatch", "Approved second-recording master did not match.")
+        return content
+
+    def _reference(self):
+        content, _ = self.store.objects.read(self.reference_key)
+        if not content or hashlib.sha256(content).hexdigest() != REFERENCE_SHA256:
+            raise VideoProviderError("reference_mismatch", "Approved real-recording voice reference did not match.")
+        inspect_reference(content)
         return content
 
     def _read(self, pipeline_id):
@@ -82,7 +128,10 @@ class SameTakeVideoProvider:
         if (state.get("id") != pipeline_id or pipeline_id != expected
                 or not valid_name(state.get("first_name"))
                 or normalize_name(state["first_name"]) != state["first_name"]
-                or state.get("reserved_cents") != 10):
+                or state.get("reserved_cents") != RESERVATION_CENTS
+                or state.get("reference_sha256") != REFERENCE_SHA256
+                or state.get("render_config_sha256") != RENDER_CONFIG_SHA256
+                or state.get("greeting_script") != "Hey " + state["first_name"] + "!"):
             raise VideoProviderError("pipeline_mismatch", "Pipeline identity or budget changed.")
         return state, version
 
@@ -121,11 +170,43 @@ class SameTakeVideoProvider:
         finally:
             response.close()
 
+    def _verified_price(self, model, key):
+        unit, maximum = APPROVED_RATES[model]
+        value = self._json("GET", PRICING_ENDPOINT + "?" + urlencode({"endpoint_id": model}),
+            headers={"Authorization": "Key " + key, "Cache-Control": "no-cache"})
+        try:
+            prices = value["prices"]
+            if (not isinstance(prices, list) or len(prices) != 1
+                    or value.get("has_more") is not False or value.get("next_cursor") is not None):
+                raise ValueError()
+            price = prices[0]
+            amount = Decimal(str(price["unit_price"]))
+            if (price["endpoint_id"] != model or price["currency"] != "USD" or price["unit"] != unit
+                    or not amount.is_finite() or not Decimal("0") < amount <= maximum):
+                raise ValueError()
+        except (ValueError, TypeError, KeyError, InvalidOperation):
+            raise VideoProviderError("unapproved_provider_price", "Provider pricing is unknown or exceeds the approved limit.") from None
+        return {"endpoint_id": model, "unit": unit, "currency": "USD", "unit_price": str(amount),
+                "maximum_unit_price": str(maximum), "verified_at": iso(utcnow())}
+
+    def _price_before_payment(self, pipeline_id, stage, model, key, field):
+        try:
+            rate = self._verified_price(model, key)
+            saved = self._update(pipeline_id, {field: rate}, stage)
+            age = (utcnow() - datetime.fromisoformat(rate["verified_at"].replace("Z", "+00:00"))).total_seconds()
+            if saved["stage"] != stage or not 0 <= age <= 60:
+                raise VideoProviderError("stale_provider_price", "Fresh provider pricing is required before payment.")
+            return rate
+        except Exception:
+            self._update(pipeline_id, {"stage": "failed", "failure_code": "provider_price_not_approved"}, stage)
+            raise
+
     def submit(self, first_name, job_id):
         first_name = normalize_name(first_name)
         if not valid_name(first_name) or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", job_id):
             raise VideoProviderError("invalid_identity", "Verified first name and job identity are required.")
         self._master()
+        self._reference()
         pipeline_id = "same-take-" + hashlib.sha256((SCRIPT_VERSION + ":" + job_id).encode()).hexdigest()[:32]
         old, _ = self.store.read("same-take/" + pipeline_id)
         if old:
@@ -136,22 +217,33 @@ class SameTakeVideoProvider:
         state = {"id": pipeline_id, "job_key": job_id, "first_name": first_name,
                  "source_sha256": MASTER_SHA256, "script_version": SCRIPT_VERSION,
                  "stage": "narration_submitting", "created_at": iso(utcnow()),
-                 "reserved_cents": 10, "greeting_script": f"Hey {first_name}!"}
+                 "reference_sha256": REFERENCE_SHA256, "render_config_sha256": RENDER_CONFIG_SHA256,
+                 "reserved_cents": RESERVATION_CENTS, "greeting_script": f"Hey {first_name}!"}
+        # The observed minimum TTS billing block is 1,000 characters (2 cents).
+        if len(state["greeting_script"]) > 1000:
+            raise VideoProviderError("tts_exceeds_budget", "Greeting exceeds the approved narration billing block.")
+        reference_url = self.store.objects.signed_get_url(self.reference_key)
         if not self._active(state):
             raise VideoProviderError("inactive_job", "Video job is no longer active.")
         self.store.write("same-take/" + pipeline_id, state, 0)
+        self._price_before_payment(pipeline_id, "narration_submitting", TTS_MODEL, self.tts_key, "tts_price")
+        if not self._active(state):
+            self._update(pipeline_id, {"stage": "cancelled"}, "narration_submitting")
+            return pipeline_id
         try:
-            result = self._json("POST", API_BASE + "/videos", paid=True,
-                headers={"X-Api-Key": self.api_key, "Idempotency-Key": pipeline_id},
-                payload={"type": "avatar", "avatar_id": AVATAR_ID, "voice_id": VOICE_ID,
-                    "voice_settings": {"speed": 1.05}, "script": state["greeting_script"],
-                    "engine": {"type": "avatar_iii"}, "resolution": "720p", "aspect_ratio": "16:9",
-                    "output_format": "mp4", "caption": {"file_format": "srt"},
-                    "title": "Crisp greeting audio " + pipeline_id, "callback_id": pipeline_id})
-            narration_id = result.get("data", {}).get("video_id")
-            if not isinstance(narration_id, str) or not re.fullmatch(r"[a-f0-9]{32}", narration_id):
+            result = self._json("POST", QUEUE + TTS_MODEL, paid=True,
+                headers={"Authorization": "Key " + self.tts_key, "X-Fal-No-Retry": "1",
+                         "X-Fal-Request-Start-Timeout": "600"},
+                payload={"text": state["greeting_script"], "audio_url": reference_url,
+                         "seed": TTS_SEED, "temperature": TTS_TEMPERATURE})
+            narration_id = result.get("request_id")
+            if not isinstance(narration_id, str) or not _REQUEST_ID.fullmatch(narration_id):
                 raise SubmissionUncertain(pipeline_id)
-            self._update(pipeline_id, {"stage": "narration_pending", "narration_id": narration_id}, "narration_submitting")
+            status_url = tts_request_url(narration_id, result.get("status_url"), status=True)
+            result_url = tts_request_url(narration_id, result.get("response_url"))
+            self._update(pipeline_id, {"stage": "narration_pending", "narration_id": narration_id,
+                                      "narration_status_url": status_url, "narration_result_url": result_url},
+                         "narration_submitting")
         except Exception:
             self._update(pipeline_id, {"stage": "uncertain", "failure_code": "narration_submission_unconfirmed"}, "narration_submitting")
             raise
@@ -171,18 +263,20 @@ class SameTakeVideoProvider:
         pipeline_id = state["id"]
         if not self._active(state):
             return self._update(pipeline_id, {"stage": "cancelled"}, "narration_pending")
-        duration = float(narration["duration"])
-        if not math.isfinite(duration) or not 0 < duration <= 3.0:
-            return self._update(pipeline_id, {"stage": "failed", "failure_code": "narration_exceeds_budget"}, "narration_pending")
         master = self._master()
-        audio_source = self.heygen._download(narration["media_url"], MAX_BYTES)
         try:
+            reference = self._reference()
+            audio_source = self._download_fal(narration["media_url"])
+            audio_qa = inspect_greeting(audio_source, reference)
+            duration = float(audio_qa["duration_seconds"])
+            if not math.isfinite(duration) or not 0 < duration <= 3.0:
+                raise VideoProviderError("narration_exceeds_budget", "Narration duration is outside the approved limit.")
             inputs = self.preparer(master, audio_source, first_name=state["first_name"])
             metadata = inputs["metadata"]
             if (metadata.get("source_sha256") != MASTER_SHA256
                     or metadata.get("first_name") != state["first_name"]
                     or not 2 <= float(metadata.get("context_seconds", 0)) <= 5
-                    or 7 + math.ceil(duration) > 10):
+                    or TTS_REQUEST_CENTS + LIPSYNC_REQUEST_CENTS > RESERVATION_CENTS):
                 raise VideoProviderError("input_budget_mismatch", "Prepared name, source or billable duration did not match.")
             for kind, content_key in (("video", "video_bytes"), ("audio", "audio_bytes"),
                                       ("greeting_audio", "greeting_audio_bytes")):
@@ -199,8 +293,10 @@ class SameTakeVideoProvider:
         # CAS is the paid-stage lease: competing polls cannot pay twice.
         claimed = {**state, "stage": "fal_submitting", "metadata": metadata,
                    "greeting_key": greeting_key, "narration_duration": duration,
-                   "estimated_cents": 7 + math.ceil(duration), "fal_attempt_at": iso(utcnow())}
+                   "estimated_cents": TTS_REQUEST_CENTS + LIPSYNC_REQUEST_CENTS,
+                   "audio_qa": audio_qa, "fal_attempt_at": iso(utcnow())}
         self.store.write("same-take/" + pipeline_id, claimed, version)
+        self._price_before_payment(pipeline_id, "fal_submitting", MODEL, self.fal_key, "lipsync_price")
         if not self._active(claimed):
             return self._update(pipeline_id, {"stage": "cancelled"}, "fal_submitting")
         try:
@@ -228,7 +324,19 @@ class SameTakeVideoProvider:
         if stage in {"failed", "uncertain", "cancelled"}:
             return {"provider_id": pipeline_id, "status": "failed", "failure_code": state.get("failure_code", stage)}
         if stage == "narration_pending":
-            narration = self.heygen.inspect(state["narration_id"])
+            headers = {"Authorization": "Key " + self.tts_key}
+            narration_status = self._json("GET", tts_request_url(state["narration_id"],
+                state.get("narration_status_url"), status=True), headers=headers)
+            if narration_status.get("status") in {"IN_QUEUE", "IN_PROGRESS"}:
+                return {"provider_id": pipeline_id, "status": "processing"}
+            if narration_status.get("status") != "COMPLETED":
+                raise VideoProviderError("tts_status_unknown", "Narration returned an unknown state.")
+            result = self._json("GET", tts_request_url(state["narration_id"],
+                state.get("narration_result_url")), headers=headers)
+            audio = result.get("audio")
+            narration = {"status": "failed" if result.get("error") or not audio else "completed"}
+            if narration["status"] == "completed":
+                narration["media_url"] = fal_media_url(audio.get("url") if isinstance(audio, dict) else audio)
             if narration["status"] == "failed":
                 state = self._update(pipeline_id, {"stage": "failed", "failure_code": "narration_failed"}, "narration_pending")
             elif narration["status"] == "completed":
@@ -284,6 +392,8 @@ class SameTakeVideoProvider:
         greeting, _ = self.store.objects.read(state["greeting_key"])
         result = self.compositor(self._master(), self._download_fal(state["media_url"]), greeting,
                                  state["metadata"], first_name=state["first_name"])
+        result["qa"] = {**result["qa"], "narration_audio": state["audio_qa"],
+                        "automated_screen_not_naturalness_guarantee": True}
         self._update(state["id"], {"qa": result["qa"]})
         return {"media_bytes": result["media_bytes"], "poster_bytes": result["poster_bytes"],
                 "vtt_bytes": result["captions_bytes"], "duration": result["duration_seconds"],

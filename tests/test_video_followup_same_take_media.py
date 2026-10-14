@@ -119,13 +119,22 @@ def test_context_always_in_kling_two_to_five_second_price_block(frames, context)
     assert 2.0 < context / media.FPS < 5.0
 
 
-def test_only_two_unused_end_context_frames_may_be_missing():
+def test_only_three_unused_end_context_frames_may_be_missing():
     minimum = media._minimum_provider_frames(63, 25)
-    assert minimum == 61
-    assert 60 < minimum
+    assert minimum == 60
+    assert 59 < minimum
     assert 25 < minimum
     assert minimum >= 25 + 24
-    assert media._minimum_provider_frames(111, 75) == 109
+    assert media._minimum_provider_frames(111, 75) == 108
+
+
+@pytest.mark.parametrize("delta,accepted", [
+    (-3 / 30, True), (-3 / 30 - 0.0049, True), (-4 / 30, False),
+    (0, True), (2 / 30, True), (3 / 30, False),
+    (float("nan"), False), (float("inf"), False),
+])
+def test_provider_duration_allows_only_observed_shorter_tail(delta, accepted):
+    assert media._provider_duration_matches(2.1 + delta, 2.1) is accepted
 
 
 def test_minimum_context_guard_never_allows_missing_greeting_or_short_context():
@@ -250,7 +259,7 @@ def test_full_prepare_and_compose_with_two_name_lengths(tmp_path, monkeypatch):
             context_path.write_bytes(provider_bytes)
             media._run([
                 ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", str(context_path), "-frames:v", str(prepared["metadata"]["context_frames"] - 2),
+                "-i", str(context_path), "-frames:v", str(prepared["metadata"]["context_frames"] - 3),
                 "-c:v", "libx264", "-threads", "1", "-crf", "17", str(shortened_path),
             ])
             provider_bytes = shortened_path.read_bytes()
@@ -261,16 +270,19 @@ def test_full_prepare_and_compose_with_two_name_lengths(tmp_path, monkeypatch):
         assert final["qa"]["nonmouth_pixels_exact_before_encoding"] is True
         assert final["qa"]["body_frames_exact_before_encoding"] is True
         assert final["qa"]["background_mae_max"] < 3
-        assert final["qa"]["provider_context_tail_frames_missing"] == (2 if name == "Sue" else 0)
+        assert final["qa"]["provider_context_tail_frames_missing"] == (3 if name == "Sue" else 0)
         assert f"Hey {name},".encode() in final["captions_bytes"]
         assert final["media_bytes"] and final["poster_bytes"]
         durations.append(final["duration_seconds"])
         if name == "Sue":
-            for remaining_frames in (prepared["metadata"]["context_frames"] - 3,
-                                     prepared["metadata"]["greeting_frames"] - 1):
+            for remaining_frames in (prepared["metadata"]["context_frames"] - 4,
+                                     prepared["metadata"]["greeting_frames"] + 23,
+                                     prepared["metadata"]["greeting_frames"] - 1,
+                                     prepared["metadata"]["context_frames"] + 3):
                 media._run([
                     ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(context_path), "-frames:v", str(remaining_frames),
+                    "-i", str(context_path), "-vf", "tpad=stop_mode=clone:stop_duration=0.2",
+                    "-frames:v", str(remaining_frames),
                     "-c:v", "libx264", "-threads", "1", "-crf", "17", str(shortened_path),
                 ])
                 # Even a container claiming the expected duration cannot hide

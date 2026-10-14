@@ -41,6 +41,7 @@ PROCESS_SECONDS = 90
 MAX_BYTES = 25 * 1024 * 1024
 BACKGROUND_MAE_LIMIT = 18.0
 MAX_PROVIDER_TIMELINE_DRIFT = 0.085
+MAX_PROVIDER_CONTEXT_TAIL_LOSS = 3
 MOUTH_CENTER = (505, 281)
 MOUTH_AXES = (82, 64)
 SCRIPT_BODY = (
@@ -289,9 +290,15 @@ def _context_frames(greeting_frames: int) -> int:
 
 
 def _minimum_provider_frames(context_frames: int, greeting_frames: int) -> int:
-    # Kling may round off two frames at the end of the context. None of those
+    # Observed Kling output may omit three end-context frames. None of those
     # pixels are used: the greeting and ample subsequent context must survive.
-    return max(context_frames - 2, greeting_frames + 24)
+    return max(context_frames - MAX_PROVIDER_CONTEXT_TAIL_LOSS, greeting_frames + 24)
+
+
+def _provider_duration_matches(actual: float, prepared: float) -> bool:
+    # The probe reports hundredths; decoded-frame checks below remain exact.
+    # Only shortening gets the observed three-frame tail allowance.
+    return -(MAX_PROVIDER_CONTEXT_TAIL_LOSS / FPS + 0.005) <= actual - prepared <= MAX_PROVIDER_TIMELINE_DRIFT
 
 
 def prepare_inputs(master_bytes: bytes, narration_bytes: bytes, *, first_name: str, ffmpeg: str | None = None) -> dict:
@@ -418,7 +425,7 @@ def compose(master_bytes: bytes, kling_bytes: bytes, greeting_audio_bytes: bytes
         probe = _probe(model, ffmpeg)
         if (probe["width"], probe["height"]) not in {(1280, 720), (1920, 1080)}:
             _fail("provider_geometry_changed", "Lip-sync output changed the approved 16:9 framing.")
-        if abs(probe["duration"] - metadata["context_seconds"]) > MAX_PROVIDER_TIMELINE_DRIFT:
+        if not _provider_duration_matches(probe["duration"], metadata["context_seconds"]):
             _fail("provider_timeline_changed", "Lip-sync output changed the prepared clip duration.")
         mask, errors = _mouth_mask(), []
         provider_timing = {"decoded_frames": 0}
