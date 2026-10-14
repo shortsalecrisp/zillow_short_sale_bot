@@ -98,7 +98,7 @@ def test_factory_is_lazy_and_invalid_id_does_not_open_store():
         assert calls == [True]
 
 
-def test_player_is_local_accessible_disclosed_and_uses_no_private_metadata(setup):
+def test_player_is_local_accessible_and_uses_no_private_metadata(setup):
     client, _ = setup
     response = client.get(BASE + "?phone=query-secret&name=QueryName")
     assert response.status_code == 200
@@ -108,7 +108,10 @@ def test_player_is_local_accessible_disclosed_and_uses_no_private_metadata(setup
     assert "Crisp Short Sales" in content
     assert "Yoni Kutler" in content
     assert "Reply to my original text message." in content
-    assert "Personalized with AI using my recorded likeness and voice." in content
+    assert "Personalized with AI using my recorded likeness and voice." not in content
+    assert "ai-disclosure" not in content
+    assert ".disclosure" not in content
+    assert 'aria-label="A quick hello from Yoni Kutler at Crisp Short Sales"' in content
     assert 'preload="none"' in content
     assert "<video controls playsinline" in content
     assert 'kind="captions"' in content and 'srclang="en"' in content and 'label="English" default' in content

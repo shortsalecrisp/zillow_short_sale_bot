@@ -37,7 +37,6 @@ h1 { font-family: Georgia, serif; font-size: clamp(2rem, 7vw, 3.2rem); font-weig
 video { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #14231e; border-radius: 12px; box-shadow: 0 12px 32px #173c321c; }
 video:focus-visible, a:focus-visible { outline: 3px solid #946820; outline-offset: 5px; }
 .reply { font-size: 1.1rem; margin: 24px 0 8px; }
-.disclosure { max-width: 58ch; color: var(--muted); font-size: 0.85rem; margin: 20px 0 0; }
 a { color: inherit; }
 @media (max-width: 480px) { main { padding-top: 26px; } .brand { margin-bottom: 24px; } }
 """
@@ -176,14 +175,13 @@ def _player_html(opaque_id: str, video: Mapping[str, Any]) -> bytes:
     <h1>{heading}</h1>
     <p class="intro">From Yoni Kutler. Just putting a face to my text.</p>
     <video controls playsinline preload="none" poster="{base}/poster.jpg"
-           aria-label="A quick hello from Yoni Kutler at Crisp Short Sales" aria-describedby="ai-disclosure">
+           aria-label="A quick hello from Yoni Kutler at Crisp Short Sales">
       <source src="{base}/media.mp4" type="video/mp4">
       <track kind="captions" src="{base}/captions.vtt" srclang="en" label="English" default>
       Your browser does not support this video. <a href="{base}/media.mp4">Open the video</a>.
     </video>
     <p class="reply">Have a question? Reply to my original text message.</p>
     <p>No need to sign in. Happy to help.</p>
-    <p class="disclosure" id="ai-disclosure">Personalized with AI using my recorded likeness and voice.</p>
   </main>
 </body>
 </html>
