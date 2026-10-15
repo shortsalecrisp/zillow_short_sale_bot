@@ -2916,6 +2916,20 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
+  if (isReinforcingDeclineAfterCloseout_(t, rowObj)) {
+    return {
+      matched: true,
+      reply_text: "",
+      lead_status: String(rowObj && rowObj[HEADERS.mailshake_status] || "R"),
+      conversation_done: true,
+      handoff_needed: false,
+      needs_review: false,
+      block_reply: true,
+      preserve_existing_state: true,
+      reason: "Reinforcing decline after an existing closeout; no duplicate reply needed"
+    };
+  }
+
   if (isCategoricalBuyerFeeRejectionSignal_(t)) {
     return {
       matched: true,
@@ -3887,6 +3901,18 @@ function isClosedMarketingConversation_(rowObj) {
   return aiState === "done" || bookingStatus === "closed_no_interest" || leadStatus === "R";
 }
 
+function isReinforcingDeclineAfterCloseout_(text, rowObj) {
+  if (!isClosedMarketingConversation_(rowObj) || !hasPreviouslyCoveredContext_(rowObj)) return false;
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || isSubstantiveFollowupSignal_(t) || isPaymentOrFeeQuestionSignal_(t) ||
+      isEmailRequestSignal_(t) || extractEmailAddress_(t) || isPresentServiceInterestSignal_(t) ||
+      isPhoneCallInterestSignal_(t) || isClientConsultationInterestSignal_(t) ||
+      isFutureBuyerRecontactSignal_(t) || isFutureNegotiationInterestSignal_(t)) return false;
+  return isAlreadyHandledSignal_(t) || isClearNoSignal_(t) ||
+    /\b(?:i|we)(?:['’]?ve| have)\s+(?:used|worked\s+with)\b.{0,70}\b(?:him|her|them|that\s+(?:team|company|person)|this\s+(?:team|company|person))\b/.test(t) ||
+    /\b(?:used|worked\s+with)\b.{0,50}\b(?:for\s+)?(?:a\s+few|several|many|dozens?|hundreds?|\d+)\b.{0,30}\bshort\s+sales?\b/.test(t);
+}
+
 function isOpenCallWindowSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
 
@@ -4699,6 +4725,7 @@ function isExistingCrispRelationshipSignal_(text) {
 function isSelfHandlingOpportunitySignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase()).replace(/\bmy\s+self\b/g, "myself");
   const selfHandling = [
+    /\b(?:i\s+am|i['’]?m)\s+(?:currently\s+)?handling\s+(?:it|this|that|the\s+file|the\s+listing|the\s+short\s+sale)\b/,
     /\bhandling (?:that part |it )?myself\b/,
     /\bhandle (?:that part |it )?myself\b/,
     /\bdoing it myself\b/,

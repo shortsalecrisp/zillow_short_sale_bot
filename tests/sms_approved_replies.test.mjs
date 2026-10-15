@@ -95,6 +95,51 @@ test('neutral self-handling gets one transparent value response, then closes', (
   assert.match(second.reply_text, /^Ok, no problem/);
 });
 
+test('first-person handling without myself gets the self-handler value response', () => {
+  const h = smsHarness();
+  const result = h.incoming("I'm handling it, thank you.");
+  assert.equal(result.should_reply, true);
+  assert.equal(result.lead_status, 'Y');
+  assert.equal(result.conversation_done, false);
+  assert.equal(JSON.parse(h.state.history_json).at(-1).response_id, 'self_handling_value');
+  assert.match(result.reply_text, /You keep the listing and client relationship/);
+});
+
+test('provider loyalty after a completed coverage closeout is recorded without a second closeout', () => {
+  const h = smsHarness({
+    mailshake_status: 'R',
+    ai_state: 'done',
+    call_booking_status: 'closed_no_interest',
+    response_status: 'I already have someone helping me.',
+    conversation_summary: 'Agent already has help; closed out',
+    history_json: JSON.stringify([
+      {role: 'agent', text: 'I already have someone helping me.'},
+      {role: 'assistant', text: 'Totally understand. Glad you already have help on it.'},
+    ]),
+  });
+  const result = h.incoming("I've used him for a few hundred short sales and really like him. Thank you though.");
+  assert.equal(result.should_reply, false);
+  assert.match(result.reason, /Reinforcing decline/);
+  assert.equal(result.lead_status, 'R');
+  assert.equal(result.conversation_done, true);
+  assert.equal(h.state.ai_state, 'done');
+  assert.equal(h.state.call_booking_status, 'closed_no_interest');
+});
+
+test('a substantive question still reopens after a completed coverage closeout', () => {
+  const h = smsHarness({
+    mailshake_status: 'R',
+    ai_state: 'done',
+    call_booking_status: 'closed_no_interest',
+    response_status: 'I already have someone helping me.',
+    conversation_summary: 'Agent already has help; closed out',
+    history_json: JSON.stringify([{role: 'agent', text: 'I already have someone helping me.'}]),
+  });
+  const result = h.incoming('What is your fee?');
+  assert.equal(result.should_reply, true);
+  assert.match(result.reply_text, /\$5,000/);
+});
+
 test('historical experience does not close an undecided current file', () => {
   const text = "So I've not decided which direction I'm gonna go on this. I have handled them on many occasions though that was during the great recession so I have not decided which direction but I'll keep your information";
   const {h, r} = answer(text);

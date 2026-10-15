@@ -6575,6 +6575,33 @@ def _sms_is_closed_marketing_conversation(row_obj: Dict[str, str]) -> bool:
     )
 
 
+def _sms_is_reinforcing_decline_after_closeout(value: Any, row_obj: Dict[str, str]) -> bool:
+    if not _sms_is_closed_marketing_conversation(row_obj) or not _sms_has_previously_covered_context(row_obj):
+        return False
+    text = _sms_normalize_whitespace(value).lower()
+    if (
+        not text
+        or _sms_is_substantive_followup(text)
+        or _sms_is_fee_question(text)
+        or _sms_is_information_delivery_request(text)
+        or _sms_is_present_service_interest(text)
+        or _sms_is_phone_call_interest(text)
+        or _sms_is_client_consultation_interest(text)
+        or _sms_is_future_buyer_recontact(text)
+        or _sms_is_future_negotiation_interest(text)
+    ):
+        return False
+    return bool(
+        _sms_has_existing_coverage(text)
+        or _sms_has_decline_or_not_short_sale_clause(text)
+        or re.search(
+            r"\b(?:i|we)(?:['’]?ve| have)\s+(?:used|worked\s+with)\b.{0,70}\b(?:him|her|them|that\s+(?:team|company|person)|this\s+(?:team|company|person))\b"
+            r"|\b(?:used|worked\s+with)\b.{0,50}\b(?:for\s+)?(?:a\s+few|several|many|dozens?|hundreds?|\d+)\b.{0,30}\bshort\s+sales?\b",
+            text,
+        )
+    )
+
+
 def _sms_is_seller_buyer_representation_only(value: Any) -> bool:
     text = _sms_rejection_text(value)
     both_sides = bool(
@@ -6753,7 +6780,11 @@ def _sms_has_decline_or_not_short_sale_clause(value: Any) -> bool:
 def _sms_is_self_handling_opportunity(value: Any) -> bool:
     text = _sms_rejection_text(value).replace("my self", "myself")
     self_handling = bool(
-        re.search(r"\b(?:handling|handle) (?:that part |it |this |the (?:bank|lender) side )?(?:myself|ourselves)\b", text)
+        re.search(
+            r"\b(?:i\s+am|i['’]?m)\s+(?:currently\s+)?handling\s+(?:it|this|that|the\s+file|the\s+listing|the\s+short\s+sale)\b",
+            text,
+        )
+        or re.search(r"\b(?:handling|handle) (?:that part |it |this |the (?:bank|lender) side )?(?:myself|ourselves)\b", text)
         or re.search(r"\b(?:doing|do) (?:it |this )?(?:myself|ourselves)\b", text)
         or re.search(r"\b(?:handle|handling) (?:short sales?|these files) (?:myself|ourselves)\b", text)
         or re.search(r"\b(?:trying|attempting) to handle it\b", text)
@@ -7336,6 +7367,15 @@ def _sms_fast_decision(
             block_reply=True,
             preserve_existing_state=True,
             reason="Exact Thx courtesy acknowledgment; no response or handoff needed",
+        )
+
+    if _sms_is_reinforcing_decline_after_closeout(t, row_obj):
+        return _sms_decision(
+            lead_status=str(row_obj.get("mailshake_status") or "R"),
+            conversation_done=True,
+            block_reply=True,
+            preserve_existing_state=True,
+            reason="Reinforcing decline after an existing closeout; no duplicate reply needed",
         )
 
     if _sms_is_automated_routing_notice(t):

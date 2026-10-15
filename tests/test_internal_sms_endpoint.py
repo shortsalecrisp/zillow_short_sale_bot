@@ -3585,6 +3585,49 @@ def test_sms_self_handling_with_contingent_future_help_is_relationship_closeout(
     assert current_help["handoff_needed"] is True
 
 
+def test_sms_first_person_handling_without_myself_uses_self_handler_value_reply(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    decision = module._sms_fast_decision({}, "I'm handling it, thank you.")
+    assert decision["reply_text"] == module.SMS_SELF_HANDLING_REPLY
+    assert decision["response_id"] == "self_handling_value"
+    assert decision["conversation_done"] is False
+    assert decision["handoff_needed"] is False
+
+
+def test_sms_reinforcing_provider_decline_after_closeout_is_silent(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    row = {
+        "mailshake_status": "R",
+        "ai_state": "done",
+        "call_booking_status": "closed_no_interest",
+        "response_status": "I already have someone helping me.",
+        "conversation_summary": "Agent already has help; closed out",
+        "history_json": json.dumps([
+            {"role": "agent", "text": "I already have someone helping me."},
+            {"role": "assistant", "text": module.SMS_ALREADY_HAS_HELP_REPLY},
+        ]),
+    }
+    decision = module._sms_fast_decision(
+        row,
+        "I've used him for a few hundred short sales and really like him. Thank you though.",
+    )
+    assert decision["block_reply"] is True
+    assert decision["preserve_existing_state"] is True
+    assert decision["reply_text"] == ""
+    assert decision["lead_status"] == "R"
+    assert decision["conversation_done"] is True
+
+    reopened = module._sms_fast_decision(row, "What is your fee?")
+    assert reopened["block_reply"] is False
+    assert reopened["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+
+
 def test_sms_contract_not_short_sale_and_source_question_use_distinct_closeouts(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
