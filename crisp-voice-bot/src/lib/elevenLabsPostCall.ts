@@ -579,6 +579,9 @@ export function shouldTreatAsDeferredContact(conversation: ElevenLabsConversatio
     ) ||
     /\b(?:i(?:'ll| will|'m going to| am going to|'m gonna| am gonna)|let me)\s+(?:reach out|get back in touch|follow up)\b/.test(
       text,
+    ) ||
+    /\b(?:i(?:'ll| will|'m going to| am going to|'m gonna| am gonna)|let me)\s+let\s+(?:you|yoni|him|crisp)\s+know\b/.test(
+      text,
     )
   );
 }

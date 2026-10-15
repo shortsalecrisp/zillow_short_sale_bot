@@ -1145,6 +1145,14 @@ test("post-call fallback distinguishes self-initiated future contact from callba
       { role: "user", message: "It'll probably be about an hour." },
     ],
   };
+  const sandraDeferred = {
+    status: "done",
+    transcript: [
+      { role: "assistant", message: "Would help with lender paperwork or calls be useful for this listing?" },
+      { role: "user", message: "Not right now. I'll let you know as soon as possible." },
+      { role: "assistant", tool_calls: [{ tool_name: "not_interested" }] },
+    ],
+  };
 
   assert.equal(shouldTreatAsDeferredContact(eugeneConversation), true);
   assert.equal(shouldTreatAsCallback(eugeneConversation), false);
@@ -1154,6 +1162,8 @@ test("post-call fallback distinguishes self-initiated future contact from callba
   assert.equal(shouldTreatAsDeferredContact(hardNo), false);
   assert.equal(shouldTreatAsDeferredContact(melaneeCallerInitiated), true);
   assert.equal(shouldTreatAsCallback(melaneeCallerInitiated), false);
+  assert.equal(shouldTreatAsDeferredContact(sandraDeferred), true);
+  assert.equal(shouldTreatAsCallback(sandraDeferred), false);
 });
 
 test("post-call fallback gives Cinthia and Summer voicemail evidence precedence over automated callback wording", async () => {

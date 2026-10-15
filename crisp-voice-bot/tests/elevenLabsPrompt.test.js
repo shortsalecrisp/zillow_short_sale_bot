@@ -274,10 +274,12 @@ test("email request must execute with caller-confirmed address before acknowledg
 test("self-initiated contact does not silently create future calls or an automatic hangup", () => {
   const s = section("Contact preferences and endings");
   assert.match(s, /DEFERRED CONTACT: caller said they will initiate future contact/);
-  assert.match(s, /"Can I call you back\?" means the caller will initiate/);
+  assert.match(s, /"I'll let you know when I'm ready," "I'll let you know as soon as possible,"/);
+  assert.match(s, /"Can I call you back\?"[^;]+means the caller will initiate/);
   assert.match(s, /"Can you call me back\?" requests an owner callback/);
   assert.match(s, /Do not create a callback or transfer/);
-  assert.match(s, /This preference alone does not authorize ending; after recording, wait for a new turn unless a pending question needs an answer/);
+  assert.match(s, /Do not create a callback or transfer, or restart the listing question, needs question, value pitch, or qualification sequence/);
+  assert.match(s, /This preference alone does not authorize ending; after recording, wait for a new turn unless the same turn contained a pending question/);
 });
 test("live transfer consent, business approval, questions and revocation remain distinct", () => {
   const s = section("Live transfer request");
