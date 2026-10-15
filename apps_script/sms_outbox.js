@@ -363,6 +363,96 @@ function getPendingSmsHeaders_() {
   return SMS_PENDING_SEND_HEADERS_.slice();
 }
 
+function freezeInitialSmsIdentityV22_(metadata, phone, replyText, messageId, requestId, pendingRows) {
+  try {
+    var sheet = getSheet_();
+    var crmRow = metadata.crm_row;
+    var cell = sheet.getRange(crmRow, 28);
+    var formula = String(cell.getFormula() || "");
+    var stableId = metadata.stable_id;
+    var timestampId = /^\d{1,2}\/\d{1,2}\/\d{4} \d{1,2}:\d{2}:\d{2}$/.test(stableId);
+    if (!formula && !timestampId) return { ok: true };
+    var recognizedFormula = new RegExp('^\\s*=\\s*IF\\s*\\(\\s*\\$?D\\$?' + crmRow +
+      '\\s*<>\\s*""\\s*,\\s*NOW\\s*\\(\\s*\\)\\s*,\\s*""\\s*\\)\\s*$', "i").test(formula);
+    var fail = function(reason) { return { ok: false, queued: false, error: reason }; };
+    if (!timestampId || (formula ? !recognizedFormula :
+        String(cell.getValue()) !== stableId || String(cell.getDisplayValue()) !== stableId)) {
+      return fail("Initial SMS listing identity formula needs review before outreach");
+    }
+    var messageMatch = /^initial-([0-9]+)-[0-9a-f]{16}$/.exec(messageId);
+    if (!messageMatch || Number(messageMatch[1]) !== crmRow ||
+        ["render-" + messageId, "scheduler-" + messageId].indexOf(requestId) === -1) {
+      return fail("Initial SMS identity cannot be bound to this request");
+    }
+    var values = sheet.getDataRange().getValues();
+    var current = values[crmRow - 1];
+    if (!current || normalizePhone_(current[2]) !== phone || !String(current[0] || "").trim() ||
+        !String(current[4] || "").trim() || !String(current[3] || "").trim()) {
+      return fail("Initial SMS current contact or property could not be verified");
+    }
+    var expectedText = "Hey " + current[0] + ", this is Yoni Kutler with Crisp Short Sales. I saw " + current[4] +
+      " listed as a short sale. I can take the lender paperwork, calls, and follow-up off your plate. " +
+      "There's no service fee to you or the seller; my fee is buyer-paid at closing. " +
+      "Are you handling the lender side yourself, or do you already have help?";
+    if (replyText !== normalizeWhitespace_(expectedText)) {
+      return fail("Initial SMS opener does not exactly match the current agent and property");
+    }
+    var displays = sheet.getRange(2, 28, values.length - 1, 1).getDisplayValues();
+    for (var i = 1; i < values.length; i++) {
+      if (i === crmRow - 1) continue;
+      if (normalizePhone_(values[i][2]) === phone || String(values[i][27] || "").trim() === stableId ||
+          String(displays[i - 1][0] || "").trim() === stableId) {
+        return fail("Initial SMS listing identity or phone is not unique");
+      }
+    }
+    var hasPriorAttempt = (pendingRows || []).some(function(row) {
+      if (normalizePhone_(row[4]) === phone) return true;
+      var match = /^__[a-z_]+__:(\{.*\})$/.exec(String(row[6] || ""));
+      if (!match) return false;
+      try { return String(JSON.parse(match[1]).stable_id || "").trim() === stableId; } catch (_) { return false; }
+    });
+    if (hasPriorAttempt) return fail("Initial SMS identity has a previous attempt that needs reconciliation");
+    var obj = {};
+    values[0].forEach(function(header, column) { obj[header] = current[column]; });
+    var contactColumns = [7, 8, 9, 11, 12, 13, 14, 22, 23];
+    var contacted = contactColumns.some(function(column) { return String(current[column] || "").trim() !== ""; });
+    if (contacted || ["", "N"].indexOf(String(current[10] || "").trim().toUpperCase()) === -1 ||
+        String(obj[HEADERS.human_override] || "").toUpperCase() === "TRUE" ||
+        String(obj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE" ||
+        String(obj[HEADERS.last_message_id] || "").trim() || String(obj[HEADERS.last_inbound_text] || "").trim() ||
+        String(obj[HEADERS.history_json] || "").trim() || hasPendingSmsTakeoverV11_(phone)) {
+      return fail("Initial SMS identity has existing contact or handoff evidence");
+    }
+    var inbound = getSmsSpreadsheet_().getSheetByName("sms_inbound_queue");
+    if (!inbound) throw new Error("Inbound queue is unavailable");
+    if (inbound.getLastRow() > 1 && inbound.getRange(2, 1, inbound.getLastRow() - 1, 8).getValues().some(function(row) {
+      return normalizePhone_(row[5]) === phone;
+    })) return fail("Initial SMS identity has an inbound message that needs review");
+    var sameRow = function(candidate) {
+      return current.every(function(value, column) {
+        return column === 27 || String(value == null ? "" : value) === String(candidate[column] == null ? "" : candidate[column]);
+      });
+    };
+    if (String(cell.getFormula() || "") !== formula ||
+        !sameRow(sheet.getRange(crmRow, 1, 1, current.length).getValues()[0])) {
+      return fail("Initial SMS contact changed during identity verification");
+    }
+    // Keep the caller's ID so receipts and future reminders reference the same
+    // episode, but remove NOW() before the first outbox record can be claimed.
+    if (formula) {
+      cell.setNumberFormat("@");
+      cell.setValue(stableId);
+    }
+    if (cell.getFormula() || String(cell.getValue()) !== stableId || String(cell.getDisplayValue()) !== stableId ||
+        !sameRow(sheet.getRange(crmRow, 1, 1, current.length).getValues()[0])) {
+      throw new Error("Initial SMS identity literal readback failed");
+    }
+    return { ok: true };
+  } catch (_) {
+    return { ok: false, queued: false, retryable: true, error: "Initial SMS listing identity could not be safely frozen" };
+  }
+}
+
 function enqueueInitialSmsV13_(body, webhookRequestId) {
   var phone = normalizePhone_(body && body.phone || "");
   var replyText = normalizeWhitespace_(String(body && (body.reply_text || body.message) || ""));
@@ -377,11 +467,11 @@ function enqueueInitialSmsV13_(body, webhookRequestId) {
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_pending_sends") || ss.insertSheet("sms_pending_sends");
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
-  var metadata = "__initial_outreach__:" + JSON.stringify({
+  var identity = {
     crm_row: crmRow,
     stable_id: String(body && (body.stable_id || body.zpid || body.listing_id) || "").trim(),
     mark_codex_verified: body.mark_codex_verified !== false
-  });
+  };
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) {
     return { ok: false, queued: false, retryable: true, error: "Initial SMS outbox is temporarily busy" };
@@ -405,6 +495,9 @@ function enqueueInitialSmsV13_(body, webhookRequestId) {
         };
       }
     }
+    var frozen = freezeInitialSmsIdentityV22_(identity, phone, replyText, messageId, requestId, rows);
+    if (!frozen.ok) return frozen;
+    var metadata = "__initial_outreach__:" + JSON.stringify(identity);
     sheet.appendRow([
       new Date(), "queued", requestId, messageId, phone, replyText, metadata,
       "", new Date(), 0, "", "", "", "", "", "", "", crmRow, ""
@@ -722,6 +815,32 @@ function normalizeVideoFollowupFirstNameV19_(value) {
   return String(value || "").normalize("NFKC").replace(/[\u2018\u2019\u02bc]/g, "'").trim();
 }
 
+function matchesVideoFollowupSpeechPolicyV22_(proof, foldedName) {
+  var config;
+  var exact = proof.normalized_transcript === "hey " + foldedName;
+  if (proof.policy_version === "exact-greeting-tiny-en-v1") {
+    config = "f1a2b9866f0576c6500f760d0b58b7a29ed8acf9d337aacc0c66c134ad39e9ca";
+    if (!exact) return false;
+  } else if (proof.policy_version === "spoken-greeting-tiny-en-v2") {
+    config = "b3a1b5798d53032e5c23da361c467141c1cfd502a8def78e8d3ddeaabde2322e";
+    if (!exact) {
+      var phrase = proof.normalized_transcript;
+      if (typeof phrase !== "string" || phrase.indexOf("hey ") !== 0) return false;
+      var observed = phrase.slice(4);
+      var groups = [["kathryn", "katherine"], ["nikki", "nicky"]];
+      if (!groups.some(function(group) {
+        return group.indexOf(foldedName) !== -1 && group.indexOf(observed) !== -1;
+      })) return false;
+    }
+  } else { return false; }
+  // Bind each policy to its exact decoder configuration; legacy proofs never
+  // inherit the new spelling rule, and no model or threshold fallback is allowed.
+  return proof.config_sha256 === config &&
+    proof.model_id === "Systran/faster-whisper-tiny.en" &&
+    proof.model_revision === "0d3d19a32d3338f10357c0889762bd8d64bbdeba" &&
+    proof.model_manifest_sha256 === "9f995ad3147f0799b2babb9e84926a53bca82d888d5fb6558d925f38dd2b78ee";
+}
+
 function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
   if (metadata.video_variant !== "video") return true;
   var proof = metadata.video_speech_proof;
@@ -730,12 +849,7 @@ function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
   if (name.length < 2 || name.length > 32 || !/^\p{L}+(?:[-']\p{L}+){0,2}$/u.test(name) ||
       ["agent", "unknown", "there", "test"].indexOf(foldedName) !== -1 ||
       !proof || typeof proof !== "object" || Array.isArray(proof) || proof.accepted !== true ||
-      proof.policy_version !== "exact-greeting-tiny-en-v1" ||
-      proof.model_id !== "Systran/faster-whisper-tiny.en" ||
-      proof.model_revision !== "0d3d19a32d3338f10357c0889762bd8d64bbdeba" ||
-      proof.model_manifest_sha256 !== "9f995ad3147f0799b2babb9e84926a53bca82d888d5fb6558d925f38dd2b78ee" ||
-      proof.config_sha256 !== "f1a2b9866f0576c6500f760d0b58b7a29ed8acf9d337aacc0c66c134ad39e9ca" ||
-      proof.expected_name !== name || proof.normalized_transcript !== "hey " + foldedName ||
+      !matchesVideoFollowupSpeechPolicyV22_(proof, foldedName) || proof.expected_name !== name ||
       proof.video_job_id !== metadata.video_job_id || proof.followup_key !== metadata.followup_key ||
       proof.stable_id !== metadata.stable_id || proof.phone !== normalizePhone_(body.phone) ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(String(proof.initial_sent_at || "")) ||

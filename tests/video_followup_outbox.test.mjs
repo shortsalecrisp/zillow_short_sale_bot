@@ -22,6 +22,10 @@ const speechPolicy = {
   model_manifest_sha256: "9f995ad3147f0799b2babb9e84926a53bca82d888d5fb6558d925f38dd2b78ee",
   config_sha256: "f1a2b9866f0576c6500f760d0b58b7a29ed8acf9d337aacc0c66c134ad39e9ca",
 };
+const spokenSpeechPolicy = {
+  ...speechPolicy, policy_version: "spoken-greeting-tiny-en-v2",
+  config_sha256: "b3a1b5798d53032e5c23da361c467141c1cfd502a8def78e8d3ddeaabde2322e",
+};
 const canonicalName = (name) => String(name).normalize("NFKC").replace(/[\u2018\u2019\u02bc]/g, "'").trim();
 const video = (changes = {}) => {
   const body = { ...base, video_variant: "video", video_job_id: "job_123", first_name: "Jim", ...changes };
@@ -34,6 +38,12 @@ const video = (changes = {}) => {
     expected_name: name, normalized_transcript: `hey ${name.toLowerCase()}`,
     greeting_seconds: 1.5, confidence: [{ avg_logprob: -0.1, no_speech_prob: 0.01 }],
   };
+  return body;
+};
+const spokenVideo = (changes = {}, observedName) => {
+  const body = video(changes);
+  body.video_speech_proof = { ...body.video_speech_proof, ...spokenSpeechPolicy };
+  if (observedName !== undefined) body.video_speech_proof.normalized_transcript = `hey ${observedName}`;
   return body;
 };
 const legacy = {
@@ -395,6 +405,98 @@ test("actual videos persist their exact spoken-name proof without changing pre-r
   const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
   assert.deepEqual(metadata.video_speech_proof, body.video_speech_proof);
   assert.equal(h.context.getPendingSmsStaleReason_(h.outbox.data[2]), "");
+});
+
+test("new speech policy accepts exact names and only verified spelling pairs through send-start", () => {
+  for (const [first_name, observed] of [
+    ["Jim", "jim"], ["D'Andre", "d'andre"], ["Kathryn", "kathryn"], ["Nikki", "nikki"],
+    ["Kathryn", "katherine"], ["Katherine", "kathryn"], ["Nikki", "nicky"], ["Nicky", "nikki"],
+  ]) {
+    const h = harness();
+    h.row[0] = first_name;
+    const body = spokenVideo({ first_name }, observed);
+    assert.equal(enqueue(h, body).ok, true, `${first_name}: ${observed}`);
+    const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
+    assert.deepEqual(metadata.video_speech_proof, body.video_speech_proof);
+    assert.equal(metadata.video_speech_proof.normalized_transcript, `hey ${observed}`);
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    assert.equal(claim.should_send, true);
+    const started = h.context.markPendingSmsSendStartedV10_(claim);
+    assert.equal(started.ok, true);
+    assert.equal(started.status, "send_started");
+    assert.equal(h.outbox.data.length, 3);
+  }
+});
+
+test("new spelling policy never widens legacy proofs or accepts unapproved near-names", () => {
+  const invalid = [
+    ["Kathryn", "kathleen"], ["Kathryn", "catherine"], ["Kathryn", "karen"],
+    ["Kathryn", "nikki"], ["Nikki", "mickey"], ["Nikki", "nick"], ["Nikki", "nicole"],
+    ["Jacqueline", "jack lim"], ["Sibelys", "cebellis"], ["Marc", "mark"],
+    ["Jerrick", "jim"], ["Nikki", "nicky hey jim"], ["Nikki", "nicky!"],
+    ["Nikki", "Nicky"], ["Nikki", " nicky"],
+  ];
+  for (const [first_name, observed] of invalid) {
+    const h = harness();
+    h.row[0] = first_name;
+    assert.equal(enqueue(h, spokenVideo({ first_name }, observed)).ok, false, `${first_name}: ${observed}`);
+    assert.equal(h.outbox.data.length, 2);
+  }
+  for (const [first_name, observed] of [["Kathryn", "katherine"], ["Katherine", "kathryn"],
+    ["Nikki", "nicky"], ["Nicky", "nikki"]]) {
+    const h = harness();
+    h.row[0] = first_name;
+    const body = video({ first_name });
+    body.video_speech_proof.normalized_transcript = `hey ${observed}`;
+    assert.equal(enqueue(h, body).ok, false, "Legacy policy must remain exact-only");
+  }
+});
+
+test("speech policies require complete matching model and config tuples", () => {
+  for (const makeVideo of [video, spokenVideo]) {
+    const original = makeVideo().video_speech_proof;
+    for (const changes of [
+      { policy_version: "unsupported" }, { policy_version: "spelling-equivalent-greeting-tiny-en-v2" },
+      { policy_version: original.policy_version === speechPolicy.policy_version ? spokenSpeechPolicy.policy_version : speechPolicy.policy_version },
+      { config_sha256: original.config_sha256 === speechPolicy.config_sha256 ? spokenSpeechPolicy.config_sha256 : speechPolicy.config_sha256 },
+      { model_id: "Systran/faster-whisper-base.en" }, { model_revision: "other" },
+      { model_manifest_sha256: "f".repeat(64) },
+    ]) {
+      const h = harness();
+      const body = makeVideo();
+      Object.assign(body.video_speech_proof, changes);
+      assert.equal(enqueue(h, body).ok, false, JSON.stringify(changes));
+      assert.equal(h.outbox.data.length, 2);
+    }
+  }
+});
+
+test("new proof policy preserves recipient, media, confidence and frozen-payload guards", () => {
+  for (const changes of [
+    { phone: "9542053206" }, { expected_name: "Nicky" }, { stable_id: "other" },
+    { followup_key: "d".repeat(64) }, { video_job_id: "other" },
+    { initial_sent_at: "2026-10-12T13:00:00Z" }, { source_audio_sha256: "bad" },
+    { media_sha256: "bad" }, { greeting_seconds: 3 },
+    { confidence: [{ avg_logprob: -1.01, no_speech_prob: 0.01 }] },
+    { confidence: [{ avg_logprob: -0.1, no_speech_prob: 0.61 }] },
+  ]) {
+    const h = harness();
+    h.row[0] = "Nikki";
+    const body = spokenVideo({ first_name: "Nikki" }, "nicky");
+    Object.assign(body.video_speech_proof, changes);
+    assert.equal(enqueue(h, body).ok, false, JSON.stringify(changes));
+    assert.equal(h.outbox.data.length, 2);
+  }
+  for (const [first, second] of [[video, spokenVideo], [spokenVideo, video]]) {
+    const h = harness();
+    assert.equal(enqueue(h, first()).ok, true);
+    const frozen = h.outbox.data[2].slice();
+    assert.equal(enqueue(h, second()).ok, true);
+    assert.deepEqual(h.outbox.data[2], frozen);
+    assert.equal(h.outbox.data.length, 3);
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    assert.equal(claim.should_send, true);
+  }
 });
 
 test("actual video enqueue rejects missing, stale or incorrectly bound speech proofs", () => {

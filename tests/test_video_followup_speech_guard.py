@@ -97,6 +97,164 @@ def test_distinct_valid_names_bind_to_the_requested_name(audio, recognized, firs
     assert not guard.validate_speech_proof(proof, first_name="Jim", audio_sha256=hashlib.sha256(audio).hexdigest())
 
 
+@pytest.mark.parametrize("first_name,transcript,observed", [
+    ("Kathryn", "Hey, Katherine.", "hey katherine"),
+    ("Katherine", "Hey Kathryn!", "hey kathryn"),
+    ("Nikki", "Hey, Nicky!", "hey nicky"),
+    ("Nicky", "HEY NIKKI.", "hey nikki"),
+])
+def test_only_pinned_spelling_groups_get_v2_proof_without_rewriting_asr(
+        audio, recognized, first_name, transcript, observed):
+    result, calls = recognized
+    result["transcript"] = transcript
+    proof = guard.verify_greeting_words(audio, first_name)
+    assert proof["policy_version"] == guard.POLICY_VERSION
+    assert proof["config_sha256"] == guard.CONFIG_SHA256
+    assert proof["normalized_transcript"] == observed
+    assert proof["expected_name"] == first_name
+    assert proof["normalized_transcript"] != "hey " + first_name.casefold()
+    assert guard.validate_speech_proof(proof, first_name=first_name,
+        audio_sha256=hashlib.sha256(audio).hexdigest())
+    assert len(calls) == 1
+
+
+def test_exact_v1_policy_and_decoder_identity_remain_unchanged(audio, recognized):
+    assert guard.LEGACY_PROOF_IDENTITY == {
+        "policy_version": "exact-greeting-tiny-en-v1",
+        "model_id": "Systran/faster-whisper-tiny.en",
+        "model_revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+        "model_manifest_sha256": "9f995ad3147f0799b2babb9e84926a53bca82d888d5fb6558d925f38dd2b78ee",
+        "config_sha256": "f1a2b9866f0576c6500f760d0b58b7a29ed8acf9d337aacc0c66c134ad39e9ca",
+    }
+    proof = guard.verify_greeting_words(audio, "Jerrick")
+    assert proof["policy_version"] == guard.POLICY_VERSION
+    assert proof["config_sha256"] == guard.CONFIG_SHA256
+    assert proof["policy_version"] != guard.LEGACY_PROOF_IDENTITY["policy_version"]
+    assert proof["config_sha256"] != guard.LEGACY_PROOF_IDENTITY["config_sha256"]
+    proof.update(guard.LEGACY_PROOF_IDENTITY)
+    assert guard.validate_speech_proof(proof, first_name="Jerrick",
+        audio_sha256=hashlib.sha256(audio).hexdigest())
+    assert guard.SPELLING_EQUIVALENCE_GROUPS == (("kathryn", "katherine"), ("nikki", "nicky"))
+
+
+@pytest.mark.parametrize("first_name,transcript", [
+    ("Kathryn", "Hey Kathleen."), ("Kathryn", "Hey Kaitlyn."),
+    ("Kathryn", "Hey Catherine."),
+    ("Kathryn", "Hey Karen."), ("Nikki", "Hey Mickey."),
+    ("Nikki", "Hey Nick."), ("Nikki", "Hey Nicole."),
+    ("Nikki", "Hey Katherine."), ("Kathryn", "Hey Nicky."),
+    ("Jacqueline", "Hey Jack Lim."), ("Sibelys", "Hey Sibyl."),
+    ("Jerrick", "Hey Jim."), ("Marc", "Hey Mark."),
+    ("Cydney", "Hey Sydney."), ("Ken", "A Ken."),
+    ("Kathryn", "Hey Katherine and Kathryn."),
+    ("Nikki", "Hey Nicky, it's Yoni."),
+])
+def test_spelling_policy_is_not_fuzzy_matching_nicknames_or_extra_words(
+        audio, recognized, first_name, transcript):
+    result, calls = recognized
+    result["transcript"] = transcript
+    with pytest.raises(guard.SpeechGuardError, match="speech_guard_name_mismatch"):
+        guard.verify_greeting_words(audio, first_name)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("segments", [
+    [{"avg_logprob": -1.00001, "no_speech_prob": 0.01}],
+    [{"avg_logprob": -0.1, "no_speech_prob": 0.60001}],
+    [{"avg_logprob": float("nan"), "no_speech_prob": 0.01}],
+])
+def test_spelling_equivalence_does_not_relax_confidence(audio, recognized, segments):
+    result, _ = recognized
+    result.update(transcript="Hey, Katherine.", segments=segments)
+    with pytest.raises(guard.SpeechGuardError, match="speech_guard_low_confidence"):
+        guard.verify_greeting_words(audio, "Kathryn")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("policy_version", "exact-greeting-tiny-en-v1"),
+    ("config_sha256", "f1a2b9866f0576c6500f760d0b58b7a29ed8acf9d337aacc0c66c134ad39e9ca"),
+    ("config_sha256", "0" * 64),
+    ("expected_name", "Nikki"),
+    ("normalized_transcript", "hey kathleen"),
+    ("normalized_transcript", "hey nicky"),
+    ("normalized_transcript", "Hey, Katherine."),
+    ("source_audio_sha256", "0" * 64),
+])
+def test_spelling_proof_cannot_be_laundered_into_v1_or_another_name(
+        audio, recognized, field, value):
+    result, _ = recognized
+    result["transcript"] = "Hey, Katherine."
+    proof = guard.verify_greeting_words(audio, "Kathryn")
+    proof[field] = value
+    assert not guard.validate_speech_proof(proof, first_name="Kathryn",
+        audio_sha256=hashlib.sha256(audio).hexdigest())
+
+
+def test_v1_proof_cannot_claim_an_equivalent_spelling(audio, recognized):
+    result, _ = recognized
+    result["transcript"] = "Hey, Kathryn."
+    proof = guard.verify_greeting_words(audio, "Kathryn")
+    proof.update(guard.LEGACY_PROOF_IDENTITY)
+    proof["normalized_transcript"] = "hey katherine"
+    assert not guard.validate_speech_proof(proof, first_name="Kathryn",
+        audio_sha256=hashlib.sha256(audio).hexdigest())
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+@pytest.mark.parametrize("field,value", [
+    ("policy_version", "spelling-equivalent-greeting-tiny-en-v2"),
+    ("model_id", "Systran/faster-whisper-base.en"),
+    ("model_revision", "3d3d5dee26484f91867d81cb899cfcf72b96be6c"),
+    ("model_manifest_sha256", "0" * 64),
+])
+def test_legacy_and_current_complete_model_policy_tuples_cannot_be_mixed(
+        audio, recognized, legacy, field, value):
+    proof = guard.verify_greeting_words(audio, "Jerrick")
+    if legacy:
+        proof.update(guard.LEGACY_PROOF_IDENTITY)
+    proof[field] = value
+    assert not guard.validate_speech_proof(proof, first_name="Jerrick",
+        audio_sha256=hashlib.sha256(audio).hexdigest())
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_legacy_and_current_config_policy_crossovers_rejected(audio, recognized, legacy):
+    proof = guard.verify_greeting_words(audio, "Jerrick")
+    if legacy:
+        proof.update(guard.LEGACY_PROOF_IDENTITY)
+        proof["config_sha256"] = guard.CONFIG_SHA256
+    else:
+        proof["config_sha256"] = guard.LEGACY_PROOF_IDENTITY["config_sha256"]
+    assert not guard.validate_speech_proof(proof, first_name="Jerrick",
+        audio_sha256=hashlib.sha256(audio).hexdigest())
+
+
+@pytest.mark.parametrize("first_name", ["Alex", "Missy", "Miguel"])
+def test_ready_legacy_proof_needs_no_new_recognition_or_generation(audio, monkeypatch, first_name):
+    proof = {"accepted": True, **guard.LEGACY_PROOF_IDENTITY,
+        "expected_name": first_name, "normalized_transcript": "hey " + first_name.casefold(),
+        "source_audio_sha256": hashlib.sha256(audio).hexdigest(),
+        "media_sha256": "a" * 64, "greeting_seconds": 1.2,
+        "confidence": [{"avg_logprob": -0.1, "no_speech_prob": 0.01}]}
+
+    def unavailable():
+        pytest.fail("Stored proof validation must not load a recognizer or contact a provider")
+
+    monkeypatch.setattr(guard, "preflight_speech_guard", unavailable)
+    assert guard.validate_speech_proof(proof, first_name=first_name, media_sha256="a" * 64)
+
+
+def test_spelling_proof_still_binds_final_media(audio, recognized, monkeypatch):
+    result, _ = recognized
+    result["transcript"] = "Hey, Nicky!"
+    monkeypatch.setattr(guard, "_extract_video_greeting", lambda *_: audio)
+    proof = guard.verify_video_greeting_words(b"exact video", "Nikki", 1.0)
+    media_sha = hashlib.sha256(b"exact video").hexdigest()
+    assert guard.validate_speech_proof(proof, first_name="Nikki", media_sha256=media_sha)
+    assert not guard.validate_speech_proof(proof, first_name="Nicky", media_sha256=media_sha)
+    assert not guard.validate_speech_proof(proof, first_name="Nikki", media_sha256="0" * 64)
+
+
 @pytest.mark.parametrize("first_name", ["", " ", "Jim 2", "Jim Smith", "123", None])
 def test_invalid_target_name_rejected_before_asr(audio, recognized, first_name):
     _, calls = recognized

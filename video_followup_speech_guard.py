@@ -18,7 +18,7 @@ import threading
 import unicodedata
 import wave
 
-POLICY_VERSION = "exact-greeting-tiny-en-v1"
+POLICY_VERSION = "spoken-greeting-tiny-en-v2"
 MODEL_ID = "Systran/faster-whisper-tiny.en"
 MODEL_REVISION = "0d3d19a32d3338f10357c0889762bd8d64bbdeba"
 MODEL_HASHES = {
@@ -40,13 +40,25 @@ def _digest_json(value):
 
 
 MODEL_MANIFEST_SHA256 = _digest_json(MODEL_MANIFEST)
+# Previously issued proofs remain valid only under their complete original tuple.
+LEGACY_PROOF_IDENTITY = {
+    "policy_version": "exact-greeting-tiny-en-v1",
+    "model_id": "Systran/faster-whisper-tiny.en",
+    "model_revision": "0d3d19a32d3338f10357c0889762bd8d64bbdeba",
+    "model_manifest_sha256": "9f995ad3147f0799b2babb9e84926a53bca82d888d5fb6558d925f38dd2b78ee",
+    "config_sha256": "f1a2b9866f0576c6500f760d0b58b7a29ed8acf9d337aacc0c66c134ad39e9ca",
+}
+SPELLING_EQUIVALENCE_GROUPS = (("kathryn", "katherine"), ("nikki", "nicky"))
+ASR_PREPROCESSING = {"silence_padding_ms": 0}
 DECODING = {"language": "en", "task": "transcribe", "beam_size": 5,
             "temperature": 0.0, "condition_on_previous_text": False,
             "initial_prompt": None, "prefix": None, "hotwords": None,
             "vad_filter": False, "word_timestamps": False, "max_new_tokens": 64}
 CONFIG_SHA256 = _digest_json({"policy": POLICY_VERSION, "model": MODEL_MANIFEST,
     "packages": PACKAGE_VERSIONS, "decoding": DECODING, "compute_type": "int8",
-    "cpu_threads": 1, "num_workers": 1, "minimum_logprob": -1.0, "maximum_no_speech": 0.6})
+    "cpu_threads": 1, "num_workers": 1, "minimum_logprob": -1.0, "maximum_no_speech": 0.6,
+    "preprocessing": ASR_PREPROCESSING, "matching_rule": "whole-greeting-pinned-spelling-groups-v1",
+    "equivalent_name_groups": SPELLING_EQUIVALENCE_GROUPS})
 MAX_AUDIO_BYTES = 1200000
 MAX_MEDIA_BYTES = 25 * 1024 * 1024
 MAX_OUTPUT_BYTES = 16384
@@ -83,6 +95,15 @@ def _normalized_phrase(text):
         str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u201c": '"', "\u201d": '"'})).casefold()
     match = re.fullmatch(r'''[\s"'.,!?]*hey[\s,.:;!?]+([^\W\d_]+(?:[-'][^\W\d_]+){0,2})[\s"'.,!?]*''', text)
     return "hey " + match.group(1) if match else None
+
+
+def _spelling_equivalent_phrase(name, phrase):
+    if not isinstance(phrase, str) or phrase != _normalized_phrase(phrase):
+        return False
+    observed = phrase[4:]
+    expected = name.casefold()
+    return observed != expected and any(
+        expected in group and observed in group for group in SPELLING_EQUIVALENCE_GROUPS)
 
 
 def _audio_duration(content):
@@ -227,7 +248,7 @@ def verify_greeting_words(audio_bytes, first_name):
     if result.get("model_revision") != MODEL_REVISION or result.get("config_sha256") != CONFIG_SHA256:
         raise SpeechGuardError("speech_guard_output_invalid")
     phrase = _normalized_phrase(result.get("transcript"))
-    if phrase != "hey " + name.casefold():
+    if phrase != "hey " + name.casefold() and not _spelling_equivalent_phrase(name, phrase):
         raise SpeechGuardError("speech_guard_name_mismatch")
     if not _confidence_ok(result.get("segments")):
         raise SpeechGuardError("speech_guard_low_confidence")
@@ -244,9 +265,16 @@ def validate_speech_proof(proof, *, first_name, audio_sha256=None, media_sha256=
         return False
     if not isinstance(proof, dict):
         return False
-    expected = {"accepted": True, "policy_version": POLICY_VERSION, "model_id": MODEL_ID,
-        "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
-        "config_sha256": CONFIG_SHA256, "expected_name": name, "normalized_transcript": "hey " + name.casefold()}
+    policy, phrase = proof.get("policy_version"), proof.get("normalized_transcript")
+    if policy == LEGACY_PROOF_IDENTITY["policy_version"] and phrase == "hey " + name.casefold():
+        identity = LEGACY_PROOF_IDENTITY
+    elif policy == POLICY_VERSION and (phrase == "hey " + name.casefold() or _spelling_equivalent_phrase(name, phrase)):
+        identity = {"policy_version": POLICY_VERSION, "model_id": MODEL_ID,
+            "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
+            "config_sha256": CONFIG_SHA256}
+    else:
+        return False
+    expected = {"accepted": True, **identity, "expected_name": name, "normalized_transcript": phrase}
     if any(proof.get(key) != value for key, value in expected.items()) or proof.get("accepted") is not True:
         return False
     if not re.fullmatch(r"[a-f0-9]{64}", str(proof.get("source_audio_sha256", ""))) or not _confidence_ok(proof.get("confidence")):
