@@ -28,6 +28,9 @@ def harness(row, elapsed_hours):
     batch.return_value.execute.side_effect = responses
     service = Mock()
     service.spreadsheets.return_value.values.return_value.batchGet = batch
+    service.spreadsheets.return_value.values.return_value.get.return_value.execute.return_value = {
+        "values": [["agent_name", "last_name", "phone"]]
+    }
     prepare = Mock()
     send = Mock()
     namespace = {

@@ -97,6 +97,8 @@ class _FakeValuesAPI:
 
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
         self._ranges.append(range)
+        if range.endswith("!1:1"):
+            return _FakeRequest({"values": [["agent_name", "last_name", "phone"]]})
         if range.endswith("!C2:C2"):
             return _FakeRequest({"values": [["5559998888"]]})
         raise AssertionError(f"Unexpected range: {range}")
@@ -301,6 +303,8 @@ class _ConfiguredFollowupValuesAPI:
         raise AssertionError(f"Unexpected ranges: {ranges}")
 
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
+        if range.endswith("!1:1"):
+            return _FakeRequest({"values": [["agent_name", "last_name", "phone"]]})
         if range.endswith("!C2:C2"):
             return _FakeRequest({"values": [[self.row[bot_min.COL_PHONE]]]})
         raise AssertionError(f"Unexpected range: {range}")

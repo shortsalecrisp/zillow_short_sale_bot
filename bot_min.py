@@ -13737,6 +13737,28 @@ def _follow_up_pass():
     max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
     if max_row <= 1:
         return
+    try:
+        header_response = sheets_service.spreadsheets().values().get(
+            spreadsheetId=GSHEET_ID,
+            range=f"{GSHEET_TAB}!1:1",
+            majorDimension="ROWS",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+        header_rows = header_response.get("values")
+        if (not isinstance(header_rows, list) or len(header_rows) != 1
+                or not isinstance(header_rows[0], list) or not header_rows[0]
+                or not all(isinstance(header, str) for header in header_rows[0])
+                or not any(header_rows[0])):
+            raise ValueError("Follow-up control headers are unavailable or malformed")
+        # Match Apps Script's header-keyed object, including last-header-wins
+        # duplicates. Inbound controls can live beyond the usual A:AB read.
+        inbound_control_columns = {
+            header: index for index, header in enumerate(header_rows[0])
+            if header in {"last_message_id", "last_inbound_text"}
+        }
+    except Exception:
+        LOG.exception("Follow-up pass skipped: authoritative inbound controls could not be read")
+        return
     init_col = _col_index_to_letter(COL_INIT_TS)
     reply_col = _col_index_to_letter(COL_REPLY_FLAG)
     init_resp = sheets_service.spreadsheets().values().batchGet(
@@ -13818,6 +13840,44 @@ def _follow_up_pass():
             row += [""] * (MIN_COLS - len(row))
             candidate_row_map[row_idx] = row
 
+    inbound_control_blocks = dict.fromkeys(candidate_indices, False)
+    if inbound_control_columns:
+        try:
+            control_first_row, control_last_row = min(candidate_indices), max(candidate_indices)
+            control_ranges = [
+                f"{GSHEET_TAB}!{_col_index_to_letter(index)}{control_first_row}:"
+                f"{_col_index_to_letter(index)}{control_last_row}"
+                for index in inbound_control_columns.values()
+            ]
+            control_response = sheets_service.spreadsheets().values().batchGet(
+                spreadsheetId=GSHEET_ID,
+                ranges=control_ranges,
+                majorDimension="COLUMNS",
+                valueRenderOption="UNFORMATTED_VALUE",
+            ).execute()
+            control_value_ranges = control_response.get("valueRanges")
+            if (not isinstance(control_value_ranges, list)
+                    or len(control_value_ranges) != len(control_ranges)):
+                raise ValueError("Follow-up inbound control response is incomplete")
+            for value_range in control_value_ranges:
+                values = value_range.get("values", [])
+                if (not isinstance(values, list) or len(values) > 1
+                        or (values and not isinstance(values[0], list))):
+                    raise ValueError("Follow-up inbound control column is malformed")
+                column_values = values[0] if values else []
+                if (len(column_values) > control_last_row - control_first_row + 1
+                        or not all(value is None or isinstance(value, (str, bool, int, float))
+                                   for value in column_values)):
+                    raise ValueError("Follow-up inbound control values are malformed")
+                for row_idx in candidate_indices:
+                    offset = row_idx - control_first_row
+                    value = column_values[offset] if offset < len(column_values) else ""
+                    # Apps Script uses getValues(), not formatted display text.
+                    inbound_control_blocks[row_idx] |= bool(str(value or "").strip())
+        except Exception:
+            LOG.exception("Follow-up pass skipped: authoritative inbound control values could not be read")
+            return
+
     LOG.info(
         "Follow-up candidate query: init_ts in %s2:%s%s ORDER BY ts DESC LIMIT %s -> rows=%s (total_init_ts=%s missing_init_ts=%s bad_init_ts=%s)",
         init_col,
@@ -13842,6 +13902,15 @@ def _follow_up_pass():
         phone_redacted = _redact_followup_phone(row[COL_PHONE])
         address = row[COL_STREET] or ""
         lead_status = row[COL_REPLY_TS].strip().upper()
+
+        if inbound_control_blocks[sheet_row]:
+            LOG.info(
+                "FU-review row %s status=skip_authoritative_inbound_control phone=%s address=%s",
+                sheet_row,
+                phone_redacted,
+                address,
+            )
+            continue
 
         # A failed transport can leave a follow-up marker that predates a later
         # confirmed initial send. Treat only that provably stale marker as
