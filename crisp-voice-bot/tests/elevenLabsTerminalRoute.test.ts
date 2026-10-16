@@ -51,3 +51,24 @@ test("actual route checks history, not model-provided permission or rationale", 
     assert.equal(typeof result.latest_user_turn_hash, "string");
   });
 });
+
+test("authenticated route permits a live listing cancellation and preserves scoped-action cancellation", async () => {
+  await withRouter("test-secret", async (url) => {
+    const check = async (prior: string, latest: string) => {
+      const response = await fetch(url + "/validate-ending", { method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test-secret" },
+        body: JSON.stringify({ conversation_id: "conv_0000000000synthetic", history: JSON.stringify({
+          "x-elevenlabs-history": true, entries: [
+            { role: "user", message: "Hello?" }, { role: "agent", message: prior },
+            { role: "user", message: latest },
+          ],
+        }) }),
+      });
+      assert.equal(response.status, 200);
+      return response.json() as Promise<{ permission: boolean; decision: string }>;
+    };
+    assert.equal((await check("Is Eleven Forty Four Waterfall your listing?", "Cancel.")).permission, true);
+    assert.equal((await check("Would you like me to request a callback?", "Cancel.")).permission, false);
+    assert.equal((await check("Is Eleven Forty Four Waterfall your listing?", "Please take me off your caller list.")).permission, true);
+  });
+});

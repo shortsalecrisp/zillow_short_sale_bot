@@ -27,6 +27,9 @@ for (const message of [
   "Please end the call, actually keep the line open.", "Please end the call. No, please continue.",
   "Please end this call. Can we discuss the fee first?", "Please end this call. Can we discuss the fee first",
   "Please stop this call. Actually I am not done.", "The seller said the following. Stop calling me.",
+  "Cancel that callback.", "Cancel the transfer.", "Cancel the email.", "Don't cancel.", "Cancel?",
+  "Cancel. Wait, who pays the fee?", "Cancel, but keep the call open.",
+  "The seller said cancel.", "For example, cancel.",
 ]) {
   test(`does not authorize an ending from ${message}`, () => assert.equal(assess(message).permission, false));
 }
@@ -42,6 +45,8 @@ for (const message of [
   "Thanks, that answers what I asked. Goodbye.", "I understand who pays now. Goodbye.",
   "Wait. Actually, please stop this call.",
   "Please stop calling this number. Thank you.", "Please end the call. Goodbye.",
+  "Cancel.", "Please cancel.", "Cancel, please.", "Cancel this call.",
+  "Could you cancel this call?", "Please take me off your caller list.",
 ]) {
   test(`authorizes a direct caller ending from ${message}`, () => assert.equal(assess(message).permission, true));
 }
@@ -54,6 +59,54 @@ test("latest user turn overrides older goodbye and later model/tool claims", () 
   ] }) });
   assert.equal(result.permission, false);
   assert.equal(result.decision, "pending_question_or_correction");
+});
+
+test("bare cancellation does not end a call with a callback, email or transfer in context", () => {
+  for (const prior of [
+    [{ role: "agent", message: "Would you like me to request a callback?" }],
+    [{ role: "user", message: "Can you call me back?" }, { role: "agent", message: "What time would you like to request?" }],
+    [{ role: "user", message: "Have Yoni call me tomorrow." }, { role: "agent", message: "What time would you like to request?" }],
+    [{ role: "user", message: "Can you send me the information?" }, { role: "agent", message: "What's the best address?" }],
+    [{ role: "user", message: "Email me the information." }, { role: "agent", message: "What's the best address?" }],
+    [{ role: "agent", message: "Would you like me to see if Yoni, our short-sale specialist, can join this call now?" }],
+    [{ role: "agent", message: "Ok, hold on, let me see if he's available one second." }],
+  ]) {
+    const entries = [...prior, { role: "user", message: "Cancel." }];
+    const check = () => assessElevenLabsTerminalPermission({ conversation_id,
+      history: JSON.stringify({ "x-elevenlabs-history": true, entries }) });
+    assert.equal(check().permission, false, JSON.stringify(prior));
+    entries.at(-1)!.message = "Cancel this call.";
+    assert.equal(check().permission, true, "an explicit current-call cancellation retains its scope");
+  }
+});
+
+test("Waterfall stop is recognized after screening and a live listing check", () => {
+  const result = assessElevenLabsTerminalPermission({ conversation_id, history: JSON.stringify({
+    "x-elevenlabs-history": true, entries: [
+      { role: "user", message: "Hi. If you record your name and reason for calling, I'll see if this person is available." },
+      { role: "agent", message: "Maya with Crisp Short Sales, about the short-sale listing at Eleven Forty Four Waterfall." },
+      { role: "user", message: "Hello?" },
+      { role: "agent", message: "Hi, Maya with Crisp Short Sales. Is Eleven Forty Four Waterfall your listing?" },
+      { role: "user", message: "Oh, that's bad hair." },
+      { role: "agent", message: "Could you clarify what you mean? Are you the listing agent for Eleven Forty Four Waterfall?" },
+      { role: "user", message: "Cancel." },
+      { role: "agent", message: "Understood, I'll end the call now. One moment." },
+    ],
+  }) });
+  assert.equal(result.permission, true);
+  assert.equal(result.decision, "explicit_stop");
+});
+
+test("cancellation in a recording or quotation cannot authorize an ending", () => {
+  for (const messages of [
+    ["This is an automated call screener. Please record your name and reason.", "Cancel."],
+    ["I am going to read an example from the script.", "Cancel."],
+  ]) {
+    const result = assessElevenLabsTerminalPermission({ conversation_id, history: history(messages) });
+    assert.equal(result.permission, false);
+  }
+  assert.equal(assessElevenLabsTerminalPermission({ conversation_id,
+    history: history(["Cancel.", "Wait, don't hang up. Who pays?"]) }).permission, false);
 });
 
 test("caller-history fingerprint changes on a new turn, even identical words", () => {

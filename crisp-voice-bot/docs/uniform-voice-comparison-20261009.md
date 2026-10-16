@@ -19,6 +19,12 @@ Require exact final branch AND version, genuine non-test positive duration and p
 
 Future prompt releases must use `src/scripts/syncElevenLabsComparisonPrompts.mjs` with reviewed versions/hashes, a saved dry-run plan and final two-arm verification. The single-arm prompt publisher now rejects updates when multiple branches carry live traffic. Never retry an ambiguous write without reconciling the live version and saved receipt. Provider updates are sequential, so no uniformity or new comparison boundary is claimed until both final readbacks and the unchanged 50/50 allocation are verified. The review automation remains read-only.
 
+### Shared backend ending correction, October 16
+
+Yoni approved repairing the shared ending validator without changing either provider arm. A bare "Cancel" during the listing conversation now permits the guarded current-call ending. If a callback, information request or transfer is in context, a bare cancellation remains ambiguous and cannot authorize a hangup; an explicit "Cancel this call" retains its current-call scope. List-removal wording now includes "caller list" as well as "call list" and "calling list". Recorded/quoted speech, hold, newer questions or revocations, authentication, and the permission-before-ending requirement remain guarded. A cancellation of this call does not create a future-contact opt-out.
+
+The r4 provider boundary, pinned branch/version identities, prompt/workflow hashes and native 50/50 allocation remain unchanged. Record the shared backend deployment cutover separately when comparing ending and tool behavior before and after this repair; do not attribute that behavior change to either TTS model. The weekly review is pinned to r4 and must verify live configuration plus approval provenance before alleging drift from a stale r2 checkout.
+
 ## Approved Revision 3
 
 Yoni approved the Lead Intelligence callback-direction and confirmed-state repair. Both provider arms now preserve an already-confirmed listing after a hearing problem and distinguish caller-initiated "Can I call you back?" from owner-directed "Can you call me back?" Prompt-only guarded writes preserved every protected provider setting and the 50/50 branch split.

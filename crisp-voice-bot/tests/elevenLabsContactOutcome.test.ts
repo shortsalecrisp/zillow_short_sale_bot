@@ -81,14 +81,14 @@ function conversation(messages: string[], summary = "The caller asked to stop ca
 }
 
 test("scoped call ending is distinct from protected bare STOP and list removal", () => {
-  for (const value of ["Please stop the call.", "End this call.", "Let's stop here.", "Could you end the call?"]) {
+  for (const value of ["Please stop the call.", "End this call.", "Let's stop here.", "Could you end the call?", "Cancel this call.", "Could you cancel this call?"]) {
     assert.equal(looksLikeCallEndingRequest(value), true, value);
     assert.equal(looksLikeDoNotCall(value), false, value);
   }
   for (const value of ["STOP", "Please stop.", "Okay, stop.", "Stop. Goodbye.", "Remove me from your list.", "Please take me off your caller list.", "No more calls.", "Don't call again."]) {
     assert.equal(looksLikeDoNotCall(value), true, value);
   }
-  for (const value of ["Do not stop the call.", "How do you end this call?", "The call stopped.", "Stop charging that fee."]) {
+  for (const value of ["Do not stop the call.", "How do you end this call?", "The call stopped.", "Stop charging that fee.", "Cancel.", "Cancel that callback.", "Don't cancel this call."]) {
     assert.equal(looksLikeCallEndingRequest(value), false, value);
     assert.equal(looksLikeDoNotCall(value), false, value);
   }

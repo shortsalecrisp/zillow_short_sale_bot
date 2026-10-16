@@ -40,10 +40,10 @@ export function looksLikeCallEndingRequest(value: string): boolean {
   return text.split(/[.!?;]+/).some((sentence) => {
     const request = sentence.trim().replace(/^(?:ok(?:ay)?|alright|all right)[, ]+/, "");
     return (
-      /^(?:please[, ]+)?(?:stop|end)\s+(?:this|the|our)\s+(?:phone\s+)?call(?:\s+(?:now|please))?$/.test(request) ||
+      /^(?:please[, ]+)?(?:stop|end|cancel)\s+(?:this|the|our)\s+(?:phone\s+)?call(?:\s+(?:now|please))?$/.test(request) ||
       /^(?:please[, ]+)?(?:hang\s+up|disconnect)(?:\s+(?:now|please))?$/.test(request) ||
       /^(?:let's|let us)\s+stop\s+here(?:\s+please)?$/.test(request) ||
-      /^(?:i (?:need|want) (?:you )?to|can you|could you|would you)\s+(?:please\s+)?(?:end|stop)\s+(?:this|the)\s+call(?:\s+(?:now|please))?$/.test(request)
+      /^(?:i (?:need|want) (?:you )?to|can you|could you|would you)\s+(?:please\s+)?(?:end|stop|cancel)\s+(?:this|the)\s+call(?:\s+(?:now|please))?$/.test(request)
     );
   });
 }

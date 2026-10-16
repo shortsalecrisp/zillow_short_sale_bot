@@ -68,14 +68,26 @@ function withoutPunctuation(text: string): string {
   return text.replace(/^[,\s]+|[.!?;,\s]+$/g, "");
 }
 
-function explicitStopIndex(clauses: string[]): number {
+function hasContactActionContext(entries: HistoryEntry[]): boolean {
+  let latestUserIndex = entries.length - 1;
+  while (latestUserIndex >= 0 && entries[latestUserIndex].role !== "user") latestUserIndex -= 1;
+  // A bare cancellation can refer to a prior request, even after a receipt or
+  // timing-only question. Ignore later model claims about what the caller meant.
+  return entries.slice(0, latestUserIndex).some((entry) =>
+    /\b(?:callback|call (?:me |you |us |him |yoni )?back|(?:call|contact|text|message) (?:me|us|him|her)|e-?mail|send (?:you |me )?(?:the )?information|transfer|patching|join (?:this|the) call|(?:bring|get) yoni|try (?:him|yoni)|see if (?:he|yoni).{0,60}available)\b/
+      .test(normalize(entry.message ?? "")));
+}
+
+function explicitStopIndex(clauses: string[], entries: HistoryEntry[]): number {
+  const bareCancellationAllowed = !hasContactActionContext(entries);
   const reversedIndex = [...clauses].reverse().findIndex((clause) => {
     const text = withoutPunctuation(clause).replace(/^(?:ok(?:ay)?|alright|all right|before you go)[, ]+/, "");
     return looksLikeCallEndingRequest(text)
+      || (bareCancellationAllowed && !clause.includes("?") && /^(?:please[, ]+)?cancel(?:[, ]+please)?$/.test(text))
       || /^(?:please[, ]+)?stop(?:[, ]+please)?$/.test(text)
       || /^(?:please[, ]+)?(?:do not|don't|dont|never) (?:call|contact|text|email) (?:me|us|(?:this|my|our) (?:phone )?number)(?: (?:again|anymore|any more|ever|now|please))*$/.test(text)
       || /^(?:please[, ]+)?stop (?:calling|contacting|texting|emailing)(?: (?:me|us|(?:this|my|our) (?:phone )?number))?(?: (?:again|anymore|now|please))*$/.test(text)
-      || /^(?:please[, ]+)?(?:take|remove) me (?:off|from) (?:your |the )?(?:call(?:ing)? )?list(?: (?:now|please))*$/.test(text)
+      || /^(?:please[, ]+)?(?:take|remove) me (?:off|from) (?:your |the )?(?:(?:call|caller|calling) )?list(?: (?:now|please))*$/.test(text)
       || /^(?:please[, ]+)?no more calls?(?: to (?:this|my|our) (?:phone )?number)?(?: (?:now|please))*$/.test(text);
   });
   return reversedIndex < 0 ? -1 : clauses.length - 1 - reversedIndex;
@@ -163,7 +175,7 @@ export function assessElevenLabsTerminalPermission(input: unknown, requestId = r
   // Recordings and reported examples are not live instructions, even if they contain STOP.
   if (isHold(latest) || hasUnresolvedRecordingContext(callerMessages)) return { ...response, decision: "recording_or_hold" };
   if (isReportedOrConditional(latest) || hasOpenQuotation(callerMessages)) return { ...response, decision: "pending_question_or_correction" };
-  const stopIndex = explicitStopIndex(clauses);
+  const stopIndex = explicitStopIndex(clauses, entries);
   if (stopIndex >= 0) {
     // A later wait/question/revocation must not be lost behind an earlier ending request.
     if (clauses.slice(stopIndex + 1).some((clause) => !isClosingCourtesy(clause) && !isContactComplaint(clause))) {
