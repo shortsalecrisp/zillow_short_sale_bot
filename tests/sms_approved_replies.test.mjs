@@ -105,6 +105,18 @@ test('first-person handling without myself gets the self-handler value response'
   assert.match(result.reply_text, /You keep the listing and client relationship/);
 });
 
+test('self-handler classification requires a first-person subject', () => {
+  const selfHandler = answer('I do all the negotiating with the bank.').r;
+  assert.equal(selfHandler.lead_status, 'Y');
+  assert.equal(selfHandler.conversation_done, false);
+  assert.equal(JSON.parse(answer('I do all the negotiating with the bank.').h.state.history_json).at(-1).response_id, 'self_handling_value');
+
+  const provider = answer('I already have someone working with the lender.').r;
+  assert.equal(provider.lead_status, 'R');
+  assert.equal(provider.conversation_done, true);
+  assert.match(provider.reply_text, /already have help/i);
+});
+
 test('provider loyalty after a completed coverage closeout is recorded without a second closeout', () => {
   const h = smsHarness({
     mailshake_status: 'R',
@@ -278,6 +290,24 @@ test('name requests use a first-person introduction without breaking prior court
     last_outbound_text: 'Yoni Kutler - 404-300-9526. You can call or text anytime.'
   });
   assert.equal(legacy.evaluate('lastOutboundWasYoniNameAndNumberReply_({...state})'), true);
+});
+
+test('business-card requests return a deterministic complete contact card without takeover', () => {
+  const {h, r} = answer('Can you send me your business card and contact number?');
+  assert.equal(r.handoff_needed, false);
+  assert.match(r.reply_text, /Yoni Kutler/);
+  assert.match(r.reply_text, /404-300-9526/);
+  assert.match(r.reply_text, /yoni@crispshortsales\.com/);
+  assert.match(r.reply_text, /crispshortsales\.com/);
+  assert.equal(JSON.parse(h.state.history_json).at(-1).response_id, 'contact_card');
+});
+
+test('an agent offering to call later gets the number without a human takeover', () => {
+  const {h, r} = answer('Can I call you tomorrow to discuss this?');
+  assert.equal(r.handoff_needed, false);
+  assert.equal(h.state.call_booking_status, 'interested_no_call');
+  assert.match(r.reply_text, /404-300-9526/);
+  assert.equal(JSON.parse(h.state.history_json).at(-1).response_id, 'caller_initiated_call_offer');
 });
 
 test('third-person self-reference is blocked at both reply and outbox boundaries', () => {

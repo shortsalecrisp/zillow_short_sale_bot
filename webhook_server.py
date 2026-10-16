@@ -122,6 +122,14 @@ TASKER_TRANSPORT_HEALTH_URL = os.getenv(
 ).strip()
 SMS_CHATBOT_OPENAI_MODEL = os.getenv("SMS_CHATBOT_OPENAI_MODEL", "gpt-5-mini")
 SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS = float(os.getenv("SMS_CHATBOT_OPENAI_TIMEOUT_SECONDS", "25"))
+CRISP_SUPPORT_ACTIVE_FILE_URL = os.getenv(
+    "CRISP_SUPPORT_ACTIVE_FILE_URL",
+    "",
+).strip()
+CRISP_ACTIVE_FILE_LOOKUP_SECRET = os.getenv("CRISP_ACTIVE_FILE_LOOKUP_SECRET", "").strip()
+CRISP_ACTIVE_FILE_LOOKUP_TIMEOUT_SECONDS = float(
+    os.getenv("CRISP_ACTIVE_FILE_LOOKUP_TIMEOUT_SECONDS", "8")
+)
 INITIAL_SMS_RETRY_ATTEMPTS = max(1, int(os.getenv("SMS_RETRY_ATTEMPTS", "3")))
 logging.basicConfig(
     level=logging.INFO,
@@ -4252,6 +4260,63 @@ def _delete_later_duplicate_phone_suppression_rows(
     return rows_to_delete
 
 
+def _active_crisp_file_lookup(row: List[str]) -> Dict[str, Any]:
+    if not CRISP_SUPPORT_ACTIVE_FILE_URL or not CRISP_ACTIVE_FILE_LOOKUP_SECRET:
+        return {"configured": False, "active_file": False}
+
+    payload = {
+        "firstName": _row_value(row, 0),
+        "lastName": _row_value(row, 1),
+        "phone": _row_value(row, 2),
+        "email": _row_value(row, 3),
+        "propertyAddress": _row_value(row, 4),
+        "propertyCity": _row_value(row, 5),
+        "propertyState": _row_value(row, 6),
+    }
+    try:
+        response = requests.post(
+            CRISP_SUPPORT_ACTIVE_FILE_URL,
+            json=payload,
+            headers={"Authorization": f"Bearer {CRISP_ACTIVE_FILE_LOOKUP_SECRET}"},
+            timeout=CRISP_ACTIVE_FILE_LOOKUP_TIMEOUT_SECONDS,
+        )
+        data = response.json() if response.status_code == 200 else {}
+    except Exception as exc:
+        logger.warning(
+            "ACTIVE_CRISP_FILE_LOOKUP_FAILED phone=%s address=%s error=%s",
+            _digits_only(payload["phone"]),
+            payload["propertyAddress"],
+            type(exc).__name__,
+        )
+        return {"configured": True, "active_file": False, "unavailable": True}
+
+    if response.status_code != 200 or not isinstance(data, dict):
+        logger.warning(
+            "ACTIVE_CRISP_FILE_LOOKUP_BAD_RESPONSE phone=%s status=%s",
+            _digits_only(payload["phone"]),
+            response.status_code,
+        )
+        return {"configured": True, "active_file": False, "unavailable": True}
+
+    return {
+        "configured": True,
+        "active_file": data.get("activeFile") is True,
+        "match": data.get("match") if isinstance(data.get("match"), dict) else {},
+    }
+
+
+def _active_crisp_file_lookup_for_row_obj(row_obj: Dict[str, str]) -> Dict[str, Any]:
+    row = [""] * 7
+    row[0] = str(row_obj.get("agent_name") or "")
+    row[1] = str(row_obj.get("last_name") or "")
+    row[2] = str(row_obj.get("phone") or "")
+    row[3] = str(row_obj.get("email") or "")
+    row[4] = str(row_obj.get("listing_address") or "")
+    row[5] = str(row_obj.get("city") or "")
+    row[6] = str(row_obj.get("state") or "")
+    return _active_crisp_file_lookup(row)
+
+
 def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         row_idx = int(payload.get("row"))
@@ -4290,6 +4355,25 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail="row_phone_missing")
     if _digits_only(current_phone) != digits:
         raise HTTPException(status_code=409, detail="row_phone_mismatch")
+
+    active_file = _active_crisp_file_lookup(row)
+    if active_file.get("unavailable"):
+        raise HTTPException(status_code=503, detail="active_file_lookup_unavailable")
+    if active_file.get("active_file"):
+        match = active_file.get("match") or {}
+        logger.info(
+            "INTERNAL_INITIAL_SMS_ACTIVE_FILE_SUPPRESSED row=%s phone=%s file_id=%s",
+            row_idx,
+            digits,
+            str(match.get("fileId") or "<redacted>"),
+        )
+        return {
+            "status": "active_crisp_file",
+            "row": row_idx,
+            "phone": digits,
+            "codex_verified": False,
+            "active_file": True,
+        }
 
     duplicate = _find_duplicate_phone_row(ws, phone_digits=digits, row_idx=row_idx)
     if duplicate and not (force_resend and allow_prior_contact_resend):
@@ -4541,6 +4625,10 @@ def _sms_enforce_first_person(decision: Dict[str, Any]) -> Dict[str, Any]:
 
 YONI_PUBLIC_CONTACT_REPLY = "My name is Yoni Kutler. You can call or text me at 404-300-9526 anytime."
 LEGACY_YONI_PUBLIC_CONTACT_REPLY = "Yoni Kutler - 404-300-9526. You can call or text anytime."
+YONI_CONTACT_CARD_REPLY = (
+    "My name is Yoni Kutler. Call or text me at 404-300-9526, email yoni@crispshortsales.com, "
+    "or visit https://www.crispshortsales.com."
+)
 SMS_SELF_HANDLING_REPLY = (
     "That makes sense. You keep the listing and client relationship; I can take the lender paperwork, calls, "
     "and follow-up off your plate. There's no fee to you or the seller and no commission split; the buyer "
@@ -4757,6 +4845,7 @@ def _sms_response_id_for_text(value: Any) -> str:
     text = _sms_normalize_whitespace(value).lower()
     known_replies = {
         "self_handling_value": SMS_SELF_HANDLING_REPLY,
+        "contact_card": YONI_CONTACT_CARD_REPLY,
         "fee_specific": SMS_SPECIFIC_FEE_REPLY,
         "buyer_cost_concern": SMS_BUYER_COST_CONCERN_REPLY,
         "buyer_fee_disclosure": SMS_BUYER_FEE_DISCLOSURE_REPLY,
@@ -6426,6 +6515,20 @@ def _sms_is_plain_contact_info_request(value: Any) -> bool:
     return any(re.search(pattern, text) for pattern in patterns)
 
 
+def _sms_is_caller_initiated_call_offer(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text or _sms_is_conditional_call(text):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:can|could|may|should)\s+i\s+(?:call|phone|ring|text)\s+(?:you|u)\b"
+            r"|\b(?:is|would)\s+it\s+(?:ok|okay|alright|all right)\s+if\s+i\s+"
+            r"(?:call|phone|ring|text)\s+(?:you|u)\b",
+            text,
+        )
+    )
+
+
 def _sms_is_courtesy_information_acknowledgment(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(
@@ -6788,7 +6891,17 @@ def _sms_is_self_handling_opportunity(value: Any) -> bool:
         or re.search(r"\b(?:doing|do) (?:it |this )?(?:myself|ourselves)\b", text)
         or re.search(r"\b(?:handle|handling) (?:short sales?|these files) (?:myself|ourselves)\b", text)
         or re.search(r"\b(?:trying|attempting) to handle it\b", text)
-        or re.search(r"\b(?:communicating|working|dealing|talking) (?:directly )?with (?:the )?(?:bank|lender)\b", text)
+        or re.search(
+            r"\b(?:i(?:\s+am|['’]?m)?|we(?:\s+are|['’]?re)?)\s+"
+            r"(?:currently\s+)?(?:communicating|working|dealing|talking) "
+            r"(?:directly )?with (?:the )?(?:bank|lender)\b",
+            text,
+        )
+        or re.search(
+            r"\b(?:i|we)\s+(?:personally\s+)?(?:do|handle|manage)\s+"
+            r"(?:all\s+(?:the\s+)?|the\s+)?(?:bank|lender|short[- ]sale\s+)?negotiat(?:e|ing|ions?)\b",
+            text,
+        )
     )
     clear_rejection = bool(
         re.search(r"\b(?:no thanks?|not interested|don['’]?t need|do not need|dont need)\b", text)
@@ -7234,7 +7347,9 @@ def _sms_question_priority_decision(
         "company": _sms_is_company_identity_question(text),
         "website": bool(re.search(r"\b(?:website|brochure|flyer|flier|one[- ]?pager|reviews|testimonials?|check out your company)\b", text)),
         "contact_card": bool(re.search(r"\b(?:business card|contact card|vcard)\b", text)),
-        "contact_info": _sms_is_plain_contact_info_request(text),
+        "contact_info": _sms_is_plain_contact_info_request(text) and not bool(
+            re.search(r"\b(?:business card|contact card|vcard)\b", text)
+        ),
         "experience": bool(re.search(
             r"\b(?:how long|how many years|experience|track record)\b.{0,80}\b(?:short sales?|doing this|handled|business|been doing)\b"
             r"|\b(?:what(?:'s| is) )?your track record\b", text,
@@ -7272,7 +7387,7 @@ def _sms_question_priority_decision(
         "local": "I'm based in Atlanta and work nationwide. The lender-side short sale work is handled remotely.",
         "company": _sms_company_identity_reply(),
         "website": "https://www.crispshortsales.com. You can also find reviews from agents and homeowners on Google.",
-        "contact_card": "Sure. What's the best email?",
+        "contact_card": YONI_CONTACT_CARD_REPLY,
         "contact_info": (
             "My name is Yoni Kutler. You can call or text me at 404-300-9526, "
             "or email me at yoni@crispshortsales.com."
@@ -7410,17 +7525,6 @@ def _sms_fast_decision(
             reason="High-confidence automated promotion ignored",
         )
 
-    if _sms_is_categorical_buyer_fee_rejection(t):
-        return _sms_decision(
-            reply_text=SMS_STANDARD_CLOSEOUT_REPLY,
-            lead_status="R",
-            conversation_done=True,
-            handoff_needed=False,
-            call_booking_status="closed_no_interest",
-            clear_callback=True,
-            reason="Categorical buyer-fee rejection closed before reply-cap escalation",
-        )
-
     if _sms_is_seller_buyer_representation_only(t):
         return _sms_seller_buyer_representation_decision()
 
@@ -7511,6 +7615,17 @@ def _sms_fast_decision(
             block_reply=True,
             preserve_existing_state=True,
             reason="Human override enabled - inbound recorded only",
+        )
+
+    if _sms_is_categorical_buyer_fee_rejection(t):
+        return _sms_decision(
+            reply_text=SMS_STANDARD_CLOSEOUT_REPLY,
+            lead_status="R",
+            conversation_done=True,
+            handoff_needed=False,
+            call_booking_status="closed_no_interest",
+            clear_callback=True,
+            reason="Categorical buyer-fee rejection closed before reply-cap escalation",
         )
 
     terminal_statement = (
@@ -7775,15 +7890,27 @@ def _sms_fast_decision(
             send_reply_before_handoff=True,
         )
 
+    if _sms_is_caller_initiated_call_offer(t):
+        return _sms_decision(
+            reply_text="Absolutely. You can call or text me at 404-300-9526 when you're ready.",
+            response_id="caller_initiated_call_offer",
+            lead_status="Y",
+            handoff_needed=False,
+            alert_needed=False,
+            call_booking_status="interested_no_call",
+            reason="Agent offered to initiate the call; contact details supplied without owner callback",
+        )
+
     if _sms_is_self_initiated_deferred_contact(t):
         return _sms_decision(
-            reply_text="No problem - message me when you're free.",
+            reply_text="No problem - call or text me at 404-300-9526 when you're free.",
+            response_id="caller_initiated_call_offer",
             lead_status="Y",
-            alert_needed=True,
-            send_reply_before_handoff=True,
+            handoff_needed=False,
+            alert_needed=False,
             call_booking_status="interested_no_call",
-            handoff_type="DEFERRED HOT LEAD",
-            reason="Agent will initiate contact later; no owner reply or callback is requested now",
+            handoff_type="",
+            reason="Agent will initiate contact later; contact details supplied without owner takeover",
         )
 
     if _sms_is_untimed_explicit_callback(t):
@@ -8519,6 +8646,52 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
             ),
             "row": row_idx,
         })
+
+    if not _sms_is_opt_out(inbound_text):
+        active_file = _active_crisp_file_lookup_for_row_obj(row_obj)
+        if active_file.get("unavailable"):
+            decision = _sms_decision(
+                lead_status="Y",
+                handoff_needed=True,
+                block_reply=True,
+                handoff_type="ACTIVE FILE LOOKUP UNAVAILABLE",
+                reason="Active Crisp file lookup unavailable; automated sales response paused for owner review",
+            )
+        elif active_file.get("active_file"):
+            decision = _sms_decision(
+                lead_status="R",
+                handoff_needed=True,
+                block_reply=True,
+                handoff_type="EXISTING CRISP FILE SUPPORT",
+                reason="Active Crisp file matched; sales automation suppressed and routed to file support",
+            )
+        else:
+            decision = None
+        if decision:
+            updates = {
+                "response_status": inbound_text,
+                "mailshake_status": decision["lead_status"],
+                "conversation_summary": decision["reason"],
+                "ai_state": "handoff",
+                "call_booking_status": "existing_crisp_file" if active_file.get("active_file") else "interested_no_call",
+                "handoff_flag": "TRUE",
+                "human_override": "TRUE",
+            }
+            _sms_update_row_fields(ws, row_idx, headers, updates)
+            return _sms_normalize_tasker_payload({
+                "ok": True,
+                "should_reply": False,
+                "reply_text": "",
+                "lead_status": decision["lead_status"],
+                "conversation_done": False,
+                "handoff_needed": True,
+                "needs_review": False,
+                "reason": decision["reason"],
+                "call_booking_status": updates["call_booking_status"],
+                "alert_needed": False,
+                "handoff_type": decision["handoff_type"],
+                "row": row_idx,
+            })
 
     auto_count = _sms_count(row_obj)
     classified_decision = _sms_build_decision(row_obj, inbound_text, received_at)

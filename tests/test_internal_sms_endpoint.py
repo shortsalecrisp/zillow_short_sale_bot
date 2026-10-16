@@ -554,6 +554,33 @@ def test_internal_initial_sms_rejects_row_phone_mismatch(monkeypatch):
     assert sender.calls == []
 
 
+def test_internal_initial_sms_suppresses_active_crisp_file(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    monkeypatch.setattr(
+        module,
+        "_active_crisp_file_lookup",
+        lambda _row: {
+            "configured": True,
+            "active_file": True,
+            "match": {"file_id": "file_justin", "reference": "CRISP-6261"},
+        },
+    )
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/internal/send-initial-sms",
+        headers={"authorization": "Bearer secret-token"},
+        json={"row": 12, "phone": "555-111-2212"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "active_crisp_file"
+    assert sender.calls == []
+
+
 def test_internal_initial_sms_force_resend_allows_already_sent_row(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
@@ -3597,6 +3624,44 @@ def test_sms_first_person_handling_without_myself_uses_self_handler_value_reply(
     assert decision["handoff_needed"] is False
 
 
+def test_sms_self_handler_requires_first_person_subject(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    self_handler = module._sms_fast_decision({}, "I do all the negotiating with the bank.")
+    assert self_handler["response_id"] == "self_handling_value"
+    assert self_handler["reply_text"] == module.SMS_SELF_HANDLING_REPLY
+    assert self_handler["handoff_needed"] is False
+
+    external_provider = module._sms_fast_decision({}, "I already have someone working with the lender.")
+    assert external_provider["conversation_done"] is True
+    assert external_provider["lead_status"] == "R"
+    assert "coverage" in external_provider["reason"].lower()
+
+
+def test_sms_contact_card_and_caller_initiated_call_do_not_require_takeover(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    contact = module._sms_fast_decision({}, "Can you send me your business card and contact number?")
+    assert contact["response_id"] == "contact_card"
+    assert contact["reply_text"] == module.YONI_CONTACT_CARD_REPLY
+    assert "404-300-9526" in contact["reply_text"]
+    assert "crispshortsales.com" in contact["reply_text"]
+    assert contact["handoff_needed"] is False
+
+    caller = module._sms_fast_decision({}, "Can I call you tomorrow to discuss this?")
+    assert module._sms_is_caller_initiated_call_offer("Can I call you tomorrow to discuss this?") is True
+    assert caller["response_id"] == "caller_initiated_call_offer"
+    assert caller["handoff_needed"] is False
+    assert caller["call_booking_status"] == "interested_no_call"
+    assert "404-300-9526" in caller["reply_text"]
+
+
 def test_sms_reinforcing_provider_decline_after_closeout_is_silent(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
@@ -3768,7 +3833,7 @@ def test_sms_relative_duration_callback_resolves_from_inbound_timestamp(monkeypa
     assert decision["handoff_needed"] is True
 
 
-def test_sms_busy_self_initiated_followup_is_deferred_hot_lead_not_callback(monkeypatch):
+def test_sms_busy_self_initiated_followup_supplies_contact_without_takeover(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -3779,13 +3844,13 @@ def test_sms_busy_self_initiated_followup_is_deferred_hot_lead_not_callback(monk
 
     assert module._sms_is_self_initiated_deferred_contact(inbound) is True
     assert decision["lead_status"] == "Y"
-    assert decision["handoff_needed"] is True
-    assert decision["alert_needed"] is True
-    assert decision["send_reply_before_handoff"] is True
-    assert decision["handoff_type"] == "DEFERRED HOT LEAD"
+    assert decision["handoff_needed"] is False
+    assert decision["alert_needed"] is False
+    assert decision["send_reply_before_handoff"] is False
+    assert decision["handoff_type"] == ""
     assert decision["call_booking_status"] == "interested_no_call"
     assert decision["callback_time"] == ""
-    assert decision["reply_text"] == "No problem - message me when you're free."
+    assert decision["reply_text"] == "No problem - call or text me at 404-300-9526 when you're free."
 
     explicit = module._sms_fast_decision({}, "I'm busy; please call me tomorrow afternoon")
     assert module._sms_is_self_initiated_deferred_contact(
@@ -3795,7 +3860,7 @@ def test_sms_busy_self_initiated_followup_is_deferred_hot_lead_not_callback(monk
     assert explicit["callback_time"] == "Tomorrow Afternoon"
 
 
-def test_sms_agent_will_call_is_deferred_without_invented_callback(monkeypatch):
+def test_sms_agent_will_call_gets_number_without_invented_callback(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
@@ -3804,10 +3869,12 @@ def test_sms_agent_will_call_is_deferred_without_invented_callback(monkeypatch):
     decision = module._sms_fast_decision({}, "I will call you")
 
     assert module._sms_is_self_initiated_deferred_contact("I will call you") is True
-    assert decision["handoff_type"] == "DEFERRED HOT LEAD"
+    assert decision["handoff_type"] == ""
+    assert decision["handoff_needed"] is False
     assert decision["call_booking_status"] == "interested_no_call"
     assert decision["callback_time"] == ""
-    assert decision["reason"] == "Agent will initiate contact later; no owner reply or callback is requested now"
+    assert decision["reason"] == "Agent will initiate contact later; contact details supplied without owner takeover"
+    assert "404-300-9526" in decision["reply_text"]
 
     immediate = module._sms_fast_decision({}, "I will call you now")
     assert module._sms_is_self_initiated_deferred_contact("I will call you now") is False

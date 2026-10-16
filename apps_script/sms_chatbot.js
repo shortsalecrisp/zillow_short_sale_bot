@@ -2387,6 +2387,8 @@ function getDeliveredResponseId_(text) {
   const t = normalizeWhitespace_(String(text || ""));
   if (isSpecificFeeReplyText_(t)) return "fee_specific";
   if (t === buildSelfHandlingValueReply_() || isSelfHandlingValueReplyText_(t)) return "self_handling_value";
+  if (t === buildYoniContactCardReply_()) return "contact_card";
+  if (/404-300-9526/.test(t) && /when you(?:'re| are) ready|when you(?:'re| are) free/.test(t.toLowerCase())) return "caller_initiated_call_offer";
   if (isInitialFeeReplyText_(t)) return "fee_initial";
   if (t === buildBuyerCostConcernReply_()) return "buyer_cost_concern";
   if (t === buildBuyerFeeDisclosureReply_()) return "buyer_fee_disclosure";
@@ -2669,7 +2671,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
     company: isCompanyIdentityQuestionSignal_(t),
     website: isWebsiteReviewsRequestSignal_(t),
     contact_card: isContactCardRequestSignal_(t),
-    contact_info: isPlainContactInfoRequestSignal_(t),
+    contact_info: isPlainContactInfoRequestSignal_(t) && !isContactCardRequestSignal_(t),
     experience: isExperienceTrackRecordQuestionSignal_(t) || isExactClosedCountQuestion_(t),
     exact_count: isExactClosedCountQuestion_(t),
     timeline: isShortSaleTimelineQuestionSignal_(t),
@@ -2781,7 +2783,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
       reason: "Answered website or reviews request"
     };
     if (flags.contact_card) return {
-      matched: true, reply_text: "Sure, what's the best email for you?", lead_status: leadStatus,
+      matched: true, reply_text: buildYoniContactCardReply_(), lead_status: leadStatus,
       conversation_done: false, handoff_needed: false, needs_review: false, block_reply: false,
       reason: "Agent asked for a business card"
     };
@@ -2853,7 +2855,7 @@ function buildPriorityQuestionDecisionV3_(text, rowObj, lastOutbound, receivedAt
   if (flags.experience) answers.push(buildExperienceReplyForQuestion_(t));
   if (flags.timeline) answers.push("A complete package and offer often takes about 60-90 days for a lender decision, though timing varies.");
   if (flags.website) answers.push("My website is https://www.crispshortsales.com.");
-  if (flags.contact_card) answers.push("What's the best email for you?");
+  if (flags.contact_card) answers.push(buildYoniContactCardReply_());
   if (flags.contact_info) answers.push(buildYoniContactInfoReply_());
   if (flags.number) answers.push("Yes, this number is great - call or text anytime.");
   if (flags.credential) answers.push("I'm not an attorney; I handle the lender-side short-sale process and negotiations.");
@@ -3253,7 +3255,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
   if (isContactCardRequestSignal_(t)) {
     return {
       matched: true,
-      reply_text: "Sure, what's the best email for you?",
+      reply_text: buildYoniContactCardReply_(),
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
@@ -3345,20 +3347,36 @@ function applyFastRules_(text, rowObj, receivedAt) {
     };
   }
 
-  if (isSelfInitiatedDeferredContactSignal_(t)) {
+  if (isCallerInitiatedCallOfferSignal_(t)) {
     return {
       matched: true,
-      reply_text: "No problem - message me when you're free.",
+      reply_text: "Absolutely. You can call or text me at 404-300-9526 when you're ready.",
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
       needs_review: false,
-      alert_needed: true,
-      send_reply_before_handoff: true,
+      alert_needed: false,
       block_reply: false,
       call_booking_status: "interested_no_call",
-      handoff_type: "DEFERRED HOT LEAD",
-      reason: "Agent will initiate contact later; no owner reply or callback is requested now"
+      response_id: "caller_initiated_call_offer",
+      handoff_type: "",
+      reason: "Agent offered to initiate the call; contact details supplied without owner callback"
+    };
+  }
+
+  if (isSelfInitiatedDeferredContactSignal_(t)) {
+    return {
+      matched: true,
+      reply_text: "No problem - call or text me at 404-300-9526 when you're free.",
+      lead_status: "Y",
+      conversation_done: false,
+      handoff_needed: false,
+      needs_review: false,
+      alert_needed: false,
+      block_reply: false,
+      call_booking_status: "interested_no_call",
+      response_id: "caller_initiated_call_offer",
+      reason: "Agent will initiate contact later; contact details supplied without owner takeover"
     };
   }
 
@@ -4731,7 +4749,8 @@ function isSelfHandlingOpportunitySignal_(text) {
     /\bdoing it myself\b/,
     /\bdo it myself\b/,
     /\b(?:trying|attempting) to handle it\b/,
-    /\b(?:i am|i['’]?m|we are|we['’]?re)?\s*(?:communicating|working|dealing|talking) (?:directly )?with (?:the )?(?:bank|lender)\b/
+    /\b(?:i(?:\s+am|['’]?m)?|we(?:\s+are|['’]?re)?)\s+(?:currently\s+)?(?:communicating|working|dealing|talking) (?:directly )?with (?:the )?(?:bank|lender)\b/,
+    /\b(?:i|we)\s+(?:personally\s+)?(?:do|handle|manage)\s+(?:all\s+(?:the\s+)?|the\s+)?(?:bank|lender|short[- ]sale\s+)?negotiat(?:e|ing|ions?)\b/
   ].some(function(pattern) { return pattern.test(t); });
   const clearRejection = [
     /\bno thanks?\b/,
@@ -4884,6 +4903,10 @@ function buildYoniNameAndNumberReply_() {
 
 function buildYoniContactInfoReply_() {
   return "My name is Yoni Kutler. You can call or text me at 404-300-9526, or email me at yoni@crispshortsales.com.";
+}
+
+function buildYoniContactCardReply_() {
+  return "My name is Yoni Kutler. Call or text me at 404-300-9526, email yoni@crispshortsales.com, or visit https://www.crispshortsales.com.";
 }
 
 function lastOutboundWasYoniNameAndNumberReply_(rowObj) {
@@ -5411,6 +5434,13 @@ function isSelfInitiatedDeferredContactSignal_(text) {
   const explicitInboundCallback = /\b(?:call|text|contact)\s+me\b/.test(t) ||
     /\b(?:can|could|would|will)\s+you\s+(?:call|text|contact)\b/.test(t);
   return ((currentlyUnavailable && selfInitiatedFollowup) || selfInitiatedCall) && !explicitInboundCallback;
+}
+
+function isCallerInitiatedCallOfferSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || isConditionalCallSignal_(t)) return false;
+  return /\b(?:can|could|may|should)\s+i\s+(?:call|phone|ring|text)\s+(?:you|u)\b/.test(t) ||
+    /\b(?:is|would)\s+it\s+(?:ok|okay|alright|all right)\s+if\s+i\s+(?:call|phone|ring|text)\s+(?:you|u)\b/.test(t);
 }
 
 function normalizeCallbackTime_(value) {
@@ -8174,12 +8204,12 @@ function testApprovedLeadIntelligenceRules_() {
   const deferredContactDecision = applyFastRules_(deferredContactText, {});
   if (!isSelfInitiatedDeferredContactSignal_(deferredContactText) ||
       !deferredContactDecision.matched ||
-      deferredContactDecision.handoff_type !== "DEFERRED HOT LEAD" ||
+      deferredContactDecision.handoff_type ||
       deferredContactDecision.call_booking_status !== "interested_no_call" ||
-      !deferredContactDecision.alert_needed ||
-      !deferredContactDecision.send_reply_before_handoff ||
+      deferredContactDecision.alert_needed ||
+      deferredContactDecision.handoff_needed ||
       deferredContactDecision.callback_time ||
-      deferredContactDecision.reply_text !== "No problem - message me when you're free.") {
+      deferredContactDecision.reply_text !== "No problem - call or text me at 404-300-9526 when you're free.") {
     throw new Error("Busy self-initiated follow-up must stay deferred without callback permission: " + JSON.stringify(deferredContactDecision));
   }
   if (isSelfInitiatedDeferredContactSignal_("I'm busy; please call me tomorrow afternoon")) {
@@ -8187,7 +8217,8 @@ function testApprovedLeadIntelligenceRules_() {
   }
   const agentWillCallDecision = applyFastRules_("I will call you", {});
   if (!isSelfInitiatedDeferredContactSignal_("I will call you") ||
-      agentWillCallDecision.handoff_type !== "DEFERRED HOT LEAD" ||
+      agentWillCallDecision.handoff_type ||
+      agentWillCallDecision.handoff_needed ||
       agentWillCallDecision.call_booking_status !== "interested_no_call" ||
       agentWillCallDecision.callback_time ||
       isSelfInitiatedDeferredContactSignal_("I will call you now")) {
