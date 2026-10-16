@@ -4458,6 +4458,51 @@ def _send_initial_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _is_standard_followup_message(message: str) -> bool:
+    from bot_min import SMS_FU_TEMPLATE
+
+    def normalized(value: str) -> str:
+        value = value.translate(str.maketrans({"\u2013": "-", "\u2014": "-"}))
+        value = re.sub(r"\s*-\s*", "-", value)
+        return re.sub(r"\s+", " ", value).strip().casefold()
+
+    return normalized(message) == normalized(SMS_FU_TEMPLATE)
+
+
+def _defer_standard_followup(row_idx: int, phone: str) -> Dict[str, Any]:
+    import bot_min as scheduler
+
+    if (
+        DISABLE_APIFY_SCHEDULER
+        or not _scheduler_started
+        or _scheduler_thread is None
+        or not _scheduler_thread.is_alive()
+        or _scheduler_stop is None
+        or _scheduler_stop.is_set()
+        or not scheduler.SMS_ENABLE
+        or scheduler.SMS_TEST_MODE
+        or not scheduler.TASKER_TRANSPORT_HEALTH_URL
+        or not scheduler.SMS_CHATBOT_ALLOWED_TOKEN
+        or not TASKER_TRANSPORT_HEALTH_URL
+        or not SMS_CHATBOT_ALLOWED_TOKEN
+    ):
+        raise HTTPException(status_code=503, detail="scheduled_followup_unavailable")
+
+    # This is not a new work item. Only the normal hourly pass may evaluate
+    # timing, current-episode eligibility and the frozen video/text variant.
+    logger.info("INTERNAL_STANDARD_FOLLOWUP_DEFERRED row=%s", row_idx)
+    return {
+        "status": "deferred_to_scheduled_video_followup",
+        "row": row_idx,
+        "phone": phone,
+        "queued": False,
+        "sent": False,
+        "outbound_persisted": False,
+        "eligibility_evaluated": False,
+        "reason": "Standard reminders remain under the normal scheduled follow-up policy; this request queued nothing.",
+    }
+
+
 def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     phone = fmt_phone(str(payload.get("phone") or ""))
     if not phone:
@@ -4469,6 +4514,7 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="empty_message")
     if len(message) > 1600:
         raise HTTPException(status_code=400, detail="message_too_long")
+    standard_reminder = _is_standard_followup_message(message)
 
     row_idx = None
     if payload.get("row") not in (None, ""):
@@ -4479,6 +4525,9 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         if row_idx < 2:
             raise HTTPException(status_code=400, detail="invalid_row")
 
+    if standard_reminder and row_idx is None:
+        raise HTTPException(status_code=400, detail="standard_followup_requires_sheet_row")
+
     if row_idx is not None:
         ws = _get_leads_ws()
         row = _retry_gspread_call("read follow-up leads row", lambda: ws.row_values(row_idx))
@@ -4487,6 +4536,8 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             raise HTTPException(status_code=409, detail="row_phone_missing")
         if _digits_only(current_phone) != digits:
             raise HTTPException(status_code=409, detail="row_phone_mismatch")
+        if standard_reminder:
+            return _defer_standard_followup(row_idx, digits)
         stable_id = str(
             payload.get("stable_id")
             or payload.get("zpid")
@@ -9000,7 +9051,7 @@ async def internal_process_initial_sms_queue(request: Request):
 
 @app.post("/internal/send-followup-sms")
 async def internal_send_followup_sms(request: Request):
-    """Send a custom follow-up SMS from the production bot using Render-side credentials."""
+    """Defer standard reminders; queue genuinely custom owner follow-ups."""
     _auth_internal_request(request)
     try:
         payload = await request.json()
@@ -9009,7 +9060,10 @@ async def internal_send_followup_sms(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="invalid_payload")
 
-    return await asyncio.to_thread(_send_followup_sms_from_payload, payload)
+    result = await asyncio.to_thread(_send_followup_sms_from_payload, payload)
+    if result.get("status") == "deferred_to_scheduled_video_followup":
+        return Response(content=json.dumps(result), status_code=202, media_type="application/json")
+    return result
 
 
 @app.post("/internal/followup-sms-status")

@@ -321,6 +321,7 @@ def _import_webhook_server(monkeypatch, *, sender_result):
     fake_bot_min.WORK_END = 20
     fake_bot_min.SCHEDULER_TZ = ZoneInfo("America/New_York")
     fake_bot_min.SMS_TEMPLATE = _source_sms_template("SMS_TEMPLATE")
+    fake_bot_min.SMS_FU_TEMPLATE = _source_sms_template("SMS_FU_TEMPLATE")
     fake_bot_min.append_seen_zpids = lambda *args, **kwargs: None
     fake_bot_min.dedupe_rows_by_zpid = lambda rows: rows
     fake_bot_min.fetch_contact_page = lambda *args, **kwargs: ("", "")
