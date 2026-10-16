@@ -14,6 +14,14 @@ test("includes only exact matching final versions after the uniform boundary", (
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });
+test("r4 restarts the clean comparison and excludes old r3 and mixed-window receipts", () => {
+  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261016_r4");
+  assert.equal(cohort.startedAt, "2026-10-16T12:57:55.149Z");
+  for (const versionId of ["agtvrsn_7501m4ppqfkhfs28xarn71t6hw23", "agtvrsn_7501m4ppqmhef29ttr75z3dbm6cq"]) {
+    assert.equal(uniformComparisonArm({ ...eligible(), versionId }), null);
+  }
+  assert.equal(uniformComparisonArm({ ...eligible(), startTimeUnixSecs: Date.parse("2026-10-15T13:22:14Z") / 1000 }), null);
+});
 test("preserves the historical start while exposing a new winner gate", () => {
   const status = getElevenLabsRuntimeExperimentStatus();
   assert.equal(status.startedAt, "2026-09-28T22:30:50.974Z");

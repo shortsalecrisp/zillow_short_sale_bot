@@ -21,6 +21,8 @@ async function setup(t) {
     expectedVersion: current.version_id, expectedPromptHash: sha256(beforePrompt), promptPath, receiptDir: path.join(dir, 'receipt') } };
 }
 const response = value => ({ ok: true, status: 200, json: async () => structuredClone(value) });
+const respond = (current, url) => response(url.endsWith('/branches')
+  ? { results: [{ id: current.branch_id, current_live_percentage: 100, is_archived: false }] } : current);
 
 test('defaults to a single read with no provider write', async t => {
   const { current, options } = await setup(t); const calls = [];
@@ -39,9 +41,9 @@ test('only approved prompt leaf changes and effective readback is required', asy
       current.conversation_config.agent.prompt.prompt = body.conversation_config.agent.prompt.prompt;
       current.version_id = 'version_after';
     }
-    return response(current);
+    return respond(current, url);
   });
-  assert.deepEqual(calls, ['GET', 'GET', 'PATCH', 'GET']);
+  assert.deepEqual(calls, ['GET', 'GET', 'GET', 'PATCH', 'GET']);
   assert.equal(result.status, 'live_prompt_verified_audio_behavior_not_tested');
   assert.deepEqual(result.protected_before, result.protected_after);
 });
@@ -57,7 +59,7 @@ test('an exact experiment branch can receive the same prompt-only release', asyn
       current.conversation_config.agent.prompt.prompt = body.conversation_config.agent.prompt.prompt;
       current.version_id = 'experiment_version_after';
     }
-    return response(current);
+    return respond(current, url);
   });
   assert.equal(result.branch_id, 'experiment');
   assert.equal(result.status, 'live_prompt_verified_audio_behavior_not_tested');
@@ -89,7 +91,7 @@ test('provider side effects cannot be reported as a verified prompt-only release
       current.conversation_config.agent.prompt.prompt = JSON.parse(init.body).conversation_config.agent.prompt.prompt;
       current.conversation_config.turn.initial_wait_time = 0;
     }
-    return response(current);
+    return respond(current, url);
   }), /readback differs/);
   const receipt = JSON.parse(await readFile(path.join(options.receiptDir, 'receipt.json'), 'utf8'));
   assert.equal(receipt.status, 'needs_readback_review_do_not_repeat_patch');
@@ -99,11 +101,23 @@ test('ambiguous patch response is not retried or claimed complete', async t => {
   const { current, options } = await setup(t); let patches = 0;
   await assert.rejects(syncPromptOnly({ ...options, apply: true }, async (url, init) => {
     if (init.method === 'PATCH') { patches++; throw new Error('timeout'); }
-    return response(current);
+    return respond(current, url);
   }), /timeout/);
   assert.equal(patches, 1);
   const receipt = JSON.parse(await readFile(path.join(options.receiptDir, 'receipt.json'), 'utf8'));
   assert.equal(receipt.status, 'needs_readback_review_do_not_repeat_patch');
+});
+
+test('single-arm publishing is blocked while multiple branches receive live traffic', async t => {
+  const { current, options } = await setup(t); let patches = 0;
+  await assert.rejects(syncPromptOnly({ ...options, apply: true }, async (url, init) => {
+    if (init.method === 'PATCH') patches++;
+    if (url.endsWith('/branches')) return response({ results: [
+      { id: 'main', current_live_percentage: 50 }, { id: 'experiment', current_live_percentage: 50 },
+    ] });
+    return response(current);
+  }), /single-arm prompt update blocked/);
+  assert.equal(patches, 0);
 });
 
 test('missing or duplicate prompt markers are rejected', () => {

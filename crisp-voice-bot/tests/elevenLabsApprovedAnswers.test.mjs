@@ -50,7 +50,7 @@ test('explicit no-contact wording has priority over earlier callback or transfer
 });
 test('fee answers preserve the payer, closing contingency and unknown economics', () => {
   for (const text of [
-    "There is no charge to you or the seller. The buyer typically pays a flat fee only if the deal closes.",
+    "Under our usual arrangement, there is no fee to you or the seller; the buyer pays a flat fee at closing. Yoni can confirm the terms for this file.",
     "The buyer typically pays the flat fee, only if the deal closes.",
     "I don't have the applicable fee amount for your file. Yoni can explain the terms before you decide.",
     "It can affect the buyer's total budget. Yoni can explain the fee and offer structure before you decide.",
@@ -79,8 +79,8 @@ test('responsibility, experience, proof, buyer sourcing, seller and location ans
 test('general scope and timing keep every approved material fact without a file guarantee', () => {
   for (const fact of ['paperwork', 'bank calls', 'title coordination', 'buyer and seller document collection',
     'liens', 'mortgages', 'backend approval process']) assert.ok(library.includes(fact), fact);
-  assert.match(library, /60 to 90 days after a full package is submitted/);
-  assert.match(library, /this is not a guarantee for their file/);
+  assert.match(library, /Timing depends on the lender and the file\. Yoni can assess where this one stands/);
+  assert.match(library, /Do not offer a 60-to-90-day estimate as though this file has been assessed/);
   assert.match(library, /not guarantees or an exact division of duties for a specific file/);
   assert.match(library, /Do not invent a fee amount, guaranteed approval or closing/);
   assert.doesNotMatch(library, /approval process end to end/);

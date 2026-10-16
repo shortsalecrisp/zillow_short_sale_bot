@@ -1,6 +1,23 @@
 # Uniform Conversion Comparison
 
-Current revision is r3, verified at 2026-10-12T00:03:23.606Z (8:03:23 PM New York on October 11). Earlier releases below are historical and must not be pooled with r3. Both arms remain identical except for TTS model.
+Current revision is r4, verified at 2026-10-16T12:57:55.149Z (8:57:55 AM New York on October 16). Earlier releases below are historical and must not be pooled with r4. Both arms are verified identical except for TTS model.
+
+## Approved Revision 4
+
+Yoni approved repairing the prompt mismatch and starting a clean comparison. The October 14 deferred-contact refinement had reached Flash only. The canonical updated prompt now also runs on v4: "I'll let you know when I'm ready" and "I'll let you know as soon as possible" mean caller-initiated contact, not owner callback consent. After recording that preference, do not restart the listing check, needs question, pitch or qualification. Existing consent and guarded-ending rules remain.
+
+The coordinated prompt-only publisher verified both arms before and after applying the stale v4 prompt. Flash already matched the approved canonical prompt and was not rewritten. Voice settings, effective opening/recovery workflow, tools, LLM, turn model, platform settings, phone routing and native 50/50 traffic were preserved. No real call or metered session was initiated.
+
+- Cohort: `maya_uniform_lead_conversion_20261016_r4`.
+- Start: `2026-10-16T12:57:55.149Z`, after the final provider uniformity readback.
+- Control: branch `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`, version `agtvrsn_4601m4yhj7xsejw8wcm77xkcn08x`, Flash v2.
+- Test: branch `agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv`, version `agtvrsn_3401m52cmpgcecsbsfd89s046bsp`, v4 Turbo.
+- Shared writable-body hash, excluding only TTS model and expanded GET-only root tool schemas: `7f8f349d8b4e16f3aa5263933707d2fe1f2fd464de88cfa9acdd37611d38cab4`.
+- Workflow hash: `f2d992bbd8c2b0d082910bf13490ee8305a3080eee32a38b204aeef9f98a785b`.
+
+Require exact final branch AND version, genuine non-test positive duration and provider start after this boundary. The 100-genuine-call preferred review and minimum 15 verified true-live conversations per arm restart for r4; at 200 calls without enough live conversations, report a reachability limitation, not a winner. Preserve the last verified uniform r3 checkpoint of 66 calls (Flash 40, v4 26) as historical evidence. Calls during the later unequal-prompt interval do not count toward either clean comparison.
+
+Future prompt releases must use `src/scripts/syncElevenLabsComparisonPrompts.mjs` with reviewed versions/hashes, a saved dry-run plan and final two-arm verification. The single-arm prompt publisher now rejects updates when multiple branches carry live traffic. Never retry an ambiguous write without reconciling the live version and saved receipt. Provider updates are sequential, so no uniformity or new comparison boundary is claimed until both final readbacks and the unchanged 50/50 allocation are verified. The review automation remains read-only.
 
 ## Approved Revision 3
 

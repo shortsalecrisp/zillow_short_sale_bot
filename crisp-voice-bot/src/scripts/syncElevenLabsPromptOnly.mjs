@@ -39,7 +39,7 @@ export function assertExpected(agent, { agentId, branchId, expectedVersion, expe
 }
 
 export async function syncPromptOnly({ apiKey, agentId, branchId, expectedVersion, expectedPromptHash,
-  promptPath, receiptDir, apply = false }, fetcher = fetch) {
+  promptPath, receiptDir, apply = false, comparisonManaged = false }, fetcher = fetch) {
   if (!apiKey || !/^agent_[a-z0-9]+$/.test(agentId ?? '') || !expectedVersion
     || !/^[a-f0-9]{64}$/.test(expectedPromptHash ?? '') || !receiptDir) {
     throw new Error('Explicit agent, version, prompt hash, credential and receipt directory required');
@@ -76,6 +76,13 @@ export async function syncPromptOnly({ apiKey, agentId, branchId, expectedVersio
   const fresh = await call(readEndpoint);
   assertExpected(fresh, { agentId, branchId, expectedVersion, expectedPromptHash });
   if (JSON.stringify(protectedHashes(fresh)) !== JSON.stringify(protectedBefore)) throw new Error('Protected configuration changed');
+  if (!comparisonManaged) {
+    const branches = await call(`${endpoint}/branches`);
+    if (!Array.isArray(branches.results)) throw new Error('Cannot verify live branch allocation');
+    if (branches.results.filter(branch => !branch.is_archived && branch.current_live_percentage > 0).length > 1) {
+      throw new Error('Active comparison requires syncElevenLabsComparisonPrompts; single-arm prompt update blocked');
+    }
+  }
   receipt.status = 'patch_attempted_readback_required';
   await save();
   try {
