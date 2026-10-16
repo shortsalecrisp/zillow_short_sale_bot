@@ -137,6 +137,15 @@ export type VoiceScheduledNoStartMarker = {
   candidateDueAt: string;
 };
 
+export type VoiceScheduledNoStartRecoveryPlan = {
+  rowNumber: number;
+  callAttemptNumber: 1 | 2;
+  originalScheduledFor: Date;
+  replacementAt: Date;
+  agentTimeZone: string;
+  marker: VoiceScheduledNoStartMarker;
+};
+
 export function formatVoiceScheduledNoStartMarker(marker: VoiceScheduledNoStartMarker): string {
   return `${SCHEDULED_NO_START_MARKER} ${JSON.stringify(marker)}`;
 }
@@ -159,6 +168,55 @@ export function parseVoiceScheduledNoStartMarker(value: unknown): VoiceScheduled
     } catch (_) {}
   }
   return undefined;
+}
+
+export function getScheduledVoiceNoStartRecoveryPlan(
+  rowNumber: number,
+  rowValues: unknown[],
+  now: Date,
+): VoiceScheduledNoStartRecoveryPlan | undefined {
+  const leadStatus = normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]).toUpperCase();
+  if (leadStatus && leadStatus !== "N") return undefined;
+  if (normalizeMarker(rowValues[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1]) !== "x") return undefined;
+  if (normalizeMarker(rowValues[VOICE_BOT_COL_CALL_ELIGIBLE - 1]) !== "yes") return undefined;
+
+  const bucket = normalizeString(rowValues[VOICE_BOT_COL_CALL_TIME_BUCKET - 1]);
+  const callAttemptNumber = bucket === "voice_call_1_due" ? 1 : bucket === "voice_call_2_due" ? 2 : undefined;
+  if (!callAttemptNumber) return undefined;
+
+  const scheduledFor = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
+  if (!scheduledFor || now.getTime() - scheduledFor.getTime() < SCHEDULED_NO_START_OVERDUE_MS) return undefined;
+  if (config.voiceQueue.scheduledNoStartMonitorStartedAt.getTime() - scheduledFor.getTime() >= SCHEDULED_NO_START_OVERDUE_MS) {
+    return undefined;
+  }
+
+  const sentColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
+  const resultColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
+  if (parseVoiceBotDate(rowValues[sentColumn - 1]) || normalizeString(rowValues[resultColumn - 1])) return undefined;
+  const hasHandoff = [VOICE_BOT_COL_CALLBACK_REQUESTED, VOICE_BOT_COL_CALLBACK_TIME,
+    VOICE_BOT_COL_LIVE_TRANSFER_REQUESTED, VOICE_BOT_COL_LIVE_TRANSFER_COMPLETED]
+    .some((column) => {
+      const value = normalizeMarker(rowValues[column - 1]);
+      return Boolean(value) && value !== "no" && value !== "false";
+    });
+  if (hasHandoff) return undefined;
+
+  const agentTimeZone = getVoiceBotAgentTimeZone(rowValues);
+  const normalizedPhone = normalizePhoneToE164(rowValues[VOICE_BOT_COL_PHONE - 1]);
+  if (!agentTimeZone || !normalizedPhone) return undefined;
+  const replacementAt = getNextVoiceBotFirstAttemptWindowStart(
+    new Date(now.getTime() + 24 * 60 * 60_000),
+    agentTimeZone,
+    normalizedPhone,
+  );
+  const existingMarker = parseVoiceScheduledNoStartMarker(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1]);
+  const marker = existingMarker ?? {
+    rowNumber,
+    callAttemptNumber,
+    detectedAt: now.toISOString(),
+    candidateDueAt: scheduledFor.toISOString(),
+  };
+  return { rowNumber, callAttemptNumber, originalScheduledFor: scheduledFor, replacementAt, agentTimeZone, marker };
 }
 
 export type VoiceCallStartUncertainMarker = {
@@ -665,6 +723,43 @@ export async function verifyVoiceSafeReplacementReadback(
   return actual;
 }
 
+export async function reconcileScheduledVoiceNoStarts(
+  sheets: sheets_v4.Sheets,
+  rows: Array<{ rowNumber: number; values: unknown[] }>,
+  now: Date,
+): Promise<number> {
+  let recovered = 0;
+  for (const row of rows) {
+    const plan = getScheduledVoiceNoStartRecoveryPlan(row.rowNumber, row.values, now);
+    if (!plan) continue;
+    const markerLine = formatVoiceScheduledNoStartMarker(plan.marker);
+    const notes = appendVoiceNotesValue(
+      row.values[VOICE_BOT_COL_VOICE_NOTES - 1],
+      `${markerLine}\nScheduled attempt had no start or provider receipt; safely carried forward from ${plan.originalScheduledFor.toISOString()} to ${plan.replacementAt.toISOString()}.`,
+    );
+    await writeCells(
+      sheets,
+      row.rowNumber,
+      buildVoiceSafeReplacementWrites(plan.callAttemptNumber, plan.replacementAt, notes),
+    );
+    await verifyVoiceSafeReplacementReadback(
+      sheets,
+      row.rowNumber,
+      plan.callAttemptNumber,
+      plan.replacementAt,
+    );
+    recovered += 1;
+    logger.warn("Scheduled voice call had no start receipt; replacement safely scheduled", {
+      rowNumber: row.rowNumber,
+      callAttemptNumber: plan.callAttemptNumber,
+      originalScheduledFor: plan.originalScheduledFor.toISOString(),
+      replacementAt: plan.replacementAt.toISOString(),
+      agentTimeZone: plan.agentTimeZone,
+    });
+  }
+  return recovered;
+}
+
 async function markVoiceBotAttemptStarted(
   sheets: sheets_v4.Sheets,
   rowValues: unknown[],
@@ -930,6 +1025,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   if (!options.dryRun) {
     await ensureProviderStartFailureAlert(now);
     await reconcileUncertainVoiceCallStarts(sheets, rows, now);
+    await reconcileScheduledVoiceNoStarts(sheets, rows, now);
   }
 
   if (outboundPause || providerCircuit.open) {

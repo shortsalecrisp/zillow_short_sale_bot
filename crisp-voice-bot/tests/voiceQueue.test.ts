@@ -182,6 +182,44 @@ test("scheduled no-start marker is durable and parseable", async () => {
   assert.deepEqual(parseVoiceScheduledNoStartMarker(`older\n\n---\n\n${formatted}`), marker);
 });
 
+test("an overdue scheduled no-start gets one future safe-replacement plan, including status N", async () => {
+  const { getScheduledVoiceNoStartRecoveryPlan } = await import("../src/lib/voiceQueue");
+  const now = new Date("2026-10-16T12:00:00.000Z");
+  const values = scheduledRow("2026-10-14T14:00:00.000Z", {
+    scheduledFor: "2026-10-15T13:15:00.000Z",
+  });
+  values[10] = "N";
+  values[29] = "yes";
+  values[30] = "voice_call_1_due";
+
+  const plan = getScheduledVoiceNoStartRecoveryPlan(6188, values, now);
+  assert.equal(plan?.rowNumber, 6188);
+  assert.equal(plan?.callAttemptNumber, 1);
+  assert.equal(plan?.originalScheduledFor.toISOString(), "2026-10-15T13:15:00.000Z");
+  assert.ok(plan && plan.replacementAt.getTime() - now.getTime() >= 24 * 60 * 60_000);
+  assert.equal(plan?.marker.candidateDueAt, "2026-10-15T13:15:00.000Z");
+
+  values[32] = "2026-10-15T13:16:00.000Z";
+  assert.equal(getScheduledVoiceNoStartRecoveryPlan(6188, values, now), undefined);
+});
+
+test("scheduled no-start recovery ignores current schedules, handoffs, and historical rows", async () => {
+  const { getScheduledVoiceNoStartRecoveryPlan } = await import("../src/lib/voiceQueue");
+  const now = new Date("2026-10-16T12:00:00.000Z");
+  const values = scheduledRow("2026-10-14T14:00:00.000Z", {
+    scheduledFor: "2026-10-15T13:15:00.000Z",
+  });
+  values[29] = "yes";
+  values[30] = "voice_call_1_due";
+  values[35] = "yes";
+  assert.equal(getScheduledVoiceNoStartRecoveryPlan(6188, values, now), undefined);
+  values[35] = "";
+  values[31] = "2026-10-16T13:15:00.000Z";
+  assert.equal(getScheduledVoiceNoStartRecoveryPlan(6188, values, now), undefined);
+  values[31] = "2026-09-25T13:15:00.000Z";
+  assert.equal(getScheduledVoiceNoStartRecoveryPlan(6188, values, now), undefined);
+});
+
 test("a stale first-attempt timestamp with no result receives exactly one bounded second-attempt candidate", async () => {
   const { getVoiceBotCallCandidateFromRowValues, isStaleVoiceBotStartWithoutReceipt } = await import("../src/lib/voiceQueue");
   const values = scheduledRow("", {

@@ -85,7 +85,7 @@ test("scoped call ending is distinct from protected bare STOP and list removal",
     assert.equal(looksLikeCallEndingRequest(value), true, value);
     assert.equal(looksLikeDoNotCall(value), false, value);
   }
-  for (const value of ["STOP", "Please stop.", "Okay, stop.", "Stop. Goodbye.", "Remove me from your list.", "No more calls.", "Don't call again."]) {
+  for (const value of ["STOP", "Please stop.", "Okay, stop.", "Stop. Goodbye.", "Remove me from your list.", "Please take me off your caller list.", "No more calls.", "Don't call again."]) {
     assert.equal(looksLikeDoNotCall(value), true, value);
   }
   for (const value of ["Do not stop the call.", "How do you end this call?", "The call stopped.", "Stop charging that fee."]) {
