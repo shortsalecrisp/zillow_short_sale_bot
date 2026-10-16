@@ -59,6 +59,16 @@ CONFIG_SHA256 = _digest_json({"policy": POLICY_VERSION, "model": MODEL_MANIFEST,
     "cpu_threads": 1, "num_workers": 1, "minimum_logprob": -1.0, "maximum_no_speech": 0.6,
     "preprocessing": ASR_PREPROCESSING, "matching_rule": "whole-greeting-pinned-spelling-groups-v1",
     "equivalent_name_groups": SPELLING_EQUIVALENCE_GROUPS})
+LEGACY_VERIFICATION_METHOD = "direct-final-asr-v1"
+PLANNED_AUDIO_VERIFICATION_METHOD = "planned-aac-lineage-v1"
+PLANNED_AUDIO_VERIFICATION_CONFIG = {
+    "method": PLANNED_AUDIO_VERIFICATION_METHOD,
+    "lineage_version": "planned-aac-same-take-v1",
+    "extraction_version": "ffmpeg-pcm-s16le-mono-16k-v1",
+    "speech_config_sha256": CONFIG_SHA256,
+    "binding": "immutable-planned-aac-full-pcm-and-greeting-v1",
+}
+PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256 = _digest_json(PLANNED_AUDIO_VERIFICATION_CONFIG)
 MAX_AUDIO_BYTES = 1200000
 MAX_MEDIA_BYTES = 25 * 1024 * 1024
 MAX_OUTPUT_BYTES = 16384
@@ -71,10 +81,60 @@ _CODES = {"speech_guard_" + code for code in (
 
 
 class SpeechGuardError(ValueError):
-    def __init__(self, code):
+    def __init__(self, code, *, diagnostics=None):
         self.code = code if code in _CODES else "speech_guard_execution_failed"
         self.uncertain = False
+        self.diagnostics = _safe_recognition_diagnostics(diagnostics)
         super().__init__(self.code)
+
+
+def is_transient_speech_failure(error):
+    return isinstance(error, SpeechGuardError) and error.code in {
+        "speech_guard_busy", "speech_guard_timeout", "speech_guard_unavailable",
+        "speech_guard_execution_failed",
+    }
+
+
+def _safe_recognition_diagnostics(value):
+    if not isinstance(value, dict):
+        return {}
+    identity = {"policy_version": POLICY_VERSION, "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
+        "config_sha256": CONFIG_SHA256}
+    if any(value.get(key) != expected for key, expected in identity.items()):
+        return {}
+    result = {"accepted": False, **identity}
+    for key in ("source_audio_sha256", "media_sha256"):
+        if re.fullmatch(r"[a-f0-9]{64}", str(value.get(key, ""))):
+            result[key] = value[key]
+    # Retain only short recognized speech, never child logs or arbitrary errors.
+    text = value.get("observed_transcript")
+    if isinstance(text, str) and len(text) <= 128:
+        text = " ".join(unicodedata.normalize("NFKC", text).translate(str.maketrans({
+            "\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u201c": '"', "\u201d": '"',
+        })).split())
+        if all(char.isalpha() or char in " ,.!?'\"-" for char in text):
+            result["observed_transcript"] = text
+            result["normalized_transcript"] = _normalized_phrase(text)
+    segments = value.get("confidence")
+    if isinstance(segments, list) and len(segments) <= 8:
+        confidence = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            clean = {key: segment[key] for key, low, high in (
+                ("avg_logprob", -100, 0), ("no_speech_prob", 0, 1))
+                if type(segment.get(key)) in {int, float}
+                and math.isfinite(segment[key]) and low <= segment[key] <= high}
+            if clean:
+                confidence.append(clean)
+        result["confidence"] = confidence
+    return result
+
+
+def safe_speech_failure_diagnostics(error):
+    return (_safe_recognition_diagnostics(error.diagnostics)
+            if isinstance(error, SpeechGuardError) else {})
 
 
 def _name(value):
@@ -209,17 +269,23 @@ def _run_child(content, python, model_dir, *, check=False):
         return result
 
 
-def preflight_speech_guard():
+def _speech_paths():
     root = Path(__file__).resolve().parent / ".video-speech-guard"
     python = Path(os.getenv("VIDEO_FOLLOWUP_SPEECH_PYTHON", str(root / "venv/bin/python")))
     model_dir = Path(os.getenv("VIDEO_FOLLOWUP_SPEECH_MODEL_DIR", str(root / "model")))
     if not python.is_absolute() or not model_dir.is_absolute() or not python.is_file() or not os.access(python, os.X_OK):
         raise SpeechGuardError("speech_guard_unavailable")
+    return {"python": str(python), "model_dir": str(model_dir), "model_manifest_sha256": MODEL_MANIFEST_SHA256}
+
+
+def preflight_speech_guard():
+    paths = _speech_paths()
+    python, model_dir = paths["python"], paths["model_dir"]
     verify_model_assets(model_dir)
     result = _run_child(b"", python, model_dir, check=True)
     if result.get("ready") is not True:
         raise SpeechGuardError("speech_guard_unavailable")
-    return {"python": str(python), "model_dir": str(model_dir), "model_manifest_sha256": MODEL_MANIFEST_SHA256}
+    return paths
 
 
 def _recognize(content, python, model_dir):
@@ -243,15 +309,21 @@ def _confidence_ok(segments):
 def verify_greeting_words(audio_bytes, first_name):
     name = _name(first_name)
     _audio_duration(audio_bytes)
-    paths = preflight_speech_guard()
+    # The recognition child validates the same assets and dependencies before
+    # decoding. Do not launch a second model-loading child for each audio clip.
+    paths = _speech_paths()
     result = _recognize(audio_bytes, paths["python"], paths["model_dir"])
     if result.get("model_revision") != MODEL_REVISION or result.get("config_sha256") != CONFIG_SHA256:
         raise SpeechGuardError("speech_guard_output_invalid")
     phrase = _normalized_phrase(result.get("transcript"))
+    rejected = {"policy_version": POLICY_VERSION, "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
+        "config_sha256": CONFIG_SHA256, "source_audio_sha256": hashlib.sha256(audio_bytes).hexdigest(),
+        "observed_transcript": result.get("transcript"), "confidence": result.get("segments")}
     if phrase != "hey " + name.casefold() and not _spelling_equivalent_phrase(name, phrase):
-        raise SpeechGuardError("speech_guard_name_mismatch")
+        raise SpeechGuardError("speech_guard_name_mismatch", diagnostics=rejected)
     if not _confidence_ok(result.get("segments")):
-        raise SpeechGuardError("speech_guard_low_confidence")
+        raise SpeechGuardError("speech_guard_low_confidence", diagnostics=rejected)
     return {"accepted": True, "policy_version": POLICY_VERSION, "model_id": MODEL_ID,
         "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
         "config_sha256": CONFIG_SHA256, "source_audio_sha256": hashlib.sha256(audio_bytes).hexdigest(),
@@ -286,7 +358,40 @@ def validate_speech_proof(proof, *, first_name, audio_sha256=None, media_sha256=
         if (not re.fullmatch(r"[a-f0-9]{64}", str(media_sha256)) or proof.get("media_sha256") != media_sha256
                 or type(seconds) not in {int, float} or not math.isfinite(seconds) or not 0.5 <= seconds <= 2.5):
             return False
+    lineage_fields = {"verification_method", "verification_config_sha256", "audio_lineage"}
+    if any(key in proof for key in lineage_fields):
+        if not lineage_fields.issubset(proof) or not _validate_audio_lineage_proof(proof, name):
+            return False
     return True
+
+
+def _validate_audio_lineage_proof(proof, name):
+    if (proof.get("verification_method") != PLANNED_AUDIO_VERIFICATION_METHOD
+            or proof.get("verification_config_sha256") != PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256
+            or proof.get("policy_version") != POLICY_VERSION):
+        return False
+    lineage = proof.get("audio_lineage")
+    if not isinstance(lineage, dict) or lineage.get("accepted") is not True:
+        return False
+    expected = {"lineage_version": PLANNED_AUDIO_VERIFICATION_CONFIG["lineage_version"],
+        "first_name": name, "final_media_sha256": proof.get("media_sha256"),
+        "checked_audio_sha256": proof.get("source_audio_sha256"),
+        "greeting_seconds": proof.get("greeting_seconds")}
+    if any(lineage.get(key) != value for key, value in expected.items()):
+        return False
+    for key in ("manifest_sha256", "planned_audio_sha256", "final_media_sha256", "checked_audio_sha256",
+                "full_pcm_sha256", "greeting_pcm_sha256", "aac_track_sha256", "speech_proof_sha256"):
+        if not re.fullmatch(r"[a-f0-9]{64}", str(lineage.get(key, ""))):
+            return False
+    seconds = proof.get("greeting_seconds")
+    if type(seconds) not in {int, float} or not math.isfinite(seconds) or not 0.5 <= seconds <= 2.5:
+        return False
+    original = {key: value for key, value in proof.items() if key not in {
+        "verification_method", "verification_config_sha256", "audio_lineage", "media_sha256", "greeting_seconds"}}
+    try:
+        return _digest_json(original) == lineage["speech_proof_sha256"]
+    except (ValueError, TypeError):
+        return False
 
 
 def _extract_video_greeting(video_bytes, greeting_seconds):
@@ -318,7 +423,13 @@ def verify_video_greeting_words(video_bytes, first_name, greeting_seconds):
             or not 0.5 <= greeting_seconds <= 2.5):
         raise SpeechGuardError("speech_guard_media_invalid")
     audio = _extract_video_greeting(video_bytes, greeting_seconds)
-    proof = verify_greeting_words(audio, first_name)
+    try:
+        proof = verify_greeting_words(audio, first_name)
+    except SpeechGuardError as error:
+        details = safe_speech_failure_diagnostics(error)
+        if details:
+            details["media_sha256"] = hashlib.sha256(video_bytes).hexdigest()
+        raise SpeechGuardError(error.code, diagnostics=details) from None
     return {**proof, "media_sha256": hashlib.sha256(video_bytes).hexdigest(), "greeting_seconds": greeting_seconds}
 
 

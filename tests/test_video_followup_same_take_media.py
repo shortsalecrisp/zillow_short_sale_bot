@@ -274,6 +274,21 @@ def test_full_prepare_and_compose_with_two_name_lengths(tmp_path, monkeypatch):
         assert f"Hey {name},".encode() in final["captions_bytes"]
         assert final["media_bytes"] and final["poster_bytes"]
         durations.append(final["duration_seconds"])
+        import video_followup_audio_lineage as lineage
+        plan = lineage.prepare_audio_plan(master, prepared["greeting_audio_bytes"], prepared["metadata"],
+                                          first_name=name, ffmpeg=ffmpeg)
+        planned_final = media.compose(master, provider_bytes, prepared["greeting_audio_bytes"],
+                                      prepared["metadata"], first_name=name, ffmpeg=ffmpeg,
+                                      planned_audio_bytes=plan["audio_bytes"])
+        assert lineage.inspect_aac_track(planned_final["media_bytes"], video_tracks=1) == plan["manifest"]["aac_track"]
+        checked, _ = lineage._decode_audio(planned_final["media_bytes"], ffmpeg=ffmpeg,
+                                           greeting_seconds=prepared["metadata"]["greeting_seconds"])
+        assert checked == plan["greeting_audio_bytes"]
+        for key in ("original_body_frames", "nonmouth_pixels_exact_before_encoding", "body_frames_exact_before_encoding",
+                    "provider_context_tail_frames_missing", "background_mae_max"):
+            assert planned_final["qa"][key] == final["qa"][key]
+        assert planned_final["captions_bytes"] == final["captions_bytes"]
+        assert planned_final["poster_bytes"]
         if name == "Sue":
             for remaining_frames in (prepared["metadata"]["context_frames"] - 4,
                                      prepared["metadata"]["greeting_frames"] + 23,

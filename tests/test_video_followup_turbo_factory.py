@@ -23,6 +23,7 @@ def configured(monkeypatch):
     monkeypatch.setenv("SMS_CHATBOT_ALLOWED_TOKEN", "test-token")
     monkeypatch.delenv("HEYGEN_API_KEY", raising=False)
     monkeypatch.delenv("VIDEO_FOLLOWUP_GENERATION_PROFILE", raising=False)
+    monkeypatch.delenv("VIDEO_FOLLOWUP_AUDIO_VERIFICATION_METHOD", raising=False)
     store = object()
     service = Mock(return_value=SimpleNamespace(store=store))
     monkeypatch.setattr(bootstrap, "get_service", service)
@@ -47,6 +48,39 @@ def test_factory_selects_explicit_clean_profile_without_changing_other_configura
     bootstrap.create_worker()
     constructor.assert_called_once_with("fal-test-key", store, "assets/master/video", tts_key="tts-test-key",
                                         generator_profile="clean_body_v1")
+
+
+def test_factory_explicit_legacy_verification_preserves_constructor(configured, monkeypatch):
+    monkeypatch.setenv("VIDEO_FOLLOWUP_AUDIO_VERIFICATION_METHOD", provider.LEGACY_VERIFICATION_METHOD)
+    bootstrap.create_worker()
+    configured[2].assert_called_once_with("fal-test-key", configured[4], "assets/master/video",
+                                          tts_key="tts-test-key", generator_profile="legacy_v1")
+
+
+def test_factory_planned_verification_is_explicit_and_keeps_generation_profile(configured, monkeypatch):
+    monkeypatch.setenv("VIDEO_FOLLOWUP_GENERATION_PROFILE", "clean_body_v1")
+    monkeypatch.setenv("VIDEO_FOLLOWUP_AUDIO_VERIFICATION_METHOD", provider.PLANNED_AUDIO_VERIFICATION_METHOD)
+    bootstrap.create_worker()
+    configured[2].assert_called_once_with("fal-test-key", configured[4], "assets/master/video",
+        tts_key="tts-test-key", generator_profile="clean_body_v1",
+        verification_method=provider.PLANNED_AUDIO_VERIFICATION_METHOD)
+
+
+@pytest.mark.parametrize("method", [provider.LEGACY_VERIFICATION_METHOD, provider.PLANNED_AUDIO_VERIFICATION_METHOD])
+def test_factory_verification_uses_real_constructor(configured, monkeypatch, method):
+    monkeypatch.setenv("VIDEO_FOLLOWUP_AUDIO_VERIFICATION_METHOD", method)
+    monkeypatch.setattr(provider, "SameTakeVideoProvider", REAL_PROVIDER)
+    bootstrap.create_worker()
+    assert configured[3].call_args.args[1].verification_method == method
+
+
+@pytest.mark.parametrize("method", ["", "latest", "planned-aac-lineage-v2", "null"])
+def test_factory_unknown_verification_fails_before_storage(configured, monkeypatch, method):
+    monkeypatch.setenv("VIDEO_FOLLOWUP_AUDIO_VERIFICATION_METHOD", method)
+    with pytest.raises(ValueError, match="verification method is not approved"):
+        bootstrap.create_worker()
+    configured[1].assert_not_called()
+    configured[2].assert_not_called()
 
 
 @pytest.mark.parametrize("profile", ["legacy_v1", "clean_body_v1"])

@@ -1082,6 +1082,22 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
   return { ok: true, sheet: sheet, row: index + 1, values: current, obj: obj, initial_ms: initialMs, time_zone: timeZone };
 }
 
+function hasRecordedFollowupConversationV23_(rowObj) {
+  var state = String(rowObj[HEADERS.ai_state] || "").trim().toLowerCase();
+  if (["active", "handoff", "done"].indexOf(state) !== -1) return true;
+  var history = [];
+  try { history = JSON.parse(String(rowObj[HEADERS.history_json] || "[]")); } catch (_) {}
+  if (Array.isArray(history) && history.some(function(entry) {
+    if (!entry || typeof entry !== "object") return false;
+    var text = entry.text || entry.content;
+    return ["agent", "user"].indexOf(String(entry.role || "").trim().toLowerCase()) !== -1 &&
+      typeof text === "string" && !!text.trim();
+  })) return true;
+  // Only affirmative conversation notes count; verifier and queue notes do not.
+  var summary = normalizeWhitespace_(String(rowObj[HEADERS.conversation_summary] || "")).toLowerCase();
+  return /^(?:(?:spoke|talked) (?:with|to) (?:the )?(?:agent|seller)\b|(?:the )?agent (?:requested|asked for) (?:a )?(?:callback|call)\b)/.test(summary);
+}
+
 function checkVideoFollowupEligibilityV19_(body, options) {
   try {
     var validation = validateVideoFollowupContextV19_(body, false);
@@ -1101,7 +1117,8 @@ function checkVideoFollowupEligibilityV19_(body, options) {
     if (typeof hasPendingSmsTakeoverV11_ !== "function") throw new Error("Takeover guard is unavailable");
     if (hasPendingSmsTakeoverV11_(phone) || String(obj[HEADERS.human_override] || "").toUpperCase() === "TRUE" ||
         String(obj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE") reason = "Human takeover is active or pending";
-    if (["R", "Y", "G", "O"].indexOf(String(row[10] || "").trim().toUpperCase()) !== -1) reason = "CRM lead no longer qualifies for follow-up";
+    if (["R", "Y", "G", "O", "H"].indexOf(String(row[10] || "").trim().toUpperCase()) !== -1) reason = "CRM lead no longer qualifies for follow-up";
+    if (hasRecordedFollowupConversationV23_(obj)) reason = "A recorded conversation already exists";
     var previousFollowupMs = parseVideoFollowupTimestampV19_(row[23], resolved.time_zone);
     var olderFollowup = isFinite(previousFollowupMs) && previousFollowupMs < resolved.initial_ms;
     if ((String(row[8] || "").trim() || String(row[23] || "").trim()) && !olderFollowup) reason = "Scheduled follow-up already recorded or a reply exists";
@@ -2516,7 +2533,8 @@ function getPendingSmsStaleReason_(outboxRow) {
         return "";
       }
       var leadStatus = String(rowObj[HEADERS.mailshake_status] || "").trim().toUpperCase();
-      if (["R", "Y", "G", "O"].indexOf(leadStatus) !== -1) return "CRM lead no longer qualifies for follow-up";
+      if (["R", "Y", "G", "O", "H"].indexOf(leadStatus) !== -1) return "CRM lead no longer qualifies for follow-up";
+      if (hasRecordedFollowupConversationV23_(rowObj)) return "A recorded conversation already exists";
       if (String(rowObj.followup_text_sent || rowObj[HEADERS.followup_text_sent] || "").trim().toLowerCase() === "x") {
         return "Scheduled follow-up already recorded";
       }

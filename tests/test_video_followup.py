@@ -1,5 +1,6 @@
 import importlib.util
 import hashlib
+import json
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +34,19 @@ def speech_proof(name="Jim", media=MEDIA["media_bytes"]):
         "media_sha256": hashlib.sha256(media).hexdigest(), "greeting_seconds": 1.5,
         "expected_name": name, "normalized_transcript": "hey " + name.casefold(),
         "confidence": [{"avg_logprob": -0.1, "no_speech_prob": 0.01}]}
+
+
+def planned_speech_proof(name="Jim", media=MEDIA["media_bytes"]):
+    proof = speech_proof(name, media)
+    original = {key: value for key, value in proof.items() if key not in {"media_sha256", "greeting_seconds"}}
+    lineage = {"accepted": True, "lineage_version": speech.PLANNED_AUDIO_VERIFICATION_CONFIG["lineage_version"],
+        "first_name": name, "final_media_sha256": proof["media_sha256"],
+        "checked_audio_sha256": proof["source_audio_sha256"], "greeting_seconds": proof["greeting_seconds"],
+        "speech_proof_sha256": hashlib.sha256(json.dumps(original, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        **{field: hashlib.sha256(field.encode()).hexdigest() for field in (
+            "manifest_sha256", "planned_audio_sha256", "full_pcm_sha256", "greeting_pcm_sha256", "aac_track_sha256")}}
+    return {**proof, "verification_method": speech.PLANNED_AUDIO_VERIFICATION_METHOD,
+            "verification_config_sha256": speech.PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256, "audio_lineage": lineage}
 
 
 MEDIA["speech_proof"] = speech_proof()
@@ -1103,6 +1117,8 @@ class VideoFollowupTests(unittest.TestCase):
     def test_audit_never_overwrites_concurrent_freeze_or_cancellation(self):
         for mode in ("frozen_text", "cancelled", "frozen_video"):
             with self.subTest(mode=mode):
+                self.set_job(variant=None, ready_audit_token=None, ready_audit_lease_at=None,
+                             ready_audit_attempts=0)
                 self.make_ready()
                 self.set_job(speech_proof=None, variant=None)
                 def audit(job, content):
@@ -1155,6 +1171,486 @@ class VideoFollowupTests(unittest.TestCase):
         self.provider.prepare_media.assert_called_once()
         message, _ = self.service.select(self.context, FALLBACK)
         self.assertEqual(message, FALLBACK)
+
+    def test_transient_final_verifier_failure_resumes_same_paid_render_after_backoff(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        self.provider.prepare_media = Mock(side_effect=[
+            speech.SpeechGuardError("speech_guard_timeout"), MEDIA])
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "submitted")
+        self.assertEqual(self.job()["provider_id"], "already-paid-render")
+        self.assertEqual(self.job()["finalization_attempts"], 1)
+        self.assertEqual(self.job()["underlying_code"], "speech_guard_timeout")
+        self.assertEqual(self.job()["failure_stage"], "final_media_prepare")
+        self.worker(now=NOW + timedelta(seconds=59)).tick()
+        self.assertEqual(len(self.provider.inspections), 1)
+        self.worker(now=NOW + timedelta(seconds=60)).tick()
+        self.assertEqual(self.job()["status"], "ready")
+        self.assertEqual(self.job()["finalization_attempts"], 2)
+        self.assertEqual(self.job()["last_verification_failure"]["underlying_code"], "speech_guard_timeout")
+        for field in video._ACTIVE_VERIFICATION_FAILURE_FIELDS:
+            self.assertNotIn(field, self.job())
+        self.assertEqual(self.provider.submissions, [])
+        self.assertEqual(self.provider.prepare_media.call_count, 2)
+        self.assertEqual(self.objects.list("active/"), [])
+
+    def test_transient_final_verifier_retry_is_bounded_without_spend_or_publication(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        self.provider.prepare_media = Mock(side_effect=speech.SpeechGuardError("speech_guard_busy"))
+        for attempt in range(3):
+            self.worker(now=NOW + timedelta(seconds=attempt * 60)).tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.assertEqual(self.job()["finalization_attempts"], 3)
+        self.assertTrue(self.job()["verification_retry_exhausted"])
+        self.assertEqual(self.job()["underlying_code"], "speech_guard_busy")
+        self.worker(now=NOW + timedelta(days=1)).tick()
+        self.assertEqual(self.provider.prepare_media.call_count, 3)
+        self.assertEqual(self.provider.submissions, [])
+        self.assertEqual(self.objects.list("assets/"), [])
+        entry = self.store.read("budget/ledger")[0]["reservations"][self.context["followup_key"]]
+        self.assertEqual(entry["cents"], 10)
+        self.assertFalse(entry["inflight"])
+
+    def test_final_speech_rejection_retains_safe_diagnostics_without_retry(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        diagnostic = {**speech_proof(), "observed_transcript": "Hey Jimmy!",
+                      "provider_url": "https://private.example/?secret=token"}
+        self.provider.prepare_media = Mock(side_effect=speech.SpeechGuardError(
+            "speech_guard_name_mismatch", diagnostics=diagnostic))
+        self.worker().tick()
+        job = self.job()
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["underlying_code"], "speech_guard_name_mismatch")
+        self.assertEqual(job["failure_stage"], "final_media_prepare")
+        self.assertEqual(job["speech_diagnostics"]["observed_transcript"], "Hey Jimmy!")
+        self.assertNotIn("provider_url", job["speech_diagnostics"])
+        self.assertNotIn("secret=token", repr(job))
+        self.worker(now=NOW + timedelta(minutes=1)).tick()
+        self.provider.prepare_media.assert_called_once()
+
+    def test_frozen_text_wins_over_a_pending_free_verification_retry(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        self.provider.prepare_media = Mock(side_effect=speech.SpeechGuardError("speech_guard_busy"))
+        self.worker().tick()
+        self.service.select(self.context, FALLBACK)
+        frozen = self.job()
+        self.worker(now=NOW + timedelta(minutes=1)).tick()
+        self.assertEqual(self.job(), frozen)
+        self.assertEqual(self.provider.prepare_media.call_count, 1)
+        self.assertEqual(self.provider.submissions, [])
+        self.assertEqual(self.objects.list("public/"), [])
+
+    def test_final_verification_error_cannot_overwrite_a_newer_processing_lease(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        def stale_failure(*args):
+            self.store.mutate("jobs/" + self.context["followup_key"], lambda old: {
+                **old, "lease_at": video.iso(NOW + timedelta(minutes=11)), "finalization_attempts": 2})
+            raise speech.SpeechGuardError("speech_guard_name_mismatch")
+        self.provider.prepare_media = Mock(side_effect=stale_failure)
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "processing")
+        self.assertNotIn("failure_stage", self.job())
+        self.assertEqual(self.job()["lease_at"], video.iso(NOW + timedelta(minutes=11)))
+
+    def test_legacy_ready_transient_audit_keeps_active_index_for_bounded_free_retry(self):
+        self.make_ready()
+        self.set_job(speech_proof=None)
+        self.provider.audit_media = Mock(side_effect=[
+            speech.SpeechGuardError("speech_guard_busy"), speech_proof()])
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "ready")
+        self.assertEqual(self.job()["ready_audit_attempts"], 1)
+        self.assertTrue(self.objects.list("active/"))
+        self.worker(now=NOW + timedelta(seconds=59)).tick()
+        self.provider.audit_media.assert_called_once()
+        self.worker(now=NOW + timedelta(seconds=60)).tick()
+        self.assertTrue(self.store.verified_video(self.job()))
+        self.assertEqual(self.job()["last_verification_failure"]["underlying_code"], "speech_guard_busy")
+        for field in video._ACTIVE_VERIFICATION_FAILURE_FIELDS:
+            self.assertNotIn(field, self.job())
+        self.assertEqual(self.provider.audit_media.call_count, 2)
+        self.assertEqual(self.provider.submissions, [])
+        self.assertEqual(self.objects.list("active/"), [])
+
+    def test_legacy_ready_audit_runtime_failures_exhaust_without_restarting_paid_job(self):
+        self.make_ready()
+        self.set_job(speech_proof=None)
+        self.provider.audit_media = Mock(side_effect=speech.SpeechGuardError("speech_guard_unavailable"))
+        for attempt in range(3):
+            self.worker(now=NOW + timedelta(seconds=60 * attempt)).tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.assertEqual(self.job()["ready_audit_attempts"], 3)
+        self.assertEqual(self.job()["failure_stage"], "ready_audit")
+        self.worker(now=NOW + timedelta(days=1)).tick()
+        self.assertEqual(self.provider.audit_media.call_count, 3)
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_stale_eligibility_cancellation_cannot_rewrite_frozen_text(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        def became_ineligible(job):
+            self.service.select(self.context, FALLBACK)
+            return False
+        self.worker(eligible=became_ineligible).tick()
+        self.assertEqual(self.job()["status"], "frozen_text")
+        self.assertEqual(self.job()["message"], FALLBACK)
+        self.assertEqual(self.provider.preparations, [])
+
+    def test_ready_audit_lease_allows_only_one_concurrent_local_attempt(self):
+        self.make_ready()
+        self.set_job(speech_proof=None)
+        entered, release = threading.Event(), threading.Event()
+        def audit(job, content):
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return speech_proof(job["first_name"], content)
+        self.provider.audit_media = Mock(side_effect=audit)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(self.worker().audit_ready, self.context["followup_key"])
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                self.assertFalse(self.worker().audit_ready(self.context["followup_key"]))
+                self.assertEqual(self.job()["ready_audit_attempts"], 1)
+                self.provider.audit_media.assert_called_once()
+            finally:
+                release.set()
+            self.assertTrue(first.result(timeout=5))
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_expired_third_processing_attempt_does_not_start_a_fourth_verification(self):
+        self.set_job(status="processing", provider_id="already-paid-render", lease_at=video.iso(NOW),
+                     finalization_attempts=3, budget_settled=True)
+        self.store.settle(self.context["followup_key"], video.iso(NOW))
+        worker = self.worker(now=NOW + timedelta(minutes=10))
+        worker.tick()
+        self.assertEqual(self.job()["status"], "submitted")
+        worker.tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.assertEqual(self.job()["finalization_attempts"], 3)
+        self.assertTrue(self.job()["verification_retry_exhausted"])
+        self.assertEqual(self.job()["underlying_code"], "local_verification_attempt_limit")
+        self.assertEqual(self.provider.inspections, [])
+        self.assertEqual(self.provider.preparations, [])
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_expired_third_ready_audit_does_not_start_a_fourth_verification(self):
+        self.make_ready()
+        self.set_job(speech_proof=None, ready_audit_attempts=3,
+                     ready_audit_token="crashed-audit", ready_audit_lease_at=video.iso(NOW))
+        self.provider.audit_media = Mock()
+        self.worker(now=NOW + timedelta(minutes=10)).tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.assertEqual(self.job()["ready_audit_attempts"], 3)
+        self.assertEqual(self.job()["underlying_code"], "local_verification_attempt_limit")
+        self.provider.audit_media.assert_not_called()
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_stale_successful_finalization_cannot_publish_for_a_newer_lease(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        self.provider.on_prepare = lambda: self.set_job(
+            lease_at=video.iso(NOW + timedelta(minutes=11)), finalization_attempts=2)
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "processing")
+        self.assertEqual(self.job()["finalization_attempts"], 2)
+        self.assertEqual(self.objects.list("assets/"), [])
+        self.assertEqual(self.objects.list("public/"), [])
+
+    def test_nontransient_speech_failures_are_terminal_on_first_attempt(self):
+        for code in ("speech_guard_name_mismatch", "speech_guard_low_confidence",
+                     "speech_guard_model_mismatch", "speech_guard_dependency_mismatch",
+                     "speech_guard_output_invalid", "speech_guard_audio_invalid"):
+            with self.subTest(code=code):
+                self.set_job(status="submitted", provider_id="already-paid-render", finalization_attempts=0)
+                self.provider.prepare_media = Mock(side_effect=speech.SpeechGuardError(code))
+                self.worker().run_job(self.context["followup_key"])
+                self.assertEqual(self.job()["status"], "failed")
+                self.assertEqual(self.job()["finalization_attempts"], 1)
+                self.assertEqual(self.job()["underlying_code"], code)
+                self.assertFalse(self.job()["verification_retry_pending"])
+                self.provider.prepare_media.assert_called_once()
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_failed_provider_status_keeps_only_sanitized_provider_diagnostics(self):
+        from video_followup_same_take import SameTakeVideoProvider
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        self.provider.safe_failure_diagnostics = SameTakeVideoProvider.safe_failure_diagnostics
+        self.provider.status = {"status": "failed", "failure_code": "greeting_preparation_failed",
+            "failure_stage": "audio_screen", "underlying_code": "narration_pitch_outlier",
+            "exception_type": "VideoProviderError", "media_url": "https://private.example/?secret=token"}
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.assertEqual(self.job()["failure_stage"], "audio_screen")
+        self.assertEqual(self.job()["underlying_code"], "narration_pitch_outlier")
+        self.assertEqual(self.job()["failure_code"], "greeting_preparation_failed")
+        self.assertNotIn("secret=token", repr(self.job()))
+        self.assertTrue(self.job()["budget_settled"])
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_finish_rejects_malformed_media_before_writing_any_assets(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        for media in (None, {**MEDIA, "poster_bytes": None}, {**MEDIA, "vtt_bytes": "not-bytes"},
+                      {**MEDIA, "duration": float("nan")}, {**MEDIA, "duration": True}):
+            with self.subTest(media=media), self.assertRaises(speech.SpeechGuardError):
+                self.store.finish(self.context["followup_key"], "already-paid-render", media)
+            self.assertEqual(self.objects.list("assets/"), [])
+
+    def unpaid_preflight_error(self, code="speech_guard_busy", *, first_name="Jim", job_id=None):
+        from video_followup_same_take import SameTakeVideoProvider, _UnpaidPreflightTransient
+        self.provider.safe_unpaid_preflight_failure = SameTakeVideoProvider.safe_unpaid_preflight_failure
+        return _UnpaidPreflightTransient(speech.SpeechGuardError(code), first_name,
+                                         job_id or self.context["followup_key"])
+
+    def test_confirmed_unpaid_preflight_reuses_one_reservation_after_backoff(self):
+        self.store.prepare(self.context)
+        original_id = self.job()["id"]
+        self.provider.submit_error = self.unpaid_preflight_error()
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "prepared")
+        self.assertEqual(self.job()["preflight_attempts"], 1)
+        self.assertTrue(self.job()["preflight_confirmed_unpaid"])
+        entry = self.store.read("budget/ledger")[0]["reservations"][self.context["followup_key"]]
+        self.assertEqual(entry["cents"], 10)
+        self.assertTrue(entry["inflight"])
+        self.worker(now=NOW + timedelta(seconds=59)).tick()
+        self.assertEqual(len(self.provider.submissions), 1)
+        self.provider.submit_error = None
+        self.worker(now=NOW + timedelta(seconds=60)).tick()
+        job = self.job()
+        self.assertEqual(job["status"], "submitted")
+        self.assertEqual(job["id"], original_id)
+        self.assertEqual(job["preflight_attempts"], 2)
+        self.assertEqual(job["last_preflight_failure"]["underlying_code"], "speech_guard_busy")
+        for field in video._ACTIVE_VERIFICATION_FAILURE_FIELDS + ("preflight_retry_at",):
+            self.assertNotIn(field, job)
+        ledger = self.store.read("budget/ledger")[0]["reservations"]
+        self.assertEqual(list(ledger), [self.context["followup_key"]])
+        self.assertEqual(ledger[self.context["followup_key"]]["cents"], 10)
+
+    def test_confirmed_unpaid_preflight_stops_after_three_attempts_without_refund(self):
+        self.store.prepare(self.context)
+        self.provider.submit_error = self.unpaid_preflight_error("speech_guard_timeout")
+        for attempt in range(3):
+            self.worker(now=NOW + timedelta(seconds=attempt * 60)).tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.assertEqual(self.job()["preflight_attempts"], 3)
+        self.assertTrue(self.job()["verification_retry_exhausted"])
+        self.worker(now=NOW + timedelta(days=1)).tick()
+        self.assertEqual(len(self.provider.submissions), 3)
+        ledger = self.store.read("budget/ledger")[0]["reservations"]
+        self.assertEqual(ledger[self.context["followup_key"]]["cents"], 10)
+        self.assertFalse(ledger[self.context["followup_key"]]["inflight"])
+        self.assertEqual(self.objects.list("assets/"), [])
+
+    def test_generic_confirmed_rejection_does_not_gain_a_submit_retry(self):
+        self.store.prepare(self.context)
+        self.unpaid_preflight_error()
+        self.provider.submit_error = speech.SpeechGuardError("speech_guard_busy")
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.worker(now=NOW + timedelta(minutes=1)).tick()
+        self.assertEqual(len(self.provider.submissions), 1)
+
+    def test_preflight_failure_for_another_identity_never_retries(self):
+        self.store.prepare(self.context)
+        self.provider.submit_error = self.unpaid_preflight_error(first_name="Sue")
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.worker(now=NOW + timedelta(minutes=1)).tick()
+        self.assertEqual(len(self.provider.submissions), 1)
+
+    def test_confirmed_unpaid_preflight_cannot_overwrite_concurrent_text_freeze(self):
+        self.store.prepare(self.context)
+        self.provider.submit_error = self.unpaid_preflight_error()
+        self.provider.on_submit = lambda: self.service.select(self.context, FALLBACK)
+        self.worker().tick()
+        frozen = self.job()
+        self.assertEqual(frozen["status"], "frozen_text")
+        self.assertNotIn("preflight_retry_at", frozen)
+        self.worker(now=NOW + timedelta(seconds=60)).tick()
+        self.assertEqual(self.job(), frozen)
+        self.assertEqual(len(self.provider.submissions), 1)
+
+    def test_confirmed_unpaid_preflight_cannot_overwrite_newer_submit_lease(self):
+        self.store.prepare(self.context)
+        self.provider.submit_error = self.unpaid_preflight_error()
+        self.provider.on_submit = lambda: self.set_job(
+            lease_at=video.iso(NOW + timedelta(minutes=11)), preflight_attempts=2)
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "submitting")
+        self.assertEqual(self.job()["preflight_attempts"], 2)
+        self.assertNotIn("preflight_retry_at", self.job())
+
+    def test_unpaid_preflight_never_rearms_an_already_settled_reservation(self):
+        self.store.prepare(self.context)
+        self.provider.submit_error = self.unpaid_preflight_error()
+        self.worker().tick()
+        self.store.settle(self.context["followup_key"], video.iso(NOW))
+        before = self.store.read("budget/ledger")[0]
+        self.provider.submit_error = None
+        self.worker(now=NOW + timedelta(seconds=60)).tick()
+        self.assertEqual(self.job()["status"], "failed")
+        self.assertEqual(self.job()["underlying_code"], "unpaid_preflight_reservation_invalid")
+        self.assertEqual(len(self.provider.submissions), 1)
+        self.assertEqual(self.store.read("budget/ledger")[0], before)
+
+    def test_corrupt_local_attempt_counters_fail_closed_without_provider_work(self):
+        for field, status in (("preflight_attempts", "prepared"),
+                              ("finalization_attempts", "submitted")):
+            for value in (-1, True, "1", 1.5, None, 4):
+                with self.subTest(field=field, value=value):
+                    self.set_job(**{"status": status,
+                        "provider_id": None if status == "prepared" else "already-paid-render",
+                        "preflight_attempts": 0, "finalization_attempts": 0, field: value})
+                    self.worker().run_job(self.context["followup_key"])
+                    self.assertEqual(self.job()["status"], "failed")
+                    self.assertEqual(self.job()["underlying_code"], "invalid_verification_attempt_count")
+        self.assertEqual(self.provider.submissions, [])
+        self.assertEqual(self.provider.inspections, [])
+
+    def test_corrupt_ready_audit_counter_fails_closed_without_audit(self):
+        self.make_ready()
+        self.provider.audit_media = Mock()
+        for value in (-1, True, "1", 1.5, None, 4):
+            with self.subTest(value=value):
+                self.set_job(status="ready", speech_proof=None, ready_audit_attempts=value)
+                self.assertFalse(self.worker().audit_ready(self.context["followup_key"]))
+                self.assertEqual(self.job()["status"], "failed")
+                self.assertEqual(self.job()["underlying_code"], "invalid_verification_attempt_count")
+        self.provider.audit_media.assert_not_called()
+
+    def test_stale_definite_submit_rejection_cannot_settle_a_newer_lease(self):
+        self.store.prepare(self.context)
+        self.provider.submit_error = speech.SpeechGuardError("speech_guard_name_mismatch")
+        self.provider.on_submit = lambda: self.set_job(
+            lease_at=video.iso(NOW + timedelta(minutes=11)), preflight_attempts=2)
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "submitting")
+        self.assertEqual(self.job()["preflight_attempts"], 2)
+        entry = self.store.read("budget/ledger")[0]["reservations"][self.context["followup_key"]]
+        self.assertTrue(entry["inflight"])
+        self.assertEqual(entry["cents"], 10)
+
+    def test_worker_pins_planned_method_before_final_media_processing(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        binding = {"verification_method": speech.PLANNED_AUDIO_VERIFICATION_METHOD,
+                   "verification_config_sha256": speech.PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256}
+        self.provider.status = {"status": "completed", "provider_id": "already-paid-render", **binding}
+        def prepare(status, name):
+            self.assertEqual(self.job()["status"], "processing")
+            for field, value in binding.items():
+                self.assertEqual(self.job()[field], value)
+            return {**MEDIA, "speech_proof": planned_speech_proof(name)}
+        self.provider.prepare_media = Mock(side_effect=prepare)
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "ready")
+        self.assertTrue(self.store.verified_video(self.job()))
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_worker_rejects_partial_unknown_or_downgraded_verification_identity(self):
+        binding = {"verification_method": speech.PLANNED_AUDIO_VERIFICATION_METHOD,
+                   "verification_config_sha256": speech.PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256}
+        cases = (({}, {"verification_method": binding["verification_method"]}),
+                 ({}, {"verification_method": None}),
+                 ({}, {"verification_config_sha256": binding["verification_config_sha256"]}),
+                 ({}, {**binding, "verification_method": "unapproved-method"}),
+                 ({}, {**binding, "verification_config_sha256": "0" * 64}),
+                 (binding, {}),
+                 ({"verification_method": binding["verification_method"]}, binding))
+        for job_binding, status_binding in cases:
+            with self.subTest(job_binding=job_binding, status_binding=status_binding):
+                self.objects = MemoryObjects()
+                self.store = video.Store(self.objects)
+                self.set_job(status="submitted", provider_id="already-paid-render", **job_binding)
+                self.provider.status = {"status": "completed", "provider_id": "already-paid-render", **status_binding}
+                self.provider.prepare_media = Mock(return_value=MEDIA)
+                self.worker().tick()
+                self.assertEqual(self.job()["status"], "failed")
+                self.assertEqual(self.job()["underlying_code"], "speech_guard_output_invalid")
+                self.assertTrue(self.job()["budget_settled"])
+                self.provider.prepare_media.assert_not_called()
+                self.assertEqual(self.objects.list("assets/"), [])
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_planned_job_rejects_stripped_or_wrong_method_proof_before_assets(self):
+        self.set_job(status="submitted", provider_id="already-paid-render",
+                     verification_method=speech.PLANNED_AUDIO_VERIFICATION_METHOD,
+                     verification_config_sha256=speech.PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256)
+        complete = planned_speech_proof()
+        stripped = {key: value for key, value in complete.items()
+                    if key not in {"verification_method", "verification_config_sha256", "audio_lineage"}}
+        self.assertTrue(speech.validate_speech_proof(stripped, first_name="Jim", media_sha256=complete["media_sha256"]))
+        for proof in (stripped, speech_proof(), {**complete, "verification_config_sha256": "0" * 64},
+                      {**complete, "verification_method": "unapproved-method"}):
+            with self.subTest(proof=proof), self.assertRaises(speech.SpeechGuardError):
+                self.store.finish(self.context["followup_key"], "already-paid-render", {**MEDIA, "speech_proof": proof})
+            self.assertEqual(self.objects.list("assets/"), [])
+
+    def test_planned_ready_job_cannot_send_a_proof_downgraded_to_legacy(self):
+        self.set_job(status="submitted", provider_id="already-paid-render",
+                     verification_method=speech.PLANNED_AUDIO_VERIFICATION_METHOD,
+                     verification_config_sha256=speech.PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256)
+        self.assertTrue(self.store.finish(self.context["followup_key"], "already-paid-render",
+                                         {**MEDIA, "speech_proof": planned_speech_proof()}))
+        self.set_job(speech_proof=speech_proof())
+        self.assertFalse(self.store.verified_video(self.job()))
+        message, metadata = self.service.select(self.context, FALLBACK)
+        self.assertEqual(message, FALLBACK)
+        self.assertEqual(metadata["video_variant"], "text")
+
+    def test_legacy_completed_job_without_method_fields_keeps_existing_rules(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "ready")
+        self.assertNotIn("verification_method", self.job())
+        self.assertNotIn("verification_config_sha256", self.job())
+        self.assertTrue(self.store.verified_video(self.job()))
+
+    def test_final_publication_cas_cannot_change_expected_verification_identity(self):
+        self.set_job(status="processing", provider_id="already-paid-render", lease_at=video.iso(NOW),
+                     finalization_attempts=1, verification_method=speech.PLANNED_AUDIO_VERIFICATION_METHOD,
+                     verification_config_sha256=speech.PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256)
+        expected = self.job()
+        original_write = self.objects.write
+        def raced_write(key, body, version, content_type="application/json"):
+            result = original_write(key, body, version, content_type)
+            if key.startswith("public/"):
+                self.set_job(verification_config_sha256="0" * 64)
+            return result
+        with patch.object(self.objects, "write", side_effect=raced_write):
+            result = self.store.finish(self.context["followup_key"], "already-paid-render",
+                {**MEDIA, "speech_proof": planned_speech_proof()}, expected_job=expected)
+        self.assertFalse(result)
+        self.assertEqual(self.job()["status"], "processing")
+        self.assertEqual(self.job()["verification_config_sha256"], "0" * 64)
+        self.assertIsNone(self.store.get_public_video(self.job()["id"]))
+
+    def test_planned_processing_text_freeze_preserves_expected_method(self):
+        binding = {"verification_method": speech.PLANNED_AUDIO_VERIFICATION_METHOD,
+                   "verification_config_sha256": speech.PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256}
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        self.provider.status = {"status": "completed", "provider_id": "already-paid-render", **binding}
+        def prepare(*args):
+            self.service.select(self.context, FALLBACK)
+            return {**MEDIA, "speech_proof": planned_speech_proof()}
+        self.provider.prepare_media = Mock(side_effect=prepare)
+        self.worker().tick()
+        self.assertEqual(self.job()["status"], "frozen_text")
+        for field, value in binding.items():
+            self.assertEqual(self.job()[field], value)
+        self.assertEqual(self.objects.list("assets/"), [])
+
+    def test_legacy_publication_cas_rejects_new_partial_null_method_field(self):
+        self.set_job(status="submitted", provider_id="already-paid-render")
+        original_write = self.objects.write
+        def raced_write(key, body, version, content_type="application/json"):
+            result = original_write(key, body, version, content_type)
+            if key.startswith("public/"):
+                self.set_job(verification_method=None)
+            return result
+        with patch.object(self.objects, "write", side_effect=raced_write):
+            result = self.store.finish(self.context["followup_key"], "already-paid-render", MEDIA)
+        self.assertFalse(result)
+        self.assertEqual(self.job()["status"], "submitted")
+        self.assertIsNone(self.store.get_public_video(self.job()["id"]))
 
 
 if __name__ == "__main__":

@@ -48,9 +48,11 @@ def recognized(monkeypatch):
         "config_sha256": guard.CONFIG_SHA256,
     }
     calls = []
-    monkeypatch.setattr(guard, "preflight_speech_guard", lambda: {
+    paths = lambda: {
         "python": "/isolated/python", "model_dir": "/offline/tiny.en",
-    })
+    }
+    monkeypatch.setattr(guard, "_speech_paths", paths)
+    monkeypatch.setattr(guard, "preflight_speech_guard", paths)
 
     def recognize(content, python, model_dir):
         calls.append((content, python, model_dir))
@@ -337,6 +339,65 @@ def test_proof_cannot_be_reused_for_different_audio(audio, recognized):
     assert not guard.validate_speech_proof(proof, first_name="Jerrick", audio_sha256=hashlib.sha256(audio + b"changed").hexdigest())
 
 
+@pytest.fixture
+def planned_proof(audio, recognized):
+    original = guard.verify_greeting_words(audio, "Jerrick")
+    return {**original, "media_sha256": "a" * 64, "greeting_seconds": 1.5,
+        "verification_method": guard.PLANNED_AUDIO_VERIFICATION_METHOD,
+        "verification_config_sha256": guard.PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256,
+        "audio_lineage": {"accepted": True,
+            "lineage_version": guard.PLANNED_AUDIO_VERIFICATION_CONFIG["lineage_version"],
+            "first_name": "Jerrick", "final_media_sha256": "a" * 64,
+            "checked_audio_sha256": original["source_audio_sha256"], "greeting_seconds": 1.5,
+            "manifest_sha256": "1" * 64, "planned_audio_sha256": "2" * 64,
+            "full_pcm_sha256": "3" * 64, "greeting_pcm_sha256": "4" * 64, "aac_track_sha256": "5" * 64,
+            "speech_proof_sha256": guard._digest_json(original)}}
+
+
+def test_planned_final_proof_retains_strict_asr_and_media_bindings(planned_proof):
+    assert guard.validate_speech_proof(planned_proof, first_name="Jerrick", media_sha256="a" * 64)
+    assert not guard.validate_speech_proof(planned_proof, first_name="Jim", media_sha256="a" * 64)
+    assert not guard.validate_speech_proof(planned_proof, first_name="Jerrick", media_sha256="b" * 64)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("verification_method", "unknown"), ("verification_method", guard.LEGACY_VERIFICATION_METHOD),
+    ("verification_config_sha256", "0" * 64), ("audio_lineage", None),
+    ("greeting_seconds", 2.0), ("media_sha256", "b" * 64),
+    ("source_audio_sha256", "c" * 64), ("normalized_transcript", "hey jim"),
+    ("confidence", [{"avg_logprob": -2.0, "no_speech_prob": 0.01}]),
+])
+def test_planned_final_proof_tampering_is_rejected(planned_proof, field, value):
+    planned_proof[field] = value
+    assert not guard.validate_speech_proof(planned_proof, first_name="Jerrick")
+
+
+@pytest.mark.parametrize("field", ["verification_method", "verification_config_sha256", "audio_lineage"])
+def test_partial_planned_proof_is_rejected(planned_proof, field):
+    planned_proof.pop(field)
+    assert not guard.validate_speech_proof(planned_proof, first_name="Jerrick")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("accepted", False), ("lineage_version", "unknown"), ("first_name", "Jim"),
+    ("speech_proof_sha256", "0" * 64), ("checked_audio_sha256", "0" * 64),
+    ("manifest_sha256", "bad"), ("final_media_sha256", "0" * 64), ("greeting_seconds", 1.0),
+])
+def test_planned_lineage_attestation_tampering_is_rejected(planned_proof, field, value):
+    planned_proof["audio_lineage"][field] = value
+    assert not guard.validate_speech_proof(planned_proof, first_name="Jerrick")
+
+
+def test_planned_proof_requires_exact_original_recognition_hash(planned_proof):
+    planned_proof["confidence"] = [{"avg_logprob": -0.2, "no_speech_prob": 0.01}]
+    assert not guard.validate_speech_proof(planned_proof, first_name="Jerrick")
+
+
+def test_planned_proof_non_json_extra_metadata_fails_closed(planned_proof):
+    planned_proof["extra"] = object()
+    assert not guard.validate_speech_proof(planned_proof, first_name="Jerrick")
+
+
 @pytest.mark.parametrize("proof", [None, {}, [], "verified", {"first_name": "Jerrick"}])
 def test_malformed_proof_fails_closed(proof):
     assert not guard.validate_speech_proof(proof, first_name="Jerrick", audio_sha256="a" * 64)
@@ -348,7 +409,7 @@ def test_missing_runtime_failure_does_not_invoke_recognition(audio, monkeypatch,
     def unavailable():
         raise guard.SpeechGuardError("speech_guard_unavailable")
 
-    monkeypatch.setattr(guard, "preflight_speech_guard", unavailable)
+    monkeypatch.setattr(guard, "_speech_paths", unavailable)
     with pytest.raises(guard.SpeechGuardError):
         guard.verify_greeting_words(audio, "Jerrick")
     assert calls == []
@@ -365,6 +426,57 @@ def test_recognition_failure_is_not_retried(audio, monkeypatch, recognized):
     with pytest.raises(guard.SpeechGuardError):
         guard.verify_greeting_words(audio, "Jerrick")
     assert len(calls) == 1
+
+
+def test_each_audio_uses_one_model_loading_child_without_preflight(audio, recognized, monkeypatch):
+    _, calls = recognized
+    def forbidden():
+        pytest.fail("Audio recognition must not load a redundant preflight model")
+    monkeypatch.setattr(guard, "preflight_speech_guard", forbidden)
+    guard.verify_greeting_words(audio, "Jerrick")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("transcript,segments,code", [
+    ("Hey Jack Lim!", [{"avg_logprob": -0.3, "no_speech_prob": 0.1}], "speech_guard_name_mismatch"),
+    ("Hey Jerrick!", [{"avg_logprob": -1.5, "no_speech_prob": 0.8}], "speech_guard_low_confidence"),
+])
+def test_rejected_recognition_retains_safe_exact_diagnostics(audio, recognized, transcript, segments, code):
+    result, _ = recognized
+    result.update(transcript=transcript, segments=segments)
+    with pytest.raises(guard.SpeechGuardError) as caught:
+        guard.verify_greeting_words(audio, "Jerrick")
+    assert caught.value.code == code
+    details = guard.safe_speech_failure_diagnostics(caught.value)
+    assert details["accepted"] is False
+    assert details["observed_transcript"] == transcript
+    assert details["confidence"] == segments
+    assert details["source_audio_sha256"] == hashlib.sha256(audio).hexdigest()
+    assert not guard.validate_speech_proof(details, first_name="Jerrick")
+    assert not guard.is_transient_speech_failure(caught.value)
+
+
+@pytest.mark.parametrize("text", ["https://example.com/private?key=secret", "agent@example.com", "x" * 129])
+def test_rejection_diagnostics_do_not_copy_urls_secrets_or_oversized_text(audio, recognized, text):
+    result, _ = recognized
+    result.update(transcript=text, segments=[{"avg_logprob": -0.2, "no_speech_prob": 0.1,
+        "secret": "never-store"}])
+    with pytest.raises(guard.SpeechGuardError) as caught:
+        guard.verify_greeting_words(audio, "Jerrick")
+    encoded = json.dumps(guard.safe_speech_failure_diagnostics(caught.value))
+    assert text not in encoded
+    assert "never-store" not in encoded
+    assert "observed_transcript" not in encoded
+
+
+def test_final_rejected_name_diagnostics_bind_actual_final_media(audio, recognized, monkeypatch):
+    recognized[0]["transcript"] = "Hey Jim!"
+    monkeypatch.setattr(guard, "_extract_video_greeting", lambda *_: audio)
+    with pytest.raises(guard.SpeechGuardError) as caught:
+        guard.verify_video_greeting_words(b"actual final media", "Jerrick", 1.0)
+    details = guard.safe_speech_failure_diagnostics(caught.value)
+    assert details["observed_transcript"] == "Hey Jim!"
+    assert details["media_sha256"] == hashlib.sha256(b"actual final media").hexdigest()
 
 
 @pytest.mark.parametrize("confidence", [[], None, [{}], [{"avg_logprob": -5, "no_speech_prob": 0.01}],
@@ -481,7 +593,26 @@ def test_preflight_verifies_model_before_check_child(runtime):
     assert result["python"] == str(python)
     assert result["model_dir"] == str(model)
     assert result["model_manifest_sha256"] == guard.MODEL_MANIFEST_SHA256
-    assert calls == [(b"", python, model, True)]
+    assert calls == [(b"", str(python), str(model), True)]
+
+
+def test_real_runtime_path_recognition_starts_exactly_one_child(audio, runtime, monkeypatch):
+    python, model, calls = runtime
+    def child(content, executable, directory, *, check=False):
+        calls.append((content, executable, directory, check))
+        return {"transcript": "Hey Jerrick!", "segments": [{"avg_logprob": -0.1, "no_speech_prob": 0.01}],
+            "model_revision": guard.MODEL_REVISION, "config_sha256": guard.CONFIG_SHA256}
+    monkeypatch.setattr(guard, "_run_child", child)
+    assert guard.verify_greeting_words(audio, "Jerrick")["accepted"] is True
+    assert calls == [(audio, str(python), str(model), False)]
+
+
+def test_recognition_missing_executable_still_fails_before_child(audio, runtime):
+    python, _, calls = runtime
+    python.unlink()
+    with pytest.raises(guard.SpeechGuardError, match="speech_guard_unavailable"):
+        guard.verify_greeting_words(audio, "Jerrick")
+    assert not calls
 
 
 @pytest.mark.parametrize("damage", ["python_missing", "python_not_executable", "python_relative", "model_relative", "model_corrupt"])

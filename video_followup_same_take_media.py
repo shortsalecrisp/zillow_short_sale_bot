@@ -408,7 +408,7 @@ def _captions(first_name: str, greeting_seconds: float, duration: float) -> byte
     return text.encode("utf-8")
 
 
-def compose(master_bytes: bytes, kling_bytes: bytes, greeting_audio_bytes: bytes, metadata: dict, *, first_name: str, ffmpeg: str | None = None) -> dict:
+def compose(master_bytes: bytes, kling_bytes: bytes, greeting_audio_bytes: bytes, metadata: dict, *, first_name: str, ffmpeg: str | None = None, planned_audio_bytes: bytes | None = None) -> dict:
     """Blend only same-take mouth pixels, retaining every original body frame."""
     _master(master_bytes)
     _bounded(kling_bytes, "Lip-sync output")
@@ -469,13 +469,19 @@ def compose(master_bytes: bytes, kling_bytes: bytes, greeting_audio_bytes: bytes
             _fail("invalid_output_timing", "The original recording body was not preserved in full.")
         source_audio = _audio(master, ffmpeg)
         final_audio = np.concatenate((greeting, source_audio[SOURCE_GREETING_FRAMES * SAMPLES_PER_FRAME:]))
-        wav_path.write_bytes(_wav(final_audio))
-        _run([
-            ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-            "-protocol_whitelist", "file,pipe", "-i", str(silent), "-i", str(wav_path),
-            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
-            "-movflags", "+faststart", str(output),
-        ])
+        if planned_audio_bytes is None:
+            wav_path.write_bytes(_wav(final_audio))
+            _run([
+                ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-protocol_whitelist", "file,pipe", "-i", str(silent), "-i", str(wav_path),
+                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+                "-movflags", "+faststart", str(output),
+            ])
+        else:
+            # The provider must bind the pre-paid name proof and manifest before
+            # publication; the compositor only proves unchanged track copying.
+            from video_followup_audio_lineage import mux_audio_track
+            output.write_bytes(mux_audio_track(silent.read_bytes(), planned_audio_bytes, ffmpeg=ffmpeg))
         _run([
             ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-protocol_whitelist", "file,pipe", "-ss", str(greeting_frames / FPS + 0.5),

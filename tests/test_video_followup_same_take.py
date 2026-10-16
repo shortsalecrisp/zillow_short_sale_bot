@@ -242,18 +242,16 @@ def test_concurrent_submit_pays_tts_once(world):
 def test_competing_polls_pay_lipsync_once(world):
     identifier = start(world)
     barrier = Barrier(2)
-    def prepare(*args, first_name):
-        barrier.wait(timeout=5)
-        return prepared(first_name)
-    world[3].side_effect = prepare
     def poll(_):
+        barrier.wait(timeout=5)
         try:
             return world[0].inspect(identifier)
         except core.Conflict:
             return "conflict"
     with ThreadPoolExecutor(max_workers=2) as executor:
         result = list(executor.map(poll, range(2)))
-    assert "conflict" in result
+    assert all(value == "conflict" or value["status"] in {"processing", "completed"} for value in result)
+    assert world[3].call_count == 1
     assert len(paid_calls(world, provider.MODEL)) == 1
 
 
@@ -637,11 +635,7 @@ def test_changed_master_or_reference_between_stages_blocks_lipsync(world, key):
     identifier = start(world)
     _, version = world[1].objects.read(key)
     world[1].objects.write(key, b"changed after narration", version)
-    if key == MASTER_KEY:
-        with pytest.raises(provider.VideoProviderError):
-            world[0].inspect(identifier)
-    else:
-        assert world[0].inspect(identifier)["status"] == "failed"
+    assert world[0].inspect(identifier)["status"] == "failed"
     assert not paid_calls(world, provider.MODEL)
 
 
@@ -734,7 +728,7 @@ def test_even_small_increase_above_approved_rate_is_rejected(world, model, price
 def test_speech_model_preflight_blocks_new_paid_tts_but_not_existing_request(world, monkeypatch):
     monkeypatch.setattr(provider, "preflight_speech_guard", Mock(side_effect=
         speech.SpeechGuardError("speech_guard_unavailable")))
-    with pytest.raises(speech.SpeechGuardError):
+    with pytest.raises(provider._UnpaidPreflightTransient):
         start(world)
     assert not paid_calls(world)
     monkeypatch.setattr(provider, "preflight_speech_guard", Mock(return_value={"ready": True}))
@@ -745,7 +739,58 @@ def test_speech_model_preflight_blocks_new_paid_tts_but_not_existing_request(wor
     assert len(paid_calls(world)) == 1
 
 
-@pytest.mark.parametrize("code", ["speech_guard_name_mismatch", "speech_guard_low_confidence", "speech_guard_timeout"])
+@pytest.mark.parametrize("code", ["speech_guard_busy", "speech_guard_timeout", "speech_guard_unavailable",
+                                   "speech_guard_execution_failed"])
+def test_only_known_unpaid_preflight_transients_expose_safe_retry_contract(world, monkeypatch, code):
+    monkeypatch.setattr(provider, "preflight_speech_guard", Mock(side_effect=speech.SpeechGuardError(code)))
+    with pytest.raises(provider._UnpaidPreflightTransient) as caught:
+        start(world)
+    assert world[0].safe_unpaid_preflight_failure(caught.value, first_name="Sue", job_id="job") == {
+        "failure_stage": "prepayment_speech_preflight", "underlying_code": code, "exception_type": "SpeechGuardError"}
+    assert world[0].safe_unpaid_preflight_failure(caught.value, first_name="Jim", job_id="job") is None
+    assert world[0].safe_unpaid_preflight_failure(caught.value, first_name="Sue", job_id="other") is None
+    assert not paid_calls(world)
+    assert not world[1].objects.list("same-take/")
+    monkeypatch.setattr(provider, "preflight_speech_guard", Mock(return_value={"ready": True}))
+    identifier = world[0].submit("Sue", "job")
+    assert world[0].submit("Sue", "job") == identifier
+    assert len(paid_calls(world)) == 1
+
+
+@pytest.mark.parametrize("code", ["speech_guard_model_mismatch", "speech_guard_dependency_mismatch",
+    "speech_guard_name_mismatch", "speech_guard_output_invalid", "speech_guard_low_confidence"])
+def test_preflight_integrity_failure_is_not_retryable(world, monkeypatch, code):
+    monkeypatch.setattr(provider, "preflight_speech_guard", Mock(side_effect=speech.SpeechGuardError(code)))
+    with pytest.raises(speech.SpeechGuardError) as caught:
+        start(world)
+    assert world[0].safe_unpaid_preflight_failure(caught.value, first_name="Sue", job_id="job") is None
+    assert not paid_calls(world)
+
+
+@pytest.mark.parametrize("error", [speech.SpeechGuardError("speech_guard_busy"),
+    provider.VideoProviderError("unpaid_preflight_transient", "forged"), provider.SubmissionUncertain("job")])
+def test_generic_or_paid_submission_error_cannot_claim_unpaid_preflight_retry(world, error):
+    assert world[0].safe_unpaid_preflight_failure(error, first_name="Sue", job_id="job") is None
+
+
+def test_concurrent_pipeline_created_during_failed_preflight_is_reused_without_payment(world, monkeypatch):
+    original = provider.preflight_speech_guard
+    entered = [False]
+    def preflight():
+        if entered[0]:
+            return original()
+        entered[0] = True
+        world[0].submit("Sue", "job")
+        raise speech.SpeechGuardError("speech_guard_busy")
+    monkeypatch.setattr(provider, "preflight_speech_guard", preflight)
+    identifier = start(world)
+    assert state(world, identifier)["stage"] == "narration_pending"
+    assert len(paid_calls(world)) == 1
+    assert world[0].submit("Sue", "job") == identifier
+    assert len(paid_calls(world)) == 1
+
+
+@pytest.mark.parametrize("code", ["speech_guard_name_mismatch", "speech_guard_low_confidence", "speech_guard_output_invalid"])
 def test_spoken_name_rejection_blocks_lipsync_and_remains_terminal(world, monkeypatch, code):
     identifier = start(world, "Jamie")
     monkeypatch.setattr(provider, "verify_greeting_words", Mock(side_effect=speech.SpeechGuardError(code)))
@@ -770,6 +815,187 @@ def test_prepared_greeting_proof_binds_actual_audio_before_kling(world):
     assert speech.validate_speech_proof(saved["greeting_speech_proof"], first_name="Sue",
         audio_sha256=hashlib.sha256(INPUTS["greeting_audio_bytes"]).hexdigest())
     assert len(paid_calls(world, provider.MODEL)) == 1
+
+
+@pytest.mark.parametrize("code", ["speech_guard_busy", "speech_guard_timeout", "speech_guard_unavailable",
+                                   "speech_guard_execution_failed"])
+@pytest.mark.parametrize("phase", ["raw", "prepared"])
+def test_free_preparation_retry_reuses_paid_narration_after_durable_backoff(world, monkeypatch, code, phase):
+    identifier = start(world)
+    now = core.utcnow()
+    clock = [now]
+    monkeypatch.setattr(provider, "utcnow", lambda: clock[0])
+    failed = [False]
+    def verify(audio, name):
+        target = b"WAV audio" if phase == "raw" else INPUTS["greeting_audio_bytes"]
+        if not failed[0] and audio == target:
+            failed[0] = True
+            raise speech.SpeechGuardError(code)
+        return speech_proof(name, audio)
+    monkeypatch.setattr(provider, "verify_greeting_words", Mock(side_effect=verify))
+    assert world[0].inspect(identifier)["status"] == "processing"
+    pending = state(world, identifier)
+    assert pending["stage"] == "narration_pending"
+    assert pending["narration_id"] == TTS_ID
+    assert pending["preparation_attempts"] == 1
+    assert pending["preparation_retry_after"] == core.iso(now + timedelta(seconds=60))
+    calls = world[2].request.call_count
+    assert world[0].inspect(identifier)["status"] == "processing"
+    assert world[2].request.call_count == calls
+    assert world[0].submit("Sue", "job") == identifier
+    clock[0] += timedelta(seconds=61)
+    assert world[0].inspect(identifier)["status"] == "processing"
+    assert state(world, identifier)["preparation_attempts"] == 2
+    assert state(world, identifier)["stage"] == "fal_pending"
+    assert state(world, identifier)["last_preparation_failure"]["underlying_code"] == code
+    assert "failure_stage" not in state(world, identifier)
+    assert "underlying_code" not in state(world, identifier)
+    assert "failure_code" not in state(world, identifier)
+    assert len(paid_calls(world, provider.TTS_MODEL)) == 1
+    assert len(paid_calls(world, provider.MODEL)) == 1
+
+
+def test_free_preparation_retry_exhaustion_is_bounded_and_never_pays_lipsync(world, monkeypatch):
+    identifier = start(world)
+    clock = [core.utcnow()]
+    monkeypatch.setattr(provider, "utcnow", lambda: clock[0])
+    monkeypatch.setattr(provider, "verify_greeting_words", Mock(side_effect=speech.SpeechGuardError("speech_guard_busy")))
+    for attempt in range(3):
+        result = world[0].inspect(identifier)
+        assert result["status"] == ("failed" if attempt == 2 else "processing")
+        clock[0] += timedelta(seconds=61)
+    assert state(world, identifier)["preparation_attempts"] == 3
+    assert state(world, identifier)["preparation_retry_exhausted"] is True
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert len(paid_calls(world)) == 1
+
+
+@pytest.mark.parametrize("mode", ["cancelled", "frozen_text", "frozen_video", "ready", "accounting_only"])
+def test_free_preparation_retry_never_bypasses_inactive_or_accounting_only_job(world, monkeypatch, mode):
+    identifier = start(world)
+    clock = [core.utcnow()]
+    monkeypatch.setattr(provider, "utcnow", lambda: clock[0])
+    monkeypatch.setattr(provider, "verify_greeting_words", Mock(side_effect=speech.SpeechGuardError("speech_guard_busy")))
+    world[0].inspect(identifier)
+    if mode != "accounting_only":
+        world[1].mutate("jobs/job", lambda old: {**old, "status": mode})
+    clock[0] += timedelta(seconds=61)
+    assert world[0].inspect(identifier, accounting_only=mode == "accounting_only")["status"] == "failed"
+    assert state(world, identifier)["preparation_attempts"] == 1
+    assert len(paid_calls(world)) == 1
+
+
+def test_interrupted_free_preparation_lease_can_resume_but_never_repeat_paid_narration(world, monkeypatch):
+    identifier = start(world)
+    now = core.utcnow()
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, "preparation_attempts": 1,
+        "preparation_lease_until": core.iso(now + timedelta(seconds=600))})
+    monkeypatch.setattr(provider, "utcnow", lambda: now + timedelta(seconds=599))
+    assert world[0].inspect(identifier)["status"] == "processing"
+    world[3].assert_not_called()
+    monkeypatch.setattr(provider, "utcnow", lambda: now + timedelta(seconds=601))
+    assert world[0].inspect(identifier)["status"] == "processing"
+    assert state(world, identifier)["stage"] == "fal_pending"
+    assert state(world, identifier)["preparation_attempts"] == 2
+    assert len(paid_calls(world)) == 2
+
+
+@pytest.mark.parametrize("model", [provider.TTS_MODEL, provider.MODEL])
+def test_transient_price_read_recovery_never_repeats_paid_submit(world, monkeypatch, model):
+    if model == provider.MODEL:
+        identifier = start(world)
+    verify = world[0]._verified_price
+    failures = [0]
+    def flaky(request_model, key):
+        if request_model == model and failures[0] < 2:
+            failures[0] += 1
+            raise provider.VideoProviderError("status_unavailable", "private details")
+        return verify(request_model, key)
+    monkeypatch.setattr(world[0], "_verified_price", flaky)
+    monkeypatch.setattr(provider.time, "sleep", Mock())
+    if model == provider.TTS_MODEL:
+        identifier = start(world)
+    else:
+        world[0].inspect(identifier)
+    assert failures == [2]
+    assert len(paid_calls(world, model)) == 1
+    field = "tts_price_read_attempts" if model == provider.TTS_MODEL else "lipsync_price_read_attempts"
+    assert state(world, identifier)[field] == 3
+    assert "private details" not in json.dumps(state(world, identifier))
+
+
+@pytest.mark.parametrize("count", [-1, True, 3, 999, "1", None])
+def test_invalid_or_exhausted_preparation_counter_fails_closed(world, count):
+    identifier = start(world)
+    world[1].mutate("same-take/" + identifier, lambda old: {**old, "preparation_attempts": count})
+    assert world[0].inspect(identifier)["status"] == "failed"
+    world[3].assert_not_called()
+    assert len(paid_calls(world)) == 1
+
+
+def test_rejected_recognition_diagnostic_is_durable_and_not_a_success_proof(world, monkeypatch):
+    identifier = start(world)
+    details = {**speech_proof("Sue", b"WAV audio"), "observed_transcript": "Hey Jim!"}
+    monkeypatch.setattr(provider, "verify_greeting_words", Mock(side_effect=speech.SpeechGuardError(
+        "speech_guard_name_mismatch", diagnostics=details)))
+    status = world[0].inspect(identifier)
+    assert status["speech_diagnostics"]["observed_transcript"] == "Hey Jim!"
+    assert status["speech_diagnostics"]["accepted"] is False
+    assert state(world, identifier)["speech_diagnostics"] == status["speech_diagnostics"]
+    assert "raw_speech_proof" not in state(world, identifier)
+    assert len(paid_calls(world)) == 1
+
+
+def test_failed_status_diagnostic_adapter_is_pure_and_allowlisted(world, monkeypatch):
+    details = {**speech_proof("Sue"), "observed_transcript": "Hey Jim!"}
+    raw = {"status": "failed", "failure_code": "greeting_preparation_failed",
+        "failure_stage": "raw_speech_screen", "underlying_code": "speech_guard_name_mismatch",
+        "exception_type": "SpeechGuardError", "speech_diagnostics": details,
+        "provider_id": "secret-provider-id", "media_url": "https://private.example/secret",
+        "message": "secret message"}
+    monkeypatch.setattr(world[0], "_read", Mock(side_effect=AssertionError("Adapter must not read or mutate")))
+    clean = world[0].safe_failure_diagnostics(raw)
+    assert set(clean) == {"failure_code", "failure_stage", "underlying_code", "exception_type", "speech_diagnostics"}
+    assert clean["speech_diagnostics"]["accepted"] is False
+    assert clean["speech_diagnostics"]["observed_transcript"] == "Hey Jim!"
+    assert "secret" not in json.dumps(clean)
+    assert not world[2].request.called
+
+
+@pytest.mark.parametrize("status", [None, [], {}, {"status": "processing", "failure_code": "greeting_preparation_failed"}])
+def test_failed_status_adapter_ignores_nonfailure_values(world, status):
+    assert world[0].safe_failure_diagnostics(status) == {}
+
+
+def test_failed_status_adapter_sanitizes_unknown_codes_and_untrusted_fields(world):
+    service = world[0]
+    assert service.safe_failure_diagnostics({"status": "failed", "failure_code": ["secret"]}) == {
+        "failure_code": "unclassified_provider_failure"}
+    value = service.safe_failure_diagnostics({"status": "failed", "failure_code": "greeting_preparation_failed",
+        "failure_stage": "secret", "underlying_code": "secret", "exception_type": "secret",
+        "speech_diagnostics": {"secret": "secret"}})
+    assert value == {"failure_code": "greeting_preparation_failed",
+        "failure_stage": "unknown_preparation_stage", "underlying_code": "unclassified_preparation_failure",
+        "exception_type": "OtherException"}
+    assert service.safe_failure_diagnostics({"status": "failed", "failure_code": "provider_price_not_approved",
+        "failure_stage": "secret"}) == {"failure_code": "provider_price_not_approved"}
+
+
+@pytest.mark.parametrize("status,attempts", [(401, 1), (403, 1), (404, 1), (429, 3), (503, 3)])
+def test_only_transient_price_http_errors_get_bounded_free_reads(world, monkeypatch, status, attempts):
+    request = world[2].request.side_effect
+    reads = []
+    def failed_price(method, url, **kwargs):
+        if url.startswith(provider.PRICING_ENDPOINT):
+            reads.append(url)
+            return Response({}, status=status)
+        return request(method, url, **kwargs)
+    world[2].request.side_effect = failed_price
+    monkeypatch.setattr(provider.time, "sleep", Mock())
+    with pytest.raises(provider.VideoProviderError):
+        start(world)
+    assert len(reads) == attempts
+    assert not paid_calls(world)
 
 
 @pytest.mark.parametrize("tamper", ["name", "hash", "policy"])
@@ -1150,3 +1376,225 @@ def test_both_paid_stages_disable_provider_fallback_and_retries(world, clean_ref
         assert call.kwargs["headers"]["x-app-fal-disable-fallback"] == "true"
         assert call.kwargs["headers"]["X-Fal-No-Retry"] == "1"
         assert call.kwargs["allow_redirects"] is False
+
+
+@pytest.fixture
+def planned(world, monkeypatch):
+    import video_followup_audio_lineage as lineage
+    def plan(master, greeting, metadata, *, first_name):
+        manifest = {"lineage_version": lineage.LINEAGE_VERSION, "extraction_version": lineage.EXTRACTION_VERSION,
+            "first_name": first_name, "source_sha256": provider.MASTER_SHA256,
+            "preparation_sha256": provider._digest_json(metadata),
+            "prepared_greeting_sha256": hashlib.sha256(greeting).hexdigest(),
+            "greeting_seconds": metadata["greeting_seconds"],
+            "planned_audio_sha256": hashlib.sha256(b"frozen AAC").hexdigest(),
+            "checked_audio_sha256": hashlib.sha256(b"decoded AAC greeting").hexdigest(),
+            "body_pcm_sha256": "1" * 64, "joined_pcm_sha256": "2" * 64,
+            "full_pcm_sha256": "3" * 64, "greeting_pcm_sha256": "4" * 64,
+            "joined_sample_count": 400000, "full_sample_count": 400000,
+            "greeting_sample_count": 24000, "aac_track": {"codec": "aac-lc"}}
+        return {"audio_bytes": b"frozen AAC", "greeting_audio_bytes": b"decoded AAC greeting",
+            "manifest": manifest, "manifest_sha256": provider._digest_json(manifest)}
+    def verify(media, audio, manifest, proof, metadata, *, first_name, expected_manifest_sha256):
+        assert audio == b"frozen AAC"
+        assert provider._digest_json(manifest) == expected_manifest_sha256
+        assert speech.validate_speech_proof(proof, first_name=first_name, audio_sha256=manifest["checked_audio_sha256"])
+        return {"accepted": True, "lineage_version": lineage.LINEAGE_VERSION, "first_name": first_name,
+            "manifest_sha256": expected_manifest_sha256, "planned_audio_sha256": manifest["planned_audio_sha256"],
+            "final_media_sha256": hashlib.sha256(media).hexdigest(),
+            "checked_audio_sha256": manifest["checked_audio_sha256"], "full_pcm_sha256": "1" * 64,
+            "greeting_pcm_sha256": "2" * 64, "aac_track_sha256": "3" * 64,
+            "speech_proof_sha256": provider._digest_json(proof)}
+    prepare_mock, verify_mock = Mock(side_effect=plan), Mock(side_effect=verify)
+    monkeypatch.setattr(lineage, "prepare_audio_plan", prepare_mock)
+    monkeypatch.setattr(lineage, "verify_final_audio", verify_mock)
+    world[0].verification_method = provider.PLANNED_AUDIO_VERIFICATION_METHOD
+    return prepare_mock, verify_mock
+
+
+def test_planned_method_default_is_legacy_and_unknown_method_rejected(world):
+    assert world[0].verification_method == provider.LEGACY_VERIFICATION_METHOD
+    with pytest.raises(provider.VideoProviderError, match="not approved"):
+        provider.SameTakeVideoProvider("key", world[1], MASTER_KEY, tts_key="key", verification_method="unknown")
+
+
+def test_planned_audio_is_checked_once_before_kling_and_bound_after_lineage(world, planned):
+    identifier = start(world)
+    assert world[0].inspect(identifier)["status"] == "processing"
+    provider.verify_greeting_words.assert_called_once_with(b"decoded AAC greeting", "Sue")
+    snapshot = world[0].inspect(identifier)
+    assert snapshot["verification_method"] == provider.PLANNED_AUDIO_VERIFICATION_METHOD
+    assert snapshot["verification_config_sha256"] == provider.PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256
+    result = world[0].prepare_media(snapshot, "Sue")
+    assert world[0].compositor.call_args.kwargs["planned_audio_bytes"] == b"frozen AAC"
+    assert planned[1].call_count == 1
+    provider.verify_video_greeting_words.assert_not_called()
+    assert provider.verify_greeting_words.call_count == 1
+    assert speech.validate_speech_proof(result["speech_proof"], first_name="Sue",
+        media_sha256=hashlib.sha256(b"output").hexdigest())
+    audit = world[0].audit_media({"provider_id": identifier, "first_name": "Sue", "followup_key": "job"}, b"output")
+    assert audit == result["speech_proof"]
+    assert planned[1].call_count == 2
+    assert provider.verify_greeting_words.call_count == 1
+    assert len(paid_calls(world)) == 2
+    assert state(world, identifier)["estimated_cents"] == 9
+    assert "raw_speech_proof" not in state(world, identifier)
+
+
+def test_planned_busy_retry_reuses_frozen_audio_and_never_repays_narration(world, planned, monkeypatch):
+    identifier = start(world)
+    original = provider.verify_greeting_words.side_effect
+    provider.verify_greeting_words.side_effect = speech.SpeechGuardError("speech_guard_busy")
+    assert world[0].inspect(identifier)["status"] == "processing"
+    saved = state(world, identifier)
+    assert saved["audio_plan_sha256"]
+    assert saved["stage"] == "narration_pending"
+    assert len(paid_calls(world)) == 1
+    downloads, preparation = world[0]._download_fal.call_count, world[3].call_count
+    now = core.utcnow() + timedelta(seconds=61)
+    monkeypatch.setattr(provider, "utcnow", lambda: now)
+    provider.verify_greeting_words.side_effect = original
+    assert world[0].inspect(identifier)["status"] == "processing"
+    assert planned[0].call_count == 1
+    assert world[0]._download_fal.call_count == downloads
+    assert world[3].call_count == preparation
+    assert state(world, identifier)["audio_plan_sha256"] == saved["audio_plan_sha256"]
+    assert len(paid_calls(world, provider.TTS_MODEL)) == 1
+    assert len(paid_calls(world, provider.MODEL)) == 1
+
+
+@pytest.mark.parametrize("code", ["speech_guard_name_mismatch", "speech_guard_low_confidence", "speech_guard_output_invalid"])
+def test_planned_wrong_greeting_is_terminal_before_lipsync(world, planned, code):
+    identifier = start(world)
+    provider.verify_greeting_words.side_effect = speech.SpeechGuardError(code)
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert state(world, identifier)["underlying_code"] == code
+    assert not paid_calls(world, provider.MODEL)
+
+
+@pytest.mark.parametrize("filename", ["prepared-plan.json", "planned.m4a", "checked-greeting.wav", "greeting.wav", "input.mp4", "input.wav"])
+def test_planned_asset_tamper_blocks_final_publication(world, planned, filename):
+    identifier = start(world)
+    world[0].inspect(identifier)
+    snapshot = world[0].inspect(identifier)
+    key = f"assets/{identifier}/{filename}"
+    _, version = world[1].objects.read(key)
+    world[1].objects.write(key, b"changed", version)
+    with pytest.raises(speech.SpeechGuardError):
+        world[0].prepare_media(snapshot, "Sue")
+    world[0].compositor.assert_not_called()
+    assert "final_speech_proof" not in state(world, identifier)
+    assert len(paid_calls(world)) == 2
+
+
+def test_planned_lineage_rejection_never_binds_final_name_proof(world, planned):
+    identifier = start(world)
+    world[0].inspect(identifier)
+    snapshot = world[0].inspect(identifier)
+    planned[1].side_effect = provider.VideoProviderError("audio_lineage_decoded_mismatch", "not the checked audio")
+    with pytest.raises(speech.SpeechGuardError) as error:
+        world[0].prepare_media(snapshot, "Sue")
+    assert error.value.code == "speech_guard_media_invalid"
+    assert "final_speech_proof" not in state(world, identifier)
+    provider.verify_video_greeting_words.assert_not_called()
+
+
+@pytest.mark.parametrize("field", ["verification_method", "verification_config", "verification_config_sha256"])
+def test_partial_verification_identity_fails_closed(world, planned, field):
+    identifier = start(world)
+    key = "same-take/" + identifier
+    old, version = world[1].read(key)
+    old.pop(field)
+    world[1].write(key, old, version)
+    with pytest.raises(provider.VideoProviderError):
+        world[0].inspect(identifier)
+    assert len(paid_calls(world)) == 1
+
+
+@pytest.mark.parametrize("field", ["verification_method", "verification_config", "verification_config_sha256", "audio_plan_sha256"])
+def test_verification_identity_cannot_be_updated(world, planned, field):
+    identifier = start(world)
+    with pytest.raises(provider.VideoProviderError):
+        world[0]._update(identifier, {field: "changed"})
+    assert len(paid_calls(world)) == 1
+
+
+def test_old_pipeline_keeps_original_path_after_constructor_switch(world, planned):
+    world[0].verification_method = provider.LEGACY_VERIFICATION_METHOD
+    identifier = start(world)
+    key = "same-take/" + identifier
+    old, version = world[1].read(key)
+    for field in ("verification_method", "verification_config", "verification_config_sha256"):
+        old.pop(field)
+    world[1].write(key, old, version)
+    world[0].verification_method = provider.PLANNED_AUDIO_VERIFICATION_METHOD
+    assert world[0].submit("Sue", "job") == identifier
+    world[0].inspect(identifier)
+    snapshot = world[0].inspect(identifier)
+    assert "verification_method" not in snapshot
+    world[0].prepare_media(snapshot, "Sue")
+    assert provider.verify_greeting_words.call_count == 2
+    provider.verify_video_greeting_words.assert_called_once()
+    planned[0].assert_not_called()
+    planned[1].assert_not_called()
+    assert "planned_audio_bytes" not in world[0].compositor.call_args.kwargs
+
+
+def test_existing_planned_pipeline_remains_planned_if_factory_returns_to_legacy(world, planned):
+    identifier = start(world)
+    world[0].verification_method = provider.LEGACY_VERIFICATION_METHOD
+    assert world[0].submit("Sue", "job") == identifier
+    world[0].inspect(identifier)
+    snapshot = world[0].inspect(identifier)
+    assert snapshot["verification_method"] == provider.PLANNED_AUDIO_VERIFICATION_METHOD
+    world[0].prepare_media(snapshot, "Sue")
+    assert planned[0].call_count == 1
+    assert planned[1].call_count == 1
+    provider.verify_greeting_words.assert_called_once()
+    provider.verify_video_greeting_words.assert_not_called()
+    assert len(paid_calls(world)) == 2
+
+
+def test_unknown_lineage_runtime_blocks_new_payment(world, planned, monkeypatch):
+    import video_followup_audio_lineage as lineage
+    monkeypatch.setattr(lineage, "LINEAGE_VERSION", "not-pinned")
+    with pytest.raises(speech.SpeechGuardError):
+        start(world)
+    assert not paid_calls(world)
+
+
+def test_planned_audio_preparation_failure_keeps_sanitized_diagnostic(world, planned):
+    identifier = start(world)
+    planned[0].side_effect = provider.VideoProviderError("audio_lineage_source_short", "private URL must not persist")
+    status = world[0].inspect(identifier)
+    assert status["status"] == "failed"
+    assert status["failure_stage"] == "audio_plan"
+    assert status["underlying_code"] == "audio_lineage_source_short"
+    assert "private URL" not in json.dumps(state(world, identifier))
+    assert not paid_calls(world, provider.MODEL)
+
+
+def test_planned_retry_still_cancels_if_job_became_inactive(world, planned, monkeypatch):
+    identifier = start(world)
+    provider.verify_greeting_words.side_effect = speech.SpeechGuardError("speech_guard_busy")
+    world[0].inspect(identifier)
+    world[1].mutate("jobs/job", lambda old: {**old, "status": "cancelled"})
+    monkeypatch.setattr(provider, "utcnow", lambda: core.utcnow() + timedelta(seconds=61))
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert state(world, identifier)["stage"] == "cancelled"
+    assert planned[0].call_count == 1
+    assert not paid_calls(world, provider.MODEL)
+
+
+def test_planned_corrupted_bundle_during_backoff_does_not_get_regenerated(world, planned, monkeypatch):
+    identifier = start(world)
+    provider.verify_greeting_words.side_effect = speech.SpeechGuardError("speech_guard_busy")
+    world[0].inspect(identifier)
+    key = f"assets/{identifier}/prepared-plan.json"
+    _, version = world[1].objects.read(key)
+    world[1].objects.write(key, b"changed", version)
+    monkeypatch.setattr(provider, "utcnow", lambda: core.utcnow() + timedelta(seconds=61))
+    assert world[0].inspect(identifier)["status"] == "failed"
+    assert state(world, identifier)["underlying_code"] == "speech_guard_audio_invalid"
+    assert planned[0].call_count == 1
+    assert not paid_calls(world, provider.MODEL)

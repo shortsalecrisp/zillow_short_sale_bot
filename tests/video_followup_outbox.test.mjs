@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -44,6 +45,38 @@ const spokenVideo = (changes = {}, observedName) => {
   const body = video(changes);
   body.video_speech_proof = { ...body.video_speech_proof, ...spokenSpeechPolicy };
   if (observedName !== undefined) body.video_speech_proof.normalized_transcript = `hey ${observedName}`;
+  return body;
+};
+const canonicalDigest = (value) => {
+  const sorted = (item) => Array.isArray(item) ? item.map(sorted) : item && typeof item === "object"
+    ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, sorted(item[key])])) : item;
+  return createHash("sha256").update(JSON.stringify(sorted(value))).digest("hex");
+};
+const plannedVideo = () => {
+  const body = spokenVideo();
+  const proof = body.video_speech_proof;
+  const rawProof = Object.fromEntries([
+    "accepted", "policy_version", "model_id", "model_revision", "model_manifest_sha256", "config_sha256",
+    "source_audio_sha256", "expected_name", "normalized_transcript", "confidence",
+  ].map((field) => [field, proof[field]]));
+  const verification = {
+    method: "planned-aac-lineage-v1", lineage_version: "planned-aac-same-take-v1",
+    extraction_version: "ffmpeg-pcm-s16le-mono-16k-v1", speech_config_sha256: spokenSpeechPolicy.config_sha256,
+    binding: "immutable-planned-aac-full-pcm-and-greeting-v1",
+  };
+  // Full provider-shaped fixture; media bytes are synthetic, not an ASR-quality test.
+  Object.assign(proof, {
+    verification_method: verification.method,
+    verification_config_sha256: canonicalDigest(verification),
+    audio_lineage: {
+      accepted: true, lineage_version: verification.lineage_version, first_name: proof.expected_name,
+      manifest_sha256: "d".repeat(64), planned_audio_sha256: "e".repeat(64),
+      final_media_sha256: proof.media_sha256, checked_audio_sha256: proof.source_audio_sha256,
+      full_pcm_sha256: "f".repeat(64), greeting_pcm_sha256: "1".repeat(64),
+      aac_track_sha256: "2".repeat(64), speech_proof_sha256: canonicalDigest(rawProof),
+      greeting_seconds: proof.greeting_seconds,
+    },
+  });
   return body;
 };
 const legacy = {
@@ -108,7 +141,9 @@ function harness({ initialProof = true } = {}) {
   const headers = Array.from({ length: 33 }, (_, i) => `column_${i}`);
   Object.assign(headers, {
     0: "agent_name", 2: "phone", 8: "follow_up", 10: "mailshake_status",
+    12: "conversation_summary", 13: "ai_state",
     28: "human_override", 29: "last_message_id", 30: "last_inbound_text", 31: "handoff_flag",
+    32: "history_json",
   });
   const row = Array(33).fill("");
   Object.assign(row, { 0: "Jim", 2: base.phone, 10: "N", 22: new Date(initial), 27: base.stable_id });
@@ -149,6 +184,7 @@ function harness({ initialProof = true } = {}) {
       agent_name: "agent_name", phone: "phone", human_override: "human_override",
       mailshake_status: "mailshake_status", followup_text_sent: "follow_up",
       last_message_id: "last_message_id", last_inbound_text: "last_inbound_text", handoff_flag: "handoff_flag",
+      conversation_summary: "conversation_summary", ai_state: "ai_state", history_json: "history_json",
     },
   };
   vm.createContext(context);
@@ -425,6 +461,53 @@ test("new speech policy accepts exact names and only verified spelling pairs thr
     assert.equal(started.ok, true);
     assert.equal(started.status, "send_started");
     assert.equal(h.outbox.data.length, 3);
+  }
+});
+
+test("planned AAC additive proof survives the unchanged Apps Script transport gate", () => {
+  const h = harness();
+  const body = plannedVideo();
+  assert.equal(body.video_speech_proof.verification_config_sha256,
+    "9f7fe677874406a34d5969c0c9f3a547225165764685805c5df50c97f3e831d6");
+  assert.equal(enqueue(h, body).ok, true);
+  const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
+  assert.deepEqual(metadata.video_speech_proof, body.video_speech_proof);
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+  assert.equal(claim.should_send, true);
+  assert.equal(claim.reply_text, body.message);
+  const started = h.context.markPendingSmsSendStartedV10_(claim);
+  assert.equal(started.ok, true);
+  assert.equal(started.status, "send_started");
+  assert.equal(h.outbox.data.length, 3);
+});
+
+test("planned AAC additive fields cannot bypass existing name identity or speech thresholds", () => {
+  for (const changes of [
+    { expected_name: "Sue" }, { normalized_transcript: "hey sue" },
+    { phone: "9542053206" }, { stable_id: "other" }, { followup_key: "d".repeat(64) },
+    { initial_sent_at: "2026-10-12T13:00:00Z" }, { video_job_id: "other" },
+    { model_id: "Systran/faster-whisper-base.en" }, { model_revision: "other" },
+    { model_manifest_sha256: "f".repeat(64) }, { config_sha256: "0".repeat(64) },
+    { confidence: [{ avg_logprob: -1.01, no_speech_prob: 0.01 }] },
+    { confidence: [{ avg_logprob: -0.1, no_speech_prob: 0.61 }] },
+    { media_sha256: "missing" }, { greeting_seconds: 3 },
+  ]) {
+    const h = harness();
+    const body = plannedVideo();
+    Object.assign(body.video_speech_proof, changes);
+    assert.equal(enqueue(h, body).ok, false, JSON.stringify(changes));
+    assert.equal(h.outbox.data.length, 2);
+  }
+  for (const message of [
+    "Hey Jim: https://go.crispshortsales.com/v/another_job",
+    "Hey Jim: https://other.example/v/job_123",
+    "Hey Jim: https://go.crispshortsales.com/not-video/job_123",
+  ]) {
+    const h = harness();
+    const body = plannedVideo();
+    body.message = message;
+    assert.equal(enqueue(h, body).ok, false, message);
+    assert.equal(h.outbox.data.length, 2);
   }
 });
 
@@ -887,6 +970,108 @@ test("known processed replies, takeover, opt-out, conversation notes and contact
     const h = harness();
     h.row[9] = note;
     assert.equal(enqueue(h).ok, true);
+  }
+});
+
+const existingConversationFixtures = [
+  ["already has help", { 10: "H" }],
+  ["lowercase already has help", { 10: " h " }],
+  ["recorded agent reply", { 32: JSON.stringify([{ role: "agent", text: "Call me at 3", ts: "2026-10-13T14:00:00Z" }]) }],
+  ["recorded user reply", { 32: JSON.stringify([{ role: "user", text: "How much do you charge?" }]) }],
+  ["recorded content reply", { 32: JSON.stringify([{ role: "agent", content: "Yes, please call" }]) }],
+  ["active conversation state", { 13: "active" }],
+  ["handoff state", { 13: "handoff" }],
+  ["completed state", { 13: "done" }],
+  ["manual conversation summary", { 12: "Spoke with agent; callback requested" }],
+  ["callback summary", { 12: "Agent requested a callback tomorrow" }],
+];
+
+test("H and independently recorded conversations block both personalized video and text fallback", () => {
+  for (const [label, changes] of existingConversationFixtures) {
+    for (const body of [base, video()]) {
+      const h = harness();
+      Object.assign(h.row, changes);
+      const before = h.counters();
+      assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, false, `${label}: ${body.video_variant}`);
+      assert.deepEqual(h.counters(), before, label);
+      assert.equal(enqueue(h, body).ok, false, `${label}: ${body.video_variant}`);
+      assert.equal(h.outbox.data.length, 2, label);
+    }
+  }
+});
+
+test("new H or conversation evidence cancels a reminder at claim, active-lease replay and send-start", () => {
+  for (const [label, changes] of existingConversationFixtures) {
+    for (const phase of ["claim", "active_claim", "send_started"]) {
+      for (const body of [base, video()]) {
+        const h = harness();
+        assert.equal(enqueue(h, body).ok, true, label);
+        const lease = phase === "claim" ? null : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+        Object.assign(h.row, changes);
+        const result = phase === "send_started"
+          ? h.context.markPendingSmsSendStartedV10_(lease)
+          : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+        assert.equal(result.should_send, false, `${label}: ${phase}: ${body.video_variant}`);
+        assert.equal(h.outbox.data[2][1], "superseded", label);
+        assert.equal(h.outbox.data.length, 3, label);
+      }
+    }
+  }
+});
+
+test("ordinary scheduled text uses the conversation guard without changing owner-approved follow-ups", () => {
+  for (const [label, changes] of existingConversationFixtures) {
+    for (const phase of ["claim", "send_started"]) {
+      const h = harness();
+      assert.equal(enqueue(h, legacy).ok, true, label);
+      const lease = phase === "claim" ? null : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+      Object.assign(h.row, changes);
+      const result = phase === "send_started"
+        ? h.context.markPendingSmsSendStartedV10_(lease)
+        : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+      assert.equal(result.should_send, false, `${label}: ${phase}`);
+      assert.equal(h.outbox.data[2][1], "superseded", label);
+    }
+    const owner = harness();
+    Object.assign(owner.row, changes);
+    assert.equal(enqueue(owner, { ...legacy, request_id: "render-followup-2-0123456789abcdef" }).ok, true, label);
+    assert.equal(owner.context.claimPendingSmsSendV10_({ worker_id: "owner-test" }).should_send, true, label);
+  }
+});
+
+test("outbound-only history and operational summaries do not imply an agent conversation", () => {
+  for (const [label, changes] of [
+    ["assistant-only history", { 32: JSON.stringify([{ role: "assistant", text: "Original initial outreach text" }]) }],
+    ["bot-only history", { 32: JSON.stringify([{ role: "bot", text: "Original initial outreach text" }]) }],
+    ["system-only history", { 32: JSON.stringify([{ role: "system", text: "Lead verifier: initial SMS receipt confirmed" }]) }],
+    ["empty history", { 32: "[]" }],
+    ["empty inbound history entry", { 32: JSON.stringify([{ role: "agent", text: "  " }]) }],
+    ["malformed history", { 32: "[not valid json" }],
+    ["non-array history", { 32: JSON.stringify({ role: "agent", text: "Not a valid history array" }) }],
+    ["verifier summary", { 12: "Lead verifier: initial SMS receipt confirmed" }],
+    ["operational summary", { 12: "Initial SMS queued; awaiting handset receipt" }],
+    ["non-response summary", { 12: "No answer on first call" }],
+    ["verifier discussion summary", { 12: "Lead verifier checked whether agent requested a callback" }],
+    ["new state", { 13: "new" }],
+    ["initial state", { 13: "initial" }],
+    ["unknown state", { 13: "unrecognized_state" }],
+  ]) {
+    for (const body of [base, video()]) {
+      const h = harness();
+      Object.assign(h.row, changes);
+      assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, true, `${label}: ${body.video_variant}`);
+      assert.equal(enqueue(h, body).ok, true, `${label}: ${body.video_variant}`);
+      assert.equal(h.context.getPendingSmsStaleReason_(h.outbox.data[2]), "", label);
+    }
+  }
+});
+
+test("malformed history does not bypass other genuine reply or takeover evidence", () => {
+  for (const changes of [{ 29: "inbound-id" }, { 30: "Call me at 3" }, { 28: "TRUE" }, { 31: "TRUE" }]) {
+    const h = harness();
+    Object.assign(h.row, { 32: "[not valid json" }, changes);
+    assert.equal(enqueue(h, base).ok, false);
+    assert.equal(h.outbox.data.length, 2);
   }
 });
 

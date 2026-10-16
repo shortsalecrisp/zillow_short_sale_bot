@@ -11,7 +11,7 @@ import json
 import math
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlencode, urlsplit
 
@@ -25,7 +25,10 @@ from video_followup_audio_guard import GUARD_VERSION, inspect_reference, inspect
 from video_followup_same_take_media import prepare_inputs, compose
 from video_followup_speech_guard import (
     SpeechGuardError, preflight_speech_guard, verify_greeting_words,
-    verify_video_greeting_words, validate_speech_proof,
+    verify_video_greeting_words, validate_speech_proof, is_transient_speech_failure,
+    safe_speech_failure_diagnostics,
+    LEGACY_VERIFICATION_METHOD, PLANNED_AUDIO_VERIFICATION_METHOD,
+    PLANNED_AUDIO_VERIFICATION_CONFIG, PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256,
 )
 
 MASTER_SHA256 = "01efd28101e8b016d51d571cc87d38d13ea623389663bc7a88cf26cce39bd60b"
@@ -41,6 +44,10 @@ TTS_TEMPERATURE = 0.5
 TTS_REQUEST_CENTS = 2
 LIPSYNC_REQUEST_CENTS = 7
 RESERVATION_CENTS = 10
+PREPARATION_MAX_ATTEMPTS = 3
+PREPARATION_RETRY_SECONDS = 60
+PREPARATION_LEASE_SECONDS = 600
+PRICE_READ_MAX_ATTEMPTS = 3
 PRICING_ENDPOINT = "https://api.fal.ai/v1/models/pricing"
 APPROVED_RATES = {TTS_MODEL: ("1000 characters", Decimal("0.02")),
                   MODEL: ("units", Decimal("0.014"))}
@@ -58,7 +65,7 @@ MAX_BYTES = 25 * 1024 * 1024
 _REQUEST_ID = re.compile(r"[a-zA-Z0-9-]{16,64}")
 _PIPELINE_ID = re.compile(r"same-take-[a-f0-9]{32}")
 _PREPARATION_FAILURE_CODES = frozenset({
-    "reference_mismatch", "unapproved_voice_reference", "invalid_voice_reference_duration",
+    "master_mismatch", "reference_mismatch", "unapproved_voice_reference", "invalid_voice_reference_duration",
     "unsafe_fal_media", "fal_download_failed", "fal_download_empty", "invalid_narration_audio",
     "clipped_narration_audio", "silent_narration_audio", "quiet_narration_audio",
     "uncertain_narration_pitch", "narration_pitch_outlier", "invalid_greeting_timing",
@@ -70,16 +77,80 @@ _PREPARATION_FAILURE_CODES = frozenset({
     "speech_guard_busy", "speech_guard_timeout", "speech_guard_execution_failed",
     "speech_guard_output_invalid", "speech_guard_audio_invalid", "speech_guard_name_invalid",
     "speech_guard_name_mismatch", "speech_guard_low_confidence", "speech_guard_media_invalid",
+    "audio_lineage_invalid", "audio_lineage_codec_changed", "audio_lineage_movie_presentation",
+    "audio_lineage_movie_timing", "audio_lineage_track_flags", "audio_lineage_fragmented",
+    "audio_lineage_track_count", "audio_lineage_media_container", "audio_lineage_timing",
+    "audio_lineage_edit_list", "audio_lineage_sound_presentation", "audio_lineage_external_data",
+    "audio_lineage_sample_table", "audio_lineage_source_short", "audio_lineage_identity_mismatch",
+    "audio_lineage_speech_proof_invalid", "audio_lineage_track_mismatch", "audio_lineage_decoded_mismatch",
 })
 _PREPARATION_FAILURE_STAGES = frozenset({
-    "reference_read", "audio_download", "audio_screen", "audio_duration", "media_prepare",
+    "master_read", "reference_read", "audio_download", "audio_screen", "audio_duration", "media_prepare",
     "prepared_validation", "raw_speech_screen", "speech_screen", "asset_storage", "asset_signing",
+    "audio_plan",
 })
 _DIAGNOSTIC_EXCEPTION_TYPES = frozenset({
     "VideoProviderError", "Conflict", "ValueError", "TypeError", "KeyError", "OSError",
     "RuntimeError", "TimeoutError", "MemoryError", "OverflowError", "HTTPError",
     "ConnectionError", "ReadTimeout", "ConnectTimeout", "Timeout", "SpeechGuardError",
 })
+_PIPELINE_FAILURE_CODES = frozenset({
+    "greeting_preparation_failed", "provider_price_not_approved", "narration_submission_unconfirmed",
+    "fal_submission_unconfirmed", "paid_stage_lease_expired", "narration_failed", "fal_render_failed",
+    "cancelled_before_lipsync", "failed", "uncertain", "cancelled",
+})
+
+
+class _UnpaidPreflightTransient(VideoProviderError):
+    """This invocation stopped before its pipeline or paid request was created."""
+
+    uncertain = False
+
+    def __init__(self, error, first_name, job_id):
+        if not is_transient_speech_failure(error):
+            raise ValueError("Only a transient speech preflight can be retried")
+        self.speech_code, self.first_name, self.job_id = error.code, first_name, job_id
+        super().__init__("unpaid_preflight_transient", "Local speech preflight is temporarily unavailable.")
+
+
+def _digest_json(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _verification_profile(method):
+    if method == LEGACY_VERIFICATION_METHOD:
+        config = {"method": method}
+    elif method == PLANNED_AUDIO_VERIFICATION_METHOD:
+        config = dict(PLANNED_AUDIO_VERIFICATION_CONFIG)
+    else:
+        raise VideoProviderError("verification_method_invalid", "Audio verification method is not approved.")
+    return {"verification_method": method, "verification_config": config,
+            "verification_config_sha256": _digest_json(config)}
+
+
+def _saved_verification_profile(state):
+    fields = ("verification_method", "verification_config", "verification_config_sha256")
+    if not any(field in state for field in fields):
+        if "audio_plan_sha256" in state:
+            raise VideoProviderError("pipeline_mismatch", "Legacy pipeline cannot contain a planned audio identity.")
+        return _verification_profile(LEGACY_VERIFICATION_METHOD)
+    if not all(field in state for field in fields):
+        raise VideoProviderError("pipeline_mismatch", "Audio verification identity is incomplete.")
+    profile = _verification_profile(state["verification_method"])
+    if any(state.get(field) != value for field, value in profile.items()):
+        raise VideoProviderError("pipeline_mismatch", "Audio verification identity changed.")
+    if "audio_plan_sha256" in state and (profile["verification_method"] != PLANNED_AUDIO_VERIFICATION_METHOD
+            or not re.fullmatch(r"[a-f0-9]{64}", str(state["audio_plan_sha256"]))):
+        raise VideoProviderError("pipeline_mismatch", "Planned audio identity changed.")
+    return profile
+
+
+def _lineage_runtime():
+    import video_followup_audio_lineage as lineage
+    if (lineage.LINEAGE_VERSION != PLANNED_AUDIO_VERIFICATION_CONFIG["lineage_version"]
+            or lineage.EXTRACTION_VERSION != PLANNED_AUDIO_VERIFICATION_CONFIG["extraction_version"]):
+        raise SpeechGuardError("speech_guard_output_invalid")
+    return lineage
 
 
 def _generator_profile(name):
@@ -140,6 +211,9 @@ def _preparation_failure_diagnostics(exc, stage, audio_qa):
                     and math.isfinite(values[name])}
         if measured:
             details["measured_audio_qa"] = measured
+    speech = safe_speech_failure_diagnostics(exc)
+    if speech:
+        details["speech_diagnostics"] = speech
     return details
 
 
@@ -153,6 +227,10 @@ def _failed_status(state):
                 ("exception_type", _DIAGNOSTIC_EXCEPTION_TYPES, "OtherException")):
             value = state.get(field)
             result[field] = value if isinstance(value, str) and value in allowed else fallback
+        speech = safe_speech_failure_diagnostics(SpeechGuardError(
+            state.get("underlying_code"), diagnostics=state.get("speech_diagnostics")))
+        if speech:
+            result["speech_diagnostics"] = speech
     return result
 
 
@@ -195,9 +273,34 @@ def tts_request_url(request_id, url=None, *, status=False):
 
 
 class SameTakeVideoProvider:
+    @staticmethod
+    def safe_unpaid_preflight_failure(error, *, first_name, job_id):
+        code = getattr(error, "speech_code", None)
+        if (type(error) is not _UnpaidPreflightTransient or error.first_name != first_name
+                or error.job_id != job_id or not isinstance(code, str)
+                or code not in {"speech_guard_busy", "speech_guard_timeout", "speech_guard_unavailable",
+                                "speech_guard_execution_failed"}):
+            return None
+        return {"failure_stage": "prepayment_speech_preflight", "underlying_code": code,
+                "exception_type": "SpeechGuardError"}
+
+    @staticmethod
+    def safe_failure_diagnostics(status):
+        if not isinstance(status, dict) or status.get("status") != "failed":
+            return {}
+        code = status.get("failure_code")
+        if not isinstance(code, str) or code not in _PIPELINE_FAILURE_CODES:
+            return {"failure_code": "unclassified_provider_failure"}
+        if code != "greeting_preparation_failed":
+            return {"failure_code": code}
+        sanitized = _failed_status({**status, "id": "", "stage": "failed"})
+        return {key: sanitized[key] for key in (
+            "failure_code", "failure_stage", "underlying_code", "exception_type", "speech_diagnostics")
+            if key in sanitized}
+
     def __init__(self, fal_key, store, master_asset_key, *, tts_key, reference_asset_key=REFERENCE_KEY, session=None,
                  media_session=None, resolver=None, preparer=prepare_inputs, compositor=compose,
-                 generator_profile=LEGACY_GENERATOR_PROFILE):
+                 generator_profile=LEGACY_GENERATOR_PROFILE, verification_method=LEGACY_VERIFICATION_METHOD):
         if (not fal_key or not tts_key or not master_asset_key.startswith("assets/")
                 or reference_asset_key != REFERENCE_KEY
                 or TTS_REQUEST_CENTS + LIPSYNC_REQUEST_CENTS > RESERVATION_CENTS):
@@ -205,6 +308,7 @@ class SameTakeVideoProvider:
         self.store, self.master_key = store, master_asset_key
         self.fal_key, self.tts_key, self.reference_key = fal_key, tts_key, reference_asset_key
         self.generator_profile = _generator_profile(generator_profile)["name"]
+        self.verification_method = _verification_profile(verification_method)["verification_method"]
         self.session, self.media_session = session or requests.Session(), media_session or requests.Session()
         if session is None:
             self.session.trust_env = False
@@ -247,12 +351,14 @@ class SameTakeVideoProvider:
                 or state.get("greeting_script") != "Hey " + state["first_name"] + "!"):
             raise VideoProviderError("pipeline_mismatch", "Pipeline identity or budget changed.")
         _saved_generator_profile(state)
+        _saved_verification_profile(state)
         return state, version
 
-    def _update(self, pipeline_id, fields, expected_stage=None):
+    def _update(self, pipeline_id, fields, expected_stage=None, *, preparation_attempt=None):
         immutable = {"id", "job_key", "first_name", "source_sha256", "script_version",
                 "reference_sha256", "render_config_sha256", "reserved_cents", "greeting_script",
-                "generator_profile", "generator_config", "tts_reference_key", "tts_reference_sha256"}
+                "generator_profile", "generator_config", "tts_reference_key", "tts_reference_sha256",
+                "verification_method", "verification_config", "verification_config_sha256", "audio_plan_sha256"}
         if set(fields).intersection(immutable):
             raise VideoProviderError("pipeline_mismatch", "Pipeline identity is immutable.")
         saved, _ = self._read(pipeline_id)
@@ -260,6 +366,9 @@ class SameTakeVideoProvider:
             if not old or any(old.get(field) != saved.get(field) for field in immutable):
                 raise VideoProviderError("pipeline_mismatch", "Pipeline identity changed during update.")
             _saved_generator_profile(old)
+            _saved_verification_profile(old)
+            if preparation_attempt is not None and old.get("preparation_attempts") != preparation_attempt:
+                return None
             return {**old, **fields} if expected_stage is None or old.get("stage") == expected_stage else None
         return self.store.mutate("same-take/" + pipeline_id, change)
 
@@ -278,10 +387,16 @@ class SameTakeVideoProvider:
                 raise SubmissionUncertain("same-take", "paid_stage_uncertain") from None
             raise VideoProviderError("status_unavailable", "Provider status is temporarily unavailable.") from None
         try:
-            if not 200 <= response.status_code < 300 or len(response.content) > MAX_API_BYTES:
+            if not 200 <= response.status_code < 300:
                 if paid:
                     raise SubmissionUncertain("same-take", "paid_stage_unconfirmed")
-                raise VideoProviderError("status_unavailable", "Provider status is temporarily unavailable.")
+                transient = response.status_code in {408, 425, 429} or 500 <= response.status_code < 600
+                raise VideoProviderError("status_unavailable" if transient else "status_rejected",
+                                         "Provider status request was not accepted.")
+            if len(response.content) > MAX_API_BYTES:
+                if paid:
+                    raise SubmissionUncertain("same-take", "paid_response_invalid")
+                raise VideoProviderError("status_invalid", "Provider status was invalid.")
             value = response.json()
             if not isinstance(value, dict):
                 raise ValueError()
@@ -314,7 +429,19 @@ class SameTakeVideoProvider:
 
     def _price_before_payment(self, pipeline_id, stage, model, key, field):
         try:
-            rate = self._verified_price(model, key)
+            # These are free GETs inside the existing paid-stage claim. Never
+            # restart a submitting stage after a crash or uncertain paid POST.
+            for attempt in range(1, PRICE_READ_MAX_ATTEMPTS + 1):
+                saved = self._update(pipeline_id, {field + "_read_attempts": attempt}, stage)
+                if saved["stage"] != stage:
+                    raise VideoProviderError("stale_provider_price", "Provider pricing lease changed.")
+                try:
+                    rate = self._verified_price(model, key)
+                    break
+                except VideoProviderError as error:
+                    if error.code != "status_unavailable" or attempt == PRICE_READ_MAX_ATTEMPTS:
+                        raise
+                    time.sleep(attempt)
             saved = self._update(pipeline_id, {field: rate}, stage)
             age = (utcnow() - datetime.fromisoformat(rate["verified_at"].replace("Z", "+00:00"))).total_seconds()
             if saved["stage"] != stage or not 0 <= age <= 60:
@@ -336,19 +463,35 @@ class SameTakeVideoProvider:
                 raise VideoProviderError("identity_changed", "Existing greeting belongs to a different name.")
             return pipeline_id
         profile = _generator_profile(self.generator_profile)
+        verification = _verification_profile(self.verification_method)
+        if self.verification_method == PLANNED_AUDIO_VERIFICATION_METHOD:
+            _lineage_runtime()
         self._master()
         self._reference()
         self._tts_reference(profile)
         # Local verification policy is independent of the paid render identity.
         # Existing requests above are reused; a missing verifier blocks new spend.
-        preflight_speech_guard()
+        try:
+            preflight_speech_guard()
+        except SpeechGuardError as error:
+            if not is_transient_speech_failure(error):
+                raise
+            # Another same-key caller may have passed preflight while this one
+            # was busy. Reuse its immutable pipeline, never reset or resubmit it.
+            concurrent, _ = self.store.read("same-take/" + pipeline_id)
+            if concurrent:
+                concurrent, _ = self._read(pipeline_id)
+                if concurrent.get("first_name") != first_name or concurrent.get("job_key") != job_id:
+                    raise VideoProviderError("identity_changed", "Existing greeting belongs to a different name.")
+                return pipeline_id
+            raise _UnpaidPreflightTransient(error, first_name, job_id) from None
         state = {"id": pipeline_id, "job_key": job_id, "first_name": first_name,
                  "source_sha256": MASTER_SHA256, "script_version": SCRIPT_VERSION,
                  "stage": "narration_submitting", "created_at": iso(utcnow()),
                  "reference_sha256": REFERENCE_SHA256, "render_config_sha256": profile["render_config_sha256"],
                  "generator_profile": profile["name"], "generator_config": profile["config"],
                  "tts_reference_key": profile["reference_key"], "tts_reference_sha256": profile["reference_sha256"],
-                 "reserved_cents": RESERVATION_CENTS, "greeting_script": f"Hey {first_name}!"}
+                 "reserved_cents": RESERVATION_CENTS, "greeting_script": f"Hey {first_name}!", **verification}
         # The observed minimum TTS billing block is 1,000 characters (2 cents).
         if len(state["greeting_script"]) > 1000:
             raise VideoProviderError("tts_exceeds_budget", "Greeting exceeds the approved narration billing block.")
@@ -389,29 +532,134 @@ class SameTakeVideoProvider:
                 raise VideoProviderError("asset_conflict", "Prepared greeting asset changed.")
         return key
 
+    def _read_audio_plan(self, state):
+        """Load only create-once, identity-bound assets; never regenerate a plan."""
+        key = f"assets/{state['id']}/prepared-plan.json"
+        content, _ = self.store.objects.read(key)
+        if content is None and "audio_plan_sha256" not in state:
+            return None
+        try:
+            if not isinstance(content, bytes) or not 0 < len(content) <= 128000:
+                raise ValueError()
+            digest = hashlib.sha256(content).hexdigest()
+            if "audio_plan_sha256" in state and digest != state["audio_plan_sha256"]:
+                raise ValueError()
+            bundle = json.loads(content)
+            if (not isinstance(bundle, dict) or _digest_json(bundle) != digest
+                    or bundle.get("version") != "frozen-same-take-audio-plan-v1"
+                    or bundle.get("pipeline_id") != state["id"]
+                    or bundle.get("first_name") != state["first_name"]
+                    or bundle.get("verification_config_sha256") != state["verification_config_sha256"]):
+                raise ValueError()
+            metadata, manifest = bundle["metadata"], bundle["manifest"]
+            duration = bundle["narration_duration"]
+            if (type(duration) not in {int, float} or not math.isfinite(duration) or not 0 < duration <= 3
+                    or not isinstance(bundle["audio_qa"], dict)):
+                raise ValueError()
+            expected = {"lineage_version": PLANNED_AUDIO_VERIFICATION_CONFIG["lineage_version"],
+                "extraction_version": PLANNED_AUDIO_VERIFICATION_CONFIG["extraction_version"],
+                "first_name": state["first_name"], "source_sha256": MASTER_SHA256,
+                "preparation_sha256": _digest_json(metadata),
+                "prepared_greeting_sha256": metadata["greeting_audio_sha256"],
+                "greeting_seconds": metadata["greeting_seconds"]}
+            if (not isinstance(manifest, dict) or any(manifest.get(k) != v for k, v in expected.items())
+                    or bundle["manifest_sha256"] != _digest_json(manifest)
+                    or metadata.get("source_sha256") != MASTER_SHA256
+                    or metadata.get("first_name") != state["first_name"]
+                    or ("metadata" in state and state["metadata"] != metadata)):
+                raise ValueError()
+            for field in ("source_sha256", "preparation_sha256", "prepared_greeting_sha256",
+                          "body_pcm_sha256", "joined_pcm_sha256", "planned_audio_sha256", "full_pcm_sha256",
+                          "checked_audio_sha256", "greeting_pcm_sha256"):
+                if not re.fullmatch(r"[a-f0-9]{64}", str(manifest.get(field, ""))):
+                    raise ValueError()
+            for field in ("joined_sample_count", "full_sample_count", "greeting_sample_count"):
+                if type(manifest.get(field)) is not int or not 0 < manifest[field] <= 48000 * 30:
+                    raise ValueError()
+            seconds = manifest["greeting_seconds"]
+            if (type(seconds) not in {int, float} or not math.isfinite(seconds) or not 0.5 <= seconds <= 2.5
+                    or not isinstance(manifest.get("aac_track"), dict)):
+                raise ValueError()
+            inputs = {"metadata": metadata}
+            for field, filename, expected_hash in (
+                    ("video_bytes", "input.mp4", metadata["video_sha256"]),
+                    ("audio_bytes", "input.wav", metadata["audio_sha256"]),
+                    ("greeting_audio_bytes", "greeting.wav", metadata["greeting_audio_sha256"]),
+                    ("planned_audio_bytes", "planned.m4a", manifest["planned_audio_sha256"]),
+                    ("checked_audio_bytes", "checked-greeting.wav", manifest["checked_audio_sha256"])):
+                data, _ = self.store.objects.read(f"assets/{state['id']}/{filename}")
+                if (not isinstance(data, bytes) or not 0 < len(data) <= MAX_BYTES
+                        or hashlib.sha256(data).hexdigest() != expected_hash):
+                    raise ValueError()
+                inputs[field] = data
+            return {"bundle": bundle, "inputs": inputs, "sha256": digest}
+        except (ValueError, TypeError, KeyError, UnicodeError):
+            raise SpeechGuardError("speech_guard_audio_invalid") from None
+
+    def _freeze_audio_plan(self, state, inputs, audio_qa, duration):
+        plan = _lineage_runtime().prepare_audio_plan(self._master(), inputs["greeting_audio_bytes"],
+            inputs["metadata"], first_name=state["first_name"])
+        for filename, content, mime in (
+                ("input.mp4", inputs["video_bytes"], "video/mp4"),
+                ("input.wav", inputs["audio_bytes"], "audio/wav"),
+                ("greeting.wav", inputs["greeting_audio_bytes"], "audio/wav"),
+                ("planned.m4a", plan["audio_bytes"], "audio/mp4"),
+                ("checked-greeting.wav", plan["greeting_audio_bytes"], "audio/wav")):
+            self._asset(state["id"], filename, content, mime)
+        bundle = {"version": "frozen-same-take-audio-plan-v1", "pipeline_id": state["id"],
+            "first_name": state["first_name"], "verification_config_sha256": state["verification_config_sha256"],
+            "metadata": inputs["metadata"], "audio_qa": audio_qa, "narration_duration": duration,
+            "manifest": plan["manifest"], "manifest_sha256": plan["manifest_sha256"]}
+        self._asset(state["id"], "prepared-plan.json",
+            json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode(), "application/json")
+        return self._read_audio_plan(state)
+
     def _start_fal(self, state, version, narration):
         pipeline_id = state["id"]
         if not self._active(state):
             return self._update(pipeline_id, {"stage": "cancelled"}, "narration_pending")
-        master = self._master()
-        failure_stage, audio_qa = "reference_read", None
+        now = utcnow()
+        for field in ("preparation_retry_after", "preparation_lease_until"):
+            if state.get(field) and now < datetime.fromisoformat(state[field].replace("Z", "+00:00")):
+                return state
+        attempts = state.get("preparation_attempts", 0)
+        if type(attempts) is not int or not 0 <= attempts < PREPARATION_MAX_ATTEMPTS:
+            return self._update(pipeline_id, {"stage": "failed",
+                "failure_code": "greeting_preparation_failed", "preparation_retry_exhausted": True},
+                "narration_pending")
+        state = {**state, "preparation_attempts": attempts + 1, "preparation_retry_after": None,
+            "preparation_lease_until": iso(now + timedelta(seconds=PREPARATION_LEASE_SECONDS))}
+        # A free-work lease prevents concurrent checks from consuming attempts
+        # or racing a successful preparation into a terminal failure.
+        version = self.store.write("same-take/" + pipeline_id, state, version)
+        failure_stage, audio_qa = "master_read", None
+        planned = _saved_verification_profile(state)["verification_method"] == PLANNED_AUDIO_VERIFICATION_METHOD
+        raw_speech_proof = None
         try:
-            reference = self._reference()
-            failure_stage = "audio_download"
-            audio_source = self._download_fal(narration["media_url"])
-            failure_stage = "audio_screen"
-            audio_qa = inspect_greeting(audio_source, reference)
-            failure_stage = "audio_duration"
-            duration = float(audio_qa["duration_seconds"])
-            if not math.isfinite(duration) or not 0 < duration <= 3.0:
-                raise VideoProviderError("narration_exceeds_budget", "Narration duration is outside the approved limit.")
-            failure_stage = "raw_speech_screen"
-            raw_speech_proof = verify_greeting_words(audio_source, state["first_name"])
-            if not validate_speech_proof(raw_speech_proof, first_name=state["first_name"],
-                    audio_sha256=hashlib.sha256(audio_source).hexdigest()):
-                raise SpeechGuardError("speech_guard_output_invalid")
-            failure_stage = "media_prepare"
-            inputs = self.preparer(master, audio_source, first_name=state["first_name"])
+            cached = self._read_audio_plan(state) if planned else None
+            if cached:
+                inputs = cached["inputs"]
+                audio_qa, duration = cached["bundle"]["audio_qa"], cached["bundle"]["narration_duration"]
+            else:
+                master = self._master()
+                failure_stage = "reference_read"
+                reference = self._reference()
+                failure_stage = "audio_download"
+                audio_source = self._download_fal(narration["media_url"])
+                failure_stage = "audio_screen"
+                audio_qa = inspect_greeting(audio_source, reference)
+                failure_stage = "audio_duration"
+                duration = float(audio_qa["duration_seconds"])
+                if not math.isfinite(duration) or not 0 < duration <= 3.0:
+                    raise VideoProviderError("narration_exceeds_budget", "Narration duration is outside the approved limit.")
+                if not planned:
+                    failure_stage = "raw_speech_screen"
+                    raw_speech_proof = verify_greeting_words(audio_source, state["first_name"])
+                    if not validate_speech_proof(raw_speech_proof, first_name=state["first_name"],
+                            audio_sha256=hashlib.sha256(audio_source).hexdigest()):
+                        raise SpeechGuardError("speech_guard_output_invalid")
+                failure_stage = "media_prepare"
+                inputs = self.preparer(master, audio_source, first_name=state["first_name"])
             failure_stage = "prepared_validation"
             metadata = inputs["metadata"]
             if (metadata.get("source_sha256") != MASTER_SHA256
@@ -423,10 +671,20 @@ class SameTakeVideoProvider:
                                       ("greeting_audio", "greeting_audio_bytes")):
                 if hashlib.sha256(inputs[content_key]).hexdigest() != metadata.get(kind + "_sha256"):
                     raise VideoProviderError("input_hash_mismatch", "Prepared input hash changed.")
+            if planned:
+                failure_stage = "audio_plan"
+                cached = cached or self._freeze_audio_plan(state, inputs, audio_qa, duration)
+                inputs = cached["inputs"]
+                if "audio_plan_sha256" not in state:
+                    # Bind the create-once bundle before ASR: free retries reuse
+                    # exactly these AAC bytes instead of re-encoding paid audio.
+                    state = {**state, "audio_plan_sha256": cached["sha256"]}
+                    version = self.store.write("same-take/" + pipeline_id, state, version)
             failure_stage = "speech_screen"
-            speech_proof = verify_greeting_words(inputs["greeting_audio_bytes"], state["first_name"])
+            checked_audio = inputs["checked_audio_bytes"] if planned else inputs["greeting_audio_bytes"]
+            speech_proof = verify_greeting_words(checked_audio, state["first_name"])
             if not validate_speech_proof(speech_proof, first_name=state["first_name"],
-                    audio_sha256=metadata["greeting_audio_sha256"]):
+                    audio_sha256=hashlib.sha256(checked_audio).hexdigest()):
                 raise SpeechGuardError("speech_guard_output_invalid")
             failure_stage = "asset_storage"
             video_key = self._asset(pipeline_id, "input.mp4", inputs["video_bytes"], "video/mp4")
@@ -436,12 +694,25 @@ class SameTakeVideoProvider:
             video_url = self.store.objects.signed_get_url(video_key)
             audio_url = self.store.objects.signed_get_url(audio_key)
         except Exception as exc:
-            self._update(pipeline_id, {"stage": "failed", "failure_code": "greeting_preparation_failed",
-                **_preparation_failure_diagnostics(exc, failure_stage, audio_qa)}, "narration_pending")
+            retry = is_transient_speech_failure(exc) and state["preparation_attempts"] < PREPARATION_MAX_ATTEMPTS
+            active = self._active(state)
+            diagnostics = {**_preparation_failure_diagnostics(exc, failure_stage, audio_qa),
+                "failure_at": iso(utcnow())}
+            fields = {"stage": "narration_pending" if retry and active else "failed" if active else "cancelled",
+                "failure_code": "greeting_preparation_retry_pending" if retry and active else "greeting_preparation_failed",
+                "preparation_lease_until": None, "preparation_last_failure_at": iso(utcnow()),
+                "preparation_retry_after": iso(utcnow() + timedelta(seconds=PREPARATION_RETRY_SECONDS)) if retry and active else None,
+                "preparation_retry_exhausted": is_transient_speech_failure(exc) and not retry,
+                "last_preparation_failure": diagnostics, **diagnostics}
+            self._update(pipeline_id, fields, "narration_pending", preparation_attempt=state["preparation_attempts"])
             # Only durable, identity-checked failure is terminal. A failed write,
             # unreadable state, or competing paid-stage transition still raises.
             latest, _ = self._read(pipeline_id)
             if latest["stage"] == "failed" and latest.get("failure_code") == "greeting_preparation_failed":
+                return latest
+            if (latest["stage"] == "cancelled" or (latest["stage"] == "narration_pending"
+                    and latest.get("preparation_attempts") == state["preparation_attempts"]
+                    and latest.get("preparation_retry_after"))):
                 return latest
             raise
         # CAS is the paid-stage lease: competing polls cannot pay twice.
@@ -449,7 +720,14 @@ class SameTakeVideoProvider:
                    "greeting_key": greeting_key, "narration_duration": duration,
                    "estimated_cents": TTS_REQUEST_CENTS + LIPSYNC_REQUEST_CENTS,
                    "audio_qa": audio_qa, "raw_speech_proof": raw_speech_proof,
-                   "greeting_speech_proof": speech_proof, "fal_attempt_at": iso(utcnow())}
+                   "greeting_speech_proof": speech_proof, "fal_attempt_at": iso(utcnow()),
+                   "preparation_lease_until": None, "preparation_retry_after": None,
+                   "failure_code": None}
+        if planned:
+            claimed.pop("raw_speech_proof", None)
+        for field in ("failure_code", "failure_stage", "underlying_code", "exception_type", "failure_at",
+                      "speech_diagnostics", "measured_audio_qa", "preparation_retry_exhausted"):
+            claimed.pop(field, None)
         self.store.write("same-take/" + pipeline_id, claimed, version)
         self._price_before_payment(pipeline_id, "fal_submitting", MODEL, self.fal_key, "lipsync_price")
         if not self._active(claimed):
@@ -479,6 +757,10 @@ class SameTakeVideoProvider:
         if stage in {"failed", "uncertain", "cancelled"}:
             return _failed_status(state)
         if stage == "narration_pending":
+            if not accounting_only and self._active(state):
+                for field in ("preparation_retry_after", "preparation_lease_until"):
+                    if state.get(field) and utcnow() < datetime.fromisoformat(state[field].replace("Z", "+00:00")):
+                        return {"provider_id": pipeline_id, "status": "processing"}
             headers = {"Authorization": "Key " + self.tts_key}
             narration_status = self._json("GET", tts_request_url(state["narration_id"],
                 state.get("narration_status_url"), status=True), headers=headers)
@@ -519,8 +801,12 @@ class SameTakeVideoProvider:
                 return {"provider_id": pipeline_id, "status": "failed" if latest["stage"] == "failed" else "processing"}
             state = self._update(pipeline_id, {"stage": "completed", "media_url": fal_media_url(result["video"].get("url"))}, "fal_pending")
         if state["stage"] == "completed":
-            return {"provider_id": pipeline_id, "status": "completed", "media_url": state["media_url"],
-                    "estimated_cents": state["estimated_cents"], "accounting_method": "conservative_reservation"}
+            result = {"provider_id": pipeline_id, "status": "completed", "media_url": state["media_url"],
+                      "estimated_cents": state["estimated_cents"], "accounting_method": "conservative_reservation"}
+            if _saved_verification_profile(state)["verification_method"] == PLANNED_AUDIO_VERIFICATION_METHOD:
+                result.update(verification_method=state["verification_method"],
+                    verification_config_sha256=state["verification_config_sha256"])
+            return result
         return {"provider_id": pipeline_id, "status": "processing"}
 
     def _download_fal(self, url):
@@ -541,23 +827,64 @@ class SameTakeVideoProvider:
             raise VideoProviderError("fal_download_empty", "Fal output was empty.")
         return bytes(content)
 
+    def _planned_final_proof(self, state, media_bytes, cached):
+        proof = state.get("greeting_speech_proof")
+        manifest = cached["bundle"]["manifest"]
+        if (not validate_speech_proof(proof, first_name=state["first_name"],
+                audio_sha256=manifest["checked_audio_sha256"])
+                or any(key in proof for key in ("verification_method", "audio_lineage", "media_sha256"))):
+            raise SpeechGuardError("speech_guard_output_invalid")
+        try:
+            lineage = _lineage_runtime().verify_final_audio(media_bytes, cached["inputs"]["planned_audio_bytes"],
+                manifest, proof, cached["inputs"]["metadata"], first_name=state["first_name"],
+                expected_manifest_sha256=cached["bundle"]["manifest_sha256"])
+        except VideoProviderError:
+            # Deterministic lineage rejection is terminal, never a retryable
+            # recognizer outage or permission to publish the provider's audio.
+            raise SpeechGuardError("speech_guard_media_invalid") from None
+        final = {**proof, "media_sha256": hashlib.sha256(media_bytes).hexdigest(),
+            "greeting_seconds": manifest["greeting_seconds"],
+            "verification_method": state["verification_method"],
+            "verification_config_sha256": state["verification_config_sha256"],
+            "audio_lineage": {**lineage, "greeting_seconds": manifest["greeting_seconds"]}}
+        if not validate_speech_proof(final, first_name=state["first_name"], media_sha256=final["media_sha256"]):
+            raise SpeechGuardError("speech_guard_output_invalid")
+        return final
+
     def prepare_media(self, snapshot, first_name):
         state, _ = self._read(snapshot["provider_id"])
         if state["stage"] != "completed" or normalize_name(first_name) != state["first_name"]:
             raise VideoProviderError("completed_identity_mismatch", "Completed video does not match this agent name.")
-        greeting, _ = self.store.objects.read(state["greeting_key"])
-        greeting_hash = hashlib.sha256(greeting).hexdigest()
-        if greeting_hash != state["metadata"].get("greeting_audio_sha256"):
-            raise SpeechGuardError("speech_guard_audio_invalid")
-        proof = state.get("greeting_speech_proof")
-        if not validate_speech_proof(proof, first_name=state["first_name"], audio_sha256=greeting_hash):
-            proof = verify_greeting_words(greeting, state["first_name"])
+        planned = _saved_verification_profile(state)["verification_method"] == PLANNED_AUDIO_VERIFICATION_METHOD
+        if planned:
+            if "audio_plan_sha256" not in state:
+                raise SpeechGuardError("speech_guard_audio_invalid")
+            cached = self._read_audio_plan(state)
+            greeting = cached["inputs"]["greeting_audio_bytes"]
+            proof = state.get("greeting_speech_proof")
+            try:
+                result = self.compositor(self._master(), self._download_fal(state["media_url"]), greeting,
+                    state["metadata"], first_name=state["first_name"],
+                    planned_audio_bytes=cached["inputs"]["planned_audio_bytes"])
+            except VideoProviderError as error:
+                if error.code.startswith("audio_lineage_"):
+                    raise SpeechGuardError("speech_guard_media_invalid") from None
+                raise
+            final_proof = self._planned_final_proof(state, result["media_bytes"], cached)
+        else:
+            greeting, _ = self.store.objects.read(state["greeting_key"])
+            greeting_hash = hashlib.sha256(greeting).hexdigest()
+            if greeting_hash != state["metadata"].get("greeting_audio_sha256"):
+                raise SpeechGuardError("speech_guard_audio_invalid")
+            proof = state.get("greeting_speech_proof")
             if not validate_speech_proof(proof, first_name=state["first_name"], audio_sha256=greeting_hash):
-                raise SpeechGuardError("speech_guard_output_invalid")
-        result = self.compositor(self._master(), self._download_fal(state["media_url"]), greeting,
-                                 state["metadata"], first_name=state["first_name"])
-        final_proof = verify_video_greeting_words(result["media_bytes"], state["first_name"],
-                                                   state["metadata"].get("greeting_seconds"))
+                proof = verify_greeting_words(greeting, state["first_name"])
+                if not validate_speech_proof(proof, first_name=state["first_name"], audio_sha256=greeting_hash):
+                    raise SpeechGuardError("speech_guard_output_invalid")
+            result = self.compositor(self._master(), self._download_fal(state["media_url"]), greeting,
+                                     state["metadata"], first_name=state["first_name"])
+            final_proof = verify_video_greeting_words(result["media_bytes"], state["first_name"],
+                                                       state["metadata"].get("greeting_seconds"))
         if not validate_speech_proof(final_proof, first_name=state["first_name"],
                 media_sha256=hashlib.sha256(result["media_bytes"]).hexdigest()):
             raise SpeechGuardError("speech_guard_output_invalid")
@@ -575,6 +902,10 @@ class SameTakeVideoProvider:
         if (state["stage"] != "completed" or state["first_name"] != job.get("first_name")
                 or state["job_key"] != job.get("followup_key")):
             raise SpeechGuardError("speech_guard_name_mismatch")
+        if _saved_verification_profile(state)["verification_method"] == PLANNED_AUDIO_VERIFICATION_METHOD:
+            if "audio_plan_sha256" not in state:
+                raise SpeechGuardError("speech_guard_audio_invalid")
+            return self._planned_final_proof(state, media_bytes, self._read_audio_plan(state))
         proof = verify_video_greeting_words(media_bytes, state["first_name"],
                                              state["metadata"].get("greeting_seconds"))
         if not validate_speech_proof(proof, first_name=state["first_name"],

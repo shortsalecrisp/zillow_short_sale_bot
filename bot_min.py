@@ -794,6 +794,9 @@ COL_REPLY_FLAG  = 8   # I  ← check before follow‑up
 COL_MANUAL_NOTE = 9   # J  ← check before follow‑up
 COL_REPLY_TS    = 10  # K
 COL_MSG_ID      = 11  # L
+COL_CONVERSATION_SUMMARY = 12  # M
+COL_AI_STATE    = 13  # N
+COL_HISTORY_JSON = 17  # R
 DEFAULT_COL_INIT_TS = 22  # W
 DEFAULT_COL_FU_TS   = 23  # X
 MAX_CONFIGURABLE_TIMESTAMP_COL = 199  # GR (safety bound for env misconfiguration)
@@ -831,6 +834,9 @@ def _resolve_timestamp_columns(init_idx: int, fu_idx: int) -> tuple[int, int, Li
         COL_MANUAL_NOTE,
         COL_REPLY_TS,
         COL_MSG_ID,
+        COL_CONVERSATION_SUMMARY,
+        COL_AI_STATE,
+        COL_HISTORY_JSON,
         COL_PHONE_CONF,
         COL_CONTACT_REASON,
         COL_EMAIL_CONF,
@@ -12610,6 +12616,31 @@ def _should_keep_shared_phone_duplicate_lead(
     return True
 
 
+def _followup_has_recorded_conversation(row: List[Any]) -> bool:
+    """Exclude answered conversations without treating verifier notes as replies."""
+    state = str(row[COL_AI_STATE] or "").strip().lower()
+    if state in {"active", "handoff", "done"}:
+        return True
+    try:
+        history = json.loads(str(row[COL_HISTORY_JSON] or "[]"))
+    except (TypeError, ValueError):
+        history = []
+    if isinstance(history, list):
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            text = entry.get("text") or entry.get("content")
+            if (str(entry.get("role") or "").strip().lower() in {"agent", "user"}
+                    and isinstance(text, str) and text.strip()):
+                return True
+    summary = re.sub(r"\s+", " ", str(row[COL_CONVERSATION_SUMMARY] or "")).strip().lower()
+    return bool(re.match(
+        r"^(?:(?:spoke|talked) (?:with|to) (?:the )?(?:agent|seller)\b|"
+        r"(?:the )?agent (?:requested|asked for) (?:a )?(?:callback|call)\b)",
+        summary,
+    ))
+
+
 def _followup_has_contact_hold(row: List[Any]) -> bool:
     """Honor verifier phone-conflict/no-resend holds before any follow-up."""
     phone_confidence = str(row[COL_PHONE_CONF] or "").strip().lower()
@@ -13876,11 +13907,19 @@ def _follow_up_pass():
                 address,
             )
             continue
-        if lead_status in {"R", "Y", "G", "O"}:
+        if lead_status in {"R", "Y", "G", "O", "H"}:
             LOG.info(
                 "FU-review row %s status=skip_lead_status lead_status=%s phone=%s address=%s",
                 sheet_row,
                 lead_status,
+                phone_redacted,
+                address,
+            )
+            continue
+        if _followup_has_recorded_conversation(row):
+            LOG.info(
+                "FU-review row %s status=skip_recorded_conversation phone=%s address=%s",
+                sheet_row,
                 phone_redacted,
                 address,
             )
