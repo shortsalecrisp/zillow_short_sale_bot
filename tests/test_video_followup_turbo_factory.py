@@ -67,7 +67,8 @@ def test_factory_planned_verification_is_explicit_and_keeps_generation_profile(c
 
 
 @pytest.mark.parametrize("method", [provider.LEGACY_VERIFICATION_METHOD, provider.PLANNED_AUDIO_VERIFICATION_METHOD,
-                                    provider.PRONUNCIATION_VERIFICATION_METHOD])
+                                    provider.PRONUNCIATION_VERIFICATION_METHOD,
+                                    provider.GENERAL_PRONUNCIATION_VERIFICATION_METHOD])
 def test_factory_verification_uses_real_constructor(configured, monkeypatch, method):
     monkeypatch.setenv("VIDEO_FOLLOWUP_AUDIO_VERIFICATION_METHOD", method)
     monkeypatch.setattr(provider, "SameTakeVideoProvider", REAL_PROVIDER)

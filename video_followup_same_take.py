@@ -28,10 +28,12 @@ from video_followup_same_take_media import prepare_inputs, compose
 from video_followup_speech_guard import (
     SpeechGuardError, preflight_speech_guard, verify_greeting_words,
     verify_video_greeting_words, validate_speech_proof, is_transient_speech_failure,
-    safe_speech_failure_diagnostics,
+    safe_speech_failure_diagnostics, preflight_pronunciation_guard,
     LEGACY_VERIFICATION_METHOD, PLANNED_AUDIO_VERIFICATION_METHOD,
     PLANNED_AUDIO_VERIFICATION_CONFIG, PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256,
     PLANNED_VERIFICATION_PROFILES, PRONUNCIATION_POLICY_VERSION, PRONUNCIATION_VERIFICATION_METHOD,
+    PLANNED_VERIFICATION_POLICIES, POLICY_VERSION, LEGACY_PROOF_IDENTITY,
+    GENERAL_PRONUNCIATION_POLICY_VERSION, GENERAL_PRONUNCIATION_VERIFICATION_METHOD,
 )
 
 MASTER_SHA256 = "01efd28101e8b016d51d571cc87d38d13ea623389663bc7a88cf26cce39bd60b"
@@ -80,6 +82,7 @@ _PREPARATION_FAILURE_CODES = frozenset({
     "speech_guard_busy", "speech_guard_timeout", "speech_guard_execution_failed",
     "speech_guard_output_invalid", "speech_guard_audio_invalid", "speech_guard_name_invalid",
     "speech_guard_name_mismatch", "speech_guard_low_confidence", "speech_guard_media_invalid",
+    "speech_guard_pronunciation_unresolved", "speech_guard_pronunciation_data_invalid",
     "audio_lineage_invalid", "audio_lineage_codec_changed", "audio_lineage_movie_presentation",
     "audio_lineage_movie_timing", "audio_lineage_track_flags", "audio_lineage_fragmented",
     "audio_lineage_track_count", "audio_lineage_media_container", "audio_lineage_timing",
@@ -150,7 +153,8 @@ def _saved_verification_profile(state):
 
 def _speech_policy_kwargs(state):
     method = _saved_verification_profile(state)["verification_method"]
-    return {"policy_version": PRONUNCIATION_POLICY_VERSION} if method == PRONUNCIATION_VERIFICATION_METHOD else {}
+    policy = PLANNED_VERIFICATION_POLICIES.get(method, POLICY_VERSION)
+    return {"policy_version": policy} if policy != POLICY_VERSION else {}
 
 
 def _validate_pipeline_speech_proof(state, proof, **bindings):
@@ -159,7 +163,7 @@ def _validate_pipeline_speech_proof(state, proof, **bindings):
     method = _saved_verification_profile(state)["verification_method"]
     if method in PLANNED_VERIFICATION_PROFILES:
         return proof.get("config_sha256") == PLANNED_VERIFICATION_PROFILES[method]["speech_config_sha256"]
-    return proof.get("policy_version") != PRONUNCIATION_POLICY_VERSION
+    return proof.get("policy_version") in (LEGACY_PROOF_IDENTITY["policy_version"], POLICY_VERSION)
 
 
 def _lineage_runtime():
@@ -487,6 +491,8 @@ class SameTakeVideoProvider:
         verification = _verification_profile(self.verification_method)
         if self.verification_method in PLANNED_VERIFICATION_PROFILES:
             _lineage_runtime()
+        if self.verification_method == GENERAL_PRONUNCIATION_VERIFICATION_METHOD:
+            preflight_pronunciation_guard()
         self._master()
         self._reference()
         self._tts_reference(profile)

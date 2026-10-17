@@ -1,0 +1,13 @@
+{
+  "ambiguity_rule": "one-distinct-full-sequence-including-stress",
+  "eligible_words": "ascii-letters-up-to-two-hyphens-or-apostrophes-max32",
+  "entries": 116744,
+  "gzip_bytes": 821490,
+  "gzip_sha256": "5ba9f7157447fbdc43a7d0a7da0959b7c8d89faa68ac436e99ad03a394328359",
+  "json_bytes": 3532581,
+  "json_sha256": "e47b99c5c03266ec49f5b5164853abb007d603e324b72c630c3c49ad8e6844df",
+  "license_sha256": "bd4ce8e44170a5f9f481310ca85c51de3c4f851a65e679b40e603b143bd3542a",
+  "schema": "cmudict-unique-stressed-phones-v1",
+  "source_revision": "74790861f652b15e4ac49015a90074ad62a27690",
+  "source_sha256": "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22"
+}

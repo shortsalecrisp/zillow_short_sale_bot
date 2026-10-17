@@ -25,6 +25,7 @@ var SMS_HANDOFF_EMAIL_HEADERS_ = [
 var SMS_INBOUND_CONTENT_REPLAY_WINDOW_MS_ = 90 * 1000;
 var SMS_HANDOFF_EVENT_REPLAY_WINDOW_MS_ = 10 * 60 * 1000;
 var SMS_HANDOFF_UPDATE_DEBOUNCE_MS_ = 20 * 60 * 1000;
+var VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = false;
 
 function getHandoffEmailEventKeyV16_(row) {
   try {
@@ -571,10 +572,24 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
       stable_id: String(body && (body.stable_id || body.zpid || body.listing_id) || "").trim()
     })
     : "__crm_followup__:" + JSON.stringify({ crm_prospect_id: crmProspectId, phone: phone });
+  if (videoContext) {
+    // This read is only a data-warming hint; the frozen episode is read again
+    // and fully validated under the lock before any enqueue decision.
+    try {
+      var warmRows = sheet.getLastRow() > 1
+        ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues() : [];
+      var warmFrozen = findFrozenVideoFollowupV19_(warmRows, videoContext.metadata, phone, messageId);
+      if (warmFrozen && warmFrozen.ok && warmFrozen.status !== "sent") {
+        prewarmVideoFollowupPronunciationV24_(parseVideoFollowupMetadataV19_(warmRows[warmFrozen.pending_row - 2]));
+      }
+    } catch (_) { /* The locked fresh read remains authoritative. */ }
+  }
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) {
     return { ok: false, queued: false, retryable: true, error: "Follow-up SMS outbox is temporarily busy" };
   }
+  var previousCacheOnly = VIDEO_PRONUNCIATION_CACHE_ONLY_V24_;
+  VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = true;
   try {
     var rows = sheet.getLastRow() > 1
       ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues()
@@ -645,6 +660,7 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
       pending_row: sheet.getLastRow()
     };
   } finally {
+    VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = previousCacheOnly;
     lock.releaseLock();
   }
 }
@@ -815,6 +831,66 @@ function normalizeVideoFollowupFirstNameV19_(value) {
   return String(value || "").normalize("NFKC").replace(/[\u2018\u2019\u02bc]/g, "'").trim();
 }
 
+function isReviewedVideoPronunciationPairV24_(foldedName, observed) {
+  return [["kathryn", "katherine"], ["nikki", "nicky"],
+    ["cydney", "sydney"], ["brook", "brooke"]].some(function(group) {
+    return group.indexOf(foldedName) !== -1 && group.indexOf(observed) !== -1;
+  });
+}
+
+function prewarmVideoFollowupPronunciationV24_(metadata) {
+  var proof = metadata && metadata.video_speech_proof;
+  if (VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ || !metadata || metadata.video_variant !== "video" ||
+      !proof || proof.policy_version !== "spoken-greeting-tiny-en-v4") return false;
+  if (typeof VIDEO_PRONUNCIATION_LEXICON_V24_CACHE_ !== "undefined" &&
+      VIDEO_PRONUNCIATION_LEXICON_V24_CACHE_) return true;
+  var name = normalizeVideoFollowupFirstNameV19_(metadata.first_name)
+    .toLowerCase().replace(/\u00df/g, "ss").replace(/\u03c2/g, "\u03c3");
+  var phrase = proof.normalized_transcript;
+  if (phrase === "hey " + name || (typeof phrase === "string" && phrase.indexOf("hey ") === 0 &&
+      isReviewedVideoPronunciationPairV24_(name, phrase.slice(4)))) return false;
+  // Warm only immutable data, never a proof/eligibility result. One attempt per
+  // request is enough; failed data remains unavailable at the locked check.
+  try { videoPronunciationLexiconV24_(); } catch (_) { /* Fail closed during validation. */ }
+  return true;
+}
+
+function matchesVideoGeneralPronunciationV24_(foldedName, phrase) {
+  if (typeof phrase !== "string" || phrase.length > 512 || phrase.normalize("NFKC") !== phrase) return false;
+  var match = phrase.match(/^hey (\p{L}+(?:[-']\p{L}+){0,2}(?: \p{L}+(?:[-']\p{L}+){0,2}){0,3})$/u);
+  if (!match) return false;
+  var tokens = match[1].split(" ");
+  if (tokens.some(function(token) { return token.length > 32; }) ||
+      (tokens.length > 1 && tokens.indexOf("hey") !== -1)) return false;
+  try {
+    var manifest = videoPronunciationLexiconManifestV24_();
+    if (!manifest || manifest.json_sha256 !== "e47b99c5c03266ec49f5b5164853abb007d603e324b72c630c3c49ad8e6844df") {
+      return false;
+    }
+    if (typeof VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ !== "undefined" && VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ &&
+        (typeof VIDEO_PRONUNCIATION_LEXICON_V24_CACHE_ === "undefined" || !VIDEO_PRONUNCIATION_LEXICON_V24_CACHE_)) {
+      return false;
+    }
+    var lexicon = videoPronunciationLexiconV24_();
+    if (!lexicon || !Object.prototype.hasOwnProperty.call(lexicon, foldedName)) return false;
+    var expected = lexicon[foldedName];
+    if (typeof expected !== "string" || !expected) return false;
+    var observed = [];
+    for (var i = 0; i < tokens.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(lexicon, tokens[i])) return false;
+      var phones = lexicon[tokens[i]];
+      if (typeof phones !== "string" || !phones) return false;
+      observed.push(phones);
+    }
+    var observedSequence = observed.join(" ");
+    if (expected.split(" ").length > 64 || observedSequence.split(" ").length > 64) return false;
+    return expected === observedSequence;
+  } catch (_) {
+    // A missing or altered immutable asset makes v4 unavailable, never permissive.
+    return false;
+  }
+}
+
 function matchesVideoFollowupSpeechPolicyV22_(proof, foldedName) {
   var config;
   var exact = proof.normalized_transcript === "hey " + foldedName;
@@ -843,6 +919,21 @@ function matchesVideoFollowupSpeechPolicyV22_(proof, foldedName) {
       if (!pronunciationGroups.some(function(group) {
         return group.indexOf(foldedName) !== -1 && group.indexOf(pronunciationObserved) !== -1;
       })) return false;
+    }
+  } else if (proof.policy_version === "spoken-greeting-tiny-en-v4") {
+    config = "e61b237ccaa3f4cccb369f0a88b1f9d0d4e01838242d9b74e90c8ed4891f03a2";
+    if (proof.config_sha256 !== config ||
+        proof.model_id !== "Systran/faster-whisper-tiny.en" ||
+        proof.model_revision !== "0d3d19a32d3338f10357c0889762bd8d64bbdeba" ||
+        proof.model_manifest_sha256 !== "9f995ad3147f0799b2babb9e84926a53bca82d888d5fb6558d925f38dd2b78ee") {
+      return false;
+    }
+    if (!exact) {
+      var generalPhrase = proof.normalized_transcript;
+      if (typeof generalPhrase !== "string" || generalPhrase.indexOf("hey ") !== 0) return false;
+      var generalObserved = generalPhrase.slice(4);
+      var reviewed = isReviewedVideoPronunciationPairV24_(foldedName, generalObserved);
+      if (!reviewed && !matchesVideoGeneralPronunciationV24_(foldedName, generalPhrase)) return false;
     }
   } else { return false; }
   // Bind each policy to its exact decoder configuration; legacy proofs never
@@ -876,6 +967,26 @@ function hasValidVideoPronunciationLineageV23_(proof, name) {
   return true;
 }
 
+function hasValidVideoGeneralPronunciationLineageV24_(proof, name) {
+  if (proof.verification_method !== "planned-aac-lineage-v3" ||
+      proof.verification_config_sha256 !== "3d70d23288207ff942cc5385ee6a926eb529434e950e4f4345e333f944500e25") {
+    return false;
+  }
+  var lineage = proof.audio_lineage;
+  if (!lineage || typeof lineage !== "object" || Array.isArray(lineage) || lineage.accepted !== true ||
+      lineage.lineage_version !== "planned-aac-same-take-v1" ||
+      lineage.first_name !== name || lineage.final_media_sha256 !== proof.media_sha256 ||
+      lineage.checked_audio_sha256 !== proof.source_audio_sha256 ||
+      lineage.greeting_seconds !== proof.greeting_seconds) return false;
+  var hashFields = ["manifest_sha256", "planned_audio_sha256", "final_media_sha256",
+    "checked_audio_sha256", "full_pcm_sha256", "greeting_pcm_sha256",
+    "aac_track_sha256", "speech_proof_sha256"];
+  if (!hashFields.every(function(field) {
+    return /^[0-9a-f]{64}$/.test(String(lineage[field] || ""));
+  })) return false;
+  return true;
+}
+
 function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
   if (metadata.video_variant !== "video") return true;
   var proof = metadata.video_speech_proof;
@@ -899,6 +1010,8 @@ function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
   // older direct/v1 cohort. Existing v1/v2 payloads retain their prior gate.
   if (proof.policy_version === "spoken-greeting-tiny-en-v3" &&
       !hasValidVideoPronunciationLineageV23_(proof, name)) return false;
+  if (proof.policy_version === "spoken-greeting-tiny-en-v4" &&
+      !hasValidVideoGeneralPronunciationLineageV24_(proof, name)) return false;
   if (!proof.confidence.every(function(segment) {
     return segment && typeof segment.avg_logprob === "number" && isFinite(segment.avg_logprob) &&
       segment.avg_logprob >= -1 && segment.avg_logprob <= 0 &&
@@ -2096,12 +2209,30 @@ function claimPendingSmsSendV10_(body) {
   var sheet = ss.getSheetByName("sms_pending_sends");
   if (!sheet || sheet.getLastRow() < 2) return noPendingSmsClaim_();
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
+  var workerId = String(body && body.worker_id || "pixel-v10").trim();
+  try {
+    var warmRows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+    var warmNow = Date.now();
+    for (var warmIndex = 0; warmIndex < warmRows.length; warmIndex++) {
+      var warmRow = warmRows[warmIndex];
+      var warmStatus = String(warmRow[1] || "");
+      var warmNotBefore = new Date(warmRow[8]).getTime();
+      var warmLeaseUntil = new Date(warmRow[11]).getTime();
+      var warmDue = warmStatus === "queued" && (!warmNotBefore || warmNotBefore <= warmNow);
+      var warmExpired = warmStatus === "claimed" && (!warmLeaseUntil || warmLeaseUntil < warmNow) && !warmRow[13];
+      var warmActive = warmStatus === "claimed" && String(warmRow[18] || "") === workerId &&
+        warmLeaseUntil && warmLeaseUntil >= warmNow;
+      if ((warmDue || warmExpired || warmActive) &&
+          prewarmVideoFollowupPronunciationV24_(parseVideoFollowupMetadataV19_(warmRow))) break;
+    }
+  } catch (_) { /* A raced or unavailable snapshot cannot authorize a claim. */ }
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(3000)) return busyPendingSmsClaim_();
+  var previousCacheOnly = VIDEO_PRONUNCIATION_CACHE_ONLY_V24_;
+  VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = true;
   try {
     var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
     var now = Date.now();
-    var workerId = String(body && body.worker_id || "pixel-v10").trim();
     var retryableFeaturePending = false;
 
     // A lost HTTP response must return the same active lease to this worker,
@@ -2169,6 +2300,7 @@ function claimPendingSmsSendV10_(body) {
     }
     return retryableFeaturePending ? busyPendingSmsClaim_() : noPendingSmsClaim_();
   } finally {
+    VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = previousCacheOnly;
     lock.releaseLock();
   }
 }

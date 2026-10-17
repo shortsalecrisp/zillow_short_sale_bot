@@ -24,6 +24,7 @@ function harness() {
     Number,
     String,
     SMS_PENDING_SEND_HEADERS_: Array.from({ length: 19 }),
+    VIDEO_PRONUNCIATION_CACHE_ONLY_V24_: false,
     normalizePhone_: (value) => String(value).replace(/\D/g, "").replace(/^1(?=\d{10}$)/, ""),
     normalizeWhitespace_: (value) => value.trim().replace(/\s+/g, " "),
     normalizePendingSmsInboundText_: (value) => String(value || "").trim().toLowerCase(),

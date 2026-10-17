@@ -94,7 +94,8 @@ def test_old_wire_config_and_both_planned_versions_are_literal_and_separate():
     assert guard.PRONUNCIATION_VERIFICATION_CONFIG_SHA256 == NEW_PLANNED_CONFIG
     assert guard.PLANNED_VERIFICATION_PROFILES == {
         "planned-aac-lineage-v1": guard.PLANNED_AUDIO_VERIFICATION_CONFIG,
-        "planned-aac-lineage-v2": guard.PRONUNCIATION_VERIFICATION_CONFIG}
+        "planned-aac-lineage-v2": guard.PRONUNCIATION_VERIFICATION_CONFIG,
+        "planned-aac-lineage-v3": guard.GENERAL_PRONUNCIATION_VERIFICATION_CONFIG}
     assert {key: value for key, value in guard.PRONUNCIATION_VERIFICATION_CONFIG.items()
             if key not in {"method", "speech_config_sha256"}} == {
         key: value for key, value in guard.PLANNED_AUDIO_VERIFICATION_CONFIG.items()
@@ -189,7 +190,7 @@ def test_default_and_explicit_v2_do_not_reinterpret_old_failures(audio, recogniz
         guard.verify_greeting_words(audio, name, **kwargs)
 
 
-@pytest.mark.parametrize("policy", [None, "", "v3", "spoken-greeting-tiny-en-v4", {}, [],
+@pytest.mark.parametrize("policy", [None, "", "v3", "spoken-greeting-tiny-en-v99", {}, [],
     guard.LEGACY_PROOF_IDENTITY["policy_version"]])
 def test_unsupported_issuance_policy_rejected_before_recognition(audio, recognized, policy):
     _, calls = recognized
