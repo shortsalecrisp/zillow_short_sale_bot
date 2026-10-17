@@ -21,7 +21,9 @@ from video_followup import Conflict, SCRIPT_VERSION, iso, normalize_name, utcnow
 from video_followup_provider import (
     MAX_API_BYTES, REQUEST_TIMEOUT, SubmissionUncertain, VideoProviderError, _public_addresses,
 )
-from video_followup_audio_guard import GUARD_VERSION, inspect_reference, inspect_greeting
+from video_followup_audio_guard import (
+    GUARD_VERSION, inspect_reference, inspect_greeting, safe_acoustic_failure_diagnostics,
+)
 from video_followup_same_take_media import prepare_inputs, compose
 from video_followup_speech_guard import (
     SpeechGuardError, preflight_speech_guard, verify_greeting_words,
@@ -198,6 +200,10 @@ def _preparation_failure_diagnostics(exc, stage, audio_qa):
         "underlying_code": code if isinstance(code, str) and code in _PREPARATION_FAILURE_CODES else "unclassified_preparation_failure",
         "exception_type": exception_type if exception_type in _DIAGNOSTIC_EXCEPTION_TYPES else "OtherException",
     }
+    if stage == "audio_screen" and audio_qa is None:
+        measured = safe_acoustic_failure_diagnostics(exc)
+        if measured:
+            details["measured_audio_qa"] = measured
     if isinstance(audio_qa, dict):
         quality = audio_qa.get("quality")
         values = {**(quality if isinstance(quality, dict) else {}),

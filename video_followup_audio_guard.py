@@ -27,8 +27,32 @@ MIN_VOICED_FRAMES = 10
 MAX_PITCH_SHIFT_SEMITONES = 3.0
 
 
-def _fail(code: str, message: str):
-    raise VideoProviderError(code, message)
+def _bounded_failure_measurements(values):
+    if type(values) is not dict:
+        return {}
+    limits = {"duration_seconds": (0, 10), "clipped_sample_fraction": (0, 1),
+              "active_rms_dbfs": (-160, 0), "median_f0_hz": (70, 400),
+              "reference_median_f0_hz": (70, 400), "pitch_shift_semitones": (-12, 12),
+              "prepared_greeting_seconds": (0.5, 2.5)}
+    return {name: values[name] for name, (low, high) in limits.items()
+            if type(values.get(name)) in (int, float) and low <= values[name] <= high
+            and math.isfinite(values[name])}
+
+
+def safe_acoustic_failure_diagnostics(exc):
+    if type(exc) is not VideoProviderError:
+        return {}
+    code = getattr(exc, "code", None)
+    if type(code) is not str or code != "narration_pitch_outlier":
+        return {}
+    return _bounded_failure_measurements(getattr(exc, "acoustic_diagnostics", None))
+
+
+def _fail(code: str, message: str, *, measurements=None):
+    error = VideoProviderError(code, message)
+    if code == "narration_pitch_outlier" and measurements is not None:
+        error.acoustic_diagnostics = _bounded_failure_measurements(measurements)
+    raise error
 
 
 def _decode(content: bytes) -> tuple[np.ndarray, np.ndarray, int]:
@@ -182,7 +206,11 @@ def inspect_greeting(wav_bytes: bytes, reference_bytes: bytes) -> dict:
     anchor_hz = reference["quality"]["median_f0_hz"]
     shift = 12 * math.log2(pitch["median_f0_hz"] / anchor_hz)
     if abs(shift) > MAX_PITCH_SHIFT_SEMITONES:
-        _fail("narration_pitch_outlier", "Generated speech differs too much from the recorded greeting's pitch range.")
+        # The caller never receives audio_qa on rejection; retain only safe measurements.
+        _fail("narration_pitch_outlier", "Generated speech differs too much from the recorded greeting's pitch range.",
+              measurements={**quality, **pitch, "duration_seconds": duration,
+                            "reference_median_f0_hz": anchor_hz, "pitch_shift_semitones": shift,
+                            "prepared_greeting_seconds": frames / 30})
     quality.update(pitch)
     quality.update({
         "reference_sha256": REFERENCE_SHA256,

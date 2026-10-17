@@ -398,6 +398,32 @@ def test_preparation_diagnostics_never_copy_untrusted_code_type_or_exception_fie
     assert len(paid_calls(world)) == 1
 
 
+def test_pitch_rejection_measurements_are_durable_without_lipsync_or_retry(world, monkeypatch):
+    identifier = start(world)
+    measured = {"duration_seconds": 1.66, "median_f0_hz": 163.8807,
+                "reference_median_f0_hz": 221.5251, "pitch_shift_semitones": -5.2179}
+    error = provider.VideoProviderError("narration_pitch_outlier", "private error details")
+    error.acoustic_diagnostics = {**measured, "url": "https://private/?token=hidden",
+        "raw_audio": b"private", "active_rms_dbfs": float("inf"), "prepared_greeting_seconds": True}
+    screen = Mock(side_effect=error)
+    monkeypatch.setattr(provider, "inspect_greeting", screen)
+    expected = {"provider_id": identifier, "status": "failed", "failure_code": "greeting_preparation_failed",
+                "failure_stage": "audio_screen", "underlying_code": "narration_pitch_outlier",
+                "exception_type": "VideoProviderError"}
+    assert world[0].inspect(identifier) == expected
+    screen.assert_called_once()
+    failed = state(world, identifier)
+    assert failed["measured_audio_qa"] == measured
+    assert failed["last_preparation_failure"]["measured_audio_qa"] == measured
+    assert failed["preparation_attempts"] == 1 and failed["preparation_retry_after"] is None
+    assert "private" not in json.dumps(failed) and "hidden" not in json.dumps(failed)
+    world[3].assert_not_called()
+    assert world[0].inspect(identifier) == expected
+    assert world[0].submit("Sue", "job") == identifier
+    screen.assert_called_once()
+    assert len(paid_calls(world)) == 1 and not paid_calls(world, provider.MODEL)
+
+
 @pytest.mark.parametrize("stage,code", [
     ("fal_submitting", None), ("fal_pending", None), ("completed", None),
     ("failed", "provider_price_not_approved"),
