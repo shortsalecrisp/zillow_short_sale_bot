@@ -203,6 +203,8 @@ test("readback compares the exact reviewed candidate and catches unrelated drift
   const before = baseline(), candidate = buildConversationRelease(before, "Candidate", true);
   const after = { ...structuredClone(before), ...structuredClone(candidate) };
   verifyReleaseReadback(before, candidate, after);
+  after.workflow.edges.main_to_patch_after_accepted_result.forward_condition.exit_slot = { type: "any" };
+  verifyReleaseReadback(before, candidate, after);
   after.conversation_config.tts.speed = 1.1;
   assert.throws(() => verifyReleaseReadback(before, candidate, after), /readback mismatch/);
   after.conversation_config.tts.speed = 0.95;

@@ -79,6 +79,13 @@ test("a current question routes to main, while an old pickup cannot trigger qual
   assert.doesNotMatch(OPENING_LISTENER_PROMPT, /\{\{openerScript\}\}/);
 });
 
+test("opening listener resumes once when a caller says go ahead after skipped silence", () => {
+  const prompt = applyConversationOpeningWorkflow(base()).workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt;
+  assert.match(prompt, /NEW intelligible "Go ahead" or "I'm listening" is a live pickup/);
+  assert.match(prompt, /pending short listing check exactly once/);
+  assert.match(prompt, /Do not repeat identity, the full pitch or the listing check if it was already delivered/);
+});
+
 test("the live opener is identical in the listener and main prompts", () => {
   const mainPrompt = readFileSync(new URL("../docs/elevenlabs-agent-prompt.md", import.meta.url), "utf8");
   assert.ok(OPENING_LISTENER_PROMPT.includes(`"${VOICE_OPENING_SCRIPT}"`));

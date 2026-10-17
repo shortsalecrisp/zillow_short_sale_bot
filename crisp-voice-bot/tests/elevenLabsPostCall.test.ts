@@ -1406,7 +1406,7 @@ for (const scenario of [
       const writes = measurementWrites.slice(writesBefore);
       assert.equal(writes.length, 2);
       const update = writes.find(write => typeof write.voiceNotes === "string")!;
-      assert.equal(update.callResult, "call_ended_by_request");
+      assert.equal(update.callResult, "call_end_requested");
       assert.equal(writes.filter(write => write.action === "process_voice_queue").length, 1);
       const metrics = JSON.parse(String(update.voiceNotes).replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""));
       assert.equal(metrics.call.initialOpeningPolicy, scenario.expectedOpening);

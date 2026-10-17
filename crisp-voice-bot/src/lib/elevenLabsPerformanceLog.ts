@@ -93,6 +93,7 @@ type BuildVoicePerformanceLogInput = {
   summary: string;
   transcript: string;
   callbackConsent?: { callbackTime: string } | null;
+  terminalCallResult?: string | null;
 };
 
 function truncate(value: string, maxLength: number): string {
@@ -369,7 +370,17 @@ function getMessageTimeAtIndex(transcript: PerformanceTranscriptItem[], index: n
 
 export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): string {
   const transcript = input.conversation.transcript ?? [];
-  const contact = classifyContact(transcript, input.metadata.fullName);
+  const classifiedContact = classifyContact(transcript, input.metadata.fullName);
+  const terminalCategory = input.terminalCallResult?.startsWith("voicemail_") ? "voicemail" :
+    input.terminalCallResult === "gatekeeper_admin_early_exit" ? "human_gatekeeper" :
+    input.terminalCallResult === "agent_not_available" ? "screening" : null;
+  const contact = terminalCategory ? {
+    ...classifiedContact,
+    humanAnswered: terminalCategory === "human_gatekeeper",
+    targetAgentAnswered: false,
+    category: terminalCategory,
+    gatekeeper: terminalCategory === "human_gatekeeper",
+  } : classifiedContact;
   const humanTranscript = transcript.map((item, index) => item.role === "user" && !contact.humanIndexes.has(index)
     ? { ...item, message: undefined }
     : item);
@@ -406,6 +417,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
     "maya-uniform-lead-conversion-20261009-r2",
     "maya-uniform-lead-conversion-20261011-r3",
     "maya-uniform-lead-conversion-20261016-r4",
+    "maya-uniform-lead-conversion-20261017-r5",
   ]
     .includes(input.metadata.declaredConversationPolicyVersion ?? "");
   const usesListingAgentOpening = input.metadata.initialOpeningPolicy === "listen_first_listing_agent_v2";

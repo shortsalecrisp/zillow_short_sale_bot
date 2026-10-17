@@ -102,7 +102,7 @@ test("S4 actual stop overrides fabricated DNC summaries and stale callback tools
     { tool_name: "not_interested" }, { tool_name: "callback_requested" }, { tool_name: "live_transfer_requested" },
   ] }] };
   assert.equal(lib.shouldTreatAsDoNotCall(withTools), false);
-  assert.equal(lib.getVoiceContactRequestResult(withTools), "call_ended_by_request");
+  assert.equal(lib.getVoiceContactRequestResult(withTools), "call_end_requested");
   assert.equal(lib.shouldTreatAsCallback(withTools), false);
   assert.equal(lib.shouldTreatAsAgentHungUp(withTools), false);
   assert.equal(lib.shouldTreatAsAgentUnavailable(withTools), false);
@@ -121,6 +121,39 @@ test("actual future opt-out wins over deferred/current-ending markers and a beni
   assert.equal(lib.classifyElevenLabsNotInterested(call), "do_not_call");
   assert.equal(lib.shouldTreatAsDeferredContact(call), false);
   assert.equal(lib.buildVoiceContactOutcomeUpdates("do_not_call", call).leadStatusCode, "R");
+});
+
+test("authoritative terminal evidence separates cancellation, decline, screener, gatekeeper and voicemail", async () => {
+  const lib = await load();
+  const terminal = (transcript: any[], summary = "") => ({
+    ...conversation([], summary),
+    transcript,
+  });
+  assert.equal(lib.getAuthoritativeTerminalCallResult(terminal([
+    { role: "assistant", message: "Is Eleven Forty Four Waterfall your listing?" },
+    { role: "user", message: "Cancel." },
+    { role: "assistant", message: "Understood, I'll end the call now." },
+  ]), 1, { firstName: "Stacy" }), "call_end_requested");
+  assert.equal(lib.getAuthoritativeTerminalCallResult(terminal([
+    { role: "assistant", message: "Would help with lender paperwork or calls be useful for this listing?" },
+    { role: "user", message: "No." },
+  ]), 1, { firstName: "Carol" }), "answered_not_interested");
+  assert.equal(lib.getAuthoritativeTerminalCallResult(terminal([
+    { role: "user", message: "This is an automated AI receptionist. Please record your name and reason." },
+    { role: "assistant", message: "Maya with Crisp Short Sales, about a short-sale listing." },
+    { role: "user", message: "The person you are calling is busy and not available." },
+  ]), 1, { firstName: "Sarah" }), "agent_not_available");
+  assert.equal(lib.getAuthoritativeTerminalCallResult(terminal([
+    { role: "assistant", message: "Hello, I'm trying to reach Gustavo." },
+    { role: "user", message: "Pacific Homebrokers, how may I help you?" },
+  ]), 1, { firstName: "Gustavo" }), "gatekeeper_admin_early_exit");
+  assert.equal(lib.getAuthoritativeTerminalCallResult(terminal([
+    { role: "assistant", message: "Hello, I'm trying to reach Gustavo." },
+    { role: "user", message: "How may I help you?" },
+  ]), 1, { firstName: "Gustavo" }), undefined);
+  assert.equal(lib.getAuthoritativeTerminalCallResult(terminal([
+    { role: "user", message: "You've reached Michele. Please leave your name and number after the tone." },
+  ]), 1, { firstName: "Michele" }), "voicemail_reached");
 });
 
 test("Google Call Assist can relay a narrow explicit list-removal instruction", async () => {
@@ -505,7 +538,7 @@ test("post-call stop writes terminal status before generic tool fallback and doe
   assert.equal(await lib.processPostCallOutcomeFromConversationId(id), true);
   assert.equal(receivedWrites.length, before + 2, "the failed attempt must remain eligible for outcome reconciliation");
   for (const write of receivedWrites.slice(before)) {
-    assert.equal(write.callResult, "call_ended_by_request");
+    assert.equal(write.callResult, "call_end_requested");
     assert.equal(write.leadStatusCode, undefined);
     assert.equal(write.callbackRequested, undefined);
     assert.equal(write.liveTransferRequested, "");
@@ -557,7 +590,7 @@ test("not-interested route ignores invented DNC tool summary and writes current-
   const response = await invokeNotInterested({ rowNumber: 123, callAttemptNumber: 1, conversationId: id,
     agentName: "Test Caller", phone: "+12025550123", listingAddress: "123 Fictional Street",
     conversationSummary: "The caller says do not call again." });
-  assert.deepEqual(response, buildElevenLabsContactOutcomeResponse("call_ended_by_request", "confirmed"));
+  assert.deepEqual(response, buildElevenLabsContactOutcomeResponse("call_end_requested", "confirmed"));
   assert.equal(receivedWrites.at(-1)!.leadStatusCode, undefined);
   assert.match(String(receivedWrites.at(-1)!.voiceNotes), /^CALL ENDED BY REQUEST:/);
 });

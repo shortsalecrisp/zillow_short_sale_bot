@@ -76,7 +76,7 @@ test("all expected unavailable outcomes share a neutral permission-first callbac
 });
 
 test("contact outcome receipts keep persistence, review and guarded ending separate", () => {
-  const results: VoiceContactResult[] = ["do_not_call", "call_ended_by_request", "contact_request_review", "interested_followup_review",
+  const results: VoiceContactResult[] = ["do_not_call", "call_end_requested", "call_ended_by_request", "contact_request_review", "interested_followup_review",
     "deferred_contact", "not_short_sale", "already_working_with_negotiator", "answered_not_interested"];
   for (const result of results) for (const persistence of ["confirmed", "unconfirmed"] as const) {
     const response = buildElevenLabsContactOutcomeResponse(result, persistence);

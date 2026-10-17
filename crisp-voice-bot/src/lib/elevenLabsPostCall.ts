@@ -261,7 +261,7 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Do not call";
   }
 
-  if (callResult === "call_ended_by_request") {
+  if (callResult === "call_end_requested" || callResult === "call_ended_by_request") {
     return "Call ended by request";
   }
 
@@ -932,11 +932,31 @@ function liveContactMessages(conversation: ElevenLabsConversation): string[] {
 }
 
 export function shouldTreatAsCallEndedByRequest(conversation: ElevenLabsConversation): boolean {
-  return !shouldTreatAsDoNotCall(conversation) && liveContactMessages(conversation).some(looksLikeCallEndingRequest);
+  if (shouldTreatAsDoNotCall(conversation)) return false;
+  if (liveContactMessages(conversation).some(looksLikeCallEndingRequest)) return true;
+  if (shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsVoicemail(conversation)) return false;
+
+  const transcript = conversation.transcript ?? [];
+  let latestUserIndex = -1;
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const item = transcript[index];
+    if (item.role === "user" && typeof item.message === "string" && hasMeaningfulSpokenContent(item.message)) {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (latestUserIndex < 0 || !/^\s*(?:please\s+)?cancel(?:\s+please)?[.!?]*\s*$/i.test(transcript[latestUserIndex].message ?? "")) {
+    return false;
+  }
+  const precedingAssistant = [...transcript.slice(0, latestUserIndex)].reverse().find((item) =>
+    (item.role === "assistant" || item.role === "agent") && typeof item.message === "string" && hasMeaningfulSpokenContent(item.message));
+  const context = normalizeText(precedingAssistant?.message ?? "");
+  return !/\b(?:callback|call you back|email|send (?:you )?(?:the )?information|transfer|join (?:this|the) call|yoni)\b/.test(context);
 }
 
 export type VoiceContactResult =
   | "do_not_call"
+  | "call_end_requested"
   | "call_ended_by_request"
   | "contact_request_review"
   | "interested_followup_review"
@@ -956,7 +976,7 @@ export function getVoiceContactRequestResult(conversation: ElevenLabsConversatio
     return "interested_followup_review";
   }
   if (shouldTreatAsCallEndedByRequest(conversation)) {
-    return "call_ended_by_request";
+    return "call_end_requested";
   }
 
   const transferReview = getUnconsentedTransferReviewResult(conversation);
@@ -1031,17 +1051,17 @@ export function buildVoiceContactOutcomeUpdates(
     ...(["do_not_call", "not_short_sale", "already_working_with_negotiator", "answered_not_interested"].includes(callResult)
       ? { leadStatusCode: "R" } : {}),
     ...(callResult === "interested_followup_review" ? { leadStatusCode: "Y" } : {}),
-    ...(["call_ended_by_request", "contact_request_review"].includes(callResult) ? {} : {
+    ...(["call_end_requested", "call_ended_by_request", "contact_request_review"].includes(callResult) ? {} : {
       callbackRequested: "",
       callbackTime: "",
       liveTransferRequested: "",
       liveTransferCompleted: "",
     }),
   };
-  if (callResult === "call_ended_by_request") {
+  if (callResult === "call_end_requested" || callResult === "call_ended_by_request") {
     updates.liveTransferRequested = "";
   }
-  if (callResult !== "call_ended_by_request" || !conversation) {
+  if (!["call_end_requested", "call_ended_by_request"].includes(callResult) || !conversation) {
     return updates;
   }
 
@@ -1284,6 +1304,43 @@ export function getVoicemailOrNoAnswerCallResult(
     return "no_answer_first_attempt";
   }
   return hasDeliveredVoicemailMessage(conversation) ? "voicemail_left" : "voicemail_reached";
+}
+
+export type AuthoritativeTerminalCallResult =
+  | "identity_mismatch_voicemail"
+  | "voicemail_left"
+  | "voicemail_reached"
+  | "voicemail_reached_final_attempt"
+  | "no_answer_first_attempt"
+  | "no_response_second_attempt"
+  | "gatekeeper_admin_early_exit"
+  | "agent_not_available"
+  | "call_end_requested"
+  | "answered_not_interested";
+
+export function getAuthoritativeTerminalCallResult(
+  conversation: ElevenLabsConversation,
+  callAttemptNumber: number,
+  expected: { firstName?: string; lastName?: string; fullName?: string; email?: string } = {},
+): AuthoritativeTerminalCallResult | undefined {
+  if (shouldTreatAsIdentityMismatchVoicemail(
+    conversation,
+    expected.firstName ?? "",
+    expected.lastName ?? "",
+    expected.fullName ?? "",
+    expected.email ?? "",
+  )) return "identity_mismatch_voicemail";
+
+  const voicemailOrNoAnswer = getVoicemailOrNoAnswerCallResult(conversation, callAttemptNumber);
+  if (voicemailOrNoAnswer?.startsWith("voicemail_")) return voicemailOrNoAnswer;
+  if (shouldTreatAsGatekeeperAdminEarlyExit(conversation, expected.firstName) ||
+    shouldTreatAsUnrelatedLiveBusiness(conversation, expected.firstName)) return "gatekeeper_admin_early_exit";
+  if (shouldTreatAsAgentUnavailable(conversation, expected.firstName) || shouldTreatAsRecordingArtifact(conversation)) {
+    return "agent_not_available";
+  }
+  if (getVoiceContactRequestResult(conversation) === "call_end_requested") return "call_end_requested";
+  if (shouldTreatAsNotInterested(conversation)) return "answered_not_interested";
+  return voicemailOrNoAnswer;
 }
 
 function getVoicemailDetectionMessage(conversation: ElevenLabsConversation): string {
@@ -1681,6 +1738,13 @@ export function hasLiveHumanGatekeeperEvidence(
     /\bthis is\b.{0,35}\b(?:real estate|realty|properties|brokerage|office|group|team)\b/i.test(message),
   );
   const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  const liveBusinessGreeting = meaningfulUserMessages(conversation).some((message) => {
+    const text = normalizeText(message);
+    const organizationPrefix = text.match(/^(.{3,80}),\s*how (?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
+    return Boolean(organizationPrefix) &&
+      !/^(?:hi|hello|yes|sure|okay|this is [a-z][a-z'-]*)$/.test(organizationPrefix) &&
+      !(expected && new RegExp(`\\b${expected}\\b`).test(organizationPrefix));
+  });
   const responderAuthorityConfirmed =
     /\b(?:i|we)\s+(?:am |are |(?:'m|'re) )?(?:the )?(?:listing agent|agent of record|handling|handle|manage|responsible for)\b.{0,80}\b(?:short sale|listing|bank|lender)\b/.test(
       contextualText,
@@ -1697,7 +1761,7 @@ export function hasLiveHumanGatekeeperEvidence(
     return Boolean(responderName && !nameSoundsSimilar(responderName, expected));
   });
 
-  return liveOfficeInteraction || (summaryNamesLiveRole && contextualUserTurns.length > 0) ||
+  return liveBusinessGreeting || liveOfficeInteraction || (summaryNamesLiveRole && contextualUserTurns.length > 0) ||
     (officeSelfIdentification && contextualUserTurns.length >= 2) ||
     (differentTeamResponder && !responderAuthorityConfirmed);
 }
@@ -2078,6 +2142,13 @@ async function processPostCallOutcomeForConversation(
 
   const summary = conversation.analysis?.transcript_summary ?? transcriptText(conversation);
   const fullTranscript = transcriptForEmail(conversation, metadata.assistantName ?? "Emmy");
+  const expectedFirstName = metadata.firstName ?? metadata.fullName.split(/\s+/)[0] ?? "";
+  const terminalCallResult = getAuthoritativeTerminalCallResult(conversation, metadata.callAttemptNumber, {
+    firstName: expectedFirstName,
+    lastName: metadata.lastName,
+    fullName: metadata.fullName,
+    email: metadata.email,
+  });
   const buildPerformanceNotes = (outcome: string, performanceSummary = summary): string =>
     buildVoicePerformanceLog({
       callbackConsent: getExplicitCallbackConsent(conversation) ?? null,
@@ -2087,8 +2158,44 @@ async function processPostCallOutcomeForConversation(
       outcome,
       summary: performanceSummary,
       transcript: fullTranscript,
+      terminalCallResult,
     });
   const persistSheetUpdate = options.postSheetUpdate ?? postSheetUpdate;
+
+  if (terminalCallResult) {
+    if (conversation.status !== "done" && conversation.status !== "failed") return false;
+    const outcome = buildVoiceResponseStatus(terminalCallResult, undefined, metadata.assistantName);
+    const terminalUpdate = terminalCallResult === "call_end_requested"
+      ? buildVoiceContactOutcomeUpdates(terminalCallResult, conversation)
+      : {
+          callResult: terminalCallResult,
+          responseStatus: outcome,
+          ...(["answered_not_interested", "identity_mismatch_voicemail"].includes(terminalCallResult)
+            ? { leadStatusCode: "R" } : {}),
+          ...(terminalCallResult === "voicemail_left" ? { vmLeft: "yes" } : {}),
+          callbackRequested: "",
+          callbackTime: "",
+          liveTransferRequested: "",
+          liveTransferCompleted: "",
+        };
+    const terminalRequest = {
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      ...terminalUpdate,
+      voiceNotes: buildPerformanceNotes(outcome),
+    };
+    if (terminalCallResult === "call_end_requested") await persistVoiceContactOutcome(terminalRequest);
+    else await persistSheetUpdate(terminalRequest);
+    await sendTranscriptEmailIfEnabled({ conversationId, metadata, outcome, summary, transcript: fullTranscript });
+    processedConversationIds.add(conversationId);
+    logger.info("ElevenLabs authoritative terminal evidence persisted", {
+      conversationId,
+      rowNumber: metadata.rowNumber,
+      callAttemptNumber: metadata.callAttemptNumber,
+      callResult: terminalCallResult,
+    });
+    return true;
+  }
 
   const contactResult = getVoiceContactRequestResult(conversation);
   if (contactResult) {
@@ -2226,7 +2333,6 @@ async function processPostCallOutcomeForConversation(
     return true;
   }
 
-  const expectedFirstName = metadata.firstName ?? metadata.fullName.split(/\s+/)[0] ?? "";
   if (shouldTreatAsIdentityMismatchVoicemail(
     conversation,
     expectedFirstName,

@@ -1,6 +1,21 @@
 # Uniform Conversion Comparison
 
-Current revision is r4, verified at 2026-10-16T12:57:55.149Z (8:57:55 AM New York on October 16). Earlier releases below are historical and must not be pooled with r4. Both arms are verified identical except for TTS model.
+Current revision is r5, verified at 2026-10-17T14:36:32.752Z (10:36:32 AM New York on October 17). Earlier releases below are historical and must not be pooled with r5. Both arms are verified identical except for TTS model.
+
+## Approved Revision 5
+
+Yoni approved the Lead Intelligence opening recovery refinement. After a skipped silence or placeholder, a new live "Go ahead" or "I'm listening" resumes the pending short listing check once; it does not repeat the full opener or restart an answered question. The release also preserves the shared current-call ending and authoritative terminal-outcome rules in the backend.
+
+The guarded publisher reconciled a provider-added neutral `exit_slot: any` readback field after the first sequential branch write, refreshed both live branches, then completed and verified the two-arm release. Tools remained unchanged, native traffic remains 50/50, and no real call or metered session was initiated.
+
+- Cohort: `maya_uniform_lead_conversion_20261017_r5`.
+- Start: `2026-10-17T14:36:32.752Z`, after the final provider uniformity readback.
+- Control: branch `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`, version `agtvrsn_9501m554nxfaee2rps63c9zznh6k`, Flash v2.
+- Test: branch `agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv`, version `agtvrsn_1801m554p0e8edbshc6dkrjcf3rj`, v4 Turbo.
+- Shared writable-body hash, excluding only TTS model and expanded GET-only root tool schemas: `2bc5c0ae40c7fa64283dd9e630b2d32401a2763e94f5bee015d3be56c672e563`.
+- Workflow hash: `31e9628299acf53fda9153f686a003bb1a25cf1a7c00a4bd9e89bcf9d2af0a35`.
+
+Require the exact r5 final branch and version, genuine non-test positive duration and provider start after the r5 boundary. The minimum 15 verified true-live conversations per arm and preferred 100-genuine-call review restart for r5. Previous cohorts remain historical controls only.
 
 ## Approved Revision 4
 

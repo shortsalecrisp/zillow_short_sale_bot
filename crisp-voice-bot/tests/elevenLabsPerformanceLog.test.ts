@@ -139,7 +139,7 @@ test("voice performance log stores codex-readable cohort metrics in one cell blo
 });
 
 async function measurementLog(input: { metadata?: Partial<CallMetadata>; conversation?: Record<string, unknown>;
-  callbackConsent?: { callbackTime: string } | null } = {}) {
+  callbackConsent?: { callbackTime: string } | null; terminalCallResult?: string | null } = {}) {
   const { buildVoicePerformanceLog, VOICE_PERFORMANCE_LOG_MARKER } = await import("../src/lib/elevenLabsPerformanceLog");
   return JSON.parse(buildVoicePerformanceLog({
     conversationId: "conv_measurement",
@@ -147,6 +147,7 @@ async function measurementLog(input: { metadata?: Partial<CallMetadata>; convers
     summary: "No delivered continuation is asserted.",
     transcript: "",
     callbackConsent: input.callbackConsent,
+    terminalCallResult: input.terminalCallResult,
     metadata: {
       rowNumber: 123, fullName: "Synthetic Caller", callAttemptNumber: 1,
       listingAddress: "123 Fictional Street", requestedPhone: "+12025550123", dialedPhone: "+12025550123",
@@ -155,6 +156,32 @@ async function measurementLog(input: { metadata?: Partial<CallMetadata>; convers
     conversation: { conversation_id: "conv_measurement", status: "done", ...input.conversation },
   }).replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""));
 }
+
+test("terminal outcome precedence drives the metrics contact bucket", async () => {
+  const voicemail = await measurementLog({ terminalCallResult: "voicemail_reached", conversation: { transcript: [
+    { role: "user", message: "Hello." },
+    { role: "agent", message: "This is Maya with Crisp Short Sales." },
+    { role: "user", message: "You've reached Michele. Please leave your name and number after the tone." },
+  ] } });
+  assert.equal(voicemail.contactEvidence.reviewBucket, "voicemail");
+  assert.equal(voicemail.contactEvidence.humanAnswered, false);
+  assert.equal(voicemail.contactEvidence.targetAgentAnswered, false);
+
+  const screener = await measurementLog({ terminalCallResult: "agent_not_available", conversation: { transcript: [
+    { role: "user", message: "Hello." },
+    { role: "agent", message: "Maya with Crisp Short Sales." },
+  ] } });
+  assert.equal(screener.contactEvidence.reviewBucket, "recorded_screener");
+  assert.equal(screener.contactEvidence.humanAnswered, false);
+
+  const gatekeeper = await measurementLog({ terminalCallResult: "gatekeeper_admin_early_exit", conversation: { transcript: [
+    { role: "agent", message: "I'm trying to reach Gustavo." },
+    { role: "user", message: "Pacific Homebrokers, how may I help you?" },
+  ] } });
+  assert.equal(gatekeeper.contactEvidence.reviewBucket, "human_gatekeeper");
+  assert.equal(gatekeeper.contactEvidence.humanAnswered, true);
+  assert.equal(gatekeeper.contactEvidence.targetAgentAnswered, false);
+});
 
 for (const status of ["done", "failed"]) {
   test(`provider identity comes from a matching final ${status} receipt, separately from declarations`, async () => {
@@ -598,6 +625,7 @@ for (const policy of [
   "maya-uniform-lead-conversion-20261009-r2",
   "maya-uniform-lead-conversion-20261011-r3",
   "maya-uniform-lead-conversion-20261016-r4",
+  "maya-uniform-lead-conversion-20261017-r5",
 ]) {
 test(`${policy} measures service and listing question while yes only confirms the listing`, async () => {
   const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: policy }, conversation: { transcript: [

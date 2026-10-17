@@ -643,7 +643,7 @@ router.post("/tool/not-interested", async (req: Request, res: Response, next: Ne
         rowNumber: payload.rowNumber,
         callAttemptNumber: payload.callAttemptNumber,
         ...buildVoiceContactOutcomeUpdates(callResult, conversation),
-        voiceNotes: `${callResult === "call_ended_by_request"
+        voiceNotes: `${["call_end_requested", "call_ended_by_request"].includes(callResult)
           ? "CALL ENDED BY REQUEST: caller asked to end the current call only. "
           : ""}Tool-provided summary (not caller evidence): ${payload.conversationSummary}`,
       });

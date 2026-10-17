@@ -7,12 +7,12 @@ export const ELEVENLABS_TTS_CONTROL_BRANCH_ID = "agtbrch_1101kpkhs3b4eg5v0q8ppq4
 export const ELEVENLABS_TTS_TEST_BRANCH_ID = "agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv";
 
 export const ELEVENLABS_UNIFORM_COMPARISON = Object.freeze({
-  cohort: "maya_uniform_lead_conversion_20261016_r4",
-  startedAt: "2026-10-16T12:57:55.149Z",
-  controlVersionId: "agtvrsn_4601m4yhj7xsejw8wcm77xkcn08x",
-  testVersionId: "agtvrsn_3401m52cmpgcecsbsfd89s046bsp",
-  sharedConfigSha256: "7f8f349d8b4e16f3aa5263933707d2fe1f2fd464de88cfa9acdd37611d38cab4",
-  workflowSha256: "f2d992bbd8c2b0d082910bf13490ee8305a3080eee32a38b204aeef9f98a785b",
+  cohort: "maya_uniform_lead_conversion_20261017_r5",
+  startedAt: "2026-10-17T14:36:32.752Z",
+  controlVersionId: "agtvrsn_9501m554nxfaee2rps63c9zznh6k",
+  testVersionId: "agtvrsn_1801m554p0e8edbshc6dkrjcf3rj",
+  sharedConfigSha256: "2bc5c0ae40c7fa64283dd9e630b2d32401a2763e94f5bee015d3be56c672e563",
+  workflowSha256: "31e9628299acf53fda9153f686a003bb1a25cf1a7c00a4bd9e89bcf9d2af0a35",
   minimumTrueLiveConversationsPerArm: 15,
   dedicatedReviewGenuineCalls: 100,
   primaryOutcome: "Verified positive handoffs per genuine call; require caller consent and completion evidence",

@@ -39,8 +39,21 @@ export function safeReceipt(value: any): any {
   return value;
 }
 
+function normalizeProviderReadbackBody(value: any): any {
+  const normalized = structuredClone(value);
+  for (const edge of Object.values(normalized?.workflow?.edges ?? {}) as any[]) {
+    for (const key of ["forward_condition", "backward_condition"]) {
+      const condition = edge?.[key];
+      if (condition?.exit_slot?.type === "any" && Object.keys(condition.exit_slot).length === 1) {
+        delete condition.exit_slot;
+      }
+    }
+  }
+  return normalized;
+}
+
 export function verifyReleaseReadback(before: any, candidate: any, after: any): void {
-  if (bodyDigest(candidate) !== bodyDigest(writableBody(after))) {
+  if (bodyDigest(normalizeProviderReadbackBody(candidate)) !== bodyDigest(normalizeProviderReadbackBody(writableBody(after)))) {
     throw new Error("Conversation policy readback mismatch after write");
   }
   for (const key of ["platform_settings", "phone_numbers", "whatsapp_accounts", "procedures"]) {
