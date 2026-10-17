@@ -310,6 +310,17 @@ test('an agent offering to call later gets the number without a human takeover',
   assert.equal(JSON.parse(h.state.history_json).at(-1).response_id, 'caller_initiated_call_offer');
 });
 
+test('an agent promising to reach out gets a no-question acknowledgment without takeover', () => {
+  const {h, r} = answer("Thank you for your information. I'll reach out to you soon.");
+  assert.equal(r.reply_text, "Sounds good—I’ll be here when you’re ready.");
+  assert.equal(r.handoff_needed, false);
+  assert.equal(r.alert_needed, false);
+  assert.equal(r.handoff_type || '', '');
+  assert.equal(r.callback_time || '', '');
+  assert.equal(h.state.call_booking_status, 'interested_no_call');
+  assert.equal(JSON.parse(h.state.history_json).at(-1).response_id, 'self_initiated_contact_ack');
+});
+
 test('third-person self-reference is blocked at both reply and outbox boundaries', () => {
   const h = smsHarness();
   const draft = "I'll have Yoni review your file.";

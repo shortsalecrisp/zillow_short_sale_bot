@@ -2388,6 +2388,7 @@ function getDeliveredResponseId_(text) {
   if (isSpecificFeeReplyText_(t)) return "fee_specific";
   if (t === buildSelfHandlingValueReply_() || isSelfHandlingValueReplyText_(t)) return "self_handling_value";
   if (t === buildYoniContactCardReply_()) return "contact_card";
+  if (t === normalizeWhitespace_("Sounds good—I’ll be here when you’re ready.")) return "self_initiated_contact_ack";
   if (/404-300-9526/.test(t) && /when you(?:'re| are) ready|when you(?:'re| are) free/.test(t.toLowerCase())) return "caller_initiated_call_offer";
   if (isInitialFeeReplyText_(t)) return "fee_initial";
   if (t === buildBuyerCostConcernReply_()) return "buyer_cost_concern";
@@ -3367,7 +3368,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
   if (isSelfInitiatedDeferredContactSignal_(t)) {
     return {
       matched: true,
-      reply_text: "No problem - call or text me at 404-300-9526 when you're free.",
+      reply_text: "Sounds good—I’ll be here when you’re ready.",
       lead_status: "Y",
       conversation_done: false,
       handoff_needed: false,
@@ -3375,8 +3376,8 @@ function applyFastRules_(text, rowObj, receivedAt) {
       alert_needed: false,
       block_reply: false,
       call_booking_status: "interested_no_call",
-      response_id: "caller_initiated_call_offer",
-      reason: "Agent will initiate contact later; contact details supplied without owner takeover"
+      response_id: "self_initiated_contact_ack",
+      reason: "Agent will initiate contact later; acknowledged without a callback question or owner takeover"
     };
   }
 
@@ -3830,6 +3831,7 @@ function isAutomatedPromotionalSmsSignal_(text) {
   const hasLink = /\b(?:https?:\/\/|www\.|[a-z0-9-]+(?:\.[a-z0-9-]+)+\/(?:[a-z0-9/?=&%-]+))/.test(t);
   const hasCampaignAppeal = /\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|voter registration|register(?:ed)? to vote|volunteer|chipped in|election|ballot)\b/.test(t);
   const hasBulkFooter = /\b(?:stop\s*2\s*end|(?:reply\s+)?stop\s+to\s+(?:end|unsubscribe|cancel|opt\s*out))\b/.test(t);
+  const hasTextStopToQuitFooter = /\btext\s+stop\s+to\s+quit\b/.test(t);
   const hasKnownCivicAutomation = /\b(?:fair fight|peachvote(?:\.com)?|didthey\.vote|mvp\.sos\.ga\.gov|voter registration portal)\b/.test(t);
   const hasSmallDonationAsk = /(?:\$\s*(?:1|5|10|15|20|25|50)\b|\b(?:chip in|anything you can spare|small donation|just one dollar)\b)/.test(t);
   const hasSurveyIdentity = /\b(?:web\s+)?surveys?\b/.test(t) &&
@@ -3837,7 +3839,8 @@ function isAutomatedPromotionalSmsSignal_(text) {
   const hasPollInvitation = /\b(?:poll(?:ing)?|survey(?:ing)?)\b/.test(t) &&
     /\b(?:can|could|would|will)\s+you\b|\banswer\s+(?:a|this|our)\b/.test(t);
   const hasNumberedChoices = /\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]/.test(t);
-  return (hasCampaignAppeal && hasLink && (hasBulkFooter || hasSmallDonationAsk)) ||
+  return (hasCampaignAppeal && hasTextStopToQuitFooter) ||
+    (hasCampaignAppeal && hasLink && (hasBulkFooter || hasSmallDonationAsk)) ||
     (hasKnownCivicAutomation && (hasLink || hasBulkFooter || hasCampaignAppeal)) ||
     (hasSurveyIdentity && hasPollInvitation && hasNumberedChoices);
 }
@@ -5426,6 +5429,10 @@ function isSelfInitiatedDeferredContactSignal_(text) {
     /\b(?:at|in)\s+(?:my|the)\s+(?:other\s+)?job\b/.test(t) ||
     /\b(?:on\s+the\s+clock|at\s+work)\b/.test(t);
   const selfInitiatedFollowup = /\b(?:i|we)(?:['’]?ll|\s+will)?\s+(?:let\s+you\s+know|message\s+you|text\s+you|reach\s+out(?:\s+to\s+you)?|contact\s+you|get\s+back\s+to\s+you)\b/.test(t);
+  const promisedSelfInitiatedFollowup = /\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:let\s+you\s+know|message\s+you|text\s+you|reach\s+out\s+to\s+you|contact\s+you|get\s+back\s+to\s+you)\b/.test(t) &&
+    !/\b(?:if|unless)\b.{0,50}\b(?:need|want|could use|would like)\b.{0,30}\b(?:help|assistance|services?)\b/.test(t) &&
+    !isPresentServiceInterestSignal_(t) &&
+    !isDirectHelpRequestSignal_(t);
   const selfInitiatedCall = /\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:call|phone|ring)\s+you\b/.test(t) &&
     !/\b(?:now|right\s+now|immediately|in\s+(?:a|one)\s+(?:minute|second))\b/.test(t) &&
     !/\b(?:can\s+use|could\s+use|need|would\s+like)\b.{0,30}\bhelp\b/.test(t) &&
@@ -5433,7 +5440,7 @@ function isSelfInitiatedDeferredContactSignal_(text) {
     !isDirectHelpRequestSignal_(t);
   const explicitInboundCallback = /\b(?:call|text|contact)\s+me\b/.test(t) ||
     /\b(?:can|could|would|will)\s+you\s+(?:call|text|contact)\b/.test(t);
-  return ((currentlyUnavailable && selfInitiatedFollowup) || selfInitiatedCall) && !explicitInboundCallback;
+  return ((currentlyUnavailable && selfInitiatedFollowup) || promisedSelfInitiatedFollowup || selfInitiatedCall) && !explicitInboundCallback;
 }
 
 function isCallerInitiatedCallOfferSignal_(text) {
@@ -8209,7 +8216,7 @@ function testApprovedLeadIntelligenceRules_() {
       deferredContactDecision.alert_needed ||
       deferredContactDecision.handoff_needed ||
       deferredContactDecision.callback_time ||
-      deferredContactDecision.reply_text !== "No problem - call or text me at 404-300-9526 when you're free.") {
+      deferredContactDecision.reply_text !== "Sounds good—I’ll be here when you’re ready.") {
     throw new Error("Busy self-initiated follow-up must stay deferred without callback permission: " + JSON.stringify(deferredContactDecision));
   }
   if (isSelfInitiatedDeferredContactSignal_("I'm busy; please call me tomorrow afternoon")) {
@@ -8223,6 +8230,17 @@ function testApprovedLeadIntelligenceRules_() {
       agentWillCallDecision.callback_time ||
       isSelfInitiatedDeferredContactSignal_("I will call you now")) {
     throw new Error("Self-initiated call must remain deferred without invented callback timing");
+  }
+  const reachOutPromise = "Thank you for your information. I'll reach out to you soon.";
+  const reachOutPromiseDecision = applyFastRules_(reachOutPromise, {});
+  if (!isSelfInitiatedDeferredContactSignal_(reachOutPromise) ||
+      reachOutPromiseDecision.reply_text !== "Sounds good—I’ll be here when you’re ready." ||
+      reachOutPromiseDecision.response_id !== "self_initiated_contact_ack" ||
+      reachOutPromiseDecision.handoff_needed ||
+      reachOutPromiseDecision.alert_needed ||
+      reachOutPromiseDecision.handoff_type ||
+      reachOutPromiseDecision.callback_time) {
+    throw new Error("Self-directed contact promise must close without a callback question or takeover");
   }
   const weekdayCallbackText = "Feel free to reach out to me Monday. Today isn't a good day";
   if (!isExplicitDayOrDateCallbackSignal_(weekdayCallbackText) ||

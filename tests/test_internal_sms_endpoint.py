@@ -3851,7 +3851,7 @@ def test_sms_busy_self_initiated_followup_supplies_contact_without_takeover(monk
     assert decision["handoff_type"] == ""
     assert decision["call_booking_status"] == "interested_no_call"
     assert decision["callback_time"] == ""
-    assert decision["reply_text"] == "No problem - call or text me at 404-300-9526 when you're free."
+    assert decision["reply_text"] == "Sounds good—I’ll be here when you’re ready."
 
     explicit = module._sms_fast_decision({}, "I'm busy; please call me tomorrow afternoon")
     assert module._sms_is_self_initiated_deferred_contact(
@@ -3874,12 +3874,56 @@ def test_sms_agent_will_call_gets_number_without_invented_callback(monkeypatch):
     assert decision["handoff_needed"] is False
     assert decision["call_booking_status"] == "interested_no_call"
     assert decision["callback_time"] == ""
-    assert decision["reason"] == "Agent will initiate contact later; contact details supplied without owner takeover"
-    assert "404-300-9526" in decision["reply_text"]
+    assert decision["reason"] == "Agent will initiate contact later; acknowledged without a callback question or owner takeover"
+    assert decision["reply_text"] == "Sounds good—I’ll be here when you’re ready."
 
     immediate = module._sms_fast_decision({}, "I will call you now")
     assert module._sms_is_self_initiated_deferred_contact("I will call you now") is False
     assert immediate["handoff_type"] == "CALL REQUESTED"
+
+
+def test_sms_unconditional_reach_out_promise_gets_terminal_ack_without_callback(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Thank you for your information. I'll reach out to you soon."
+
+    decision = module._sms_fast_decision({}, inbound)
+
+    assert module._sms_is_self_initiated_deferred_contact(inbound) is True
+    assert decision["reply_text"] == "Sounds good—I’ll be here when you’re ready."
+    assert decision["response_id"] == "self_initiated_contact_ack"
+    assert decision["call_booking_status"] == "interested_no_call"
+    assert decision["callback_time"] == ""
+    assert decision["handoff_type"] == ""
+    assert decision["handoff_needed"] is False
+    assert decision["alert_needed"] is False
+
+
+def test_sms_team_keisha_text_stop_to_quit_is_suppressed_without_link(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = (
+        "Join #TeamKeisha tomorrow for a day of Get Out the Vote action, including phone banking. "
+        "Tomorrow, October 17 | 11:00 AM - 3:00 PM. Text STOP to quit"
+    )
+    before = {index: list(row) for index, row in sheet.rows.items()}
+
+    result = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={"token": "secret-token", "action": "incoming_sms", "phone": "7703419929",
+              "message": inbound, "message_id": "team-keisha-text-stop"},
+    ).json()
+
+    assert module._sms_is_automated_promotional_sms(inbound) is True
+    assert result["should_reply"] is False
+    assert result["handoff_needed"] is False
+    assert result["needs_review"] is False
+    assert sheet.rows == before
+    assert sender.calls == []
 
 
 def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):

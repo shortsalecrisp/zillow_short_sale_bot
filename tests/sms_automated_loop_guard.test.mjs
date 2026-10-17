@@ -30,6 +30,8 @@ for (const automated of [
 }
 assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("I am registered to vote and have a short-sale listing question")`), false);
 assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("I am surveying the property. 1) Vacant 2) Occupied")`), false);
+assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("Text STOP to quit, but I have a short-sale listing question")`), false);
+assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("Join #TeamKeisha tomorrow for Get Out the Vote action and canvassing. Tomorrow, October 17. Text STOP to quit")`), true);
 
 const repeated = smsHarness();
 const question = 'What is your fee?';

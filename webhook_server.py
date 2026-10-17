@@ -5870,6 +5870,7 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
     has_bulk_footer = re.search(
         r"\b(?:stop\s*2\s*end|(?:reply\s+)?stop\s+to\s+(?:end|unsubscribe|cancel|opt\s*out))\b", t
     )
+    has_text_stop_to_quit_footer = re.search(r"\btext\s+stop\s+to\s+quit\b", t)
     has_known_civic_automation = re.search(
         r"\b(?:fair fight|peachvote(?:\.com)?|didthey\.vote|mvp\.sos\.ga\.gov|voter registration portal)\b",
         t,
@@ -5886,7 +5887,8 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
     )
     has_numbered_choices = re.search(r"\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]", t)
     return bool(
-        (has_campaign_appeal and has_link and (has_bulk_footer or has_small_donation_ask))
+        (has_campaign_appeal and has_text_stop_to_quit_footer)
+        or (has_campaign_appeal and has_link and (has_bulk_footer or has_small_donation_ask))
         or (has_known_civic_automation and (has_link or has_bulk_footer or has_campaign_appeal))
         or (has_survey_identity and has_poll_invitation and has_numbered_choices)
     )
@@ -6405,6 +6407,18 @@ def _sms_is_self_initiated_deferred_contact(value: Any) -> bool:
             text,
         )
     )
+    promised_self_initiated_followup = bool(
+        re.search(
+            r"\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:let\s+you\s+know|message\s+you|text\s+you|"
+            r"reach\s+out\s+to\s+you|contact\s+you|get\s+back\s+to\s+you)\b",
+            text,
+        )
+        and not re.search(
+            r"\b(?:if|unless)\b.{0,50}\b(?:need|want|could use|would like)\b.{0,30}\b(?:help|assistance|services?)\b",
+            text,
+        )
+        and not _sms_is_present_service_interest(text)
+    )
     self_initiated_call = bool(
         re.search(r"\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:call|phone|ring)\s+you\b", text)
         and not re.search(r"\b(?:now|right\s+now|immediately|in\s+(?:a|one)\s+(?:minute|second))\b", text)
@@ -6415,7 +6429,11 @@ def _sms_is_self_initiated_deferred_contact(value: Any) -> bool:
         re.search(r"\b(?:call|text|contact)\s+me\b", text)
         or re.search(r"\b(?:can|could|would|will)\s+you\s+(?:call|text|contact)\b", text)
     )
-    return ((currently_unavailable and self_initiated_followup) or self_initiated_call) and not explicit_inbound_callback
+    return (
+        (currently_unavailable and self_initiated_followup)
+        or promised_self_initiated_followup
+        or self_initiated_call
+    ) and not explicit_inbound_callback
 
 
 def _sms_is_future_callback_while_unavailable_now(value: Any) -> bool:
@@ -7954,14 +7972,14 @@ def _sms_fast_decision(
 
     if _sms_is_self_initiated_deferred_contact(t):
         return _sms_decision(
-            reply_text="No problem - call or text me at 404-300-9526 when you're free.",
-            response_id="caller_initiated_call_offer",
+            reply_text="Sounds good—I’ll be here when you’re ready.",
+            response_id="self_initiated_contact_ack",
             lead_status="Y",
             handoff_needed=False,
             alert_needed=False,
             call_booking_status="interested_no_call",
             handoff_type="",
-            reason="Agent will initiate contact later; contact details supplied without owner takeover",
+            reason="Agent will initiate contact later; acknowledged without a callback question or owner takeover",
         )
 
     if _sms_is_untimed_explicit_callback(t):
