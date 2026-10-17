@@ -66,7 +66,8 @@ def test_factory_planned_verification_is_explicit_and_keeps_generation_profile(c
         verification_method=provider.PLANNED_AUDIO_VERIFICATION_METHOD)
 
 
-@pytest.mark.parametrize("method", [provider.LEGACY_VERIFICATION_METHOD, provider.PLANNED_AUDIO_VERIFICATION_METHOD])
+@pytest.mark.parametrize("method", [provider.LEGACY_VERIFICATION_METHOD, provider.PLANNED_AUDIO_VERIFICATION_METHOD,
+                                    provider.PRONUNCIATION_VERIFICATION_METHOD])
 def test_factory_verification_uses_real_constructor(configured, monkeypatch, method):
     monkeypatch.setenv("VIDEO_FOLLOWUP_AUDIO_VERIFICATION_METHOD", method)
     monkeypatch.setattr(provider, "SameTakeVideoProvider", REAL_PROVIDER)
@@ -74,7 +75,7 @@ def test_factory_verification_uses_real_constructor(configured, monkeypatch, met
     assert configured[3].call_args.args[1].verification_method == method
 
 
-@pytest.mark.parametrize("method", ["", "latest", "planned-aac-lineage-v2", "null"])
+@pytest.mark.parametrize("method", ["", "latest", "planned-aac-lineage-v99", "null"])
 def test_factory_unknown_verification_fails_before_storage(configured, monkeypatch, method):
     monkeypatch.setenv("VIDEO_FOLLOWUP_AUDIO_VERIFICATION_METHOD", method)
     with pytest.raises(ValueError, match="verification method is not approved"):

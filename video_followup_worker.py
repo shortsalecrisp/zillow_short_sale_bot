@@ -27,14 +27,14 @@ def create_worker():
     if not fal_key or not tts_key or not master_asset_key or not url or not token:
         raise ValueError("Video API access and eligibility checking must be configured")
     from video_followup_same_take import SameTakeVideoProvider, _generator_profile
-    from video_followup_speech_guard import LEGACY_VERIFICATION_METHOD, PLANNED_AUDIO_VERIFICATION_METHOD
+    from video_followup_speech_guard import LEGACY_VERIFICATION_METHOD, PLANNED_VERIFICATION_PROFILES
     generation_profile = os.getenv("VIDEO_FOLLOWUP_GENERATION_PROFILE", "legacy_v1").strip()
     _generator_profile(generation_profile)
     verification_method = os.getenv("VIDEO_FOLLOWUP_AUDIO_VERIFICATION_METHOD", LEGACY_VERIFICATION_METHOD).strip()
-    if verification_method not in {LEGACY_VERIFICATION_METHOD, PLANNED_AUDIO_VERIFICATION_METHOD}:
+    if verification_method != LEGACY_VERIFICATION_METHOD and verification_method not in PLANNED_VERIFICATION_PROFILES:
         raise ValueError("Audio verification method is not approved")
     provider_options = {"tts_key": tts_key, "generator_profile": generation_profile}
-    if verification_method == PLANNED_AUDIO_VERIFICATION_METHOD:
+    if verification_method in PLANNED_VERIFICATION_PROFILES:
         provider_options["verification_method"] = verification_method
     store = get_service().store
     provider = SameTakeVideoProvider(fal_key, store, master_asset_key, **provider_options)

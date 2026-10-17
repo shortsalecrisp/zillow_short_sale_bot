@@ -31,6 +31,7 @@ from video_followup_speech_guard import (
     safe_speech_failure_diagnostics,
     LEGACY_VERIFICATION_METHOD, PLANNED_AUDIO_VERIFICATION_METHOD,
     PLANNED_AUDIO_VERIFICATION_CONFIG, PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256,
+    PLANNED_VERIFICATION_PROFILES, PRONUNCIATION_POLICY_VERSION, PRONUNCIATION_VERIFICATION_METHOD,
 )
 
 MASTER_SHA256 = "01efd28101e8b016d51d571cc87d38d13ea623389663bc7a88cf26cce39bd60b"
@@ -122,8 +123,8 @@ def _digest_json(value):
 def _verification_profile(method):
     if method == LEGACY_VERIFICATION_METHOD:
         config = {"method": method}
-    elif method == PLANNED_AUDIO_VERIFICATION_METHOD:
-        config = dict(PLANNED_AUDIO_VERIFICATION_CONFIG)
+    elif isinstance(method, str) and method in PLANNED_VERIFICATION_PROFILES:
+        config = dict(PLANNED_VERIFICATION_PROFILES[method])
     else:
         raise VideoProviderError("verification_method_invalid", "Audio verification method is not approved.")
     return {"verification_method": method, "verification_config": config,
@@ -141,10 +142,24 @@ def _saved_verification_profile(state):
     profile = _verification_profile(state["verification_method"])
     if any(state.get(field) != value for field, value in profile.items()):
         raise VideoProviderError("pipeline_mismatch", "Audio verification identity changed.")
-    if "audio_plan_sha256" in state and (profile["verification_method"] != PLANNED_AUDIO_VERIFICATION_METHOD
+    if "audio_plan_sha256" in state and (profile["verification_method"] not in PLANNED_VERIFICATION_PROFILES
             or not re.fullmatch(r"[a-f0-9]{64}", str(state["audio_plan_sha256"]))):
         raise VideoProviderError("pipeline_mismatch", "Planned audio identity changed.")
     return profile
+
+
+def _speech_policy_kwargs(state):
+    method = _saved_verification_profile(state)["verification_method"]
+    return {"policy_version": PRONUNCIATION_POLICY_VERSION} if method == PRONUNCIATION_VERIFICATION_METHOD else {}
+
+
+def _validate_pipeline_speech_proof(state, proof, **bindings):
+    if not validate_speech_proof(proof, first_name=state["first_name"], **bindings):
+        return False
+    method = _saved_verification_profile(state)["verification_method"]
+    if method in PLANNED_VERIFICATION_PROFILES:
+        return proof.get("config_sha256") == PLANNED_VERIFICATION_PROFILES[method]["speech_config_sha256"]
+    return proof.get("policy_version") != PRONUNCIATION_POLICY_VERSION
 
 
 def _lineage_runtime():
@@ -470,7 +485,7 @@ class SameTakeVideoProvider:
             return pipeline_id
         profile = _generator_profile(self.generator_profile)
         verification = _verification_profile(self.verification_method)
-        if self.verification_method == PLANNED_AUDIO_VERIFICATION_METHOD:
+        if self.verification_method in PLANNED_VERIFICATION_PROFILES:
             _lineage_runtime()
         self._master()
         self._reference()
@@ -639,7 +654,7 @@ class SameTakeVideoProvider:
         # or racing a successful preparation into a terminal failure.
         version = self.store.write("same-take/" + pipeline_id, state, version)
         failure_stage, audio_qa = "master_read", None
-        planned = _saved_verification_profile(state)["verification_method"] == PLANNED_AUDIO_VERIFICATION_METHOD
+        planned = _saved_verification_profile(state)["verification_method"] in PLANNED_VERIFICATION_PROFILES
         raw_speech_proof = None
         try:
             cached = self._read_audio_plan(state) if planned else None
@@ -661,7 +676,7 @@ class SameTakeVideoProvider:
                 if not planned:
                     failure_stage = "raw_speech_screen"
                     raw_speech_proof = verify_greeting_words(audio_source, state["first_name"])
-                    if not validate_speech_proof(raw_speech_proof, first_name=state["first_name"],
+                    if not _validate_pipeline_speech_proof(state, raw_speech_proof,
                             audio_sha256=hashlib.sha256(audio_source).hexdigest()):
                         raise SpeechGuardError("speech_guard_output_invalid")
                 failure_stage = "media_prepare"
@@ -688,8 +703,8 @@ class SameTakeVideoProvider:
                     version = self.store.write("same-take/" + pipeline_id, state, version)
             failure_stage = "speech_screen"
             checked_audio = inputs["checked_audio_bytes"] if planned else inputs["greeting_audio_bytes"]
-            speech_proof = verify_greeting_words(checked_audio, state["first_name"])
-            if not validate_speech_proof(speech_proof, first_name=state["first_name"],
+            speech_proof = verify_greeting_words(checked_audio, state["first_name"], **_speech_policy_kwargs(state))
+            if not _validate_pipeline_speech_proof(state, speech_proof,
                     audio_sha256=hashlib.sha256(checked_audio).hexdigest()):
                 raise SpeechGuardError("speech_guard_output_invalid")
             failure_stage = "asset_storage"
@@ -809,7 +824,7 @@ class SameTakeVideoProvider:
         if state["stage"] == "completed":
             result = {"provider_id": pipeline_id, "status": "completed", "media_url": state["media_url"],
                       "estimated_cents": state["estimated_cents"], "accounting_method": "conservative_reservation"}
-            if _saved_verification_profile(state)["verification_method"] == PLANNED_AUDIO_VERIFICATION_METHOD:
+            if _saved_verification_profile(state)["verification_method"] in PLANNED_VERIFICATION_PROFILES:
                 result.update(verification_method=state["verification_method"],
                     verification_config_sha256=state["verification_config_sha256"])
             return result
@@ -836,7 +851,7 @@ class SameTakeVideoProvider:
     def _planned_final_proof(self, state, media_bytes, cached):
         proof = state.get("greeting_speech_proof")
         manifest = cached["bundle"]["manifest"]
-        if (not validate_speech_proof(proof, first_name=state["first_name"],
+        if (not _validate_pipeline_speech_proof(state, proof,
                 audio_sha256=manifest["checked_audio_sha256"])
                 or any(key in proof for key in ("verification_method", "audio_lineage", "media_sha256"))):
             raise SpeechGuardError("speech_guard_output_invalid")
@@ -853,7 +868,7 @@ class SameTakeVideoProvider:
             "verification_method": state["verification_method"],
             "verification_config_sha256": state["verification_config_sha256"],
             "audio_lineage": {**lineage, "greeting_seconds": manifest["greeting_seconds"]}}
-        if not validate_speech_proof(final, first_name=state["first_name"], media_sha256=final["media_sha256"]):
+        if not _validate_pipeline_speech_proof(state, final, media_sha256=final["media_sha256"]):
             raise SpeechGuardError("speech_guard_output_invalid")
         return final
 
@@ -861,7 +876,7 @@ class SameTakeVideoProvider:
         state, _ = self._read(snapshot["provider_id"])
         if state["stage"] != "completed" or normalize_name(first_name) != state["first_name"]:
             raise VideoProviderError("completed_identity_mismatch", "Completed video does not match this agent name.")
-        planned = _saved_verification_profile(state)["verification_method"] == PLANNED_AUDIO_VERIFICATION_METHOD
+        planned = _saved_verification_profile(state)["verification_method"] in PLANNED_VERIFICATION_PROFILES
         if planned:
             if "audio_plan_sha256" not in state:
                 raise SpeechGuardError("speech_guard_audio_invalid")
@@ -883,15 +898,15 @@ class SameTakeVideoProvider:
             if greeting_hash != state["metadata"].get("greeting_audio_sha256"):
                 raise SpeechGuardError("speech_guard_audio_invalid")
             proof = state.get("greeting_speech_proof")
-            if not validate_speech_proof(proof, first_name=state["first_name"], audio_sha256=greeting_hash):
+            if not _validate_pipeline_speech_proof(state, proof, audio_sha256=greeting_hash):
                 proof = verify_greeting_words(greeting, state["first_name"])
-                if not validate_speech_proof(proof, first_name=state["first_name"], audio_sha256=greeting_hash):
+                if not _validate_pipeline_speech_proof(state, proof, audio_sha256=greeting_hash):
                     raise SpeechGuardError("speech_guard_output_invalid")
             result = self.compositor(self._master(), self._download_fal(state["media_url"]), greeting,
                                      state["metadata"], first_name=state["first_name"])
             final_proof = verify_video_greeting_words(result["media_bytes"], state["first_name"],
                                                        state["metadata"].get("greeting_seconds"))
-        if not validate_speech_proof(final_proof, first_name=state["first_name"],
+        if not _validate_pipeline_speech_proof(state, final_proof,
                 media_sha256=hashlib.sha256(result["media_bytes"]).hexdigest()):
             raise SpeechGuardError("speech_guard_output_invalid")
         result["qa"] = {**result["qa"], "narration_audio": state["audio_qa"],
@@ -908,13 +923,13 @@ class SameTakeVideoProvider:
         if (state["stage"] != "completed" or state["first_name"] != job.get("first_name")
                 or state["job_key"] != job.get("followup_key")):
             raise SpeechGuardError("speech_guard_name_mismatch")
-        if _saved_verification_profile(state)["verification_method"] == PLANNED_AUDIO_VERIFICATION_METHOD:
+        if _saved_verification_profile(state)["verification_method"] in PLANNED_VERIFICATION_PROFILES:
             if "audio_plan_sha256" not in state:
                 raise SpeechGuardError("speech_guard_audio_invalid")
             return self._planned_final_proof(state, media_bytes, self._read_audio_plan(state))
         proof = verify_video_greeting_words(media_bytes, state["first_name"],
                                              state["metadata"].get("greeting_seconds"))
-        if not validate_speech_proof(proof, first_name=state["first_name"],
+        if not _validate_pipeline_speech_proof(state, proof,
                 media_sha256=hashlib.sha256(media_bytes).hexdigest()):
             raise SpeechGuardError("speech_guard_output_invalid")
         return proof

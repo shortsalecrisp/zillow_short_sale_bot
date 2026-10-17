@@ -832,6 +832,18 @@ function matchesVideoFollowupSpeechPolicyV22_(proof, foldedName) {
         return group.indexOf(foldedName) !== -1 && group.indexOf(observed) !== -1;
       })) return false;
     }
+  } else if (proof.policy_version === "spoken-greeting-tiny-en-v3") {
+    config = "bb77463c65987cdf07caef001a49d29cb70a93ee7372e7e9edcacd07fde5fea3";
+    if (!exact) {
+      var pronunciationPhrase = proof.normalized_transcript;
+      if (typeof pronunciationPhrase !== "string" || pronunciationPhrase.indexOf("hey ") !== 0) return false;
+      var pronunciationObserved = pronunciationPhrase.slice(4);
+      var pronunciationGroups = [["kathryn", "katherine"], ["nikki", "nicky"],
+        ["cydney", "sydney"], ["brook", "brooke"]];
+      if (!pronunciationGroups.some(function(group) {
+        return group.indexOf(foldedName) !== -1 && group.indexOf(pronunciationObserved) !== -1;
+      })) return false;
+    }
   } else { return false; }
   // Bind each policy to its exact decoder configuration; legacy proofs never
   // inherit the new spelling rule, and no model or threshold fallback is allowed.
@@ -839,6 +851,29 @@ function matchesVideoFollowupSpeechPolicyV22_(proof, foldedName) {
     proof.model_id === "Systran/faster-whisper-tiny.en" &&
     proof.model_revision === "0d3d19a32d3338f10357c0889762bd8d64bbdeba" &&
     proof.model_manifest_sha256 === "9f995ad3147f0799b2babb9e84926a53bca82d888d5fb6558d925f38dd2b78ee";
+}
+
+function hasValidVideoPronunciationLineageV23_(proof, name) {
+  if (proof.verification_method !== "planned-aac-lineage-v2" ||
+      proof.verification_config_sha256 !== "45aa4b4c344179321d82eaf66ab0c36bcaa7cf8f56b48b07f9b63423bc2a6cf5") {
+    return false;
+  }
+  var lineage = proof.audio_lineage;
+  if (!lineage || typeof lineage !== "object" || Array.isArray(lineage) || lineage.accepted !== true ||
+      lineage.lineage_version !== "planned-aac-same-take-v1" ||
+      lineage.first_name !== name || lineage.final_media_sha256 !== proof.media_sha256 ||
+      lineage.checked_audio_sha256 !== proof.source_audio_sha256 ||
+      lineage.greeting_seconds !== proof.greeting_seconds) return false;
+  var hashFields = ["manifest_sha256", "planned_audio_sha256", "final_media_sha256",
+    "checked_audio_sha256", "full_pcm_sha256", "greeting_pcm_sha256",
+    "aac_track_sha256", "speech_proof_sha256"];
+  if (!hashFields.every(function(field) {
+    return /^[0-9a-f]{64}$/.test(String(lineage[field] || ""));
+  })) return false;
+  // The authenticated worker verifies the digest and same-take audio before
+  // issuing this proof. Recomputing Python's JSON digest here would reject
+  // valid proofs when the runtimes serialize finite numbers differently.
+  return true;
 }
 
 function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
@@ -859,6 +894,11 @@ function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
       typeof proof.greeting_seconds !== "number" || !isFinite(proof.greeting_seconds) ||
       proof.greeting_seconds < 0.5 || proof.greeting_seconds > 2.5 ||
       !Array.isArray(proof.confidence) || proof.confidence.length < 1 || proof.confidence.length > 8) return false;
+  // v3 is only issued by the immutable planned-audio v2 pipeline. Requiring
+  // its complete lineage tuple prevents a stripped proof from widening the
+  // older direct/v1 cohort. Existing v1/v2 payloads retain their prior gate.
+  if (proof.policy_version === "spoken-greeting-tiny-en-v3" &&
+      !hasValidVideoPronunciationLineageV23_(proof, name)) return false;
   if (!proof.confidence.every(function(segment) {
     return segment && typeof segment.avg_logprob === "number" && isFinite(segment.avg_logprob) &&
       segment.avg_logprob >= -1 && segment.avg_logprob <= 0 &&

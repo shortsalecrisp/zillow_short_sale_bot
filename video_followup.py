@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from video_followup_speech_guard import (
     PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256, PLANNED_AUDIO_VERIFICATION_METHOD,
+    PLANNED_VERIFICATION_PROFILES,
     SpeechGuardError, is_transient_speech_failure, safe_speech_failure_diagnostics,
     validate_speech_proof,
 )
@@ -92,10 +93,14 @@ def _attempt_count(job, field):
 
 
 def _verification_binding(value):
-    expected = {"verification_method": PLANNED_AUDIO_VERIFICATION_METHOD,
-                "verification_config_sha256": PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256}
-    if not any(field in value for field in expected):
+    if not any(field in value for field in _VERIFICATION_IDENTITY_FIELDS):
         return {}
+    method = value.get("verification_method")
+    config = PLANNED_VERIFICATION_PROFILES.get(method) if isinstance(method, str) else None
+    if config is None:
+        raise SpeechGuardError("speech_guard_output_invalid")
+    expected = {"verification_method": method, "verification_config_sha256": hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
     if any(value.get(field) != item for field, item in expected.items()):
         raise SpeechGuardError("speech_guard_output_invalid")
     return expected

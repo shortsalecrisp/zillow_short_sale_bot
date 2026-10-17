@@ -59,6 +59,13 @@ CONFIG_SHA256 = _digest_json({"policy": POLICY_VERSION, "model": MODEL_MANIFEST,
     "cpu_threads": 1, "num_workers": 1, "minimum_logprob": -1.0, "maximum_no_speech": 0.6,
     "preprocessing": ASR_PREPROCESSING, "matching_rule": "whole-greeting-pinned-spelling-groups-v1",
     "equivalent_name_groups": SPELLING_EQUIVALENCE_GROUPS})
+PRONUNCIATION_POLICY_VERSION = "spoken-greeting-tiny-en-v3"
+PRONUNCIATION_EQUIVALENCE_GROUPS = SPELLING_EQUIVALENCE_GROUPS + (
+    ("cydney", "sydney"), ("brook", "brooke"))
+PRONUNCIATION_CONFIG_SHA256 = _digest_json({
+    "policy": PRONUNCIATION_POLICY_VERSION, "recognition_config_sha256": CONFIG_SHA256,
+    "matching_rule": "whole-greeting-pinned-pronunciation-groups-v1",
+    "equivalent_name_groups": PRONUNCIATION_EQUIVALENCE_GROUPS})
 LEGACY_VERIFICATION_METHOD = "direct-final-asr-v1"
 PLANNED_AUDIO_VERIFICATION_METHOD = "planned-aac-lineage-v1"
 PLANNED_AUDIO_VERIFICATION_CONFIG = {
@@ -69,6 +76,17 @@ PLANNED_AUDIO_VERIFICATION_CONFIG = {
     "binding": "immutable-planned-aac-full-pcm-and-greeting-v1",
 }
 PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256 = _digest_json(PLANNED_AUDIO_VERIFICATION_CONFIG)
+PRONUNCIATION_VERIFICATION_METHOD = "planned-aac-lineage-v2"
+PRONUNCIATION_VERIFICATION_CONFIG = {
+    **PLANNED_AUDIO_VERIFICATION_CONFIG,
+    "method": PRONUNCIATION_VERIFICATION_METHOD,
+    "speech_config_sha256": PRONUNCIATION_CONFIG_SHA256,
+}
+PRONUNCIATION_VERIFICATION_CONFIG_SHA256 = _digest_json(PRONUNCIATION_VERIFICATION_CONFIG)
+PLANNED_VERIFICATION_PROFILES = {
+    PLANNED_AUDIO_VERIFICATION_METHOD: PLANNED_AUDIO_VERIFICATION_CONFIG,
+    PRONUNCIATION_VERIFICATION_METHOD: PRONUNCIATION_VERIFICATION_CONFIG,
+}
 MAX_AUDIO_BYTES = 1200000
 MAX_MEDIA_BYTES = 25 * 1024 * 1024
 MAX_OUTPUT_BYTES = 16384
@@ -98,9 +116,10 @@ def is_transient_speech_failure(error):
 def _safe_recognition_diagnostics(value):
     if not isinstance(value, dict):
         return {}
-    identity = {"policy_version": POLICY_VERSION, "model_id": MODEL_ID,
-        "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
-        "config_sha256": CONFIG_SHA256}
+    try:
+        identity = _policy_identity(value.get("policy_version"))
+    except SpeechGuardError:
+        return {}
     if any(value.get(key) != expected for key, expected in identity.items()):
         return {}
     result = {"accepted": False, **identity}
@@ -158,12 +177,34 @@ def _normalized_phrase(text):
 
 
 def _spelling_equivalent_phrase(name, phrase):
+    return _equivalent_phrase(name, phrase, SPELLING_EQUIVALENCE_GROUPS)
+
+
+def _equivalent_phrase(name, phrase, groups):
     if not isinstance(phrase, str) or phrase != _normalized_phrase(phrase):
         return False
     observed = phrase[4:]
     expected = name.casefold()
     return observed != expected and any(
-        expected in group and observed in group for group in SPELLING_EQUIVALENCE_GROUPS)
+        expected in group and observed in group for group in groups)
+
+
+def _policy_identity(policy_version):
+    if policy_version == POLICY_VERSION:
+        config = CONFIG_SHA256
+    elif policy_version == PRONUNCIATION_POLICY_VERSION:
+        config = PRONUNCIATION_CONFIG_SHA256
+    else:
+        raise SpeechGuardError("speech_guard_output_invalid")
+    return {"policy_version": policy_version, "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
+        "config_sha256": config}
+
+
+def _policy_phrase_matches(name, phrase, policy_version):
+    groups = (PRONUNCIATION_EQUIVALENCE_GROUPS if policy_version == PRONUNCIATION_POLICY_VERSION
+              else SPELLING_EQUIVALENCE_GROUPS)
+    return phrase == "hey " + name.casefold() or _equivalent_phrase(name, phrase, groups)
 
 
 def _audio_duration(content):
@@ -306,27 +347,26 @@ def _confidence_ok(segments):
     return True
 
 
-def verify_greeting_words(audio_bytes, first_name):
+def verify_greeting_words(audio_bytes, first_name, *, policy_version=POLICY_VERSION):
+    identity = _policy_identity(policy_version)
     name = _name(first_name)
     _audio_duration(audio_bytes)
     # The recognition child validates the same assets and dependencies before
     # decoding. Do not launch a second model-loading child for each audio clip.
     paths = _speech_paths()
     result = _recognize(audio_bytes, paths["python"], paths["model_dir"])
+    # The child keeps the frozen v2 recognition protocol. Only the parent's
+    # whole-phrase comparison varies, and the proof records that chosen policy.
     if result.get("model_revision") != MODEL_REVISION or result.get("config_sha256") != CONFIG_SHA256:
         raise SpeechGuardError("speech_guard_output_invalid")
     phrase = _normalized_phrase(result.get("transcript"))
-    rejected = {"policy_version": POLICY_VERSION, "model_id": MODEL_ID,
-        "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
-        "config_sha256": CONFIG_SHA256, "source_audio_sha256": hashlib.sha256(audio_bytes).hexdigest(),
+    rejected = {**identity, "source_audio_sha256": hashlib.sha256(audio_bytes).hexdigest(),
         "observed_transcript": result.get("transcript"), "confidence": result.get("segments")}
-    if phrase != "hey " + name.casefold() and not _spelling_equivalent_phrase(name, phrase):
+    if not _policy_phrase_matches(name, phrase, policy_version):
         raise SpeechGuardError("speech_guard_name_mismatch", diagnostics=rejected)
     if not _confidence_ok(result.get("segments")):
         raise SpeechGuardError("speech_guard_low_confidence", diagnostics=rejected)
-    return {"accepted": True, "policy_version": POLICY_VERSION, "model_id": MODEL_ID,
-        "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
-        "config_sha256": CONFIG_SHA256, "source_audio_sha256": hashlib.sha256(audio_bytes).hexdigest(),
+    return {"accepted": True, **identity, "source_audio_sha256": hashlib.sha256(audio_bytes).hexdigest(),
         "expected_name": name, "normalized_transcript": phrase, "confidence": result["segments"]}
 
 
@@ -340,10 +380,9 @@ def validate_speech_proof(proof, *, first_name, audio_sha256=None, media_sha256=
     policy, phrase = proof.get("policy_version"), proof.get("normalized_transcript")
     if policy == LEGACY_PROOF_IDENTITY["policy_version"] and phrase == "hey " + name.casefold():
         identity = LEGACY_PROOF_IDENTITY
-    elif policy == POLICY_VERSION and (phrase == "hey " + name.casefold() or _spelling_equivalent_phrase(name, phrase)):
-        identity = {"policy_version": POLICY_VERSION, "model_id": MODEL_ID,
-            "model_revision": MODEL_REVISION, "model_manifest_sha256": MODEL_MANIFEST_SHA256,
-            "config_sha256": CONFIG_SHA256}
+    elif (policy in (POLICY_VERSION, PRONUNCIATION_POLICY_VERSION)
+            and _policy_phrase_matches(name, phrase, policy)):
+        identity = _policy_identity(policy)
     else:
         return False
     expected = {"accepted": True, **identity, "expected_name": name, "normalized_transcript": phrase}
@@ -359,21 +398,29 @@ def validate_speech_proof(proof, *, first_name, audio_sha256=None, media_sha256=
                 or type(seconds) not in {int, float} or not math.isfinite(seconds) or not 0.5 <= seconds <= 2.5):
             return False
     lineage_fields = {"verification_method", "verification_config_sha256", "audio_lineage"}
-    if any(key in proof for key in lineage_fields):
+    final_pronunciation_proof = (policy == PRONUNCIATION_POLICY_VERSION
+        and (media_sha256 is not None or "media_sha256" in proof or "greeting_seconds" in proof))
+    if final_pronunciation_proof or any(key in proof for key in lineage_fields):
         if not lineage_fields.issubset(proof) or not _validate_audio_lineage_proof(proof, name):
             return False
     return True
 
 
 def _validate_audio_lineage_proof(proof, name):
-    if (proof.get("verification_method") != PLANNED_AUDIO_VERIFICATION_METHOD
-            or proof.get("verification_config_sha256") != PLANNED_AUDIO_VERIFICATION_CONFIG_SHA256
-            or proof.get("policy_version") != POLICY_VERSION):
+    method = proof.get("verification_method")
+    if not isinstance(method, str) or method not in PLANNED_VERIFICATION_PROFILES:
+        return False
+    config = PLANNED_VERIFICATION_PROFILES[method]
+    policy = (POLICY_VERSION if method == PLANNED_AUDIO_VERIFICATION_METHOD
+              else PRONUNCIATION_POLICY_VERSION)
+    if (proof.get("verification_config_sha256") != _digest_json(config)
+            or proof.get("policy_version") != policy
+            or proof.get("config_sha256") != config["speech_config_sha256"]):
         return False
     lineage = proof.get("audio_lineage")
     if not isinstance(lineage, dict) or lineage.get("accepted") is not True:
         return False
-    expected = {"lineage_version": PLANNED_AUDIO_VERIFICATION_CONFIG["lineage_version"],
+    expected = {"lineage_version": config["lineage_version"],
         "first_name": name, "final_media_sha256": proof.get("media_sha256"),
         "checked_audio_sha256": proof.get("source_audio_sha256"),
         "greeting_seconds": proof.get("greeting_seconds")}
