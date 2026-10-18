@@ -5886,11 +5886,28 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
         r"\b(?:can|could|would|will)\s+you\b|\banswer\s+(?:a|this|our)\b", t
     )
     has_numbered_choices = re.search(r"\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]", t)
+    has_commercial_service = re.search(
+        r"\b(?:tree\s+(?:service|care|removal|trimming)|landscap(?:e|ing)|lawn\s+care|"
+        r"pressure\s+washing|power\s+washing|pest\s+control|roofing|hvac|plumbing|cleaning\s+service)\b",
+        t,
+    )
+    has_commercial_identity = re.search(
+        r"\b(?:this\s+is|i(?:'|’)m|i\s+am|we(?:'|’)re|we\s+are|from|with)\b.{0,80}"
+        r"\b(?:tree\s+(?:service|care|removal|trimming)|landscap(?:e|ing)|lawn\s+care|"
+        r"pressure\s+washing|power\s+washing|pest\s+control|roofing|hvac|plumbing|cleaning\s+service)\b",
+        t,
+    )
+    has_commercial_pitch = re.search(
+        r"\b(?:free\s+(?:quote|estimate)|estimate|quote|schedule|book|call\s+us|"
+        r"text\s+us|special|offer|service(?:s)?\s+(?:available|for))\b",
+        t,
+    )
     return bool(
         (has_campaign_appeal and has_text_stop_to_quit_footer)
         or (has_campaign_appeal and has_link and (has_bulk_footer or has_small_donation_ask))
         or (has_known_civic_automation and (has_link or has_bulk_footer or has_campaign_appeal))
         or (has_survey_identity and has_poll_invitation and has_numbered_choices)
+        or (has_commercial_service and has_commercial_identity and has_commercial_pitch)
     )
 
 

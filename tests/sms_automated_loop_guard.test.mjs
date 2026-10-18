@@ -32,6 +32,14 @@ assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("I am register
 assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("I am surveying the property. 1) Vacant 2) Occupied")`), false);
 assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("Text STOP to quit, but I have a short-sale listing question")`), false);
 assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_("Join #TeamKeisha tomorrow for Get Out the Vote action and canvassing. Tomorrow, October 17. Text STOP to quit")`), true);
+const commercialSolicitation = 'Hi Yoni, this is Alex with Acme Tree Service. We offer free estimates for trimming and removal. Call us today.';
+const commercial = smsHarness();
+const commercialResult = commercial.incoming(commercialSolicitation);
+assert.equal(commercialResult.should_reply, false);
+assert.equal(commercialResult.handoff_needed, false);
+assert.equal(commercialResult.needs_review, false);
+assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_(${JSON.stringify('Hi, this is Alex with Acme Tree Service.')})`), false);
+assert.equal(promotion.evaluate(`isAutomatedPromotionalSmsSignal_(${JSON.stringify('I need a tree service quote for my short-sale property.')})`), false);
 
 const repeated = smsHarness();
 const question = 'What is your fee?';

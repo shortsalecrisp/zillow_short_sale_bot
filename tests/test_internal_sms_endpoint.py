@@ -1678,6 +1678,10 @@ def test_sms_automated_civic_and_unsubscribe_confirmations_are_suppressed(monkey
     assert module._sms_is_automated_promotional_sms(
         "Ruth, Election Day is Nov 3. Confirm your voting record at https://didthey.vote -Did They Vote Stop to end"
     ) is True
+    commercial = "Hi Yoni, this is Alex with Acme Tree Service. We offer free estimates for trimming and removal. Call us today."
+    assert module._sms_is_automated_promotional_sms(commercial) is True
+    assert module._sms_is_automated_promotional_sms("Hi, this is Alex with Acme Tree Service.") is False
+    assert module._sms_is_automated_promotional_sms("I need a tree service quote for my short-sale property.") is False
 
     client = TestClient(module.app)
     first = client.post("/sms-chatbot", data={

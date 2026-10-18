@@ -3839,10 +3839,15 @@ function isAutomatedPromotionalSmsSignal_(text) {
   const hasPollInvitation = /\b(?:poll(?:ing)?|survey(?:ing)?)\b/.test(t) &&
     /\b(?:can|could|would|will)\s+you\b|\banswer\s+(?:a|this|our)\b/.test(t);
   const hasNumberedChoices = /\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]/.test(t);
+  const commercialService = /\b(?:tree\s+(?:service|care|removal|trimming)|landscap(?:e|ing)|lawn\s+care|pressure\s+washing|power\s+washing|pest\s+control|roofing|hvac|plumbing|cleaning\s+service)\b/;
+  const hasCommercialService = commercialService.test(t);
+  const hasCommercialIdentity = /\b(?:this\s+is|i(?:'|’)m|i\s+am|we(?:'|’)re|we\s+are|from|with)\b.{0,80}\b(?:tree\s+(?:service|care|removal|trimming)|landscap(?:e|ing)|lawn\s+care|pressure\s+washing|power\s+washing|pest\s+control|roofing|hvac|plumbing|cleaning\s+service)\b/.test(t);
+  const hasCommercialPitch = /\b(?:free\s+(?:quote|estimate)|estimate|quote|schedule|book|call\s+us|text\s+us|special|offer|service(?:s)?\s+(?:available|for))\b/.test(t);
   return (hasCampaignAppeal && hasTextStopToQuitFooter) ||
     (hasCampaignAppeal && hasLink && (hasBulkFooter || hasSmallDonationAsk)) ||
     (hasKnownCivicAutomation && (hasLink || hasBulkFooter || hasCampaignAppeal)) ||
-    (hasSurveyIdentity && hasPollInvitation && hasNumberedChoices);
+    (hasSurveyIdentity && hasPollInvitation && hasNumberedChoices) ||
+    (hasCommercialService && hasCommercialIdentity && hasCommercialPitch);
 }
 
 function isAutomatedPromotionalFollowupSignal_(text) {
