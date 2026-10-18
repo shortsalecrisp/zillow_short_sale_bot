@@ -5851,7 +5851,9 @@ def _sms_is_automated_routing_notice(text: str) -> bool:
 
 def _sms_is_automated_promotional_sms(text: str) -> bool:
     t = _sms_normalize_whitespace(text).lower()
-    if not t or re.search(r"\b(?:short[ -]?sale|lender|listing|property|seller|buyer)\b", t):
+    if not t or re.search(
+        r"\b(?:short[ -]?sale|lender|listing|property|seller|buyer|agent|realtor|real estate)\b", t
+    ):
         return False
     subscription_confirmation = re.search(
         r"\b(?:you(?:'|’)ve|you have|you are|you(?:'|’)re)\s+(?:now\s+)?(?:been\s+)?"
@@ -5887,18 +5889,18 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
     )
     has_numbered_choices = re.search(r"\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]", t)
     has_commercial_service = re.search(
-        r"\b(?:tree\s+(?:service|care|removal|trimming)|landscap(?:e|ing)|lawn\s+care|"
+        r"\b(?:tree(?:s)?\s+(?:service|care|removal|trim(?:ming|med)?)|landscap(?:e|ing)|lawn\s+care|"
         r"pressure\s+washing|power\s+washing|pest\s+control|roofing|hvac|plumbing|cleaning\s+service)\b",
         t,
     )
     has_commercial_identity = re.search(
-        r"\b(?:this\s+is|i(?:'|’)m|i\s+am|we(?:'|’)re|we\s+are|from|with)\b.{0,80}"
-        r"\b(?:tree\s+(?:service|care|removal|trimming)|landscap(?:e|ing)|lawn\s+care|"
-        r"pressure\s+washing|power\s+washing|pest\s+control|roofing|hvac|plumbing|cleaning\s+service)\b",
+        r"\b(?:this\s+is\s+[a-z][a-z.'-]*(?:\s+in\s+[a-z][a-z.'-]*)?|our\s+(?:crew|team|technicians?)|"
+        r"we(?:'|’)re\s+(?:working|servicing)|we\s+are\s+(?:working|servicing)|"
+        r"from\s+[a-z][a-z0-9&.' -]*|with\s+[a-z][a-z0-9&.' -]*)\b",
         t,
     )
     has_commercial_pitch = re.search(
-        r"\b(?:free\s+(?:quote|estimate)|estimate|quote|schedule|book|call\s+us|"
+        r"\b(?:free\s+(?:quotes?|estimates?)|estimates?|quotes?|schedule|book|call\s+us|"
         r"text\s+us|special|offer|service(?:s)?\s+(?:available|for))\b",
         t,
     )
@@ -5921,6 +5923,26 @@ def _sms_is_automated_promotional_followup(text: str) -> bool:
         r"(?:have (?:a )?(?:good|great|nice) day[.! ]*)?",
         normalized,
     ))
+
+
+def _sms_is_offtopic_commercial_followup(text: str) -> bool:
+    t = _sms_normalize_whitespace(text).lower()
+    if not t or re.search(
+        r"\b(?:short[ -]?sale|lender|listing|property|seller|buyer|agent|realtor|real estate)\b", t
+    ):
+        return False
+    has_service_term = re.search(
+        r"\b(?:tree(?:s)?|trim(?:ming|med)?|removal|roof(?:ing)?|solar|pressure washing|"
+        r"power washing|landscap(?:e|ing)|lawn care|pest control|hvac|plumb(?:er|ing)|"
+        r"cleaning service|gutter)\b",
+        t,
+    )
+    has_followup_ask = re.search(
+        r"\b(?:are you looking|do you need|would you like|want us to|can we|how big|"
+        r"small,?\s+medium,?\s+large|send (?:us )?a photo|stop by|quote|estimate)\b",
+        t,
+    )
+    return bool(has_service_term and has_followup_ask)
 
 
 def _sms_remember_automated_promotional_sender(phone: str) -> None:
@@ -8598,7 +8620,10 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         _sms_remember_automated_promotional_sender(phone_raw)
     if direct_automated_promotion or (
         _sms_is_recent_automated_promotional_sender(phone_raw)
-        and _sms_is_automated_promotional_followup(inbound_text)
+        and (
+            _sms_is_automated_promotional_followup(inbound_text)
+            or _sms_is_offtopic_commercial_followup(inbound_text)
+        )
     ):
         _sms_append_debug(
             "incoming_sms_automated_promotion_ignored",

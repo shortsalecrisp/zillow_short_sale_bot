@@ -3930,6 +3930,40 @@ def test_sms_team_keisha_text_stop_to_quit_is_suppressed_without_link(monkeypatc
     assert sender.calls == []
 
 
+def test_sms_offtopic_commercial_bot_sequence_is_suppressed_before_sheet_or_send(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    phone = "3128784883"
+    messages = [
+        "Hi Larry, this is Mike in Atlanta. Our crew is working in your area this week, free quotes on tree trimming",
+        "Awesome, glad you're interested! Are you looking to get a tree trimmed or do you need a removal done?",
+        "Sounds good on the trimming. How big is the tree roughly, small, medium, large? Or feel free to send a photo",
+    ]
+    before = {index: list(row) for index, row in sheet.rows.items()}
+
+    for index, inbound in enumerate(messages, start=1):
+        result = TestClient(module.app).post(
+            "/sms-chatbot",
+            data={"token": "secret-token", "action": "incoming_sms", "phone": phone,
+                  "message": inbound, "message_id": f"tree-vendor-{index}"},
+        ).json()
+        assert result["should_reply"] is False
+        assert result["handoff_needed"] is False
+        assert result["needs_review"] is False
+
+    assert module._sms_is_automated_promotional_sms(messages[0]) is True
+    assert module._sms_is_automated_promotional_sms(
+        "Our crew is working on the property. Can you help with the lender?"
+    ) is False
+    assert module._sms_is_automated_promotional_sms(
+        "I own a tree trimming company and need help with a short-sale listing."
+    ) is False
+    assert sheet.rows == before
+    assert sender.calls == []
+
+
 def test_sms_contract_send_information_request_uses_email_workflow(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

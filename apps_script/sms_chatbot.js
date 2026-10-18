@@ -510,7 +510,9 @@ function handleIncomingSmsCore_(body) {
     rememberAutomatedPromotionalSender_(phoneRaw);
   }
   if (directAutomatedPromotion ||
-      (isRecentAutomatedPromotionalSender_(phoneRaw) && isAutomatedPromotionalFollowupSignal_(inboundText))) {
+      (isRecentAutomatedPromotionalSender_(phoneRaw) &&
+       (isAutomatedPromotionalFollowupSignal_(inboundText) ||
+        isOffTopicCommercialFollowupSignal_(inboundText)))) {
     appendSmsDebugLog_("incoming_sms_automated_promotion_ignored", {
       phone: phoneRaw,
       message_id: messageId,
@@ -3825,7 +3827,7 @@ function isAutomatedRoutingNoticeSignal_(text) {
 
 function isAutomatedPromotionalSmsSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  if (!t || /\b(?:short[ -]?sale|lender|listing|property|seller|buyer)\b/.test(t)) return false;
+  if (!t || /\b(?:short[ -]?sale|lender|listing|property|seller|buyer|agent|realtor|real estate)\b/.test(t)) return false;
   const subscriptionConfirmation = /\b(?:you(?:'|’)ve|you have|you are|you(?:'|’)re)\s+(?:now\s+)?(?:been\s+)?(?:successfully\s+)?unsubscribed\b|\byou will no longer receive (?:text|sms|mobile) messages\b|\breply\s+start\s+to\s+(?:resubscribe|re-?subscribe|receive messages again)\b/.test(t);
   if (subscriptionConfirmation) return true;
   const hasLink = /\b(?:https?:\/\/|www\.|[a-z0-9-]+(?:\.[a-z0-9-]+)+\/(?:[a-z0-9/?=&%-]+))/.test(t);
@@ -3839,10 +3841,10 @@ function isAutomatedPromotionalSmsSignal_(text) {
   const hasPollInvitation = /\b(?:poll(?:ing)?|survey(?:ing)?)\b/.test(t) &&
     /\b(?:can|could|would|will)\s+you\b|\banswer\s+(?:a|this|our)\b/.test(t);
   const hasNumberedChoices = /\b1\s*[).:\-]?\s*[a-z][\s\S]{0,100}\b2\s*[).:\-]?\s*[a-z]/.test(t);
-  const commercialService = /\b(?:tree\s+(?:service|care|removal|trimming)|landscap(?:e|ing)|lawn\s+care|pressure\s+washing|power\s+washing|pest\s+control|roofing|hvac|plumbing|cleaning\s+service)\b/;
+  const commercialService = /\b(?:tree(?:s)?\s+(?:service|care|removal|trim(?:ming|med)?)|landscap(?:e|ing)|lawn\s+care|pressure\s+washing|power\s+washing|pest\s+control|roofing|hvac|plumbing|cleaning\s+service)\b/;
   const hasCommercialService = commercialService.test(t);
-  const hasCommercialIdentity = /\b(?:this\s+is|i(?:'|’)m|i\s+am|we(?:'|’)re|we\s+are|from|with)\b.{0,80}\b(?:tree\s+(?:service|care|removal|trimming)|landscap(?:e|ing)|lawn\s+care|pressure\s+washing|power\s+washing|pest\s+control|roofing|hvac|plumbing|cleaning\s+service)\b/.test(t);
-  const hasCommercialPitch = /\b(?:free\s+(?:quote|estimate)|estimate|quote|schedule|book|call\s+us|text\s+us|special|offer|service(?:s)?\s+(?:available|for))\b/.test(t);
+  const hasCommercialIdentity = /\b(?:this\s+is\s+[a-z][a-z.'-]*(?:\s+in\s+[a-z][a-z.'-]*)?|our\s+(?:crew|team|technicians?)|we(?:'|’)re\s+(?:working|servicing)|we\s+are\s+(?:working|servicing)|from\s+[a-z][a-z0-9&.' -]*|with\s+[a-z][a-z0-9&.' -]*)\b/.test(t);
+  const hasCommercialPitch = /\b(?:free\s+(?:quotes?|estimates?)|estimates?|quotes?|schedule|book|call\s+us|text\s+us|special|offer|service(?:s)?\s+(?:available|for))\b/.test(t);
   return (hasCampaignAppeal && hasTextStopToQuitFooter) ||
     (hasCampaignAppeal && hasLink && (hasBulkFooter || hasSmallDonationAsk)) ||
     (hasKnownCivicAutomation && (hasLink || hasBulkFooter || hasCampaignAppeal)) ||
@@ -3853,6 +3855,14 @@ function isAutomatedPromotionalSmsSignal_(text) {
 function isAutomatedPromotionalFollowupSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   return /^(?:thank you|thanks) for (?:your )?(?:response|support|participation)[.! ]*(?:have (?:a )?(?:good|great|nice) day[.! ]*)?$/.test(t);
+}
+
+function isOffTopicCommercialFollowupSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t || /\b(?:short[ -]?sale|lender|listing|property|seller|buyer|agent|realtor|real estate)\b/.test(t)) return false;
+  const hasServiceTerm = /\b(?:tree(?:s)?|trim(?:ming|med)?|removal|roof(?:ing)?|solar|pressure washing|power washing|landscap(?:e|ing)|lawn care|pest control|hvac|plumb(?:er|ing)|cleaning service|gutter)\b/.test(t);
+  const hasFollowupAsk = /\b(?:are you looking|do you need|would you like|want us to|can we|how big|small,?\s+medium,?\s+large|send (?:us )?a photo|stop by|quote|estimate)\b/.test(t);
+  return hasServiceTerm && hasFollowupAsk;
 }
 
 function automatedPromotionalSenderKey_(phone) {
