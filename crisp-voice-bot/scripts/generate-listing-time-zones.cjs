@@ -70,7 +70,10 @@ for (const [key, entry] of [...cities].sort(([a], [b]) => a.localeCompare(b, "en
   cityOutput[key] = !entry.hasAccuratePoint ? -2 : found.length === 1 && allowedZones.has(found[0]) ? zones.indexOf(found[0]) : -1;
 }
 // Vetted postal alias absent from GeoNames; see provenance for official geographic evidence.
-const aliases = { "FL|POINCIANA": "FL|KISSIMMEE" };
+const aliases = {
+  "FL|POINCIANA": "FL|KISSIMMEE",
+  "FL|INDIAN HARBOUR BEACH": "FL|SATELLITE BEACH",
+};
 for (const [alias, canonical] of Object.entries(aliases)) {
   if (!(cityOutput[canonical] >= 0)) throw new Error("Vetted alias target no longer has unanimous timezone evidence: " + canonical);
   cityOutput[alias] = cityOutput[canonical];

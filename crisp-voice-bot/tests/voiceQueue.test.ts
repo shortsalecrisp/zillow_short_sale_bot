@@ -42,6 +42,27 @@ function scheduledRow(
   return values;
 }
 
+test("Indian Harbour Beach becomes eligible only in its assigned Eastern window and retries next slot", async () => {
+  const { getVoiceBotCallCandidateFromRowValues } = await import("../src/lib/voiceQueue");
+  const values = row("2026-10-16T14:18:32-04:00");
+  values[2] = fixturePhone("reach_morning_v1");
+  values[4] = "159 Kristi Drive";
+  values[5] = "Indian Harbour Beach";
+  values[6] = "FL";
+  assert.equal(getVoiceBotCallCandidateFromRowValues(6270, values, new Date("2026-10-19T13:14:59Z")), undefined);
+  const candidate = getVoiceBotCallCandidateFromRowValues(6270, values, new Date("2026-10-19T13:15:00Z"));
+  assert.equal(candidate?.agentTimeZone, "America/New_York");
+  assert.equal(candidate?.callWindow, "reach_morning_v1");
+  assert.equal(candidate?.callAttemptNumber, 1);
+  assert.equal(getVoiceBotCallCandidateFromRowValues(6270, values, new Date("2026-10-19T13:45:00Z")), undefined);
+  values[32] = "2026-10-19T13:20:00Z";
+  values[33] = "voicemail_left";
+  const retry = getVoiceBotCallCandidateFromRowValues(6270, values, new Date("2026-10-19T19:00:00Z"));
+  assert.equal(retry?.callAttemptNumber, 2);
+  assert.equal(retry?.callWindow, "reach_afternoon_v1");
+  assert.equal(retry?.dueAt.toISOString(), "2026-10-19T19:00:00.000Z");
+});
+
 test("automatic voicemail retries advance to the next local slot despite old two-day AF dates", async () => {
   const { getVoiceBotCallCandidateFromRowValues } = await import("../src/lib/voiceQueue");
   for (const fixture of [

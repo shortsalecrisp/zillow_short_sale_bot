@@ -73,6 +73,22 @@ generator refuses the alias if that canonical-city consensus becomes unresolved.
 Explicit contradictory ZIP or state evidence still fails closed. No CRM data
 was changed, and no exact property address is added to the runtime database.
 
+## Vetted Postal Alias: Indian Harbour Beach
+
+Verified 2026-10-19 for held Sheet1 row 6270: `FL|INDIAN HARBOUR BEACH`
+aliases the resolved postal city `FL|SATELLITE BEACH`, using America/New_York
+with normal Eastern daylight-saving rules. The existing GeoNames ZIP 32937
+record identifies Satellite Beach; its accepted city consensus is unchanged.
+The Brevard County commission lists Indian Harbour Beach and Satellite Beach
+in the same district: https://www.brevardfl.gov/CountyCommissioners/District4 .
+The county confirms Indian Harbour Beach addresses use ZIP 32937:
+https://www.brevardfl.gov/ParksAndRecreation/ParkDirectory/IreneCanova .
+The federal Florida Eastern/Central boundary is in the western panhandle,
+not Brevard County: https://www.ecfr.gov/current/title-49/subtitle-A/part-71/section-71.5 .
+This adds only the named municipal/postal alias; unknown Florida cities and
+contradictory ZIP/state evidence continue to fail closed. No listing city or
+address is rewritten to make the lookup succeed.
+
 ## Rebuild
 
 Download and retain the public US.zip source, extract US.txt, and install

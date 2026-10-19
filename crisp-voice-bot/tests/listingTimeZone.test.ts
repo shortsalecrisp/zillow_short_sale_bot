@@ -11,6 +11,7 @@ const cases: [string, string, string][] = [
   ["Miami", "FL", "America/New_York"], ["Indianapolis", "IN", "America/New_York"],
   ["Fort Worth", "TX", "America/Chicago"],
   ["Poinciana", "FL", "America/New_York"],
+  ["Indian Harbour Beach", "FL", "America/New_York"],
   ["Nashville", "TN", "America/Chicago"], ["Knoxville", "TN", "America/New_York"],
   ["El Paso", "TX", "America/Denver"], ["Dallas", "TX", "America/Chicago"],
   ["Boise", "ID", "America/Denver"], ["Coeur d'Alene", "ID", "America/Los_Angeles"],
@@ -64,6 +65,25 @@ test("vetted Poinciana postal alias resolves the exact held listing without a st
   }
   assert.equal(resolveListingTimeZone({ streetAddress: "326 Bowfin Court FL 32501", city: "Poinciana", state: "FL" }).reason, "listing_zip_conflict");
   assert.equal(resolveListingTimeZone({ state: "FL" }).timeZone, "");
+});
+
+test("Indian Harbour Beach uses the vetted Satellite Beach postal consensus without changing the city", () => {
+  for (const streetAddress of [
+    "159 Kristi Drive",
+    "159 Kristi Drive, Indian Harbour Beach, FL 32937",
+    "159 Kristi Drive, Satellite Beach, FL 32937",
+  ]) {
+    assert.deepEqual(resolveListingTimeZone({ streetAddress, city: "Indian Harbour Beach", state: "FL" }), {
+      timeZone: "America/New_York", reason: "", source: "city_consensus",
+    });
+  }
+  assert.equal(resolveListingTimeZone({ streetAddress: "159 Kristi Drive, Indian Harbour Beach, FL 32937" }).timeZone, "America/New_York");
+  assert.equal(resolveListingTimeZone({ streetAddress: "159 Kristi Drive FL 32501", city: "Indian Harbour Beach", state: "FL" }).reason, "listing_zip_conflict");
+  assert.equal(resolveListingTimeZone({ city: "Indian Harbour Beach", state: "FL", streetAddress: "159 Kristi Drive TX 79901" }).reason, "listing_state_conflict");
+  for (const [date, expectedHour] of [["2026-10-19T13:15:00Z", "09"], ["2026-12-15T14:15:00Z", "09"]]) {
+    const timeZone = resolveListingTimeZone({ city: "Indian Harbour Beach", state: "FL" }).timeZone;
+    assert.equal(new Intl.DateTimeFormat("en-US", { timeZone, hour: "2-digit", hourCycle: "h23" }).format(new Date(date!)), expectedHour);
+  }
 });
 
 test("missing, conflicting, invalid, and unknown split-state evidence fails closed", () => {
