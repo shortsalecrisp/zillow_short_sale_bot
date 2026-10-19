@@ -124,6 +124,16 @@ export function parseVoiceBotDate(value: unknown): Date | undefined {
     return value;
   }
 
+  // Native Sheets dates are local wall-clock serials, not Unix timestamps.
+  // ShortSaleLeads' verified spreadsheet timezone is America/New_York.
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 30_000 || value > 100_000) return undefined;
+    const wall = new Date(Date.UTC(1899, 11, 30) + Math.round(value * 86_400_000));
+    const key = wall.toISOString().slice(0, 10);
+    return new Date(buildVoiceBotDateInTimeZone(key, wall.getUTCHours() * 60 + wall.getUTCMinutes(), VOICE_BOT_TIMEZONE).getTime()
+      + wall.getUTCSeconds() * 1000 + wall.getUTCMilliseconds());
+  }
+
   const text = normalizeString(value);
   if (!text) {
     return undefined;

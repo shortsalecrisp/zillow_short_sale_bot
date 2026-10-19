@@ -2,6 +2,7 @@ import type { sheets_v4 } from "googleapis";
 import { config } from "./config";
 import { getGoogleSheetsClient } from "./googleSheets";
 import { logger } from "./logger";
+import { VOICE_OVERDUE_FALLBACK_MARKER } from "./voiceOverdueFallback";
 import {
   appendVoiceNotesValue,
   cellRange,
@@ -94,6 +95,7 @@ async function readVoiceLeadRow(sheets: sheets_v4.Sheets, rowNumber: number): Pr
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheets.sheetId,
     range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${rowNumber}:AP${rowNumber}`,
+    valueRenderOption: "UNFORMATTED_VALUE",
   });
 
   return response.data.values?.[0] ?? [];
@@ -170,7 +172,7 @@ export function buildVoiceLeadRowWrites(
 
   const existingResults = [VOICE_BOT_COL_CALL_1_RESULT, VOICE_BOT_COL_CALL_2_RESULT]
     .map((column) => String(rowValues[column - 1] ?? "").trim().toLowerCase());
-  const protectedContactOutcome = existingResults.some((result) =>
+  const protectedContactOutcome = String(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1] ?? "").includes(VOICE_OVERDUE_FALLBACK_MARKER) || existingResults.some((result) =>
     ["do_not_call", "call_end_requested", "call_ended_by_request", "contact_request_review", "interested_followup_review"].includes(result));
   const wouldReplaceDoNotCall = existingResults.includes("do_not_call") && updates.callResult !== "do_not_call";
   if (wouldReplaceDoNotCall || (protectedContactOutcome && (isRetryableVoiceBotResult(updates.callResult) ||

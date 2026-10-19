@@ -52,6 +52,14 @@ Yoni approved repairing the shared ending validator without changing either prov
 
 The r4 provider boundary, pinned branch/version identities, prompt/workflow hashes and native 50/50 allocation remain unchanged. Record the shared backend deployment cutover separately when comparing ending and tool behavior before and after this repair; do not attribute that behavior change to either TTS model. The weekly review is pinned to r4 and must verify live configuration plus approval provenance before alleging drift from a stale r2 checkout.
 
+## Approved Overdue Voice Fallback, October 19
+
+Blank K rows with an unplaced scheduled first or retry attempt expire two Monday-Friday business days after the end of their original listing-local call window. Automatic no-start rescheduling cannot restart that clock. A missed Friday morning window expires Tuesday at 09:45 local. Native Sheets date serials retain their full timestamp in the verified spreadsheet timezone rather than using date-only display formatting.
+
+The shared backend checks final provider history, fresh owning cells, duplicate-phone rows, inbound quiet protection, and existing suppression/human preferences before writing K=N, clearing AD/AE/AF and appending CODEX_VOICE_EXPIRED_TO_MAILSHAKE_V1 in AP. Existing K codes and real AG/AH/AN/AO history are preserved. Accepted/uncertain starts, pending results, callbacks, handoffs, information requests, opt-outs and unresolved identity/timezone evidence hold release. Incomplete provider evidence fails closed. A terminal expiry cannot be reopened by automatic no-start recovery or a delayed generic result. Pre-existing cohort eligibility limits remain unchanged.
+
+Provider history warms in the background; fallback maintenance never places a call and must not delay unrelated guarded dispatch. This unblocks the existing Mailshake route; K=N is not proof of enrollment or email delivery. Track expired-to-Mailshake exits separately from actual calls in queue reviews. Both TTS arms retain the same approved r5 prompt, settings, versions, hashes and split; no prompt release or cohort reset accompanies this shared scheduling change. Record the backend deployment cutover separately for reachability and volume comparisons. SMS, Apps Script, Tasker and AutoRemote are unchanged.
+
 ## Approved Revision 3
 
 Yoni approved the Lead Intelligence callback-direction and confirmed-state repair. Both provider arms now preserve an already-confirmed listing after a hearing problem and distinguish caller-initiated "Can I call you back?" from owner-directed "Can you call me back?" Prompt-only guarded writes preserved every protected provider setting and the 50/50 branch split.

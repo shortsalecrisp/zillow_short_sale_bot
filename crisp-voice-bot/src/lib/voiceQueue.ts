@@ -3,6 +3,13 @@ import type { sheets_v4 } from "googleapis";
 import { config } from "./config";
 import listingTimeZones from "../config/us-city-timezones.json";
 import {
+  getVoiceOverdueFallbackPlan,
+  getOrWarmVoiceFallbackEvidence,
+  hasAcceptedVoiceFallbackEvidence,
+  noteVoiceFallbackRelease,
+  VOICE_OVERDUE_FALLBACK_MARKER,
+} from "./voiceOverdueFallback";
+import {
   reconcilePendingElevenLabsCallStart,
   recoverAcceptedElevenLabsCallStart,
 } from "./elevenLabs";
@@ -16,6 +23,7 @@ import {
   ensureFinalReceiptCircuitAlert,
   evaluateFinalReceiptCircuit,
   getInboundQuietGate,
+  evaluateInboundQuietGate,
 } from "./voiceSafety";
 import {
   appendVoiceNotesValue,
@@ -92,6 +100,7 @@ export type VoiceQueueResult = {
   availableSlots?: number;
   candidateCount?: number;
   eligibleCandidateCount?: number;
+  overdueFallbackCandidates?: Array<{ rowNumber: number; callAttemptNumber: number; scheduledFor: string; deadline: string }>;
   timeZoneReviewRequired?: Array<{ rowNumber: number; reason: string }>;
   maxCallsPerRun?: number;
   maxActiveCalls?: number;
@@ -177,6 +186,8 @@ export function getScheduledVoiceNoStartRecoveryPlan(
   rowValues: unknown[],
   now: Date,
 ): VoiceScheduledNoStartRecoveryPlan | undefined {
+  if (normalizeString(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1]).includes(VOICE_OVERDUE_FALLBACK_MARKER) ||
+      getVoiceOverdueFallbackPlan(rowNumber, rowValues, now)) return undefined;
   const leadStatus = normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]).toUpperCase();
   if (leadStatus && leadStatus !== "N") return undefined;
   if (normalizeMarker(rowValues[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1]) !== "x") return undefined;
@@ -331,6 +342,7 @@ async function getVoiceBotRows(sheets: sheets_v4.Sheets): Promise<Array<{ rowNum
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheets.sheetId,
     range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A2:AP`,
+    valueRenderOption: "UNFORMATTED_VALUE",
   });
   const values = response.data.values ?? [];
 
@@ -344,6 +356,7 @@ async function getVoiceBotRowByNumber(sheets: sheets_v4.Sheets, rowNumber: numbe
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: config.googleSheets.sheetId,
     range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${rowNumber}:AP${rowNumber}`,
+    valueRenderOption: "UNFORMATTED_VALUE",
   });
 
   return response.data.values?.[0] ?? [];
@@ -452,6 +465,8 @@ export function getVoiceBotCallCandidateFromRowValues(
   rowValues: unknown[],
   now: Date,
 ): VoiceQueueCandidate | undefined {
+  if (normalizeString(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1]).includes(VOICE_OVERDUE_FALLBACK_MARKER) ||
+      getVoiceOverdueFallbackPlan(rowNumber, rowValues, now)) return undefined;
   if (normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1])) {
     return undefined;
   }
@@ -689,6 +704,72 @@ async function writeCells(sheets: sheets_v4.Sheets, rowNumber: number, writes: S
       })),
     },
   });
+}
+
+export async function reconcileOverdueVoiceMailshakeFallback(
+  sheets: sheets_v4.Sheets,
+  rows: Array<{ rowNumber: number; values: unknown[] }>,
+  now: Date,
+  dependencies: { getEvidence?: typeof getOrWarmVoiceFallbackEvidence; clock?: () => Date } = {},
+): Promise<number> {
+  const clock = dependencies.clock ?? (() => new Date());
+  const plans = rows.map((row) => getVoiceOverdueFallbackPlan(row.rowNumber, row.values, now))
+    .filter((plan): plan is NonNullable<typeof plan> => Boolean(plan));
+  if (!plans.length) return 0;
+  const since = new Date(Math.min(...plans.map((plan) => plan.evidenceSince.getTime())));
+  // Warm the provider index in the background: it must not hold the dispatch
+  // single-flight lock or turn receipt verification into a new queue bottleneck.
+  const proof = (dependencies.getEvidence ?? getOrWarmVoiceFallbackEvidence)(since, now, () =>
+    processVoiceQueue({ fallbackOnly: true, refill: true }));
+  if (!proof) return 0;
+  const inbound = await sheets.spreadsheets.values.get({
+    spreadsheetId: config.googleSheets.sheetId, range: "'sms_inbound_queue'!A2:H",
+  });
+  let released = 0;
+  for (const oldPlan of plans) {
+    if (released >= 20) break;
+    if (clock().getTime() - proof.verifiedAt.getTime() > 30_000) break;
+    const values = await getVoiceBotRowByNumber(sheets, oldPlan.rowNumber);
+    const checkNow = clock();
+    const plan = getVoiceOverdueFallbackPlan(oldPlan.rowNumber, values, checkNow);
+    if (!plan || plan.phone !== oldPlan.phone || plan.callAttemptNumber !== oldPlan.callAttemptNumber ||
+        plan.scheduledFor.getTime() !== oldPlan.scheduledFor.getTime()) continue;
+    const duplicate = rows.some((row) => row.rowNumber !== plan.rowNumber &&
+      normalizePhoneToE164(row.values[VOICE_BOT_COL_PHONE - 1]) === plan.phone);
+    if (duplicate || evaluateInboundQuietGate(plan.phone, (inbound.data.values ?? []).slice(-500), checkNow).blocked ||
+        hasAcceptedVoiceFallbackEvidence(plan, proof)) continue;
+    const notes = appendVoiceNotesValue(values[VOICE_BOT_COL_VOICE_NOTES - 1],
+      `${VOICE_OVERDUE_FALLBACK_MARKER} ${JSON.stringify({
+        rowNumber: plan.rowNumber, phone: plan.phone, callAttemptNumber: plan.callAttemptNumber,
+        scheduledFor: plan.scheduledFor.toISOString(), deadline: plan.deadline.toISOString(),
+        agentTimeZone: plan.agentTimeZone, releasedAt: checkNow.toISOString(),
+        providerEvidenceSince: proof.since.toISOString(), providerEvidenceVerifiedAt: proof.verifiedAt.toISOString(),
+      })}\nScheduled voice attempt was not placed within two listing-local business days after its window; released to Mailshake with K=N. No call outcome or sent timestamp was fabricated.`);
+    await writeCells(sheets, plan.rowNumber, [
+      { columnNumber: VOICE_BOT_COL_LEAD_STATUS_CODE, value: "N" },
+      { columnNumber: VOICE_BOT_COL_CALL_ELIGIBLE, value: "" },
+      { columnNumber: VOICE_BOT_COL_CALL_TIME_BUCKET, value: "" },
+      { columnNumber: VOICE_BOT_COL_CALL_SCHEDULED_FOR, value: "" },
+      { columnNumber: VOICE_BOT_COL_VOICE_NOTES, value: notes },
+    ]);
+    const after = await getVoiceBotRowByNumber(sheets, plan.rowNumber);
+    if (normalizePhoneToE164(after[2]) !== plan.phone || normalizeString(after[10]) !== "N" ||
+        [29, 30, 31].some((index) => normalizeString(after[index])) ||
+        !normalizeString(after[41]).includes(VOICE_OVERDUE_FALLBACK_MARKER) ||
+        [32, 33, 39, 40].some((index) => normalizeString(after[index]) !== normalizeString(values[index]))) {
+      throw new Error(`Overdue voice fallback readback mismatch for row ${plan.rowNumber}`);
+    }
+    const localRow = rows.find((row) => row.rowNumber === plan.rowNumber);
+    if (localRow) localRow.values = after;
+    noteVoiceFallbackRelease();
+    released += 1;
+    logger.info("Overdue voice attempt released to Mailshake", {
+      rowNumber: plan.rowNumber, callAttemptNumber: plan.callAttemptNumber,
+      scheduledFor: plan.scheduledFor.toISOString(), deadline: plan.deadline.toISOString(),
+      agentTimeZone: plan.agentTimeZone,
+    });
+  }
+  return released;
 }
 
 export function buildVoiceSafeReplacementWrites(
@@ -1034,10 +1115,24 @@ async function postStartCall(candidate: VoiceQueueCandidate): Promise<unknown> {
   return response.data;
 }
 
-async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date } = {}): Promise<VoiceQueueResult> {
+async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date; fallbackOnly?: boolean } = {}): Promise<VoiceQueueResult> {
   const now = options.now ?? new Date();
   const outboundPause = getOutboundCallPause(now);
   const providerCircuit = getProviderCircuitStatus();
+
+  const sheets = await getGoogleSheetsClient();
+  const rows = await getVoiceBotRows(sheets);
+  if (!options.dryRun) {
+    try {
+      await reconcileOverdueVoiceMailshakeFallback(sheets, rows, now);
+    } catch (error) {
+      // A held or failed maintenance write must not block unrelated scheduled calls.
+      logger.error("Overdue voice fallback held; normal guarded queue continues", {
+        message: error instanceof Error ? error.message : "Fallback maintenance failed",
+      });
+    }
+  }
+  if (options.fallbackOnly) return { ok: true, queued: false, reason: "overdue_fallback_maintenance" };
 
   if (!config.outboundVoice.enabled) {
     logger.info("Voice queue paused by owner control", {
@@ -1056,8 +1151,6 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   // Receipt reconciliation is a safety operation, not a new outbound call.
   // Run it even while starts are paused or outside the dialing window so an
   // uncertain attempt cannot be mistaken for a confirmed failure.
-  const sheets = await getGoogleSheetsClient();
-  const rows = await getVoiceBotRows(sheets);
   if (!options.dryRun) {
     await ensureProviderStartFailureAlert(now);
     await reconcileUncertainVoiceCallStarts(sheets, rows, now);
@@ -1142,6 +1235,10 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS,
       candidateCount: candidates.length,
       eligibleCandidateCount,
+      overdueFallbackCandidates: rows.map((row) => getVoiceOverdueFallbackPlan(row.rowNumber, row.values, now))
+        .filter((plan): plan is NonNullable<typeof plan> => Boolean(plan))
+        .map((plan) => ({ rowNumber: plan.rowNumber, callAttemptNumber: plan.callAttemptNumber,
+          scheduledFor: plan.scheduledFor.toISOString(), deadline: plan.deadline.toISOString() })),
       nowEt: formatVoiceBotDateEt(now),
       candidates: candidates.map(candidateSummary),
     };
@@ -1248,7 +1345,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   };
 }
 
-export async function processVoiceQueue(options: { dryRun?: boolean; now?: Date; refill?: boolean } = {}): Promise<VoiceQueueResult> {
+export async function processVoiceQueue(options: { dryRun?: boolean; now?: Date; refill?: boolean; fallbackOnly?: boolean } = {}): Promise<VoiceQueueResult> {
   // A read-only inspection must never join a dispatching run and return its starts.
   if (options.dryRun) return processVoiceQueueUnlocked(options);
   if (activeQueueRun) {
@@ -1256,7 +1353,7 @@ export async function processVoiceQueue(options: { dryRun?: boolean; now?: Date;
       const previousRun = activeQueueRun;
       logger.info("Voice queue refill deferred until active dispatch settles");
       await previousRun;
-      return processVoiceQueue({ now: options.now });
+      return processVoiceQueue({ now: options.now, fallbackOnly: options.fallbackOnly });
     }
     logger.info("Voice queue run already active; joining existing run");
     return activeQueueRun;

@@ -12,6 +12,7 @@ import { startGmailImportSchedulers } from "./lib/gmailImporters";
 import { logger } from "./lib/logger";
 import { startMailshakeSyncScheduler } from "./lib/mailshakeSync";
 import { getVoiceQueueDispatchStatus, startVoiceQueueScheduler } from "./lib/voiceQueue";
+import { getVoiceOverdueFallbackStatus } from "./lib/voiceOverdueFallback";
 import elevenLabsRouter from "./routes/elevenLabs";
 import gmailImportRouter from "./routes/gmailImport";
 import infoEmailRouter from "./routes/infoEmail";
@@ -49,6 +50,7 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
     runtimeExperiment: getElevenLabsRuntimeExperimentStatus(),
     conversationPolicyVersion: VOICE_CONVERSATION_POLICY_VERSION,
     queueDispatch: getVoiceQueueDispatchStatus(),
+    overdueVoiceFallback: getVoiceOverdueFallbackStatus(),
     returnCalls: {
       ready: returnCallsReady({ ...config.returnCalls, baseUrl: config.baseUrl }),
       officeAcceptance: "private_announcement_press_1",
