@@ -77,6 +77,8 @@ def test_worker_lexicon_failure_is_unpaid_terminal_and_not_reopened_after_data_r
     service.verification_method = NEW
     context = core.snapshot(row=12, stable_id="offline-unpaid-lexicon", phone="2125550100",
         first_name="Marc", initial_sent_at="2026-10-17T10:00:00Z")
+    from test_video_followup import initial_receipt
+    context.update(core.initial_receipt_binding(context, initial_receipt(context)))
     config = core.Config({"VIDEO_FOLLOWUP_ENABLED": "true", "VIDEO_FOLLOWUP_GENERATION_ENABLED": "true",
         "VIDEO_FOLLOWUP_TEST_PHONES": "2125550100", "VIDEO_FOLLOWUP_INITIALS_AFTER": "2026-10-13T00:00:00Z"})
     store.prepare(context)

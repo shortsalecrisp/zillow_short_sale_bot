@@ -10,6 +10,7 @@ import video_followup as core
 import video_followup_same_take as provider
 import video_followup_speech_guard as speech
 import video_followup_worker as bootstrap
+from test_video_followup import initial_receipt
 from test_video_followup_same_take import (
     Objects, paid_calls, planned, speech_proof, start, state, world,
 )
@@ -69,6 +70,7 @@ def submitted_job(method, *, name="Sue"):
     store = core.Store(Objects())
     context = core.snapshot(row=12, stable_id="offline-policy-integration", phone="2125550100",
                             first_name=name, initial_sent_at="2026-10-17T10:00:00Z")
+    context.update(core.initial_receipt_binding(context, initial_receipt(context)))
     config = core.Config({"VIDEO_FOLLOWUP_ENABLED": "true", "VIDEO_FOLLOWUP_GENERATION_ENABLED": "true",
         "VIDEO_FOLLOWUP_TEST_PHONES": "2125550100", "VIDEO_FOLLOWUP_INITIALS_AFTER": "2026-10-13T00:00:00Z",
         "VIDEO_FOLLOWUP_PUBLIC_ORIGIN": "https://go.crispshortsales.com"})

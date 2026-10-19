@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from test_internal_sms_endpoint import FakeSendResult, FakeWorksheet, _import_webhook_server, _source_sms_template
-from test_video_followup import MEDIA, MemoryObjects, video
+from test_video_followup import MEDIA, MemoryObjects, initial_receipt, video
 from test_video_followup_scheduler import INITIAL_SENT_AT, PHONE, harness, scheduler_handoff
 
 
@@ -219,6 +219,7 @@ def automatic_path(monkeypatch, state):
         monkeypatch.setenv(name, value)
     context = video.snapshot(row=12, stable_id="listing-12", phone=PHONE,
                              first_name="Jim", initial_sent_at=INITIAL_SENT_AT)
+    context.update(video.initial_receipt_binding(context, initial_receipt(context)))
     store = video.Store(MemoryObjects())
     if state != "missing":
         store.prepare(context)

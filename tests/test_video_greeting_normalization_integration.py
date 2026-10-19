@@ -176,7 +176,7 @@ def test_pending_old_profile_keeps_raw_length_rejection_after_factory_change(wor
     assert after["render_config_sha256"] == before["render_config_sha256"]
     provider.inspect_greeting.assert_called_once_with(raw, REFERENCE)
     provider.normalize_greeting_audio.assert_not_called()
-    assert not world[1].objects.list(f"assets/{identifier}/")
+    assert world[1].objects.list(f"assets/{identifier}/") == [f"assets/{identifier}/evidence.json"]
     assert len(paid_calls(legacy, provider.TTS_MODEL)) == 1
     assert not paid_calls(legacy, provider.MODEL)
 

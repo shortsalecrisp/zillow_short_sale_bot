@@ -52,6 +52,17 @@ def planned_speech_proof(name="Jim", media=MEDIA["media_bytes"]):
 MEDIA["speech_proof"] = speech_proof()
 
 
+def initial_receipt(context):
+    initial = datetime.fromisoformat(video.iso(context["initial_sent_at"]).replace("Z", "+00:00"))
+    suffix = hashlib.sha256(json.dumps([context["stable_id"], video.canonical_phone(context["phone"]),
+        video.iso(initial)], separators=(",", ":")).encode()).hexdigest()[:16]
+    message_id = "initial-12-" + suffix
+    return {"schema": video.INITIAL_RECEIPT_SCHEMA, "status": "sent", "message_id": message_id,
+        "request_id": "scheduler-" + message_id, "phone": video.canonical_phone(context["phone"]),
+        "stable_id": context["stable_id"], "created_at": video.iso(initial - timedelta(seconds=10)),
+        "send_started_at": video.iso(initial - timedelta(seconds=5)), "sent_at": video.iso(initial + timedelta(seconds=5))}
+
+
 class MemoryObjects:
     """Byte storage with atomic generation checks matching the GCS adapter."""
 
@@ -90,9 +101,12 @@ class MemoryObjects:
             if existing and existing[1] == version:
                 del self._objects[key]
 
-    def list(self, prefix, limit=50):
+    def list(self, prefix, limit=50, max_items=None):
         with self._lock:
-            return sorted(key for key in self._objects if key.startswith(prefix))
+            result = sorted(key for key in self._objects if key.startswith(prefix))
+            if max_items is not None and len(result) > max_items:
+                raise video.InitialReceiptHold("Test inventory exceeds its complete-scan bound")
+            return result
 
 
 class FakeProvider:
@@ -170,6 +184,8 @@ class VideoFollowupTests(unittest.TestCase):
             "initial_sent_at": "2026-10-13T10:00:00Z",
         }
         values.update(overrides)
+        if "initial_receipt" not in values:
+            values["initial_receipt"] = initial_receipt(values)
         return video.snapshot(**values)
 
     def worker(self, eligible=None, now=NOW):

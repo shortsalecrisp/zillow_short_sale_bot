@@ -242,6 +242,111 @@ function addUnrelatedExactEpisode(w) {
   return pending;
 }
 
+function requireFutureDecisionEvidence(w) {
+  w.outbox[1][13] = new Date(INITIAL);
+  const metadata = JSON.parse(w.outbox[2][6].replace(/^__scheduled_followup__:/, ""));
+  metadata.initial_receipt = {
+    schema: "initial-sms-receipt-v1", request_id: w.outbox[1][2], message_id: w.outbox[1][3],
+    phone: PHONE, stable_id: STABLE, created_at: INITIAL, send_started_at: INITIAL,
+    sent_at: INITIAL, status: "sent",
+  };
+  metadata.audit_contract = "followup-decision-v1";
+  Object.assign(metadata.video_speech_proof, {
+    evidence_version: "same-take-evidence-v1", evidence_contract: "same-take-evidence-required-v1",
+    evidence_sha256: "7".repeat(64),
+  });
+  w.outbox[2][6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+}
+
+function futureJournal(w) {
+  return JSON.parse(w.outbox[2][6].replace(/^__scheduled_followup__:/, "")).decision_evidence;
+}
+
+test("future evidence claim and cold send-start keep all lexical work outside shared locks", () => {
+  const w = world();
+  requireFutureDecisionEvidence(w);
+  const claim = harness(w, "claim").claim();
+  assert.equal(claim.should_send, true);
+  const result = harness(w, "start").context.markPendingSmsSendStartedV10_(claim);
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "send_started");
+  assert.equal(futureJournal(w).events.length, 2);
+  assert.ok(w.writes.every(write => write.lock !== null));
+  expectShortLocks(w);
+});
+
+test("future overlapping claim callbacks retain only one immutable claim event and lease", () => {
+  const w = world();
+  requireFutureDecisionEvidence(w);
+  const second = harness(w, "second");
+  let inner;
+  const first = harness(w, "first", { duringInflate: () => { inner = second.claim("same-worker"); } });
+  const outer = first.claim("same-worker");
+  assert.equal(outer.lease_token, inner.lease_token);
+  assert.equal(w.outbox[2][9], 1);
+  assert.equal(futureJournal(w).events.length, 1);
+  expectShortLocks(w);
+});
+
+test("future send-start rechecks replies after cold warming and journals denial", () => {
+  const w = world();
+  requireFutureDecisionEvidence(w);
+  const claim = harness(w, "claim").claim();
+  const original = JSON.stringify(futureJournal(w).events[0]);
+  const start = harness(w, "start", { duringInflate: () => inboundReply(w) });
+  const result = start.context.markPendingSmsSendStartedV10_(claim);
+  noSend(result);
+  assert.equal(result.status, "superseded");
+  assert.equal(JSON.stringify(futureJournal(w).events[0]), original);
+  assert.equal(futureJournal(w).events[1].stage, "send_start_blocked");
+  assert.equal(futureJournal(w).events[1].decision.blocked_checks.queued_inbound, true);
+  expectShortLocks(w);
+});
+
+test("future overlapping send-start callbacks append one event and never overwrite it", () => {
+  const w = world();
+  requireFutureDecisionEvidence(w);
+  const claim = harness(w, "claim").claim();
+  const second = harness(w, "second");
+  let inner;
+  const first = harness(w, "first", { beforeLock: () => { inner = second.context.markPendingSmsSendStartedV10_(claim); } });
+  const outer = first.context.markPendingSmsSendStartedV10_(claim);
+  assert.equal(inner.ok, true);
+  assert.equal(outer.duplicate, true);
+  assert.equal(futureJournal(w).events.length, 2);
+  assert.equal(w.outbox[2][9], 1);
+  expectShortLocks(w);
+});
+
+test("future expired unstarted lease appends new claim evidence without replacing the prior event", () => {
+  const w = world();
+  requireFutureDecisionEvidence(w);
+  const h = harness(w, "claim");
+  const first = h.claim();
+  const original = JSON.stringify(futureJournal(w).events[0]);
+  w.now += 301000;
+  const second = h.claim();
+  assert.notEqual(first.lease_token, second.lease_token);
+  assert.equal(second.attempts, 2);
+  assert.equal(futureJournal(w).events.length, 2);
+  assert.equal(JSON.stringify(futureJournal(w).events[0]), original);
+  assert.equal(futureJournal(w).events[1].previous_sha256, futureJournal(w).events[0].sha256);
+  expectShortLocks(w);
+});
+
+test("future send-start lock contention preserves claim and never grants authorization", () => {
+  const w = world();
+  requireFutureDecisionEvidence(w);
+  const claim = harness(w, "claim").claim();
+  const original = JSON.stringify(w.outbox[2]);
+  const start = harness(w, "start", { beforeLock: () => { w.lockOwner = "other"; } });
+  const result = start.context.markPendingSmsSendStartedV10_(claim);
+  noSend(result);
+  assert.equal(result.retryable, true);
+  assert.equal(JSON.stringify(w.outbox[2]), original);
+  assert.equal(start.context.VIDEO_PRONUNCIATION_CACHE_ONLY_V24_, false);
+});
+
 test("5.025-second cold inflation occurs before the claim lock, with real pinned dictionary validation", () => {
   const w = world();
   const h = harness(w);

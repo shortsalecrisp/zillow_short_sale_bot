@@ -666,7 +666,7 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
 }
 
 function hasVideoFollowupContextV19_(body) {
-  return ["followup_key", "initial_sent_at", "video_variant", "video_job_id", "video_speech_proof"]
+  return ["followup_key", "initial_sent_at", "video_variant", "video_job_id", "video_speech_proof", "initial_receipt", "audit_contract"]
     .some(function(key) { return Object.prototype.hasOwnProperty.call(body || {}, key); }) ||
     /^followup-video-/.test(String(body && body.message_id || ""));
 }
@@ -1021,8 +1021,19 @@ function hasValidVideoDirectedPronunciationLineageV25_(proof, name) {
 }
 
 function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
+  var auditMarked = metadata.initial_receipt !== undefined || metadata.audit_contract !== undefined ||
+    metadata.decision_evidence !== undefined;
+  if (auditMarked && (metadata.audit_contract !== "followup-decision-v1" ||
+      !validateVideoInitialReceiptV26_(metadata.initial_receipt, metadata, normalizePhone_(body.phone)))) return false;
   if (metadata.video_variant !== "video") return true;
   var proof = metadata.video_speech_proof;
+  var evidenceMarked = auditMarked ||
+    proof && ["evidence_version", "evidence_contract", "evidence_sha256"].some(function(field) { return proof[field] !== undefined; });
+  if (evidenceMarked && (metadata.audit_contract !== "followup-decision-v1" ||
+      !validateVideoInitialReceiptV26_(metadata.initial_receipt, metadata, normalizePhone_(body.phone)) || !proof ||
+      proof.evidence_version !== "same-take-evidence-v1" ||
+      proof.evidence_contract !== "same-take-evidence-required-v1" ||
+      !/^[0-9a-f]{64}$/.test(String(proof.evidence_sha256 || "")))) return false;
   var name = normalizeVideoFollowupFirstNameV19_(metadata.first_name);
   var foldedName = name.toLowerCase().replace(/\u00df/g, "ss").replace(/\u03c2/g, "\u03c3");
   if (name.length < 2 || name.length > 32 || !/^\p{L}+(?:[-']\p{L}+){0,2}$/u.test(name) ||
@@ -1085,6 +1096,14 @@ function validateVideoFollowupContextV19_(body, requireJob) {
     initial_sent_at: new Date(initialMs).toISOString(), video_variant: variant,
     video_job_id: job, first_name: firstName
   };
+  if (body.initial_receipt !== undefined || body.audit_contract !== undefined) {
+    var initialReceipt = validateVideoInitialReceiptV26_(body.initial_receipt, metadata, phone);
+    if (!initialReceipt || (body.audit_contract !== undefined && body.audit_contract !== "followup-decision-v1")) {
+      return { ok: false, reason: "Personalized follow-up initial receipt descriptor is invalid" };
+    }
+    metadata.initial_receipt = initialReceipt;
+    metadata.audit_contract = "followup-decision-v1";
+  }
   if (variant === "video" && body.video_speech_proof !== undefined) metadata.video_speech_proof = body.video_speech_proof;
   if (requireJob && !hasValidVideoFollowupSpeechProofV21_(body, metadata)) {
     return { ok: false, retryable: true, reason: "Personalized video spoken-name proof is missing or invalid" };
@@ -1200,6 +1219,37 @@ function isSameVideoFollowupInitialAttemptV19_(entry, metadata, initialMs, timeZ
   return hasUniqueVideoFollowupInitialReceiptIdsV19_(row, pendingRows);
 }
 
+function validateVideoInitialReceiptV26_(receipt, metadata, phone) {
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) ||
+      receipt.schema !== "initial-sms-receipt-v1" || receipt.status !== "sent" ||
+      receipt.phone !== phone || receipt.stable_id !== metadata.stable_id) return null;
+  var messageMatch = /^initial-([0-9]+)-[0-9a-f]{16}$/.exec(String(receipt.message_id || ""));
+  if (!messageMatch || !Number.isSafeInteger(Number(messageMatch[1])) || Number(messageMatch[1]) < 2) return null;
+  if (["scheduler-" + receipt.message_id, "render-" + receipt.message_id].indexOf(receipt.request_id) === -1) return null;
+  var times = ["created_at", "send_started_at", "sent_at"].map(function(field) {
+    var value = receipt[field];
+    var ms = typeof value === "string" ? Date.parse(value) : NaN;
+    return isFinite(ms) && new Date(ms).toISOString() === value ? ms : NaN;
+  });
+  var initialMs = Date.parse(metadata.initial_sent_at);
+  if (!times.every(isFinite) || times[0] > times[1] || times[1] > initialMs || initialMs > times[2]) return null;
+  return { schema: receipt.schema, request_id: receipt.request_id, message_id: receipt.message_id,
+    phone: receipt.phone, stable_id: receipt.stable_id, created_at: receipt.created_at,
+    send_started_at: receipt.send_started_at, sent_at: receipt.sent_at, status: "sent" };
+}
+
+function buildVideoInitialReceiptV26_(entry, metadata, phone, timeZone, pendingRows) {
+  if (!entry || !isSameVideoFollowupInitialAttemptV19_(entry, metadata,
+      Date.parse(metadata.initial_sent_at), timeZone, pendingRows)) return null;
+  return validateVideoInitialReceiptV26_({
+    schema: "initial-sms-receipt-v1", request_id: String(entry.row[2]), message_id: String(entry.row[3]),
+    phone: phone, stable_id: metadata.stable_id,
+    created_at: new Date(parseVideoFollowupTimestampV19_(entry.row[0], timeZone)).toISOString(),
+    send_started_at: new Date(parseVideoFollowupTimestampV19_(entry.row[13], timeZone)).toISOString(),
+    sent_at: new Date(entry.sent_ms).toISOString(), status: "sent"
+  }, metadata, phone);
+}
+
 function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
   if (!metadata || !/^[0-9a-f]{64}$/.test(String(metadata.followup_key || "")) ||
       !String(metadata.stable_id || "").trim() || !isFinite(Date.parse(metadata.initial_sent_at))) {
@@ -1225,6 +1275,7 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
   var recoveryReceipt = NaN;
   var laterReceipts = [];
   var exactEpisodeReceipts = 0;
+  var exactReceipt = null;
   var exactReceiptIdsUnique = true;
   (pendingRows || []).forEach(function(row) {
     if (String(row[1]) !== "sent" || normalizePhone_(row[4]) !== phone ||
@@ -1238,6 +1289,7 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
     if (!isFinite(sentMs)) return;
     if (Math.abs(sentMs - expectedMs) < 1000) {
       exactEpisodeReceipts++;
+      exactReceipt = { row: row, metadata: initialMetadata, sent_ms: sentMs };
       if (!hasUniqueVideoFollowupInitialReceiptIdsV19_(row, pendingRows)) exactReceiptIdsUnique = false;
     }
     if (sentMs - expectedMs >= 1000) laterReceipts.push({ row: row, metadata: initialMetadata, sent_ms: sentMs });
@@ -1267,7 +1319,14 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
   }
   var obj = {};
   values[0].forEach(function(header, column) { obj[header] = current[column]; });
-  return { ok: true, sheet: sheet, row: index + 1, values: current, obj: obj, initial_ms: initialMs, time_zone: timeZone };
+  var initialReceipt = buildVideoInitialReceiptV26_(sameInitialAttempt ? laterReceipts[0] : exactReceipt,
+    metadata, phone, timeZone, pendingRows);
+  if (metadata.initial_receipt && JSON.stringify(metadata.initial_receipt) !== JSON.stringify(initialReceipt)) {
+    return { ok: false, retryable: !initialReceipt,
+      reason: "Personalized follow-up pinned initial receipt changed or could not be verified" };
+  }
+  return { ok: true, sheet: sheet, row: index + 1, values: current, obj: obj, initial_ms: initialMs,
+    time_zone: timeZone, initial_receipt: initialReceipt };
 }
 
 function hasRecordedFollowupConversationV23_(rowObj) {
@@ -1286,6 +1345,110 @@ function hasRecordedFollowupConversationV23_(rowObj) {
   return /^(?:(?:spoke|talked) (?:with|to) (?:the )?(?:agent|seller)\b|(?:the )?agent (?:requested|asked for) (?:a )?(?:callback|call)\b)/.test(summary);
 }
 
+function videoDecisionDigestV26_(value) {
+  function canonical(item) {
+    if (Array.isArray(item)) return item.map(canonical);
+    if (item && typeof item === "object") {
+      var result = {};
+      Object.keys(item).sort().forEach(function(key) { result[key] = canonical(item[key]); });
+      return result;
+    }
+    return item;
+  }
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, JSON.stringify(canonical(value)))
+    .map(function(byte) { return ("0" + (byte & 255).toString(16)).slice(-2); }).join("");
+}
+
+function videoDecisionEvidenceV26_(metadata, phone, resolved, checks, inboundEvidence, competitorEvidence, reason) {
+  var obj = resolved.obj;
+  var row = resolved.values;
+  return {
+    schema: "followup-decision-v1", observed_at: new Date().toISOString(), eligible: !reason, reason: reason,
+    recipient: { phone: phone, stable_id: metadata.stable_id, crm_row: resolved.row,
+      first_name: normalizeVideoFollowupFirstNameV19_(row[0]), initial_sent_at: metadata.initial_sent_at },
+    initial_receipt: resolved.initial_receipt,
+    observed: {
+      h_initial_marker: String(row[7] || "").trim().slice(0, 100), k_status: String(row[10] || "").trim().toUpperCase(),
+      w_initial_at: new Date(resolved.initial_ms).toISOString(),
+      reply_or_followup_marker_present: !!String(row[8] || "").trim(),
+      previous_followup_value_sha256: videoDecisionDigestV26_(String(row[23] || "")),
+      manual_note_sha256: videoDecisionDigestV26_(String(row[9] || "")),
+      human_override: String(obj[HEADERS.human_override] || "").toUpperCase(),
+      handoff_flag: String(obj[HEADERS.handoff_flag] || "").toUpperCase(),
+      ai_state: String(obj[HEADERS.ai_state] || "").trim().toLowerCase(),
+      history_sha256: videoDecisionDigestV26_(String(obj[HEADERS.history_json] || "")),
+      summary_sha256: videoDecisionDigestV26_(String(obj[HEADERS.conversation_summary] || "")),
+      last_message_id: String(obj[HEADERS.last_message_id] || "").slice(0, 200),
+      last_inbound_text_sha256: videoDecisionDigestV26_(String(obj[HEADERS.last_inbound_text] || ""))
+    },
+    blocked_checks: checks,
+    inbound: { matched_count: inboundEvidence.length, rows_sha256: videoDecisionDigestV26_(inboundEvidence),
+      samples: inboundEvidence.slice(-4) },
+    competing_attempts: { matched_count: competitorEvidence.length,
+      rows_sha256: videoDecisionDigestV26_(competitorEvidence), samples: competitorEvidence.slice(-4) },
+    scope: "Observed CRM, inbound queue, pending-takeover guard and SMS outbox only; no claim about unseen or external controls."
+  };
+}
+
+// New receipt-pinned rows carry append-only evidence in the same atomic row
+// transition. Existing rows are never upgraded or backfilled by this helper.
+function appendVideoDecisionEvidenceV26_(outboxRow, stage, eligibility, leaseToken) {
+  var metadata = parseVideoFollowupMetadataV19_(outboxRow);
+  if (!metadata || metadata.audit_contract !== "followup-decision-v1") return outboxRow.slice();
+  var evidence = metadata.decision_evidence || { schema: "followup-decision-journal-v1", events: [] };
+  if (evidence.schema !== "followup-decision-journal-v1" || !Array.isArray(evidence.events) ||
+      evidence.events.length > 16) throw new Error("Follow-up decision evidence is invalid");
+  var priorHash = "";
+  evidence.events.forEach(function(event) {
+    var unhashed = Object.assign({}, event);
+    delete unhashed.sha256;
+    if (event.previous_sha256 !== priorHash || videoDecisionDigestV26_(unhashed) !== event.sha256) {
+      throw new Error("Follow-up decision evidence changed");
+    }
+    priorHash = event.sha256;
+  });
+  var eventId = videoDecisionDigestV26_([String(outboxRow[2]), String(outboxRow[3]), stage, String(leaseToken || "")]);
+  if (evidence.events.some(function(event) { return event.event_id === eventId; })) return outboxRow.slice();
+  if (evidence.events.length >= 16 || !eligibility || !eligibility.decision_evidence) {
+    throw new Error("Follow-up decision evidence is unavailable or full");
+  }
+  var event = {
+    event_id: eventId, previous_sha256: priorHash, stage: stage, lease_token: String(leaseToken || ""),
+    request_id: String(outboxRow[2]), message_id: String(outboxRow[3]), followup_key: metadata.followup_key,
+    video_job_id: metadata.video_job_id || "", video_variant: metadata.video_variant,
+    speech_evidence_version: metadata.video_speech_proof && metadata.video_speech_proof.evidence_version || "",
+    speech_evidence_sha256: metadata.video_speech_proof && metadata.video_speech_proof.evidence_sha256 || "",
+    decision: eligibility.decision_evidence
+  };
+  event.sha256 = videoDecisionDigestV26_(event);
+  evidence.events.push(event);
+  metadata.decision_evidence = evidence;
+  var encoded = "__scheduled_followup__:" + JSON.stringify(metadata);
+  if (encoded.length > 45000) throw new Error("Follow-up decision evidence reached cell capacity");
+  var updated = outboxRow.slice();
+  updated[6] = encoded;
+  return updated;
+}
+
+function hasVideoDecisionStageV26_(outboxRow, stage, leaseToken) {
+  var metadata = parseVideoFollowupMetadataV19_(outboxRow);
+  if (!metadata || metadata.audit_contract !== "followup-decision-v1") return true;
+  var eventId = videoDecisionDigestV26_([String(outboxRow[2]), String(outboxRow[3]), stage, String(leaseToken || "")]);
+  return !!(metadata.decision_evidence && Array.isArray(metadata.decision_evidence.events) &&
+    metadata.decision_evidence.events.some(function(event) { return event.event_id === eventId; }));
+}
+
+function persistVideoDecisionTransitionV26_(sheet, rowNumber, row) {
+  sheet.getRange(rowNumber, 1, 1, SMS_PENDING_SEND_HEADERS_.length).setValues([row]);
+  var saved = sheet.getRange(rowNumber, 1, 1, SMS_PENDING_SEND_HEADERS_.length).getValues()[0];
+  function comparable(value) {
+    return Object.prototype.toString.call(value) === "[object Date]" ? value.toISOString() : String(value || "");
+  }
+  if ([1, 2, 3, 4, 6, 9, 10, 11, 12, 13, 18].some(function(column) { return comparable(saved[column]) !== comparable(row[column]); })) {
+    throw new Error("Follow-up decision transition was not confirmed");
+  }
+}
+
 function checkVideoFollowupEligibilityV19_(body, options) {
   try {
     var validation = validateVideoFollowupContextV19_(body, false);
@@ -1298,12 +1461,23 @@ function checkVideoFollowupEligibilityV19_(body, options) {
     var rows = options && options.pendingRows || (outbox.getLastRow() > 1
       ? outbox.getRange(2, 1, outbox.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues() : []);
     var resolved = resolveVideoFollowupIdentityV19_(phone, metadata, rows);
-    if (!resolved.ok) return { ok: !resolved.retryable, eligible: false, retryable: !!resolved.retryable, reason: resolved.reason };
+    if (!resolved.ok) {
+      var denied = { ok: !resolved.retryable, eligible: false, retryable: !!resolved.retryable, reason: resolved.reason };
+      if (options && options.captureDecision && metadata.audit_contract === "followup-decision-v1") {
+        denied.decision_evidence = { schema: "followup-decision-v1", observed_at: new Date().toISOString(),
+          eligible: false, reason: resolved.reason, initial_receipt: metadata.initial_receipt,
+          recipient_requested: { phone: phone, stable_id: metadata.stable_id, initial_sent_at: metadata.initial_sent_at },
+          identity_resolution_verified: false, remaining_controls_evaluated: false,
+          scope: "Initial identity resolution failed; no claim about unread CRM, reply, takeover or external controls." };
+      }
+      return denied;
+    }
     var row = resolved.values;
     var obj = resolved.obj;
     var reason = "";
     if (typeof hasPendingSmsTakeoverV11_ !== "function") throw new Error("Takeover guard is unavailable");
-    if (hasPendingSmsTakeoverV11_(phone) || String(obj[HEADERS.human_override] || "").toUpperCase() === "TRUE" ||
+    var pendingTakeover = hasPendingSmsTakeoverV11_(phone);
+    if (pendingTakeover || String(obj[HEADERS.human_override] || "").toUpperCase() === "TRUE" ||
         String(obj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE") reason = "Human takeover is active or pending";
     if (["R", "Y", "G", "O", "H"].indexOf(String(row[10] || "").trim().toUpperCase()) !== -1) reason = "CRM lead no longer qualifies for follow-up";
     if (hasRecordedFollowupConversationV23_(obj)) reason = "A recorded conversation already exists";
@@ -1321,25 +1495,56 @@ function checkVideoFollowupEligibilityV19_(body, options) {
     var inbound = ss.getSheetByName("sms_inbound_queue");
     if (!inbound) throw new Error("Inbound queue is unavailable");
     var inboundRows = inbound.getLastRow() > 1 ? inbound.getRange(2, 1, inbound.getLastRow() - 1, 8).getValues() : [];
+    var inboundEvidence = [];
     inboundRows.forEach(function(entry) {
       if (normalizePhone_(entry[5]) !== phone) return;
-      var received = parseVideoFollowupTimestampV19_(entry[7], resolved.time_zone);
-      if (!isFinite(received)) received = parseVideoFollowupTimestampV19_(entry[0], resolved.time_zone);
+      var reportedReceived = parseVideoFollowupTimestampV19_(entry[7], resolved.time_zone);
+      var recordedCreated = parseVideoFollowupTimestampV19_(entry[0], resolved.time_zone);
+      var received = isFinite(reportedReceived) ? reportedReceived : recordedCreated;
+      inboundEvidence.push({ queue_id: String(entry[2] || "").slice(0, 200), message_id: String(entry[4] || "").slice(0, 200),
+        status: String(entry[1] || "").slice(0, 40), received_at: isFinite(received) ? new Date(received).toISOString() : null,
+        created_at: isFinite(recordedCreated) ? new Date(recordedCreated).toISOString() : null,
+        reported_received_at: isFinite(reportedReceived) ? new Date(reportedReceived).toISOString() : null,
+        timestamp_source: isFinite(reportedReceived) ? "received_at" : isFinite(recordedCreated) ? "created_at_fallback" : "unknown",
+        blocked: !isFinite(received) || received >= resolved.initial_ms });
       if (!isFinite(received) || received >= resolved.initial_ms) reason = "An inbound reply exists since the initial send";
     });
+    var competitorEvidence = [];
     rows.forEach(function(entry) {
       if (normalizePhone_(entry[4]) !== phone || String(entry[6] || "").indexOf("__scheduled_followup__:") !== 0) return;
       var existing = parseVideoFollowupMetadataV19_(entry);
       if (options && options.ignoreOwnKey && existing && existing.followup_key === metadata.followup_key) return;
       var status = String(entry[1] || "");
       var created = parseVideoFollowupTimestampV19_(entry[0], resolved.time_zone);
-      if ((existing && existing.followup_key === metadata.followup_key) ||
+      var competing = (existing && existing.followup_key === metadata.followup_key) ||
           ["queued", "pending", "alerted", "claimed", "send_started", "receipt_pending", "uncertain"].indexOf(status) !== -1 ||
-          ((!isFinite(created) || created >= resolved.initial_ms) && ["sent", "failed"].indexOf(status) !== -1)) {
+          ((!isFinite(created) || created >= resolved.initial_ms) && ["sent", "failed"].indexOf(status) !== -1);
+      competitorEvidence.push({ request_id: String(entry[2] || "").slice(0, 200), message_id: String(entry[3] || "").slice(0, 200),
+        status: status, created_at: isFinite(created) ? new Date(created).toISOString() : null, blocked: !!competing });
+      if (competing) {
         reason = "A follow-up attempt already exists and needs reconciliation";
       }
     });
-    return { ok: true, eligible: !reason, reason: reason, crm_row: resolved.row };
+    var result = { ok: true, eligible: !reason, reason: reason, crm_row: resolved.row,
+      initial_receipt: resolved.initial_receipt };
+    if (options && options.captureDecision && metadata.audit_contract === "followup-decision-v1") {
+      result.decision_evidence = videoDecisionEvidenceV26_(metadata, phone, resolved, {
+        pending_takeover: !!pendingTakeover,
+        human_override: String(obj[HEADERS.human_override] || "").toUpperCase() === "TRUE",
+        handoff: String(obj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE",
+        crm_status: ["R", "Y", "G", "O", "H"].indexOf(String(row[10] || "").trim().toUpperCase()) !== -1,
+        recorded_conversation: hasRecordedFollowupConversationV23_(obj),
+        existing_followup_or_reply: !!(String(row[8] || "").trim() || String(row[23] || "").trim()) && !olderFollowup,
+        manual_note: !!note && noResponseNotes.indexOf(note) === -1 && note.indexOf("no answer on ") !== 0,
+        contact_hold: !/(phone conflict resolved|phone_conflict_resolved|sol_exception_resolved)/.test(contact) &&
+          /(phone_conflict|phone conflict|duplicate phone suppressed)/.test(contact),
+        crm_inbound: !!(String(obj[HEADERS.last_message_id] || "").trim() || String(obj[HEADERS.last_inbound_text] || "").trim()),
+        first_name_changed: metadata.video_variant === "video" && normalizeVideoFollowupFirstNameV19_(row[0]).toLowerCase() !== normalizeVideoFollowupFirstNameV19_(metadata.first_name).toLowerCase(),
+        queued_inbound: inboundEvidence.some(function(entry) { return entry.blocked; }),
+        competing_attempt: competitorEvidence.some(function(entry) { return entry.blocked; })
+      }, inboundEvidence, competitorEvidence, reason);
+    }
+    return result;
   } catch (_) {
     return { ok: false, eligible: false, retryable: true, reason: "Personalized follow-up eligibility could not be verified" };
   }
@@ -2278,13 +2483,30 @@ function claimPendingSmsSendV10_(body) {
       if (activeStatus !== "claimed" || String(rows[activeIndex][18] || "") !== workerId ||
           !activeLeaseUntil || activeLeaseUntil < now) continue;
       if (isOwnerVideoProbeRowV20_(rows[activeIndex]) || parseVideoFollowupMetadataV19_(rows[activeIndex]) || /^followup-video-/.test(String(rows[activeIndex][3] || ""))) {
-        var activeStaleReason = getPendingSmsStaleReason_(rows[activeIndex]);
+        var activeDecision = {};
+        var activeStaleReason = getPendingSmsStaleReason_(rows[activeIndex], activeDecision);
         if (activeStaleReason === "Personalized follow-up eligibility temporarily unavailable") return busyPendingSmsClaim_();
         if (activeStaleReason) {
+          if (activeDecision.audited) {
+            try {
+              var blockedActive = appendVideoDecisionEvidenceV26_(rows[activeIndex], "claim_blocked", activeDecision.eligibility, rows[activeIndex][10]);
+              blockedActive[1] = "superseded";
+              blockedActive[15] = activeStaleReason;
+              persistVideoDecisionTransitionV26_(sheet, activeIndex + 2, blockedActive);
+              rows[activeIndex] = blockedActive;
+            } catch (_) { return busyPendingSmsClaim_(); }
+            continue;
+          }
           sheet.getRange(activeIndex + 2, 2).setValue("superseded");
           sheet.getRange(activeIndex + 2, 16).setValue(activeStaleReason);
           rows[activeIndex][1] = "superseded";
           continue;
+        }
+        if (activeDecision.audited) {
+          try {
+            if (!hasVideoDecisionStageV26_(rows[activeIndex], "claim", rows[activeIndex][10])) return busyPendingSmsClaim_();
+            appendVideoDecisionEvidenceV26_(rows[activeIndex], "claim", activeDecision.eligibility, rows[activeIndex][10]);
+          } catch (_) { return busyPendingSmsClaim_(); }
         }
       }
       return buildPendingSmsClaimResponse_(rows[activeIndex], activeIndex + 2);
@@ -2299,12 +2521,24 @@ function claimPendingSmsSendV10_(body) {
       if (!eligible) continue;
 
       var sheetRow = i + 2;
-      var staleReason = getPendingSmsStaleReason_(rows[i]);
+      var claimDecision = {};
+      var staleReason = getPendingSmsStaleReason_(rows[i], claimDecision);
       if (staleReason === "Personalized follow-up eligibility temporarily unavailable") {
         retryableFeaturePending = true;
         continue;
       }
       if (staleReason) {
+        if (claimDecision.audited) {
+          var blockedClaim;
+          try {
+            blockedClaim = appendVideoDecisionEvidenceV26_(rows[i], "claim_blocked", claimDecision.eligibility, rows[i][10]);
+          } catch (_) { retryableFeaturePending = true; continue; }
+          blockedClaim[1] = "superseded";
+          blockedClaim[15] = staleReason;
+          try { persistVideoDecisionTransitionV26_(sheet, sheetRow, blockedClaim); }
+          catch (_) { return busyPendingSmsClaim_(); }
+          continue;
+        }
         sheet.getRange(sheetRow, 2).setValue("superseded");
         sheet.getRange(sheetRow, 16).setValue(staleReason);
         continue;
@@ -2328,8 +2562,17 @@ function claimPendingSmsSendV10_(body) {
       claimedPendingRow[18] = workerId;
       // Commit ownership, token, lease, and worker together. If this write
       // fails, the prior queued/expired state remains eligible for retry.
-      sheet.getRange(sheetRow, 1, 1, SMS_PENDING_SEND_HEADERS_.length)
-        .setValues([claimedPendingRow]);
+      if (claimDecision.audited) {
+        try {
+          claimedPendingRow = appendVideoDecisionEvidenceV26_(claimedPendingRow, "claim", claimDecision.eligibility, leaseToken);
+        } catch (_) { retryableFeaturePending = true; continue; }
+        // A failed write/readback may already own this lease. Do not claim a
+        // second conversation until the next fresh poll reconciles ownership.
+        try { persistVideoDecisionTransitionV26_(sheet, sheetRow, claimedPendingRow); }
+        catch (_) { return busyPendingSmsClaim_(); }
+      } else {
+        sheet.getRange(sheetRow, 1, 1, SMS_PENDING_SEND_HEADERS_.length).setValues([claimedPendingRow]);
+      }
       rows[i] = claimedPendingRow;
       return buildPendingSmsClaimResponse_(claimedPendingRow, sheetRow);
     }
@@ -2371,7 +2614,7 @@ function busyPendingSmsClaim_() {
   };
 }
 
-function markPendingSmsSendStartedV10_(body) {
+function markPendingSmsSendStartedV10_(body, decisionLocked) {
   var match;
   var correlationMode = "exact_text";
   try {
@@ -2387,11 +2630,35 @@ function markPendingSmsSendStartedV10_(body) {
     throw err;
   }
   if (!match.ok) return match;
-  var staleReason = getPendingSmsStaleReason_(match.values);
+  var auditedMetadata = parseVideoFollowupMetadataV19_(match.values);
+  var audited = auditedMetadata && auditedMetadata.audit_contract === "followup-decision-v1";
+  if (audited && !decisionLocked) {
+    prewarmVideoFollowupPronunciationV24_(auditedMetadata);
+    var decisionLock = LockService.getScriptLock();
+    if (!decisionLock.tryLock(3000)) return { ok: false, should_send: false, retryable: true, reason: "Follow-up decision evidence is busy" };
+    var previousCacheOnly = VIDEO_PRONUNCIATION_CACHE_ONLY_V24_;
+    VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = true;
+    try { return markPendingSmsSendStartedV10_(body, true); }
+    finally { VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = previousCacheOnly; decisionLock.releaseLock(); }
+  }
+  var startDecision = {};
+  var staleReason = getPendingSmsStaleReason_(match.values, startDecision);
   if (staleReason === "Personalized follow-up eligibility temporarily unavailable") {
     return { ok: false, should_send: false, retryable: true, status: String(match.values[1] || ""), reason: staleReason };
   }
   if (staleReason) {
+    if (audited) {
+      try {
+        var blockedStart = appendVideoDecisionEvidenceV26_(match.values, "send_start_blocked", startDecision.eligibility, match.values[10]);
+        blockedStart[1] = "superseded";
+        blockedStart[15] = staleReason;
+        blockedStart[10] = "";
+        blockedStart[11] = "";
+        blockedStart[18] = "";
+        persistVideoDecisionTransitionV26_(match.sheet, match.row, blockedStart);
+      } catch (_) { return { ok: false, should_send: false, retryable: true, reason: "Follow-up decision evidence could not be confirmed" }; }
+      return { ok: false, should_send: false, status: "superseded", reason: staleReason };
+    }
     match.sheet.getRange(match.row, 2).setValue("superseded");
     match.sheet.getRange(match.row, 16).setValue(staleReason);
     match.sheet.getRange(match.row, 11, 1, 2).setValues([["", ""]]);
@@ -2399,6 +2666,12 @@ function markPendingSmsSendStartedV10_(body) {
     return { ok: false, should_send: false, status: "superseded", reason: staleReason };
   }
   if (String(match.values[1] || "") === "send_started") {
+    if (audited) {
+      try {
+        if (!hasVideoDecisionStageV26_(match.values, "send_start", match.values[10])) throw new Error("Missing original send-start evidence");
+        appendVideoDecisionEvidenceV26_(match.values, "send_start", startDecision.eligibility, match.values[10]);
+      } catch (_) { return { ok: false, should_send: false, retryable: true, reason: "Follow-up decision evidence could not be confirmed" }; }
+    }
     return {
       ok: true,
       duplicate: true,
@@ -2407,8 +2680,18 @@ function markPendingSmsSendStartedV10_(body) {
       correlation_mode: correlationMode
     };
   }
-  match.sheet.getRange(match.row, 2).setValue("send_started");
-  match.sheet.getRange(match.row, 14).setValue(new Date());
+  if (audited) {
+    try {
+      if (!hasVideoDecisionStageV26_(match.values, "claim", match.values[10])) throw new Error("Missing original claim evidence");
+      var started = appendVideoDecisionEvidenceV26_(match.values, "send_start", startDecision.eligibility, match.values[10]);
+      started[1] = "send_started";
+      started[13] = new Date();
+      persistVideoDecisionTransitionV26_(match.sheet, match.row, started);
+    } catch (_) { return { ok: false, should_send: false, retryable: true, reason: "Follow-up decision evidence could not be confirmed" }; }
+  } else {
+    match.sheet.getRange(match.row, 2).setValue("send_started");
+    match.sheet.getRange(match.row, 14).setValue(new Date());
+  }
   return {
     ok: true,
     status: "send_started",
@@ -2663,7 +2946,7 @@ function shouldCarryOutstandingSpecificFeeReplyV15_(replyText, originalInboundTe
     (typeof isPunctuationCorrectionFragment_ === "function" && isPunctuationCorrectionFragment_(currentInboundText));
 }
 
-function getPendingSmsStaleReason_(outboxRow) {
+function getPendingSmsStaleReason_(outboxRow, decisionCapture) {
   if (isOwnerVideoProbeRowV20_(outboxRow)) return ownerVideoProbeStaleReasonV20_(outboxRow, false);
   var phone = normalizePhone_(outboxRow[4]);
   var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);
@@ -2676,7 +2959,11 @@ function getPendingSmsStaleReason_(outboxRow) {
       phone: phone, message_id: messageId, request_id: String(outboxRow[2] || ""), reply_text: String(outboxRow[5] || "")
     });
     if (!hasValidVideoFollowupSpeechProofV21_(videoBody, videoMetadata)) return "Personalized follow-up eligibility temporarily unavailable";
-    var videoEligibility = checkVideoFollowupEligibilityV19_(videoBody, { ignoreOwnKey: true });
+    if (decisionCapture) decisionCapture.audited = videoMetadata.audit_contract === "followup-decision-v1";
+    var videoEligibility = checkVideoFollowupEligibilityV19_(videoBody, {
+      ignoreOwnKey: true, captureDecision: !!(decisionCapture && decisionCapture.audited)
+    });
+    if (decisionCapture) decisionCapture.eligibility = videoEligibility;
     if (videoEligibility.retryable) return "Personalized follow-up eligibility temporarily unavailable";
     return videoEligibility.eligible ? "" : videoEligibility.reason;
   }

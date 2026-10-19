@@ -9,17 +9,21 @@ import hashlib
 import ipaddress
 import json
 import math
+import os
+from pathlib import Path
 import re
+import subprocess
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlencode, urlsplit
 
 import requests
+import video_followup_speech_guard as speech_guard
 
 from video_followup import Conflict, SCRIPT_VERSION, iso, normalize_name, utcnow, valid_name
 from video_followup_provider import (
-    MAX_API_BYTES, REQUEST_TIMEOUT, SubmissionUncertain, VideoProviderError, _public_addresses,
+    MAX_API_BYTES, REQUEST_TIMEOUT, SubmissionUncertain, VideoProviderError, _public_addresses, _ffmpeg_executable,
 )
 from video_followup_audio_guard import (
     GUARD_VERSION, inspect_reference, inspect_greeting, safe_acoustic_failure_diagnostics,
@@ -70,6 +74,10 @@ BOUNDED_PAD_GENERATOR_PROFILE = "clean_body_bounded_pad_v1"
 CLEAN_BODY_REFERENCE_SHA256 = "b6a19ab1886102f471aa06ccb2e0347120c22498321f852a46b8b49efd707e3d"
 CLEAN_BODY_REFERENCE_KEY = "assets/voice-references/" + CLEAN_BODY_REFERENCE_SHA256 + "/name-free-recording.wav"
 MAX_BYTES = 25 * 1024 * 1024
+EVIDENCE_VERSION = "same-take-evidence-v1"
+EVIDENCE_CONTRACT = "same-take-evidence-required-v1"
+EVIDENCE_FIELDS = ("evidence_contract", "evidence_version", "evidence_sha256")
+_RUNTIME_CACHE = {}
 _REQUEST_ID = re.compile(r"[a-zA-Z0-9-]{16,64}")
 _PIPELINE_ID = re.compile(r"same-take-[a-f0-9]{32}")
 _PREPARATION_FAILURE_CODES = frozenset({
@@ -126,6 +134,228 @@ def _digest_json(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _speech_configuration(method):
+    """Materialize the already-approved digest chain, never a new matching policy."""
+    s = speech_guard
+    recognition = {"policy": s.POLICY_VERSION, "model": s.MODEL_MANIFEST,
+        "packages": s.PACKAGE_VERSIONS, "decoding": s.DECODING, "compute_type": "int8",
+        "cpu_threads": 1, "num_workers": 1, "minimum_logprob": -1.0, "maximum_no_speech": 0.6,
+        "preprocessing": s.ASR_PREPROCESSING, "matching_rule": "whole-greeting-pinned-spelling-groups-v1",
+        "equivalent_name_groups": s.SPELLING_EQUIVALENCE_GROUPS}
+    reviewed = {"policy": s.PRONUNCIATION_POLICY_VERSION, "recognition_config_sha256": s.CONFIG_SHA256,
+        "matching_rule": "whole-greeting-pinned-pronunciation-groups-v1",
+        "equivalent_name_groups": s.PRONUNCIATION_EQUIVALENCE_GROUPS}
+    general = {"policy": s.GENERAL_PRONUNCIATION_POLICY_VERSION,
+        "recognition_config_sha256": s.CONFIG_SHA256,
+        "reviewed_matching_config_sha256": s.PRONUNCIATION_CONFIG_SHA256,
+        "lexicon_manifest": s.GENERAL_PRONUNCIATION_LEXICON_MANIFEST,
+        "matching_config": s.GENERAL_PRONUNCIATION_MATCHING_CONFIG}
+    candidates = [(recognition, s.CONFIG_SHA256), (reviewed, s.PRONUNCIATION_CONFIG_SHA256),
+        (general, s.GENERAL_PRONUNCIATION_CONFIG_SHA256),
+        (s.REVIEWED_VARIANT_CONFIG, s.REVIEWED_VARIANT_CONFIG_SHA256)]
+    policy = PLANNED_VERIFICATION_POLICIES[method]
+    chain = []
+    for config, expected in candidates:
+        if _digest_json(config) != expected:
+            raise SpeechGuardError("speech_guard_output_invalid")
+        chain.append({"config": config, "sha256": expected})
+        if config["policy"] == policy:
+            break
+    if chain[-1]["config"]["policy"] != policy:
+        raise SpeechGuardError("speech_guard_output_invalid")
+    return json.loads(json.dumps({"policy_version": policy,
+        "config_sha256": chain[-1]["sha256"], "configuration_chain": chain,
+        "lexicon_manifest": s.GENERAL_PRONUNCIATION_LEXICON_MANIFEST if len(chain) >= 3 else None}))
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+# This probe imports metadata, not the recognizer or application. Hash actual
+# installed files, not RECORD claims; inference remains solely in speech_guard.
+_RUNTIME_PROBE = r'''
+import hashlib, importlib.metadata, json, pathlib, platform, sys
+expected = json.loads(sys.stdin.read())
+versions, inventory, guards, total = {}, [], {}, 0
+def guard(path):
+    st = path.stat()
+    guards[str(path)] = [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode]
+for name in sorted(expected):
+    dist = importlib.metadata.distribution(name)
+    versions[name] = dist.version
+    if dist.version != expected[name] or not dist.files:
+        raise ValueError("dependency mismatch")
+    for entry in sorted(dist.files, key=str):
+        if str(entry).endswith((".pyc", ".pyo")) or "__pycache__" in entry.parts:
+            continue
+        path = pathlib.Path(dist.locate_file(entry)).resolve(strict=True)
+        if not path.is_file():
+            raise ValueError("package file missing")
+        size = path.stat().st_size
+        total += size
+        if total > 1073741824 or len(inventory) >= 20000:
+            raise ValueError("inventory bound")
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1048576), b""):
+                h.update(chunk)
+        inventory.append([name, str(entry), size, h.hexdigest()])
+        guard(path)
+        guard(path.parent)
+python = pathlib.Path(sys.executable).resolve(strict=True)
+guard(python)
+print(json.dumps({"python": {"path": sys.executable, "realpath": str(python),
+    "sha256": hashlib.sha256(python.read_bytes()).hexdigest(), "version": platform.python_version()},
+    "platform": {"system": platform.system(), "machine": platform.machine()},
+    "packages": versions, "package_files_sha256": hashlib.sha256(json.dumps(inventory,
+    sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    "package_file_count": len(inventory), "package_file_bytes": total, "file_guards": guards}))
+'''
+
+
+def _stat_identity(path):
+    st = Path(path).stat()
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode]
+
+
+def _decoder_linkage(ffmpeg, system):
+    if system != "Linux":
+        return {"mode": "reported-runtime-versions-only", "linux_parity_claim": False}, {}
+    result = subprocess.run(["/usr/bin/ldd", ffmpeg], capture_output=True, timeout=10, check=False)
+    if len(result.stdout) + len(result.stderr) > 65536:
+        raise ValueError()
+    raw = result.stdout + result.stderr
+    report = raw.decode("utf-8", errors="strict")
+    stable_report = "\n".join(sorted(" ".join(re.sub(r"\(0x[0-9a-fA-F]+\)",
+        "(address omitted)", line).split()) for line in report.splitlines() if line.strip()))
+    report_sha256 = hashlib.sha256(stable_report.encode()).hexdigest()
+    if "not found" in report:
+        raise ValueError()
+    if report.strip() in {"not a dynamic executable", "statically linked"}:
+        return {"mode": "linux-static-executable", "report_sha256": report_sha256}, {}
+    paths = sorted(set(re.findall(r"(?:^|\s)(/[^\s]+)", report)))
+    if result.returncode or not 1 <= len(paths) <= 256:
+        raise ValueError()
+    files, guards, total = [], {}, 0
+    for path in paths:
+        resolved = str(Path(path).resolve(strict=True))
+        before = _stat_identity(resolved)
+        if not Path(resolved).is_file():
+            raise ValueError()
+        total += before[2]
+        if total > 512 * 1024 * 1024:
+            raise ValueError()
+        files.append({"path": path, "realpath": resolved, "sha256": _file_sha256(resolved)})
+        if _stat_identity(resolved) != before:
+            raise ValueError()
+        guards[resolved] = before
+        guards[path] = _stat_identity(path)
+        guards[str(Path(path).parent)] = _stat_identity(Path(path).parent)
+    return {"mode": "linux-observed-shared-libraries-v1", "files": files,
+            "report_sha256": report_sha256}, guards
+
+
+def _runtime_identity(paths):
+    """Observe the exact selected decoder and isolated speech installation."""
+    try:
+        ffmpeg = str(Path(_ffmpeg_executable()).resolve(strict=True))
+        key = (str(paths["python"]), str(paths["model_dir"]), ffmpeg)
+        cached = _RUNTIME_CACHE.get(key)
+        if cached and all(_stat_identity(path) == identity for path, identity in cached[1].items()):
+            return json.loads(json.dumps(cached[0]))
+        speech_guard.verify_model_assets(paths["model_dir"])
+        result = subprocess.run([paths["python"], "-I", "-B", "-c", _RUNTIME_PROBE],
+            input=json.dumps(speech_guard.PACKAGE_VERSIONS).encode(), capture_output=True,
+            timeout=30, check=True, env=speech_guard._environment(paths["model_dir"]))
+        if len(result.stdout) > 4 * 1024 * 1024 or len(result.stderr) > 65536:
+            raise ValueError()
+        recognizer = json.loads(result.stdout)
+        if (not isinstance(recognizer, dict) or recognizer.get("packages") != speech_guard.PACKAGE_VERSIONS
+                or recognizer["python"]["sha256"] != _file_sha256(paths["python"])
+                or not re.fullmatch(r"[a-f0-9]{64}", recognizer["package_files_sha256"])
+                or type(recognizer["package_file_count"]) is not int or recognizer["package_file_count"] < 1):
+            raise ValueError()
+        guards = recognizer.pop("file_guards")
+        if not isinstance(guards, dict) or not 1 <= len(guards) <= 40000:
+            raise ValueError()
+        for path, identity in guards.items():
+            if not Path(path).is_absolute() or identity != _stat_identity(path):
+                raise ValueError()
+        for path in [paths["python"], ffmpeg, str(Path(paths["model_dir"]) / "manifest.json"),
+                     *(str(Path(paths["model_dir"]) / name) for name in speech_guard.MODEL_HASHES)]:
+            guards[path] = _stat_identity(path)
+        linkage, library_guards = _decoder_linkage(ffmpeg, recognizer.get("platform", {}).get("system"))
+        guards.update(library_guards)
+        version = subprocess.run([ffmpeg, "-version"], capture_output=True, timeout=10, check=True)
+        if len(version.stdout) > 32768 or len(version.stderr) > 32768:
+            raise ValueError()
+        version_text = version.stdout.decode("utf-8", errors="strict")
+        if not version_text.startswith("ffmpeg version "):
+            raise ValueError()
+        observed = {"recognizer": recognizer,
+            "model": {"path": str(Path(paths["model_dir"]).resolve(strict=True)),
+                "manifest": speech_guard.MODEL_MANIFEST,
+                "manifest_sha256": speech_guard.MODEL_MANIFEST_SHA256},
+            "decoder": {"path": ffmpeg, "sha256": _file_sha256(ffmpeg),
+                "version_output": version_text, "version_sha256": hashlib.sha256(version.stdout).hexdigest(),
+                "linkage": linkage,
+                "fingerprint_scope": "executable-build-runtime-versions-and-observed-linux-library-bytes"}}
+        if not all(_stat_identity(path) == identity for path, identity in guards.items()):
+            raise ValueError()
+        _RUNTIME_CACHE.clear()
+        _RUNTIME_CACHE[key] = (observed, guards)
+        return json.loads(json.dumps(observed))
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        raise SpeechGuardError("speech_guard_dependency_mismatch") from None
+
+
+def _source_identity():
+    root = Path(__file__).resolve().parent
+    revision = os.getenv("RENDER_GIT_COMMIT", "")
+    if not re.fullmatch(r"[a-f0-9]{40}", revision):
+        try:
+            revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
+                timeout=5, check=True).stdout.decode().strip()
+        except (OSError, UnicodeError, subprocess.SubprocessError):
+            raise SpeechGuardError("speech_guard_dependency_mismatch") from None
+    if not re.fullmatch(r"[a-f0-9]{40}", revision):
+        raise SpeechGuardError("speech_guard_dependency_mismatch")
+    files = ("video_followup_same_take.py", "video_followup_speech_guard.py",
+        "video_followup_pronunciation.py", "video_followup_pronunciation_data.py",
+        "video_followup_audio_lineage.py", "video_followup_same_take_media.py",
+        "video_followup_provider.py", "video_followup_audio_guard.py", "video_followup_greeting_normalization.py")
+    return {"reported_revision": revision, "files_sha256": {name: _file_sha256(root / name) for name in files},
+        "revision_scope": "reported-release-revision-with-observed-file-hashes"}
+
+
+def _capture_evidence_descriptor(state, paths):
+    if state["verification_method"] in {GENERAL_PRONUNCIATION_VERIFICATION_METHOD, REVIEWED_VARIANT_VERIFICATION_METHOD}:
+        lexicon = Path(__file__).resolve().parent / "data/video_pronunciation/unique-phones-v1.json.gz"
+        if _file_sha256(lexicon) != speech_guard.GENERAL_PRONUNCIATION_LEXICON_MANIFEST["gzip_sha256"]:
+            raise SpeechGuardError("speech_guard_pronunciation_data_invalid")
+    return {"version": EVIDENCE_VERSION,
+        "identity": {key: state[key] for key in ("id", "job_key", "first_name", "source_sha256", "script_version")},
+        "verification": _saved_verification_profile(state), "generator": _saved_generator_profile(state),
+        "speech": _speech_configuration(state["verification_method"]),
+        "runtime": _runtime_identity(paths), "source": _source_identity()}
+
+
+def _evidence_binding(state):
+    present = set(EVIDENCE_FIELDS).intersection(state)
+    if not present:
+        return {}
+    if (len(present) != len(EVIDENCE_FIELDS) or state.get("evidence_contract") != EVIDENCE_CONTRACT
+            or state.get("evidence_version") != EVIDENCE_VERSION
+            or not re.fullmatch(r"[a-f0-9]{64}", str(state.get("evidence_sha256", "")))):
+        raise SpeechGuardError("speech_guard_output_invalid")
+    return {key: state[key] for key in EVIDENCE_FIELDS}
+
+
 def _verification_profile(method):
     if method == LEGACY_VERIFICATION_METHOD:
         config = {"method": method}
@@ -162,6 +392,11 @@ def _speech_policy_kwargs(state):
 
 def _validate_pipeline_speech_proof(state, proof, **bindings):
     if not validate_speech_proof(proof, first_name=state["first_name"], **bindings):
+        return False
+    evidence = _evidence_binding(state)
+    if any(proof.get(key) != value for key, value in evidence.items()):
+        return False
+    if not evidence and any(key in proof for key in EVIDENCE_FIELDS):
         return False
     method = _saved_verification_profile(state)["verification_method"]
     if method in PLANNED_VERIFICATION_PROFILES:
@@ -390,13 +625,15 @@ class SameTakeVideoProvider:
                 and state.get("verification_method") not in {
                     GENERAL_PRONUNCIATION_VERIFICATION_METHOD, REVIEWED_VARIANT_VERIFICATION_METHOD}):
             raise VideoProviderError("pipeline_mismatch", "Normalized greeting verification identity changed.")
+        self._read_evidence(state)
         return state, version
 
     def _update(self, pipeline_id, fields, expected_stage=None, *, preparation_attempt=None):
         immutable = {"id", "job_key", "first_name", "source_sha256", "script_version",
                 "reference_sha256", "render_config_sha256", "reserved_cents", "greeting_script",
                 "generator_profile", "generator_config", "tts_reference_key", "tts_reference_sha256",
-                "verification_method", "verification_config", "verification_config_sha256", "audio_plan_sha256"}
+                "verification_method", "verification_config", "verification_config_sha256", "audio_plan_sha256",
+                *EVIDENCE_FIELDS}
         if set(fields).intersection(immutable):
             raise VideoProviderError("pipeline_mismatch", "Pipeline identity is immutable.")
         saved, _ = self._read(pipeline_id)
@@ -513,7 +750,7 @@ class SameTakeVideoProvider:
         # Local verification policy is independent of the paid render identity.
         # Existing requests above are reused; a missing verifier blocks new spend.
         try:
-            preflight_speech_guard()
+            speech_paths = preflight_speech_guard()
         except SpeechGuardError as error:
             if not is_transient_speech_failure(error):
                 raise
@@ -533,6 +770,14 @@ class SameTakeVideoProvider:
                  "generator_profile": profile["name"], "generator_config": profile["config"],
                  "tts_reference_key": profile["reference_key"], "tts_reference_sha256": profile["reference_sha256"],
                  "reserved_cents": RESERVATION_CENTS, "greeting_script": f"Hey {first_name}!", **verification}
+        if self.verification_method in PLANNED_VERIFICATION_PROFILES:
+            descriptor = _capture_evidence_descriptor(state, speech_paths)
+            content = json.dumps(descriptor, sort_keys=True, separators=(",", ":")).encode()
+            if len(content) > 64000:
+                raise SpeechGuardError("speech_guard_output_invalid")
+            self._asset(pipeline_id, "evidence.json", content, "application/json")
+            state.update(evidence_contract=EVIDENCE_CONTRACT, evidence_version=EVIDENCE_VERSION,
+                         evidence_sha256=hashlib.sha256(content).hexdigest())
         # The observed minimum TTS billing block is 1,000 characters (2 cents).
         if len(state["greeting_script"]) > 1000:
             raise VideoProviderError("tts_exceeds_budget", "Greeting exceeds the approved narration billing block.")
@@ -573,6 +818,40 @@ class SameTakeVideoProvider:
                 raise VideoProviderError("asset_conflict", "Prepared greeting asset changed.")
         return key
 
+    def _read_evidence(self, state):
+        binding = _evidence_binding(state)
+        content, _ = self.store.objects.read(f"assets/{state['id']}/evidence.json")
+        if content is None and not binding:
+            return None
+        try:
+            if (not binding or not isinstance(content, bytes) or not 0 < len(content) <= 64000
+                    or hashlib.sha256(content).hexdigest() != binding["evidence_sha256"]):
+                raise ValueError()
+            descriptor = json.loads(content)
+            expected = {"version": EVIDENCE_VERSION,
+                "identity": {key: state[key] for key in ("id", "job_key", "first_name", "source_sha256", "script_version")},
+                "verification": _saved_verification_profile(state), "generator": _saved_generator_profile(state),
+                "speech": _speech_configuration(state["verification_method"])}
+            expected = json.loads(json.dumps(expected))
+            if (_digest_json(descriptor) != binding["evidence_sha256"]
+                    or set(descriptor) != {*expected, "runtime", "source"}
+                    or any(descriptor.get(key) != value for key, value in expected.items())
+                    or not isinstance(descriptor["runtime"], dict) or not isinstance(descriptor["source"], dict)):
+                raise ValueError()
+            return descriptor
+        except (ValueError, TypeError, KeyError, UnicodeError):
+            raise SpeechGuardError("speech_guard_output_invalid") from None
+
+    def _evidence_runtime(self, state):
+        descriptor = self._read_evidence(state)
+        if descriptor is None:
+            return {}
+        actual = _runtime_identity(speech_guard._speech_paths())
+        if (actual != descriptor["runtime"]
+                or _source_identity().get("files_sha256") != descriptor["source"].get("files_sha256")):
+            raise SpeechGuardError("speech_guard_dependency_mismatch")
+        return {"ffmpeg": actual["decoder"]["path"]}
+
     def _read_audio_plan(self, state):
         """Load only create-once, identity-bound assets; never regenerate a plan."""
         key = f"assets/{state['id']}/prepared-plan.json"
@@ -592,6 +871,11 @@ class SameTakeVideoProvider:
                     or bundle.get("first_name") != state["first_name"]
                     or bundle.get("verification_config_sha256") != state["verification_config_sha256"]):
                 raise ValueError()
+            evidence = _evidence_binding(state)
+            if (any(bundle.get(key) != value for key, value in evidence.items())
+                    or (not evidence and any(key in bundle for key in EVIDENCE_FIELDS))):
+                raise ValueError()
+            self._read_evidence(state)
             metadata, manifest = bundle["metadata"], bundle["manifest"]
             duration = bundle["narration_duration"]
             if (type(duration) not in {int, float} or not math.isfinite(duration) or not 0 < duration <= 3
@@ -650,7 +934,7 @@ class SameTakeVideoProvider:
 
     def _freeze_audio_plan(self, state, inputs, audio_qa, duration):
         plan = _lineage_runtime().prepare_audio_plan(self._master(), inputs["greeting_audio_bytes"],
-            inputs["metadata"], first_name=state["first_name"])
+            inputs["metadata"], first_name=state["first_name"], **self._evidence_runtime(state))
         for filename, content, mime in (
                 ("input.mp4", inputs["video_bytes"], "video/mp4"),
                 ("input.wav", inputs["audio_bytes"], "audio/wav"),
@@ -661,7 +945,7 @@ class SameTakeVideoProvider:
         bundle = {"version": "frozen-same-take-audio-plan-v1", "pipeline_id": state["id"],
             "first_name": state["first_name"], "verification_config_sha256": state["verification_config_sha256"],
             "metadata": inputs["metadata"], "audio_qa": audio_qa, "narration_duration": duration,
-            "manifest": plan["manifest"], "manifest_sha256": plan["manifest_sha256"]}
+            "manifest": plan["manifest"], "manifest_sha256": plan["manifest_sha256"], **_evidence_binding(state)}
         self._asset(state["id"], "prepared-plan.json",
             json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode(), "application/json")
         return self._read_audio_plan(state)
@@ -688,6 +972,7 @@ class SameTakeVideoProvider:
         planned = _saved_verification_profile(state)["verification_method"] in PLANNED_VERIFICATION_PROFILES
         raw_speech_proof = None
         try:
+            self._evidence_runtime(state)
             cached = self._read_audio_plan(state) if planned else None
             if cached:
                 inputs = cached["inputs"]
@@ -748,8 +1033,11 @@ class SameTakeVideoProvider:
                     state = {**state, "audio_plan_sha256": cached["sha256"]}
                     version = self.store.write("same-take/" + pipeline_id, state, version)
             failure_stage = "speech_screen"
+            self._evidence_runtime(state)
             checked_audio = inputs["checked_audio_bytes"] if planned else inputs["greeting_audio_bytes"]
             speech_proof = verify_greeting_words(checked_audio, state["first_name"], **_speech_policy_kwargs(state))
+            self._evidence_runtime(state)
+            speech_proof = {**speech_proof, **_evidence_binding(state)}
             if not _validate_pipeline_speech_proof(state, speech_proof,
                     audio_sha256=hashlib.sha256(checked_audio).hexdigest()):
                 raise SpeechGuardError("speech_guard_output_invalid")
@@ -904,7 +1192,8 @@ class SameTakeVideoProvider:
         try:
             lineage = _lineage_runtime().verify_final_audio(media_bytes, cached["inputs"]["planned_audio_bytes"],
                 manifest, proof, cached["inputs"]["metadata"], first_name=state["first_name"],
-                expected_manifest_sha256=cached["bundle"]["manifest_sha256"])
+                expected_manifest_sha256=cached["bundle"]["manifest_sha256"], **self._evidence_runtime(state))
+            self._evidence_runtime(state)
         except VideoProviderError:
             # Deterministic lineage rejection is terminal, never a retryable
             # recognizer outage or permission to publish the provider's audio.
@@ -930,9 +1219,11 @@ class SameTakeVideoProvider:
             greeting = cached["inputs"]["greeting_audio_bytes"]
             proof = state.get("greeting_speech_proof")
             try:
+                self._evidence_runtime(state)
                 result = self.compositor(self._master(), self._download_fal(state["media_url"]), greeting,
                     state["metadata"], first_name=state["first_name"],
                     planned_audio_bytes=cached["inputs"]["planned_audio_bytes"])
+                self._evidence_runtime(state)
             except VideoProviderError as error:
                 if error.code.startswith("audio_lineage_"):
                     raise SpeechGuardError("speech_guard_media_invalid") from None

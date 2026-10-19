@@ -33,6 +33,7 @@ def ready_video():
             row=12, stable_id="verified-listing-12", phone=helpers.PHONE,
             first_name="Jim", initial_sent_at="2026-10-13T10:00:00Z",
         )
+        context.update(video.initial_receipt_binding(context, helpers.initial_receipt(context)))
         config = video.Config({
             "VIDEO_FOLLOWUP_ENABLED": "true",
             "VIDEO_FOLLOWUP_GENERATION_ENABLED": "true",

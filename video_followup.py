@@ -30,8 +30,12 @@ MAX_MEDIA_BYTES = 30 * 1024 * 1024
 LOCAL_VERIFICATION_MAX_ATTEMPTS = 3
 LOCAL_VERIFICATION_RETRY_SECONDS = 60
 _VERIFICATION_IDENTITY_FIELDS = ("verification_method", "verification_config_sha256")
+_RECEIPT_IDENTITY_FIELDS = ("initial_receipt", "initial_receipt_key")
+INITIAL_RECEIPT_SCHEMA = "initial-sms-receipt-v1"
+GENERATION_OWNER_SCHEMA = "initial-sms-generation-owner-v1"
+MAX_RECEIPT_OWNERSHIP_JOBS = 10000
 _JOB_IDENTITY_FIELDS = ("id", "followup_key", "provider_id", "first_name", "phone",
-                        "stable_id", "initial_sent_at", "script_version") + _VERIFICATION_IDENTITY_FIELDS
+                        "stable_id", "initial_sent_at", "script_version") + _VERIFICATION_IDENTITY_FIELDS + _RECEIPT_IDENTITY_FIELDS
 _ACTIVE_VERIFICATION_FAILURE_FIELDS = (
     "failure_stage", "underlying_code", "exception_type", "failure_at", "reason", "speech_diagnostics",
     "finalization_retry_at", "ready_audit_retry_at", "preflight_retry_at", "verification_retry_exhausted",
@@ -42,6 +46,10 @@ _SERVICE_LOCK = threading.Lock()
 
 class Conflict(Exception):
     pass
+
+
+class InitialReceiptHold(ValueError):
+    """No new paid work without unambiguous ownership of an initial SMS."""
 
 
 def iso(value):
@@ -106,7 +114,40 @@ def _verification_binding(value):
     return expected
 
 
-def snapshot(*, row, stable_id, phone, first_name, initial_sent_at):
+def initial_receipt_binding(context, receipt):
+    fields = {"schema", "request_id", "message_id", "phone", "stable_id", "created_at",
+              "send_started_at", "sent_at", "status"}
+    if not isinstance(receipt, dict) or set(receipt) != fields:
+        raise InitialReceiptHold("Initial receipt descriptor is missing or invalid")
+    message_id = receipt.get("message_id")
+    match = re.fullmatch(r"initial-([0-9]+)-[0-9a-f]{16}", message_id or "")
+    if (receipt.get("schema") != INITIAL_RECEIPT_SCHEMA or receipt.get("status") != "sent"
+            or not match or int(match[1]) < 2
+            or receipt.get("request_id") not in {"scheduler-" + message_id, "render-" + message_id}
+            or receipt.get("phone") != canonical_phone(context["phone"])
+            or receipt.get("stable_id") != context["stable_id"]):
+        raise InitialReceiptHold("Initial receipt identity does not match the recipient")
+    try:
+        times = {field: iso(receipt[field]) for field in ("created_at", "send_started_at", "sent_at")}
+        initial = iso(context["initial_sent_at"])
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise InitialReceiptHold("Initial receipt timestamps are invalid") from exc
+    if (any(receipt[field] != value for field, value in times.items())
+            or not times["created_at"] <= times["send_started_at"] <= initial <= times["sent_at"]):
+        raise InitialReceiptHold("Initial receipt does not enclose this initial-send episode")
+    expected_key = hashlib.sha256(json.dumps(
+        [context["stable_id"], canonical_phone(context["phone"]), initial], separators=(",", ":")).encode()).hexdigest()
+    if (context.get("followup_key") != expected_key
+            or context.get("message_id") != "followup-video-" + expected_key[:24]
+            or context.get("request_id") != "scheduler-followup-video-" + expected_key[:24]):
+        raise InitialReceiptHold("Follow-up identity does not match its receipt-bound episode")
+    receipt_key = hashlib.sha256(json.dumps(
+        [receipt["stable_id"], receipt["phone"], receipt["request_id"], message_id],
+        separators=(",", ":")).encode()).hexdigest()
+    return {"initial_receipt": dict(receipt), "initial_receipt_key": receipt_key}
+
+
+def snapshot(*, row, stable_id, phone, first_name, initial_sent_at, initial_receipt=None):
     stable_id = str(stable_id or "").strip()
     if not stable_id or int(row) < 2:
         raise ValueError("A verified stable listing identity is required")
@@ -114,10 +155,13 @@ def snapshot(*, row, stable_id, phone, first_name, initial_sent_at):
     initial = iso(initial_sent_at)
     # The row may move. Copy or script changes must not create a second follow-up.
     key = hashlib.sha256(json.dumps([stable_id, phone, initial], separators=(",", ":")).encode()).hexdigest()
-    return dict(row=int(row), crm_row=int(row), stable_id=stable_id, phone=phone,
-                first_name=normalize_name(first_name), initial_sent_at=initial,
-                followup_key=key, message_id="followup-video-" + key[:24],
-                request_id="scheduler-followup-video-" + key[:24])
+    context = dict(row=int(row), crm_row=int(row), stable_id=stable_id, phone=phone,
+                   first_name=normalize_name(first_name), initial_sent_at=initial,
+                   followup_key=key, message_id="followup-video-" + key[:24],
+                   request_id="scheduler-followup-video-" + key[:24])
+    if initial_receipt is not None:
+        context.update(initial_receipt_binding(context, initial_receipt))
+    return context
 
 
 class Config:
@@ -223,9 +267,14 @@ class GCSObjects:
         if response.status_code not in {204, 404, 412}:
             response.raise_for_status()
 
-    def list(self, prefix, limit=50):
+    def list(self, prefix, limit=50, max_items=None):
         names, page_token = [], None
+        seen_tokens = set()
+        pages = 0
         while True:
+            pages += 1
+            if max_items is not None and pages > math.ceil(max_items / limit) + 1:
+                raise InitialReceiptHold("Job listing exceeded its complete-scan page bound")
             params = {"prefix": "video-followup/" + prefix, "maxResults": limit}
             if page_token:
                 params["pageToken"] = page_token
@@ -234,9 +283,14 @@ class GCSObjects:
             response.raise_for_status()
             payload = response.json()
             names.extend(o["name"].removeprefix("video-followup/") for o in payload.get("items", []))
+            if max_items is not None and len(names) > max_items:
+                raise InitialReceiptHold("Job listing exceeded its complete-scan item bound")
             page_token = payload.get("nextPageToken")
             if not page_token:
                 return names
+            if page_token in seen_tokens:
+                raise InitialReceiptHold("Job listing pagination did not complete")
+            seen_tokens.add(page_token)
 
 
 class Store:
@@ -295,12 +349,102 @@ class Store:
                 return False
         return True
 
+    def _assert_no_receipt_collision(self, context):
+        receipt = context["initial_receipt"]
+        # The complete legacy inventory is necessary: terminal jobs and missing
+        # active indexes still own their old attempts. Never migrate those jobs.
+        paths = self.objects.list("jobs/", limit=1000, max_items=MAX_RECEIPT_OWNERSHIP_JOBS)
+        if not isinstance(paths, list) or len(paths) > MAX_RECEIPT_OWNERSHIP_JOBS or len(paths) != len(set(paths)):
+            raise InitialReceiptHold("Legacy job inventory is incomplete or exceeds the scan bound")
+        for path in paths:
+            if not isinstance(path, str) or not re.fullmatch(r"jobs/[A-Za-z0-9_-]{1,200}", path):
+                raise InitialReceiptHold("Legacy job inventory contains an invalid identity")
+            old, _ = self.read(path)
+            if not isinstance(old, dict):
+                raise InitialReceiptHold("Legacy job inventory is incomplete")
+            if path == "jobs/" + context["followup_key"]:
+                continue
+            old_receipt = old.get("initial_receipt")
+            if isinstance(old_receipt, dict) and (
+                    old_receipt.get("request_id") == receipt["request_id"]
+                    or old_receipt.get("message_id") == receipt["message_id"]):
+                raise InitialReceiptHold("Initial receipt already belongs to another job")
+            try:
+                old_phone = canonical_phone(old.get("phone", old.get("owner_phone")))
+            except (TypeError, ValueError) as exc:
+                raise InitialReceiptHold("Legacy job recipient identity is ambiguous") from exc
+            if old_phone != context["phone"]:
+                continue
+            if not str(old.get("stable_id") or "").strip():
+                raise InitialReceiptHold("Legacy job listing identity is ambiguous")
+            if old.get("stable_id") != context["stable_id"]:
+                continue
+            try:
+                initial = iso(old["initial_sent_at"])
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise InitialReceiptHold("Legacy episode identity is ambiguous") from exc
+            if receipt["send_started_at"] <= initial <= receipt["sent_at"]:
+                raise InitialReceiptHold("Legacy timestamp alias already owns this initial attempt")
+
+    def _owner_matches(self, owner, context):
+        return (isinstance(owner, dict) and owner.get("schema") == GENERATION_OWNER_SCHEMA
+                and owner.get("followup_key") == context.get("followup_key")
+                and all(owner.get(field) == context.get(field) for field in _RECEIPT_IDENTITY_FIELDS))
+
+    def generation_owned(self, job, *, check_collisions=True):
+        try:
+            binding = initial_receipt_binding(job, job.get("initial_receipt"))
+            if binding["initial_receipt_key"] != job.get("initial_receipt_key"):
+                return False
+            owner, _ = self.read("generation-owners/" + binding["initial_receipt_key"])
+            if not self._owner_matches(owner, job):
+                return False
+            if check_collisions:
+                self._assert_no_receipt_collision(job)
+            return True
+        except (InitialReceiptHold, KeyError, TypeError, ValueError):
+            return False
+
+    def _claim_generation(self, context):
+        binding = initial_receipt_binding(context, context.get("initial_receipt"))
+        if context.get("initial_receipt_key") != binding["initial_receipt_key"]:
+            raise InitialReceiptHold("Initial receipt ownership digest is invalid")
+        self._assert_no_receipt_collision(context)
+        path = "generation-owners/" + binding["initial_receipt_key"]
+        owner, generation = self.read(path)
+        if not generation:
+            candidate = {"schema": GENERATION_OWNER_SCHEMA, "followup_key": context["followup_key"],
+                         **binding, "created_at": iso(utcnow())}
+            try:
+                self.write(path, candidate, 0)
+                owner = candidate
+            except Conflict:
+                owner, _ = self.read(path)
+        if not self._owner_matches(owner, context):
+            raise InitialReceiptHold("Initial receipt ownership is already frozen")
+
     def prepare(self, context):
         context = {**context, "first_name": normalize_name(context["first_name"])}
         key = context["followup_key"]
-        job = self.mutate("jobs/" + key, lambda old: None if old else {
-            **context, "id": secrets.token_hex(16), "status": "prepared",
-            "script_version": SCRIPT_VERSION, "created_at": iso(utcnow())})
+        if any(field in context for field in _RECEIPT_IDENTITY_FIELDS):
+            binding = initial_receipt_binding(context, context.get("initial_receipt"))
+            if any(context.get(field) != value for field, value in binding.items()):
+                raise InitialReceiptHold("Supplied receipt ownership is invalid")
+        existing, _ = self.read("jobs/" + key)
+        if existing is not None:
+            if not isinstance(existing, dict) or not existing.get("id") or not existing.get("status"):
+                raise InitialReceiptHold("Existing job identity is incomplete")
+            if "initial_receipt" in existing and "initial_receipt" in context and any(
+                    existing.get(field) != context.get(field) for field in _RECEIPT_IDENTITY_FIELDS):
+                raise InitialReceiptHold("Supplied initial receipt differs from the existing job")
+            # No retroactive identity attachment or job reopening. Preserve the
+            # existing free ready-audit/accounting index behavior below.
+            job = existing
+        else:
+            self._claim_generation(context)
+            job = self.mutate("jobs/" + key, lambda old: None if old else {
+                **context, "id": secrets.token_hex(16), "status": "prepared",
+                "script_version": SCRIPT_VERSION, "created_at": iso(utcnow())})
         if (job["status"] in {"prepared", "submitted", "submitting", "processing"}
                 or (job["status"] == "ready" and not job.get("variant") and not self.has_speech_proof(job))):
             # Legacy ready jobs need only a free audit, never another render.
@@ -454,14 +598,37 @@ class Eligibility:
         try:
             body = {k: job[k] for k in ("crm_row", "row", "phone", "stable_id", "first_name", "initial_sent_at", "followup_key", "message_id", "request_id")}
             body.update(action="check_video_followup_eligibility", token=self.token, video_variant="video", video_job_id=job["id"])
+            if "initial_receipt" in job:
+                body["initial_receipt"] = initial_receipt_binding(job, job["initial_receipt"])["initial_receipt"]
             response = self.session.post(self.url, json=body, timeout=20)
             response.raise_for_status()
             result = response.json()
             if result.get("ok") is not True or result.get("retryable"):
                 return None
+            if "initial_receipt" in job and result.get("eligible") is True:
+                if initial_receipt_binding(job, result.get("initial_receipt"))["initial_receipt"] != job["initial_receipt"]:
+                    return None
             return result.get("eligible") is True
         except Exception:
             LOG.warning("Video eligibility check unavailable; no paid render started")
+            return None
+
+    def resolve_initial_receipt(self, context):
+        if not self.url or not self.token:
+            return None
+        try:
+            body = {key: context[key] for key in ("crm_row", "row", "phone", "stable_id", "first_name",
+                    "initial_sent_at", "followup_key", "message_id", "request_id")}
+            body.update(action="check_video_followup_eligibility", token=self.token,
+                        video_variant="text", video_job_id="")
+            response = self.session.post(self.url, json=body, timeout=20)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("ok") is not True or result.get("eligible") is not True or result.get("retryable"):
+                return None
+            return initial_receipt_binding(context, result.get("initial_receipt"))["initial_receipt"]
+        except Exception:
+            LOG.warning("Initial receipt ownership unavailable; no video job created")
             return None
 
 
@@ -650,6 +817,10 @@ class Worker:
             return
         if not self.config.accepts(job) or not self.config.generation_enabled:
             return
+        if job["status"] == "prepared" and not self.store.generation_owned(job, check_collisions=False):
+            # Legacy or colliding jobs are held without rewriting or reopening
+            # them. A receipt correction must never purchase another greeting.
+            return
         now = self.now()
         if job["status"] in {"prepared", "submitted"}:
             counter = "preflight_attempts" if job["status"] == "prepared" else "finalization_attempts"
@@ -690,6 +861,15 @@ class Worker:
             if not valid_name(job["first_name"]):
                 self.store.mutate("jobs/" + key, lambda old: {**old, "status": "failed", "reason": "Uncertain canonical first name"} if old["status"] == "prepared" else None)
                 return
+            if not self.store.generation_owned(job):
+                return
+            eligible = self.eligible(job)
+            if eligible is False:
+                self._cancel_attempt(key, job, "Recipient changed during initial receipt ownership scan")
+                return
+            if eligible is not True:
+                return
+            now = self.now()
             if not self.store.reserve(key, self.config, now):
                 # Budget/capacity can recover; the due-time text freeze wins if
                 # it has not recovered before the unchanged scheduled follow-up.
@@ -826,6 +1006,14 @@ class Service:
         metadata = {**context, "video_variant": "text", "video_job_id": ""}
         try:
             job, _ = self.store.read("jobs/" + context["followup_key"])
+            if job and "initial_receipt" in job:
+                binding = initial_receipt_binding(context, job["initial_receipt"])
+                if binding["initial_receipt_key"] != job.get("initial_receipt_key"):
+                    raise InitialReceiptHold("Stored initial receipt ownership digest is invalid")
+                if "initial_receipt" in context and context["initial_receipt"] != job["initial_receipt"]:
+                    raise InitialReceiptHold("Supplied initial receipt differs from the frozen job")
+                context.update(binding)
+                metadata.update(binding)
             if (self.audit_ready and job and job.get("status") == "ready" and not job.get("variant")
                     and not self.store.verified_video(job)):
                 try:
@@ -874,7 +1062,17 @@ def prepare_for_followup(**kwargs):
     if os.getenv("VIDEO_FOLLOWUP_ENABLED", "false").lower() != "true":
         return
     try:
-        get_service().prepare(snapshot(**kwargs))
+        context = snapshot(**kwargs)
+        config = Config()
+        if not config.accepts(context) or not valid_name(context["first_name"]):
+            return
+        eligibility = Eligibility(os.getenv("TASKER_TRANSPORT_HEALTH_URL", "").strip(),
+                                  os.getenv("SMS_CHATBOT_ALLOWED_TOKEN", "").strip())
+        receipt = eligibility.resolve_initial_receipt(context)
+        if receipt is None or ("initial_receipt" in context and context["initial_receipt"] != receipt):
+            return
+        context.update(initial_receipt_binding(context, receipt))
+        get_service().prepare(context)
     except Exception as exc:
         LOG.warning("Video preparation skipped; normal follow-up remains scheduled error_type=%s", type(exc).__name__)
 

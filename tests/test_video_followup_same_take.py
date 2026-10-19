@@ -56,9 +56,12 @@ class Objects:
     def signed_get_url(self, key, ttl_seconds=1800):
         return "https://storage.googleapis.com/private/" + key + "?signed=yes"
 
-    def list(self, prefix, limit=1000):
+    def list(self, prefix, limit=1000, max_items=None):
         with self.lock:
-            return [key for key in self.values if key.startswith(prefix)][:limit]
+            keys = [key for key in self.values if key.startswith(prefix)]
+            if max_items is not None and len(keys) > max_items:
+                raise RuntimeError("Complete inventory exceeds bound")
+            return keys
 
     def delete(self, key, version):
         with self.lock:
@@ -101,6 +104,12 @@ def world(monkeypatch):
     monkeypatch.setattr(provider, "inspect_greeting", Mock(return_value={"duration_seconds": 1.5,
         "coarse_pitch_match": True, "identity_guaranteed": False}))
     monkeypatch.setattr(provider, "preflight_speech_guard", Mock(return_value={"ready": True}))
+    monkeypatch.setattr(provider.speech_guard, "_speech_paths", Mock(return_value={"ready": True}))
+    monkeypatch.setattr(provider, "_runtime_identity", Mock(return_value={
+        "decoder": {"path": "/test/ffmpeg", "sha256": "d" * 64},
+        "recognizer": {"packages": speech.PACKAGE_VERSIONS}, "model": speech.MODEL_MANIFEST}))
+    monkeypatch.setattr(provider, "_source_identity", Mock(return_value={
+        "reported_revision": "a" * 40, "files_sha256": {"fixture.py": "b" * 64}}))
     monkeypatch.setattr(provider, "verify_greeting_words", Mock(side_effect=lambda audio, name: speech_proof(name, audio)))
     monkeypatch.setattr(provider, "verify_video_greeting_words", Mock(side_effect=
         lambda media, name, seconds: speech_proof(name, media=media)))
@@ -479,6 +488,8 @@ def test_worker_terminalizes_preparation_rejection_immediately_without_retry(wor
     service, store, *_ = world
     context = core.snapshot(row=2, stable_id="listing", phone="9542053205", first_name="Sue",
                             initial_sent_at="2026-10-14T12:00:00Z")
+    from test_video_followup import initial_receipt
+    context.update(core.initial_receipt_binding(context, initial_receipt(context)))
     config = core.Config({"VIDEO_FOLLOWUP_ENABLED": "true", "VIDEO_FOLLOWUP_GENERATION_ENABLED": "true",
         "VIDEO_FOLLOWUP_INITIALS_AFTER": "2026-10-14T00:00:00Z", "VIDEO_FOLLOWUP_TEST_PHONES": "9542053205"})
     store.prepare(context)
@@ -1407,7 +1418,7 @@ def test_both_paid_stages_disable_provider_fallback_and_retries(world, clean_ref
 @pytest.fixture
 def planned(world, monkeypatch):
     import video_followup_audio_lineage as lineage
-    def plan(master, greeting, metadata, *, first_name):
+    def plan(master, greeting, metadata, *, first_name, ffmpeg=None):
         manifest = {"lineage_version": lineage.LINEAGE_VERSION, "extraction_version": lineage.EXTRACTION_VERSION,
             "first_name": first_name, "source_sha256": provider.MASTER_SHA256,
             "preparation_sha256": provider._digest_json(metadata),
@@ -1421,7 +1432,7 @@ def planned(world, monkeypatch):
             "greeting_sample_count": 24000, "aac_track": {"codec": "aac-lc"}}
         return {"audio_bytes": b"frozen AAC", "greeting_audio_bytes": b"decoded AAC greeting",
             "manifest": manifest, "manifest_sha256": provider._digest_json(manifest)}
-    def verify(media, audio, manifest, proof, metadata, *, first_name, expected_manifest_sha256):
+    def verify(media, audio, manifest, proof, metadata, *, first_name, expected_manifest_sha256, ffmpeg=None):
         assert audio == b"frozen AAC"
         assert provider._digest_json(manifest) == expected_manifest_sha256
         assert speech.validate_speech_proof(proof, first_name=first_name, audio_sha256=manifest["checked_audio_sha256"])

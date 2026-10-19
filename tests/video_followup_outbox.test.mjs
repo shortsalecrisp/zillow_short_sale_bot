@@ -191,6 +191,8 @@ function harness({ initialProof = true } = {}) {
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
     Utilities: {
       getUuid: () => `uuid-${++sequence}`,
+      DigestAlgorithm: { SHA_256: "SHA_256" },
+      computeDigest: (_, text) => [...createHash("sha256").update(text).digest()].map(value => value > 127 ? value - 256 : value),
       formatDate: (date, timeZone) => {
         const parts = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" })
           .formatToParts(date);
@@ -1329,4 +1331,444 @@ test("guard read failures hold without changing existing legacy enqueue", () => 
     crm_row: 2, stable_id: base.stable_id, phone: base.phone,
     message: "Legacy text", message_id: "followup-2-oldhash", request_id: "scheduler-followup-2-oldhash",
   }).ok, true);
+});
+
+function futureEvidenceBody(h, asVideo = false) {
+  const body = asVideo ? video() : { ...base };
+  const result = h.context.checkVideoFollowupEligibilityV19_(body);
+  assert.equal(result.eligible, true);
+  assert.ok(result.initial_receipt);
+  body.initial_receipt = JSON.parse(JSON.stringify(result.initial_receipt));
+  if (asVideo) Object.assign(body.video_speech_proof, {
+    evidence_version: "same-take-evidence-v1", evidence_contract: "same-take-evidence-required-v1",
+    evidence_sha256: "e".repeat(64),
+  });
+  return body;
+}
+
+function futureHarness() {
+  const h = harness({ initialProof: false });
+  delayedInitialReceipt(h);
+  return h;
+}
+
+function journal(h) {
+  return JSON.parse(h.outbox.data.at(-1)[6].replace(/^__scheduled_followup__:/, "")).decision_evidence;
+}
+
+test("pure eligibility exposes the sole exact immutable initial receipt without writes", () => {
+  const h = futureHarness();
+  const before = h.counters();
+  const result = h.context.checkVideoFollowupEligibilityV19_(base);
+  assert.equal(result.eligible, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.initial_receipt)), {
+    schema: "initial-sms-receipt-v1", request_id: "scheduler-initial-2-0123456789abcdef",
+    message_id: "initial-2-0123456789abcdef", phone: base.phone, stable_id: base.stable_id,
+    created_at: "2026-10-13T12:59:00.000Z", send_started_at: "2026-10-13T12:59:58.000Z",
+    sent_at: "2026-10-13T13:00:08.247Z", status: "sent",
+  });
+  assert.deepEqual(h.counters(), before);
+  h.leads.data.splice(1, 0, Array(33).fill(""));
+  const shifted = h.context.checkVideoFollowupEligibilityV19_(base);
+  assert.deepEqual(shifted.initial_receipt, result.initial_receipt);
+  assert.equal(shifted.crm_row, 3);
+});
+
+test("legacy eligibility remains unchanged when strict immutable receipt evidence is absent", () => {
+  const h = harness();
+  const before = h.counters();
+  const result = h.context.checkVideoFollowupEligibilityV19_(base);
+  assert.equal(result.eligible, true);
+  assert.equal(result.initial_receipt, null);
+  assert.deepEqual(h.counters(), before);
+  assert.equal(enqueue(h).ok, true);
+  assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }).should_send, true);
+  assert.equal(journal(h), undefined);
+});
+
+test("present but invalid receipt descriptors never fall back to legacy handling", () => {
+  for (const mutate of [
+    body => { body.initial_receipt = null; },
+    body => { body.initial_receipt.schema = "other"; },
+    body => { body.initial_receipt.phone = "9542053206"; },
+    body => { body.initial_receipt.stable_id = "other"; },
+    body => { body.initial_receipt.request_id = "wrong"; },
+    body => { body.initial_receipt.message_id = "initial-1-0123456789abcdef"; },
+    body => { body.initial_receipt.send_started_at = "2026-10-13T13:00:01.000Z"; },
+    body => { body.initial_receipt.created_at = "2026-10-13T13:00:00.000Z"; },
+    body => { body.initial_receipt.status = "send_started"; },
+    body => { body.audit_contract = "unrecognized"; },
+  ]) {
+    const h = futureHarness();
+    const body = futureEvidenceBody(h);
+    mutate(body);
+    const before = h.counters();
+    assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, false);
+    assert.equal(enqueue(h, body).ok, false);
+    assert.deepEqual(h.counters(), before);
+  }
+  const h = futureHarness();
+  assert.equal(enqueue(h, { ...legacy, initial_receipt: {} }).ok, false);
+});
+
+test("a supplied receipt is revalidated against current exact outbox identity", () => {
+  for (const mutation of [
+    row => { row[2] = "render-initial-2-0123456789abcdef"; },
+    row => { row[14] = new Date("2026-10-13T13:00:09.000Z"); },
+    row => { row[13] = new Date("2026-10-13T12:59:59.000Z"); },
+  ]) {
+    const h = futureHarness();
+    const body = futureEvidenceBody(h);
+    mutation(h.outbox.data[1]);
+    const result = h.context.checkVideoFollowupEligibilityV19_(body);
+    assert.equal(result.eligible, false);
+    assert.match(result.reason, /pinned initial receipt/);
+    assert.equal(enqueue(h, body).ok, false);
+  }
+});
+
+test("new video metadata requires the descriptor marker but legacy speech proof is unchanged", () => {
+  for (const field of ["evidence_version", "evidence_contract", "evidence_sha256"]) {
+    const h = futureHarness();
+    const body = futureEvidenceBody(h, true);
+    delete body.video_speech_proof[field];
+    assert.equal(enqueue(h, body).ok, false, field);
+    delete body.initial_receipt;
+    for (const marker of ["evidence_version", "evidence_contract", "evidence_sha256"]) delete body.video_speech_proof[marker];
+    assert.equal(enqueue(h, body).ok, true, `legacy ${field}`);
+  }
+});
+
+test("future claim and send-start atomically retain exact decision snapshots and callbacks are idempotent", () => {
+  const h = futureHarness();
+  const body = futureEvidenceBody(h, true);
+  assert.equal(enqueue(h, body).ok, true);
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+  assert.equal(claim.should_send, true);
+  const first = JSON.stringify(journal(h).events[0]);
+  assert.equal(journal(h).events[0].stage, "claim");
+  assert.equal(journal(h).events[0].speech_evidence_sha256, "e".repeat(64));
+  assert.equal(journal(h).events[0].decision.initial_receipt.request_id, body.initial_receipt.request_id);
+  assert.equal(Object.values(journal(h).events[0].decision.blocked_checks).some(Boolean), false);
+  const writes = h.counters().writes;
+  const replay = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+  assert.equal(replay.lease_token, claim.lease_token);
+  assert.equal(h.counters().writes, writes);
+  assert.equal(JSON.stringify(journal(h).events[0]), first);
+  const started = h.context.markPendingSmsSendStartedV10_(claim);
+  assert.equal(started.ok, true);
+  assert.equal(h.outbox.data.at(-1)[1], "send_started");
+  assert.equal(journal(h).events.length, 2);
+  assert.equal(journal(h).events[1].stage, "send_start");
+  assert.equal(journal(h).events[1].previous_sha256, journal(h).events[0].sha256);
+  assert.equal(JSON.stringify(journal(h).events[0]), first);
+  const afterStart = h.counters().writes;
+  const second = h.context.markPendingSmsSendStartedV10_(claim);
+  assert.equal(second.duplicate, true);
+  assert.equal(h.counters().writes, afterStart);
+  assert.equal(journal(h).events.length, 2);
+});
+
+test("reply after claim is recorded at send-start denial without altering original claim evidence", () => {
+  const h = futureHarness();
+  enqueue(h, futureEvidenceBody(h));
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+  const before = JSON.stringify(journal(h).events[0]);
+  inboundReply(h);
+  const result = h.context.markPendingSmsSendStartedV10_(claim);
+  assert.equal(result.should_send, false);
+  assert.equal(result.status, "superseded");
+  assert.equal(journal(h).events[1].stage, "send_start_blocked");
+  assert.equal(journal(h).events[1].decision.blocked_checks.queued_inbound, true);
+  assert.equal(journal(h).events[1].decision.inbound.samples[0].queue_id, "q1");
+  assert.equal(JSON.stringify(journal(h).events[0]), before);
+});
+
+test("future claim captures each existing CRM/control suppression without changing its enforcement", () => {
+  for (const [field, mutate] of [
+    ["pending_takeover", h => h.setTakeover(true)],
+    ["human_override", h => { h.row[28] = "TRUE"; }],
+    ["handoff", h => { h.row[31] = "TRUE"; }],
+    ["crm_status", h => { h.row[10] = "H"; }],
+    ["recorded_conversation", h => { h.row[32] = '[{"role":"user","text":"Call me"}]'; }],
+    ["manual_note", h => { h.row[9] = "Discussed transaction"; }],
+    ["crm_inbound", h => { h.row[29] = "received-message"; }],
+    ["queued_inbound", h => inboundReply(h)],
+  ]) {
+    const h = futureHarness();
+    enqueue(h, futureEvidenceBody(h));
+    mutate(h);
+    const result = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+    assert.equal(result.should_send, false, field);
+    assert.equal(h.outbox.data.at(-1)[1], "superseded", field);
+    assert.equal(journal(h).events[0].stage, "claim_blocked");
+    assert.equal(journal(h).events[0].decision.blocked_checks[field], true, field);
+  }
+});
+
+test("failed evidence persistence cannot authorize a claim or advance attempt ownership", () => {
+  const h = futureHarness();
+  enqueue(h, futureEvidenceBody(h));
+  const prior = JSON.stringify(h.outbox.data.at(-1));
+  const getRange = h.outbox.getRange;
+  h.outbox.getRange = (...args) => ({ ...getRange(...args), setValues: () => { throw new Error("offline write failure"); } });
+  const result = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+  assert.equal(result.should_send, false);
+  assert.equal(result.retryable, true);
+  assert.equal(JSON.stringify(h.outbox.data.at(-1)), prior);
+});
+
+test("evidence readback failure retains a single claimed attempt recoverable by same worker", () => {
+  const h = futureHarness();
+  enqueue(h, futureEvidenceBody(h));
+  const getRange = h.outbox.getRange;
+  let failReadback = false;
+  h.outbox.getRange = (...args) => {
+    const range = getRange(...args);
+    return { ...range,
+      setValues: values => { range.setValues(values); failReadback = true; },
+      getValues: () => { if (failReadback) throw new Error("offline readback failure"); return range.getValues(); },
+    };
+  };
+  assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }).should_send, false);
+  assert.equal(h.outbox.data.at(-1)[1], "claimed");
+  assert.equal(h.outbox.data.at(-1)[9], 1);
+  h.outbox.getRange = getRange;
+  assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }).should_send, true);
+  assert.equal(h.outbox.data.at(-1)[9], 1);
+  assert.equal(journal(h).events.length, 1);
+});
+
+test("failed send-start evidence write leaves the same claim and no send authorization", () => {
+  const h = futureHarness();
+  enqueue(h, futureEvidenceBody(h));
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+  const prior = JSON.stringify(h.outbox.data.at(-1));
+  const getRange = h.outbox.getRange;
+  h.outbox.getRange = (...args) => ({ ...getRange(...args), setValues: () => { throw new Error("offline write failure"); } });
+  const result = h.context.markPendingSmsSendStartedV10_(claim);
+  assert.equal(result.should_send, false);
+  assert.equal(result.retryable, true);
+  assert.equal(JSON.stringify(h.outbox.data.at(-1)), prior);
+});
+
+test("missing or tampered original journal is never backfilled at send-start", () => {
+  for (const tamper of [
+    metadata => { delete metadata.decision_evidence; },
+    metadata => { metadata.decision_evidence.events[0].decision.eligible = false; },
+  ]) {
+    const h = futureHarness();
+    enqueue(h, futureEvidenceBody(h));
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+    const row = h.outbox.data.at(-1);
+    const metadata = JSON.parse(row[6].replace(/^__scheduled_followup__:/, ""));
+    tamper(metadata);
+    row[6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+    const prior = JSON.stringify(row);
+    const result = h.context.markPendingSmsSendStartedV10_(claim);
+    assert.equal(result.should_send, false);
+    assert.equal(JSON.stringify(row), prior);
+  }
+});
+
+test("future journal overflow holds without truncation, eviction or an untracked send", () => {
+  const h = futureHarness();
+  enqueue(h, futureEvidenceBody(h));
+  const row = h.outbox.data.at(-1);
+  const metadata = JSON.parse(row[6].replace(/^__scheduled_followup__:/, ""));
+  metadata.reserved_padding = "x".repeat(44000);
+  row[6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+  const prior = JSON.stringify(row);
+  const result = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+  assert.equal(result.should_send, false);
+  assert.equal(result.retryable, true);
+  assert.equal(JSON.stringify(row), prior);
+});
+
+test("future journal event cap holds without eviction or changing the existing queued record", () => {
+  const h = futureHarness();
+  const body = futureEvidenceBody(h);
+  enqueue(h, body);
+  const metadata = JSON.parse(h.outbox.data.at(-1)[6].replace(/^__scheduled_followup__:/, ""));
+  const result = h.context.checkVideoFollowupEligibilityV19_({ ...body, audit_contract: metadata.audit_contract }, { ignoreOwnKey: true, captureDecision: true });
+  let row = h.outbox.data.at(-1);
+  for (let i = 0; i < 16; i++) row = h.context.appendVideoDecisionEvidenceV26_(row, "claim", result, `prior-${i}`);
+  h.outbox.data[h.outbox.data.length - 1] = row;
+  const prior = JSON.stringify(row);
+  assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }).should_send, false);
+  assert.equal(JSON.stringify(row), prior);
+  assert.equal(journal(h).events.length, 16);
+});
+
+test("terminal and already-started future rows are never claimed, replayed or retrofitted", () => {
+  for (const status of ["sent", "send_started", "receipt_pending", "uncertain", "failed", "superseded"]) {
+    const h = futureHarness();
+    enqueue(h, futureEvidenceBody(h));
+    h.outbox.data.at(-1)[1] = status;
+    const prior = JSON.stringify(h.outbox.data);
+    assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }).should_send, false);
+    assert.equal(JSON.stringify(h.outbox.data), prior, status);
+  }
+});
+
+test("future audit fields cannot bypass unchanged name, confidence, cadence or receipt uniqueness guards", () => {
+  for (const mutate of [
+    body => { body.video_speech_proof.normalized_transcript = "hey cindy"; },
+    body => { body.video_speech_proof.confidence[0].avg_logprob = -1.01; },
+    body => { body.video_speech_proof.greeting_seconds = 2.51; },
+    body => { body.video_speech_proof.evidence_sha256 = "not-a-hash"; },
+  ]) {
+    const h = futureHarness();
+    const body = futureEvidenceBody(h, true);
+    mutate(body);
+    assert.equal(enqueue(h, body).ok, false);
+  }
+  const h = futureHarness();
+  const body = futureEvidenceBody(h);
+  h.outbox.data.push(h.outbox.data[1].slice());
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, false);
+  assert.equal(enqueue(h, body).ok, false);
+});
+
+test("future chronology records unknown and created-time fallback honestly", () => {
+  for (const [created, received, source] of [
+    ["2026-10-13T14:00:00Z", "invalid", "created_at_fallback"],
+    ["invalid", "invalid", "unknown"],
+  ]) {
+    const h = futureHarness();
+    enqueue(h, futureEvidenceBody(h));
+    h.inbound.data.push([created, "queued", "q-unknown", "dedupe", "m-unknown", base.phone, "hello", received]);
+    assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }).should_send, false);
+    const sample = journal(h).events[0].decision.inbound.samples[0];
+    assert.equal(sample.timestamp_source, source);
+    assert.equal(sample.reported_received_at, null);
+    assert.equal(sample.blocked, true);
+  }
+});
+
+test("partial future marker stripping cannot silently enter the legacy video path", () => {
+  for (const strip of [
+    body => { delete body.initial_receipt; },
+    body => { body.initial_receipt = null; },
+    body => { delete body.video_speech_proof.evidence_version; },
+    body => { delete body.video_speech_proof.evidence_contract; },
+    body => { delete body.video_speech_proof.evidence_sha256; },
+  ]) {
+    const h = futureHarness();
+    const body = futureEvidenceBody(h, true);
+    strip(body);
+    assert.equal(enqueue(h, body).ok, false);
+  }
+  for (const strip of [
+    metadata => { delete metadata.audit_contract; },
+    metadata => { delete metadata.initial_receipt; },
+    metadata => { delete metadata.audit_contract; delete metadata.initial_receipt; },
+  ]) {
+    const h = futureHarness();
+    enqueue(h, futureEvidenceBody(h, true));
+    const row = h.outbox.data.at(-1);
+    const metadata = JSON.parse(row[6].replace(/^__scheduled_followup__:/, ""));
+    strip(metadata);
+    row[6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+    const before = JSON.stringify(row);
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+    assert.equal(claim.should_send, false);
+    assert.equal(JSON.stringify(row), before);
+  }
+});
+
+function enqueueUnrelatedLegacy(h) {
+  const another = h.row.slice();
+  another[2] = "9542053206";
+  another[27] = "another-listing";
+  h.leads.data.push(another);
+  enqueue(h, { ...legacy, crm_row: 3, phone: another[2], stable_id: another[27],
+    message_id: "followup-3-other", request_id: "scheduler-followup-3-other" });
+  return another;
+}
+
+test("deterministic future journal failures do not starve an unrelated queued SMS", () => {
+  for (const mutate of [
+    metadata => { metadata.reserved_padding = "x".repeat(44000); },
+    metadata => { metadata.decision_evidence = { schema: "wrong", events: [] }; },
+  ]) {
+    for (const state of ["queued", "claimed"]) {
+      const h = futureHarness();
+      enqueue(h, futureEvidenceBody(h));
+      const row = h.outbox.data[2];
+      const metadata = JSON.parse(row[6].replace(/^__scheduled_followup__:/, ""));
+      mutate(metadata);
+      row[6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+      row[1] = state;
+      if (state === "claimed") { row[10] = "expired-lease"; row[11] = new Date(0); row[18] = "other-worker"; }
+      const prior = JSON.stringify(row);
+      const another = enqueueUnrelatedLegacy(h);
+      const result = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+      assert.equal(result.should_send, true);
+      assert.equal(result.phone, another[2]);
+      assert.equal(JSON.stringify(row), prior);
+    }
+  }
+});
+
+test("uncertain future claim persistence never claims a second queued conversation", () => {
+  const h = futureHarness();
+  enqueue(h, futureEvidenceBody(h));
+  enqueueUnrelatedLegacy(h);
+  const getRange = h.outbox.getRange;
+  let failReadback = false;
+  h.outbox.getRange = (...args) => {
+    const range = getRange(...args);
+    return { ...range,
+      setValues: values => { range.setValues(values); failReadback = true; },
+      getValues: () => { if (failReadback) throw new Error("offline readback failure"); return range.getValues(); },
+    };
+  };
+  assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }).should_send, false);
+  assert.equal(h.outbox.data[2][1], "claimed");
+  assert.equal(h.outbox.data[3][1], "queued");
+  assert.equal(h.outbox.data[3][9], 0);
+});
+
+test("nonretryable future identity changes retain existing cancellation with honest incomplete evidence", () => {
+  const h = futureHarness();
+  enqueue(h, futureEvidenceBody(h));
+  h.row[2] = "9542053206";
+  assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }).should_send, false);
+  assert.equal(h.outbox.data[2][1], "superseded");
+  const event = journal(h).events[0];
+  assert.equal(event.stage, "claim_blocked");
+  assert.equal(event.decision.identity_resolution_verified, false);
+  assert.equal(event.decision.remaining_controls_evaluated, false);
+  assert.equal(event.decision.eligible, false);
+  assert.equal(event.decision.blocked_checks, undefined);
+});
+
+test("partial future text markers cannot bypass decision journaling at claim or send-start", () => {
+  for (const state of ["queued", "claimed"]) {
+    for (const field of ["audit_contract", "initial_receipt"]) {
+      const h = futureHarness();
+      enqueue(h, futureEvidenceBody(h));
+      const claim = state === "claimed" ? h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }) : null;
+      const row = h.outbox.data.at(-1);
+      const metadata = JSON.parse(row[6].replace(/^__scheduled_followup__:/, ""));
+      delete metadata[field];
+      row[6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+      const before = JSON.stringify(row);
+      assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "pixel" }).should_send, false, `${state} ${field}`);
+      if (claim) assert.equal(h.context.markPendingSmsSendStartedV10_(claim).should_send, false, field);
+      assert.equal(JSON.stringify(row), before);
+    }
+  }
+  const h = futureHarness();
+  enqueue(h, futureEvidenceBody(h));
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+  const row = h.outbox.data.at(-1);
+  const metadata = JSON.parse(row[6].replace(/^__scheduled_followup__:/, ""));
+  delete metadata.initial_receipt;
+  delete metadata.audit_contract;
+  row[6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+  const before = JSON.stringify(row);
+  assert.equal(h.context.markPendingSmsSendStartedV10_(claim).should_send, false);
+  assert.equal(JSON.stringify(row), before);
 });
