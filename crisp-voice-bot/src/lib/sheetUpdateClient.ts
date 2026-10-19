@@ -141,7 +141,7 @@ export async function requestVoiceQueueRefill(context: {
   rowNumber?: number;
   callAttemptNumber?: number;
 } = {}, dependencies: VoiceQueueRefillDependencies = {}): Promise<void> {
-  const processQueue = dependencies.processQueue ?? (() => processVoiceQueue());
+  const processQueue = dependencies.processQueue ?? (() => processVoiceQueue({ refill: true }));
   // The backend owns capacity and local-window guards. An Apps Script transport
   // acknowledgement does not prove that a free slot was actually checked.
   logger.info("Requesting direct voice queue refill", context);

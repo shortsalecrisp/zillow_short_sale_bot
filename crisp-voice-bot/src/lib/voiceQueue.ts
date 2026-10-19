@@ -274,6 +274,48 @@ function getCallStartUncertainPayload(error: unknown): Omit<VoiceCallStartUncert
 
 let activeQueueRun: Promise<VoiceQueueResult> | undefined;
 let schedulerTimer: NodeJS.Timeout | undefined;
+export const VOICE_QUEUE_MAX_PARALLEL_STARTS = 2;
+
+export async function dispatchVoiceQueueBatch<T>(
+  candidates: T[],
+  dispatch: (candidate: T) => Promise<void>,
+  maxParallelStarts = VOICE_QUEUE_MAX_PARALLEL_STARTS,
+): Promise<void> {
+  let index = 0;
+  let stopped = false;
+  const workers = Math.min(candidates.length, Math.max(1, Math.floor(maxParallelStarts) || 1));
+  // Wait for every worker even if persistence fails, so the single-flight lock
+  // cannot release while another accepted/uncertain start is still settling.
+  const results = await Promise.allSettled(Array.from({ length: workers }, async () => {
+    while (!stopped && index < candidates.length) {
+      try {
+        await dispatch(candidates[index++]);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
+    }
+  }));
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
+}
+
+export function hasVoiceQueueDispatchHeadroom(candidate: VoiceQueueCandidate, now: Date): boolean {
+  return getVoiceBotPreferredCallWindowName(now, candidate.agentTimeZone) === candidate.callWindow &&
+    getVoiceBotPreferredCallWindowName(new Date(now.getTime() + 60_000), candidate.agentTimeZone) === candidate.callWindow;
+}
+
+export function countAllocatedVoiceBotSlots(
+  rows: Array<{ rowNumber: number; values: unknown[] }>,
+  now: Date,
+  reservations: VoiceQueueCandidate[],
+): number {
+  return countActiveVoiceBotCalls(rows, now) + reservations.filter((candidate) => {
+    const values = rows.find((row) => row.rowNumber === candidate.rowNumber)?.values;
+    const sentColumn = candidate.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
+    return !parseVoiceBotDate(values?.[sentColumn - 1]);
+  }).length;
+}
 
 function candidateSummary(candidate: VoiceQueueCandidate) {
   return {
@@ -1128,18 +1170,19 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
 
   const queuedCalls: VoiceQueueResult["calls"] = [];
 
-  for (const candidate of candidates) {
+  const reservations = new Map<string, VoiceQueueCandidate>();
+  await dispatchVoiceQueueBatch(candidates, async (candidate) => {
     const refreshedRows = await getVoiceBotRows(sheets);
     let startNow = options.now ?? new Date();
     const refreshedValues = refreshedRows.find((row) => row.rowNumber === candidate.rowNumber)?.values ?? [];
     const refreshedCandidate = getVoiceBotCallCandidateFromRowValues(candidate.rowNumber, refreshedValues, startNow);
 
     if (!refreshedCandidate || isVoiceBotPhoneBlocked(refreshedCandidate, refreshedRows, startNow) ||
-        countActiveVoiceBotCalls(refreshedRows, startNow) >= VOICE_BOT_MAX_ACTIVE_CALLS) {
+        countAllocatedVoiceBotSlots(refreshedRows, startNow, [...reservations.values()]) >= VOICE_BOT_MAX_ACTIVE_CALLS) {
       logger.info("Voice queue candidate no longer eligible", {
         rowNumber: candidate.rowNumber,
       });
-      continue;
+      return;
     }
 
     await markScheduledNoStartRecoveryDetected(sheets, refreshedValues, refreshedCandidate, startNow);
@@ -1150,15 +1193,18 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
         ...candidateSummary(refreshedCandidate),
         ...inboundQuietGate,
       });
-      continue;
+      return;
     }
 
     startNow = options.now ?? new Date();
-    if (!getVoiceBotCallCandidateFromRowValues(candidate.rowNumber, refreshedValues, startNow)) {
+    if (!getVoiceBotCallCandidateFromRowValues(candidate.rowNumber, refreshedValues, startNow) ||
+        !hasVoiceQueueDispatchHeadroom(refreshedCandidate, startNow) ||
+        countAllocatedVoiceBotSlots(refreshedRows, startNow, [...reservations.values()]) >= VOICE_BOT_MAX_ACTIVE_CALLS) {
       logger.info("Voice queue window closed before dispatch; attempt not started", { rowNumber: candidate.rowNumber });
-      continue;
+      return;
     }
 
+    reservations.set(refreshedCandidate.phone, refreshedCandidate);
     try {
       const startCallResult = await postStartCall(refreshedCandidate);
       await markVoiceBotAttemptStarted(sheets, refreshedValues, refreshedCandidate, startNow);
@@ -1185,8 +1231,10 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
         status: error instanceof AxiosError ? error.response?.status : undefined,
         message: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      reservations.delete(refreshedCandidate.phone);
     }
-  }
+  });
 
   return {
     ok: true,
@@ -1200,10 +1248,16 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   };
 }
 
-export async function processVoiceQueue(options: { dryRun?: boolean; now?: Date } = {}): Promise<VoiceQueueResult> {
+export async function processVoiceQueue(options: { dryRun?: boolean; now?: Date; refill?: boolean } = {}): Promise<VoiceQueueResult> {
   // A read-only inspection must never join a dispatching run and return its starts.
   if (options.dryRun) return processVoiceQueueUnlocked(options);
   if (activeQueueRun) {
+    if (options.refill) {
+      const previousRun = activeQueueRun;
+      logger.info("Voice queue refill deferred until active dispatch settles");
+      await previousRun;
+      return processVoiceQueue({ now: options.now });
+    }
     logger.info("Voice queue run already active; joining existing run");
     return activeQueueRun;
   }
@@ -1231,11 +1285,13 @@ export function shouldPollVoiceQueue(now: Date, lastRunAt?: Date): boolean {
 
 export function getVoiceQueueDispatchStatus() {
   return {
-    version: "capacity-refill-v1",
+    version: "capacity-refill-v2",
     schedulerEnabled: config.voiceQueue.schedulerEnabled,
     pollingSecondsInLocalWindows: Math.min(60, voiceQueueMaintenanceIntervalMs() / 1000),
     maintenanceIntervalMinutes: voiceQueueMaintenanceIntervalMs() / 60_000,
     maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS,
+    maxParallelStarts: VOICE_QUEUE_MAX_PARALLEL_STARTS,
+    dispatchWindowHeadroomSeconds: 60,
     refillMode: "direct_backend",
     freshPerStartEligibility: true,
   };
