@@ -24,6 +24,7 @@ from video_followup_provider import (
 from video_followup_audio_guard import (
     GUARD_VERSION, inspect_reference, inspect_greeting, safe_acoustic_failure_diagnostics,
 )
+from video_followup_greeting_normalization import NORMALIZATION_CONFIG, normalize_greeting_audio
 from video_followup_same_take_media import prepare_inputs, compose
 from video_followup_speech_guard import (
     SpeechGuardError, preflight_speech_guard, verify_greeting_words,
@@ -64,6 +65,7 @@ RENDER_CONFIG = {"tts_model": TTS_MODEL, "seed": TTS_SEED, "temperature": TTS_TE
 RENDER_CONFIG_SHA256 = hashlib.sha256(json.dumps(RENDER_CONFIG, sort_keys=True).encode()).hexdigest()
 LEGACY_GENERATOR_PROFILE = "legacy_v1"
 CLEAN_BODY_GENERATOR_PROFILE = "clean_body_v1"
+BOUNDED_PAD_GENERATOR_PROFILE = "clean_body_bounded_pad_v1"
 CLEAN_BODY_REFERENCE_SHA256 = "b6a19ab1886102f471aa06ccb2e0347120c22498321f852a46b8b49efd707e3d"
 CLEAN_BODY_REFERENCE_KEY = "assets/voice-references/" + CLEAN_BODY_REFERENCE_SHA256 + "/name-free-recording.wav"
 MAX_BYTES = 25 * 1024 * 1024
@@ -93,7 +95,7 @@ _PREPARATION_FAILURE_CODES = frozenset({
 _PREPARATION_FAILURE_STAGES = frozenset({
     "master_read", "reference_read", "audio_download", "audio_screen", "audio_duration", "media_prepare",
     "prepared_validation", "raw_speech_screen", "speech_screen", "asset_storage", "asset_signing",
-    "audio_plan",
+    "audio_plan", "audio_normalization",
 })
 _DIAGNOSTIC_EXCEPTION_TYPES = frozenset({
     "VideoProviderError", "Conflict", "ValueError", "TypeError", "KeyError", "OSError",
@@ -179,10 +181,12 @@ def _generator_profile(name):
         return {"name": name, "config": dict(RENDER_CONFIG),
                 "render_config_sha256": RENDER_CONFIG_SHA256,
                 "reference_key": REFERENCE_KEY, "reference_sha256": REFERENCE_SHA256}
-    if name == CLEAN_BODY_GENERATOR_PROFILE:
-        config = {**RENDER_CONFIG, "generator_profile": CLEAN_BODY_GENERATOR_PROFILE,
+    if name in (CLEAN_BODY_GENERATOR_PROFILE, BOUNDED_PAD_GENERATOR_PROFILE):
+        config = {**RENDER_CONFIG, "generator_profile": name,
                   "reference_sha256": CLEAN_BODY_REFERENCE_SHA256,
                   "acoustic_reference_sha256": REFERENCE_SHA256}
+        if name == BOUNDED_PAD_GENERATOR_PROFILE:
+            config["greeting_normalization"] = json.loads(json.dumps(NORMALIZATION_CONFIG))
         return {"name": name, "config": config,
                 "render_config_sha256": hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
                 "reference_key": CLEAN_BODY_REFERENCE_KEY, "reference_sha256": CLEAN_BODY_REFERENCE_SHA256}
@@ -334,6 +338,9 @@ class SameTakeVideoProvider:
         self.fal_key, self.tts_key, self.reference_key = fal_key, tts_key, reference_asset_key
         self.generator_profile = _generator_profile(generator_profile)["name"]
         self.verification_method = _verification_profile(verification_method)["verification_method"]
+        if (self.generator_profile == BOUNDED_PAD_GENERATOR_PROFILE
+                and self.verification_method != GENERAL_PRONUNCIATION_VERIFICATION_METHOD):
+            raise VideoProviderError("verification_method_invalid", "Normalized greetings require the approved final-audio verifier.")
         self.session, self.media_session = session or requests.Session(), media_session or requests.Session()
         if session is None:
             self.session.trust_env = False
@@ -377,6 +384,9 @@ class SameTakeVideoProvider:
             raise VideoProviderError("pipeline_mismatch", "Pipeline identity or budget changed.")
         _saved_generator_profile(state)
         _saved_verification_profile(state)
+        if (state.get("generator_profile") == BOUNDED_PAD_GENERATOR_PROFILE
+                and state.get("verification_method") != GENERAL_PRONUNCIATION_VERIFICATION_METHOD):
+            raise VideoProviderError("pipeline_mismatch", "Normalized greeting verification identity changed.")
         return state, version
 
     def _update(self, pipeline_id, fields, expected_stage=None, *, preparation_attempt=None):
@@ -595,6 +605,17 @@ class SameTakeVideoProvider:
                     or metadata.get("first_name") != state["first_name"]
                     or ("metadata" in state and state["metadata"] != metadata)):
                 raise ValueError()
+            if state.get("generator_profile") == BOUNDED_PAD_GENERATOR_PROFILE:
+                raw, _ = self.store.objects.read(f"assets/{state['id']}/raw-narration.wav")
+                normalized, _ = self.store.objects.read(f"assets/{state['id']}/normalized-narration.wav")
+                try:
+                    replay = normalize_greeting_audio(raw)
+                except VideoProviderError:
+                    raise ValueError() from None
+                if (normalized != replay["audio_bytes"]
+                        or metadata.get("greeting_normalization") != replay["provenance"]
+                        or metadata.get("narration_sha256") != hashlib.sha256(normalized).hexdigest()):
+                    raise ValueError()
             for field in ("source_sha256", "preparation_sha256", "prepared_greeting_sha256",
                           "body_pcm_sha256", "joined_pcm_sha256", "planned_audio_sha256", "full_pcm_sha256",
                           "checked_audio_sha256", "greeting_pcm_sha256"):
@@ -673,6 +694,17 @@ class SameTakeVideoProvider:
                 reference = self._reference()
                 failure_stage = "audio_download"
                 audio_source = self._download_fal(narration["media_url"])
+                normalization = None
+                if state.get("generator_profile") == BOUNDED_PAD_GENERATOR_PROFILE:
+                    failure_stage = "audio_normalization"
+                    # Retain the original even if a future greeting fails. This
+                    # profile never changes an existing pipeline's saved policy.
+                    if not isinstance(audio_source, bytes) or not 0 < len(audio_source) <= NORMALIZATION_CONFIG["maximum_wav_bytes"]:
+                        raise VideoProviderError("invalid_narration_audio", "Raw greeting exceeds the bounded input size.")
+                    self._asset(pipeline_id, "raw-narration.wav", audio_source, "audio/wav")
+                    normalized = normalize_greeting_audio(audio_source)
+                    audio_source, normalization = normalized["audio_bytes"], normalized["provenance"]
+                    self._asset(pipeline_id, "normalized-narration.wav", audio_source, "audio/wav")
                 failure_stage = "audio_screen"
                 audio_qa = inspect_greeting(audio_source, reference)
                 failure_stage = "audio_duration"
@@ -687,6 +719,10 @@ class SameTakeVideoProvider:
                         raise SpeechGuardError("speech_guard_output_invalid")
                 failure_stage = "media_prepare"
                 inputs = self.preparer(master, audio_source, first_name=state["first_name"])
+                if normalization is not None:
+                    if inputs["metadata"].get("narration_sha256") != hashlib.sha256(audio_source).hexdigest():
+                        raise VideoProviderError("input_hash_mismatch", "Normalized narration input changed.")
+                    inputs["metadata"]["greeting_normalization"] = normalization
             failure_stage = "prepared_validation"
             metadata = inputs["metadata"]
             if (metadata.get("source_sha256") != MASTER_SHA256
