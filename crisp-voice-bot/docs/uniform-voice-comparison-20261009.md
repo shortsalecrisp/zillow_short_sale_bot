@@ -2,6 +2,12 @@
 
 Current revision is r5, verified at 2026-10-17T14:36:32.752Z (10:36:32 AM New York on October 17). Earlier releases below are historical and must not be pooled with r5. Both arms are verified identical except for TTS model.
 
+## October 19 Queue Capacity Repair
+
+Yoni approved repairing missed-window queue throughput. The `capacity-refill-v1` backend release checks capacity every 60 seconds during supported listing-local weekday windows, uses the existing two-call concurrency cap in both morning and afternoon, and refills directly through the guarded backend after final call processing instead of treating an Apps Script acknowledgement as dispatch proof. Idle maintenance retains the configured interval. Each start rechecks current eligibility and the provider route still enforces the local window. Dry-run inspections cannot join a dispatching run or emit circuit alerts.
+
+This is a shared scheduler change, not a prompt or TTS release. Both r5 provider versions, policies, tools, voice/LLM/turn settings and 50/50 allocation remain unchanged; do not reset or pool cohorts. Stratify reachability and local-window results before/after the exact live deployment of the commit containing this section, using Render's deployment receipt and `/experiment-status.queueDispatch.version`. Deployment or dry-run eligibility is not evidence that any particular agent was called. Jennifer row 6270's missed first attempt remains scheduled for October 20 at 09:15 Eastern, not misrepresented as a second attempt. Existing next-slot retry, campaign/suppression, historical freeze and uncertain-start protections remain in force. Two concurrent calls are still a capacity ceiling, not a guarantee that an unbounded backlog will fit in one window.
+
 ## Approved Revision 5
 
 Yoni approved the Lead Intelligence opening recovery refinement. After a skipped silence or placeholder, a new live "Go ahead" or "I'm listening" resumes the pending short listing check once; it does not repeat the full opener or restart an answered question. The release also preserves the shared current-call ending and authoritative terminal-outcome rules in the backend.

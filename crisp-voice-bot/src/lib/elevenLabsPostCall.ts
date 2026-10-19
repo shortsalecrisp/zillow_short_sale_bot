@@ -3376,7 +3376,7 @@ export async function handleElevenLabsPostCallWebhook(conversationId: string): P
 
 export async function processPostCallOutcomeFromConversationId(
   conversationId: string,
-  options: Pick<PostCallOptions, "postSheetUpdate"> = {},
+  options: Pick<PostCallOptions, "postSheetUpdate"> & { requestQueueRefill?: typeof requestVoiceQueueRefill } = {},
 ): Promise<boolean> {
   const conversation = await fetchConversation(conversationId);
   const metadata = metadataFromConversation(conversation);
@@ -3393,7 +3393,7 @@ export async function processPostCallOutcomeFromConversationId(
   const done = await processPostCallOutcomeForConversation(conversationId, metadata, conversation, options);
 
   if (done && shouldRequestQueueRefillAfterPostCall(conversationId)) {
-    await requestVoiceQueueRefill({
+    await (options.requestQueueRefill ?? requestVoiceQueueRefill)({
       conversationId,
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
@@ -3419,6 +3419,11 @@ export function scheduleElevenLabsPostCallFallback(params: {
             conversationId: params.conversationId,
             rowNumber: params.metadata.rowNumber,
             callAttemptNumber: params.metadata.callAttemptNumber,
+          }).catch((error) => {
+            logger.error("Voice queue post-call refill failed; scheduler will retry", {
+              conversationId: params.conversationId,
+              message: error instanceof Error ? error.message : String(error),
+            });
           });
           return;
         }

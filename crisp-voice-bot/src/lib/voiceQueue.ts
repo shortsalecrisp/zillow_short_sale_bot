@@ -1,6 +1,7 @@
 import axios, { AxiosError } from "axios";
 import type { sheets_v4 } from "googleapis";
 import { config } from "./config";
+import listingTimeZones from "../config/us-city-timezones.json";
 import {
   reconcilePendingElevenLabsCallStart,
   recoverAcceptedElevenLabsCallStart,
@@ -90,6 +91,7 @@ export type VoiceQueueResult = {
   activeCallCountBeforeRun?: number;
   availableSlots?: number;
   candidateCount?: number;
+  eligibleCandidateCount?: number;
   timeZoneReviewRequired?: Array<{ rowNumber: number; reason: string }>;
   maxCallsPerRun?: number;
   maxActiveCalls?: number;
@@ -597,10 +599,6 @@ export function isVoiceBotPhoneBlocked(
   return acceptedAttempts >= 2;
 }
 
-function getVoiceBotWindowStartLimit(callWindow: string | undefined, activeLimit: number): number {
-  return callWindow === "morning_probe" || callWindow === "reach_morning_v1" ? 1 : activeLimit;
-}
-
 export function getVoiceBotStartableCallCandidatesFromRows(
   rows: Array<{ rowNumber: number; values: unknown[] }>,
   now: Date,
@@ -609,11 +607,7 @@ export function getVoiceBotStartableCallCandidatesFromRows(
 ): VoiceQueueCandidate[] {
   const activeCallCount = countActiveVoiceBotCalls(rows, now);
   const activeLimit = Math.max(1, Number(maxActiveCalls) || 1);
-  const currentCallWindow = rows
-    .map((row) => getVoiceBotCallCandidateFromRowValues(row.rowNumber, row.values, now)?.callWindow)
-    .find(Boolean);
-  const windowStartLimit = getVoiceBotWindowStartLimit(currentCallWindow, activeLimit);
-  const availableSlots = Math.max(0, Math.min(activeLimit, windowStartLimit) - activeCallCount);
+  const availableSlots = Math.max(0, activeLimit - activeCallCount);
 
   if (availableSlots <= 0) {
     return [];
@@ -1029,7 +1023,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   }
 
   if (outboundPause || providerCircuit.open) {
-    if (providerCircuit.open) {
+    if (providerCircuit.open && !options.dryRun) {
       await ensureProviderCircuitAlert();
     }
     logger.info("Voice queue paused", {
@@ -1067,7 +1061,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
     config.voiceQueue.finalReceiptMonitorStartedAt,
   );
   if (finalReceiptCircuit.open) {
-    await ensureFinalReceiptCircuitAlert(finalReceiptCircuit);
+    if (!options.dryRun) await ensureFinalReceiptCircuitAlert(finalReceiptCircuit);
     logger.error("Voice queue paused by final-receipt circuit", finalReceiptCircuit);
     return {
       ok: true,
@@ -1078,14 +1072,14 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
     };
   }
   const activeCallCount = countActiveVoiceBotCalls(rows, now);
+  const eligibleCandidateCount = getVoiceBotCallCandidatesFromRows(rows, now, rows.length).length;
   const candidates = getVoiceBotStartableCallCandidatesFromRows(
     rows,
     now,
     VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
     VOICE_BOT_MAX_ACTIVE_CALLS,
   );
-  const windowStartLimit = getVoiceBotWindowStartLimit(candidates[0]?.callWindow, VOICE_BOT_MAX_ACTIVE_CALLS);
-  const availableSlots = Math.max(0, Math.min(VOICE_BOT_MAX_ACTIVE_CALLS, windowStartLimit) - activeCallCount);
+  const availableSlots = Math.max(0, VOICE_BOT_MAX_ACTIVE_CALLS - activeCallCount);
 
   if (options.dryRun) {
     const timeZoneReviewRequired = rows
@@ -1105,6 +1099,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       maxCallsPerRun: VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
       maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS,
       candidateCount: candidates.length,
+      eligibleCandidateCount,
       nowEt: formatVoiceBotDateEt(now),
       candidates: candidates.map(candidateSummary),
     };
@@ -1116,6 +1111,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       queued: false,
       reason: "active_call_limit",
       activeCallCount,
+      eligibleCandidateCount,
       maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS,
     };
   }
@@ -1134,19 +1130,21 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
 
   for (const candidate of candidates) {
     const refreshedRows = await getVoiceBotRows(sheets);
+    let startNow = options.now ?? new Date();
     const refreshedValues = refreshedRows.find((row) => row.rowNumber === candidate.rowNumber)?.values ?? [];
-    const refreshedCandidate = getVoiceBotCallCandidateFromRowValues(candidate.rowNumber, refreshedValues, now);
+    const refreshedCandidate = getVoiceBotCallCandidateFromRowValues(candidate.rowNumber, refreshedValues, startNow);
 
-    if (!refreshedCandidate || isVoiceBotPhoneBlocked(refreshedCandidate, refreshedRows, now)) {
+    if (!refreshedCandidate || isVoiceBotPhoneBlocked(refreshedCandidate, refreshedRows, startNow) ||
+        countActiveVoiceBotCalls(refreshedRows, startNow) >= VOICE_BOT_MAX_ACTIVE_CALLS) {
       logger.info("Voice queue candidate no longer eligible", {
         rowNumber: candidate.rowNumber,
       });
       continue;
     }
 
-    await markScheduledNoStartRecoveryDetected(sheets, refreshedValues, refreshedCandidate, now);
+    await markScheduledNoStartRecoveryDetected(sheets, refreshedValues, refreshedCandidate, startNow);
 
-    const inboundQuietGate = await getInboundQuietGate(sheets, refreshedCandidate.phone, now);
+    const inboundQuietGate = await getInboundQuietGate(sheets, refreshedCandidate.phone, startNow);
     if (inboundQuietGate.blocked) {
       logger.info("Voice queue candidate blocked by final inbound quiet gate", {
         ...candidateSummary(refreshedCandidate),
@@ -1155,9 +1153,15 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       continue;
     }
 
+    startNow = options.now ?? new Date();
+    if (!getVoiceBotCallCandidateFromRowValues(candidate.rowNumber, refreshedValues, startNow)) {
+      logger.info("Voice queue window closed before dispatch; attempt not started", { rowNumber: candidate.rowNumber });
+      continue;
+    }
+
     try {
       const startCallResult = await postStartCall(refreshedCandidate);
-      await markVoiceBotAttemptStarted(sheets, refreshedValues, refreshedCandidate, now);
+      await markVoiceBotAttemptStarted(sheets, refreshedValues, refreshedCandidate, startNow);
       queuedCalls.push(candidateSummary(refreshedCandidate));
       logger.info("Voice queue call started", {
         ...candidateSummary(refreshedCandidate),
@@ -1166,7 +1170,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
     } catch (error) {
       const uncertainPayload = getCallStartUncertainPayload(error);
       const fieldsWritten = uncertainPayload
-        ? await markVoiceBotAttemptStartUncertain(sheets, refreshedValues, refreshedCandidate, now, {
+        ? await markVoiceBotAttemptStartUncertain(sheets, refreshedValues, refreshedCandidate, startNow, {
             rowNumber: refreshedCandidate.rowNumber,
             callAttemptNumber: refreshedCandidate.callAttemptNumber,
             callStartRequestId: uncertainPayload.callStartRequestId,
@@ -1174,7 +1178,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
             scheduledWindow: refreshedCandidate.callWindow,
             agentTimeZone: refreshedCandidate.agentTimeZone,
           })
-        : await markVoiceBotAttemptStartFailed(sheets, refreshedValues, refreshedCandidate, now, error);
+        : await markVoiceBotAttemptStartFailed(sheets, refreshedValues, refreshedCandidate, startNow, error);
       logger.error("Voice queue call start failed", {
         ...candidateSummary(refreshedCandidate),
         fieldsWritten,
@@ -1191,11 +1195,14 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
     maxCallsPerRun: VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
     maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS,
     activeCallCountBeforeRun: activeCallCount,
+    eligibleCandidateCount,
     calls: queuedCalls,
   };
 }
 
 export async function processVoiceQueue(options: { dryRun?: boolean; now?: Date } = {}): Promise<VoiceQueueResult> {
+  // A read-only inspection must never join a dispatching run and return its starts.
+  if (options.dryRun) return processVoiceQueueUnlocked(options);
   if (activeQueueRun) {
     logger.info("Voice queue run already active; joining existing run");
     return activeQueueRun;
@@ -1208,8 +1215,30 @@ export async function processVoiceQueue(options: { dryRun?: boolean; now?: Date 
   return activeQueueRun;
 }
 
-function voiceQueueIntervalMs(): number {
+function voiceQueueMaintenanceIntervalMs(): number {
   return Math.max(1, config.voiceQueue.intervalMinutes) * 60_000;
+}
+
+export function isVoiceQueueDialingWindow(now: Date): boolean {
+  return isWithinVoiceBotQueueRunWindow(now) && listingTimeZones.zones.some((zone) =>
+    Boolean(getVoiceBotPreferredCallWindowName(now, zone)));
+}
+
+export function shouldPollVoiceQueue(now: Date, lastRunAt?: Date): boolean {
+  return !lastRunAt || isVoiceQueueDialingWindow(now) ||
+    now.getTime() - lastRunAt.getTime() >= voiceQueueMaintenanceIntervalMs();
+}
+
+export function getVoiceQueueDispatchStatus() {
+  return {
+    version: "capacity-refill-v1",
+    schedulerEnabled: config.voiceQueue.schedulerEnabled,
+    pollingSecondsInLocalWindows: Math.min(60, voiceQueueMaintenanceIntervalMs() / 1000),
+    maintenanceIntervalMinutes: voiceQueueMaintenanceIntervalMs() / 60_000,
+    maxActiveCalls: VOICE_BOT_MAX_ACTIVE_CALLS,
+    refillMode: "direct_backend",
+    freshPerStartEligibility: true,
+  };
 }
 
 export function startVoiceQueueScheduler(): void {
@@ -1222,18 +1251,28 @@ export function startVoiceQueueScheduler(): void {
     return;
   }
 
+  let lastRunAt: Date | undefined;
   const run = () => {
-    void processVoiceQueue().catch((error) => {
+    const now = new Date();
+    if (!shouldPollVoiceQueue(now, lastRunAt)) return;
+    lastRunAt = now;
+    void processVoiceQueue().then((result) => {
+      logger.info("Voice queue scheduler pass completed", {
+        reason: result.reason,
+        queuedCount: result.queuedCount ?? 0,
+        activeCallCount: result.activeCallCount ?? result.activeCallCountBeforeRun,
+        availableSlots: result.availableSlots,
+        eligibleCandidateCount: result.eligibleCandidateCount,
+      });
+    }).catch((error) => {
       logger.error("Voice queue scheduler run failed", {
         message: error instanceof Error ? error.message : String(error),
       });
     });
   };
 
-  logger.info("Voice queue scheduler enabled", {
-    intervalMinutes: config.voiceQueue.intervalMinutes,
-  });
+  logger.info("Voice queue scheduler enabled", getVoiceQueueDispatchStatus());
 
-  schedulerTimer = setInterval(run, voiceQueueIntervalMs());
+  schedulerTimer = setInterval(run, Math.min(60_000, voiceQueueMaintenanceIntervalMs()));
   setTimeout(run, 30_000);
 }

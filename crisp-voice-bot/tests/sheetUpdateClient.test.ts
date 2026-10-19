@@ -10,23 +10,11 @@ process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 process.env.GOOGLE_APPS_SCRIPT_TOKEN = "queue-secret";
 process.env.GOOGLE_APPS_SCRIPT_WEBHOOK_URL = "https://script.example.com/callback";
 
-test("voice queue refill payload uses the shared Apps Script token", async () => {
-  const { buildVoiceQueueRefillPayload } = await import("../src/lib/sheetUpdateClient");
-
-  assert.deepEqual(buildVoiceQueueRefillPayload(), {
-    token: "queue-secret",
-    action: "process_voice_queue",
-  });
-});
-
-test("rejected Apps Script queue refill runs the direct queue", async () => {
+test("voice queue refill uses backend guards without calling Apps Script", async () => {
   const { requestVoiceQueueRefill } = await import("../src/lib/sheetUpdateClient");
   let directQueueRuns = 0;
 
   await requestVoiceQueueRefill({ rowNumber: 5890, callAttemptNumber: 2 }, {
-    appsScriptPost: async () => ({
-      data: { ok: false, code: "unauthorized", error: "Missing or invalid voice bot token" },
-    }),
     processQueue: async () => {
       directQueueRuns += 1;
       return { ok: true, queued: false };
@@ -36,19 +24,25 @@ test("rejected Apps Script queue refill runs the direct queue", async () => {
   assert.equal(directQueueRuns, 1);
 });
 
-test("accepted Apps Script queue refill does not run the direct queue", async () => {
+test("an empty backend pass completes without retrying or claiming a call started", async () => {
   const { requestVoiceQueueRefill } = await import("../src/lib/sheetUpdateClient");
   let directQueueRuns = 0;
 
   await requestVoiceQueueRefill({ rowNumber: 5891, callAttemptNumber: 1 }, {
-    appsScriptPost: async () => ({ data: { ok: true, queued: false } }),
     processQueue: async () => {
       directQueueRuns += 1;
       return { ok: true, queued: false };
     },
   });
 
-  assert.equal(directQueueRuns, 0);
+  assert.equal(directQueueRuns, 1);
+});
+
+test("backend refill failures propagate instead of claiming a successful refill", async () => {
+  const { requestVoiceQueueRefill } = await import("../src/lib/sheetUpdateClient");
+  await assert.rejects(requestVoiceQueueRefill({}, {
+    processQueue: async () => { throw new Error("queue unavailable"); },
+  }), /queue unavailable/);
 });
 
 test("Apps Script sheet response requires an explicit ok result", async () => {

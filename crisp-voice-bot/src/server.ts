@@ -11,7 +11,7 @@ import { FINAL_RECEIPT_CIRCUIT_THRESHOLD, FINAL_RECEIPT_STALE_AFTER_MINUTES, INB
 import { startGmailImportSchedulers } from "./lib/gmailImporters";
 import { logger } from "./lib/logger";
 import { startMailshakeSyncScheduler } from "./lib/mailshakeSync";
-import { startVoiceQueueScheduler } from "./lib/voiceQueue";
+import { getVoiceQueueDispatchStatus, startVoiceQueueScheduler } from "./lib/voiceQueue";
 import elevenLabsRouter from "./routes/elevenLabs";
 import gmailImportRouter from "./routes/gmailImport";
 import infoEmailRouter from "./routes/infoEmail";
@@ -48,6 +48,7 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
     voiceExperiment: getElevenLabsVoiceExperimentStatus(),
     runtimeExperiment: getElevenLabsRuntimeExperimentStatus(),
     conversationPolicyVersion: VOICE_CONVERSATION_POLICY_VERSION,
+    queueDispatch: getVoiceQueueDispatchStatus(),
     returnCalls: {
       ready: returnCallsReady({ ...config.returnCalls, baseUrl: config.baseUrl }),
       officeAcceptance: "private_announcement_press_1",

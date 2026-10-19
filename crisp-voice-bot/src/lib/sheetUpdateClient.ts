@@ -28,16 +28,8 @@ type SheetUpdateDependencies = {
 };
 
 type VoiceQueueRefillDependencies = {
-  appsScriptPost?: AppsScriptPost;
   processQueue?: () => Promise<unknown>;
 };
-
-export function buildVoiceQueueRefillPayload(): Record<string, string> {
-  return {
-    ...(config.googleAppsScript.token ? { token: config.googleAppsScript.token } : {}),
-    action: "process_voice_queue",
-  };
-}
 
 function redactLargeSheetFields(payload: Record<string, unknown>): Record<string, unknown> {
   if (typeof payload.voiceNotes !== "string") {
@@ -150,66 +142,11 @@ export async function requestVoiceQueueRefill(context: {
   callAttemptNumber?: number;
 } = {}, dependencies: VoiceQueueRefillDependencies = {}): Promise<void> {
   const processQueue = dependencies.processQueue ?? (() => processVoiceQueue());
-  const appsScriptPost = dependencies.appsScriptPost ?? ((url, body, options) => axios.post(url, body, options));
-
-  if (!config.googleAppsScript.webhookUrl) {
-    logger.info("Requesting direct voice queue refill", context);
-    await processQueue();
-    return;
-  }
-
-  const payload = buildVoiceQueueRefillPayload();
-  const logPayload = {
-    ...payload,
-    ...(payload.token ? { token: "[redacted]" } : {}),
-  };
-
-  logger.info("Requesting voice queue refill", {
-    ...context,
-    url: config.googleAppsScript.webhookUrl,
-    payload: logPayload,
-  });
-
-  try {
-    const response = await appsScriptPost(config.googleAppsScript.webhookUrl, payload, {
-      timeout: 10_000,
-      headers: {
-        "Content-Type": "application/json",
-        ...(config.googleAppsScript.token ? { "X-Crisp-Token": config.googleAppsScript.token } : {}),
-      },
-    });
-
-    if (!isAppsScriptSheetUpdateAccepted(response.data)) {
-      logger.error("Voice queue refill rejected by Apps Script", {
-        ...context,
-        response: summarizeAppsScriptResponse(response.data),
-      });
-      await processQueue();
-      logger.info("Direct voice queue refill accepted after Apps Script rejection", context);
-      return;
-    }
-
-    logger.info("Voice queue refill accepted", context);
-  } catch (error) {
-    if (error instanceof AxiosError) {
-      logger.error("Voice queue refill failed", {
-        ...context,
-        status: error.response?.status,
-        data: error.response?.data,
-        message: error.message,
-      });
-      await processQueue();
-      logger.info("Direct voice queue refill accepted after Apps Script HTTP failure", context);
-      return;
-    }
-
-    logger.error("Voice queue refill failed", {
-      ...context,
-      message: error instanceof Error ? error.message : String(error),
-    });
-    await processQueue();
-    logger.info("Direct voice queue refill accepted after Apps Script transport failure", context);
-  }
+  // The backend owns capacity and local-window guards. An Apps Script transport
+  // acknowledgement does not prove that a free slot was actually checked.
+  logger.info("Requesting direct voice queue refill", context);
+  const result = await processQueue();
+  logger.info("Direct voice queue refill completed", { ...context, result });
 }
 
 export async function postSheetUpdate(

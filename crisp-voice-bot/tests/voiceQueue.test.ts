@@ -125,7 +125,7 @@ test("Render queue prioritizes first calls, then oldest due time", async () => {
   assert.equal(candidates[1].dueAt.toISOString(), "2026-08-24T19:05:00.000Z");
 });
 
-test("Render queue starts one morning call but keeps two mid-afternoon slots available", async () => {
+test("Render queue uses both existing concurrency slots in morning and afternoon", async () => {
   const { getVoiceBotStartableCallCandidatesFromRows } = await import("../src/lib/voiceQueue");
   const rows = [
     { rowNumber: 6101, values: row("2026-08-23T13:14:00-04:00") },
@@ -137,7 +137,7 @@ test("Render queue starts one morning call but keeps two mid-afternoon slots ava
   assert.deepEqual(
     getVoiceBotStartableCallCandidatesFromRows(rows, new Date("2026-08-24T13:30:00Z"), 10, 2)
       .map((candidate) => candidate.rowNumber),
-    [6101],
+    [6101, 6102],
   );
   for (const item of rows) item.values[2] = fixturePhone();
   assert.deepEqual(
@@ -145,6 +145,38 @@ test("Render queue starts one morning call but keeps two mid-afternoon slots ava
       .map((candidate) => candidate.rowNumber),
     [6101, 6102],
   );
+});
+
+test("morning capacity refills after a terminal receipt without exceeding two active calls", async () => {
+  const { getVoiceBotStartableCallCandidatesFromRows } = await import("../src/lib/voiceQueue");
+  const now = new Date("2026-10-19T13:30:00Z");
+  const rows = [6101, 6102, 6103].map((rowNumber) => {
+    const values = row("2026-10-16T14:00:00Z");
+    values[2] = fixturePhone("reach_morning_v1");
+    return { rowNumber, values };
+  });
+  rows[0].values[32] = "2026-10-19T13:29:00Z";
+  rows[1].values[32] = "2026-10-19T13:29:01Z";
+  assert.deepEqual(getVoiceBotStartableCallCandidatesFromRows(rows, now, 10, 2), []);
+  rows[0].values[33] = "voicemail_left";
+  assert.deepEqual(getVoiceBotStartableCallCandidatesFromRows(rows, now, 10, 2).map((c) => c.rowNumber), [6103]);
+  assert.deepEqual(getVoiceBotStartableCallCandidatesFromRows(rows, new Date("2026-10-19T13:45:00Z"), 10, 2), []);
+});
+
+test("fast polling follows listing-local weekday windows including DST-independent zones", async () => {
+  const { isVoiceQueueDialingWindow, shouldPollVoiceQueue, getVoiceQueueDispatchStatus } = await import("../src/lib/voiceQueue");
+  for (const timestamp of ["2026-10-19T13:15:00Z", "2026-10-19T14:15:00Z", "2026-10-19T16:15:00Z", "2026-10-19T19:15:00Z"]) {
+    const now = new Date(timestamp);
+    assert.equal(isVoiceQueueDialingWindow(now), true, timestamp);
+    assert.equal(shouldPollVoiceQueue(now, new Date(now.getTime() - 60_000)), true);
+  }
+  for (const timestamp of ["2026-10-19T13:45:00Z", "2026-10-19T13:14:59Z", "2026-10-18T13:30:00Z"]) {
+    const now = new Date(timestamp);
+    assert.equal(isVoiceQueueDialingWindow(now), false, timestamp);
+    assert.equal(shouldPollVoiceQueue(now, new Date(now.getTime() - 60_000)), false);
+    assert.equal(shouldPollVoiceQueue(now, new Date(now.getTime() - 15 * 60_000)), true);
+  }
+  assert.equal(getVoiceQueueDispatchStatus().pollingSecondsInLocalWindows, 60);
 });
 
 test("Render queue prioritizes an overdue scheduled no-start until the attempt is marked started", async () => {

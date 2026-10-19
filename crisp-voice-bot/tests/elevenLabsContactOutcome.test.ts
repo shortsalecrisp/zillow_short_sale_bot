@@ -535,7 +535,9 @@ test("post-call stop writes terminal status before generic tool fallback and doe
   await assert.rejects(lib.processPostCallOutcomeFromConversationId(id), /Synthetic write failure/);
   assert.equal(refillCount, refillBefore);
   receiptMode = "confirmed";
-  assert.equal(await lib.processPostCallOutcomeFromConversationId(id), true);
+  assert.equal(await lib.processPostCallOutcomeFromConversationId(id, {
+    requestQueueRefill: async () => { refillCount += 1; },
+  }), true);
   assert.equal(receivedWrites.length, before + 2, "the failed attempt must remain eligible for outcome reconciliation");
   for (const write of receivedWrites.slice(before)) {
     assert.equal(write.callResult, "call_end_requested");
@@ -835,7 +837,9 @@ test("failed-transfer final processing records review before any callback tool o
     { role: "assistant", tool_calls: [{ tool_name: "callback_requested" }] },
   ]));
   const before = receivedWrites.length;
-  assert.equal(await lib.processPostCallOutcomeFromConversationId(id), true);
+  assert.equal(await lib.processPostCallOutcomeFromConversationId(id, {
+    requestQueueRefill: async () => { refillCount += 1; },
+  }), true);
   assert.equal(receivedWrites.length, before + 1);
   const write = receivedWrites.at(-1)!;
   assert.equal(write.callResult, "interested_followup_review");

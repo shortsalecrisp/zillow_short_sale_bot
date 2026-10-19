@@ -23,6 +23,7 @@ process.env.ALERT_EMAIL_TO = "";
 const originalAdapter = axios.defaults.adapter;
 const measurementConversations = new Map<string, Record<string, unknown>>();
 const measurementWrites: Array<Record<string, unknown>> = [];
+const requestQueueRefill = async () => { measurementWrites.push({ action: "backend_queue_refill" }); };
 const unexpectedRequests: string[] = [];
 axios.defaults.adapter = async (request) => {
   if (request.method === "get" && request.baseURL === "https://elevenlabs.invalid/measurement-post-call-test") {
@@ -1353,6 +1354,7 @@ for (const scenario of [
     });
     try {
       assert.equal(await processPostCallOutcomeFromConversationId(conversationId, {
+        requestQueueRefill,
         postSheetUpdate: (payload) => postSheetUpdate(payload, {
           directSheetUpdate: async () => [
             "J:response_status",
@@ -1402,12 +1404,12 @@ for (const scenario of [
     const original = structuredClone(conversation), writesBefore = measurementWrites.length;
     measurementConversations.set(conversationId, conversation);
     try {
-      assert.equal(await processPostCallOutcomeFromConversationId(conversationId), true);
+      assert.equal(await processPostCallOutcomeFromConversationId(conversationId, { requestQueueRefill }), true);
       const writes = measurementWrites.slice(writesBefore);
       assert.equal(writes.length, 2);
       const update = writes.find(write => typeof write.voiceNotes === "string")!;
       assert.equal(update.callResult, "call_end_requested");
-      assert.equal(writes.filter(write => write.action === "process_voice_queue").length, 1);
+      assert.equal(writes.filter(write => write.action === "backend_queue_refill").length, 1);
       const metrics = JSON.parse(String(update.voiceNotes).replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""));
       assert.equal(metrics.call.initialOpeningPolicy, scenario.expectedOpening);
       assert.equal(metrics.call.declaredConversationPolicyVersion, scenario.expectedPolicy);
@@ -1440,7 +1442,7 @@ test("post-call reconstruction does not manufacture historical provider versions
     transcript: [{ role: "user", message: "Please end this call." }],
   });
   try {
-    assert.equal(await processPostCallOutcomeFromConversationId(conversationId), true);
+    assert.equal(await processPostCallOutcomeFromConversationId(conversationId, { requestQueueRefill }), true);
     const update = measurementWrites.slice(writesBefore).find(write => typeof write.voiceNotes === "string")!;
     const metrics = JSON.parse(String(update.voiceNotes).replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""));
     assert.equal(metrics.call.initialOpeningPolicy, null);
