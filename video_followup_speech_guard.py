@@ -95,6 +95,19 @@ GENERAL_PRONUNCIATION_CONFIG_SHA256 = _digest_json({
     "lexicon_manifest": GENERAL_PRONUNCIATION_LEXICON_MANIFEST,
     "matching_config": GENERAL_PRONUNCIATION_MATCHING_CONFIG,
 })
+REVIEWED_VARIANT_POLICY_VERSION = "spoken-greeting-tiny-en-v5"
+REVIEWED_VARIANT_NAME_TRANSCRIPTS = {
+    "colin": ("collin",),
+    "sheikh": ("shake",),
+}
+REVIEWED_VARIANT_CONFIG = {
+    "policy": REVIEWED_VARIANT_POLICY_VERSION,
+    "base_general_pronunciation_config_sha256": GENERAL_PRONUNCIATION_CONFIG_SHA256,
+    "matching_rule": "whole-greeting-canonical-name-directed-reviewed-variants-v1",
+    "observed_name_variants": REVIEWED_VARIANT_NAME_TRANSCRIPTS,
+}
+REVIEWED_VARIANT_CONFIG_SHA256 = _digest_json(REVIEWED_VARIANT_CONFIG)
+GENERAL_PRONUNCIATION_POLICIES = (GENERAL_PRONUNCIATION_POLICY_VERSION, REVIEWED_VARIANT_POLICY_VERSION)
 LEGACY_VERIFICATION_METHOD = "direct-final-asr-v1"
 PLANNED_AUDIO_VERIFICATION_METHOD = "planned-aac-lineage-v1"
 PLANNED_AUDIO_VERIFICATION_CONFIG = {
@@ -119,15 +132,24 @@ GENERAL_PRONUNCIATION_VERIFICATION_CONFIG = {
     "speech_config_sha256": GENERAL_PRONUNCIATION_CONFIG_SHA256,
 }
 GENERAL_PRONUNCIATION_VERIFICATION_CONFIG_SHA256 = _digest_json(GENERAL_PRONUNCIATION_VERIFICATION_CONFIG)
+REVIEWED_VARIANT_VERIFICATION_METHOD = "planned-aac-lineage-v4"
+REVIEWED_VARIANT_VERIFICATION_CONFIG = {
+    **PLANNED_AUDIO_VERIFICATION_CONFIG,
+    "method": REVIEWED_VARIANT_VERIFICATION_METHOD,
+    "speech_config_sha256": REVIEWED_VARIANT_CONFIG_SHA256,
+}
+REVIEWED_VARIANT_VERIFICATION_CONFIG_SHA256 = _digest_json(REVIEWED_VARIANT_VERIFICATION_CONFIG)
 PLANNED_VERIFICATION_PROFILES = {
     PLANNED_AUDIO_VERIFICATION_METHOD: PLANNED_AUDIO_VERIFICATION_CONFIG,
     PRONUNCIATION_VERIFICATION_METHOD: PRONUNCIATION_VERIFICATION_CONFIG,
     GENERAL_PRONUNCIATION_VERIFICATION_METHOD: GENERAL_PRONUNCIATION_VERIFICATION_CONFIG,
+    REVIEWED_VARIANT_VERIFICATION_METHOD: REVIEWED_VARIANT_VERIFICATION_CONFIG,
 }
 PLANNED_VERIFICATION_POLICIES = {
     PLANNED_AUDIO_VERIFICATION_METHOD: POLICY_VERSION,
     PRONUNCIATION_VERIFICATION_METHOD: PRONUNCIATION_POLICY_VERSION,
     GENERAL_PRONUNCIATION_VERIFICATION_METHOD: GENERAL_PRONUNCIATION_POLICY_VERSION,
+    REVIEWED_VARIANT_VERIFICATION_METHOD: REVIEWED_VARIANT_POLICY_VERSION,
 }
 MAX_AUDIO_BYTES = 1200000
 MAX_MEDIA_BYTES = 25 * 1024 * 1024
@@ -239,6 +261,8 @@ def _policy_identity(policy_version):
         config = PRONUNCIATION_CONFIG_SHA256
     elif policy_version == GENERAL_PRONUNCIATION_POLICY_VERSION:
         config = GENERAL_PRONUNCIATION_CONFIG_SHA256
+    elif policy_version == REVIEWED_VARIANT_POLICY_VERSION:
+        config = REVIEWED_VARIANT_CONFIG_SHA256
     else:
         raise SpeechGuardError("speech_guard_output_invalid")
     return {"policy_version": policy_version, "model_id": MODEL_ID,
@@ -247,6 +271,15 @@ def _policy_identity(policy_version):
 
 
 def _policy_phrase_matches(name, phrase, policy_version):
+    if policy_version == REVIEWED_VARIANT_POLICY_VERSION:
+        if not isinstance(phrase, str) or phrase != _policy_normalized_phrase(phrase, policy_version):
+            return False
+        # These observations are directional and anchored to the canonical name;
+        # they are not dictionary rewrites or transitive spelling groups.
+        observed = phrase[4:]
+        if observed in REVIEWED_VARIANT_NAME_TRANSCRIPTS.get(name.casefold(), ()):
+            return True
+        return _policy_phrase_matches(name, phrase, GENERAL_PRONUNCIATION_POLICY_VERSION)
     if policy_version == GENERAL_PRONUNCIATION_POLICY_VERSION:
         if not isinstance(phrase, str) or phrase != _policy_normalized_phrase(phrase, policy_version):
             return False
@@ -292,7 +325,7 @@ def preflight_pronunciation_guard():
 
 
 def _policy_normalized_phrase(text, policy_version):
-    if policy_version == GENERAL_PRONUNCIATION_POLICY_VERSION:
+    if policy_version in GENERAL_PRONUNCIATION_POLICIES:
         try:
             return _pronunciation_module().normalize_greeting(text)
         except SpeechGuardError:
@@ -444,7 +477,7 @@ def verify_greeting_words(audio_bytes, first_name, *, policy_version=POLICY_VERS
     identity = _policy_identity(policy_version)
     name = _name(first_name)
     _audio_duration(audio_bytes)
-    if policy_version == GENERAL_PRONUNCIATION_POLICY_VERSION:
+    if policy_version in GENERAL_PRONUNCIATION_POLICIES:
         preflight_pronunciation_guard()
     # The recognition child validates the same assets and dependencies before
     # decoding. Do not launch a second model-loading child for each audio clip.
@@ -457,10 +490,10 @@ def verify_greeting_words(audio_bytes, first_name, *, policy_version=POLICY_VERS
     phrase = _policy_normalized_phrase(result.get("transcript"), policy_version)
     rejected = {**identity, "source_audio_sha256": hashlib.sha256(audio_bytes).hexdigest(),
         "observed_transcript": result.get("transcript"), "confidence": result.get("segments")}
-    if policy_version == GENERAL_PRONUNCIATION_POLICY_VERSION and not _confidence_ok(result.get("segments")):
+    if policy_version in GENERAL_PRONUNCIATION_POLICIES and not _confidence_ok(result.get("segments")):
         raise SpeechGuardError("speech_guard_low_confidence", diagnostics=rejected)
     if not _policy_phrase_matches(name, phrase, policy_version):
-        if policy_version == GENERAL_PRONUNCIATION_POLICY_VERSION:
+        if policy_version in GENERAL_PRONUNCIATION_POLICIES:
             raise SpeechGuardError("speech_guard_pronunciation_unresolved", diagnostics=rejected)
         raise SpeechGuardError("speech_guard_name_mismatch", diagnostics=rejected)
     if not _confidence_ok(result.get("segments")):
@@ -479,7 +512,7 @@ def validate_speech_proof(proof, *, first_name, audio_sha256=None, media_sha256=
     policy, phrase = proof.get("policy_version"), proof.get("normalized_transcript")
     if policy == LEGACY_PROOF_IDENTITY["policy_version"] and phrase == "hey " + name.casefold():
         identity = LEGACY_PROOF_IDENTITY
-    elif (policy in (POLICY_VERSION, PRONUNCIATION_POLICY_VERSION, GENERAL_PRONUNCIATION_POLICY_VERSION)
+    elif (policy in (POLICY_VERSION, PRONUNCIATION_POLICY_VERSION, *GENERAL_PRONUNCIATION_POLICIES)
             and _policy_phrase_matches(name, phrase, policy)):
         identity = _policy_identity(policy)
     else:
@@ -497,7 +530,7 @@ def validate_speech_proof(proof, *, first_name, audio_sha256=None, media_sha256=
                 or type(seconds) not in {int, float} or not math.isfinite(seconds) or not 0.5 <= seconds <= 2.5):
             return False
     lineage_fields = {"verification_method", "verification_config_sha256", "audio_lineage"}
-    final_pronunciation_proof = (policy in (PRONUNCIATION_POLICY_VERSION, GENERAL_PRONUNCIATION_POLICY_VERSION)
+    final_pronunciation_proof = (policy in (PRONUNCIATION_POLICY_VERSION, *GENERAL_PRONUNCIATION_POLICIES)
         and (media_sha256 is not None or "media_sha256" in proof or "greeting_seconds" in proof))
     if final_pronunciation_proof or any(key in proof for key in lineage_fields):
         if not lineage_fields.issubset(proof) or not _validate_audio_lineage_proof(proof, name):

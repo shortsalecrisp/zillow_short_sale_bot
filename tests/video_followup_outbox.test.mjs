@@ -79,6 +79,25 @@ const plannedVideo = () => {
   });
   return body;
 };
+const directedVideo = (name = "Colin", observed = "collin") => {
+  const body = plannedVideo();
+  body.first_name = name;
+  body.message = `Hey ${name}, here's your video: https://go.crispshortsales.com/v/${body.video_job_id}`;
+  const proof = body.video_speech_proof;
+  Object.assign(proof, {
+    policy_version: "spoken-greeting-tiny-en-v5",
+    config_sha256: "060ec33e383b742872a129c3652143f658313851fd61594cec243789b5dcb8fd",
+    expected_name: name, normalized_transcript: `hey ${observed}`,
+    verification_method: "planned-aac-lineage-v4",
+    verification_config_sha256: "528159aa9b387b42fbc0a4987953e5e46fd36e808ee098a677b5f8cab5ba7592",
+  });
+  proof.audio_lineage.first_name = name;
+  proof.audio_lineage.speech_proof_sha256 = canonicalDigest(Object.fromEntries([
+    "accepted", "policy_version", "model_id", "model_revision", "model_manifest_sha256", "config_sha256",
+    "source_audio_sha256", "expected_name", "normalized_transcript", "confidence",
+  ].map((field) => [field, proof[field]])));
+  return body;
+};
 const legacy = {
   crm_row: 2, stable_id: base.stable_id, phone: base.phone, message: "Original legacy text",
   message_id: "followup-2-oldhash", request_id: "scheduler-followup-2-oldhash",
@@ -479,6 +498,81 @@ test("planned AAC additive proof survives the unchanged Apps Script transport ga
   assert.equal(started.ok, true);
   assert.equal(started.status, "send_started");
   assert.equal(h.outbox.data.length, 3);
+});
+
+test("directed v5 variants preserve canonical identity through enqueue, claim and send-start", () => {
+  for (const [name, observed] of [["Colin", "collin"], ["Sheikh", "shake"]]) {
+    const h = harness();
+    h.row[0] = name;
+    const body = directedVideo(name, observed);
+    assert.equal(enqueue(h, body).ok, true);
+    const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
+    assert.equal(metadata.first_name, name);
+    assert.deepEqual(metadata.video_speech_proof, body.video_speech_proof);
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    assert.equal(claim.should_send, true);
+    assert.equal(claim.reply_text, body.message);
+    assert.equal(h.context.markPendingSmsSendStartedV10_(claim).status, "send_started");
+    assert.equal(h.outbox.data.length, 3);
+  }
+});
+
+test("v5 cannot replace a frozen text choice or reopen terminal or in-flight episodes", () => {
+  for (const status of ["queued", "claimed", "send_started", "receipt_pending", "uncertain",
+    "failed", "superseded", "manual_sent", "sent"]) {
+    const h = harness();
+    h.row[0] = "Colin";
+    assert.equal(enqueue(h, base).ok, true);
+    h.outbox.data[2][1] = status;
+    const before = h.outbox.data[2].slice();
+    const result = enqueue(h, directedVideo());
+    assert.equal(result.payload_frozen, true, status);
+    assert.equal(h.outbox.data.length, 3, status);
+    assert.deepEqual(h.outbox.data[2], before, status);
+  }
+});
+
+test("v5 availability never reinterprets frozen legacy proofs or upgrades their method", () => {
+  for (const phase of ["claim", "active_claim", "send_started"]) {
+    const h = harness();
+    h.row[0] = "Colin";
+    assert.equal(enqueue(h, video({ first_name: "Colin" })).ok, true);
+    const claim = phase === "claim" ? null : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    const metadata = JSON.parse(h.outbox.data[2][6].replace("__scheduled_followup__:", ""));
+    metadata.video_speech_proof.normalized_transcript = "hey collin";
+    h.outbox.data[2][6] = `__scheduled_followup__:${JSON.stringify(metadata)}`;
+    const before = h.outbox.data[2].slice();
+    const result = phase === "send_started" ? h.context.markPendingSmsSendStartedV10_(claim)
+      : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+    assert.equal(result.should_send, false, phase);
+    assert.equal(result.retryable, true, phase);
+    assert.deepEqual(h.outbox.data[2], before, phase);
+    const replacement = enqueue(h, directedVideo());
+    assert.equal(replacement.payload_frozen, true);
+    assert.equal(replacement.ok, false);
+    assert.deepEqual(h.outbox.data[2], before);
+    assert.equal(h.outbox.data.length, 3);
+  }
+});
+
+test("v5 queued replies, manual conversations and takeover still suppress before claim and send-start", () => {
+  for (const mutate of [(h) => inboundReply(h), (h) => { h.row[10] = "H"; },
+    (h) => { h.row[28] = "TRUE"; }, (h) => { h.row[31] = "TRUE"; },
+    (h) => { h.row[12] = "Spoke with agent; callback requested"; },
+    (h) => { h.setTakeover(true); }]) {
+    for (const phase of ["claim", "active_claim", "send_started"]) {
+      const h = harness();
+      h.row[0] = "Colin";
+      assert.equal(enqueue(h, directedVideo()).ok, true);
+      const claim = phase === "claim" ? null : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+      mutate(h);
+      const result = phase === "send_started" ? h.context.markPendingSmsSendStartedV10_(claim)
+        : h.context.claimPendingSmsSendV10_({ worker_id: "owner-test" });
+      assert.equal(result.should_send, false, phase);
+      assert.equal(h.outbox.data[2][1], "superseded", phase);
+      assert.equal(h.outbox.data.length, 3);
+    }
+  }
 });
 
 test("planned AAC additive fields cannot bypass existing name identity or speech thresholds", () => {

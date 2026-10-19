@@ -35,6 +35,7 @@ from video_followup_speech_guard import (
     PLANNED_VERIFICATION_PROFILES, PRONUNCIATION_POLICY_VERSION, PRONUNCIATION_VERIFICATION_METHOD,
     PLANNED_VERIFICATION_POLICIES, POLICY_VERSION, LEGACY_PROOF_IDENTITY,
     GENERAL_PRONUNCIATION_POLICY_VERSION, GENERAL_PRONUNCIATION_VERIFICATION_METHOD,
+    REVIEWED_VARIANT_VERIFICATION_METHOD,
 )
 
 MASTER_SHA256 = "01efd28101e8b016d51d571cc87d38d13ea623389663bc7a88cf26cce39bd60b"
@@ -339,7 +340,8 @@ class SameTakeVideoProvider:
         self.generator_profile = _generator_profile(generator_profile)["name"]
         self.verification_method = _verification_profile(verification_method)["verification_method"]
         if (self.generator_profile == BOUNDED_PAD_GENERATOR_PROFILE
-                and self.verification_method != GENERAL_PRONUNCIATION_VERIFICATION_METHOD):
+                and self.verification_method not in {
+                    GENERAL_PRONUNCIATION_VERIFICATION_METHOD, REVIEWED_VARIANT_VERIFICATION_METHOD}):
             raise VideoProviderError("verification_method_invalid", "Normalized greetings require the approved final-audio verifier.")
         self.session, self.media_session = session or requests.Session(), media_session or requests.Session()
         if session is None:
@@ -385,7 +387,8 @@ class SameTakeVideoProvider:
         _saved_generator_profile(state)
         _saved_verification_profile(state)
         if (state.get("generator_profile") == BOUNDED_PAD_GENERATOR_PROFILE
-                and state.get("verification_method") != GENERAL_PRONUNCIATION_VERIFICATION_METHOD):
+                and state.get("verification_method") not in {
+                    GENERAL_PRONUNCIATION_VERIFICATION_METHOD, REVIEWED_VARIANT_VERIFICATION_METHOD}):
             raise VideoProviderError("pipeline_mismatch", "Normalized greeting verification identity changed.")
         return state, version
 
@@ -501,7 +504,8 @@ class SameTakeVideoProvider:
         verification = _verification_profile(self.verification_method)
         if self.verification_method in PLANNED_VERIFICATION_PROFILES:
             _lineage_runtime()
-        if self.verification_method == GENERAL_PRONUNCIATION_VERIFICATION_METHOD:
+        if self.verification_method in {
+                GENERAL_PRONUNCIATION_VERIFICATION_METHOD, REVIEWED_VARIANT_VERIFICATION_METHOD}:
             preflight_pronunciation_guard()
         self._master()
         self._reference()

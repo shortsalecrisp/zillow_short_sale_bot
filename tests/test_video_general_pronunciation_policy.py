@@ -42,7 +42,8 @@ def test_new_identities_are_separate_pinned_and_match_runtime_literals():
     assert guard.preflight_pronunciation_guard() == pronunciation.LEXICON_MANIFEST
     assert guard.PLANNED_VERIFICATION_POLICIES == {
         OLD_METHODS[0]: guard.POLICY_VERSION, OLD_METHODS[1]: guard.PRONUNCIATION_POLICY_VERSION,
-        METHOD: POLICY}
+        METHOD: POLICY,
+        guard.REVIEWED_VARIANT_VERIFICATION_METHOD: guard.REVIEWED_VARIANT_POLICY_VERSION}
 
 
 @pytest.mark.parametrize("name,observed", [

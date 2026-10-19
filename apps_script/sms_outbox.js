@@ -838,17 +838,25 @@ function isReviewedVideoPronunciationPairV24_(foldedName, observed) {
   });
 }
 
+function isDirectedVideoPronunciationVariantV25_(foldedName, observed) {
+  var variants = { colin: ["collin"], sheikh: ["shake"] };
+  return Object.prototype.hasOwnProperty.call(variants, foldedName) &&
+    variants[foldedName].indexOf(observed) !== -1;
+}
+
 function prewarmVideoFollowupPronunciationV24_(metadata) {
   var proof = metadata && metadata.video_speech_proof;
   if (VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ || !metadata || metadata.video_variant !== "video" ||
-      !proof || proof.policy_version !== "spoken-greeting-tiny-en-v4") return false;
+      !proof || ["spoken-greeting-tiny-en-v4", "spoken-greeting-tiny-en-v5"].indexOf(proof.policy_version) === -1) return false;
   if (typeof VIDEO_PRONUNCIATION_LEXICON_V24_CACHE_ !== "undefined" &&
       VIDEO_PRONUNCIATION_LEXICON_V24_CACHE_) return true;
   var name = normalizeVideoFollowupFirstNameV19_(metadata.first_name)
     .toLowerCase().replace(/\u00df/g, "ss").replace(/\u03c2/g, "\u03c3");
   var phrase = proof.normalized_transcript;
   if (phrase === "hey " + name || (typeof phrase === "string" && phrase.indexOf("hey ") === 0 &&
-      isReviewedVideoPronunciationPairV24_(name, phrase.slice(4)))) return false;
+      (isReviewedVideoPronunciationPairV24_(name, phrase.slice(4)) ||
+       (proof.policy_version === "spoken-greeting-tiny-en-v5" &&
+        isDirectedVideoPronunciationVariantV25_(name, phrase.slice(4)))))) return false;
   // Warm only immutable data, never a proof/eligibility result. One attempt per
   // request is enough; failed data remains unavailable at the locked check.
   try { videoPronunciationLexiconV24_(); } catch (_) { /* Fail closed during validation. */ }
@@ -920,8 +928,11 @@ function matchesVideoFollowupSpeechPolicyV22_(proof, foldedName) {
         return group.indexOf(foldedName) !== -1 && group.indexOf(pronunciationObserved) !== -1;
       })) return false;
     }
-  } else if (proof.policy_version === "spoken-greeting-tiny-en-v4") {
-    config = "e61b237ccaa3f4cccb369f0a88b1f9d0d4e01838242d9b74e90c8ed4891f03a2";
+  } else if (proof.policy_version === "spoken-greeting-tiny-en-v4" ||
+      proof.policy_version === "spoken-greeting-tiny-en-v5") {
+    config = proof.policy_version === "spoken-greeting-tiny-en-v5"
+      ? "060ec33e383b742872a129c3652143f658313851fd61594cec243789b5dcb8fd"
+      : "e61b237ccaa3f4cccb369f0a88b1f9d0d4e01838242d9b74e90c8ed4891f03a2";
     if (proof.config_sha256 !== config ||
         proof.model_id !== "Systran/faster-whisper-tiny.en" ||
         proof.model_revision !== "0d3d19a32d3338f10357c0889762bd8d64bbdeba" ||
@@ -933,6 +944,8 @@ function matchesVideoFollowupSpeechPolicyV22_(proof, foldedName) {
       if (typeof generalPhrase !== "string" || generalPhrase.indexOf("hey ") !== 0) return false;
       var generalObserved = generalPhrase.slice(4);
       var reviewed = isReviewedVideoPronunciationPairV24_(foldedName, generalObserved);
+      if (proof.policy_version === "spoken-greeting-tiny-en-v5" &&
+          isDirectedVideoPronunciationVariantV25_(foldedName, generalObserved)) reviewed = true;
       if (!reviewed && !matchesVideoGeneralPronunciationV24_(foldedName, generalPhrase)) return false;
     }
   } else { return false; }
@@ -987,6 +1000,26 @@ function hasValidVideoGeneralPronunciationLineageV24_(proof, name) {
   return true;
 }
 
+function hasValidVideoDirectedPronunciationLineageV25_(proof, name) {
+  if (proof.verification_method !== "planned-aac-lineage-v4" ||
+      proof.verification_config_sha256 !== "528159aa9b387b42fbc0a4987953e5e46fd36e808ee098a677b5f8cab5ba7592") {
+    return false;
+  }
+  var lineage = proof.audio_lineage;
+  if (!lineage || typeof lineage !== "object" || Array.isArray(lineage) || lineage.accepted !== true ||
+      lineage.lineage_version !== "planned-aac-same-take-v1" ||
+      lineage.first_name !== name || lineage.final_media_sha256 !== proof.media_sha256 ||
+      lineage.checked_audio_sha256 !== proof.source_audio_sha256 ||
+      lineage.greeting_seconds !== proof.greeting_seconds) return false;
+  var hashFields = ["manifest_sha256", "planned_audio_sha256", "final_media_sha256",
+    "checked_audio_sha256", "full_pcm_sha256", "greeting_pcm_sha256",
+    "aac_track_sha256", "speech_proof_sha256"];
+  if (!hashFields.every(function(field) {
+    return /^[0-9a-f]{64}$/.test(String(lineage[field] || ""));
+  })) return false;
+  return true;
+}
+
 function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
   if (metadata.video_variant !== "video") return true;
   var proof = metadata.video_speech_proof;
@@ -1012,6 +1045,8 @@ function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
       !hasValidVideoPronunciationLineageV23_(proof, name)) return false;
   if (proof.policy_version === "spoken-greeting-tiny-en-v4" &&
       !hasValidVideoGeneralPronunciationLineageV24_(proof, name)) return false;
+  if (proof.policy_version === "spoken-greeting-tiny-en-v5" &&
+      !hasValidVideoDirectedPronunciationLineageV25_(proof, name)) return false;
   if (!proof.confidence.every(function(segment) {
     return segment && typeof segment.avg_logprob === "number" && isFinite(segment.avg_logprob) &&
       segment.avg_logprob >= -1 && segment.avg_logprob <= 0 &&

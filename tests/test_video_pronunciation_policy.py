@@ -95,7 +95,8 @@ def test_old_wire_config_and_both_planned_versions_are_literal_and_separate():
     assert guard.PLANNED_VERIFICATION_PROFILES == {
         "planned-aac-lineage-v1": guard.PLANNED_AUDIO_VERIFICATION_CONFIG,
         "planned-aac-lineage-v2": guard.PRONUNCIATION_VERIFICATION_CONFIG,
-        "planned-aac-lineage-v3": guard.GENERAL_PRONUNCIATION_VERIFICATION_CONFIG}
+        "planned-aac-lineage-v3": guard.GENERAL_PRONUNCIATION_VERIFICATION_CONFIG,
+        "planned-aac-lineage-v4": guard.REVIEWED_VARIANT_VERIFICATION_CONFIG}
     assert {key: value for key, value in guard.PRONUNCIATION_VERIFICATION_CONFIG.items()
             if key not in {"method", "speech_config_sha256"}} == {
         key: value for key, value in guard.PLANNED_AUDIO_VERIFICATION_CONFIG.items()
