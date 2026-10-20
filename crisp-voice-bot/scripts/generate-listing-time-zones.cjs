@@ -73,6 +73,8 @@ for (const [key, entry] of [...cities].sort(([a], [b]) => a.localeCompare(b, "en
 const aliases = {
   "FL|POINCIANA": "FL|KISSIMMEE",
   "FL|INDIAN HARBOUR BEACH": "FL|SATELLITE BEACH",
+  "FL|HARMONY": "FL|SAINT CLOUD",
+  "MI|COTTRELLVILLE": "MI|MARINE CITY",
 };
 for (const [alias, canonical] of Object.entries(aliases)) {
   if (!(cityOutput[canonical] >= 0)) throw new Error("Vetted alias target no longer has unanimous timezone evidence: " + canonical);

@@ -89,6 +89,33 @@ This adds only the named municipal/postal alias; unknown Florida cities and
 contradictory ZIP/state evidence continue to fail closed. No listing city or
 address is rewritten to make the lookup succeed.
 
+## Vetted Postal Aliases: Harmony and Cottrellville
+
+Verified 2026-10-20 for held rows 6290 and 6286. `FL|HARMONY` maps to
+the existing unanimous `FL|SAINT CLOUD` consensus (ZIP 34773), and
+`MI|COTTRELLVILLE` maps to `MI|MARINE CITY` (ZIP 48039). Both resolve to
+America/New_York, including daylight-saving transitions. These are named
+postal aliases, not state-wide fallbacks, and do not rewrite CRM identities.
+
+The official Harmony West CDD agenda lists the exact 2556 Harmonia Hammock
+Road address, Harmony FL 34773:
+https://harmonywestcdd.net/_assets/documents/fy-2025/2024-11-05-HWCDD-agenda-lo.pdf?v=1770424659
+Osceola County identifies the Harmony development:
+https://www.osceola.org/Doing-Business/Community-and-Economic-Development/DCIs-and-DRIs/Harmony-DRI
+Cottrellville Township identifies its St. Clair County, Michigan location:
+https://cottrellvilletwp.gov/
+The local school district's published route includes 8217 S River Road in
+the Cottrellville 48039 area:
+https://core-docs.s3.us-east-1.amazonaws.com/documents/asset/uploaded_file/2970/ECSD/5987487/ECSD-BusRoutes-2025-26_for_the_webv3.pdf
+Federal Eastern/Central boundaries place Osceola County and Michigan's
+Lower Peninsula in Eastern time:
+https://www.ecfr.gov/current/title-49/subtitle-A/part-71/section-71.5
+Existing canonical ZIP consensus, unknown-city holds and contradictory
+state/ZIP guards remain unchanged. Stable phone-based first-call lanes
+remain afternoon for both held agents; no morning call is authorized by
+this location repair. Generated TypeScript data and Apps Script companion
+remain identical; production backend dispatch owns the guarded call start.
+
 ## Rebuild
 
 Download and retain the public US.zip source, extract US.txt, and install

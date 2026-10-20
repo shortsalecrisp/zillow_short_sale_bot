@@ -12,6 +12,8 @@ const cases: [string, string, string][] = [
   ["Fort Worth", "TX", "America/Chicago"],
   ["Poinciana", "FL", "America/New_York"],
   ["Indian Harbour Beach", "FL", "America/New_York"],
+  ["Harmony", "FL", "America/New_York"],
+  ["Cottrellville", "MI", "America/New_York"],
   ["Nashville", "TN", "America/Chicago"], ["Knoxville", "TN", "America/New_York"],
   ["El Paso", "TX", "America/Denver"], ["Dallas", "TX", "America/Chicago"],
   ["Boise", "ID", "America/Denver"], ["Coeur d'Alene", "ID", "America/Los_Angeles"],
@@ -83,6 +85,24 @@ test("Indian Harbour Beach uses the vetted Satellite Beach postal consensus with
   for (const [date, expectedHour] of [["2026-10-19T13:15:00Z", "09"], ["2026-12-15T14:15:00Z", "09"]]) {
     const timeZone = resolveListingTimeZone({ city: "Indian Harbour Beach", state: "FL" }).timeZone;
     assert.equal(new Intl.DateTimeFormat("en-US", { timeZone, hour: "2-digit", hourCycle: "h23" }).format(new Date(date!)), expectedHour);
+  }
+});
+
+test("vetted Harmony and Cottrellville aliases retain ZIP and state conflict guards", () => {
+  for (const [city, state, address, zip, canonical] of [
+    ["Harmony", "FL", "2556 Harmonia Hammock Rd", "34773", "Saint Cloud"],
+    ["Cottrellville", "MI", "8217 River Road", "48039", "Marine City"],
+  ]) {
+    for (const streetAddress of [address, `${address}, ${city}, ${state} ${zip}`, `${address}, ${canonical}, ${state} ${zip}`]) {
+      assert.deepEqual(resolveListingTimeZone({ streetAddress, city, state }), {
+        timeZone: "America/New_York", reason: "", source: "city_consensus",
+      });
+    }
+    assert.equal(resolveListingTimeZone({ streetAddress: `${address}, ${city}, ${state} ${zip}` }).timeZone, "America/New_York");
+    assert.equal(resolveListingTimeZone({ streetAddress: `${address} FL 32501`, city, state }).reason,
+      state === "FL" ? "listing_zip_conflict" : "listing_state_conflict");
+    assert.equal(resolveListingTimeZone({ streetAddress: `${address} MI 49801`, city, state }).reason,
+      state === "MI" ? "listing_zip_conflict" : "listing_state_conflict");
   }
 });
 
