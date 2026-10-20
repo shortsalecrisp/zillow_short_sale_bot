@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -8,6 +9,22 @@ import vm from "node:vm";
 const root = path.join(import.meta.dirname, "..");
 const outboxSource = fs.readFileSync(path.join(root, "apps_script/sms_outbox.js"), "utf8");
 const postSource = fs.readFileSync(path.join(root, "apps_script/zz_unified_post.js"), "utf8");
+
+function schedulerSerialized(body) {
+  // Exercise the real Python request boundary, not a JS copy of its allowlist.
+  const result = spawnSync(process.env.PYTHON || "python3", [
+    "-I", "-B", path.join(root, "tests/serialize_followup_payload_fixture.py"),
+  ], {
+    encoding: "utf8", timeout: 10000, maxBuffer: 128 * 1024,
+    input: JSON.stringify({
+      action: "enqueue_followup_sms", row_idx: body.crm_row, phone_digits: body.phone,
+      message: body.message, stable_id: body.stable_id, followup_context: body,
+    }),
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
 const initial = "2026-10-13T13:00:00.000Z";
 const key = "a".repeat(64);
 const base = {
@@ -1355,6 +1372,185 @@ function futureHarness() {
 function journal(h) {
   return JSON.parse(h.outbox.data.at(-1)[6].replace(/^__scheduled_followup__:/, "")).decision_evidence;
 }
+
+function schedulerReceiptFixture(asVideo = false) {
+  const h = futureHarness();
+  const phone = "2025550142";
+  h.row[2] = phone;
+  for (const row of h.outbox.data.slice(1)) row[4] = phone;
+  const body = asVideo ? directedVideo("Jim", "jim") : { ...base, first_name: "Jim", video_job_id: "job_123" };
+  body.phone = phone;
+  if (asVideo) Object.assign(body.video_speech_proof, {
+    phone, evidence_version: "same-take-evidence-v1",
+    evidence_contract: "same-take-evidence-required-v1", evidence_sha256: "e".repeat(64),
+  });
+  const resolved = h.context.checkVideoFollowupEligibilityV19_(body);
+  assert.equal(resolved.eligible, true);
+  body.initial_receipt = JSON.parse(JSON.stringify(resolved.initial_receipt));
+  return { h, body };
+}
+
+for (const asVideo of [false, true]) {
+  test(`Python serializer receipt boundary journals ${asVideo ? "evidence video" : "text fallback"} claim and send-start`, () => {
+    const { h, body } = schedulerReceiptFixture(asVideo);
+    const before = JSON.stringify(body);
+    const payload = schedulerSerialized(body);
+    assert.deepEqual(payload.initial_receipt, body.initial_receipt);
+    for (const field of ["message_id", "request_id", "followup_key", "video_job_id", "video_variant", "phone"]) {
+      assert.equal(payload[field], body[field], field);
+    }
+    assert.deepEqual(payload.video_speech_proof, body.video_speech_proof);
+    assert.equal(JSON.stringify(body), before);
+    assert.equal(enqueue(h, payload).ok, true);
+    const metadata = JSON.parse(h.outbox.data.at(-1)[6].replace(/^__scheduled_followup__:/, ""));
+    assert.equal(metadata.audit_contract, "followup-decision-v1");
+    assert.deepEqual(metadata.initial_receipt, body.initial_receipt);
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "offline-fixture" });
+    assert.equal(claim.should_send, true);
+    assert.equal(h.context.markPendingSmsSendStartedV10_(claim).ok, true);
+    const events = journal(h).events;
+    assert.deepEqual(events.map(event => event.stage), ["claim", "send_start"]);
+    let prior = "";
+    for (const event of events) {
+      const { sha256, ...unhashed } = event;
+      assert.equal(sha256, canonicalDigest(unhashed));
+      assert.equal(event.previous_sha256, prior);
+      assert.equal(event.event_id, canonicalDigest([payload.request_id, payload.message_id, event.stage, claim.lease_token]));
+      assert.equal(event.decision.eligible, true);
+      assert.deepEqual(event.decision.initial_receipt, body.initial_receipt);
+      assert.equal(event.speech_evidence_sha256, asVideo ? "e".repeat(64) : "");
+      prior = sha256;
+    }
+    const saved = JSON.stringify(h.outbox.data);
+    assert.equal(h.context.markPendingSmsSendStartedV10_(claim).ok, true);
+    assert.equal(JSON.stringify(h.outbox.data), saved);
+  });
+}
+
+test("Python serializer receipt boundary preserves legacy absence but rejects stripped evidence video", () => {
+  for (const asVideo of [false, true]) {
+    const { h, body } = schedulerReceiptFixture(asVideo);
+    delete body.initial_receipt;
+    const payload = schedulerSerialized(body);
+    assert.equal(Object.hasOwn(payload, "initial_receipt"), false);
+    assert.equal(Object.hasOwn(payload, "audit_contract"), false);
+    assert.equal(enqueue(h, payload).ok, !asVideo);
+    if (!asVideo) {
+      assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "offline-fixture" }).should_send, true);
+      assert.equal(journal(h), undefined);
+    } else {
+      assert.equal(h.outbox.data.length, 2);
+    }
+  }
+});
+
+test("Python serializer receipt boundary retains invalid-present values for Apps fail-closed validation", () => {
+  for (const asVideo of [false, true]) {
+    for (const invalid of [null, {}, [], "", { schema: "unknown" }, { status: "sent" }]) {
+      const { h, body } = schedulerReceiptFixture(asVideo);
+      body.initial_receipt = invalid;
+      const payload = schedulerSerialized(body);
+      assert.equal(Object.hasOwn(payload, "initial_receipt"), true);
+      assert.deepEqual(payload.initial_receipt, invalid);
+      const before = JSON.stringify(h.outbox.data);
+      assert.equal(enqueue(h, payload).ok, false);
+      assert.equal(JSON.stringify(h.outbox.data), before);
+    }
+  }
+});
+
+test("Python serializer receipt boundary cannot change receipt identity or strict speech gates", () => {
+  for (const mutate of [
+    body => { body.initial_receipt.phone = "2025550143"; },
+    body => { body.initial_receipt.stable_id = "different-listing"; },
+    body => { body.initial_receipt.sent_at = "2026-10-13T13:00:09.000Z"; },
+    body => { body.video_speech_proof.normalized_transcript = "hey cindy"; },
+    body => { body.video_speech_proof.confidence[0].avg_logprob = -1.01; },
+    body => { body.video_speech_proof.greeting_seconds = 2.51; },
+    body => { delete body.video_speech_proof.evidence_contract; },
+  ]) {
+    const { h, body } = schedulerReceiptFixture(true);
+    mutate(body);
+    const payload = schedulerSerialized(body);
+    assert.deepEqual(payload.initial_receipt, body.initial_receipt);
+    assert.deepEqual(payload.video_speech_proof, body.video_speech_proof);
+    const before = JSON.stringify(h.outbox.data);
+    assert.equal(enqueue(h, payload).ok, false);
+    assert.equal(JSON.stringify(h.outbox.data), before);
+  }
+});
+
+test("Python serializer receipt boundary never replaces frozen text or reopens completed and uncertain rows", () => {
+  const text = schedulerSerialized(schedulerReceiptFixture().body);
+  const replacement = schedulerSerialized(schedulerReceiptFixture(true).body);
+  for (const status of ["queued", "claimed", "send_started", "receipt_pending", "uncertain",
+    "failed", "superseded", "manual_sent", "sent"]) {
+    const { h } = schedulerReceiptFixture();
+    assert.equal(enqueue(h, text).ok, true);
+    h.outbox.data.at(-1)[1] = status;
+    const before = JSON.stringify(h.outbox.data);
+    const result = enqueue(h, replacement);
+    assert.equal(result.payload_frozen, true, status);
+    assert.equal(JSON.stringify(h.outbox.data), before, status);
+    if (["receipt_pending", "uncertain", "failed", "superseded", "manual_sent", "sent"].includes(status)) {
+      assert.equal(h.context.claimPendingSmsSendV10_({ worker_id: "offline-fixture" }).should_send, false, status);
+      assert.equal(JSON.stringify(h.outbox.data), before, status);
+    }
+  }
+});
+
+test("Python serializer receipt boundary never retrofits an existing unmarked text row", () => {
+  const legacyBody = schedulerReceiptFixture().body;
+  delete legacyBody.initial_receipt;
+  const legacyPayload = schedulerSerialized(legacyBody);
+  assert.equal(Object.hasOwn(legacyPayload, "initial_receipt"), false);
+  const repairedPayloads = [false, true].map(asVideo => schedulerSerialized(schedulerReceiptFixture(asVideo).body));
+  for (const status of ["queued", "claimed", "send_started", "receipt_pending", "uncertain",
+    "failed", "superseded", "manual_sent", "sent"]) {
+    for (const repaired of repairedPayloads) {
+      const { h } = schedulerReceiptFixture();
+      assert.equal(enqueue(h, legacyPayload).ok, true);
+      h.outbox.data.at(-1)[1] = status;
+      const before = JSON.stringify(h.outbox.data);
+      assert.equal(enqueue(h, repaired).payload_frozen, true, `${status}/${repaired.video_variant}`);
+      assert.equal(JSON.stringify(h.outbox.data), before, `${status}/${repaired.video_variant}`);
+      const metadata = JSON.parse(h.outbox.data.at(-1)[6].replace(/^__scheduled_followup__:/, ""));
+      for (const field of ["initial_receipt", "audit_contract", "decision_evidence"]) {
+        assert.equal(Object.hasOwn(metadata, field), false, `${status}/${field}`);
+      }
+    }
+  }
+});
+
+test("Python serializer receipt boundary records reply and takeover blocks at claim and send-start", () => {
+  for (const asVideo of [false, true]) {
+    const payload = schedulerSerialized(schedulerReceiptFixture(asVideo).body);
+    for (const phase of ["claim", "send_start"]) {
+      for (const control of ["queued_reply", "recorded_reply", "takeover"]) {
+        const { h } = schedulerReceiptFixture(asVideo);
+        assert.equal(enqueue(h, payload).ok, true);
+        const claim = phase === "send_start"
+          ? h.context.claimPendingSmsSendV10_({ worker_id: "offline-fixture" }) : null;
+        if (claim) assert.equal(claim.should_send, true);
+        if (control === "queued_reply") {
+          h.inbound.data.push(["2026-10-13T14:00:00Z", "queued", "offline-q", "offline-dedupe",
+            "offline-message", payload.phone, "Please stop", "2026-10-13T14:00:00Z"]);
+        } else if (control === "recorded_reply") {
+          h.row[32] = JSON.stringify([{ role: "user", text: "Please stop" }]);
+        } else {
+          h.setTakeover(true);
+        }
+        const result = claim ? h.context.markPendingSmsSendStartedV10_(claim)
+          : h.context.claimPendingSmsSendV10_({ worker_id: "offline-fixture" });
+        assert.equal(claim ? result.ok : result.should_send, false, `${asVideo}/${phase}/${control}`);
+        const events = journal(h).events;
+        assert.equal(events.at(-1).stage, `${phase}_blocked`);
+        assert.equal(events.at(-1).decision.eligible, false);
+        assert.equal(events.some(event => event.stage === "send_start"), false);
+      }
+    }
+  }
+});
 
 test("pure eligibility exposes the sole exact immutable initial receipt without writes", () => {
   const h = futureHarness();

@@ -12826,6 +12826,8 @@ def _enqueue_tasker_sms_outbox(
             body[key] = followup_context[key]
         if "video_speech_proof" in followup_context:
             body["video_speech_proof"] = followup_context["video_speech_proof"]
+        if "initial_receipt" in followup_context:
+            body["initial_receipt"] = followup_context["initial_receipt"]
 
     try:
         response = requests.post(TASKER_TRANSPORT_HEALTH_URL, json=body, timeout=20)

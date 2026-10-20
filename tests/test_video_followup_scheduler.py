@@ -314,6 +314,45 @@ class VideoFollowupOutboxTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["message_id"], context["message_id"])
 
+    def test_receipt_owned_text_and_video_forward_receipt_without_changing_payload_identity(self):
+        receipt = {
+            "schema": "initial-sms-receipt-v1", "status": "sent",
+            "stable_id": "listing-12", "phone": PHONE,
+            "request_id": "scheduler-initial-12-1234567890abcdef",
+            "message_id": "initial-12-1234567890abcdef",
+            "created_at": "2026-10-13T09:59:58.000Z",
+            "send_started_at": "2026-10-13T09:59:59.000Z",
+            "sent_at": "2026-10-13T10:00:01.000Z",
+        }
+        for variant, message in (("text", ORIGINAL_FALLBACK), ("video", VIDEO_MESSAGE)):
+            with self.subTest(variant=variant):
+                context = feature_context(variant)
+                if variant == "video":
+                    context["video_speech_proof"] = {"evidence_sha256": "c" * 64}
+                self.enqueue(message=message, followup_context=context)
+                legacy_body = dict(self.harness.post.call_args.kwargs["json"])
+                context["initial_receipt"] = receipt
+                self.enqueue(message=message, followup_context=context)
+                body = self.harness.post.call_args.kwargs["json"]
+                self.assertIs(body["initial_receipt"], receipt)
+                self.assertEqual(body, {**legacy_body, "initial_receipt": receipt})
+                self.assertNotIn("audit_contract", body)
+
+    def test_invalid_present_receipt_is_forwarded_for_authoritative_fail_closed_validation(self):
+        for value in (None, {}, "", False, [], {"status": "sent"}):
+            with self.subTest(receipt=value):
+                self.enqueue(followup_context=feature_context("text", initial_receipt=value))
+                body = self.harness.post.call_args.kwargs["json"]
+                self.assertIn("initial_receipt", body)
+                self.assertIs(body["initial_receipt"], value)
+
+    def test_initial_sms_does_not_forward_optional_followup_receipt(self):
+        self.enqueue(action="enqueue_initial_sms", message="Initial message",
+                     followup_context=feature_context(initial_receipt={"status": "sent"}))
+        body = self.harness.post.call_args.kwargs["json"]
+        self.assertNotIn("initial_receipt", body)
+        self.assertNotIn("audit_contract", body)
+
     def test_video_and_original_text_use_same_content_independent_identity_after_row_shift(self):
         self.enqueue(message=VIDEO_MESSAGE, followup_context=feature_context())
         self.enqueue(row_idx=99, message=ORIGINAL_FALLBACK, followup_context=feature_context("text", row=99, crm_row=99))
@@ -388,6 +427,40 @@ class VideoFollowupOutboxTests(unittest.TestCase):
         self.assertEqual(body["message"], VIDEO_MESSAGE)
         self.assertEqual(body["message_id"], context["message_id"])
         self.assertEqual(body["request_id"], context["request_id"])
+        self.harness.direct_sender.assert_not_called()
+        self.harness.sheet_write.assert_not_called()
+
+    def test_receipt_owned_enqueue_retry_reuses_one_selection_and_identical_serialized_body(self):
+        receipt = {
+            "schema": "initial-sms-receipt-v1", "status": "sent",
+            "stable_id": "listing-12", "phone": PHONE,
+            "request_id": "scheduler-initial-12-1234567890abcdef",
+            "message_id": "initial-12-1234567890abcdef",
+            "created_at": "2026-10-13T09:59:58.000Z",
+            "send_started_at": "2026-10-13T09:59:59.000Z",
+            "sent_at": "2026-10-13T10:00:01.000Z",
+        }
+        context = feature_context("text", initial_receipt=receipt)
+        selector = Mock(return_value=(ORIGINAL_FALLBACK, context))
+        module = types.ModuleType("video_followup")
+        module.select_for_followup = selector
+        response = self.harness.post.return_value
+        response.json.side_effect = [
+            {"ok": False, "retryable": True}, {"ok": True, "queued": True},
+        ]
+        with patch.dict(sys.modules, {"video_followup": module}):
+            self.harness.namespace["send_sms"](
+                phone=PHONE, first="Jim", address="123 Main Street", row_idx=12,
+                follow_up=True, stable_id="listing-12", initial_sent_at=INITIAL_SENT_AT,
+            )
+        selector.assert_called_once()
+        self.assertEqual(self.harness.post.call_count, 2)
+        first, second = [call.kwargs["json"] for call in self.harness.post.call_args_list]
+        self.assertEqual(first, second)
+        self.assertEqual(first["initial_receipt"], receipt)
+        self.assertEqual(first["message_id"], context["message_id"])
+        self.assertEqual(first["request_id"], context["request_id"])
+        self.harness.sleep.assert_called_once_with(2)
         self.harness.direct_sender.assert_not_called()
         self.harness.sheet_write.assert_not_called()
 
