@@ -4,6 +4,7 @@ import { logger } from "./logger";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
 import { processVoiceQueue } from "./voiceQueue";
 import { isRetryableVoiceBotResult } from "./voiceSheet";
+import { isFinalUnansweredVoiceResult } from "./voiceFinalUnanswered";
 import type { SheetUpdateRequest } from "../types";
 
 type AppsScriptPost = (
@@ -156,6 +157,14 @@ export async function postSheetUpdate(
   const useAppsScript = Boolean(config.googleAppsScript.webhookUrl);
   const directSheetUpdate = dependencies.directSheetUpdate ?? updateVoiceLeadRow;
   const appsScriptPost = dependencies.appsScriptPost ?? ((url, body, options) => axios.post(url, body, options));
+
+  // A final miss needs fresh protected-state checks and a K/schedule readback,
+  // not only a relay acknowledgement or a result-only write.
+  if (isFinalUnansweredVoiceResult(payload.callResult, payload.callAttemptNumber)) {
+    await persistDirectSheetFallback({ ...payload, leadStatusCode: "N" },
+      directSheetUpdate, "final_unanswered_disposition_readback", true);
+    return;
+  }
 
   if (!useAppsScript) {
     if (!Number.isInteger(payload.rowNumber) || Number(payload.rowNumber) < 2) {

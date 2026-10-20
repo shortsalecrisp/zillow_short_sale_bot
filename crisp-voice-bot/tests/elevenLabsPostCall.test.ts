@@ -1537,3 +1537,36 @@ test("post-call reconstruction does not manufacture historical provider versions
     measurementConversations.delete(conversationId);
   }
 });
+
+for (const scenario of [
+  { name: "final_vm_first", attempt: 1, vm: true, expected: "voicemail_reached", code: undefined },
+  { name: "final_vm_second", attempt: 2, vm: true, expected: "voicemail_reached_final_attempt", code: "N" },
+  { name: "final_no_answer_second", attempt: 2, vm: false, expected: "no_response_second_attempt", code: "N" },
+]) {
+  test("authoritative terminal write includes the correct Mailshake code: " + scenario.name, async () => {
+    const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+    const conversationId = "conv_measurement_" + scenario.name;
+    const updates: Array<Record<string, unknown>> = [];
+    measurementConversations.set(conversationId, {
+      conversation_id: conversationId, status: "done",
+      metadata: { call_duration_secs: scenario.vm ? 12 : 0, termination_reason: scenario.vm ? "voicemail_detection tool was called." : "No answer" },
+      analysis: { transcript_summary: scenario.vm ? "The voicemail box has not been set up yet." : "Nobody answered the call." },
+      conversation_initiation_client_data: { dynamic_variables: {
+        rowNumber: 123, callAttemptNumber: scenario.attempt, agentName: "Synthetic Agent",
+        listingAddress: "123 Fictional Street", phone: "+12025550123", testMode: true,
+      } },
+      transcript: scenario.vm ? [{ role: "user", message: "The voicemail box has not been set up yet. Please try again later." }] : [],
+    });
+    try {
+      assert.equal(await processPostCallOutcomeFromConversationId(conversationId, {
+        requestQueueRefill,
+        postSheetUpdate: async payload => { updates.push(payload as Record<string, unknown>); },
+      }), true);
+      assert.equal(updates.length, 1);
+      assert.equal(updates[0].callResult, scenario.expected);
+      assert.equal(updates[0].leadStatusCode, scenario.code);
+    } finally {
+      measurementConversations.delete(conversationId);
+    }
+  });
+}

@@ -19,6 +19,7 @@ import { isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
 import { requestInfoEmailApproval } from "./requestInfoEmailApproval";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
+import { isFinalUnansweredVoiceResult } from "./voiceFinalUnanswered";
 import type { CallMetadata, SheetUpdateRequest } from "../types";
 
 const FIRST_CHECK_DELAY_MS = 90_000;
@@ -2228,6 +2229,8 @@ async function processPostCallOutcomeForConversation(
           responseStatus: outcome,
           ...(["answered_not_interested", "identity_mismatch_voicemail"].includes(terminalCallResult)
             ? { leadStatusCode: "R" } : {}),
+          ...(isFinalUnansweredVoiceResult(terminalCallResult, metadata.callAttemptNumber)
+            ? { leadStatusCode: "N" } : {}),
           ...(terminalCallResult === "voicemail_left" ? { vmLeft: "yes" } : {}),
           callbackRequested: "",
           callbackTime: "",

@@ -290,6 +290,47 @@ function fakeSheet(row: string[], beforeWrite: () => Promise<void> = async () =>
   return { client, reads: () => reads };
 }
 
+test("two unanswered attempts close K=N with owner-surface readback and no third-call schedule", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  for (const result of ["voicemail_reached_final_attempt", "no_response_second_attempt", "agent_not_available", "gatekeeper_admin_early_exit"]) {
+    const row = Array.from({ length: 42 }, () => "");
+    row[9] = "Voicemail reached on final attempt - message not confirmed";
+    row[32] = "2026-10-20T13:15:00Z";
+    row[33] = "voicemail_left";
+    row[39] = "2026-10-20T19:00:00Z";
+    row[29] = "yes"; row[30] = "voice_call_2_due"; row[31] = "2026-10-20T19:00:00Z";
+    const originalDates = [row[32], row[39]];
+    const sheet = fakeSheet(row);
+    await updateVoiceLeadRow(6322, { callAttemptNumber: 2, callResult: result }, async () => sheet.client);
+    assert.equal(row[10], "N", result);
+    assert.equal(row[40], result);
+    assert.deepEqual([row[29], row[30], row[31]], ["", "", ""]);
+    assert.deepEqual([row[32], row[39]], originalDates);
+    assert.equal(sheet.reads(), 2);
+  }
+});
+
+test("final unanswered updates preserve positive, opt-out, callback, information and human preferences", async () => {
+  const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
+  for (const [index, value] of [[10, "Y"], [10, "G"], [10, "R"], [19, "x"], [16, "information_requested"],
+    [37, "yes"], [38, "tomorrow"], [35, "yes"], [36, "yes"], [9, "Agent asked for more information"],
+    [33, "do_not_call"], [40, "call_ended_by_request"], [13, "handoff-ready"]] as Array<[number, string]>) {
+    const row = Array.from({ length: 42 }, () => "");
+    row[32] = "2026-10-20T13:15:00Z"; row[index] = value;
+    const writes = buildVoiceLeadRowWrites(row, {
+      callAttemptNumber: 2, callResult: "voicemail_reached_final_attempt", leadStatusCode: "N",
+      callbackRequested: "", callbackTime: "", liveTransferRequested: "", liveTransferCompleted: "",
+    }, new Date("2026-10-20T19:05:00Z"));
+    assert.equal(writes.some(w => [11, 30, 31, 32, 34, 41, 36, 37, 38, 39].includes(w.columnNumber)), false, String(index));
+  }
+});
+
+test("a final result without first-attempt history cannot manufacture a two-call closeout", async () => {
+  const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
+  const writes = buildVoiceLeadRowWrites([], { callAttemptNumber: 2, callResult: "no_response_second_attempt" }, new Date());
+  assert.equal(writes.some(w => w.columnNumber === 11), false);
+});
+
 test("same-row concurrent direct writes reread terminal intent before applying a late retry", async () => {
   const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
   const started = deferred();

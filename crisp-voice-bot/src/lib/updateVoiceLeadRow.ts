@@ -3,6 +3,7 @@ import { config } from "./config";
 import { getGoogleSheetsClient } from "./googleSheets";
 import { logger } from "./logger";
 import { VOICE_OVERDUE_FALLBACK_MARKER } from "./voiceOverdueFallback";
+import { finalUnansweredPreservationReason, isFinalUnansweredVoiceResult } from "./voiceFinalUnanswered";
 import {
   appendVoiceNotesValue,
   cellRange,
@@ -170,6 +171,16 @@ export function buildVoiceLeadRowWrites(
   const providerD17Failure = updates.providerD17Failure || updates.callResult === "provider_d17_failure";
   const providerLlmFailure = updates.providerLlmFailure || updates.callResult === "provider_llm_failure";
 
+  if (isFinalUnansweredVoiceResult(updates.callResult, updates.callAttemptNumber)) {
+    const reason = finalUnansweredPreservationReason(rowValues);
+    if (reason) {
+      appendVoiceNotesWrite(writes, rowValues,
+        "Final unanswered Mailshake closeout preserved existing state: " + reason + "." + (updates.voiceNotes ? " " + updates.voiceNotes : ""));
+      return writes;
+    }
+    updates = { ...updates, leadStatusCode: "N" };
+  }
+
   const existingResults = [VOICE_BOT_COL_CALL_1_RESULT, VOICE_BOT_COL_CALL_2_RESULT]
     .map((column) => String(rowValues[column - 1] ?? "").trim().toLowerCase());
   const protectedContactOutcome = String(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1] ?? "").includes(VOICE_OVERDUE_FALLBACK_MARKER) || existingResults.some((result) =>
@@ -275,10 +286,12 @@ async function writeVoiceLeadRow(
     },
   });
 
-  if (normalizeCallAttemptNumber(updates.callAttemptNumber) === 1 && isRetryableVoiceBotResult(updates.callResult)) {
+  const finalUnanswered = isFinalUnansweredVoiceResult(updates.callResult, updates.callAttemptNumber);
+  if (finalUnanswered || (normalizeCallAttemptNumber(updates.callAttemptNumber) === 1 && isRetryableVoiceBotResult(updates.callResult))) {
     const verifiedRow = await readVoiceLeadRow(sheets, rowNumber);
     const proofColumns = new Set([
       VOICE_BOT_COL_CALL_1_RESULT,
+      ...(finalUnanswered ? [VOICE_BOT_COL_CALL_2_RESULT] : []),
       VOICE_BOT_COL_LEAD_STATUS_CODE,
       VOICE_BOT_COL_CALL_ELIGIBLE,
       VOICE_BOT_COL_CALL_TIME_BUCKET,
@@ -288,9 +301,9 @@ async function writeVoiceLeadRow(
     const mismatches = expectedProof.filter((write) =>
       String(verifiedRow[write.columnNumber - 1] ?? "").trim() !== write.value.trim());
     if (mismatches.length > 0) {
-      throw new Error(`Retry scheduling readback mismatch for row ${rowNumber}: ${fieldsWritten(mismatches).join(", ")}`);
+      throw new Error(`${finalUnanswered ? "Final unanswered disposition" : "Retry scheduling"} readback mismatch for row ${rowNumber}: ${fieldsWritten(mismatches).join(", ")}`);
     }
-    logger.info("Google Sheets retry scheduling verified by readback", {
+    logger.info(finalUnanswered ? "Google Sheets final unanswered disposition verified by readback" : "Google Sheets retry scheduling verified by readback", {
       spreadsheetId: config.googleSheets.sheetId,
       tabName: config.googleSheets.tabName,
       rowNumber,

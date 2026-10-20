@@ -101,7 +101,7 @@ test("Apps Script transport timeout falls back to the direct writer", async () =
   assert.equal(directCallCount, 1);
 });
 
-test("successful Apps Script sheet update does not invoke the fallback", async () => {
+test("final unanswered closeout uses the guarded direct writer even when the relay would accept", async () => {
   const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
   let directCallCount = 0;
 
@@ -117,7 +117,22 @@ test("successful Apps Script sheet update does not invoke the fallback", async (
     },
   });
 
-  assert.equal(directCallCount, 0);
+  assert.equal(directCallCount, 1);
+});
+
+test("final unanswered closeout supplies N and propagates readback failures", async () => {
+  const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
+  let relayCalls = 0;
+  await assert.rejects(postSheetUpdate({
+    rowNumber: 6322, callAttemptNumber: 2, callResult: "voicemail_reached_final_attempt",
+  }, {
+    appsScriptPost: async () => { relayCalls += 1; return { data: { ok: true } }; },
+    directSheetUpdate: async (_row, payload) => {
+      assert.equal(payload.leadStatusCode, "N");
+      throw new Error("Synthetic final disposition readback mismatch");
+    },
+  }), /final disposition readback mismatch/);
+  assert.equal(relayCalls, 0);
 });
 
 test("accepted terminal call failure is reconciled directly when Apps Script omits scheduling cleanup proof", async () => {
