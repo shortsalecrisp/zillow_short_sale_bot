@@ -1,6 +1,22 @@
 # Uniform Conversion Comparison
 
-Current revision is r5, verified at 2026-10-17T14:36:32.752Z (10:36:32 AM New York on October 17). Earlier releases below are historical and must not be pooled with r5. Both arms are verified identical except for TTS model.
+Current revision is r6, verified at 2026-10-20T01:13:01.709Z (9:13:01 PM New York on October 19). Earlier releases below are historical and must not be pooled with r6. Both arms are verified identical except for TTS model.
+
+## Approved Revision 6
+
+Yoni approved the October 19 Lead Intelligence voice fixes. The shared prompt now gives the exact fee answer: $5,000, buyer-paid at closing only if the deal closes, with no fee to the agent or seller; it then waits without adding a Yoni pitch. It never tells a caller to move because of background noise. Backend review now accepts provider `agent` as the assistant role for a bare no after the help question, recognizes named office gatekeepers without confusing the expected agent, and lets a later live human override an earlier automated screen or hold artifact.
+
+The guarded prompt-only publisher reread both pinned r5 branches, verified exact versions, prompt hashes and native 50/50 traffic, and changed only `conversation_config.agent.prompt.prompt`. It then reread both branches and verified the same workflow, phone bindings, platform settings and protected provider configuration. No real call or metered session was started.
+
+- Cohort: `maya_uniform_lead_conversion_20261019_r6`.
+- Start: `2026-10-20T01:13:01.709Z`, after the final provider uniformity readback.
+- Control: branch `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`, version `agtvrsn_8701m5bdwq8af46r1rpnzmb04b4g`, Flash v2.
+- Test: branch `agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv`, version `agtvrsn_6801m5bdwvh2fnkb9hfycj82vzj0`, v4 Turbo.
+- Canonical prompt hash: `31c94d5c1728936a8004c7cd749ed5c8c4b563ede6d65a908146555a4228a64b`.
+- Shared normalized configuration hash: `d2fee79aa371e5fec4e7b5426f5932139f39d2ca48b21a6fbd7d8ac3f0ed6770`.
+- Workflow hash: `31e9628299acf53fda9153f686a003bb1a25cf1a7c00a4bd9e89bcf9d2af0a35`.
+
+Require the exact r6 branch/version pair, a matching final receipt, a genuine non-test positive duration, and a provider start at or after the r6 boundary. The 15 verified true-live conversations per arm minimum and preferred 100-genuine-call review restart at r6; all earlier cohorts remain historical.
 
 ## October 19 Queue Capacity Repair
 

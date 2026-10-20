@@ -14,10 +14,11 @@ test("includes only exact matching final versions after the uniform boundary", (
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });
-test("r5 restarts the clean comparison and excludes old r4 and mixed-window receipts", () => {
-  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261017_r5");
-  assert.equal(cohort.startedAt, "2026-10-17T14:36:32.752Z");
-  for (const versionId of ["agtvrsn_4601m4yhj7xsejw8wcm77xkcn08x", "agtvrsn_3401m52cmpgcecsbsfd89s046bsp"]) {
+test("r6 restarts the clean comparison and excludes old r5 and r4 receipts", () => {
+  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261019_r6");
+  assert.equal(cohort.startedAt, "2026-10-20T01:13:01.709Z");
+  for (const versionId of ["agtvrsn_9501m554nxfaee2rps63c9zznh6k", "agtvrsn_1801m554p0e8edbshc6dkrjcf3rj",
+    "agtvrsn_4601m4yhj7xsejw8wcm77xkcn08x", "agtvrsn_3401m52cmpgcecsbsfd89s046bsp"]) {
     assert.equal(uniformComparisonArm({ ...eligible(), versionId }), null);
   }
   assert.equal(uniformComparisonArm({ ...eligible(), startTimeUnixSecs: Date.parse("2026-10-15T13:22:14Z") / 1000 }), null);

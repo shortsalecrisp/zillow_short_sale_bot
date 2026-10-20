@@ -7,11 +7,11 @@ export const ELEVENLABS_TTS_CONTROL_BRANCH_ID = "agtbrch_1101kpkhs3b4eg5v0q8ppq4
 export const ELEVENLABS_TTS_TEST_BRANCH_ID = "agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv";
 
 export const ELEVENLABS_UNIFORM_COMPARISON = Object.freeze({
-  cohort: "maya_uniform_lead_conversion_20261017_r5",
-  startedAt: "2026-10-17T14:36:32.752Z",
-  controlVersionId: "agtvrsn_9501m554nxfaee2rps63c9zznh6k",
-  testVersionId: "agtvrsn_1801m554p0e8edbshc6dkrjcf3rj",
-  sharedConfigSha256: "2bc5c0ae40c7fa64283dd9e630b2d32401a2763e94f5bee015d3be56c672e563",
+  cohort: "maya_uniform_lead_conversion_20261019_r6",
+  startedAt: "2026-10-20T01:13:01.709Z",
+  controlVersionId: "agtvrsn_8701m5bdwq8af46r1rpnzmb04b4g",
+  testVersionId: "agtvrsn_6801m5bdwvh2fnkb9hfycj82vzj0",
+  sharedConfigSha256: "d2fee79aa371e5fec4e7b5426f5932139f39d2ca48b21a6fbd7d8ac3f0ed6770",
   workflowSha256: "31e9628299acf53fda9153f686a003bb1a25cf1a7c00a4bd9e89bcf9d2af0a35",
   minimumTrueLiveConversationsPerArm: 15,
   dedicatedReviewGenuineCalls: 100,
