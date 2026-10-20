@@ -1,5 +1,7 @@
 import base64
+import copy
 import hashlib
+import io
 import re
 import sys
 from html.parser import HTMLParser
@@ -8,18 +10,23 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import video_followup_player as player
 from video_followup_player import create_video_followup_router
 
 
 OPAQUE_ID = "0123456789abcdef0123456789abcdef"
 BASE = f"/v/{OPAQUE_ID}"
 ASSET_PATHS = {"video": "/media.mp4", "poster": "/poster.jpg", "captions": "/captions.vtt"}
-PATHS = ["", *ASSET_PATHS.values()]
+OPENING_SUFFIX = "/poster.jpg?preview=opening-v1"
+OPENING_PATH = ROOT / "assets/video-preview/yoni-opening-v1.jpg"
+OPENING_SHA256 = "38807e8294d09a059bccbbbfe547910381c9b60f78c57a53f8129ebe47cd04c5"
+PATHS = ["", *ASSET_PATHS.values(), OPENING_SUFFIX]
 VIDEO = b"0123456789"
 
 
@@ -115,7 +122,7 @@ def test_player_is_local_accessible_and_uses_no_private_metadata(setup):
     assert 'preload="none"' in content
     assert "<video controls playsinline" in content
     assert 'kind="captions"' in content and 'srclang="en"' in content and 'label="English" default' in content
-    assert f'poster="{BASE}/poster.jpg"' in content
+    assert f'poster="{BASE}{OPENING_SUFFIX}"' in content
     assert f'src="{BASE}/media.mp4"' in content
     assert f'src="{BASE}/captions.vtt"' in content
     for forbidden in ("autoplay", "<script", "<form", "http://", "private-agent", "+15555550123", "123 Private Street", "query-secret", "QueryName"):
@@ -149,7 +156,7 @@ def test_preview_has_public_face_poster_without_exposing_recipient_or_trusting_h
     metadata = parser.tags
     public_url = "https://go.crispshortsales.com" + BASE
     assert metadata["og:url"] == public_url
-    assert metadata["og:image"] == metadata["twitter:image"] == public_url + "/poster.jpg"
+    assert metadata["og:image"] == metadata["twitter:image"] == public_url + OPENING_SUFFIX
     assert metadata["og:image:type"] == "image/jpeg"
     assert metadata["og:image:width"] == "960"
     assert metadata["og:image:height"] == "540"
@@ -159,10 +166,10 @@ def test_preview_has_public_face_poster_without_exposing_recipient_or_trusting_h
     for private in ("Jim", "QueryName", "query-secret", "untrusted", "15555550123", "Private Street"):
         assert private not in repr(metadata)
     assert "og:video" not in metadata  # Do not auto-download/play video in previews.
-    poster = client.get(BASE + "/poster.jpg", headers={"User-Agent": user_agent})
+    poster = client.get(BASE + OPENING_SUFFIX, headers={"User-Agent": user_agent})
     assert poster.status_code == 200
     assert poster.headers["content-type"] == "image/jpeg"
-    assert poster.content == b"jpeg-data"
+    assert hashlib.sha256(poster.content).hexdigest() == OPENING_SHA256
 
 
 def test_first_name_is_escaped_and_not_used_in_resource_urls(setup):
@@ -173,7 +180,7 @@ def test_first_name_is_escaped_and_not_used_in_resource_urls(setup):
     assert '&lt;img src=x onerror=&quot;alert(1)&quot;&gt; &amp; Jim' in response.text
     resources = re.findall(r'(?:src|poster|href)="([^"]+)"', response.text)
     assert resources
-    assert all(url.startswith(BASE + "/") and "?" not in url for url in resources)
+    assert all(url == BASE + OPENING_SUFFIX or url.startswith(BASE + "/") and "?" not in url for url in resources)
 
 
 @pytest.mark.parametrize("first_name", [None, "", "  ", 123])
@@ -192,7 +199,11 @@ def test_ready_statuses_and_assets(setup, suffix, status):
     assert response.status_code == 200
     assert_security_headers(response)
     assert store.video_calls == [OPAQUE_ID]
-    if suffix:
+    if suffix == OPENING_SUFFIX:
+        assert store.asset_calls == []
+        assert hashlib.sha256(response.content).hexdigest() == OPENING_SHA256
+        assert response.headers["content-type"] == "image/jpeg"
+    elif suffix:
         kind = next(kind for kind, path in ASSET_PATHS.items() if path == suffix)
         assert store.asset_calls == [(OPAQUE_ID, kind)]
         assert response.content == store.assets[kind]["body"]
@@ -389,3 +400,119 @@ def test_cancelled_after_page_read_is_not_served_from_application_cache(setup):
     response = client.get(BASE + "/media.mp4")
     assert response.status_code == 404
     assert_security_headers(response)
+
+
+def test_opening_preview_pins_approved_jpeg_bytes_and_dimensions(setup):
+    client, store = setup
+    assert player._OPENING_POSTER_PATH == OPENING_PATH
+    assert player._OPENING_POSTER_SHA256 == OPENING_SHA256
+    assert player._OPENING_POSTER_SUFFIX == OPENING_SUFFIX
+    before = OPENING_PATH.read_bytes()
+    assert hashlib.sha256(before).hexdigest() == OPENING_SHA256
+    with Image.open(io.BytesIO(before)) as image:
+        assert image.format == "JPEG"
+        assert image.size == (960, 540)
+        assert image.mode == "RGB"
+        image.verify()
+    assets_before = copy.deepcopy(store.assets)
+    metadata_before = copy.deepcopy(store.video)
+    response = client.get(BASE + OPENING_SUFFIX)
+    assert response.status_code == 200
+    assert response.content == before
+    assert store.asset_calls == []
+    assert store.assets == assets_before and store.video == metadata_before
+    assert OPENING_PATH.read_bytes() == before
+    assert_security_headers(response)
+
+
+def test_opening_preview_ignores_recipient_query_host_and_user_agent(setup):
+    client, store = setup
+    responses = []
+    for user_agent in ("Mozilla/5.0", "facebookexternalhit/1.1", "Twitterbot/1.0"):
+        store.video["first_name"] = "PrivateRecipient"
+        response = client.get(BASE + OPENING_SUFFIX + "&phone=query-secret&name=QueryName&image=https://untrusted.example/face.jpg", headers={
+            "Host": "untrusted.example", "X-Forwarded-Host": "also-untrusted.example", "User-Agent": user_agent,
+        })
+        assert response.status_code == 200
+        assert hashlib.sha256(response.content).hexdigest() == OPENING_SHA256
+        for private in (b"PrivateRecipient", b"QueryName", b"query-secret", b"untrusted.example", b"15555550123", b"Private Street"):
+            assert private not in response.content
+            assert private.decode() not in repr(dict(response.headers))
+        responses.append(response)
+    assert all(response.content == responses[0].content and response.headers == responses[0].headers for response in responses)
+    assert store.asset_calls == []
+
+
+@pytest.mark.parametrize("fault", ["missing", "corrupt", "directory"])
+@pytest.mark.parametrize("method", ["get", "head"])
+def test_opening_preview_missing_or_corrupt_fails_closed_without_legacy_fallback(setup, monkeypatch, tmp_path, fault, method):
+    client, store = setup
+    image_path = tmp_path / "opening.jpg"
+    if fault == "corrupt":
+        image_path.write_bytes(b"not-the-approved-image")
+    elif fault == "directory":
+        image_path.mkdir()
+    monkeypatch.setattr(player, "_OPENING_POSTER_PATH", image_path)
+    before = image_path.read_bytes() if fault == "corrupt" else None
+    response = getattr(client, method)(BASE + OPENING_SUFFIX)
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "60"
+    assert store.asset_calls == []
+    assert "opening.jpg" not in response.text and "not-the-approved-image" not in response.text
+    if method == "head":
+        assert response.content == b""
+    else:
+        assert response.text == "Video temporarily unavailable. Please try again later."
+    assert_security_headers(response)
+    assert image_path.exists() == (fault != "missing")
+    if before is not None:
+        assert image_path.read_bytes() == before
+    # A broken new preview must not alter the legacy assets or media path.
+    for kind, suffix in ASSET_PATHS.items():
+        old = client.get(BASE + suffix)
+        assert old.status_code == 200 and old.content == store.assets[kind]["body"]
+
+
+def test_opening_preview_is_independent_of_legacy_asset_outage(setup):
+    client, store = setup
+    store.asset_error = True
+    response = client.get(BASE + OPENING_SUFFIX, headers={"Range": "bytes=0-1"})
+    assert response.status_code == 200
+    assert hashlib.sha256(response.content).hexdigest() == OPENING_SHA256
+    assert "content-range" not in response.headers
+    assert store.asset_calls == []
+    assert client.get(BASE + "/poster.jpg").status_code == 503
+
+
+def test_opening_preview_rechecks_publication_status_after_success(setup):
+    client, store = setup
+    assert client.get(BASE + OPENING_SUFFIX).status_code == 200
+    store.video["status"] = "cancelled"
+    for method in ("get", "head"):
+        response = getattr(client, method)(BASE + OPENING_SUFFIX)
+        assert response.status_code == 404
+        assert_security_headers(response)
+    assert store.asset_calls == []
+
+
+@pytest.mark.parametrize("query", [
+    "", "?preview=", "?preview=OPENING-V1", "?preview=opening-v1-extra",
+    "?preview=opening-v2", "?Preview=opening-v1", "?phone=query-secret&name=QueryName",
+])
+@pytest.mark.parametrize("method", ["get", "head"])
+def test_only_exact_opening_preview_selector_replaces_legacy_poster(setup, query, method):
+    client, store = setup
+    response = getattr(client, method)(BASE + "/poster.jpg" + query)
+    assert response.status_code == 200
+    assert response.content == (b"jpeg-data" if method == "get" else b"")
+    assert response.headers["content-length"] == str(len(b"jpeg-data"))
+    assert response.headers["etag"] == '"poster-v1"'
+    assert store.asset_calls == [(OPAQUE_ID, "poster")]
+    assert_security_headers(response)
+
+
+def test_opening_preview_uses_existing_poster_route_not_new_gateway_path(setup):
+    client, store = setup
+    response = client.get(BASE + "/preview-opening-v1.jpg")
+    assert response.status_code == 404
+    assert store.video_calls == [] and store.asset_calls == []

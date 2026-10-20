@@ -7,6 +7,7 @@ import hashlib
 import html
 import re
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any, Protocol
 
 from fastapi import APIRouter, Request
@@ -23,6 +24,9 @@ class PublicVideoStore(Protocol):
 
 _OPAQUE_ID = re.compile(r"[0-9a-f]{32}\Z")
 _PUBLIC_ORIGIN = "https://go.crispshortsales.com"
+_OPENING_POSTER_SUFFIX = "/poster.jpg?preview=opening-v1"
+_OPENING_POSTER_PATH = Path(__file__).resolve().parent / "assets/video-preview/yoni-opening-v1.jpg"
+_OPENING_POSTER_SHA256 = "38807e8294d09a059bccbbbfe547910381c9b60f78c57a53f8129ebe47cd04c5"
 _READY_STATUSES = frozenset({"ready", "frozen_video"})
 _CONTENT_TYPES = {"video": "video/mp4", "poster": "image/jpeg", "captions": "text/vtt"}
 _STYLE = """
@@ -157,7 +161,7 @@ def _player_html(opaque_id: str, video: Mapping[str, Any]) -> bytes:
   <meta property="og:title" content="A quick hello from Yoni">
   <meta property="og:description" content="A short video to put a face to my text. Happy to help if you have questions.">
   <meta property="og:url" content="{public_url}">
-  <meta property="og:image" content="{public_url}/poster.jpg">
+  <meta property="og:image" content="{public_url}{_OPENING_POSTER_SUFFIX}">
   <meta property="og:image:type" content="image/jpeg">
   <meta property="og:image:width" content="960">
   <meta property="og:image:height" content="540">
@@ -165,7 +169,7 @@ def _player_html(opaque_id: str, video: Mapping[str, Any]) -> bytes:
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="A quick hello from Yoni">
   <meta name="twitter:description" content="A short video to put a face to my text. Happy to help if you have questions.">
-  <meta name="twitter:image" content="{public_url}/poster.jpg">
+  <meta name="twitter:image" content="{public_url}{_OPENING_POSTER_SUFFIX}">
   <meta name="twitter:image:alt" content="Yoni Kutler speaking from his office.">
   <style>{_STYLE}</style>
 </head>
@@ -174,7 +178,7 @@ def _player_html(opaque_id: str, video: Mapping[str, Any]) -> bytes:
     <p class="brand">Crisp Short Sales</p>
     <h1>{heading}</h1>
     <p class="intro">From Yoni Kutler. Just putting a face to my text.</p>
-    <video controls playsinline preload="none" poster="{base}/poster.jpg"
+    <video controls playsinline preload="none" poster="{base}{_OPENING_POSTER_SUFFIX}"
            aria-label="A quick hello from Yoni Kutler at Crisp Short Sales">
       <source src="{base}/media.mp4" type="video/mp4">
       <track kind="captions" src="{base}/captions.vtt" srclang="en" label="English" default>
@@ -199,6 +203,19 @@ def create_video_followup_router(store_factory: Callable[[], PublicVideoStore]) 
             return loaded
         _, video = loaded
         return _response(request, _player_html(opaque_id, video), media_type="text/html")
+
+    def opening_poster(opaque_id: str, request: Request) -> Response:
+        loaded = _load_video(request, opaque_id, store_factory)
+        if isinstance(loaded, Response):
+            return loaded
+        # Presentation-only: never replace a job's stored media or original poster.
+        try:
+            body = _OPENING_POSTER_PATH.read_bytes()
+            if hashlib.sha256(body).hexdigest() != _OPENING_POSTER_SHA256:
+                return _unavailable(request, 503)
+        except OSError:
+            return _unavailable(request, 503)
+        return _response(request, body, media_type="image/jpeg", headers={"ETag": f'"{_OPENING_POSTER_SHA256}"'})
 
     def serve_asset(opaque_id: str, request: Request, kind: str) -> Response:
         loaded = _load_video(request, opaque_id, store_factory)
@@ -249,6 +266,8 @@ def create_video_followup_router(store_factory: Callable[[], PublicVideoStore]) 
 
     @router.api_route("/v/{opaque_id}/poster.jpg", methods=["GET", "HEAD"], include_in_schema=False)
     def poster(opaque_id: str, request: Request) -> Response:
+        if request.query_params.get("preview") == "opening-v1":
+            return opening_poster(opaque_id, request)
         return serve_asset(opaque_id, request, "poster")
 
     @router.api_route("/v/{opaque_id}/captions.vtt", methods=["GET", "HEAD"], include_in_schema=False)
