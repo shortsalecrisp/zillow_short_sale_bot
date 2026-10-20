@@ -54,6 +54,7 @@ app.get("/experiment-status", (_req: Request, res: Response) => {
     returnCalls: {
       ready: returnCallsReady({ ...config.returnCalls, baseUrl: config.baseUrl }),
       officeAcceptance: "private_announcement_press_1",
+      ownerAnnouncement: "matched_agent_full_listing_v1",
       unansweredFallback: "dedicated_voicemail",
       recordOfficeConversation: false,
     },

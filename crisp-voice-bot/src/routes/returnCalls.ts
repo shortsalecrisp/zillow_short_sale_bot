@@ -1,13 +1,26 @@
 import express, { Router } from "express";
 import axios from "axios";
+import { timingSafeEqual } from "node:crypto";
 import { config } from "../lib/config";
 import { logger } from "../lib/logger";
 import { dialOfficeXml, parseTelnyxForm, responseXml, RETURN_CALL_NUMBER, RETURN_CALL_OFFICE, returnCallUrl, screenOfficeXml, verifyReturnCallLink, verifyReturnCallIncomingToken, verifyTelnyxForm, voicemailXml, type ReturnCallStage } from "../lib/returnCallFlow";
 import { notifyReturnCallVoicemail, readReturnCallState, updateReturnCallState, type ReturnCallStateDependencies } from "../lib/returnCallState";
+import { buildReturnCallAnnouncement, buildLiveTransferAnnouncement, type OwnerCallContext } from "../lib/ownerCallAnnouncement";
+import { lookupOwnerCallContext } from "../lib/ownerCallContext";
 
 const hangup = responseXml("<Hangup/>");
 const webhookStages = new Set(["screen", "accept", "dial-result", "recorded", "record-done"]);
 export type RouteSettings = { enabled: boolean; publicKey?: string; applicationId?: string; signingSecret?: string; baseUrl: string };
+export type ReturnCallDependencies = ReturnCallStateDependencies & {
+  lookupCallerContext?: (phone: string) => Promise<OwnerCallContext>;
+};
+
+export function authorizeOwnerAnnouncementPreview(provided: string | undefined, expected: string | undefined): boolean {
+  if (!provided || !expected) return false;
+  const actualBytes = Buffer.from(provided);
+  const expectedBytes = Buffer.from(expected);
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+}
 
 export function returnCallsReady(settings: RouteSettings): boolean {
   return settings.enabled && Boolean(settings.publicKey && settings.applicationId && settings.signingSecret && settings.signingSecret.length >= 32 && settings.baseUrl.startsWith("https://"));
@@ -37,7 +50,7 @@ export async function handleReturnCall(
   parent: string,
   form: Record<string, string>,
   url: (stage: ReturnCallStage) => string,
-  deps: ReturnCallStateDependencies = {},
+  deps: ReturnCallDependencies = {},
 ): Promise<string> {
   const now = new Date().toISOString();
   if (stage === "incoming") {
@@ -55,12 +68,19 @@ export async function handleReturnCall(
     if (!form.CallSid || form.CallSid === parent || form.To !== RETURN_CALL_OFFICE || (form.ParentCallSid && form.ParentCallSid !== parent)) throw new Error("Invalid office leg");
     if (state.voicemailStartedAt) return hangup;
     if (stage === "screen") {
-      const screenState = await updateReturnCallState(parent, (current) => {
+      const screenState = await updateReturnCallState(parent, async (current) => {
         if (!current || (current.officeCallSid && current.officeCallSid !== form.CallSid)) throw new Error("Office leg mismatch");
-        if (current.voicemailStartedAt) return current;
-        return { ...current, officeCallSid: form.CallSid };
+        if (current.voicemailStartedAt || current.acceptedAt) return current;
+        let announcement = current.ownerAnnouncement;
+        if (!announcement) {
+          let context: OwnerCallContext;
+          try { context = await (deps.lookupCallerContext ?? lookupOwnerCallContext)(current.callerFrom); }
+          catch { context = { status: "unavailable" }; }
+          announcement = buildReturnCallAnnouncement(context);
+        }
+        return { ...current, officeCallSid: form.CallSid, ownerAnnouncement: announcement };
       }, deps);
-      return screenState.voicemailStartedAt ? hangup : screenState.acceptedAt ? responseXml("") : screenOfficeXml(url);
+      return screenState.voicemailStartedAt ? hangup : screenState.acceptedAt ? responseXml("") : screenOfficeXml(url, screenState.ownerAnnouncement);
     }
     if (state.officeCallSid !== form.CallSid) throw new Error("Office leg mismatch");
     if (form.Digits !== "1") return hangup;
@@ -100,6 +120,22 @@ export async function handleReturnCall(
 
 const router = Router();
 const settings = { ...config.returnCalls, baseUrl: config.baseUrl };
+
+// Owner-only, read-only preview of the same private announcement builders used on calls.
+router.get("/announcement-preview", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!authorizeOwnerAnnouncementPreview(req.get("X-Crisp-Token"), config.googleAppsScript.token)) {
+    res.status(401).json({ error: "Unauthorized" }); return;
+  }
+  const phone = typeof req.query.phone === "string" ? req.query.phone : "";
+  const rowNumber = req.query.rowNumber === undefined ? undefined : Number(req.query.rowNumber);
+  if (!phone || phone.length > 32 || (rowNumber !== undefined && (!Number.isInteger(rowNumber) || rowNumber < 2))) {
+    res.status(400).json({ error: "Valid phone and optional rowNumber required" }); return;
+  }
+  const context = await lookupOwnerCallContext(phone, rowNumber);
+  res.json({ readOnly: true, context, returnCall: buildReturnCallAnnouncement(context),
+    liveTransfer: buildLiveTransferAnnouncement(context), privateOfficeXml: screenOfficeXml(() => "https://preview.invalid/accept", buildReturnCallAnnouncement(context)) });
+});
 
 router.get("/playback", async (req, res) => {
   res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });

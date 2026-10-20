@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ReturnCallState, ReturnCallStateDependencies } from "../src/lib/returnCallState";
+import type { ReturnCallState } from "../src/lib/returnCallState";
 import type { ReturnCallStage } from "../src/lib/returnCallFlow";
+import type { ReturnCallDependencies } from "../src/routes/returnCalls";
 
 process.env.BASE_URL = "https://voice.example.com";
 process.env.TELNYX_API_KEY = "test";
@@ -24,10 +25,11 @@ const url = (stage: ReturnCallStage) => `https://voice.example.com/return-calls/
 function fixture() {
   let state: ReturnCallState | null = null;
   const sent: unknown[] = [];
-  const deps: ReturnCallStateDependencies = {
+  const deps: ReturnCallDependencies = {
     readState: async () => state ? structuredClone(state) : null,
     writeState: async (_key, next) => { state = structuredClone(next); },
     sendMail: async (message) => { sent.push(message); },
+    lookupCallerContext: async () => ({ status: "unknown" as const }),
   };
   return { deps, sent, get: () => state, set: (value: ReturnCallState) => { state = value; } };
 }
@@ -47,9 +49,9 @@ test("office screening is private, requires keypad acceptance, and hangs up on t
   const f = fixture();
   await handleReturnCall("incoming", parent, incoming, url, f.deps);
   const xml = await handleReturnCall("screen", parent, screened, url, f.deps);
-  assert.match(xml, /Crisp return call\. Press 1 to connect\./);
+  assert.match(xml, /Crisp return call\. Agent name and property could not be identified\. Press 1 to connect\./);
   assert.match(xml, /<\/Gather><Hangup\/>/);
-  assert.doesNotMatch(xml, /agent|listing|property/i);
+  assert.doesNotMatch(xml, /<Record /);
   assert.equal(f.get()?.officeCallSid, child);
 });
 
@@ -66,6 +68,45 @@ test("only press1 accepts; silence, wrong key and office voicemail do not bridge
   assert.match(vm, /<Record /);
   assert.equal(f.get()?.acceptedAt, undefined);
   assert.ok(f.get()?.voicemailStartedAt);
+});
+
+test("private screen uses the stored caller number and freezes full matched context across retries", async () => {
+  const { handleReturnCall } = await import("../src/routes/returnCalls");
+  const f = fixture();
+  let lookups = 0;
+  f.deps.lookupCallerContext = async (phone) => {
+    lookups += 1;
+    assert.equal(phone, caller);
+    return { status: "matched", agentName: "Loretta Butler", listingAddress: "7123 CAPELLA CIR, San Antonio, TX", rowNumber: 4705 };
+  };
+  const publicXml = await handleReturnCall("incoming", parent, incoming, url, f.deps);
+  assert.doesNotMatch(publicXml, /Loretta|CAPELLA|San Antonio/);
+  const privateXml = await handleReturnCall("screen", parent, { ...screened, From: "+12175559999" }, url, f.deps);
+  assert.match(privateXml, /agent Loretta Butler\. Listing: 7123 CAPELLA CIR, San Antonio, TX\. Press 1/);
+  assert.match(privateXml, /<Gather[^>]*><Say>/);
+  const retryXml = await handleReturnCall("screen", parent, screened, url, f.deps);
+  assert.equal(retryXml, privateXml);
+  assert.equal(lookups, 1);
+  assert.match(await handleReturnCall("accept", parent, { ...screened, Digits: "1" }, url, f.deps), /<Response><\/Response>/);
+});
+
+test("failed identity lookup preserves office acceptance and public voicemail without guessing", async () => {
+  const { handleReturnCall } = await import("../src/routes/returnCalls");
+  const f = fixture();
+  f.deps.lookupCallerContext = async () => { throw new Error("Sheets unavailable"); };
+  await handleReturnCall("incoming", parent, incoming, url, f.deps);
+  assert.match(await handleReturnCall("screen", parent, screened, url, f.deps), /could not be identified/);
+  const publicXml = await handleReturnCall("dial-result", parent, { CallSid: parent }, url, f.deps);
+  assert.match(publicXml, /<Record /);
+  assert.doesNotMatch(publicXml, /Caller number matches|could not be identified/);
+});
+
+test("owner announcement preview requires a nonempty exact secret", async () => {
+  const { authorizeOwnerAnnouncementPreview } = await import("../src/routes/returnCalls");
+  assert.equal(authorizeOwnerAnnouncementPreview(undefined, undefined), false);
+  assert.equal(authorizeOwnerAnnouncementPreview("wrong", "secret"), false);
+  assert.equal(authorizeOwnerAnnouncementPreview("secret!", "secret"), false);
+  assert.equal(authorizeOwnerAnnouncementPreview("secret", "secret"), true);
 });
 
 test("accepted call and duplicate acceptance preserve receipt and do not offer voicemail", async () => {

@@ -2,7 +2,7 @@ import { createHmac, createPublicKey, timingSafeEqual, verify } from "node:crypt
 
 export const RETURN_CALL_NUMBER = "+12176341017";
 export const RETURN_CALL_OFFICE = "+14043009526";
-export const RETURN_CALL_ANNOUNCEMENT = "Crisp return call. Press 1 to connect.";
+export const RETURN_CALL_ANNOUNCEMENT = "Crisp return call. Agent name and property could not be identified. Press 1 to connect.";
 export type ReturnCallStage = "screen" | "accept" | "dial-result" | "recorded" | "record-done" | "playback";
 
 export function xmlEscape(value: string): string {
@@ -66,8 +66,8 @@ export function dialOfficeXml(url: (stage: ReturnCallStage) => string): string {
   return responseXml(`<Dial action="${xmlEscape(url("dial-result"))}" method="POST" timeout="20" callerId="${RETURN_CALL_NUMBER}" record="do-not-record"><Number url="${xmlEscape(url("screen"))}">${RETURN_CALL_OFFICE}</Number></Dial>`);
 }
 
-export function screenOfficeXml(url: (stage: ReturnCallStage) => string): string {
-  return responseXml(`<Gather numDigits="1" timeout="5" action="${xmlEscape(url("accept"))}"><Say>${RETURN_CALL_ANNOUNCEMENT}</Say></Gather><Hangup/>`);
+export function screenOfficeXml(url: (stage: ReturnCallStage) => string, announcement = RETURN_CALL_ANNOUNCEMENT): string {
+  return responseXml(`<Gather numDigits="1" timeout="5" action="${xmlEscape(url("accept"))}"><Say>${xmlEscape(announcement)}</Say></Gather><Hangup/>`);
 }
 
 export function voicemailXml(url: (stage: ReturnCallStage) => string): string {

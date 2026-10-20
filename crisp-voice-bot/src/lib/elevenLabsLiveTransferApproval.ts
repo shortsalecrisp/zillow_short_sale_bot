@@ -3,6 +3,8 @@ import { clearTransfer, setYoniCallControlId } from "./liveTransferStore";
 import { logger } from "./logger";
 import { hangupCall, placeLiveTransferApprovalCall, speakText } from "./telnyx";
 import { waitForLiveTransferReply } from "./waitForLiveTransferReply";
+import { buildLiveTransferAnnouncement } from "./ownerCallAnnouncement";
+import { resolveLiveTransferOwnerContext } from "./ownerCallContext";
 
 const ELEVENLABS_TRANSFER_APPROVAL_TIMEOUT_MS = 35_000;
 
@@ -20,15 +22,12 @@ type ApprovalInput = {
   liveTransferNumber: string;
 };
 
-function buildApprovalPrompt(input: ApprovalInput): string {
-  return `You have a live transfer request from agent ${input.agentName} at ${input.listingAddress}. Press 1 to accept.`;
-}
-
 export async function requestElevenLabsLiveTransferApproval(
   input: ApprovalInput,
 ): Promise<ElevenLabsLiveTransferApprovalResult> {
   const syntheticCallControlId = `elevenlabs-transfer-${input.rowNumber}-${randomUUID()}`;
-  const yoniPrompt = buildApprovalPrompt(input);
+  const announcementContext = await resolveLiveTransferOwnerContext(input);
+  const yoniPrompt = buildLiveTransferAnnouncement(announcementContext);
   let approvalCallControlId: string | undefined;
 
   const replyPromise = waitForLiveTransferReply({
@@ -44,9 +43,9 @@ export async function requestElevenLabsLiveTransferApproval(
         kind: "live_transfer_yoni",
         originalCallControlId: syntheticCallControlId,
         rowNumber: input.rowNumber,
-        agentName: input.agentName,
-        listingAddress: input.listingAddress,
-        whisperMessage: `Live transfer from ${input.agentName} about ${input.listingAddress}.`,
+        agentName: announcementContext.agentName,
+        listingAddress: announcementContext.listingAddress,
+        whisperMessage: `Live transfer from ${announcementContext.agentName} about ${announcementContext.listingAddress}.`,
         yoniPrompt,
       },
     });

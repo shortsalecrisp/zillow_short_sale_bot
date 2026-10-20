@@ -1,6 +1,7 @@
 import { getCallState, markFinalOutcome, updateCallState } from "./callState";
 import { config } from "./config";
-import { formatWhisperMessage } from "./formatWhisperMessage";
+import { buildLiveTransferAnnouncement } from "./ownerCallAnnouncement";
+import { resolveLiveTransferOwnerContext } from "./ownerCallContext";
 import { clearTransfer, getPendingTransfer, setYoniCallControlId } from "./liveTransferStore";
 import { logger } from "./logger";
 import { sendCallbackEmail } from "./sendCallbackEmail";
@@ -138,11 +139,6 @@ async function simulateTransferSuccess(callControlId: string, rowNumber: number)
   await speakText(callControlId, PRE_CONNECTION_MESSAGE);
 }
 
-function buildYoniPrompt(whisperMessage: string): string {
-  const transferSubject = whisperMessage.replace(/^Live transfer from\s+/i, "");
-  return `You have a live transfer request from ${transferSubject}. Press 1 to accept.`;
-}
-
 async function executeAcceptedTransfer({
   callControlId,
   rowNumber,
@@ -242,8 +238,9 @@ async function executeAcceptedTransfer({
 export async function handleLiveTransfer(input: LiveTransferInput): Promise<void> {
   const { agentName, phone, listingAddress, rowNumber, callControlId } = input;
   const liveTransferNumber = config.liveTransferNumber;
-  const whisperMessage = formatWhisperMessage({ agentName, listingAddress });
-  const yoniPrompt = buildYoniPrompt(whisperMessage);
+  const announcementContext = await resolveLiveTransferOwnerContext(input);
+  const whisperMessage = `Live transfer from ${announcementContext.agentName} about ${announcementContext.listingAddress}.`;
+  const yoniPrompt = buildLiveTransferAnnouncement(announcementContext);
 
   logger.info("Live transfer requested", {
     callControlId,

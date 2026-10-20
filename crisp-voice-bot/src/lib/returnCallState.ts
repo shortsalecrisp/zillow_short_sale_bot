@@ -7,6 +7,7 @@ export type ReturnCallState = {
   callerFrom: string;
   accountSid?: string;
   officeCallSid?: string;
+  ownerAnnouncement?: string;
   createdAt: string;
   acceptedAt?: string;
   voicemailStartedAt?: string;
@@ -50,7 +51,8 @@ async function withReturnCallLock<T>(parentCallSid: string, work: () => Promise<
 function validateState(state: ReturnCallState, parentCallSid: string): void {
   if (!state || typeof state !== "object" || state.parentCallSid !== parentCallSid || typeof state.callerFrom !== "string" ||
       !state.callerFrom || typeof state.createdAt !== "string" || !Number.isFinite(Date.parse(state.createdAt)) ||
-      (state.emailStatus !== undefined && !validEmailStatuses.has(state.emailStatus))) {
+      (state.emailStatus !== undefined && !validEmailStatuses.has(state.emailStatus)) ||
+      (state.ownerAnnouncement !== undefined && (typeof state.ownerAnnouncement !== "string" || !state.ownerAnnouncement || state.ownerAnnouncement.length > 2048))) {
     throw new Error("Invalid persisted return-call state; manual review required");
   }
 }
@@ -95,6 +97,9 @@ export async function updateReturnCallState(
     }
     if (current?.acceptedAt && next.acceptedAt !== current.acceptedAt) {
       throw new Error("Cannot replace or remove return-call acceptance receipt");
+    }
+    if (current?.ownerAnnouncement && next.ownerAnnouncement !== current.ownerAnnouncement) {
+      throw new Error("Cannot replace the return-call announcement context");
     }
     if (current?.recordingId && next.recordingId !== current.recordingId) {
       throw new Error("Cannot replace return-call voicemail recording");
