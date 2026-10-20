@@ -710,6 +710,25 @@ test("explicit assistance refusal and opening no-thanks outrank generic hangup",
   }
 });
 
+test("provider agent-role help question plus a bare no is answered not interested", async () => {
+  const { getAuthoritativeTerminalCallResult, shouldTreatAsNotInterested } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const marlene = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "Yes, this is Marlene." },
+      { role: "agent", message: "Would help with lender paperwork or calls be useful for this listing?" },
+      { role: "user", message: "No." },
+      { role: "agent", message: "Understood. Thanks for your time." },
+    ],
+  };
+
+  assert.equal(shouldTreatAsNotInterested(marlene), true);
+  assert.equal(getAuthoritativeTerminalCallResult(marlene, 1, { firstName: "Marlene" }), "answered_not_interested");
+});
+
 test("live office redirection to call the named agent directly is unavailable", async () => {
   const { hasLiveHumanGatekeeperEvidence, shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import(
     "../src/lib/elevenLabsPostCall"
@@ -727,6 +746,32 @@ test("live office redirection to call the named agent directly is unavailable", 
   assert.equal(hasLiveHumanGatekeeperEvidence(conversation, "Leslie"), true);
   assert.equal(shouldTreatAsAgentUnavailable(conversation, "Leslie"), true);
   assert.equal(shouldTreatAsAgentHungUp(conversation), false);
+});
+
+test("named brokerage office responder is a gatekeeper when the responder is not the target", async () => {
+  const { getAuthoritativeTerminalCallResult, hasLiveHumanGatekeeperEvidence } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const tiffanyOffice = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "Thank you for calling Coldwell Banker Apex. This is Julie. How may I help you?" },
+      { role: "agent", message: "I'm calling for Tiffany about a short-sale listing." },
+      { role: "user", message: "She's not available right now." },
+    ],
+  };
+  const targetControl = {
+    ...tiffanyOffice,
+    transcript: [
+      { role: "user", message: "Thank you for calling Roscoe Realty. This is Tiffany. How may I help you?" },
+      { role: "agent", message: "I'm calling about your short-sale listing." },
+    ],
+  };
+
+  assert.equal(hasLiveHumanGatekeeperEvidence(tiffanyOffice, "Tiffany"), true);
+  assert.equal(getAuthoritativeTerminalCallResult(tiffanyOffice, 1, { firstName: "Tiffany" }), "gatekeeper_admin_early_exit");
+  assert.equal(hasLiveHumanGatekeeperEvidence(targetControl, "Tiffany"), false);
 });
 
 test("Google Call Assist follow-up prompts remain screening, with real human reply preserved", async () => {
@@ -945,6 +990,44 @@ test("post-call fallback classifies a completed automated screener as agent unav
   };
 
   assert.equal(shouldTreatAsAgentUnavailable(conversation), true);
+});
+
+test("a later live human overrides an earlier recorded screener", async () => {
+  const {
+    getAuthoritativeTerminalCallResult,
+    hasLiveHumanAfterAutomatedScreening,
+    shouldTreatAsAgentUnavailable,
+  } = await import("../src/lib/elevenLabsPostCall");
+  const amelia = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    analysis: { transcript_summary: "The call began with an automated screening service." },
+    transcript: [
+      { role: "user", message: "Please state your name and reason for calling, then stay on the line." },
+      { role: "agent", message: "Maya with Crisp Short Sales, about the short-sale listing at 410 Lake Drive." },
+      { role: "user", message: "Please stay on the line while I try to reach them." },
+      { role: "agent", message: "Sure, I'll wait." },
+      { role: "user", message: "Good afternoon. This is Amelia." },
+      { role: "agent", message: "I'm calling about the short-sale listing at 410 Lake Drive." },
+      { role: "user", message: "That isn't the correct property. My listing is on Lakeview Drive." },
+    ],
+  };
+  const sheikh = {
+    ...amelia,
+    transcript: [
+      { role: "user", message: "Please record your name and reason for calling." },
+      { role: "agent", message: "Maya with Crisp Short Sales, about a short-sale listing." },
+      { role: "user", message: "Hello, this is Sheikh. What property are you calling about?" },
+      { role: "agent", message: "The one at 22 Main Street." },
+      { role: "user", message: "I don't recognize that address. Who are you trying to reach?" },
+    ],
+  };
+
+  for (const conversation of [amelia, sheikh]) {
+    assert.equal(hasLiveHumanAfterAutomatedScreening(conversation), true);
+    assert.equal(shouldTreatAsAgentUnavailable(conversation), false);
+    assert.equal(getAuthoritativeTerminalCallResult(conversation, 1), undefined);
+  }
 });
 
 test("post-call fallback retains an earlier hold instruction when the final screener turn is truncated", async () => {

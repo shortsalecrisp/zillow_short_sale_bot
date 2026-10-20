@@ -144,10 +144,10 @@ test("payer corrections get the substantive answer while preserving other questi
   assert.match(section("Answer library"), /The buyer typically pays the flat fee, only if the deal closes\." If another question or request accompanies it, address that too/);
   assert.match(section("Answer library"), /Answer all questions asked, then wait/);
 });
-test("fees describe usual terms and timing is file-specific rather than an assessed estimate", () => {
+test("fees give the approved amount and terms while timing stays file-specific", () => {
   const s = section("Answer library");
-  assert.match(s, /Under our usual arrangement, there is no fee to you or the seller; the buyer pays a flat fee at closing/);
-  assert.match(s, /Yoni can confirm the terms for this file/);
+  assert.match(s, /The fee is \$5,000, paid by the buyer at closing only if the deal closes\. There is no fee to you or the seller/);
+  assert.match(s, /Give this complete answer, then wait\. Do not append a Yoni offer, qualification question, or transfer pitch/);
   assert.match(s, /Timing depends on the lender and the file\. Yoni can assess where this one stands/);
   assert.match(s, /Do not offer a 60-to-90-day estimate as though this file has been assessed/);
   assert.doesNotMatch(s, /short sales usually take about 60 to 90 days/);

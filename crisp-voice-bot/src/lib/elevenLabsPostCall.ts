@@ -1184,7 +1184,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     );
   });
   const completedHelpDecline = messages.some((item, index) => {
-    if (item.role !== "assistant" || typeof item.message !== "string") {
+    if ((item.role !== "assistant" && item.role !== "agent") || typeof item.message !== "string") {
       return false;
     }
     const question = normalizeText(item.message);
@@ -1704,16 +1704,31 @@ export function hasLiveHumanGatekeeperEvidence(
   expectedFirstName = "",
 ): boolean {
   const transcript = conversation.transcript ?? [];
+  let lastScreeningIndex = -1;
+  if (hasLiveHumanAfterAutomatedScreening(conversation)) {
+    for (let index = 0; index < transcript.length; index += 1) {
+      const item = transcript[index];
+      if (item.role !== "user" || typeof item.message !== "string") continue;
+      const text = normalizeText(item.message);
+      if (/\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
+        /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|please stay on the(?: line)?|please hold while|one moment while|checking with the person you called|see if (?:this person|they|he|she) is available)\b/.test(text)) {
+        lastScreeningIndex = index;
+      }
+    }
+  }
   const summary = normalizeText(conversation.analysis?.transcript_summary ?? "");
   const summaryNamesLiveRole =
-    /\b(?:live |human )?(?:gatekeeper|receptionist|administrator|admin|office assistant|answering service)\b/.test(summary);
+    /\b(?:live |human )?(?:gatekeeper|receptionist|administrator|admin|office assistant|answering service)\b/.test(summary) &&
+    !/\b(?:automated|recorded|virtual|ai)\b.{0,40}\b(?:screening service|gatekeeper|receptionist|administrator|admin|office assistant|answering service)\b/.test(summary);
   const contextualUserTurns = transcript.filter((item, index) => {
-    if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) {
+    if (index <= lastScreeningIndex || item.role !== "user" || typeof item.message !== "string" ||
+      !hasMeaningfulSpokenContent(item.message)) {
       return false;
     }
 
     return transcript.slice(0, index).some(
-      (prior) => prior.role === "assistant" && typeof prior.message === "string" && hasMeaningfulSpokenContent(prior.message),
+      (prior) => (prior.role === "assistant" || prior.role === "agent") &&
+        typeof prior.message === "string" && hasMeaningfulSpokenContent(prior.message),
     );
   });
 
@@ -1741,6 +1756,13 @@ export function hasLiveHumanGatekeeperEvidence(
   const liveBusinessGreeting = meaningfulUserMessages(conversation).some((message) => {
     const text = normalizeText(message);
     const organizationPrefix = text.match(/^(.{3,80}),\s*how (?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
+    const namedOfficeGreeting = text.match(
+      /^(?:thank you for calling|welcome to)\s+(.{2,80}?)[.!?]\s*this is\s+([a-z][a-z'-]*)[.!?, ]+\s*how (?:can|may) i help (?:you|ya)\b/,
+    );
+    if (namedOfficeGreeting) {
+      const responderName = namedOfficeGreeting[2];
+      return !(expected && nameSoundsSimilar(responderName, expected));
+    }
     return Boolean(organizationPrefix) &&
       !/^(?:hi|hello|yes|sure|okay|this is [a-z][a-z'-]*)$/.test(organizationPrefix) &&
       !(expected && new RegExp(`\\b${expected}\\b`).test(organizationPrefix));
@@ -1827,6 +1849,39 @@ export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
   return identityConfirmed && selfHandlingConfirmed;
 }
 
+export function hasLiveHumanAfterAutomatedScreening(conversation: ElevenLabsConversation): boolean {
+  const transcript = conversation.transcript ?? [];
+  let sawScreening = false;
+  let assistantAnsweredScreening = false;
+
+  for (const item of transcript) {
+    if (item.role === "user" && typeof item.message === "string") {
+      const text = normalizeText(item.message);
+      const screeningTurn = /\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
+        /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|please stay on the(?: line)?|please hold while|one moment while|checking with the person you called|see if (?:this person|they|he|she) is available)\b/.test(text);
+      if (screeningTurn) {
+        sawScreening = true;
+        continue;
+      }
+      if (!sawScreening || !assistantAnsweredScreening || !hasMeaningfulSpokenContent(item.message)) {
+        continue;
+      }
+      const automatedContinuation = /\b(?:person (?:you called|you are calling|you're calling) (?:is|was) (?:not )?available|leave an additional message|can you tell me more about the details|checking with the person you called)\b/.test(text) ||
+        /^(?:thank you|thanks|please hold|one moment|not available)[.!? ]*$/.test(text) ||
+        /-\s*$/.test(item.message.trim());
+      if (!automatedContinuation) {
+        return true;
+      }
+      continue;
+    }
+    if (sawScreening && (item.role === "assistant" || item.role === "agent") &&
+      typeof item.message === "string" && hasMeaningfulSpokenContent(item.message)) {
+      assistantAnsweredScreening = true;
+    }
+  }
+  return false;
+}
+
 export function shouldTreatAsAgentUnavailable(
   conversation: ElevenLabsConversation,
   expectedFirstName = "",
@@ -1840,6 +1895,7 @@ export function shouldTreatAsAgentUnavailable(
   }
 
   const earlyText = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
+  const liveHumanAfterScreening = hasLiveHumanAfterAutomatedScreening(conversation);
   const automatedScreenUnavailable =
     (earlyText.includes("record your name and reason") ||
       earlyText.includes("name and reason for calling") ||
@@ -1851,7 +1907,7 @@ export function shouldTreatAsAgentUnavailable(
       earlyText.includes("currently unavailable") ||
       earlyText.includes("unavailable to take your call") ||
       earlyText.includes("leave an additional message"));
-  if (automatedScreenUnavailable) {
+  if (automatedScreenUnavailable && !liveHumanAfterScreening) {
     return true;
   }
 
@@ -1927,9 +1983,9 @@ export function shouldTreatAsAgentUnavailable(
     assistantText.includes("okay, i'll wait");
 
   return (
-    hasAvailabilityScreen ||
+    (hasAvailabilityScreen && !liveHumanAfterScreening) ||
     (hasGatekeeper && targetUnavailable) ||
-    (wasPlacedOnHold && (assistantWaited || text.includes("placed the agent on hold")))
+    (wasPlacedOnHold && !liveHumanAfterScreening && (assistantWaited || text.includes("placed the agent on hold")))
   );
 }
 

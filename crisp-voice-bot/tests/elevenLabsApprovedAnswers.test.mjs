@@ -48,16 +48,15 @@ test('explicit no-contact wording has priority over earlier callback or transfer
   assert.match(prompt, /"do not contact me," "do not reach out to me,"/);
   assert.match(prompt, /has priority over every pitch and action, including an earlier callback or transfer request/);
 });
-test('fee answers preserve the payer, closing contingency and unknown economics', () => {
+test('fee answers give the approved amount, payer and closing contingency without a handoff pitch', () => {
   for (const text of [
-    "Under our usual arrangement, there is no fee to you or the seller; the buyer pays a flat fee at closing. Yoni can confirm the terms for this file.",
+    "The fee is $5,000, paid by the buyer at closing only if the deal closes. There is no fee to you or the seller.",
     "The buyer typically pays the flat fee, only if the deal closes.",
-    "I don't have the applicable fee amount for your file. Yoni can explain the terms before you decide.",
     "It can affect the buyer's total budget. Yoni can explain the fee and offer structure before you decide.",
   ]) assert.ok(library.includes(text), text);
   assert.match(library, /Never describe the service simply as free/);
   assert.match(library, /Do not promise an unchanged offer, lender net, commission, or approval/);
-  assert.doesNotMatch(library, /\$[\d,]+/);
+  assert.match(library, /Give this complete answer, then wait\. Do not append a Yoni offer, qualification question, or transfer pitch/);
 });
 test('responsibility, experience, proof, buyer sourcing, seller and location answers remain bounded', () => {
   for (const text of [
@@ -82,7 +81,7 @@ test('general scope and timing keep every approved material fact without a file 
   assert.match(library, /Timing depends on the lender and the file\. Yoni can assess where this one stands/);
   assert.match(library, /Do not offer a 60-to-90-day estimate as though this file has been assessed/);
   assert.match(library, /not guarantees or an exact division of duties for a specific file/);
-  assert.match(library, /Do not invent a fee amount, guaranteed approval or closing/);
+  assert.match(library, /The approved flat fee fact is \$5,000; do not state a different amount/);
   assert.doesNotMatch(library, /approval process end to end/);
 });
 test('answer and repair contracts retain complete questions without repeated handoff pitches', () => {
@@ -98,6 +97,10 @@ test('answer and repair contracts retain complete questions without repeated han
   assert.match(repair, /Do not claim the connection or volume was fixed/);
   assert.match(prompt, /not automatically the service or current conversation|not necessarily the service or current conversation/);
   assert.doesNotMatch(prompt, /then pivot to Yoni|Then pivot back to Yoni|Treat that as re-engagement and offer Yoni once/);
+});
+test('background noise never causes a location instruction', () => {
+  assert.match(repair, /Never tell callers to move because of background noise/);
+  assert.match(repair, /If speech is unintelligible, ask once: "Sorry, could you repeat that\?"/);
 });
 test('explicit opt-out and current-call ending markers remain verbatim', () => {
   for (const marker of [

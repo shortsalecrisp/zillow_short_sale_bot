@@ -183,6 +183,22 @@ test("terminal outcome precedence drives the metrics contact bucket", async () =
   assert.equal(gatekeeper.contactEvidence.targetAgentAnswered, false);
 });
 
+test("performance evidence counts a named live human reached after screening", async () => {
+  const parsed = await measurementLog({ metadata: { fullName: "Amelia Colonna" }, conversation: { transcript: [
+    { role: "user", message: "Please state your name and reason for calling, then stay on the line." },
+    { role: "agent", message: "Maya with Crisp Short Sales, about the short-sale listing at 410 Lake Drive." },
+    { role: "user", message: "Please stay on the line while I try to reach them." },
+    { role: "agent", message: "Sure, I'll wait." },
+    { role: "user", message: "Good afternoon. This is Amelia." },
+    { role: "agent", message: "I'm calling about the short-sale listing at 410 Lake Drive." },
+    { role: "user", message: "That isn't the correct property. My listing is on Lakeview Drive." },
+  ] } });
+
+  assert.equal(parsed.contactEvidence.reviewBucket, "target_live");
+  assert.equal(parsed.contactEvidence.humanAnswered, true);
+  assert.equal(parsed.contactEvidence.targetAgentAnswered, true);
+});
+
 for (const status of ["done", "failed"]) {
   test(`provider identity comes from a matching final ${status} receipt, separately from declarations`, async () => {
     const parsed = await measurementLog({
