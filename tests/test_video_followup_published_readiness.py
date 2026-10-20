@@ -77,7 +77,8 @@ def test_complete_published_asset_set_selects_one_correct_branded_link(ready_vid
     message, metadata = service.select(context, helpers.FALLBACK)
     assert message.count("https://") == 1
     assert message.endswith("https://go.crispshortsales.com/v/" + job["id"])
-    assert message.startswith("Hey Jim, it's Yoni Kutler")
+    assert message.startswith("Hey, just following up on my message from earlier.  Heres a quick video")
+    assert "Jim" not in message
     assert metadata["video_variant"] == "video"
     assert metadata["video_speech_proof"]["media_sha256"] == hashlib.sha256(helpers.MEDIA["media_bytes"]).hexdigest()
     assert store.get_public_video(job["id"])["first_name"] == "Jim"

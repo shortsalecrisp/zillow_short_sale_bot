@@ -20,8 +20,8 @@ ORIGINAL_FALLBACK = (
     "Let me know if I can help with anything\u2014happy to connect whenever works for you!"
 )
 VIDEO_MESSAGE = (
-    "Hey Jim, it's Yoni Kutler with Crisp Short Sales. "
-    "Here's a quick video to put a face to my text. Happy to help if you have questions.\n"
+    "Hey, just following up on my message from earlier.  "
+    "Heres a quick video to put a face to my text... Happy to help if you have any questions!\n"
     "https://go.crispshortsales.com/v/" + "b" * 32
 )
 

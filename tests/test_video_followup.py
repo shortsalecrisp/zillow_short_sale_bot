@@ -389,20 +389,23 @@ class VideoFollowupTests(unittest.TestCase):
         self.assertEqual(self.objects.list("assets/"), [])
         self.assertIsNone(self.store.get_public_video(first_meta["video_job_id"]))
 
-    def test_ready_video_freezes_branded_name_only_wrapper_once(self):
+    def test_ready_video_freezes_casual_wrapper_without_repeating_name_once(self):
         ready = self.make_ready()
         message, meta = self.service.select(self.context, FALLBACK)
         self.assertEqual(meta["video_variant"], "video")
-        self.assertEqual(message, "Hey Jim, it's Yoni Kutler with Crisp Short Sales. "
-                         "Here's a quick video to put a face to my text. Happy to help if you have questions.\n"
+        self.assertEqual(message, "Hey, just following up on my message from earlier.  "
+                         "Heres a quick video to put a face to my text... Happy to help if you have any questions!\n"
                          "https://go.crispshortsales.com/v/" + ready["id"])
         self.assertEqual(self.service.select(self.context, "New fallback"), (message, meta))
+        self.assertNotIn(self.context["first_name"], message)
         self.assertNotIn(PHONE, message)
         self.assertNotIn(self.context["stable_id"], message)
 
     def test_existing_frozen_video_keeps_its_original_copy_and_identity(self):
         ready = self.make_ready()
-        old_message = "Hey Jim, just putting a face to my text: https://go.crispshortsales.com/v/" + ready["id"]
+        old_message = ("Hey Jim, it's Yoni Kutler with Crisp Short Sales. "
+                       "Here's a quick video to put a face to my text. Happy to help if you have questions.\n"
+                       "https://go.crispshortsales.com/v/" + ready["id"])
         self.store.mutate("jobs/" + self.context["followup_key"], lambda old: {
             **old, "status": "frozen_video", "variant": "video", "message": old_message,
             "frozen_at": old["created_at"],

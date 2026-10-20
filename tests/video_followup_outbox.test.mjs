@@ -1427,6 +1427,59 @@ for (const asVideo of [false, true]) {
   });
 }
 
+test("approved video copy survives Python serialization and existing Apps whitespace normalization with both journals", () => {
+  const { h, body } = schedulerReceiptFixture(true);
+  const jobId = "3".repeat(32);
+  const videoUrl = `https://go.crispshortsales.com/v/${jobId}`;
+  body.video_job_id = jobId;
+  body.video_speech_proof.video_job_id = jobId;
+  body.message = "Hey, just following up on my message from earlier.  "
+    + "Heres a quick video to put a face to my text... Happy to help if you have any questions!\n"
+    + videoUrl;
+  const expected = "Hey, just following up on my message from earlier. "
+    + "Heres a quick video to put a face to my text... Happy to help if you have any questions! "
+    + videoUrl;
+  const payload = schedulerSerialized(body);
+  assert.equal(payload.message, body.message);
+  assert.equal(payload.reply_text, body.message);
+  assert.notEqual(payload.phone, "9542053205");
+  assert.deepEqual(payload.initial_receipt, body.initial_receipt);
+  assert.deepEqual(payload.video_speech_proof, body.video_speech_proof);
+  for (const field of ["message_id", "request_id", "followup_key", "video_job_id", "video_variant", "phone"]) {
+    assert.equal(payload[field], body[field], field);
+  }
+  assert.equal(enqueue(h, payload).ok, true);
+  const stored = h.outbox.data.at(-1);
+  assert.equal(stored[5], expected);
+  assert.equal(stored[2], body.request_id);
+  assert.equal(stored[3], body.message_id);
+  assert.deepEqual(stored[5].match(/https?:\/\/[^\s<>"']+/g), [videoUrl]);
+  const metadata = JSON.parse(stored[6].replace(/^__scheduled_followup__:/, ""));
+  assert.equal(metadata.audit_contract, "followup-decision-v1");
+  assert.equal(metadata.video_job_id, jobId);
+  assert.deepEqual(metadata.initial_receipt, body.initial_receipt);
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "offline-fixture" });
+  assert.equal(claim.should_send, true);
+  assert.equal(claim.reply_text, expected);
+  assert.equal(claim.request_id, body.request_id);
+  assert.equal(claim.message_id, body.message_id);
+  assert.equal(h.context.markPendingSmsSendStartedV10_(claim).ok, true);
+  assert.equal(h.outbox.data.at(-1)[5], expected);
+  const events = journal(h).events;
+  assert.deepEqual(events.map(event => event.stage), ["claim", "send_start"]);
+  let prior = "";
+  for (const event of events) {
+    const { sha256, ...unhashed } = event;
+    assert.equal(sha256, canonicalDigest(unhashed));
+    assert.equal(event.previous_sha256, prior);
+    assert.equal(event.event_id, canonicalDigest([body.request_id, body.message_id, event.stage, claim.lease_token]));
+    assert.equal(event.decision.eligible, true);
+    assert.deepEqual(event.decision.initial_receipt, body.initial_receipt);
+    assert.equal(event.speech_evidence_sha256, "e".repeat(64));
+    prior = sha256;
+  }
+});
+
 test("Python serializer receipt boundary preserves legacy absence but rejects stripped evidence video", () => {
   for (const asVideo of [false, true]) {
     const { h, body } = schedulerReceiptFixture(asVideo);
