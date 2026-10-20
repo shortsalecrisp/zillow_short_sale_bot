@@ -19,6 +19,7 @@ export const canonical = value => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === 'object'
     ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 export const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+export const DISABLED_NOISY_ENVIRONMENT_MESSAGE = "Uhh ... sorry, I'm picking up some noise in the background. Could you move somewhere quieter?";
 
 export function comparisonBody(agent) {
   const body = structuredClone({ conversation_config: agent.conversation_config, workflow: agent.workflow });
@@ -37,6 +38,13 @@ export function comparisonBody(agent) {
     tts.pvc_strength = 0;
   }
   if (!Object.hasOwn(config, 'subagents')) config.subagents = [];
+  const turn = body.conversation_config.turn;
+  // Reconcile only the exact disabled pair added to the pinned r6 GET responses.
+  if (turn && Object.hasOwn(turn, 'noisy_environment_detection') && turn.noisy_environment_detection === false
+      && Object.hasOwn(turn, 'noisy_environment_message') && turn.noisy_environment_message === DISABLED_NOISY_ENVIRONMENT_MESSAGE) {
+    delete turn.noisy_environment_detection;
+    delete turn.noisy_environment_message;
+  }
   return body;
 }
 

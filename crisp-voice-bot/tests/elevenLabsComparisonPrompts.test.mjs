@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { syncComparisonPrompts } from '../src/scripts/syncElevenLabsComparisonPrompts.mjs';
 import { sha256 } from '../src/scripts/syncElevenLabsPromptOnly.mjs';
+import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE } from '../src/scripts/verifyElevenLabsComparison.mjs';
 
 async function setup(t, bothOld = false) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'voice-comparison-test-'));
@@ -45,6 +46,17 @@ test('comparison dry-run makes no writes and binds the reviewed plan', async t =
   const s = await setup(t);
   const r = await syncComparisonPrompts(s.options, s.fetcher);
   assert.equal(r.status, 'prepared_not_applied');
+  assert.equal(s.writes.length, 0);
+});
+test('release plans use the same canonical hash as the read-only verifier', async t => {
+  const s = await setup(t);
+  const expectedHash = digest(comparisonBody(s.agents[0]));
+  for (const a of s.agents) {
+    a.conversation_config.turn.noisy_environment_detection = false;
+    a.conversation_config.turn.noisy_environment_message = DISABLED_NOISY_ENVIRONMENT_MESSAGE;
+  }
+  const r = await syncComparisonPrompts(s.options, s.fetcher);
+  assert.equal(r.sharedHash, expectedHash);
   assert.equal(s.writes.length, 0);
 });
 test('synchronizes the stale arm, preserving the already-updated arm and protected settings', async t => {

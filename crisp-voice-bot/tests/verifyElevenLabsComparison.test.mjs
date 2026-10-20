@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { comparisonBody, digest, R6_COMPARISON, validateComparison, verifyLiveComparison } from '../src/scripts/verifyElevenLabsComparison.mjs';
+import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE, R6_COMPARISON, validateComparison, verifyLiveComparison } from '../src/scripts/verifyElevenLabsComparison.mjs';
 
 function fixture(index = 0) {
   const arm = R6_COMPARISON.arms[index];
@@ -20,6 +20,39 @@ function newShape(agent) {
 }
 const expected = { ...R6_COMPARISON, sharedHash: digest(comparisonBody(fixture())), workflowHash: digest(fixture().workflow) };
 const allocation = () => ({ meta: { total: 2 }, results: R6_COMPARISON.arms.map(arm => ({ id: arm.branchId, is_archived: false, current_live_percentage: 50 })) });
+
+function disabledNoiseShape(agent) {
+  const result = newShape(agent);
+  result.conversation_config.turn.noisy_environment_detection = false;
+  result.conversation_config.turn.noisy_environment_message = DISABLED_NOISY_ENVIRONMENT_MESSAGE;
+  return result;
+}
+
+test('the exact disabled noise pair reproduces the approved digest without mutating the response', () => {
+  const fresh = disabledNoiseShape(fixture()), before = JSON.stringify(fresh);
+  assert.deepEqual(comparisonBody(fresh), comparisonBody(fixture()));
+  assert.equal(JSON.stringify(fresh), before);
+  assert.equal(validateComparison([fresh, disabledNoiseShape(fixture(1))], allocation(), expected).ok, true);
+  assert.equal(validateComparison([fixture(), disabledNoiseShape(fixture(1))], allocation(), expected).ok, true);
+});
+
+test('enabled, malformed, partial or customized noise settings remain drift', () => {
+  for (const change of [
+    a => { a.conversation_config.turn.noisy_environment_detection = true; },
+    a => { a.conversation_config.turn.noisy_environment_detection = null; },
+    a => { a.conversation_config.turn.noisy_environment_detection = 0; },
+    a => { a.conversation_config.turn.noisy_environment_detection = 'false'; },
+    a => { delete a.conversation_config.turn.noisy_environment_detection; },
+    a => { delete a.conversation_config.turn.noisy_environment_message; },
+    a => { a.conversation_config.turn.noisy_environment_message = ''; },
+    a => { a.conversation_config.turn.noisy_environment_message = null; },
+    a => { a.conversation_config.turn.noisy_environment_message += ' changed'; },
+    a => { a.conversation_config.turn.another_default = false; },
+  ]) {
+    const value = disabledNoiseShape(fixture()); change(value);
+    assert.throws(() => validateComparison([value, fixture(1)], allocation(), expected), /configuration digest/);
+  }
+});
 
 test('old and exact approved new response shapes share one digest without mutating either readback', () => {
   const old = fixture(), fresh = newShape(old), before = JSON.stringify(fresh);
@@ -105,7 +138,7 @@ test('live verifier makes exactly three GETs and never invokes a publisher or ot
   const fetcher = async (url, options) => {
     assert.equal(options.method, 'GET'); requests.push(url);
     const value = url.endsWith('/branches') ? allocation()
-      : newShape(fixture(url.includes(R6_COMPARISON.arms[1].branchId) ? 1 : 0));
+      : disabledNoiseShape(fixture(url.includes(R6_COMPARISON.arms[1].branchId) ? 1 : 0));
     return { ok: true, json: async () => value };
   };
   const result = await verifyLiveComparison({ apiKey: 'synthetic_key', expected }, fetcher);
