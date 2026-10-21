@@ -1334,9 +1334,12 @@ export function getAuthoritativeTerminalCallResult(
 
   const voicemailOrNoAnswer = getVoicemailOrNoAnswerCallResult(conversation, callAttemptNumber);
   if (voicemailOrNoAnswer?.startsWith("voicemail_")) return voicemailOrNoAnswer;
+  // Terminal automated screening must outrank any gatekeeper-like wording in
+  // the recording (for example "stay on the line" or "try to connect you").
+  if (shouldTreatAsRecordingArtifact(conversation)) return "agent_not_available";
   if (shouldTreatAsGatekeeperAdminEarlyExit(conversation, expected.firstName) ||
     shouldTreatAsUnrelatedLiveBusiness(conversation, expected.firstName)) return "gatekeeper_admin_early_exit";
-  if (shouldTreatAsAgentUnavailable(conversation, expected.firstName) || shouldTreatAsRecordingArtifact(conversation)) {
+  if (shouldTreatAsAgentUnavailable(conversation, expected.firstName)) {
     return "agent_not_available";
   }
   if (getVoiceContactRequestResult(conversation) === "call_end_requested") return "call_end_requested";
@@ -1706,15 +1709,13 @@ export function hasLiveHumanGatekeeperEvidence(
 ): boolean {
   const transcript = conversation.transcript ?? [];
   let lastScreeningIndex = -1;
-  if (hasLiveHumanAfterAutomatedScreening(conversation)) {
-    for (let index = 0; index < transcript.length; index += 1) {
-      const item = transcript[index];
-      if (item.role !== "user" || typeof item.message !== "string") continue;
-      const text = normalizeText(item.message);
-      if (/\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
-        /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|please stay on the(?: line)?|please hold while|one moment while|checking with the person you called|see if (?:this person|they|he|she) is available)\b/.test(text)) {
-        lastScreeningIndex = index;
-      }
+  for (let index = 0; index < transcript.length; index += 1) {
+    const item = transcript[index];
+    if (item.role !== "user" || typeof item.message !== "string") continue;
+    const text = normalizeText(item.message);
+    if (/\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
+      /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|please stay on the(?: line)?|please hold while|one moment while|checking with the person you called|see if (?:this person|they|he|she) is available|(?:the )?call could not be connected)\b/.test(text)) {
+      lastScreeningIndex = index;
     }
   }
   const summary = normalizeText(conversation.analysis?.transcript_summary ?? "");
@@ -1859,7 +1860,7 @@ export function hasLiveHumanAfterAutomatedScreening(conversation: ElevenLabsConv
     if (item.role === "user" && typeof item.message === "string") {
       const text = normalizeText(item.message);
       const screeningTurn = /\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
-        /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|please stay on the(?: line)?|please hold while|one moment while|checking with the person you called|see if (?:this person|they|he|she) is available)\b/.test(text);
+        /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|please stay on the(?: line)?|please hold while|one moment while|checking with the person you called|see if (?:this person|they|he|she) is available|(?:the )?call could not be connected)\b/.test(text);
       if (screeningTurn) {
         sawScreening = true;
         continue;
@@ -1868,6 +1869,7 @@ export function hasLiveHumanAfterAutomatedScreening(conversation: ElevenLabsConv
         continue;
       }
       const automatedContinuation = /\b(?:person (?:you called|you are calling|you're calling) (?:is|was) (?:not )?available|leave an additional message|can you tell me more about the details|checking with the person you called)\b/.test(text) ||
+        /\b(?:the )?call could not be connected\b/.test(text) ||
         /^(?:thank you|thanks|please hold|one moment|not available)[.!? ]*$/.test(text) ||
         /-\s*$/.test(item.message.trim());
       if (!automatedContinuation) {

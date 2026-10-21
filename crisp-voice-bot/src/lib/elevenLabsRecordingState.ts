@@ -17,6 +17,8 @@ function isAutomatedMessage(message: string): boolean {
     /\b(?:record|state)\s+(?:your\s+)?name(?:\s+and\s+(?:the\s+)?reason)?\b/.test(text) ||
     /\b(?:press|dial)\s+(?:one|two|three|[0-9])\b/.test(text) ||
     /\b(?:please\s+)?stay on the line\b/.test(text) ||
+    /\bplease hold while (?:i|we) (?:try to )?connect you\b/.test(text) ||
+    /\b(?:the )?call could not be connected\b/.test(text) ||
     /\bone moment while\b/.test(text) ||
     /\bi(?:'|’)ll see if (?:this person|they|he|she) is available\b/.test(text)
     || /\bcall assist by google\b/.test(text)

@@ -794,6 +794,121 @@ test("Google Call Assist follow-up prompts remain screening, with real human rep
   assert.equal(shouldTreatAsAgentUnavailable(withHuman), false);
 });
 
+const terminalAutomatedScreenerScenarios = [
+  {
+    name: "jeremiah_recorded_screener",
+    firstName: "Jeremiah",
+    transcript: [
+      { role: "user", message: "Please record your name and reason for calling." },
+      { role: "assistant", message: "Maya with Crisp Short Sales, calling about Jeremiah's short-sale listing." },
+      { role: "user", message: "Thank you. Please stay on the line." },
+    ],
+  },
+  {
+    name: "ernestine_recorded_screener",
+    firstName: "Ernestine",
+    transcript: [
+      { role: "user", message: "Please record your name and the reason for your call." },
+      { role: "assistant", message: "Maya with Crisp Short Sales, calling about Ernestine's short-sale listing." },
+      { role: "user", message: "Please stay on the line while I try to reach them." },
+    ],
+  },
+  {
+    name: "scharisse_failed_screener_connection",
+    firstName: "Scharisse",
+    transcript: [
+      { role: "user", message: "Please hold while I try to connect you." },
+      { role: "assistant", message: "Sure, I'll wait." },
+      { role: "user", message: "The call could not be connected. Goodbye." },
+    ],
+  },
+] as const;
+
+for (const scenario of terminalAutomatedScreenerScenarios) {
+  test(`terminal automated screener outranks gatekeeper and hangup for ${scenario.name}`, async () => {
+    const {
+      getAuthoritativeTerminalCallResult,
+      hasLiveHumanGatekeeperEvidence,
+      shouldTreatAsRecordingArtifact,
+    } = await import("../src/lib/elevenLabsPostCall");
+    const conversation = {
+      status: "done",
+      metadata: { termination_reason: "Client disconnected: 1000" },
+      analysis: { transcript_summary: "An automated call screener answered; the target agent was never reached." },
+      transcript: scenario.transcript,
+    };
+
+    assert.equal(shouldTreatAsRecordingArtifact(conversation), true);
+    assert.equal(hasLiveHumanGatekeeperEvidence(conversation, scenario.firstName), false);
+    assert.equal(
+      getAuthoritativeTerminalCallResult(conversation, 1, { firstName: scenario.firstName }),
+      "agent_not_available",
+    );
+  });
+}
+
+for (const scenario of terminalAutomatedScreenerScenarios) {
+  test(`terminal screener Sheet write matches final contact evidence for ${scenario.name}`, async () => {
+    const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+    const { VOICE_PERFORMANCE_LOG_MARKER } = await import("../src/lib/elevenLabsPerformanceLog");
+    const conversationId = `conv_measurement_${scenario.name}`;
+    const updates: Array<Record<string, unknown>> = [];
+    measurementConversations.set(conversationId, {
+      conversation_id: conversationId,
+      status: "done",
+      metadata: { termination_reason: "Client disconnected: 1000", call_duration_secs: 19 },
+      analysis: { transcript_summary: "An automated call screener answered; the target agent was never reached." },
+      conversation_initiation_client_data: {
+        dynamic_variables: {
+          rowNumber: 123,
+          callAttemptNumber: 1,
+          agentName: `${scenario.firstName} Example`,
+          listingAddress: "123 Fictional Street",
+          requestedPhone: "+12025550123",
+          phone: "+12025550123",
+          assistantName: "Maya",
+          testMode: true,
+        },
+      },
+      transcript: scenario.transcript,
+    });
+    try {
+      assert.equal(await processPostCallOutcomeFromConversationId(conversationId, {
+        requestQueueRefill,
+        postSheetUpdate: async payload => { updates.push(payload as Record<string, unknown>); },
+      }), true);
+      assert.equal(updates.length, 1);
+      assert.equal(updates[0].callResult, "agent_not_available");
+      const performance = JSON.parse(
+        String(updates[0].voiceNotes).replace(`--- ${VOICE_PERFORMANCE_LOG_MARKER} ---\n`, ""),
+      );
+      assert.equal(performance.contactEvidence.reviewBucket, "recorded_screener");
+      assert.equal(performance.contactEvidence.humanAnswered, false);
+      assert.equal(performance.contactEvidence.gatekeeper, false);
+    } finally {
+      measurementConversations.delete(conversationId);
+    }
+  });
+}
+
+test("a live office responder remains a human gatekeeper", async () => {
+  const { getAuthoritativeTerminalCallResult } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "Good afternoon, Leslie Wells Realty. This is Lisa. May I help you?" },
+      { role: "assistant", message: "I'm calling about Leslie's short-sale listing. Is Leslie available?" },
+      { role: "user", message: "No, you'll have to call her directly." },
+    ],
+  };
+
+  assert.equal(
+    getAuthoritativeTerminalCallResult(conversation, 1, { firstName: "Leslie" }),
+    "gatekeeper_admin_early_exit",
+  );
+});
+
 test("post-call fallback identifies wrong-person and unrelated-business voicemail", async () => {
   const { buildVoiceResponseStatus, shouldTreatAsIdentityMismatchVoicemail } = await import(
     "../src/lib/elevenLabsPostCall"
