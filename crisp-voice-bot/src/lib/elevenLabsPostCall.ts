@@ -20,16 +20,13 @@ import { requestInfoEmailApproval } from "./requestInfoEmailApproval";
 import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
 import { isFinalUnansweredVoiceResult } from "./voiceFinalUnanswered";
+import { shouldContinuePostCallFallback } from "./voiceOutcomeRecovery";
 import type { CallMetadata, SheetUpdateRequest } from "../types";
 
 const FIRST_CHECK_DELAY_MS = 90_000;
 const RETRY_DELAY_MS = 30_000;
-const MAX_ATTEMPTS = 5;
-const CALL_CONNECT_RETRY_DELAY_MS = 30_000;
-const MAX_CALL_CONNECT_RETRIES = 1;
 
 type PostCallOptions = {
-  finalAttempt?: boolean;
   postSheetUpdate?: (payload: SheetUpdateRequest) => Promise<void>;
 };
 
@@ -97,6 +94,7 @@ type ElevenLabsConversation = {
 };
 
 const processedConversationIds = new Set<string>();
+const processingConversations = new Map<string, Promise<boolean>>();
 const conversationsWithoutQueueRefill = new Set<string>();
 
 const elevenLabsApi = axios.create({
@@ -1194,7 +1192,8 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
         /\b(?:would you like|do you want|do you need|anything else i can assist|specific questions|something you'd like|any part|you need|need help)\b/.test(
           question,
         ) ||
-        /\bwould help with\b.*\bbe useful\b/.test(question)
+        /\bwould help with\b.*\bbe useful\b/.test(question) ||
+        /\bhelp with\b.*\bwould be useful\b/.test(question)
       ) ||
       !/\b(?:help|assist|details|questions|services?)\b/.test(question)
     ) {
@@ -1205,7 +1204,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     );
     return Boolean(
       answer?.message &&
-        /^(?:uh+[, ]*)?(?:no(?:[, ]+not today)?|not right now|no[, ]+thanks|nothing right now)[.!?]*$/i.test(answer.message.trim()),
+        /^(?:uh+[, ]*)?(?:no(?:[, ]+not today)?|not right now|no[, ]+thanks|no[, ]+that['’]?s (?:okay|ok)|nothing right now)[.!?]*$/i.test(answer.message.trim()),
     );
   });
   const declinedOpeningPermission = messages.some((item, index) => {
@@ -1332,18 +1331,23 @@ export function getAuthoritativeTerminalCallResult(
     expected.email ?? "",
   )) return "identity_mismatch_voicemail";
 
+  const unresolvedPhoneMenu = isRecordingOrScreeningArtifact(conversation.transcript ?? []) &&
+    userMessages(conversation).some(message => /\b(?:press|dial)\s+(?:zero|one|two|three|four|five|six|seven|eight|nine|[0-9])\b/i.test(message));
+  if (unresolvedPhoneMenu && !usedVoicemailDetectionTool(conversation) && !hasDeliveredVoicemailMessage(conversation)) {
+    return "agent_not_available";
+  }
   const voicemailOrNoAnswer = getVoicemailOrNoAnswerCallResult(conversation, callAttemptNumber);
   if (voicemailOrNoAnswer?.startsWith("voicemail_")) return voicemailOrNoAnswer;
   // Terminal automated screening must outrank any gatekeeper-like wording in
   // the recording (for example "stay on the line" or "try to connect you").
   if (shouldTreatAsRecordingArtifact(conversation)) return "agent_not_available";
+  if (shouldTreatAsNotInterested(conversation)) return "answered_not_interested";
   if (shouldTreatAsGatekeeperAdminEarlyExit(conversation, expected.firstName) ||
     shouldTreatAsUnrelatedLiveBusiness(conversation, expected.firstName)) return "gatekeeper_admin_early_exit";
   if (shouldTreatAsAgentUnavailable(conversation, expected.firstName)) {
     return "agent_not_available";
   }
   if (getVoiceContactRequestResult(conversation) === "call_end_requested") return "call_end_requested";
-  if (shouldTreatAsNotInterested(conversation)) return "answered_not_interested";
   return voicemailOrNoAnswer;
 }
 
@@ -1461,63 +1465,12 @@ export function shouldTreatAsUnconnectedInitiatedConversation(conversation: Elev
 }
 
 export function shouldRetryUnconnectedConversation(
-  conversation: ElevenLabsConversation,
-  metadata: Pick<CallMetadata, "callConnectRetryCount">,
+  _conversation: ElevenLabsConversation,
+  _metadata: Pick<CallMetadata, "callConnectRetryCount">,
 ): boolean {
-  return (
-    shouldTreatAsUnconnectedInitiatedConversation(conversation) &&
-    (metadata.callConnectRetryCount ?? 0) < MAX_CALL_CONNECT_RETRIES
-  );
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-async function retryUnconnectedElevenLabsCall(params: {
-  originalConversationId: string;
-  metadata: CallMetadata;
-}): Promise<void> {
-  const nextMetadata: CallMetadata = {
-    ...params.metadata,
-    callConnectRetryCount: (params.metadata.callConnectRetryCount ?? 0) + 1,
-  };
-
-  logger.info("Retrying unconnected ElevenLabs call after delay", {
-    originalConversationId: params.originalConversationId,
-    rowNumber: params.metadata.rowNumber,
-    callAttemptNumber: params.metadata.callAttemptNumber,
-    callConnectRetryCount: nextMetadata.callConnectRetryCount,
-    retryDelayMs: CALL_CONNECT_RETRY_DELAY_MS,
-  });
-
-  await delay(CALL_CONNECT_RETRY_DELAY_MS);
-
-  const { placeElevenLabsOutboundCall } = await import("./elevenLabs");
-  const retryResponse = await placeElevenLabsOutboundCall({
-    to: nextMetadata.dialedPhone,
-    metadata: nextMetadata,
-    schedulePostCallFallback: false,
-  });
-
-  if (!retryResponse.conversation_id) {
-    throw new Error("ElevenLabs retry call accepted without a conversation_id");
-  }
-
-  logger.info("Unconnected ElevenLabs call retry accepted", {
-    originalConversationId: params.originalConversationId,
-    retryConversationId: retryResponse.conversation_id,
-    rowNumber: params.metadata.rowNumber,
-    callAttemptNumber: params.metadata.callAttemptNumber,
-    sipCallId: retryResponse.sip_call_id,
-  });
-
-  scheduleElevenLabsPostCallFallback({
-    conversationId: retryResponse.conversation_id,
-    metadata: nextMetadata,
-  });
+  // An initiated provider receipt is uncertain, not definitive non-delivery.
+  // Only the normal queue may place another call after a final outcome.
+  return false;
 }
 
 function userMessages(conversation: ElevenLabsConversation): string[] {
@@ -2186,6 +2139,18 @@ async function processPostCallOutcome(
 }
 
 async function processPostCallOutcomeForConversation(
+  conversationId: string, metadata: CallMetadata, conversation: ElevenLabsConversation, options: PostCallOptions = {},
+): Promise<boolean> {
+  const running = processingConversations.get(conversationId);
+  if (running) return running;
+  const operation = processPostCallOutcomeForConversationUnlocked(conversationId, metadata, conversation, options);
+  processingConversations.set(conversationId, operation);
+  const release = () => { if (processingConversations.get(conversationId) === operation) processingConversations.delete(conversationId); };
+  void operation.then(release, release);
+  return operation;
+}
+
+async function processPostCallOutcomeForConversationUnlocked(
   conversationId: string,
   metadata: CallMetadata,
   conversation: ElevenLabsConversation,
@@ -3133,51 +3098,6 @@ async function processPostCallOutcomeForConversation(
       return true;
     }
 
-    if (options.finalAttempt && shouldRetryUnconnectedConversation(conversation, metadata)) {
-      await retryUnconnectedElevenLabsCall({
-        originalConversationId: conversationId,
-        metadata,
-      });
-
-      processedConversationIds.add(conversationId);
-      return true;
-    }
-
-    if (options.finalAttempt && shouldTreatAsUnconnectedInitiatedConversation(conversation)) {
-      const isFirstAttempt = metadata.callAttemptNumber <= 1;
-      const callResult = isFirstAttempt ? "no_answer_first_attempt" : "no_response_second_attempt";
-      const outcome = buildVoiceResponseStatus(callResult);
-      const noConnectSummary =
-        "ElevenLabs accepted the outbound call request, but the call never connected and produced no audio or transcript.";
-
-      await persistSheetUpdate({
-        rowNumber: metadata.rowNumber,
-        callAttemptNumber: metadata.callAttemptNumber,
-        callResult,
-        responseStatus: outcome,
-        ...(isFirstAttempt ? {} : { leadStatusCode: "N" }),
-        voiceNotes: buildPerformanceNotes(outcome, noConnectSummary),
-      });
-
-      await sendTranscriptEmailIfEnabled({
-        conversationId,
-        metadata,
-        outcome,
-        summary: noConnectSummary,
-        transcript: fullTranscript,
-      });
-
-      processedConversationIds.add(conversationId);
-      logger.info("ElevenLabs post-call fallback recorded unconnected initiated conversation", {
-        conversationId,
-        rowNumber: metadata.rowNumber,
-        callAttemptNumber: metadata.callAttemptNumber,
-        callResult,
-        status: conversation.status,
-      });
-      return true;
-    }
-
     logger.info("ElevenLabs conversation not finished yet; will retry post-call outcome", {
       conversationId,
       rowNumber: metadata.rowNumber,
@@ -3469,7 +3389,7 @@ export function scheduleElevenLabsPostCallFallback(params: {
   metadata: CallMetadata;
 }): void {
   const run = (attempt: number) => {
-    void processPostCallOutcome(params.conversationId, params.metadata, { finalAttempt: attempt >= MAX_ATTEMPTS })
+    void processPostCallOutcome(params.conversationId, params.metadata)
       .then((done) => {
         if (done) {
           if (!shouldRequestQueueRefillAfterPostCall(params.conversationId)) {
@@ -3489,7 +3409,7 @@ export function scheduleElevenLabsPostCallFallback(params: {
           return;
         }
 
-        if (attempt < MAX_ATTEMPTS) {
+        if (shouldContinuePostCallFallback(attempt)) {
           setTimeout(() => run(attempt + 1), RETRY_DELAY_MS);
         }
       })
@@ -3502,7 +3422,7 @@ export function scheduleElevenLabsPostCallFallback(params: {
       ...getErrorDetails(error),
     });
 
-        if (attempt < MAX_ATTEMPTS) {
+        if (shouldContinuePostCallFallback(attempt)) {
           setTimeout(() => run(attempt + 1), RETRY_DELAY_MS);
         }
       });

@@ -165,6 +165,10 @@ export async function postSheetUpdate(
       directSheetUpdate, "final_unanswered_disposition_readback", true);
     return;
   }
+  if (needsRetrySchedulingReadback(payload) || payload.callResult === "answered_not_interested") {
+    await persistDirectSheetFallback(payload, directSheetUpdate, "guarded_retry_scheduling_readback", true);
+    return;
+  }
 
   if (!useAppsScript) {
     if (!Number.isInteger(payload.rowNumber) || Number(payload.rowNumber) < 2) {

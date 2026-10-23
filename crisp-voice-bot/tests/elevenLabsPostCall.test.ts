@@ -710,6 +710,89 @@ test("explicit assistance refusal and opening no-thanks outrank generic hangup",
   }
 });
 
+test("failed calls retain a contextual No that's okay decline without creating a retry", async () => {
+  const { getAuthoritativeTerminalCallResult, shouldTreatAsNotInterested, processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+  const conversationId = "conv_measurement_failed_help_decline";
+  const transcript = [
+    { role: "user", message: "Happy New Properties. How can I help?" },
+    { role: "agent", message: "Hi, Maya with Crisp Short Sales. We help with short-sale lender paperwork." },
+    { role: "user", message: "Okay. Do you need more information or..." },
+    { role: "agent", message: "I'm reaching out to see if help with lender paperwork or calls would be useful for this listing." },
+    { role: "user", message: "No, that's okay." },
+  ];
+  const conversation = { conversation_id: conversationId, status: "failed",
+    metadata: { termination_reason: "Invalid message received", call_duration_secs: 40 }, transcript,
+    conversation_initiation_client_data: { dynamic_variables: { rowNumber: 123, callAttemptNumber: 2,
+      agentName: "Synthetic Person", listingAddress: "123 Fictional Street", requestedPhone: "+12025550123", phone: "+12025550123", testMode: true } } };
+  assert.equal(shouldTreatAsNotInterested(conversation), true);
+  assert.equal(getAuthoritativeTerminalCallResult(conversation, 2, { firstName: "Synthetic" }), "answered_not_interested");
+  measurementConversations.set(conversationId, conversation);
+  const writes: Array<Record<string, unknown>> = [];
+  await processPostCallOutcomeFromConversationId(conversationId, { postSheetUpdate: async p => { writes.push(p); }, requestQueueRefill });
+  assert.equal(writes.length, 1); assert.equal(writes[0].callResult, "answered_not_interested");
+  assert.equal(writes[0].leadStatusCode, "R");
+  for (const answer of ["No, that's okay, but can you email me?", "No, can you call tomorrow?"]) {
+    const changed = { ...conversation, transcript: [...transcript.slice(0, -1), { role: "user", message: answer }] };
+    assert.equal(shouldTreatAsNotInterested(changed), false);
+  }
+  const listingAnswer = { ...conversation, transcript: [{ role: "agent", message: "Is that your listing?" }, { role: "user", message: "No, that's okay." }] };
+  assert.equal(shouldTreatAsNotInterested(listingAnswer), false);
+  measurementConversations.delete(conversationId);
+});
+
+test("an unresolved extension menu is unavailable, not voicemail merely because it says leave a message", async () => {
+  const { getAuthoritativeTerminalCallResult } = await import("../src/lib/elevenLabsPostCall");
+  const { buildVoicePerformanceLog } = await import("../src/lib/elevenLabsPerformanceLog");
+  const conversation = { status: "done", metadata: { call_duration_secs: 600 }, transcript: [
+    { role: "user", message: "Thank you for calling Synthetic Realty. If you know your party's extension, enter it now. Leave a message and an agent will return your call. For Synthetic Person, dial one. For another agent, dial two." },
+    { role: "agent", message: "..." },
+    { role: "user", message: "Thank you for calling Synthetic Realty. If you know your party's extension, please enter it now. Normal business hours are Monday through" },
+  ] };
+  assert.equal(getAuthoritativeTerminalCallResult(conversation, 1), "agent_not_available");
+  const metrics = JSON.parse(buildVoicePerformanceLog({ conversationId: "conv_synthetic_menu", conversation,
+    metadata: { rowNumber: 123, callAttemptNumber: 1, fullName: "Synthetic Person", listingAddress: "123 Fictional Street",
+      requestedPhone: "+12025550123", dialedPhone: "+12025550123", testMode: true },
+    outcome: "Agent was not available", summary: "Automated office menu", transcript: "Synthetic recorded menu",
+    terminalCallResult: "agent_not_available",
+  }).split("--- CODEX_VOICE_CALL_METRICS_V1 ---\n")[1]);
+  assert.equal(metrics.contactEvidence.reviewBucket, "ivr");
+  assert.equal(metrics.contactEvidence.humanAnswered, false);
+  assert.deepEqual(metrics.contactEvidence.humanTurnIndexes, []);
+  assert.equal(metrics.flags.voicemailDetected, false);
+  const answered = { ...conversation, transcript: [...conversation.transcript, { role: "user", message: "This is Synthetic Person. Yes, that is my listing." }] };
+  assert.notEqual(getAuthoritativeTerminalCallResult(answered, 1), "agent_not_available");
+});
+
+test("nonterminal accepted conversations remain pending without a sheet outcome or another call", async () => {
+  const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+  const conversationId = "conv_measurement_held_initiated";
+  measurementConversations.set(conversationId, { conversation_id: conversationId, status: "initiated", transcript: [],
+    metadata: { call_duration_secs: 0 }, conversation_initiation_client_data: { dynamic_variables: {
+      rowNumber: 123, callAttemptNumber: 1, agentName: "Synthetic", listingAddress: "123 Fictional Street",
+      requestedPhone: "+12025550123", phone: "+12025550123", testMode: true,
+    } } });
+  assert.equal(await processPostCallOutcomeFromConversationId(conversationId, {
+    postSheetUpdate: async () => { assert.fail("pending receipt cannot authorize a write or retry"); },
+    requestQueueRefill: async () => { assert.fail("pending call cannot request another start"); },
+  }), false);
+  measurementConversations.delete(conversationId);
+});
+
+test("concurrent webhook and recovery processing persist a terminal conversation only once", async () => {
+  const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+  const conversationId = "conv_measurement_single_flight_decline";
+  measurementConversations.set(conversationId, { conversation_id: conversationId, status: "done", transcript: [
+    { role: "agent", message: "Would help with lender paperwork or calls be useful?" }, { role: "user", message: "No, thanks." },
+  ], conversation_initiation_client_data: { dynamic_variables: { rowNumber: 123, callAttemptNumber: 1,
+    agentName: "Synthetic", listingAddress: "123 Fictional Street", requestedPhone: "+12025550123", phone: "+12025550123", testMode: true } } });
+  let writes = 0;
+  const options = { postSheetUpdate: async () => { writes++; await new Promise<void>(resolve => setImmediate(resolve)); }, requestQueueRefill };
+  assert.deepEqual(await Promise.all([processPostCallOutcomeFromConversationId(conversationId, options),
+    processPostCallOutcomeFromConversationId(conversationId, options)]), [true, true]);
+  assert.equal(writes, 1);
+  measurementConversations.delete(conversationId);
+});
+
 test("provider agent-role help question plus a bare no is answered not interested", async () => {
   const { getAuthoritativeTerminalCallResult, shouldTreatAsNotInterested } = await import(
     "../src/lib/elevenLabsPostCall"
@@ -1389,7 +1472,7 @@ test("post-call fallback treats stale initiated conversations with no audio as n
   };
 
   assert.equal(shouldTreatAsUnconnectedInitiatedConversation(unconnectedConversation), true);
-  assert.equal(shouldRetryUnconnectedConversation(unconnectedConversation, { callConnectRetryCount: 0 }), true);
+  assert.equal(shouldRetryUnconnectedConversation(unconnectedConversation, { callConnectRetryCount: 0 }), false);
   assert.equal(shouldRetryUnconnectedConversation(unconnectedConversation, { callConnectRetryCount: 1 }), false);
 
   assert.equal(
@@ -1554,13 +1637,13 @@ for (const scenario of [
       assert.equal(await processPostCallOutcomeFromConversationId(conversationId, {
         requestQueueRefill,
         postSheetUpdate: (payload) => postSheetUpdate(payload, {
-          directSheetUpdate: async () => [
+          directSheetUpdate: async (_row, payload) => { measurementWrites.push(payload as unknown as Record<string, unknown>); return [
             "J:response_status",
             "K:call_attempt_status",
             "AD:call_eligible",
             "AE:call_time_bucket",
             "AF:call_scheduled_for",
-          ],
+          ]; },
         }),
       }), true);
       const update = measurementWrites.slice(writesBefore).find((write) => typeof write.voiceNotes === "string")!;

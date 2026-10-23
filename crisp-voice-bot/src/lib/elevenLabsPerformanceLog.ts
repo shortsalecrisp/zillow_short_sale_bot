@@ -117,6 +117,8 @@ type AutomatedContact = "voicemail" | "screening" | "ivr";
 function automatedContactType(message: string): AutomatedContact | null {
   const text = normalizeText(message);
   if (/\b(?:call assist|google (?:call )?screening|automated (?:call )?screener)\b/.test(text)) return "screening";
+  if (/\b(?:press|dial) (?:one|two|three|four|five|six|seven|eight|nine|zero|[0-9])\b/.test(text) ||
+      /\bif you know (?:your )?party'?s extension\b/.test(text)) return "ivr";
   if (/\b(?:your call has been forwarded|after (?:the )?(?:tone|beep)|at the (?:tone|beep)|leave (?:me |us )?(?:a |your )?(?:(?:brief|detailed|short|voice) )?(?:message|name)|record (?:a |your )?message|you(?:'ve| have) reached|you (?:have )?reached (?:the )?(?:voice ?mail|mailbox)|welcome to (?:the )?voice ?mail|(?:sorry,? )?i missed your call|your voicemail is being transcribed)\b/.test(text) ||
       /\b(?:message with your name|message or send me a text|call is very important to me)\b/.test(text) ||
       /^(?:hi[, ]+)?(?:this is|you(?:'ve| have) reached) [\p{L}'-]+\b.{0,100}\b(?:away from (?:my )?phone|unable to (?:answer|take) (?:your )?call|can't (?:answer|come to) (?:the )?phone|cannot (?:answer|come to) (?:the )?phone)\b/u.test(text) ||
@@ -377,7 +379,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const classifiedContact = classifyContact(transcript, input.metadata.fullName);
   const terminalCategory = input.terminalCallResult?.startsWith("voicemail_") ? "voicemail" :
     input.terminalCallResult === "gatekeeper_admin_early_exit" ? "human_gatekeeper" :
-    input.terminalCallResult === "agent_not_available" ? "screening" : null;
+    input.terminalCallResult === "agent_not_available" ? classifiedContact.category === "ivr" ? "ivr" : "screening" : null;
   const contact = terminalCategory ? {
     ...classifiedContact,
     humanAnswered: terminalCategory === "human_gatekeeper",

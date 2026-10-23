@@ -4,6 +4,7 @@ import { getGoogleSheetsClient } from "./googleSheets";
 import { logger } from "./logger";
 import { VOICE_OVERDUE_FALLBACK_MARKER } from "./voiceOverdueFallback";
 import { finalUnansweredPreservationReason, isFinalUnansweredVoiceResult } from "./voiceFinalUnanswered";
+import { voiceOutcomeRecoveryBlockReason, type VoiceOutcomeRecoveryProof } from "./voiceOutcomeRecovery";
 import {
   appendVoiceNotesValue,
   cellRange,
@@ -31,6 +32,7 @@ import {
 } from "./voiceSheet";
 
 export type VoiceLeadRowUpdates = {
+  voiceOutcomeRecoveryProof?: VoiceOutcomeRecoveryProof;
   responseStatus?: string;
   leadStatusCode?: string;
   voiceCall1Sent?: string;
@@ -141,9 +143,7 @@ function addSchedulingWrites(
     }
     const nextAttemptAt = getNextVoiceBotFollowupAttemptWindowStart(firstAttemptSentAt, timeZone, callResult === "call_start_failed" ? 1 : 0);
 
-    // A retryable first attempt must remain queue-eligible. Clear any stale
-    // terminal status left by an earlier or partial classifier write so K
-    // cannot suppress the already-scheduled second attempt.
+    // Protected dispositions are checked above; only the blank retry lane is released.
     clearWrite(writes, VOICE_BOT_COL_LEAD_STATUS_CODE, "leadStatusCode_retry_cleared");
     addWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "call_scheduled_for", nextAttemptAt.toISOString());
     addWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible", "yes");
@@ -164,6 +164,10 @@ export function buildVoiceLeadRowWrites(
   now: Date,
 ): SheetCellWrite[] {
   const writes: SheetCellWrite[] = [];
+  if (updates.voiceOutcomeRecoveryProof) {
+    const reason = voiceOutcomeRecoveryBlockReason(rowValues, updates.voiceOutcomeRecoveryProof);
+    if (reason) throw new Error(`Voice outcome recovery held: ${reason}`);
+  }
   const callAttemptNumber = normalizeCallAttemptNumber(updates.callAttemptNumber);
   const callSentColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_SENT : VOICE_BOT_COL_CALL_1_SENT;
   const callResultColumn = callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
@@ -196,6 +200,13 @@ export function buildVoiceLeadRowWrites(
     appendVoiceNotesWrite(writes, rowValues,
       `Ignored stale outcome ${updates.callResult ?? "update"}; existing terminal contact outcome retained.${updates.voiceNotes ? ` ${updates.voiceNotes}` : ""}`);
     return writes;
+  }
+  if (isRetryableVoiceBotResult(updates.callResult) || updates.callResult === "answered_not_interested") {
+    const reason = finalUnansweredPreservationReason(rowValues);
+    if (reason && reason !== "missing_first_attempt_history") {
+      appendVoiceNotesWrite(writes, rowValues, `Ignored delayed retry outcome; existing contact state retained: ${reason}.`);
+      return writes;
+    }
   }
 
   if (providerQuotaExceeded || providerD17Failure || providerLlmFailure) {
@@ -287,21 +298,26 @@ async function writeVoiceLeadRow(
   });
 
   const finalUnanswered = isFinalUnansweredVoiceResult(updates.callResult, updates.callAttemptNumber);
-  if (finalUnanswered || (normalizeCallAttemptNumber(updates.callAttemptNumber) === 1 && isRetryableVoiceBotResult(updates.callResult))) {
+  if (updates.voiceOutcomeRecoveryProof || finalUnanswered || updates.callResult === "answered_not_interested" ||
+      (normalizeCallAttemptNumber(updates.callAttemptNumber) === 1 && isRetryableVoiceBotResult(updates.callResult))) {
     const verifiedRow = await readVoiceLeadRow(sheets, rowNumber);
     const proofColumns = new Set([
       VOICE_BOT_COL_CALL_1_RESULT,
-      ...(finalUnanswered ? [VOICE_BOT_COL_CALL_2_RESULT] : []),
+      ...(finalUnanswered || normalizeCallAttemptNumber(updates.callAttemptNumber) === 2 ? [VOICE_BOT_COL_CALL_2_RESULT] : []),
       VOICE_BOT_COL_LEAD_STATUS_CODE,
       VOICE_BOT_COL_CALL_ELIGIBLE,
       VOICE_BOT_COL_CALL_TIME_BUCKET,
       VOICE_BOT_COL_CALL_SCHEDULED_FOR,
     ]);
-    const expectedProof = writes.filter((write) => proofColumns.has(write.columnNumber));
+    const expectedProof = writes.filter((write) => updates.voiceOutcomeRecoveryProof || proofColumns.has(write.columnNumber));
+    if (updates.voiceOutcomeRecoveryProof &&
+        parseVoiceBotDate(verifiedRow[updates.voiceOutcomeRecoveryProof.callAttemptNumber === 1 ? 32 : 39])?.toISOString() !== updates.voiceOutcomeRecoveryProof.sentAt) {
+      throw new Error(`Recovery attempt timestamp changed for row ${rowNumber}`);
+    }
     const mismatches = expectedProof.filter((write) =>
       String(verifiedRow[write.columnNumber - 1] ?? "").trim() !== write.value.trim());
     if (mismatches.length > 0) {
-      throw new Error(`${finalUnanswered ? "Final unanswered disposition" : "Retry scheduling"} readback mismatch for row ${rowNumber}: ${fieldsWritten(mismatches).join(", ")}`);
+      throw new Error(`${updates.voiceOutcomeRecoveryProof ? "Recovered outcome" : finalUnanswered ? "Final unanswered disposition" : "Voice disposition"} readback mismatch for row ${rowNumber}: ${fieldsWritten(mismatches).join(", ")}`);
     }
     logger.info(finalUnanswered ? "Google Sheets final unanswered disposition verified by readback" : "Google Sheets retry scheduling verified by readback", {
       spreadsheetId: config.googleSheets.sheetId,

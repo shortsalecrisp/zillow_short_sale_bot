@@ -15,6 +15,9 @@ import {
 } from "./elevenLabs";
 import { getGoogleSheetsClient } from "./googleSheets";
 import { logger } from "./logger";
+import { processPostCallOutcomeFromConversationId } from "./elevenLabsPostCall";
+import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
+import { getPendingVoiceOutcomeRecoveries, isMatchingTerminalVoiceReceipt, voiceOutcomeRecoveryBlockReason } from "./voiceOutcomeRecovery";
 import { getOutboundCallPause } from "./outboundCallPause";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
 import { ensureProviderStartFailureAlert } from "./providerStartFailureAlert";
@@ -70,7 +73,7 @@ import {
   VOICE_BOT_MAX_ACTIVE_CALLS,
   VOICE_BOT_MAX_CALLS_PER_QUEUE_RUN,
 } from "./voiceSheet";
-import type { StartCallRequest } from "../types";
+import type { CallMetadata, StartCallRequest } from "../types";
 
 export type VoiceQueueCandidate = {
   rowNumber: number;
@@ -478,13 +481,10 @@ export function getVoiceBotCallCandidateFromRowValues(
   const firstAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_1_SENT - 1]);
   const secondAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_2_SENT - 1]);
   const firstAttemptResult = normalizeString(rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1]);
-  const firstAttemptStartReceiptMissing = isStaleVoiceBotStartWithoutReceipt(
-    rowValues[VOICE_BOT_COL_CALL_1_SENT - 1],
-    rowValues[VOICE_BOT_COL_CALL_1_RESULT - 1],
-    now,
-  );
+  // An old timestamp without a final receipt is not proof the call failed.
+  if (firstAttemptSentAt && ["", "call_start_reconciled", "call_start_receipt_missing"].includes(firstAttemptResult)) return undefined;
   const scheduledFor = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_SCHEDULED_FOR - 1]);
-  const providerStartRecovery = ["call_start_failed", "call_start_receipt_missing"].includes(firstAttemptResult) || firstAttemptStartReceiptMissing;
+  const providerStartRecovery = firstAttemptResult === "call_start_failed";
   const hasHandoff = [VOICE_BOT_COL_CALLBACK_REQUESTED, VOICE_BOT_COL_CALLBACK_TIME,
     VOICE_BOT_COL_LIVE_TRANSFER_REQUESTED, VOICE_BOT_COL_LIVE_TRANSFER_COMPLETED]
     .some((column) => {
@@ -556,7 +556,7 @@ export function getVoiceBotCallCandidateFromRowValues(
     );
   }
 
-  if (secondAttemptSentAt || (!isRetryableVoiceBotResult(firstAttemptResult) && !firstAttemptStartReceiptMissing)) {
+  if (secondAttemptSentAt || !isRetryableVoiceBotResult(firstAttemptResult)) {
     return undefined;
   }
 
@@ -1115,13 +1115,65 @@ async function postStartCall(candidate: VoiceQueueCandidate): Promise<unknown> {
   return response.data;
 }
 
+const finalReceiptRecoveryChecks = new Map<string, number>();
+
+async function reconcilePendingVoiceFinalReceipts(
+  sheets: sheets_v4.Sheets, rows: Array<{ rowNumber: number; values: unknown[] }>, now: Date,
+): Promise<boolean> {
+  const candidates = getPendingVoiceOutcomeRecoveries(rows, now, config.voiceQueue.finalReceiptMonitorStartedAt)
+    .filter(c => now.getTime() - (finalReceiptRecoveryChecks.get(`${c.rowNumber}:${c.proof.sentAt}`) ?? 0) >= 120_000)
+    .sort((a, b) => (finalReceiptRecoveryChecks.get(`${a.rowNumber}:${a.proof.sentAt}`) ?? 0) -
+      (finalReceiptRecoveryChecks.get(`${b.rowNumber}:${b.proof.sentAt}`) ?? 0)).slice(0, 4);
+  let changed = false;
+  for (const { rowNumber, proof } of candidates) {
+    finalReceiptRecoveryChecks.set(`${rowNumber}:${proof.sentAt}`, now.getTime());
+    const values = rows.find(r => r.rowNumber === rowNumber)!.values;
+    const metadata: CallMetadata = {
+      rowNumber, callAttemptNumber: proof.callAttemptNumber, firstName: normalizeString(values[0]),
+      lastName: normalizeString(values[1]), fullName: [values[0], values[1]].filter(Boolean).join(" "),
+      listingAddress: buildVoiceBotListingAddress(values), requestedPhone: proof.phone, dialedPhone: proof.phone,
+      testMode: false, sheetName: config.googleSheets.tabName,
+    };
+    try {
+      const receipt = await reconcilePendingElevenLabsCallStart({ metadata, requestStartedAtUnixSecs: Date.parse(proof.sentAt) / 1000 });
+      if (!receipt || !isMatchingTerminalVoiceReceipt(receipt.conversation, rowNumber, proof, config.elevenLabs.agentId ?? "")) continue;
+      const done = await processPostCallOutcomeFromConversationId(receipt.conversationId, {
+        requestQueueRefill: async () => {},
+        postSheetUpdate: async payload => {
+          const freshRows = await getVoiceBotRows(sheets);
+          const current = freshRows.find(r => r.rowNumber === rowNumber)?.values ?? [];
+          const blocked = voiceOutcomeRecoveryBlockReason(current, proof);
+          if (blocked) throw new Error(`Fresh final-receipt recovery held: ${blocked}`);
+          if (freshRows.some(r => r.rowNumber !== rowNumber && normalizePhoneToE164(r.values[2]) === proof.phone)) {
+            throw new Error("Final-receipt recovery requires same-phone duplicate review");
+          }
+          const quiet = await getInboundQuietGate(sheets, proof.phone, new Date());
+          if (quiet.blocked) throw new Error("Final-receipt recovery held by inbound quiet gate");
+          await updateVoiceLeadRow(rowNumber, { ...payload, voiceOutcomeRecoveryProof: proof }, async () => sheets);
+          changed = true;
+        },
+      });
+      changed ||= done;
+    } catch (error) {
+      logger.warn("Pending final receipt remains held; no replacement call authorized", {
+        rowNumber, callAttemptNumber: proof.callAttemptNumber, message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (finalReceiptRecoveryChecks.size > 1000) {
+    for (const [key, checked] of finalReceiptRecoveryChecks) if (now.getTime() - checked > 3_600_000) finalReceiptRecoveryChecks.delete(key);
+  }
+  return changed;
+}
+
 async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date; fallbackOnly?: boolean } = {}): Promise<VoiceQueueResult> {
   const now = options.now ?? new Date();
   const outboundPause = getOutboundCallPause(now);
   const providerCircuit = getProviderCircuitStatus();
 
   const sheets = await getGoogleSheetsClient();
-  const rows = await getVoiceBotRows(sheets);
+  let rows = await getVoiceBotRows(sheets);
+  if (!options.dryRun && await reconcilePendingVoiceFinalReceipts(sheets, rows, now)) rows = await getVoiceBotRows(sheets);
   if (!options.dryRun) {
     try {
       await reconcileOverdueVoiceMailshakeFallback(sheets, rows, now);

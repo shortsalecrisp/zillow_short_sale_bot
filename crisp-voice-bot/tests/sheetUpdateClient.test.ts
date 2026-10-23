@@ -218,6 +218,16 @@ test("accepted human-answer no-bot-response always gets direct scheduling readba
   assert.deepEqual(directCalls, [{ rowNumber: 6055, callResult: "human_answered_no_bot_response" }]);
 });
 
+test("retry scheduling uses fresh direct guards before any relay can overwrite caller preferences", async () => {
+  const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
+  let writes = 0;
+  await postSheetUpdate({ rowNumber: 123, callAttemptNumber: 1, callResult: "agent_not_available" }, {
+    appsScriptPost: async () => { assert.fail("retry must not reach the unguarded relay first"); },
+    directSheetUpdate: async () => { writes++; return ["AF:call_scheduled_for"]; },
+  });
+  assert.equal(writes, 1);
+});
+
 test("accepted retryable outcome fails closed when scheduling readback cannot be proved", async () => {
   const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
   await assert.rejects(postSheetUpdate({

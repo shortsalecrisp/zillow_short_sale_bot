@@ -273,7 +273,7 @@ test("scheduled no-start recovery ignores current schedules, handoffs, and histo
   assert.equal(getScheduledVoiceNoStartRecoveryPlan(6188, values, now), undefined);
 });
 
-test("a stale first-attempt timestamp with no result receives exactly one bounded second-attempt candidate", async () => {
+test("a stale first-attempt timestamp without a receipt stays held, never authorizing a duplicate", async () => {
   const { getVoiceBotCallCandidateFromRowValues, isStaleVoiceBotStartWithoutReceipt } = await import("../src/lib/voiceQueue");
   const values = scheduledRow("", {
     call1SentAt: "2026-10-07T18:15:00.000Z",
@@ -281,7 +281,11 @@ test("a stale first-attempt timestamp with no result receives exactly one bounde
   });
   const now = new Date("2026-10-08T13:30:00.000Z");
   assert.equal(isStaleVoiceBotStartWithoutReceipt(values[32], values[33], now), true);
-  assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now)?.callAttemptNumber, 2);
+  assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now), undefined);
+  for (const result of ["call_start_reconciled", "call_start_receipt_missing"]) {
+    values[33] = result;
+    assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now), undefined);
+  }
   values[39] = "2026-10-08T13:26:00.000Z";
   assert.equal(getVoiceBotCallCandidateFromRowValues(5916, values, now), undefined);
 });

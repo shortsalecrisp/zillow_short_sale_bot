@@ -148,7 +148,7 @@ test("verified pre-connection first-attempt failures schedule exactly one normal
   assert.equal(secondByColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "");
 });
 
-test("retryable first attempts clear stale terminal lead status before scheduling call two", async () => {
+test("a delayed retryable outcome cannot reopen an existing terminal lead status", async () => {
   const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
   const row = Array.from({ length: 42 }, () => "");
   row[6] = "NJ";
@@ -166,10 +166,34 @@ test("retryable first attempts clear stale terminal lead status before schedulin
   );
   const byColumn = new Map(writes.map((write) => [write.columnNumber, write.value]));
 
-  assert.equal(byColumn.get(VOICE_BOT_COL_LEAD_STATUS_CODE), "");
-  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_ELIGIBLE), "yes");
-  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_TIME_BUCKET), "voice_call_2_due");
-  assert.equal(byColumn.get(VOICE_BOT_COL_CALL_SCHEDULED_FOR), "2026-09-09T19:00:00.000Z");
+  for (const column of [VOICE_BOT_COL_LEAD_STATUS_CODE, VOICE_BOT_COL_CALL_ELIGIBLE,
+    VOICE_BOT_COL_CALL_TIME_BUCKET, VOICE_BOT_COL_CALL_SCHEDULED_FOR]) assert.equal(byColumn.has(column), false);
+});
+
+test("recovered outcome writes fail closed if identity, attempt, or contact preferences changed", async () => {
+  const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
+  const row: unknown[] = Array(42).fill(""); row[2] = "202-555-0123"; row[6] = "NJ";
+  row[32] = "2026-10-23T13:15:22.242Z";
+  const updates = { callAttemptNumber: 1, callResult: "agent_not_available", voiceOutcomeRecoveryProof: {
+    phone: "+12025550123", callAttemptNumber: 1 as const, sentAt: "2026-10-23T13:15:22.242Z", previousResult: "",
+    fullName: "", listingAddress: "NJ",
+  } };
+  assert.equal(buildVoiceLeadRowWrites(row, updates, new Date("2026-10-23T14:00:00Z")).find(w => w.columnNumber === 32)?.value, "2026-10-23T19:00:00.000Z");
+  for (const [index, value] of [[2, "202-555-0199"], [10, "N"], [37, "yes"], [19, "x"], [33, "information_requested"], [39, "2026-10-23T13:30:00Z"]] as Array<[number, string]>) {
+    const changed = [...row]; changed[index] = value;
+    assert.throws(() => buildVoiceLeadRowWrites(changed, updates, new Date()), /recovery held/);
+  }
+});
+
+test("delayed generic retry cannot erase callback, takeover or existing Mailshake decisions", async () => {
+  const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
+  for (const [index, value] of [[10, "N"], [10, "G"], [37, "yes"], [19, "x"], [16, "handoff"]] as Array<[number, string]>) {
+    const row: unknown[] = Array(42).fill(""); row[32] = "2026-10-23T13:15:00Z"; row[index] = value;
+    for (const result of ["agent_not_available", "answered_not_interested"]) {
+      const writes = buildVoiceLeadRowWrites(row, { callAttemptNumber: 1, callResult: result, callbackRequested: "", callbackTime: "" }, new Date());
+      assert.equal(writes.some(w => w.columnNumber !== 42), false);
+    }
+  }
 });
 
 test("current-call ending and contact review clear cadence without changing lead K or erasing existing history", async () => {
