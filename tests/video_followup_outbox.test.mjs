@@ -10,6 +10,24 @@ const root = path.join(import.meta.dirname, "..");
 const outboxSource = fs.readFileSync(path.join(root, "apps_script/sms_outbox.js"), "utf8");
 const postSource = fs.readFileSync(path.join(root, "apps_script/zz_unified_post.js"), "utf8");
 
+test("preserved live-v329 collision guard ignores only untouched superseded other-phone initials", () => {
+  const source = outboxSource.match(/^function hasUniqueVideoFollowupInitialReceiptIdsV19_\([\s\S]*?^}/m)[0];
+  const scope = { normalizePhone_: (phone) => String(phone || "").replace(/\D/g, "").slice(-10) };
+  vm.runInNewContext(source, scope);
+  const row = Array(19).fill("");
+  Object.assign(row, { 1: "sent", 2: "request", 3: "message", 4: "2125550100" });
+  const superseded = [...row];
+  Object.assign(superseded, { 1: "superseded", 2: "old-request", 4: "2125550199", 9: 0 });
+  assert.equal(scope.hasUniqueVideoFollowupInitialReceiptIdsV19_(row, [superseded, row]), true);
+  for (const changes of [{ 1: "queued" }, { 1: "sent" }, { 1: "uncertain" }, { 4: row[4] },
+    { 9: 1 }, ...[10, 11, 12, 13, 14].map((field) => ({ [field]: "attempt evidence" }))]) {
+    const collision = Object.assign([...superseded], changes);
+    assert.equal(scope.hasUniqueVideoFollowupInitialReceiptIdsV19_(row, [collision, row]), false);
+  }
+  assert.equal(scope.hasUniqueVideoFollowupInitialReceiptIdsV19_(row, [row, [...row]]), false);
+  assert.equal(scope.hasUniqueVideoFollowupInitialReceiptIdsV19_(row, [[...row]]), false);
+});
+
 function schedulerSerialized(body) {
   // Exercise the real Python request boundary, not a JS copy of its allowlist.
   const result = spawnSync(process.env.PYTHON || "python3", [
