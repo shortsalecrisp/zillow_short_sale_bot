@@ -6,7 +6,7 @@ Current revision is r7, verified at 2026-10-23T12:27:33.399Z (8:27:33 AM New Yor
 
 Yoni approved the October 22 Lead Intelligence fixes. The shared prompt now treats an explicit statement that another negotiator, attorney, specialist or provider handles the file as terminal existing coverage rather than self-handling, closing without another value pitch, Yoni offer, callback or transfer. Backend contact evidence now accepts a contextual `It is`, `That is`, `It's mine` or `That's mine` only when it immediately answers the exact listing question; the same words after timing, needs or property-status questions do not authenticate the target.
 
-The guarded prompt-only publisher reread both exact r6 versions, prompt hashes and 50/50 allocation, then changed only `conversation_config.agent.prompt.prompt`. It preserved and reread workflow, phone bindings, platform settings and every other provider setting. The provider had added one identical neutral `built_in_tools.identity_challenge: null` field to both immutable r6 responses; the r7 baseline preserves that field instead of normalizing or overwriting it. No real call or metered session was started.
+The guarded prompt-only publisher reread both exact r6 versions, prompt hashes and 50/50 allocation, then changed only `conversation_config.agent.prompt.prompt`. It preserved and reread workflow, phone bindings, platform settings and every other provider setting. The provider had added one identical neutral `built_in_tools.identity_challenge: null` field to both immutable r6 responses; the r7 canonical baseline preserves that null field. No real call or metered session was started.
 
 - Cohort: `maya_uniform_lead_conversion_20261023_r7`.
 - Start: `2026-10-23T12:27:33.399Z`, after final two-arm provider readback.
@@ -17,6 +17,12 @@ The guarded prompt-only publisher reread both exact r6 versions, prompt hashes a
 - Workflow hash: `31e9628299acf53fda9153f686a003bb1a25cf1a7c00a4bd9e89bcf9d2af0a35`.
 
 Require the exact r7 branch/version pair, a matching final receipt, a genuine non-test positive duration, and a provider start at or after the r7 boundary. The 15 verified true-live conversations per arm minimum and preferred 100-genuine-call review restart at r7; all earlier cohorts remain historical.
+
+### Approved Identity-Tool Response Reconciliation, October 23
+
+Yoni approved a validator-only repair for `conversation_config.agent.prompt.built_in_tools.identity_challenge: null`. Investigation of the then-pinned r6 responses reproduced the original `d2fee79aa371e5fec4e7b5426f5932139f39d2ca48b21a6fbd7d8ac3f0ed6770` digest by removing ONLY that new null property from the otherwise identical bodies (before removal: `b11ec29044f9add6b0cb38bb87386f764f75f27452cc795bbbb97c2f27c25f4b`). During validation, the separately approved r7 prompt release above established its own exact two-arm boundary and null-shaped canonical baseline. This repair preserves that approved r7 release rather than reverting its prompt or replacing its hash.
+
+For the current r7 baseline, the canonical validator reconstructs `identity_challenge: null` ONLY when `built_in_tools` is a non-array object without that own property. An explicit null remains null. Configured objects, arrays, booleans, numbers, strings, malformed or missing containers and every other new tool/default remain visible and fail the pinned digest. Both absent and explicit-null responses must reproduce the original r7 `18d8a334dbb09f6f6c196d84dac6331c0a4a45882aea4f89c591d820197f90a8` hash. Exact r7 versions, workflow, protected settings and 50/50 allocation remain mandatory. The future approved publisher imports this same canonical recipe; it is not invoked by this repair or ordinary reviews. No provider mutation or further cohort reset is authorized by this validator change. Tests cover null/omitted equality, input immutability, configured/invalid/other-tool rejection and exactly three GET-only verification requests. Preserve all earlier narrow normalization rules below.
 
 ## Approved Revision 6
 

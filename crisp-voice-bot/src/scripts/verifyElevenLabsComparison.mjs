@@ -26,6 +26,12 @@ export function comparisonBody(agent) {
   const { agent: config, tts } = body.conversation_config;
   delete tts.model_id;
   delete config.prompt.tools;
+  const builtInTools = config.prompt.built_in_tools;
+  // The approved r7 baseline includes the provider's disabled identity-tool default.
+  if (builtInTools && typeof builtInTools === 'object' && !Array.isArray(builtInTools)
+      && !Object.hasOwn(builtInTools, 'identity_challenge')) {
+    builtInTools.identity_challenge = null;
+  }
   const sub = config.subagent_config;
   if (sub && typeof sub === 'object' && !Array.isArray(sub) && Object.keys(sub).length === 2
       && Object.hasOwn(sub, 'agents') && Array.isArray(sub.agents) && sub.agents.length === 0

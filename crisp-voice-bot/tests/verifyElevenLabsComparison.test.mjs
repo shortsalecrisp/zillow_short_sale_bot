@@ -6,7 +6,7 @@ function fixture(index = 0) {
   const arm = R7_COMPARISON.arms[index];
   return { agent_id: R7_COMPARISON.agentId, branch_id: arm.branchId, version_id: arm.versionId,
     conversation_config: { tts: { model_id: arm.ttsModel, pvc_strength: 0, voice_id: 'synthetic_eryn', speed: 1 },
-      agent: { subagents: [], prompt: { prompt: 'Synthetic policy', tool_ids: ['synthetic_tool'], tools: [{ expanded: true }], llm: 'gpt-4.1' } },
+      agent: { subagents: [], prompt: { prompt: 'Synthetic policy', tool_ids: ['synthetic_tool'], tools: [{ expanded: true }], built_in_tools: { skip_turn: null, identity_challenge: null }, llm: 'gpt-4.1' } },
       turn: { turn_model: 'turn_v3' } },
     workflow: { edges: [{ order: 1 }, { order: 2 }] }, platform_settings: { test: false }, phone_numbers: [] };
 }
@@ -27,6 +27,34 @@ function disabledNoiseShape(agent) {
   result.conversation_config.turn.noisy_environment_message = DISABLED_NOISY_ENVIRONMENT_MESSAGE;
   return result;
 }
+
+test('omitted identity_challenge reconstructs only the approved r7 null default', () => {
+  const old = fixture(), fresh = disabledNoiseShape(fixture(1));
+  delete old.conversation_config.agent.prompt.built_in_tools.identity_challenge;
+  const before = JSON.stringify([old, fresh]);
+  assert.deepEqual(comparisonBody(fresh), comparisonBody(old));
+  assert.equal(JSON.stringify([old, fresh]), before);
+  assert.equal(Object.hasOwn(comparisonBody(old).conversation_config.agent.prompt.built_in_tools, 'identity_challenge'), true);
+  assert.equal(comparisonBody(old).conversation_config.agent.prompt.built_in_tools.identity_challenge, null);
+  assert.equal(validateComparison([old, fresh], allocation(), expected).ok, true);
+});
+
+test('configured identity tools, other new tools and malformed containers remain drift', () => {
+  for (const value of [false, 0, '', [], {}, { type: 'system', name: 'identity_challenge' }]) {
+    const fresh = fixture();
+    fresh.conversation_config.agent.prompt.built_in_tools.identity_challenge = value;
+    assert.throws(() => validateComparison([fresh, fixture(1)], allocation(), expected), /configuration digest/);
+  }
+  for (const change of [
+    a => { a.conversation_config.agent.prompt.built_in_tools.other_new_tool = null; },
+    a => { a.conversation_config.agent.prompt.built_in_tools = null; },
+    a => { a.conversation_config.agent.prompt.built_in_tools = []; },
+    a => { delete a.conversation_config.agent.prompt.built_in_tools; },
+  ]) {
+    const fresh = fixture(); change(fresh);
+    assert.throws(() => validateComparison([fresh, fixture(1)], allocation(), expected), /configuration digest/);
+  }
+});
 
 test('the exact disabled noise pair reproduces the approved digest without mutating the response', () => {
   const fresh = disabledNoiseShape(fixture()), before = JSON.stringify(fresh);
