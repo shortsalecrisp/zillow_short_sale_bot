@@ -112,14 +112,14 @@ test('self-handler classification requires a first-person subject', () => {
   assert.equal(JSON.parse(answer('I do all the negotiating with the bank.').h.state.history_json).at(-1).response_id, 'self_handling_value');
 
   const provider = answer('I already have someone working with the lender.').r;
-  assert.equal(provider.lead_status, 'R');
+  assert.equal(provider.lead_status, 'H');
   assert.equal(provider.conversation_done, true);
   assert.match(provider.reply_text, /already have help/i);
 });
 
 test('provider loyalty after a completed coverage closeout is recorded without a second closeout', () => {
   const h = smsHarness({
-    mailshake_status: 'R',
+    mailshake_status: 'H',
     ai_state: 'done',
     call_booking_status: 'closed_no_interest',
     response_status: 'I already have someone helping me.',
@@ -132,7 +132,7 @@ test('provider loyalty after a completed coverage closeout is recorded without a
   const result = h.incoming("I've used him for a few hundred short sales and really like him. Thank you though.");
   assert.equal(result.should_reply, false);
   assert.match(result.reason, /Reinforcing decline/);
-  assert.equal(result.lead_status, 'R');
+  assert.equal(result.lead_status, 'H');
   assert.equal(result.conversation_done, true);
   assert.equal(h.state.ai_state, 'done');
   assert.equal(h.state.call_booking_status, 'closed_no_interest');
@@ -140,7 +140,7 @@ test('provider loyalty after a completed coverage closeout is recorded without a
 
 test('a substantive question still reopens after a completed coverage closeout', () => {
   const h = smsHarness({
-    mailshake_status: 'R',
+    mailshake_status: 'H',
     ai_state: 'done',
     call_booking_status: 'closed_no_interest',
     response_status: 'I already have someone helping me.',
@@ -215,10 +215,13 @@ for (const text of ["I'm confused about how the buyer pays you", "What if the bu
 }
 
 test('existing provider and explicit refusal outrank Equator, including at cap', () => {
-  for (const text of ['I have a negotiator handling this in Equator, thanks.', 'No thanks, I handle Equator myself.']) {
+  for (const [text, expectedStatus] of [
+    ['I have a negotiator handling this in Equator, thanks.', 'H'],
+    ['No thanks, I handle Equator myself.', 'R'],
+  ]) {
     for (const count of [0, 3]) {
       const {r} = answer(text, {auto_reply_count: count});
-      assert.equal(r.lead_status, 'R');
+      assert.equal(r.lead_status, expectedStatus);
       assert.equal(r.handoff_needed, false);
       assert.equal(r.should_reply, count < 3);
     }
@@ -494,7 +497,7 @@ test('seller and buyer representation is not lender-side processor coverage', ()
 
   const covered = answer('I represent the seller and buyer, and I already have a short sale negotiator handling the file.').r;
   assert.equal(covered.conversation_done, true);
-  assert.equal(covered.lead_status, 'R');
+  assert.equal(covered.lead_status, 'H');
 });
 
 test('lender or agent questions get one plain-English bank-side role explanation', () => {

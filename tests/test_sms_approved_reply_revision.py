@@ -324,16 +324,16 @@ def test_failed_provider_multiquestion_keeps_new_copy_and_known_answers(chatbot)
 
 
 @pytest.mark.parametrize("count", [0, 3])
-@pytest.mark.parametrize("message", [
-    "No thanks, I already have a negotiator on Equator",
-    "We already have a processor handling this on Equator",
-    "It is not a short sale. I use Equator for other files",
-    "No thanks, I'm handling it myself",
+@pytest.mark.parametrize("message, expected_status", [
+    ("No thanks, I already have a negotiator on Equator", "H"),
+    ("We already have a processor handling this on Equator", "H"),
+    ("It is not a short sale. I use Equator for other files", "R"),
+    ("No thanks, I'm handling it myself", "R"),
 ])
-def test_terminal_provider_or_decline_beats_equator_even_at_cap(chatbot, count, message):
+def test_terminal_provider_or_decline_beats_equator_even_at_cap(chatbot, count, message, expected_status):
     chatbot.set(auto_reply_count=str(count))
     result = chatbot.receive(message)
-    assert result["lead_status"] == "R"
+    assert result["lead_status"] == expected_status
     assert result["conversation_done"] is True
     assert result["handoff_needed"] is False
     assert "expert" not in result["reply_text"].lower()

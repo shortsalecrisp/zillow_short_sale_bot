@@ -9,13 +9,15 @@ for (const text of [
   'We already have a processor handling it.',
   'I have an attorney handling the short sale.',
   'Our title company is handling the short sale.',
+  'We have Sean Wilder doing it.',
+  'I have one already.',
 ]) {
   test(`existing provider receives the approved backup acknowledgment: ${text}`, () => {
     const h = smsHarness();
     const r = h.incoming(text);
     assert.equal(r.reply_text, backupReply);
     assert.equal(r.handoff_needed, false);
-    assert.equal(h.state.mailshake_status, 'R');
+    assert.equal(h.state.mailshake_status, 'H');
     assert.equal(h.state.ai_state, 'done');
     assert.doesNotMatch(r.reply_text, /\$|credit|referral|bonus/);
     assert.equal(h.incoming('Thank you').should_reply, false);
@@ -23,11 +25,11 @@ for (const text of [
 }
 
 for (const text of ['No thanks, I already have an attorney.', 'Not interested, we have a negotiator.']) {
-  test(`explicit refusal retains the no-interest closeout: ${text}`, () => {
+  test(`explicit refusal with an outside provider still enters the H campaign: ${text}`, () => {
     const h = smsHarness();
     const r = h.incoming(text);
     assert.equal(r.reply_text, h.evaluate('getStandardNoCloseoutReply_()'));
-    assert.equal(h.state.mailshake_status, 'R');
+    assert.equal(h.state.mailshake_status, 'H');
   });
 }
 
@@ -36,6 +38,20 @@ test('opt-out with existing coverage remains silent', () => {
   const r = h.incoming('Stop. I already have a negotiator.');
   assert.equal(r.should_reply, false);
   assert.equal(h.state.mailshake_status, 'R');
+});
+
+test('not-a-short-sale and self-handling replies do not enter the H campaign', () => {
+  const notShortSale = smsHarness();
+  notShortSale.incoming('This is not a short sale.');
+  assert.equal(notShortSale.state.mailshake_status, 'R');
+
+  const selfHandling = smsHarness();
+  selfHandling.incoming("I'm handling it myself.");
+  assert.notEqual(selfHandling.state.mailshake_status, 'H');
+
+  const underContract = smsHarness();
+  underContract.incoming('This listing is already under contract.');
+  assert.equal(underContract.state.mailshake_status, 'R');
 });
 
 test('existing coverage does not replace a substantive fee answer', () => {

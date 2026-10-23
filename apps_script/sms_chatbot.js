@@ -1426,11 +1426,13 @@ function handleIncomingSmsCore_(body) {
   }
 
   if (!ruleResult.matched && !hasFeeQuestion && !hasExperienceQuestion && !hasClientConsultationInterest && !hasExistingCrispRelationship && !hasInformationRequest && !hasPhoneCallInterest && !hasPresentServiceInterest && !hasCompanyIdentityQuestion && isAlreadyHandledSignal_(inboundText)) {
+    const outsideHelp = isOutsideHelpSignal_(inboundText);
+    const closeoutStatus = outsideHelp ? "H" : "R";
     const replyText = getStandardNoCloseoutReply_();
 
     updateRowFields_(sheet, row, {
       [HEADERS.response_status]: inboundText,
-      [HEADERS.mailshake_status]: "R",
+      [HEADERS.mailshake_status]: closeoutStatus,
       [HEADERS.conversation_summary]: "Already represented / handled",
       [HEADERS.ai_state]: "done",
       [HEADERS.call_booking_status]: "closed_no_interest",
@@ -1441,7 +1443,7 @@ function handleIncomingSmsCore_(body) {
       ok: true,
       should_reply: !capReached,
       reply_text: capReached ? "" : replyText,
-      lead_status: "R",
+      lead_status: closeoutStatus,
       conversation_done: true,
       handoff_needed: false,
       needs_review: false,
@@ -1503,7 +1505,7 @@ function handleIncomingSmsCore_(body) {
         updates[HEADERS.call_booking_status] = "interested_no_call";
       } else if (decision.lead_status === "O") {
         updates[HEADERS.call_booking_status] = "warm_future_interest";
-      } else if (decision.lead_status === "R") {
+      } else if (decision.lead_status === "R" || decision.lead_status === "H") {
         updates[HEADERS.call_booking_status] = "closed_no_interest";
       }
       if (decision.callback_requested) {
@@ -1709,7 +1711,7 @@ function handleIncomingSmsCore_(body) {
       updates[HEADERS.call_booking_status] = "call_set_or_hot";
     } else if (decision.lead_status === "Y") {
       updates[HEADERS.call_booking_status] = "interested_no_call";
-    } else if (decision.lead_status === "R") {
+    } else if (decision.lead_status === "R" || decision.lead_status === "H") {
       updates[HEADERS.call_booking_status] = "closed_no_interest";
     }
     if (decision.callback_requested) {
@@ -1801,7 +1803,7 @@ function isTerminalCloseoutDecision_(decision) {
   const d = decision || {};
   return !!d.matched &&
     !!d.conversation_done &&
-    (d.lead_status === "R" || d.lead_status === "O") &&
+    (d.lead_status === "R" || d.lead_status === "O" || d.lead_status === "H") &&
     !d.handoff_needed &&
     !d.needs_review &&
     !d.alert_needed;
@@ -2576,12 +2578,14 @@ function buildTerminalCoverageDecisionV4_(text, rowObj) {
       /\b(?:what|why|who|where|how|can you|could you|would you|are you|do you|will you|send me|tell me)\b/.test(t)) return null;
   const notShortSale = isNotShortSaleSignal_(t);
   const covered = !isSelfHandlingOpportunitySignal_(t) && isAlreadyHandledSignal_(t);
+  const outsideHelp = covered && isOutsideHelpSignal_(t);
   if (!notShortSale && !covered && !isClearNoSignal_(t)) return null;
   return {matched: true,
     reply_text: notShortSale ? "Ahh, ok... thanks for letting me know. Good luck with your listing!" : getProviderAwareCloseoutReply_(t),
-    lead_status: "R", conversation_done: true, handoff_needed: false, needs_review: false, block_reply: false,
+    lead_status: outsideHelp ? "H" : "R", conversation_done: true, handoff_needed: false, needs_review: false, block_reply: false,
     call_booking_status: "closed_no_interest",
-    reason: notShortSale ? "Listing is not a short sale; closed out" : "Explicit refusal or current provider coverage; closed out"};
+    reason: notShortSale ? "Listing is not a short sale; closed out" :
+      (outsideHelp ? "Agent already has outside short-sale help; marked H for marketing follow-up" : "Explicit refusal or non-provider coverage; closed out")};
 }
 
 function isUrgentAuctionReviewSignal_(text) {
@@ -3014,7 +3018,7 @@ function applyFastRules_(text, rowObj, receivedAt) {
     return {
       matched: true,
       reply_text: getProviderAwareCloseoutReply_(t),
-      lead_status: "R",
+      lead_status: "H",
       conversation_done: true,
       handoff_needed: false,
       needs_review: false,
@@ -3081,11 +3085,11 @@ function applyFastRules_(text, rowObj, receivedAt) {
 
   if (isCurrentTextingNumberQuestionSignal_(t)) {
     const existingStatus = String(rowObj && rowObj[HEADERS.mailshake_status] || "").toUpperCase();
-    const remainsClosed = existingStatus === "R";
+    const remainsClosed = existingStatus === "R" || existingStatus === "H";
     return {
       matched: true,
       reply_text: "Yes, this number is great - call or text anytime. Thanks!",
-      lead_status: remainsClosed ? "R" : "Y",
+      lead_status: remainsClosed ? existingStatus : "Y",
       conversation_done: remainsClosed,
       handoff_needed: false,
       needs_review: false,
@@ -3934,7 +3938,7 @@ function isClosedMarketingConversation_(rowObj) {
   const aiState = String(rowObj && rowObj[HEADERS.ai_state] || "").toLowerCase();
   const bookingStatus = String(rowObj && rowObj[HEADERS.call_booking_status] || "").toLowerCase();
   const leadStatus = String(rowObj && rowObj[HEADERS.mailshake_status] || "").toUpperCase();
-  return aiState === "done" || bookingStatus === "closed_no_interest" || leadStatus === "R";
+  return aiState === "done" || bookingStatus === "closed_no_interest" || leadStatus === "R" || leadStatus === "H";
 }
 
 function isReinforcingDeclineAfterCloseout_(text, rowObj) {
@@ -5036,7 +5040,7 @@ function buildNegotiatorRoleQuestionReply_() {
   return "Yes, essentially. I handle the short-sale process and lender negotiations through approval; if you want, I can answer any questions on a quick call.";
 }
 
-function isAlreadyHandledSignal_(text) {
+function isOutsideHelpSignal_(text) {
   if (isNegotiatorRoleQuestionSignal_(text)) return false;
   if (isSellerBuyerRepresentationOnlySignal_(text)) return false;
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
@@ -5045,9 +5049,6 @@ function isAlreadyHandledSignal_(text) {
     /\b(?:i|we)\s+(?:have|use|retained|hired|work with|are working with|already have)\s+(?:an?\s+)?(?:lawyer|attorney|negotiator|short sale negotiator)\b/,
     /\bwe have a negotiator\b/,
     /\bi have a negotiator\b/,
-    /\bsigned agreement\b/,
-    /\balready signed\b/,
-    /\balready under contract\b/,
     /\balready have representation\b/,
     /\balready working with\b/,
     /\balready have someone\b/,
@@ -5057,22 +5058,32 @@ function isAlreadyHandledSignal_(text) {
     /\bwe have help\b/,
     /\bi have someone already\b/,
     /\bwe have someone already\b/,
+    /\b(?:i|we)\s+have\s+one\s+already\b/,
+    /\b(?:i|we)\s+(?:already\s+)?have\s+[a-z][a-z0-9&.\x27-]*(?:\s+[a-z][a-z0-9&.\x27-]*){0,3}\s+(?:doing|handling|working\s+on|helping\s+with)\s+(?:it|this|that|the\s+file|the\s+short\s+sale|the\s+process)\b/,
     /\b(?:i|we)\s+(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b/,
     /\balready have a processor\b/,
     /\b(?:i|we)\s+have\s+(?:a|my|our)?\s*team\s+(?:handling|working on|taking care of)\b/,
     /\b(?:my|our|the)\s+team\s+(?:is\s+)?(?:handling|working on|taking care of)\b/,
     /\bteam\s+(?:is\s+)?(?:already\s+)?(?:handling|working on|taking care of)\s+it\b/,
     /\b(?:my|our)\s+team\s+(?:has|have)\s+it\s+handled\b/,
-    /\bwe are dealing directly with the bank\b/,
-    /\bwe're dealing directly with the bank\b/,
-    /\bworking with the bank already\b/,
     /\b(?:i|we)\s+(?:work|deal)\s+with\s+(?!you\b|yoni\b|crisp\b).+\s+already\b/,
     /\b(?:i|we)\s+(?:am|are|\x27m|\x27re)?\s*(?:already\s+)?(?:working|dealing)\s+with\s+(?!you\b|yoni\b|crisp\b)(?:someone|somebody|a\s+person|a\s+company|a\s+team|[a-z][a-z0-9&.\x27-]*(?:\s+[a-z][a-z0-9&.\x27-]*){0,3})\b/,
-    /\b(?:i|we)\s+(?:already\s+)?(?:use|have)\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team|help|a\s+processor|a\s+negotiator|a\s+specialist)\b/,
-    /^no[,.]?\s+.+\b(?:with|through|using)\b.+$/
+    /\b(?:i|we)\s+(?:already\s+)?(?:use|have)\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team|help|a\s+processor|a\s+negotiator|a\s+specialist)\b/
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isAlreadyHandledSignal_(text) {
+  if (isOutsideHelpSignal_(text)) return true;
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /\bsigned agreement\b/.test(t) ||
+    /\balready signed\b/.test(t) ||
+    /\balready under contract\b/.test(t) ||
+    /\bwe are dealing directly with the bank\b/.test(t) ||
+    /\bwe're dealing directly with the bank\b/.test(t) ||
+    /\bworking with the bank already\b/.test(t) ||
+    /^no[,.]?\s+.+\b(?:with|through|using)\b.+$/.test(t);
 }
 
 function isSellerBuyerRepresentationOnlySignal_(text) {
@@ -5683,7 +5694,7 @@ function getAiDecision_(rowInfo, inboundText) {
           additionalProperties: false,
           properties: {
             reply_text: { type: "string" },
-            lead_status: { type: "string", enum: ["R", "Y", "G", "N", "O"] },
+            lead_status: { type: "string", enum: ["R", "Y", "G", "N", "O", "H"] },
             conversation_done: { type: "boolean" },
             handoff_needed: { type: "boolean" },
             needs_review: { type: "boolean" },
@@ -6111,7 +6122,7 @@ function normalizeLoopGuardText_(text) {
 
 function getRespondedLeadStatusFallback_(existingStatus) {
   const existing = String(existingStatus || "").toUpperCase();
-  if (existing === "R" || existing === "Y" || existing === "G" || existing === "O") {
+  if (existing === "R" || existing === "Y" || existing === "G" || existing === "O" || existing === "H") {
     return existing;
   }
   return "Y";
@@ -6119,7 +6130,7 @@ function getRespondedLeadStatusFallback_(existingStatus) {
 
 function coerceRespondedLeadStatus_(candidateStatus, existingStatus) {
   const candidate = String(candidateStatus || "").toUpperCase();
-  if (candidate === "R" || candidate === "Y" || candidate === "G" || candidate === "O") {
+  if (candidate === "R" || candidate === "Y" || candidate === "G" || candidate === "O" || candidate === "H") {
     return candidate;
   }
   return getRespondedLeadStatusFallback_(existingStatus);
@@ -6167,7 +6178,7 @@ IMPORTANT BEHAVIOR:
 - For a clear no, your final closeout should be something like:
   "Ok, no problem. If anything changes in the future and you're looking for additional help with these files, please just keep me in mind. Thanks"
 - Treat clear polite declines like "I'm fine" and "we're all set" as "no thanks". A courtesy greeting or "thank you for reaching out" is not a rejection when followed by questions or interest. "I'm not saying I'm not interested" is not a rejection.
-- If they say they already have a negotiator, processor, lawyer, or someone handling it, close respectfully with: "${getProviderAwareCloseoutReply_("I already have a negotiator")}". An explicit refusal still uses the normal no closeout. Do not promise credits, referral payments, or compensation; route payment negotiations for personal review.
+- If they say they already have a negotiator, processor, lawyer, title company, named person, or other outside help handling the current file, close respectfully with: "${getProviderAwareCloseoutReply_("I already have a negotiator")}" and use lead status H. An explicit refusal with existing outside help still uses H, while a plain refusal without outside help uses R. Do not promise credits, referral payments, or compensation; route payment negotiations for personal review.
 - If they ask whether I am a negotiator, confirm that I handle the short sale process and lender negotiations, then invite a phone call. That is a clarification question, not a statement that they already have help.
 - If they ask whether this is the best or correct number to reach me, reply exactly: "Yes, this number is great - call or text anytime. Thanks!" Never include or repeat any numeric phone number because the phone in agent_context belongs to the agent, not me.
 - After a clear no closeout, if they later only say "thank you", "ok", "sounds good", thumbs up, or something similar, do not respond
@@ -6242,7 +6253,8 @@ BUSINESS RULES:
 - Only paid if deal closes
 
 LEAD STATUS:
-- R = not interested / stop / already handled / closed out
+- R = not interested / stop / not a short sale / self-handled / closed out without outside provider coverage
+- H = the agent already has another negotiator, processor, attorney, title company, company, team, named person, or other outside help on the current file; use H even when the same message politely declines
 - O = not interested in help on the current file, but asked for information or left the door open for future opportunities
 - G = only use this when a human has actually connected live on the phone, not for text-based call interest or scheduling
 - Y = default for any inbound response that is not clearly R, including "let's talk", "call me", "available now", future availability, or callback timing by text
@@ -7637,11 +7649,18 @@ function testSmsIntentContractV3_() {
 
   const titleCompanyCoverage = applyFastRules_("Hi. I have a title company doing it thanks.", baseRow);
   record("title_company_doing_it_is_rejection",
-    titleCompanyCoverage.matched && titleCompanyCoverage.lead_status === "R" &&
+    titleCompanyCoverage.matched && titleCompanyCoverage.lead_status === "H" &&
       titleCompanyCoverage.conversation_done && !titleCompanyCoverage.handoff_needed &&
       titleCompanyCoverage.call_booking_status === "closed_no_interest" &&
-      titleCompanyCoverage.reply_text === getStandardNoCloseoutReply_(),
+      titleCompanyCoverage.reply_text === getProviderAwareCloseoutReply_("Hi. I have a title company doing it thanks."),
     titleCompanyCoverage.reason);
+  ["We have Sean Wilder doing it.", "I have one already."].forEach(function(message) {
+    const namedProviderCoverage = applyFastRules_(message, baseRow);
+    record("named_or_pronominal_provider_uses_h_" + message,
+      namedProviderCoverage.matched && namedProviderCoverage.lead_status === "H" &&
+        namedProviderCoverage.conversation_done && !namedProviderCoverage.handoff_needed,
+      namedProviderCoverage.reason);
+  });
   const titleCompanyQuestion = applyFastRules_(
     "I already have a title company I'm working for if that's what you mean",
     baseRow

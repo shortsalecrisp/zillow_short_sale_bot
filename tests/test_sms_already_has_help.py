@@ -7,12 +7,14 @@ from test_internal_sms_endpoint import _import_webhook_server, FakeSendResult
     'We already have a processor handling it.',
     'I have an attorney handling the short sale.',
     'Our title company is handling the short sale.',
+    'We have Sean Wilder doing it.',
+    'I have one already.',
 ])
 def test_existing_provider_receives_backup_acknowledgment(monkeypatch, text):
     module, _sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
     decision = module._sms_fast_decision({}, text)
     assert decision['reply_text'] == module.SMS_ALREADY_HAS_HELP_REPLY
-    assert decision['lead_status'] == 'R'
+    assert decision['lead_status'] == 'H'
     assert decision['conversation_done'] is True
     assert decision['handoff_needed'] is False
     assert not sender.calls
@@ -22,11 +24,18 @@ def test_existing_provider_receives_backup_acknowledgment(monkeypatch, text):
     'No thanks, I already have an attorney.',
     'Not interested, we have a negotiator.',
 ])
-def test_explicit_refusal_keeps_standard_closeout(monkeypatch, text):
+def test_explicit_refusal_with_provider_keeps_standard_closeout_and_uses_h(monkeypatch, text):
     module, _sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
     decision = module._sms_fast_decision({}, text)
     assert decision['reply_text'] == module.SMS_STANDARD_CLOSEOUT_REPLY
-    assert decision['lead_status'] == 'R'
+    assert decision['lead_status'] == 'H'
+
+
+def test_not_short_sale_and_self_handling_do_not_use_h(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
+    assert module._sms_fast_decision({}, 'This is not a short sale.')['lead_status'] == 'R'
+    assert module._sms_fast_decision({}, "I'm handling it myself.")['lead_status'] != 'H'
+    assert module._sms_fast_decision({}, 'This listing is already under contract.')['lead_status'] == 'R'
 
 
 def test_existing_provider_does_not_replace_fee_answer(monkeypatch):

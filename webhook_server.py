@@ -5795,7 +5795,7 @@ def _sms_decision(
     info_email_to: str = "",
     info_email_approval_required: bool = False,
 ) -> Dict[str, Any]:
-    normalized_status = lead_status if lead_status in {"R", "Y", "O"} else "Y"
+    normalized_status = lead_status if lead_status in {"R", "Y", "O", "H"} else "Y"
     if preserve_existing_state and lead_status == "G":
         normalized_status = "G"
     return {
@@ -5825,7 +5825,7 @@ def _sms_decision(
 def _sms_is_terminal_closeout_decision(decision: Dict[str, Any]) -> bool:
     return bool(
         decision.get("conversation_done")
-        and decision.get("lead_status") in {"R", "O"}
+        and decision.get("lead_status") in {"R", "O", "H"}
         and not decision.get("handoff_needed")
         and not decision.get("needs_review")
         and not decision.get("alert_needed")
@@ -6072,6 +6072,9 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
         "'How would you market that' immediately after a fee answer refers to that fee. "
         f"For that question, answer: {SMS_BUYER_FEE_DISCLOSURE_REPLY} "
         "Do not offer unsolicited materials, or claim email is sent or will be sent without a durable approval request. "
+        "Use lead_status H when the agent already has another negotiator, processor, attorney, title company, "
+        "company, team, named person, or other outside help on the current file, even when they also politely decline. "
+        "Use R for a plain rejection, opt-out, not-a-short-sale correction, or self-handling without outside help. "
         "Keep any reply under 500 characters and casual."
     )
     user_payload = {
@@ -6105,7 +6108,7 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
                     "additionalProperties": False,
                     "properties": {
                         "reply_text": {"type": "string"},
-                        "lead_status": {"type": "string", "enum": ["R", "Y", "G", "N", "O"]},
+                        "lead_status": {"type": "string", "enum": ["R", "Y", "G", "N", "O", "H"]},
                         "conversation_done": {"type": "boolean"},
                         "handoff_needed": {"type": "boolean"},
                         "needs_review": {"type": "boolean"},
@@ -6782,7 +6785,7 @@ def _sms_is_closed_marketing_conversation(row_obj: Dict[str, str]) -> bool:
     return (
         str(row_obj.get("ai_state") or "").lower() == "done"
         or str(row_obj.get("call_booking_status") or "").lower() == "closed_no_interest"
-        or str(row_obj.get("mailshake_status") or "").upper() == "R"
+        or str(row_obj.get("mailshake_status") or "").upper() in {"R", "H"}
     )
 
 
@@ -6856,7 +6859,29 @@ def _sms_has_existing_coverage(value: Any) -> bool:
             r"|\b(?:my|our|the)\s+(?:attorney|lawyer|negotiator|housing counselor)\b"
             r"|\b(?:i|we|seller|owner|borrower)\b.{0,30}\b(?:retained|hired|engaged|using|working with)\b"
             r".{0,40}\b(?:attorney|lawyer|negotiator|processor|specialist|company|team|housing counselor)\b"
+            r"|\b(?:i|we)\s+have\s+one\s+already\b"
+            r"|\b(?:i|we)\s+(?:already\s+)?have\s+[a-z][a-z0-9&.'-]*(?:\s+[a-z][a-z0-9&.'-]*){0,3}\s+"
+            r"(?:doing|handling|working\s+on|helping\s+with)\s+(?:it|this|that|the\s+file|the\s+short\s+sale|the\s+process)\b"
             r"|\b(?:handled|covered|under contract)\b",
+            text,
+        )
+    )
+
+
+def _sms_has_outside_help(value: Any) -> bool:
+    text = _sms_rejection_text(value)
+    if _sms_is_failed_provider_experience(text) or _sms_is_seller_buyer_representation_only(text):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:already have|already working with|currently have|have)\b.{0,45}"
+            r"\b(?:help|someone|somebody|negotiator|processor|attorney|lawyer|company|team|representation|housing counselor|counselor)\b"
+            r"|\b(?:my|our|the)\s+(?:attorney|lawyer|negotiator|housing counselor)\b"
+            r"|\b(?:i|we|seller|owner|borrower)\b.{0,30}\b(?:retained|hired|engaged|using|working with)\b"
+            r".{0,40}\b(?:attorney|lawyer|negotiator|processor|specialist|company|team|housing counselor)\b"
+            r"|\b(?:i|we)\s+have\s+one\s+already\b"
+            r"|\b(?:i|we)\s+(?:already\s+)?have\s+[a-z][a-z0-9&.'-]*(?:\s+[a-z][a-z0-9&.'-]*){0,3}\s+"
+            r"(?:doing|handling|working\s+on|helping\s+with)\s+(?:it|this|that|the\s+file|the\s+short\s+sale|the\s+process)\b",
             text,
         )
     )
@@ -7736,10 +7761,11 @@ def _sms_fast_decision(
             reason="Categorical buyer-fee rejection closed before reply-cap escalation",
         )
 
+    existing_coverage = _sms_has_existing_coverage(t)
+    outside_help = _sms_has_outside_help(t) or _sms_is_title_company_coverage_rejection(t)
     terminal_statement = (
         _sms_has_decline_or_not_short_sale_clause(t)
-        or _sms_has_existing_coverage(t)
-        or _sms_is_title_company_coverage_rejection(t)
+        or existing_coverage
     )
     if (
         terminal_statement
@@ -7758,8 +7784,13 @@ def _sms_fast_decision(
         not_short_sale = bool(re.search(r"\b(?:not a short sale|no short sale|isn't a short sale)\b", t))
         return _sms_decision(
             reply_text="Ahh, ok... thanks for letting me know. Good luck with your listing!" if not_short_sale else _sms_provider_aware_closeout_reply(t),
-            lead_status="R", conversation_done=True, clear_callback=True,
-            reason="Agent declined or confirmed existing coverage before a portal keyword",
+            lead_status="H" if outside_help and not not_short_sale else "R",
+            conversation_done=True, clear_callback=True,
+            reason=(
+                "Agent already has outside short-sale help; marked H for marketing follow-up"
+                if outside_help and not not_short_sale
+                else "Agent declined before a portal keyword"
+            ),
             call_booking_status="closed_no_interest",
         )
 
@@ -7812,7 +7843,7 @@ def _sms_fast_decision(
     if _sms_is_title_company_coverage_rejection(t):
         return _sms_decision(
             reply_text=_sms_provider_aware_closeout_reply(t),
-            lead_status="R",
+            lead_status="H",
             conversation_done=True,
             handoff_needed=False,
             block_reply=False,
@@ -8171,7 +8202,9 @@ def _sms_fast_decision(
             call_booking_status="closed_no_interest",
         )
 
-    if _sms_has_existing_coverage(t) or re.search(
+    existing_coverage = _sms_has_existing_coverage(t)
+    outside_help = _sms_has_outside_help(t) or _sms_is_title_company_coverage_rejection(t)
+    if existing_coverage or re.search(
         r"\b(already have help|have help|we handle|handling (it|this)|not interested|no thank)\b"
         r"|\bno\s*,?\s*thank(?:s|\s+you)?\b"
         r"|\b(?:i|we)\s+(?:currently|already)\s+have\s+(?:someone|somebody|a\s+person|a\s+company|a\s+team)\s+(?:helping|assisting|handling|working\s+on)\b",
@@ -8179,9 +8212,13 @@ def _sms_fast_decision(
     ):
         return _sms_decision(
             reply_text=_sms_provider_aware_closeout_reply(t),
-            lead_status="R",
+            lead_status="H" if outside_help else "R",
             conversation_done=True,
-            reason="Agent declined, is already represented, or says this is not a short sale",
+            reason=(
+                "Agent already has outside short-sale help; marked H for marketing follow-up"
+                if outside_help
+                else "Agent declined or says this is not a short sale"
+            ),
         )
 
     if re.search(r"\b(local|where are you located|where r u located|based)\b", t):
@@ -8853,7 +8890,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     else:
         reply_text = _sms_normalize_whitespace(decision.get("reply_text") or "") if should_reply else ""
     lead_status = str(decision.get("lead_status") or "Y")
-    if lead_status not in {"R", "Y", "O"}:
+    if lead_status not in {"R", "Y", "O", "H"}:
         lead_status = "Y"
     conversation_done = bool(decision.get("conversation_done"))
     handoff_needed = bool(decision.get("handoff_needed"))
@@ -8873,7 +8910,7 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         "ai_state": "handoff" if terminal_handoff else ("done" if conversation_done else "active"),
         "call_booking_status": str(decision.get("call_booking_status") or "") or (
             "closed_no_interest"
-            if conversation_done and lead_status == "R"
+            if conversation_done and lead_status in {"R", "H"}
             else ("warm_future_interest" if conversation_done and lead_status == "O" else "interested_no_call")
         ),
         "handoff_flag": "TRUE" if terminal_handoff else "FALSE",

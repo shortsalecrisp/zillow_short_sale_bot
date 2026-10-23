@@ -3642,8 +3642,8 @@ def test_sms_self_handler_requires_first_person_subject(monkeypatch):
 
     external_provider = module._sms_fast_decision({}, "I already have someone working with the lender.")
     assert external_provider["conversation_done"] is True
-    assert external_provider["lead_status"] == "R"
-    assert "coverage" in external_provider["reason"].lower()
+    assert external_provider["lead_status"] == "H"
+    assert "outside short-sale help" in external_provider["reason"].lower()
 
 
 def test_sms_contact_card_and_caller_initiated_call_do_not_require_takeover(monkeypatch):
@@ -3673,7 +3673,7 @@ def test_sms_reinforcing_provider_decline_after_closeout_is_silent(monkeypatch):
         sender_result=FakeSendResult(success=True),
     )
     row = {
-        "mailshake_status": "R",
+        "mailshake_status": "H",
         "ai_state": "done",
         "call_booking_status": "closed_no_interest",
         "response_status": "I already have someone helping me.",
@@ -3690,7 +3690,7 @@ def test_sms_reinforcing_provider_decline_after_closeout_is_silent(monkeypatch):
     assert decision["block_reply"] is True
     assert decision["preserve_existing_state"] is True
     assert decision["reply_text"] == ""
-    assert decision["lead_status"] == "R"
+    assert decision["lead_status"] == "H"
     assert decision["conversation_done"] is True
 
     reopened = module._sms_fast_decision(row, "What is your fee?")
@@ -4036,7 +4036,7 @@ def test_sms_contract_title_company_doing_it_is_terminal_rejection(monkeypatch):
     decision = module._sms_fast_decision({}, inbound)
 
     assert module._sms_is_title_company_coverage_rejection(inbound) is True
-    assert decision["lead_status"] == "R"
+    assert decision["lead_status"] == "H"
     assert decision["conversation_done"] is True
     assert decision["handoff_needed"] is False
     assert decision["block_reply"] is False
@@ -4177,7 +4177,7 @@ def test_sms_contract_ordinary_closeout_does_not_block_later_question(monkeypatc
             "message_id": "closeout-reopen-1",
         },
     ).json()
-    assert first["lead_status"] == "R"
+    assert first["lead_status"] == "H"
     assert sheet.rows[2][19] == "FALSE"
 
     second = client.post(
