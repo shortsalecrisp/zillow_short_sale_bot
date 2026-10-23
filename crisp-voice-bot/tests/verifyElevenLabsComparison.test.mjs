@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE, R6_COMPARISON, validateComparison, verifyLiveComparison } from '../src/scripts/verifyElevenLabsComparison.mjs';
+import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE, R7_COMPARISON, validateComparison, verifyLiveComparison } from '../src/scripts/verifyElevenLabsComparison.mjs';
 
 function fixture(index = 0) {
-  const arm = R6_COMPARISON.arms[index];
-  return { agent_id: R6_COMPARISON.agentId, branch_id: arm.branchId, version_id: arm.versionId,
+  const arm = R7_COMPARISON.arms[index];
+  return { agent_id: R7_COMPARISON.agentId, branch_id: arm.branchId, version_id: arm.versionId,
     conversation_config: { tts: { model_id: arm.ttsModel, pvc_strength: 0, voice_id: 'synthetic_eryn', speed: 1 },
       agent: { subagents: [], prompt: { prompt: 'Synthetic policy', tool_ids: ['synthetic_tool'], tools: [{ expanded: true }], llm: 'gpt-4.1' } },
       turn: { turn_model: 'turn_v3' } },
@@ -18,8 +18,8 @@ function newShape(agent) {
   result.conversation_config.agent.subagent_config = { agents: [], self_subagent: null };
   return result;
 }
-const expected = { ...R6_COMPARISON, sharedHash: digest(comparisonBody(fixture())), workflowHash: digest(fixture().workflow) };
-const allocation = () => ({ meta: { total: 2 }, results: R6_COMPARISON.arms.map(arm => ({ id: arm.branchId, is_archived: false, current_live_percentage: 50 })) });
+const expected = { ...R7_COMPARISON, sharedHash: digest(comparisonBody(fixture())), workflowHash: digest(fixture().workflow) };
+const allocation = () => ({ meta: { total: 2 }, results: R7_COMPARISON.arms.map(arm => ({ id: arm.branchId, is_archived: false, current_live_percentage: 50 })) });
 
 function disabledNoiseShape(agent) {
   const result = newShape(agent);
@@ -138,7 +138,7 @@ test('live verifier makes exactly three GETs and never invokes a publisher or ot
   const fetcher = async (url, options) => {
     assert.equal(options.method, 'GET'); requests.push(url);
     const value = url.endsWith('/branches') ? allocation()
-      : disabledNoiseShape(fixture(url.includes(R6_COMPARISON.arms[1].branchId) ? 1 : 0));
+      : disabledNoiseShape(fixture(url.includes(R7_COMPARISON.arms[1].branchId) ? 1 : 0));
     return { ok: true, json: async () => value };
   };
   const result = await verifyLiveComparison({ apiKey: 'synthetic_key', expected }, fetcher);

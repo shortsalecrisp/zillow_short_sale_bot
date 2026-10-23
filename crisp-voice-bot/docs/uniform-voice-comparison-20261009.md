@@ -1,6 +1,22 @@
 # Uniform Conversion Comparison
 
-Current revision is r6, verified at 2026-10-20T01:13:01.709Z (9:13:01 PM New York on October 19). Earlier releases below are historical and must not be pooled with r6. Both arms are verified identical except for TTS model.
+Current revision is r7, verified at 2026-10-23T12:27:33.399Z (8:27:33 AM New York on October 23). Earlier releases below are historical and must not be pooled with r7. Both arms are verified identical except for TTS model.
+
+## Approved Revision 7
+
+Yoni approved the October 22 Lead Intelligence fixes. The shared prompt now treats an explicit statement that another negotiator, attorney, specialist or provider handles the file as terminal existing coverage rather than self-handling, closing without another value pitch, Yoni offer, callback or transfer. Backend contact evidence now accepts a contextual `It is`, `That is`, `It's mine` or `That's mine` only when it immediately answers the exact listing question; the same words after timing, needs or property-status questions do not authenticate the target.
+
+The guarded prompt-only publisher reread both exact r6 versions, prompt hashes and 50/50 allocation, then changed only `conversation_config.agent.prompt.prompt`. It preserved and reread workflow, phone bindings, platform settings and every other provider setting. The provider had added one identical neutral `built_in_tools.identity_challenge: null` field to both immutable r6 responses; the r7 baseline preserves that field instead of normalizing or overwriting it. No real call or metered session was started.
+
+- Cohort: `maya_uniform_lead_conversion_20261023_r7`.
+- Start: `2026-10-23T12:27:33.399Z`, after final two-arm provider readback.
+- Control: branch `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`, version `agtvrsn_5901m5mbp1pafv1skkvbhzh4cqfn`, Flash v2.
+- Test: branch `agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv`, version `agtvrsn_4301m5mbp4jgfn5ayjenb7yjjtby`, v4 Turbo.
+- Canonical prompt hash: `0ef6a6f8ca9008cd8a5d21732d1df829be3808e33de2d7d9ce5534818a873629`.
+- Shared normalized configuration hash: `18d8a334dbb09f6f6c196d84dac6331c0a4a45882aea4f89c591d820197f90a8`.
+- Workflow hash: `31e9628299acf53fda9153f686a003bb1a25cf1a7c00a4bd9e89bcf9d2af0a35`.
+
+Require the exact r7 branch/version pair, a matching final receipt, a genuine non-test positive duration, and a provider start at or after the r7 boundary. The 15 verified true-live conversations per arm minimum and preferred 100-genuine-call review restart at r7; all earlier cohorts remain historical.
 
 ## Approved Revision 6
 

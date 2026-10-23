@@ -3,15 +3,15 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const R6_COMPARISON = {
-  cohort: 'maya_uniform_lead_conversion_20261019_r6',
-  startedAt: '2026-10-20T01:13:01.709Z',
+export const R7_COMPARISON = {
+  cohort: 'maya_uniform_lead_conversion_20261023_r7',
+  startedAt: '2026-10-23T12:27:33.399Z',
   agentId: 'agent_9901kpkhs1cmfgj8w9vm199nc92j',
-  sharedHash: 'd2fee79aa371e5fec4e7b5426f5932139f39d2ca48b21a6fbd7d8ac3f0ed6770',
+  sharedHash: '18d8a334dbb09f6f6c196d84dac6331c0a4a45882aea4f89c591d820197f90a8',
   workflowHash: '31e9628299acf53fda9153f686a003bb1a25cf1a7c00a4bd9e89bcf9d2af0a35',
   arms: [
-    { name: 'Flash', branchId: 'agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks', versionId: 'agtvrsn_8701m5bdwq8af46r1rpnzmb04b4g', ttsModel: 'eleven_flash_v2' },
-    { name: 'v4', branchId: 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv', versionId: 'agtvrsn_6801m5bdwvh2fnkb9hfycj82vzj0', ttsModel: 'eleven_v4_turbo' },
+    { name: 'Flash', branchId: 'agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks', versionId: 'agtvrsn_5901m5mbp1pafv1skkvbhzh4cqfn', ttsModel: 'eleven_flash_v2' },
+    { name: 'v4', branchId: 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv', versionId: 'agtvrsn_4301m5mbp4jgfn5ayjenb7yjjtby', ttsModel: 'eleven_v4_turbo' },
   ],
 };
 
@@ -48,7 +48,7 @@ export function comparisonBody(agent) {
   return body;
 }
 
-export function validateComparison(agents, allocation, expected = R6_COMPARISON) {
+export function validateComparison(agents, allocation, expected = R7_COMPARISON) {
   assert.equal(agents.length, 2, 'Exactly two provider readbacks required');
   const results = allocation?.results;
   assert.ok(Array.isArray(results) && allocation.meta?.total === results.length,
@@ -79,7 +79,7 @@ export function validateComparison(agents, allocation, expected = R6_COMPARISON)
     sharedHash: expected.sharedHash, workflowHash: expected.workflowHash, arms };
 }
 
-export async function verifyLiveComparison({ apiKey, expected = R6_COMPARISON }, fetcher = fetch) {
+export async function verifyLiveComparison({ apiKey, expected = R7_COMPARISON }, fetcher = fetch) {
   assert.ok(apiKey, 'ELEVENLABS_API_KEY is required');
   const endpoint = `https://api.elevenlabs.io/v1/convai/agents/${expected.agentId}`;
   const get = async url => {
