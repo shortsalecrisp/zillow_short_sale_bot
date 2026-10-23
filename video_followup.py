@@ -613,6 +613,8 @@ class Eligibility:
             body.update(action="check_video_followup_eligibility", token=self.token, video_variant="video", video_job_id=job["id"])
             if "initial_receipt" in job:
                 body["initial_receipt"] = initial_receipt_binding(job, job["initial_receipt"])["initial_receipt"]
+            if "receipt_selection_version" in job:
+                body["receipt_selection_version"] = job["receipt_selection_version"]
             response = self.session.post(self.url, json=body, timeout=20)
             response.raise_for_status()
             result = response.json()
@@ -1094,6 +1096,8 @@ class Service:
                 # whether this same-key fallback can create a new text entry.
                 return fallback, metadata
             metadata.update(video_variant=job["variant"], video_job_id=job["id"])
+            if job.get("receipt_selection_version") == RECEIPT_SELECTION_VERSION:
+                metadata["receipt_selection_version"] = RECEIPT_SELECTION_VERSION
             if job["variant"] == "video":
                 metadata["video_speech_proof"] = {**job["speech_proof"], "video_job_id": job["id"],
                     **{field: context[field] for field in ("followup_key", "phone", "initial_sent_at", "stable_id")}}

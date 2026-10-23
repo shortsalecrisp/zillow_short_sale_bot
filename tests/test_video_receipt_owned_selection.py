@@ -32,6 +32,7 @@ class ReceiptOwnedSelectionTests(unittest.TestCase):
         self.assertEqual(metadata["initial_sent_at"], ready["initial_sent_at"])
         self.assertEqual(metadata["crm_row"], 44)
         self.assertEqual(metadata["initial_receipt"], ready["initial_receipt"])
+        self.assertEqual(metadata["receipt_selection_version"], video.RECEIPT_SELECTION_VERSION)
         self.assertEqual(len(self.objects.list("jobs/")), 1)
         self.assertEqual(self.provider.submissions, [])
 
@@ -78,6 +79,19 @@ class ReceiptOwnedSelectionTests(unittest.TestCase):
         message, _ = self.service.select(self.alias(), FALLBACK)
         self.assertIsNone(message)
         self.assertEqual(self.objects._objects, before)
+
+    def test_eligibility_only_forwards_marker_already_frozen_on_job(self):
+        ready = self.make_ready()
+        session = Mock()
+        session.post.return_value.json.return_value = {"ok": True, "eligible": True}
+        eligibility = video.Eligibility("https://example.test", "offline-token", session=session)
+        eligibility(ready)
+        self.assertEqual(session.post.call_args.kwargs["json"]["receipt_selection_version"],
+                         video.RECEIPT_SELECTION_VERSION)
+        legacy = {key: value for key, value in ready.items() if key != "receipt_selection_version"}
+        eligibility(legacy)
+        self.assertNotIn("receipt_selection_version", session.post.call_args.kwargs["json"])
+        self.assertNotIn("receipt_selection_version", legacy)
 
     def test_changed_recipient_name_or_missing_owner_or_receipt_fails_closed(self):
         self.make_ready()

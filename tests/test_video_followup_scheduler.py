@@ -346,6 +346,14 @@ class VideoFollowupOutboxTests(unittest.TestCase):
                 self.assertIn("initial_receipt", body)
                 self.assertIs(body["initial_receipt"], value)
 
+    def test_future_receipt_marker_is_forwarded_literally_never_added_to_legacy(self):
+        for value in ("receipt-owned-selection-v1", None, "invalid"):
+            with self.subTest(marker=value):
+                self.enqueue(followup_context=feature_context(receipt_selection_version=value))
+                self.assertIs(self.harness.post.call_args.kwargs["json"]["receipt_selection_version"], value)
+        self.enqueue(followup_context=feature_context())
+        self.assertNotIn("receipt_selection_version", self.harness.post.call_args.kwargs["json"])
+
     def test_initial_sms_does_not_forward_optional_followup_receipt(self):
         self.enqueue(action="enqueue_initial_sms", message="Initial message",
                      followup_context=feature_context(initial_receipt={"status": "sent"}))

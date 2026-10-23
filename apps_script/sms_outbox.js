@@ -666,7 +666,7 @@ function enqueueFollowupSmsV13_(body, webhookRequestId) {
 }
 
 function hasVideoFollowupContextV19_(body) {
-  return ["followup_key", "initial_sent_at", "video_variant", "video_job_id", "video_speech_proof", "initial_receipt", "audit_contract"]
+  return ["followup_key", "initial_sent_at", "video_variant", "video_job_id", "video_speech_proof", "initial_receipt", "audit_contract", "receipt_selection_version"]
     .some(function(key) { return Object.prototype.hasOwnProperty.call(body || {}, key); }) ||
     /^followup-video-/.test(String(body && body.message_id || ""));
 }
@@ -1021,6 +1021,9 @@ function hasValidVideoDirectedPronunciationLineageV25_(proof, name) {
 }
 
 function hasValidVideoFollowupSpeechProofV21_(body, metadata) {
+  if (metadata.receipt_selection_version !== undefined &&
+      (metadata.receipt_selection_version !== "receipt-owned-selection-v1" || !metadata.video_job_id ||
+       !validateVideoInitialReceiptV26_(metadata.initial_receipt, metadata, normalizePhone_(body.phone)))) return false;
   var auditMarked = metadata.initial_receipt !== undefined || metadata.audit_contract !== undefined ||
     metadata.decision_evidence !== undefined;
   if (auditMarked && (metadata.audit_contract !== "followup-decision-v1" ||
@@ -1096,13 +1099,19 @@ function validateVideoFollowupContextV19_(body, requireJob) {
     initial_sent_at: new Date(initialMs).toISOString(), video_variant: variant,
     video_job_id: job, first_name: firstName
   };
-  if (body.initial_receipt !== undefined || body.audit_contract !== undefined) {
+  if (body.initial_receipt !== undefined || body.audit_contract !== undefined || body.receipt_selection_version !== undefined) {
     var initialReceipt = validateVideoInitialReceiptV26_(body.initial_receipt, metadata, phone);
     if (!initialReceipt || (body.audit_contract !== undefined && body.audit_contract !== "followup-decision-v1")) {
       return { ok: false, reason: "Personalized follow-up initial receipt descriptor is invalid" };
     }
     metadata.initial_receipt = initialReceipt;
     metadata.audit_contract = "followup-decision-v1";
+  }
+  if (body.receipt_selection_version !== undefined) {
+    if (body.receipt_selection_version !== "receipt-owned-selection-v1" || !job) {
+      return { ok: false, reason: "Prospective receipt selection identity is invalid" };
+    }
+    metadata.receipt_selection_version = body.receipt_selection_version;
   }
   if (variant === "video" && body.video_speech_proof !== undefined) metadata.video_speech_proof = body.video_speech_proof;
   if (requireJob && !hasValidVideoFollowupSpeechProofV21_(body, metadata)) {
@@ -1277,6 +1286,7 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
   var exactEpisodeReceipts = 0;
   var exactReceipt = null;
   var exactReceiptIdsUnique = true;
+  var receiptEntries = [];
   (pendingRows || []).forEach(function(row) {
     if (String(row[1]) !== "sent" || normalizePhone_(row[4]) !== phone ||
         String(row[6] || "").indexOf("__initial_outreach__:") !== 0) return;
@@ -1287,6 +1297,7 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
         Number(row[17]) !== index + 1 || Number(initialMetadata.crm_row) !== index + 1) return;
     var sentMs = parseVideoFollowupTimestampV19_(row[14], timeZone);
     if (!isFinite(sentMs)) return;
+    receiptEntries.push({ row: row, metadata: initialMetadata, sent_ms: sentMs });
     if (Math.abs(sentMs - expectedMs) < 1000) {
       exactEpisodeReceipts++;
       exactReceipt = { row: row, metadata: initialMetadata, sent_ms: sentMs };
@@ -1298,6 +1309,35 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
         (!isFinite(recoveryReceipt) || sentMs > recoveryReceipt)) recoveryReceipt = sentMs;
   });
   if (recoveryDate) initialMs = recoveryReceipt;
+  if (metadata.receipt_selection_version === "receipt-owned-selection-v1") {
+    var pinned = metadata.initial_receipt;
+    var owned = receiptEntries.filter(function(entry) {
+      return pinned && String(entry.row[2]) === pinned.request_id && String(entry.row[3]) === pinned.message_id;
+    });
+    var built = owned.length === 1 && buildVideoInitialReceiptV26_(owned[0], metadata, phone, timeZone, pendingRows);
+    var startedMs = built ? Date.parse(built.send_started_at) : NaN;
+    var sentMs = built ? Date.parse(built.sent_at) : NaN;
+    var competingInitial = receiptEntries.some(function(entry) {
+      return (!owned.length || entry !== owned[0]) && entry.sent_ms >= startedMs;
+    });
+    (pendingRows || []).forEach(function(candidate) {
+      if (normalizePhone_(candidate[4]) !== phone || String(candidate[6] || "").indexOf("__initial_outreach__:") !== 0 ||
+          ["queued", "pending", "alerted", "claimed", "send_started", "receipt_pending", "uncertain", "manual_sent"].indexOf(String(candidate[1])) === -1) return;
+      var created = parseVideoFollowupTimestampV19_(candidate[0], timeZone);
+      if (!isFinite(created) || created >= startedMs) competingInitial = true;
+    });
+    if (!built || JSON.stringify(built) !== JSON.stringify(pinned) || !isFinite(initialMs) ||
+        initialMs < startedMs || initialMs > sentMs || competingInitial) {
+      return { ok: false, reason: "Prospective receipt interval is missing, changed or ambiguous" };
+    }
+    var intervalObj = {};
+    values[0].forEach(function(header, column) { intervalObj[header] = current[column]; });
+    // Preserve the earliest reply/control cutoff; a later receipt timestamp
+    // must never make an intervening reply or existing reminder disappear.
+    return { ok: true, sheet: sheet, row: index + 1, values: current, obj: intervalObj,
+      initial_ms: Math.min(initialMs, expectedMs), observed_initial_ms: initialMs,
+      time_zone: timeZone, initial_receipt: built };
+  }
   // W records the handset timestamp; outbox O records later receipt processing.
   // Accept that difference only for one exact attempt enclosing W, never a later send.
   var sameInitialAttempt = laterReceipts.length === 1 &&
@@ -1362,14 +1402,14 @@ function videoDecisionDigestV26_(value) {
 function videoDecisionEvidenceV26_(metadata, phone, resolved, checks, inboundEvidence, competitorEvidence, reason) {
   var obj = resolved.obj;
   var row = resolved.values;
-  return {
+  var evidence = {
     schema: "followup-decision-v1", observed_at: new Date().toISOString(), eligible: !reason, reason: reason,
     recipient: { phone: phone, stable_id: metadata.stable_id, crm_row: resolved.row,
       first_name: normalizeVideoFollowupFirstNameV19_(row[0]), initial_sent_at: metadata.initial_sent_at },
     initial_receipt: resolved.initial_receipt,
     observed: {
       h_initial_marker: String(row[7] || "").trim().slice(0, 100), k_status: String(row[10] || "").trim().toUpperCase(),
-      w_initial_at: new Date(resolved.initial_ms).toISOString(),
+      w_initial_at: new Date(resolved.observed_initial_ms === undefined ? resolved.initial_ms : resolved.observed_initial_ms).toISOString(),
       reply_or_followup_marker_present: !!String(row[8] || "").trim(),
       previous_followup_value_sha256: videoDecisionDigestV26_(String(row[23] || "")),
       manual_note_sha256: videoDecisionDigestV26_(String(row[9] || "")),
@@ -1388,6 +1428,11 @@ function videoDecisionEvidenceV26_(metadata, phone, resolved, checks, inboundEvi
       rows_sha256: videoDecisionDigestV26_(competitorEvidence), samples: competitorEvidence.slice(-4) },
     scope: "Observed CRM, inbound queue, pending-takeover guard and SMS outbox only; no claim about unseen or external controls."
   };
+  if (metadata.receipt_selection_version === "receipt-owned-selection-v1") {
+    evidence.receipt_selection_version = metadata.receipt_selection_version;
+    evidence.observed.reply_control_cutoff_at = new Date(resolved.initial_ms).toISOString();
+  }
+  return evidence;
 }
 
 // New receipt-pinned rows carry append-only evidence in the same atomic row

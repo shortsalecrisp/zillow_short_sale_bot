@@ -955,6 +955,113 @@ test("prospective receipt key reuse does not relax the current date-only W timin
   assert.equal(JSON.stringify(h.outbox.data), before);
 });
 
+function receiptIntervalFixture() {
+  const h = futureHarness();
+  const body = directedVideo("Jim", "jim");
+  body.initial_receipt = JSON.parse(JSON.stringify(h.context.checkVideoFollowupEligibilityV19_(body).initial_receipt));
+  Object.assign(body.video_speech_proof, { evidence_version: "same-take-evidence-v1",
+    evidence_contract: "same-take-evidence-required-v1", evidence_sha256: "e".repeat(64) });
+  body.receipt_selection_version = "receipt-owned-selection-v1";
+  h.row[22] = "10/13/2026";
+  return { h, body };
+}
+
+test("future marked exact receipt interval survives Python serialization, claim and send-start", () => {
+  const { h, body } = receiptIntervalFixture();
+  const payload = schedulerSerialized(body);
+  assert.equal(payload.receipt_selection_version, body.receipt_selection_version);
+  const before = h.counters();
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(payload).eligible, true);
+  assert.deepEqual(h.counters(), before);
+  assert.equal(enqueue(h, payload).ok, true);
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "future-interval-fixture" });
+  assert.equal(claim.should_send, true);
+  assert.equal(h.context.markPendingSmsSendStartedV10_(claim).ok, true);
+  for (const event of journal(h).events) {
+    assert.equal(event.decision.receipt_selection_version, body.receipt_selection_version);
+    assert.equal(event.decision.observed.w_initial_at, body.initial_receipt.sent_at);
+    assert.equal(event.decision.observed.reply_control_cutoff_at, initial);
+    const { sha256, ...unhashed } = event;
+    assert.equal(sha256, canonicalDigest(unhashed));
+  }
+  assert.equal(h.row[22], "10/13/2026");
+});
+
+test("future receipt interval rejects point-times outside its exact bounds and missing or altered markers", () => {
+  for (const w of ["2026-10-13T12:59:57.999Z", "2026-10-13T13:00:08.248Z"]) {
+    const { h, body } = receiptIntervalFixture();
+    h.row[22] = new Date(w);
+    assert.equal(enqueue(h, body).ok, false);
+  }
+  for (const change of [
+    { receipt_selection_version: "unknown" }, { initial_receipt: undefined },
+    { initial_receipt: null }, { video_job_id: "" },
+  ]) {
+    const { h, body } = receiptIntervalFixture();
+    const before = JSON.stringify(h.outbox.data);
+    assert.equal(enqueue(h, { ...body, ...change }).ok, false);
+    assert.equal(JSON.stringify(h.outbox.data), before);
+  }
+  const { h, body } = receiptIntervalFixture();
+  delete body.receipt_selection_version;
+  assert.equal(enqueue(h, body).ok, false);
+});
+
+test("future receipt interval rejects duplicate, overlapping, later, pending or uncertain initials", () => {
+  for (const mode of ["duplicate", "overlap", "later", "queued", "uncertain"]) {
+    const { h, body } = receiptIntervalFixture();
+    if (mode === "duplicate") h.outbox.data.push(h.outbox.data[1].slice());
+    else initialReceipt(h, mode === "later" ? "2026-10-14T13:00:00Z" : body.initial_receipt.sent_at, {
+      0: new Date(initial), 13: new Date(initial),
+      1: ["queued", "uncertain"].includes(mode) ? mode : "sent",
+    });
+    assert.equal(enqueue(h, body).ok, false, mode);
+  }
+});
+
+test("future receipt interval never hides an inbound between handset and receipt processing", () => {
+  for (const stage of ["enqueue", "send_start"]) {
+    const { h, body } = receiptIntervalFixture();
+    let claim;
+    if (stage === "send_start") {
+      assert.equal(enqueue(h, body).ok, true);
+      claim = h.context.claimPendingSmsSendV10_({ worker_id: "future-interval-fixture" });
+      assert.equal(claim.should_send, true);
+    }
+    h.inbound.data.push([new Date("2026-10-13T19:00:00Z"), "queued", "interval-reply", "", "interval-message",
+      body.phone, "Stop", new Date("2026-10-13T13:00:04Z")]);
+    if (stage === "enqueue") assert.equal(enqueue(h, body).ok, false);
+    else assert.equal(h.context.markPendingSmsSendStartedV10_(claim).ok, false);
+  }
+});
+
+test("future receipt interval preserves takeover, manual, H-status, phone and name guards", () => {
+  for (const mutate of [
+    h => h.setTakeover(true), h => { h.row[9] = "Spoke with agent"; },
+    h => { h.row[10] = "H"; }, h => { h.row[2] = "9542053206"; },
+    h => { h.row[0] = "James"; }, h => { h.row[28] = "TRUE"; },
+    h => { h.row[31] = "TRUE"; }, h => { h.row[13] = "handoff"; },
+  ]) {
+    const { h, body } = receiptIntervalFixture();
+    mutate(h);
+    assert.equal(enqueue(h, body).ok, false);
+  }
+});
+
+test("future receipt interval cannot upgrade a frozen old payload or reopen terminal attempts", () => {
+  for (const status of ["queued", "claimed", "send_started", "uncertain", "sent", "failed", "manual_sent"]) {
+    const { h, body } = receiptIntervalFixture();
+    h.row[22] = new Date(initial);
+    const old = { ...base, first_name: "Jim" };
+    assert.equal(enqueue(h, old).ok, true);
+    h.outbox.data.at(-1)[1] = status;
+    h.row[22] = "10/13/2026";
+    const before = JSON.stringify(h.outbox.data);
+    enqueue(h, body);
+    assert.equal(JSON.stringify(h.outbox.data), before, status);
+  }
+});
+
 test("delayed initial receipt also correlates render IDs after a CRM row shift", () => {
   const h = harness({ initialProof: false });
   delayedInitialReceipt(h, { 2: "render-initial-2-0123456789abcdef" });
