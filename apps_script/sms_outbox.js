@@ -1142,9 +1142,19 @@ function hasUniqueVideoFollowupInitialReceiptIdsV19_(row, pendingRows) {
   var requestId = String(row[2] || "").trim();
   var messageId = String(row[3] || "").trim();
   if (!requestId || !messageId) return false;
-  return (pendingRows || []).filter(function(candidate) {
-    return String(candidate[2] || "").trim() === requestId || String(candidate[3] || "").trim() === messageId;
-  }).length === 1;
+  // A corrected-phone initial can retain the old deterministic message ID.
+  // Ignore only an explicitly superseded row that never acquired a lease or
+  // attempted a send; all other collisions still make the receipt ambiguous.
+  var matches = (pendingRows || []).filter(function(candidate) {
+    if (String(candidate[2] || "").trim() !== requestId &&
+        String(candidate[3] || "").trim() !== messageId) return false;
+    var neverAttemptedSuperseded = String(candidate[1] || "").trim() === "superseded" &&
+      Number(candidate[9] || 0) === 0 &&
+      !candidate[10] && !candidate[11] && !candidate[12] && !candidate[13] && !candidate[14] &&
+      normalizePhone_(candidate[4]) !== normalizePhone_(row[4]);
+    return !neverAttemptedSuperseded;
+  });
+  return matches.length === 1 && matches[0] === row;
 }
 
 function isSameVideoFollowupInitialAttemptV19_(entry, metadata, initialMs, timeZone, pendingRows) {
