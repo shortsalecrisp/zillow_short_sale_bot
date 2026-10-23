@@ -154,11 +154,13 @@ async function findElevenLabsCallStartReceipt(params: {
   requestStartedAtUnixSecs: number;
   strictDetails?: boolean;
 }): Promise<ElevenLabsCallStartReceipt | undefined> {
+  const requestStartedAtUnixSecs = Math.floor(params.requestStartedAtUnixSecs);
+  if (!Number.isFinite(requestStartedAtUnixSecs)) throw new Error("Receipt lookup requires a finite start timestamp");
   const response = await params.client.get<ElevenLabsConversationListResponse>("/v1/convai/conversations", {
     params: {
       agent_id: params.agentId,
-      call_start_after_unix: params.requestStartedAtUnixSecs - 10,
-      call_start_before_unix: params.requestStartedAtUnixSecs + 10 * 60,
+      call_start_after_unix: requestStartedAtUnixSecs - 10,
+      call_start_before_unix: requestStartedAtUnixSecs + 10 * 60,
       page_size: MAX_CALL_START_RECEIPT_CANDIDATES,
       sort_direction: "desc",
     },

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { AxiosError } from "axios";
+import test, { after } from "node:test";
+import axios, { AxiosError } from "axios";
 
 process.env.BASE_URL = "https://example.com";
 process.env.TELNYX_API_KEY = "test";
@@ -9,7 +9,19 @@ process.env.TELNYX_CONNECTION_ID = "test";
 process.env.TELNYX_OUTBOUND_VOICE_PROFILE_ID = "test";
 process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 process.env.ELEVENLABS_AGENT_ID = "agent";
+process.env.ELEVENLABS_API_KEY = "synthetic-receipt-key";
 process.env.ELEVENLABS_AGENT_PHONE_NUMBER_ID = "phone";
+const originalAdapter = axios.defaults.adapter;
+const receiptRequests: Array<{ path?: string; params?: Record<string, unknown> }> = [];
+axios.defaults.adapter = async request => {
+  assert.equal(request.method, "get", "receipt reconciliation must never dial");
+  receiptRequests.push({ path: request.url, params: request.params });
+  const data = request.url === "/v1/convai/conversations" ? { conversations: [{ conversation_id: "conv_receipt" }] }
+    : request.url === "/v1/convai/conversations/conv_receipt" ? conversation({ status: "done" }) : undefined;
+  assert.ok(data, "Unexpected receipt request");
+  return { data, status: 200, statusText: "OK", headers: {}, config: request };
+};
+after(() => { axios.defaults.adapter = originalAdapter; });
 
 const metadata = {
   rowNumber: 5590,
@@ -63,6 +75,21 @@ test("call-start receipt classification permits one retry only for a matching de
     ),
     undefined,
   );
+});
+
+test("receipt recovery rounds ISO millisecond timestamps to integer provider query bounds", async () => {
+  const { reconcilePendingElevenLabsCallStart } = await import("../src/lib/elevenLabs");
+  const before = receiptRequests.length;
+  const receipt = await reconcilePendingElevenLabsCallStart({ requestStartedAtUnixSecs: 1_788_450_000.655,
+    metadata: { ...metadata, requestedPhone: metadata.dialedPhone, fullName: "Synthetic Agent", listingAddress: "123 Fictional Street", testMode: true } });
+  assert.equal(receipt?.conversationId, "conv_receipt");
+  const requests = receiptRequests.slice(before);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].params?.call_start_after_unix, 1_788_449_990);
+  assert.equal(requests[0].params?.call_start_before_unix, 1_788_450_600);
+  assert.ok(Number.isInteger(requests[0].params?.call_start_after_unix));
+  await assert.rejects(reconcilePendingElevenLabsCallStart({ requestStartedAtUnixSecs: NaN,
+    metadata: { ...metadata, requestedPhone: metadata.dialedPhone, fullName: "Synthetic Agent", listingAddress: "123 Fictional Street", testMode: true } }), /finite start/);
 });
 
 test("call-start receipt classification never retries a created or accepted conversation", async () => {
