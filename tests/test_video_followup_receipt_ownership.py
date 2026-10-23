@@ -228,7 +228,7 @@ class InitialReceiptOwnershipTests(unittest.TestCase):
         self.assertEqual((message, metadata["video_variant"]), (helpers.FALLBACK, "text"))
         before = self.objects.read("jobs/" + self.context["followup_key"])
         message, metadata = self.service.select(self.alias(), helpers.FALLBACK)
-        self.assertEqual((message, metadata["video_variant"]), (helpers.FALLBACK, "text"))
+        self.assertEqual((message, metadata["video_variant"]), (None, "text"))
         self.worker().tick()
         self.assertEqual(self.objects.read("jobs/" + self.context["followup_key"]), before)
         self.assertEqual(len(self.objects.list("jobs/")), 1)

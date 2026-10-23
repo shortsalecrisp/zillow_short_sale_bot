@@ -33,6 +33,7 @@ _VERIFICATION_IDENTITY_FIELDS = ("verification_method", "verification_config_sha
 _RECEIPT_IDENTITY_FIELDS = ("initial_receipt", "initial_receipt_key")
 INITIAL_RECEIPT_SCHEMA = "initial-sms-receipt-v1"
 GENERATION_OWNER_SCHEMA = "initial-sms-generation-owner-v1"
+RECEIPT_SELECTION_VERSION = "receipt-owned-selection-v1"
 MAX_RECEIPT_OWNERSHIP_JOBS = 10000
 _JOB_IDENTITY_FIELDS = ("id", "followup_key", "provider_id", "first_name", "phone",
                         "stable_id", "initial_sent_at", "script_version") + _VERIFICATION_IDENTITY_FIELDS + _RECEIPT_IDENTITY_FIELDS
@@ -444,6 +445,7 @@ class Store:
             self._claim_generation(context)
             job = self.mutate("jobs/" + key, lambda old: None if old else {
                 **context, "id": secrets.token_hex(16), "status": "prepared",
+                "receipt_selection_version": RECEIPT_SELECTION_VERSION,
                 "script_version": SCRIPT_VERSION, "created_at": iso(utcnow())})
         if (job["status"] in {"prepared", "submitted", "submitting", "processing"}
                 or (job["status"] == "ready" and not job.get("variant") and not self.has_speech_proof(job))):
@@ -500,10 +502,17 @@ class Store:
             return old
         self.mutate("budget/ledger", update)
 
-    def freeze(self, context, text, origin):
+    def freeze(self, context, text, origin, *, expected_job=None):
         context = {**context, "first_name": normalize_name(context["first_name"])}
-        job = self.prepare(context)
+        if expected_job is None:
+            self.prepare(context)
+        frozen = [False]
         def update(old):
+            frozen[0] = False
+            if expected_job is not None and (not _same_job_identity(old, expected_job)
+                    or old.get("status") not in {"prepared", "submitting", "submitted", "processing", "ready"}
+                    or old.get("receipt_selection_version") != RECEIPT_SELECTION_VERSION):
+                return None
             if old.get("variant") or old["status"] == "cancelled":
                 return None
             ready = (old["status"] == "ready" and old.get("script_version") == SCRIPT_VERSION
@@ -513,9 +522,13 @@ class Store:
             payload = ("Hey, just following up on my message from earlier.  "
                        "Heres a quick video to put a face to my text... Happy to help if you have any questions!\n"
                        f"{origin}/v/{old['id']}") if variant == "video" else text
+            frozen[0] = True
             return {**old, "status": "frozen_" + variant, "variant": variant, "message": payload,
                     "frozen_at": iso(utcnow())}
         job = self.mutate("jobs/" + context["followup_key"], update)
+        if expected_job is not None and (not frozen[0] or not _same_job_identity(job, expected_job)
+                                         or not job.get("variant")):
+            return None
         if job["status"] == "cancelled":
             return None
         return job
@@ -989,8 +1002,45 @@ class Worker:
 
 
 class Service:
-    def __init__(self, config, store, audit_ready=None):
+    def __init__(self, config, store, audit_ready=None, resolve_initial_receipt=None):
         self.config, self.store, self.audit_ready = config, store, audit_ready
+        self.resolve_initial_receipt = resolve_initial_receipt
+
+    def _receipt_owned_selection(self, context):
+        receipt = context.get("initial_receipt")
+        if receipt is None and self.resolve_initial_receipt:
+            receipt = self.resolve_initial_receipt(context)
+        if receipt is None:
+            return context, None
+        binding = initial_receipt_binding(context, receipt)
+        if any(field in context and context[field] != value for field, value in binding.items()):
+            raise InitialReceiptHold("Supplied receipt ownership is invalid")
+        owner, _ = self.store.read("generation-owners/" + binding["initial_receipt_key"])
+        if owner is None:
+            return {**context, **binding}, None
+        key = owner.get("followup_key") if isinstance(owner, dict) else None
+        if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key):
+            raise InitialReceiptHold("Stored receipt owner identity is invalid")
+        job, _ = self.store.read("jobs/" + key)
+        # Only jobs created with this selection contract opt in. Never migrate
+        # legacy jobs or turn an old terminal/frozen attempt into a catch-up send.
+        if (not isinstance(job, dict) or job.get("receipt_selection_version") != RECEIPT_SELECTION_VERSION
+                or job.get("followup_key") != key or not self.store.generation_owned(job)):
+            raise InitialReceiptHold("Receipt owner is not eligible for prospective selection")
+        if (job.get("variant") or job.get("status") not in
+                {"prepared", "submitting", "submitted", "processing", "ready"}):
+            return None, None
+        if (any(job.get(field) != context.get(field) for field in ("phone", "stable_id", "first_name"))
+                or job.get("initial_receipt") != receipt or job.get("script_version") != SCRIPT_VERSION):
+            raise InitialReceiptHold("Receipt-owned job does not match the current recipient")
+        selected = snapshot(row=context["row"], stable_id=context["stable_id"], phone=context["phone"],
+                            first_name=context["first_name"], initial_sent_at=job["initial_sent_at"],
+                            initial_receipt=receipt)
+        if selected["followup_key"] != key:
+            raise InitialReceiptHold("Receipt-owned job key is invalid")
+        if not self.config.accepts(selected):
+            return None, None
+        return selected, job
 
     def prepare(self, context):
         context = {**context, "first_name": normalize_name(context["first_name"])}
@@ -1005,7 +1055,15 @@ class Service:
         # Apps Script atomically freezes the first accepted variant under lock.
         metadata = {**context, "video_variant": "text", "video_job_id": ""}
         try:
+            selected_job = None
             job, _ = self.store.read("jobs/" + context["followup_key"])
+            if job is None:
+                selected, selected_job = self._receipt_owned_selection(context)
+                if selected is None:
+                    return None, metadata
+                context = selected
+                metadata = {**context, "video_variant": "text", "video_job_id": ""}
+                job, _ = self.store.read("jobs/" + context["followup_key"])
             if job and "initial_receipt" in job:
                 binding = initial_receipt_binding(context, job["initial_receipt"])
                 if binding["initial_receipt_key"] != job.get("initial_receipt_key"):
@@ -1020,7 +1078,10 @@ class Service:
                     self.audit_ready(context["followup_key"])
                 except Exception as exc:
                     LOG.warning("Free video audit unavailable; use text error_type=%s", type(exc).__name__)
-            job = self.store.freeze(context, fallback, self.config.origin)
+            if selected_job is None:
+                job = self.store.freeze(context, fallback, self.config.origin)
+            else:
+                job = self.store.freeze(context, fallback, self.config.origin, expected_job=selected_job)
             if job is None:
                 return None, metadata
             if job["variant"] == "video" and (job["first_name"] != context["first_name"]
@@ -1048,7 +1109,10 @@ def get_service():
         with _SERVICE_LOCK:
             if _SERVICE is None:
                 config = Config()
-                _SERVICE = Service(config, Store(GCSObjects(config.bucket)), audit_ready=_audit_ready_job)
+                eligibility = Eligibility(os.getenv("TASKER_TRANSPORT_HEALTH_URL", "").strip(),
+                                          os.getenv("SMS_CHATBOT_ALLOWED_TOKEN", "").strip())
+                _SERVICE = Service(config, Store(GCSObjects(config.bucket)), audit_ready=_audit_ready_job,
+                                   resolve_initial_receipt=eligibility.resolve_initial_receipt)
     return _SERVICE
 
 

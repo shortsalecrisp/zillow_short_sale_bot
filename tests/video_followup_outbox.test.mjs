@@ -944,6 +944,17 @@ test("handset W and a later exact-attempt receipt allow video and text without c
   }
 });
 
+test("prospective receipt key reuse does not relax the current date-only W timing hold", () => {
+  const h = harness({ initialProof: false });
+  delayedInitialReceipt(h, { 14: new Date(Date.parse(initial) + 5530) });
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(video()).eligible, true);
+  h.row[22] = "10/13/2026";
+  const before = JSON.stringify(h.outbox.data);
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(video()).eligible, false);
+  assert.equal(enqueue(h, video()).ok, false);
+  assert.equal(JSON.stringify(h.outbox.data), before);
+});
+
 test("delayed initial receipt also correlates render IDs after a CRM row shift", () => {
   const h = harness({ initialProof: false });
   delayedInitialReceipt(h, { 2: "render-initial-2-0123456789abcdef" });
