@@ -44,6 +44,13 @@ test('the single listing-agent check is answerable while other compound answers 
   assert.match(prompt, /Their confirmed listing ownership cancels an earlier ambiguous "no" or wrong-listing inference/);
 });
 
+test('existing provider coverage closes without the self-handler value pitch', () => {
+  assert.match(postIntro, /Another negotiator, attorney, specialist or provider handling the file is existing coverage, not self-handling/);
+  assert.match(postIntro, /For that statement alone say only: "Understood\. Thanks for letting me know\."/);
+  assert.match(postIntro, /Do not re-pitch, ask another question, or offer Yoni, callback or transfer/);
+  assert.match(postIntro, /Answer any substantive question or requested action first/);
+});
+
 test('explicit no-contact wording has priority over earlier callback or transfer intent', () => {
   assert.match(prompt, /"do not contact me," "do not reach out to me,"/);
   assert.match(prompt, /has priority over every pitch and action, including an earlier callback or transfer request/);

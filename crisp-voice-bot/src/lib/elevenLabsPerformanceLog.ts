@@ -191,10 +191,14 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
     const lastQuestion = lastAssistantMessage.match(/(?:^|[.!?])\s*([^.!?]+\?)\s*$/)?.[1] ?? lastAssistantMessage;
     const simpleIdentityQuestion = /\b(?:is this|am i speaking (?:with|to))\b/.test(lastQuestion) ||
       /\bare you the listing agent\b/.test(lastQuestion) || /\bis .{1,120} your listing\?/.test(lastQuestion);
+    const exactListingQuestion = /\bis .{1,120} your listing\?/.test(lastQuestion);
     const identityAnswer = /^(?:yes|yeah|yep|speaking|this is (?:he|she)|i am)[.!?]*$/.test(text) &&
       simpleIdentityQuestion && !/\band\b|\b(?:handling|want|help|may i|can i)\b/.test(lastQuestion);
+    const contextualListingAnswer = /^(?:it is|that is|it'?s mine|that'?s mine)[.!?]*$/.test(text) &&
+      exactListingQuestion;
     const directHumanQuestion = /\b(?:who is this|why are you calling|what (?:is this|are you calling) about|can you hear me|i can't hear you)\b/.test(text);
-    const newLiveIdentity = greeting || namedPickup || explicitRole || explicitAdmin || identityAnswer || nameOnly || officeGreeting || directHumanQuestion;
+    const newLiveIdentity = greeting || namedPickup || explicitRole || explicitAdmin || identityAnswer ||
+      contextualListingAnswer || nameOnly || officeGreeting || directHumanQuestion;
     const automationContinuation = inAutomation && !newLiveIdentity && (
       canned || /^(?:yes|no|okay|ok|sure)[.!?]*$/.test(text) ||
       /\b(?:can you tell me more about the details|person (?:you called|you're calling|you are calling) (?:is|was)|leave an additional message)\b/.test(text)
@@ -213,7 +217,7 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
     hasContextualHumanTurn ||= contextual || explicitRole || explicitAdmin || (officeGreeting && /\bhow (?:can|may) (?:i|we) help\b/.test(text));
     if (newLiveIdentity || contextual) inAutomation = false;
     if (explicitAdmin || differentOfficeSpeaker) gatekeeperIndexes.add(index);
-    if (explicitRole || identityAnswer || targetIdentity) targetIndexes.add(index);
+    if (explicitRole || identityAnswer || contextualListingAnswer || targetIdentity) targetIndexes.add(index);
   }
   flush(false);
 

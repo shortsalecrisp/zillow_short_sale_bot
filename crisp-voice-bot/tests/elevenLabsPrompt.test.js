@@ -57,7 +57,10 @@ test("post-intro handles an answer to the new opener without repeating the pitch
   assert.match(s, /For a neutral acknowledgment or unclear answer, ask one precise clarification/);
   assert.match(s, /You keep the listing and client relationship; Crisp can take the lender paperwork and follow-up off your plate/);
   assert.match(s, /Would that help on this file\?/);
-  assert.match(s, /Do not ask another diagnostic question or repeat this value statement/);
+  assert.match(s, /do not diagnose or repeat it/);
+  assert.match(s, /Another negotiator, attorney, specialist or provider handling the file is existing coverage, not self-handling/);
+  assert.match(s, /For that statement alone say only: "Understood\. Thanks for letting me know\."/);
+  assert.match(s, /Do not re-pitch, ask another question, or offer Yoni, callback or transfer/);
 });
 test("a question keeps the entire response answer-only even after it is answered", () => {
   const s = section("Shared turn priority");

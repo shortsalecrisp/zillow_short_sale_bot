@@ -635,6 +635,33 @@ test("a named pickup after a business name is human but its target role remains 
   assert.equal(result.flags.targetAgentAnswered, null);
 });
 
+test("a contextual it is after the exact listing question confirms the target agent", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Debra Cole" }, conversation: { transcript: [
+    { role: "user", message: "It's Deborah." },
+    { role: "agent", message: "Is 110 Huckleberry your listing?" },
+    { role: "user", message: "It is." },
+    { role: "agent", message: "Would help with lender paperwork or calls be useful for this listing?" },
+    { role: "user", message: "No." },
+  ] } });
+  assert.equal(result.contactEvidence.category, "target_agent");
+  assert.equal(result.flags.targetAgentAnswered, true);
+});
+
+test("contextual listing affirmatives do not confirm a target after other questions", async () => {
+  for (const question of [
+    "Is this a good time?",
+    "Would help with lender paperwork or calls be useful for this listing?",
+    "Is 110 Huckleberry still active?",
+  ]) {
+    const result = await measurementLog({ metadata: { fullName: "Debra Cole" }, conversation: { transcript: [
+      { role: "user", message: "Hello." },
+      { role: "agent", message: question },
+      { role: "user", message: "It is." },
+    ] } });
+    assert.notEqual(result.flags.targetAgentAnswered, true, question);
+  }
+});
+
 for (const policy of [
   "maya-service-first-recovery-20261003",
   "maya-uniform-lead-conversion-20261009",
