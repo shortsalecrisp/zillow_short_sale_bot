@@ -4,7 +4,8 @@ import { getGoogleSheetsClient } from "./googleSheets";
 import { logger } from "./logger";
 import { VOICE_OVERDUE_FALLBACK_MARKER } from "./voiceOverdueFallback";
 import { finalUnansweredPreservationReason, isFinalUnansweredVoiceResult } from "./voiceFinalUnanswered";
-import { voiceOutcomeRecoveryBlockReason, type VoiceOutcomeRecoveryProof } from "./voiceOutcomeRecovery";
+import { voiceOutcomeRecoveryBlockReason, voiceReconciliationStateHash, type VoiceOutcomeRecoveryProof } from "./voiceOutcomeRecovery";
+import { getInboundQuietGate } from "./voiceSafety";
 import {
   appendVoiceNotesValue,
   cellRange,
@@ -32,6 +33,7 @@ import {
 } from "./voiceSheet";
 
 export type VoiceLeadRowUpdates = {
+  voiceExpectedStateHash?: string;
   voiceOutcomeRecoveryProof?: VoiceOutcomeRecoveryProof;
   responseStatus?: string;
   leadStatusCode?: string;
@@ -164,6 +166,9 @@ export function buildVoiceLeadRowWrites(
   now: Date,
 ): SheetCellWrite[] {
   const writes: SheetCellWrite[] = [];
+  if (updates.voiceExpectedStateHash && voiceReconciliationStateHash(rowValues) !== updates.voiceExpectedStateHash) {
+    throw new Error("Voice reconciliation held: owning state changed");
+  }
   if (updates.voiceOutcomeRecoveryProof) {
     if (updates.voiceOutcomeRecoveryProof.expectedLeadStatusCode && updates.callResult !== "answered_not_interested") {
       throw new Error("A prior generic N may only be reconciled to a verified decline");
@@ -273,6 +278,10 @@ async function writeVoiceLeadRow(
   const now = new Date();
   const sheets = await getClient();
   const rowValues = await readVoiceLeadRow(sheets, rowNumber);
+  if (updates.voiceExpectedStateHash) {
+    const phone = String(rowValues[2] ?? "").replace(/\D/g, "");
+    if ((await getInboundQuietGate(sheets, phone, now)).blocked) throw new Error("Voice reconciliation held: inbound preference pending");
+  }
   const writes = buildVoiceLeadRowWrites(rowValues, updates, now);
   const written = fieldsWritten(writes);
 
@@ -304,7 +313,7 @@ async function writeVoiceLeadRow(
   });
 
   const finalUnanswered = isFinalUnansweredVoiceResult(updates.callResult, updates.callAttemptNumber);
-  if (updates.voiceOutcomeRecoveryProof || finalUnanswered ||
+  if (updates.voiceExpectedStateHash || updates.voiceOutcomeRecoveryProof || finalUnanswered ||
       ["answered_not_interested", "provider_destination_blocked", "contact_request_review"].includes(updates.callResult ?? "") ||
       (normalizeCallAttemptNumber(updates.callAttemptNumber) === 1 && isRetryableVoiceBotResult(updates.callResult))) {
     const verifiedRow = await readVoiceLeadRow(sheets, rowNumber);
@@ -316,7 +325,7 @@ async function writeVoiceLeadRow(
       VOICE_BOT_COL_CALL_TIME_BUCKET,
       VOICE_BOT_COL_CALL_SCHEDULED_FOR,
     ]);
-    const expectedProof = writes.filter((write) => updates.voiceOutcomeRecoveryProof || proofColumns.has(write.columnNumber));
+    const expectedProof = writes.filter((write) => updates.voiceExpectedStateHash || updates.voiceOutcomeRecoveryProof || proofColumns.has(write.columnNumber));
     if (updates.voiceOutcomeRecoveryProof &&
         parseVoiceBotDate(verifiedRow[updates.voiceOutcomeRecoveryProof.callAttemptNumber === 1 ? 32 : 39])?.toISOString() !== updates.voiceOutcomeRecoveryProof.sentAt) {
       throw new Error(`Recovery attempt timestamp changed for row ${rowNumber}`);

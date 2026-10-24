@@ -3,10 +3,20 @@ import test from "node:test";
 import {
   getPendingVoiceOutcomeRecoveries, isMatchingTerminalVoiceReceipt, voiceOutcomeRecoveryBlockReason,
   POST_CALL_FALLBACK_MAX_ATTEMPTS, shouldContinuePostCallFallback,
+  voiceReconciliationStateHash,
 } from "../src/lib/voiceOutcomeRecovery";
 
 const now = new Date("2026-10-23T14:00:00Z");
 const monitor = new Date("2026-09-30T09:46:05.445Z");
+
+test("reconciliation digest detects identity, campaign, contact, receipt and schedule races", () => {
+  const row = Array(42).fill(""); row[2] = "+12025550123";
+  const hash = voiceReconciliationStateHash(row);
+  for (const i of [0, 2, 4, 9, 10, 13, 16, 17, 19, 29, 31, 32, 33, 37, 39, 40, 41]) {
+    const changed = [...row]; changed[i] = "changed";
+    assert.notEqual(voiceReconciliationStateHash(changed), hash);
+  }
+});
 function pending() {
   const values: unknown[] = Array(42).fill("");
   values[0] = "Synthetic"; values[2] = "202-555-0123";
