@@ -25,6 +25,13 @@ process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 process.env.GOOGLE_SHEETS_SPREADSHEET_ID = "synthetic-test-sheet";
 process.env.GOOGLE_SHEETS_TAB_NAME = "SyntheticTestLeads";
 
+test("a notes-only receipt reconciliation cannot fabricate a sent timestamp", async () => {
+  const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
+  const row = Array(42).fill("");
+  const writes = buildVoiceLeadRowWrites(row, { voiceNotes: "Verified historical transport resolution" }, new Date("2026-10-24T01:40:00Z"));
+  assert.deepEqual(writes.map(w => w.columnNumber), [42]);
+});
+
 test("voicemail writeback and dispatch agree on the next-slot retry", async () => {
   const { buildVoiceLeadRowWrites } = await import("../src/lib/updateVoiceLeadRow");
   const { getVoiceBotCallCandidateFromRowValues } = await import("../src/lib/voiceQueue");

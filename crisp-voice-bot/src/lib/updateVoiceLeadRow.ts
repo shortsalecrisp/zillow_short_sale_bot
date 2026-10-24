@@ -230,7 +230,7 @@ export function buildVoiceLeadRowWrites(
     );
   } else {
     addWrite(writes, callResultColumn, "callResult", updates.callResult);
-    if (!rowValues[callSentColumn - 1]) {
+    if (updates.callResult && !rowValues[callSentColumn - 1]) {
       addWrite(writes, callSentColumn, `voice_call_${callAttemptNumber}_sent`, now.toISOString());
     }
   }
