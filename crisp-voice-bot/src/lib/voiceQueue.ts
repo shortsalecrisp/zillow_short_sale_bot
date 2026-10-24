@@ -18,6 +18,7 @@ import { logger } from "./logger";
 import { processPostCallOutcomeFromConversationId } from "./elevenLabsPostCall";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
 import { getPendingVoiceOutcomeRecoveries, isMatchingTerminalVoiceReceipt, voiceOutcomeRecoveryBlockReason } from "./voiceOutcomeRecovery";
+import { nextTransportRecoverySlot, transportFailureKind, VOICE_START_RESOLUTION_MARKER } from "./voiceTransportRecovery";
 import { getOutboundCallPause } from "./outboundCallPause";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
 import { ensureProviderStartFailureAlert } from "./providerStartFailureAlert";
@@ -1032,10 +1033,11 @@ function buildRecoveredCallMetadata(
   };
 }
 
-async function reconcileUncertainVoiceCallStarts(
+export async function reconcileUncertainVoiceCallStarts(
   sheets: sheets_v4.Sheets,
   rows: Array<{ rowNumber: number; values: unknown[] }>,
   now: Date,
+  resolveReceipt: typeof reconcilePendingElevenLabsCallStart = reconcilePendingElevenLabsCallStart,
 ): Promise<number> {
   let reconciled = 0;
   for (const row of rows) {
@@ -1052,7 +1054,7 @@ async function reconcileUncertainVoiceCallStarts(
 
     const metadata = buildRecoveredCallMetadata(row.rowNumber, row.values, marker);
     try {
-      const receipt = await reconcilePendingElevenLabsCallStart({
+      const receipt = await resolveReceipt({
         metadata,
         requestStartedAtUnixSecs: marker.requestStartedAtUnixSecs,
       });
@@ -1068,27 +1070,53 @@ async function reconcileUncertainVoiceCallStarts(
             label: "voiceNotes_receipt_recovered",
           },
         ]);
-      } else {
-        const agentTimeZone = marker.agentTimeZone || getVoiceBotAgentTimeZone(row.values);
-        if (!agentTimeZone) continue;
-        const replacementAt = getNextVoiceBotFirstAttemptWindowStart(
-          new Date(now.getTime() + 5 * 60_000),
-          agentTimeZone,
-          metadata.requestedPhone,
-        );
-        const proof = receipt?.status === "definitive_failure"
-          ? `Provider receipt ${receipt.conversationId} proves the call failed before acceptance.`
-          : "Provider conversation reconciliation completed after the grace period with no matching receipt.";
+      } else if (receipt?.status === "definitive_failure") {
+        const fresh = await sheets.spreadsheets.values.get({ spreadsheetId: config.googleSheets.sheetId,
+          range: `'${config.googleSheets.tabName.replace(/'/g, "''")}'!A${row.rowNumber}:AP${row.rowNumber}`, valueRenderOption: "UNFORMATTED_VALUE" });
+        const values = fresh.data.values?.[0] ?? [];
+        if (normalizePhoneToE164(values[2]) !== metadata.requestedPhone ||
+            buildVoiceBotListingAddress(values) !== metadata.listingAddress ||
+            values.slice(0, 2).map(normalizeString).filter(Boolean).join(" ") !== metadata.fullName ||
+            normalizeString(values[resultColumn - 1]) !== "call_start_uncertain" ||
+            parseVoiceCallStartUncertainMarker(values[41])?.callStartRequestId !== marker.callStartRequestId ||
+            normalizeString(values[10]) || [15, 16, 19, 35, 36, 37, 38].some(i => {
+              const value = normalizeMarker(values[i]); return value && !["no", "false", "0"].includes(value);
+            }) || /reply|interested|callback|handoff|opt.?out|stop|remove|information/i.test(`${values[9] ?? ""} ${values[13] ?? ""}`)) continue;
+        const agentTimeZone = getVoiceBotAgentTimeZone(values);
+        if (!agentTimeZone || (marker.agentTimeZone && marker.agentTimeZone !== agentTimeZone) ||
+            rows.some(other => other.rowNumber !== row.rowNumber && normalizePhoneToE164(other.values[2]) === metadata.requestedPhone) ||
+            (await getInboundQuietGate(sheets, metadata.requestedPhone, now)).blocked) continue;
+        const replacementAt = nextTransportRecoverySlot(now, agentTimeZone, metadata.requestedPhone, uncertainAttempt);
+        const resolution = `${VOICE_START_RESOLUTION_MARKER} ${JSON.stringify({ rowNumber: row.rowNumber,
+          phone: metadata.requestedPhone, callAttemptNumber: uncertainAttempt, callStartRequestId: marker.callStartRequestId,
+          conversationId: receipt.conversationId, status: "definitive_failure", resolvedAt: now.toISOString() })}`;
+        const proof = `Provider receipt ${receipt.conversationId} proves the call failed before acceptance.`;
+        if (transportFailureKind(receipt.conversation) === "destination_blocked") {
+          await writeCells(sheets, row.rowNumber, [
+            { columnNumber: resultColumn, value: "provider_destination_blocked", label: "callResult" },
+            { columnNumber: VOICE_BOT_COL_RESPONSE_STATUS, value: "Provider blocked destination; contact review required, no cold retry", label: "response_status" },
+            ...[VOICE_BOT_COL_CALL_ELIGIBLE, VOICE_BOT_COL_CALL_TIME_BUCKET, VOICE_BOT_COL_CALL_SCHEDULED_FOR].map(columnNumber => ({ columnNumber, value: "", label: "transport_hold" })),
+            { columnNumber: VOICE_BOT_COL_VOICE_NOTES, value: appendVoiceNotesValue(values[41], resolution), label: "voiceNotes_transport_hold" },
+          ]);
+          const after = await getVoiceBotRowByNumber(sheets, row.rowNumber);
+          if (normalizeString(after[resultColumn - 1]) !== "provider_destination_blocked" ||
+              [29, 30, 31].some(i => normalizeString(after[i])) ||
+              normalizePhoneToE164(after[2]) !== metadata.requestedPhone) throw new Error("Transport hold readback mismatch");
+          continue;
+        }
         const replacementWrites = buildVoiceSafeReplacementWrites(
           uncertainAttempt,
           replacementAt,
           appendVoiceNotesValue(
-            row.values[VOICE_BOT_COL_VOICE_NOTES - 1],
-            `${proof} Safe replacement for attempt ${uncertainAttempt} scheduled for ${formatVoiceBotDateEt(replacementAt)}.`,
+            values[VOICE_BOT_COL_VOICE_NOTES - 1],
+            `${resolution}\n${proof} Safe replacement for attempt ${uncertainAttempt} scheduled for ${formatVoiceBotDateEt(replacementAt)}.`,
           ),
         );
         await writeCells(sheets, row.rowNumber, replacementWrites);
         await verifyVoiceSafeReplacementReadback(sheets, row.rowNumber, uncertainAttempt, replacementAt);
+      } else {
+        logger.warn("No exact provider receipt; uncertain start remains held without retry", { rowNumber: row.rowNumber });
+        continue;
       }
       reconciled += 1;
     } catch (error) {

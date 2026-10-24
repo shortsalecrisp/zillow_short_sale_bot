@@ -25,8 +25,6 @@ const elevenLabsClient = axios.create({
 const CALL_START_RECEIPT_ATTEMPTS = 3;
 export const INITIAL_OPENING_POLICY = "listen_first_listing_agent_v2";
 const CALL_START_RECEIPT_DELAY_MS = 2_000;
-const CALL_START_RETRY_JITTER_MIN_MS = 1_500;
-const CALL_START_RETRY_JITTER_MAX_MS = 3_000;
 const MAX_CALL_START_RECEIPT_CANDIDATES = 100;
 
 type ElevenLabsConversationSummary = {
@@ -619,27 +617,9 @@ export async function placeElevenLabsOutboundCall(params: {
         );
       }
 
-      if (receipt?.status === "definitive_failure" && retryCount === 0) {
-        const jitterMs =
-          CALL_START_RETRY_JITTER_MIN_MS +
-          Math.floor(Math.random() * (CALL_START_RETRY_JITTER_MAX_MS - CALL_START_RETRY_JITTER_MIN_MS + 1));
-        logger.warn("ElevenLabs receipt proves call was not accepted; retrying once", {
-          rowNumber: params.metadata.rowNumber,
-          callAttemptNumber: params.metadata.callAttemptNumber,
-          callStartRequestId: attemptMetadata.callStartRequestId,
-          failedConversationId: receipt.conversationId,
-          jitterMs,
-        });
-        await delay(jitterMs);
-        return placeWithTimeoutRecovery(1);
-      }
-
-      const message = receipt
-        ? "ElevenLabs call start definitively failed after the single receipt-safe retry"
-        : "ElevenLabs call start delivery is uncertain after timeout; no automatic retry was performed";
-      const recoveryError = receipt
-        ? new Error(message)
-        : new ElevenLabsCallStartUncertainError(attemptMetadata, requestStartedAtUnixSecs);
+      // Only the normal queue can retry, after durable receipt reconciliation and fresh window checks.
+      const message = "ElevenLabs call start requires durable provider reconciliation; no immediate retry was performed";
+      const recoveryError = new ElevenLabsCallStartUncertainError(attemptMetadata, requestStartedAtUnixSecs);
       logger.error(message, {
         rowNumber: params.metadata.rowNumber,
         callAttemptNumber: params.metadata.callAttemptNumber,

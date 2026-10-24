@@ -8,6 +8,7 @@ export type VoiceOutcomeRecoveryProof = {
   previousResult: string;
   fullName: string;
   listingAddress: string;
+  expectedLeadStatusCode?: "N";
 };
 
 export function voiceOutcomeRecoveryBlockReason(row: unknown[], proof: VoiceOutcomeRecoveryProof): string | undefined {
@@ -19,6 +20,13 @@ export function voiceOutcomeRecoveryBlockReason(row: unknown[], proof: VoiceOutc
   if (parseVoiceBotDate(row[sent])?.toISOString() !== proof.sentAt) return "attempt_changed";
   if (normalizeString(row[sent + 1]) !== proof.previousResult) return "outcome_changed";
   if (proof.callAttemptNumber === 1 && parseVoiceBotDate(row[39])) return "second_attempt_already_started";
+  if (proof.expectedLeadStatusCode !== undefined) {
+    if (normalizeString(row[10]) !== proof.expectedLeadStatusCode || proof.previousResult !== "call_received_agent_hung_up") {
+      return "reconciliation_status_changed";
+    }
+    const unmarked = [...row]; unmarked[10] = "";
+    return finalUnansweredPreservationReason(unmarked);
+  }
   return finalUnansweredPreservationReason(row);
 }
 

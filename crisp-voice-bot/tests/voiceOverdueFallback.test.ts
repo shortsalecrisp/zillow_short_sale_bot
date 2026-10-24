@@ -77,6 +77,27 @@ test("an unplaced automatic second attempt expires from the approved next slot, 
   assert.equal(p.deadline.toISOString(), "2026-10-14T19:45:00.000Z");
 });
 
+test("resolved failed starts do not freeze the original two-business-day deadline forever", async () => {
+  const { getVoiceOverdueFallbackPlan } = await import("../src/lib/voiceOverdueFallback");
+  const v = row(); v[31] = "2026-10-26T13:15:00Z";
+  const pending = { rowNumber: 6000, callAttemptNumber: 1, callStartRequestId: "known-request" };
+  v[41] = 'CODEX_VOICE_SCHEDULED_NO_START_V1 {"rowNumber":6000,"callAttemptNumber":1,"candidateDueAt":"2026-10-12T13:15:00Z"}\n' +
+    'CODEX_VOICE_CALL_START_UNCERTAIN_V1 ' + JSON.stringify(pending);
+  assert.equal(getVoiceOverdueFallbackPlan(6000, v, new Date("2026-10-23T22:00:00Z")), undefined);
+  v[41] += '\nCODEX_VOICE_CALL_START_RESOLUTION_V1 ' + JSON.stringify({ ...pending, phone: v[2], conversationId: "conv_failed", status: "definitive_failure" });
+  assert.equal(getVoiceOverdueFallbackPlan(6000, v, new Date("2026-10-23T22:00:00Z"))?.deadline.toISOString(), "2026-10-14T13:45:00.000Z");
+});
+
+test("blocked initiation retains its real request history and expires as an unplaced first attempt", async () => {
+  const { getVoiceOverdueFallbackPlan } = await import("../src/lib/voiceOverdueFallback");
+  const v = row(); v[23] = "2026-10-23T12:00:00Z"; v[31] = "";
+  v[32] = "2026-10-23T13:15:18Z"; v[33] = "provider_destination_blocked";
+  const p = getVoiceOverdueFallbackPlan(6000, v, new Date("2026-10-27T13:45:00Z"))!;
+  assert.equal(p.callAttemptNumber, 1);
+  assert.equal(p.deadline.toISOString(), "2026-10-27T13:45:00.000Z");
+  assert.equal(v[32], "2026-10-23T13:15:18Z");
+});
+
 test("campaign codes, human preferences, pending starts, malformed evidence and pre-cohort rows stay protected", async () => {
   const { getVoiceOverdueFallbackPlan } = await import("../src/lib/voiceOverdueFallback");
   const now = new Date("2026-10-19T17:00:00Z");

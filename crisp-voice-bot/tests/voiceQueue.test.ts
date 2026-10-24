@@ -11,6 +11,35 @@ process.env.TEST_DESTINATION_NUMBER = "+12175550101";
 process.env.GOOGLE_SHEETS_TAB_NAME = "Sheet1";
 
 let nextFixturePhone = 21_755_50200;
+
+test("uncertain-start reconciliation never retries absent receipts or overwrites fresh protected state", async () => {
+  const q = await import("../src/lib/voiceQueue");
+  const sent = "2026-10-23T19:00:00Z", now = new Date("2026-10-23T19:21:00Z");
+  for (const mode of ["missing", "callback", "duplicate", "failed"] as const) {
+    const values = row("2026-10-22T12:00:00Z", { call1SentAt: sent, call1Result: "call_start_uncertain" });
+    const marker = { rowNumber: 7000, callAttemptNumber: 1 as const, callStartRequestId: "synthetic-request", requestStartedAtUnixSecs: Date.parse(sent)/1000,
+      scheduledWindow: "reach_afternoon_v1", agentTimeZone: "America/New_York" };
+    values[41] = q.formatVoiceCallStartUncertainMarker(marker);
+    const current = [...values]; if (mode === "callback") current[37] = "yes";
+    let writes = 0;
+    const column = (range: string) => { let n=0; for(const c of range.split("!")[1].match(/^[A-Z]+/)![0]) n=n*26+c.charCodeAt(0)-64; return n-1; };
+    const sheets = { spreadsheets: { values: {
+      get: async ({range}: {range:string}) => ({data:{values:range.includes("sms_inbound_queue") ? [] : [current]}}),
+      batchUpdate: async ({requestBody}: any) => { writes++; for(const d of requestBody.data) current[column(d.range)] = d.values[0][0]; return {data:{}}; },
+      batchGet: async ({ranges}: {ranges:string[]}) => ({data:{valueRanges:ranges.map(r=>({values:[[current[column(r)]]]}))}}),
+    } } };
+    const rows = [{rowNumber:7000,values}]; if(mode === "duplicate") rows.push({rowNumber:7001,values:[...values]});
+    const resolver = async () => mode === "missing" ? undefined : ({ status:"definitive_failure", conversationId:"conv_synthetic", conversation:{status:"failed",metadata:{call_duration_secs:0,error:{error_type:"call_initialization_error",reason:"sip request timed out"}}} });
+    await q.reconcileUncertainVoiceCallStarts(sheets as never, rows, now, resolver as never);
+    assert.equal(writes, mode === "failed" ? 1 : 0, mode);
+    if(mode === "failed") {
+      assert.equal(current[32], ""); assert.equal(current[33], "");
+      assert.equal(current[30], "voice_call_1_due");
+      assert.equal(current[31], "2026-10-26T19:00:00.000Z");
+      assert.match(String(current[41]), /CODEX_VOICE_CALL_START_RESOLUTION_V1/);
+    }
+  }
+});
 function fixturePhone(window = "reach_afternoon_v1") {
   let phone: string;
   do { phone = `+1${nextFixturePhone++}`; } while (getVoiceBotFirstAttemptWindowName(phone) !== window);

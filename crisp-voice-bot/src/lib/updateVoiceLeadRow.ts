@@ -165,6 +165,9 @@ export function buildVoiceLeadRowWrites(
 ): SheetCellWrite[] {
   const writes: SheetCellWrite[] = [];
   if (updates.voiceOutcomeRecoveryProof) {
+    if (updates.voiceOutcomeRecoveryProof.expectedLeadStatusCode && updates.callResult !== "answered_not_interested") {
+      throw new Error("A prior generic N may only be reconciled to a verified decline");
+    }
     const reason = voiceOutcomeRecoveryBlockReason(rowValues, updates.voiceOutcomeRecoveryProof);
     if (reason) throw new Error(`Voice outcome recovery held: ${reason}`);
   }
@@ -201,8 +204,11 @@ export function buildVoiceLeadRowWrites(
       `Ignored stale outcome ${updates.callResult ?? "update"}; existing terminal contact outcome retained.${updates.voiceNotes ? ` ${updates.voiceNotes}` : ""}`);
     return writes;
   }
-  if (isRetryableVoiceBotResult(updates.callResult) || updates.callResult === "answered_not_interested") {
-    const reason = finalUnansweredPreservationReason(rowValues);
+  if (isRetryableVoiceBotResult(updates.callResult) ||
+      ["answered_not_interested", "provider_destination_blocked"].includes(updates.callResult ?? "")) {
+    const preservationValues = updates.voiceOutcomeRecoveryProof?.expectedLeadStatusCode === "N" &&
+      updates.callResult === "answered_not_interested" ? rowValues.map((v, i) => i === 10 ? "" : v) : rowValues;
+    const reason = finalUnansweredPreservationReason(preservationValues);
     if (reason && reason !== "missing_first_attempt_history") {
       appendVoiceNotesWrite(writes, rowValues, `Ignored delayed retry outcome; existing contact state retained: ${reason}.`);
       return writes;
@@ -298,7 +304,8 @@ async function writeVoiceLeadRow(
   });
 
   const finalUnanswered = isFinalUnansweredVoiceResult(updates.callResult, updates.callAttemptNumber);
-  if (updates.voiceOutcomeRecoveryProof || finalUnanswered || updates.callResult === "answered_not_interested" ||
+  if (updates.voiceOutcomeRecoveryProof || finalUnanswered ||
+      ["answered_not_interested", "provider_destination_blocked", "contact_request_review"].includes(updates.callResult ?? "") ||
       (normalizeCallAttemptNumber(updates.callAttemptNumber) === 1 && isRetryableVoiceBotResult(updates.callResult))) {
     const verifiedRow = await readVoiceLeadRow(sheets, rowNumber);
     const proofColumns = new Set([

@@ -21,6 +21,7 @@ import { postSheetUpdate, requestVoiceQueueRefill } from "./sheetUpdateClient";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
 import { isFinalUnansweredVoiceResult } from "./voiceFinalUnanswered";
 import { shouldContinuePostCallFallback } from "./voiceOutcomeRecovery";
+import { transportFailureKind } from "./voiceTransportRecovery";
 import type { CallMetadata, SheetUpdateRequest } from "../types";
 
 const FIRST_CHECK_DELAY_MS = 90_000;
@@ -3064,7 +3065,11 @@ async function processPostCallOutcomeForConversationUnlocked(
       const responseStatus = buildVoiceResponseStatus(outcome);
       const outcomeSummary = `${failureReason}${summary ? ` ${summary}` : ""}`.trim();
 
-      if (invalidDestinationNumber) {
+      if (transportFailureKind(conversation) === "destination_blocked") {
+        await persistSheetUpdate({ rowNumber: metadata.rowNumber, callAttemptNumber: metadata.callAttemptNumber,
+          callResult: "provider_destination_blocked", responseStatus: "Provider blocked destination; contact review required, no cold retry",
+          voiceNotes: buildPerformanceNotes("Provider blocked destination; contact review required, no cold retry", outcomeSummary) });
+      } else if (invalidDestinationNumber) {
         await persistSheetUpdate({
           rowNumber: metadata.rowNumber,
           callAttemptNumber: metadata.callAttemptNumber,
@@ -3223,6 +3228,15 @@ async function processPostCallOutcomeForConversationUnlocked(
       rowNumber: metadata.rowNumber,
       callAttemptNumber: metadata.callAttemptNumber,
     });
+    return true;
+  }
+
+  if (hasLiveHumanAssistantExchange(conversation) &&
+      /(?:silence|no response|lost connection)/i.test(conversation.metadata?.termination_reason ?? "")) {
+    const outcome = "Live person reached; connection lost; follow-up requires review";
+    await persistSheetUpdate({ rowNumber: metadata.rowNumber, callAttemptNumber: metadata.callAttemptNumber,
+      callResult: "contact_request_review", responseStatus: outcome, voiceNotes: buildPerformanceNotes(outcome) });
+    processedConversationIds.add(conversationId);
     return true;
   }
 

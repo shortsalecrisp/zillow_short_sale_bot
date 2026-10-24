@@ -63,6 +63,56 @@ axios.defaults.adapter = async (request) => {
 after(() => assert.deepEqual(unexpectedRequests, [], "A caught evidence failure must not hide an unexpected URL"));
 const load = () => import("../src/lib/elevenLabsPostCall");
 
+test("a live caller declining a clarified help offer is not a hangup or transfer refusal", async () => {
+  const lib = await load();
+  const call = { status: "done", has_user_audio: true, transcript: [
+    { role: "user", message: "Hi. If you record your name and reason for calling, I'll see if this person is available." },
+    { role: "agent", message: "Maya with Crisp Short Sales." },
+    { role: "user", message: "Hello?" },
+    { role: "agent", message: "Is 123 Test your listing?" },
+    { role: "user", message: "Yes." },
+    { role: "agent", message: "Would help with lender paperwork or calls be useful for this listing?" },
+    { role: "user", message: "Lender? I don't understand." },
+    { role: "agent", message: "We help prepare the short-sale paperwork and follow up with the bank or mortgage company. Does that sound like something you might need for this listing?" },
+    { role: "user", message: "Oh, no, thank you." },
+    { role: "agent", message: "Understood. Goodbye." },
+  ] };
+  assert.equal(lib.shouldTreatAsNotInterested(call), true);
+  assert.equal(lib.getAuthoritativeTerminalCallResult(call, 2), "answered_not_interested");
+  const transferOnly = { ...call, transcript: [
+    { role: "agent", message: "Would you like Yoni to join this call?" }, { role: "user", message: "Oh, no, thank you." },
+  ] };
+  assert.equal(lib.shouldTreatAsNotInterested(transferOnly), false);
+});
+
+test("human listing engagement without a needs answer followed by connection loss does not generate a cold retry", async () => {
+  const lib = await load();
+  const id = "test-human-connection-loss";
+  const call = { status: "done", has_user_audio: true,
+    metadata: { termination_reason: "Ending conversation after 45 seconds of silence." },
+    transcript: [
+      { role: "user", message: "Hello, this is Cesar." },
+      { role: "agent", message: "Is 123 Test your listing?" },
+      { role: "user", message: "Can you hear me now?" },
+      { role: "agent", message: "Is 123 Test your listing?" },
+      { role: "user", message: "Yeah." },
+      { role: "agent", message: "Would help with lender paperwork..." },
+      { role: "user", message: "Can you hear me?" },
+      { role: "agent", message: "Would you like me to see if Yoni can join this call now?" },
+    ],
+    conversation_initiation_client_data: { dynamic_variables: {
+      rowNumber: 123, callAttemptNumber: 1, listingAddress: "123 Test", requestedPhone: "+12025550123", phone: "+12025550123", agentName: "Test Caller", testMode: true,
+    } },
+  };
+  conversations.set(id, call);
+  const writes: any[] = [];
+  await lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: async p => { writes.push(p); }, requestQueueRefill: async () => {} });
+  assert.equal(writes[0].callResult, "contact_request_review");
+  assert.equal(writes[0].callbackRequested, undefined);
+  assert.equal(writes[0].leadStatusCode, undefined);
+  assert.match(writes[0].responseStatus, /Live person reached/);
+});
+
 function conversation(messages: string[], summary = "The caller asked to stop calling and requested no more calls.") {
   return {
     status: "done",

@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance } from "axios";
 import { config } from "./config";
 import { logger } from "./logger";
+import { hasUnresolvedVoiceStart } from "./voiceTransportRecovery";
 import {
   buildVoiceBotDateInTimeZone,
   getNextVoiceBotFirstAttemptWindowStart,
@@ -81,14 +82,18 @@ export function getVoiceOverdueFallbackPlan(
     .test(normalizeString(values[9]))) return undefined;
   const phone = normalizePhoneToE164(values[2]), agentTimeZone = getVoiceBotAgentTimeZone(values);
   if (!phone || !agentTimeZone) return undefined;
-  const firstSent = parseVoiceBotDate(values[32]), secondSent = parseVoiceBotDate(values[39]);
-  if ((normalizeString(values[32]) && !firstSent) || (normalizeString(values[39]) && !secondSent)) return undefined;
   const firstResult = normalizeString(values[33]).toLowerCase(), secondResult = normalizeString(values[40]).toLowerCase();
+  const recordedFirstStart = parseVoiceBotDate(values[32]), secondSent = parseVoiceBotDate(values[39]);
+  if ((normalizeString(values[32]) && !recordedFirstStart) || (normalizeString(values[39]) && !secondSent)) return undefined;
+  // A provider-blocked, zero-duration initiation is unplaced work, not attempt two.
+  // The complete provider-history scan still vetoes expiry if anything was accepted.
+  const blockedBeforeConnection = firstResult === "provider_destination_blocked";
+  const firstSent = blockedBeforeConnection ? undefined : recordedFirstStart;
   if (secondSent || secondResult) return undefined;
   if (firstSent && (!firstResult || !isRetryableVoiceBotResult(firstResult))) return undefined;
-  if (!firstSent && firstResult) return undefined;
+  if (!firstSent && firstResult && !blockedBeforeConnection) return undefined;
   if (/call_start_uncertain|pending|in_progress|live_transfer_requested/.test(firstResult)) return undefined;
-  if (notes.includes("CODEX_VOICE_CALL_START_UNCERTAIN_V1")) return undefined;
+  if (hasUnresolvedVoiceStart(notes)) return undefined;
   const callAttemptNumber = firstSent ? 2 : 1;
   const followupSent = parseVoiceBotDate(values[23]);
   if (!firstSent && !followupSent) return undefined;
@@ -99,7 +104,8 @@ export function getVoiceOverdueFallbackPlan(
   const scheduled = parseVoiceBotDate(values[31]);
   const original = originalNoStartDueAt(notes, rowNumber, callAttemptNumber);
   const automaticRetry = firstSent && normalizeString(values[30]) === "voice_call_2_due";
-  const anchors = [original, automaticRetry ? policyDue : scheduled ?? policyDue].filter((d): d is Date => Boolean(d));
+  const anchors = [original, blockedBeforeConnection ? recordedFirstStart : undefined,
+    automaticRetry ? policyDue : scheduled ?? policyDue].filter((d): d is Date => Boolean(d));
   const scheduledFor = anchors.sort((a, b) => a.getTime() - b.getTime())[0];
   if (scheduledFor < config.voiceQueue.minCandidateDueAt) return undefined;
   const deadline = getVoiceMissedWindowDeadline(scheduledFor, agentTimeZone);

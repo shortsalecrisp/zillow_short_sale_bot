@@ -66,3 +66,14 @@ test("only an exact terminal non-test outbound receipt can release pending proce
     assert.equal(isMatchingTerminalVoiceReceipt(changed, 123, proof, "agent_synthetic"), false);
   }
 });
+
+test("explicit decline reconciliation can replace only the exact prior generic N/hangup state", () => {
+  const row = pending(); row.values[33] = "call_received_agent_hung_up"; row.values[10] = "N";
+  const proof = { phone: "+12025550123", callAttemptNumber: 1 as const, sentAt: "2026-10-23T13:15:22.242Z",
+    previousResult: "call_received_agent_hung_up", fullName: "Synthetic", listingAddress: "", expectedLeadStatusCode: "N" as const };
+  assert.equal(voiceOutcomeRecoveryBlockReason(row.values, proof), undefined);
+  for (const [index, value] of [[10, "G"], [10, "R"], [19, "x"], [37, "yes"], [13, "opt-out"], [33, "do_not_call"]] as Array<[number, string]>) {
+    const changed = [...row.values]; changed[index] = value;
+    assert.ok(voiceOutcomeRecoveryBlockReason(changed, proof));
+  }
+});
