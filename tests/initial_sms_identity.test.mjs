@@ -104,7 +104,12 @@ test("freeze only the volatile identity as a literal under lock before initial e
   assert.deepEqual(writes.map((event) => event.type), ["format", "value", "append"]);
   assert.ok(writes.every((event) => event.locked));
   assert.ok(writes.filter((event) => event.type !== "append").every((event) => event.row === 2 && event.column === 28));
-  assert.deepEqual(JSON.parse(h.outbox.data[1][6].split(":").slice(1).join(":")), { crm_row: 2, stable_id: stableId, mark_codex_verified: true });
+  assert.deepEqual(JSON.parse(h.outbox.data[1][6].split(":").slice(1).join(":")), {
+    crm_row: 2,
+    stable_id: stableId,
+    mark_codex_verified: true,
+    recipient_time_zone: "America/Los_Angeles",
+  });
 });
 
 test("ordinary immutable IDs retain existing initial-enqueue behavior", () => {

@@ -1232,13 +1232,13 @@ def test_sms_name_and_number_rule_does_not_match_agent_sending_buyer_contact(mon
     ) is False
 
 
-def test_sms_weekday_callback_is_handed_off_and_persisted_as_scheduled(monkeypatch):
+def test_sms_explicit_weekday_call_is_handed_off_and_persisted_as_scheduled(monkeypatch):
     module, sheet, _sender = _import_webhook_server(
         monkeypatch,
         sender_result=FakeSendResult(success=True),
     )
     client = TestClient(module.app)
-    inbound = "Feel free to reach out to me Monday. Today isn't a good day"
+    inbound = "Feel free to call me Monday. Today isn't a good day"
 
     response = client.post(
         "/sms-chatbot",
@@ -3817,7 +3817,7 @@ def test_sms_relative_duration_callback_resolves_from_inbound_timestamp(monkeypa
         monkeypatch,
         sender_result=FakeSendResult(success=True),
     )
-    inbound = "I wont have time. Can you touch base in three weeks time?"
+    inbound = "I wont have time. Can you call me in three weeks time?"
     received_at = "2026-09-09T10:33:00-04:00"
     row = {
         "human_override": "TRUE",

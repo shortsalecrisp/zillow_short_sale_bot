@@ -5510,12 +5510,13 @@ function isExplicitDayOrDateCallbackSignal_(text) {
     return false;
   }
 
+  // Do not turn a bare timestamp or a reference to when our prior text
+  // arrived into callback consent. A scheduled callback needs explicit
+  // spoken-call intent in this inbound message.
   const patterns = [
-    /\b(?:call|text|contact)\s+me\b/,
-    /\b(?:reach out|follow up|get in touch|connect|touch base)\s+(?:with\s+|to\s+)?me\b/,
-    /\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect|touch base)\b/,
-    /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b/,
-    /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect|touch base)\s+(?:with\s+|to\s+)?you\b/,
+    /\b(?:call|phone|ring)\s+me\b/,
+    /\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|phone|ring)\b/,
+    /\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|phone|ring)\s+you\b/,
     /\b(?:let['’]?s|lets|can\s+we|could\s+we|would\s+you|can\s+you)\s+(?:set\s+up\s+(?:a\s+)?time\s+to\s+)?(?:talk|speak|chat)\b/,
     /\b(?:i|we)\s+can\s+(?:talk|speak|chat)\b/,
     /\bset\s+up\s+(?:a\s+)?time\s+(?:for\s+us\s+)?to\s+(?:talk|speak|chat)\b/
@@ -5530,10 +5531,10 @@ function isSchedulingSignal_(text) {
   if (isConditionalCallSignal_(t) || /\b(?:do not|don['\u2019]?t|dont)\s+call\b/.test(t)) return false;
   const compactClock = t.match(/\b\d{3,4}\s*(?:am|pm)\b/i);
   if (compactClock && !normalizeCallbackClockText_(compactClock[0])) return false;
-  const callContext = /\b(?:call|text|phone|talk|speak|chat|reach out|contact|available|free|works for me|open house)\b/.test(t);
+  const callContext = /\b(?:call|phone|ring|talk|speak|chat)\b/.test(t);
   if (/\b(?:auction|foreclosure|sale date|closing date|deadline)\b/.test(t) &&
       !/\b(?:call|text|phone|talk|speak|chat)\b/.test(t)) return false;
-  if (!callContext && !/^(?:yes[, ]+|ok[, ]+)?(?:tomorrow|today|this afternoon|after|around|at|\d{1,2}(?::\d{2})?\s*(?:am|pm)|(?:next |this )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/.test(t)) return false;
+  if (!callContext) return false;
 
   if (isExplicitDayOrDateCallbackSignal_(t)) {
     return true;
@@ -8276,7 +8277,7 @@ function testApprovedLeadIntelligenceRules_() {
       reachOutPromiseDecision.callback_time) {
     throw new Error("Self-directed contact promise must close without a callback question or takeover");
   }
-  const weekdayCallbackText = "Feel free to reach out to me Monday. Today isn't a good day";
+  const weekdayCallbackText = "Feel free to call me Monday. Today isn't a good day";
   if (!isExplicitDayOrDateCallbackSignal_(weekdayCallbackText) ||
       !isSchedulingSignal_(weekdayCallbackText) ||
       extractScheduledCallbackReference_(weekdayCallbackText) !== "Monday") {
@@ -8285,6 +8286,24 @@ function testApprovedLeadIntelligenceRules_() {
   if (!isSchedulingSignal_("Not tomorrow, please call me Monday") ||
       extractScheduledCallbackReference_("Not tomorrow, please call me Monday") !== "Monday") {
     throw new Error("A positive weekday callback must outrank a rejected earlier day");
+  }
+  const historicalTextComplaint = "Hello! Oh I see you did text me at 4am this morning. No thank you!";
+  const historicalTextDecision = applyFastRules_(historicalTextComplaint, {});
+  if (isSchedulingSignal_(historicalTextComplaint) ||
+      !isClearNoSignal_(historicalTextComplaint) ||
+      !historicalTextDecision.matched ||
+      historicalTextDecision.lead_status !== "R" ||
+      !historicalTextDecision.conversation_done ||
+      historicalTextDecision.handoff_needed ||
+      historicalTextDecision.callback_time ||
+      historicalTextDecision.callback_requested) {
+    throw new Error("Historical SMS timestamp plus refusal must not create a callback: " + JSON.stringify(historicalTextDecision));
+  }
+  if (!isSchedulingSignal_("Please call me at 4 pm") ||
+      !isSchedulingSignal_("Can we talk tomorrow afternoon?") ||
+      isSchedulingSignal_("Please text me at 4 pm") ||
+      isSchedulingSignal_("Tomorrow at 4 pm works")) {
+    throw new Error("Scheduled callback requires explicit call or conversation intent");
   }
   if (isExplicitDayOrDateCallbackSignal_("Please don't call me Monday") ||
       isExplicitDayOrDateCallbackSignal_("I have an open house Monday") ||
@@ -8344,7 +8363,7 @@ function testApprovedLeadIntelligenceRules_() {
       isPostHandoffCallbackUpdate_({ [HEADERS.human_override]: "FALSE" }, "Monday afternoon works better")) {
     throw new Error("Post-handoff callback update regression");
   }
-  const relativeCallbackText = "I wont have time. Can you touch base in three weeks time?";
+  const relativeCallbackText = "I wont have time. Can you call me in three weeks time?";
   const relativeCallbackDecision = applyFastRules_(relativeCallbackText, postHandoffCallbackRow, "2026-09-09T10:33:00-04:00");
   if (extractScheduledCallbackReference_(relativeCallbackText) !== "In Three Weeks Time" ||
       extractScheduledCallbackReference_(relativeCallbackText, "2026-09-09T10:33:00-04:00") !== "September 30, 2026" ||

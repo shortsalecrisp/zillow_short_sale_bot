@@ -6599,12 +6599,13 @@ def _sms_is_scheduled_callback(value: Any) -> bool:
     ):
         return False
 
+    # A timestamp by itself, or a reference to when our prior text arrived,
+    # is not callback consent. Require explicit spoken-call intent before a
+    # date/time can create owner handoff state.
     patterns = [
-        r"\b(?:call|text|contact)\s+me\b",
-        r"\b(?:reach out|follow up|get in touch|connect|touch base)\s+(?:with\s+|to\s+)?me\b",
-        r"\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|text|contact|reach out|follow up|get in touch|connect|touch base)\b",
-        r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|text|contact)\s+you\b",
-        r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:reach out|follow up|get in touch|connect|touch base)\s+(?:with\s+|to\s+)?you\b",
+        r"\b(?:call|phone|ring)\s+me\b",
+        r"\b(?:feel free to|please|can you|could you|would you|you can)\s+(?:call|phone|ring)\b",
+        r"\b(?:i['’]?ll|i will|we['’]?ll|we will)\s+(?:call|phone|ring)\s+you\b",
         r"\b(?:let['’]?s|lets|can\s+we|could\s+we|would\s+you|can\s+you)\s+(?:set\s+up\s+(?:a\s+)?time\s+to\s+)?(?:talk|speak|chat)\b",
         r"\b(?:i|we)\s+can\s+(?:talk|speak|chat)\b",
         r"\bset\s+up\s+(?:a\s+)?time\s+(?:for\s+us\s+)?to\s+(?:talk|speak|chat)\b",

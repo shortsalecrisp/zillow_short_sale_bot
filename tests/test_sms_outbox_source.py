@@ -6,6 +6,16 @@ OUTBOX = (ROOT / "apps_script" / "sms_outbox.js").read_text(encoding="utf-8")
 UNIFIED = (ROOT / "apps_script" / "zz_unified_post.js").read_text(encoding="utf-8")
 
 
+def test_initial_sms_claim_and_send_start_enforce_recipient_local_8_to_8_window():
+    assert "INITIAL_SMS_LOCAL_START_HOUR_V27_ = 8" in OUTBOX
+    assert "INITIAL_SMS_LOCAL_END_HOUR_V27_ = 20" in OUTBOX
+    assert "initialSmsRecipientTimeZoneForStateV27_" in OUTBOX
+    assert "initialSmsPendingWindowDecisionV27_" in OUTBOX
+    assert "deferInitialSmsPendingRowV27_" in OUTBOX
+    assert "recipient_time_zone" in OUTBOX
+    assert "Initial SMS deferred until 8:00 AM recipient local time" in OUTBOX
+
+
 def test_v10_routes_are_registered():
     for action in (
         "enqueue_incoming_sms",

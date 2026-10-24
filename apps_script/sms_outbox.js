@@ -26,6 +26,114 @@ var SMS_INBOUND_CONTENT_REPLAY_WINDOW_MS_ = 90 * 1000;
 var SMS_HANDOFF_EVENT_REPLAY_WINDOW_MS_ = 10 * 60 * 1000;
 var SMS_HANDOFF_UPDATE_DEBOUNCE_MS_ = 20 * 60 * 1000;
 var VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = false;
+var INITIAL_SMS_LOCAL_START_HOUR_V27_ = 8;
+var INITIAL_SMS_LOCAL_END_HOUR_V27_ = 20;
+
+function formatInitialSmsDateV27_(date, timeZone, pattern) {
+  if (typeof Utilities !== "undefined" && typeof Utilities.formatDate === "function") {
+    return Utilities.formatDate(date, timeZone, pattern);
+  }
+  var options = pattern === "H"
+    ? { timeZone: timeZone, hour: "numeric", hourCycle: "h23" }
+    : { timeZone: timeZone, year: "numeric", month: "2-digit", day: "2-digit" };
+  var parts = new Intl.DateTimeFormat("en-US", options).formatToParts(date);
+  var values = {};
+  parts.forEach(function(part) { values[part.type] = part.value; });
+  if (pattern === "H") return String(Number(values.hour));
+  return [values.year, values.month, values.day].join("-");
+}
+
+function initialSmsRecipientTimeZoneForStateV27_(state) {
+  var normalized = String(state || "").trim().toUpperCase();
+  var zones = {
+    AL: "America/Chicago", AK: "America/Anchorage", AZ: "America/Phoenix", AR: "America/Chicago",
+    CA: "America/Los_Angeles", CO: "America/Denver", CT: "America/New_York", DC: "America/New_York",
+    DE: "America/New_York", FL: "America/New_York", GA: "America/New_York", HI: "Pacific/Honolulu",
+    IA: "America/Chicago", ID: "America/Denver", IL: "America/Chicago", IN: "America/Indiana/Indianapolis",
+    KS: "America/Chicago", KY: "America/New_York", LA: "America/Chicago", MA: "America/New_York",
+    MD: "America/New_York", ME: "America/New_York", MI: "America/Detroit", MN: "America/Chicago",
+    MO: "America/Chicago", MS: "America/Chicago", MT: "America/Denver", NC: "America/New_York",
+    ND: "America/Chicago", NE: "America/Chicago", NH: "America/New_York", NJ: "America/New_York",
+    NM: "America/Denver", NV: "America/Los_Angeles", NY: "America/New_York", OH: "America/New_York",
+    OK: "America/Chicago", OR: "America/Los_Angeles", PA: "America/New_York", RI: "America/New_York",
+    SC: "America/New_York", SD: "America/Chicago", TN: "America/Chicago", TX: "America/Chicago",
+    UT: "America/Denver", VA: "America/New_York", VT: "America/New_York", WA: "America/Los_Angeles",
+    WI: "America/Chicago", WV: "America/New_York", WY: "America/Denver"
+  };
+  return zones[normalized] || "";
+}
+
+function nextInitialSmsLocalDateV27_(localDate) {
+  var parts = String(localDate || "").split("-").map(Number);
+  if (parts.length !== 3 || parts.some(function(value) { return !isFinite(value); })) return "";
+  var next = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] + 1, 12, 0, 0));
+  return formatInitialSmsDateV27_(next, "UTC", "yyyy-MM-dd");
+}
+
+function initialSmsLocalWindowDecisionV27_(timeZone, at) {
+  var now = at instanceof Date ? at : new Date(at || Date.now());
+  if (!timeZone || isNaN(now.getTime())) return { eligible: false, retryable: true, reason: "Initial SMS recipient time zone is unavailable" };
+  var localHour = Number(formatInitialSmsDateV27_(now, timeZone, "H"));
+  if (localHour >= INITIAL_SMS_LOCAL_START_HOUR_V27_ && localHour < INITIAL_SMS_LOCAL_END_HOUR_V27_) {
+    return { eligible: true, time_zone: timeZone, local_hour: localHour, not_before: now };
+  }
+  var localDate = formatInitialSmsDateV27_(now, timeZone, "yyyy-MM-dd");
+  if (localHour >= INITIAL_SMS_LOCAL_END_HOUR_V27_) localDate = nextInitialSmsLocalDateV27_(localDate);
+  var notBefore = Utilities.parseDate(
+    localDate + " " + String(INITIAL_SMS_LOCAL_START_HOUR_V27_).padStart(2, "0") + ":00:00",
+    timeZone,
+    "yyyy-MM-dd HH:mm:ss"
+  );
+  return {
+    eligible: false,
+    retryable: true,
+    reason: "Initial SMS deferred until 8:00 AM recipient local time",
+    time_zone: timeZone,
+    local_hour: localHour,
+    not_before: notBefore
+  };
+}
+
+function parseInitialSmsIdentityV27_(row) {
+  var raw = String(row && row[6] || "");
+  if (raw.indexOf("__initial_outreach__:") !== 0) return null;
+  try { return JSON.parse(raw.slice("__initial_outreach__:".length)); }
+  catch (_) { return {}; }
+}
+
+function initialSmsTimeZoneForPendingRowV27_(row) {
+  var identity = parseInitialSmsIdentityV27_(row);
+  if (identity === null) return "";
+  var stored = String(identity.recipient_time_zone || "").trim();
+  if (stored) return stored;
+  var crmRow = Number(identity.crm_row || row[17] || 0);
+  if (!Number.isInteger(crmRow) || crmRow < 2) return "";
+  try {
+    var lead = getSheet_().getRange(crmRow, 1, 1, 7).getValues()[0];
+    if (normalizePhone_(lead[2]) !== normalizePhone_(row[4])) return "";
+    return initialSmsRecipientTimeZoneForStateV27_(lead[6]);
+  } catch (_) {
+    return "";
+  }
+}
+
+function initialSmsPendingWindowDecisionV27_(row, at) {
+  if (parseInitialSmsIdentityV27_(row) === null) return null;
+  return initialSmsLocalWindowDecisionV27_(initialSmsTimeZoneForPendingRowV27_(row), at);
+}
+
+function deferInitialSmsPendingRowV27_(sheet, sheetRow, row, decision) {
+  var deferred = row.slice();
+  deferred[1] = "queued";
+  deferred[8] = decision.not_before || new Date(Date.now() + 15 * 60 * 1000);
+  deferred[10] = "";
+  deferred[11] = "";
+  deferred[12] = "";
+  deferred[15] = String(decision.reason || "Initial SMS recipient local-hours check is pending");
+  deferred[18] = "";
+  sheet.getRange(sheetRow, 1, 1, SMS_PENDING_SEND_HEADERS_.length).setValues([deferred]);
+  return deferred;
+}
 
 function getHandoffEmailEventKeyV16_(row) {
   try {
@@ -498,10 +606,19 @@ function enqueueInitialSmsV13_(body, webhookRequestId) {
     }
     var frozen = freezeInitialSmsIdentityV22_(identity, phone, replyText, messageId, requestId, rows);
     if (!frozen.ok) return frozen;
+    var leadState = "";
+    try { leadState = String(getSheet_().getRange(crmRow, 7).getDisplayValue() || ""); }
+    catch (_) { return { ok: false, queued: false, retryable: true, error: "Initial SMS recipient state could not be read" }; }
+    identity.recipient_time_zone = initialSmsRecipientTimeZoneForStateV27_(leadState);
+    if (!identity.recipient_time_zone) {
+      return { ok: false, queued: false, retryable: true, error: "Initial SMS recipient time zone is unavailable" };
+    }
+    var localWindow = initialSmsLocalWindowDecisionV27_(identity.recipient_time_zone, new Date());
     var metadata = "__initial_outreach__:" + JSON.stringify(identity);
     sheet.appendRow([
       new Date(), "queued", requestId, messageId, phone, replyText, metadata,
-      "", new Date(), 0, "", "", "", "", "", "", "", crmRow, ""
+      "", localWindow.eligible ? new Date() : localWindow.not_before, 0, "", "", "", "", "",
+      localWindow.eligible ? "" : localWindow.reason, "", crmRow, ""
     ]);
     return {
       ok: true,
@@ -2537,6 +2654,11 @@ function claimPendingSmsSendV10_(body) {
       var activeLeaseUntil = new Date(rows[activeIndex][11]).getTime();
       if (activeStatus !== "claimed" || String(rows[activeIndex][18] || "") !== workerId ||
           !activeLeaseUntil || activeLeaseUntil < now) continue;
+      var activeInitialWindow = initialSmsPendingWindowDecisionV27_(rows[activeIndex], new Date(now));
+      if (activeInitialWindow && !activeInitialWindow.eligible) {
+        rows[activeIndex] = deferInitialSmsPendingRowV27_(sheet, activeIndex + 2, rows[activeIndex], activeInitialWindow);
+        continue;
+      }
       if (isOwnerVideoProbeRowV20_(rows[activeIndex]) || parseVideoFollowupMetadataV19_(rows[activeIndex]) || /^followup-video-/.test(String(rows[activeIndex][3] || ""))) {
         var activeDecision = {};
         var activeStaleReason = getPendingSmsStaleReason_(rows[activeIndex], activeDecision);
@@ -2576,6 +2698,12 @@ function claimPendingSmsSendV10_(body) {
       if (!eligible) continue;
 
       var sheetRow = i + 2;
+      var initialWindow = initialSmsPendingWindowDecisionV27_(rows[i], new Date(now));
+      if (initialWindow && !initialWindow.eligible) {
+        rows[i] = deferInitialSmsPendingRowV27_(sheet, sheetRow, rows[i], initialWindow);
+        retryableFeaturePending = true;
+        continue;
+      }
       var claimDecision = {};
       var staleReason = getPendingSmsStaleReason_(rows[i], claimDecision);
       if (staleReason === "Personalized follow-up eligibility temporarily unavailable") {
@@ -2685,6 +2813,18 @@ function markPendingSmsSendStartedV10_(body, decisionLocked) {
     throw err;
   }
   if (!match.ok) return match;
+  var initialWindow = initialSmsPendingWindowDecisionV27_(match.values, new Date());
+  if (initialWindow && !initialWindow.eligible) {
+    deferInitialSmsPendingRowV27_(match.sheet, match.row, match.values, initialWindow);
+    return {
+      ok: false,
+      should_send: false,
+      retryable: true,
+      status: "queued",
+      reason: initialWindow.reason,
+      retry_after_seconds: Math.max(60, Math.ceil(((initialWindow.not_before || new Date(Date.now() + 15 * 60 * 1000)).getTime() - Date.now()) / 1000))
+    };
+  }
   var auditedMetadata = parseVideoFollowupMetadataV19_(match.values);
   var audited = auditedMetadata && auditedMetadata.audit_contract === "followup-decision-v1";
   if (audited && !decisionLocked) {

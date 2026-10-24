@@ -18,13 +18,15 @@ def test_apps_script_preserves_explicit_weekday_callback_through_reply_cap():
 
 
 def test_apps_script_embeds_weekday_callback_positive_and_negative_controls():
-    assert "Feel free to reach out to me Monday. Today isn't a good day" in CHATBOT
+    assert "Feel free to call me Monday. Today isn't a good day" in CHATBOT
     assert "Not tomorrow, please call me Monday" in CHATBOT
     assert "Please don't call me Monday" in CHATBOT
     assert "I have an open house Monday" in CHATBOT
     assert "Call the lender Monday" in CHATBOT
     assert "Let's set up a time to talk tomorrow. Let me know what time works best for you." in CHATBOT
     assert "Let's talk to the lender tomorrow" in CHATBOT
+    assert "Oh I see you did text me at 4am this morning. No thank you!" in CHATBOT
+    assert "Scheduled callback requires explicit call or conversation intent" in CHATBOT
 
 
 def test_apps_script_captures_relative_weekend_callback_and_blocks_unscheduled_promises():
