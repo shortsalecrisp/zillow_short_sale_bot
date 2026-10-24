@@ -903,12 +903,14 @@ export function shouldTreatAsPositiveNeedsAnswer(conversation: ElevenLabsConvers
   let positive = false;
   for (let index = 0; index < messages.length; index += 1) {
     const item = messages[index];
-    if ((item.role !== "assistant" && item.role !== "agent") || typeof item.message !== "string" ||
-      !/would help with lender paperwork or calls be useful for this listing\?/i.test(item.message)) continue;
+    if ((item.role !== "assistant" && item.role !== "agent") || typeof item.message !== "string") continue;
+    const question = normalizeText(item.message);
+    if (!/\bwould help with lender paperwork or calls be useful for this listing\b/.test(question) &&
+      !/^would help with lender paperwork(?: or calls)?\b/.test(question)) continue;
     const answer = messages.slice(index + 1).find((next) =>
       next.role === "user" && typeof next.message === "string" && hasMeaningfulSpokenContent(next.message));
     positive = Boolean(answer?.message &&
-      /^(?:yes|yeah|yep|sure|it would|yes[, ]+it would|that would|absolutely|definitely)[.!? ]*$/i.test(answer.message.trim()));
+      /^(?:yes|yeah|yep|sure|it would|yes[, ]+it would|yes[, ]+(?:thanks|thank you)|that would|absolutely|definitely)[.!? ]*$/i.test(answer.message.trim()));
   }
   if (!positive) return false;
   return !liveContactMessages(conversation).some((message) =>
@@ -1187,15 +1189,18 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
       return false;
     }
     const question = normalizeText(item.message);
+    const asksWhetherServiceIsNeeded =
+      /\bdoes (?:that|this) sound like\b.{0,60}\b(?:need|useful|helpful|beneficial)\b/.test(question);
     if (
       !(
         /\b(?:would you like|do you want|do you need|anything else i can assist|specific questions|something you'd like|any part|you need|need help)\b/.test(
           question,
         ) ||
         /\bwould help with\b.*\bbe useful\b/.test(question) ||
-        /\bhelp with\b.*\bwould be useful\b/.test(question)
+        /\bhelp with\b.*\bwould be useful\b/.test(question) ||
+        asksWhetherServiceIsNeeded
       ) ||
-      !/\b(?:help|assist|details|questions|services?)\b/.test(question)
+      !/\b(?:help|assist|details|questions|services?|need)\b/.test(question)
     ) {
       return false;
     }
@@ -1204,7 +1209,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     );
     return Boolean(
       answer?.message &&
-        /^(?:uh+[, ]*)?(?:no(?:[, ]+not today)?|not right now|no[, ]+thanks|no[, ]+that['’]?s (?:okay|ok)|nothing right now)[.!?]*$/i.test(answer.message.trim()),
+        /^(?:(?:uh+|oh)[, ]*)?(?:no(?:[, ]+not today)?|not right now|no[, ]+(?:thanks|thank you)|no[, ]+that['’]?s (?:okay|ok)|nothing right now)[.!?]*$/i.test(answer.message.trim()),
     );
   });
   const declinedOpeningPermission = messages.some((item, index) => {
@@ -1342,6 +1347,10 @@ export function getAuthoritativeTerminalCallResult(
   // the recording (for example "stay on the line" or "try to connect you").
   if (shouldTreatAsRecordingArtifact(conversation)) return "agent_not_available";
   if (shouldTreatAsNotInterested(conversation)) return "answered_not_interested";
+  // A real affirmative answer to the needs question is stronger than a later
+  // silence/no-response fallback. Let the contact-outcome path preserve it as
+  // interested follow-up without inventing callback or transfer consent.
+  if (shouldTreatAsPositiveNeedsAnswer(conversation)) return undefined;
   if (shouldTreatAsGatekeeperAdminEarlyExit(conversation, expected.firstName) ||
     shouldTreatAsUnrelatedLiveBusiness(conversation, expected.firstName)) return "gatekeeper_admin_early_exit";
   if (shouldTreatAsAgentUnavailable(conversation, expected.firstName)) {
