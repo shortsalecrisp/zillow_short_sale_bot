@@ -4509,23 +4509,32 @@ function isSelfDuplicateSmsReactionArtifact_(text) {
 
 function hasShortSaleInboundContext_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  return /\b(?:short[ -]?sales?|lender|foreclosure|listing|realtor|real estate|property|homeowner|seller|buyer|mortgage|crisp short sales|fee|commission|attorney|negotiator|processor)\b/.test(t);
+  return /\b(?:short[ -]?sales?|lender|foreclosure|listing|realtor|real estate|property|homeowner|seller|buyer|mortgage|crisp short sales|fee|commission|attorney|negotiator|processor|bank|paperwork|offer|approval)\b/.test(t) ||
+    /\b(?:can|could|would|will) you (?:help|handle|process|negotiate)\b.{0,60}\b(?:file|deal|sale)\b/.test(t) ||
+    /\b(?:need|want|looking for) help\b.{0,40}\b(?:file|deal|sale)\b/.test(t);
 }
 
 function hasVerifiedSmsCampaignContext_(rowObj) {
   if (!rowObj) return false;
   if (rowObj[HEADERS.initial_text_sent] || rowObj[HEADERS.listing_address]) return true;
   return getHistoryArray_(rowObj[HEADERS.history_json]).some(function(entry) {
-    return entry && entry.role === "agent" && hasShortSaleInboundContext_(entry.text);
+    return entry && entry.role === "agent" &&
+      !isImageReactionOnly_(entry.text) && hasShortSaleInboundContext_(entry.text);
   });
+}
+
+function isImageReactionOnly_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /^(?:(?:liked|loved|laughed at|emphasized|disliked|questioned)\s+|reacted(?:\s+with\s+.{1,12})?\s+to\s+)(?:an? |the |your )?(?:image|photo|picture|video)(?:\s+of\s+(?:the|your|my)\s+(?:listing|property|home|house))?[.!\s]*$/.test(t);
 }
 
 function isUnrelatedPersonalSms_(text, rowObj) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
-  if (hasShortSaleInboundContext_(t)) return false;
   // Reaction events to images do not quote an outbound text, so the usual
-  // exact-target reaction filter cannot recognize them.
-  if (/^(?:liked|loved|laughed at|emphasized|disliked|questioned|reacted(?: with .+?)? to)\s+(?:an? |the |your )?(?:image|photo|picture|video)\b/.test(t)) return true;
+  // exact-target reaction filter cannot recognize them. Require a reaction-
+  // only payload; a question after the image is still eligible for review.
+  if (isImageReactionOnly_(t)) return true;
+  if (hasShortSaleInboundContext_(t)) return false;
   const personalTopic = /\b(?:game|team|season|playoffs?|football|basketball|baseball|soccer|coach|teammates?|school|college|graduation|family|vacation|birthday|wedding|kids?|children|photo|picture|image)\b/.test(t);
   const personalFraming = /\b(?:remember|miss|back (?:in|when)|those days|good times|we (?:played|went|were)|you (?:played|were|looked)|our (?:team|school|family))\b/.test(t);
   if (personalTopic && personalFraming) return true;

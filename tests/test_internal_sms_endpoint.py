@@ -1205,6 +1205,55 @@ def test_sms_name_and_number_request_gets_public_contact_without_handoff(monkeyp
     assert body["needs_review"] is False
 
 
+def test_render_sms_personal_relevance_guard_uses_business_context(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    unknown = {"initial_text": "", "listing_address": "", "history_json": "[]"}
+    assert module._sms_is_unrelated_personal(
+        "Remember our basketball team back in school?", unknown,
+    )
+    assert module._sms_is_unrelated_personal("Loved an image", unknown)
+    assert module._sms_is_unrelated_personal("Send me an email with more details", unknown)
+    assert not module._sms_is_unrelated_personal("Can you help with this file?", unknown)
+    assert not module._sms_is_unrelated_personal(
+        "Great seeing you at the game. Can you help with my short sale?", unknown,
+    )
+    assert module._sms_is_unrelated_personal("Liked a photo of the listing", unknown)
+    assert not module._sms_is_unrelated_personal(
+        "Liked a photo of the listing. Can you help with the bank?", unknown,
+    )
+    with_reaction = {**unknown, "history_json": json.dumps([
+        {"role": "agent", "text": "Liked a photo of the listing"},
+    ])}
+    assert module._sms_is_unrelated_personal("Sounds good", with_reaction)
+    known = {**unknown, "listing_address": "123 Example Lane"}
+    assert not module._sms_is_unrelated_personal("Send me an email with more details", known)
+
+
+def test_render_sms_personal_message_does_not_enter_sales_queue(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    response = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token", "action": "incoming_sms",
+            "phone": "202-555-0100",
+            "message": "Remember our basketball team back in school?",
+            "message_id": "personal-synthetic-1",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["should_reply"] is False
+    assert body["handoff_needed"] is False
+    assert body["reason"] == "Unrelated personal message; no sales action"
+    assert sender.calls == []
+    assert not any(row[CHATBOT_HEADERS.index("mailshake_status")] == "Y"
+                   for row in sheet.rows.values() if len(row) == len(CHATBOT_HEADERS))
+
+
 def test_sms_third_person_self_reference_fails_closed(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch, sender_result={"ok": True}

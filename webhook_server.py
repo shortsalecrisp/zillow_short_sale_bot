@@ -5109,6 +5109,60 @@ def _sms_is_reaction_to_last_outbound(inbound_text: Any, row_obj: Dict[str, str]
     return payload in {last_outbound, f"{last_outbound} to {last_outbound}"}
 
 
+def _sms_is_image_reaction_only(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(re.fullmatch(
+        r"(?:(?:liked|loved|laughed at|emphasized|disliked|questioned)\s+|"
+        r"reacted(?:\s+with\s+.{1,12})?\s+to\s+)"
+        r"(?:an? |the |your )?(?:image|photo|picture|video)"
+        r"(?:\s+of\s+(?:the|your|my)\s+(?:listing|property|home|house))?[.!\s]*",
+        text,
+    ))
+
+
+def _sms_has_business_inbound_context(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    return bool(
+        re.search(
+            r"\b(?:short[ -]?sales?|lender|foreclosure|listing|realtor|real estate|"
+            r"property|homeowner|seller|buyer|mortgage|crisp short sales|fee|commission|"
+            r"attorney|negotiator|processor|bank|paperwork|offer|approval)\b",
+            text,
+        )
+        or re.search(r"\b(?:can|could|would|will) you (?:help|handle|process|negotiate)\b.{0,60}\b(?:file|deal|sale)\b", text)
+        or re.search(r"\b(?:need|want|looking for) help\b.{0,40}\b(?:file|deal|sale)\b", text)
+    )
+
+
+def _sms_is_unrelated_personal(value: Any, row_obj: Dict[str, str]) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if _sms_is_image_reaction_only(text):
+        return True
+    if _sms_has_business_inbound_context(text):
+        return False
+    personal_topic = re.search(
+        r"\b(?:game|team|season|playoffs?|football|basketball|baseball|soccer|coach|"
+        r"teammates?|school|college|graduation|family|vacation|birthday|wedding|"
+        r"kids?|children|photo|picture|image)\b", text,
+    )
+    personal_framing = re.search(
+        r"\b(?:remember|miss|back (?:in|when)|those days|good times|"
+        r"we (?:played|went|were)|you (?:played|were|looked)|our (?:team|school|family))\b",
+        text,
+    )
+    if personal_topic and personal_framing:
+        return True
+    if row_obj.get("initial_text") or row_obj.get("listing_address"):
+        return False
+    return not any(
+        entry.get("role") == "agent"
+        and not _sms_is_image_reaction_only(entry.get("text"))
+        and _sms_has_business_inbound_context(entry.get("text"))
+        for entry in _sms_history_array(row_obj.get("history_json"))
+        if isinstance(entry, dict)
+    )
+
+
 def _sms_is_self_duplicate_reaction_artifact(value: Any) -> bool:
     raw = _sms_normalize_whitespace(
         re.sub(r"[\u2009\u200a\u200b\u200c\u200d\u2060\ufeff]", " ", str(value or ""))
@@ -8794,6 +8848,29 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
                 else "Opt-out retained; renewed-interest owner alert recorded"
             ),
             "row": row_idx,
+        })
+
+    manual_takeover = (
+        str(row_obj.get("human_override") or "").upper() == "TRUE"
+        or str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
+        or str(row_obj.get("ai_state") or "").lower() == "handoff"
+    )
+    automated_stop_instruction = bool(re.search(
+        r"\breply\s+stop\s+to\s+(?:end|unsubscribe|cancel|opt out)\b",
+        inbound_text, re.IGNORECASE,
+    ))
+    if (not manual_takeover and not _sms_is_opt_out(inbound_text)
+            and not automated_stop_instruction
+            and _sms_is_unrelated_personal(inbound_text, row_obj)):
+        _sms_append_debug(
+            "incoming_sms_unrelated_personal_suppressed",
+            {"request_id": request_id, "phone": phone_raw, "message_id": message_id,
+             "reason": "No short-sale context in personal inbound"},
+        )
+        return _sms_normalize_tasker_payload({
+            "ok": True, "should_reply": False, "reply_text": "", "block_reply": True,
+            "handoff_needed": False, "needs_review": False,
+            "reason": "Unrelated personal message; no sales action", "row": row_idx,
         })
 
     if not _sms_is_opt_out(inbound_text):
