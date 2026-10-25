@@ -3778,6 +3778,7 @@ function isPresentServiceInterestSignal_(text) {
       /\b(?:interested|open)\s+(?:in|to)\s+(?:hearing|learning)\s+more\b/.test(t)) {
     return true;
   }
+  if (/\b(?:our|my) team\s+(?:would like|wants?|is interested|is ready)\s+to\s+work\s+with\s+you\b/.test(t)) return true;
   const interest = /\b(?:i(?:['\u2019]?m| am)?|we(?:['\u2019]?re| are)?)\s+(?:am\s+|are\s+)?(?:interested|open to|ready to|would like|want|need|could use)\b/.test(t);
   const service = /\b(?:your services?|crisp(?: short sales?)?|short sale help|help with (?:this|the|my|our) (?:file|listing|short sale)|work with you|learn more|more details|getting more details|see how you (?:can|could) help)\b/.test(t);
   return interest && service;
@@ -4535,6 +4536,10 @@ function isUnrelatedPersonalSms_(text, rowObj) {
   // only payload; a question after the image is still eligible for review.
   if (isImageReactionOnly_(t)) return true;
   if (hasShortSaleInboundContext_(t)) return false;
+  // "Our team" can also describe an agent's brokerage. In an established
+  // campaign, an explicit offer to work together is a service inquiry.
+  if (hasVerifiedSmsCampaignContext_(rowObj) &&
+      /\b(?:would like|want|interested|ready|looking)\s+to\s+work\s+with\s+you\b/.test(t)) return false;
   const personalTopic = /\b(?:game|team|season|playoffs?|football|basketball|baseball|soccer|coach|teammates?|school|college|graduation|family|vacation|birthday|wedding|kids?|children|photo|picture|image)\b/.test(t);
   const personalFraming = /\b(?:remember|miss|back (?:in|when)|those days|good times|we (?:played|went|were)|you (?:played|were|looked)|our (?:team|school|family))\b/.test(t);
   if (personalTopic && personalFraming) return true;

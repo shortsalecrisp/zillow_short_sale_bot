@@ -1229,6 +1229,16 @@ def test_render_sms_personal_relevance_guard_uses_business_context(monkeypatch):
     assert module._sms_is_unrelated_personal("Sounds good", with_reaction)
     known = {**unknown, "listing_address": "123 Example Lane"}
     assert not module._sms_is_unrelated_personal("Send me an email with more details", known)
+    campaign_only = {**unknown, "initial_text_sent": "I help with short sales."}
+    assert not module._sms_is_unrelated_personal("Send me an email with more details", campaign_only)
+    assert not module._sms_is_unrelated_personal("Our team would like to work with you", campaign_only)
+    assert module._sms_is_present_service_interest("Our team would like to work with you")
+    assert module._sms_is_unrelated_personal("Remember our team from the basketball season?", campaign_only)
+    assert module._sms_is_unrelated_personal("Our team would like to work with you", unknown)
+    prior_business = {**unknown, "history_json": json.dumps([
+        {"role": "agent", "text": "I have a short sale question."},
+    ])}
+    assert not module._sms_is_unrelated_personal("Our team would like to work with you", prior_business)
 
 
 def test_render_sms_personal_message_does_not_enter_sales_queue(monkeypatch):
