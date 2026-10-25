@@ -1295,6 +1295,48 @@ def test_render_sms_manual_takeover_image_reactions_do_not_alert(monkeypatch):
     assert mixed["handoff_needed"] is True
 
 
+def test_render_sms_manual_takeover_text_reactions_do_not_alert(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][10] = "R"
+    client = TestClient(module.app)
+    for index, message in enumerate((
+        "Reacted to Remember that old game? Good times!",
+        "Reacted to Forget that game! Guess we grew up.",
+        "Reacted with heart to That photo brought back memories.",
+        "Reacted to Can you call about the listing?",
+    )):
+        body = client.post("/sms-chatbot", data={
+            "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+            "message": message, "message_id": f"text-reaction-{index}",
+        }).json()
+        assert body["reaction"] is True
+        assert body["should_reply"] is False
+        assert body["handoff_needed"] is False
+    assert sender.calls == []
+    assert sheet.rows[2][19] == "TRUE"
+    assert sheet.rows[2][10] == "R"
+
+    mixed = client.post("/sms-chatbot", data={
+        "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+        "message": 'Reacted to "Good to hear from you." Can you call about my short sale?',
+        "message_id": "text-reaction-question",
+    }).json()
+    assert mixed.get("reaction") is not True
+    assert mixed["handoff_needed"] is True
+    opt_out = client.post("/sms-chatbot", data={
+        "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+        "message": 'Reacted to "Thanks for the update." STOP',
+        "message_id": "text-reaction-stop",
+    }).json()
+    assert opt_out.get("reaction") is not True
+    assert opt_out["lead_status"] == "R"
+
+
 def test_sms_third_person_self_reference_fails_closed(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch, sender_result={"ok": True}
