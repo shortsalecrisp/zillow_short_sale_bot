@@ -772,6 +772,24 @@ function handleIncomingSmsCore_(body) {
     };
   }
 
+  // A phone match alone is not evidence that a personal text belongs to the
+  // short-sale campaign. Run this before the reply cap and intent rules: both
+  // otherwise turn unrelated conversation into an interested lead.
+  if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE" &&
+      !isManualFollowupLocked_(currentRowObj) &&
+      isUnrelatedPersonalSms_(inboundText, currentRowObj)) {
+    appendSmsDebugLog_("incoming_sms_unrelated_personal_suppressed", {
+      phone: phoneRaw, message_id: messageId,
+      reason: "No short-sale context in personal inbound"
+    });
+    return {
+      ok: true, should_reply: false, reply_text: "", block_reply: true,
+      handoff_needed: false, needs_review: false,
+      reason: "Unrelated personal message; no sales action"
+    };
+  }
+
+
   if (isAnsweredRepeatedInboundQuestion_(currentRowObj, inboundText)) {
     if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE" ||
         isManualFollowupLocked_(currentRowObj)) {
@@ -4487,6 +4505,31 @@ function isSelfDuplicateSmsReactionArtifact_(text) {
     const second = payload.slice(index + 4).trim();
     return first.length >= 12 && first.split(/\s+/).length >= 3 && first === second;
   });
+}
+
+function hasShortSaleInboundContext_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  return /\b(?:short[ -]?sales?|lender|foreclosure|listing|realtor|real estate|property|homeowner|seller|buyer|mortgage|crisp short sales|fee|commission|attorney|negotiator|processor)\b/.test(t);
+}
+
+function hasVerifiedSmsCampaignContext_(rowObj) {
+  if (!rowObj) return false;
+  if (rowObj[HEADERS.initial_text_sent] || rowObj[HEADERS.listing_address]) return true;
+  return getHistoryArray_(rowObj[HEADERS.history_json]).some(function(entry) {
+    return entry && entry.role === "agent" && hasShortSaleInboundContext_(entry.text);
+  });
+}
+
+function isUnrelatedPersonalSms_(text, rowObj) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (hasShortSaleInboundContext_(t)) return false;
+  // Reaction events to images do not quote an outbound text, so the usual
+  // exact-target reaction filter cannot recognize them.
+  if (/^(?:liked|loved|laughed at|emphasized|disliked|questioned|reacted(?: with .+?)? to)\s+(?:an? |the |your )?(?:image|photo|picture|video)\b/.test(t)) return true;
+  const personalTopic = /\b(?:game|team|season|playoffs?|football|basketball|baseball|soccer|coach|teammates?|school|college|graduation|family|vacation|birthday|wedding|kids?|children|photo|picture|image)\b/.test(t);
+  const personalFraming = /\b(?:remember|miss|back (?:in|when)|those days|good times|we (?:played|went|were)|you (?:played|were|looked)|our (?:team|school|family))\b/.test(t);
+  if (personalTopic && personalFraming) return true;
+  return !hasVerifiedSmsCampaignContext_(rowObj);
 }
 
 function isFinalCourtesyReply_(text) {
