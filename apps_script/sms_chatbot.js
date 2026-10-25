@@ -7198,8 +7198,36 @@ function approvePendingInfoEmail_(approvalId) {
     };
   }
 
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    return approvePendingInfoEmailWithLock_(id);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function approvePendingInfoEmailWithLock_(id) {
   const props = PropertiesService.getScriptProperties();
   const key = "INFO_EMAIL_PENDING_" + id;
+  const completedKey = "INFO_EMAIL_COMPLETED_" + id;
+  const completedRaw = props.getProperty(completedKey);
+  if (completedRaw) {
+    try {
+      const completed = JSON.parse(completedRaw);
+      if (completed && completed.sent_at) {
+        return {
+          ok: true,
+          already_sent: true,
+          message: "Info email sent. This approval was already completed.",
+          to: completed.to || "",
+          subject: completed.subject || "",
+          backend: completed.backend || {}
+        };
+      }
+    } catch (_) {}
+  }
+
   const raw = props.getProperty(key);
   if (!raw) {
     return {
@@ -7220,12 +7248,19 @@ function approvePendingInfoEmail_(approvalId) {
   }
 
   const sendResult = sendAgentInfoEmail_(data);
+  const subject = buildAgentInfoEmailSubject_(data);
+  props.setProperty(completedKey, JSON.stringify({
+    sent_at: new Date().toISOString(),
+    to: data.to || "",
+    subject: subject,
+    backend: sendResult || {}
+  }));
   props.deleteProperty(key);
   return {
     ok: true,
     message: "Info email sent.",
     to: data.to || "",
-    subject: buildAgentInfoEmailSubject_(data),
+    subject: subject,
     backend: sendResult
   };
 }

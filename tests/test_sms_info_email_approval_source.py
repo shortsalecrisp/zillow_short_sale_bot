@@ -57,6 +57,14 @@ def test_info_email_uses_mobile_safe_approval_gateway():
     assert '"&id=" + encodeURIComponent(approvalId)' in CHATBOT
 
 
+def test_completed_info_email_approval_is_replay_safe():
+    assert "LockService.getScriptLock()" in CHATBOT
+    assert 'const completedKey = "INFO_EMAIL_COMPLETED_" + id;' in CHATBOT
+    assert "props.setProperty(completedKey, JSON.stringify({" in CHATBOT
+    assert "already_sent: true" in CHATBOT
+    assert "This approval was already completed." in CHATBOT
+
+
 def test_info_email_rehydrates_personalization_from_crm():
     assert "function hydrateInfoEmailDataFromSheet_(data)" in CHATBOT
     assert "const hydratedData = hydrateInfoEmailDataFromSheet_(data);" in CHATBOT
