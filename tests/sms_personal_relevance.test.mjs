@@ -100,3 +100,31 @@ test('mixed image reaction and business question still reaches manual owner', ()
   assert.equal(result.should_reply, false);
   assert.equal(h.effects.some(effect => effect.type === 'handoff'), true);
 });
+
+test('text reactions to personal messages do not create manual owner alerts', () => {
+  const h = smsHarness({human_override: 'TRUE', ai_state: 'handoff', handoff_flag: 'TRUE', mailshake_status: 'R'});
+  for (const message of ['Reacted to Remember that old game? Good times!',
+    'Reacted to Forget that game! Guess we grew up.',
+    'Reacted with ❤️ to That photo brought back memories.',
+    'Reacted to Can you call about the listing?']) {
+    const result = h.incoming(message);
+    assert.equal(result.reaction, true);
+    assert.equal(result.should_reply, false);
+    assert.equal(result.handoff_needed, false);
+  }
+  assert.equal(h.effects.length, 0);
+  assert.equal(h.state.mailshake_status, 'R');
+  assert.equal(h.state.human_override, 'TRUE');
+});
+
+test('a new request or opt-out appended to a text reaction is not discarded', () => {
+  const h = smsHarness({human_override: 'TRUE', ai_state: 'handoff', handoff_flag: 'TRUE', mailshake_status: 'Y'});
+  const question = h.incoming('Reacted to "Good to hear from you." Can you call about my short sale?');
+  assert.notEqual(question.reaction, true);
+  assert.equal(question.should_reply, false);
+  assert.equal(h.effects.some(effect => effect.type === 'handoff'), true);
+  assert.notEqual(h.incoming('Reacted to the photo, can you help with my listing?').reaction, true);
+  const optOut = h.incoming('Reacted to "Thanks for the update." STOP');
+  assert.notEqual(optOut.reaction, true);
+  assert.equal(optOut.lead_status, 'R');
+});

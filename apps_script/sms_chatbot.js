@@ -606,7 +606,7 @@ function handleIncomingSmsCore_(body) {
     }
 
     if (isSmsReactionToLastOutbound_(inboundText, rowObj) || isSelfDuplicateSmsReactionArtifact_(inboundText) ||
-        isImageReactionOnly_(inboundText)) {
+        isImageReactionOnly_(inboundText) || isSmsTextReactionOnly_(inboundText)) {
       updateRowFields_(sheet, row, {
         [HEADERS.last_inbound_text]: normalizeHandledInboundText_(inboundText),
         [HEADERS.last_inbound_at]: receivedAt,
@@ -2184,6 +2184,8 @@ function buildSpanishCapabilityReply_() {
 
 function isOptOutSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
+
+  if (/^reacted(?:\s+with\s+.{1,12})?\s+to\s+.+(?:[.!?,;:\u2014-]\s+|["”]\s+|\s+and\s+)(?:stop|unsubscribe|opt\s+out)[.!?]*$/.test(t)) return true;
 
   const patterns = [
     /^stop[.!?]*$/,
@@ -4528,6 +4530,14 @@ function hasVerifiedSmsCampaignContext_(rowObj) {
 function isImageReactionOnly_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
   return /^(?:(?:liked|loved|laughed at|emphasized|disliked|questioned)\s+|reacted(?:\s+with\s+.{1,12})?\s+to\s+)(?:an? |the |your )?(?:image|photo|picture|video)(?:\s+of\s+(?:the|your|my)\s+(?:listing|property|home|house))?[.!\s]*$/.test(t);
+}
+
+function isSmsTextReactionOnly_(text) {
+  const t = normalizeWhitespace_(String(text || ""));
+  if (!/^reacted(?:\s+with\s+.{1,12})?\s+to\s+\S/i.test(t)) return false;
+  // A transport reaction can quote arbitrary earlier text. Preserve an
+  // independent request or opt-out appended after that quoted target.
+  return !/(?:[.!?,;:\u2014-]\s+|["”]\s+|\s+and\s+)(?:can|could|would|will|please|send|tell|what|how|when|where|is|are|do|does|i\s+(?:want|need|have)|stop\b|unsubscribe\b|opt\s+out\b)\b/i.test(t);
 }
 
 function isUnrelatedPersonalSms_(text, rowObj) {

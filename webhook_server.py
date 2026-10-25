@@ -5120,6 +5120,19 @@ def _sms_is_image_reaction_only(value: Any) -> bool:
     ))
 
 
+def _sms_is_text_reaction_only(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value)
+    if not re.match(r"^reacted(?:\s+with\s+.{1,12})?\s+to\s+\S", text, re.IGNORECASE):
+        return False
+    # A transport reaction can quote arbitrary earlier text. Preserve an
+    # independent request or opt-out appended after that quoted target.
+    return not bool(re.search(
+        r'(?:[.!?,;:\u2014-]\s+|["”]\s+|\s+and\s+)(?:can|could|would|will|please|send|tell|what|how|when|where|'
+        r'is|are|do|does|i\s+(?:want|need|have)|stop\b|unsubscribe\b|opt\s+out\b)\b',
+        text, re.IGNORECASE,
+    ))
+
+
 def _sms_has_business_inbound_context(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     return bool(
@@ -6221,6 +6234,11 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
 
 def _sms_is_opt_out(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
+    if re.fullmatch(
+        r'^reacted(?:\s+with\s+.{1,12})?\s+to\s+.+(?:[.!?,;:\u2014-]\s+|["”]\s+|\s+and\s+)(?:stop|unsubscribe|opt\s+out)[.!?]*',
+        text,
+    ):
+        return True
     patterns = [
         r"^stop[.!?]*$",
         r"^stop(?:\s*[.!?,;:\u2014-]+\s*|\s+(?!by\b|in\b|at\b|over\b|to\b)).+",
@@ -8746,7 +8764,8 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
 
     if (_sms_is_reaction_to_last_outbound(inbound_text, row_obj)
             or _sms_is_self_duplicate_reaction_artifact(inbound_text)
-            or _sms_is_image_reaction_only(inbound_text)):
+            or _sms_is_image_reaction_only(inbound_text)
+            or _sms_is_text_reaction_only(inbound_text)):
         result = _sms_normalize_tasker_payload(
             {
                 "ok": True,
