@@ -605,7 +605,8 @@ function handleIncomingSmsCore_(body) {
       };
     }
 
-    if (isSmsReactionToLastOutbound_(inboundText, rowObj) || isSelfDuplicateSmsReactionArtifact_(inboundText)) {
+    if (isSmsReactionToLastOutbound_(inboundText, rowObj) || isSelfDuplicateSmsReactionArtifact_(inboundText) ||
+        isImageReactionOnly_(inboundText)) {
       updateRowFields_(sheet, row, {
         [HEADERS.last_inbound_text]: normalizeHandledInboundText_(inboundText),
         [HEADERS.last_inbound_at]: receivedAt,

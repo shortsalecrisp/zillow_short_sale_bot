@@ -8744,12 +8744,16 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     ws, headers, rows = _sms_read_leads_sheet()
     row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
 
-    if _sms_is_reaction_to_last_outbound(inbound_text, row_obj) or _sms_is_self_duplicate_reaction_artifact(inbound_text):
+    if (_sms_is_reaction_to_last_outbound(inbound_text, row_obj)
+            or _sms_is_self_duplicate_reaction_artifact(inbound_text)
+            or _sms_is_image_reaction_only(inbound_text)):
         result = _sms_normalize_tasker_payload(
             {
                 "ok": True,
                 "reaction": True,
                 "should_reply": False,
+                "handoff_needed": False,
+                "needs_review": False,
                 "reason": "Reaction-only artifact ignored",
             }
         )
