@@ -79,3 +79,24 @@ test('opt-out and manual takeover remain active', () => {
   assert.equal(result.should_reply, false);
   assert.notEqual(result.reason, 'Unrelated personal message; no sales action');
 });
+
+test('image-only reactions during manual takeover do not alert the owner', () => {
+  const h = smsHarness({human_override: 'TRUE', ai_state: 'handoff', handoff_flag: 'TRUE', mailshake_status: 'Y'});
+  for (const message of ['Reacted to an image', 'Liked a photo of the listing']) {
+    const result = h.incoming(message);
+    assert.equal(result.reaction, true);
+    assert.equal(result.should_reply, false);
+    assert.equal(result.handoff_needed, false);
+  }
+  assert.equal(h.effects.length, 0);
+  assert.equal(h.state.human_override, 'TRUE');
+  assert.equal(h.state.mailshake_status, 'Y');
+});
+
+test('mixed image reaction and business question still reaches manual owner', () => {
+  const h = smsHarness({human_override: 'TRUE', ai_state: 'handoff', handoff_flag: 'TRUE', mailshake_status: 'Y'});
+  const result = h.incoming('Reacted to an image. Can you call about the short sale?');
+  assert.notEqual(result.reaction, true);
+  assert.equal(result.should_reply, false);
+  assert.equal(h.effects.some(effect => effect.type === 'handoff'), true);
+});

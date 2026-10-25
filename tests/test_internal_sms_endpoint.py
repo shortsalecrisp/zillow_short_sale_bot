@@ -1264,6 +1264,37 @@ def test_render_sms_personal_message_does_not_enter_sales_queue(monkeypatch):
                    for row in sheet.rows.values() if len(row) == len(CHATBOT_HEADERS))
 
 
+def test_render_sms_manual_takeover_image_reactions_do_not_alert(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][10] = "Y"
+    client = TestClient(module.app)
+    for index, message in enumerate(("Reacted to an image", "Liked a photo of the listing")):
+        body = client.post("/sms-chatbot", data={
+            "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+            "message": message, "message_id": f"image-reaction-{index}",
+        }).json()
+        assert body["reaction"] is True
+        assert body["should_reply"] is False
+        assert body["handoff_needed"] is False
+    assert sender.calls == []
+    assert sheet.rows[2][19] == "TRUE"
+    assert sheet.rows[2][10] == "Y"
+
+    mixed = client.post("/sms-chatbot", data={
+        "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+        "message": "Reacted to an image. Can you call about the short sale?",
+        "message_id": "image-reaction-question",
+    }).json()
+    assert mixed.get("reaction") is not True
+    assert mixed["should_reply"] is False
+    assert mixed["handoff_needed"] is True
+
+
 def test_sms_third_person_self_reference_fails_closed(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch, sender_result={"ok": True}
