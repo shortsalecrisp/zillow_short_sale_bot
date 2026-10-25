@@ -2185,7 +2185,7 @@ function buildSpanishCapabilityReply_() {
 function isOptOutSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
 
-  if (/^reacted(?:\s+with\s+.{1,12})?\s+to\s+.+(?:[.!?]\s+|["”]\s+)(?:stop|unsubscribe|opt\s+out)[.!?]*$/.test(t)) return true;
+  if (/^reacted(?:\s+with\s+.{1,12})?\s+to\s+.+(?:[.!?,;:\u2014-]\s+|["”]\s+|\s+and\s+)(?:stop|unsubscribe|opt\s+out)[.!?]*$/.test(t)) return true;
 
   const patterns = [
     /^stop[.!?]*$/,
@@ -4537,7 +4537,7 @@ function isSmsTextReactionOnly_(text) {
   if (!/^reacted(?:\s+with\s+.{1,12})?\s+to\s+\S/i.test(t)) return false;
   // A transport reaction can quote arbitrary earlier text. Preserve an
   // independent request or opt-out appended after that quoted target.
-  return !/(?:[.!?]\s+|["”]\s+)(?:can|could|would|will|please|send|tell|what|how|when|where|is|are|do|does|i\s+(?:want|need|have)|stop\b|unsubscribe\b|opt\s+out\b)\b/i.test(t);
+  return !/(?:[.!?,;:\u2014-]\s+|["”]\s+|\s+and\s+)(?:can|could|would|will|please|send|tell|what|how|when|where|is|are|do|does|i\s+(?:want|need|have)|stop\b|unsubscribe\b|opt\s+out\b)\b/i.test(t);
 }
 
 function isUnrelatedPersonalSms_(text, rowObj) {

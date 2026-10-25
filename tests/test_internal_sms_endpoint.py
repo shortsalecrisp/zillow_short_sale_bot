@@ -1328,6 +1328,12 @@ def test_render_sms_manual_takeover_text_reactions_do_not_alert(monkeypatch):
     }).json()
     assert mixed.get("reaction") is not True
     assert mixed["handoff_needed"] is True
+    comma_question = client.post("/sms-chatbot", data={
+        "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+        "message": "Reacted to the photo, can you help with my listing?",
+        "message_id": "text-reaction-comma-question",
+    }).json()
+    assert comma_question.get("reaction") is not True
     opt_out = client.post("/sms-chatbot", data={
         "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
         "message": 'Reacted to "Thanks for the update." STOP',

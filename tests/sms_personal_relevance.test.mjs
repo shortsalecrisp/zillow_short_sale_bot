@@ -123,6 +123,7 @@ test('a new request or opt-out appended to a text reaction is not discarded', ()
   assert.notEqual(question.reaction, true);
   assert.equal(question.should_reply, false);
   assert.equal(h.effects.some(effect => effect.type === 'handoff'), true);
+  assert.notEqual(h.incoming('Reacted to the photo, can you help with my listing?').reaction, true);
   const optOut = h.incoming('Reacted to "Thanks for the update." STOP');
   assert.notEqual(optOut.reaction, true);
   assert.equal(optOut.lead_status, 'R');

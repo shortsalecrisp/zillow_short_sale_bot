@@ -5127,7 +5127,7 @@ def _sms_is_text_reaction_only(value: Any) -> bool:
     # A transport reaction can quote arbitrary earlier text. Preserve an
     # independent request or opt-out appended after that quoted target.
     return not bool(re.search(
-        r'(?:[.!?]\s+|["”]\s+)(?:can|could|would|will|please|send|tell|what|how|when|where|'
+        r'(?:[.!?,;:\u2014-]\s+|["”]\s+|\s+and\s+)(?:can|could|would|will|please|send|tell|what|how|when|where|'
         r'is|are|do|does|i\s+(?:want|need|have)|stop\b|unsubscribe\b|opt\s+out\b)\b',
         text, re.IGNORECASE,
     ))
@@ -6235,7 +6235,7 @@ def _sms_openai_decision(row_obj: Dict[str, str], inbound_text: str) -> Dict[str
 def _sms_is_opt_out(value: Any) -> bool:
     text = _sms_normalize_whitespace(value).lower()
     if re.fullmatch(
-        r'^reacted(?:\s+with\s+.{1,12})?\s+to\s+.+(?:[.!?]\s+|["”]\s+)(?:stop|unsubscribe|opt\s+out)[.!?]*',
+        r'^reacted(?:\s+with\s+.{1,12})?\s+to\s+.+(?:[.!?,;:\u2014-]\s+|["”]\s+|\s+and\s+)(?:stop|unsubscribe|opt\s+out)[.!?]*',
         text,
     ):
         return True
