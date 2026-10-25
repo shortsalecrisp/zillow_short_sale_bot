@@ -35,6 +35,19 @@ test('known campaign lead retains normal response to a contextual email request'
   assert.equal(h.evaluate(`isUnrelatedPersonalSms_('Send me an email with more details', state)`), false);
 });
 
+test('known campaign without a listing keeps a direct collaboration request eligible', () => {
+  const h = smsHarness({initial_text: 'I help with short sales.', listing_address: ''});
+  assert.equal(h.evaluate(`isUnrelatedPersonalSms_('Send me an email with more details', state)`), false);
+  assert.equal(h.evaluate(`isUnrelatedPersonalSms_('Our team would like to work with you', state)`), false);
+  assert.equal(h.evaluate(`isPresentServiceInterestSignal_('Our team would like to work with you')`), true);
+  const interest = h.incoming('Our team would like to work with you');
+  assert.equal(interest.handoff_needed, true);
+  assert.equal(interest.lead_status, 'Y');
+  assert.equal(h.evaluate(`isUnrelatedPersonalSms_('Remember our team from the basketball season?', state)`), true);
+  const unknownSender = smsHarness(unknown);
+  assert.equal(unknownSender.evaluate(`isUnrelatedPersonalSms_('Our team would like to work with you', state)`), true);
+});
+
 test('explicit short-sale request is eligible without a prior campaign row', () => {
   const h = smsHarness(unknown);
   assert.equal(h.evaluate(`isUnrelatedPersonalSms_('Send me an email with more details about your short-sale service', state)`), false);

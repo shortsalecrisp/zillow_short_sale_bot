@@ -5140,6 +5140,22 @@ def _sms_is_unrelated_personal(value: Any, row_obj: Dict[str, str]) -> bool:
         return True
     if _sms_has_business_inbound_context(text):
         return False
+    campaign_context = bool(
+        row_obj.get("initial_text_sent") or row_obj.get("initial_text")
+        or row_obj.get("listing_address")
+    ) or any(
+        entry.get("role") == "agent"
+        and not _sms_is_image_reaction_only(entry.get("text"))
+        and _sms_has_business_inbound_context(entry.get("text"))
+        for entry in _sms_history_array(row_obj.get("history_json"))
+        if isinstance(entry, dict)
+    )
+    # "Our team" may mean the agent's brokerage in an established campaign.
+    if campaign_context and re.search(
+        r"\b(?:would like|want|interested|ready|looking)\s+to\s+work\s+with\s+you\b",
+        text,
+    ):
+        return False
     personal_topic = re.search(
         r"\b(?:game|team|season|playoffs?|football|basketball|baseball|soccer|coach|"
         r"teammates?|school|college|graduation|family|vacation|birthday|wedding|"
@@ -5152,15 +5168,7 @@ def _sms_is_unrelated_personal(value: Any, row_obj: Dict[str, str]) -> bool:
     )
     if personal_topic and personal_framing:
         return True
-    if row_obj.get("initial_text") or row_obj.get("listing_address"):
-        return False
-    return not any(
-        entry.get("role") == "agent"
-        and not _sms_is_image_reaction_only(entry.get("text"))
-        and _sms_has_business_inbound_context(entry.get("text"))
-        for entry in _sms_history_array(row_obj.get("history_json"))
-        if isinstance(entry, dict)
-    )
+    return not campaign_context
 
 
 def _sms_is_self_duplicate_reaction_artifact(value: Any) -> bool:
@@ -6754,6 +6762,11 @@ def _sms_is_present_service_interest(value: Any) -> bool:
     if re.search(
         r"\b(?:would love|want|need|could use)\s+(?:some\s+)?help\b"
         r"|\b(?:interested|open)\s+(?:in|to)\s+(?:what you have to say|a conversation|getting more details|more details|hearing more|learning more)\b",
+        text,
+    ):
+        return True
+    if re.search(
+        r"\b(?:our|my) team\s+(?:would like|wants?|is interested|is ready)\s+to\s+work\s+with\s+you\b",
         text,
     ):
         return True
