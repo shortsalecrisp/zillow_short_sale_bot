@@ -1295,6 +1295,67 @@ def test_render_sms_manual_takeover_image_reactions_do_not_alert(monkeypatch):
     assert mixed["handoff_needed"] is True
 
 
+def test_render_sms_legacy_unowned_personal_takeover_stays_silent(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][0] = ""
+    sheet.rows[2][1] = ""
+    sheet.rows[2][4] = ""
+    sheet.rows[2][7] = ""
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][17] = json.dumps([
+        {"role": "agent", "text": "Reminiscing our last World Series championship. Miss yall!"},
+        {"role": "agent", "text": "Stop bitches! Guess I do not miss yall"},
+    ])
+    sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][10] = "R"
+    client = TestClient(module.app)
+
+    for index, message in enumerate((
+        "Great times! Miss ya bitches.",
+        "Laughed at Stop bitches! Guess I do not miss yall",
+        "Sexy indeed!",
+    )):
+        body = client.post("/sms-chatbot", data={
+            "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+            "message": message, "message_id": f"legacy-personal-{index}",
+        }).json()
+        assert body["reason"] == "Unrelated personal message; no sales action"
+        assert body["should_reply"] is False
+        assert body["handoff_needed"] is False
+
+    assert sender.calls == []
+    assert sheet.rows[2][19] == "TRUE"
+    assert sheet.rows[2][10] == "R"
+
+
+def test_render_sms_legacy_takeover_guard_preserves_business_and_opt_out(monkeypatch):
+    module, sheet, _sender = _import_webhook_server(
+        monkeypatch, sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][13] = "handoff"
+    sheet.rows[2][16] = "TRUE"
+    sheet.rows[2][19] = "TRUE"
+    sheet.rows[2][10] = "Y"
+    client = TestClient(module.app)
+
+    business = client.post("/sms-chatbot", data={
+        "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+        "message": "Can you call about the short sale?", "message_id": "legacy-business-1",
+    }).json()
+    assert business["reason"] != "Unrelated personal message; no sales action"
+    assert business["handoff_needed"] is True
+
+    opt_out = client.post("/sms-chatbot", data={
+        "token": "secret-token", "action": "incoming_sms", "phone": "+19542357723",
+        "message": "STOP", "message_id": "legacy-opt-out-1",
+    }).json()
+    assert opt_out["lead_status"] == "R"
+    assert opt_out["reason"] == "Opt-out / stop request"
+
+
 def test_render_sms_manual_takeover_text_reactions_do_not_alert(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch, sender_result=FakeSendResult(success=True),

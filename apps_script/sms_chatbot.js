@@ -773,11 +773,12 @@ function handleIncomingSmsCore_(body) {
     };
   }
 
-  // A phone match alone is not evidence that a personal text belongs to the
-  // short-sale campaign. Run this before the reply cap and intent rules: both
-  // otherwise turn unrelated conversation into an interested lead.
-  if (String(currentRowObj[HEADERS.human_override] || "").toUpperCase() !== "TRUE" &&
-      !isManualFollowupLocked_(currentRowObj) &&
+  // A phone match or an old human-override flag is not evidence that a
+  // personal text belongs to the short-sale campaign. Run this before reply
+  // caps and takeover-update alerts so legacy synthetic rows stay quiet.
+  // Mapped campaign rows and current real-estate/service questions remain
+  // eligible through isUnrelatedPersonalSms_().
+  if (!isPostHandoffCallbackUpdate_(currentRowObj, inboundText) &&
       isUnrelatedPersonalSms_(inboundText, currentRowObj)) {
     appendSmsDebugLog_("incoming_sms_unrelated_personal_suppressed", {
       phone: phoneRaw, message_id: messageId,

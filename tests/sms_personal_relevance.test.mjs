@@ -75,9 +75,56 @@ test('opt-out and manual takeover remain active', () => {
   const optOut = smsHarness(unknown);
   assert.equal(optOut.incoming('STOP').lead_status, 'R');
   const manual = smsHarness({...unknown, human_override: 'TRUE', ai_state: 'handoff', handoff_flag: 'TRUE'});
-  const result = manual.incoming('Tomorrow at 3 works');
+  const result = manual.incoming('Please call me tomorrow at 3');
   assert.equal(result.should_reply, false);
   assert.notEqual(result.reason, 'Unrelated personal message; no sales action');
+});
+
+test('legacy unowned personal takeover rows stay silent before owner alerts', () => {
+  const h = smsHarness({
+    ...unknown,
+    human_override: 'TRUE',
+    ai_state: 'handoff',
+    handoff_flag: 'TRUE',
+    mailshake_status: 'R',
+    history_json: JSON.stringify([
+      {role: 'agent', text: 'Reminiscing our last World Series championship. Miss yall!', ts: '10-24-26 19.30'},
+      {role: 'agent', text: 'Stop bitches! Guess I do not miss yall', ts: '10-24-26 21.22'}
+    ])
+  });
+  for (const message of [
+    'Great times! Miss ya bitches.',
+    'Laughed at Stop bitches! Guess I do not miss yall',
+    'Sexy indeed!'
+  ]) {
+    const result = h.incoming(message);
+    assert.equal(result.reason, 'Unrelated personal message; no sales action');
+    assert.equal(result.should_reply, false);
+    assert.equal(result.handoff_needed, false);
+  }
+  assert.equal(h.effects.length, 0);
+  assert.equal(h.state.human_override, 'TRUE');
+  assert.equal(h.state.mailshake_status, 'R');
+});
+
+test('legacy takeover guard preserves mapped leads service questions and opt-outs', () => {
+  const mapped = smsHarness({
+    human_override: 'TRUE', ai_state: 'handoff', handoff_flag: 'TRUE',
+    mailshake_status: 'Y', listing_address: '123 Example Lane'
+  });
+  const mappedQuestion = mapped.incoming('Can you call about the short sale?');
+  assert.notEqual(mappedQuestion.reason, 'Unrelated personal message; no sales action');
+  assert.equal(mappedQuestion.handoff_needed, true);
+
+  const unownedQuestion = smsHarness({...unknown, human_override: 'TRUE', ai_state: 'handoff', handoff_flag: 'TRUE'});
+  const serviceQuestion = unownedQuestion.incoming('Can you help with this short-sale file?');
+  assert.notEqual(serviceQuestion.reason, 'Unrelated personal message; no sales action');
+  assert.equal(serviceQuestion.handoff_needed, true);
+
+  const optOut = smsHarness({...unknown, human_override: 'TRUE', ai_state: 'handoff', handoff_flag: 'TRUE'});
+  const stop = optOut.incoming('STOP');
+  assert.equal(stop.lead_status, 'R');
+  assert.equal(stop.reason, 'Opt-out / stop request');
 });
 
 test('image-only reactions during manual takeover do not alert the owner', () => {

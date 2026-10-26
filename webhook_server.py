@@ -8886,17 +8886,15 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
             "row": row_idx,
         })
 
-    manual_takeover = (
-        str(row_obj.get("human_override") or "").upper() == "TRUE"
-        or str(row_obj.get("handoff_flag") or "").upper() == "TRUE"
-        or str(row_obj.get("ai_state") or "").lower() == "handoff"
-    )
     automated_stop_instruction = bool(re.search(
         r"\breply\s+stop\s+to\s+(?:end|unsubscribe|cancel|opt out)\b",
         inbound_text, re.IGNORECASE,
     ))
-    if (not manual_takeover and not _sms_is_opt_out(inbound_text)
-            and not automated_stop_instruction
+    # A legacy takeover flag must not turn an unowned personal thread into an
+    # owner alert. Mapped campaign rows and explicit service/callback context
+    # remain eligible through _sms_is_unrelated_personal().
+    if (not _sms_is_opt_out(inbound_text) and not automated_stop_instruction
+            and not _sms_is_post_handoff_callback_update(row_obj, inbound_text)
             and _sms_is_unrelated_personal(inbound_text, row_obj)):
         _sms_append_debug(
             "incoming_sms_unrelated_personal_suppressed",
