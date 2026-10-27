@@ -9,6 +9,8 @@ historical row slots; changing C never relabels their destination or resets them
 - Final `CODEX_VOICE_CALL_METRICS_V1` blocks bind each actual destination to its
   provider conversation. Only positive-duration final receipts contribute to
   `currentPhoneAttempts`. Former-number calls do not contribute to that count.
+  Their phone identity still blocks a conflicting cadence on another listing;
+  correcting C never deletes the former phone's duplicate protection.
 - Changed/conflicting/malformed phone evidence holds the row for review. Missing
   historical attempt identity also prevents an automatic retry. Dry-runs expose
   `phoneIdentityReviewRequired`; neither the hold nor phone correction grants

@@ -641,7 +641,12 @@ export function isVoiceBotPhoneBlocked(
 ): boolean {
   let acceptedAttempts = 0;
   for (const row of rows) {
-    if (normalizePhoneToE164(row.values[VOICE_BOT_COL_PHONE - 1]) !== candidate.phone) continue;
+    if (normalizePhoneToE164(row.values[VOICE_BOT_COL_PHONE - 1]) !== candidate.phone) {
+      // Correcting C must not erase the old phone's existing cadence on another listing.
+      if (normalizeString(row.values[41]).includes(candidate.phone) &&
+          getVoicePhoneAttemptIdentity(row.values).historicalPhones.includes(candidate.phone)) return true;
+      continue;
+    }
     if (normalizeString(row.values[VOICE_BOT_COL_LEAD_STATUS_CODE - 1])) return true;
     if (isVoiceBotRowActivelyCalling(row.values, now)) return true;
     for (const [sentColumn, resultColumn] of [

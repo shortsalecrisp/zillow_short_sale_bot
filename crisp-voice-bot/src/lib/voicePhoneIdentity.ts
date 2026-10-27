@@ -11,6 +11,7 @@ export function getVoicePhoneAttemptIdentity(row: unknown[]): {
   currentPhone: string | undefined;
   currentPhoneAttempts: number;
   unknownAttempts: number;
+  historicalPhones: string[];
   reviewReason?: string;
 } {
   const currentPhone = normalizePhoneToE164(row[2]);
@@ -60,5 +61,6 @@ export function getVoicePhoneAttemptIdentity(row: unknown[]): {
     if (!currentPhone || evidence.size !== 1 || !evidence.has(currentPhone)) reviewReason = "attempt_phone_changed";
     if (genuineCurrentAttempts.has(attempt)) currentPhoneAttempts += 1;
   }
-  return { currentPhone, currentPhoneAttempts, unknownAttempts, reviewReason };
+  return { currentPhone, currentPhoneAttempts, unknownAttempts,
+    historicalPhones: [...new Set([...phones.values()].flatMap(set => [...set]))], reviewReason };
 }

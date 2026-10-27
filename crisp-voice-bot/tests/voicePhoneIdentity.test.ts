@@ -24,7 +24,7 @@ test("old-number receipts never count as attempts at the corrected number or res
   const { getVoiceOverdueFallbackPlan } = await import("../src/lib/voiceOverdueFallback");
   const r = row(); r[41] = metrics("+12025550199"); const before = [...r];
   assert.deepEqual(getVoicePhoneAttemptIdentity(r), { currentPhone: "+12025550123", currentPhoneAttempts: 0,
-    unknownAttempts: 0, reviewReason: "attempt_phone_changed" });
+    unknownAttempts: 0, historicalPhones: ["+12025550199"], reviewReason: "attempt_phone_changed" });
   assert.equal(getVoiceBotCallCandidateFromRowValues(7000, r, new Date("2026-10-27T19:05Z")), undefined);
   assert.equal(finalUnansweredPreservationReason(r), "attempt_phone_requires_review");
   assert.equal(getVoiceOverdueFallbackPlan(7000, r, new Date("2026-10-30T19:05Z")), undefined);
@@ -70,6 +70,17 @@ test("unknown history cannot authorize a retry and protected preferences survive
     assert.equal(getVoiceBotCallCandidateFromRowValues(7000, protectedRow, new Date("2026-10-27T19:05Z")), undefined);
     assert.equal(protectedRow[column], value);
   }
+});
+
+test("a phone correction preserves the old phone's duplicate guard across other listing rows", async () => {
+  const { isVoiceBotPhoneBlocked } = await import("../src/lib/voiceQueue");
+  const corrected = row(); corrected[41] = metrics("+12025550199");
+  const other = row(); other[2] = "+12025550199"; other[32] = ""; other[33] = "";
+  assert.equal(isVoiceBotPhoneBlocked({ rowNumber: 7001, phone: "+12025550199" } as never,
+    [{ rowNumber: 7000, values: corrected }, { rowNumber: 7001, values: other }], new Date()), true);
+  corrected[41] = JSON.stringify({ transcript: "The owner mentioned +12025550199, not a placed call." });
+  assert.equal(isVoiceBotPhoneBlocked({ rowNumber: 7001, phone: "+12025550199" } as never,
+    [{ rowNumber: 7000, values: corrected }, { rowNumber: 7001, values: other }], new Date()), false);
 });
 
 test("identity is durably bound before dispatch without fabricating a sent time, and changed owners stop dispatch", async () => {
