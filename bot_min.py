@@ -13735,7 +13735,40 @@ def release_due_followups_to_mailshake(now: Optional[datetime] = None) -> int:
     return updated
 
 
-def _follow_up_pass():
+def _reconcile_queue_time_marker(row_idx, row, ts, entries):
+    from initial_sms_timestamp import receipt_time_for_queue_marker
+
+    sent_at = receipt_time_for_queue_marker(row_idx, row, entries, _parse_sheet_datetime)
+    if sent_at is None:
+        return ts
+    # Re-resolve identity immediately before this narrow owner write.
+    fresh = sheets_service.spreadsheets().values().get(
+        spreadsheetId=GSHEET_ID, range=f"{GSHEET_TAB}!A{row_idx}:AB{row_idx}",
+        majorDimension="ROWS", valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", [])
+    current = (list(fresh[0]) + [""] * 28)[:28] if fresh else []
+    if not current or any(str(current[i] or "") != str(row[i] or "") for i in range(28)):
+        raise ValueError("Initial timestamp repair identity/state changed")
+    sheets_service.spreadsheets().values().batchUpdate(
+        spreadsheetId=GSHEET_ID,
+        body={"valueInputOption": "RAW", "data": [
+            {"range": f"{GSHEET_TAB}!W{row_idx}", "values": [[sent_at.isoformat()]]},
+            {"range": f"{GSHEET_TAB}!Z{row_idx}", "values": [[
+                str(row[COL_CONTACT_REASON] or "") + "; initial_sms_reply_cutoff=" + ts.isoformat()
+            ]]},
+        ]},
+    ).execute()
+    check = sheets_service.spreadsheets().values().get(
+        spreadsheetId=GSHEET_ID, range=f"{GSHEET_TAB}!W{row_idx}",
+        majorDimension="ROWS", valueRenderOption="UNFORMATTED_VALUE",
+    ).execute().get("values", [])
+    if not check or _parse_sheet_datetime(check[0][0]) != sent_at:
+        raise ValueError("Initial timestamp repair readback failed")
+    LOG.warning("INITIAL_TIMESTAMP_RECONCILED row=%s old=%s receipt_sent_at=%s", row_idx, ts.isoformat(), sent_at.isoformat())
+    return sent_at
+
+
+def _follow_up_pass(only_rows=None, recipient_local_hours=False):
     LOG.info("follow-up: using bounded init_ts scan path")
     now = datetime.now(tz=SCHEDULER_TZ)
     max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
@@ -13820,7 +13853,10 @@ def _follow_up_pass():
         return
 
     init_rows.sort(key=lambda item: item[1], reverse=True)
-    candidate_rows = init_rows[:FU_LOOKBACK_ROWS]
+    candidate_rows = ([item for item in init_rows if item[0] in only_rows]
+                      if only_rows is not None else init_rows[:FU_LOOKBACK_ROWS])
+    if not candidate_rows:
+        return
     candidate_indices = [row_idx for row_idx, _ in candidate_rows]
     row_ranges = [
         f"{GSHEET_TAB}!A{row_idx}:{FOLLOWUP_READ_END_COL}{row_idx}"
@@ -13901,6 +13937,7 @@ def _follow_up_pass():
     )
 
     eligible_count = 0
+    receipt_entries = None
     for sheet_row, ts in candidate_rows:
         row = candidate_row_map.get(sheet_row, [""] * MIN_COLS)
         phone_redacted = _redact_followup_phone(row[COL_PHONE])
@@ -14009,7 +14046,10 @@ def _follow_up_pass():
             continue
 
         # auto-check for replies since initial message
-        if check_reply(row[COL_PHONE], ts.isoformat()):
+        reply_cutoffs = re.findall(r"initial_sms_reply_cutoff=([^;\s]+)", str(row[COL_CONTACT_REASON]))
+        reply_since = min([ts] + [parsed for value in reply_cutoffs
+                                 if (parsed := _parse_sheet_datetime(value)) is not None])
+        if check_reply(row[COL_PHONE], reply_since.isoformat()):
             LOG.info(
                 "Auto-detected reply for row %s (msg_id=%s)",
                 sheet_row,
@@ -14017,6 +14057,27 @@ def _follow_up_pass():
             )
             mark_reply(sheet_row)
             continue
+
+        # Historical verifier writes sometimes copied enqueue/not-before into W.
+        # Recover only a uniquely proven queue marker, retaining the earlier
+        # reply cutoff above. Receipt identity/interval validation stays strict.
+        if re.match(r"^\d{4}-\d{2}-\d{2}T", str(row[COL_INIT_TS])):
+            try:
+                if receipt_entries is None:
+                    receipt_entries = sheets_service.spreadsheets().values().get(
+                        spreadsheetId=GSHEET_ID, range="sms_pending_sends!A2:S",
+                        majorDimension="ROWS", valueRenderOption="UNFORMATTED_VALUE",
+                    ).execute().get("values", [])
+                ts = _reconcile_queue_time_marker(sheet_row, row, ts, receipt_entries)
+            except Exception:
+                LOG.exception("Initial timestamp repair failed closed row=%s", sheet_row)
+                continue
+
+        if recipient_local_hours:
+            from initial_sms_timestamp import within_recipient_hours
+            if not within_recipient_hours(row[COL_STATE], datetime.now(tz=SCHEDULER_TZ)):
+                LOG.info("FU-review row %s status=recipient_local_hours_deferred", sheet_row)
+                continue
 
         elapsed_hours = business_hours_elapsed(
             ts,

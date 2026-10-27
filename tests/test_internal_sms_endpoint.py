@@ -421,6 +421,31 @@ def test_internal_initial_sms_requires_token(monkeypatch):
     assert sender.calls == []
 
 
+def test_targeted_followup_recovery_auth_bounds_lock_and_policy(monkeypatch):
+    import threading
+    module, _sheet, _sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
+    scheduler = sys.modules["bot_min"]
+    scheduler._follow_up_pass_lock = threading.Lock()
+    calls = []
+    scheduler._follow_up_pass = lambda **kwargs: calls.append(kwargs)
+    client = TestClient(module.app)
+    route = "/internal/reconcile-followup-sms"
+    assert client.post(route, json={"rows": [6413, 6414]}).status_code == 403
+    headers = {"Authorization": "Bearer secret-token"}
+    for rows in ([], [True], [1], [9000], list(range(2, 23))):
+        assert client.post(route, headers=headers, json={"rows": rows}).status_code == 400
+    scheduler._follow_up_pass_lock.acquire()
+    assert client.post(route, headers=headers, json={"rows": [6413]}).status_code == 409
+    scheduler._follow_up_pass_lock.release()
+    response = client.post(route, headers=headers, json={"rows": [6413, 6414]})
+    assert response.status_code == 200
+    assert response.json()["sent"] is False
+    assert calls == [{"only_rows": {6413, 6414}, "recipient_local_hours": True}]
+    assert scheduler._follow_up_pass_lock.acquire(blocking=False)
+    scheduler._follow_up_pass_lock.release()
+    assert _sender.calls == []
+
+
 def test_internal_initial_sms_queues_and_waits_for_tasker_receipt_before_marking_sheet(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
