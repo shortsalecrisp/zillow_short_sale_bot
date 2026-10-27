@@ -51,6 +51,7 @@ def harness(row, elapsed_hours):
         "_col_index_to_letter": lambda index: "W" if index == 22 else "I",
         "_parse_sheet_datetime": datetime.fromisoformat,
         "_recover_initial_sent_at_from_receipts": Mock(return_value={}),
+        "_reconcile_queue_time_marker": lambda row_idx, row, ts, entries: ts,
         "_redact_followup_phone": lambda phone: "test-phone",
         "_followup_has_contact_hold": Mock(return_value=False),
         "check_reply": Mock(return_value=False), "mark_reply": Mock(),

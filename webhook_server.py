@@ -9287,6 +9287,33 @@ async def internal_followup_sms_status(request: Request):
     return await asyncio.to_thread(_get_crm_followup_sms_status, str(payload.get("request_id") or ""))
 
 
+@app.post("/internal/reconcile-followup-sms")
+async def internal_reconcile_followup_sms(request: Request):
+    """Evaluate a bounded recovery cohort through the unchanged scheduler policy."""
+    _auth_internal_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if (not isinstance(rows, list) or not 1 <= len(rows) <= 20
+            or any(type(row) is not int or not 2 <= row < 9000 for row in rows)):
+        raise HTTPException(status_code=400, detail="bounded_rows_required")
+
+    def evaluate():
+        import bot_min as scheduler
+        if not scheduler._follow_up_pass_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="followup_pass_active")
+        try:
+            scheduler._follow_up_pass(only_rows=set(rows), recipient_local_hours=True)
+        finally:
+            scheduler._follow_up_pass_lock.release()
+        return {"status": "evaluated", "rows": rows, "sent": False,
+                "reason": "Read exact outbox receipts; evaluation is not delivery proof."}
+
+    return await asyncio.to_thread(evaluate)
+
+
 _RELATIVE_TIME_RE = re.compile(
     r"(?P<count>\d+)\s*(?P<unit>minute|min|hour|hr|day|week|month|year)s?",
     re.IGNORECASE,

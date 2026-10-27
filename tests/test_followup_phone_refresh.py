@@ -96,6 +96,8 @@ class _FakeValuesAPI:
         raise AssertionError(f"Unexpected batchGet: {ranges}")
 
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
+        if range == "sms_pending_sends!A2:S":
+            return _FakeRequest({"values": []})
         self._ranges.append(range)
         if range.endswith("!1:1"):
             return _FakeRequest({"values": [["agent_name", "last_name", "phone"]]})
@@ -144,6 +146,44 @@ class _FakeSheetsService:
 
     def values(self):
         return self.values_api
+
+
+def test_queue_timestamp_repair_writes_only_receipt_and_preserves_earlier_reply_cutoff(monkeypatch):
+    import json
+    row = [""] * 28
+    row[0], row[2], row[4], row[7], row[22], row[27] = (
+        "Taylor", "904-541-0180", "440 W 23rd Street", "x", "2026-10-25T08:01:21-04:00", "44486664")
+    entry = [""] * 19
+    entry[0], entry[1], entry[2], entry[3], entry[4] = (
+        row[22], "sent", "scheduler-initial-6412-9df9ef38c2fc8954", "initial-6412-9df9ef38c2fc8954", "9045410180")
+    entry[6] = "__initial_outreach__:" + json.dumps({"crm_row": 6412, "stable_id": row[27]})
+    entry[8], entry[13], entry[14], entry[17] = row[22], "2026-10-25T08:02:21-04:00", "2026-10-25T08:02:30-04:00", 6412
+    class API:
+        def __init__(self): self.updates = []
+        def get(self, **kwargs):
+            return _FakeRequest({"values": [row if kwargs["range"].endswith(":AB6412") else [entry[14]]]})
+        def batchUpdate(self, **kwargs):
+            self.updates.extend(kwargs["body"]["data"])
+            return _FakeRequest({})
+    api = API()
+    monkeypatch.setattr(bot_min, "sheets_service", types.SimpleNamespace(
+        spreadsheets=lambda: types.SimpleNamespace(values=lambda: api)))
+    old = bot_min._parse_sheet_datetime(row[22])
+    assert bot_min._reconcile_queue_time_marker(6412, row, old, [entry]) == bot_min._parse_sheet_datetime(entry[14])
+    assert [item["range"] for item in api.updates] == ["Sheet1!W6412", "Sheet1!Z6412"]
+    assert "initial_sms_reply_cutoff=" + old.isoformat() in api.updates[1]["values"][0][0]
+
+
+def test_followup_reply_lookup_uses_earlier_reconciled_cutoff(monkeypatch):
+    row = _followup_test_row()
+    row[bot_min.COL_CONTACT_REASON] = "initial_sms_reply_cutoff=2026-07-24T10:59:00-04:00"
+    seen = []
+    monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda phone, since: seen.append(since) or True)
+    monkeypatch.setattr(bot_min, "mark_reply", lambda row: None)
+    bot_min._follow_up_pass()
+    assert seen == ["2026-07-24T10:59:00-04:00"]
 
 
 def test_send_sms_followup_queues_tasker_outbox_before_direct_sender(monkeypatch):
@@ -303,6 +343,8 @@ class _ConfiguredFollowupValuesAPI:
         raise AssertionError(f"Unexpected ranges: {ranges}")
 
     def get(self, spreadsheetId, range, majorDimension, valueRenderOption):
+        if range == "sms_pending_sends!A2:S":
+            return _FakeRequest({"values": []})
         if range.endswith("!1:1"):
             return _FakeRequest({"values": [["agent_name", "last_name", "phone"]]})
         if range.endswith("!C2:C2"):
