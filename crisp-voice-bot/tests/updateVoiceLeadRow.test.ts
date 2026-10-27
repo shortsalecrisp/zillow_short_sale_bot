@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { sheets_v4 } from "googleapis";
+import { formatVoiceAttemptIdentity } from "../src/lib/voicePhoneIdentity";
 import {
   VOICE_BOT_COL_CALL_1_RESULT,
   VOICE_BOT_COL_CALL_1_SENT,
@@ -47,6 +48,7 @@ test("voicemail writeback and dispatch agree on the next-slot retry", async () =
     row[6] = "NJ";
     row[8] = "x";
     row[VOICE_BOT_COL_CALL_1_SENT - 1] = first;
+    row[41] = formatVoiceAttemptIdentity(6001, row[2], 1, new Date(first));
     for (const write of buildVoiceLeadRowWrites(row, {
       callAttemptNumber: 1, callResult: "voicemail_left",
     }, new Date(first))) row[write.columnNumber - 1] = write.value;

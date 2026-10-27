@@ -169,7 +169,7 @@ export async function postSheetUpdate(
       directSheetUpdate, "final_unanswered_disposition_readback", true);
     return;
   }
-  if (payload.voiceReceiptOnly || needsRetrySchedulingReadback(payload) ||
+  if (payload.voiceTerminalReceipt || payload.voiceReceiptOnly || needsRetrySchedulingReadback(payload) ||
       ["answered_not_interested", "provider_destination_blocked", "contact_request_review"].includes(payload.callResult ?? "")) {
     await persistDirectSheetFallback(payload, directSheetUpdate, "guarded_retry_scheduling_readback", true);
     return;

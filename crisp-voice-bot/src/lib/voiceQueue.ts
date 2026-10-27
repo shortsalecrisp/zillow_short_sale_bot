@@ -19,6 +19,8 @@ import { processPostCallOutcomeFromConversationId } from "./elevenLabsPostCall";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
 import { getPendingVoiceOutcomeRecoveries, isMatchingTerminalVoiceReceipt, voiceOutcomeRecoveryBlockReason, voiceReconciliationStateHash } from "./voiceOutcomeRecovery";
 import { nextTransportRecoverySlot, transportFailureKind, VOICE_START_RESOLUTION_MARKER } from "./voiceTransportRecovery";
+import { formatVoiceAttemptIdentity, getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
+import { finalUnansweredPreservationReason } from "./voiceFinalUnanswered";
 import { getOutboundCallPause } from "./outboundCallPause";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
 import { ensureProviderStartFailureAlert } from "./providerStartFailureAlert";
@@ -106,6 +108,7 @@ export type VoiceQueueResult = {
   eligibleCandidateCount?: number;
   overdueFallbackCandidates?: Array<{ rowNumber: number; callAttemptNumber: number; scheduledFor: string; deadline: string }>;
   timeZoneReviewRequired?: Array<{ rowNumber: number; reason: string }>;
+  phoneIdentityReviewRequired?: Array<{ rowNumber: number; currentPhoneAttempts: number; unknownAttempts: number; reviewReason?: string }>;
   maxCallsPerRun?: number;
   maxActiveCalls?: number;
   nowEt?: string;
@@ -469,15 +472,14 @@ export function getVoiceBotCallCandidateFromRowValues(
   rowValues: unknown[],
   now: Date,
 ): VoiceQueueCandidate | undefined {
+  if (normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]) ||
+      normalizeMarker(rowValues[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1]) !== "x") return undefined;
+  const phoneIdentity = getVoicePhoneAttemptIdentity(rowValues);
+  if (phoneIdentity.reviewReason || phoneIdentity.unknownAttempts) return undefined;
   if (normalizeString(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1]).includes(VOICE_OVERDUE_FALLBACK_MARKER) ||
       getVoiceOverdueFallbackPlan(rowNumber, rowValues, now)) return undefined;
-  if (normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1])) {
-    return undefined;
-  }
-
-  if (normalizeMarker(rowValues[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1]) !== "x") {
-    return undefined;
-  }
+  const preference = finalUnansweredPreservationReason(rowValues);
+  if (preference && preference !== "missing_first_attempt_history") return undefined;
 
   const firstAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_1_SENT - 1]);
   const secondAttemptSentAt = parseVoiceBotDate(rowValues[VOICE_BOT_COL_CALL_2_SENT - 1]);
@@ -904,16 +906,23 @@ async function markVoiceBotAttemptStarted(
     writes.push(
       { columnNumber: VOICE_BOT_COL_CALL_1_RESULT, value: "call_start_receipt_missing" },
       { columnNumber: VOICE_BOT_COL_RESPONSE_STATUS, value: "Prior call start had no final receipt; one bounded retry started" },
-      {
-        columnNumber: VOICE_BOT_COL_VOICE_NOTES,
-        value: appendVoiceNotesValue(
-          rowValues[VOICE_BOT_COL_VOICE_NOTES - 1],
-          `Prior call start became stale without a final provider or transcript receipt; bounded retry started at ${formatVoiceBotDateEt(now)}.`,
-        ),
-      },
     );
+    writes.push({ columnNumber: VOICE_BOT_COL_VOICE_NOTES,
+      value: appendVoiceNotesValue(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1],
+        `Prior call start became stale without a final provider or transcript receipt; bounded retry started at ${formatVoiceBotDateEt(now)}.`) });
   }
   await writeCells(sheets, candidate.rowNumber, writes);
+}
+
+export async function bindVoiceBotAttemptIdentity(
+  sheets: sheets_v4.Sheets, rowValues: unknown[], candidate: VoiceQueueCandidate, now: Date,
+): Promise<unknown[] | undefined> {
+  const notes = appendVoiceNotesValue(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1],
+    formatVoiceAttemptIdentity(candidate.rowNumber, candidate.phone, candidate.callAttemptNumber, now));
+  await writeCells(sheets, candidate.rowNumber, [{ columnNumber: VOICE_BOT_COL_VOICE_NOTES, value: notes }]);
+  const expected = [...rowValues]; expected[VOICE_BOT_COL_VOICE_NOTES - 1] = notes;
+  const fresh = await getVoiceBotRowByNumber(sheets, candidate.rowNumber);
+  return voiceReconciliationStateHash(fresh) === voiceReconciliationStateHash(expected) ? fresh : undefined;
 }
 
 async function markScheduledNoStartRecoveryDetected(
@@ -1299,6 +1308,9 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   const availableSlots = Math.max(0, VOICE_BOT_MAX_ACTIVE_CALLS - activeCallCount);
 
   if (options.dryRun) {
+    const phoneIdentityReviewRequired = rows.filter(row => !normalizeString(row.values[10]) && normalizeMarker(row.values[8]) === "x")
+      .map(row => ({ rowNumber: row.rowNumber,
+      ...getVoicePhoneAttemptIdentity(row.values) })).filter(row => row.reviewReason || row.unknownAttempts);
     const timeZoneReviewRequired = rows
       .filter((row) => !normalizeString(row.values[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]) &&
         normalizeMarker(row.values[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1]) === "x" &&
@@ -1310,6 +1322,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       ok: true,
       queued: false,
       dryRun: true,
+      phoneIdentityReviewRequired,
       timeZoneReviewRequired,
       activeCallCount,
       availableSlots,
@@ -1353,7 +1366,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   await dispatchVoiceQueueBatch(candidates, async (candidate) => {
     const refreshedRows = await getVoiceBotRows(sheets);
     let startNow = options.now ?? new Date();
-    const refreshedValues = refreshedRows.find((row) => row.rowNumber === candidate.rowNumber)?.values ?? [];
+    let refreshedValues = refreshedRows.find((row) => row.rowNumber === candidate.rowNumber)?.values ?? [];
     const refreshedCandidate = getVoiceBotCallCandidateFromRowValues(candidate.rowNumber, refreshedValues, startNow);
 
     if (!refreshedCandidate || isVoiceBotPhoneBlocked(refreshedCandidate, refreshedRows, startNow) ||
@@ -1383,6 +1396,15 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       return;
     }
 
+    const bound = await bindVoiceBotAttemptIdentity(sheets, refreshedValues, refreshedCandidate, startNow);
+    startNow = options.now ?? new Date();
+    if (!bound || !getVoiceBotCallCandidateFromRowValues(candidate.rowNumber, bound, startNow) ||
+        !hasVoiceQueueDispatchHeadroom(refreshedCandidate, startNow) ||
+        countAllocatedVoiceBotSlots(refreshedRows, startNow, [...reservations.values()]) >= VOICE_BOT_MAX_ACTIVE_CALLS) {
+      logger.info("Voice queue identity binding changed or window closed; attempt not started", { rowNumber: candidate.rowNumber });
+      return;
+    }
+    refreshedValues = bound;
     reservations.set(refreshedCandidate.phone, refreshedCandidate);
     try {
       const startCallResult = await postStartCall(refreshedCandidate);

@@ -62,6 +62,35 @@ axios.defaults.adapter = async (request) => {
 };
 after(() => assert.deepEqual(unexpectedRequests, [], "A caught evidence failure must not hide an unexpected URL"));
 const load = () => import("../src/lib/elevenLabsPostCall");
+const captureReviewedOutcome = async (payload: import("../src/types").SheetUpdateRequest) => { receivedWrites.push({ ...payload }); };
+
+test("contextual disfluent and clarified service declines outrank technical failure and hangup", async () => {
+  const lib = await load();
+  const assistant = (message: string) => ({ role: "agent", message });
+  const user = (message: string) => ({ role: "user", message });
+  const help = assistant("Would help with lender paperwork or calls be useful for this listing?");
+  const failed = { status: "failed", has_user_audio: true, metadata: { termination_reason: "Invalid message received" }, transcript: [
+    assistant("Is 123 Test your listing?"), user("Yes."), help, user("..."), user("N- no, I'm doing everything."),
+    assistant("Crisp can take the lender paperwork off your plate. Would that help on this file?"), user("No."),
+  ] };
+  assert.equal(lib.getAuthoritativeTerminalCallResult(failed, 1), "answered_not_interested");
+  const clarified = { status: "done", has_user_audio: true, metadata: { termination_reason: "Client disconnected: 1000" }, transcript: [
+    assistant("Is 123 Test your listing?"), user("Yes."), help, user("What's that?"),
+    assistant("We help collect the documents and follow up with the lender. Would you like me to see if Yoni can join this call now?"),
+    user("No, that's okay. Thank you."),
+  ] };
+  assert.equal(lib.getAuthoritativeTerminalCallResult(clarified, 2), "answered_not_interested");
+  assert.equal(lib.shouldTreatAsAgentHungUp(clarified), false);
+  for (const transcript of [
+    [assistant("Is 123 Test your listing?"), user("No.")],
+    [help, assistant("Is it still active?"), user("No.")],
+    [assistant("Would you like Yoni to join this call?"), user("No, that's okay. Thank you.")],
+    [help, user("No, can you call me back tomorrow at two?")],
+    [...clarified.transcript, assistant("Anything else?"), user("Please call me back tomorrow at two.")],
+  ]) assert.equal(lib.shouldTreatAsNotInterested({ ...clarified, transcript }), false, JSON.stringify(transcript));
+  const optOut = { ...clarified, transcript: [...clarified.transcript, user("Do not call me again.")] };
+  assert.equal(lib.getVoiceContactRequestResult(optOut), "do_not_call");
+});
 
 test("a live caller declining a clarified help offer is not a hangup or transfer refusal", async () => {
   const lib = await load();
@@ -362,7 +391,7 @@ test("M6 full observed transcript remains information-only without inventing DNC
   const before = receivedWrites.length;
   // Email is deliberately unconfigured. Assert only the preceding local mock
   // outcome write; no send or completed post-call processing is claimed.
-  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id), /Missing email alert config/);
+  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome }), /Missing email alert config/);
   assert.equal(receivedWrites.length, before + 1);
   assert.equal(receivedWrites.at(-1)!.callResult, "information_requested");
   assert.equal(receivedWrites.at(-1)!.leadStatusCode, "G");
@@ -479,7 +508,7 @@ test("final direct-callback timing corrects model-added PM only from attributabl
   const id = "test-direct-callback-time-correction";
   conversations.set(id, call);
   const before = receivedWrites.length;
-  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id), /Missing email alert config/);
+  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome }), /Missing email alert config/);
   assert.equal(receivedWrites.length, before + 1);
   assert.equal(receivedWrites.at(-1)!.callResult, "callback_requested", "Final evidence repairs a missing live request write");
   assert.equal(receivedWrites.at(-1)!.callbackRequested, "yes");
@@ -506,7 +535,7 @@ test("incidental showing or closing times do not replace requested callback timi
     const id = `test-incidental-callback-time-${index}`;
     conversations.set(id, call);
     const before = receivedWrites.length;
-    await assert.rejects(lib.processPostCallOutcomeFromConversationId(id), /Missing email alert config/);
+    await assert.rejects(lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome }), /Missing email alert config/);
     assert.equal(receivedWrites.length, before + 1);
     assert.equal(receivedWrites.at(-1)!.callbackTime, "tomorrow at two Pacific", comment);
   }
@@ -523,7 +552,7 @@ test("a final callback without attributable timing does not replace the earlier 
   const id = "test-direct-callback-no-time-evidence";
   conversations.set(id, call);
   const before = receivedWrites.length;
-  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id), /Missing email alert config/);
+  await assert.rejects(lib.processPostCallOutcomeFromConversationId(id, { postSheetUpdate: captureReviewedOutcome }), /Missing email alert config/);
   assert.equal(receivedWrites.length, before + 1);
   assert.equal(receivedWrites.at(-1)!.callbackTime, undefined);
   assert.equal(receivedWrites.at(-1)!.responseStatus, undefined);

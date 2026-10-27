@@ -75,6 +75,42 @@ test("mismatched, synthetic, pending and changed-owner receipts fail without wri
   assert.equal(row[33], "");
 });
 
+test("even an unprotected blank-K row rejects a delayed former-phone final receipt", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  const { row, receipt, payload } = fixture();
+  row[10] = ""; row[13] = ""; row[16] = ""; row[19] = ""; row[2] = "202-555-0199";
+  const before = [...row];
+  await assert.rejects(updateVoiceLeadRow(6370, payload, async () => sheet(row), async () => receipt), /identity changed/);
+  assert.deepEqual(row, before);
+});
+
+test("a verified unprotected current-phone decline still writes R and preserves its sent timestamp", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  const { row, receipt, payload } = fixture();
+  row[10] = ""; row[13] = ""; row[16] = ""; row[19] = "";
+  const sent = row[32];
+  await updateVoiceLeadRow(6370, { ...payload, callResult: "answered_not_interested", leadStatusCode: "R" },
+    async () => sheet(row), async () => receipt);
+  assert.equal(row[10], "R"); assert.equal(row[33], "answered_not_interested"); assert.equal(row[32], sent);
+  assert.deepEqual([row[29], row[30], row[31]], ["", "", ""]);
+});
+
+test("zero-duration technical recovery remains distinct from a genuine call and still checks phone identity", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  const { row, receipt, payload } = fixture();
+  row[10] = ""; row[13] = ""; row[16] = ""; row[19] = "";
+  receipt.status = "failed"; receipt.metadata.call_duration_secs = 0;
+  await assert.rejects(updateVoiceLeadRow(6370, { ...payload, callResult: "answered_not_interested", leadStatusCode: "R" },
+    async () => sheet(row), async () => receipt), /does not match/);
+  const technical = { ...payload, callResult: "call_failed_before_completion", leadStatusCode: undefined };
+  await updateVoiceLeadRow(6370, technical, async () => sheet(row), async () => receipt);
+  assert.equal(row[33], "call_failed_before_completion");
+  assert.equal(row[10], ""); assert.equal(row[29], "");
+  const changed = fixture(); changed.row[10] = ""; changed.row[13] = ""; changed.row[16] = ""; changed.row[19] = "";
+  changed.row[2] = "+12025550199";
+  await assert.rejects(updateVoiceLeadRow(6370, technical, async () => sheet(changed.row), async () => receipt), /identity changed/);
+});
+
 test("protected notes without receipt proof cannot be acknowledged as a final outcome", async () => {
   const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
   const { row } = fixture(); const before = [...row];

@@ -315,12 +315,16 @@ async function writeVoiceLeadRow(
   }
   let terminalReceiptVerified = false;
   const protectedReason = finalUnansweredPreservationReason(rowValues);
-  if (updates.voiceTerminalReceipt && (updates.voiceReceiptOnly || (protectedReason && protectedReason !== "missing_first_attempt_history"))) {
+  const receiptOnlyPersistence = updates.voiceReceiptOnly || (protectedReason && protectedReason !== "missing_first_attempt_history");
+  if (updates.voiceTerminalReceipt) {
     const before = voiceReconciliationStateHash(rowValues);
     const receipt = await getTerminalReceipt(updates.voiceTerminalReceipt.conversationId);
     const fresh = await readVoiceLeadRow(sheets, rowNumber);
     if (voiceReconciliationStateHash(fresh) !== before) throw new Error("Terminal receipt owning state changed during verification");
-    verifyVoiceTerminalReceipt(rowNumber, fresh, updates.callAttemptNumber, updates.voiceTerminalReceipt, receipt);
+    const unplacedTechnicalFailure = !receiptOnlyPersistence && ["provider_quota_exceeded", "provider_d17_failure",
+      "provider_llm_failure", "call_failed_before_completion", "call_failed_before_completion_retryable"]
+      .includes(updates.callResult ?? "");
+    verifyVoiceTerminalReceipt(rowNumber, fresh, updates.callAttemptNumber, updates.voiceTerminalReceipt, receipt, unplacedTechnicalFailure);
     rowValues = fresh;
     terminalReceiptVerified = true;
   }
@@ -372,7 +376,7 @@ async function writeVoiceLeadRow(
     ]);
     const expectedProof = writes.filter((write) => terminalReceiptVerified || updates.voiceExpectedStateHash || updates.voiceOutcomeRecoveryProof || proofColumns.has(write.columnNumber));
     if (!expectedProof.length) throw new Error("Terminal outcome readback has no owning proof fields");
-    if (terminalReceiptVerified && [0, 1, 2, 4, 5, 6, 9, 10, 13, 15, 16, 19, 32, 35, 36, 37, 38, 39]
+    if (terminalReceiptVerified && receiptOnlyPersistence && [0, 1, 2, 4, 5, 6, 9, 10, 13, 15, 16, 19, 32, 35, 36, 37, 38, 39]
       .some(i => String(verifiedRow[i] ?? "") !== String(rowValues[i] ?? ""))) {
       throw new Error("Protected terminal receipt readback changed owning history or preferences");
     }
@@ -385,7 +389,7 @@ async function writeVoiceLeadRow(
     if (mismatches.length > 0) {
       throw new Error(`${updates.voiceOutcomeRecoveryProof ? "Recovered outcome" : finalUnanswered ? "Final unanswered disposition" : "Voice disposition"} readback mismatch for row ${rowNumber}: ${fieldsWritten(mismatches).join(", ")}`);
     }
-    logger.info(terminalReceiptVerified ? "Google Sheets protected terminal receipt verified by readback" : finalUnanswered ? "Google Sheets final unanswered disposition verified by readback" : "Google Sheets retry scheduling verified by readback", {
+    logger.info(terminalReceiptVerified && receiptOnlyPersistence ? "Google Sheets protected terminal receipt verified by readback" : finalUnanswered ? "Google Sheets final unanswered disposition verified by readback" : "Google Sheets retry scheduling verified by readback", {
       spreadsheetId: config.googleSheets.sheetId,
       tabName: config.googleSheets.tabName,
       rowNumber,

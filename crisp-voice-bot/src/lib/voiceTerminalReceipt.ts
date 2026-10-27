@@ -21,6 +21,7 @@ export async function fetchVoiceTerminalReceipt(id: string): Promise<unknown> {
 export function verifyVoiceTerminalReceipt(
   rowNumber: number, row: unknown[], attempt: number | undefined,
   proof: VoiceTerminalReceiptProof, receipt: unknown,
+  allowUnplacedFailure = false,
 ): void {
   if (attempt !== 1 && attempt !== 2) throw new Error("Terminal receipt attempt is invalid");
   const sentAt = parseVoiceBotDate(row[attempt === 1 ? 32 : 39])?.toISOString();
@@ -28,9 +29,12 @@ export function verifyVoiceTerminalReceipt(
   if (!sentAt || !phone || phone !== proof.phone ||
       row.slice(0, 2).map(normalizeString).filter(Boolean).join(" ") !== proof.fullName ||
       buildVoiceBotListingAddress(row) !== proof.listingAddress) throw new Error("Terminal receipt owning identity changed");
-  const detail = receipt as { conversation_id?: string; metadata?: { call_duration_secs?: number } } | null;
+  const detail = receipt as { conversation_id?: string; status?: string;
+    metadata?: { call_duration_secs?: number; accepted_time_unix_secs?: number | null } } | null;
+  const unplacedFailure = allowUnplacedFailure && detail?.status === "failed" &&
+    detail.metadata?.call_duration_secs === 0 && !detail.metadata.accepted_time_unix_secs;
   if (!config.elevenLabs.agentId || detail?.conversation_id !== proof.conversationId ||
-      !(Number(detail?.metadata?.call_duration_secs) > 0) ||
+      (!(Number(detail?.metadata?.call_duration_secs) > 0) && !unplacedFailure) ||
       !isMatchingTerminalVoiceReceipt(receipt, rowNumber, {
         phone, callAttemptNumber: attempt, sentAt, previousResult: normalizeString(row[attempt === 1 ? 33 : 40]),
         fullName: proof.fullName, listingAddress: proof.listingAddress,

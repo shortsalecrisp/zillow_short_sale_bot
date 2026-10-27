@@ -2,6 +2,7 @@ import axios, { type AxiosInstance } from "axios";
 import { config } from "./config";
 import { logger } from "./logger";
 import { hasUnresolvedVoiceStart } from "./voiceTransportRecovery";
+import { getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 import {
   buildVoiceBotDateInTimeZone,
   getNextVoiceBotFirstAttemptWindowStart,
@@ -74,6 +75,7 @@ export function getVoiceOverdueFallbackPlan(
   rowNumber: number, values: unknown[], now: Date,
 ): VoiceOverdueFallbackPlan | undefined {
   if (normalizeString(values[10]) || normalizeMarker(values[8]) !== "x") return undefined;
+  if (getVoicePhoneAttemptIdentity(values).reviewReason) return undefined;
   const notes = normalizeString(values[41]);
   if (notes.includes(VOICE_OVERDUE_FALLBACK_MARKER)) return undefined;
   if ([15, 16, 19, 35, 36, 37, 38].some((index) => marked(values[index]))) return undefined;

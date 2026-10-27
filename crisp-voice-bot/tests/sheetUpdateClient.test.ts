@@ -238,6 +238,20 @@ test("retry scheduling uses fresh direct guards before any relay can overwrite c
   assert.equal(writes, 1);
 });
 
+test("all final receipts including callback and information outcomes bypass the unguarded relay", async () => {
+  const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
+  for (const callResult of ["callback_requested", "information_requested", "call_received_agent_hung_up"]) {
+    let writes = 0;
+    await postSheetUpdate({ rowNumber: 123, callAttemptNumber: 1, callResult,
+      voiceTerminalReceipt: { conversationId: "conv_synthetic", phone: "+12025550123",
+        fullName: "Synthetic Owner", listingAddress: "123 Test" } }, {
+      appsScriptPost: async () => { assert.fail("final phone proof must be checked by the guarded writer"); },
+      directSheetUpdate: async (_, payload) => { writes++; assert.equal(payload.callResult, callResult); return ["AH:callResult"]; },
+    });
+    assert.equal(writes, 1);
+  }
+});
+
 test("accepted retryable outcome fails closed when scheduling readback cannot be proved", async () => {
   const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
   await assert.rejects(postSheetUpdate({

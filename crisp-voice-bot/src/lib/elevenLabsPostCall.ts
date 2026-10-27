@@ -1181,13 +1181,36 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     shouldTreatAsRecordingArtifact(conversation) ||
     shouldTreatAsDoNotCall(conversation) ||
     shouldTreatAsCallEndedByRequest(conversation) ||
-    shouldTreatAsDeferredContact(conversation)
+    shouldTreatAsDeferredContact(conversation) ||
+    getExplicitCallbackConsent(conversation)
   ) {
     return false;
   }
 
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   const messages = conversation.transcript ?? [];
+  const liveMessages = new Set(liveContactMessages(conversation));
+  const contextualServiceDecline = messages.some((item, index) => {
+    if ((item.role !== "assistant" && item.role !== "agent") || !item.message) return false;
+    const question = normalizeText(item.message);
+    const helpQuestion = /\bwould help with\b.{0,100}\bbe useful\b/.test(question);
+    const priorHelpQuestion = messages.slice(0, index).some(prior =>
+      (prior.role === "assistant" || prior.role === "agent") &&
+      /\bwould help with\b.{0,100}\bbe useful\b/i.test(prior.message ?? ""));
+    const clarification = priorHelpQuestion && (
+      /\bwould (?:that|this) help on (?:this|the) file\?/.test(question) ||
+      (/\bwe help (?:collect|prepare)\b.{0,100}\b(?:documents?|paperwork|lender|bank)\b/.test(question) &&
+        /\bwould you like\b/.test(question)));
+    if (!helpQuestion && !clarification) return false;
+    // Never borrow a No from a later assistant question, a recording or a callback request.
+    for (const next of messages.slice(index + 1)) {
+      if (!next.message || !hasMeaningfulSpokenContent(next.message)) continue;
+      if (next.role !== "user" || !liveMessages.has(next.message)) return false;
+      const answer = normalizeText(next.message).replace(/^(?:(?:uh+|oh|n-)[, ]*)/, "");
+      return /^(?:no|nope)(?:[, ]+(?:that['’]?s (?:okay|ok)|i(?:'m| am) (?:doing|handling) (?:everything|it|this|the file)))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer);
+    }
+    return false;
+  });
   const directServiceRefusal = liveContactMessages(conversation).some((message) => {
     const callerText = normalizeText(message);
     return (
@@ -1215,9 +1238,10 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     ) {
       return false;
     }
-    const answer = messages.slice(index + 1).find(
-      (next) => next.role === "user" && typeof next.message === "string" && hasMeaningfulSpokenContent(next.message),
+    const next = messages.slice(index + 1).find(
+      (next) => typeof next.message === "string" && hasMeaningfulSpokenContent(next.message),
     );
+    const answer = next?.role === "user" ? next : undefined;
     return Boolean(
       answer?.message &&
         /^(?:(?:uh+|oh)[, ]*)?(?:no(?:[, ]+not today)?|not right now|no[, ]+(?:thanks|thank you)|no[, ]+that['’]?s (?:okay|ok)|nothing right now)[.!?]*$/i.test(answer.message.trim()),
@@ -1231,14 +1255,16 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
     if (!/\b(?:is it okay if i ask|may i ask|can i ask|got a quick second)\b/.test(question)) {
       return false;
     }
-    const answer = messages.slice(index + 1).find(
-      (next) => next.role === "user" && typeof next.message === "string" && hasMeaningfulSpokenContent(next.message),
+    const next = messages.slice(index + 1).find(
+      (next) => typeof next.message === "string" && hasMeaningfulSpokenContent(next.message),
     );
+    const answer = next?.role === "user" ? next : undefined;
     return Boolean(answer?.message && /^(?:uh+[, ]*)?(?:no|no[, ]+thanks|not interested)[.!?]*$/i.test(answer.message.trim()));
   });
   return (
     shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
     directServiceRefusal ||
+    contextualServiceDecline ||
     completedHelpDecline ||
     declinedOpeningPermission ||
     text.includes("not interested") ||

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { getVoiceBotFirstAttemptWindowName } from "../src/lib/voiceSheet";
+import { formatVoiceAttemptIdentity } from "../src/lib/voicePhoneIdentity";
 
 process.env.BASE_URL = "https://example.com";
 process.env.TELNYX_API_KEY = "test";
@@ -58,6 +59,7 @@ function row(followupSentAt: string, options: { call1SentAt?: string; call1Resul
   values[23] = followupSentAt;
   values[32] = options.call1SentAt ?? "";
   values[33] = options.call1Result ?? "";
+  if (options.call1SentAt) values[41] = formatVoiceAttemptIdentity(7000, String(values[2]), 1, new Date(options.call1SentAt));
   return values;
 }
 
@@ -86,6 +88,7 @@ test("Indian Harbour Beach becomes eligible only in its assigned Eastern window 
   assert.equal(getVoiceBotCallCandidateFromRowValues(6270, values, new Date("2026-10-19T13:45:00Z")), undefined);
   values[32] = "2026-10-19T13:20:00Z";
   values[33] = "voicemail_left";
+  values[41] = formatVoiceAttemptIdentity(6270, String(values[2]), 1, new Date(String(values[32])));
   const retry = getVoiceBotCallCandidateFromRowValues(6270, values, new Date("2026-10-19T19:00:00Z"));
   assert.equal(retry?.callAttemptNumber, 2);
   assert.equal(retry?.callWindow, "reach_afternoon_v1");
@@ -405,6 +408,7 @@ test("phone-scoped guards preserve no-call preferences and prevent duplicate-lis
   assert.equal(getVoiceBotCallCandidatesFromRows(rows, now, 10).length, 0);
   duplicate[33] = "voicemail_left";
   duplicate[32] = "2026-10-01T13:30:00Z";
+  duplicate[41] = formatVoiceAttemptIdentity(6002, String(duplicate[2]), 1, new Date(String(duplicate[32])));
   assert.deepEqual(getVoiceBotCallCandidatesFromRows(rows, now, 10).map((item) => [item.rowNumber, item.callAttemptNumber]), [[6002, 2]]);
   duplicate[39] = "2026-10-05T19:10:00Z";
   duplicate[40] = "voicemail_left";

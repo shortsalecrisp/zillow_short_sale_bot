@@ -1,4 +1,5 @@
 import { normalizeMarker, normalizeString, parseVoiceBotDate } from "./voiceSheet";
+import { getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 
 export function isFinalUnansweredVoiceResult(callResult: unknown, callAttemptNumber: unknown): boolean {
   return Number(callAttemptNumber) === 2 && [
@@ -9,6 +10,7 @@ export function isFinalUnansweredVoiceResult(callResult: unknown, callAttemptNum
 
 export function finalUnansweredPreservationReason(row: unknown[]): string | undefined {
   if (normalizeString(row[10])) return "existing_lead_status";
+  if (getVoicePhoneAttemptIdentity(row).reviewReason) return "attempt_phone_requires_review";
   const marked = (value: unknown) => {
     const marker = normalizeMarker(value);
     return Boolean(marker) && !["no", "false", "0"].includes(marker);
