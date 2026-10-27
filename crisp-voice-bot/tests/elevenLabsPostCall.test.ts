@@ -1032,6 +1032,60 @@ test("post-call fallback identifies wrong-person and unrelated-business voicemai
   );
 });
 
+test("reviewed target-name variants do not become identity-mismatch voicemail", async () => {
+  const { shouldTreatAsIdentityMismatchVoicemail } = await import("../src/lib/elevenLabsPostCall");
+  const monty = {
+    status: "done",
+    transcript: [{ role: "user", message: "Hi, you've reached Monty Ordoneau. Please leave a message." }],
+  };
+  const emmanuel = {
+    status: "done",
+    transcript: [{ role: "user", message: "Hi, this is Emmanuel. I'm unavailable, so please leave a message." }],
+  };
+  const johnBramble = {
+    status: "done",
+    transcript: [{ role: "user", message: "You've reached John Bramble. Please leave a message." }],
+  };
+  const johnHartley = {
+    status: "done",
+    transcript: [{ role: "user", message: "This is John Hartley. Please leave a message." }],
+  };
+
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(monty, "Montserrat", "Ordono"), false);
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(emmanuel, "Emanuel", "Ochoa"), false);
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(johnBramble, "Jonathan", "Granlund"), true);
+  // Matching surname keeps Shawn/John under the existing ambiguous review
+  // behavior; this approved fix must not promote it into the variant allowlist.
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(johnHartley, "Shawn", "Hartley"), false);
+});
+
+test("recorded screener unavailable message outranks generic voicemail and hangup", async () => {
+  const {
+    getAuthoritativeTerminalCallResult,
+    shouldTreatAsRecordedScreenerTerminal,
+    shouldTreatAsVoicemail,
+  } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    metadata: {
+      termination_reason: "voicemail_detection tool was called.",
+      features_usage: { voicemail_detection: { used: true } },
+    },
+    analysis: { transcript_summary: "A recorded screening service said the person was unavailable and offered to take an additional message." },
+    transcript: [
+      { role: "user", message: "Please record your name and reason for calling." },
+      { role: "assistant", message: "Maya with Crisp Short Sales, calling about Devonte's short-sale listing." },
+      { role: "user", message: "Please stay on the line while I try to reach them." },
+      { role: "assistant", message: "Sure, I'll wait." },
+      { role: "user", message: "The person you are calling is not available. You may leave an additional message." },
+    ],
+  };
+
+  assert.equal(shouldTreatAsVoicemail(conversation), true);
+  assert.equal(shouldTreatAsRecordedScreenerTerminal(conversation), true);
+  assert.equal(getAuthoritativeTerminalCallResult(conversation, 1, { firstName: "Devonte" }), "agent_not_available");
+});
+
 test("post-call fallback accepts a lead's email-verified middle name on voicemail only", async () => {
   const { shouldTreatAsIdentityMismatchVoicemail } = await import("../src/lib/elevenLabsPostCall");
   const oliverGreeting = {

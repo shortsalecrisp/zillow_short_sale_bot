@@ -883,6 +883,16 @@ export function shouldTreatAsRecordingArtifact(conversation: ElevenLabsConversat
   );
 }
 
+export function shouldTreatAsRecordedScreenerTerminal(conversation: ElevenLabsConversation): boolean {
+  if (hasLiveHumanAfterAutomatedScreening(conversation)) return false;
+  const messages = userMessages(conversation).map(normalizeText);
+  const hasScreeningPrompt = messages.some((text) =>
+    /\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
+    /\b(?:call assist by google|call screening|screening (?:service|assistant)|please stay on the(?: line)?|checking with the person you called|see if (?:this person|they|he|she) is available)\b/.test(text),
+  );
+  return hasScreeningPrompt;
+}
+
 export function shouldTreatAsDoNotCall(conversation: ElevenLabsConversation): boolean {
   return liveContactMessages(conversation).some(looksLikeDoNotCall);
 }
@@ -1342,6 +1352,10 @@ export function getAuthoritativeTerminalCallResult(
   if (unresolvedPhoneMenu && !usedVoicemailDetectionTool(conversation) && !hasDeliveredVoicemailMessage(conversation)) {
     return "agent_not_available";
   }
+  // A recorded screener can offer to take an additional message and thereby
+  // trip the generic voicemail detector. The terminal screener artifact is
+  // still authoritative unless a live human actually joins afterward.
+  if (shouldTreatAsRecordedScreenerTerminal(conversation)) return "agent_not_available";
   const voicemailOrNoAnswer = getVoicemailOrNoAnswerCallResult(conversation, callAttemptNumber);
   if (voicemailOrNoAnswer?.startsWith("voicemail_")) return voicemailOrNoAnswer;
   // Terminal automated screening must outrank any gatekeeper-like wording in
@@ -1567,6 +1581,18 @@ function nameSoundsSimilar(actualName: string, expectedName: string): boolean {
     return false;
   }
   if (actual === expected) {
+    return true;
+  }
+
+  // Keep this list deliberately narrow. These are reviewed, high-confidence
+  // preferred-name or spelling variants; broader nickname inference would
+  // incorrectly collapse genuine wrong-person greetings such as John for
+  // Jonathan/Shawn.
+  const reviewedVariantGroups = [
+    ["montserrat", "monty"],
+    ["emanuel", "emmanuel"],
+  ];
+  if (reviewedVariantGroups.some((group) => group.includes(actual) && group.includes(expected))) {
     return true;
   }
 
