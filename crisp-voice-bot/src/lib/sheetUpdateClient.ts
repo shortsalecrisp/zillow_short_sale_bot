@@ -116,6 +116,10 @@ async function persistDirectSheetFallback(
 
   try {
     const fieldsWritten = await directSheetUpdate(Number(payload.rowNumber), payload);
+    if (failClosed && payload.callResult && !fieldsWritten.some(field =>
+      field === `${Number(payload.callAttemptNumber) === 2 ? "AO" : "AH"}:callResult` || field === "AP:voiceTerminalReceipt_verified")) {
+      throw new RetrySchedulingReadbackError("Terminal outcome was not acknowledged by an owning result or verified receipt");
+    }
     logger.info("Direct sheet fallback accepted", {
       rowNumber: payload.rowNumber,
       callAttemptNumber: payload.callAttemptNumber,
@@ -165,7 +169,7 @@ export async function postSheetUpdate(
       directSheetUpdate, "final_unanswered_disposition_readback", true);
     return;
   }
-  if (needsRetrySchedulingReadback(payload) ||
+  if (payload.voiceReceiptOnly || needsRetrySchedulingReadback(payload) ||
       ["answered_not_interested", "provider_destination_blocked", "contact_request_review"].includes(payload.callResult ?? "")) {
     await persistDirectSheetFallback(payload, directSheetUpdate, "guarded_retry_scheduling_readback", true);
     return;

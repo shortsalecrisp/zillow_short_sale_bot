@@ -101,11 +101,11 @@ test("Apps Script transport timeout falls back to the direct writer", async () =
   assert.equal(directCallCount, 1);
 });
 
-test("final unanswered closeout uses the guarded direct writer even when the relay would accept", async () => {
+test("final unanswered closeout rejects an empty direct acknowledgement even when the relay would accept", async () => {
   const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
   let directCallCount = 0;
 
-  await postSheetUpdate({
+  await assert.rejects(postSheetUpdate({
     rowNumber: 5891,
     callAttemptNumber: 2,
     callResult: "no_response_second_attempt",
@@ -115,9 +115,19 @@ test("final unanswered closeout uses the guarded direct writer even when the rel
       directCallCount += 1;
       return [];
     },
-  });
+  }), /not acknowledged/);
 
   assert.equal(directCallCount, 1);
+});
+
+test("a notes-only direct acknowledgement cannot claim terminal persistence", async () => {
+  const { postSheetUpdate } = await import("../src/lib/sheetUpdateClient");
+  await assert.rejects(postSheetUpdate({ rowNumber: 6370, callAttemptNumber: 1, callResult: "voicemail_left" }, {
+    directSheetUpdate: async () => ["AP:voiceNotes_appended"],
+  }), /not acknowledged/);
+  await postSheetUpdate({ rowNumber: 6370, callAttemptNumber: 1, callResult: "voicemail_left" }, {
+    directSheetUpdate: async () => ["AP:voiceTerminalReceipt_verified"],
+  });
 });
 
 test("final unanswered closeout supplies N and propagates readback failures", async () => {
@@ -149,7 +159,7 @@ test("accepted terminal call failure is reconciled directly when Apps Script omi
     appsScriptPost: async () => ({ data: { ok: true, fieldsWritten: ["AH:callResult", "J:responseStatus"] } }),
     directSheetUpdate: async (rowNumber, payload) => {
       directCalls.push({ rowNumber, callResult: payload.callResult, responseStatus: payload.responseStatus });
-      return ["AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for"];
+      return ["AH:callResult", "AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for"];
     },
   });
 
@@ -192,7 +202,7 @@ test("accepted retryable call failure also requires scheduling proof", async () 
     appsScriptPost: async () => ({ data: { ok: true, fieldsWritten: ["AH:callResult"] } }),
     directSheetUpdate: async () => {
       directCallCount += 1;
-      return ["AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for"];
+      return ["AH:callResult", "AD:call_eligible", "AE:call_time_bucket", "AF:call_scheduled_for"];
     },
   });
   assert.equal(directCallCount, 1);
@@ -223,7 +233,7 @@ test("retry scheduling uses fresh direct guards before any relay can overwrite c
   let writes = 0;
   await postSheetUpdate({ rowNumber: 123, callAttemptNumber: 1, callResult: "agent_not_available" }, {
     appsScriptPost: async () => { assert.fail("retry must not reach the unguarded relay first"); },
-    directSheetUpdate: async () => { writes++; return ["AF:call_scheduled_for"]; },
+    directSheetUpdate: async () => { writes++; return ["AH:callResult", "AF:call_scheduled_for"]; },
   });
   assert.equal(writes, 1);
 });

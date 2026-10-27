@@ -378,8 +378,9 @@ test("same-row concurrent direct writes reread terminal intent before applying a
   await new Promise<void>((done) => setImmediate(done));
   assert.equal(sheet.reads(), 1, "the second write cannot read an obsolete pre-terminal row");
   release.resolve();
-  await Promise.all([terminal, stale]);
-  assert.equal(sheet.reads(), 3, "the retry path rereads once for ordering and once for persisted scheduling proof");
+  await terminal;
+  await assert.rejects(stale, /no result or verified receipt/);
+  assert.equal(sheet.reads(), 2, "the stale retry rereads current intent and fails before writing a notes-only success");
   assert.equal(row[VOICE_BOT_COL_CALL_1_RESULT - 1], "do_not_call");
   assert.equal(row[VOICE_BOT_COL_LEAD_STATUS_CODE - 1], "R");
   assert.equal(row[VOICE_BOT_COL_CALL_ELIGIBLE - 1], "");

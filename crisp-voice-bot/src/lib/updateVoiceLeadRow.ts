@@ -6,6 +6,7 @@ import { VOICE_OVERDUE_FALLBACK_MARKER } from "./voiceOverdueFallback";
 import { finalUnansweredPreservationReason, isFinalUnansweredVoiceResult } from "./voiceFinalUnanswered";
 import { voiceOutcomeRecoveryBlockReason, voiceReconciliationStateHash, type VoiceOutcomeRecoveryProof } from "./voiceOutcomeRecovery";
 import { getInboundQuietGate } from "./voiceSafety";
+import { fetchVoiceTerminalReceipt, verifyVoiceTerminalReceipt, type VoiceTerminalReceiptProof } from "./voiceTerminalReceipt";
 import {
   appendVoiceNotesValue,
   cellRange,
@@ -33,6 +34,8 @@ import {
 } from "./voiceSheet";
 
 export type VoiceLeadRowUpdates = {
+  voiceReceiptOnly?: boolean;
+  voiceTerminalReceipt?: VoiceTerminalReceiptProof;
   voiceExpectedStateHash?: string;
   voiceOutcomeRecoveryProof?: VoiceOutcomeRecoveryProof;
   responseStatus?: string;
@@ -164,10 +167,37 @@ export function buildVoiceLeadRowWrites(
   rowValues: unknown[],
   updates: VoiceLeadRowUpdates,
   now: Date,
+  terminalReceiptVerified = false,
 ): SheetCellWrite[] {
   const writes: SheetCellWrite[] = [];
   if (updates.voiceExpectedStateHash && voiceReconciliationStateHash(rowValues) !== updates.voiceExpectedStateHash) {
     throw new Error("Voice reconciliation held: owning state changed");
+  }
+  const protectedReason = finalUnansweredPreservationReason(rowValues);
+  if (updates.voiceReceiptOnly && !updates.voiceTerminalReceipt) throw new Error("Receipt-only recovery requires terminal proof");
+  if (updates.voiceTerminalReceipt && (updates.voiceReceiptOnly || (protectedReason && protectedReason !== "missing_first_attempt_history"))) {
+    const id = updates.voiceTerminalReceipt.conversationId;
+    if (!terminalReceiptVerified || !updates.callResult || !updates.voiceNotes?.includes(id)) {
+      throw new Error("Protected terminal receipt has not been verified");
+    }
+    const resultColumn = updates.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT;
+    const oldResult = String(rowValues[resultColumn - 1] ?? "").trim();
+    if (!oldResult || oldResult === "call_start_reconciled") addWrite(writes, resultColumn, "callResult", updates.callResult);
+    // Retire only this completed cold lane, never an agreed callback schedule.
+    if (String(rowValues[30] ?? "") === `voice_call_${updates.callAttemptNumber}_due` &&
+        !String(rowValues[38] ?? "").trim() && ["", "no", "false", "0"].includes(String(rowValues[37] ?? "").trim().toLowerCase())) {
+      clearWrite(writes, VOICE_BOT_COL_CALL_ELIGIBLE, "call_eligible");
+      clearWrite(writes, VOICE_BOT_COL_CALL_TIME_BUCKET, "call_time_bucket");
+      clearWrite(writes, VOICE_BOT_COL_CALL_SCHEDULED_FOR, "call_scheduled_for");
+    }
+    const marker = `CODEX_VOICE_TERMINAL_RECEIPT_V1 ${JSON.stringify({ conversationId: id,
+      callAttemptNumber: updates.callAttemptNumber, observedResult: updates.callResult,
+      protectedReason, preservedLeadStatus: rowValues[10] ?? "", recordedAt: now.toISOString() })}`;
+    const existing = String(rowValues[41] ?? "");
+    const notes = existing.includes(`CODEX_VOICE_TERMINAL_RECEIPT_V1 {"conversationId":"${id}"`)
+      ? existing : appendVoiceNotesValue(existing, `${updates.voiceNotes}\n${marker}`);
+    addWrite(writes, VOICE_BOT_COL_VOICE_NOTES, "voiceTerminalReceipt_verified", notes);
+    return writes;
   }
   if (updates.voiceOutcomeRecoveryProof) {
     if (updates.voiceOutcomeRecoveryProof.expectedLeadStatusCode && updates.callResult !== "answered_not_interested") {
@@ -270,6 +300,7 @@ async function writeVoiceLeadRow(
   rowNumber: number,
   updates: VoiceLeadRowUpdates,
   getClient: () => Promise<sheets_v4.Sheets>,
+  getTerminalReceipt: typeof fetchVoiceTerminalReceipt,
 ): Promise<string[]> {
   if (!Number.isInteger(rowNumber) || rowNumber < 2) {
     throw new Error(`rowNumber must be a sheet row number greater than 1. Received: ${rowNumber}`);
@@ -277,12 +308,26 @@ async function writeVoiceLeadRow(
 
   const now = new Date();
   const sheets = await getClient();
-  const rowValues = await readVoiceLeadRow(sheets, rowNumber);
+  let rowValues = await readVoiceLeadRow(sheets, rowNumber);
   if (updates.voiceExpectedStateHash) {
     const phone = String(rowValues[2] ?? "").replace(/\D/g, "");
     if ((await getInboundQuietGate(sheets, phone, now)).blocked) throw new Error("Voice reconciliation held: inbound preference pending");
   }
-  const writes = buildVoiceLeadRowWrites(rowValues, updates, now);
+  let terminalReceiptVerified = false;
+  const protectedReason = finalUnansweredPreservationReason(rowValues);
+  if (updates.voiceTerminalReceipt && (updates.voiceReceiptOnly || (protectedReason && protectedReason !== "missing_first_attempt_history"))) {
+    const before = voiceReconciliationStateHash(rowValues);
+    const receipt = await getTerminalReceipt(updates.voiceTerminalReceipt.conversationId);
+    const fresh = await readVoiceLeadRow(sheets, rowNumber);
+    if (voiceReconciliationStateHash(fresh) !== before) throw new Error("Terminal receipt owning state changed during verification");
+    verifyVoiceTerminalReceipt(rowNumber, fresh, updates.callAttemptNumber, updates.voiceTerminalReceipt, receipt);
+    rowValues = fresh;
+    terminalReceiptVerified = true;
+  }
+  const writes = buildVoiceLeadRowWrites(rowValues, updates, now, terminalReceiptVerified);
+  if (updates.callResult && !writes.some(w => /callResult|voiceTerminalReceipt_verified/.test(w.field))) {
+    throw new Error("Terminal outcome held: no result or verified receipt can be persisted");
+  }
   const written = fieldsWritten(writes);
 
   if (writes.length === 0) {
@@ -313,7 +358,7 @@ async function writeVoiceLeadRow(
   });
 
   const finalUnanswered = isFinalUnansweredVoiceResult(updates.callResult, updates.callAttemptNumber);
-  if (updates.voiceExpectedStateHash || updates.voiceOutcomeRecoveryProof || finalUnanswered ||
+  if (terminalReceiptVerified || updates.voiceExpectedStateHash || updates.voiceOutcomeRecoveryProof || finalUnanswered ||
       ["answered_not_interested", "provider_destination_blocked", "contact_request_review"].includes(updates.callResult ?? "") ||
       (normalizeCallAttemptNumber(updates.callAttemptNumber) === 1 && isRetryableVoiceBotResult(updates.callResult))) {
     const verifiedRow = await readVoiceLeadRow(sheets, rowNumber);
@@ -325,7 +370,12 @@ async function writeVoiceLeadRow(
       VOICE_BOT_COL_CALL_TIME_BUCKET,
       VOICE_BOT_COL_CALL_SCHEDULED_FOR,
     ]);
-    const expectedProof = writes.filter((write) => updates.voiceExpectedStateHash || updates.voiceOutcomeRecoveryProof || proofColumns.has(write.columnNumber));
+    const expectedProof = writes.filter((write) => terminalReceiptVerified || updates.voiceExpectedStateHash || updates.voiceOutcomeRecoveryProof || proofColumns.has(write.columnNumber));
+    if (!expectedProof.length) throw new Error("Terminal outcome readback has no owning proof fields");
+    if (terminalReceiptVerified && [0, 1, 2, 4, 5, 6, 9, 10, 13, 15, 16, 19, 32, 35, 36, 37, 38, 39]
+      .some(i => String(verifiedRow[i] ?? "") !== String(rowValues[i] ?? ""))) {
+      throw new Error("Protected terminal receipt readback changed owning history or preferences");
+    }
     if (updates.voiceOutcomeRecoveryProof &&
         parseVoiceBotDate(verifiedRow[updates.voiceOutcomeRecoveryProof.callAttemptNumber === 1 ? 32 : 39])?.toISOString() !== updates.voiceOutcomeRecoveryProof.sentAt) {
       throw new Error(`Recovery attempt timestamp changed for row ${rowNumber}`);
@@ -335,7 +385,7 @@ async function writeVoiceLeadRow(
     if (mismatches.length > 0) {
       throw new Error(`${updates.voiceOutcomeRecoveryProof ? "Recovered outcome" : finalUnanswered ? "Final unanswered disposition" : "Voice disposition"} readback mismatch for row ${rowNumber}: ${fieldsWritten(mismatches).join(", ")}`);
     }
-    logger.info(finalUnanswered ? "Google Sheets final unanswered disposition verified by readback" : "Google Sheets retry scheduling verified by readback", {
+    logger.info(terminalReceiptVerified ? "Google Sheets protected terminal receipt verified by readback" : finalUnanswered ? "Google Sheets final unanswered disposition verified by readback" : "Google Sheets retry scheduling verified by readback", {
       spreadsheetId: config.googleSheets.sheetId,
       tabName: config.googleSheets.tabName,
       rowNumber,
@@ -357,11 +407,12 @@ export async function updateVoiceLeadRow(
   rowNumber: number,
   updates: VoiceLeadRowUpdates,
   getClient: () => Promise<sheets_v4.Sheets> = getGoogleSheetsClient,
+  getTerminalReceipt: typeof fetchVoiceTerminalReceipt = fetchVoiceTerminalReceipt,
 ): Promise<string[]> {
   // Serialize this service's read/build/write operations for the same row so
   // a concurrent fallback sees a terminal outcome written by the live tool.
   const prior = pendingRowUpdates.get(rowNumber) ?? Promise.resolve();
-  const operation = prior.then(() => writeVoiceLeadRow(rowNumber, updates, getClient));
+  const operation = prior.then(() => writeVoiceLeadRow(rowNumber, updates, getClient, getTerminalReceipt));
   const settled = operation.then(() => undefined, () => undefined);
   pendingRowUpdates.set(rowNumber, settled);
   void settled.then(() => {

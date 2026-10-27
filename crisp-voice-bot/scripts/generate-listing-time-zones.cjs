@@ -75,11 +75,15 @@ const aliases = {
   "FL|INDIAN HARBOUR BEACH": "FL|SATELLITE BEACH",
   "FL|HARMONY": "FL|SAINT CLOUD",
   "MI|COTTRELLVILLE": "MI|MARINE CITY",
+  "FL|SUNRISE": "FL|FORT LAUDERDALE",
 };
 for (const [alias, canonical] of Object.entries(aliases)) {
   if (!(cityOutput[canonical] >= 0)) throw new Error("Vetted alias target no longer has unanimous timezone evidence: " + canonical);
   cityOutput[alias] = cityOutput[canonical];
 }
+// Named municipal evidence, not a Texas-wide or low-accuracy fallback.
+if (cityOutput["TX|LAREDO"] !== -2) throw new Error("Review changed Laredo postal evidence before applying the vetted city zone");
+cityOutput["TX|LAREDO"] = zones.indexOf("America/Chicago");
 const output = {
   metadata: {
     schemaVersion: 1,

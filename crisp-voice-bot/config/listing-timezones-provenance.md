@@ -116,6 +116,33 @@ remain afternoon for both held agents; no morning call is authorized by
 this location repair. Generated TypeScript data and Apps Script companion
 remain identical; production backend dispatch owns the guarded call start.
 
+## Vetted Sunrise Alias and Laredo City Zone
+
+Verified 2026-10-27 for held rows 6408 and 6433. Sunrise uses the existing
+Fort Lauderdale postal consensus, including ZIP 33313, without rewriting the
+listing city. The exact public property is 5979 NW 15th St, Sunrise FL 33313:
+https://www.redfin.com/FL/Sunrise/5979-NW-15th-St-33313/home/41627073
+The Florida corporate registry independently lists this same Sunrise address:
+https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResultDetail?aggregateId=flal-l25000163299-54b37fcf-0267-4da1-b19c-0e7ec9101fd8&inquirytype=FeiNumber
+Sunrise is in Broward County, east of the federal Eastern/Central boundary:
+https://www.ecfr.gov/current/title-49/subtitle-A/part-71/section-71.5
+
+Laredo is a separately vetted named-city exception to the postal coordinate
+accuracy gate, not an alias to an unrelated city. GeoNames' TX|LAREDO entry
+was -2 (insufficient high-accuracy coordinates), not a conflicting-zone -1.
+The exact public property is 4704 Mims Ave, Laredo TX 78041, Webb County:
+https://www.realtor.com/realestateandhomes-detail/4704-Mims-Ave_Laredo_TX_78041_M84188-60015
+The city ordinance specifies Central time for the city:
+https://library.municode.com/TX/laredo/codes/code_of_ordinances?nodeId=PTIICOOR_CH19MOVETR_ARTVIIISTSTPA
+The federal Central/Mountain boundary follows eastern Hudspeth County, far
+west of Webb County:
+https://www.ecfr.gov/current/title-49/subtitle-A/part-71/section-71.7
+Only TX|LAREDO is assigned America/Chicago; the generator requires its exact
+reviewed -2 baseline. Unknown, ambiguous and other low-accuracy cities remain
+held. State/ZIP conflict checks, IANA DST, stable phone lanes and all call
+safety gates are unchanged. Sunrise is America/New_York. Runtime and generated
+Apps Script companion use identical data; no provider prompt is published.
+
 ## Rebuild
 
 Download and retain the public US.zip source, extract US.txt, and install

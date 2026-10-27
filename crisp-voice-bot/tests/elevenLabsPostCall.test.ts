@@ -1692,6 +1692,7 @@ for (const scenario of [
         requestQueueRefill,
         postSheetUpdate: (payload) => postSheetUpdate(payload, {
           directSheetUpdate: async (_row, payload) => { measurementWrites.push(payload as unknown as Record<string, unknown>); return [
+            "AH:callResult",
             "J:response_status",
             "K:call_attempt_status",
             "AD:call_eligible",

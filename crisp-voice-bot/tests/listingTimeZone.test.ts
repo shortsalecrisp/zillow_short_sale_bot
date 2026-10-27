@@ -124,6 +124,24 @@ test("missing, conflicting, invalid, and unknown split-state evidence fails clos
   assert.equal(resolveListingTimeZone({ state: "CA" }).timeZone, "America/Los_Angeles");
 });
 
+test("vetted Sunrise and Laredo resolve the held listings without weakening split-state holds", () => {
+  for (const [city, state, address, zip, zone, otherZip] of [
+    ["Sunrise", "FL", "5979 NW 15th St", "33313", "America/New_York", "32501"],
+    ["Laredo", "TX", "4704 Mims Ave", "78041", "America/Chicago", "79901"],
+  ]) {
+    for (const streetAddress of [address, `${address}, ${city}, ${state} ${zip}`]) {
+      assert.equal(resolveListingTimeZone({ streetAddress, city, state }).timeZone, zone);
+    }
+    assert.equal(resolveListingTimeZone({ streetAddress: `${address} ${state} ${otherZip}`, city, state }).reason, "listing_zip_conflict");
+    for (const date of ["2026-10-27", "2026-12-15"]) {
+      const at = `${date}T${zone === "America/Chicago" ? (date.endsWith("27") ? "14" : "15") : (date.endsWith("27") ? "13" : "14")}:15:00Z`;
+      assert.equal(new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "2-digit", hourCycle: "h23" }).format(new Date(at)), "09");
+    }
+  }
+  assert.equal(resolveListingTimeZone({ city: "Invented city", state: "TX" }).timeZone, "");
+  assert.equal(resolveListingTimeZone({ state: "FL" }).timeZone, "");
+});
+
 test("IANA city zones preserve DST and Arizona reservation differences", () => {
   const hour = (city: string, state: string, date: string) => new Intl.DateTimeFormat("en-US", {
     timeZone: resolveListingTimeZone({ city, state }).timeZone, hour: "numeric", hourCycle: "h23",

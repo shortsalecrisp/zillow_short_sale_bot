@@ -2220,7 +2220,10 @@ async function processPostCallOutcomeForConversationUnlocked(
       transcript: fullTranscript,
       terminalCallResult,
     });
-  const persistSheetUpdate = options.postSheetUpdate ?? postSheetUpdate;
+  const persistSheetUpdate = (payload: SheetUpdateRequest) => (options.postSheetUpdate ?? postSheetUpdate)({
+    ...payload, voiceTerminalReceipt: { conversationId, phone: metadata.requestedPhone,
+      fullName: metadata.fullName, listingAddress: metadata.listingAddress },
+  });
 
   if (terminalCallResult) {
     if (conversation.status !== "done" && conversation.status !== "failed") return false;

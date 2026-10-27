@@ -40,7 +40,8 @@ export function voiceOutcomeRecoveryBlockReason(row: unknown[], proof: VoiceOutc
 
 export function getPendingVoiceOutcomeRecoveries(
   rows: Array<{ rowNumber: number; values: unknown[] }>, now: Date, monitorStartedAt: Date,
-): Array<{ rowNumber: number; proof: VoiceOutcomeRecoveryProof }> {
+  includeProtectedReceipts = false,
+): Array<{ rowNumber: number; proof: VoiceOutcomeRecoveryProof; receiptOnly?: boolean }> {
   return rows.flatMap(({ rowNumber, values }) => {
     const attempt = parseVoiceBotDate(values[39]) ? 2 : 1;
     const index = attempt === 1 ? 32 : 39;
@@ -51,7 +52,11 @@ export function getPendingVoiceOutcomeRecoveries(
         !["", "call_start_reconciled"].includes(result)) return [];
     const proof: VoiceOutcomeRecoveryProof = { phone, callAttemptNumber: attempt, sentAt: sent.toISOString(), previousResult: result,
       fullName: values.slice(0, 2).map(normalizeString).filter(Boolean).join(" "), listingAddress: buildVoiceBotListingAddress(values) };
-    return voiceOutcomeRecoveryBlockReason(values, proof) ? [] : [{ rowNumber, proof }];
+    const blocked = voiceOutcomeRecoveryBlockReason(values, proof);
+    if (!blocked) return [{ rowNumber, proof }];
+    return includeProtectedReceipts && blocked !== "expired_to_mailshake" &&
+      ["existing_lead_status", "handoff_callback_or_human_takeover", "contact_preference", "response_requires_review", "protected_contact_outcome"].includes(blocked)
+      ? [{ rowNumber, proof, receiptOnly: true }] : [];
   });
 }
 

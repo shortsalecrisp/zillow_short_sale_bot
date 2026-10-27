@@ -55,6 +55,16 @@ test("recovery preserves contact preferences, existing K, current attempt and fi
   const old = pending(); old.values[32] = "2026-09-01T13:15:00Z";
   assert.deepEqual(getPendingVoiceOutcomeRecoveries([old], now, monitor), []);
 });
+
+test("protected missing receipts may be discovered only in an explicitly receipt-only recovery lane", () => {
+  const row = pending(); row.values[10] = "N"; row.values[16] = true; row.values[19] = true;
+  assert.deepEqual(getPendingVoiceOutcomeRecoveries([row], now, monitor), []);
+  const [candidate] = getPendingVoiceOutcomeRecoveries([row], now, monitor, true);
+  assert.equal(candidate.receiptOnly, true);
+  assert.equal(candidate.proof.phone, "+12025550123");
+  row.values[41] = "CODEX_VOICE_EXPIRED_TO_MAILSHAKE_V1";
+  assert.deepEqual(getPendingVoiceOutcomeRecoveries([row], now, monitor, true), []);
+});
 test("only an exact terminal non-test outbound receipt can release pending processing", () => {
   const proof = getPendingVoiceOutcomeRecoveries([pending()], now, monitor)[0].proof;
   const receipt = {

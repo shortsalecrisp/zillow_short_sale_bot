@@ -17,7 +17,7 @@ import { getGoogleSheetsClient } from "./googleSheets";
 import { logger } from "./logger";
 import { processPostCallOutcomeFromConversationId } from "./elevenLabsPostCall";
 import { updateVoiceLeadRow } from "./updateVoiceLeadRow";
-import { getPendingVoiceOutcomeRecoveries, isMatchingTerminalVoiceReceipt, voiceOutcomeRecoveryBlockReason } from "./voiceOutcomeRecovery";
+import { getPendingVoiceOutcomeRecoveries, isMatchingTerminalVoiceReceipt, voiceOutcomeRecoveryBlockReason, voiceReconciliationStateHash } from "./voiceOutcomeRecovery";
 import { nextTransportRecoverySlot, transportFailureKind, VOICE_START_RESOLUTION_MARKER } from "./voiceTransportRecovery";
 import { getOutboundCallPause } from "./outboundCallPause";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
@@ -1148,12 +1148,12 @@ const finalReceiptRecoveryChecks = new Map<string, number>();
 async function reconcilePendingVoiceFinalReceipts(
   sheets: sheets_v4.Sheets, rows: Array<{ rowNumber: number; values: unknown[] }>, now: Date,
 ): Promise<boolean> {
-  const candidates = getPendingVoiceOutcomeRecoveries(rows, now, config.voiceQueue.finalReceiptMonitorStartedAt)
+  const candidates = getPendingVoiceOutcomeRecoveries(rows, now, config.voiceQueue.finalReceiptMonitorStartedAt, true)
     .filter(c => now.getTime() - (finalReceiptRecoveryChecks.get(`${c.rowNumber}:${c.proof.sentAt}`) ?? 0) >= 120_000)
     .sort((a, b) => (finalReceiptRecoveryChecks.get(`${a.rowNumber}:${a.proof.sentAt}`) ?? 0) -
       (finalReceiptRecoveryChecks.get(`${b.rowNumber}:${b.proof.sentAt}`) ?? 0)).slice(0, 4);
   let changed = false;
-  for (const { rowNumber, proof } of candidates) {
+  for (const { rowNumber, proof, receiptOnly } of candidates) {
     finalReceiptRecoveryChecks.set(`${rowNumber}:${proof.sentAt}`, now.getTime());
     const values = rows.find(r => r.rowNumber === rowNumber)!.values;
     const metadata: CallMetadata = {
@@ -1171,13 +1171,15 @@ async function reconcilePendingVoiceFinalReceipts(
           const freshRows = await getVoiceBotRows(sheets);
           const current = freshRows.find(r => r.rowNumber === rowNumber)?.values ?? [];
           const blocked = voiceOutcomeRecoveryBlockReason(current, proof);
-          if (blocked) throw new Error(`Fresh final-receipt recovery held: ${blocked}`);
+          if (blocked && !receiptOnly) throw new Error(`Fresh final-receipt recovery held: ${blocked}`);
           if (freshRows.some(r => r.rowNumber !== rowNumber && normalizePhoneToE164(r.values[2]) === proof.phone)) {
             throw new Error("Final-receipt recovery requires same-phone duplicate review");
           }
           const quiet = await getInboundQuietGate(sheets, proof.phone, new Date());
           if (quiet.blocked) throw new Error("Final-receipt recovery held by inbound quiet gate");
-          await updateVoiceLeadRow(rowNumber, { ...payload, voiceOutcomeRecoveryProof: proof }, async () => sheets);
+          await updateVoiceLeadRow(rowNumber, receiptOnly
+            ? { ...payload, voiceReceiptOnly: true, voiceExpectedStateHash: voiceReconciliationStateHash(current) }
+            : { ...payload, voiceOutcomeRecoveryProof: proof }, async () => sheets);
           changed = true;
         },
       });

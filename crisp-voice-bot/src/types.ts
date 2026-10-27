@@ -148,6 +148,8 @@ export interface ElevenLabsOutboundCallResponse {
 }
 
 export interface SheetUpdateRequest {
+  voiceReceiptOnly?: boolean;
+  voiceTerminalReceipt?: import("./lib/voiceTerminalReceipt").VoiceTerminalReceiptProof;
   rowNumber?: number;
   sheetName?: string;
   status?: string;
