@@ -4499,8 +4499,10 @@ def test_sms_contract_manual_reply_is_terminal_takeover(monkeypatch):
         data={
             "token": "secret-token",
             "action": "manual_reply_sent",
+            "request_id": "manual-receipt-1",
             "phone": "+19542357723",
             "reply_text": "I can call you this afternoon.",
+            "sent_at": "2026-10-26T15:30:49+00:00",
         },
     )
     assert response.status_code == 200
@@ -4508,6 +4510,23 @@ def test_sms_contract_manual_reply_is_terminal_takeover(monkeypatch):
     assert sheet.rows[2][13] == "handoff"
     assert sheet.rows[2][16] == "TRUE"
     assert sheet.rows[2][19] == "TRUE"
+    first = response.json()
+    repeated = TestClient(module.app).post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "manual_reply_sent",
+            "request_id": "manual-receipt-1",
+            "phone": "+19542357723",
+            "reply_text": "I can call you this afternoon.",
+            "sent_at": "2026-10-26T15:30:49+00:00",
+        },
+    ).json()
+    assert repeated["duplicate"] is True
+    assert repeated["receipt_id"] == first["receipt_id"]
+    matching = [entry for entry in json.loads(sheet.rows[2][17]) if entry.get("receipt_id") == first["receipt_id"]]
+    assert len(matching) == 1
+    assert matching[0]["manual"] is True
 
 
 def test_sms_contract_reply_cap_always_hands_off_substantive_inbound(monkeypatch):

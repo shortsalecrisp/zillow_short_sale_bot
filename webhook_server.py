@@ -8705,10 +8705,24 @@ def _sms_handle_manual_reply_sent(body: Dict[str, Any], request_id: str) -> Dict
 
     ws, headers, rows = _sms_read_leads_sheet()
     row_idx, row_obj = _sms_find_or_create_row_by_phone(ws, headers, rows, phone_raw)
-    _sms_append_history(ws, row_idx, headers, row_obj, {
-        "role": "assistant", "text": reply_text, "ts": sent_at,
-        "response_id": _sms_response_id_for_text(reply_text),
-    })
+    receipt_material = "|".join([
+        str(body.get("request_id") or body.get("sms_request_id") or request_id),
+        str(body.get("message_id") or ""),
+        _sms_normalize_phone(phone_raw),
+        reply_text,
+        sent_at,
+    ])
+    receipt_id = hashlib.sha256(receipt_material.encode("utf-8")).hexdigest()[:32]
+    history = _sms_history_array(row_obj.get("history_json"))
+    already_applied = any(str(entry.get("receipt_id") or "") == receipt_id for entry in history)
+    if not already_applied:
+        history.append({
+            "role": "assistant", "text": reply_text, "ts": sent_at,
+            "receipt_id": receipt_id,
+            "response_id": _sms_response_id_for_text(reply_text),
+            "manual": True,
+        })
+        _sms_update_row_fields(ws, row_idx, headers, {"history_json": _sms_json(history[-20:])})
     _sms_update_row_fields(
         ws,
         row_idx,
@@ -8722,7 +8736,8 @@ def _sms_handle_manual_reply_sent(body: Dict[str, Any], request_id: str) -> Dict
             "conversation_summary": "Manual reply sent; automation disabled for this conversation",
         },
     )
-    result = {"ok": True, "manual_takeover": True, "row": row_idx, "should_reply": False}
+    result = {"ok": True, "manual_takeover": True, "row": row_idx, "should_reply": False,
+              "receipt_id": receipt_id, "duplicate": already_applied}
     _sms_append_debug(
         "manual_reply_sent_result",
         {"request_id": request_id, "phone": phone_raw, "reply_text": reply_text, "result": result},

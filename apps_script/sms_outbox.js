@@ -3713,6 +3713,146 @@ function cancelPendingSmsForPhoneV10_(phone, status) {
   }
 }
 
+function recordVerifiedManualSmsReplyReceiptV28_(body) {
+  var phone = normalizePhone_(body && body.phone || "");
+  var replyText = normalizePendingSmsInboundText_(body && (body.reply_text || body.message) || "");
+  var sentAt = new Date(body && body.sent_at || new Date());
+  if (!phone || !replyText || isNaN(sentAt.getTime())) {
+    return { ok: false, reason: "A verified manual reply requires phone, text, and sent time" };
+  }
+  var ss = getSmsSpreadsheet_();
+  var sheet = ss.getSheetByName("sms_pending_sends");
+  if (!sheet || sheet.getLastRow() < 2) return { ok: false, reason: "No pending-send ledger is available" };
+  ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return { ok: false, retryable: true, reason: "SMS outbox is busy" };
+  try {
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+    var requestedMessageId = String(body && body.message_id || "").trim();
+    for (var i = rows.length - 1; i >= 0; i--) {
+      var row = rows[i];
+      var status = String(row[1] || "");
+      if (["pending", "alerted", "queued", "claimed", "send_started", "manual_sent"].indexOf(status) === -1 ||
+          normalizePhone_(row[4]) !== phone || normalizePendingSmsInboundText_(row[5]) !== replyText ||
+          (requestedMessageId && String(row[3] || "") !== requestedMessageId)) continue;
+      var verifiedAlready = status === "manual_sent" && !!row[14] &&
+        String(row[15] || "").indexOf("Verified manual reply receipt") === 0;
+      if (!verifiedAlready) {
+        row[1] = "manual_sent";
+        row[10] = "";
+        row[11] = "";
+        row[12] = "";
+        row[13] = "";
+        row[14] = sentAt;
+        row[15] = "Verified manual reply receipt";
+        row[18] = "";
+        sheet.getRange(i + 2, 1, 1, SMS_PENDING_SEND_HEADERS_.length).setValues([row]);
+      }
+      return {
+        ok: true, pending_row: i + 2, status: "manual_sent", duplicate: verifiedAlready,
+        request_id: String(row[2] || ""), message_id: String(row[3] || ""), sent_at: sentAt.toISOString()
+      };
+    }
+    return { ok: false, reason: "No exact pending send matched the verified manual reply" };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function manualSmsReceiptIdV28_(row) {
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    [String(row[2] || ""), String(row[3] || ""), normalizePhone_(row[4]),
+      normalizePendingSmsInboundText_(row[5]), new Date(row[14]).toISOString()].join("|")
+  );
+  return "manual-" + digest.map(function(value) { return (value + 256).toString(16).slice(-2); }).join("").slice(0, 24);
+}
+
+function mergeVerifiedManualSmsReceiptIntoHistoryV28_(history, receipt) {
+  var entries = Array.isArray(history) ? history.slice() : [];
+  var receiptId = String(receipt && receipt.receipt_id || "");
+  if (!receiptId || !receipt || !receipt.reply_text || !receipt.inbound_text) {
+    return { added: false, history: entries, reason: "Verified manual receipt is incomplete" };
+  }
+  if (entries.some(function(entry) { return String(entry && entry.receipt_id || "") === receiptId; })) {
+    return { added: false, duplicate: true, history: entries };
+  }
+  var inbound = normalizePendingSmsInboundText_(receipt.inbound_text);
+  var inboundIndex = -1;
+  for (var i = entries.length - 1; i >= 0; i--) {
+    if (String(entries[i] && entries[i].role || "").toLowerCase() === "agent" &&
+        normalizePendingSmsInboundText_(entries[i].text) === inbound) {
+      inboundIndex = i;
+      break;
+    }
+  }
+  if (inboundIndex < 0) return { added: false, history: entries, reason: "Matching inbound is not in conversation history" };
+  var normalizedReply = normalizePendingSmsInboundText_(receipt.reply_text);
+  var nextAgentIndex = entries.length;
+  for (var j = inboundIndex + 1; j < entries.length; j++) {
+    if (String(entries[j] && entries[j].role || "").toLowerCase() === "agent") {
+      nextAgentIndex = j;
+      break;
+    }
+    if (String(entries[j] && entries[j].role || "").toLowerCase() === "assistant" &&
+        normalizePendingSmsInboundText_(entries[j].text) === normalizedReply) {
+      entries[j].receipt_id = entries[j].receipt_id || receiptId;
+      entries[j].manual = true;
+      return { added: false, enriched: true, history: entries };
+    }
+  }
+  entries.splice(nextAgentIndex, 0, {
+    role: "assistant", text: receipt.reply_text, ts: receipt.sent_at,
+    receipt_id: receiptId, manual: true
+  });
+  return { added: true, history: entries.slice(-20) };
+}
+
+function mergeVerifiedManualSendReceiptsIntoConversationContextV28_(phone) {
+  var normalizedPhone = normalizePhone_(phone);
+  if (!normalizedPhone) return { ok: false, history: [] };
+  var leadSheet = getSheet_();
+  var leadData = getSheetData_(leadSheet);
+  var lead = null;
+  for (var i = 0; i < leadData.length; i++) {
+    if (normalizePhone_(leadData[i].obj[HEADERS.phone]) === normalizedPhone) {
+      lead = leadData[i];
+      break;
+    }
+  }
+  if (!lead) return { ok: false, history: [] };
+  var history = getHistoryArray_(lead.obj[HEADERS.history_json]);
+  var pending = getSmsSpreadsheet_().getSheetByName("sms_pending_sends");
+  if (!pending || pending.getLastRow() < 2) return { ok: true, history: history, merged: 0 };
+  ensureSmsSheetHeaders_(pending, SMS_PENDING_SEND_HEADERS_);
+  var rows = pending.getRange(2, 1, pending.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+  var receipts = rows.filter(function(row) {
+    return String(row[1] || "") === "manual_sent" && normalizePhone_(row[4]) === normalizedPhone &&
+      Number(row[17] || 0) === Number(lead.row) && !!row[14] &&
+      String(row[15] || "").indexOf("Verified manual reply receipt") === 0;
+  }).map(function(row) {
+    return { row: row, receipt_id: manualSmsReceiptIdV28_(row), reply_text: String(row[5] || ""),
+      inbound_text: String(row[6] || ""), sent_at: new Date(row[14]).toISOString() };
+  }).sort(function(a, b) { return Date.parse(a.sent_at) - Date.parse(b.sent_at); });
+  var merged = 0;
+  receipts.forEach(function(receipt) {
+    var result = mergeVerifiedManualSmsReceiptIntoHistoryV28_(history, receipt);
+    history = result.history;
+    if (result.added || result.enriched) merged++;
+  });
+  if (merged) {
+    var lastAssistant = null;
+    history.forEach(function(entry) {
+      if (String(entry && entry.role || "").toLowerCase() === "assistant") lastAssistant = entry;
+    });
+    var updates = {};
+    updates[HEADERS.history_json] = JSON.stringify(history.slice(-20));
+    if (lastAssistant && lastAssistant.text) updates[HEADERS.last_outbound_text] = lastAssistant.text;
+    updateRowFields_(leadSheet, lead.row, updates);
+  }
+  return { ok: true, history: history, merged: merged };
+}
+
 function getSmsLeadContextByPhone_(phone) {
   var empty = { agent_name: "", last_name: "", email: "", listing_address: "", city: "", state: "", history: [] };
   try {

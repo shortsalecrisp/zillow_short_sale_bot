@@ -674,6 +674,10 @@ function handleIncomingSmsCore_(body) {
   }
 
   if (!(recoveryRetry && messageId && String(rowObj[HEADERS.last_message_id] || "") === messageId)) {
+    if (typeof SpreadsheetApp !== "undefined" &&
+        typeof mergeVerifiedManualSendReceiptsIntoConversationContextV28_ === "function") {
+      mergeVerifiedManualSendReceiptsIntoConversationContextV28_(phoneRaw);
+    }
     appendHistory_(sheet, row, { role: "agent", text: inboundText, ts: receivedAt });
   }
 
@@ -6871,6 +6875,11 @@ function joinUniqueNameTokens_(parts) {
 }
 
 function sendHandoffEmail_(data) {
+  if (data && data.phone && typeof SpreadsheetApp !== "undefined" &&
+      typeof mergeVerifiedManualSendReceiptsIntoConversationContextV28_ === "function") {
+    const reconciled = mergeVerifiedManualSendReceiptsIntoConversationContextV28_(data.phone);
+    if (reconciled && reconciled.ok) data.history = reconciled.history;
+  }
   const props = PropertiesService.getScriptProperties();
   const toEmail = props.getProperty("HANDOFF_EMAIL") || "yoni.kutler@ygkutler.com";
   const fullName = getHandoffDisplayName_(data);

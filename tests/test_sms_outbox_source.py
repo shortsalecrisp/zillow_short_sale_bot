@@ -489,6 +489,22 @@ def test_human_control_paths_share_the_conversation_lease():
     assert "Override queued" in override_source
 
 
+def test_verified_manual_send_receipts_rehydrate_context_before_alerts():
+    chatbot = (ROOT / "apps_script" / "sms_chatbot.js").read_text(encoding="utf-8")
+    unified = (ROOT / "apps_script" / "zz_unified_post.js").read_text(encoding="utf-8")
+    for marker in (
+        "function recordVerifiedManualSmsReplyReceiptV28_",
+        "Verified manual reply receipt",
+        "function mergeVerifiedManualSmsReceiptIntoHistoryV28_",
+        "function mergeVerifiedManualSendReceiptsIntoConversationContextV28_",
+    ):
+        assert marker in OUTBOX
+    assert "mergeVerifiedManualSendReceiptsIntoConversationContextV28_(phoneRaw)" in chatbot
+    assert "data.history = reconciled.history" in chatbot
+    assert "recordVerifiedManualSmsReplyReceiptV28_(body)" in unified
+    assert 'cancelPendingSmsForPhoneV10_(body.phone, "cancelled_takeover")' in unified
+
+
 def test_pending_human_control_is_durable_and_suppresses_outbox_work():
     chatbot = (ROOT / "apps_script" / "sms_chatbot.js").read_text(encoding="utf-8")
     for marker in (

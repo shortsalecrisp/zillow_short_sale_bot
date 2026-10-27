@@ -367,7 +367,9 @@ function handleUnifiedSmsPost_(e) {
 
     if (action === "manual_reply_sent" && typeof handleManualReplySent_ === "function") {
       var manualResult = handleManualReplySent_(body);
-      if (typeof markPendingSmsSendManuallyResolved_ === "function") {
+      if (typeof recordVerifiedManualSmsReplyReceiptV28_ === "function") {
+        manualResult.pending_send = recordVerifiedManualSmsReplyReceiptV28_(body);
+      } else if (typeof markPendingSmsSendManuallyResolved_ === "function") {
         manualResult.pending_send = markPendingSmsSendManuallyResolved_(body);
       }
       try {
@@ -386,7 +388,7 @@ function handleUnifiedSmsPost_(e) {
     if (action === "mark_override" || action === "takeover") {
       var overrideResult = markOverride_(body);
       if (String(body.value || "TRUE").toUpperCase() !== "FALSE" && typeof cancelPendingSmsForPhoneV10_ === "function") {
-        overrideResult.pending_send = cancelPendingSmsForPhoneV10_(body.phone, "manual_sent");
+        overrideResult.pending_send = cancelPendingSmsForPhoneV10_(body.phone, "cancelled_takeover");
       }
       try {
         if (typeof appendSmsDebugLog_ === "function") {
