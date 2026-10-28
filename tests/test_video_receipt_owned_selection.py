@@ -80,6 +80,59 @@ class ReceiptOwnedSelectionTests(unittest.TestCase):
         self.assertIsNone(message)
         self.assertEqual(self.objects._objects, before)
 
+    def test_failed_video_alias_uses_original_text_identity_without_reopening(self):
+        self.make_ready()
+        self.set_job(status="failed", failure_stage="audio_screen", underlying_code="narration_pitch_outlier")
+        before = copy.deepcopy(self.objects._objects)
+        audit = Mock(side_effect=AssertionError("no audio retry"))
+        service = video.Service(self.config, self.store, audit_ready=audit)
+        results = self.concurrent(8, lambda _: service.select(self.alias(row=44), FALLBACK))
+        for message, metadata in results:
+            self.assertEqual(message, FALLBACK)
+            self.assertEqual(metadata["followup_key"], self.context["followup_key"])
+            self.assertEqual(metadata["request_id"], self.context["request_id"])
+            self.assertEqual(metadata["initial_receipt"], self.context["initial_receipt"])
+            self.assertEqual(metadata["video_variant"], "text")
+            self.assertEqual(metadata["crm_row"], 44)
+            self.assertEqual(metadata["selection_reason"], "failed_video_text_fallback")
+        audit.assert_not_called()
+        self.assertEqual(self.objects._objects, before)
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_failed_same_key_is_not_frozen_or_retried(self):
+        self.make_ready()
+        self.set_job(status="failed")
+        before = copy.deepcopy(self.objects._objects)
+        with patch.object(self.store, "freeze", side_effect=AssertionError("no terminal rewrite")):
+            message, metadata = self.service.select(self.context, FALLBACK)
+        self.assertEqual(message, FALLBACK)
+        self.assertEqual(metadata["video_job_id"], self.job()["id"])
+        self.assertEqual(self.objects._objects, before)
+
+    def test_failed_selection_rereads_job_before_returning_text(self):
+        self.make_ready()
+        self.set_job(status="failed")
+        def cancel(*args, **kwargs):
+            self.set_job(status="cancelled")
+            return True
+        with patch.object(self.store, "generation_owned", side_effect=cancel):
+            message, _ = self.service.select(self.context, FALLBACK)
+        self.assertIsNone(message)
+        self.assertEqual(self.job()["status"], "cancelled")
+        self.assertEqual(self.provider.submissions, [])
+
+    def test_verifier_recovery_never_creates_job_or_runs_ready_audit(self):
+        service = video.Service(self.config, self.store,
+                                audit_ready=Mock(side_effect=AssertionError("no audio work")))
+        message, metadata = service.select(self.context, FALLBACK, allow_ready_audit=False)
+        self.assertEqual(message, FALLBACK)
+        self.assertEqual(self.objects._objects, {})
+        self.make_ready()
+        self.set_job(speech_proof={})
+        message, metadata = service.select(self.context, FALLBACK, allow_ready_audit=False)
+        self.assertEqual((message, metadata["video_variant"]), (FALLBACK, "text"))
+        service.audit_ready.assert_not_called()
+
     def test_eligibility_only_forwards_marker_already_frozen_on_job(self):
         ready = self.make_ready()
         session = Mock()

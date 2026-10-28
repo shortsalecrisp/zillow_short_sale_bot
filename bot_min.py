@@ -12654,6 +12654,10 @@ def _followup_has_contact_hold(row: List[Any]) -> bool:
     phone_confidence = str(row[COL_PHONE_CONF] or "").strip().lower()
     contact_reason = str(row[COL_CONTACT_REASON] or "").strip().lower()
     combined = f"{phone_confidence} {contact_reason}"
+    # Identity exceptions must not be hidden by an unrelated older resolution.
+    if any(marker in combined for marker in (
+            "property_agent_mismatch", "verified_agent_cell_not_listing_agent")):
+        return True
     if any(
         resolved_marker in combined
         for resolved_marker in (
@@ -12869,6 +12873,7 @@ def send_sms(
     stable_id: str = "",
     initial_sent_at: str = "",
     text_followup_context: Optional[Dict[str, Any]] = None,
+    allow_video_audit: bool = True,
 ):
     if not SMS_ENABLE or not phone:
         LOG.info(
@@ -12930,10 +12935,11 @@ def send_sms(
         msg_txt, context = select_for_followup(
             msg_txt, row=row_idx, stable_id=stable_id, phone=digits,
             first_name=first, initial_sent_at=initial_sent_at,
+            **({"allow_ready_audit": False} if not allow_video_audit else {}),
         )
         if msg_txt is None:
             LOG.info("VIDEO_FOLLOWUP_CANCELLED row=%s", row_idx)
-            return
+            return {"status": "blocked", "reason": "video_selection_terminal_or_frozen"}
         if context:
             followup_options["followup_context"] = context
 
@@ -12956,7 +12962,8 @@ def send_sms(
                 queued.get("message_id"),
                 queued.get("pending_row"),
             )
-            return
+            return {key: queued[key] for key in ("status", "request_id", "message_id", "pending_row", "duplicate")
+                    if key in queued}
         response_payload = queued.get("response") if queued else None
         retryable = bool(queued and queued.get("error")) or bool(
             isinstance(response_payload, dict) and response_payload.get("retryable")
@@ -12972,6 +12979,10 @@ def send_sms(
         _redact_phone(phone),
         queued,
     )
+    payload = queued.get("response") if queued else None
+    return {"status": "blocked", "reason": str(payload.get("error") or "enqueue_rejected")[:300]
+            if isinstance(payload, dict) else "enqueue_result_unknown_reconcile_before_retry",
+            "message_id": queued.get("message_id") if queued else None}
 
 
 def _within_initial_hours(slot: datetime) -> bool:
@@ -13779,12 +13790,78 @@ def _reconcile_queue_time_marker(row_idx, row, ts, entries):
     return sent_at
 
 
-def _follow_up_pass(only_rows=None, recipient_local_hours=False):
+def review_followup_delivery():
+    """Complete bounded discovery for the verifier, with no send/worker calls."""
+    from followup_delivery_review import review
+    from initial_sms_timestamp import within_recipient_hours
+
+    api = sheets_service.spreadsheets()
+    def capacities():
+        result = api.get(spreadsheetId=GSHEET_ID,
+                         fields="sheets(properties(title,gridProperties(rowCount)))").execute()
+        return {s["properties"]["title"]: s["properties"]["gridProperties"]["rowCount"]
+                for s in result["sheets"]}
+    before = capacities()
+    headers = api.values().get(spreadsheetId=GSHEET_ID, range=f"{GSHEET_TAB}!A1:AS1",
+                               valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [[]])[0]
+    for index, name in {0:"agent_name", 2:"phone", 7:"initial_text_sent", 8:"followup_text_sent",
+                        13:"ai_state", 16:"handoff_flag", 19:"human_override", 21:"last_message_id",
+                        27:"created-at", 43:"last_inbound_text", 44:"last_inbound_at"}.items():
+        if len(headers) <= index or headers[index] != name:
+            raise ValueError("Follow-up review header contract changed")
+    crm_max, outbox_max = before[GSHEET_TAB], before["sms_pending_sends"]
+    if not (2 <= crm_max <= 20000 and 2 <= outbox_max <= 50000):
+        raise ValueError("Follow-up review capacity is outside reviewed bounds")
+    capture = api.values().batchGet(spreadsheetId=GSHEET_ID, majorDimension="ROWS",
+        valueRenderOption="UNFORMATTED_VALUE", ranges=[
+            f"{GSHEET_TAB}!A2:AD{crm_max}", f"{GSHEET_TAB}!AQ2:AS{crm_max}",
+            f"sms_pending_sends!A2:S{outbox_max}",
+        ]).execute()["valueRanges"]
+    if len(capture) != 3:
+        raise ValueError("Follow-up review capture is incomplete")
+    rows = capture[0].get("values", [])
+    controls = capture[1].get("values", [])
+    rows += [[] for _ in range(max(0, len(controls) - len(rows)))]
+    merged = []
+    for offset, row in enumerate(rows):
+        full = list(row) + [""] * (45 - len(row))
+        if offset < len(controls):
+            full[42:45] = (list(controls[offset]) + [""] * 3)[:3]
+        merged.append(full)
+    entries = capture[2].get("values", [])
+    end = api.values().get(spreadsheetId=GSHEET_ID, range=f"sms_pending_sends!A2:E{outbox_max}",
+                          majorDimension="ROWS", valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
+    after = capacities()
+    stable = before == after and [e[:5] for e in entries] == end
+    result = review(merged, entries, parse_time=_parse_sheet_datetime,
+                    elapsed=lambda start, finish: business_hours_elapsed(
+                        start, finish, include_weekends=FOLLOWUP_INCLUDE_WEEKENDS),
+                    now=datetime.now(tz=SCHEDULER_TZ), due_hours=FU_HOURS,
+                    grace_minutes=FOLLOWUP_DUE_GRACE_MINUTES,
+                    contact_hold=_followup_has_contact_hold,
+                    conversation_hold=_followup_has_recorded_conversation,
+                    within_hours=within_recipient_hours)
+    result.update(complete=stable, crm_capacity=crm_max, outbox_capacity=outbox_max)
+    if not stable:
+        for item in result["items"]:
+            if item["status"] == "due_unsent":
+                item.update(status="blocked", reason="capture_raced_reread_required")
+        result["counts"] = {"capture_raced": len(result["items"])}
+    return result
+
+
+def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episodes=None):
+    outcomes = {row: {"row": row, "status": "blocked", "reason": "initial_timestamp_missing_or_unreadable"}
+                for row in (only_rows or [])}
     LOG.info("follow-up: using bounded init_ts scan path")
     now = datetime.now(tz=SCHEDULER_TZ)
+    if recipient_local_hours and (now.weekday() >= 5 or not 8 <= now.hour < 20):
+        for item in outcomes.values():
+            item.update(status="deferred", reason="weekday_business_window")
+        return list(outcomes.values())
     max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
     if max_row <= 1:
-        return
+        return list(outcomes.values())
     try:
         header_response = sheets_service.spreadsheets().values().get(
             spreadsheetId=GSHEET_ID,
@@ -13806,7 +13883,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
         }
     except Exception:
         LOG.exception("Follow-up pass skipped: authoritative inbound controls could not be read")
-        return
+        return list(outcomes.values())
     init_col = _col_index_to_letter(COL_INIT_TS)
     reply_col = _col_index_to_letter(COL_REPLY_FLAG)
     init_resp = sheets_service.spreadsheets().values().batchGet(
@@ -13861,13 +13938,13 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
         )
 
     if not init_rows:
-        return
+        return list(outcomes.values())
 
     init_rows.sort(key=lambda item: item[1], reverse=True)
     candidate_rows = ([item for item in init_rows if item[0] in only_rows]
                       if only_rows is not None else init_rows[:FU_LOOKBACK_ROWS])
     if not candidate_rows:
-        return
+        return list(outcomes.values())
     candidate_indices = [row_idx for row_idx, _ in candidate_rows]
     row_ranges = [
         f"{GSHEET_TAB}!A{row_idx}:{FOLLOWUP_READ_END_COL}{row_idx}"
@@ -13927,7 +14004,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
                     inbound_control_blocks[row_idx] |= bool(str(value or "").strip())
         except Exception:
             LOG.exception("Follow-up pass skipped: authoritative inbound control values could not be read")
-            return
+            return list(outcomes.values())
 
     LOG.info(
         "Follow-up candidate query: init_ts in %s2:%s%s ORDER BY ts DESC LIMIT %s -> rows=%s (total_init_ts=%s missing_init_ts=%s bad_init_ts=%s)",
@@ -13951,6 +14028,15 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
     receipt_entries = None
     for sheet_row, ts in candidate_rows:
         row = candidate_row_map.get(sheet_row, [""] * MIN_COLS)
+        outcome = {"row": sheet_row, "phone": _digits_only(row[COL_PHONE])[-10:],
+                   "stable_id": str(row[27]), "initial_sent_at": ts.isoformat(),
+                   "status": "blocked", "reason": "guard_not_completed"}
+        outcomes[sheet_row] = outcome
+        expected = (expected_episodes or {}).get(sheet_row)
+        if expected and (expected["phone"] != outcome["phone"] or expected["stable_id"] != outcome["stable_id"]
+                         or _parse_sheet_datetime(expected["initial_sent_at"]) != ts):
+            outcome["reason"] = "reviewed_episode_changed"
+            continue
         corrected_episode = None
         if "CODEX_CORRECTED_PHONE_CONTACT_V1 " in str(row[COL_CONTACT_REASON]):
             try:
@@ -13973,12 +14059,14 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
                     ts = _parse_sheet_datetime(corrected_episode["initialReceipt"]["sent_at"])
             except Exception:
                 LOG.exception("Corrected-phone follow-up held row=%s", sheet_row)
+                outcome["reason"] = "corrected_phone_episode_requires_review"
                 continue
         phone_redacted = _redact_followup_phone(row[COL_PHONE])
         address = row[COL_STREET] or ""
         lead_status = row[COL_REPLY_TS].strip().upper()
 
         if inbound_control_blocks[sheet_row]:
+            outcome["reason"] = "authoritative_inbound_control"
             LOG.info(
                 "FU-review row %s status=skip_authoritative_inbound_control phone=%s address=%s",
                 sheet_row,
@@ -14008,6 +14096,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
                 stale_followup_marker = False
 
         if followup_ts_raw and not stale_followup_marker:
+            outcome["reason"] = "existing_followup_marker_reconcile_receipt"
             LOG.info(
                 "FU-review row %s status=already_sent followup_ts=%s phone=%s address=%s",
                 sheet_row,
@@ -14046,6 +14135,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
         reply_flag_blocks = row[COL_REPLY_FLAG].strip() and not stale_followup_marker
         manual_note_blocks = manual_note and not non_response_call_note
         if reply_flag_blocks or manual_note_blocks:
+            outcome["reason"] = "reply_or_manual_control"
             LOG.info(
                 "FU-review row %s status=skip_reply_or_manual reply=%s manual=%s phone=%s address=%s",
                 sheet_row,
@@ -14056,6 +14146,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
             )
             continue
         if lead_status in {"R", "Y", "G", "O", "H"}:
+            outcome["reason"] = "crm_status_hold"
             LOG.info(
                 "FU-review row %s status=skip_lead_status lead_status=%s phone=%s address=%s",
                 sheet_row,
@@ -14065,6 +14156,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
             )
             continue
         if _followup_has_recorded_conversation(row):
+            outcome["reason"] = "recorded_conversation"
             LOG.info(
                 "FU-review row %s status=skip_recorded_conversation phone=%s address=%s",
                 sheet_row,
@@ -14073,6 +14165,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
             )
             continue
         if _followup_has_contact_hold(row):
+            outcome["reason"] = "contact_identity_hold"
             LOG.warning(
                 "FU-review row %s status=skip_contact_hold phone_conf=%s contact_reason=%s phone=%s address=%s",
                 sheet_row,
@@ -14088,6 +14181,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
         reply_since = min([ts] + [parsed for value in reply_cutoffs
                                  if (parsed := _parse_sheet_datetime(value)) is not None])
         if check_reply(row[COL_PHONE], reply_since.isoformat()):
+            outcome["reason"] = "recorded_reply"
             LOG.info(
                 "Auto-detected reply for row %s (msg_id=%s)",
                 sheet_row,
@@ -14109,11 +14203,13 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
                 ts = _reconcile_queue_time_marker(sheet_row, row, ts, receipt_entries)
             except Exception:
                 LOG.exception("Initial timestamp repair failed closed row=%s", sheet_row)
+                outcome["reason"] = "initial_timestamp_receipt_reconciliation_failed"
                 continue
 
         if recipient_local_hours or corrected_episode:
             from initial_sms_timestamp import within_recipient_hours
             if not within_recipient_hours(row[COL_STATE], datetime.now(tz=SCHEDULER_TZ)):
+                outcome.update(status="deferred", reason="recipient_local_hours")
                 LOG.info("FU-review row %s status=recipient_local_hours_deferred", sheet_row)
                 continue
 
@@ -14126,7 +14222,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
             elapsed_hours + FOLLOWUP_DUE_GRACE_MINUTES / 60.0
         )
         video_enabled = os.getenv("VIDEO_FOLLOWUP_ENABLED", "false").lower() == "true"
-        if video_enabled and not corrected_episode and SMS_ENABLE and not SMS_TEST_MODE and effective_elapsed_hours < FU_HOURS:
+        if video_enabled and not recipient_local_hours and not corrected_episode and SMS_ENABLE and not SMS_TEST_MODE and effective_elapsed_hours < FU_HOURS:
             from video_followup import prepare_for_followup
             prepare_for_followup(
                 row=sheet_row, stable_id=row[27] if len(row) > 27 else "",
@@ -14145,11 +14241,13 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
             address,
         )
         if effective_elapsed_hours < FU_HOURS:
+            outcome.update(status="deferred", reason="six_business_hours_not_due")
             LOG.debug(
                 "FU‑skip row %s – %.2f hours elapsed", sheet_row, elapsed_hours
             )
             continue
         if not row[COL_PHONE].strip():
+            outcome["reason"] = "missing_phone"
             LOG.info(
                 "FU-review row %s status=skip_missing_phone phone=%s address=%s",
                 sheet_row,
@@ -14165,7 +14263,11 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
         )
 
         latest_sheet_phone = _current_sheet_phone_for_row(sheet_row)
+        if expected and _digits_only(latest_sheet_phone)[-10:] != expected["phone"]:
+            outcome["reason"] = "reviewed_phone_changed"
+            continue
         if corrected_episode and _digits_only(latest_sheet_phone)[-10:] != corrected_episode["phone"]:
+            outcome["reason"] = "current_phone_changed"
             LOG.warning("Corrected-phone follow-up held: phone changed row=%s", sheet_row)
             continue
         followup_phone = latest_sheet_phone or row[COL_PHONE]
@@ -14189,7 +14291,9 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
                                initial_receipt=corrected_episode["initialReceipt"])
             video_options.clear()
             video_options["text_followup_context"] = {**context, "video_variant": "text", "video_job_id": ""}
-        send_sms(
+        if recipient_local_hours:
+            video_options["allow_video_audit"] = False
+        result = send_sms(
             phone=followup_phone,
             first=row[COL_FIRST],
             address=row[COL_STREET],
@@ -14198,6 +14302,10 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
             stable_id=row[27] if len(row) > 27 else "",
             **video_options,
         )
+        outcome.update(result if isinstance(result, dict) and result else
+                       {"status": "blocked", "reason": "send_result_missing_reconcile_receipts"})
+        if outcome.get("status") in {"queued", "claimed", "send_started", "sent"}:
+            outcome["reason"] = "outbox_receipt_readback_required"
         eligible_count += 1
 
     if eligible_count == 0:
@@ -14208,6 +14316,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
             min(candidate_indices),
             max(candidate_indices),
         )
+    return list(outcomes.values())
 
 # ───────────────────── core row processor (UNCHANGED) ─────────────────────
 def _expand_row(l: List[str], n: int = MIN_COLS) -> List[str]:

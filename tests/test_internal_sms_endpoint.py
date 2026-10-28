@@ -444,6 +444,24 @@ def test_targeted_followup_recovery_auth_bounds_lock_and_policy(monkeypatch):
     assert scheduler._follow_up_pass_lock.acquire(blocking=False)
     scheduler._follow_up_pass_lock.release()
     assert _sender.calls == []
+    episode={'row':6413,'phone':'2125550100','stable_id':'listing','initial_sent_at':'2026-10-26T15:00:00Z'}
+    response=client.post(route,headers=headers,json={'rows':[6413],'expected_episodes':[episode]})
+    assert response.status_code==200
+    assert calls[-1]['expected_episodes']=={6413:episode}
+    for bad in ([],[{'row':6413}], [{**episode,'phone':'bad'}], [{**episode,'row':6414}]):
+        assert client.post(route,headers=headers,json={'rows':[6413],'expected_episodes':bad}).status_code==400
+
+
+def test_followup_review_is_authenticated_read_only_and_separate_from_send(monkeypatch):
+    module, _sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
+    scheduler = sys.modules["bot_min"]
+    calls = []
+    scheduler.review_followup_delivery = lambda: calls.append('read') or {'complete':True,'sent':False,'items':[]}
+    client=TestClient(module.app)
+    assert client.get('/internal/review-followup-sms').status_code==403
+    response=client.get('/internal/review-followup-sms',headers={'Authorization':'Bearer secret-token'})
+    assert response.status_code==200 and response.json()['sent'] is False
+    assert calls==['read'] and sender.calls==[]
 
 
 def test_corrected_phone_review_is_authenticated_hash_guarded_and_read_back(monkeypatch):
