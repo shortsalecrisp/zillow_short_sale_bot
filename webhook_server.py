@@ -9302,6 +9302,14 @@ async def internal_followup_sms_status(request: Request):
     return await asyncio.to_thread(_get_crm_followup_sms_status, str(payload.get("request_id") or ""))
 
 
+@app.get("/internal/review-followup-sms")
+async def internal_review_followup_sms(request: Request):
+    """Read-only overdue inventory; does not evaluate a send or invoke media."""
+    _auth_internal_request(request)
+    import bot_min as scheduler
+    return await asyncio.to_thread(scheduler.review_followup_delivery)
+
+
 @app.post("/internal/reconcile-followup-sms")
 async def internal_reconcile_followup_sms(request: Request):
     """Evaluate a bounded recovery cohort through the unchanged scheduler policy."""
@@ -9314,16 +9322,28 @@ async def internal_reconcile_followup_sms(request: Request):
     if (not isinstance(rows, list) or not 1 <= len(rows) <= 20
             or any(type(row) is not int or not 2 <= row < 9000 for row in rows)):
         raise HTTPException(status_code=400, detail="bounded_rows_required")
+    episodes = payload.get("expected_episodes")
+    if episodes is not None:
+        if (not isinstance(episodes, list) or len(episodes) != len(rows)
+                or any(not isinstance(e, dict) or set(e) != {"row", "phone", "stable_id", "initial_sent_at"}
+                       or type(e["row"]) is not int or e["row"] not in rows
+                       or not re.fullmatch(r"[0-9]{10}", str(e["phone"]))
+                       or not isinstance(e["stable_id"], str) or not e["stable_id"]
+                       or not isinstance(e["initial_sent_at"], str) or not e["initial_sent_at"]
+                       for e in episodes)
+                or len({e["row"] for e in episodes}) != len(rows)):
+            raise HTTPException(status_code=400, detail="exact_expected_episodes_required")
 
     def evaluate():
         import bot_min as scheduler
         if not scheduler._follow_up_pass_lock.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="followup_pass_active")
         try:
-            scheduler._follow_up_pass(only_rows=set(rows), recipient_local_hours=True)
+            options = {"expected_episodes": {e["row"]:e for e in episodes}} if episodes is not None else {}
+            outcomes = scheduler._follow_up_pass(only_rows=set(rows), recipient_local_hours=True, **options)
         finally:
             scheduler._follow_up_pass_lock.release()
-        return {"status": "evaluated", "rows": rows, "sent": False,
+        return {"status": "evaluated", "rows": rows, "outcomes": outcomes or [], "sent": False,
                 "reason": "Read exact outbox receipts; evaluation is not delivery proof."}
 
     return await asyncio.to_thread(evaluate)

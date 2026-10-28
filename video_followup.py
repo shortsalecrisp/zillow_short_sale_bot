@@ -1030,7 +1030,9 @@ class Service:
                 or job.get("followup_key") != key or not self.store.generation_owned(job)):
             raise InitialReceiptHold("Receipt owner is not eligible for prospective selection")
         if (job.get("variant") or job.get("status") not in
-                {"prepared", "submitting", "submitted", "processing", "ready"}):
+                {"prepared", "submitting", "submitted", "processing", "ready", "failed"}):
+            LOG.warning("FOLLOWUP_SELECTION_BLOCKED row=%s key=%s reason=terminal_or_frozen_job status=%s",
+                        context.get("row"), key[:12], job.get("status"))
             return None, None
         if (any(job.get(field) != context.get(field) for field in ("phone", "stable_id", "first_name"))
                 or job.get("initial_receipt") != receipt or job.get("script_version") != SCRIPT_VERSION):
@@ -1049,7 +1051,7 @@ class Service:
         if self.config.accepts(context) and valid_name(context["first_name"]):
             return self.store.prepare(context)
 
-    def select(self, context, fallback):
+    def select(self, context, fallback, *, allow_ready_audit=True):
         context = {**context, "first_name": normalize_name(context["first_name"])}
         if not self.config.accepts(context):
             return fallback, {}
@@ -1066,6 +1068,9 @@ class Service:
                 context = selected
                 metadata = {**context, "video_variant": "text", "video_job_id": ""}
                 job, _ = self.store.read("jobs/" + context["followup_key"])
+            if job is None and not allow_ready_audit:
+                # The verifier may recover an SMS, never create media work.
+                return fallback, metadata
             if job and "initial_receipt" in job:
                 binding = initial_receipt_binding(context, job["initial_receipt"])
                 if binding["initial_receipt_key"] != job.get("initial_receipt_key"):
@@ -1074,7 +1079,25 @@ class Service:
                     raise InitialReceiptHold("Supplied initial receipt differs from the frozen job")
                 context.update(binding)
                 metadata.update(binding)
-            if (self.audit_ready and job and job.get("status") == "ready" and not job.get("variant")
+            if (job and job.get("status") == "failed" and not job.get("variant")
+                    and job.get("receipt_selection_version") == RECEIPT_SELECTION_VERSION):
+                # A failed video is not a recipient suppression. Keep the job
+                # terminal and reuse its IDs; Apps authorizes/deduplicates the
+                # text under lock at enqueue, claim and send_start.
+                if job.get("script_version") != SCRIPT_VERSION or not self.store.generation_owned(job):
+                    raise InitialReceiptHold("Failed job receipt ownership is invalid")
+                current, _ = self.store.read("jobs/" + context["followup_key"])
+                if current != job or job.get("first_name") != context.get("first_name"):
+                    LOG.warning("FOLLOWUP_SELECTION_BLOCKED row=%s key=%s reason=failed_job_changed",
+                                context.get("row"), context["followup_key"][:12])
+                    return None, metadata
+                metadata.update(video_job_id=job["id"], receipt_selection_version=RECEIPT_SELECTION_VERSION,
+                                selection_reason="failed_video_text_fallback")
+                LOG.warning("FOLLOWUP_TEXT_FALLBACK row=%s key=%s reason=failed_video failure_stage=%s code=%s",
+                            context.get("row"), context["followup_key"][:12],
+                            job.get("failure_stage", "unknown"), job.get("underlying_code", "unknown"))
+                return fallback, metadata
+            if (allow_ready_audit and self.audit_ready and job and job.get("status") == "ready" and not job.get("variant")
                     and not self.store.verified_video(job)):
                 try:
                     self.audit_ready(context["followup_key"])
@@ -1145,7 +1168,7 @@ def prepare_for_followup(**kwargs):
         LOG.warning("Video preparation skipped; normal follow-up remains scheduled error_type=%s", type(exc).__name__)
 
 
-def select_for_followup(fallback, **kwargs):
+def select_for_followup(fallback, *, allow_ready_audit=True, **kwargs):
     if os.getenv("VIDEO_FOLLOWUP_ENABLED", "false").lower() != "true":
         return fallback, {}
     context = None
@@ -1154,7 +1177,7 @@ def select_for_followup(fallback, **kwargs):
         config = Config()
         if not config.accepts(context):
             return fallback, {}
-        return get_service().select(context, fallback)
+        return get_service().select(context, fallback, allow_ready_audit=allow_ready_audit)
     except Exception as exc:
         LOG.warning("Video configuration unavailable; same-identity fallback error_type=%s", type(exc).__name__)
         return fallback, ({**context, "video_variant": "text", "video_job_id": ""} if context else {})

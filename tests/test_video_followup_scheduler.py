@@ -92,7 +92,7 @@ def scheduler_handoff(namespace, *, enabled, current_phone=PHONE):
         if len(matches) != 1:
             raise AssertionError("Expected one scheduler assignment for " + name)
         selected.append(matches[0])
-    calls = [node for node in ast.walk(scheduler) if isinstance(node, ast.Expr)
+    calls = [node for node in ast.walk(scheduler) if isinstance(node, (ast.Expr, ast.Assign))
              and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
              and node.value.func.id == "send_sms"]
     if len(calls) != 1:
