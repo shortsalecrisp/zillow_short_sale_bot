@@ -446,6 +446,55 @@ def test_targeted_followup_recovery_auth_bounds_lock_and_policy(monkeypatch):
     assert _sender.calls == []
 
 
+def test_corrected_phone_review_is_authenticated_hash_guarded_and_read_back(monkeypatch):
+    import threading
+    from test_corrected_phone_contact import fixture, parse
+    row, entries, payload = fixture()
+    module, _sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
+    scheduler = sys.modules["bot_min"]
+    class Request:
+        def __init__(self, result): self.result = result
+        def execute(self): return self.result
+    class API:
+        def __init__(self): self.writes = []
+        def get(self, **kwargs):
+            rng = kwargs["range"]
+            if rng == "sms_pending_sends!A2:S": return Request({"values": entries})
+            if rng == "sms_inbound_queue!A2:H": return Request({"values": []})
+            return Request({"values": [list(row)]})
+        def batchUpdate(self, **kwargs):
+            for item in kwargs["body"]["data"]:
+                self.writes.append(item)
+                row[9 if "!J" in item["range"] else 25] = item["values"][0][0]
+            return Request({})
+    api = API()
+    scheduler._follow_up_pass_lock = threading.Lock()
+    scheduler.sheets_service = types.SimpleNamespace(spreadsheets=lambda: types.SimpleNamespace(values=lambda: api))
+    scheduler.ws = types.SimpleNamespace(row_count=7000)
+    scheduler.GSHEET_ID, scheduler.GSHEET_TAB = "test", "Sheet1"
+    scheduler._parse_sheet_datetime = parse
+    scheduler.check_reply = lambda *_: False
+    scheduler._followup_has_recorded_conversation = lambda *_: False
+    scheduler._followup_has_contact_hold = lambda *_: False
+    scheduler.FU_HOURS, scheduler.FOLLOWUP_DUE_GRACE_MINUTES = 6, 0
+    client = TestClient(module.app)
+    route = "/internal/reconcile-corrected-phone-contact"
+    body = {"row": 6411, **payload}
+    assert client.post(route, json=body).status_code == 403
+    headers = {"Authorization": "Bearer secret-token"}
+    plan = client.post(route, headers=headers, json=body)
+    assert plan.status_code == 200 and api.writes == []
+    assert client.post(route, headers=headers, json={**body, "apply": True, "expectedStateHash": "stale"}).status_code == 409
+    assert api.writes == []
+    result = client.post(route, headers=headers, json={**body, "apply": True,
+        "expectedStateHash": plan.json()["stateHash"], "expectedPlanHash": plan.json()["planHash"]})
+    assert result.status_code == 200 and result.json()["durableReadback"] is True
+    assert [item["range"] for item in api.writes] == ["Sheet1!J6411", "Sheet1!Z6411"]
+    assert row[8] == "x" and row[23] == "2026-10-26T15:00:00Z"
+    assert row[30] == "phone_identity_review_required" and sender.calls == []
+    assert client.post(route, headers=headers, json=body).status_code == 409
+
+
 def test_internal_initial_sms_queues_and_waits_for_tasker_receipt_before_marking_sheet(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,

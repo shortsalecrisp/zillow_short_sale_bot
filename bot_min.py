@@ -12860,6 +12860,7 @@ def send_sms(
     follow_up: bool = False,
     stable_id: str = "",
     initial_sent_at: str = "",
+    text_followup_context: Optional[Dict[str, Any]] = None,
 ):
     if not SMS_ENABLE or not phone:
         LOG.info(
@@ -12914,7 +12915,9 @@ def send_sms(
         return
 
     followup_options = {}
-    if initial_sent_at and stable_id and not SMS_TEST_MODE:
+    if text_followup_context:
+        followup_options["followup_context"] = text_followup_context
+    elif initial_sent_at and stable_id and not SMS_TEST_MODE:
         from video_followup import select_for_followup
         msg_txt, context = select_for_followup(
             msg_txt, row=row_idx, stable_id=stable_id, phone=digits,
@@ -13940,6 +13943,29 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
     receipt_entries = None
     for sheet_row, ts in candidate_rows:
         row = candidate_row_map.get(sheet_row, [""] * MIN_COLS)
+        corrected_episode = None
+        if "CODEX_CORRECTED_PHONE_CONTACT_V1 " in str(row[COL_CONTACT_REASON]):
+            try:
+                from corrected_phone_contact import active_episode
+                fresh_rows = sheets_service.spreadsheets().values().get(
+                    spreadsheetId=GSHEET_ID, range=f"{GSHEET_TAB}!A{sheet_row}:AS{sheet_row}",
+                    majorDimension="ROWS", valueRenderOption="UNFORMATTED_VALUE",
+                ).execute().get("values", [])
+                fresh = (fresh_rows[0] if fresh_rows else [])
+                fresh += [""] * max(0, 45 - len(fresh))
+                if receipt_entries is None:
+                    receipt_entries = sheets_service.spreadsheets().values().get(
+                        spreadsheetId=GSHEET_ID, range="sms_pending_sends!A2:S",
+                        majorDimension="ROWS", valueRenderOption="UNFORMATTED_VALUE",
+                    ).execute().get("values", [])
+                corrected_episode = active_episode(sheet_row, fresh, receipt_entries, _parse_sheet_datetime)
+                if corrected_episode:
+                    if hashlib.sha256(SMS_FU_TEMPLATE.encode()).hexdigest() != corrected_episode["followupMessageSha256"]:
+                        raise ValueError("Approved corrected-phone follow-up copy changed")
+                    ts = _parse_sheet_datetime(corrected_episode["initialReceipt"]["sent_at"])
+            except Exception:
+                LOG.exception("Corrected-phone follow-up held row=%s", sheet_row)
+                continue
         phone_redacted = _redact_followup_phone(row[COL_PHONE])
         address = row[COL_STREET] or ""
         lead_status = row[COL_REPLY_TS].strip().upper()
@@ -13960,12 +13986,16 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
         stale_followup_marker = False
         if followup_ts_raw:
             try:
-                followup_ts = datetime.fromisoformat(followup_ts_raw)
+                date_only = bool(re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", followup_ts_raw))
+                followup_ts = (SCHEDULER_TZ.localize(datetime.strptime(followup_ts_raw, "%m/%d/%Y"))
+                               if date_only else _parse_sheet_datetime(followup_ts_raw))
+                if followup_ts is None:
+                    raise ValueError("Unrecognized follow-up timestamp")
                 if followup_ts.tzinfo is None:
                     followup_ts = followup_ts.replace(tzinfo=SCHEDULER_TZ)
                 else:
                     followup_ts = followup_ts.astimezone(SCHEDULER_TZ)
-                stale_followup_marker = followup_ts < ts
+                stale_followup_marker = (followup_ts.date() < ts.date() if date_only else followup_ts < ts)
             except Exception:
                 stale_followup_marker = False
 
@@ -14073,7 +14103,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
                 LOG.exception("Initial timestamp repair failed closed row=%s", sheet_row)
                 continue
 
-        if recipient_local_hours:
+        if recipient_local_hours or corrected_episode:
             from initial_sms_timestamp import within_recipient_hours
             if not within_recipient_hours(row[COL_STATE], datetime.now(tz=SCHEDULER_TZ)):
                 LOG.info("FU-review row %s status=recipient_local_hours_deferred", sheet_row)
@@ -14088,7 +14118,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
             elapsed_hours + FOLLOWUP_DUE_GRACE_MINUTES / 60.0
         )
         video_enabled = os.getenv("VIDEO_FOLLOWUP_ENABLED", "false").lower() == "true"
-        if video_enabled and SMS_ENABLE and not SMS_TEST_MODE and effective_elapsed_hours < FU_HOURS:
+        if video_enabled and not corrected_episode and SMS_ENABLE and not SMS_TEST_MODE and effective_elapsed_hours < FU_HOURS:
             from video_followup import prepare_for_followup
             prepare_for_followup(
                 row=sheet_row, stable_id=row[27] if len(row) > 27 else "",
@@ -14127,6 +14157,9 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
         )
 
         latest_sheet_phone = _current_sheet_phone_for_row(sheet_row)
+        if corrected_episode and _digits_only(latest_sheet_phone)[-10:] != corrected_episode["phone"]:
+            LOG.warning("Corrected-phone follow-up held: phone changed row=%s", sheet_row)
+            continue
         followup_phone = latest_sheet_phone or row[COL_PHONE]
         if latest_sheet_phone and _digits_only(latest_sheet_phone) != _digits_only(row[COL_PHONE]):
             LOG.info(
@@ -14139,6 +14172,13 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
         _pace_followup_sms_batch(eligible_count)
 
         video_options = {"initial_sent_at": ts.isoformat()} if video_enabled else {}
+        if corrected_episode:
+            from video_followup import snapshot
+            context = snapshot(row=sheet_row, stable_id=row[27], phone=latest_sheet_phone,
+                               first_name=row[COL_FIRST], initial_sent_at=ts.isoformat(),
+                               initial_receipt=corrected_episode["initialReceipt"])
+            video_options.clear()
+            video_options["text_followup_context"] = {**context, "video_variant": "text", "video_job_id": ""}
         send_sms(
             phone=followup_phone,
             first=row[COL_FIRST],

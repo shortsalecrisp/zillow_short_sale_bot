@@ -9329,6 +9329,72 @@ async def internal_reconcile_followup_sms(request: Request):
     return await asyncio.to_thread(evaluate)
 
 
+@app.post("/internal/reconcile-corrected-phone-contact")
+async def internal_reconcile_corrected_phone_contact(request: Request):
+    """Review/apply a receipt-backed episode; never send or release voice here."""
+    _auth_internal_request(request)
+    payload = await request.json()
+    if not isinstance(payload, dict) or type(payload.get("row")) is not int or not 2 <= payload["row"] < 9000:
+        raise HTTPException(status_code=400, detail="bounded_row_required")
+
+    def reconcile():
+        import bot_min as scheduler
+        from corrected_phone_contact import MARKER, prepare, state_hash
+        if not scheduler._follow_up_pass_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="followup_pass_active")
+        try:
+            api = scheduler.sheets_service.spreadsheets().values()
+            number = payload["row"]
+            def read():
+                response = api.get(spreadsheetId=scheduler.GSHEET_ID,
+                    range=f"{scheduler.GSHEET_TAB}!A{number}:AS{number}",
+                    valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
+                return (response[0] if response else []) + [""] * max(0, 45 - len(response[0] if response else []))
+            row = read()
+            fleet = api.get(spreadsheetId=scheduler.GSHEET_ID,
+                range=f"{scheduler.GSHEET_TAB}!A2:AS{scheduler.ws.row_count}",
+                valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
+            entries = api.get(spreadsheetId=scheduler.GSHEET_ID, range="sms_pending_sends!A2:S",
+                valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
+            try:
+                episode = prepare(number, row, fleet, entries, payload, scheduler._parse_sheet_datetime)
+                inbound = api.get(spreadsheetId=scheduler.GSHEET_ID, range="sms_inbound_queue!A2:H",
+                    valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
+                from corrected_phone_contact import digits
+                if any(len(e) > 5 and digits(e[5]) == episode["phone"] for e in inbound):
+                    raise ValueError("Current-phone inbound queue requires review")
+                if scheduler.check_reply(row[2], episode["initialReceipt"]["created_at"]):
+                    raise ValueError("Current-phone reply requires review")
+                if scheduler._followup_has_recorded_conversation(row) or scheduler._followup_has_contact_hold(row):
+                    raise ValueError("Contact/conversation hold remains")
+            except (ValueError, TypeError, KeyError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+            digest = state_hash(row)
+            plan_hash = state_hash([episode])
+            result = {"status": "reviewed", "stateHash": digest, "planHash": plan_hash, "episode": episode,
+                      "followupHours": scheduler.FU_HOURS, "graceMinutes": scheduler.FOLLOWUP_DUE_GRACE_MINUTES,
+                      "sends": 0, "voiceReleased": False}
+            if payload.get("apply") is not True:
+                return result
+            if (payload.get("expectedStateHash") != digest or payload.get("expectedPlanHash") != plan_hash
+                    or state_hash(read()) != digest):
+                raise HTTPException(status_code=409, detail="owning_state_changed")
+            updated = list(row)
+            updated[9] = ""
+            updated[25] = str(row[25]) + "\n" + MARKER + " " + json.dumps(episode, separators=(",", ":"))
+            api.batchUpdate(spreadsheetId=scheduler.GSHEET_ID, body={"valueInputOption": "RAW", "data": [
+                {"range": f"{scheduler.GSHEET_TAB}!J{number}", "values": [[updated[9]]]},
+                {"range": f"{scheduler.GSHEET_TAB}!Z{number}", "values": [[updated[25]]]},
+            ]}).execute()
+            if state_hash(read()) != state_hash(updated):
+                raise HTTPException(status_code=409, detail="durable_readback_failed_reconcile_before_retry")
+            return {**result, "status": "reconciled", "durableReadback": True}
+        finally:
+            scheduler._follow_up_pass_lock.release()
+
+    return await asyncio.to_thread(reconcile)
+
+
 _RELATIVE_TIME_RE = re.compile(
     r"(?P<count>\d+)\s*(?P<unit>minute|min|hour|hr|day|week|month|year)s?",
     re.IGNORECASE,

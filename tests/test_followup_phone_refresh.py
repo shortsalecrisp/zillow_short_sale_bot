@@ -613,10 +613,11 @@ def test_follow_up_reads_native_timestamp_value_not_date_only_display(monkeypatc
     assert sent[0]["row_idx"] == 2
 
 
-def test_follow_up_allows_stale_marker_and_nonresponse_call_note(monkeypatch):
+@pytest.mark.parametrize("prior", ["2026-07-23T17:00:00-04:00", "7/23/2026"])
+def test_follow_up_allows_stale_marker_and_nonresponse_call_note(monkeypatch, prior):
     row = _followup_test_row()
     row[bot_min.COL_REPLY_FLAG] = "x"
-    row[bot_min.COL_FU_TS] = "2026-07-23T17:00:00-04:00"
+    row[bot_min.COL_FU_TS] = prior
     row[bot_min.COL_MANUAL_NOTE] = "No answer on first call"
     sent = []
 
@@ -637,10 +638,11 @@ def test_follow_up_allows_stale_marker_and_nonresponse_call_note(monkeypatch):
     assert sent[0]["follow_up"] is True
 
 
-def test_follow_up_keeps_current_marker_as_duplicate_guard(monkeypatch):
+@pytest.mark.parametrize("prior", ["2026-07-24T18:00:00-04:00", "7/24/2026", "unrecognized"])
+def test_follow_up_keeps_current_marker_as_duplicate_guard(monkeypatch, prior):
     row = _followup_test_row()
     row[bot_min.COL_REPLY_FLAG] = "x"
-    row[bot_min.COL_FU_TS] = "2026-07-24T18:00:00-04:00"
+    row[bot_min.COL_FU_TS] = prior
     sent = []
 
     monkeypatch.setattr(bot_min, "sheets_service", _ConfiguredFollowupSheetsService(row))
