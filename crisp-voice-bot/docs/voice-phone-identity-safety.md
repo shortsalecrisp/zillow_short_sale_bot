@@ -18,6 +18,10 @@ historical row slots; changing C never relabels their destination or resets them
 - Known identity mismatches cannot create a final-unanswered K=N closeout or an
   unplaced-call expiry. Existing K, callbacks, opt-outs and human takeover stay
   binding. Prior transport failures cannot release a different number.
+- Legacy `CODEX_VOICE_CALL_START_RESOLUTION_V1` records also bind their original
+  destination after unaccepted-start recovery clears its sent slot. They count
+  as zero genuine calls, retain former-phone duplicate protection and hold a
+  corrected number for review instead of inheriting old SMS/schedule proof.
 - Final provider receipts are checked against fresh owning identity even when K
   is blank. A delayed old-number result cannot overwrite the corrected row.
 

@@ -45,6 +45,30 @@ test("start identity protects the gap before a provider final receipt, including
   assert.equal(getVoicePhoneAttemptIdentity(r).currentPhoneAttempts, 0);
   assert.equal(getVoicePhoneAttemptIdentity(r).reviewReason, "attempt_phone_changed", "transport recovery cannot release a different phone");
 });
+
+test("legacy terminal transport resolutions bind the old phone even after sent slots were safely released", async () => {
+  const { getVoiceBotCallCandidateFromRowValues, isVoiceBotPhoneBlocked } = await import("../src/lib/voiceQueue");
+  const { getVoiceOverdueFallbackPlan } = await import("../src/lib/voiceOverdueFallback");
+  const r = row(); r[32] = ""; r[33] = ""; r[30] = "voice_call_1_due";
+  const resolution = { rowNumber: 7000, phone: "+12025550199", callAttemptNumber: 1,
+    callStartRequestId: "synthetic-old-start", conversationId: "conv_synthetic_failure", status: "definitive_failure" };
+  r[41] = "CODEX_VOICE_CALL_START_RESOLUTION_V1 " + JSON.stringify(resolution);
+  assert.deepEqual(getVoicePhoneAttemptIdentity(r), { currentPhone: "+12025550123", currentPhoneAttempts: 0,
+    unknownAttempts: 0, historicalPhones: ["+12025550199"], reviewReason: "attempt_phone_changed" });
+  assert.equal(getVoiceBotCallCandidateFromRowValues(7000, r, new Date("2026-10-27T19:05Z")), undefined);
+  assert.equal(getVoiceOverdueFallbackPlan(7000, r, new Date("2026-10-30T19:05Z")), undefined);
+  assert.equal(isVoiceBotPhoneBlocked({ rowNumber: 7001, phone: "+12025550199" } as never,
+    [{ rowNumber: 7000, values: r }], new Date()), true);
+  const samePhone = [...r]; samePhone[2] = "+12025550199";
+  assert.equal(getVoicePhoneAttemptIdentity(samePhone).reviewReason, undefined);
+  assert.equal(getVoicePhoneAttemptIdentity(samePhone).currentPhoneAttempts, 0, "a failed start is never a genuine call");
+  for (const change of [{ phone: null }, { callAttemptNumber: 3 }, { status: "accepted" }, { conversationId: "" }, { callStartRequestId: "" }]) {
+    const malformed = [...r]; malformed[41] = "CODEX_VOICE_CALL_START_RESOLUTION_V1 " + JSON.stringify({ ...resolution, ...change });
+    assert.equal(getVoicePhoneAttemptIdentity(malformed).reviewReason, "malformed_attempt_phone_evidence");
+  }
+  const transcript = [...r]; transcript[41] = JSON.stringify({ transcript: r[41] });
+  assert.equal(getVoicePhoneAttemptIdentity(transcript).reviewReason, undefined);
+});
 test("malformed/conflicting evidence holds, synthetic metrics and arbitrary transcript text do not count", () => {
   const r = row(); r[41] = 'CODEX_VOICE_ATTEMPT_IDENTITY_V1 broken';
   assert.equal(getVoicePhoneAttemptIdentity(r).reviewReason, "malformed_attempt_phone_evidence");

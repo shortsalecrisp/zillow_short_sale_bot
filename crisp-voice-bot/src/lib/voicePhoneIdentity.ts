@@ -1,4 +1,5 @@
 import { normalizePhoneToE164, normalizeString, parseVoiceBotDate } from "./voiceSheet";
+import { VOICE_START_RESOLUTION_MARKER } from "./voiceTransportRecovery";
 
 export const VOICE_ATTEMPT_IDENTITY_MARKER = "CODEX_VOICE_ATTEMPT_IDENTITY_V1";
 
@@ -28,12 +29,19 @@ export function getVoicePhoneAttemptIdentity(row: unknown[]): {
   const lines = normalizeString(row[41]).split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
-    for (const marker of [VOICE_ATTEMPT_IDENTITY_MARKER, "CODEX_VOICE_CALL_METRICS_V1"]) {
+    for (const marker of [VOICE_ATTEMPT_IDENTITY_MARKER, VOICE_START_RESOLUTION_MARKER, "CODEX_VOICE_CALL_METRICS_V1"]) {
       const metricsBlock = marker === "CODEX_VOICE_CALL_METRICS_V1" && line === `--- ${marker} ---`;
       if (!metricsBlock && !line.startsWith(`${marker} `)) continue;
       try {
         const data = JSON.parse(metricsBlock ? lines[i + 1] : line.slice(marker.length).trim());
-        if (marker === VOICE_ATTEMPT_IDENTITY_MARKER) {
+        if (marker === VOICE_START_RESOLUTION_MARKER) {
+          // Legacy unaccepted starts have no sent slot or reservation after recovery.
+          if (data.status !== "definitive_failure" || !Number.isInteger(data.rowNumber) || data.rowNumber < 2 ||
+              typeof data.callStartRequestId !== "string" || !data.callStartRequestId.trim() ||
+              typeof data.conversationId !== "string" || !data.conversationId.trim()) {
+            malformed = true;
+          } else add(data.callAttemptNumber, data.phone);
+        } else if (marker === VOICE_ATTEMPT_IDENTITY_MARKER) {
           const attempt = Number(data.callAttemptNumber);
           // A released transport failure is still historical phone identity,
           // not permission to reuse its old SMS/schedule anchors for a new phone.
