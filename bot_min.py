@@ -14181,9 +14181,11 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False):
 
         video_options = {"initial_sent_at": ts.isoformat()} if video_enabled else {}
         if corrected_episode:
+            from corrected_phone_contact import followup_identity_anchor
             from video_followup import snapshot
             context = snapshot(row=sheet_row, stable_id=row[27], phone=latest_sheet_phone,
-                               first_name=row[COL_FIRST], initial_sent_at=ts.isoformat(),
+                               first_name=row[COL_FIRST],
+                               initial_sent_at=followup_identity_anchor(fresh, corrected_episode, _parse_sheet_datetime),
                                initial_receipt=corrected_episode["initialReceipt"])
             video_options.clear()
             video_options["text_followup_context"] = {**context, "video_variant": "text", "video_job_id": ""}

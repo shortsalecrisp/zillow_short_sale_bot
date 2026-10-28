@@ -101,4 +101,17 @@ def active_episode(row_number, row, entries, parse):
     for e in entries:
         if len(e) > 6 and digits(e[4]) == episode["phone"] and e[2] != receipt["request_id"]:
             raise ValueError("Current-phone follow-up/request already exists; reconcile it")
+    followup_identity_anchor(row, episode, parse)
     return episode
+
+
+def followup_identity_anchor(row, episode, parse):
+    """Bind queue identity to handset W, not the later receipt-processing time."""
+    receipt = episode["initialReceipt"]
+    owning, started, sent = [parse(value) for value in
+                             (row[22], receipt["send_started_at"], receipt["sent_at"])]
+    if (not row[7] or digits(row[2]) != receipt["phone"]
+            or str(row[27]) != receipt["stable_id"]
+            or None in (owning, started, sent) or not started <= owning <= sent):
+        raise ValueError("Owning handset initial timestamp is outside its exact sent receipt")
+    return owning.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")

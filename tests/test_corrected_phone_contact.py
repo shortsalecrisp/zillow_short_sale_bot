@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from corrected_phone_contact import HOLD_NOTE, MARKER, active_episode, prepare, state_hash
+from corrected_phone_contact import HOLD_NOTE, MARKER, active_episode, followup_identity_anchor, prepare, state_hash
 
 
 def parse(value):
@@ -86,3 +86,30 @@ def test_later_callback_or_followup_is_not_ignored():
     assert active_episode(6411, row, entries, parse) is None
     row[9] = ""; row[23] = "2026-10-28T22:00:00Z"
     assert active_episode(6411, row, entries, parse) is None
+
+
+def test_handset_anchor_differs_from_terminal_receipt_without_changing_cadence_proof():
+    row, entries, payload = fixture()
+    row[22] = "2026-10-28T15:39:27.833Z"
+    entries[0][14] = "2026-10-28T15:39:33.402Z"
+    episode = prepare(6411, row, [row], entries, payload, parse)
+    row[9] = ""; row[25] = MARKER + " " + json.dumps(episode)
+    before = copy.deepcopy((row, entries, episode))
+    assert active_episode(6411, row, entries, parse) == episode
+    anchor = followup_identity_anchor(row, episode, parse)
+    from video_followup import snapshot
+    context = snapshot(row=6411, stable_id=row[27], phone=row[2], first_name=row[0],
+                       initial_sent_at=anchor, initial_receipt=episode["initialReceipt"])
+    assert context["initial_sent_at"] == "2026-10-28T15:39:27.833Z"
+    assert context["initial_receipt"]["sent_at"] == "2026-10-28T15:39:33.402Z"
+    assert (row, entries, episode) == before
+
+
+@pytest.mark.parametrize("owning", ["", "2026-10-28T15:39:24Z", "2026-10-28T15:39:34Z"])
+def test_changed_or_unconfirmed_handset_anchor_fails_closed(owning):
+    row, entries, payload = fixture()
+    episode = prepare(6411, row, [row], entries, payload, parse)
+    row[9] = ""; row[25] = MARKER + " " + json.dumps(episode)
+    row[22] = owning
+    with pytest.raises(ValueError, match="Owning handset"):
+        active_episode(6411, row, entries, parse)
