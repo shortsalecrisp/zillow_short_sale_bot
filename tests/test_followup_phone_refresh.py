@@ -372,6 +372,59 @@ def _followup_test_row():
     return row
 
 
+def test_corrected_followup_uses_handset_identity_but_terminal_receipt_cadence(monkeypatch):
+    import json
+    from corrected_phone_contact import HOLD_NOTE, MARKER, prepare
+    row = [""] * 45
+    for i, value in {0: "Judy", 1: "Wang", 2: "214-500-7663", 4: "120 Piping Rock Dr",
+                     5: "Fort Worth", 6: "TX", 7: "x", 8: "x", 9: HOLD_NOTE,
+                     22: 46323.48573880787, 23: "2026-10-26T15:00:00Z",
+                     27: "340857261", 30: "phone_identity_review_required"}.items():
+        row[i] = value
+    entries = []
+    for phone, prefix, request, date in [
+        ("2145007663", "__initial_outreach__:", "render-initial-2-98ffb61bfde011ac", "2026-10-28T15:39:33.402Z"),
+        ("2193970173", "__scheduled_followup__:", "old-followup", row[23]),
+    ]:
+        e = [""] * 19
+        e[0], e[1], e[2], e[3], e[4] = date, "sent", request, request, phone
+        if phone == "2145007663":
+            e[3] = request.removeprefix("render-")
+        e[6] = prefix + json.dumps({"crm_row": 2, "stable_id": row[27]})
+        e[13], e[14], e[17] = date, date, 2
+        entries.append(e)
+    entries[0][0], entries[0][13] = "2026-10-28T15:38:12.911Z", "2026-10-28T15:39:25.147Z"
+    episode = prepare(2, row, [row], entries, {
+        "formerPhone": "2193970173", "initialRequestId": entries[0][2],
+        "formerFollowupRequestId": "old-followup"}, bot_min._parse_sheet_datetime)
+    row[9] = ""; row[25] = MARKER + " " + json.dumps(episode)
+    service = _ConfiguredFollowupSheetsService(row)
+    original_get = service.values_api.get
+    def get(**kwargs):
+        if kwargs["range"] == "sms_pending_sends!A2:S":
+            return _FakeRequest({"values": entries})
+        if kwargs["range"] == "Sheet1!A2:AS2":
+            return _FakeRequest({"values": [row]})
+        return original_get(**kwargs)
+    service.values_api.get = get
+    sent, cadence = [], []
+    monkeypatch.setenv("VIDEO_FOLLOWUP_ENABLED", "true")
+    monkeypatch.setattr(bot_min, "sheets_service", service)
+    monkeypatch.setattr(bot_min, "ws", types.SimpleNamespace(row_count=2))
+    monkeypatch.setattr(bot_min, "check_reply", lambda *args, **kwargs: False)
+    monkeypatch.setattr(bot_min, "business_hours_elapsed", lambda ts, *args, **kwargs:
+                        cadence.append(ts) or bot_min.FU_HOURS)
+    monkeypatch.setattr(bot_min, "send_sms", lambda **kwargs: sent.append(kwargs))
+    bot_min._follow_up_pass()
+    assert len(sent) == 1
+    context = sent[0]["text_followup_context"]
+    assert context["initial_sent_at"] == "2026-10-28T15:39:27.833Z"
+    assert context["initial_receipt"]["sent_at"] == "2026-10-28T15:39:33.402Z"
+    assert context["video_variant"] == "text"
+    assert cadence and all(ts == bot_min._parse_sheet_datetime(entries[0][14]) for ts in cadence)
+    assert row[22] == 46323.48573880787
+
+
 def _video_followup_sheet_fixture(monkeypatch, *, elapsed_hours, already_followed_up=False):
     row = _followup_test_row()
     row[bot_min.COL_INIT_TS] = "2026-10-13T15:18:24-04:00"
