@@ -1,6 +1,22 @@
 # Uniform Conversion Comparison
 
-Current revision is r7, verified at 2026-10-23T12:27:33.399Z (8:27:33 AM New York on October 23). Earlier releases below are historical and must not be pooled with r7. Both arms are verified identical except for TTS model.
+Current revision is r8, verified at 2026-10-28T01:14:41.028Z (9:14:41 PM New York on October 27). Earlier releases below are historical and must not be pooled with r8. Both arms are verified identical except for TTS model.
+
+## Approved Revision 8
+
+Yoni approved the October 27 Lead Intelligence fixes. The shared prompt now treats a clear no to the exact needs question, including "No, I'm doing/handling everything," as a terminal service refusal: acknowledge once, record it, and use the guarded ending without another pitch, question, callback offer, transfer offer or Yoni offer. The backend release separately improves terminal voicemail, target/gatekeeper and no-assistant-turn diagnostics.
+
+The guarded prompt-only publisher reread both exact r7 versions, prompt hashes and 50/50 allocation, then changed only `conversation_config.agent.prompt.prompt`. It preserved and reread workflow, phone bindings, platform settings and every other provider setting. No real call or metered session was started.
+
+- Cohort: `maya_uniform_lead_conversion_20261027_r8`.
+- Start: `2026-10-28T01:14:41.028Z`, after final two-arm provider readback.
+- Control: branch `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`, version `agtvrsn_1101m6015jj3e7r8xem6crdzbv08`, Flash v2.
+- Test: branch `agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv`, version `agtvrsn_8601m6015mjxf1f8m8gqqygf3n33`, v4 Turbo.
+- Canonical prompt hash: `b4e68945fcec6952784d195235d80098502016dc523855d7292854142088038e`.
+- Shared normalized configuration hash: `698e298abf335fc7a596a54f11634796c8fd5cf037ea934aefcd1ed495ab1a48`.
+- Workflow hash: `31e9628299acf53fda9153f686a003bb1a25cf1a7c00a4bd9e89bcf9d2af0a35`.
+
+Require the exact r8 branch/version pair, a matching final receipt, a genuine non-test positive duration, and a provider start at or after the r8 boundary. The 15 verified true-live conversations per arm minimum and preferred 100-genuine-call review restart at r8; all earlier cohorts remain historical.
 
 ## Approved Revision 7
 
@@ -22,7 +38,7 @@ Require the exact r7 branch/version pair, a matching final receipt, a genuine no
 
 Yoni approved a validator-only repair for `conversation_config.agent.prompt.built_in_tools.identity_challenge: null`. Investigation of the then-pinned r6 responses reproduced the original `d2fee79aa371e5fec4e7b5426f5932139f39d2ca48b21a6fbd7d8ac3f0ed6770` digest by removing ONLY that new null property from the otherwise identical bodies (before removal: `b11ec29044f9add6b0cb38bb87386f764f75f27452cc795bbbb97c2f27c25f4b`). During validation, the separately approved r7 prompt release above established its own exact two-arm boundary and null-shaped canonical baseline. This repair preserves that approved r7 release rather than reverting its prompt or replacing its hash.
 
-For the current r7 baseline, the canonical validator reconstructs `identity_challenge: null` ONLY when `built_in_tools` is a non-array object without that own property. An explicit null remains null. Configured objects, arrays, booleans, numbers, strings, malformed or missing containers and every other new tool/default remain visible and fail the pinned digest. Both absent and explicit-null responses must reproduce the original r7 `18d8a334dbb09f6f6c196d84dac6331c0a4a45882aea4f89c591d820197f90a8` hash. Exact r7 versions, workflow, protected settings and 50/50 allocation remain mandatory. The future approved publisher imports this same canonical recipe; it is not invoked by this repair or ordinary reviews. No provider mutation or further cohort reset is authorized by this validator change. Tests cover null/omitted equality, input immutability, configured/invalid/other-tool rejection and exactly three GET-only verification requests. Preserve all earlier narrow normalization rules below.
+For the current r8 baseline, the canonical validator reconstructs `identity_challenge: null` ONLY when `built_in_tools` is a non-array object without that own property. An explicit null remains null. Configured objects, arrays, booleans, numbers, strings, malformed or missing containers and every other new tool/default remain visible and fail the pinned digest. Both absent and explicit-null responses must reproduce the r8 `698e298abf335fc7a596a54f11634796c8fd5cf037ea934aefcd1ed495ab1a48` hash. Exact r8 versions, workflow, protected settings and 50/50 allocation remain mandatory. The future approved publisher imports this same canonical recipe; it is not invoked by ordinary reviews. Tests cover null/omitted equality, input immutability, configured/invalid/other-tool rejection and exactly three GET-only verification requests. Preserve all earlier narrow normalization rules below.
 
 ## October 23 Backend Recovery Repair (No Provider Release)
 

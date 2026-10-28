@@ -727,6 +727,7 @@ for (const policy of [
   "maya-uniform-lead-conversion-20261017-r5",
   "maya-uniform-lead-conversion-20261019-r6",
   "maya-uniform-lead-conversion-20261023-r7",
+  "maya-uniform-lead-conversion-20261027-r8",
 ]) {
 test(`${policy} measures service and listing question while yes only confirms the listing`, async () => {
   const result = await measurementLog({ metadata: { declaredConversationPolicyVersion: policy }, conversation: { transcript: [
