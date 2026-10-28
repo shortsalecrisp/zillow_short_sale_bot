@@ -12311,7 +12311,15 @@ def append_row(vals) -> int:
         zpid = _lead_row_cell(padded_vals, COL_ZPID) or "<blank>"
         for attempt in range(1, 3):
             while True:
-                active_open_row = _find_next_open_row(_next_row_hint)
+                # Whole-row deletes can shift the active block above the in-memory hint.
+                # Rescan from the block start so the next write cannot strand blank rows.
+                active_open_row = _find_next_open_row(GSHEET_NEXT_ROW_HINT)
+                if active_open_row < _next_row_hint:
+                    LOG.info(
+                        "SHEET_APPEND_GAP_RECOVERED open_row=%s previous_hint=%s",
+                        active_open_row,
+                        _next_row_hint,
+                    )
                 existing_values = _read_active_lead_row(active_open_row)
                 if _row_is_empty(existing_values):
                     break

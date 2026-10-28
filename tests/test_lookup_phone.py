@@ -165,7 +165,8 @@ def test_append_row_writes_exact_active_lead_row(monkeypatch):
 
     monkeypatch.setattr(bot_min, "_find_next_open_row", fake_find_next_open_row)
     monkeypatch.setattr(bot_min, "record_seen_zpid", recorded_zpids.append)
-    monkeypatch.setattr(bot_min, "_next_row_hint", 4733)
+    monkeypatch.setattr(bot_min, "GSHEET_NEXT_ROW_HINT", 4733)
+    monkeypatch.setattr(bot_min, "_next_row_hint", 4999)
 
     row_idx = bot_min.append_row(row_values)
 
