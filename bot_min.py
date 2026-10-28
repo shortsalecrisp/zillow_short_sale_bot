@@ -13832,7 +13832,16 @@ def review_followup_delivery():
     end = api.values().get(spreadsheetId=GSHEET_ID, range=f"sms_pending_sends!A2:E{outbox_max}",
                           majorDimension="ROWS", valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
     after = capacities()
-    stable = before == after and [e[:5] for e in entries] == end
+    def status_index(values):
+        # Sheets omits trailing empty cells/rows independently for each range.
+        result = [(list(e[:5]) + [""] * 5)[:5] for e in values]
+        while result and not any(result[-1]):
+            result.pop()
+        return result
+    relevant = (GSHEET_TAB, "sms_pending_sends")
+    capacity_stable = all(before.get(name) == after.get(name) for name in relevant)
+    index_stable = status_index(entries) == status_index(end)
+    stable = capacity_stable and index_stable
     result = review(merged, entries, parse_time=_parse_sheet_datetime,
                     elapsed=lambda start, finish: business_hours_elapsed(
                         start, finish, include_weekends=FOLLOWUP_INCLUDE_WEEKENDS),
@@ -13841,7 +13850,10 @@ def review_followup_delivery():
                     contact_hold=_followup_has_contact_hold,
                     conversation_hold=_followup_has_recorded_conversation,
                     within_hours=within_recipient_hours)
-    result.update(complete=stable, crm_capacity=crm_max, outbox_capacity=outbox_max)
+    result.update(complete=stable, crm_capacity=crm_max, outbox_capacity=outbox_max,
+                  capture_bounds={"before":{name:before.get(name) for name in relevant},
+                                  "after":{name:after.get(name) for name in relevant},
+                                  "status_index_stable":index_stable})
     if not stable:
         for item in result["items"]:
             if item["status"] == "due_unsent":

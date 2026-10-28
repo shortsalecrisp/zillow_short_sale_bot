@@ -7,7 +7,7 @@ import pytest
 from test_followup_delivery_review import fixture, parse
 
 
-def capture(race=False, bad_headers=False):
+def capture(race=False, bad_headers=False, omitted_blanks=False):
     row, initial=fixture()
     headers=['']*45
     for i,n in {0:'agent_name',2:'phone',7:'initial_text_sent',8:'followup_text_sent',13:'ai_state',
@@ -27,13 +27,15 @@ def capture(race=False, bad_headers=False):
             if 'fields' in kw:
                 self.caps+=1
                 return Result({'sheets':[{'properties':{'title':n,'gridProperties':{'rowCount':size}}}
-                    for n,size in [('Sheet1',1000),('sms_pending_sends',10+int(race and self.caps>1))]]})
+                    for n,size in [('Sheet1',1000),('sms_pending_sends',10+int(race and self.caps>1)),
+                                   ('unrelated_debug',100+self.caps)]]})
             if '!A1:AS1' in kw['range']: return Result({'values':[headers]})
-            return Result({'values':[initial[:5]]})
+            return Result({'values':[initial[:5],[]] if omitted_blanks else [initial[:5]]})
         def batchGet(self,**kw):
             requests.append(kw)
             return Result({'valueRanges':[{'values':[[]]*899+[row[:30]]},
-                {'values':[[]]*899+[row[42:45]]},{'values':[initial]}]})
+                {'values':[[]]*899+[row[42:45]]},{'values':[initial,['']*6+['old metadata']]
+                    if omitted_blanks else [initial]}]})
         def batchUpdate(self,**kw): raise AssertionError('Read-only review must not write')
     source=Path(__file__).resolve().parents[1]/'bot_min.py'
     node=next(n for n in ast.parse(source.read_text()).body if isinstance(n,ast.FunctionDef)
@@ -63,6 +65,13 @@ def test_racing_capacity_never_returns_a_send_candidate():
     assert result['complete'] is False
     assert result['items'][0]['status']=='blocked'
     assert result['items'][0]['reason']=='capture_raced_reread_required'
+
+
+def test_omitted_empty_status_cells_and_unrelated_sheet_growth_are_not_races():
+    run,_=capture(omitted_blanks=True)
+    result=run()
+    assert result['complete'] is True
+    assert result['capture_bounds']['status_index_stable'] is True
 
 
 def test_header_drift_fails_closed_before_survey():
