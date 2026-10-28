@@ -647,6 +647,62 @@ test("a contextual it is after the exact listing question confirms the target ag
   assert.equal(result.flags.targetAgentAnswered, true);
 });
 
+test("a target saying their name followed by speaking is target-live evidence", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Diana Cardona Castro" }, conversation: { transcript: [
+    { role: "user", message: "Diana speaking." },
+    { role: "agent", message: "Hi, Maya with Crisp Short Sales. Is 123 Fictional Street your listing?" },
+  ] } });
+  assert.equal(result.contactEvidence.reviewBucket, "target_live");
+  assert.equal(result.flags.targetAgentAnswered, true);
+});
+
+test("a differently named agent responder is recorded as a human gatekeeper", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Sandra Velasquez" }, conversation: { transcript: [
+    { role: "agent", message: "Hi, Maya with Crisp Short Sales. Is 123 Fictional Street your listing?" },
+    { role: "user", message: "I am. Felicity, agent." },
+  ] } });
+  assert.equal(result.contactEvidence.reviewBucket, "human_gatekeeper");
+  assert.equal(result.flags.targetAgentAnswered, false);
+});
+
+test("truncated callback voicemail text stays automated in performance evidence", async () => {
+  const result = await measurementLog({ metadata: { fullName: "Kristina Melkonyan" }, conversation: { transcript: [
+    { role: "user", message: "This is Christina. I'll call you back shortly. Thanks." },
+  ] }, terminalCallResult: "voicemail_reached_final_attempt" });
+  assert.equal(result.contactEvidence.reviewBucket, "voicemail");
+  assert.equal(result.flags.targetAgentAnswered, false);
+});
+
+test("no-assistant diagnostics preserve provider audio and tool lifecycle without assigning a cause", async () => {
+  const result = await measurementLog({
+    metadata: { fullName: "Ernest Van Glahn", callStartRequestId: "voice-row-6421-attempt-2" },
+    conversation: {
+      has_audio: true,
+      has_user_audio: true,
+      has_response_audio: false,
+      phone_call: { sip_call_id: "sip-secret-value" },
+      transcript: [
+        { role: "user", message: "Okay." },
+        { role: "agent", tool_calls: [{ tool_name: "diagnostic_probe" }] },
+        { role: "agent", tool_results: [{ tool_name: "diagnostic_probe", result_value: '{"status":"ok"}' }] },
+      ],
+    },
+  });
+  assert.deepEqual(result.responseDiagnostics, {
+    classification: "human_speech_no_assistant_turn",
+    callStartRequestId: "voice-row-6421-attempt-2",
+    providerAudio: { hasAudio: true, hasUserAudio: true, hasResponseAudio: false },
+    sipCallIdPresent: true,
+    userTranscriptTurns: 1,
+    assistantTranscriptTurns: 0,
+    toolCalls: ["diagnostic_probe"],
+    toolResults: ["diagnostic_probe"],
+    interpretation: result.responseDiagnostics.interpretation,
+  });
+  assert.match(result.responseDiagnostics.interpretation, /not proof of the failure lane/i);
+  assert.doesNotMatch(JSON.stringify(result.responseDiagnostics), /sip-secret-value/);
+});
+
 test("contextual listing affirmatives do not confirm a target after other questions", async () => {
   for (const question of [
     "Is this a good time?",

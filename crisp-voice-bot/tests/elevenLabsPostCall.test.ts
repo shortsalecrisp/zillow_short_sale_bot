@@ -1053,10 +1053,48 @@ test("reviewed target-name variants do not become identity-mismatch voicemail", 
 
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(monty, "Montserrat", "Ordono"), false);
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(emmanuel, "Emanuel", "Ochoa"), false);
+  assert.equal(shouldTreatAsIdentityMismatchVoicemail(emmanuel, "Emanuel Ochoa", "Ochoa"), false);
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(johnBramble, "Jonathan", "Granlund"), true);
   // Matching surname keeps Shawn/John under the existing ambiguous review
   // behavior; this approved fix must not promote it into the variant allowlist.
   assert.equal(shouldTreatAsIdentityMismatchVoicemail(johnHartley, "Shawn", "Hartley"), false);
+});
+
+test("a truncated first-person callback greeting is terminal voicemail, not deferred contact", async () => {
+  const { getAuthoritativeTerminalCallResult, shouldTreatAsVoicemail } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const conversation = {
+    status: "failed",
+    metadata: { error: { code: 1008, reason: "provider ended" } },
+    transcript: [{ role: "user", message: "This is Christina. I'll call you back shortly. Thanks." }],
+  };
+
+  assert.equal(shouldTreatAsVoicemail(conversation), true);
+  assert.equal(
+    getAuthoritativeTerminalCallResult(conversation, 2, { firstName: "Kristina", fullName: "Kristina Melkonyan" }),
+    "voicemail_reached_final_attempt",
+  );
+});
+
+test("a differently named person identifying as agent remains a non-target live responder", async () => {
+  const { getAuthoritativeTerminalCallResult, hasLiveHumanGatekeeperEvidence } = await import(
+    "../src/lib/elevenLabsPostCall"
+  );
+  const conversation = {
+    status: "done",
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "assistant", message: "Hi, Maya with Crisp Short Sales. Is 123 Main your listing?" },
+      { role: "user", message: "I am. Felicity, agent." },
+    ],
+  };
+
+  assert.equal(hasLiveHumanGatekeeperEvidence(conversation, "Sandra"), true);
+  assert.equal(
+    getAuthoritativeTerminalCallResult(conversation, 1, { firstName: "Sandra", fullName: "Sandra Velasquez" }),
+    "gatekeeper_admin_early_exit",
+  );
 });
 
 test("recorded screener unavailable message outranks generic voicemail and hangup", async () => {

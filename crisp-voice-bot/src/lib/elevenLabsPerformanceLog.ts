@@ -67,6 +67,13 @@ type PerformanceConversation = {
   version_id?: unknown;
   branch_id?: unknown;
   status?: string;
+  has_audio?: boolean;
+  has_user_audio?: boolean;
+  has_response_audio?: boolean;
+  phone_call?: {
+    sip_call_id?: string | null;
+    [key: string]: unknown;
+  };
   analysis?: {
     call_successful?: unknown;
     transcript_summary?: string;
@@ -123,6 +130,7 @@ function automatedContactType(message: string): AutomatedContact | null {
       /\b(?:message with your name|message or send me a text|call is very important to me)\b/.test(text) ||
       /^(?:hi[, ]+)?(?:this is|you(?:'ve| have) reached) [\p{L}'-]+\b.{0,100}\b(?:away from (?:my )?phone|unable to (?:answer|take) (?:your )?call|can't (?:answer|come to) (?:the )?phone|cannot (?:answer|come to) (?:the )?phone)\b/u.test(text) ||
       /^(?:(?:hi|hello|good (?:morning|afternoon|evening))[, ]+)?(?:this is|you(?:'ve| have) reached)\s+[\p{L}][\p{L}'-]*(?:\s+[\p{L}][\p{L}'-]*){0,3}\b.{0,180}\bleave\s+(?:me\s+)?(?:your\s+)?(?:name|number|phone number|contact information|details?|message)\b.{0,120}\b(?:call (?:you )?back|return your call|get back to you)\b/u.test(text) ||
+      /^(?:(?:hi|hello)[, ]+)?(?:this is|you(?:'ve| have) reached)\s+[\p{L}][\p{L}'-]*(?:\s+[\p{L}][\p{L}'-]*){0,3}\b.{0,100}\bi(?:'ll| will) call you back (?:shortly|soon|as soon as i can)\b.{0,30}\b(?:thanks|thank you)\b[.! ]*$/u.test(text) ||
       /\b(?:mailbox|voice ?mail(?: box)?)\b.{0,60}\b(?:full|not (?:been )?set up|hasn't been set up|not initialized|cannot accept|can't accept|unavailable|not accepting)\b/.test(text)) {
     return "voicemail";
   }
@@ -181,13 +189,19 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
     const canned = /^(?:(?:thank you|thanks|goodbye|please hold|not available|as soon as possible|one moment)\s*)+$/.test(bareText) ||
       /^(?:thank you|thanks)(?:[,. ]+(?:and )?have a (?:great|good|wonderful) day|[, ]+maya[.! ]*(?:please[-.]*)?)?[.!]*$/.test(text);
     const greeting = /^(?:(?:hi|hello|hey|good (?:morning|afternoon|evening))\b|(?:this is|it's|it is)\s+[\p{L}'-]+\b|(?:thank you|thanks) for calling\b)/u.test(text);
-    const identity = text.match(/\b(?:this is|it is|it's|i am|i'm)\s+([\p{L}'-]+)\b/u)?.[1];
-    const namedPickup = Boolean(identity) && /\b(?:this is|it is|it's) [\p{L}'-]+(?: speaking)?(?:[.!?]|$)/u.test(text);
+    const identity = text.match(/\b(?:this is|it is|it's|i am|i'm)[,. ]+([\p{L}'-]+)\b/u)?.[1] ??
+      text.match(/^([\p{L}'-]+)\s+speaking\b/u)?.[1];
+    const namedPickup = Boolean(identity) && (
+      /\b(?:this is|it is|it's) [\p{L}'-]+(?: speaking)?(?:[.!?]|$)/u.test(text) ||
+      /^[\p{L}'-]+\s+speaking(?:[.!?]|$)/u.test(text)
+    );
     const nameOnly = bareText === normalizeText(fullName) || bareText === expectedFirstName;
     const targetIdentity = Boolean(expectedFirstName && (identity === expectedFirstName || nameOnly));
     const explicitRole = /\bi(?: am|'m) (?:the )?(?:listing agent|agent of record)\b/.test(text);
     const explicitAdmin = /\b(?:i(?: am|'m)|this is) (?:his |her |their |the |an? )?(?:admin(?:istrative)?(?: assistant)?|assistant|receptionist|transaction coordinator)\b/.test(text) ||
       /\bthis is [\p{L}'-]+[, ]+[^.!?]{0,35}'s (?:assistant|admin|receptionist)\b/u.test(text);
+    const differentNamedAgent = Boolean(identity && expectedFirstName && identity !== expectedFirstName) &&
+      /^(?:i am|i'm|this is)[,. ]+[\p{L}'-]+[, ]+(?:the )?(?:listing )?agent\b/u.test(text);
     const officeGreeting = Boolean(identity) && /\b(?:real estate|realty|brokerage|office|group|team)\b/.test(text);
     const differentOfficeSpeaker = Boolean(officeGreeting && identity && expectedFirstName && identity !== expectedFirstName);
     const lastQuestion = lastAssistantMessage.match(/(?:^|[.!?])\s*([^.!?]+\?)\s*$/)?.[1] ?? lastAssistantMessage;
@@ -218,7 +232,7 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
     pending.push(index);
     hasContextualHumanTurn ||= contextual || explicitRole || explicitAdmin || (officeGreeting && /\bhow (?:can|may) (?:i|we) help\b/.test(text));
     if (newLiveIdentity || contextual) inAutomation = false;
-    if (explicitAdmin || differentOfficeSpeaker) gatekeeperIndexes.add(index);
+    if (explicitAdmin || differentOfficeSpeaker || differentNamedAgent) gatekeeperIndexes.add(index);
     if (explicitRole || identityAnswer || contextualListingAnswer || targetIdentity) targetIndexes.add(index);
   }
   flush(false);
@@ -309,6 +323,14 @@ function getToolCallNames(transcript: PerformanceTranscriptItem[]): string[] {
   return transcript.flatMap((item) =>
     (item.tool_calls ?? [])
       .map((toolCall) => toolCall.tool_name ?? toolCall.name ?? "")
+      .filter((toolName) => toolName.trim() !== ""),
+  );
+}
+
+function getToolResultNames(transcript: PerformanceTranscriptItem[]): string[] {
+  return transcript.flatMap((item) =>
+    (item.tool_results ?? [])
+      .map((toolResult) => toolResult.tool_name ?? "")
       .filter((toolName) => toolName.trim() !== ""),
   );
 }
@@ -412,6 +434,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
   const agentText = normalizeText(agentMessages.join(" "));
   const combinedText = normalizeText(`${input.outcome} ${input.summary} ${input.transcript}`);
   const toolCallNames = getToolCallNames(transcript);
+  const toolResultNames = getToolResultNames(transcript);
   const agentToAssistantLatencies = getAgentToAssistantLatencies(humanTranscript);
   const liveTransferToolFired = toolCallNames.includes("live_transfer_requested");
   const clearLiveTransferConsent = contact.humanAnswered === true && hasClearLiveTransferConsent(humanTranscript, "");
@@ -551,6 +574,24 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
       agentId: finalReceiptMatched ? optionalLabel(input.conversation.agent_id) : null,
       versionId: finalReceiptMatched ? optionalLabel(input.conversation.version_id) : null,
       branchId: finalReceiptMatched ? optionalLabel(input.conversation.branch_id) : null,
+    },
+    responseDiagnostics: {
+      classification: contact.automation.length === 0 && rawUserMessages.length > 0 && assistantMessages.length === 0
+        ? "human_speech_no_assistant_turn"
+        : null,
+      callStartRequestId: optionalLabel(input.metadata.callStartRequestId),
+      providerAudio: {
+        hasAudio: input.conversation.has_audio ?? null,
+        hasUserAudio: input.conversation.has_user_audio ?? null,
+        hasResponseAudio: input.conversation.has_response_audio ?? null,
+      },
+      sipCallIdPresent: typeof input.conversation.phone_call?.sip_call_id === "string" &&
+        input.conversation.phone_call.sip_call_id.trim() !== "",
+      userTranscriptTurns: Array.isArray(input.conversation.transcript) ? rawUserMessages.length : null,
+      assistantTranscriptTurns: Array.isArray(input.conversation.transcript) ? assistantMessages.length : null,
+      toolCalls: toolCallNames,
+      toolResults: toolResultNames,
+      interpretation: "A user transcript with zero assistant turns is a diagnostic signal, not proof of the failure lane. Compare response audio, tool lifecycle, request identity, final status and playback before classifying provider, transcript or bot failure.",
     },
     rawSignals: {
       // This preserves the old liveAnswered heuristic, not a provider human verdict.

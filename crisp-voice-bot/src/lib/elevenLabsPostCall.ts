@@ -1295,6 +1295,10 @@ export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): bo
     return true;
   }
 
+  if (hasTruncatedFirstPersonCallbackGreeting(conversation)) {
+    return true;
+  }
+
   const text = normalizeText(`${conversation.analysis?.transcript_summary ?? ""} ${transcriptText(conversation)}`);
   return (
     text.includes("voicemail") ||
@@ -1307,6 +1311,21 @@ export function shouldTreatAsVoicemail(conversation: ElevenLabsConversation): bo
     text.includes("after the tone") ||
     text.includes("at the beep")
   );
+}
+
+function hasTruncatedFirstPersonCallbackGreeting(conversation: ElevenLabsConversation): boolean {
+  const hasAssistantSpeech = (conversation.transcript ?? []).some(
+    (item) => (item.role === "assistant" || item.role === "agent") &&
+      typeof item.message === "string" && hasMeaningfulSpokenContent(item.message),
+  );
+  if (hasAssistantSpeech) return false;
+
+  const spokenUserTurns = userMessages(conversation).filter(hasMeaningfulSpokenContent);
+  if (spokenUserTurns.length !== 1) return false;
+  const text = normalizeText(spokenUserTurns[0]);
+  return /^(?:(?:hi|hello)[, ]+)?(?:this is|you(?:'ve| have) reached)\s+[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,3}\b/.test(text) &&
+    /\bi(?:'ll| will) call you back (?:shortly|soon|as soon as i can)\b/.test(text) &&
+    /\b(?:thanks|thank you)\b[.! ]*$/.test(text);
 }
 
 function hasFirstPersonVoicemailGreeting(conversation: ElevenLabsConversation): boolean {
@@ -1674,7 +1693,7 @@ export function shouldTreatAsIdentityMismatchVoicemail(
     return false;
   }
 
-  const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  const expected = normalizeText(expectedFirstName).split(/\s+/)[0]?.replace(/[^a-z0-9'-]/g, "") ?? "";
   const expectedLast = normalizeText(expectedLastName).replace(/[^a-z0-9'-]/g, "");
   const mentionsExpectedTarget =
     Boolean(expected && new RegExp(`\\b${expected}\\b`).test(text)) ||
@@ -1800,9 +1819,17 @@ export function hasLiveHumanGatekeeperEvidence(
     return Boolean(responderName && !nameSoundsSimilar(responderName, expected));
   });
 
+  const differentNamedAgentResponder = Boolean(expected) && contextualUserTurns.some((item) => {
+    const message = normalizeText(item.message ?? "");
+    const introduction = message.match(
+      /^(?:i am|i'm|this is)[,. ]+([a-z][a-z'-]*)[, ]+(?:the )?(?:listing )?agent\b/,
+    );
+    return Boolean(introduction?.[1] && !nameSoundsSimilar(introduction[1], expected));
+  });
+
   return liveBusinessGreeting || liveOfficeInteraction || (summaryNamesLiveRole && contextualUserTurns.length > 0) ||
     (officeSelfIdentification && contextualUserTurns.length >= 2) ||
-    (differentTeamResponder && !responderAuthorityConfirmed);
+    (differentTeamResponder && !responderAuthorityConfirmed) || differentNamedAgentResponder;
 }
 
 export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
