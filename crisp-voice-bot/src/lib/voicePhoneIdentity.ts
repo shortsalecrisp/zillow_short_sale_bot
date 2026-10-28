@@ -1,7 +1,34 @@
 import { normalizePhoneToE164, normalizeString, parseVoiceBotDate } from "./voiceSheet";
 import { VOICE_START_RESOLUTION_MARKER } from "./voiceTransportRecovery";
+import { createHash } from "node:crypto";
 
 export const VOICE_ATTEMPT_IDENTITY_MARKER = "CODEX_VOICE_ATTEMPT_IDENTITY_V1";
+export const VOICE_CORRECTED_PHONE_RELEASE_MARKER = "CODEX_VOICE_CORRECTED_PHONE_RELEASE_V1";
+
+export function correctedPhoneReleaseDigest(row: unknown[]): string {
+  const phone = normalizePhoneToE164(row[2]);
+  const bindings = normalizeString(row[41]).split(/\r?\n/).filter(line => {
+    if (![VOICE_ATTEMPT_IDENTITY_MARKER, VOICE_START_RESOLUTION_MARKER].some(m => line.startsWith(m + " "))) return false;
+    try { return normalizePhoneToE164(JSON.parse(line.slice(line.indexOf(" ") + 1)).phone) !== phone; }
+    catch { return true; }
+  });
+  return createHash("sha256").update(JSON.stringify({
+    identity: [0, 1, 2, 3, 4, 5, 6, 27].map(i => normalizeString(row[i])),
+    initial: parseVoiceBotDate(row[22])?.toISOString(), followup: parseVoiceBotDate(row[23])?.toISOString(), bindings,
+  })).digest("hex");
+}
+
+function reviewedFormerPhones(row: unknown[]): Set<string> {
+  const lines = normalizeString(row[41]).split(/\r?\n/).filter(l => l.startsWith(VOICE_CORRECTED_PHONE_RELEASE_MARKER + " "));
+  if (lines.length !== 1) return new Set();
+  try {
+    const release = JSON.parse(lines[0].slice(VOICE_CORRECTED_PHONE_RELEASE_MARKER.length + 1));
+    if (release.phone !== normalizePhoneToE164(row[2]) || release.digest !== correctedPhoneReleaseDigest(row) ||
+        !Array.isArray(release.formerPhones) || !release.formerPhones.length ||
+        !release.formerPhones.every((p: unknown) => typeof p === "string" && normalizePhoneToE164(p) === p && p !== release.phone)) return new Set();
+    return new Set(release.formerPhones);
+  } catch { return new Set(); }
+}
 
 export function formatVoiceAttemptIdentity(rowNumber: number, phone: string, attempt: number, sentAt: Date): string {
   return `${VOICE_ATTEMPT_IDENTITY_MARKER} ${JSON.stringify({ rowNumber, phone: normalizePhoneToE164(phone),
@@ -17,12 +44,16 @@ export function getVoicePhoneAttemptIdentity(row: unknown[]): {
 } {
   const currentPhone = normalizePhoneToE164(row[2]);
   const phones = new Map<number, Set<string>>();
+  const historicalPhones = new Set<string>();
+  const reviewed = reviewedFormerPhones(row);
   const genuineCurrentAttempts = new Set<number>();
   let malformed = false;
   let changedPhone = false;
   const add = (attempt: unknown, phone: unknown) => {
     const n = Number(attempt), normalized = normalizePhoneToE164(phone);
     if (![1, 2].includes(n) || !normalized) { malformed = true; return; }
+    historicalPhones.add(normalized);
+    if (reviewed.has(normalized)) return;
     if (normalized !== currentPhone) changedPhone = true;
     const set = phones.get(n) ?? new Set<string>(); set.add(normalized); phones.set(n, set);
   };
@@ -48,6 +79,8 @@ export function getVoicePhoneAttemptIdentity(row: unknown[]): {
           add(attempt, data.phone);
         } else if (data.schema === "voice_call_metrics_v1" && data.providerIdentity?.source === "final_conversation_receipt") {
           if ([data.call?.testMode, data.call?.providerProofCall].some(v => v === true || v === "true")) continue;
+          // A reviewed zero-acceptance episode can never hide a genuine old call.
+          if (reviewed.has(normalizePhoneToE164(data.call?.requestedPhone) ?? "")) malformed = true;
           add(data.call?.callAttemptNumber, data.call?.requestedPhone);
           add(data.call?.callAttemptNumber, data.call?.dialedPhone);
           if (typeof data.call?.conversationId === "string" && Number(data.metrics?.durationSecs) > 0 &&
@@ -70,5 +103,5 @@ export function getVoicePhoneAttemptIdentity(row: unknown[]): {
     if (genuineCurrentAttempts.has(attempt)) currentPhoneAttempts += 1;
   }
   return { currentPhone, currentPhoneAttempts, unknownAttempts,
-    historicalPhones: [...new Set([...phones.values()].flatMap(set => [...set]))], reviewReason };
+    historicalPhones: [...historicalPhones], reviewReason };
 }

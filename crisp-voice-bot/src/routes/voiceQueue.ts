@@ -2,8 +2,18 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { config } from "../lib/config";
 import { processVoiceQueue } from "../lib/voiceQueue";
 import { getProviderCircuitStatus, resetProviderCircuit } from "../lib/providerCircuitBreaker";
+import { reconcileCorrectedVoicePhone } from "../lib/voiceCorrectedPhoneRelease";
 
 const router = Router();
+
+router.post("/reconcile-corrected-phone", async (req: Request, res: Response, next: NextFunction) => {
+  const token = config.googleAppsScript.token;
+  if (!token || requestToken(req) !== token) { res.status(401).json({ ok: false, error: "unauthorized" }); return; }
+  if (!Number.isInteger(req.body?.row) || req.body.row < 2 || req.body.row >= 9000) {
+    res.status(400).json({ ok: false, error: "bounded_row_required" }); return;
+  }
+  try { res.json(await reconcileCorrectedVoicePhone(req.body)); } catch (error) { next(error); }
+});
 
 function requestToken(req: Request): string | undefined {
   const header = req.header("X-Crisp-Token")?.trim();
