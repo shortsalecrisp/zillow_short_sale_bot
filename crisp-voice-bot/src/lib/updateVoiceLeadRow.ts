@@ -6,7 +6,7 @@ import { VOICE_OVERDUE_FALLBACK_MARKER } from "./voiceOverdueFallback";
 import { finalUnansweredPreservationReason, isFinalUnansweredVoiceResult } from "./voiceFinalUnanswered";
 import { voiceOutcomeRecoveryBlockReason, voiceReconciliationStateHash, type VoiceOutcomeRecoveryProof } from "./voiceOutcomeRecovery";
 import { getInboundQuietGate } from "./voiceSafety";
-import { fetchVoiceTerminalReceipt, verifyVoiceTerminalReceipt, type VoiceTerminalReceiptProof } from "./voiceTerminalReceipt";
+import { fetchVoiceTerminalReceipt, verifyVoiceTerminalReceipt, verifyUnresolvedIvrFirstAttemptReceipt, type VoiceTerminalReceiptProof } from "./voiceTerminalReceipt";
 import {
   appendVoiceNotesValue,
   cellRange,
@@ -170,12 +170,18 @@ export function buildVoiceLeadRowWrites(
   terminalReceiptVerified = false,
 ): SheetCellWrite[] {
   const writes: SheetCellWrite[] = [];
+  const ivrReconciliation = updates.voiceOutcomeRecoveryProof?.reconciliationReason === "verified_unresolved_ivr_first_attempt";
+  if (ivrReconciliation && (!terminalReceiptVerified || !updates.voiceTerminalReceipt || !updates.voiceExpectedStateHash ||
+      updates.voiceReceiptOnly || updates.voiceOutcomeRecoveryProof?.expectedLeadStatusCode !== "N" ||
+      updates.callAttemptNumber !== 1 || updates.callResult !== "agent_not_available" || updates.leadStatusCode !== "")) {
+    throw new Error("IVR reconciliation requires exact verified first-attempt proof and fresh owning state");
+  }
   if (updates.voiceExpectedStateHash && voiceReconciliationStateHash(rowValues) !== updates.voiceExpectedStateHash) {
     throw new Error("Voice reconciliation held: owning state changed");
   }
   const protectedReason = finalUnansweredPreservationReason(rowValues);
   if (updates.voiceReceiptOnly && !updates.voiceTerminalReceipt) throw new Error("Receipt-only recovery requires terminal proof");
-  if (updates.voiceTerminalReceipt && (updates.voiceReceiptOnly || (protectedReason && protectedReason !== "missing_first_attempt_history"))) {
+  if (!ivrReconciliation && updates.voiceTerminalReceipt && (updates.voiceReceiptOnly || (protectedReason && protectedReason !== "missing_first_attempt_history"))) {
     const id = updates.voiceTerminalReceipt.conversationId;
     if (!terminalReceiptVerified || !updates.callResult || !updates.voiceNotes?.includes(id)) {
       throw new Error("Protected terminal receipt has not been verified");
@@ -200,7 +206,7 @@ export function buildVoiceLeadRowWrites(
     return writes;
   }
   if (updates.voiceOutcomeRecoveryProof) {
-    if (updates.voiceOutcomeRecoveryProof.expectedLeadStatusCode && updates.callResult !== "answered_not_interested") {
+    if (updates.voiceOutcomeRecoveryProof.expectedLeadStatusCode && updates.callResult !== "answered_not_interested" && !ivrReconciliation) {
       throw new Error("A prior generic N may only be reconciled to a verified decline");
     }
     const reason = voiceOutcomeRecoveryBlockReason(rowValues, updates.voiceOutcomeRecoveryProof);
@@ -242,7 +248,7 @@ export function buildVoiceLeadRowWrites(
   if (isRetryableVoiceBotResult(updates.callResult) ||
       ["answered_not_interested", "provider_destination_blocked"].includes(updates.callResult ?? "")) {
     const preservationValues = updates.voiceOutcomeRecoveryProof?.expectedLeadStatusCode === "N" &&
-      updates.callResult === "answered_not_interested" ? rowValues.map((v, i) => i === 10 ? "" : v) : rowValues;
+      (updates.callResult === "answered_not_interested" || ivrReconciliation) ? rowValues.map((v, i) => i === 10 ? "" : v) : rowValues;
     const reason = finalUnansweredPreservationReason(preservationValues);
     if (reason && reason !== "missing_first_attempt_history") {
       appendVoiceNotesWrite(writes, rowValues, `Ignored delayed retry outcome; existing contact state retained: ${reason}.`);
@@ -315,7 +321,8 @@ async function writeVoiceLeadRow(
   }
   let terminalReceiptVerified = false;
   const protectedReason = finalUnansweredPreservationReason(rowValues);
-  const receiptOnlyPersistence = updates.voiceReceiptOnly || (protectedReason && protectedReason !== "missing_first_attempt_history");
+  const ivrReconciliation = updates.voiceOutcomeRecoveryProof?.reconciliationReason === "verified_unresolved_ivr_first_attempt";
+  const receiptOnlyPersistence = !ivrReconciliation && (updates.voiceReceiptOnly || (protectedReason && protectedReason !== "missing_first_attempt_history"));
   if (updates.voiceTerminalReceipt) {
     const before = voiceReconciliationStateHash(rowValues);
     const receipt = await getTerminalReceipt(updates.voiceTerminalReceipt.conversationId);
@@ -325,6 +332,7 @@ async function writeVoiceLeadRow(
       "provider_llm_failure", "call_failed_before_completion", "call_failed_before_completion_retryable"]
       .includes(updates.callResult ?? "");
     verifyVoiceTerminalReceipt(rowNumber, fresh, updates.callAttemptNumber, updates.voiceTerminalReceipt, receipt, unplacedTechnicalFailure);
+    if (ivrReconciliation) verifyUnresolvedIvrFirstAttemptReceipt(receipt);
     rowValues = fresh;
     terminalReceiptVerified = true;
   }

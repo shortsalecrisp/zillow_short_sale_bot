@@ -128,3 +128,57 @@ test("receipt recovery is idempotent and cannot clear another accepted attempt's
   assert.equal(row[30], "voice_call_2_due");
   assert.equal(row[39], "2026-10-27T13:15:00Z");
 });
+
+async function ivrFixture() {
+  const { voiceReconciliationStateHash } = await import("../src/lib/voiceOutcomeRecovery");
+  const { formatVoiceAttemptIdentity } = await import("../src/lib/voicePhoneIdentity");
+  const { row, receipt, proof } = fixture();
+  row[13] = ""; row[16] = ""; row[19] = ""; row[8] = "x";
+  row[33] = "call_received_agent_hung_up";
+  row[41] = formatVoiceAttemptIdentity(6370, proof.phone, 1, new Date(String(row[32])));
+  const conversation = { ...receipt, metadata: { ...receipt.metadata, accepted_time_unix_secs: receipt.metadata.start_time_unix_secs },
+    transcript: [{ role: "user", message: "Thank you for calling Synthetic Realty. For property inquiries, press one." },
+      { role: "user", message: "Thank you for calling. Good" }] };
+  const payload = { callAttemptNumber: 1, callResult: "agent_not_available", leadStatusCode: "", responseStatus: "Agent was not available",
+    voiceTerminalReceipt: proof, voiceExpectedStateHash: voiceReconciliationStateHash(row),
+    voiceOutcomeRecoveryProof: { phone: proof.phone, callAttemptNumber: 1 as const, sentAt: new Date(String(row[32])).toISOString(),
+      previousResult: "call_received_agent_hung_up", fullName: proof.fullName, listingAddress: proof.listingAddress,
+      expectedLeadStatusCode: "N" as const, reconciliationReason: "verified_unresolved_ivr_first_attempt" as const },
+    voiceNotes: `Owner-approved exact IVR reconciliation ${proof.conversationId}` };
+  return { row, conversation, payload };
+}
+
+test("owner-reviewed generic N from a verified unresolved first-call IVR can recover without resetting history", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  const { row, conversation, payload } = await ivrFixture(); const sent = row[32];
+  await updateVoiceLeadRow(6370, payload, async () => sheet(row), async () => conversation);
+  assert.equal(row[10], ""); assert.equal(row[33], "agent_not_available"); assert.equal(row[32], sent);
+  assert.equal(row[29], "yes"); assert.equal(row[30], "voice_call_2_due");
+  assert.equal(row[31], "2026-10-26T20:00:00.000Z");
+  assert.equal(row[39], ""); assert.equal(row[40], "");
+});
+
+test("IVR reconciliation rejects real contact, voicemail, uncertain receipts and any protected or changed owner state", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  const { voiceReconciliationStateHash } = await import("../src/lib/voiceOutcomeRecovery");
+  for (const message of ["This is Ellen, how can I help?", "Don't call again.", "Call me tomorrow.", "Can you email me instead?"]) {
+    const { row, conversation, payload } = await ivrFixture(); const before = [...row];
+    conversation.transcript.push({ role: "user", message });
+    await assert.rejects(updateVoiceLeadRow(6370, payload, async () => sheet(row), async () => conversation), /IVR reconciliation/);
+    assert.deepEqual(row, before);
+  }
+  for (const [index, value] of [[10, "R"], [19, true], [16, true], [37, "yes"], [38, "tomorrow"],
+    [33, "do_not_call"], [39, "2026-10-27T13:15:00Z"], [2, "202-555-0199"], [28, "sent"], [28, "pushed"]] as Array<[number, unknown]>) {
+    const { row, conversation, payload } = await ivrFixture(); row[index] = value;
+    payload.voiceExpectedStateHash = voiceReconciliationStateHash(row); const before = [...row];
+    await assert.rejects(updateVoiceLeadRow(6370, payload, async () => sheet(row), async () => conversation));
+    assert.deepEqual(row, before);
+  }
+  const { row, conversation, payload } = await ivrFixture();
+  await assert.rejects(updateVoiceLeadRow(6370, { ...payload, voiceTerminalReceipt: undefined }, async () => sheet(row)), /requires exact verified/);
+  await assert.rejects(updateVoiceLeadRow(6370, { ...payload, callAttemptNumber: 2 }, async () => sheet(row), async () => conversation));
+  await assert.rejects(updateVoiceLeadRow(6370, payload, async () => sheet(row), async () => ({ ...conversation, status: "initiated" })));
+  await assert.rejects(updateVoiceLeadRow(6370, payload, async () => sheet(row), async () => ({ ...conversation,
+    transcript: [...conversation.transcript, { role: "agent", message: "I left a voicemail." }] })), /IVR reconciliation/);
+  assert.equal(row[10], "N");
+});

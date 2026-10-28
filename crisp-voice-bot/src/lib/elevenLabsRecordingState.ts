@@ -50,6 +50,15 @@ function isLikelyHumanMessage(message: string): boolean {
   return text !== "" && text !== "..." && !isAutomatedMessage(text) && !isCannedFragment(text);
 }
 
+export function isRepeatedPhoneMenuFragment(message: string, earlierMessages: string[]): boolean {
+  const words = (value: string) => normalizeText(value).replace(/[^\p{L}\p{N}']+/gu, " ").trim();
+  const text = words(message);
+  if (!text.startsWith("thank you for calling")) return false;
+  const menus = earlierMessages.filter(value => /\b(?:press|dial)\s+(?:one|two|three|four|five|six|seven|eight|nine|zero|[0-9])\b/i.test(value));
+  return menus.length > 0 && (menus.some(value => words(value).startsWith(text)) ||
+    /^thank you for calling(?: good(?:bye)?)?$/.test(text));
+}
+
 export function isRecordingOrScreeningArtifact(
   transcript: RecordingStateTranscriptItem[],
   summary = "",
@@ -77,8 +86,10 @@ export function isRecordingOrScreeningArtifact(
       break;
     }
   }
-  const humanAfterAutomation = messages.slice(lastAutomationIndex + 1).some((message) =>
-    isLikelyHumanMessage(message) && !(hasGoogleCallAssist && isGoogleCallAssistContinuation(message)),
+  const humanAfterAutomation = messages.slice(lastAutomationIndex + 1).some((message, offset) =>
+    isLikelyHumanMessage(message) &&
+    !isRepeatedPhoneMenuFragment(message, messages.slice(0, lastAutomationIndex + 1 + offset)) &&
+    !(hasGoogleCallAssist && isGoogleCallAssistContinuation(message)),
   );
   return !humanAfterAutomation;
 }

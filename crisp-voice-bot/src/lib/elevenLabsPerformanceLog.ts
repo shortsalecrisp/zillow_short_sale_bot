@@ -1,4 +1,5 @@
 import type { CallMetadata } from "../types";
+import { isRepeatedPhoneMenuFragment } from "./elevenLabsRecordingState";
 import {
   hasCallbackOrLaterSignal,
   hasClearLiveTransferConsent,
@@ -175,7 +176,9 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
     if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) continue;
     hasSpokenUserContent = true;
     const text = normalizeText(item.message);
-    const automatedType = automatedContactType(text);
+    const earlierMessages = transcript.slice(0, index)
+      .filter(item => item.role === "user" && typeof item.message === "string").map(item => item.message!);
+    const automatedType = isRepeatedPhoneMenuFragment(text, earlierMessages) ? "ivr" : automatedContactType(text);
     if (automatedType) {
       flush(true);
       automatedIndexes.add(index);

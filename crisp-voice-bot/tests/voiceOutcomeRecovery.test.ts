@@ -12,7 +12,7 @@ const monitor = new Date("2026-09-30T09:46:05.445Z");
 test("reconciliation digest detects identity, campaign, contact, receipt and schedule races", () => {
   const row = Array(42).fill(""); row[2] = "+12025550123";
   const hash = voiceReconciliationStateHash(row);
-  for (const i of [0, 2, 4, 9, 10, 13, 16, 17, 19, 29, 31, 32, 33, 37, 39, 40, 41]) {
+  for (const i of [0, 2, 4, 9, 10, 13, 16, 17, 19, 28, 29, 31, 32, 33, 37, 39, 40, 41]) {
     const changed = [...row]; changed[i] = "changed";
     assert.notEqual(voiceReconciliationStateHash(changed), hash);
   }

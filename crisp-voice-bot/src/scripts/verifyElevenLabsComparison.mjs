@@ -23,6 +23,12 @@ export const DISABLED_NOISY_ENVIRONMENT_MESSAGE = "Uhh ... sorry, I'm picking up
 
 export function comparisonBody(agent) {
   const body = structuredClone({ conversation_config: agent.conversation_config, workflow: agent.workflow });
+  const asr = body.conversation_config.asr;
+  if (asr && typeof asr === 'object' && !Array.isArray(asr)
+      && Object.hasOwn(asr, 'keyterm_libraries') && Array.isArray(asr.keyterm_libraries)
+      && asr.keyterm_libraries.length === 0) {
+    delete asr.keyterm_libraries;
+  }
   const { agent: config, tts } = body.conversation_config;
   delete tts.model_id;
   delete config.prompt.tools;

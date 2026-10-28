@@ -18,6 +18,25 @@ The guarded prompt-only publisher reread both exact r7 versions, prompt hashes a
 
 Require the exact r8 branch/version pair, a matching final receipt, a genuine non-test positive duration, and a provider start at or after the r8 boundary. The 15 verified true-live conversations per arm minimum and preferred 100-genuine-call review restart at r8; all earlier cohorts remain historical.
 
+## October 28 Validator Response Reconciliation (No Provider Release)
+
+Yoni approved reconciling the provider's identical new `conversation_config.asr.keyterm_libraries: []`
+response field on both exact r8 versions. Removing only that empty array offline reproduces the original
+r8 shared hash `698e298abf335fc7a596a54f11634796c8fd5cf037ea934aefcd1ed495ab1a48` from the observed
+`4b0aa3702e4b4ab425f6656736576c0c2d98f514bb360946d9e0805d10e153d8` body. The canonical normalizer now
+removes only an own empty-array `keyterm_libraries` property from a non-array ASR object. Absent fields
+stay absent; nonempty arrays, null, booleans, numbers, strings, objects, malformed/missing containers and
+every other ASR field remain visible. Both arms must still directly match and pass the original pinned
+versions, prompt/workflow/shared hashes, protected settings and complete 50/50 allocation. No provider
+publisher, prompt change, schedule change or new r8 boundary accompanies this validator repair.
+
+The same approved backend release recognizes truncated repetitions of an established office phone menu
+as IVR rather than inventing a live pickup. Later substantive live responses and contact preferences
+remain authoritative. An owner-reviewed generic first-call N/hangup correction requires a state hash,
+the exact positive-duration accepted terminal receipt, an unresolved menu with no assistant speech or
+voicemail tool, unchanged current-phone identity/attempt, no second start, and no protected preference
+or recorded Mailshake enrollment. Ordinary delayed results cannot reopen nonblank K.
+
 ## Approved Revision 7
 
 Yoni approved the October 22 Lead Intelligence fixes. The shared prompt now treats an explicit statement that another negotiator, attorney, specialist or provider handles the file as terminal existing coverage rather than self-handling, closing without another value pitch, Yoni offer, callback or transfer. Backend contact evidence now accepts a contextual `It is`, `That is`, `It's mine` or `That's mine` only when it immediately answers the exact listing question; the same words after timing, needs or property-status questions do not authenticate the target.

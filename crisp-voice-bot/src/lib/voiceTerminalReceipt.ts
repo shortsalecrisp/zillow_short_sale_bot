@@ -2,6 +2,22 @@ import axios from "axios";
 import { config } from "./config";
 import { isMatchingTerminalVoiceReceipt } from "./voiceOutcomeRecovery";
 import { buildVoiceBotListingAddress, normalizePhoneToE164, normalizeString, parseVoiceBotDate } from "./voiceSheet";
+import { isRecordingOrScreeningArtifact } from "./elevenLabsRecordingState";
+
+export function verifyUnresolvedIvrFirstAttemptReceipt(receipt: unknown): void {
+  const value = receipt as { status?: string; metadata?: { accepted_time_unix_secs?: number | null };
+    transcript?: Array<{ role?: string; message?: string | null;
+      tool_calls?: Array<{ tool_name?: string; name?: string }>;
+      tool_results?: Array<{ tool_name?: string }> }> } | null;
+  const transcript = value?.transcript ?? [];
+  const hasMenu = transcript.some(t => t.role === "user" &&
+    /\b(?:press|dial)\s+(?:one|two|three|four|five|six|seven|eight|nine|zero|[0-9])\b/i.test(t.message ?? ""));
+  const assistantSpoke = transcript.some(t => ["agent", "assistant"].includes(t.role ?? "") && /[\p{L}\p{N}]/u.test(t.message ?? ""));
+  const voicemailTool = transcript.some(t => [...(t.tool_calls ?? []), ...(t.tool_results ?? [])]
+    .some(tool => tool.tool_name === "voicemail_detection" || ("name" in tool && tool.name === "voicemail_detection")));
+  if (value?.status !== "done" || !value.metadata?.accepted_time_unix_secs || !hasMenu || assistantSpoke || voicemailTool ||
+      !isRecordingOrScreeningArtifact(transcript)) throw new Error("IVR reconciliation requires a verified unresolved menu, not human contact or voicemail");
+}
 
 export type VoiceTerminalReceiptProof = {
   conversationId: string;

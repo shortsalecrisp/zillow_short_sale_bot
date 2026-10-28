@@ -763,6 +763,28 @@ test("an unresolved extension menu is unavailable, not voicemail merely because 
   assert.notEqual(getAuthoritativeTerminalCallResult(answered, 1), "agent_not_available");
 });
 
+test("a repeated office menu with a truncated closing is unavailable, not a live hangup", async () => {
+  const { getAuthoritativeTerminalCallResult } = await import("../src/lib/elevenLabsPostCall");
+  const { buildVoicePerformanceLog } = await import("../src/lib/elevenLabsPerformanceLog");
+  const menu = "Thank you for calling Synthetic Realty. For buying or selling, press one. For property management, press two.";
+  const conversation = { status: "done", metadata: { call_duration_secs: 80, termination_reason: "Client disconnected: 1000" },
+    transcript: [{ role: "user", message: menu }, { role: "agent", tool_calls: [{ tool_name: "skip_turn" }] },
+      { role: "user", message: menu }, { role: "user", message: "Thank you for calling Synthetic Realty." },
+      { role: "user", message: "For buying or selling, press one. For property management, press two." },
+      { role: "user", message: "Thank you for calling. Good" }] };
+  assert.equal(getAuthoritativeTerminalCallResult(conversation, 1), "agent_not_available");
+  const metrics = JSON.parse(buildVoicePerformanceLog({ conversationId: "conv_synthetic_ivr_fragment", conversation,
+    metadata: { rowNumber: 123, callAttemptNumber: 1, fullName: "Synthetic Owner", listingAddress: "123 Main St",
+      requestedPhone: "+12025550123", dialedPhone: "+12025550123", testMode: true }, outcome: "Agent was not available",
+    summary: "Repeated office menu", transcript: "Synthetic menu", terminalCallResult: "agent_not_available",
+  }).split("--- CODEX_VOICE_CALL_METRICS_V1 ---\n")[1]);
+  assert.equal(metrics.contactEvidence.reviewBucket, "ivr");
+  assert.equal(metrics.contactEvidence.humanAnswered, false);
+  assert.deepEqual(metrics.contactEvidence.humanTurnIndexes, []);
+  const live = { ...conversation, transcript: [...conversation.transcript, { role: "user", message: "Thank you for calling. This is Ellen. How may I help?" }] };
+  assert.notEqual(getAuthoritativeTerminalCallResult(live, 1), "agent_not_available");
+});
+
 test("nonterminal accepted conversations remain pending without a sheet outcome or another call", async () => {
   const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
   const conversationId = "conv_measurement_held_initiated";

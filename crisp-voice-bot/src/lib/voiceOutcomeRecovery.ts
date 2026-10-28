@@ -4,7 +4,7 @@ import { buildVoiceBotListingAddress, normalizePhoneToE164, normalizeString, par
 
 export function voiceReconciliationStateHash(row: unknown[]): string {
   const dates = new Set([31, 32, 39]);
-  const columns = [0, 1, 2, 3, 4, 5, 6, 9, 10, 13, 15, 16, 17, 19, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39, 40, 41];
+  const columns = [0, 1, 2, 3, 4, 5, 6, 9, 10, 13, 15, 16, 17, 19, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39, 40, 41];
   return createHash("sha256").update(JSON.stringify(columns.map(i => dates.has(i)
     ? parseVoiceBotDate(row[i])?.toISOString() ?? normalizeString(row[i]) : normalizeString(row[i])))).digest("hex");
 }
@@ -17,6 +17,7 @@ export type VoiceOutcomeRecoveryProof = {
   fullName: string;
   listingAddress: string;
   expectedLeadStatusCode?: "N";
+  reconciliationReason?: "verified_unresolved_ivr_first_attempt";
 };
 
 export function voiceOutcomeRecoveryBlockReason(row: unknown[], proof: VoiceOutcomeRecoveryProof): string | undefined {
@@ -31,6 +32,11 @@ export function voiceOutcomeRecoveryBlockReason(row: unknown[], proof: VoiceOutc
   if (proof.expectedLeadStatusCode !== undefined) {
     if (normalizeString(row[10]) !== proof.expectedLeadStatusCode || proof.previousResult !== "call_received_agent_hung_up") {
       return "reconciliation_status_changed";
+    }
+    if (proof.reconciliationReason && (proof.reconciliationReason !== "verified_unresolved_ivr_first_attempt" ||
+        proof.callAttemptNumber !== 1)) return "reconciliation_scope_changed";
+    if (proof.reconciliationReason && ["sent", "pushed"].includes(normalizeString(row[28]).toLowerCase())) {
+      return "campaign_already_enrolled";
     }
     const unmarked = [...row]; unmarked[10] = "";
     return finalUnansweredPreservationReason(unmarked);

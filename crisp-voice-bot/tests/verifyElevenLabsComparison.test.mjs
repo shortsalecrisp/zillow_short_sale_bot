@@ -5,7 +5,7 @@ import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE, R8_COMPARIS
 function fixture(index = 0) {
   const arm = R8_COMPARISON.arms[index];
   return { agent_id: R8_COMPARISON.agentId, branch_id: arm.branchId, version_id: arm.versionId,
-    conversation_config: { tts: { model_id: arm.ttsModel, pvc_strength: 0, voice_id: 'synthetic_eryn', speed: 1 },
+    conversation_config: { asr: { provider: 'synthetic' }, tts: { model_id: arm.ttsModel, pvc_strength: 0, voice_id: 'synthetic_eryn', speed: 1 },
       agent: { subagents: [], prompt: { prompt: 'Synthetic policy', tool_ids: ['synthetic_tool'], tools: [{ expanded: true }], built_in_tools: { skip_turn: null, identity_challenge: null }, llm: 'gpt-4.1' } },
       turn: { turn_model: 'turn_v3' } },
     workflow: { edges: [{ order: 1 }, { order: 2 }] }, platform_settings: { test: false }, phone_numbers: [] };
@@ -27,6 +27,27 @@ function disabledNoiseShape(agent) {
   result.conversation_config.turn.noisy_environment_message = DISABLED_NOISY_ENVIRONMENT_MESSAGE;
   return result;
 }
+
+test('only the exact empty ASR keyterm library response default is reconciled', () => {
+  const fresh = fixture(); fresh.conversation_config.asr.keyterm_libraries = [];
+  const before = JSON.stringify(fresh);
+  assert.deepEqual(comparisonBody(fresh), comparisonBody(fixture()));
+  assert.equal(JSON.stringify(fresh), before);
+  assert.equal(validateComparison([fresh, fixture(1)], allocation(), expected).ok, true);
+  for (const value of [null, false, 0, '', {}, ['configured'], [null]]) {
+    const changed = fixture(); changed.conversation_config.asr.keyterm_libraries = value;
+    assert.throws(() => validateComparison([changed, fixture(1)], allocation(), expected), /configuration digest/);
+  }
+  for (const change of [
+    a => { a.conversation_config.asr.other_default = []; },
+    a => { a.conversation_config.asr = null; },
+    a => { a.conversation_config.asr = []; },
+    a => { delete a.conversation_config.asr; },
+  ]) {
+    const changed = fixture(); change(changed);
+    assert.throws(() => validateComparison([changed, fixture(1)], allocation(), expected), /configuration digest/);
+  }
+});
 
 test('omitted identity_challenge reconstructs only the approved r7 null default', () => {
   const old = fixture(), fresh = disabledNoiseShape(fixture(1));
