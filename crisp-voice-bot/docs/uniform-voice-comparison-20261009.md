@@ -1,6 +1,22 @@
 # Uniform Conversion Comparison
 
-Current revision is r8, verified at 2026-10-28T01:14:41.028Z (9:14:41 PM New York on October 27). Earlier releases below are historical and must not be pooled with r8. Both arms are verified identical except for TTS model.
+Current revision is r9, verified at 2026-10-29T01:11:30.360Z (9:11:30 PM New York on October 28). Earlier releases below are historical and must not be pooled with r9. Both arms are verified identical except for TTS model.
+
+## Approved Revision 9
+
+Yoni approved the October 28 Lead Intelligence fixes. The shared prompt now treats "I already have a team" as terminal existing coverage: acknowledge once, record the service refusal, and close without another pitch, callback or transfer offer. The backend release separately gives final live target and gatekeeper turns precedence over earlier screening while retaining repeated menus and canned playback as automation.
+
+The guarded prompt-only publisher reread both exact r8 versions, prompt hashes and 50/50 allocation, then changed only `conversation_config.agent.prompt.prompt`. It preserved and reread workflow, phone bindings, platform settings and every other provider setting. No real call or metered session was started.
+
+- Cohort: `maya_uniform_lead_conversion_20261028_r9`.
+- Start: `2026-10-29T01:11:30.360Z`, after final two-arm provider readback.
+- Control: branch `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`, version `agtvrsn_7201m62kcfnwf28tzhjppg5seej9`, Flash v2.
+- Test: branch `agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv`, version `agtvrsn_0301m62kcj00fn98azqm64hmer07`, v4 Turbo.
+- Canonical prompt hash: `30b58348880ee991fc801601022c94a83f2c9751c90f94de0b20139afed7dcd9`.
+- Shared normalized configuration hash: `916f2084eee9e63a91cf0e3940811d8fc0c09fe3ec7f8008a8925631d46de7ff`.
+- Workflow hash: `31e9628299acf53fda9153f686a003bb1a25cf1a7c00a4bd9e89bcf9d2af0a35`.
+
+Require the exact r9 branch/version pair, a matching final receipt, a genuine non-test positive duration, and a provider start at or after the r9 boundary. The 15 verified true-live conversations per arm minimum and preferred 100-genuine-call review restart at r9; all earlier cohorts remain historical.
 
 ## Approved Revision 8
 
