@@ -1921,7 +1921,8 @@ test("voicemail wording cannot bypass takeover, opt-out, reply or conversation a
     ["opt-out R", h => { h.row[10] = "R"; }],
     ["opt-out O", h => { h.row[10] = "O"; }],
     ["real conversation", h => { h.row[32] = '[{"role":"user","text":"Call me"}]'; }],
-    ["queued STOP", h => inboundReply(h)],
+    ["queued reply", h => inboundReply(h)],
+    ["queued STOP", h => { inboundReply(h); h.inbound.data.at(-1)[6] = "STOP"; }],
     ["actual manual note", h => { h.row[9] = "Voicemail reached - message not confirmed; spoke with agent"; }],
     ["different voicemail note", h => { h.row[9] = "Voicemail reached - callback requested"; }],
   ];
