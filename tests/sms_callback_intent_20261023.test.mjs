@@ -22,3 +22,21 @@ test('scheduled callback requires explicit call or conversation intent', () => {
   assert.equal(h.evaluate('isSchedulingSignal_("Feel free to reach out to me Monday")'), false);
   assert.equal(h.evaluate('isSchedulingSignal_("Can you touch base in three weeks time?")'), false);
 });
+
+test('agent promise to give us a call does not bind an appointment time as owner callback', () => {
+  const h = smsHarness();
+  const inbound = "Hey, I have an appointment at 10:30 and then I'll give you a call after.";
+  assert.equal(h.evaluate(`isSelfInitiatedDeferredContactSignal_(${JSON.stringify(inbound)})`), true);
+  assert.equal(h.evaluate(`isSchedulingSignal_(${JSON.stringify(inbound)})`), false);
+  const result = h.incoming(inbound);
+  assert.notEqual(result.callback_requested, 'yes');
+  assert.equal(result.callback_time ?? '', '');
+  assert.equal(result.handoff_needed, false);
+});
+
+test('paid-for-by STOP equals END campaign footer is suppressed without blocking real estate context', () => {
+  const h = smsHarness();
+  const campaign = 'Vote for a stronger Georgia. Paid for by Powering Georgias Future IC STOP=END';
+  assert.equal(h.evaluate(`isAutomatedPromotionalSmsSignal_(${JSON.stringify(campaign)})`), true);
+  assert.equal(h.evaluate('isAutomatedPromotionalSmsSignal_("The buyer pays at closing for this short-sale listing. Paid for by buyer. STOP=END")'), false);
+});

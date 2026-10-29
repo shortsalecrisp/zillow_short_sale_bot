@@ -1969,6 +1969,12 @@ def test_sms_automated_civic_and_unsubscribe_confirmations_are_suppressed(monkey
     assert module._sms_is_automated_promotional_sms(
         "Ruth, Election Day is Nov 3. Confirm your voting record at https://didthey.vote -Did They Vote Stop to end"
     ) is True
+    assert module._sms_is_automated_promotional_sms(
+        "Vote for a stronger Georgia this November. Paid for by Powering Georgias Future IC STOP=END"
+    ) is True
+    assert module._sms_is_automated_promotional_sms(
+        "The buyer pays the approved fee at closing for this short-sale listing. Paid for by buyer. STOP=END"
+    ) is False
     commercial = "Hi Yoni, this is Alex with Acme Tree Service. We offer free estimates for trimming and removal. Call us today."
     assert module._sms_is_automated_promotional_sms(commercial) is True
     assert module._sms_is_automated_promotional_sms("Hi, this is Alex with Acme Tree Service.") is False
@@ -1989,6 +1995,20 @@ def test_sms_automated_civic_and_unsubscribe_confirmations_are_suppressed(monkey
     assert followup.json()["should_reply"] is False
     assert followup.json()["handoff_needed"] is False
     assert sender.calls == []
+
+
+def test_sms_agent_promised_call_after_appointment_is_not_owner_callback(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    inbound = "Hey, I have an appointment at 10:30 and then I'll give you a call after."
+    assert module._sms_is_self_initiated_deferred_contact(inbound) is True
+    assert module._sms_is_scheduled_callback(inbound) is False
+    decision = module._sms_fast_decision({}, inbound)
+    assert decision.get("callback_requested", "") != "yes"
+    assert decision.get("callback_time", "") == ""
+    assert decision.get("handoff_needed", False) is False
 
 
 def test_sms_courtesy_information_acknowledgment_is_not_a_contact_request(monkeypatch):

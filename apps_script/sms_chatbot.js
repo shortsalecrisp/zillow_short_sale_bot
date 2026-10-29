@@ -3865,6 +3865,8 @@ function isAutomatedPromotionalSmsSignal_(text) {
   const hasCampaignAppeal = /\b(?:donat(?:e|ion|ions)|fundrais(?:e|ing|er)|rapid response fund|campaign|poll|vote|voting|voter registration|register(?:ed)? to vote|volunteer|chipped in|election|ballot)\b/.test(t);
   const hasBulkFooter = /\b(?:stop\s*2\s*end|(?:reply\s+)?stop\s+to\s+(?:end|unsubscribe|cancel|opt\s*out))\b/.test(t);
   const hasTextStopToQuitFooter = /\btext\s+stop\s+to\s+quit\b/.test(t);
+  const hasSponsoredCampaignFooter = /\bpaid\s+for\s+by\b/.test(t) &&
+    /\bstop\s*=\s*(?:end|quit)\b/.test(t);
   const hasKnownCivicAutomation = /\b(?:fair fight|peachvote(?:\.com)?|didthey\.vote|mvp\.sos\.ga\.gov|voter registration portal)\b/.test(t);
   const hasSmallDonationAsk = /(?:\$\s*(?:1|5|10|15|20|25|50)\b|\b(?:chip in|anything you can spare|small donation|just one dollar)\b)/.test(t);
   const hasSurveyIdentity = /\b(?:web\s+)?surveys?\b/.test(t) &&
@@ -3876,7 +3878,8 @@ function isAutomatedPromotionalSmsSignal_(text) {
   const hasCommercialService = commercialService.test(t);
   const hasCommercialIdentity = /\b(?:this\s+is\s+[a-z][a-z.'-]*(?:\s+in\s+[a-z][a-z.'-]*)?|our\s+(?:crew|team|technicians?)|we(?:'|’)re\s+(?:working|servicing)|we\s+are\s+(?:working|servicing)|from\s+[a-z][a-z0-9&.' -]*|with\s+[a-z][a-z0-9&.' -]*)\b/.test(t);
   const hasCommercialPitch = /\b(?:free\s+(?:quotes?|estimates?)|estimates?|quotes?|schedule|book|call\s+us|text\s+us|special|offer|service(?:s)?\s+(?:available|for))\b/.test(t);
-  return (hasCampaignAppeal && hasTextStopToQuitFooter) ||
+  return hasSponsoredCampaignFooter ||
+    (hasCampaignAppeal && hasTextStopToQuitFooter) ||
     (hasCampaignAppeal && hasLink && (hasBulkFooter || hasSmallDonationAsk)) ||
     (hasKnownCivicAutomation && (hasLink || hasBulkFooter || hasCampaignAppeal)) ||
     (hasSurveyIdentity && hasPollInvitation && hasNumberedChoices) ||
@@ -5532,7 +5535,7 @@ function isSelfInitiatedDeferredContactSignal_(text) {
     !/\b(?:if|unless)\b.{0,50}\b(?:need|want|could use|would like)\b.{0,30}\b(?:help|assistance|services?)\b/.test(t) &&
     !isPresentServiceInterestSignal_(t) &&
     !isDirectHelpRequestSignal_(t);
-  const selfInitiatedCall = /\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:call|phone|ring)\s+you\b/.test(t) &&
+  const selfInitiatedCall = /\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:(?:call|phone|ring)\s+you|give\s+you\s+a\s+call)\b/.test(t) &&
     !/\b(?:now|right\s+now|immediately|in\s+(?:a|one)\s+(?:minute|second))\b/.test(t) &&
     !/\b(?:can\s+use|could\s+use|need|would\s+like)\b.{0,30}\bhelp\b/.test(t) &&
     !isPresentServiceInterestSignal_(t) &&
@@ -5601,7 +5604,8 @@ function isExplicitDayOrDateCallbackSignal_(text) {
 function isSchedulingSignal_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase());
 
-  if (isConditionalCallSignal_(t) || /\b(?:do not|don['\u2019]?t|dont)\s+call\b/.test(t)) return false;
+  if (isConditionalCallSignal_(t) || isSelfInitiatedDeferredContactSignal_(t) ||
+      /\b(?:do not|don['\u2019]?t|dont)\s+call\b/.test(t)) return false;
   const compactClock = t.match(/\b\d{3,4}\s*(?:am|pm)\b/i);
   if (compactClock && !normalizeCallbackClockText_(compactClock[0])) return false;
   const callContext = /\b(?:call|phone|ring|talk|speak|chat)\b/.test(t);

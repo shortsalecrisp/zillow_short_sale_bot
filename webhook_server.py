@@ -5948,6 +5948,9 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
         r"\b(?:stop\s*2\s*end|(?:reply\s+)?stop\s+to\s+(?:end|unsubscribe|cancel|opt\s*out))\b", t
     )
     has_text_stop_to_quit_footer = re.search(r"\btext\s+stop\s+to\s+quit\b", t)
+    has_sponsored_campaign_footer = re.search(r"\bpaid\s+for\s+by\b", t) and re.search(
+        r"\bstop\s*=\s*(?:end|quit)\b", t
+    )
     has_known_civic_automation = re.search(
         r"\b(?:fair fight|peachvote(?:\.com)?|didthey\.vote|mvp\.sos\.ga\.gov|voter registration portal)\b",
         t,
@@ -5980,7 +5983,8 @@ def _sms_is_automated_promotional_sms(text: str) -> bool:
         t,
     )
     return bool(
-        (has_campaign_appeal and has_text_stop_to_quit_footer)
+        has_sponsored_campaign_footer
+        or (has_campaign_appeal and has_text_stop_to_quit_footer)
         or (has_campaign_appeal and has_link and (has_bulk_footer or has_small_donation_ask))
         or (has_known_civic_automation and (has_link or has_bulk_footer or has_campaign_appeal))
         or (has_survey_identity and has_poll_invitation and has_numbered_choices)
@@ -6542,7 +6546,10 @@ def _sms_is_self_initiated_deferred_contact(value: Any) -> bool:
         and not _sms_is_present_service_interest(text)
     )
     self_initiated_call = bool(
-        re.search(r"\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:call|phone|ring)\s+you\b", text)
+        re.search(
+            r"\b(?:i|we)(?:['’]?ll|\s+will)\s+(?:(?:call|phone|ring)\s+you|give\s+you\s+a\s+call)\b",
+            text,
+        )
         and not re.search(r"\b(?:now|right\s+now|immediately|in\s+(?:a|one)\s+(?:minute|second))\b", text)
         and not re.search(r"\b(?:can\s+use|could\s+use|need|would\s+like)\b.{0,30}\bhelp\b", text)
         and not _sms_is_present_service_interest(text)
