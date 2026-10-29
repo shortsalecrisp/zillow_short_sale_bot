@@ -45,6 +45,7 @@ function harness() {
     },
   };
   vm.createContext(context);
+  vm.runInContext(extract("ownerSmsSourceMuteReasonV28_", "formatInitialSmsDateV27_"), context);
   vm.runInContext(extract("getCrmFollowupSmsStatusV18_", "enqueueFollowupSmsV13_"), context);
   vm.runInContext(extract("enqueueFollowupSmsV13_", "resolveInitialSmsReceiptRowV14_"), context);
   vm.runInContext(extract("getPendingSmsStaleReason_", "findSmsCrmRowByPhone_"), context);

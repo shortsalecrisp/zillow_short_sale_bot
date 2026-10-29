@@ -1701,7 +1701,7 @@ function checkVideoFollowupEligibilityV19_(body, options) {
     var olderFollowup = isFinite(previousFollowupMs) && previousFollowupMs < resolved.initial_ms;
     if ((String(row[8] || "").trim() || String(row[23] || "").trim()) && !olderFollowup) reason = "Scheduled follow-up already recorded or a reply exists";
     var note = normalizeWhitespace_(String(row[9] || "")).toLowerCase();
-    var noResponseNotes = ["left vm", "left voicemail", "no answer on first call", "no response after second call", "call start failed before connecting", "call received but agent hung up on maya", "elevenlabs quota exceeded - call not counted"];
+    var noResponseNotes = ["left vm", "left voicemail", "voicemail reached - message not confirmed", "no answer on first call", "no response after second call", "call start failed before connecting", "call received but agent hung up on maya", "elevenlabs quota exceeded - call not counted"];
     if (note && noResponseNotes.indexOf(note) === -1 && note.indexOf("no answer on ") !== 0) reason = "A manual conversation note exists";
     var contact = String(row[24] || "").toLowerCase() + " " + String(row[25] || "").toLowerCase();
     if (!/(phone conflict resolved|phone_conflict_resolved|sol_exception_resolved)/.test(contact) &&
