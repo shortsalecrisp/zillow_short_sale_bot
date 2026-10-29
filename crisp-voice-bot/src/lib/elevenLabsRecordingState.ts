@@ -40,6 +40,7 @@ function isCannedFragment(message: string): boolean {
     text === "thank you" ||
     text === "thanks" ||
     text === "goodbye" ||
+    text === "good day" ||
     text === "not available" ||
     text === "please hold"
   );
@@ -56,7 +57,7 @@ export function isRepeatedPhoneMenuFragment(message: string, earlierMessages: st
   if (!text.startsWith("thank you for calling")) return false;
   const menus = earlierMessages.filter(value => /\b(?:press|dial)\s+(?:one|two|three|four|five|six|seven|eight|nine|zero|[0-9])\b/i.test(value));
   return menus.length > 0 && (menus.some(value => words(value).startsWith(text)) ||
-    /^thank you for calling(?: good(?:bye)?)?$/.test(text));
+    /^thank you for calling(?: good(?:bye| day)?)?$/.test(text));
 }
 
 export function isRecordingOrScreeningArtifact(

@@ -868,12 +868,20 @@ export function shouldTreatAsAlreadyHasShortSaleHelp(conversation: ElevenLabsCon
     /\b(?:negotiator|attorney|lawyer|specialist)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text) ||
     /\b(?:already\s+)?(?:have|has|got)\s+(?:someone|somebody)\s+handling\b/.test(text) ||
     /\b(?:someone|somebody)\s+(?:is\s+)?(?:already\s+)?handling\b/.test(text) ||
-    /\b(?:i|we)\s+(?:already\s+)?have\s+(?:that|the)\s+(?:short sale\s+)?service\s+(?:taken care of|covered|handled)\b/.test(text)
+    /\b(?:i|we)\s+(?:already\s+)?have\s+(?:that|the)\s+(?:short sale\s+)?service\s+(?:taken care of|covered|handled)\b/.test(text) ||
+    /\b(?:i|we)\s+(?:already\s+)?(?:have|got)\s+(?:a|my|our|the)\s+(?:short sale\s+)?team\b/.test(text)
   );
 }
 
 export function shouldTreatAsRecordingArtifact(conversation: ElevenLabsConversation): boolean {
   if (shouldTreatAsVoicemail(conversation) || hasDeliveredVoicemailMessage(conversation)) {
+    return false;
+  }
+
+  // A final live pickup outranks an earlier automated screening prompt. Without
+  // this guard, the whole call remains a recording artifact even after the
+  // target or a human gatekeeper joins and the assistant answers them.
+  if (hasLiveHumanAfterAutomatedScreening(conversation)) {
     return false;
   }
 
@@ -1768,8 +1776,27 @@ export function hasLiveHumanGatekeeperEvidence(
     );
   });
 
+  const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  const differentNamedPickup = Boolean(expected) && transcript.some((item, index) => {
+    if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) {
+      return false;
+    }
+    const message = normalizeText(item.message);
+    const introduction = message.match(/^(?:i am|i'm|this is)[,. ]+([a-z][a-z'-]*)(?: speaking)?[.!?]*$/) ??
+      message.match(/^([a-z][a-z'-]*) speaking[.!?]*$/);
+    const actual = normalizeText(introduction?.[1] ?? "").replace(/[^a-z0-9'-]/g, "");
+    const reviewedDifferentResponder = actual === "donna" && expected === "johnna";
+    if (!actual || (nameSoundsSimilar(actual, expected) && !reviewedDifferentResponder)) {
+      return false;
+    }
+    return transcript.slice(index + 1).some((next) =>
+      (next.role === "assistant" || next.role === "agent") &&
+      typeof next.message === "string" && hasMeaningfulSpokenContent(next.message),
+    );
+  });
+
   if (contextualUserTurns.length === 0) {
-    return false;
+    return differentNamedPickup;
   }
 
   const contextualText = normalizeText(contextualUserTurns.map((item) => item.message ?? "").join(" "));
@@ -1788,7 +1815,6 @@ export function hasLiveHumanGatekeeperEvidence(
     /\b(?:real estate|realty|properties|brokerage|office|group|team)\b.{0,35}\bthis is\b/i.test(message) ||
     /\bthis is\b.{0,35}\b(?:real estate|realty|properties|brokerage|office|group|team)\b/i.test(message),
   );
-  const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
   const liveBusinessGreeting = meaningfulUserMessages(conversation).some((message) => {
     const text = normalizeText(message);
     const organizationPrefix = text.match(/^(.{3,80}),\s*how (?:can|may) i help (?:you|ya)\b/)?.[1] ?? "";
@@ -1829,7 +1855,7 @@ export function hasLiveHumanGatekeeperEvidence(
 
   return liveBusinessGreeting || liveOfficeInteraction || (summaryNamesLiveRole && contextualUserTurns.length > 0) ||
     (officeSelfIdentification && contextualUserTurns.length >= 2) ||
-    (differentTeamResponder && !responderAuthorityConfirmed) || differentNamedAgentResponder;
+    (differentTeamResponder && !responderAuthorityConfirmed) || differentNamedAgentResponder || differentNamedPickup;
 }
 
 export function shouldTreatAsTargetReachedSelfHandlingDisconnect(
@@ -1912,6 +1938,7 @@ export function hasLiveHumanAfterAutomatedScreening(conversation: ElevenLabsConv
       }
       const automatedContinuation = /\b(?:person (?:you called|you are calling|you're calling) (?:is|was) (?:not )?available|leave an additional message|can you tell me more about the details|checking with the person you called)\b/.test(text) ||
         /\b(?:the )?call could not be connected\b/.test(text) ||
+        /^(?:(?:as soon as possible|thank you|thanks|goodbye|good day|not available|please hold|one moment)[.!? ]*)+$/.test(text) ||
         /^(?:thank you|thanks|please hold|one moment|not available)[.!? ]*$/.test(text) ||
         /-\s*$/.test(item.message.trim());
       if (!automatedContinuation) {

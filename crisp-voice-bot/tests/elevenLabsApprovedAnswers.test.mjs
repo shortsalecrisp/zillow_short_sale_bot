@@ -45,7 +45,8 @@ test('the single listing-agent check is answerable while other compound answers 
 });
 
 test('existing provider coverage closes without the self-handler value pitch', () => {
-  assert.match(postIntro, /Another negotiator, attorney, specialist or provider handling the file is existing coverage, not self-handling/);
+  assert.match(postIntro, /A negotiator, attorney, specialist, provider or team is existing coverage/);
+  assert.match(postIntro, /"I already have a team" is a covered-service refusal/);
   assert.match(postIntro, /A clear no to the exact needs question is a terminal service refusal/);
   assert.match(postIntro, /Do not re-pitch, ask another question, or offer Yoni, callback or transfer/);
   assert.match(postIntro, /For that statement alone say only: "Understood\. Thanks for letting me know\."/);
