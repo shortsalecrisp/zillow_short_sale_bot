@@ -29,6 +29,37 @@ var VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = false;
 var INITIAL_SMS_LOCAL_START_HOUR_V27_ = 8;
 var INITIAL_SMS_LOCAL_END_HOUR_V27_ = 20;
 
+// Owner-approved temporary source mute, October 25. No group ID is available;
+// these two sources (including direct messages) stay muted until owner removal.
+function ownerSmsSourceMuteReasonV28_(phone) {
+  var raw = String(phone == null ? "" : phone).trim();
+  if (!/^[+\d\s().-]+$/.test(raw)) return "";
+  var digits = raw.replace(/\D/g, "");
+  if (digits.length === 11 && digits.charAt(0) === "1") digits = digits.slice(1);
+  return ["4045393880", "7706303482"].indexOf(digits) !== -1
+    ? "Owner-requested temporary source mute (2026-10-25)" : "";
+}
+
+function ownerMutedSmsResponseV28_(phone) {
+  var reason = ownerSmsSourceMuteReasonV28_(phone);
+  return reason ? {
+    ok: true, queued: false, suppressed: true, should_reply: false,
+    should_reply_text: "false", reply_text: "", block_reply: true,
+    handoff_needed: false, handoff_needed_text: "false", needs_review: false,
+    reason: reason
+  } : null;
+}
+
+function ownerMutedHandoffPayloadV28_(payload) {
+  var message = payload || {};
+  if (message.source_phone) return !!ownerSmsSourceMuteReasonV28_(message.source_phone);
+  // Historical alert payloads lack source_phone. Match only their structured
+  // Phone header, never an arbitrary number mentioned in conversation text.
+  var header = String(message.body || "").split(/\r?\nLast message received:/)[0];
+  var match = /^Phone:[ \t]*([+\d(). -]+)[ \t]*$/m.exec(header);
+  return !!(match && ownerSmsSourceMuteReasonV28_(match[1]));
+}
+
 function formatInitialSmsDateV27_(date, timeZone, pattern) {
   if (typeof Utilities !== "undefined" && typeof Utilities.formatDate === "function") {
     return Utilities.formatDate(date, timeZone, pattern);
@@ -150,6 +181,7 @@ function isRecentHandoffEmailEventV16_(row, eventKey, createdAt) {
 }
 
 function queueHandoffEmailV11_(payload) {
+  if (ownerMutedHandoffPayloadV28_(payload)) return { ok: true, queued: false, suppressed: true };
   var message = payload || {};
   var to = String(message.to || "").trim();
   var subject = String(message.subject || "").trim();
@@ -210,6 +242,7 @@ function queueHandoffEmailV11_(payload) {
 // Keep one latest-context owner alert pending while a human-owned thread is
 // receiving related updates. Existing terminal handoff alerts remain immediate.
 function queueCoalescedHandoffEmailV18_(payload) {
+  if (ownerMutedHandoffPayloadV28_(payload)) return { ok: true, queued: false, suppressed: true };
   var message = payload || {};
   var coalesceKey = String(message.coalesce_key || "").trim();
   if (!message.to || !message.subject || !message.body || !coalesceKey) {
@@ -329,6 +362,13 @@ function drainHandoffEmailOutboxV11_() {
         continue;
       }
       var claimedEmailRow = rows[i].slice();
+      if (ownerMutedHandoffPayloadV28_(payload)) {
+        sheet.getRange(rowNumber, 2).setValue("suppressed");
+        sheet.getRange(rowNumber, 6).setValue("Owner-requested temporary source mute (2026-10-25)");
+        rowNumber = 0;
+        payload = null;
+        continue;
+      }
       claimedEmailRow[1] = "claimed";
       claimedEmailRow[4] = Number(rows[i][4] || 0) + 1;
       claimedEmailRow[7] = leaseToken;
@@ -563,6 +603,8 @@ function freezeInitialSmsIdentityV22_(metadata, phone, replyText, messageId, req
 }
 
 function enqueueInitialSmsV13_(body, webhookRequestId) {
+  var sourceMute = ownerMutedSmsResponseV28_(body && body.phone);
+  if (sourceMute) return sourceMute;
   var phone = normalizePhone_(body && body.phone || "");
   var replyText = normalizeWhitespace_(String(body && (body.reply_text || body.message) || ""));
   var crmRow = Number(body && body.crm_row || body && body.row || 0);
@@ -660,6 +702,8 @@ function getCrmFollowupSmsStatusV18_(body) {
 }
 
 function enqueueFollowupSmsV13_(body, webhookRequestId) {
+  var sourceMute = ownerMutedSmsResponseV28_(body && body.phone);
+  if (sourceMute) return sourceMute;
   var phone = normalizePhone_(body && body.phone || "");
   var replyText = normalizeWhitespace_(String(body && (body.reply_text || body.message) || ""));
   var crmRow = Number(body && body.crm_row || body && body.row || 0);
@@ -1967,6 +2011,8 @@ function applyInitialSmsReceiptV13_(body, correlation) {
 }
 
 function enqueueIncomingSmsV10_(body, webhookRequestId) {
+  var sourceMute = ownerMutedSmsResponseV28_(body && body.phone);
+  if (sourceMute) return sourceMute;
   var phone = normalizePhone_(body && body.phone || "");
   var message = normalizeWhitespace_(String(body && body.message || ""));
   if (phone.length !== 10 || !message) {
@@ -2155,6 +2201,13 @@ function processSmsInboundQueue_() {
     var claim = claimQueuedSmsInbound_();
     if (!claim) break;
     try {
+      var sourceMute = ownerMutedSmsResponseV28_(claim.phone);
+      if (sourceMute) {
+        if (!completeQueuedSmsInbound_(claim, "processed", "", "", "intentional_skip", sourceMute.reason)) break;
+        clearSmsInboundDecisionSnapshotV10_(claim.queue_id);
+        processed++;
+        continue;
+      }
       var normalized = loadSmsInboundDecisionSnapshotV10_(claim.queue_id);
       var outboxRequestId = normalized && normalized.request_id || Utilities.getUuid();
       var pendingRegistration = null;
@@ -2571,6 +2624,8 @@ function sendSmsInboundCompletenessHandoffV14_(inboundRow, reason) {
 }
 
 function registerPendingSmsSendV10_(body, normalized, requestId, inboundQueueId) {
+  var sourceMute = ownerMutedSmsResponseV28_(body && body.phone);
+  if (sourceMute) return sourceMute;
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_pending_sends") || ss.insertSheet("sms_pending_sends");
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
@@ -2654,6 +2709,11 @@ function claimPendingSmsSendV10_(body) {
       var activeLeaseUntil = new Date(rows[activeIndex][11]).getTime();
       if (activeStatus !== "claimed" || String(rows[activeIndex][18] || "") !== workerId ||
           !activeLeaseUntil || activeLeaseUntil < now) continue;
+      if (ownerSmsSourceMuteReasonV28_(rows[activeIndex][4])) {
+        sheet.getRange(activeIndex + 2, 2).setValue("superseded");
+        sheet.getRange(activeIndex + 2, 16).setValue(ownerSmsSourceMuteReasonV28_(rows[activeIndex][4]));
+        continue;
+      }
       var activeInitialWindow = initialSmsPendingWindowDecisionV27_(rows[activeIndex], new Date(now));
       if (activeInitialWindow && !activeInitialWindow.eligible) {
         rows[activeIndex] = deferInitialSmsPendingRowV27_(sheet, activeIndex + 2, rows[activeIndex], activeInitialWindow);
@@ -3142,6 +3202,8 @@ function shouldCarryOutstandingSpecificFeeReplyV15_(replyText, originalInboundTe
 }
 
 function getPendingSmsStaleReason_(outboxRow, decisionCapture) {
+  var sourceMuteReason = ownerSmsSourceMuteReasonV28_(outboxRow && outboxRow[4]);
+  if (sourceMuteReason) return sourceMuteReason;
   if (isOwnerVideoProbeRowV20_(outboxRow)) return ownerVideoProbeStaleReasonV20_(outboxRow, false);
   var phone = normalizePhone_(outboxRow[4]);
   var inboundText = normalizePendingSmsInboundText_(outboxRow[6]);
@@ -3200,7 +3262,10 @@ function getPendingSmsStaleReason_(outboxRow, decisionCapture) {
     if (isScheduledFollowup && data[i].row !== scheduledCrmRow) continue;
     var newHandoffReply = typeof isAuthorizedNewHandoffReply_ === "function" &&
       isAuthorizedNewHandoffReply_(phone, messageId, outboxRow[5], rowObj);
-    if (!approvedOfferScopeReply && !newHandoffReply && String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE") return "Human takeover is active";
+    if (!approvedOfferScopeReply && !newHandoffReply &&
+        (String(rowObj[HEADERS.human_override] || "").toUpperCase() === "TRUE" ||
+         String(rowObj[HEADERS.handoff_flag] || "").toUpperCase() === "TRUE" ||
+         String(rowObj[HEADERS.ai_state] || "").toLowerCase() === "handoff")) return "Human takeover is active";
     if (isInitialOutreach) return "";
     if (isScheduledFollowup) {
       if (isOwnerApprovedFollowup) {
@@ -3392,8 +3457,18 @@ function smsOutboxWatchdog_() {
     var sheetRow = index + 2;
     var status = String(row[1] || "");
     var created = new Date(row[0]).getTime();
+    var notBefore = new Date(row[8]).getTime();
+    var claimEligibleAt = notBefore > created ? notBefore : created;
     var leaseUntil = new Date(row[11]).getTime();
     var sendStarted = new Date(row[13]).getTime();
+    var sourceMuteReason = ownerSmsSourceMuteReasonV28_(row[4]);
+    if (sourceMuteReason) {
+      if (["queued", "claimed"].indexOf(status) !== -1 && !row[13]) {
+        sheet.getRange(sheetRow, 2).setValue("superseded");
+        sheet.getRange(sheetRow, 16).setValue(sourceMuteReason);
+      }
+      return;
+    }
     if (isOwnerVideoProbeRowV20_(row)) {
       if (["queued", "claimed"].indexOf(status) !== -1 && ownerVideoProbeStaleReasonV20_(row, false)) {
         sheet.getRange(sheetRow, 2).setValue("expired");
@@ -3418,21 +3493,66 @@ function smsOutboxWatchdog_() {
       }
       return;
     }
-    if (status === "queued" && created && now - created >= 15 * 60 * 1000 && !row[7]) {
-      // A queued row remains claimable on every Tasker poll. Give that
-      // self-healing path 45 minutes before escalating to a person.
-      if (now - created < 45 * 60 * 1000) {
+    if (status === "queued" && created && now - claimEligibleAt >= 15 * 60 * 1000 && !row[7]) {
+      // A phone outage is an operational delay, not a lead takeover.
+      if (now - claimEligibleAt < 45 * 60 * 1000) {
         if (String(row[15] || "").indexOf("Automatic claim grace") === -1) {
           sheet.getRange(sheetRow, 16).setValue("Automatic claim grace; still eligible for Tasker polling");
         }
         return;
       }
-      alertSmsOutboxProblem_(sheet, sheetRow, row, "SMS OUTBOX NOT CLAIMED");
+      var receipt = findConfirmedSmsReplyReceiptForPendingRow_(row);
+      if (receipt.confirmed) recordRecoveredSmsReplyReceipt_(sheet, sheetRow, receipt);
     }
   });
+  notifyUnclaimedSmsBacklogV31_(sheet, now);
+}
+
+function isUnclaimedSmsBacklogRowV31_(row, now) {
+  if (String(row[1] || "") !== "queued" || row[10] || row[11] || row[12] || row[13] || row[14] || row[18] ||
+      ownerSmsSourceMuteReasonV28_(row[4]) || isOwnerVideoProbeRowV20_(row)) return false;
+  var created = new Date(row[0]).getTime();
+  var notBefore = row[8] ? new Date(row[8]).getTime() : created;
+  return isFinite(created) && isFinite(notBefore) && now - Math.max(created, notBefore) >= 45 * 60 * 1000;
+}
+
+function notifyUnclaimedSmsBacklogV31_(sheet, nowOverride) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return false;
+  try {
+    // Reread under the same lock as claims. Never write a stale row snapshot
+    // or turn a transient transport delay into a human-owned conversation.
+    var now = Number(nowOverride || Date.now());
+    var rows = sheet.getLastRow() > 1
+      ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues() : [];
+    var delayed = rows.filter(function(row) { return isUnclaimedSmsBacklogRowV31_(row, now); });
+    var props = PropertiesService.getScriptProperties();
+    var key = "SMS_UNCLAIMED_BACKLOG_NOTICE_V31";
+    if (!delayed.length) {
+      props.deleteProperty(key);
+      return false;
+    }
+    if (props.getProperty(key)) return false;
+    var health = getTaskerTransportHealthV12_(now);
+    sendSystemAlertEmail_("SMS OUTBOX DELAYED - PHONE CLAIM PENDING", [
+      delayed.length + " queued SMS message(s) have waited at least 45 minutes past their scheduled claim time.",
+      "Tasker transport: " + health.reason,
+      "Last activity: " + (health.last_activity_at || "none recorded"),
+      "",
+      "This is an operational backlog notice, not a lead handoff. No human-takeover flags were set.",
+      "The original messages remain queued for normal Tasker polling. Reply, opt-out, manual-takeover, duplicate, identity and sending-window checks still run before sending.",
+      "Do not manually resend. Check the phone, Tasker and AutoRemote if the backlog does not drain."
+    ].join("\n"));
+    // One notice per continuous overdue backlog, shared across all messages.
+    props.setProperty(key, new Date(now).toISOString());
+    return true;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function buildAutomaticSmsRetryRowV15_(row, now) {
+  if (ownerSmsSourceMuteReasonV28_(row && row[4])) return null;
   var source = Array.isArray(row) ? row.slice() : [];
   if (isOwnerVideoProbeRowV20_(source)) return null;
   // A missing receipt is not proof that the first personalized SMS failed.
@@ -3650,6 +3770,9 @@ function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
     recordRecoveredSmsReplyReceipt_(sheet, sheetRow, receipt);
     return false;
   }
+  if (String(reason || "").trim().toUpperCase() === "SMS OUTBOX NOT CLAIMED") {
+    return notifyUnclaimedSmsBacklogV31_(sheet);
+  }
   var context = getSmsLeadContextByPhone_(row[4]);
   lockSmsConversationAfterTransportAlertV10_(row[4], reason);
   sendHandoffEmail_({
@@ -3669,6 +3792,7 @@ function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
 }
 
 function lockSmsConversationAfterTransportAlertV10_(phone, reason) {
+  if (String(reason || "").trim().toUpperCase() === "SMS OUTBOX NOT CLAIMED") return;
   try {
     var sheet = getSheet_();
     var data = getSheetData_(sheet);
