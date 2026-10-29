@@ -1,6 +1,43 @@
 # Uniform Conversion Comparison
 
-Current revision is r10, verified at 2026-10-29T18:32:40.654Z (2:32:40 PM New York on October 29). Earlier releases below are historical and must not be pooled with r10. Both arms are verified identical except for TTS model.
+Current revision is r11, verified at 2026-10-29T18:51:46.460Z (2:51:46 PM New York on October 29). Earlier releases below are historical and must not be pooled with r11. Both arms are verified identical except for TTS model.
+
+## Approved Revision 11: Transfer Waiting Audio
+
+Yoni approved hold music and connection-stage audio testing without calling Nestor again. The
+paired publisher's reviewed `holdAudio` profile sets `elevator1` / `always` on the three existing
+native conference tools. It replaces only the old availability-tool bindings with one verified
+shared clone, `tool_4101m64g0xqteevsgfwtpgxv4he6`. The original tool and all historical branch
+versions remain unchanged. The clone retains its authenticated request, URL, schema, assignments,
+descriptions and execution mode; only waiting sound/behavior, interruption settings and timeout
+change. It allows interruptions so caller questions, cancellation, callback/email preferences,
+opt-outs and takeover still outrank an old accepted result. Its 60-second webhook timeout covers
+the existing 35-second owner-approval wait instead of expiring at the old 20-second limit.
+
+No global business prompt, transfer destination, connection/consent conditions, terminal guard,
+callback/info tool, voice, LLM, turn model, phone binding, platform/WhatsApp/procedure setting,
+traffic split, cold window, headroom or duplicate/two-attempt rule changed.
+
+- Cohort: `maya_uniform_lead_conversion_20261029_r11`.
+- Boundary: `2026-10-29T18:51:46.460Z`, after exact two-arm and shared-tool readback.
+- Flash: branch `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`, version `agtvrsn_0901m64g1vjxfrqabsamjpzph4wk`.
+- v4: branch `agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv`, version `agtvrsn_5301m64g1z3kf1ssnxk5rwncswga`.
+- Unchanged global prompt: `30b58348880ee991fc801601022c94a83f2c9751c90f94de0b20139afed7dcd9`.
+- Shared normalized body: `aac44538ffbdd2353425a3aaaaf954f4bb8b6348bda99106ccc96489fc92e025`.
+- Workflow: `302126b2cc13ddd3f7f1252b0b3773a365f28af8b591029495ab7a1afc149363`.
+- Availability clone config: `6eb7797a911ea9dc3b2feb834932fa63f38f7121858f22476eb54a245f7fae63`.
+- Unchanged historical availability tool: `tool_8801kptzeqqwen0tmr29ykzddem0`, config `5d3e8e93f147db8c03990b92e1a19e3ecfc36f00c7262dcbfca86ac23ea808f2`.
+
+The canonical comparison verifier still performs exactly three GETs. The separately exported
+`verifyLiveTransferAudio` performs one additional GET to verify the shared webhook resource and
+its full digest without exposing authentication. Neither verifier places calls. A valid native
+sound setting and synthetic tests are not acoustic proof of audio during SIP ringing, its cutover
+on connection, or two-way speech. The configured test number forwards to the same owner handset
+as live transfers; a controlled physical test requires a separate independent caller endpoint.
+Do not call a lead, replay Nestor's request, create a same-phone loop, or report that test completed
+from configuration alone. Preserve r10 and earlier samples separately, with unchanged review gates.
+
+Evidence: `voice-hold-audio-repair-20261029/` in the originating task's artifact directory.
 
 ## Approved Revision 10: Accepted Transfer Connection
 

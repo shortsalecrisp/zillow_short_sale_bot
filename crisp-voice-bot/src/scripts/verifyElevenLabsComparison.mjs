@@ -4,14 +4,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const R8_COMPARISON = {
-  cohort: 'maya_uniform_lead_conversion_20261029_r10',
-  startedAt: '2026-10-29T18:32:40.654Z',
+  cohort: 'maya_uniform_lead_conversion_20261029_r11',
+  startedAt: '2026-10-29T18:51:46.460Z',
   agentId: 'agent_9901kpkhs1cmfgj8w9vm199nc92j',
-  sharedHash: '3fefda272c1a50aea0ed55b7aa7f4fdfd4a6ad0dd95e464eeb6d43144a2f9c40',
-  workflowHash: 'ae244801611fb131092db3a8903b7b752b7394b563feef556b876e5361eeed33',
+  sharedHash: 'aac44538ffbdd2353425a3aaaaf954f4bb8b6348bda99106ccc96489fc92e025',
+  workflowHash: '302126b2cc13ddd3f7f1252b0b3773a365f28af8b591029495ab7a1afc149363',
+  waitingAudio: { sound: 'elevator1', availabilityToolId: 'tool_4101m64g0xqteevsgfwtpgxv4he6',
+    availabilityToolHash: '6eb7797a911ea9dc3b2feb834932fa63f38f7121858f22476eb54a245f7fae63' },
   arms: [
-    { name: 'Flash', branchId: 'agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks', versionId: 'agtvrsn_7001m64ex5v3fvx8794e269sj033', ttsModel: 'eleven_flash_v2' },
-    { name: 'v4', branchId: 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv', versionId: 'agtvrsn_1201m64eyzthfc0r8kdcednrjpw4', ttsModel: 'eleven_v4_turbo' },
+    { name: 'Flash', branchId: 'agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks', versionId: 'agtvrsn_0901m64g1vjxfrqabsamjpzph4wk', ttsModel: 'eleven_flash_v2' },
+    { name: 'v4', branchId: 'agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv', versionId: 'agtvrsn_5301m64g1z3kf1ssnxk5rwncswga', ttsModel: 'eleven_v4_turbo' },
   ],
 };
 
@@ -102,6 +104,22 @@ export async function verifyLiveComparison({ apiKey, expected = R8_COMPARISON },
   const agents = [];
   for (const arm of expected.arms) agents.push(await get(`${endpoint}?branch_id=${encodeURIComponent(arm.branchId)}`));
   return { ...validateComparison(agents, await get(`${endpoint}/branches`), expected), verifiedAt: new Date().toISOString() };
+}
+
+// Separate from the canonical three-GET arm verifier: shared webhook settings are independent resources.
+export async function verifyLiveTransferAudio({ apiKey, expected = R8_COMPARISON.waitingAudio }, fetcher = fetch) {
+  assert.ok(apiKey && /^tool_[a-z0-9]+$/.test(expected?.availabilityToolId ?? ''), 'Exact availability audio tool required');
+  const r = await fetcher('https://api.elevenlabs.io/v1/convai/tools/' + expected.availabilityToolId,
+    { method: 'GET', headers: { 'xi-api-key': apiKey }, signal: AbortSignal.timeout(45000) });
+  assert.ok(r.ok, `Availability audio read failed HTTP ${r.status}`);
+  const t = await r.json(), c = t.tool_config;
+  assert.equal(t.id, expected.availabilityToolId, 'Availability audio identity mismatch');
+  assert.equal(digest(c), expected.availabilityToolHash, 'Availability audio config drifted');
+  assert.equal(c.name, 'live_transfer_requested'); assert.equal(c.tool_call_sound, expected.sound);
+  assert.equal(c.tool_call_sound_behavior, 'always'); assert.equal(c.interruption_mode, 'allow');
+  assert.equal(c.disable_interruptions, false); assert.equal(c.response_timeout_secs, 60);
+  return { ok: true, readOnly: true, toolId: t.id, configHash: digest(c), sound: c.tool_call_sound,
+    behavior: 'always', interruptible: true, responseTimeoutSeconds: 60, audioPlaybackVerified: false };
 }
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
