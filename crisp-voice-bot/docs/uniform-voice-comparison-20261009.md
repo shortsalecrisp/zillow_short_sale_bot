@@ -20,6 +20,13 @@ Require the exact r8 branch/version pair, a matching final receipt, a genuine no
 
 ## October 28 Validator Response Reconciliation (No Provider Release)
 
+October 28 failed-initiation receipt repair: exact terminal zero-duration failures with explicit null
+acceptance and no audio or transcript can persist their technical outcome, including invalid-number
+and blocked-destination results. Phone, row, attempt, provider identity, start-time and fresh owning
+state checks remain mandatory. Protected callback/opt-out/takeover state is receipt-only, not permission
+to reschedule or overwrite K. Invalid destinations require contact review and no cold retry; they do
+not create an unanswered-call N, a genuine call or a new TTS cohort. No provider setting is changed.
+
 Yoni approved reconciling the provider's identical new `conversation_config.asr.keyterm_libraries: []`
 response field on both exact r8 versions. Removing only that empty array offline reproduces the original
 r8 shared hash `698e298abf335fc7a596a54f11634796c8fd5cf037ea934aefcd1ed495ab1a48` from the observed

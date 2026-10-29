@@ -100,6 +100,7 @@ test("zero-duration technical recovery remains distinct from a genuine call and 
   const { row, receipt, payload } = fixture();
   row[10] = ""; row[13] = ""; row[16] = ""; row[19] = "";
   receipt.status = "failed"; receipt.metadata.call_duration_secs = 0;
+  Object.assign(receipt.metadata, { accepted_time_unix_secs: null });
   await assert.rejects(updateVoiceLeadRow(6370, { ...payload, callResult: "answered_not_interested", leadStatusCode: "R" },
     async () => sheet(row), async () => receipt), /does not match/);
   const technical = { ...payload, callResult: "call_failed_before_completion", leadStatusCode: undefined };
@@ -109,6 +110,60 @@ test("zero-duration technical recovery remains distinct from a genuine call and 
   const changed = fixture(); changed.row[10] = ""; changed.row[13] = ""; changed.row[16] = ""; changed.row[19] = "";
   changed.row[2] = "+12025550199";
   await assert.rejects(updateVoiceLeadRow(6370, technical, async () => sheet(changed.row), async () => receipt), /identity changed/);
+});
+
+test("exact invalid-number initiation records its failure without inventing N, a retry or a genuine call", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  for (const attempt of [1, 2]) {
+    const { row, receipt, payload } = fixture();
+    row[10] = ""; row[13] = ""; row[16] = ""; row[19] = "";
+    if (attempt === 2) { row[39] = row[32]; row[30] = "voice_call_2_due"; }
+    receipt.status = "failed"; receipt.metadata.call_duration_secs = 0;
+    Object.assign(receipt.metadata, { accepted_time_unix_secs: null });
+    receipt.conversation_initiation_client_data.dynamic_variables.callAttemptNumber = attempt;
+    const before = [...row];
+    await updateVoiceLeadRow(6370, { ...payload, callAttemptNumber: attempt, callResult: "call_failed_invalid_number",
+      leadStatusCode: undefined, responseStatus: "Invalid destination number; contact review required, no cold retry" },
+      async () => sheet(row), async () => receipt);
+    assert.equal(row[attempt === 1 ? 33 : 40], "call_failed_invalid_number");
+    assert.equal(row[10], "");
+    assert.deepEqual(row.slice(29, 32), ["", "", ""]);
+    for (const i of [2, 13, 16, 19, 32, 35, 36, 37, 38, 39]) assert.equal(row[i], before[i], String(i));
+  }
+});
+
+test("unaccepted technical receipt can fill a protected receipt gap without replacing callback, opt-out or takeover", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  for (const result of ["call_failed_invalid_number", "provider_destination_blocked", "call_failed_before_completion"]) {
+    const { row, receipt, payload } = fixture();
+    row[10] = "R"; row[9] = "Do not call"; row[37] = "yes"; row[38] = "tomorrow at two"; row[30] = "callback_due";
+    receipt.status = "failed"; receipt.metadata.call_duration_secs = 0;
+    Object.assign(receipt.metadata, { accepted_time_unix_secs: null });
+    const before = [...row];
+    await updateVoiceLeadRow(6370, { ...payload, callResult: result }, async () => sheet(row), async () => receipt);
+    assert.equal(row[33], result);
+    for (const i of [2, 9, 10, 13, 16, 19, 29, 30, 31, 32, 35, 36, 37, 38, 39, 40]) assert.equal(row[i], before[i], String(i));
+    assert.ok(String(row[41]).includes("CODEX_VOICE_TERMINAL_RECEIPT_V1"));
+  }
+});
+
+test("invalid-number receipt permission cannot accept active, audible, answered or unproven zero-duration calls", async () => {
+  const { updateVoiceLeadRow } = await import("../src/lib/updateVoiceLeadRow");
+  for (const change of [
+    { status: "initiated" }, { has_audio: true }, { has_user_audio: true }, { has_response_audio: true },
+    { transcript: [{ message: "Hello" }] }, { accepted: 123 }, { accepted: undefined }, { duration: null },
+  ]) {
+    const { row, receipt, payload } = fixture();
+    row[10] = ""; row[13] = ""; row[16] = ""; row[19] = "";
+    const failed = { ...receipt, status: "failed", metadata: { ...receipt.metadata, call_duration_secs: 0 as number | null,
+      accepted_time_unix_secs: null as number | null | undefined }, ...change };
+    if (Object.hasOwn(change, "accepted")) failed.metadata.accepted_time_unix_secs = change.accepted;
+    if (Object.hasOwn(change, "duration")) failed.metadata.call_duration_secs = change.duration ?? null;
+    const before = [...row];
+    await assert.rejects(updateVoiceLeadRow(6370, { ...payload, callResult: "call_failed_invalid_number", leadStatusCode: undefined },
+      async () => sheet(row), async () => failed), /does not match/);
+    assert.deepEqual(row, before);
+  }
 });
 
 test("protected notes without receipt proof cannot be acknowledged as a final outcome", async () => {

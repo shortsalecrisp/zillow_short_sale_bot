@@ -328,8 +328,9 @@ async function writeVoiceLeadRow(
     const receipt = await getTerminalReceipt(updates.voiceTerminalReceipt.conversationId);
     const fresh = await readVoiceLeadRow(sheets, rowNumber);
     if (voiceReconciliationStateHash(fresh) !== before) throw new Error("Terminal receipt owning state changed during verification");
-    const unplacedTechnicalFailure = !receiptOnlyPersistence && ["provider_quota_exceeded", "provider_d17_failure",
-      "provider_llm_failure", "call_failed_before_completion", "call_failed_before_completion_retryable"]
+    const unplacedTechnicalFailure = ["provider_quota_exceeded", "provider_d17_failure",
+      "provider_llm_failure", "call_failed_before_completion", "call_failed_before_completion_retryable",
+      "call_failed_invalid_number", "provider_destination_blocked"]
       .includes(updates.callResult ?? "");
     verifyVoiceTerminalReceipt(rowNumber, fresh, updates.callAttemptNumber, updates.voiceTerminalReceipt, receipt, unplacedTechnicalFailure);
     if (ivrReconciliation) verifyUnresolvedIvrFirstAttemptReceipt(receipt);

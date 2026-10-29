@@ -1770,6 +1770,29 @@ for (const scenario of [
   });
 }
 
+test("invalid destination failure requests contact review, not an unanswered N or a retry", async () => {
+  const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
+  const conversationId = "conv_measurement_invalid_destination";
+  measurementConversations.set(conversationId, {
+    conversation_id: conversationId, status: "failed", has_audio: false, transcript: [],
+    metadata: { call_duration_secs: 0, accepted_time_unix_secs: null,
+      error: { code: 404, error_type: "call_initialization_error", reason: "INVITE failed: sip status: 404: Invalid destination number D11 (SIP 404)" } },
+    conversation_initiation_client_data: { dynamic_variables: { rowNumber: 123, callAttemptNumber: 1,
+      agentName: "Synthetic Agent", listingAddress: "123 Fictional Street", phone: "+12025550123", testMode: true } },
+  });
+  const updates: Array<Record<string, unknown>> = [];
+  try {
+    assert.equal(await processPostCallOutcomeFromConversationId(conversationId, {
+      requestQueueRefill: async () => {}, postSheetUpdate: async payload => { updates.push(payload); },
+    }), true);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].callResult, "call_failed_invalid_number");
+    assert.equal(updates[0].leadStatusCode, undefined);
+    assert.match(String(updates[0].responseStatus), /contact review required, no cold retry/);
+    assert.ok(updates[0].voiceTerminalReceipt);
+  } finally { measurementConversations.delete(conversationId); }
+});
+
 for (const scenario of [
   { name: "new", declarations: { initialOpeningPolicy: "listen_first_uniform_v1", declaredConversationPolicyVersion: "captured-code-version" },
     expectedOpening: "listen_first_uniform_v1", expectedPolicy: "captured-code-version" },

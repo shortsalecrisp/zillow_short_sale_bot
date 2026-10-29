@@ -46,9 +46,13 @@ export function verifyVoiceTerminalReceipt(
       row.slice(0, 2).map(normalizeString).filter(Boolean).join(" ") !== proof.fullName ||
       buildVoiceBotListingAddress(row) !== proof.listingAddress) throw new Error("Terminal receipt owning identity changed");
   const detail = receipt as { conversation_id?: string; status?: string;
+    has_audio?: boolean; has_user_audio?: boolean; has_response_audio?: boolean;
+    transcript?: Array<{ message?: unknown }>;
     metadata?: { call_duration_secs?: number; accepted_time_unix_secs?: number | null } } | null;
   const unplacedFailure = allowUnplacedFailure && detail?.status === "failed" &&
-    detail.metadata?.call_duration_secs === 0 && !detail.metadata.accepted_time_unix_secs;
+    detail.metadata?.call_duration_secs === 0 && detail.metadata.accepted_time_unix_secs === null &&
+    ![detail.has_audio, detail.has_user_audio, detail.has_response_audio].includes(true) &&
+    !(detail.transcript ?? []).some(turn => typeof turn.message === "string" && turn.message.trim());
   if (!config.elevenLabs.agentId || detail?.conversation_id !== proof.conversationId ||
       (!(Number(detail?.metadata?.call_duration_secs) > 0) && !unplacedFailure) ||
       !isMatchingTerminalVoiceReceipt(receipt, rowNumber, {

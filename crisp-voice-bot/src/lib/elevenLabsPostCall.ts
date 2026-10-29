@@ -3156,8 +3156,7 @@ async function processPostCallOutcomeForConversationUnlocked(
           rowNumber: metadata.rowNumber,
           callAttemptNumber: metadata.callAttemptNumber,
           callResult: outcome,
-          responseStatus,
-          leadStatusCode: "N",
+          responseStatus: "Invalid destination number; contact review required, no cold retry",
           voiceNotes: buildPerformanceNotes(responseStatus, outcomeSummary),
         });
       } else {
