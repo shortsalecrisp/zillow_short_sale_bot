@@ -27,7 +27,12 @@ export function buildElevenLabsLiveTransferResponse(status: LiveTransferStatus) 
       ? "Yoni accepted the availability request. This is not proof of caller consent or a completed connection. " +
         currentCallerPriority +
         "Continue the configured transfer only if the caller explicitly chose to speak with Yoni now and that choice remains current, with no unanswered question or request to wait. " +
-        "A stale accepted result never authorizes a transfer after cancellation or a choice of callback or email instead. Do not promise a connection before it completes."
+        "A stale accepted result never authorizes a transfer after cancellation or a choice of callback or email instead. Do not promise a connection before it completes. " +
+        "This accepted result explicitly returns control to the current conversation node, including opening_listener, for the enabled transfer_to_number action. " +
+        "When those consent checks pass, call transfer_to_number exactly once for the configured Yoni destination now, using its client_message for the hold announcement. " +
+        "Do not only announce a transfer, skip_turn, wait for another caller turn or depend on moving to main_conversation. " +
+        "Do not repeat a previous connection attempt, even after a failure or returned control, or enter the phone-transfer node as a second attempt. " +
+        "A new opt-out, refusal or human takeover blocks the connection just as a changed callback preference does."
       : "The attempted connection could not be completed now; do not call transfer_to_number or retry the availability tool. " +
         currentCallerPriority +
         "If the caller has already chosen a next action, honor that choice without offering a different one. Otherwise, when no question or stop request is pending, ask once: I couldn't connect with Yoni right now. Would you like to request a callback? Then listen. " +

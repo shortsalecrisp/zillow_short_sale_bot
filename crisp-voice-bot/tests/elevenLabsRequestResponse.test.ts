@@ -55,6 +55,11 @@ test("accepted availability cannot revive stale consent after a question or canc
   assert.match(nextAction, /no unanswered question or request to wait/);
   assert.match(nextAction, /stale accepted result never authorizes a transfer after cancellation or a choice of callback or email instead/);
   assert.match(nextAction, /Do not promise a connection before it completes/);
+  assert.match(nextAction, /explicitly returns control to the current conversation node, including opening_listener/);
+  assert.match(nextAction, /call transfer_to_number exactly once/);
+  assert.match(nextAction, /Do not only announce a transfer, skip_turn/);
+  assert.match(nextAction, /Do not repeat a previous connection attempt/);
+  assert.match(nextAction, /human takeover blocks the connection/);
 });
 
 test("all expected unavailable outcomes share a neutral permission-first callback contract", () => {
@@ -194,6 +199,7 @@ axios.defaults.adapter = async (request) => {
       assert.equal(body.to, "+12025550124");
       const metadata = JSON.parse(Buffer.from(body.client_state, "base64").toString("utf8"));
       assert.equal(metadata.kind, "live_transfer_yoni");
+      assert.match(metadata.yoniPrompt, /After you accept, this approval call ends and the connecting call will ring next/);
       assert.match(metadata.originalCallControlId, /^elevenlabs-transfer-123-/);
       const call = { originalCallControlId: metadata.originalCallControlId, approvalCallControlId: `synthetic-approval-${approvalCalls.length + 1}` };
       approvalCalls.push(call);

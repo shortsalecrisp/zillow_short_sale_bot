@@ -454,6 +454,7 @@ export function buildVoicePerformanceLog(input: BuildVoicePerformanceLogInput): 
     "maya-uniform-lead-conversion-20261023-r7",
     "maya-uniform-lead-conversion-20261027-r8",
     "maya-uniform-lead-conversion-20261028-r9",
+    "maya-uniform-lead-conversion-20261029-r10",
   ]
     .includes(input.metadata.declaredConversationPolicyVersion ?? "");
   const usesListingAgentOpening = input.metadata.initialOpeningPolicy === "listen_first_listing_agent_v2";

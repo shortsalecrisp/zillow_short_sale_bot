@@ -14,10 +14,11 @@ test("includes only exact matching final versions after the uniform boundary", (
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });
-test("r9 restarts the clean comparison and excludes old r8, r7, r6, r5 and r4 receipts", () => {
-  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261028_r9");
-  assert.equal(cohort.startedAt, "2026-10-29T01:11:30.360Z");
-  for (const versionId of ["agtvrsn_1101m6015jj3e7r8xem6crdzbv08", "agtvrsn_8601m6015mjxf1f8m8gqqygf3n33",
+test("r10 transfer release excludes earlier workflow and prompt cohorts", () => {
+  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261029_r10");
+  assert.equal(cohort.startedAt, "2026-10-29T18:32:40.654Z");
+  for (const versionId of ["agtvrsn_7201m62kcfnwf28tzhjppg5seej9", "agtvrsn_0301m62kcj00fn98azqm64hmer07",
+    "agtvrsn_1101m6015jj3e7r8xem6crdzbv08", "agtvrsn_8601m6015mjxf1f8m8gqqygf3n33",
     "agtvrsn_5901m5mbp1pafv1skkvbhzh4cqfn", "agtvrsn_4301m5mbp4jgfn5ayjenb7yjjtby",
     "agtvrsn_8701m5bdwq8af46r1rpnzmb04b4g", "agtvrsn_6801m5bdwvh2fnkb9hfycj82vzj0",
     "agtvrsn_9501m554nxfaee2rps63c9zznh6k", "agtvrsn_1801m554p0e8edbshc6dkrjcf3rj",

@@ -1,6 +1,53 @@
 # Uniform Conversion Comparison
 
-Current revision is r9, verified at 2026-10-29T01:11:30.360Z (9:11:30 PM New York on October 28). Earlier releases below are historical and must not be pooled with r9. Both arms are verified identical except for TTS model.
+Current revision is r10, verified at 2026-10-29T18:32:40.654Z (2:32:40 PM New York on October 29). Earlier releases below are historical and must not be pooled with r10. Both arms are verified identical except for TTS model.
+
+## Approved Revision 10: Accepted Transfer Connection
+
+Yoni approved fixing and deploying the failed transfer workflow after Nestor row 6478's call
+`conv_4401m6473a9teb18qm7jmarvvtbs`. The owner availability call received press 1, then its
+separate approval leg ended normally. The provider never connected the agent: every turn remained
+in `opening_listener`, where `transfer_to_number` was disabled. A spoken hold announcement was
+followed by a 45-second silence termination, not a successful transfer.
+
+The reviewed `--repair-accepted-transfer` profile of `syncElevenLabsComparisonPrompts.mjs`
+adds the same single-destination conference tool and consent-preserving connection instructions
+to `opening_listener`, `main_conversation` and `patch_transfer` on both arms. It changes only
+those tool leaves and appends a bounded transfer policy; all prior node instructions, terminal
+guards, workflow edges, global business prompt, voice, LLM, turn model, tool IDs, phone bindings,
+platform/WhatsApp/procedures and traffic allocation remain unchanged. The accepted backend result
+explicitly returns control for one real phone action, not another yes or a spoken-only promise.
+Pending/declined/failed approval, revocation, unanswered questions, changed callback/email preferences,
+opt-outs and takeover remain blockers. A failed connection cannot cause another transfer or an
+automatic callback. Callback capture still requires explicit current caller consent.
+
+This preserves the existing two-leg telephony design: the availability call ends after acceptance,
+and the actual connecting call rings the owner next. The private approval announcement now explains
+that behavior. It is not a bridge into the already-ended approval leg. SIP conference transfers
+do not support the provider's native Twilio-only warm-transfer announcement.
+
+The first Flash write was not repeated after its readback added the provider's deprecated
+`phone_number` copy of the same destination in each transfer rule. Exact offline comparison showed
+only those three added copies; the builder now supplies each explicitly. A fresh reviewed plan
+recognized Flash as already matching and updated only v4. No normalization exception was added.
+The final complete two-arm readback and exact 50/50 allocation establish:
+
+- Cohort: `maya_uniform_lead_conversion_20261029_r10`.
+- Start: `2026-10-29T18:32:40.654Z`.
+- Flash branch `agtbrch_1101kpkhs3b4eg5v0q8ppq4hayks`, final version `agtvrsn_7001m64ex5v3fvx8794e269sj033`.
+- v4 branch `agtbrch_8401m3n23qvbewvtr9kfzx7nw4gv`, final version `agtvrsn_1201m64eyzthfc0r8kdcednrjpw4`.
+- Unchanged global prompt SHA-256: `30b58348880ee991fc801601022c94a83f2c9751c90f94de0b20139afed7dcd9`.
+- Shared normalized body SHA-256: `3fefda272c1a50aea0ed55b7aa7f4fdfd4a6ad0dd95e464eeb6d43144a2f9c40`.
+- Workflow SHA-256: `ae244801611fb131092db3a8903b7b752b7394b563feef556b876e5361eeed33`.
+
+All r9 and earlier calls remain separate. The original minimum 15 verified true-live conversations
+per arm and 100/200 genuine-call review gates remain. This is an approved common workflow release,
+not a TTS change or validator-only sample reset. No call, SMS, email, CRM rewrite, queue replay or
+metered test was placed during this repair, and Nestor must not be redialed to test it. Provider
+configuration and synthetic transport tests do not prove a completed real handoff; the next organic
+caller-consented provider transfer and owner completion are still the live audio/connection proof.
+
+Evidence: `voice-accepted-transfer-repair-20261029/` in the originating task's artifact directory.
 
 ## Approved Revision 9
 

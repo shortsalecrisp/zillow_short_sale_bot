@@ -27,7 +27,8 @@ export async function requestElevenLabsLiveTransferApproval(
 ): Promise<ElevenLabsLiveTransferApprovalResult> {
   const syntheticCallControlId = `elevenlabs-transfer-${input.rowNumber}-${randomUUID()}`;
   const announcementContext = await resolveLiveTransferOwnerContext(input);
-  const yoniPrompt = buildLiveTransferAnnouncement(announcementContext);
+  const yoniPrompt = buildLiveTransferAnnouncement(announcementContext) +
+    " After you accept, this approval call ends and the connecting call will ring next.";
   let approvalCallControlId: string | undefined;
 
   const replyPromise = waitForLiveTransferReply({
@@ -91,7 +92,7 @@ export async function requestElevenLabsLiveTransferApproval(
     });
 
     if (approvalCallControlId) {
-      await speakText(approvalCallControlId, "Thanks. Sending the live transfer now.").catch((error) => {
+      await speakText(approvalCallControlId, "Please answer the connecting call.").catch((error) => {
         logger.error("Unable to play ElevenLabs warm handoff acceptance confirmation", {
           approvalCallControlId,
           syntheticCallControlId,
