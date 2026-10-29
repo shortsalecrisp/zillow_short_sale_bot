@@ -1268,7 +1268,7 @@ test("new H or conversation evidence cancels a reminder at claim, active-lease r
   }
 });
 
-test("ordinary scheduled text uses the conversation guard without changing owner-approved follow-ups", () => {
+test("owner-approved follow-ups may use recorded history but cannot bypass an active manual hold", () => {
   for (const [label, changes] of existingConversationFixtures) {
     for (const phase of ["claim", "send_started"]) {
       const h = harness();
@@ -1284,7 +1284,8 @@ test("ordinary scheduled text uses the conversation guard without changing owner
     const owner = harness();
     Object.assign(owner.row, changes);
     assert.equal(enqueue(owner, { ...legacy, request_id: "render-followup-2-0123456789abcdef" }).ok, true, label);
-    assert.equal(owner.context.claimPendingSmsSendV10_({ worker_id: "owner-test" }).should_send, true, label);
+    const activeManualHold = String(changes[13] || "").toLowerCase() === "handoff";
+    assert.equal(owner.context.claimPendingSmsSendV10_({ worker_id: "owner-test" }).should_send, !activeManualHold, label);
   }
 });
 
@@ -1888,6 +1889,54 @@ test("future claim captures each existing CRM/control suppression without changi
     assert.equal(h.outbox.data.at(-1)[1], "superseded", field);
     assert.equal(journal(h).events[0].stage, "claim_blocked");
     assert.equal(journal(h).events[0].decision.blocked_checks[field], true, field);
+  }
+});
+
+test("exact voicemail-only outcome is not a manual conversation and IDs are retained", () => {
+  for (const note of ["Voicemail reached - message not confirmed", "  VOICEMAIL reached  - message not confirmed  "]) {
+    const h = futureHarness();
+    h.row[9] = note;
+    const body = futureEvidenceBody(h);
+    const result = enqueue(h, body);
+    assert.equal(result.ok, true);
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+    assert.equal(claim.should_send, true);
+    assert.equal(claim.message_id, body.message_id);
+    assert.equal(claim.request_id, body.request_id);
+    const start = h.context.markPendingSmsSendStartedV10_(claim);
+    assert.equal(start.ok, true);
+    assert.equal(start.status, "send_started");
+    assert.equal(journal(h).events[0].decision.blocked_checks.manual_note, false);
+    assert.equal(journal(h).events[1].decision.blocked_checks.manual_note, false);
+    assert.equal(h.row[9], note);
+  }
+});
+
+test("voicemail wording cannot bypass takeover, opt-out, reply or conversation at either boundary", () => {
+  const controls = [
+    ["pending takeover", h => h.setTakeover(true)],
+    ["human override", h => { h.row[28] = "TRUE"; }],
+    ["handoff", h => { h.row[31] = "TRUE"; }],
+    ["handoff state", h => { h.row[13] = "handoff"; }],
+    ["opt-out R", h => { h.row[10] = "R"; }],
+    ["opt-out O", h => { h.row[10] = "O"; }],
+    ["real conversation", h => { h.row[32] = '[{"role":"user","text":"Call me"}]'; }],
+    ["queued STOP", h => inboundReply(h)],
+    ["actual manual note", h => { h.row[9] = "Voicemail reached - message not confirmed; spoke with agent"; }],
+    ["different voicemail note", h => { h.row[9] = "Voicemail reached - callback requested"; }],
+  ];
+  for (const [label, mutate] of controls) {
+    for (const stage of ["claim", "send_start"]) {
+      const h = futureHarness();
+      h.row[9] = "Voicemail reached - message not confirmed";
+      enqueue(h, futureEvidenceBody(h));
+      let claim;
+      if (stage === "send_start") claim = h.context.claimPendingSmsSendV10_({ worker_id: "pixel" });
+      mutate(h);
+      const result = stage === "claim" ? h.context.claimPendingSmsSendV10_({ worker_id: "pixel" })
+        : h.context.markPendingSmsSendStartedV10_(claim);
+      assert.equal(result.should_send, false, `${label}/${stage}`);
+    }
   }
 });
 

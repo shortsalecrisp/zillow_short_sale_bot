@@ -122,6 +122,8 @@ class FollowupConversationGuardTests(unittest.TestCase):
             {12: "No answer on first call"},
             {12: "No conversation yet; agent has not replied"},
             {9: "left voicemail"},
+            {9: "Voicemail reached - message not confirmed"},
+            {9: "  VOICEMAIL reached  - message not confirmed  "},
         ]
         for changes in cases:
             for elapsed_hours in (2, 6):
@@ -134,6 +136,9 @@ class FollowupConversationGuardTests(unittest.TestCase):
     def test_existing_suppression_and_single_followup_guards_are_unchanged(self):
         cases = [{10: status} for status in ("R", "Y", "G", "O")]
         cases += [{8: "x"}, {9: "Do not call"}, {23: "2026-10-13T18:00:00+00:00"}]
+        cases += [{9: "Voicemail reached - message not confirmed; spoke with agent later"},
+                  {9: "Voicemail reached - callback requested"},
+                  {9: "Voicemail reached - do not contact"}]
         for changes in cases:
             with self.subTest(changes=changes):
                 h = self.run_pass(changes, 6)

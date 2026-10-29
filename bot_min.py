@@ -14133,6 +14133,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episod
             normalized_manual_note in {
                 "left vm",
                 "left voicemail",
+                "voicemail reached - message not confirmed",
                 "no answer on first call",
                 "no response after second call",
                 "call start failed before connecting",
