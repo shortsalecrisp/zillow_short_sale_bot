@@ -2647,6 +2647,7 @@ function hasSelfHandlingStatement_(text) {
 function buildCompoundCoverageDeclinePrecedenceDecision_(text) {
   const t = withoutNegatedRejection_(text).replace(/\bmy self\b/g, "myself");
   if (!t || hasDirectQuestionSignal_(t) || isEmailRequestSignal_(t) || isPresentServiceInterestSignal_(t) ||
+      isBuyerSideProcessingInterestSignal_(t) || isExplicitFutureServiceInterestSignal_(t) ||
       /\b(?:willing|open|interested)\s+to\s+(?:review|hear|learn)\b/.test(t)) return null;
   const covered = isAlreadyHandledSignal_(t) || /\balready covered\b|\b(?:i|we) have it covered\b/.test(t);
   const selfHandled = hasSelfHandlingStatement_(t);

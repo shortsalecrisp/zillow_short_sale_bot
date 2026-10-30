@@ -38,6 +38,20 @@ test('explicit fresh future-service interest after coverage generates a lead ale
   assert.match(h.effects[0].reason, /INTEREST/);
 });
 
+test('same-turn current coverage cannot outrank explicit fresh service interest', () => {
+  for (const message of [
+    'I handle the lender myself, but I am interested in your services for future short sales.',
+    'I already have help with this file, but I would like to learn about your fees for future short sales.',
+    'I already have help on the listing, but I am the buyer on another deal and need a processor.'
+  ]) {
+    const h = smsHarness();
+    const result = h.incoming(message);
+    assert.equal(result.handoff_needed, true, message);
+    assert.equal(result.should_reply, false);
+    assert.equal(h.effects.filter(x => x.type === 'handoff').length, 1);
+  }
+});
+
 test('exact and flattened liked reactions retain the pending substantive pointer and answer', () => {
   for (const reaction of [`Liked "${feeAnswer}"`, `Liked ${feeAnswer} to ${feeAnswer}`]) {
     const {h, row} = waitingAnswer();
