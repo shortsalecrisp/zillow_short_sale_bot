@@ -495,6 +495,8 @@ function releaseSmsConversationLease_(lease) {
 }
 
 function handleIncomingSmsCore_(body) {
+  const sourceMute = ownerMutedSmsResponseV28_(body && body.phone);
+  if (sourceMute) return sourceMute;
   const phoneRaw = String(body.phone || "").trim();
   const inboundText = normalizeWhitespace_(String(body.message || ""));
   const messageId = String(body.message_id || "");
@@ -607,12 +609,19 @@ function handleIncomingSmsCore_(body) {
 
     if (isSmsReactionToLastOutbound_(inboundText, rowObj) || isSelfDuplicateSmsReactionArtifact_(inboundText) ||
         isImageReactionOnly_(inboundText) || isSmsTextReactionOnly_(inboundText)) {
-      updateRowFields_(sheet, row, {
-        [HEADERS.last_inbound_text]: normalizeHandledInboundText_(inboundText),
-        [HEADERS.last_inbound_at]: receivedAt,
-        [HEADERS.last_contact_time]: receivedAt,
-        [HEADERS.last_message_id]: messageId
-      });
+      const reactionUpdates = { [HEADERS.last_contact_time]: receivedAt };
+      const previousInbound = String(rowObj[HEADERS.last_inbound_text] || "");
+      // Keep a real message as the stale-reply anchor. The reaction still
+      // has its own durable queue receipt and is retained in history below.
+      if (!rowObj[HEADERS.last_message_id] || !previousInbound ||
+          isSmsReactionToLastOutbound_(previousInbound, rowObj) ||
+          isSelfDuplicateSmsReactionArtifact_(previousInbound) ||
+          isImageReactionOnly_(previousInbound) || isSmsTextReactionOnly_(previousInbound)) {
+        reactionUpdates[HEADERS.last_inbound_text] = normalizeHandledInboundText_(inboundText);
+        reactionUpdates[HEADERS.last_inbound_at] = receivedAt;
+        reactionUpdates[HEADERS.last_message_id] = messageId;
+      }
+      updateRowFields_(sheet, row, reactionUpdates);
       appendHistory_(sheet, row, { role: "agent", text: inboundText, ts: receivedAt });
       appendSmsDebugLog_("incoming_sms_reaction_suppressed", {
         phone: phoneRaw,
@@ -3043,6 +3052,19 @@ function applyFastRules_(text, rowObj, receivedAt) {
   const compoundDecline = buildCompoundCoverageDeclinePrecedenceDecision_(t);
   if (compoundDecline) return compoundDecline;
 
+  if (isBuyerSideProcessingInterestSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Fresh buyer-side processing or arm's-length inquiry requires owner review; prior coverage is not a rejection of this new request",
+      "BUYER-SIDE SERVICE REVIEW"
+    );
+  }
+  if (isExplicitFutureServiceInterestSignal_(t)) {
+    return buildManualHandoffDecision_(
+      "Agent expressed fresh interest in future short-sale service; prior current-file coverage does not close this inquiry",
+      "FRESH SERVICE INTEREST"
+    );
+  }
+
   const terminal = buildTerminalCoverageDecisionV4_(t, rowObj);
   if (terminal) return terminal;
   if (isFirstFileCreditQuestionSignal_(t)) {
@@ -3822,6 +3844,24 @@ function isPhoneCallInterestSignal_(text) {
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isBuyerSideProcessingInterestSignal_(text) {
+  const t = normalizeLanguageSignalText_(text).replace(/[\u2018\u2019]/g, "'");
+  if (!t || isOptOutSignal_(t) || /\b(?:not interested|no thanks?|do not need|don't need|dont need)\b/.test(t)) return false;
+  const ownBuyerRole = /\b(?:i|we)\s+(?:am|are|might be|may be|could be|would be|will be)\s+(?:(?:the|a)\s+)?buyer\b/.test(t) ||
+    /\b(?:i'm|we're)\s+(?:(?:the|a)\s+)?buyer\b/.test(t) || /\bas (?:the|a) buyer\b/.test(t);
+  const processingNeed = /\barm(?:'s|s)?[ -]+length\b/.test(t) ||
+    /\b(?:need|want|looking for|interested in|can you|could you)\b.{0,65}\b(?:help|processing|processor|negotiator|negotiate|handle the lender|lender paperwork)\b/.test(t);
+  return ownBuyerRole && processingNeed;
+}
+
+function isExplicitFutureServiceInterestSignal_(text) {
+  const t = withoutNegatedRejection_(text);
+  if (!t || isOptOutSignal_(t) ||
+      /\b(?:not interested|no thanks?|do not need|don['\u2019]?t need|dont need|if (?:i|we) need|in case (?:i|we) need)\b/.test(t)) return false;
+  return isFutureNegotiationInterestSignal_(t) &&
+    /\b(?:interested|would like|would love|want to|open to|ready to|considering)\b/.test(t);
 }
 
 function isPresentServiceInterestSignal_(text) {
@@ -6929,6 +6969,8 @@ function joinUniqueNameTokens_(parts) {
 }
 
 function sendHandoffEmail_(data) {
+  const sourceMute = ownerMutedSmsResponseV28_(data && data.phone);
+  if (sourceMute) return sourceMute;
   if (data && data.phone && typeof SpreadsheetApp !== "undefined" &&
       typeof mergeVerifiedManualSendReceiptsIntoConversationContextV28_ === "function") {
     const reconciled = mergeVerifiedManualSendReceiptsIntoConversationContextV28_(data.phone);
@@ -6989,6 +7031,7 @@ ${historyText}
     to: toEmail,
     subject: subject,
     body: body,
+    source_phone: normalizePhone_(data.phone),
     event_key: eventKey
   };
   if (rawHandoffType === "HUMAN HANDOFF UPDATE") {
