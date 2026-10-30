@@ -1770,6 +1770,44 @@ for (const scenario of [
   });
 }
 
+test("first-person recorded email instructions override a misfired information handoff", async () => {
+  const { getAuthoritativeTerminalCallResult, processPostCallOutcomeFromConversationId, shouldTreatAsVoicemail } = await import("../src/lib/elevenLabsPostCall");
+  const conversationId = "conv_measurement_recorded_email_instruction";
+  const updates: Array<Record<string, unknown>> = [];
+  const conversation = {
+    conversation_id: conversationId,
+    status: "done",
+    metadata: { call_duration_secs: 24, termination_reason: "Client disconnected: 1000" },
+    analysis: { transcript_summary: "A first-person recorded voicemail asked callers to email Frank instead." },
+    conversation_initiation_client_data: { dynamic_variables: {
+      rowNumber: 123, callAttemptNumber: 1, agentName: "Frank Goehringer",
+      listingAddress: "123 Fictional Street", phone: "+12025550123", testMode: true,
+    } },
+    transcript: [
+      { role: "user", message: "Hi, you've reached Frank. I can't take your call. Please email me at frank@example.com instead. Thank you." },
+      { role: "agent", tool_calls: [{ tool_name: "information_requested", params_as_json: '{"email":"frank@example.com"}' }] },
+      { role: "agent", message: "Thanks. I've received your request for information." },
+    ],
+  };
+  measurementConversations.set(conversationId, conversation);
+  try {
+    assert.equal(shouldTreatAsVoicemail(conversation), true);
+    assert.equal(getAuthoritativeTerminalCallResult(conversation, 1), "voicemail_reached");
+    assert.equal(await processPostCallOutcomeFromConversationId(conversationId, {
+      requestQueueRefill,
+      postSheetUpdate: async payload => { updates.push(payload as Record<string, unknown>); },
+    }), true);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].callResult, "voicemail_reached");
+    assert.equal(updates[0].responseStatus, "Voicemail reached - message not confirmed");
+    assert.equal(updates[0].leadStatusCode, undefined);
+    assert.equal(updates[0].callbackRequested, "");
+    assert.equal(updates[0].liveTransferRequested, "");
+  } finally {
+    measurementConversations.delete(conversationId);
+  }
+});
+
 test("invalid destination failure requests contact review, not an unanswered N or a retry", async () => {
   const { processPostCallOutcomeFromConversationId } = await import("../src/lib/elevenLabsPostCall");
   const conversationId = "conv_measurement_invalid_destination";

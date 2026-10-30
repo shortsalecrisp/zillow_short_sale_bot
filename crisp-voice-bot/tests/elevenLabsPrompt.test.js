@@ -307,6 +307,8 @@ test("admin callbacks use shared permission rules and the return number has corr
 });
 test("recordings and hold never create human contact outcomes", () => {
   const s = section("Automated screening and hold");
+  assert.match(section("Shared turn priority"), /first-person email\/callback instructions/);
+  assert.match(s, /including first-person email\/callback instructions/);
   assert.match(s, /never authorize callback_requested, information_requested, not_interested or live_transfer_requested/);
   assert.match(s, /give this spoken response once/);
   assert.match(s, /Do not use skip_turn instead of answering that request/);

@@ -114,6 +114,7 @@ test("contact tool metadata changes only descriptions for webhook and client sch
       const actual = type === "client" ? after.parameters : after.api_schema.request_body_schema;
       if (name === "callback_requested") {
         assert.match(after.description, /not a booked appointment/);
+        assert.match(after.description, /Never use this tool for voicemail, IVR, screening, hold, or a first-person prerecorded greeting/);
         assert.match(after.description, /"Can I call you back\?" means the caller will initiate/);
         assert.match(actual.properties.callbackTime.description, /requested timing words verbatim/);
         assert.match(actual.properties.callbackTime.description, /Do not convert words to digits, add an unspoken AM or PM/);
@@ -125,6 +126,7 @@ test("contact tool metadata changes only descriptions for webhook and client sch
         assert.match(actual.properties.conversationSummary.description, /Do not leave out supplied context or uncertainty to save time/);
       } else if (name === "information_requested") {
         assert.match(after.description, /caller-confirmed or clearly supplied/);
+        assert.match(after.description, /Never use this tool for voicemail, IVR, screening, hold, or a first-person prerecorded greeting/);
         assert.match(after.description, /execute this tool before acknowledging receipt/);
         assert.match(after.description, /Confirm a stored address with the caller once/);
         assert.match(after.description, /do not repeat an address they just clearly supplied/);
