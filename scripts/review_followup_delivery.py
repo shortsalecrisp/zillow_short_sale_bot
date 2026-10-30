@@ -48,9 +48,12 @@ def main():
     with open(args.ledger.with_suffix(".lock"),"a",opener=lambda p,f:os.open(p,f,0o600)) as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         previous=json.loads(args.ledger.read_text()) if args.ledger.exists() else None
-        save(args.ledger,merge_ledger(previous,survey,args.retry_after))
+        merged=merge_ledger(previous,survey,args.retry_after)
+        save(args.ledger,merged)
     print(json.dumps({"complete":survey["complete"],"counts":survey["counts"],
                       "due_unsent_rows":[x["row"] for x in survey["items"] if x["status"]=="due_unsent"],
+                      "corrected_phone_review_rows":[x["row"] for x in survey.get("remediation_queue",[])],
+                      "carried_corrected_phone_review_rows":[x["row"] for x in merged.get("remediation_queue",[])],
                       "outreach_calls":0}))
 
 
