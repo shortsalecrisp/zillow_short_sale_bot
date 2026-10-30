@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import test from 'node:test';
 import {smsHarness} from './helpers/sms_core_harness.mjs';
 
 const campaign = ': 3 things just happened: A new poll showed us 4845 after a 6-point swing. ' +
@@ -48,13 +49,23 @@ assert.equal(first.should_reply, true);
 assert.equal(repeated.state.auto_reply_count, 1);
 const second = repeated.incoming(question);
 assert.equal(second.should_reply, false);
-assert.equal(second.handoff_type, 'REPEATED ANSWERED MESSAGE REVIEW');
+assert.equal(second.duplicate, true);
+assert.equal(second.reason, 'Durably handled inbound replay ignored');
+assert.equal(repeated.effects.length, 0);
+assert.equal(repeated.state.human_override, 'FALSE');
+assert.equal(repeated.state.auto_reply_count, 1);
+// A differently worded fee question must still reach the real follow-up guard.
+const followup = 'How much is your fee?';
+const clarified = repeated.incoming(followup);
+assert.equal(clarified.should_reply, false);
+assert.equal(clarified.handoff_needed, true);
+assert.equal(repeated.effects.at(-1).reason, 'FEE QUESTION FOLLOW-UP');
 assert.equal(repeated.effects.filter(effect => effect.type === 'handoff').length, 1);
 assert.equal(repeated.state.human_override, 'TRUE');
 assert.equal(repeated.state.auto_reply_count, 1);
-const third = repeated.incoming(question);
+const third = repeated.incoming(followup);
 assert.equal(third.should_reply, false);
-assert.equal(third.handoff_needed, false);
+assert.equal(third.duplicate, true);
 assert.equal(repeated.effects.filter(effect => effect.type === 'handoff').length, 1);
 const newQuestion = repeated.incoming('Can you email the fee details to me?');
 assert.equal(newQuestion.should_reply, false);
@@ -73,4 +84,45 @@ const humanOwned = smsHarness({
 const ownedRepeat = humanOwned.incoming(question);
 assert.equal(ownedRepeat.should_reply, false);
 assert.equal(humanOwned.effects.length, 0);
+
+test('a delayed exact replay stays silent even with a new transport ID', () => {
+  const h = smsHarness();
+  h.incoming(question, {messageId: 'original', receivedAt: '2026-10-29T14:00:00Z'});
+  const before = {...h.state};
+  const replay = h.incoming('  WHAT is your fee?  ', {
+    messageId: 'delayed-provider-alias', receivedAt: '2026-10-30T14:00:00Z',
+  });
+  assert.equal(replay.should_reply, false);
+  assert.equal(replay.duplicate, true);
+  assert.equal(replay.reason, 'Durably handled inbound replay ignored');
+  assert.deepEqual(h.state, before);
+  assert.deepEqual(h.effects, []);
+});
+
+test('returning to an answered question after a different turn still alerts once', () => {
+  const h = smsHarness({
+    last_inbound_text: 'Will do. Thanks for reaching out.',
+    history_json: JSON.stringify([
+      {role: 'agent', text: question},
+      {role: 'assistant', text: 'The buyer pays at closing.', receipt_id: 'confirmed'},
+      {role: 'agent', text: 'Will do. Thanks for reaching out.'},
+    ]),
+  });
+  const result = h.incoming(question);
+  assert.equal(result.should_reply, false);
+  assert.equal(result.handoff_type, 'REPEATED ANSWERED MESSAGE REVIEW');
+  assert.equal(h.state.human_override, 'TRUE');
+  assert.equal(h.effects.filter(e => e.type === 'handoff').length, 1);
+  assert.equal(h.incoming(question).should_reply, false);
+  assert.equal(h.effects.filter(e => e.type === 'handoff').length, 1);
+  assert.equal(h.state.auto_reply_count, 0);
+});
+
+test('an unreceipted answer alone cannot establish the answered-repeat guard', () => {
+  const h = smsHarness({history_json: JSON.stringify([
+    {role: 'agent', text: question},
+    {role: 'assistant', text: 'The buyer pays at closing.'},
+  ])});
+  assert.equal(h.evaluate(`isAnsweredRepeatedInboundQuestion_(state, ${JSON.stringify(question)})`), false);
+});
 console.log('Automated-promotion and answered-repeat SMS guards passed.');

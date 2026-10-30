@@ -101,7 +101,17 @@ test('payer clarification remains one answer and never escapes existing human ow
   assert.equal(h.incoming('Who pays you?').should_reply, true);
   const repeated = h.incoming('Who pays you?');
   assert.equal(repeated.should_reply, false);
-  assert.equal(repeated.handoff_needed, true);
+  assert.equal(repeated.duplicate, true);
+  assert.equal(repeated.reason, 'Durably handled inbound replay ignored');
+  assert.deepEqual(h.effects, []);
+  assert.equal(h.state.auto_reply_count, 2);
+  assert.equal(h.state.human_override, 'FALSE');
+  const clarification = h.incoming('Does the seller pay anything?');
+  assert.equal(clarification.should_reply, false);
+  assert.equal(clarification.handoff_needed, true);
+  assert.equal(h.effects.filter(e => e.type === 'handoff').length, 1);
+  assert.equal(h.state.auto_reply_count, 2);
+  assert.equal(h.state.human_override, 'TRUE');
   const locked = smsHarness({human_override: 'TRUE', handoff_flag: 'TRUE', ai_state: 'handoff'});
   assert.equal(locked.incoming('Does the seller pay anything?').should_reply, false);
 });
