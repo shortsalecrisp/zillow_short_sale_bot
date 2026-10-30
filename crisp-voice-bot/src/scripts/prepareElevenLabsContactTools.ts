@@ -154,7 +154,10 @@ export async function readContactToolBaseline(client: ToolClient, identity: Iden
       throw new Error("Attached expanded tool config differs from its fresh resource readback");
     }
     const after = applyContactToolDescriptions(before);
-    if (!verifyContactDescriptionOnlyChange(before, after).length) throw new Error("Contact tool already has the proposed descriptions; review instead of cloning");
+    // Keep the three contact bindings as one atomic map. A tool already on the
+    // reviewed policy may be cloned byte-for-byte so the paired-arm release
+    // still replaces one exact, complete three-tool set.
+    verifyContactDescriptionOnlyChange(before, after);
     tools[name] = { id, before, after };
   }
   const plan = {

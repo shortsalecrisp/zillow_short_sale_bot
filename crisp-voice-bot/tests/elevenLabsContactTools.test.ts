@@ -162,6 +162,19 @@ test("exactly three new clones preserve full config in memory and produce a dura
   assert.equal(state.calls.filter(call => call.method === "POST").length, 3);
 });
 
+test("an already compliant contact tool is cloned byte-for-byte inside the atomic three-tool map", async t => {
+  const state = await fixture(t);
+  state.configs.set(state.ids.not_interested, applyContactToolDescriptions(state.configs.get(state.ids.not_interested)));
+  state.agent.conversation_config.agent.prompt.tools = [...state.configs.values()].map(value => structuredClone(value));
+  const dry = await prepareContactTools(state.options, state.client);
+  const result = await prepareContactTools({ ...state.options, create: true, expectedPlanHash: dry.plan_sha256 }, state.client);
+  const map = JSON.parse(await readFile(result.map_path, "utf8"));
+  const entry = map.plan.tools.find((item: any) => item.name === "not_interested");
+  assert.deepEqual(entry.changed_description_paths, []);
+  assert.equal(entry.before_config_sha256, entry.after_config_sha256);
+  assert.deepEqual(state.configs.get(result.replacements[state.ids.not_interested]), state.configs.get(state.ids.not_interested));
+});
+
 test("ambiguous creation is journaled once and cannot be retried automatically", async t => {
   const state = await fixture(t);
   const dry = await prepareContactTools(state.options, state.client);
