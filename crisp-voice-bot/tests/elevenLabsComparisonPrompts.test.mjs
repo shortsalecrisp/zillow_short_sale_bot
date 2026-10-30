@@ -3,11 +3,11 @@ import test from 'node:test';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { syncComparisonPrompts } from '../src/scripts/syncElevenLabsComparisonPrompts.mjs';
+import { replaceContactBindings, syncComparisonPrompts } from '../src/scripts/syncElevenLabsComparisonPrompts.mjs';
 import { sha256 } from '../src/scripts/syncElevenLabsPromptOnly.mjs';
 import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE } from '../src/scripts/verifyElevenLabsComparison.mjs';
 
-async function setup(t, bothOld = false) {
+async function setup(t, bothOld = false, contact = false) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'voice-comparison-test-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const prompt = 'Approved shared deferred-contact policy. '.repeat(10).trim();
@@ -15,8 +15,11 @@ async function setup(t, bothOld = false) {
   const models = ['eleven_flash_v2', 'eleven_v4_turbo'];
   const agents = models.map((model, i) => ({ agent_id: 'agent_test', branch_id: `branch_${i}`, main_branch_id: 'branch_0', version_id: `v_${i}`,
     conversation_config: { tts: { model_id: model, voice_id: 'eryn', speed: 0.95 }, turn: { turn_model: 'turn_v3' },
-      agent: { prompt: { prompt: i === 0 && !bothOld ? prompt : old, llm: 'gpt-4.1', tool_ids: ['tool_test'] } } },
-    workflow: { guarded: true }, platform_settings: { unchanged: true }, phone_numbers: [], procedures: {} }));
+      agent: { prompt: { prompt: i === 0 && !bothOld ? prompt : old, llm: 'gpt-4.1',
+        tool_ids: contact ? ['tool_callback', 'tool_contact', 'tool_information'] : ['tool_test'] } } },
+    workflow: contact ? { nodes: { main: { additional_tool_ids: ['tool_callback', 'tool_information'] },
+      terminal: { tools: [{ tool_id: 'tool_contact' }] } } } : { guarded: true },
+    platform_settings: { unchanged: true }, phone_numbers: [], procedures: {} }));
   const promptPath = path.join(dir, 'prompt.md');
   await writeFile(promptPath, `# Approved\n## Prompt\n${prompt}`);
   const options = { apiKey: 'test', agentId: 'agent_test', branches: agents.map(a => ({ id: a.branch_id, version: a.version_id,
@@ -25,7 +28,7 @@ async function setup(t, bothOld = false) {
   const writes = [];
   let failure = false;
   const fetcher = async (url, init) => {
-    if (url.endsWith('/branches')) return { ok: true, json: async () => structuredClone({ results: allocation }) };
+    if (url.endsWith('/branches')) return { ok: true, json: async () => structuredClone({ results: allocation, meta: { total: allocation.length } }) };
     const branch = new URL(url).searchParams.get('branch_id');
     const current = agents.find(a => a.branch_id === branch);
     assert.ok(current);
@@ -33,8 +36,12 @@ async function setup(t, bothOld = false) {
       writes.push(branch);
       if (failure) throw new Error('ambiguous timeout');
       const body = JSON.parse(init.body);
-      assert.deepEqual(Object.keys(body.conversation_config.agent.prompt), ['prompt']);
+      assert.deepEqual(Object.keys(body.conversation_config.agent.prompt), contact ? ['prompt', 'tool_ids'] : ['prompt']);
       current.conversation_config.agent.prompt.prompt = body.conversation_config.agent.prompt.prompt;
+      if (contact) {
+        current.conversation_config.agent.prompt.tool_ids = body.conversation_config.agent.prompt.tool_ids;
+        current.workflow = body.workflow;
+      }
       current.version_id += '_updated';
     }
     return { ok: true, status: 200, json: async () => structuredClone(current) };
@@ -97,4 +104,30 @@ test('does not retry an ambiguous first write or report uniform completion', asy
   await syncComparisonPrompts(s.options, s.fetcher); s.failWrites();
   await assert.rejects(syncComparisonPrompts({ ...s.options, apply: true }, s.fetcher), /ambiguous timeout/);
   assert.deepEqual(s.writes, ['branch_0']);
+});
+
+test('contact-policy release remaps only reviewed bindings on both arms with fresh verification and exact readback', async t => {
+  const s = await setup(t, true, true);
+  const replacements = { tool_callback: 'tool_d', tool_contact: 'tool_e', tool_information: 'tool_f' };
+  let verified = 0;
+  const options = { ...s.options, contactToolReplacements: replacements, contactToolMapHash: 'a'.repeat(64),
+    verifyContactTools: async () => { verified++; } };
+  const preview = await syncComparisonPrompts(options, s.fetcher);
+  assert.equal(preview.release, 'recorded-voicemail-contact-guard-r12');
+  const receipt = await syncComparisonPrompts({ ...options, apply: true }, s.fetcher);
+  assert.deepEqual(s.writes, ['branch_0', 'branch_1']);
+  assert.equal(verified, 3);
+  assert.equal(receipt.status, 'live_uniform_comparison_verified');
+  for (const agent of s.agents) {
+    assert.deepEqual(agent.conversation_config.agent.prompt.tool_ids, Object.values(replacements));
+    assert.deepEqual(agent.workflow.nodes.main.additional_tool_ids, ['tool_d', 'tool_f']);
+    assert.equal(agent.workflow.nodes.terminal.tools[0].tool_id, 'tool_e');
+  }
+});
+
+test('contact binding helper rejects unsupported references and incomplete maps', () => {
+  const body = { conversation_config: { agent: { prompt: { tool_ids: ['tool_a', 'tool_b', 'tool_c'] } } },
+    workflow: { nodes: { main: { additional_tool_ids: ['tool_a'], unsafe: 'tool_b' }, terminal: { tool_id: 'tool_c' } } } };
+  assert.throws(() => replaceContactBindings(body, { tool_a: 'tool_d', tool_b: 'tool_e', tool_c: 'tool_f' }), /outside/);
+  assert.throws(() => replaceContactBindings(body, { tool_a: 'tool_d' }), /three-tool/);
 });

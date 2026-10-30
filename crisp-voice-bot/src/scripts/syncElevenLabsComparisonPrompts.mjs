@@ -6,6 +6,61 @@ import { comparisonBody, digest } from './verifyElevenLabsComparison.mjs';
 import { applyAcceptedTransferWorkflow, transferProtectedHashes } from './elevenLabsAcceptedTransferWorkflow.mjs';
 import { applyTransferHoldAudio, holdAudioProtectedHashes, AVAILABILITY_TOOL_ID, buildAvailabilityHoldAudio } from './elevenLabsTransferHoldAudio.mjs';
 export { comparisonBody, digest };
+function contactProtectedHashes(agent) {
+  const config = structuredClone(agent.conversation_config);
+  delete config.agent.prompt.prompt;
+  delete config.agent.prompt.tool_ids;
+  delete config.agent.prompt.tools;
+  return {
+    conversationConfig: digest(config), platformSettings: digest(agent.platform_settings ?? null),
+    phoneNumbers: digest(agent.phone_numbers ?? []), whatsappAccounts: digest(agent.whatsapp_accounts ?? []),
+    procedures: digest(agent.procedures ?? {}),
+  };
+}
+export function replaceContactBindings(body, replacements) {
+  const oldIds = Object.keys(replacements ?? {}), newIds = Object.values(replacements ?? {});
+  if (oldIds.length !== 3 || new Set(oldIds).size !== 3 || new Set(newIds).size !== 3
+    || [...oldIds, ...newIds].some(id => !/^tool_[a-z0-9]+$/.test(id)) || newIds.some(id => oldIds.includes(id))) {
+    throw new Error('Exact reviewed three-tool replacement map required');
+  }
+  const result = structuredClone(body);
+  const global = result.conversation_config?.agent?.prompt?.tool_ids;
+  if (!Array.isArray(global) || oldIds.some(id => global.filter(value => value === id).length !== 1)
+    || newIds.some(id => global.includes(id))) throw new Error('Reviewed contact-tool bindings drifted');
+  const supported = path => path.length === 5 && path.slice(0, 4).join('.') === 'conversation_config.agent.prompt.tool_ids'
+    || path[0] === 'workflow' && (path.at(-1) === 'tool_id'
+      || ['tool_ids', 'additional_tool_ids'].includes(String(path.at(-2))));
+  let replaced = 0;
+  const walk = (value, at = []) => {
+    if (Array.isArray(value)) return value.forEach((item, index) => {
+      const next = [...at, index];
+      if (oldIds.includes(item)) {
+        if (!supported(next)) throw new Error('Contact tool appears outside a supported binding path');
+        value[index] = replacements[item]; replaced++;
+      } else walk(item, next);
+    });
+    if (!value || typeof value !== 'object') return;
+    for (const [key, item] of Object.entries(value)) {
+      const next = [...at, key];
+      if (oldIds.includes(item)) {
+        if (!supported(next)) throw new Error('Contact tool appears outside a supported binding path');
+        value[key] = replacements[item]; replaced++;
+      } else walk(item, next);
+    }
+  };
+  walk({ conversation_config: result.conversation_config, workflow: result.workflow });
+  const remaining = [];
+  const findOld = value => {
+    if (Array.isArray(value)) return value.forEach(findOld);
+    if (value && typeof value === 'object') return Object.values(value).forEach(findOld);
+    if (oldIds.includes(value)) remaining.push(value);
+  };
+  findOld({ conversation_config: result.conversation_config, workflow: result.workflow });
+  if (replaced < 3 || remaining.length) {
+    throw new Error('Contact-tool binding replacement was incomplete');
+  }
+  return result;
+}
 export function assertComparison(control, test) {
   if (control.conversation_config.tts.model_id !== 'eleven_flash_v2'
     || test.conversation_config.tts.model_id !== 'eleven_v4_turbo'
@@ -17,11 +72,16 @@ export function assertComparison(control, test) {
   }
 }
 
-export async function syncComparisonPrompts({ apiKey, agentId, branches, promptPath, receiptDir, apply = false, repairAcceptedTransfer = false, holdAudio }, fetcher = fetch) {
+export async function syncComparisonPrompts({ apiKey, agentId, branches, promptPath, receiptDir, apply = false, repairAcceptedTransfer = false, holdAudio,
+  contactToolReplacements, contactToolMapHash, verifyContactTools }, fetcher = fetch) {
   if (!apiKey || !/^agent_[a-z0-9]+$/.test(agentId ?? '') || branches?.length !== 2
     || new Set(branches.map(b => b.id)).size !== 2 || !receiptDir) throw new Error('Two explicit reviewed branches required');
-  if (repairAcceptedTransfer && holdAudio) throw new Error('One reviewed release profile at a time');
-  const managedRelease = repairAcceptedTransfer || Boolean(holdAudio);
+  if ([repairAcceptedTransfer, Boolean(holdAudio), Boolean(contactToolReplacements)].filter(Boolean).length > 1) throw new Error('One reviewed release profile at a time');
+  const contactRelease = Boolean(contactToolReplacements);
+  if (contactRelease && (!/^[a-f0-9]{64}$/.test(contactToolMapHash ?? '') || typeof verifyContactTools !== 'function')) {
+    throw new Error('Verified contact-tool map and fresh resource verifier required');
+  }
+  const managedRelease = repairAcceptedTransfer || Boolean(holdAudio) || contactRelease;
   const endpoint = `https://api.elevenlabs.io/v1/convai/agents/${agentId}`;
   const get = async url => {
     const r = await fetcher(url, { method: 'GET', headers: { 'xi-api-key': apiKey }, signal: AbortSignal.timeout(45000) });
@@ -38,7 +98,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
     }
   };
   const prompt = extractPrompt(await readFile(promptPath, 'utf8'));
-  const protectedForRelease = holdAudio ? a => holdAudioProtectedHashes(a, holdAudio.id) : repairAcceptedTransfer ? transferProtectedHashes : protectedHashes;
+  const protectedForRelease = contactRelease ? contactProtectedHashes : holdAudio ? a => holdAudioProtectedHashes(a, holdAudio.id) : repairAcceptedTransfer ? transferProtectedHashes : protectedHashes;
   const verifyAudioTool = async () => {
     if (!holdAudio || !/^tool_[a-z0-9]+$/.test(holdAudio.id ?? '') || holdAudio.id === AVAILABILITY_TOOL_ID
       || !/^[a-f0-9]{64}$/.test(holdAudio.sourceHash ?? '') || !/^[a-f0-9]{64}$/.test(holdAudio.candidateHash ?? '')) throw new Error('Exact reviewed shared audio-tool clone required');
@@ -50,6 +110,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
     }
   };
   if (holdAudio) await verifyAudioTool();
+  if (contactRelease) await verifyContactTools();
   const before = [];
   await traffic();
   for (const branch of branches) {
@@ -61,8 +122,9 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
     before.push(agent);
   }
   const candidates = before.map(agent => {
-    const result = holdAudio ? applyTransferHoldAudio(agent, holdAudio.id) : repairAcceptedTransfer ? applyAcceptedTransferWorkflow(agent) : structuredClone(agent);
-    if (managedRelease && result.conversation_config.agent.prompt.prompt !== prompt) {
+    const result = contactRelease ? replaceContactBindings(agent, contactToolReplacements)
+      : holdAudio ? applyTransferHoldAudio(agent, holdAudio.id) : repairAcceptedTransfer ? applyAcceptedTransferWorkflow(agent) : structuredClone(agent);
+    if (managedRelease && !contactRelease && result.conversation_config.agent.prompt.prompt !== prompt) {
       throw new Error('Managed transfer repair must preserve the existing business prompt');
     }
     result.conversation_config.agent.prompt.prompt = prompt;
@@ -70,8 +132,8 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
   });
   assertComparison(...candidates);
   const plan = { agentId, branches, promptHash: sha256(prompt), protected: before.map(protectedForRelease),
-    ...(managedRelease ? { release: holdAudio ? 'transfer-hold-audio-v1' : 'accepted-transfer-v1',
-      ...(holdAudio ? { holdAudio } : {}), beforeBodies: before.map(a => digest(comparisonBody(a))) } : {}),
+    ...(managedRelease ? { release: contactRelease ? 'recorded-voicemail-contact-guard-r12' : holdAudio ? 'transfer-hold-audio-v1' : 'accepted-transfer-v1',
+      ...(holdAudio ? { holdAudio } : {}), ...(contactRelease ? { contactToolMapHash } : {}), beforeBodies: before.map(a => digest(comparisonBody(a))) } : {}),
     sharedHash: digest(comparisonBody(candidates[0])), workflowHash: digest(candidates[0].workflow) };
   await mkdir(receiptDir, { recursive: true, mode: 0o700 });
   const planPath = path.join(receiptDir, 'comparison-plan.json');
@@ -80,6 +142,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
     return { ...plan, status: 'prepared_not_applied' };
   }
   if (digest(JSON.parse(await readFile(planPath, 'utf8'))) !== digest(plan)) throw new Error('Reviewed comparison plan drifted');
+  if (contactRelease) await verifyContactTools();
   // Check both arms immediately before the first write. Ambiguous writes are never retried here.
   for (let i = 0; i < branches.length; i++) {
     const fresh = await read(branches[i]);
@@ -104,8 +167,8 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
       try {
         const r = await fetcher(`${endpoint}?branch_id=${encodeURIComponent(branches[i].id)}&enable_versioning_if_not_enabled=true`, {
           method: 'PATCH', headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workflow: candidates[i].workflow, ...(holdAudio ? {
-            conversation_config: { agent: { prompt: { tool_ids: candidates[i].conversation_config.agent.prompt.tool_ids } } } } : {}) }), signal: AbortSignal.timeout(60000) });
+          body: JSON.stringify({ workflow: candidates[i].workflow, ...((holdAudio || contactRelease) ? {
+            conversation_config: { agent: { prompt: { ...(contactRelease ? { prompt } : {}), tool_ids: candidates[i].conversation_config.agent.prompt.tool_ids } } } } : {}) }), signal: AbortSignal.timeout(60000) });
         if (!r.ok) throw new Error(`Provider transfer PATCH failed HTTP ${r.status}; read back before retrying`);
         const after = await read(branches[i]);
         if (after.agent_id !== agentId || after.branch_id !== branches[i].id || !after.version_id
