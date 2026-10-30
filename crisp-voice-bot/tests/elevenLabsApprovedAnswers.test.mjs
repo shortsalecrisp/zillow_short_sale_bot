@@ -108,6 +108,10 @@ test('answer and repair contracts retain complete questions without repeated han
   assert.match(prompt, /not automatically the service or current conversation|not necessarily the service or current conversation/);
   assert.doesNotMatch(prompt, /then pivot to Yoni|Then pivot back to Yoni|Treat that as re-engagement and offer Yoni once/);
 });
+test('AI-voice switching question receives one answer without restarting the pitch', () => {
+  assert.match(prompt, /If the caller asks whether you want to switch to AI voice: "I'm already an AI assistant with Crisp Short Sales\." Then wait\./);
+  assert.match(prompt, /Do not restart the listing check, repeat the service explanation, or offer Yoni unless the caller makes a new, clear request\./);
+});
 test('background noise never causes a location instruction', () => {
   assert.match(repair, /Never tell callers to move because of background noise/);
   assert.match(repair, /If speech is unintelligible, ask once: "Sorry, could you repeat that\?"/);
