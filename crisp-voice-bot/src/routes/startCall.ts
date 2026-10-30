@@ -11,6 +11,7 @@ import { getOutboundCallPause } from "../lib/outboundCallPause";
 import { getProviderCircuitStatus } from "../lib/providerCircuitBreaker";
 import { placeOutboundCall } from "../lib/telnyx";
 import type { CallMetadata, StartCallRequest } from "../types";
+import { voiceListingAddressBlockReason } from "../lib/voiceListingAddress";
 
 const router = Router();
 
@@ -110,6 +111,10 @@ function validateStartCallRequest(body: unknown): ValidatedStartCallRequest {
   const fullName = providedFullName ?? ([firstName, lastName].filter(Boolean).join(" ") || "Unknown");
   const phone = readString(body, "phone", true)!;
   const listingAddress = readString(body, "listingAddress", true)!;
+  const listingAddressIssue = voiceListingAddressBlockReason(listingAddress);
+  if (listingAddressIssue) {
+    throw new ValidationError(`listingAddress requires review: ${listingAddressIssue}`);
+  }
 
   if (!E164_PHONE.test(phone)) {
     throw new ValidationError("phone must be in E.164 format, for example +19542053205");

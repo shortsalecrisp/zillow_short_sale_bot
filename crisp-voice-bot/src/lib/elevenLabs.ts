@@ -11,6 +11,7 @@ import {
   type ElevenLabsVoiceVariant,
 } from "./elevenLabsVoiceVariant";
 import { logger } from "./logger";
+import { assertVoiceListingAddress } from "./voiceListingAddress";
 import type { CallMetadata, ElevenLabsOutboundCallResponse } from "../types";
 
 const elevenLabsClient = axios.create({
@@ -442,6 +443,7 @@ export function buildElevenLabsOutboundCallBody(params: {
   to: string;
   metadata: CallMetadata;
 }) {
+  assertVoiceListingAddress(params.metadata.listingAddress);
   const voiceVariant = resolveElevenLabsVoiceVariant(params.metadata);
   const streetAddress = getStreetAddress(params.metadata.listingAddress);
   const openerVariant = resolveElevenLabsOpener(params.metadata, voiceVariant.assistantName);

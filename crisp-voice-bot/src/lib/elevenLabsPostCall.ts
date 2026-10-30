@@ -1184,6 +1184,27 @@ export async function persistVoiceContactOutcome(
   }
 }
 
+function declinedServiceAfterIdentityClarification(conversation: ElevenLabsConversation): boolean {
+  const messages = conversation.transcript ?? [];
+  const liveMessages = new Set(liveContactMessages(conversation));
+  return messages.some((item, index) => {
+    if ((item.role !== "assistant" && item.role !== "agent") ||
+        !/\bwould help with\b.{0,100}\bbe useful\b/i.test(item.message ?? "")) return false;
+    // An identity answer does not consume the pending service question.
+    const next = messages.slice(index + 1).filter(turn => turn.message && hasMeaningfulSpokenContent(turn.message)).slice(0, 3);
+    const [question, identity, refusal] = next;
+    if (question?.role !== "user" || !question.message || !liveMessages.has(question.message) ||
+        (identity?.role !== "assistant" && identity?.role !== "agent") || !identity.message ||
+        refusal?.role !== "user" || !refusal.message || !liveMessages.has(refusal.message)) return false;
+    const asksIdentity = /\bwho\b.{0,40}\b(?:speaking|calling|this|you)\b|\b(?:are you|is this)\b.{0,35}\b(?:ai|bot|robot|automated|human|real person)\b/i.test(question.message);
+    const answersIdentity = identity.message.length <= 180 && !identity.message.includes("?") &&
+      /\b(?:i['’]?m|i am|this is)\b.{0,65}\b(?:maya|crisp|ai|assistant)\b/i.test(identity.message);
+    const answer = normalizeText(refusal.message).replace(/^(?:(?:uh+|oh)[, ]*)/, "");
+    return asksIdentity && answersIdentity &&
+      /^(?:no|nope)[, ]+(?:(?:i['’]?m|i am|we['’]?re|we are) (?:okay|ok|good|fine|all set)|thanks|thank you)(?:[, ]+(?:thanks|thank you))?[.! ]*$/.test(answer);
+  });
+}
+
 export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation): boolean {
   if (
     shouldTreatAsRecordingArtifact(conversation) ||
@@ -1215,7 +1236,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
       if (!next.message || !hasMeaningfulSpokenContent(next.message)) continue;
       if (next.role !== "user" || !liveMessages.has(next.message)) return false;
       const answer = normalizeText(next.message).replace(/^(?:(?:uh+|oh|n-)[, ]*)/, "");
-      return /^(?:no|nope)(?:[, ]+(?:that['’]?s (?:okay|ok)|i(?:'m| am) (?:doing|handling) (?:everything|it|this|the file)))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer);
+      return /^(?:no|nope)(?:[, ]+(?:that['’]?s (?:okay|ok)|i(?:['’]m| am) (?:(?:doing|handling) (?:everything|it|this|the file)|okay|ok|good|fine|all set)))?(?:[,.!? ]+(?:thanks|thank you))?[.!? ]*$/.test(answer);
     }
     return false;
   });
@@ -1272,6 +1293,7 @@ export function shouldTreatAsNotInterested(conversation: ElevenLabsConversation)
   return (
     shouldTreatAsAlreadyHasShortSaleHelp(conversation) ||
     directServiceRefusal ||
+    declinedServiceAfterIdentityClarification(conversation) ||
     contextualServiceDecline ||
     completedHelpDecline ||
     declinedOpeningPermission ||

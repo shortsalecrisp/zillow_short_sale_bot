@@ -32,12 +32,37 @@ The canonical comparison verifier still performs exactly three GETs. The separat
 `verifyLiveTransferAudio` performs one additional GET to verify the shared webhook resource and
 its full digest without exposing authentication. Neither verifier places calls. A valid native
 sound setting and synthetic tests are not acoustic proof of audio during SIP ringing, its cutover
-on connection, or two-way speech. The configured test number forwards to the same owner handset
-as live transfers; a controlled physical test requires a separate independent caller endpoint.
+on connection, or two-way speech. The earlier assertion that 404-300-9526 forwards to the
+owner transfer handset was unverified; the return-call source only routes the public bot number
+to that office number. Yoni supplied 404-300-9526 as the independently answerable test endpoint.
 Do not call a lead, replay Nestor's request, create a same-phone loop, or report that test completed
 from configuration alone. Preserve r10 and earlier samples separately, with unchanged review gates.
 
+On October 29, the isolated owner-only test `conv_1501m64h0fbbe858pxaabzk8x1cq`
+called 404-300-9526 and connected to the configured owner destination after explicit test consent.
+Its final receipt reports `transfer_to_number_sip_success`; Yoni separately confirmed hearing
+music and the two phones connecting. The isolated agent retained the live native conference/audio
+settings but had no CRM tools or row identity. This verifies the native connection stage only,
+not the production private approval webhook or a completed lead handoff. No cohort reset follows.
+
 Evidence: `voice-hold-audio-repair-20261029/` in the originating task's artifact directory.
+
+## Shared Backend Listing And Decline Safeguards, October 29
+
+The owner approved restoring rows 6497/6495 from their stable-ID intake records and
+reconciling row 6480's explicit refusal after an identity clarification. The backend now
+rejects internal verification prose, URLs, email addresses and multiline data in listing
+address inputs before queue selection, start-call processing and provider payload creation.
+It never extracts an apparent address from a verification note or changes consent, cadence
+or phone ownership to release a hold. Read-only in-window queue evaluation exposes the
+listing-address review reason. Real source correction is still required.
+
+A concise identity clarification does not consume the pending service question. A clear
+"No, I'm okay" refusal in that bounded context, or directly answering the help question,
+is a decline rather than a generic hangup. Different questions, affirmative agreement,
+callbacks, deferred contact and opt-outs retain their existing priority. This shared
+backend repair changes no provider prompt, TTS configuration, r11 version/hash, boundary,
+split allocation or local calling window. All real call and preference history is retained.
 
 ## Approved Revision 10: Accepted Transfer Connection
 

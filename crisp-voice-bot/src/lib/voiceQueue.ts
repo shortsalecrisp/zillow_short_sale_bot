@@ -21,6 +21,7 @@ import { getPendingVoiceOutcomeRecoveries, isMatchingTerminalVoiceReceipt, voice
 import { nextTransportRecoverySlot, transportFailureKind, VOICE_START_RESOLUTION_MARKER } from "./voiceTransportRecovery";
 import { formatVoiceAttemptIdentity, getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 import { finalUnansweredPreservationReason } from "./voiceFinalUnanswered";
+import { voiceListingAddressBlockReason } from "./voiceListingAddress";
 import { getOutboundCallPause } from "./outboundCallPause";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
 import { ensureProviderStartFailureAlert } from "./providerStartFailureAlert";
@@ -108,6 +109,7 @@ export type VoiceQueueResult = {
   eligibleCandidateCount?: number;
   overdueFallbackCandidates?: Array<{ rowNumber: number; callAttemptNumber: number; scheduledFor: string; deadline: string }>;
   timeZoneReviewRequired?: Array<{ rowNumber: number; reason: string }>;
+  listingAddressReviewRequired?: Array<{ rowNumber: number; reason: string }>;
   phoneIdentityReviewRequired?: Array<{ rowNumber: number; currentPhoneAttempts: number; unknownAttempts: number; reviewReason?: string }>;
   maxCallsPerRun?: number;
   maxActiveCalls?: number;
@@ -472,6 +474,7 @@ export function getVoiceBotCallCandidateFromRowValues(
   rowValues: unknown[],
   now: Date,
 ): VoiceQueueCandidate | undefined {
+  if (voiceListingAddressBlockReason(rowValues[VOICE_BOT_COL_LISTING_ADDRESS - 1])) return undefined;
   if (normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]) ||
       normalizeMarker(rowValues[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1]) !== "x") return undefined;
   const phoneIdentity = getVoicePhoneAttemptIdentity(rowValues);
@@ -1313,6 +1316,12 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
   const availableSlots = Math.max(0, VOICE_BOT_MAX_ACTIVE_CALLS - activeCallCount);
 
   if (options.dryRun) {
+    const listingAddressReviewRequired = rows
+      .filter(row => !normalizeString(row.values[10]) && normalizeMarker(row.values[8]) === "x")
+      .flatMap(row => {
+        const reason = voiceListingAddressBlockReason(row.values[VOICE_BOT_COL_LISTING_ADDRESS - 1]);
+        return reason ? [{ rowNumber: row.rowNumber, reason }] : [];
+      });
     const phoneIdentityReviewRequired = rows.filter(row => !normalizeString(row.values[10]) && normalizeMarker(row.values[8]) === "x")
       .map(row => ({ rowNumber: row.rowNumber,
       ...getVoicePhoneAttemptIdentity(row.values) })).filter(row => row.reviewReason || row.unknownAttempts);
@@ -1327,6 +1336,7 @@ async function processVoiceQueueUnlocked(options: { dryRun?: boolean; now?: Date
       ok: true,
       queued: false,
       dryRun: true,
+      listingAddressReviewRequired,
       phoneIdentityReviewRequired,
       timeZoneReviewRequired,
       activeCallCount,
