@@ -14,9 +14,9 @@ test("includes only exact matching final versions after the uniform boundary", (
     assert.equal(uniformComparisonArm({ ...eligible(), ...changes }), null);
   }
 });
-test("r11 hold-audio release excludes earlier workflow and prompt cohorts", () => {
-  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261029_r11");
-  assert.equal(cohort.startedAt, "2026-10-29T18:51:46.460Z");
+test("r12 recording guard release excludes earlier workflow and prompt cohorts", () => {
+  assert.equal(cohort.cohort, "maya_uniform_lead_conversion_20261029_r12");
+  assert.equal(cohort.startedAt, "2026-10-30T01:12:22.737Z");
   for (const versionId of ["agtvrsn_7001m64ex5v3fvx8794e269sj033", "agtvrsn_1201m64eyzthfc0r8kdcednrjpw4",
     "agtvrsn_7201m62kcfnwf28tzhjppg5seej9", "agtvrsn_0301m62kcj00fn98azqm64hmer07",
     "agtvrsn_1101m6015jj3e7r8xem6crdzbv08", "agtvrsn_8601m6015mjxf1f8m8gqqygf3n33",
