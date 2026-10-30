@@ -281,3 +281,28 @@ test("the two historical sent receipts regain exact identity after literal-only 
     assert.equal(h.context.resolveVideoFollowupIdentityV19_("7021111111", context, [sent]).ok, false);
   }
 });
+
+test("a corrected-phone follow-up ignores only a never-attempted superseded initial collision", () => {
+  const unique = harness().context.hasUniqueVideoFollowupInitialReceiptIdsV19_;
+  const makeRow = (status, recipient, attempts = 0) => {
+    const row = Array(19).fill("");
+    Object.assign(row, {
+      1: status, 2: "render-initial-6346-d9973be7f523b8f0",
+      3: "initial-6346-d9973be7f523b8f0", 4: recipient, 9: attempts,
+    });
+    return row;
+  };
+  const sent = makeRow("sent", "5053207384", 1);
+  const supersededOffice = makeRow("superseded", "5053260110");
+  supersededOffice[2] = "scheduler-initial-6346-d9973be7f523b8f0";
+  assert.equal(unique(sent, [supersededOffice, sent]), true);
+  assert.equal(unique(sent, [sent]), true);
+  assert.equal(unique(sent, [supersededOffice]), false);
+  assert.equal(unique(sent, [makeRow("sent", "5053260110", 1), sent]), false);
+  assert.equal(unique(sent, [makeRow("superseded", "5053260110", 1), sent]), false);
+  const startedOffice = makeRow("superseded", "5053260110");
+  startedOffice[13] = new Date();
+  assert.equal(unique(sent, [startedOffice, sent]), false);
+  assert.equal(unique(sent, [makeRow("superseded", "5053207384"), sent]), false);
+  assert.equal(unique(sent, [makeRow("queued", "5053260110"), sent]), false);
+});
