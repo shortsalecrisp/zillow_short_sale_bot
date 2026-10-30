@@ -925,15 +925,16 @@ export function shouldTreatAsPositiveNeedsAnswer(conversation: ElevenLabsConvers
     if ((item.role !== "assistant" && item.role !== "agent") || typeof item.message !== "string") continue;
     const question = normalizeText(item.message);
     if (!/\bwould help with lender paperwork or calls be useful for this listing\b/.test(question) &&
-      !/^would help with lender paperwork(?: or calls)?\b/.test(question)) continue;
+      !/^would help with lender paperwork(?: or calls)?\b/.test(question) &&
+      !/\bte ser[ií]a [uú]til (?:apoyo|ayuda) con (?:esos|los) tr[aá]mites para (?:tu|esta) propiedad\b/.test(question)) continue;
     const answer = messages.slice(index + 1).find((next) =>
       next.role === "user" && typeof next.message === "string" && hasMeaningfulSpokenContent(next.message));
     positive = Boolean(answer?.message &&
-      /^(?:yes|yeah|yep|sure|it would|yes[, ]+it would|yes[, ]+(?:thanks|thank you)|that would|absolutely|definitely)[.!? ]*$/i.test(answer.message.trim()));
+      /^(?:yes|yeah|yep|sure|it would|yes[, ]+it would|yes[, ]+(?:thanks|thank you)|that would|absolutely|definitely|s[ií]|claro|por supuesto)[.!? ]*$/i.test(answer.message.trim()));
   }
   if (!positive) return false;
   return !liveContactMessages(conversation).some((message) =>
-    /\b(?:not interested|do not need|don't need|dont need|no longer need|already (?:have|got) (?:it|that) (?:handled|covered)|no thanks)\b/i.test(message));
+    /\b(?:not interested|do not need|don't need|dont need|no longer need|already (?:have|got) (?:it|that) (?:handled|covered)|no thanks|no necesito|no quiero|no estoy interesad[oa])\b/i.test(message));
 }
 
 function liveContactMessages(conversation: ElevenLabsConversation): string[] {
@@ -953,6 +954,12 @@ function liveContactMessages(conversation: ElevenLabsConversation): string[] {
 
 export function shouldTreatAsCallEndedByRequest(conversation: ElevenLabsConversation): boolean {
   if (shouldTreatAsDoNotCall(conversation)) return false;
+  if (!shouldTreatAsRecordingArtifact(conversation) && !shouldTreatAsVoicemail(conversation)) {
+    const live = liveContactMessages(conversation);
+    // A bare first response ends this call; a sign-off after a prior request
+    // must not replace that callback, information or other protected intent.
+    if (live.length === 1 && /^\s*(?:goodbye|bye(?:[ ,]+bye)?)[.!? ]*$/i.test(live[0])) return true;
+  }
   if (liveContactMessages(conversation).some(looksLikeCallEndingRequest)) return true;
   if (shouldTreatAsRecordingArtifact(conversation) || shouldTreatAsVoicemail(conversation)) return false;
 

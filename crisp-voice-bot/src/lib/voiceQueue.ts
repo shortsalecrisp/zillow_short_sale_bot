@@ -21,6 +21,7 @@ import { getPendingVoiceOutcomeRecoveries, isMatchingTerminalVoiceReceipt, voice
 import { nextTransportRecoverySlot, transportFailureKind, VOICE_START_RESOLUTION_MARKER } from "./voiceTransportRecovery";
 import { formatVoiceAttemptIdentity, getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
 import { finalUnansweredPreservationReason } from "./voiceFinalUnanswered";
+import { currentPhoneVoiceRow } from "./voicePhoneEpisode";
 import { voiceListingAddressBlockReason } from "./voiceListingAddress";
 import { getOutboundCallPause } from "./outboundCallPause";
 import { ensureProviderCircuitAlert } from "./providerCircuitAlert";
@@ -195,6 +196,7 @@ export function getScheduledVoiceNoStartRecoveryPlan(
   rowValues: unknown[],
   now: Date,
 ): VoiceScheduledNoStartRecoveryPlan | undefined {
+  rowValues = currentPhoneVoiceRow(rowValues);
   if (normalizeString(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1]).includes(VOICE_OVERDUE_FALLBACK_MARKER) ||
       getVoiceOverdueFallbackPlan(rowNumber, rowValues, now)) return undefined;
   const leadStatus = normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]).toUpperCase();
@@ -474,6 +476,7 @@ export function getVoiceBotCallCandidateFromRowValues(
   rowValues: unknown[],
   now: Date,
 ): VoiceQueueCandidate | undefined {
+  rowValues = currentPhoneVoiceRow(rowValues);
   if (voiceListingAddressBlockReason(rowValues[VOICE_BOT_COL_LISTING_ADDRESS - 1])) return undefined;
   if (normalizeString(rowValues[VOICE_BOT_COL_LEAD_STATUS_CODE - 1]) ||
       normalizeMarker(rowValues[VOICE_BOT_COL_FOLLOWUP_TEXT_SENT - 1]) !== "x") return undefined;
@@ -604,7 +607,8 @@ export function getVoiceBotCallCandidatesFromRows(
   const limit = Math.max(1, Number(maxCandidates) || 1);
   const candidates: VoiceQueueCandidate[] = [];
 
-  for (const row of rows) {
+  for (const original of rows) {
+    const row = { ...original, values: currentPhoneVoiceRow(original.values) };
     const candidate = getVoiceBotCallCandidateFromRowValues(row.rowNumber, row.values, now);
     if (!candidate || isVoiceBotPhoneBlocked(candidate, rows, now)) {
       continue;
@@ -643,7 +647,8 @@ export function isVoiceBotPhoneBlocked(
   now: Date,
 ): boolean {
   let acceptedAttempts = 0;
-  for (const row of rows) {
+  for (const original of rows) {
+    const row = { ...original, values: currentPhoneVoiceRow(original.values) };
     if (normalizePhoneToE164(row.values[VOICE_BOT_COL_PHONE - 1]) !== candidate.phone) {
       // Correcting C must not erase the old phone's existing cadence on another listing.
       if (normalizeString(row.values[41]).includes(candidate.phone) &&
@@ -903,6 +908,10 @@ async function markVoiceBotAttemptStarted(
     { columnNumber: VOICE_BOT_COL_CALL_TIME_BUCKET, value: timeBucket },
     { columnNumber: VOICE_BOT_COL_CALL_SCHEDULED_FOR, value: candidate.dueAt.toISOString() },
   ];
+  if (candidate.callAttemptNumber === 1 && rowValues[32] && !currentPhoneVoiceRow(rowValues)[32]) {
+    // The archived result belongs to the old phone, not this newly started call.
+    writes.push({ columnNumber: VOICE_BOT_COL_CALL_1_RESULT, value: "in_progress" });
+  }
   if (
     candidate.callAttemptNumber === 2 &&
     isStaleVoiceBotStartWithoutReceipt(
@@ -939,7 +948,7 @@ async function markScheduledNoStartRecoveryDetected(
   candidate: VoiceQueueCandidate,
   now: Date,
 ): Promise<void> {
-  if (!candidate.overdueNoStartRecovery || parseVoiceScheduledNoStartMarker(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1])) {
+  if (!candidate.overdueNoStartRecovery || parseVoiceScheduledNoStartMarker(currentPhoneVoiceRow(rowValues)[VOICE_BOT_COL_VOICE_NOTES - 1])) {
     return;
   }
   const marker = formatVoiceScheduledNoStartMarker({

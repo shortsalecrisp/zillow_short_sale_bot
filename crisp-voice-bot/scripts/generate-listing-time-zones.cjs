@@ -84,6 +84,11 @@ for (const [alias, canonical] of Object.entries(aliases)) {
 // Named municipal evidence, not a Texas-wide or low-accuracy fallback.
 if (cityOutput["TX|LAREDO"] !== -2) throw new Error("Review changed Laredo postal evidence before applying the vetted city zone");
 cityOutput["TX|LAREDO"] = zones.indexOf("America/Chicago");
+// Incorporated Miami-Dade municipality absent from the postal city names.
+if (cityOutput["FL|FLORIDA CITY"] !== undefined) throw new Error("Review changed Florida City postal evidence before applying the vetted city zone");
+cityOutput["FL|FLORIDA CITY"] = zones.indexOf("America/New_York");
+if (!zips.get("33034")?.has("FL|HOMESTEAD")) throw new Error("Review changed Florida City ZIP evidence");
+zips.get("33034").add("FL|FLORIDA CITY");
 const output = {
   metadata: {
     schemaVersion: 1,

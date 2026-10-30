@@ -1,5 +1,18 @@
 # Listing Time Zone Lookup
 
+## October 30 Florida City Addition
+
+Florida City is an incorporated Miami-Dade municipality, not a Florida-wide
+timezone fallback. The county municipality list identifies Florida City:
+https://www.miamidade.gov/global/management/municipalities.page . Its official
+city address uses ZIP 33034: https://www.floridacityfl.gov/ . Miami-Dade lies east
+of the Florida Central/Eastern boundary defined in 49 CFR 71.5:
+https://www.ecfr.gov/current/title-49/subtitle-A/part-71/section-71.5 .
+The reviewed `FL|FLORIDA CITY` entry resolves America/New_York and shares the
+33034 postal association with Homestead. City/state/ZIP conflicts still hold;
+the actual listing city is not rewritten. Generator and Apps Script companion
+carry the same narrow entry, including Eastern DST transitions.
+
 This offline lookup estimates the listing's local time zone from its postal city
 and state. It is not street-level geocoding or proof of a property's exact time
 zone. No phone area code, paid API, or external prospect-data transmission is used.

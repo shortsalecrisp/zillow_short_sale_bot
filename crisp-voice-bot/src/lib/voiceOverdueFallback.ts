@@ -3,6 +3,7 @@ import { config } from "./config";
 import { logger } from "./logger";
 import { hasUnresolvedVoiceStart } from "./voiceTransportRecovery";
 import { getVoicePhoneAttemptIdentity } from "./voicePhoneIdentity";
+import { currentPhoneVoiceRow } from "./voicePhoneEpisode";
 import {
   buildVoiceBotDateInTimeZone,
   getNextVoiceBotFirstAttemptWindowStart,
@@ -74,6 +75,7 @@ export function getVoiceMissedWindowDeadline(scheduledFor: Date, timeZone: strin
 export function getVoiceOverdueFallbackPlan(
   rowNumber: number, values: unknown[], now: Date,
 ): VoiceOverdueFallbackPlan | undefined {
+  values = currentPhoneVoiceRow(values);
   if (normalizeString(values[10]) || normalizeMarker(values[8]) !== "x") return undefined;
   if (getVoicePhoneAttemptIdentity(values).reviewReason) return undefined;
   const notes = normalizeString(values[41]);

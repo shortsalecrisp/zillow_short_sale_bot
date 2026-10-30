@@ -3,8 +3,16 @@ import { config } from "../lib/config";
 import { processVoiceQueue } from "../lib/voiceQueue";
 import { getProviderCircuitStatus, resetProviderCircuit } from "../lib/providerCircuitBreaker";
 import { reconcileCorrectedVoicePhone } from "../lib/voiceCorrectedPhoneRelease";
+import { reconcileReviewedVoiceIdentity } from "../lib/voiceReviewedIdentity";
 
 const router = Router();
+
+router.post("/reconcile-reviewed-identity", async (req: Request, res: Response, next: NextFunction) => {
+  const token = config.googleAppsScript.token;
+  if (!token || requestToken(req) !== token) { res.status(401).json({ ok: false, error: "unauthorized" }); return; }
+  if (!Number.isInteger(req.body?.row) || req.body.row < 2 || req.body.row >= 9000) { res.status(400).json({ ok: false, error: "bounded_row_required" }); return; }
+  try { res.json(await reconcileReviewedVoiceIdentity(req.body)); } catch (error) { next(error); }
+});
 
 router.post("/reconcile-corrected-phone", async (req: Request, res: Response, next: NextFunction) => {
   const token = config.googleAppsScript.token;

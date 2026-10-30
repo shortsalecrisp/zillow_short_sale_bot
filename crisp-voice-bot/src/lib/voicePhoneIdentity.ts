@@ -1,6 +1,7 @@
 import { normalizePhoneToE164, normalizeString, parseVoiceBotDate } from "./voiceSheet";
 import { VOICE_START_RESOLUTION_MARKER } from "./voiceTransportRecovery";
 import { createHash } from "node:crypto";
+import { currentPhoneVoiceRow, getVoicePhoneEpisode } from "./voicePhoneEpisode";
 
 export const VOICE_ATTEMPT_IDENTITY_MARKER = "CODEX_VOICE_ATTEMPT_IDENTITY_V1";
 export const VOICE_CORRECTED_PHONE_RELEASE_MARKER = "CODEX_VOICE_CORRECTED_PHONE_RELEASE_V1";
@@ -46,6 +47,7 @@ export function getVoicePhoneAttemptIdentity(row: unknown[]): {
   const phones = new Map<number, Set<string>>();
   const historicalPhones = new Set<string>();
   const reviewed = reviewedFormerPhones(row);
+  const episode = getVoicePhoneEpisode(row);
   const genuineCurrentAttempts = new Set<number>();
   let malformed = false;
   let changedPhone = false;
@@ -65,6 +67,17 @@ export function getVoicePhoneAttemptIdentity(row: unknown[]): {
       if (!metricsBlock && !line.startsWith(`${marker} `)) continue;
       try {
         const data = JSON.parse(metricsBlock ? lines[i + 1] : line.slice(marker.length).trim());
+        const formerEpisodeReceipt = episode && marker === "CODEX_VOICE_CALL_METRICS_V1" &&
+          episode.formerConversationIds.includes(data.call?.conversationId) &&
+          normalizePhoneToE164(data.call?.requestedPhone) === episode.formerPhone &&
+          normalizePhoneToE164(data.call?.dialedPhone) === episode.formerPhone;
+        const formerEpisodeReservation = episode && marker === VOICE_ATTEMPT_IDENTITY_MARKER &&
+          normalizePhoneToE164(data.phone) === episode.formerPhone && [1, 2].includes(Number(data.callAttemptNumber)) &&
+          Math.abs(Date.parse(data.sentAt) - Date.parse(episode.prior[Number(data.callAttemptNumber) === 1 ? 0 : 2])) <= 10_000;
+        if (formerEpisodeReceipt || formerEpisodeReservation) {
+          historicalPhones.add(episode!.formerPhone);
+          continue;
+        }
         if (marker === VOICE_START_RESOLUTION_MARKER) {
           // Legacy unaccepted starts have no sent slot or reservation after recovery.
           if (data.status !== "definitive_failure" || !Number.isInteger(data.rowNumber) || data.rowNumber < 2 ||
@@ -94,9 +107,10 @@ export function getVoicePhoneAttemptIdentity(row: unknown[]): {
     }
   }
   let currentPhoneAttempts = 0, unknownAttempts = 0;
+  const current = currentPhoneVoiceRow(row);
   let reviewReason = changedPhone ? "attempt_phone_changed" : malformed ? "malformed_attempt_phone_evidence" : undefined;
   for (const attempt of [1, 2]) {
-    if (!parseVoiceBotDate(row[attempt === 1 ? 32 : 39])) continue;
+    if (!parseVoiceBotDate(current[attempt === 1 ? 32 : 39])) continue;
     const evidence = phones.get(attempt);
     if (!evidence?.size) { unknownAttempts += 1; continue; }
     if (!currentPhone || evidence.size !== 1 || !evidence.has(currentPhone)) reviewReason = "attempt_phone_changed";
