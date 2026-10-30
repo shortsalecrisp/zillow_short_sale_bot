@@ -18,6 +18,8 @@ function harness() {
   let now = Date.parse("2026-10-13T16:00:00Z");
   let writes = 0;
   let crmTouches = 0;
+  const properties = new Map();
+  const systemAlerts = [];
   let uuid = 0;
   let lockAvailable = true;
   class Clock extends Date {
@@ -45,6 +47,11 @@ function harness() {
     } }),
     getSheet_: noCrm, getSheetData_: noCrm, handleReplySent_: noCrm,
     hasPendingSmsTakeoverV11_: noCrm, sendHandoffEmail_: noCrm,
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: (key) => properties.get(key) ?? null,
+      setProperty: (key, value) => properties.set(key, String(value)),
+      deleteProperty: (key) => properties.delete(key),
+    }) },
     LockService: { getScriptLock: () => ({ tryLock: () => lockAvailable, releaseLock: () => {} }) },
     Utilities: { getUuid: () => `lease-${++uuid}` },
     validateToken_: (token) => { if (token !== "test-token") throw new Error("Unauthorized"); },
@@ -54,7 +61,7 @@ function harness() {
     detectIncomingTransport_: () => "test",
     getRawPostBody_: () => "",
     maskSensitiveDebugText_: () => "",
-    sendSystemAlertEmail_: () => {},
+    sendSystemAlertEmail_: (...args) => systemAlerts.push(args),
   };
   vm.createContext(context);
   sources.forEach((source) => vm.runInContext(source, context));
@@ -74,7 +81,7 @@ function harness() {
     assert.equal(context.markPendingSmsSendStartedV10_(body).status, "send_started");
     return body;
   };
-  return { context, rows, sheet, post, queue, claim, started,
+  return { context, rows, sheet, post, queue, claim, started, systemAlerts,
     advance: (ms) => { now += ms; }, lock: (value) => { lockAvailable = value; },
     counters: () => ({ writes, crmTouches }) };
 }
@@ -281,6 +288,8 @@ test("legacy stored body remains claimable and only its exact late receipt succe
   assert.equal(h.post("reply_sent", body).status, "sent");
   assert.equal(h.rows[1][5], legacyMessage);
   assert.equal(h.counters().crmTouches, 0);
+  assert.equal(h.rows.length, 2);
+  assert.deepEqual(h.systemAlerts, []);
 });
 
 test("enqueue lock contention never appends or bypasses identity validation", () => {
@@ -349,6 +358,8 @@ test("watchdog preserves exact late receipts but never retries or touches CRM", 
   assert.equal(h.context.alertSmsOutboxProblem_(h.sheet, 2, h.rows[1], "probe failure"), false);
   assert.equal(h.post("reply_sent", body).status, "sent");
   assert.equal(h.counters().crmTouches, 0);
+  assert.equal(h.rows.length, 2);
+  assert.deepEqual(h.systemAlerts, []);
 });
 
 test("expiry watchdog and old pending watchdog stay outbox-only", () => {
@@ -359,6 +370,8 @@ test("expiry watchdog and old pending watchdog stay outbox-only", () => {
   h.context.smsPendingSendWatchdog_();
   assert.equal(h.rows[1][1], "pending");
   assert.equal(h.counters().crmTouches, 0);
+  assert.equal(h.rows.length, 2);
+  assert.deepEqual(h.systemAlerts, []);
 });
 
 test("a reported SMS failure is terminal and cannot create another probe attempt", () => {
