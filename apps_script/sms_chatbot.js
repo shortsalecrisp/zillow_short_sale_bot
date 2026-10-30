@@ -2614,6 +2614,53 @@ function buildTerminalCoverageDecisionV4_(text, rowObj) {
       (outsideHelp ? "Agent already has outside short-sale help; marked H for marketing follow-up" : "Explicit refusal or non-provider coverage; closed out")};
 }
 
+function hasDirectQuestionSignal_(text) {
+  const raw = normalizeWhitespace_(String(text || ""));
+  if (!raw) return false;
+  if (raw.indexOf("?") !== -1) return true;
+  const t = raw.toLowerCase();
+  return /^(?:who|what|when|where|why|how|can|could|would|do|does|did|is|are|am|will|should|may)\b/.test(t) ||
+    /\b(?:who|what|when|where|why|how)\s+(?:is|are|do|does|did|can|could|would|will|should)\b/.test(t) ||
+    /\b(?:can|could|would|will|do|does|did|are|is)\s+you\b/.test(t);
+}
+
+function hasSelfHandlingStatement_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase()).replace(/\bmy self\b/g, "myself");
+  return /\b(?:i am|i'm)\s+(?:currently\s+)?handling\s+(?:it|this|that|the file|the listing|the short sale)\b/.test(t) ||
+    /\b(?:handling|handle) (?:that part |it |this |the (?:bank|lender) side )?(?:myself|ourselves)\b/.test(t) ||
+    /\b(?:doing|do) (?:it |this )?(?:myself|ourselves)\b/.test(t) ||
+    /\b(?:handle|handling) (?:short sales?|these files) (?:myself|ourselves)\b/.test(t) ||
+    /\b(?:i|we)\s+(?:personally\s+)?(?:handle|manage)\s+(?:all\s+)?(?:my|our|the)?\s*short[- ]sales?\b/.test(t) ||
+    /\b(?:i|we)\s+(?:personally\s+)?(?:do|handle|manage)\s+(?:all\s+(?:the\s+)?|the\s+)?(?:bank|lender|short[- ]sale\s+)?negotiat(?:e|ing|ions?)\b/.test(t) ||
+    /\b(?:i(?: am|'m)?|we(?: are|'re)?)\s+(?:currently\s+)?(?:communicating|working|dealing|talking) (?:directly )?with (?:the )?(?:bank|lender)\b/.test(t);
+}
+
+function buildCompoundCoverageDeclinePrecedenceDecision_(text) {
+  const t = withoutNegatedRejection_(text).replace(/\bmy self\b/g, "myself");
+  if (!t || hasDirectQuestionSignal_(t) || isEmailRequestSignal_(t) || isPresentServiceInterestSignal_(t) ||
+      /\b(?:willing|open|interested)\s+to\s+(?:review|hear|learn)\b/.test(t)) return null;
+  const covered = isAlreadyHandledSignal_(t) || /\balready covered\b|\b(?:i|we) have it covered\b/.test(t);
+  const selfHandled = hasSelfHandlingStatement_(t);
+  const declined = isClearNoSignal_(t) || isNotShortSaleSignal_(t);
+  const secondarySalesRemark = /\b(?:buyers?|bring|find|provide|supply|send|offers?|fee|cost|price|pricing|rate|charge|commission|service|services|capability|capabilities)\b/.test(t);
+  const coveredOrDeclinedSecondary = /\b(?:paperwork|negotiat(?:e|ing|ion|ions))\b/.test(t);
+  if (!((selfHandled && secondarySalesRemark) ||
+      ((covered || declined) && (secondarySalesRemark || coveredOrDeclinedSecondary)))) return null;
+  const outsideHelp = isOutsideHelpSignal_(t) || isTitleCompanyCoverageRejectionSignal_(t);
+  return {
+    matched: true,
+    reply_text: getProviderAwareCloseoutReply_(t),
+    lead_status: outsideHelp ? "H" : "R",
+    conversation_done: true,
+    handoff_needed: false,
+    needs_review: false,
+    block_reply: false,
+    call_booking_status: "closed_no_interest",
+    clear_callback: true,
+    reason: "Explicit coverage or self-handling decline outranked secondary buyer, fee, or capability remarks"
+  };
+}
+
 function isUrgentAuctionReviewSignal_(text) {
   const t = normalizeLanguageSignalText_(text);
   return /\b(?:auction|foreclosure (?:sale|date|deadline)|sale date)\b/.test(t) &&
@@ -2992,6 +3039,9 @@ function applyFastRules_(text, rowObj, receivedAt) {
       reason: "Distinguished seller and buyer representation from lender-side processor coverage"
     };
   }
+
+  const compoundDecline = buildCompoundCoverageDeclinePrecedenceDecision_(t);
+  if (compoundDecline) return compoundDecline;
 
   const terminal = buildTerminalCoverageDecisionV4_(t, rowObj);
   if (terminal) return terminal;

@@ -3113,6 +3113,41 @@ def test_sms_rate_question_outranks_existing_coverage_closeout(monkeypatch):
     assert decision["reason"] == "Answered fee question before generic coverage language"
 
 
+def test_sms_compound_coverage_decline_outranks_secondary_sales_remarks(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    for inbound in (
+        "Already covered, but thanks bring me a buyer.",
+        "I personally handle all my short sales and only charge 1% because I like control.",
+    ):
+        decision = module._sms_fast_decision({}, inbound)
+        assert decision["conversation_done"] is True
+        assert decision["handoff_needed"] is False
+        assert decision["lead_status"] == "R"
+        assert decision["reason"] == (
+            "Explicit coverage or self-handling decline outranked secondary buyer, fee, or capability remarks"
+        )
+        assert "don't bring the buyer" not in decision["reply_text"].lower()
+        assert "$5,000" not in decision["reply_text"]
+
+
+def test_sms_direct_question_still_outranks_compound_coverage_decline(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+
+    fee = module._sms_fast_decision({}, "We already have a negotiator. What's your rate?")
+    buyer = module._sms_fast_decision({}, "Already covered. Can you bring the buyer?")
+
+    assert fee["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
+    assert buyer["reply_text"] == module.SMS_BUYER_PROVISION_REPLY
+    assert fee["reason"] != buyer["reason"]
+
+
 def test_sms_differentiation_question_gets_deterministic_reply(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

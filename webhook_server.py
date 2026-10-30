@@ -5273,6 +5273,20 @@ def _sms_is_substantive_followup(value: Any) -> bool:
     )
 
 
+def _sms_has_direct_question(value: Any) -> bool:
+    raw = _sms_normalize_whitespace(value)
+    if not raw:
+        return False
+    if "?" in raw:
+        return True
+    return bool(re.search(
+        r"^(?:who|what|when|where|why|how|can|could|would|do|does|did|is|are|am|will|should|may)\b"
+        r"|\b(?:who|what|when|where|why|how)\s+(?:is|are|do|does|did|can|could|would|will|should)\b"
+        r"|\b(?:can|could|would|will|do|does|did|are|is)\s+you\b",
+        raw.lower(),
+    ))
+
+
 def _sms_is_closed_not_short_sale(row_obj: Dict[str, str]) -> bool:
     if str(row_obj.get("ai_state") or "").lower() != "done":
         return False
@@ -7106,9 +7120,9 @@ def _sms_has_decline_or_not_short_sale_clause(value: Any) -> bool:
     )
 
 
-def _sms_is_self_handling_opportunity(value: Any) -> bool:
+def _sms_has_self_handling_statement(value: Any) -> bool:
     text = _sms_rejection_text(value).replace("my self", "myself")
-    self_handling = bool(
+    return bool(
         re.search(
             r"\b(?:i\s+am|i['’]?m)\s+(?:currently\s+)?handling\s+(?:it|this|that|the\s+file|the\s+listing|the\s+short\s+sale)\b",
             text,
@@ -7116,6 +7130,7 @@ def _sms_is_self_handling_opportunity(value: Any) -> bool:
         or re.search(r"\b(?:handling|handle) (?:that part |it |this |the (?:bank|lender) side )?(?:myself|ourselves)\b", text)
         or re.search(r"\b(?:doing|do) (?:it |this )?(?:myself|ourselves)\b", text)
         or re.search(r"\b(?:handle|handling) (?:short sales?|these files) (?:myself|ourselves)\b", text)
+        or re.search(r"\b(?:i|we)\s+(?:personally\s+)?(?:handle|manage)\s+(?:all\s+)?(?:my|our|the)?\s*short[- ]sales?\b", text)
         or re.search(r"\b(?:trying|attempting) to handle it\b", text)
         or re.search(
             r"\b(?:i(?:\s+am|['’]?m)?|we(?:\s+are|['’]?re)?)\s+"
@@ -7129,6 +7144,11 @@ def _sms_is_self_handling_opportunity(value: Any) -> bool:
             text,
         )
     )
+
+
+def _sms_is_self_handling_opportunity(value: Any) -> bool:
+    text = _sms_rejection_text(value).replace("my self", "myself")
+    self_handling = _sms_has_self_handling_statement(text)
     clear_rejection = bool(
         re.search(r"\b(?:no thanks?|not interested|don['’]?t need|do not need|dont need)\b", text)
         or re.search(r"\b(?:thanks?|thank you) for (?:the|your) offer\b", text)
@@ -7141,6 +7161,43 @@ def _sms_is_self_handling_opportunity(value: Any) -> bool:
         or "?" in text
     )
     return self_handling and not clear_rejection and not substantive and "not a short sale" not in text
+
+
+def _sms_compound_coverage_decline_precedence_decision(value: Any) -> Optional[Dict[str, Any]]:
+    """Close explicit coverage/self-handling before secondary sales remarks."""
+    text = _sms_rejection_text(value).replace("my self", "myself")
+    if (
+        not text
+        or _sms_has_direct_question(text)
+        or _sms_is_information_delivery_request(text)
+        or _sms_is_present_service_interest(text)
+        or re.search(r"\b(?:willing|open|interested)\s+to\s+(?:review|hear|learn)\b", text)
+    ):
+        return None
+    covered = _sms_has_existing_coverage(text)
+    self_handled = _sms_has_self_handling_statement(text)
+    declined = _sms_has_decline_or_not_short_sale_clause(text)
+    secondary_sales_remark = bool(re.search(
+        r"\b(?:buyers?|bring|find|provide|supply|send|offers?|fee|cost|price|pricing|rate|charge|commission|"
+        r"service|services|capability|capabilities)\b",
+        text,
+    ))
+    covered_or_declined_secondary = bool(re.search(r"\b(?:paperwork|negotiat(?:e|ing|ion|ions))\b", text))
+    if not (
+        (self_handled and secondary_sales_remark)
+        or ((covered or declined) and (secondary_sales_remark or covered_or_declined_secondary))
+    ):
+        return None
+    outside_help = _sms_has_outside_help(text) or _sms_is_title_company_coverage_rejection(text)
+    return _sms_decision(
+        reply_text=_sms_provider_aware_closeout_reply(text),
+        lead_status="H" if outside_help else "R",
+        conversation_done=True,
+        handoff_needed=False,
+        call_booking_status="closed_no_interest",
+        clear_callback=True,
+        reason="Explicit coverage or self-handling decline outranked secondary buyer, fee, or capability remarks",
+    )
 
 
 def _sms_company_identity_reply(covered: bool = False) -> str:
@@ -7853,6 +7910,10 @@ def _sms_fast_decision(
             clear_callback=True,
             reason="Categorical buyer-fee rejection closed before reply-cap escalation",
         )
+
+    compound_decline = _sms_compound_coverage_decline_precedence_decision(t)
+    if compound_decline is not None:
+        return compound_decline
 
     existing_coverage = _sms_has_existing_coverage(t)
     outside_help = _sms_has_outside_help(t) or _sms_is_title_company_coverage_rejection(t)
