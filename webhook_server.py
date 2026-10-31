@@ -7127,6 +7127,11 @@ def _sms_has_self_handling_statement(value: Any) -> bool:
             r"\b(?:i\s+am|i['’]?m)\s+(?:currently\s+)?handling\s+(?:it|this|that|the\s+file|the\s+listing|the\s+short\s+sale)\b",
             text,
         )
+        or re.search(
+            r"\bi['’]?ve\b[^.!?]{0,100}\b(?:and\s+)?am\s+(?:currently\s+)?handling\s+"
+            r"(?:it|this|that|the\s+file|the\s+listing|the\s+short\s+sale)\b",
+            text,
+        )
         or re.search(r"\b(?:handling|handle) (?:that part |it |this |the (?:bank|lender) side )?(?:myself|ourselves)\b", text)
         or re.search(r"\b(?:doing|do) (?:it |this )?(?:myself|ourselves)\b", text)
         or re.search(r"\b(?:handle|handling) (?:short sales?|these files) (?:myself|ourselves)\b", text)
@@ -7176,7 +7181,15 @@ def _sms_compound_coverage_decline_precedence_decision(value: Any) -> Optional[D
         return None
     covered = _sms_has_existing_coverage(text)
     self_handled = _sms_has_self_handling_statement(text)
-    declined = _sms_has_decline_or_not_short_sale_clause(text)
+    declined = _sms_has_decline_or_not_short_sale_clause(text) or bool(
+        re.search(r"\b(?:thanks?|thank you) anyway\b", text)
+    )
+    platform_mention = bool(re.search(r"\b(?:equator|short[- ]sale portal|lender portal)\b", text))
+    competence_statement = bool(re.search(
+        r"\b(?:handling|managing|doing)\s+(?:it|this|the file|the listing|the short sale)\s+"
+        r"(?:pretty\s+)?(?:well|fine)\b|\bfamiliarized myself with\b|\bcomfortable (?:using|with)\b",
+        text,
+    ))
     secondary_sales_remark = bool(re.search(
         r"\b(?:buyers?|bring|find|provide|supply|send|offers?|fee|cost|price|pricing|rate|charge|commission|"
         r"service|services|capability|capabilities)\b",
@@ -7185,6 +7198,7 @@ def _sms_compound_coverage_decline_precedence_decision(value: Any) -> Optional[D
     covered_or_declined_secondary = bool(re.search(r"\b(?:paperwork|negotiat(?:e|ing|ion|ions))\b", text))
     if not (
         (self_handled and secondary_sales_remark)
+        or (self_handled and declined and (platform_mention or competence_statement))
         or ((covered or declined) and (secondary_sales_remark or covered_or_declined_secondary))
     ):
         return None

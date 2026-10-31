@@ -3148,6 +3148,35 @@ def test_sms_direct_question_still_outranks_compound_coverage_decline(monkeypatc
     assert fee["reason"] != buyer["reason"]
 
 
+def test_sms_equator_competence_decline_closes_without_repitch(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    message = "I've familiarized myself with Equator and am handling it pretty well. Thanks anyway."
+    decision = module._sms_fast_decision({}, message)
+
+    assert decision["conversation_done"] is True
+    assert decision["handoff_needed"] is False
+    assert decision["lead_status"] == "R"
+    assert "familiar with Equator" not in decision["reply_text"]
+    assert decision["reason"] == (
+        "Explicit coverage or self-handling decline outranked secondary buyer, fee, or capability remarks"
+    )
+
+
+def test_sms_equator_self_handler_direct_question_remains_answerable(monkeypatch):
+    module, _sheet, _sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    message = "I've familiarized myself with Equator and am handling it pretty well. What is your fee?"
+    decision = module._sms_fast_decision({}, message)
+
+    assert decision["conversation_done"] is False
+    assert decision["reply_text"].startswith(APPROVED_SPECIFIC_FEE_REPLY)
+
+
 def test_sms_differentiation_question_gets_deterministic_reply(monkeypatch):
     module, _sheet, _sender = _import_webhook_server(
         monkeypatch,

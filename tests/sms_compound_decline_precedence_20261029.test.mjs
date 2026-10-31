@@ -34,4 +34,24 @@ for (const message of [
   assert.match(decision.reply_text, /\$5,000|don't bring the buyer|best email|lender/i, message);
 }
 
+{
+  const message = "I've familiarized myself with Equator and am handling it pretty well. Thanks anyway.";
+  const decision = h.evaluate(`applyFastRules_(${JSON.stringify(message)}, {})`);
+  assert.equal(decision.conversation_done, true);
+  assert.equal(decision.handoff_needed, false);
+  assert.equal(decision.lead_status, 'R');
+  assert.doesNotMatch(decision.reply_text, /familiar with Equator|help manage/i);
+  assert.equal(
+    decision.reason,
+    'Explicit coverage or self-handling decline outranked secondary buyer, fee, or capability remarks',
+  );
+}
+
+{
+  const message = "I've familiarized myself with Equator and am handling it pretty well. What is your fee?";
+  const decision = h.evaluate(`applyFastRules_(${JSON.stringify(message)}, {})`);
+  assert.equal(decision.conversation_done, false);
+  assert.match(decision.reply_text, /buyer at closing|flat fee/i);
+}
+
 console.log('sms compound decline precedence tests passed');

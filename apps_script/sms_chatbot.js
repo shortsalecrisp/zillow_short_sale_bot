@@ -2636,6 +2636,7 @@ function hasDirectQuestionSignal_(text) {
 function hasSelfHandlingStatement_(text) {
   const t = normalizeWhitespace_(String(text || "").toLowerCase()).replace(/\bmy self\b/g, "myself");
   return /\b(?:i am|i'm)\s+(?:currently\s+)?handling\s+(?:it|this|that|the file|the listing|the short sale)\b/.test(t) ||
+    /\bi(?:'|’)?ve\b[^.!?]{0,100}\b(?:and\s+)?am\s+(?:currently\s+)?handling\s+(?:it|this|that|the file|the listing|the short sale)\b/.test(t) ||
     /\b(?:handling|handle) (?:that part |it |this |the (?:bank|lender) side )?(?:myself|ourselves)\b/.test(t) ||
     /\b(?:doing|do) (?:it |this )?(?:myself|ourselves)\b/.test(t) ||
     /\b(?:handle|handling) (?:short sales?|these files) (?:myself|ourselves)\b/.test(t) ||
@@ -2651,10 +2652,14 @@ function buildCompoundCoverageDeclinePrecedenceDecision_(text) {
       /\b(?:willing|open|interested)\s+to\s+(?:review|hear|learn)\b/.test(t)) return null;
   const covered = isAlreadyHandledSignal_(t) || /\balready covered\b|\b(?:i|we) have it covered\b/.test(t);
   const selfHandled = hasSelfHandlingStatement_(t);
-  const declined = isClearNoSignal_(t) || isNotShortSaleSignal_(t);
+  const declined = isClearNoSignal_(t) || isNotShortSaleSignal_(t) ||
+    /\b(?:thanks?|thank you) anyway\b/.test(t);
+  const platformMention = /\b(?:equator|short[- ]sale portal|lender portal)\b/.test(t);
+  const competenceStatement = /\b(?:handling|managing|doing)\s+(?:it|this|the file|the listing|the short sale)\s+(?:pretty\s+)?(?:well|fine)\b|\bfamiliarized myself with\b|\bcomfortable (?:using|with)\b/.test(t);
   const secondarySalesRemark = /\b(?:buyers?|bring|find|provide|supply|send|offers?|fee|cost|price|pricing|rate|charge|commission|service|services|capability|capabilities)\b/.test(t);
   const coveredOrDeclinedSecondary = /\b(?:paperwork|negotiat(?:e|ing|ion|ions))\b/.test(t);
   if (!((selfHandled && secondarySalesRemark) ||
+      (selfHandled && declined && (platformMention || competenceStatement)) ||
       ((covered || declined) && (secondarySalesRemark || coveredOrDeclinedSecondary)))) return null;
   const outsideHelp = isOutsideHelpSignal_(t) || isTitleCompanyCoverageRejectionSignal_(t);
   return {
