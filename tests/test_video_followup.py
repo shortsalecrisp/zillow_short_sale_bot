@@ -393,13 +393,29 @@ class VideoFollowupTests(unittest.TestCase):
         ready = self.make_ready()
         message, meta = self.service.select(self.context, FALLBACK)
         self.assertEqual(meta["video_variant"], "video")
-        self.assertEqual(message, "Hey, just following up on my message from earlier.  "
-                         "Heres a quick video to put a face to my text... Happy to help if you have any questions!\n"
+        self.assertEqual(message, "Hey just wanted you to see im a real person who can really help you with this short sale.  "
+                         "Please reach out if interested!\n"
                          "https://go.crispshortsales.com/v/" + ready["id"])
         self.assertEqual(self.service.select(self.context, "New fallback"), (message, meta))
         self.assertNotIn(self.context["first_name"], message)
         self.assertNotIn(PHONE, message)
         self.assertNotIn(self.context["stable_id"], message)
+
+    def test_video_copy_change_preserves_public_video_and_all_asset_bytes(self):
+        self.make_ready()
+        assets_before = {key: self.objects.read(key) for key in self.objects.list("assets/")}
+        self.assertTrue(assets_before)
+        ready = self.job()
+        public_before = self.store.get_public_video(ready["id"])
+        self.service.select(self.context, FALLBACK)
+        frozen = self.job()
+        changed = {"status", "variant", "message", "frozen_at"}
+        self.assertEqual({key: value for key, value in ready.items() if key not in changed},
+                         {key: value for key, value in frozen.items() if key not in changed})
+        self.assertEqual(assets_before,
+                         {key: self.objects.read(key) for key in self.objects.list("assets/")})
+        public = self.store.get_public_video(frozen["id"])
+        self.assertEqual(public, {**public_before, "status": "frozen_video"})
 
     def test_existing_frozen_video_keeps_its_original_copy_and_identity(self):
         ready = self.make_ready()
