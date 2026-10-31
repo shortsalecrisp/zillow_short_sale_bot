@@ -342,6 +342,10 @@ export function buildVoiceResponseStatus(callResult: string, callbackTime?: stri
     return "Gatekeeper or office admin answered; target agent was not reached";
   }
 
+  if (callResult === "apparent_human_early_exit") {
+    return "Live person reached after screening; target identity not confirmed";
+  }
+
   if (callResult === "agent_reached_self_handling_disconnected") {
     return "Agent reached; handling bank side; call disconnected";
   }
@@ -1418,6 +1422,7 @@ export type AuthoritativeTerminalCallResult =
   | "no_answer_first_attempt"
   | "no_response_second_attempt"
   | "gatekeeper_admin_early_exit"
+  | "apparent_human_early_exit"
   | "agent_not_available"
   | "call_end_requested"
   | "answered_not_interested";
@@ -1460,6 +1465,9 @@ export function getAuthoritativeTerminalCallResult(
     return "agent_not_available";
   }
   if (getVoiceContactRequestResult(conversation) === "call_end_requested") return "call_end_requested";
+  if (shouldTreatAsApparentHumanAfterAutomatedScreening(conversation, expected.firstName)) {
+    return "apparent_human_early_exit";
+  }
   return voicemailOrNoAnswer;
 }
 
@@ -1989,6 +1997,58 @@ export function hasLiveHumanAfterAutomatedScreening(conversation: ElevenLabsConv
   return false;
 }
 
+function hasTargetIdentityAfterAutomatedScreening(
+  conversation: ElevenLabsConversation,
+  expectedFirstName = "",
+): boolean {
+  const expected = normalizeText(expectedFirstName).replace(/[^a-z0-9'-]/g, "");
+  let sawScreening = false;
+  let lastAssistantMessage = "";
+
+  for (const item of conversation.transcript ?? []) {
+    if ((item.role === "assistant" || item.role === "agent") && typeof item.message === "string") {
+      if (sawScreening && hasMeaningfulSpokenContent(item.message)) {
+        lastAssistantMessage = normalizeText(item.message);
+      }
+      continue;
+    }
+    if (item.role !== "user" || typeof item.message !== "string" || !hasMeaningfulSpokenContent(item.message)) {
+      continue;
+    }
+    const text = normalizeText(item.message);
+    if (/\b(?:record|state) (?:your )?name(?: and (?:the )?reason)?\b/.test(text) ||
+      /\b(?:call assist by google|call screening|screening (?:service|assistant)|automated (?:system|assistant)|please stay on the(?: line)?|please hold while|one moment while|checking with the person you called|see if (?:this person|they|he|she) is available|(?:the )?call could not be connected)\b/.test(text)) {
+      sawScreening = true;
+      lastAssistantMessage = "";
+      continue;
+    }
+    if (!sawScreening) continue;
+    const actual = normalizeText(
+      text.match(/\b(?:this is|it is|it's|i am|i'm)[,. ]+([a-z][a-z'-]*)\b/)?.[1] ??
+      text.match(/^([a-z][a-z'-]*)\s+(?:speaking|here)\b/)?.[1] ?? "",
+    ).replace(/[^a-z0-9'-]/g, "");
+    if ((expected && actual && nameSoundsSimilar(actual, expected)) ||
+      /\bi(?: am|'m) (?:the )?(?:listing agent|agent of record)\b/.test(text)) {
+      return true;
+    }
+    if (/^(?:yes|yeah|yep|speaking|this is (?:he|she)|i am)[.!?]*$/.test(text) &&
+      /\bis .{1,120} your listing\?/.test(lastAssistantMessage)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function shouldTreatAsApparentHumanAfterAutomatedScreening(
+  conversation: ElevenLabsConversation,
+  expectedFirstName = "",
+): boolean {
+  if (!normalizeText(expectedFirstName)) return false;
+  return hasLiveHumanAfterAutomatedScreening(conversation) &&
+    !hasLiveHumanGatekeeperEvidence(conversation, expectedFirstName) &&
+    !hasTargetIdentityAfterAutomatedScreening(conversation, expectedFirstName);
+}
+
 export function shouldTreatAsAgentUnavailable(
   conversation: ElevenLabsConversation,
   expectedFirstName = "",
@@ -2350,6 +2410,7 @@ async function processPostCallOutcomeForConversationUnlocked(
           responseStatus: outcome,
           ...(["answered_not_interested", "identity_mismatch_voicemail"].includes(terminalCallResult)
             ? { leadStatusCode: "R" } : {}),
+          ...(terminalCallResult === "apparent_human_early_exit" ? { leadStatusCode: "N" } : {}),
           ...(isFinalUnansweredVoiceResult(terminalCallResult, metadata.callAttemptNumber)
             ? { leadStatusCode: "N" } : {}),
           ...(terminalCallResult === "voicemail_left" ? { vmLeft: "yes" } : {}),

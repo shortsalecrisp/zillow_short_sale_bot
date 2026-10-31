@@ -215,6 +215,8 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
       simpleIdentityQuestion && !/\band\b|\b(?:handling|want|help|may i|can i)\b/.test(lastQuestion);
     const contextualListingAnswer = /^(?:it is|that is|it'?s mine|that'?s mine)[.!?]*$/.test(text) &&
       exactListingQuestion;
+    const ambiguousListingAnswer = /^(?:maybe|possibly|perhaps|i think so|not sure|i'm not sure|i am not sure)[.!?]*$/.test(text) &&
+      exactListingQuestion;
     const directHumanQuestion = /\b(?:who is this|why are you calling|what (?:is this|are you calling) about|can you hear me|i can't hear you)\b/.test(text);
     const newLiveIdentity = greeting || namedPickup || explicitRole || explicitAdmin || identityAnswer ||
       contextualListingAnswer || nameOnly || officeGreeting || directHumanQuestion;
@@ -231,10 +233,11 @@ function classifyContact(transcript: PerformanceTranscriptItem[], fullName: stri
     const contextual = Boolean(lastAssistantMessage) && !canned && !greeting &&
       !/^\.{2,}|^[\d\s()+.-]+$|^(?:phone rings|ringing)$/i.test(text);
     if (!newLiveIdentity && !contextual && pending.length === 0) continue;
-    if (inAutomation && !newLiveIdentity) continue;
+    if (inAutomation && !newLiveIdentity && !ambiguousListingAnswer) continue;
     pending.push(index);
-    hasContextualHumanTurn ||= contextual || explicitRole || explicitAdmin || (officeGreeting && /\bhow (?:can|may) (?:i|we) help\b/.test(text));
-    if (newLiveIdentity || contextual) inAutomation = false;
+    hasContextualHumanTurn ||= contextual || ambiguousListingAnswer || explicitRole || explicitAdmin ||
+      (officeGreeting && /\bhow (?:can|may) (?:i|we) help\b/.test(text));
+    if (newLiveIdentity || contextual || ambiguousListingAnswer) inAutomation = false;
     if (explicitAdmin || differentOfficeSpeaker || differentNamedAgent) gatekeeperIndexes.add(index);
     if (explicitRole || identityAnswer || contextualListingAnswer || targetIdentity) targetIndexes.add(index);
   }

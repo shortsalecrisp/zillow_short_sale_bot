@@ -1342,6 +1342,38 @@ test("a later live human overrides an earlier recorded screener", async () => {
   }
 });
 
+test("an ambiguous connected human after Google screening is not labeled as the target agent hanging up", async () => {
+  const {
+    buildVoiceResponseStatus,
+    getAuthoritativeTerminalCallResult,
+    hasLiveHumanAfterAutomatedScreening,
+    shouldTreatAsApparentHumanAfterAutomatedScreening,
+  } = await import("../src/lib/elevenLabsPostCall");
+  const conversation = {
+    status: "done",
+    has_user_audio: true,
+    metadata: { termination_reason: "Client disconnected: 1000" },
+    transcript: [
+      { role: "user", message: "Hi. An AI assistant recording this call for the person you're trying to reach. Please say who you are and why you're calling." },
+      { role: "agent", message: "Maya with Crisp Short Sales, about the short-sale listing at Seventeen Thirty Two Xenia." },
+      { role: "user", message: "Thank you. Please hold while I connect you. Hello?" },
+      { role: "agent", message: "Hi, Maya with Crisp Short Sales. Is Seventeen Thirty Two Xenia your listing?" },
+      { role: "user", message: "Maybe." },
+      { role: "agent", message: "No problem. Do you handle the listing at Seventeen Thirty Two Xenia?" },
+    ],
+  };
+  assert.equal(hasLiveHumanAfterAutomatedScreening(conversation), true);
+  assert.equal(shouldTreatAsApparentHumanAfterAutomatedScreening(conversation, "Chris"), true);
+  assert.equal(
+    getAuthoritativeTerminalCallResult(conversation, 1, { firstName: "Chris" }),
+    "apparent_human_early_exit",
+  );
+  assert.equal(
+    buildVoiceResponseStatus("apparent_human_early_exit"),
+    "Live person reached after screening; target identity not confirmed",
+  );
+});
+
 test("post-call fallback retains an earlier hold instruction when the final screener turn is truncated", async () => {
   const { shouldTreatAsAgentHungUp, shouldTreatAsAgentUnavailable } = await import(
     "../src/lib/elevenLabsPostCall"
@@ -1658,6 +1690,21 @@ for (const scenario of [
       { role: "user", message: "Not right now." },
       { role: "assistant", message: "No problem. If you ever need help, just let us know." },
       { role: "user", message: "Okay." },
+    ],
+  },
+  {
+    name: "chris_ambiguous_live_answer_after_screening",
+    expectedCallResult: "apparent_human_early_exit",
+    expectedResponseStatus: "Live person reached after screening; target identity not confirmed",
+    terminationReason: "Client disconnected: 1000",
+    summary: "A person answered ambiguously after Google Call Assist connected Maya.",
+    transcript: [
+      { role: "user", message: "Hi. An AI assistant recording this call for the person you're trying to reach. Please say who you are and why you're calling." },
+      { role: "assistant", message: "Maya with Crisp Short Sales, about the short-sale listing at Seventeen Thirty Two Xenia." },
+      { role: "user", message: "Thank you. Please hold while I connect you. Hello?" },
+      { role: "assistant", message: "Hi, Maya with Crisp Short Sales. Is Seventeen Thirty Two Xenia your listing?" },
+      { role: "user", message: "Maybe." },
+      { role: "assistant", message: "No problem. Do you handle the listing at Seventeen Thirty Two Xenia?" },
     ],
   },
   {

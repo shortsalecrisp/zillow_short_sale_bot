@@ -596,6 +596,25 @@ test("screener followed by human counts only the human exchange", async () => {
   assert.equal(result.flags.agentRespondedAfterOpeningQuestion, true);
 });
 
+test("ambiguous live answer after Google screening is apparent human, not a recorded screener", async () => {
+  const result = await measurementLog({
+    metadata: { fullName: "Chris Ferguson" },
+    terminalCallResult: "apparent_human_early_exit",
+    conversation: { transcript: [
+      { role: "user", message: "Hi. An AI assistant recording this call for the person you're trying to reach. Please say who you are and why you're calling." },
+      { role: "agent", message: "Maya with Crisp Short Sales, about the short-sale listing at Seventeen Thirty Two Xenia." },
+      { role: "user", message: "Thank you. Please hold while I connect you. Hello?" },
+      { role: "agent", message: "Hi, Maya with Crisp Short Sales. Is Seventeen Thirty Two Xenia your listing?" },
+      { role: "user", message: "Maybe." },
+      { role: "agent", message: "No problem. Do you handle the listing at Seventeen Thirty Two Xenia?" },
+    ] },
+  });
+  assert.equal(result.contactEvidence.reviewBucket, "apparent_human");
+  assert.equal(result.contactEvidence.humanAnswered, true);
+  assert.equal(result.contactEvidence.targetAgentAnswered, null);
+  assert.deepEqual(result.contactEvidence.humanTurnIndexes, [4]);
+});
+
 test("admin contact and subsequent target pickup are tracked separately", async () => {
   const transcript = [
     { role: "user", message: "Hello, this is her admin. How can I help?" },
