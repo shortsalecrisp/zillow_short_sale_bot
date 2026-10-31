@@ -1570,11 +1570,11 @@ test("approved video copy survives Python serialization and existing Apps whites
   const videoUrl = `https://go.crispshortsales.com/v/${jobId}`;
   body.video_job_id = jobId;
   body.video_speech_proof.video_job_id = jobId;
-  body.message = "Hey, just following up on my message from earlier.  "
-    + "Heres a quick video to put a face to my text... Happy to help if you have any questions!\n"
+  body.message = "Hey just wanted you to see im a real person who can really help you with this short sale.  "
+    + "Please reach out if interested!\n"
     + videoUrl;
-  const expected = "Hey, just following up on my message from earlier. "
-    + "Heres a quick video to put a face to my text... Happy to help if you have any questions! "
+  const expected = "Hey just wanted you to see im a real person who can really help you with this short sale. "
+    + "Please reach out if interested! "
     + videoUrl;
   const payload = schedulerSerialized(body);
   assert.equal(payload.message, body.message);

@@ -250,7 +250,10 @@ def test_deferral_then_existing_automatic_pipeline_selects_ready_video_or_same_k
     assert body["first_name"] == "Jim"
     assert body["initial_sent_at"] == context["initial_sent_at"]
     if variant == "video":
-        assert body["message"].startswith("Hey, just following up on my message from earlier.  Heres a quick video")
+        assert body["message"] == (
+            "Hey just wanted you to see im a real person who can really help you with this short sale.  "
+            "Please reach out if interested!\nhttps://go.crispshortsales.com/v/" + body["video_job_id"]
+        )
         assert "Jim" not in body["message"]
         assert "https://go.crispshortsales.com/v/" in body["message"]
         assert body["video_speech_proof"]["expected_name"] == "Jim"
