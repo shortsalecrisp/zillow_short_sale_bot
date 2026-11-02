@@ -91,6 +91,7 @@ function handleUnifiedVoicePost_(payload) {
 }
 
 function handleUnifiedSmsPost_(e) {
+  var smsRequestStartedAt = Date.now();
   var requestId = Utilities.getUuid();
 
   try {
@@ -243,14 +244,13 @@ function handleUnifiedSmsPost_(e) {
 
     if (action === "send_started") {
       recordTaskerTransportActivityV12_("send_started", body);
-      var sendStartClock = Date.now();
-      var sendStartResult = markPendingSmsSendStartedV10_(body);
+      var sendStartResult = markPendingSmsSendStartedV10_(body, false, smsRequestStartedAt);
       try {
         appendSmsDebugLog_("send_started_result", {
           request_id: String(body.request_id || body.sms_request_id || ""), phone: normalizePhone_(body.phone),
           message_id: String(body.message_id || ""), ok: sendStartResult.ok === true,
           status: sendStartResult.status || "", retryable: sendStartResult.retryable === true,
-          reason: sendStartResult.reason || "", server_elapsed_ms: Date.now() - sendStartClock,
+          reason: sendStartResult.reason || "", server_elapsed_ms: Date.now() - smsRequestStartedAt,
           correlation_mode: sendStartResult.correlation_mode || ""
         });
       } catch (_) {}

@@ -2894,6 +2894,16 @@ function claimPendingSmsSendV10_(body) {
 }
 
 function buildPendingSmsClaimResponse_(row, sheetRow) {
+  try {
+    var metadata = parseVideoFollowupMetadataV19_(row);
+    if (metadata && metadata.audit_contract === "followup-decision-v1" && typeof CacheService !== "undefined") {
+      CacheService.getScriptCache().put("SMS_LEASE_WARM_V33_" + String(row[10]), JSON.stringify({
+        request_id: String(row[2]), message_id: String(row[3]), phone: normalizePhone_(row[4]), lease_token: String(row[10]),
+        metadata: { audit_contract: metadata.audit_contract, video_variant: metadata.video_variant,
+          first_name: metadata.first_name, video_speech_proof: metadata.video_speech_proof }
+      }), 300);
+    }
+  } catch (_) { /* A missing cache falls back to full fresh lookup. */ }
   return {
     ok: true,
     should_send: true,
@@ -2926,6 +2936,23 @@ function busyPendingSmsClaim_() {
 
 function markPendingSmsSendStartedV10_(body, decisionLocked, requestStartedAt) {
   var requestStart = requestStartedAt === undefined ? Date.now() : requestStartedAt;
+  if (!decisionLocked && typeof CacheService !== "undefined") {
+    var warm = null;
+    try { warm = JSON.parse(CacheService.getScriptCache().get("SMS_LEASE_WARM_V33_" + String(body.lease_token || "")) || "null"); } catch (_) {}
+    if (warm && warm.request_id === String(body.request_id || body.sms_request_id || "") &&
+        warm.message_id === String(body.message_id || "") && warm.phone === normalizePhone_(body.phone) &&
+        warm.lease_token === String(body.lease_token || "") && warm.metadata && warm.metadata.audit_contract === "followup-decision-v1") {
+      // Cached data only selects immutable lexical warm-up. The locked call
+      // still rereads the actual lease, receipt, media, CRM and all controls.
+      prewarmVideoFollowupPronunciationV24_(warm.metadata);
+      var warmLock = LockService.getScriptLock();
+      if (!warmLock.tryLock(3000)) return { ok: false, should_send: false, retryable: true, reason: "Follow-up decision evidence is busy" };
+      var savedMode = VIDEO_PRONUNCIATION_CACHE_ONLY_V24_;
+      VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = true;
+      try { return markPendingSmsSendStartedV10_(body, true, requestStart); }
+      finally { VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = savedMode; warmLock.releaseLock(); }
+    }
+  }
   var match;
   var correlationMode = "exact_text";
   try {
@@ -3007,7 +3034,7 @@ function markPendingSmsSendStartedV10_(body, decisionLocked, requestStartedAt) {
       correlation_mode: correlationMode
     };
   }
-  if (Date.now() - requestStart >= 15000) {
+  if (Date.now() - requestStart >= 20000) {
     return { ok: false, should_send: false, retryable: true, status: "claimed",
       reason: "Send-start deadline reached before authorization; no SMS authorized",
       server_elapsed_ms: Date.now() - requestStart };

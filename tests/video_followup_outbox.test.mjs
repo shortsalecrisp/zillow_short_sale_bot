@@ -358,7 +358,7 @@ test("a slow send-start guard never commits send_started or authorizes an SMS", 
     static now() { return now; }
   };
   const check = h.context.getPendingSmsStaleReason_;
-  h.context.getPendingSmsStaleReason_ = (...args) => { const result = check(...args); now += 16000; return result; };
+  h.context.getPendingSmsStaleReason_ = (...args) => { const result = check(...args); now += 25000; return result; };
   const before = JSON.stringify(h.outbox.data);
   const result = h.context.markPendingSmsSendStartedV10_(claim);
   assert.equal(result.ok, false);
@@ -377,6 +377,31 @@ test("an expired, malformed or nearly expired claim cannot authorize a send", ()
     const before = JSON.stringify(h.outbox.data);
     assert.equal(h.context.markPendingSmsSendStartedV10_(claim).ok, false);
     assert.equal(JSON.stringify(h.outbox.data), before);
+  }
+});
+
+test("claim warm-up cache avoids redundant lookup but cannot authorize changed controls", () => {
+  for (const mutation of ["none", "reply", "phone", "takeover", "optout", "bad cache"]) {
+    const { h, body } = schedulerReceiptFixture();
+    const cache = new Map();
+    h.context.CacheService = { getScriptCache: () => ({ put: (key, value) => cache.set(key, value), get: key => cache.get(key) }) };
+    enqueue(h, body);
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+    assert.equal(cache.size, 1);
+    if (mutation === "reply") { inboundReply(h); h.inbound.data.at(-1)[5] = body.phone; }
+    if (mutation === "phone") h.row[2] = "2125550199";
+    if (mutation === "takeover") h.setTakeover(true);
+    if (mutation === "optout") h.row[10] = "R";
+    if (mutation === "bad cache") {
+      const [key, value] = [...cache.entries()][0];
+      cache.set(key, JSON.stringify({ ...JSON.parse(value), phone: "2125550199" }));
+    }
+    let lookups = 0;
+    const find = h.context.findLeasedPendingSmsRow_;
+    h.context.findLeasedPendingSmsRow_ = (...args) => { lookups++; return find(...args); };
+    const result = h.context.markPendingSmsSendStartedV10_(claim);
+    assert.equal(result.ok, ["none", "bad cache"].includes(mutation), mutation);
+    assert.equal(lookups, mutation === "bad cache" ? 2 : 1, mutation);
   }
 });
 
