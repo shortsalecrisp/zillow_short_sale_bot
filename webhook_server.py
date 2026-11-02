@@ -9509,6 +9509,27 @@ async def internal_review_followup_sms(request: Request):
 @app.post("/internal/reconcile-followup-sms")
 async def internal_reconcile_followup_sms(request: Request):
     """Evaluate a bounded recovery cohort through the unchanged scheduler policy."""
+    return await _evaluate_followup_recovery(request)
+
+
+@app.post("/internal/reconcile-text-followup-sms")
+async def internal_reconcile_text_followup_sms(request: Request):
+    """Receipt-pinned ordinary text only; never select, prepare or retry media."""
+    return await _evaluate_followup_recovery(request, text_only=True)
+
+
+@app.get("/internal/text-followup-policy")
+async def internal_text_followup_policy(request: Request):
+    """Non-secret runtime proof of the deployed text-only safety configuration."""
+    _auth_internal_request(request)
+    return {"ordinary_text_only": os.getenv("ORDINARY_TEXT_FOLLOWUPS_ONLY", "false").lower() == "true",
+            "personalized_video_enabled": os.getenv("VIDEO_FOLLOWUP_ENABLED", "false").lower() == "true",
+            "video_generation_enabled": os.getenv("VIDEO_FOLLOWUP_GENERATION_ENABLED", "false").lower() == "true",
+            "video_live_approved": os.getenv("VIDEO_FOLLOWUP_LIVE_APPROVED", "false").lower() == "true",
+            "recovery_requires_pinned_episode": True, "sent": False}
+
+
+async def _evaluate_followup_recovery(request: Request, *, text_only=False):
     _auth_internal_request(request)
     try:
         payload = await request.json()
@@ -9519,6 +9540,8 @@ async def internal_reconcile_followup_sms(request: Request):
             or any(type(row) is not int or not 2 <= row < 9000 for row in rows)):
         raise HTTPException(status_code=400, detail="bounded_rows_required")
     episodes = payload.get("expected_episodes")
+    if text_only and episodes is None:
+        raise HTTPException(status_code=400, detail="exact_expected_episodes_required")
     if episodes is not None:
         if (not isinstance(episodes, list) or len(episodes) != len(rows)
                 or any(not isinstance(e, dict) or set(e) != {"row", "phone", "stable_id", "initial_sent_at"}
@@ -9536,6 +9559,8 @@ async def internal_reconcile_followup_sms(request: Request):
             raise HTTPException(status_code=409, detail="followup_pass_active")
         try:
             options = {"expected_episodes": {e["row"]:e for e in episodes}} if episodes is not None else {}
+            if text_only:
+                options["text_only"] = True
             outcomes = scheduler._follow_up_pass(only_rows=set(rows), recipient_local_hours=True, **options)
         finally:
             scheduler._follow_up_pass_lock.release()

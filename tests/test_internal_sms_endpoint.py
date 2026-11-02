@@ -452,6 +452,42 @@ def test_targeted_followup_recovery_auth_bounds_lock_and_policy(monkeypatch):
         assert client.post(route,headers=headers,json={'rows':[6413],'expected_episodes':bad}).status_code==400
 
 
+def test_pinned_text_recovery_has_no_unpinned_or_video_fallback(monkeypatch):
+    import threading
+    module, _sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
+    scheduler = sys.modules["bot_min"]
+    scheduler._follow_up_pass_lock = threading.Lock()
+    calls = []
+    scheduler._follow_up_pass = lambda **kwargs: calls.append(kwargs) or []
+    client = TestClient(module.app)
+    route = "/internal/reconcile-text-followup-sms"
+    episode = {"row": 6587, "phone": "8573333210", "stable_id": "listing",
+               "initial_sent_at": "2026-11-02T08:04:43.891-05:00"}
+    payload = {"rows": [6587], "expected_episodes": [episode]}
+    headers = {"Authorization": "Bearer secret-token"}
+    assert client.post(route, json=payload).status_code == 403
+    assert client.post(route, headers=headers, json={"rows": [6587]}).status_code == 400
+    assert client.post(route, headers=headers, json={**payload, "expected_episodes": []}).status_code == 400
+    assert client.post(route, headers=headers, json={**payload, "rows": [6587, 6587]}).status_code == 400
+    scheduler._follow_up_pass_lock.acquire()
+    assert client.post(route, headers=headers, json=payload).status_code == 409
+    scheduler._follow_up_pass_lock.release()
+    result = client.post(route, headers=headers, json=payload)
+    assert result.status_code == 200 and result.json()["sent"] is False
+    assert calls == [{"only_rows": {6587}, "recipient_local_hours": True,
+                      "expected_episodes": {6587: episode}, "text_only": True}]
+    assert sender.calls == []
+    assert scheduler._follow_up_pass_lock.acquire(blocking=False)
+    scheduler._follow_up_pass_lock.release()
+    assert client.get("/internal/text-followup-policy").status_code == 403
+    monkeypatch.setenv("ORDINARY_TEXT_FOLLOWUPS_ONLY", "true")
+    for key in ("VIDEO_FOLLOWUP_ENABLED", "VIDEO_FOLLOWUP_GENERATION_ENABLED", "VIDEO_FOLLOWUP_LIVE_APPROVED"):
+        monkeypatch.setenv(key, "false")
+    proof = client.get("/internal/text-followup-policy", headers=headers).json()
+    assert proof["ordinary_text_only"] is True
+    assert proof["personalized_video_enabled"] is proof["video_generation_enabled"] is proof["video_live_approved"] is False
+
+
 def test_owner_confirmed_text_recovery_is_authenticated_exact_and_never_sends_directly(monkeypatch):
     module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
     row = [""] * 28

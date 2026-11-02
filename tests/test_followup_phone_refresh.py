@@ -472,6 +472,70 @@ def _video_followup_sheet_fixture(monkeypatch, *, elapsed_hours, already_followe
                                  posts=posts, video_message=video_message)
 
 
+def _text_only_review(monkeypatch, fixture, status="due_unsent", **overrides):
+    fixture.row[bot_min.COL_STATE] = "NY"
+    item = {"row": 2, "phone": re.sub(r"\D", "", fixture.row[bot_min.COL_PHONE])[-10:],
+            "stable_id": fixture.row[bot_min.COL_ZPID],
+            "initial_sent_at": fixture.row[bot_min.COL_INIT_TS],
+            "status": status, "reason": "test_guard", "initial_contact_readback_verified": True,
+            "current_initial_receipt": {"sent": "receipt-fixture"}}
+    item.update(overrides)
+    monkeypatch.setenv("ORDINARY_TEXT_FOLLOWUPS_ONLY", "true")
+    monkeypatch.setattr(bot_min, "review_followup_delivery", lambda: {"complete": True, "items": [item]})
+    return item
+
+
+@pytest.mark.parametrize("explicit", [True, False])
+def test_text_only_never_prepares_selects_or_audits_video(monkeypatch, explicit):
+    fixture = _video_followup_sheet_fixture(monkeypatch, elapsed_hours=bot_min.FU_HOURS)
+    reviewed = _text_only_review(monkeypatch, fixture)
+    contexts = []
+    marker_writes = []
+    monkeypatch.setattr(bot_min, "mark_followup", lambda *args, **kwargs: marker_writes.append(args))
+    def snapshot(**kwargs):
+        contexts.append(kwargs)
+        assert kwargs["initial_receipt"] == reviewed["current_initial_receipt"]
+        return {**kwargs, "followup_key": "a" * 64,
+                "message_id": "followup-video-" + "a" * 24}
+    monkeypatch.setattr(sys.modules["video_followup"], "snapshot", snapshot, raising=False)
+    bot_min._follow_up_pass(text_only=explicit)
+    assert fixture.prepared == fixture.selected == []
+    assert len(contexts) == len(fixture.posts) == 1
+    body = fixture.posts[0]
+    assert body["video_variant"] == "text" and body["video_job_id"] == ""
+    assert body["reply_text"] == bot_min.SMS_FU_TEMPLATE
+    assert "http" not in body["reply_text"] and "video_speech_proof" not in body
+    assert marker_writes == []
+
+
+@pytest.mark.parametrize("status", ["pending", "blocked", "sent", "deferred"])
+def test_text_only_existing_or_ineligible_attempt_never_enqueues(monkeypatch, status):
+    fixture = _video_followup_sheet_fixture(monkeypatch, elapsed_hours=bot_min.FU_HOURS)
+    _text_only_review(monkeypatch, fixture, status)
+    result = bot_min._follow_up_pass(only_rows={2}, text_only=True)
+    assert result[0]["status"] == status
+    assert fixture.prepared == fixture.selected == fixture.posts == []
+
+
+@pytest.mark.parametrize("changed", [{"phone": "2125559999"}, {"stable_id": "other"},
+                                     {"initial_sent_at": "2026-10-12T15:18:24-04:00"},
+                                     {"initial_contact_readback_verified": False}])
+def test_text_only_changed_or_unproved_episode_never_enqueues(monkeypatch, changed):
+    fixture = _video_followup_sheet_fixture(monkeypatch, elapsed_hours=bot_min.FU_HOURS)
+    _text_only_review(monkeypatch, fixture, **changed)
+    result = bot_min._follow_up_pass(only_rows={2}, text_only=True)
+    assert result[0]["status"] == "blocked"
+    assert fixture.prepared == fixture.selected == fixture.posts == []
+
+
+def test_text_only_incomplete_survey_fails_closed(monkeypatch):
+    fixture = _video_followup_sheet_fixture(monkeypatch, elapsed_hours=bot_min.FU_HOURS)
+    monkeypatch.setattr(bot_min, "review_followup_delivery", lambda: {"complete": False})
+    assert bot_min._follow_up_pass(only_rows={2}, text_only=True) == [
+        {"row": 2, "status": "blocked", "reason": "text_review_incomplete"}]
+    assert fixture.prepared == fixture.selected == fixture.posts == []
+
+
 def test_video_preparation_reads_stable_id_from_actual_requested_sheet_range(monkeypatch):
     fixture = _video_followup_sheet_fixture(monkeypatch, elapsed_hours=1)
 
