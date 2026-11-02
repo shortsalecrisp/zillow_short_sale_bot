@@ -251,6 +251,7 @@ function handleUnifiedSmsPost_(e) {
           message_id: String(body.message_id || ""), ok: sendStartResult.ok === true,
           status: sendStartResult.status || "", retryable: sendStartResult.retryable === true,
           reason: sendStartResult.reason || "", server_elapsed_ms: Date.now() - smsRequestStartedAt,
+          cached_warmup_used: sendStartResult.cached_warmup_used === true,
           correlation_mode: sendStartResult.correlation_mode || ""
         });
       } catch (_) {}
