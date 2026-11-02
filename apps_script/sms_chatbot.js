@@ -7052,6 +7052,8 @@ function sendHandoffEmail_(data) {
   const toEmail = props.getProperty("HANDOFF_EMAIL") || "yoni.kutler@ygkutler.com";
   const fullName = getHandoffDisplayName_(data);
   const rawHandoffType = data.handoff_type || "MANUAL FOLLOW-UP";
+  const isTransportWarning = typeof isSmsTransportOperationalReasonV32_ === "function" &&
+    isSmsTransportOperationalReasonV32_(rawHandoffType);
   const isDeferredHotLead = rawHandoffType === "DEFERRED HOT LEAD";
   const isRepeatedAnswerReview = rawHandoffType === "REPEATED ANSWERED MESSAGE REVIEW";
   const isComplianceLegalNotice = rawHandoffType === "COMPLIANCE / LEGAL NOTICE";
@@ -7060,7 +7062,9 @@ function sendHandoffEmail_(data) {
   const formattedAddress = formatPropertyAddressForEmail_(data);
   const historyText = formatConversationHistory_(data.history || []);
 
-  const subject = isComplianceLegalNotice
+  const subject = isTransportWarning
+    ? `SMS DELIVERY WARNING - ${handoffType} - ${fullName}`
+    : isComplianceLegalNotice
     ? `COMPLIANCE NOTICE - ${fullName}`
     : rawHandoffType === "HUMAN HANDOFF UPDATE"
     ? `LEAD UPDATE 🔔 - ${fullName}`
@@ -7068,7 +7072,9 @@ function sendHandoffEmail_(data) {
     ? `SMS REVIEW - Repeated answered question - ${fullName}`
     : `NEW LEAD 🔥 - ${handoffType} - ${fullName}`;
 
-  const actionLine = isComplianceLegalNotice
+  const actionLine = isTransportWarning
+    ? "This is an SMS transport exception, not evidence of agent interest. Delivery is not confirmed. Do not resend blindly; reconcile the original attempt. No new human-takeover hold was created by this operational notice."
+    : isComplianceLegalNotice
     ? "The recipient opted out and then sent a regulatory or legal notice. Do not reply from the bot or restart outreach. Preserve the message and review it as a compliance matter."
     : rawHandoffType === "HUMAN HANDOFF UPDATE"
     ? "A human-owned conversation has new scheduling or file details. Review the latest message and continue the manual follow-up; the bot did not reply."
@@ -7087,8 +7093,8 @@ Phone: ${formattedPhone}
 Email: ${data.email || ""}
 Address: ${formattedAddress}
 
-Last message received:
-${data.last_message || ""}
+${isTransportWarning ? "Outgoing SMS awaiting confirmation:" : "Last message received:"}
+${data.last_message || ""}${isTransportWarning ? `\n\nOutbox request: ${data.outbox_request_id || "unknown"}\nMessage ID: ${data.outbox_message_id || "unknown"}\nRecorded status: ${data.outbox_status || "unknown"}` : ""}
 
 Full Convo:
 ${historyText}

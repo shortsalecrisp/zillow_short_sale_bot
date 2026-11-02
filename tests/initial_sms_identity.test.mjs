@@ -64,8 +64,13 @@ function harness(options = {}) {
       },
     };
   }
+  const fixtureNow = Date.parse("2026-10-15T19:00:00Z");
+  class FixtureDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [fixtureNow])); }
+    static now() { return fixtureNow; }
+  }
   const context = {
-    Date, JSON, String, Number, Object, Array, Math, isFinite,
+    Date: FixtureDate, JSON, String, Number, Object, Array, Math, isFinite,
     normalizePhone_: (value) => String(value ?? "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, ""),
     normalizeWhitespace_: (value) => String(value ?? "").trim().replace(/\s+/g, " "),
     getSheet_: () => leads,
