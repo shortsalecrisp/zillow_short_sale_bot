@@ -13865,10 +13865,16 @@ def review_followup_delivery():
 def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episodes=None, text_only=False):
     outcomes = {row: {"row": row, "status": "blocked", "reason": "initial_timestamp_missing_or_unreadable"}
                 for row in (only_rows or [])}
+    text_only = text_only or os.getenv("ORDINARY_TEXT_FOLLOWUPS_ONLY", "false").lower() == "true"
+    recipient_local_hours = recipient_local_hours or text_only
+    LOG.info("follow-up: using bounded init_ts scan path")
+    now = datetime.now(tz=SCHEDULER_TZ)
+    if recipient_local_hours and (now.weekday() >= 5 or not 8 <= now.hour < 20):
+        for item in outcomes.values():
+            item.update(status="deferred", reason="weekday_business_window")
+        return list(outcomes.values())
     text_review = {}
-    if text_only or os.getenv("ORDINARY_TEXT_FOLLOWUPS_ONLY", "false").lower() == "true":
-        text_only = True
-        recipient_local_hours = True
+    if text_only:
         # A text fallback is not permission to reselect a frozen video or to
         # create a second request. Require positive current-phone receipt proof
         # and inventory every existing attempt before the ordinary final guards.
@@ -13878,12 +13884,6 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episod
                     for row in (only_rows or [0])]
         text_review = {item["row"]: item for item in
                        survey.get("items", []) + survey.get("verified_sent", [])}
-    LOG.info("follow-up: using bounded init_ts scan path")
-    now = datetime.now(tz=SCHEDULER_TZ)
-    if recipient_local_hours and (now.weekday() >= 5 or not 8 <= now.hour < 20):
-        for item in outcomes.values():
-            item.update(status="deferred", reason="weekday_business_window")
-        return list(outcomes.values())
     max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
     if max_row <= 1:
         return list(outcomes.values())
@@ -14067,6 +14067,10 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episod
                 continue
             if reviewed.get("initial_contact_readback_verified") is not True:
                 outcome["reason"] = "current_initial_receipt_unverified"
+                continue
+            receipt_sent = _parse_sheet_datetime(reviewed.get("current_initial_receipt", {}).get("sent_at"))
+            if receipt_sent is None or receipt_sent < _parse_sheet_datetime("2026-10-28T23:49:59Z"):
+                outcome["reason"] = "historical_text_recovery_owner_review_required"
                 continue
             if (reviewed.get("phone") != outcome["phone"]
                     or reviewed.get("stable_id") != outcome["stable_id"]

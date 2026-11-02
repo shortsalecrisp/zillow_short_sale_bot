@@ -4,6 +4,9 @@
 text-only. Set `VIDEO_FOLLOWUP_ENABLED`, `VIDEO_FOLLOWUP_GENERATION_ENABLED` and
 `VIDEO_FOLLOWUP_LIVE_APPROVED` to false while personalized videos are paused.
 No timer, cohort expansion, spending increase or safety override is introduced.
+Automatic text recovery retains the standing prospective boundary: the exact
+initial receipt must be sent at/after 2026-10-28T23:49:59Z. Older historical
+episodes remain owner review, not a new backlog campaign.
 
 The authenticated `POST /internal/reconcile-text-followup-sms` accepts 1–20 rows
 and mandatory `expected_episodes` containing exactly row, ten-digit phone,

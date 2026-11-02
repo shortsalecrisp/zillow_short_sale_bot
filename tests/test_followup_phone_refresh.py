@@ -474,11 +474,13 @@ def _video_followup_sheet_fixture(monkeypatch, *, elapsed_hours, already_followe
 
 def _text_only_review(monkeypatch, fixture, status="due_unsent", **overrides):
     fixture.row[bot_min.COL_STATE] = "NY"
+    fixture.row[bot_min.COL_INIT_TS] = "2026-10-30T10:00:00-04:00"
+    fixture.service.values_api.init_scan_value = fixture.row[bot_min.COL_INIT_TS]
     item = {"row": 2, "phone": re.sub(r"\D", "", fixture.row[bot_min.COL_PHONE])[-10:],
             "stable_id": fixture.row[bot_min.COL_ZPID],
             "initial_sent_at": fixture.row[bot_min.COL_INIT_TS],
             "status": status, "reason": "test_guard", "initial_contact_readback_verified": True,
-            "current_initial_receipt": {"sent": "receipt-fixture"}}
+            "current_initial_receipt": {"sent_at": "2026-10-30T14:00:01.000Z"}}
     item.update(overrides)
     monkeypatch.setenv("ORDINARY_TEXT_FOLLOWUPS_ONLY", "true")
     monkeypatch.setattr(bot_min, "review_followup_delivery", lambda: {"complete": True, "items": [item]})
@@ -533,6 +535,14 @@ def test_text_only_incomplete_survey_fails_closed(monkeypatch):
     monkeypatch.setattr(bot_min, "review_followup_delivery", lambda: {"complete": False})
     assert bot_min._follow_up_pass(only_rows={2}, text_only=True) == [
         {"row": 2, "status": "blocked", "reason": "text_review_incomplete"}]
+    assert fixture.prepared == fixture.selected == fixture.posts == []
+
+
+def test_text_only_does_not_launch_historical_backlog(monkeypatch):
+    fixture = _video_followup_sheet_fixture(monkeypatch, elapsed_hours=bot_min.FU_HOURS)
+    _text_only_review(monkeypatch, fixture, current_initial_receipt={"sent_at": "2026-10-27T14:00:01Z"})
+    result = bot_min._follow_up_pass(only_rows={2}, text_only=True)
+    assert result[0]["reason"] == "historical_text_recovery_owner_review_required"
     assert fixture.prepared == fixture.selected == fixture.posts == []
 
 
