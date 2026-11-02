@@ -476,6 +476,21 @@ test("explicit Android failure cannot create a third owner-recovery SMS attempt"
   assert.equal(w.h.context.requeuePendingSmsSendAfterFailureV10_(claim).status, "failed");
 });
 
+test("expired or requeued owner recovery cannot acquire a third claim", () => {
+  for (const state of ["claimed", "queued"]) {
+    const w = ownerRecoveryFixture();
+    assert.equal(w.recover().ok, true);
+    const claim = w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+    assert.equal(claim.attempts, 2);
+    const pending = w.h.outbox.data.at(-1);
+    pending[1] = state;
+    pending[11] = new Date(w.now - 1);
+    assert.equal(w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" }).should_send, false);
+    assert.equal(pending[1], "failed");
+    assert.equal(pending[9], 2);
+  }
+});
+
 test("current-episode receipt cannot be replaced by an older receipt plus current H and W", () => {
   const h = harness({ initialProof: false });
   initialReceipt(h, "2026-10-12T13:00:00Z");

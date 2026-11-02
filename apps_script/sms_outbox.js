@@ -2776,6 +2776,12 @@ function claimPendingSmsSendV10_(body) {
       if (!eligible) continue;
 
       var sheetRow = i + 2;
+      var recovery = parseVideoFollowupMetadataV19_(rows[i]);
+      if (recovery && recovery.owner_text_recovery && Number(rows[i][9]) >= 2) {
+        sheet.getRange(sheetRow, 2).setValue("failed");
+        sheet.getRange(sheetRow, 16).setValue("Owner-authorized recovery claim exhausted without a send receipt; manual reconciliation required");
+        continue;
+      }
       var initialWindow = initialSmsPendingWindowDecisionV27_(rows[i], new Date(now));
       if (initialWindow && !initialWindow.eligible) {
         rows[i] = deferInitialSmsPendingRowV27_(sheet, sheetRow, rows[i], initialWindow);
@@ -3003,10 +3009,19 @@ function findLeasedPendingSmsRow_(body, allowedStatuses) {
   var sheet = ss.getSheetByName("sms_pending_sends");
   if (!sheet || sheet.getLastRow() < 2) return { ok: false, reason: "No pending-send ledger is available" };
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
-  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
   var requestId = String(body && (body.request_id || body.sms_request_id) || "").trim();
   var messageId = String(body && body.message_id || "").trim();
   var leaseToken = String(body && body.lease_token || "").trim();
+  if (!leaseToken) return { ok: false, reason: "Exact lease token is required" };
+  var count = sheet.getLastRow();
+  var tokens = sheet.getRange(2, 11, count - 1, 1).getValues();
+  var positions = [];
+  tokens.forEach(function(entry, index) { if (String(entry[0] || "") === leaseToken) positions.push(index + 2); });
+  if (positions.length !== 1) return { ok: false, reason: "Lease is missing or ambiguous" };
+  var rows = [sheet.getRange(positions[0], 1, 1, SMS_PENDING_SEND_HEADERS_.length).getValues()[0]];
+  if (sheet.getLastRow() !== count || String(rows[0][10] || "") !== leaseToken) {
+    return { ok: false, reason: "Lease changed during lookup" };
+  }
   var phone = normalizePhone_(body && body.phone || "");
   var replyText = normalizePendingSmsReply_(body && body.reply_text || "");
   for (var i = rows.length - 1; i >= 0; i--) {
@@ -3016,7 +3031,7 @@ function findLeasedPendingSmsRow_(body, allowedStatuses) {
     if (!leaseToken || String(rows[i][10] || "") !== leaseToken) continue;
     if (phone && normalizePhone_(rows[i][4]) !== phone) continue;
     if (replyText && normalizePendingSmsReply_(rows[i][5]) !== replyText) continue;
-    return { ok: true, sheet: sheet, row: i + 2, values: rows[i] };
+    return { ok: true, sheet: sheet, row: positions[0], values: rows[i] };
   }
   return { ok: false, reason: "No exact leased send matched the callback" };
 }
