@@ -397,8 +397,8 @@ test("claim warm-up cache avoids redundant lookup but cannot authorize changed c
       cache.set(key, JSON.stringify({ ...JSON.parse(value), phone: "2125550199" }));
     }
     let lookups = 0;
-    const find = h.context.findLeasedPendingSmsRow_;
-    h.context.findLeasedPendingSmsRow_ = (...args) => { lookups++; return find(...args); };
+    const find = h.context.findPendingSmsRowByExactLeaseIdentityV10_;
+    h.context.findPendingSmsRowByExactLeaseIdentityV10_ = (...args) => { lookups++; return find(...args); };
     const result = h.context.markPendingSmsSendStartedV10_(claim);
     assert.equal(result.ok, ["none", "bad cache"].includes(mutation), mutation);
     assert.equal(lookups, mutation === "bad cache" ? 2 : 1, mutation);
@@ -574,6 +574,66 @@ test("v2 preauthorization lease expiry preserves monotone attempts but never rep
   assert.equal(w.row[1], "failed");
   assert.equal(w.row[9], 4);
 });
+
+test("send-start reuses only the complete raw outbox snapshot read freshly under its lock", () => {
+  const { h, body } = schedulerReceiptFixture(true);
+  const cache = new Map();
+  h.context.CacheService = { getScriptCache: () => ({ put: (k, v) => cache.set(k, v), get: k => cache.get(k) }) };
+  enqueue(h, body);
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+  const getRange = h.outbox.getRange;
+  let fullReads = 0, indexReads = 0;
+  h.outbox.getRange = (...args) => {
+    if (args[0] === 2 && args[1] === 1 && args[3] === 19) fullReads++;
+    if (args[0] === 2 && args[1] === 2 && args[3] === 4) indexReads++;
+    return getRange(...args);
+  };
+  assert.equal(h.context.markPendingSmsSendStartedV10_(claim).ok, true);
+  assert.equal(fullReads, 1);
+  assert.equal(indexReads, 0);
+});
+
+for (const change of ["none", "reply", "takeover", "optout", "phone", "authorized", "already renewed"]) {
+  test(`one bounded preauthorization renewal retains history and guards: ${change}`, () => {
+    const w = ownerDeliveryFixture();
+    assert.equal(w.recover().ok, true);
+    const claim = w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+    if (change === "authorized") assert.equal(w.h.context.markPendingSmsSendStartedV10_(claim).ok, true);
+    const old = JSON.parse(w.row[6].replace(/^__scheduled_followup__:/, ""));
+    const nextNow = w.now + 31 * 60 * 1000;
+    w.h.context.Date = class extends Date {
+      constructor(...args) { super(...(args.length ? args : [nextNow])); }
+      static now() { return nextNow; }
+    };
+    w.row[1] = "failed";
+    [10, 11, 12, 13, 18].forEach(index => { w.row[index] = ""; });
+    if (change === "reply") { inboundReply(w.h); w.h.inbound.data.at(-1)[5] = w.body.phone; }
+    if (change === "takeover") w.h.setTakeover(true);
+    if (change === "optout") w.h.row[10] = "R";
+    if (change === "phone") w.h.row[2] = "2125550199";
+    if (change === "already renewed") {
+      old.owner_delivery_recovery.renewal_count = 1;
+      w.row[6] = "__scheduled_followup__:" + JSON.stringify(old);
+    }
+    Object.assign(w.confirmation, { renew_unstarted_recovery: true, expected_status: "failed", expected_attempts: 2,
+      expected_lease_token: "", issued_at: new Date(nextNow).toISOString(), expires_at: new Date(nextNow + 1800000).toISOString(),
+      expected_metadata_sha256: w.h.context.videoDecisionDigestV26_(w.row[6]) });
+    const before = JSON.stringify([w.h.leads.data, w.h.outbox.data]);
+    const result = w.h.context.recoverOwnerConfirmedFollowupV33_(w.h.outbox, w.position, w.row,
+      w.h.outbox.data.slice(1), { owner_confirmation: w.confirmation }, nextNow);
+    assert.equal(result.ok, change === "none");
+    if (change !== "none") assert.equal(JSON.stringify([w.h.leads.data, w.h.outbox.data]), before);
+    else {
+      const current = JSON.parse(w.row[6].replace(/^__scheduled_followup__:/, ""));
+      assert.deepEqual(current.decision_evidence, old.decision_evidence);
+      assert.equal(current.owner_delivery_recovery.maximum_claim_attempts, old.owner_delivery_recovery.maximum_claim_attempts);
+      assert.equal(current.owner_delivery_recovery.maximum_replacement_send_authorizations, 1);
+      assert.equal(current.owner_delivery_recovery.first_authorized_at, old.owner_delivery_recovery.authorized_at);
+      assert.equal(w.row[9], 2);
+      assert.equal(w.row[1], "queued");
+    }
+  });
+}
 
 test("a new explicit v2 approval preserves the exhausted v1 claim history without decrementing attempts", () => {
   const w = ownerRecoveryFixture();

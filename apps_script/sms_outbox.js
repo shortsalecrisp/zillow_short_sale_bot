@@ -2960,10 +2960,11 @@ function markPendingSmsSendStartedV10_(body, decisionLocked, requestStartedAt) {
   var match;
   var correlationMode = "exact_text";
   try {
-    match = findLeasedPendingSmsRow_(body, ["claimed", "send_started"]);
+    match = findPendingSmsRowByExactLeaseIdentityV10_(body, ["claimed", "send_started"]);
+    correlationMode = "exact_lease_identity";
     if (!match.ok) {
-      match = findPendingSmsRowByExactLeaseIdentityV10_(body, ["claimed", "send_started"]);
-      correlationMode = "exact_lease_identity";
+      match = findLeasedPendingSmsRow_(body, ["claimed", "send_started"]);
+      correlationMode = "exact_text";
     }
   } catch (err) {
     if (/^followup-video-/.test(String(body && body.message_id || ""))) {
@@ -3000,7 +3001,7 @@ function markPendingSmsSendStartedV10_(body, decisionLocked, requestStartedAt) {
     finally { VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = previousCacheOnly; decisionLock.releaseLock(); }
   }
   var startDecision = {};
-  var staleReason = getPendingSmsStaleReason_(match.values, startDecision);
+  var staleReason = getPendingSmsStaleReason_(match.values, startDecision, decisionLocked ? match.pendingRows : undefined);
   if (staleReason === "Personalized follow-up eligibility temporarily unavailable") {
     return { ok: false, should_send: false, retryable: true, status: String(match.values[1] || ""), reason: staleReason };
   }
@@ -3146,6 +3147,7 @@ function findPendingSmsRowByExactLeaseIdentityV10_(body, allowedStatuses) {
     sheet: sheet,
     row: rowIndex + 2,
     values: rows[rowIndex],
+    pendingRows: rows,
     correlation_mode: "exact_lease_identity"
   };
 }
@@ -3322,7 +3324,7 @@ function shouldCarryOutstandingSpecificFeeReplyV15_(replyText, originalInboundTe
     (typeof isPunctuationCorrectionFragment_ === "function" && isPunctuationCorrectionFragment_(currentInboundText));
 }
 
-function getPendingSmsStaleReason_(outboxRow, decisionCapture) {
+function getPendingSmsStaleReason_(outboxRow, decisionCapture, lockedPendingRows) {
   var sourceMuteReason = ownerSmsSourceMuteReasonV28_(outboxRow && outboxRow[4]);
   if (sourceMuteReason) return sourceMuteReason;
   if (isOwnerVideoProbeRowV20_(outboxRow)) return ownerVideoProbeStaleReasonV20_(outboxRow, false);
@@ -3345,7 +3347,7 @@ function getPendingSmsStaleReason_(outboxRow, decisionCapture) {
     if (!hasValidVideoFollowupSpeechProofV21_(videoBody, videoMetadata)) return "Personalized follow-up eligibility temporarily unavailable";
     if (decisionCapture) decisionCapture.audited = videoMetadata.audit_contract === "followup-decision-v1";
     var videoEligibility = checkVideoFollowupEligibilityV19_(videoBody, {
-      ignoreOwnKey: true, captureDecision: !!(decisionCapture && decisionCapture.audited)
+      ignoreOwnKey: true, captureDecision: !!(decisionCapture && decisionCapture.audited), pendingRows: lockedPendingRows
     });
     if (decisionCapture) decisionCapture.eligibility = videoEligibility;
     if (videoEligibility.retryable) return "Personalized follow-up eligibility temporarily unavailable";
@@ -3767,6 +3769,54 @@ function recoverySendAuthorizationExistsV33_(metadata) {
   return events.slice(recovery.original_event_count).some(function(event) { return event.stage === "send_start"; });
 }
 
+function renewUnstartedOwnerRecoveryV35_(sheet, sheetRow, row, rows, body, now) {
+  var confirmation = body && body.owner_confirmation;
+  var metadata = parseVideoFollowupMetadataV19_(row);
+  var recovery = metadata && metadata.owner_delivery_recovery;
+  function deny(reason) { return { ok: false, reason: reason, pending_row: sheetRow }; }
+  if (!recovery || !validOwnerDeliveryRecoveryV33_(metadata) || recovery.renewal_count ||
+      !confirmation || confirmation.authority_id !== recovery.authority_id ||
+      confirmation.confirmed_absent_on_handset !== true ||
+      String(row[1]) !== confirmation.expected_status || Number(row[9]) !== confirmation.expected_attempts ||
+      String(row[2]) !== confirmation.request_id || String(row[3]) !== confirmation.message_id ||
+      String(row[5]) !== confirmation.expected_reply_text ||
+      metadata.stable_id !== confirmation.stable_id ||
+      String(row[10] || "") !== confirmation.expected_lease_token || row[13] || row[14] ||
+      videoDecisionDigestV26_(String(row[6])) !== confirmation.expected_metadata_sha256 ||
+      recoverySendAuthorizationExistsV33_(metadata)) return deny("Recovery cannot renew an authorized, changed or already-renewed attempt");
+  var issued = Date.parse(confirmation.issued_at), expires = Date.parse(confirmation.expires_at);
+  if (!isFinite(issued) || !isFinite(expires) || issued > now + 30000 || expires <= now ||
+      expires - issued > 30 * 60 * 1000 || expires <= issued ||
+      now - Date.parse(recovery.authorized_at) > 60 * 60 * 1000 ||
+      ["queued", "claimed", "failed"].indexOf(String(row[1])) === -1 ||
+      Number(row[9]) >= recovery.maximum_claim_attempts) return deny("Recovery renewal window or claim limit exhausted");
+  var localDay = Number(Utilities.formatDate(new Date(now), "America/New_York", "u"));
+  var resolved = resolveVideoFollowupIdentityV19_(normalizePhone_(row[4]), metadata, rows);
+  if (!resolved.ok) return deny(resolved.reason);
+  if (localDay < 1 || localDay > 5 || !initialSmsLocalWindowDecisionV27_("America/New_York", new Date(now)).eligible ||
+      !initialSmsLocalWindowDecisionV27_(initialSmsRecipientTimeZoneForStateV27_(resolved.values[6]), new Date(now)).eligible) return deny("Outside permitted recovery hours");
+  recovery.previous_authority_sha256 = videoDecisionDigestV26_(Object.assign({}, recovery));
+  recovery.first_authorized_at = recovery.authorized_at;
+  recovery.previous_expires_at = recovery.expires_at;
+  recovery.authorized_at = new Date(now).toISOString();
+  recovery.expires_at = confirmation.expires_at;
+  recovery.renewal_count = 1;
+  recovery.renewal_reason = "Backend repair consumed window; no replacement send authorization exists";
+  var updated = row.slice();
+  updated[6] = "__scheduled_followup__:" + JSON.stringify(metadata);
+  var stale = getPendingSmsStaleReason_(updated);
+  if (stale) return deny(stale);
+  if (String(row[1]) !== "claimed" || new Date(row[11]).getTime() <= now) {
+    updated[1] = "queued";
+    updated[8] = new Date(now);
+    [10, 11, 12, 13, 18].forEach(function(column) { updated[column] = ""; });
+  }
+  updated[15] = "Same approved recovery window extended once before any send authorization; claims and history preserved";
+  persistVideoDecisionTransitionV26_(sheet, sheetRow, updated);
+  return { ok: true, renewed: true, status: updated[1], pending_row: sheetRow,
+    request_id: String(row[2]), expires_at: recovery.expires_at, additional_send_authorizations: 0 };
+}
+
 function recoverOwnerConfirmedFollowupV33_(sheet, sheetRow, row, rows, body, now) {
   var confirmation = body && body.owner_confirmation;
   var metadata = parseVideoFollowupMetadataV19_(row);
@@ -3775,6 +3825,9 @@ function recoverOwnerConfirmedFollowupV33_(sheet, sheetRow, row, rows, body, now
       confirmation.confirmed_absent_on_handset !== true ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(confirmation.authority_id || ""))) return deny("Exact owner confirmation required");
   if (metadata && metadata.owner_delivery_recovery) {
+    if (confirmation.renew_unstarted_recovery === true) {
+      return renewUnstartedOwnerRecoveryV35_(sheet, sheetRow, row, rows, body, now);
+    }
     return metadata.owner_delivery_recovery.authority_id === confirmation.authority_id
       ? { ok: String(row[1]) !== "owner_recovery_prepared", duplicate: true,
           needs_reconciliation: String(row[1]) === "owner_recovery_prepared", status: String(row[1]), pending_row: sheetRow }
