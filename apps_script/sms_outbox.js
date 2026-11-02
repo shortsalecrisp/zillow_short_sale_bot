@@ -1819,7 +1819,11 @@ function checkVideoFollowupEligibilityV19_(body, options) {
     }
     return result;
   } catch (_) {
-    return { ok: false, eligible: false, retryable: true, reason: "Personalized follow-up eligibility could not be verified" };
+    var diagnostic = String(_ && _.message || _ || "Unknown error")
+      .replace(/https?:\/\/\S+/gi, "[url]").replace(/[A-Za-z0-9_-]{32,}/g, "[identifier]");
+    if (/token|secret|bearer|authorization/i.test(diagnostic)) diagnostic = "[redacted error]";
+    return { ok: false, eligible: false, retryable: true, reason: "Personalized follow-up eligibility could not be verified",
+      diagnostic_code: String(_ && _.name || "Error"), diagnostic_detail: diagnostic.slice(0, 200) };
   }
 }
 
@@ -3344,7 +3348,10 @@ function getPendingSmsStaleReason_(outboxRow, decisionCapture, lockedPendingRows
     var videoBody = Object.assign({}, videoMetadata, {
       phone: phone, message_id: messageId, request_id: String(outboxRow[2] || ""), reply_text: String(outboxRow[5] || "")
     });
-    if (!hasValidVideoFollowupSpeechProofV21_(videoBody, videoMetadata)) return "Personalized follow-up eligibility temporarily unavailable";
+    if (!hasValidVideoFollowupSpeechProofV21_(videoBody, videoMetadata)) {
+      if (decisionCapture) decisionCapture.failure_stage = "stored_media_proof";
+      return "Personalized follow-up eligibility temporarily unavailable";
+    }
     if (decisionCapture) decisionCapture.audited = videoMetadata.audit_contract === "followup-decision-v1";
     var videoEligibility = checkVideoFollowupEligibilityV19_(videoBody, {
       ignoreOwnKey: true, captureDecision: !!(decisionCapture && decisionCapture.audited), pendingRows: lockedPendingRows
@@ -3825,6 +3832,12 @@ function recoverOwnerConfirmedFollowupV33_(sheet, sheetRow, row, rows, body, now
       confirmation.confirmed_absent_on_handset !== true ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(confirmation.authority_id || ""))) return deny("Exact owner confirmation required");
   if (metadata && metadata.owner_delivery_recovery) {
+    if (confirmation.diagnostics_only === true && metadata.owner_delivery_recovery.authority_id === confirmation.authority_id) {
+      var diagnosticDecision = {};
+      var diagnosticReason = getPendingSmsStaleReason_(row, diagnosticDecision);
+      return { ok: true, read_only: true, status: String(row[1]), pending_row: sheetRow,
+        eligible: !diagnosticReason, reason: diagnosticReason, details: diagnosticDecision };
+    }
     if (confirmation.renew_unstarted_recovery === true) {
       return renewUnstartedOwnerRecoveryV35_(sheet, sheetRow, row, rows, body, now);
     }
