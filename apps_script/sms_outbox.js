@@ -3552,6 +3552,7 @@ function getTaskerTransportHealthV12_(nowOverride) {
 }
 
 function monitorTaskerTransportHealthV12_() {
+  try { if (typeof flushSendStartDiagnosticsV35_ === "function") flushSendStartDiagnosticsV35_(); } catch (_) {}
   var health = getTaskerTransportHealthV12_();
   var props = PropertiesService.getScriptProperties();
   var priorState = props.getProperty("SMS_TASKER_TRANSPORT_ALERT_STATE") || "unknown";

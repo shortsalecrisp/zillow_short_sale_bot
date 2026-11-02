@@ -106,7 +106,7 @@ function handleUnifiedSmsPost_(e) {
     }
     // Inbound messages write their own debug row only after the durable queue
     // append. Avoid all Spreadsheet and ScriptApp work before that boundary.
-    if (action !== "incoming_sms" && action !== "enqueue_incoming_sms") {
+    if (action !== "incoming_sms" && action !== "enqueue_incoming_sms" && action !== "send_started" && action !== "reply_sent") {
       try {
         if (typeof appendSmsDebugLog_ === "function") {
           appendSmsDebugLog_("doPost_start", {
@@ -246,7 +246,7 @@ function handleUnifiedSmsPost_(e) {
       recordTaskerTransportActivityV12_("send_started", body);
       var sendStartResult = markPendingSmsSendStartedV10_(body, false, smsRequestStartedAt);
       try {
-        appendSmsDebugLog_("send_started_result", {
+        queueSendStartDiagnosticV35_({
           request_id: String(body.request_id || body.sms_request_id || ""), phone: normalizePhone_(body.phone),
           message_id: String(body.message_id || ""), ok: sendStartResult.ok === true,
           status: sendStartResult.status || "", retryable: sendStartResult.retryable === true,
@@ -630,6 +630,58 @@ function appendSmsDebugLog_(stage, data) {
     data.lead_status || "",
     maskSensitiveDebugText_(safeJsonStringify_(data))
   ]);
+}
+
+// Diagnostic Sheet appends can exceed the handset's 30-second HTTP deadline
+// after authorization has already committed. Keep the actual locked checks and
+// immutable send-start journal unchanged; persist only this non-authorizing
+// diagnostic in ScriptProperties and drain it on the existing health monitor.
+function queueSendStartDiagnosticV35_(data) {
+  var safe = {};
+  ["request_id", "phone", "message_id", "ok", "status", "retryable", "reason",
+    "server_elapsed_ms", "cached_warmup_used", "correlation_mode"].forEach(function(key) {
+      if (Object.prototype.hasOwnProperty.call(data, key)) safe[key] = data[key];
+    });
+  var entry = { logged_at: new Date().toISOString(), data: safe };
+  var encoded = JSON.stringify(entry);
+  if (encoded.length > 3000) throw new Error("Send-start diagnostic exceeds bounded size");
+  PropertiesService.getScriptProperties().setProperty(
+    "SMS_SENDSTART_DIAGNOSTIC_V35_" + Utilities.getUuid(), encoded);
+}
+
+function flushSendStartDiagnosticsV35_() {
+  // Separate diagnostic serialization must not hold the send-authorization lock.
+  var lock = LockService.getUserLock();
+  if (!lock.tryLock(100)) return 0;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var values = props.getProperties();
+    var keys = Object.keys(values).filter(function(key) {
+      return key.indexOf("SMS_SENDSTART_DIAGNOSTIC_V35_") === 0;
+    }).sort().slice(0, 10);
+    if (!keys.length) return 0;
+    var rows = keys.map(function(key) {
+      var entry = JSON.parse(values[key]);
+      var data = entry.data;
+      if (!entry.logged_at || !data || !data.request_id) throw new Error("Invalid queued send-start diagnostic");
+      return [entry.logged_at, "send_started_result", data.request_id, data.phone || "",
+        "", "", "", data.reason || "", "", maskSensitiveDebugText_(JSON.stringify(data))];
+    });
+    var ss = getSmsSpreadsheet_();
+    var sheet = ss.getSheetByName("sms_debug_log") || ss.insertSheet("sms_debug_log");
+    var headers = ["logged_at", "stage", "request_id", "phone", "message", "should_reply", "reply_text", "reason", "lead_status", "details_json"];
+    if (!sheet.getLastRow()) sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    else if (sheet.getRange(1, 1, 1, headers.length).getValues()[0].join("|") !== headers.join("|")) {
+      throw new Error("SMS diagnostic header changed; queued evidence retained");
+    }
+    // appendRow preserves unrelated concurrent debug appends. A failed append
+    // retains its property; diagnostic duplicates are safer than dropping it.
+    rows.forEach(function(row, index) {
+      sheet.appendRow(row);
+      props.deleteProperty(keys[index]);
+    });
+    return keys.length;
+  } finally { lock.releaseLock(); }
 }
 
 // Records a reply before Tasker attempts to send it. This makes a missing
