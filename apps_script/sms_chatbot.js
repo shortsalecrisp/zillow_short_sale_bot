@@ -711,6 +711,11 @@ function handleIncomingSmsCore_(body) {
       [HEADERS.conversation_summary]: "Opt-out / stop request",
       [HEADERS.ai_state]: "done",
       [HEADERS.call_booking_status]: "closed_no_interest",
+      [HEADERS.call_eligible]: "",
+      [HEADERS.call_time_bucket]: "",
+      [HEADERS.call_scheduled_for]: "",
+      [HEADERS.callback_requested]: "no",
+      [HEADERS.callback_time]: "",
       [HEADERS.handoff_flag]: "FALSE",
       [HEADERS.human_override]: "TRUE"
     });
@@ -724,6 +729,54 @@ function handleIncomingSmsCore_(body) {
       handoff_needed: false,
       needs_review: false,
       reason: "Opt-out / stop request"
+    };
+  }
+
+  if (isPriorOptOutConversation_(currentRowObj) && isRegulatoryLegalNoticeSignal_(inboundText)) {
+    const alreadyAlerted = hasPostOptOutLegalNoticeAlert_(currentRowObj);
+    if (!alreadyAlerted) {
+      sendHandoffEmail_({
+        handoff_type: "COMPLIANCE / LEGAL NOTICE",
+        agent_name: currentRowObj[HEADERS.agent_name] || "",
+        last_name: currentRowObj[HEADERS.last_name] || "",
+        initial_text: currentRowObj[HEADERS.initial_text_sent] || "",
+        phone: phoneRaw,
+        email: currentRowObj[HEADERS.email] || "",
+        listing_address: currentRowObj[HEADERS.listing_address] || "",
+        city: currentRowObj[HEADERS.city] || "",
+        state: currentRowObj[HEADERS.state] || "",
+        zip: currentRowObj[HEADERS.zip] || "",
+        last_message: inboundText,
+        history: getHistoryArray_(currentRowObj[HEADERS.history_json])
+      });
+    }
+    updateRowFields_(sheet, row, {
+      [HEADERS.response_status]: inboundText,
+      [HEADERS.mailshake_status]: "R",
+      [HEADERS.conversation_summary]: "Opt-out retained; regulatory/legal notice owner alert recorded",
+      [HEADERS.ai_state]: "done",
+      [HEADERS.call_booking_status]: "closed_no_interest",
+      [HEADERS.call_eligible]: "",
+      [HEADERS.call_time_bucket]: "",
+      [HEADERS.call_scheduled_for]: "",
+      [HEADERS.callback_requested]: "no",
+      [HEADERS.callback_time]: "",
+      [HEADERS.handoff_flag]: "FALSE",
+      [HEADERS.human_override]: "TRUE"
+    });
+    return {
+      ok: true,
+      should_reply: false,
+      reply_text: "",
+      lead_status: "R",
+      conversation_done: true,
+      handoff_needed: !alreadyAlerted,
+      needs_review: false,
+      alert_needed: !alreadyAlerted,
+      handoff_type: alreadyAlerted ? "" : "COMPLIANCE / LEGAL NOTICE",
+      reason: alreadyAlerted
+        ? "Opt-out retained; regulatory/legal notice owner alert already recorded"
+        : "Opt-out retained; regulatory/legal notice owner alert recorded"
     };
   }
 
@@ -2214,6 +2267,19 @@ function isOptOutSignal_(text) {
   ];
 
   return patterns.some(pattern => pattern.test(t));
+}
+
+function isRegulatoryLegalNoticeSignal_(text) {
+  const t = normalizeWhitespace_(String(text || "").toLowerCase());
+  if (!t) return false;
+  const namesLawOrRegulator = /\b(?:tcpa|telephone consumer protection act|can[\s-]*spam(?: act)?|fcc|ftc|federal communications commission|federal trade commission|attorney general)\b/.test(t);
+  const enforcementClaim = /\b(?:violat(?:e|ed|es|ing|ion)|reported?|complaint|filed?|lawsuit|sue|suing|legal action|cease and desist|regulator|regulatory)\b/.test(t);
+  return namesLawOrRegulator && enforcementClaim;
+}
+
+function hasPostOptOutLegalNoticeAlert_(rowObj) {
+  return normalizeWhitespace_(String(rowObj && rowObj[HEADERS.conversation_summary] || ""))
+    .toLowerCase().indexOf("regulatory/legal notice owner alert recorded") !== -1;
 }
 
 function isPaymentOrFeeQuestionSignal_(text) {
@@ -6988,18 +7054,23 @@ function sendHandoffEmail_(data) {
   const rawHandoffType = data.handoff_type || "MANUAL FOLLOW-UP";
   const isDeferredHotLead = rawHandoffType === "DEFERRED HOT LEAD";
   const isRepeatedAnswerReview = rawHandoffType === "REPEATED ANSWERED MESSAGE REVIEW";
+  const isComplianceLegalNotice = rawHandoffType === "COMPLIANCE / LEGAL NOTICE";
   const handoffType = isDeferredHotLead ? "DEFERRED HOT LEAD - NO ACTION NOW" : rawHandoffType;
   const formattedPhone = formatPhoneForEmail_(data.phone);
   const formattedAddress = formatPropertyAddressForEmail_(data);
   const historyText = formatConversationHistory_(data.history || []);
 
-  const subject = rawHandoffType === "HUMAN HANDOFF UPDATE"
+  const subject = isComplianceLegalNotice
+    ? `COMPLIANCE NOTICE - ${fullName}`
+    : rawHandoffType === "HUMAN HANDOFF UPDATE"
     ? `LEAD UPDATE 🔔 - ${fullName}`
     : isRepeatedAnswerReview
     ? `SMS REVIEW - Repeated answered question - ${fullName}`
     : `NEW LEAD 🔥 - ${handoffType} - ${fullName}`;
 
-  const actionLine = rawHandoffType === "HUMAN HANDOFF UPDATE"
+  const actionLine = isComplianceLegalNotice
+    ? "The recipient opted out and then sent a regulatory or legal notice. Do not reply from the bot or restart outreach. Preserve the message and review it as a compliance matter."
+    : rawHandoffType === "HUMAN HANDOFF UPDATE"
     ? "A human-owned conversation has new scheduling or file details. Review the latest message and continue the manual follow-up; the bot did not reply."
     : isRepeatedAnswerReview
     ? "The same question arrived again after a confirmed bot answer. The bot paused this conversation and did not send another reply. Please review the answer and follow up if needed; identical repeats will not send more alerts."

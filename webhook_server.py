@@ -6271,6 +6271,23 @@ def _sms_is_opt_out(value: Any) -> bool:
     return any(re.search(pattern, text) for pattern in patterns)
 
 
+def _sms_is_regulatory_legal_notice(value: Any) -> bool:
+    text = _sms_normalize_whitespace(value).lower()
+    if not text:
+        return False
+    names_law_or_regulator = re.search(
+        r"\b(?:tcpa|telephone consumer protection act|can[\s-]*spam(?: act)?|fcc|ftc|"
+        r"federal communications commission|federal trade commission|attorney general)\b",
+        text,
+    )
+    enforcement_claim = re.search(
+        r"\b(?:violat(?:e|ed|es|ing|ion)|reported?|complaint|filed?|lawsuit|sue|suing|"
+        r"legal action|cease and desist|regulator|regulatory)\b",
+        text,
+    )
+    return bool(names_law_or_regulator and enforcement_claim)
+
+
 def _sms_is_prior_opt_out_conversation(row_obj: Dict[str, str]) -> bool:
     summary = _sms_normalize_whitespace(row_obj.get("conversation_summary") or "").lower()
     response_status = _sms_normalize_whitespace(row_obj.get("response_status") or "")
@@ -6279,6 +6296,12 @@ def _sms_is_prior_opt_out_conversation(row_obj: Dict[str, str]) -> bool:
         and str(row_obj.get("human_override") or "").upper() == "TRUE"
         and ("opt-out" in summary or "stop request" in summary or _sms_is_opt_out(response_status))
     )
+
+
+def _sms_has_post_opt_out_legal_notice_alert(row_obj: Dict[str, str]) -> bool:
+    return "regulatory/legal notice owner alert recorded" in _sms_normalize_whitespace(
+        row_obj.get("conversation_summary") or ""
+    ).lower()
 
 
 def _sms_is_clear_post_opt_out_interest(value: Any) -> bool:
@@ -7803,6 +7826,7 @@ def _sms_fast_decision(
             lead_status="R",
             conversation_done=True,
             block_reply=True,
+            clear_callback=True,
             reason="Opt-out / stop request",
         )
 
@@ -8953,6 +8977,45 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
     )
     _sms_append_history(ws, row_idx, headers, row_obj, {"role": "agent", "text": inbound_text, "ts": received_at})
 
+    if _sms_is_prior_opt_out_conversation(row_obj) and _sms_is_regulatory_legal_notice(inbound_text):
+        already_alerted = _sms_has_post_opt_out_legal_notice_alert(row_obj)
+        _sms_update_row_fields(
+            ws,
+            row_idx,
+            headers,
+            {
+                "response_status": inbound_text,
+                "mailshake_status": "R",
+                "conversation_summary": "Opt-out retained; regulatory/legal notice owner alert recorded",
+                "ai_state": "done",
+                "call_booking_status": "closed_no_interest",
+                "call_eligible": "",
+                "call_time_bucket": "",
+                "call_scheduled_for": "",
+                "callback_requested": "no",
+                "callback_time": "",
+                "handoff_flag": "FALSE",
+                "human_override": "TRUE",
+            },
+        )
+        return _sms_normalize_tasker_payload({
+            "ok": True,
+            "should_reply": False,
+            "reply_text": "",
+            "lead_status": "R",
+            "conversation_done": True,
+            "handoff_needed": not already_alerted,
+            "needs_review": False,
+            "alert_needed": not already_alerted,
+            "handoff_type": "" if already_alerted else "COMPLIANCE / LEGAL NOTICE",
+            "reason": (
+                "Opt-out retained; regulatory/legal notice owner alert already recorded"
+                if already_alerted
+                else "Opt-out retained; regulatory/legal notice owner alert recorded"
+            ),
+            "row": row_idx,
+        })
+
     if _sms_is_prior_opt_out_conversation(row_obj) and _sms_is_clear_post_opt_out_interest(inbound_text):
         already_alerted = _sms_has_post_opt_out_interest_alert(row_obj)
         if not already_alerted:
@@ -9125,6 +9188,11 @@ def _sms_handle_incoming(body: Dict[str, Any], request_id: str) -> Dict[str, Any
         "handoff_flag": "TRUE" if terminal_handoff else "FALSE",
         "human_override": "TRUE" if terminal_handoff else "FALSE",
     }
+    if not preserve_existing_state and _sms_is_opt_out(inbound_text):
+        updates["call_eligible"] = ""
+        updates["call_time_bucket"] = ""
+        updates["call_scheduled_for"] = ""
+        updates["human_override"] = "TRUE"
     callback_time = str(decision.get("callback_time") or "")
     if not preserve_existing_state and updates["call_booking_status"] in {"scheduled_callback", "call_now"}:
         updates["callback_requested"] = "yes"

@@ -2342,6 +2342,77 @@ def test_sms_post_opt_out_interest_alerts_once_without_reply_or_reopening(monkey
     assert sender.calls == []
 
 
+def test_sms_post_opt_out_regulatory_notice_stays_silent_and_routes_compliance(monkeypatch):
+    module, sheet, sender = _import_webhook_server(
+        monkeypatch,
+        sender_result=FakeSendResult(success=True),
+    )
+    sheet.rows[2][29] = "yes"
+    sheet.rows[2][30] = "voice_call_1_due"
+    sheet.rows[2][31] = "2026-11-02T14:15:00Z"
+    sheet.rows[2][37] = "yes"
+    sheet.rows[2][38] = "Tomorrow"
+    client = TestClient(module.app)
+
+    stop = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "STOP",
+            "message_id": "legal-stop-1",
+        },
+    ).json()
+    assert stop["should_reply"] is False
+    assert stop["lead_status"] == "R"
+    assert sheet.rows[2][19] == "TRUE"
+    assert sheet.rows[2][29] == ""
+    assert sheet.rows[2][30] == ""
+    assert sheet.rows[2][31] == ""
+    assert sheet.rows[2][37] == "no"
+    assert sheet.rows[2][38] == ""
+
+    complaint = (
+        "The unsolicited commercial communication has been identified as violating the "
+        "Telephone Consumer Protection Act and has been reported to the FCC and FTC."
+    )
+    notice = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": complaint,
+            "message_id": "legal-stop-2",
+        },
+    ).json()
+    assert notice["should_reply"] is False
+    assert notice["handoff_needed"] is True
+    assert notice["handoff_type"] == "COMPLIANCE / LEGAL NOTICE"
+    assert notice["lead_status"] == "R"
+    assert sheet.rows[2][10] == "R"
+    assert sheet.rows[2][12] == "Opt-out retained; regulatory/legal notice owner alert recorded"
+    assert sheet.rows[2][13] == "done"
+    assert sheet.rows[2][16] == "FALSE"
+    assert sheet.rows[2][19] == "TRUE"
+    assert sender.calls == []
+
+    duplicate = client.post(
+        "/sms-chatbot",
+        data={
+            "token": "secret-token",
+            "action": "incoming_sms",
+            "phone": "+19542357723",
+            "message": "This TCPA violation was reported to the FCC.",
+            "message_id": "legal-stop-3",
+        },
+    ).json()
+    assert duplicate["should_reply"] is False
+    assert duplicate["handoff_needed"] is False
+    assert duplicate["handoff_type"] == ""
+
+
 def test_sms_compact_same_day_callback_is_persisted_before_reply_cap(monkeypatch):
     module, sheet, sender = _import_webhook_server(
         monkeypatch,
