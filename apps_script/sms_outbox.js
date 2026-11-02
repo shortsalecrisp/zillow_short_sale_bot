@@ -1430,22 +1430,40 @@ function buildVideoInitialReceiptV26_(entry, metadata, phone, timeZone, pendingR
   }, metadata, phone);
 }
 
+function readVideoFollowupLeadIdentityV32_(sheet, stableId, phone) {
+  var count = sheet.getLastRow();
+  if (count < 2) return null;
+  function matches() {
+    return sheet.getRange(2, 28, count - 1, 1).getValues().reduce(function(found, row, index) {
+      if (String(row[0] || "").trim() === stableId) found.push(index + 2);
+      return found;
+    }, []);
+  }
+  var before = matches();
+  if (before.length !== 1) return null;
+  var width = Math.max(45, typeof sheet.getLastColumn === "function" ? sheet.getLastColumn() : 45);
+  var headers = sheet.getRange(1, 1, 1, width).getValues()[0];
+  var current = sheet.getRange(before[0], 1, 1, width).getValues()[0];
+  // Scan the complete identity column, not the entire 10,000-row CRM body.
+  // Recheck after the row read so movement/duplicate creation fails closed.
+  var after = matches();
+  if (sheet.getLastRow() !== count || after.length !== 1 || after[0] !== before[0] ||
+      String(current[27] || "").trim() !== stableId || normalizePhone_(current[2]) !== phone) return null;
+  return { row: before[0], values: current, headers: headers };
+}
+
 function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
   if (!metadata || !/^[0-9a-f]{64}$/.test(String(metadata.followup_key || "")) ||
       !String(metadata.stable_id || "").trim() || !isFinite(Date.parse(metadata.initial_sent_at))) {
     return { ok: false, reason: "Personalized follow-up identity metadata is invalid" };
   }
   var sheet = getSheet_();
-  var values = sheet.getDataRange().getValues();
-  var matches = [];
-  for (var i = 1; i < values.length; i++) {
-    if (String(values[i][27] || "").trim() === metadata.stable_id) matches.push(i);
-  }
-  if (matches.length !== 1 || normalizePhone_(values[matches[0]][2]) !== phone) {
+  var identity = readVideoFollowupLeadIdentityV32_(sheet, metadata.stable_id, phone);
+  if (!identity) {
     return { ok: false, reason: "Personalized follow-up listing or phone changed or is ambiguous" };
   }
-  var index = matches[0];
-  var current = values[index];
+  var index = identity.row - 1;
+  var current = identity.values;
   var timeZone = getSmsSpreadsheet_().getSpreadsheetTimeZone();
   var initialMs = parseVideoFollowupTimestampV19_(current[22], timeZone);
   var dateOnly = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(current[22] || "").trim());
@@ -1502,7 +1520,7 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
       return { ok: false, reason: "Prospective receipt interval is missing, changed or ambiguous" };
     }
     var intervalObj = {};
-    values[0].forEach(function(header, column) { intervalObj[header] = current[column]; });
+    identity.headers.forEach(function(header, column) { intervalObj[header] = current[column]; });
     // Preserve the earliest reply/control cutoff; a later receipt timestamp
     // must never make an intervening reply or existing reminder disappear.
     return { ok: true, sheet: sheet, row: index + 1, values: current, obj: intervalObj,
@@ -1529,7 +1547,7 @@ function resolveVideoFollowupIdentityV19_(phone, metadata, pendingRows) {
       reason: "Confirmed initial SMS for the current phone and episode is missing or ambiguous" };
   }
   var obj = {};
-  values[0].forEach(function(header, column) { obj[header] = current[column]; });
+  identity.headers.forEach(function(header, column) { obj[header] = current[column]; });
   var initialReceipt = buildVideoInitialReceiptV26_(sameInitialAttempt ? laterReceipts[0] : exactReceipt,
     metadata, phone, timeZone, pendingRows);
   if (metadata.initial_receipt && JSON.stringify(metadata.initial_receipt) !== JSON.stringify(initialReceipt)) {
@@ -2857,7 +2875,8 @@ function busyPendingSmsClaim_() {
   };
 }
 
-function markPendingSmsSendStartedV10_(body, decisionLocked) {
+function markPendingSmsSendStartedV10_(body, decisionLocked, requestStartedAt) {
+  var requestStart = requestStartedAt === undefined ? Date.now() : requestStartedAt;
   var match;
   var correlationMode = "exact_text";
   try {
@@ -2893,7 +2912,7 @@ function markPendingSmsSendStartedV10_(body, decisionLocked) {
     if (!decisionLock.tryLock(3000)) return { ok: false, should_send: false, retryable: true, reason: "Follow-up decision evidence is busy" };
     var previousCacheOnly = VIDEO_PRONUNCIATION_CACHE_ONLY_V24_;
     VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = true;
-    try { return markPendingSmsSendStartedV10_(body, true); }
+    try { return markPendingSmsSendStartedV10_(body, true, requestStart); }
     finally { VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = previousCacheOnly; decisionLock.releaseLock(); }
   }
   var startDecision = {};
@@ -2935,6 +2954,11 @@ function markPendingSmsSendStartedV10_(body, decisionLocked) {
       correlation_mode: correlationMode
     };
   }
+  if (Date.now() - requestStart >= 15000) {
+    return { ok: false, should_send: false, retryable: true, status: "claimed",
+      reason: "Send-start deadline reached before authorization; no SMS authorized",
+      server_elapsed_ms: Date.now() - requestStart };
+  }
   if (audited) {
     try {
       if (!hasVideoDecisionStageV26_(match.values, "claim", match.values[10])) throw new Error("Missing original claim evidence");
@@ -2951,6 +2975,7 @@ function markPendingSmsSendStartedV10_(body, decisionLocked) {
     ok: true,
     status: "send_started",
     pending_row: match.row,
+    server_elapsed_ms: Date.now() - requestStart,
     correlation_mode: correlationMode
   };
 }
@@ -2960,7 +2985,9 @@ function requeuePendingSmsSendAfterFailureV10_(body) {
   if (!match.ok) return match;
   var attempts = Number(match.values[9] || 0);
   var ownerProbe = isOwnerVideoProbeRowV20_(match.values);
-  var nextStatus = ownerProbe || attempts >= 3 ? "failed" : "queued";
+  var recoveryMetadata = parseVideoFollowupMetadataV19_(match.values);
+  var ownerRecoveryExhausted = recoveryMetadata && recoveryMetadata.owner_text_recovery && attempts >= 2;
+  var nextStatus = ownerProbe || ownerRecoveryExhausted || attempts >= 3 ? "failed" : "queued";
   match.sheet.getRange(match.row, 2).setValue(nextStatus);
   match.sheet.getRange(match.row, 9).setValue(new Date(Date.now() + 2 * 60 * 1000));
   match.sheet.getRange(match.row, 11, 1, 4).setValues([["", "", "", ""]]);
@@ -3617,6 +3644,92 @@ function clearTransportGeneratedSmsHandoffV15_(phone, expectedReason) {
   return { ok: false, reason: "CRM phone was not found" };
 }
 
+function recoverOwnerConfirmedTextFollowupV32_(sheet, sheetRow, row, rows, body, now) {
+  var confirmation = body && body.owner_confirmation;
+  var metadata = parseVideoFollowupMetadataV19_(row);
+  function deny(reason) { return { ok: false, reason: reason, pending_row: sheetRow }; }
+  if (!confirmation || confirmation.schema !== "owner-confirmed-absent-text-v1" ||
+      confirmation.confirmed_absent_on_handset !== true ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(confirmation.authority_id || ""))) return deny("Exact owner confirmation required");
+  if (metadata && metadata.owner_text_recovery) {
+    return metadata.owner_text_recovery.authority_id === confirmation.authority_id
+      ? { ok: String(row[1]) !== "owner_recovery_prepared", duplicate: true,
+          needs_reconciliation: String(row[1]) === "owner_recovery_prepared",
+          status: String(row[1]), pending_row: sheetRow, request_id: String(row[2]) }
+      : deny("This follow-up already used its one owner-authorized recovery");
+  }
+  var issued = Date.parse(confirmation.issued_at), expires = Date.parse(confirmation.expires_at);
+  if (!isFinite(issued) || !isFinite(expires) || issued > now + 30000 || expires <= now ||
+      expires - issued > 60 * 60 * 1000 || expires <= issued) return deny("Owner confirmation expired or invalid");
+  if (!metadata || metadata.video_variant !== "text" || /https?:\/\//i.test(String(row[5])) ||
+      metadata.audit_contract !== "followup-decision-v1" || String(row[1]) !== "uncertain" || row[14] ||
+      Number(row[9]) !== 1 || confirmation.expected_attempts !== 1 ||
+      String(row[3]) !== String(confirmation.message_id) ||
+      metadata.stable_id !== confirmation.stable_id ||
+      String(row[10]) !== String(confirmation.expected_lease_token) ||
+      new Date(row[13]).toISOString() !== confirmation.expected_send_started_at ||
+      videoDecisionDigestV26_(String(row[6])) !== confirmation.expected_metadata_sha256 ||
+      String(row[5]) !== confirmation.expected_reply_text ||
+      JSON.stringify(metadata.initial_receipt) !== JSON.stringify(confirmation.initial_receipt)) {
+    return deny("Original text attempt changed, was sent, or is not safely recoverable");
+  }
+  var phone = normalizePhone_(row[4]);
+  if (ownerSmsSourceMuteReasonV28_(phone) || hasPendingSmsTakeoverV11_(phone)) return deny("Source mute or real pending takeover");
+  var resolved = resolveVideoFollowupIdentityV19_(phone, metadata, rows);
+  if (!resolved.ok) return deny(resolved.reason);
+  var obj = resolved.obj, current = resolved.values;
+  if (String(obj[HEADERS.conversation_summary] || "").trim() !== "SMS SEND RESULT UNCERTAIN" ||
+      String(obj[HEADERS.ai_state] || "").toLowerCase() !== "handoff" ||
+      String(obj[HEADERS.human_override] || "").toUpperCase() !== "TRUE" ||
+      String(obj[HEADERS.handoff_flag] || "").toUpperCase() !== "TRUE" ||
+      String(current[8] || "").trim() || String(current[23] || "").trim() ||
+      String(current[9] || "").trim() || ["", "N"].indexOf(String(current[10] || "").trim().toUpperCase()) === -1 ||
+      String(obj[HEADERS.last_message_id] || "").trim() || String(obj[HEADERS.last_inbound_text] || "").trim() ||
+      String(obj[HEADERS.history_json] || "").trim().replace(/^\[\]$/, "")) return deny("CRM no longer has only the original transport hold");
+  var easternDay = Number(Utilities.formatDate(new Date(now), "America/New_York", "u"));
+  var zone = initialSmsRecipientTimeZoneForStateV27_(current[6]);
+  if (!(easternDay >= 1 && easternDay <= 5) ||
+      !initialSmsLocalWindowDecisionV27_("America/New_York", new Date(now)).eligible ||
+      !initialSmsLocalWindowDecisionV27_(zone, new Date(now)).eligible) return deny("Outside permitted recovery hours");
+  var competing = rows.some(function(other, index) {
+    return index + 2 !== sheetRow && normalizePhone_(other[4]) === phone &&
+      String(other[2]) !== metadata.initial_receipt.request_id &&
+      String(other[1]) !== "superseded";
+  });
+  if (competing) return deny("Another same-phone attempt needs reconciliation");
+  var inbound = getSmsSpreadsheet_().getSheetByName("sms_inbound_queue");
+  if (!inbound) return deny("Inbound queue unavailable");
+  var received = inbound.getLastRow() > 1 ? inbound.getRange(2, 1, inbound.getLastRow() - 1, 8).getValues() : [];
+  if (received.some(function(entry) { return normalizePhone_(entry[5]) === phone; })) return deny("A recorded inbound message exists");
+  metadata.owner_text_recovery = {
+    schema: confirmation.schema, authority_id: confirmation.authority_id,
+    owner_confirmed_absent_on_handset: true, authorized_at: new Date(now).toISOString(),
+    original_outcome: "uncertain", original_attempts: Number(row[9]),
+    original_lease_token: String(row[10]), original_claimed_at: new Date(row[12]).toISOString(),
+    original_send_started_at: new Date(row[13]).toISOString(), original_alert_at: new Date(row[7]).toISOString(),
+    original_metadata_sha256: confirmation.expected_metadata_sha256,
+    maximum_total_attempts: 2, no_video_generation_or_job_retry: true
+  };
+  var staged = row.slice();
+  staged[1] = "owner_recovery_prepared";
+  staged[6] = "__scheduled_followup__:" + JSON.stringify(metadata);
+  staged[15] = "Owner-confirmed absent: explicit one-time text recovery prepared; original outcome remains uncertain";
+  // Non-deliverable staging preserves the prior attempt before touching only
+  // its transport-created hold. Any partial/error outcome stays fail-closed.
+  persistVideoDecisionTransitionV26_(sheet, sheetRow, staged);
+  var unlocked = clearTransportGeneratedSmsHandoffV15_(phone, "SMS SEND RESULT UNCERTAIN");
+  if (!unlocked.ok) return deny(unlocked.reason);
+  var stale = getPendingSmsStaleReason_(staged);
+  if (stale) return deny(stale);
+  var retry = staged.slice();
+  retry[1] = "queued"; retry[7] = ""; retry[8] = new Date(now);
+  [10, 11, 12, 13, 18].forEach(function(column) { retry[column] = ""; });
+  retry[15] = "One owner-authorized text recovery; no automatic further retry";
+  persistVideoDecisionTransitionV26_(sheet, sheetRow, retry);
+  return { ok: true, requeued: true, owner_authorized_text_recovery: true,
+    pending_row: sheetRow, crm_row: resolved.row, request_id: String(row[2]), status: "queued" };
+}
+
 function recoverUncertainSmsSendV15_(body) {
   var phone = normalizePhone_(body && body.phone || "");
   var requestId = String(body && body.request_id || "").trim();
@@ -3636,6 +3749,9 @@ function recoverUncertainSmsSendV15_(body) {
       var row = rows[i];
       if (String(row[2] || "") !== requestId || normalizePhone_(row[4]) !== phone) continue;
       if (isOwnerVideoProbeRowV20_(row)) return { ok: false, owner_video_probe: true, error: "Owner video probes are never retried" };
+      if (/^followup-video-/.test(String(row[3] || ""))) {
+        return recoverOwnerConfirmedTextFollowupV32_(sheet, i + 2, row, rows, body, Date.now());
+      }
       if (String(row[1] || "") !== "uncertain") return { ok: false, error: "Matching send is not uncertain" };
       if (Number(row[9] || 0) >= 2) return { ok: false, exhausted: true, error: "Automatic retry limit reached" };
       var isInitial = String(row[6] || "").indexOf("__initial_outreach__:") === 0;
@@ -3649,10 +3765,10 @@ function recoverUncertainSmsSendV15_(body) {
           return { ok: false, error: "CRM state no longer supports an initial SMS retry" };
         }
       }
-      var unlocked = clearTransportGeneratedSmsHandoffV15_(phone, "SMS SEND RESULT UNCERTAIN");
-      if (!unlocked.ok) return unlocked;
       var retryRow = buildAutomaticSmsRetryRowV15_(row, Date.now());
       if (!retryRow) return { ok: false, exhausted: true, error: "Automatic retry limit reached" };
+      var unlocked = clearTransportGeneratedSmsHandoffV15_(phone, "SMS SEND RESULT UNCERTAIN");
+      if (!unlocked.ok) return unlocked;
       sheet.getRange(i + 2, 1, 1, SMS_PENDING_SEND_HEADERS_.length).setValues([retryRow]);
       return { ok: true, requeued: true, pending_row: i + 2, crm_row: unlocked.row, request_id: requestId };
     }
@@ -3760,6 +3876,11 @@ function recordRecoveredSmsReplyReceipt_(sheet, sheetRow, receipt) {
   sheet.getRange(sheetRow, 16).setValue("Recovered from confirmed CRM reply receipt");
 }
 
+function isSmsTransportOperationalReasonV32_(reason) {
+  return /^(SMS OUTBOX NOT CLAIMED|SMS SEND RESULT UNCERTAIN|SMS SEND NOT CONFIRMED)$/.test(
+    String(reason || "").trim().toUpperCase());
+}
+
 function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
   if (isOwnerVideoProbeRowV20_(row)) return false;
   // The Tasker receipt can reach the CRM while the outbox status write is
@@ -3774,7 +3895,7 @@ function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
     return notifyUnclaimedSmsBacklogV31_(sheet);
   }
   var context = getSmsLeadContextByPhone_(row[4]);
-  lockSmsConversationAfterTransportAlertV10_(row[4], reason);
+  if (!isSmsTransportOperationalReasonV32_(reason)) lockSmsConversationAfterTransportAlertV10_(row[4], reason);
   sendHandoffEmail_({
     handoff_type: reason,
     agent_name: context.agent_name,
@@ -3784,6 +3905,9 @@ function alertSmsOutboxProblem_(sheet, sheetRow, row, reason) {
     listing_address: context.listing_address,
     city: context.city,
     state: context.state,
+    outbox_request_id: String(row[2] || ""),
+    outbox_message_id: String(row[3] || ""),
+    outbox_status: String(row[1] || ""),
     last_message: row[5] || "",
     history: context.history
   });

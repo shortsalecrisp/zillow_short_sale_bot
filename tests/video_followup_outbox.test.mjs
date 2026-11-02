@@ -172,6 +172,7 @@ function harness({ initialProof = true } = {}) {
   const makeSheet = (data) => ({
     data,
     getLastRow: () => data.length,
+    getLastColumn: () => data[0].length,
     getDataRange: () => ({ getValues: () => data.map((row) => row.slice()) }),
     appendRow: (row) => { writes++; data.push(row.slice()); },
     getRange: (start, column, count = 1, width = 1) => {
@@ -309,6 +310,170 @@ test("current-phone initial proof is required even when H and W are populated", 
     assert.deepEqual(h.counters(), before);
     assert.equal(enqueue(h, video()).ok, false, proof);
   }
+});
+
+test("follow-up identity reads complete narrow indexes and one full row, never the full CRM body", () => {
+  const h = harness();
+  let cells = 0;
+  const range = h.leads.getRange;
+  h.leads.getRange = (row, col, height = 1, width = 1) => {
+    cells += height * width;
+    return range(row, col, height, width);
+  };
+  h.leads.getDataRange = () => { throw new Error("Full CRM body read is forbidden"); };
+  for (let n = 0; n < 10000; n++) h.leads.data.push(Array(33).fill(""));
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(base).eligible, true);
+  assert.ok(cells < 21000, `read ${cells} cells instead of the 330,000-cell CRM body`);
+});
+
+test("narrow identity capture rejects a duplicate or row movement created during the target read", () => {
+  for (const change of ["duplicate", "move", "phone"]) {
+    const h = harness();
+    const range = h.leads.getRange;
+    let changed = false;
+    h.leads.getRange = (row, col, height = 1, width = 1) => {
+      const target = range(row, col, height, width);
+      return { ...target, getValues: () => {
+        const values = target.getValues();
+        if (!changed && row === 2 && col === 1) {
+          changed = true;
+          if (change === "duplicate") h.leads.data.push([...h.row]);
+          if (change === "move") h.leads.data.splice(1, 0, Array(33).fill(""));
+          if (change === "phone") values[0][2] = "2125550199";
+        }
+        return values;
+      } };
+    };
+    assert.equal(h.context.checkVideoFollowupEligibilityV19_(base).eligible, false, change);
+  }
+});
+
+test("a slow send-start guard never commits send_started or authorizes an SMS", () => {
+  const h = harness();
+  enqueue(h);
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+  let now = Date.now();
+  h.context.Date = class extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  };
+  const check = h.context.getPendingSmsStaleReason_;
+  h.context.getPendingSmsStaleReason_ = (...args) => { const result = check(...args); now += 16000; return result; };
+  const before = JSON.stringify(h.outbox.data);
+  const result = h.context.markPendingSmsSendStartedV10_(claim);
+  assert.equal(result.ok, false);
+  assert.equal(result.should_send, false);
+  assert.equal(result.retryable, true);
+  assert.match(result.reason, /deadline/);
+  assert.equal(JSON.stringify(h.outbox.data), before);
+});
+
+function ownerRecoveryFixture() {
+  const { h, body } = schedulerReceiptFixture(false);
+  const now = Date.parse("2026-11-02T17:00:00Z");
+  h.context.Date = class extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  };
+  h.row[6] = "CO";
+  enqueue(h, body);
+  const claim = h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+  assert.equal(h.context.markPendingSmsSendStartedV10_(claim).ok, true);
+  const row = h.outbox.data.at(-1), position = h.outbox.data.length;
+  row[1] = "uncertain";
+  row[7] = new Date();
+  Object.assign(h.row, { 12: "SMS SEND RESULT UNCERTAIN", 13: "handoff", 28: "TRUE", 31: "TRUE" });
+  h.context.updateRowFields_ = (_sheet, _row, fields) => {
+    for (const [key, value] of Object.entries(fields)) h.row[h.leads.data[0].indexOf(key)] = value;
+  };
+  const format = h.context.Utilities.formatDate;
+  h.context.Utilities.formatDate = (date, zone, pattern) => pattern === "u" ? "1" : pattern === "H"
+    ? new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "numeric", hourCycle: "h23" }).format(date)
+    : format(date, zone, pattern);
+  const confirmation = {
+    schema: "owner-confirmed-absent-text-v1", confirmed_absent_on_handset: true,
+    authority_id: "00000000-0000-4000-8000-000000000032", issued_at: new Date(now).toISOString(),
+    expires_at: new Date(now + 1800000).toISOString(), expected_attempts: 1,
+    message_id: row[3], stable_id: body.stable_id, expected_lease_token: row[10],
+    expected_send_started_at: new Date(row[13]).toISOString(), expected_reply_text: row[5],
+    expected_metadata_sha256: h.context.videoDecisionDigestV26_(row[6]), initial_receipt: body.initial_receipt,
+  };
+  const recover = () => h.context.recoverOwnerConfirmedTextFollowupV32_(h.outbox, position, row,
+    h.outbox.data.slice(1), { owner_confirmation: confirmation }, now);
+  return { h, body, row, position, confirmation, recover, now };
+}
+
+test("explicit owner-confirmed text recovery preserves the old unknown attempt and reuses one identity", () => {
+  const w = ownerRecoveryFixture();
+  const oldMetadata = JSON.parse(w.row[6].replace(/^__scheduled_followup__:/, ""));
+  const result = w.recover();
+  assert.equal(result.ok, true);
+  const row = w.h.outbox.data.at(-1);
+  assert.equal(row[1], "queued");
+  assert.equal(row[9], 1);
+  assert.equal(row[10], "");
+  assert.equal(row[13], "");
+  assert.equal(row[14], "");
+  const metadata = JSON.parse(row[6].replace(/^__scheduled_followup__:/, ""));
+  assert.deepEqual(metadata.decision_evidence, oldMetadata.decision_evidence);
+  assert.deepEqual(metadata.initial_receipt, oldMetadata.initial_receipt);
+  assert.equal(metadata.owner_text_recovery.original_outcome, "uncertain");
+  assert.equal(metadata.owner_text_recovery.maximum_total_attempts, 2);
+  assert.equal(w.h.outbox.data.length, w.position);
+  assert.equal(w.h.row[28], "FALSE");
+  assert.equal(w.h.row[31], "FALSE");
+  const saved = JSON.stringify(w.h.outbox.data);
+  const repeated = w.h.context.recoverOwnerConfirmedTextFollowupV32_(w.h.outbox, w.position, row,
+    w.h.outbox.data.slice(1), { owner_confirmation: w.confirmation }, w.now);
+  assert.equal(repeated.duplicate, true);
+  assert.equal(JSON.stringify(w.h.outbox.data), saved);
+});
+
+for (const change of ["no approval", "expired", "lease", "metadata", "text", "stable", "sent", "attempts", "takeover", "inbound", "optout", "history", "note", "other send", "phone"]) {
+  test(`owner recovery fails closed without changes: ${change}`, () => {
+    const w = ownerRecoveryFixture();
+    if (change === "no approval") w.confirmation.confirmed_absent_on_handset = false;
+    if (change === "expired") w.confirmation.expires_at = new Date(w.now - 1).toISOString();
+    if (change === "lease") w.confirmation.expected_lease_token = "wrong";
+    if (change === "metadata") w.confirmation.expected_metadata_sha256 = "f".repeat(64);
+    if (change === "text") w.confirmation.expected_reply_text += " changed";
+    if (change === "stable") w.confirmation.stable_id = "different";
+    if (change === "sent") w.row[14] = new Date();
+    if (change === "attempts") w.row[9] = 2;
+    if (change === "takeover") w.h.setTakeover(true);
+    if (change === "inbound") { inboundReply(w.h); w.h.inbound.data.at(-1)[5] = w.body.phone; }
+    if (change === "optout") w.h.row[10] = "R";
+    if (change === "history") w.h.row[32] = JSON.stringify([{ role: "user", text: "STOP" }]);
+    if (change === "note") w.h.row[9] = "Real manual conversation";
+    if (change === "other send") w.h.outbox.data.push(Object.assign([...w.row], { 1: "sent", 2: "other" }));
+    if (change === "phone") w.h.row[2] = "2125550199";
+    const before = JSON.stringify([w.h.leads.data, w.h.outbox.data]);
+    assert.equal(w.recover().ok, false);
+    assert.equal(JSON.stringify([w.h.leads.data, w.h.outbox.data]), before);
+  });
+}
+
+test("partial owner recovery remains non-deliverable if a fresh inbound arrives before requeue", () => {
+  const w = ownerRecoveryFixture();
+  const clear = w.h.context.clearTransportGeneratedSmsHandoffV15_;
+  w.h.context.clearTransportGeneratedSmsHandoffV15_ = (...args) => {
+    const result = clear(...args);
+    inboundReply(w.h, new Date(w.now).toISOString());
+    w.h.inbound.data.at(-1)[5] = w.body.phone;
+    return result;
+  };
+  assert.equal(w.recover().ok, false);
+  assert.equal(w.h.outbox.data.at(-1)[1], "owner_recovery_prepared");
+  assert.equal(w.h.context.claimPendingSmsSendV10_({}).should_send, false);
+});
+
+test("explicit Android failure cannot create a third owner-recovery SMS attempt", () => {
+  const w = ownerRecoveryFixture();
+  assert.equal(w.recover().ok, true);
+  const claim = w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+  assert.equal(claim.attempts, 2);
+  assert.equal(w.h.context.markPendingSmsSendStartedV10_(claim).ok, true);
+  assert.equal(w.h.context.requeuePendingSmsSendAfterFailureV10_(claim).status, "failed");
 });
 
 test("current-episode receipt cannot be replaced by an older receipt plus current H and W", () => {

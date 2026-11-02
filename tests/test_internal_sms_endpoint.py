@@ -452,6 +452,51 @@ def test_targeted_followup_recovery_auth_bounds_lock_and_policy(monkeypatch):
         assert client.post(route,headers=headers,json={'rows':[6413],'expected_episodes':bad}).status_code==400
 
 
+def test_owner_confirmed_text_recovery_is_authenticated_exact_and_never_sends_directly(monkeypatch):
+    module, sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
+    row = [""] * 28
+    row[2], row[27] = "7192105557", "313208960"
+    sheet.rows[6513] = row
+    module.TASKER_TRANSPORT_HEALTH_URL = "https://script.example.test/exec"
+    module.SMS_CHATBOT_ALLOWED_TOKEN = "test-transport-token"
+    calls = []
+    result = {"ok": True, "requeued": True, "status": "queued"}
+
+    def post(url, json, timeout):
+        calls.append((url, json, timeout))
+        return types.SimpleNamespace(status_code=200, json=lambda: result)
+
+    monkeypatch.setattr(module.requests, "post", post)
+    client = TestClient(module.app)
+    route = "/internal/recover-owner-confirmed-followup"
+    headers = {"Authorization": "Bearer secret-token"}
+    body = {"row": 6513, "phone": "7192105557",
+            "request_id": "scheduler-followup-video-" + "a" * 24,
+            "owner_confirmation": {"confirmed_absent_on_handset": True, "stable_id": "313208960"}}
+    assert client.post(route, json=body).status_code == 403
+    for changes in ({"owner_confirmation": {}}, {"request_id": "guessed"}, {"row": 1}, {"row": True}, {"row": 6513.5}):
+        assert client.post(route, headers=headers, json={**body, **changes}).status_code == 400
+    sheet.rows[6513][2] = "7192105558"
+    assert client.post(route, headers=headers, json=body).status_code == 409
+    sheet.rows[6513][2] = "7192105557"
+    assert calls == []
+    response = client.post(route, headers=headers, json=body)
+    assert response.status_code == 200 and response.json()["status"] == "queued"
+    assert calls[0][1] == {"token": "test-transport-token", "action": "recover_uncertain_send",
+                           "phone": body["phone"], "request_id": body["request_id"],
+                           "owner_confirmation": body["owner_confirmation"]}
+    assert calls[0][2] == 150
+    result.update(ok=False, reason="Fresh opt-out")
+    assert client.post(route, headers=headers, json=body).status_code == 409
+    def timeout_post(*args, **kwargs):
+        raise module.requests.Timeout("No acknowledgement")
+    monkeypatch.setattr(module.requests, "post", timeout_post)
+    response = client.post(route, headers=headers, json=body)
+    assert response.status_code == 502
+    assert response.json()["detail"].endswith("reconcile_before_retry")
+    assert sender.calls == [] and sheet.batch_updates == []
+
+
 def test_followup_review_is_authenticated_read_only_and_separate_from_send(monkeypatch):
     module, _sheet, sender = _import_webhook_server(monkeypatch, sender_result=FakeSendResult())
     scheduler = sys.modules["bot_min"]

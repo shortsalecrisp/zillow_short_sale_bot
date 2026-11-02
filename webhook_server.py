@@ -4586,6 +4586,39 @@ def _send_followup_sms_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _recover_owner_confirmed_followup(payload: Dict[str, Any]) -> Dict[str, Any]:
+    confirmation = payload.get("owner_confirmation")
+    if not isinstance(confirmation, dict) or confirmation.get("confirmed_absent_on_handset") is not True:
+        raise HTTPException(status_code=400, detail="explicit_owner_confirmation_required")
+    phone = re.sub(r"\D", "", fmt_phone(str(payload.get("phone") or "")))
+    request_id = str(payload.get("request_id") or "")
+    if not re.fullmatch(r"scheduler-followup-video-[0-9a-f]{24}", request_id):
+        raise HTTPException(status_code=400, detail="exact_followup_request_required")
+    row_idx = payload.get("row")
+    if type(row_idx) is not int or not 2 <= row_idx < 9000 or len(phone) != 10:
+        raise HTTPException(status_code=400, detail="invalid_recovery_identity")
+    ws = _get_leads_ws()
+    row = _retry_gspread_call("read owner recovery row", lambda: ws.row_values(row_idx))
+    if (re.sub(r"\D", "", fmt_phone(_row_value(row, 2))) != phone
+            or str(_row_value(row, 27)).strip() != str(confirmation.get("stable_id") or "")):
+        raise HTTPException(status_code=409, detail="owner_recovery_identity_changed")
+    if not TASKER_TRANSPORT_HEALTH_URL or not SMS_CHATBOT_ALLOWED_TOKEN:
+        raise HTTPException(status_code=503, detail="tasker_outbox_not_configured")
+    try:
+        response = requests.post(TASKER_TRANSPORT_HEALTH_URL, json={
+            "token": SMS_CHATBOT_ALLOWED_TOKEN, "action": "recover_uncertain_send",
+            "phone": phone, "request_id": request_id, "owner_confirmation": confirmation,
+        }, timeout=150)
+        result = response.json() if response.status_code == 200 else {}
+    except (requests.RequestException, ValueError):
+        raise HTTPException(status_code=502, detail="owner_recovery_response_unavailable_reconcile_before_retry")
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail="owner_recovery_response_unavailable_reconcile_before_retry")
+    if result.get("ok") is not True:
+        raise HTTPException(status_code=409, detail=str(result.get("reason") or result.get("error") or "owner_recovery_blocked"))
+    return result
+
+
 def _get_crm_followup_sms_status(request_id: str) -> Dict[str, Any]:
     if not (
         re.fullmatch(r"render-crm-followup-[0-9a-f]{24}", request_id)
@@ -9450,6 +9483,19 @@ async def internal_followup_sms_status(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="invalid_payload")
     return await asyncio.to_thread(_get_crm_followup_sms_status, str(payload.get("request_id") or ""))
+
+
+@app.post("/internal/recover-owner-confirmed-followup")
+async def internal_recover_owner_confirmed_followup(request: Request):
+    """One explicit owner-confirmed text recovery; never generates a video."""
+    _auth_internal_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
+    return await asyncio.to_thread(_recover_owner_confirmed_followup, payload)
 
 
 @app.get("/internal/review-followup-sms")
