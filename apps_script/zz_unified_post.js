@@ -243,7 +243,18 @@ function handleUnifiedSmsPost_(e) {
 
     if (action === "send_started") {
       recordTaskerTransportActivityV12_("send_started", body);
-      return jsonOutput_(markPendingSmsSendStartedV10_(body));
+      var sendStartClock = Date.now();
+      var sendStartResult = markPendingSmsSendStartedV10_(body);
+      try {
+        appendSmsDebugLog_("send_started_result", {
+          request_id: String(body.request_id || body.sms_request_id || ""), phone: normalizePhone_(body.phone),
+          message_id: String(body.message_id || ""), ok: sendStartResult.ok === true,
+          status: sendStartResult.status || "", retryable: sendStartResult.retryable === true,
+          reason: sendStartResult.reason || "", server_elapsed_ms: Date.now() - sendStartClock,
+          correlation_mode: sendStartResult.correlation_mode || ""
+        });
+      } catch (_) {}
+      return jsonOutput_(sendStartResult);
     }
 
     if (action === "install_outbox_triggers") {
@@ -738,6 +749,7 @@ function findPendingSmsRow_(rows, body) {
           String(rows[i][2] || "") === requestId &&
           String(rows[i][3] || "") === messageId &&
           normalizePhone_(rows[i][4]) === phone &&
+          (!leaseToken || String(rows[i][10] || "") === leaseToken) &&
           pendingSmsReplyMatchesFormDecoded_(rows[i][5], replyText)) {
         return i;
       }
@@ -761,6 +773,35 @@ function findPendingSmsRow_(rows, body) {
   return -1;
 }
 
+// A watchdog can mark a started send uncertain before its handset receipt
+// arrives. Only the current, fully identified lease can resolve that state.
+function findUncertainPendingSmsReceiptRow_(rows, body) {
+  var requestId = String(body && (body.request_id || body.sms_request_id) || "").trim();
+  var messageId = String(body && body.message_id || "").trim();
+  var phone = normalizePhone_(body && body.phone || "");
+  var leaseToken = String(body && body.lease_token || "").trim();
+  if (!requestId || !messageId || phone.length !== 10 || !leaseToken) return -1;
+
+  for (var i = rows.length - 1; i >= 0; i--) {
+    var row = rows[i];
+    if (String(row[1] || "") !== "uncertain" ||
+        String(row[2] || "") !== requestId ||
+        String(row[3] || "") !== messageId ||
+        normalizePhone_(row[4]) !== phone ||
+        String(row[10] || "") !== leaseToken ||
+        !row[12] || !row[13] || row[14]) continue;
+    var claimedAt = new Date(row[12]).getTime();
+    var startedAt = new Date(row[13]).getTime();
+    if (!isFinite(claimedAt) || !isFinite(startedAt) || startedAt < claimedAt) continue;
+    var newerAttempt = rows.some(function(later, index) {
+      return index > i &&
+        (String(later[2] || "") === requestId || String(later[3] || "") === messageId);
+    });
+    if (!newerAttempt) return i;
+  }
+  return -1;
+}
+
 function validatePendingSmsSendReceipt_(body) {
   var ss = getSmsSpreadsheet_();
   var sheet = ss.getSheetByName("sms_pending_sends");
@@ -780,6 +821,13 @@ function validatePendingSmsSendReceipt_(body) {
   }
   var matchIndex = findPendingSmsRow_(rows, body);
   var correlationMode = "exact_text";
+  if (matchIndex < 0) {
+    var uncertainIndex = findUncertainPendingSmsReceiptRow_(rows, body);
+    if (uncertainIndex >= 0) {
+      matchIndex = uncertainIndex;
+      correlationMode = "exact_uncertain_lease";
+    }
+  }
   if (matchIndex === -2 && typeof findPendingSmsRowByExactLeaseIdentityV10_ === "function") {
     var leaseMatch = findPendingSmsRowByExactLeaseIdentityV10_(
       body,
@@ -828,6 +876,9 @@ function updatePendingSmsSendStatus_(body, status, note) {
   ensurePendingSmsHeaders_(sheet, headers);
   var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues();
   var matchIndex = findPendingSmsRow_(rows, body);
+  if (matchIndex < 0 && status === "sent") {
+    matchIndex = findUncertainPendingSmsReceiptRow_(rows, body);
+  }
 
   if (matchIndex >= 0) {
     var matchRow = matchIndex + 2;

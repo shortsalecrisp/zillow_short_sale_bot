@@ -9487,7 +9487,7 @@ async def internal_followup_sms_status(request: Request):
 
 @app.post("/internal/recover-owner-confirmed-followup")
 async def internal_recover_owner_confirmed_followup(request: Request):
-    """One explicit owner-confirmed text recovery; never generates a video."""
+    """Exact owner-confirmed message recovery; never generates or retries media."""
     _auth_internal_request(request)
     try:
         payload = await request.json()

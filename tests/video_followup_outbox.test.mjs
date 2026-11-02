@@ -368,8 +368,20 @@ test("a slow send-start guard never commits send_started or authorizes an SMS", 
   assert.equal(JSON.stringify(h.outbox.data), before);
 });
 
-function ownerRecoveryFixture() {
-  const { h, body } = schedulerReceiptFixture(false);
+test("an expired, malformed or nearly expired claim cannot authorize a send", () => {
+  for (const lease of ["invalid", new Date(Date.now() - 1), new Date(Date.now() + 10000)]) {
+    const h = harness();
+    enqueue(h);
+    const claim = h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+    h.outbox.data.at(-1)[11] = lease;
+    const before = JSON.stringify(h.outbox.data);
+    assert.equal(h.context.markPendingSmsSendStartedV10_(claim).ok, false);
+    assert.equal(JSON.stringify(h.outbox.data), before);
+  }
+});
+
+function ownerRecoveryFixture(asVideo = false) {
+  const { h, body } = schedulerReceiptFixture(asVideo);
   const now = Date.parse("2026-11-02T17:00:00Z");
   h.context.Date = class extends Date {
     constructor(...args) { super(...(args.length ? args : [now])); }
@@ -489,6 +501,152 @@ test("expired or requeued owner recovery cannot acquire a third claim", () => {
     assert.equal(pending[1], "failed");
     assert.equal(pending[9], 2);
   }
+});
+
+function ownerDeliveryFixture(asVideo = false) {
+  const w = ownerRecoveryFixture(asVideo);
+  w.h.sheets.Replies = { getLastRow: () => 1 };
+  Object.assign(w.confirmation, { schema: "owner-confirmed-message-v2", request_id: w.row[2],
+    expected_status: w.row[1],
+    reuse_existing_media: asVideo, expected_video_job_id: w.body.video_job_id,
+    expected_media_sha256: w.body.video_speech_proof?.media_sha256 });
+  w.recover = () => w.h.context.recoverOwnerConfirmedFollowupV33_(w.h.outbox, w.position, w.row,
+    w.h.outbox.data.slice(1), { owner_confirmation: w.confirmation }, w.now);
+  return w;
+}
+
+for (const asVideo of [false, true]) {
+  test(`v2 owner recovery reuses exact existing ${asVideo ? "video" : "text"} and permits one replacement authorization`, () => {
+    const w = ownerDeliveryFixture(asVideo);
+    const original = JSON.parse(w.row[6].replace(/^__scheduled_followup__:/, ""));
+    assert.equal(w.recover().ok, true);
+    const saved = JSON.stringify(w.h.outbox.data);
+    assert.equal(w.recover().duplicate, true);
+    assert.equal(JSON.stringify(w.h.outbox.data), saved);
+    const claim = w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+    assert.equal(claim.attempts, 2);
+    assert.equal(w.h.context.markPendingSmsSendStartedV10_(claim).ok, true);
+    const metadata = JSON.parse(w.row[6].replace(/^__scheduled_followup__:/, ""));
+    assert.deepEqual(metadata.initial_receipt, original.initial_receipt);
+    assert.deepEqual(metadata.video_speech_proof, original.video_speech_proof);
+    assert.equal(w.h.context.recoverySendAuthorizationExistsV33_(metadata), true);
+    assert.equal(w.h.context.requeuePendingSmsSendAfterFailureV10_(claim).status, "failed");
+    assert.equal(w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" }).should_send, false);
+  });
+}
+
+test("v2 preauthorization lease expiry preserves monotone attempts but never repeats an authorized send", () => {
+  const w = ownerDeliveryFixture();
+  assert.equal(w.recover().ok, true);
+  for (let attempt = 2; attempt <= 4; attempt++) {
+    const claim = w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+    assert.equal(claim.attempts, attempt);
+    const metadata = JSON.parse(w.row[6].replace(/^__scheduled_followup__:/, ""));
+    assert.equal(w.h.context.recoverySendAuthorizationExistsV33_(metadata), false);
+    w.row[11] = new Date(w.now - 1);
+  }
+  assert.equal(w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" }).should_send, false);
+  assert.equal(w.row[1], "failed");
+  assert.equal(w.row[9], 4);
+});
+
+test("a new explicit v2 approval preserves the exhausted v1 claim history without decrementing attempts", () => {
+  const w = ownerRecoveryFixture();
+  assert.equal(w.recover().ok, true);
+  w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+  w.row[11] = new Date(w.now - 1);
+  w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" });
+  assert.equal(w.row[1], "failed");
+  const old = JSON.parse(w.row[6].replace(/^__scheduled_followup__:/, ""));
+  w.h.sheets.Replies = { getLastRow: () => 1 };
+  Object.assign(w.confirmation, { schema: "owner-confirmed-message-v2", expected_status: "failed",
+    expected_attempts: 2, request_id: w.row[2], expected_lease_token: w.row[10], expected_send_started_at: "",
+    expected_metadata_sha256: w.h.context.videoDecisionDigestV26_(w.row[6]), authority_id: "00000000-0000-4000-8000-000000000033" });
+  assert.equal(w.h.context.recoverOwnerConfirmedFollowupV33_(w.h.outbox, w.position, w.row,
+    w.h.outbox.data.slice(1), { owner_confirmation: w.confirmation }, w.now).ok, true);
+  const current = JSON.parse(w.row[6].replace(/^__scheduled_followup__:/, ""));
+  assert.deepEqual(current.owner_text_recovery, old.owner_text_recovery);
+  assert.deepEqual(current.decision_evidence, old.decision_evidence);
+  assert.equal(w.row[9], 2);
+  assert.equal(w.h.context.claimPendingSmsSendV10_({ worker_id: "offline" }).attempts, 3);
+});
+
+test("send-start outcomes are logged without raw message, token or lease data", () => {
+  const h = harness(), logs = [];
+  const body = { action: "send_started", token: "private-token", lease_token: "private-lease",
+    phone: base.phone, request_id: "exact-request", message_id: "exact-message", reply_text: "private-message" };
+  h.context.parseIncomingRequest_ = () => body;
+  h.context.validateToken_ = () => {};
+  h.context.jsonOutput_ = value => value;
+  h.context.detectIncomingTransport_ = () => "json";
+  h.context.getRawPostBody_ = () => "";
+  h.context.maskSensitiveDebugText_ = () => "";
+  h.context.safeJsonStringify_ = () => "";
+  h.context.recordTaskerTransportActivityV12_ = () => {};
+  h.context.appendSmsDebugLog_ = (stage, data) => { logs.push({ stage, data }); };
+  h.context.markPendingSmsSendStartedV10_ = () => ({ ok: false, retryable: true, reason: "Send-start deadline reached", status: "claimed" });
+  assert.equal(h.context.handleUnifiedSmsPost_({}).ok, false);
+  const entry = logs.find(event => event.stage === "send_started_result");
+  assert.equal(entry.data.request_id, body.request_id);
+  assert.equal(entry.data.ok, false);
+  assert.equal(typeof entry.data.server_elapsed_ms, "number");
+  assert.doesNotMatch(JSON.stringify(entry), /private-token|private-lease|private-message/);
+});
+
+for (const change of ["metadata", "text", "phone", "stable", "reply", "takeover", "note", "optout", "media", "expired", "sent"]) {
+  test(`v2 recovery fails closed without writes: ${change}`, () => {
+    const w = ownerDeliveryFixture(change === "media");
+    if (change === "metadata") w.confirmation.expected_metadata_sha256 = "f".repeat(64);
+    if (change === "text") w.confirmation.expected_reply_text += " changed";
+    if (change === "phone") w.h.row[2] = "2125550199";
+    if (change === "stable") w.confirmation.stable_id = "other";
+    if (change === "reply") { inboundReply(w.h); w.h.inbound.data.at(-1)[5] = w.body.phone; }
+    if (change === "takeover") w.h.setTakeover(true);
+    if (change === "note") w.h.row[9] = "Manual conversation";
+    if (change === "optout") w.h.row[10] = "R";
+    if (change === "media") w.confirmation.expected_media_sha256 = "f".repeat(64);
+    if (change === "expired") w.confirmation.expires_at = new Date(w.now - 1).toISOString();
+    if (change === "sent") w.row[14] = new Date(w.now);
+    const before = JSON.stringify([w.h.leads.data, w.h.outbox.data]);
+    assert.equal(w.recover().ok, false);
+    assert.equal(JSON.stringify([w.h.leads.data, w.h.outbox.data]), before);
+  });
+}
+
+test("bounded indexes retain cross-phone attempted initial-ID collisions and reject index races", () => {
+  const { h, body } = schedulerReceiptFixture();
+  const initial = h.outbox.data[1];
+  const collision = [...initial];
+  collision[4] = "2125550199";
+  collision[1] = "superseded";
+  collision[9] = 1;
+  h.outbox.data.push(collision);
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, false);
+  collision[9] = 0;
+  [10, 11, 12, 13, 14].forEach(i => { collision[i] = ""; });
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, true);
+  const range = h.outbox.getRange;
+  let read = 0;
+  h.outbox.getRange = (...args) => {
+    const result = range(...args);
+    return { ...result, getValues: () => {
+      const values = result.getValues();
+      if (args[1] === 2 && args[3] === 4 && ++read === 2) values[0][1] = "racing-request";
+      return values;
+    } };
+  };
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, false);
+});
+
+test("bounded phone indexes do not transfer unrelated large payloads", () => {
+  const { h, body } = schedulerReceiptFixture();
+  for (let i = 0; i < 1000; i++) h.outbox.data.push([new Date(), "sent", `r${i}`, `m${i}`, "2125550199", "", "x".repeat(10000)]);
+  const read = h.outbox.getRange;
+  h.outbox.getRange = (start, col, count = 1, width = 1) => {
+    assert.ok(!(count > 1 && col <= 7 && col + width > 7), "Unrelated metadata must not be transferred");
+    return read(start, col, count, width);
+  };
+  assert.equal(h.context.checkVideoFollowupEligibilityV19_(body).eligible, true);
 });
 
 test("current-episode receipt cannot be replaced by an older receipt plus current H and W", () => {
