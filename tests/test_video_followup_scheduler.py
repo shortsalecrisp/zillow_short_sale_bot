@@ -83,6 +83,7 @@ def harness(*, real_outbox=False):
 
 def scheduler_handoff(namespace, *, enabled, current_phone=PHONE):
     """Execute only the scheduler's optional-context and send-call boundary."""
+    namespace["text_only"] = False
     scheduler = next(node for node in PARSED.body if isinstance(node, ast.FunctionDef)
                      and node.name == "_follow_up_pass")
     selected = []

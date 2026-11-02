@@ -13862,15 +13862,28 @@ def review_followup_delivery():
     return result
 
 
-def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episodes=None):
+def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episodes=None, text_only=False):
     outcomes = {row: {"row": row, "status": "blocked", "reason": "initial_timestamp_missing_or_unreadable"}
                 for row in (only_rows or [])}
+    text_only = text_only or os.getenv("ORDINARY_TEXT_FOLLOWUPS_ONLY", "false").lower() == "true"
+    recipient_local_hours = recipient_local_hours or text_only
     LOG.info("follow-up: using bounded init_ts scan path")
     now = datetime.now(tz=SCHEDULER_TZ)
     if recipient_local_hours and (now.weekday() >= 5 or not 8 <= now.hour < 20):
         for item in outcomes.values():
             item.update(status="deferred", reason="weekday_business_window")
         return list(outcomes.values())
+    text_review = {}
+    if text_only:
+        # A text fallback is not permission to reselect a frozen video or to
+        # create a second request. Require positive current-phone receipt proof
+        # and inventory every existing attempt before the ordinary final guards.
+        survey = review_followup_delivery()
+        if survey.get("complete") is not True:
+            return [{"row": row, "status": "blocked", "reason": "text_review_incomplete"}
+                    for row in (only_rows or [0])]
+        text_review = {item["row"]: item for item in
+                       survey.get("items", []) + survey.get("verified_sent", [])}
     max_row = max(1, int(getattr(ws, "row_count", 1) or 1))
     if max_row <= 1:
         return list(outcomes.values())
@@ -14044,6 +14057,26 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episod
                    "stable_id": str(row[27]), "initial_sent_at": ts.isoformat(),
                    "status": "blocked", "reason": "guard_not_completed"}
         outcomes[sheet_row] = outcome
+        if text_only:
+            reviewed = text_review.get(sheet_row, {})
+            if reviewed.get("status") != "due_unsent":
+                outcome.update(status=reviewed.get("status", "blocked"),
+                               reason=reviewed.get("reason", "current_initial_receipt_unverified"))
+                if reviewed.get("request_id"):
+                    outcome["request_id"] = reviewed["request_id"]
+                continue
+            if reviewed.get("initial_contact_readback_verified") is not True:
+                outcome["reason"] = "current_initial_receipt_unverified"
+                continue
+            receipt_sent = _parse_sheet_datetime(reviewed.get("current_initial_receipt", {}).get("sent_at"))
+            if receipt_sent is None or receipt_sent < _parse_sheet_datetime("2026-10-28T23:49:59Z"):
+                outcome["reason"] = "historical_text_recovery_owner_review_required"
+                continue
+            if (reviewed.get("phone") != outcome["phone"]
+                    or reviewed.get("stable_id") != outcome["stable_id"]
+                    or _parse_sheet_datetime(reviewed.get("initial_sent_at")) != ts):
+                outcome["reason"] = "text_reviewed_episode_changed"
+                continue
         expected = (expected_episodes or {}).get(sheet_row)
         if expected and (expected["phone"] != outcome["phone"] or expected["stable_id"] != outcome["stable_id"]
                          or _parse_sheet_datetime(expected["initial_sent_at"]) != ts):
@@ -14234,7 +14267,7 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episod
         effective_elapsed_hours = (
             elapsed_hours + FOLLOWUP_DUE_GRACE_MINUTES / 60.0
         )
-        video_enabled = os.getenv("VIDEO_FOLLOWUP_ENABLED", "false").lower() == "true"
+        video_enabled = not text_only and os.getenv("VIDEO_FOLLOWUP_ENABLED", "false").lower() == "true"
         if video_enabled and not recipient_local_hours and not corrected_episode and SMS_ENABLE and not SMS_TEST_MODE and effective_elapsed_hours < FU_HOURS:
             from video_followup import prepare_for_followup
             prepare_for_followup(
@@ -14295,7 +14328,21 @@ def _follow_up_pass(only_rows=None, recipient_local_hours=False, expected_episod
         _pace_followup_sms_batch(eligible_count)
 
         video_options = {"initial_sent_at": ts.isoformat()} if video_enabled else {}
-        if corrected_episode:
+        if text_only:
+            # snapshot is a pure identity/receipt validator, not media selection.
+            # Preserve the established episode ID so Apps Script crossover and
+            # same-phone guards also reject a competing legacy/video attempt.
+            from video_followup import snapshot
+            try:
+                context = snapshot(row=sheet_row, stable_id=row[27], phone=followup_phone,
+                                   first_name=row[COL_FIRST], initial_sent_at=ts,
+                                   initial_receipt=reviewed["current_initial_receipt"])
+            except (KeyError, TypeError, ValueError):
+                outcome["reason"] = "text_initial_receipt_binding_invalid"
+                continue
+            video_options["text_followup_context"] = {
+                **context, "video_variant": "text", "video_job_id": ""}
+        elif corrected_episode:
             from corrected_phone_contact import followup_identity_anchor
             from video_followup import snapshot
             context = snapshot(row=sheet_row, stable_id=row[27], phone=latest_sheet_phone,

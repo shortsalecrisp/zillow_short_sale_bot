@@ -99,7 +99,7 @@ def test_bounded_recovery_off_hours_never_reads_or_sends(stamp):
     node=next(n for n in ast.parse(source.read_text()).body if isinstance(n,ast.FunctionDef)
               and n.name=='_follow_up_pass')
     ns=dict(LOG=logging.getLogger(__name__),datetime=SimpleNamespace(now=lambda **_:parse(stamp)),
-            SCHEDULER_TZ=timezone.utc)
+            SCHEDULER_TZ=timezone.utc, os=SimpleNamespace(getenv=lambda key, default: default))
     exec(compile(ast.Module(body=[node],type_ignores=[]),str(source),'exec'),ns)
     assert ns['_follow_up_pass'](only_rows={6452},recipient_local_hours=True)==[
         {'row':6452,'status':'deferred','reason':'weekday_business_window'}]

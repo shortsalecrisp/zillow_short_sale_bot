@@ -56,7 +56,7 @@ def harness(row, elapsed_hours):
         "_followup_has_contact_hold": Mock(return_value=False),
         "check_reply": Mock(return_value=False), "mark_reply": Mock(),
         "business_hours_elapsed": Mock(return_value=elapsed_hours),
-        "os": types.SimpleNamespace(getenv=lambda key, default: "true"),
+        "os": types.SimpleNamespace(getenv=lambda key, default: "true" if key == "VIDEO_FOLLOWUP_ENABLED" else default),
         "_current_sheet_phone_for_row": Mock(return_value="2125550100"),
         "_digits_only": lambda value: re.sub(r"\D", "", value),
         "_pace_followup_sms_batch": Mock(), "send_sms": send,

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Owner-approved ordinary-text operation while personalized videos are paused.
+# Unpausing requires an explicit configuration change, not a guard self-test.
+export ORDINARY_TEXT_FOLLOWUPS_ONLY="${ORDINARY_TEXT_FOLLOWUPS_ONLY:-true}"
+if [[ "${ORDINARY_TEXT_FOLLOWUPS_ONLY}" == "true" ]]; then
+  export VIDEO_FOLLOWUP_ENABLED=false
+  export VIDEO_FOLLOWUP_GENERATION_ENABLED=false
+  export VIDEO_FOLLOWUP_LIVE_APPROVED=false
+  echo "FOLLOWUP_DELIVERY_POLICY ordinary_text_only=true personalized_videos=false"
+fi
+
 echo "STARTUP_SCRIPT_RUNNING"
 echo "STARTUP_WHOAMI=$(whoami)"
 echo "STARTUP_PWD=$(pwd)"
