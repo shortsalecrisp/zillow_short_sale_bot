@@ -682,6 +682,7 @@ test("send-start outcomes are logged without raw message, token or lease data", 
   h.context.safeJsonStringify_ = () => "";
   h.context.recordTaskerTransportActivityV12_ = () => {};
   h.context.appendSmsDebugLog_ = (stage, data) => { logs.push({ stage, data }); };
+  h.context.queueSendStartDiagnosticV35_ = data => { logs.push({ stage: "send_started_result", data }); };
   h.context.markPendingSmsSendStartedV10_ = () => ({ ok: false, retryable: true, reason: "Send-start deadline reached", status: "claimed" });
   assert.equal(h.context.handleUnifiedSmsPost_({}).ok, false);
   const entry = logs.find(event => event.stage === "send_started_result");
@@ -689,6 +690,7 @@ test("send-start outcomes are logged without raw message, token or lease data", 
   assert.equal(entry.data.ok, false);
   assert.equal(typeof entry.data.server_elapsed_ms, "number");
   assert.doesNotMatch(JSON.stringify(entry), /private-token|private-lease|private-message/);
+  assert.equal(logs.some(event => event.stage === "doPost_start"), false);
 });
 
 for (const change of ["metadata", "text", "phone", "stable", "reply", "takeover", "note", "optout", "media", "expired", "sent"]) {
