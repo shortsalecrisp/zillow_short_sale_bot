@@ -593,6 +593,19 @@ test("send-start reuses only the complete raw outbox snapshot read freshly under
   assert.equal(indexReads, 0);
 });
 
+test("existing owner recovery diagnostics are read-only and reveal the precise guard", () => {
+  const w = ownerDeliveryFixture(true);
+  assert.equal(w.recover().ok, true);
+  w.h.setTakeover(true);
+  w.confirmation.diagnostics_only = true;
+  const before = JSON.stringify([w.h.leads.data, w.h.outbox.data]);
+  const result = w.recover();
+  assert.equal(result.read_only, true);
+  assert.equal(result.eligible, false);
+  assert.match(result.reason, /takeover/i);
+  assert.equal(JSON.stringify([w.h.leads.data, w.h.outbox.data]), before);
+});
+
 for (const change of ["none", "reply", "takeover", "optout", "phone", "authorized", "already renewed"]) {
   test(`one bounded preauthorization renewal retains history and guards: ${change}`, () => {
     const w = ownerDeliveryFixture();
