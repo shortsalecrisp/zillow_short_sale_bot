@@ -2949,7 +2949,11 @@ function markPendingSmsSendStartedV10_(body, decisionLocked, requestStartedAt) {
       if (!warmLock.tryLock(3000)) return { ok: false, should_send: false, retryable: true, reason: "Follow-up decision evidence is busy" };
       var savedMode = VIDEO_PRONUNCIATION_CACHE_ONLY_V24_;
       VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = true;
-      try { return markPendingSmsSendStartedV10_(body, true, requestStart); }
+      try {
+        var warmedResult = markPendingSmsSendStartedV10_(body, true, requestStart);
+        warmedResult.cached_warmup_used = true;
+        return warmedResult;
+      }
       finally { VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = savedMode; warmLock.releaseLock(); }
     }
   }
@@ -3034,7 +3038,7 @@ function markPendingSmsSendStartedV10_(body, decisionLocked, requestStartedAt) {
       correlation_mode: correlationMode
     };
   }
-  if (Date.now() - requestStart >= 20000) {
+  if (Date.now() - requestStart >= 23000) {
     return { ok: false, should_send: false, retryable: true, status: "claimed",
       reason: "Send-start deadline reached before authorization; no SMS authorized",
       server_elapsed_ms: Date.now() - requestStart };
