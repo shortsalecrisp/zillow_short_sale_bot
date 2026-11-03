@@ -2733,9 +2733,113 @@ function registerPendingSmsSendV10_(body, normalized, requestId, inboundQueueId)
 }
 
 function claimPendingSmsSendV10_(body) {
-  var ss = getSmsSpreadsheet_();
-  var sheet = ss.getSheetByName("sms_pending_sends");
-  if (!sheet || sheet.getLastRow() < 2) return noPendingSmsClaim_();
+  var storageRead = { complete: false };
+  try {
+    var result = claimPendingSmsSendOnceV36_(body, storageRead);
+    if (storageRead.complete) recordSmsClaimStorageOutcomeV36_(true);
+    return result;
+  } catch (err) {
+    if (!isSmsClaimStorageUnavailableV36_(err)) throw err;
+    recordSmsClaimStorageOutcomeV36_(false);
+    // A claim write may have committed before an exception. Do not replay it
+    // here: the next ordinary poll reconciles this worker's existing lease.
+    return { ok: true, should_send: false, should_send_text: "false", retryable: true,
+      retry_after_seconds: 30, code: "SMS_CLAIM_STORAGE_UNAVAILABLE",
+      reason: "SMS outbox storage temporarily unavailable; no SMS authorized" };
+  }
+}
+
+function isSmsClaimStorageUnavailableV36_(err) {
+  return /^(?:Exception:\s*)?(?:Service Spreadsheets failed while accessing document with id\s+[^\s.]+\.?|Service Spreadsheets timed out while accessing document with id\s+[^\s.]+\.?)$/i
+    .test(String(err && err.message || err || "").trim());
+}
+
+function readSmsClaimSheetV36_() {
+  // Only these non-mutating reads may be retried inside a request.
+  for (var attempt = 0; attempt < 2; attempt++) {
+    try {
+      var ss = getSmsSpreadsheet_();
+      var sheet = ss.getSheetByName("sms_pending_sends");
+      return { sheet: sheet, lastRow: sheet ? sheet.getLastRow() : 0 };
+    } catch (err) {
+      if (attempt || !isSmsClaimStorageUnavailableV36_(err)) throw err;
+      Utilities.sleep(250);
+    }
+  }
+}
+
+function recordSmsClaimStorageOutcomeV36_(healthy) {
+  // Keep bounded diagnostics outside Sheets so the failing service is not
+  // required to record its own outage. No phone, body, credential or lease.
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var key = "SMS_CLAIM_STORAGE_HEALTH_V36";
+    var prior = JSON.parse(props.getProperty(key) || "null");
+    if (healthy && prior && prior.recovered_at_ms) return;
+    var lock = LockService.getUserLock();
+    if (!lock.tryLock(100)) return;
+    try {
+      prior = JSON.parse(props.getProperty(key) || "null");
+      if (healthy && prior && prior.recovered_at_ms) return;
+      var now = Date.now();
+      var state = healthy ? (prior || { failures: 0 }) : (prior && !prior.recovered_at_ms ? prior : {
+        first_failure_at_ms: now, failures: 0, last_alert_at_ms: prior && prior.last_alert_at_ms || 0
+      });
+      if (healthy) state.recovered_at_ms = now;
+      else { state.last_failure_at_ms = now; state.failures = Math.min(1000000, state.failures + 1); }
+      state.event_at_ms = now;
+      props.setProperty(key, JSON.stringify(state));
+      if (typeof console !== "undefined") console.warn(JSON.stringify({
+        event: healthy ? "sms_claim_storage_recovered" : "sms_claim_storage_unavailable",
+        failures: state.failures, first_failure_at_ms: state.first_failure_at_ms
+      }));
+    } finally { lock.releaseLock(); }
+  } catch (_) { /* Diagnostics must never authorize, replay or fail a claim. */ }
+}
+
+function monitorSmsClaimStorageV36_() {
+  var props = PropertiesService.getScriptProperties();
+  var state = JSON.parse(props.getProperty("SMS_CLAIM_STORAGE_HEALTH_V36") || "null");
+  if (!state) return;
+  var lock = LockService.getUserLock();
+  if (!lock.tryLock(100)) return;
+  try {
+    state = JSON.parse(props.getProperty("SMS_CLAIM_STORAGE_HEALTH_V36") || "null");
+    if (!state) return;
+    if (state.event_at_ms && state.logged_event_at_ms !== state.event_at_ms) {
+      try {
+        appendSmsDebugLog_("sms_claim_storage_status", {
+          status: state.recovered_at_ms ? "ready" : "unavailable", failures: state.failures,
+          observed_at: new Date(state.event_at_ms).toISOString(), contract: "claim-storage-v36",
+          first_failure_at_ms: state.first_failure_at_ms || 0
+        });
+        state.logged_event_at_ms = state.event_at_ms;
+        props.setProperty("SMS_CLAIM_STORAGE_HEALTH_V36", JSON.stringify(state));
+      } catch (_) { /* Retain the event and still escalate a sustained outage. */ }
+    }
+    if (!state || state.recovered_at_ms || state.failures < 3 ||
+        Date.now() - state.first_failure_at_ms < 10 * 60 * 1000 ||
+        (state.last_alert_at_ms && Date.now() - state.last_alert_at_ms < 30 * 60 * 1000)) return;
+    sendSystemAlertEmail_("SMS OUTBOX STORAGE DELAY", [
+      "Google Sheets has repeatedly failed during SMS queue claims for at least ten minutes.",
+      "No SMS is authorized by the failed requests. Existing messages and leases are preserved for fresh normal polling.",
+      "This is an operational storage warning, not agent interest or a human-takeover instruction.",
+      "Failures: " + state.failures,
+      "First failure: " + new Date(state.first_failure_at_ms).toISOString(),
+      "Inspect SMS_CLAIM_STORAGE_HEALTH_V36 and the current outbox before any manual recovery. Never blindly resend."
+    ].join("\n"));
+    state.last_alert_at_ms = Date.now();
+    props.setProperty("SMS_CLAIM_STORAGE_HEALTH_V36", JSON.stringify(state));
+  } finally { lock.releaseLock(); }
+}
+
+function claimPendingSmsSendOnceV36_(body, storageRead) {
+  var snapshot = readSmsClaimSheetV36_();
+  var sheet = snapshot.sheet;
+  if (!sheet || snapshot.lastRow < 2) {
+    storageRead.complete = !!sheet;
+    return noPendingSmsClaim_();
+  }
   ensureSmsSheetHeaders_(sheet, SMS_PENDING_SEND_HEADERS_);
   var workerId = String(body && body.worker_id || "pixel-v10").trim();
   try {
@@ -2760,6 +2864,7 @@ function claimPendingSmsSendV10_(body) {
   VIDEO_PRONUNCIATION_CACHE_ONLY_V24_ = true;
   try {
     var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, SMS_PENDING_SEND_HEADERS_.length).getValues();
+    storageRead.complete = true;
     var now = Date.now();
     var retryableFeaturePending = false;
 
@@ -3553,6 +3658,7 @@ function getTaskerTransportHealthV12_(nowOverride) {
 
 function monitorTaskerTransportHealthV12_() {
   try { if (typeof flushSendStartDiagnosticsV35_ === "function") flushSendStartDiagnosticsV35_(); } catch (_) {}
+  try { monitorSmsClaimStorageV36_(); } catch (_) {}
   var health = getTaskerTransportHealthV12_();
   var props = PropertiesService.getScriptProperties();
   var priorState = props.getProperty("SMS_TASKER_TRANSPORT_ALERT_STATE") || "unknown";
