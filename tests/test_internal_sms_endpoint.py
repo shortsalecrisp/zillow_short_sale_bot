@@ -50,8 +50,8 @@ APPROVED_EXPERIENCE_REPLY = (
 )
 APPROVED_CLOSED_COUNT_ADMISSION = "I don't have a verified closed count to quote here; I'll need to confirm that number."
 APPROVED_BUYER_COST_REPLY = (
-    "The buyer does need to consider that cost with their offer, so we discuss the fee and disclosure up front. "
-    "I'm happy to walk through how that would work on this listing before you decide anything."
+    "I understand the concern. The buyer-paid fee covers Crisp's short-sale processing, so there's no service fee "
+    "to you or the seller. We disclose it up front so the buyer can consider it in their offer. Would a brief call help?"
 )
 APPROVED_FAILED_PROVIDER_REPLY = (
     "I understand why you'd be cautious after that. I handle the lender paperwork, calls, follow-up, and "
@@ -3809,6 +3809,18 @@ def test_sms_contract_recognizes_stacked_buyer_fee_wording(monkeypatch, inbound)
     assert decision["reply_text"] == APPROVED_SPECIFIC_FEE_REPLY
     assert decision["response_id"] == "fee_specific"
     assert decision["handoff_needed"] is False
+
+
+def test_nov2_conversation_regressions(monkeypatch):
+    module, _, _ = _import_webhook_server(monkeypatch, sender_result=FakeSendResult(success=True))
+    row = {"last_outbound_text": "Are you handling the lender side yourself, or do you already have help?"}
+    assert "handling it yourself, or you already have help" in module._sms_fast_decision(row, "Thanks Yoni! I do!")["reply_text"]
+    consideration = module._sms_fast_decision({}, "I'll have to check on it, I'm not sure if the listing agent has gotten someone yet")
+    assert consideration["handoff_needed"] is False
+    assert "let me know what the listing agent says" in consideration["reply_text"]
+    fee = module._sms_fast_decision({}, "Why would the buyer pay that?")
+    assert fee["reply_text"] == APPROVED_BUYER_COST_REPLY
+    assert module._sms_fast_decision({}, "STOP")['block_reply'] is True
 
 
 def test_sms_contract_fee_amount_is_first_and_delivered_history_controls_followup(monkeypatch):

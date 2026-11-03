@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import { smsHarness } from './helpers/sms_core_harness.mjs';
+const h = smsHarness();
+const decide = (message, row = {}) => h.evaluate(`applyFastRules_(${JSON.stringify(message)}, ${JSON.stringify(row)})`);
+const row = {last_outbound_text: 'Are you handling the lender side yourself, or do you already have help?'};
+assert.match(decide('Thanks Yoni! I do!', row).reply_text, /handling it yourself, or you already have help/);
+assert.notEqual(decide('I do!', {}).reason, 'Clarified ambiguous affirmative to either-or coverage question');
+const check = decide("I'll have to check on it, I'm not sure if the listing agent has gotten someone yet");
+assert.equal(check.handoff_needed, false);
+assert.match(check.reply_text, /let me know what the listing agent says/i);
+const fee = decide('Why would the buyer pay that?');
+assert.match(fee.reply_text, /covers Crisp's short-sale processing/);
+assert.equal(fee.handoff_needed, false);
+console.log('November 2 conversation regressions passed');

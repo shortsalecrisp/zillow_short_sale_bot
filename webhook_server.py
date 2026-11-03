@@ -4723,8 +4723,8 @@ SMS_SPECIFIC_FEE_REPLY = (
     "or the seller, and I don't take anything from your commission."
 )
 SMS_BUYER_COST_CONCERN_REPLY = (
-    "The buyer does need to consider that cost with their offer, so we discuss the fee and disclosure up front. "
-    "I'm happy to walk through how that would work on this listing before you decide anything."
+    "I understand the concern. The buyer-paid fee covers Crisp's short-sale processing, so there's no service fee "
+    "to you or the seller. We disclose it up front so the buyer can consider it in their offer. Would a brief call help?"
 )
 SMS_BUYER_FEE_DISCLOSURE_REPLY = (
     "You'll want to disclose the fee to the buyer up front in the listing, so they can take that extra cost "
@@ -7862,6 +7862,17 @@ def _sms_fast_decision(
             clear_callback=True,
             reason="Opt-out / stop request",
         )
+
+    last_outbound = _sms_normalize_whitespace(row_obj.get("last_outbound_text")).lower()
+    if (re.fullmatch(r"(?:thanks[ ,!]+(?:yoni[ ,!]+)?)?(?:yes|yeah|yep|i do)[.! ]*", t)
+            and re.search(r"are you handling the lender side yourself,? or do you already have help\??", last_outbound)):
+        return _sms_decision(reply_text="Do you mean you're handling it yourself, or you already have help?",
+                             reason="Clarified ambiguous affirmative to either-or coverage question")
+    if (re.search(r"\b(?:i(?:'ll| will)|i have to|i need to) (?:have to |need to )?check\b", t)
+            and re.search(r"\blisting agent\b", t) and re.search(r"\b(?:someone|somebody|help|gotten)\b", t)
+            and "?" not in t and not re.search(r"\b(?:call me|call you|talk|stop|urgent)\b", t)):
+        return _sms_decision(reply_text="Thanks. Please let me know what the listing agent says.",
+                             reason="Acknowledged tentative check without takeover")
 
     if re.search(r"\breply\s+stop\s+to\s+(end|unsubscribe|cancel|opt out)\b", t):
         return _sms_decision(

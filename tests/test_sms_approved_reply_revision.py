@@ -18,8 +18,8 @@ FEE_REPLY = (
     "the seller, and I don't take anything from your commission."
 )
 BUYER_REPLY = (
-    "The buyer does need to consider that cost with their offer, so we discuss the fee and disclosure up front. "
-    "I'm happy to walk through how that would work on this listing before you decide anything."
+    "I understand the concern. The buyer-paid fee covers Crisp's short-sale processing, so there's no service fee "
+    "to you or the seller. We disclose it up front so the buyer can consider it in their offer. Would a brief call help?"
 )
 FAILED_PROVIDER_REPLY = (
     "I understand why you'd be cautious after that. I handle the lender paperwork, calls, follow-up, and "

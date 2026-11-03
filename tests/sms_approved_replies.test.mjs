@@ -194,7 +194,7 @@ test('payer, amount, and buyer concern are distinct questions, not a loop', () =
   assert.match(h.incoming('How much is the fee?').reply_text, /5,000/);
   const r = h.incoming("Won't the buyer lower their offer because of that cost?");
   assert.equal(r.should_reply, true);
-  assert.match(r.reply_text, /buyer does need to consider that cost/);
+  assert.match(r.reply_text, /buyer-paid fee covers Crisp's short-sale processing/);
   assert.equal(r.handoff_needed, false);
 });
 
@@ -210,7 +210,7 @@ for (const text of ["I'm confused about how the buyer pays you", "What if the bu
     const r = h.incoming(text);
     assert.equal(r.should_reply, true);
     assert.equal(r.handoff_needed, false);
-    assert.match(r.reply_text, /buyer does need to consider that cost/);
+    assert.match(r.reply_text, /buyer-paid fee covers Crisp's short-sale processing/);
   });
 }
 
@@ -540,7 +540,7 @@ test('amount plus buyer concern answers both questions', () => {
   assert.equal(r.should_reply, true);
   assert.equal(r.handoff_needed, false);
   assert.match(r.reply_text, /5,000/);
-  assert.match(r.reply_text, /buyer does need to consider that cost/);
+  assert.match(r.reply_text, /buyer-paid fee covers Crisp's short-sale processing/);
 });
 
 test('existing first-fee-after-closeout cap exception also covers a compound question', () => {

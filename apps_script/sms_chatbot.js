@@ -2390,7 +2390,7 @@ function buildSelfHandlingValueReply_() {
 }
 
 function buildBuyerCostConcernReply_() {
-  return "The buyer does need to consider that cost with their offer, so we discuss the fee and disclosure up front. I'm happy to walk through how that would work on this listing before you decide anything.";
+  return "I understand the concern. The buyer-paid fee covers Crisp's short-sale processing, so there's no service fee to you or the seller. We disclose it up front so the buyer can consider it in their offer. Would a brief call help?";
 }
 
 function buildBuyerFeeDisclosureReply_() {
@@ -3139,6 +3139,15 @@ function applyFastRules_(text, rowObj, receivedAt) {
 
   const terminal = buildTerminalCoverageDecisionV4_(t, rowObj);
   if (terminal) return terminal;
+  if (/^(?:thanks[ ,!]+(?:yoni[ ,!]+)?)?(?:yes|yeah|yep|i do)[.! ]*$/.test(t) &&
+      /are you handling the lender side yourself,? or do you already have help\??/i.test(lastOutbound)) {
+    return {matched: true, reply_text: "Do you mean you're handling it yourself, or you already have help?", lead_status: "Y", conversation_done: false, handoff_needed: false, needs_review: false, block_reply: false, reason: "Clarified ambiguous affirmative to either-or coverage question"};
+  }
+  if (/\b(?:i(?:'ll| will)|i have to|i need to) (?:have to |need to )?check\b/.test(t) &&
+      /\blisting agent\b/.test(t) && /\b(?:someone|somebody|help|gotten)\b/.test(t) &&
+      !/[?]/.test(t) && !/\b(?:call me|call you|talk|stop|urgent)\b/.test(t)) {
+    return {matched: true, reply_text: "Thanks. Please let me know what the listing agent says.", lead_status: "Y", conversation_done: false, handoff_needed: false, needs_review: false, block_reply: false, reason: "Acknowledged tentative check without takeover"};
+  }
   if (isFirstFileCreditQuestionSignal_(t)) {
     return buildManualHandoffDecision_(
       "Agent asked about a first-file credit or referral compensation; terms require personal review",
