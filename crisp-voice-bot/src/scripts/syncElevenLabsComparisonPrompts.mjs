@@ -154,7 +154,7 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
   const receipts = [];
   for (let i = 0; i < branches.length; i++) {
     if (managedRelease) {
-      // Managed profiles preserve the business prompt; audio may replace only the reviewed availability binding.
+      // Each managed profile changes only its reviewed leaves; all other fields remain hashed.
       const fresh = await read(branches[i]);
       assertExpected(fresh, { agentId, branchId: branches[i].id, expectedVersion: branches[i].version, expectedPromptHash: branches[i].promptHash });
       if (digest(comparisonBody(fresh)) !== plan.beforeBodies[i]) throw new Error('Reviewed workflow drifted before write');
@@ -171,11 +171,11 @@ export async function syncComparisonPrompts({ apiKey, agentId, branches, promptP
           body: JSON.stringify({ workflow: candidates[i].workflow, ...((holdAudio || contactRelease || repairSharedBusinessPrompt) ? {
             conversation_config: { agent: { prompt: { ...((contactRelease || repairSharedBusinessPrompt) ? { prompt } : {}),
               ...(!repairSharedBusinessPrompt ? { tool_ids: candidates[i].conversation_config.agent.prompt.tool_ids } : {}) } } } } : {}) }), signal: AbortSignal.timeout(60000) });
-        if (!r.ok) throw new Error(`Provider transfer PATCH failed HTTP ${r.status}; read back before retrying`);
+        if (!r.ok) throw new Error(`Provider managed PATCH failed HTTP ${r.status}; read back before retrying`);
         const after = await read(branches[i]);
         if (after.agent_id !== agentId || after.branch_id !== branches[i].id || !after.version_id
           || digest(comparisonBody(after)) !== plan.sharedHash
-          || digest(protectedForRelease(after)) !== digest(plan.protected[i])) throw new Error('Transfer workflow readback differs');
+          || digest(protectedForRelease(after)) !== digest(plan.protected[i])) throw new Error('Managed workflow readback differs');
         Object.assign(attempt, { status: 'branch_verified', afterVersion: after.version_id });
         receipts.push(attempt);
         await writeFile(attemptPath, JSON.stringify(attempt, null, 2), { mode: 0o600 });

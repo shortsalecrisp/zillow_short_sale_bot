@@ -1,6 +1,77 @@
 # Uniform Conversion Comparison
 
-Current revision is r11, verified at 2026-10-29T18:51:46.460Z (2:51:46 PM New York on October 29). Earlier releases below are historical and must not be pooled with r11. Both arms are verified identical except for TTS model.
+Current revision is r14, verified at 2026-11-03T02:27:07.813Z (November 2 at 9:27:07 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r14.
+
+## Approved Revision 14: Effective Decline And Mailbox Policy
+
+Yoni approved fixing Shanti's explicit negative needs-answer repitch and Carolyn's recorded
+first-person callback greeting being treated as live future-contact intent. A clear "No, I've
+already got it handled" is terminal service refusal, not permission for the self-handler pitch.
+Recorded "Sorry I missed your call. I will call you back" wording creates no live preference.
+Wait through an ambiguous greeting; a mailbox review/rerecord/send menu confirms voicemail.
+Use the existing attempt-specific voicemail path, preserving later genuine live questions,
+callbacks, opt-outs, takeover, and the second-attempt no-second-message rule.
+
+The effective opening listener contained an older embedded business-policy copy. The guarded
+`--repair-shared-business-prompt` paired publisher updates the root policy and that embedded
+prefix together. It retains the exact opening-handoff/listener suffix and verifies hashes of
+every other workflow field, edge, tool, transfer consent/audio setting, platform/phone/WhatsApp/
+procedure field and the complete 50/50 allocation. It does not run the full workflow unifier.
+The new boundary follows final paired readback, not the first sequential provider write.
+
+- Cohort: `maya_uniform_lead_conversion_20261102_r14`.
+- Boundary: `2026-11-03T02:27:07.813Z`.
+- Policy: `maya-uniform-lead-conversion-20261102-r14`.
+- Flash version: `agtvrsn_8401m6fkph5seyfrr5jbkkk6daq0` on the unchanged control branch.
+- v4 version: `agtvrsn_8501m6fkpkemfrp8q394ewj6atks` on the unchanged test branch.
+- Prompt: `6239974a473a3eb259521a561a122fc3e3067f62acd0d334c40d080e7ad992b6`.
+- Shared normalized body: `c7178a98505262e4d1f236973f2a6bcda4acf2176f4cba64d603f825764a8874`.
+- Normalized workflow: `62b89280ef2968ef5c5b20830c9b7521900a0800ed526d8c1348c25abf8fcaf0`.
+
+Maya/Eryn, gpt-4.1, turn_v3, both TTS models, waiting audio, owner controls, four slots/two
+parallel starts, 60-second polling/headroom, listing-local weekday windows, protected preferences,
+same-phone identity, two-attempt cap and duplicate guards are unchanged. Shanti's correct K=R
+and Carolyn's existing November 3 09:15 Pacific retry were not edited. No outreach or paid test
+call was placed. Configuration/readback and synthetic tests are not proof of subsequent organic
+behavior or a completed handoff. Winner gates remain 100 genuine calls and 15 verified true-live
+conversations per arm; at 200 without that live sample report the sample limitation.
+
+Evidence: `voice-reroutes-decline-voicemail-repair-20261102/paired-publisher/comparison-receipt.json`
+in the originating task's artifact directory.
+
+## Validator-Only Empty Edge Defaults, November 2
+
+Both pinned r13 GET responses gained 38 direct `workflow.edges.<edge-id>.reroutes: []` fields.
+Yoni approved removing ONLY that own empty-array property on non-array direct edge objects
+within a non-array workflow/edges object. Absence stays absent. Nonempty arrays, null, strings,
+numbers, booleans, objects, nested/unrelated reroutes and malformed/missing containers remain
+visible. The canonical shared-body AND workflow digests use this same narrow normalizer; the
+publisher imports it. Other new fields, native transfer phone numbers and operational settings
+remain protected. The executable validator still makes exactly three GETs, with separate shared
+audio verification requiring one additional GET; neither invokes a publisher.
+
+This reconciliation independently reproduced original r13 shared/workflow digests on BOTH exact
+versions before publishing r14. It did not reset r13, mutate provider configuration or establish
+a new release. R14 above is a separately approved behavior release, not a normalization reset.
+
+## Historical Revisions 12 And 13
+
+R12's approved coverage/refusal/recorded-intent repair and r13's AI-question clarification are
+historical, separately approved prompt releases. R13 was independently paired-readback verified
+at `2026-10-30T16:10:53.784Z`: Flash `agtvrsn_5501m66s8047f78sqdq3ygth562e`, v4
+`agtvrsn_8701m66s83hcerj9hs04tds0ca8s`; prompt
+`cb02c3f101dedd98f05547624adc0296f2dcf26f8107a04d22ab566929c06345`, shared
+`3864eeeea76eb9474670e700af5f01cbc71bec77fd1f36eb02aed25fab95877d`, workflow
+`d6751b5e90009abc495aa96c5901fe29a49b37a6bddc2795e9231fda15851851`.
+The previously reported stale r11 header was documentation lag, not an outage or unexplained
+provider drift. Backend-only b2c67c21 and 3dd8761c did not reset r13.
+
+Keep r11 final 14 (Flash 7/v4 7), r12 final 12 (6/6), and the November 2 receipt-verified r13
+checkpoint of 48 (24/24; four unaccepted zero-duration failures excluded) separate. These are
+genuine-call counts, not true-live sample counts or conversion wins. Preserve r3 final 66 (40/26)
+and r4 final 25 (12/13), and all other earlier/unequal intervals separately. Never pool any of
+them toward r14's gates. Provider receipt identity, not declared policy or current settings,
+controls admission. The isolated owner audio-test agent remains excluded.
 
 ## Approved Revision 11: Transfer Waiting Audio
 

@@ -124,8 +124,6 @@ test('shared policy release updates root and embedded opening prompts, preservin
       main_conversation: { additional_prompt: 'Keep pending questions, callbacks, opt-outs and takeover.' },
     } };
   }
-  await writeFile(s.options.promptPath, '## Prompt\n' + prompt + ' '.repeat(120));
-  // extractPrompt requires a substantive body.
   const approved = prompt + '\n' + 'Preserve every protected preference. '.repeat(4).trim();
   await writeFile(s.options.promptPath, '## Prompt\n' + approved);
   s.options.branches = s.agents.map(a => ({ id: a.branch_id, version: a.version_id, promptHash: sha256(old) }));
