@@ -32,10 +32,11 @@ test('all meaningful approved identity, purpose and property answers survive con
 });
 
 test('the single listing-agent check is answerable while other compound answers defer disposition', () => {
-  assert.match(prompt, /A plain "yes" to the single live listing-agent check clearly confirms they are the listing agent/);
-  assert.match(prompt, /A yes or no after any other compound property or identity question is ambiguous\./);
+  assert.match(prompt, /A plain "yes" to the single live listing-agent check clearly confirms listing ownership at \{\{streetAddress\}\}/);
+  assert.match(prompt, /Yes\/no after a compound property or identity question is ambiguous: record no contact outcome, wrong-person result, rejection, callback or transfer/);
   assert.match(prompt, /Do you have the listing at \{\{streetAddress\}\}\?/);
-  assert.match(prompt, /If a later caller turn clearly confirms they have the listing, that latest confirmation overrides the earlier ambiguous answer or wrong-listing inference\./);
+  assert.match(prompt, /Later clear confirmation overrides the earlier ambiguity or wrong-listing inference/);
+  assert.match(prompt, /answer their latest question, and leave any obsolete ending, waiting or contact-outcome path/);
   assert.match(postIntro, /A clear yes confirms listing ownership only, not interest in help, a transfer or callback/);
   assert.match(postIntro, /Would help with lender paperwork or calls be useful for this listing\?/);
   assert.match(postIntro, /If the caller confirms they have the listing and asks what the call is about, answer only the purpose from the answer library and wait/);
@@ -65,10 +66,10 @@ test('compound negative needs answers cannot enter the self-handler pitch', () =
 test('first-person mailbox callback wording waits for recording completion, never creates live consent', () => {
   const voicemail = prompt.split('# Voicemail and recorded exits\n')[1];
   assert.ok(voicemail.includes('Sorry I missed your call. I will call you back. Thank you'));
-  assert.match(voicemail, /Do not say you will wait for their call, acknowledge a live preference, or invoke a contact-request tool/);
-  assert.match(voicemail, /stay silent while it finishes rather than guessing live consent/);
+  assert.match(voicemail, /Do not promise to wait, acknowledge a live preference or invoke contact-request tools/);
+  assert.match(voicemail, /An ambiguous first-person greeting requires silence until it finishes/);
   assert.match(voicemail, /review\/rerecord\/send-message menu confirms voicemail/);
-  assert.match(voicemail, /Then follow the attempt-specific voicemail path below/);
+  assert.match(voicemail, /follow the attempt-specific path without waiting for live replies or repeating delivered messages/);
   assert.match(voicemail, /A later substantive live interruption supersedes the recording/);
   assert.ok(voicemail.includes("Sorry I missed your call--what's this about?"));
 });
@@ -109,8 +110,8 @@ test('general scope and timing keep every approved material fact without a file 
     'liens', 'mortgages', 'backend approval process']) assert.ok(library.includes(fact), fact);
   assert.match(library, /Timing depends on the lender and the file\. Yoni can assess where this one stands/);
   assert.match(library, /Do not offer a 60-to-90-day estimate as though this file has been assessed/);
-  assert.match(library, /not guarantees or an exact division of duties for a specific file/);
-  assert.match(library, /The approved flat fee fact is \$5,000; do not state a different amount/);
+  assert.match(library, /These facts guarantee neither results nor file-specific duties/);
+  assert.match(library, /The approved flat fee is \$5,000\. Never invent other fees/);
   assert.doesNotMatch(library, /approval process end to end/);
 });
 test('answer and repair contracts retain complete questions without repeated handoff pitches', () => {
@@ -124,7 +125,7 @@ test('answer and repair contracts retain complete questions without repeated han
   assert.match(repair, /A second clarification alone is never permission to say goodbye/);
   assert.match(repair, /For an audio problem say only "Sorry, can you hear me now\?" and wait/);
   assert.match(repair, /Do not claim the connection or volume was fixed/);
-  assert.match(prompt, /not automatically the service or current conversation|not necessarily the service or current conversation/);
+  assert.match(prompt, /No declines only that offer; follow the stated email, later-callback or other preference/);
   assert.doesNotMatch(prompt, /then pivot to Yoni|Then pivot back to Yoni|Treat that as re-engagement and offer Yoni once/);
 });
 test('AI-voice switching question receives one answer without restarting the pitch', () => {
