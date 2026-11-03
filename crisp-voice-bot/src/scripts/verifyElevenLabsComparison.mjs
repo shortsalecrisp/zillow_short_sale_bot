@@ -23,8 +23,24 @@ export const canonical = value => Array.isArray(value) ? value.map(canonical)
 export const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 export const DISABLED_NOISY_ENVIRONMENT_MESSAGE = "Uhh ... sorry, I'm picking up some noise in the background. Could you move somewhere quieter?";
 
+export function comparisonWorkflow(workflow) {
+  const result = structuredClone(workflow);
+  const edges = result && typeof result === 'object' && !Array.isArray(result) ? result.edges : undefined;
+  // Reconcile only the provider's empty GET-only edge rerouting default.
+  if (edges && typeof edges === 'object' && !Array.isArray(edges)) {
+    for (const edge of Object.values(edges)) {
+      if (edge && typeof edge === 'object' && !Array.isArray(edge)
+          && Object.hasOwn(edge, 'reroutes') && Array.isArray(edge.reroutes) && edge.reroutes.length === 0) {
+        delete edge.reroutes;
+      }
+    }
+  }
+  return result;
+}
+
 export function comparisonBody(agent) {
   const body = structuredClone({ conversation_config: agent.conversation_config, workflow: agent.workflow });
+  body.workflow = comparisonWorkflow(body.workflow);
   const asr = body.conversation_config.asr;
   if (asr && typeof asr === 'object' && !Array.isArray(asr)
       && Object.hasOwn(asr, 'keyterm_libraries') && Array.isArray(asr.keyterm_libraries)
@@ -81,9 +97,9 @@ export function validateComparison(agents, allocation, expected = R8_COMPARISON)
     const body = comparisonBody(agent);
     bodies.push(body);
     assert.equal(digest(body), expected.sharedHash, `${arm.name}: shared configuration digest mismatch`);
-    assert.equal(digest(agent.workflow), expected.workflowHash, `${arm.name}: workflow digest mismatch`);
+    assert.equal(digest(body.workflow), expected.workflowHash, `${arm.name}: workflow digest mismatch`);
     return { name: arm.name, branchId: agent.branch_id, versionId: agent.version_id,
-      ttsModel: arm.ttsModel, trafficPercent: 50, sharedHash: digest(body), workflowHash: digest(agent.workflow) };
+      ttsModel: arm.ttsModel, trafficPercent: 50, sharedHash: digest(body), workflowHash: digest(body.workflow) };
   });
   assert.deepEqual(canonical(bodies[0]), canonical(bodies[1]), 'Normalized bodies must be directly identical');
   for (const key of ['platform_settings', 'phone_numbers', 'whatsapp_accounts', 'procedures']) {

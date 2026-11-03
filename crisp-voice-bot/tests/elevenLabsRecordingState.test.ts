@@ -20,3 +20,14 @@ test("a later real responder or contact preference is never swallowed as a menu 
     assert.equal(isRecordingOrScreeningArtifact([{ role: "user", message: menu }, { role: "user", message }]), false);
   }
 });
+
+test("a first-person voicemail promise plus mailbox menu is not live callback consent", () => {
+  const greeting = "Hi, this is Carolyn. Sorry I missed your call. I will call you back. Thank you.";
+  const mailbox = "To review, rerecord, or add to your message, press one. To send your message as is, press pound.";
+  const transcript = [{ role: "user", message: greeting }, { role: "user", message: mailbox }];
+  assert.equal(isRecordingOrScreeningArtifact(transcript), true);
+  for (const message of ["Sorry I missed your call--what's this about?", "Can you call me back tomorrow?",
+    "Please stop calling me.", "No thanks, I already have help.", "Please email me instead."]) {
+    assert.equal(isRecordingOrScreeningArtifact([...transcript, { role: "user", message }]), false);
+  }
+});

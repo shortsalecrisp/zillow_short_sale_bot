@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE, R8_COMPARISON, validateComparison, verifyLiveComparison } from '../src/scripts/verifyElevenLabsComparison.mjs';
+import { comparisonBody, comparisonWorkflow, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE, R8_COMPARISON, validateComparison, verifyLiveComparison } from '../src/scripts/verifyElevenLabsComparison.mjs';
 
 function fixture(index = 0) {
   const arm = R8_COMPARISON.arms[index];
@@ -20,6 +20,39 @@ function newShape(agent) {
 }
 const expected = { ...R8_COMPARISON, sharedHash: digest(comparisonBody(fixture())), workflowHash: digest(fixture().workflow) };
 const allocation = () => ({ meta: { total: 2 }, results: R8_COMPARISON.arms.map(arm => ({ id: arm.branchId, is_archived: false, current_live_percentage: 50 })) });
+
+test('only own empty reroutes arrays on direct workflow edge objects are reconciled', () => {
+  const agents = [fixture(), fixture(1)];
+  for (const agent of agents) agent.workflow = { edges: { first: { order: 1 }, second: { order: 2 } } };
+  const pinned = { ...expected, sharedHash: digest(comparisonBody(agents[0])), workflowHash: digest(agents[0].workflow) };
+  const fresh = structuredClone(agents);
+  for (const agent of fresh) for (const edge of Object.values(agent.workflow.edges)) edge.reroutes = [];
+  const before = JSON.stringify(fresh);
+  assert.equal(validateComparison(fresh, allocation(), pinned).ok, true);
+  assert.deepEqual(comparisonWorkflow(fresh[0].workflow), agents[0].workflow);
+  assert.equal(JSON.stringify(fresh), before);
+  for (const value of [null, false, 0, '', {}, ['configured'], [null]]) {
+    const changed = structuredClone(fresh); changed[0].workflow.edges.first.reroutes = value;
+    assert.throws(() => validateComparison(changed, allocation(), pinned), /configuration digest/);
+  }
+  for (const change of [
+    a => { a.workflow.reroutes = []; },
+    a => { a.workflow.edges.first.nested = { reroutes: [] }; },
+    a => { a.workflow.edges.first.order = 3; },
+    a => { a.workflow.edges.first = []; },
+    a => { a.workflow.edges.first = null; },
+    a => { a.workflow.edges = []; },
+    a => { a.workflow.edges = null; },
+    a => { delete a.workflow.edges; },
+    a => { a.workflow = []; },
+    a => { a.workflow = null; },
+  ]) {
+    const changed = structuredClone(fresh); change(changed[0]);
+    assert.throws(() => validateComparison(changed, allocation(), pinned), /configuration digest/);
+  }
+  assert.deepEqual(comparisonWorkflow({ edges: [{ reroutes: [] }] }), { edges: [{ reroutes: [] }] });
+  assert.equal(comparisonWorkflow(undefined), undefined);
+});
 
 function disabledNoiseShape(agent) {
   const result = newShape(agent);

@@ -54,6 +54,25 @@ test('existing provider coverage closes without the self-handler value pitch', (
   assert.match(postIntro, /Answer any substantive question or requested action first/);
 });
 
+test('compound negative needs answers cannot enter the self-handler pitch', () => {
+  assert.ok(postIntro.includes("No, I've already got it handled"));
+  assert.match(postIntro, /The negative answer wins over the self-handling detail; never route it to the self-handler pitch/);
+  assert.match(postIntro, /this path is forbidden after a clear negative answer to the needs question or an existing-coverage\/refusal statement/);
+  assert.match(postIntro, /Answer an accompanying substantive question or explicit requested action without restarting qualification/);
+  assert.match(postIntro, /future opt-out or takeover still wins/);
+});
+
+test('first-person mailbox callback wording waits for recording completion, never creates live consent', () => {
+  const voicemail = prompt.split('# Voicemail and recorded exits\n')[1];
+  assert.ok(voicemail.includes('Sorry I missed your call. I will call you back. Thank you'));
+  assert.match(voicemail, /Do not say you will wait for their call, acknowledge a live preference, or invoke a contact-request tool/);
+  assert.match(voicemail, /stay silent while it finishes rather than guessing live consent/);
+  assert.match(voicemail, /review\/rerecord\/send-message menu confirms voicemail/);
+  assert.match(voicemail, /Then follow the attempt-specific voicemail path below/);
+  assert.match(voicemail, /A later substantive live interruption supersedes the recording/);
+  assert.ok(voicemail.includes("Sorry I missed your call--what's this about?"));
+});
+
 test('explicit no-contact wording has priority over earlier callback or transfer intent', () => {
   assert.match(prompt, /"do not contact me," "do not reach out to me,"/);
   assert.match(prompt, /has priority over every pitch and action, including an earlier callback or transfer request/);

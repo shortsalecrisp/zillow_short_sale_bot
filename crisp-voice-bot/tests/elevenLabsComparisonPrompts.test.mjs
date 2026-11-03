@@ -6,6 +6,7 @@ import os from 'node:os';
 import { replaceContactBindings, syncComparisonPrompts } from '../src/scripts/syncElevenLabsComparisonPrompts.mjs';
 import { sha256 } from '../src/scripts/syncElevenLabsPromptOnly.mjs';
 import { comparisonBody, digest, DISABLED_NOISY_ENVIRONMENT_MESSAGE } from '../src/scripts/verifyElevenLabsComparison.mjs';
+import { applySharedBusinessPrompt, sharedBusinessPromptProtectedHashes } from '../src/scripts/elevenLabsSharedBusinessPrompt.mjs';
 
 async function setup(t, bothOld = false, contact = false) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'voice-comparison-test-'));
@@ -40,8 +41,8 @@ async function setup(t, bothOld = false, contact = false) {
       current.conversation_config.agent.prompt.prompt = body.conversation_config.agent.prompt.prompt;
       if (contact) {
         current.conversation_config.agent.prompt.tool_ids = body.conversation_config.agent.prompt.tool_ids;
-        current.workflow = body.workflow;
       }
+      if (body.workflow) current.workflow = body.workflow;
       current.version_id += '_updated';
     }
     return { ok: true, status: 200, json: async () => structuredClone(current) };
@@ -57,13 +58,17 @@ test('comparison dry-run makes no writes and binds the reviewed plan', async t =
 });
 test('release plans use the same canonical hash as the read-only verifier', async t => {
   const s = await setup(t);
+  for (const a of s.agents) a.workflow.edges = { first: { order: 1 } };
   const expectedHash = digest(comparisonBody(s.agents[0]));
+  const workflowHash = digest(comparisonBody(s.agents[0]).workflow);
   for (const a of s.agents) {
+    a.workflow.edges.first.reroutes = [];
     a.conversation_config.turn.noisy_environment_detection = false;
     a.conversation_config.turn.noisy_environment_message = DISABLED_NOISY_ENVIRONMENT_MESSAGE;
   }
   const r = await syncComparisonPrompts(s.options, s.fetcher);
   assert.equal(r.sharedHash, expectedHash);
+  assert.equal(r.workflowHash, workflowHash);
   assert.equal(s.writes.length, 0);
 });
 test('synchronizes the stale arm, preserving the already-updated arm and protected settings', async t => {
@@ -104,6 +109,49 @@ test('does not retry an ambiguous first write or report uniform completion', asy
   await syncComparisonPrompts(s.options, s.fetcher); s.failWrites();
   await assert.rejects(syncComparisonPrompts({ ...s.options, apply: true }, s.fetcher), /ambiguous timeout/);
   assert.deepEqual(s.writes, ['branch_0']);
+});
+
+test('shared policy release updates root and embedded opening prompts, preserving every routing/tool/audio field', async t => {
+  const s = await setup(t, true);
+  const old = '# Role and style\n\nOld business policy.';
+  const prompt = '# Role and style\n\nApproved decline and mailbox policy.';
+  const suffix = '\n\n[CRISP_OPENING_HANDOFF_POLICY]\nKeep listing confirmation.\n[END_CRISP_OPENING_HANDOFF_POLICY]\n\nKeep listening and consent.';
+  for (const a of s.agents) {
+    a.conversation_config.agent.prompt.prompt = old;
+    a.workflow = { edges: { first: { target: 'opening_listener', reroutes: [] } }, nodes: {
+      opening_listener: { type: 'override_agent', additional_prompt: 'Unchanged audio/consent',
+        conversation_config: { agent: { prompt: { prompt: old + suffix, built_in_tools: { end_call: null, transfer_to_number: { tool_call_sound: 'elevator1' } } } } } },
+      main_conversation: { additional_prompt: 'Keep pending questions, callbacks, opt-outs and takeover.' },
+    } };
+  }
+  await writeFile(s.options.promptPath, '## Prompt\n' + prompt + ' '.repeat(120));
+  // extractPrompt requires a substantive body.
+  const approved = prompt + '\n' + 'Preserve every protected preference. '.repeat(4).trim();
+  await writeFile(s.options.promptPath, '## Prompt\n' + approved);
+  s.options.branches = s.agents.map(a => ({ id: a.branch_id, version: a.version_id, promptHash: sha256(old) }));
+  const protectedBefore = s.agents.map(sharedBusinessPromptProtectedHashes);
+  const options = { ...s.options, repairSharedBusinessPrompt: true };
+  const plan = await syncComparisonPrompts(options, s.fetcher);
+  assert.equal(s.writes.length, 0);
+  assert.equal(plan.release, 'shared-business-prompt-r14');
+  const receipt = await syncComparisonPrompts({ ...options, apply: true }, s.fetcher);
+  assert.equal(receipt.status, 'live_uniform_comparison_verified');
+  assert.deepEqual(s.writes, ['branch_0', 'branch_1']);
+  for (const [i, a] of s.agents.entries()) {
+    assert.equal(a.conversation_config.agent.prompt.prompt, approved);
+    assert.equal(a.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt, approved + suffix);
+    assert.deepEqual(sharedBusinessPromptProtectedHashes(a), protectedBefore[i]);
+  }
+  for (const changed of [
+    a => { a.workflow.nodes.opening_listener.type = 'unknown'; },
+    a => { a.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt += suffix; },
+    a => { a.workflow.nodes.opening_listener.conversation_config.agent.prompt.prompt = 'Malformed'; },
+  ]) {
+    const a = structuredClone(s.agents[0]); changed(a);
+    assert.throws(() => applySharedBusinessPrompt(a, approved), /boundary/);
+  }
+  const drifted = structuredClone(s.agents[0]); drifted.workflow.edges.first.target = 'wrong';
+  assert.notDeepEqual(sharedBusinessPromptProtectedHashes(drifted), protectedBefore[0]);
 });
 
 test('contact-policy release remaps only reviewed bindings on both arms with fresh verification and exact readback', async t => {
