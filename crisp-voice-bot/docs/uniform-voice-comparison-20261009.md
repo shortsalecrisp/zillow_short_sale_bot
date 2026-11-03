@@ -1,6 +1,29 @@
 # Uniform Conversion Comparison
 
-Current revision is r14, verified at 2026-11-03T02:27:07.813Z (November 2 at 9:27:07 PM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r14.
+Current revision is r15, verified at 2026-11-03T13:26:42.725Z (November 3 at 8:26:42 AM America/New_York). Both arms are independently verified identical except for TTS model. Earlier releases below are historical and must never be pooled with r15.
+
+## Approved Revision 15: Prompt-Length Repair
+
+The canonical business prompt is condensed from 6,539 to 6,286 whitespace-delimited words.
+The strict less-than-6,300 guard is unchanged. Approved spoken answers, terminal decline,
+recorded mailbox, consent, opt-out, callback, transfer, receipt and identity rules remain.
+Redundant explanations are shortened; the root and opening-listener business copy are
+published together. The opening suffix and every other protected setting are unchanged.
+All 737 tests and the production build pass, including the previously failing length check.
+
+- Cohort: `maya_uniform_lead_conversion_20261103_r15`.
+- Boundary: `2026-11-03T13:26:42.725Z`, after final paired readback.
+- Flash: `agtvrsn_7101m6gse6zefeqsa481y18yxjr4`.
+- v4: `agtvrsn_9101m6gsebm7fzk85t478vmj1kzc`.
+- Prompt: `6af0fb3748e0ecf26070168d806551e1f99f83ae1ed7ec2cd4d7569a85b33344`.
+- Shared body: `e95c9034e9e7fd1a1e3cea4a681dc6c4e9f6692f5ccfc00ed00a1da37bc45f76`.
+- Workflow: `a3d103de3083a9446599502bfda86311bd4bc7a4203180b7f2bf8380df5625ba`.
+
+Both models retain native 50/50 traffic and all r14 operational controls. Earlier cohorts
+remain historical; no real or metered test call was started. Model adherence and conversion
+still require organic evidence. Evidence is `work/prompt-length-paired/comparison-receipt.json`
+in the originating Lead Intelligence task. Publisher profile name `shared-business-prompt-r14`
+identifies the guarded operation, not the resulting comparison cohort.
 
 ## Approved Revision 14: Effective Decline And Mailbox Policy
 
