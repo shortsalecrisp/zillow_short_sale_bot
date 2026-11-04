@@ -182,6 +182,12 @@ test("historical gatekeeper reconciliation changes only first result and audit a
   await assert.rejects(updateVoiceLeadRow(7000, updates(), async () => sheets as never, getReceipt), /later protected/);
   assert.deepEqual(written, []);
   laterPreference = false;
+  r[41] = "saved audit ".repeat(4000) + original[41];
+  const fullNotes = r[41];
+  await assert.rejects(updateVoiceLeadRow(7000, { ...updates(), voiceNotes: "additional audit ".repeat(2000) }, async () => sheets as never, getReceipt), /compact audit required/);
+  assert.deepEqual(written, []);
+  assert.equal(r[41], fullNotes);
+  r[41] = original[41];
   for (const i of [13, 16, 19, 28, 35, 36, 37, 38, 43, 44]) {
     r[i] = "yes";
     await assert.rejects(updateVoiceLeadRow(7000, updates(), async () => sheets as never, getReceipt), /protected/);

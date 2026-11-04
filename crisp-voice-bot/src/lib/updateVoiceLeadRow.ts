@@ -190,11 +190,16 @@ export function buildVoiceLeadRowWrites(
     if (verifiedDisposition === "verified_historical_gatekeeper") {
       if (!updates.voiceReviewedSecondReceipt) throw new Error("Historical gatekeeper reconciliation requires both exact receipts");
       addWrite(writes, VOICE_BOT_COL_CALL_1_RESULT, "callResult", target.callResult);
-      appendVoiceNotesWrite(writes, rowValues, `${updates.voiceNotes ?? ""}\nCODEX_VOICE_CLASSIFICATION_RECONCILED_V1 ${JSON.stringify({
+      const existingNotes = String(rowValues[VOICE_BOT_COL_VOICE_NOTES - 1] ?? "");
+      const notes = appendVoiceNotesValue(existingNotes, `${updates.voiceNotes ?? ""}\nCODEX_VOICE_CLASSIFICATION_RECONCILED_V1 ${JSON.stringify({
         conversationId: updates.voiceTerminalReceipt.conversationId, secondConversationId: updates.voiceReviewedSecondReceipt,
         callAttemptNumber: 1, reason: verifiedDisposition, previousResult: rowValues[33], callResult: target.callResult,
         preservedK: rowValues[10], preservedSecondResult: rowValues[40], recordedAt: now.toISOString(),
       })}`);
+      if (!notes.startsWith(existingNotes)) {
+        throw new Error("Historical gatekeeper reconciliation held: compact audit required to preserve existing notes");
+      }
+      addWrite(writes, VOICE_BOT_COL_VOICE_NOTES, "voiceNotes_appended", notes);
       return writes;
     }
     addWrite(writes, updates.callAttemptNumber === 2 ? VOICE_BOT_COL_CALL_2_RESULT : VOICE_BOT_COL_CALL_1_RESULT, "callResult", target.callResult);
